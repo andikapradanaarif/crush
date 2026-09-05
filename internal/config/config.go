@@ -648,7 +648,7 @@ type Agent struct {
 	// This is the id of the system prompt used by the agent
 	Disabled bool `json:"disabled,omitempty"`
 
-	Model SelectedModelType `json:"model" jsonschema:"required,description=The model type to use for this agent,enum=large,enum=small,default=large"`
+	Model SelectedModelType `json:"model" jsonschema:"required,description=The model type (large/small) or a custom key from the models config to use for this agent,default=large"`
 
 	// The available tools for the agent
 	//  if this is nil, all tools are available
@@ -759,7 +759,7 @@ type Config struct {
 	// Env is a map of environment variables set on startup.
 	Env map[string]string `json:"env,omitempty" jsonschema:"description=Environment variables to set on startup"`
 
-	Agents map[string]Agent `json:"-"`
+	Agents map[string]Agent `json:"agents,omitempty"`
 }
 
 // cloneForWrite returns a copy of c that the store's typed field mutators
@@ -962,6 +962,38 @@ func (c *Config) SetupAgents() {
 			// NO MCPs or LSPs by default
 			AllowedMCP: map[string][]string{},
 		},
+	}
+
+	// Overlay user-defined agents from crush.json on top of the defaults so
+	// custom model and tool configuration survives SetupAgents.
+	for id, userAgent := range c.Agents {
+		merged, ok := agents[id]
+		if !ok {
+			agents[id] = userAgent
+			continue
+		}
+		if userAgent.Name != "" {
+			merged.Name = userAgent.Name
+		}
+		if userAgent.Description != "" {
+			merged.Description = userAgent.Description
+		}
+		if userAgent.Model != "" {
+			merged.Model = userAgent.Model
+		}
+		if userAgent.AllowedTools != nil {
+			merged.AllowedTools = userAgent.AllowedTools
+		}
+		if len(userAgent.ContextPaths) > 0 {
+			merged.ContextPaths = userAgent.ContextPaths
+		}
+		if userAgent.AllowedMCP != nil {
+			merged.AllowedMCP = userAgent.AllowedMCP
+		}
+		if userAgent.Disabled {
+			merged.Disabled = true
+		}
+		agents[id] = merged
 	}
 	c.Agents = agents
 }
