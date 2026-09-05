@@ -624,7 +624,7 @@ func mergeCallOptions(model Model, cfg config.ProviderConfig) (fantasy.ProviderO
 }
 
 func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, agent config.Agent, isSubAgent bool) (SessionAgent, error) {
-	large, small, err := c.buildAgentModels(ctx, isSubAgent)
+	large, small, err := c.buildAgentModels(ctx, agent, isSubAgent)
 	if err != nil {
 		return nil, err
 	}
@@ -804,9 +804,14 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	return filteredTools, nil
 }
 
-// TODO: when we support multiple agents we need to change this so that we pass in the agent specific model config
-func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Model, Model, error) {
-	largeModelCfg, ok := c.cfg.Config().Models[config.SelectedModelTypeLarge]
+func (c *coordinator) buildAgentModels(ctx context.Context, agent config.Agent, isSubAgent bool) (Model, Model, error) {
+	// An agent can pin its own model via Agent.Model: either a built-in
+	// selection (large/small) or a custom key from the models config.
+	// Unknown or empty keys fall back to the global large selection.
+	largeModelCfg, ok := c.cfg.Config().Models[agent.Model]
+	if !ok {
+		largeModelCfg, ok = c.cfg.Config().Models[config.SelectedModelTypeLarge]
+	}
 	if !ok {
 		return Model{}, Model{}, errLargeModelNotSelected
 	}
@@ -1208,17 +1213,17 @@ func (c *coordinator) Model() Model {
 }
 
 func (c *coordinator) UpdateModels(ctx context.Context) error {
-	// build the models again so we make sure we get the latest config
-	large, small, err := c.buildAgentModels(ctx, false)
-	if err != nil {
-		return err
-	}
-	c.currentAgent.SetModels(large, small)
-
 	agentCfg, ok := c.cfg.Config().Agents[config.AgentCoder]
 	if !ok {
 		return errCoderAgentNotConfigured
 	}
+
+	// build the models again so we make sure we get the latest config
+	large, small, err := c.buildAgentModels(ctx, agentCfg, false)
+	if err != nil {
+		return err
+	}
+	c.currentAgent.SetModels(large, small)
 
 	tools, err := c.buildTools(ctx, agentCfg, false)
 	if err != nil {
