@@ -67,8 +67,14 @@ func (m *Mem0Sync) SyncEntries(ctx context.Context, entries []Entry) {
 	}
 }
 
+// mem0SearchMaxTokens is the maximum token count for mem0 search
+// results returned to the model. Results beyond this are truncated
+// to avoid prompt inflation.
+const mem0SearchMaxTokens = 4000
+
 // SearchMem0 searches cross-session memories via the MCP server's
-// search_memories tool. Returns the raw text results.
+// search_memories tool. Returns the raw text results, truncated to
+// mem0SearchMaxTokens to avoid prompt inflation.
 func SearchMem0(ctx context.Context, cfg *config.ConfigStore, serverName, query string) (string, error) {
 	if cfg == nil || serverName == "" || strings.TrimSpace(query) == "" {
 		return "", nil
@@ -83,5 +89,15 @@ func SearchMem0(ctx context.Context, cfg *config.ConfigStore, serverName, query 
 	if err != nil {
 		return "", fmt.Errorf("mem0 search failed: %w", err)
 	}
-	return result.Content, nil
+	return truncateTextToTokens(result.Content, mem0SearchMaxTokens), nil
+}
+
+// truncateTextToTokens truncates text to approximately maxTokens by
+// using a rough 4-chars-per-token estimate.
+func truncateTextToTokens(text string, maxTokens int) string {
+	maxChars := maxTokens * 4
+	if len(text) <= maxChars {
+		return text
+	}
+	return text[:maxChars] + "\n\n[Results truncated to stay within token budget]"
 }

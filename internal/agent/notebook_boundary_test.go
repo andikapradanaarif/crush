@@ -293,3 +293,14 @@ func TestExtractExplicitFilePaths_RelativePath(t *testing.T) {
 	refs := extractExplicitFilePaths("fix ./src/main.go")
 	require.Contains(t, refs, "file:main.go")
 }
+
+func TestExtractExplicitFilePaths_StripsTrailingPunctuation(t *testing.T) {
+	// Trailing periods, commas, etc. should be stripped.
+	refs := extractExplicitFilePaths("fix internal/middleware/auth.go.")
+	require.Contains(t, refs, "file:auth.go")
+	require.NotContains(t, refs, "file:auth.go.")
+
+	refs2 := extractExplicitFilePaths("edit internal/config/load.go, then test")
+	require.Contains(t, refs2, "file:load.go")
+	require.NotContains(t, refs2, "file:load.go,")
+}

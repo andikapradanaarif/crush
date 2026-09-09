@@ -1697,14 +1697,6 @@ If not, please feel free to ignore. Again do not mention this message to the use
 			}
 		}
 		rawMsgs = msgs[boundary:]
-		// Store the boundary message ID as the active-range marker
-		// so getSessionMessages can skip old messages that are
-		// already represented in the notebook. This is an advisory
-		// optimization — preparePrompt still recomputes the boundary
-		// dynamically from the loaded messages.
-		if boundary > 0 && boundary < len(msgs) {
-			a.storeActiveRangeMarker(msgs[boundary].SessionID, msgs[boundary].ID)
-		}
 	} else {
 		rawMsgs = msgs
 	}
@@ -1842,10 +1834,12 @@ func (a *sessionAgent) buildNotebookMessage(oldMsgs []message.Message, rawMsgs [
 
 // fullPathRegex matches file paths with at least one separator.
 // Does NOT match bare filenames like "auth.go" — too many false positives.
-var fullPathRegex = regexp.MustCompile(`(?:^|\s)((?:\./)?(?:[a-zA-Z0-9_-]+/)+[a-zA-Z0-9_.-]+)`)
+var fullPathRegex = regexp.MustCompile(`(?:^|\s)((?:\./)?(?:[a-zA-Z0-9_-]+/)+[a-zA-Z0-9_][a-zA-Z0-9_.-]*)`)
 
 // extractExplicitFilePaths finds file paths in the user's message
 // and returns them as "file:basename" tags for notebook lookup.
+// Trailing punctuation (e.g., periods, commas) is stripped from
+// the basename so "internal/auth.go." produces "file:auth.go".
 func extractExplicitFilePaths(msg string) []string {
 	var refs []string
 	matches := fullPathRegex.FindAllStringSubmatch(msg, -1)
@@ -1855,6 +1849,12 @@ func extractExplicitFilePaths(msg string) []string {
 		basename := path
 		if idx := strings.LastIndex(path, "/"); idx >= 0 {
 			basename = path[idx+1:]
+		}
+		// Strip trailing punctuation that isn't part of a real
+		// filename (periods, commas, semicolons, colons).
+		basename = strings.TrimRight(basename, ".,;:")
+		if basename == "" {
+			continue
 		}
 		tag := "file:" + basename
 		if !seen[tag] {
@@ -2016,28 +2016,6 @@ func syntheticToolResultsForOrphanedCalls(m message.Message, knownToolResultIDs 
 	}, true
 }
 
-// storeActiveRangeMarker stores the boundary message ID as the
-// session's summary_message_id. In notebook mode, this serves as an
-// advisory active-range marker: getSessionMessages uses it to skip
-// old messages already represented in the notebook, with a buffer for
-// stale-turn fallback.
-func (a *sessionAgent) storeActiveRangeMarker(sessionID, msgID string) {
-	if sessionID == "" || msgID == "" {
-		return
-	}
-	sess, err := a.sessions.Get(context.Background(), sessionID)
-	if err != nil {
-		return
-	}
-	if sess.SummaryMessageID == msgID {
-		return
-	}
-	sess.SummaryMessageID = msgID
-	if _, err := a.sessions.Save(context.Background(), sess); err != nil {
-		slog.Warn("Failed to store active-range marker", "error", err, "session_id", sessionID)
-	}
-}
-
 func (a *sessionAgent) getSessionMessages(ctx context.Context, session session.Session) ([]message.Message, error) {
 	msgs, err := a.messages.List(ctx, session.ID)
 	if err != nil {
@@ -2048,42 +2026,25 @@ func (a *sessionAgent) getSessionMessages(ctx context.Context, session session.S
 		return msgs, nil
 	}
 
-	// Find the marker message index.
-	markerIdx := -1
+	// Legacy summary mode: trim to the summary message and
+	// treat it as a user message. In notebook mode, we always
+	// return the full message list so that turn numbers and
+	// pre-turn message counts remain absolute.
+	if a.notebookEnabled {
+		return msgs, nil
+	}
+
+	summaryMsgIndex := -1
 	for i, msg := range msgs {
 		if msg.ID == session.SummaryMessageID {
-			markerIdx = i
+			summaryMsgIndex = i
 			break
 		}
 	}
-	if markerIdx == -1 {
-		return msgs, nil
+	if summaryMsgIndex != -1 {
+		msgs = msgs[summaryMsgIndex:]
+		msgs[0].Role = message.User
 	}
-
-	if a.notebookEnabled {
-		// Notebook mode: the marker is the boundary message.
-		// Keep a buffer of messages before the marker for
-		// stale-turn fallback. The buffer is 2 turns worth
-		// of messages (approximate: count back to the 2nd
-		// previous user message).
-		bufferStart := markerIdx
-		userCount := 0
-		for i := markerIdx - 1; i >= 0 && userCount < 2; i-- {
-			if msgs[i].Role == message.User {
-				userCount++
-			}
-			bufferStart = i
-		}
-		if bufferStart > 0 {
-			msgs = msgs[bufferStart:]
-		}
-		return msgs, nil
-	}
-
-	// Legacy summary mode: trim to the summary message and
-	// treat it as a user message.
-	msgs = msgs[markerIdx:]
-	msgs[0].Role = message.User
 	return msgs, nil
 }
 

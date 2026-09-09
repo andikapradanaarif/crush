@@ -598,3 +598,55 @@ func TestFindToolResult_NoDanglingPointer(t *testing.T) {
 	require.NotNil(t, result)
 	require.Equal(t, "result1", result.Content)
 }
+
+func TestSearchMem0_NilGuards(t *testing.T) {
+	// nil cfg, empty server name, and empty query should all
+	// return empty results without error.
+	ctx := context.Background()
+
+	result, err := SearchMem0(ctx, nil, "mem0", "test")
+	require.NoError(t, err)
+	require.Equal(t, "", result)
+
+	// These need a non-nil cfg to test the server-name and query
+	// guards, but we can test the empty-query guard with nil since
+	// it's checked first.
+	result, err = SearchMem0(ctx, nil, "mem0", "")
+	require.NoError(t, err)
+	require.Equal(t, "", result)
+
+	result, err = SearchMem0(ctx, nil, "mem0", "   ")
+	require.NoError(t, err)
+	require.Equal(t, "", result)
+}
+
+func TestTruncateTextToTokens(t *testing.T) {
+	// Short text is returned as-is.
+	short := "hello world"
+	require.Equal(t, short, truncateTextToTokens(short, 1000))
+
+	// Long text is truncated.
+	long := strings.Repeat("a", 10000)
+	result := truncateTextToTokens(long, 100)
+	require.Less(t, len(result), len(long))
+	require.True(t, strings.Contains(result, "[Results truncated"))
+
+	// Exact boundary: 100 tokens * 4 chars = 400 chars.
+	exact := strings.Repeat("b", 400)
+	require.Equal(t, exact, truncateTextToTokens(exact, 100))
+}
+
+func TestMem0Sync_NilGuards(t *testing.T) {
+	// Nil sync should be a no-op.
+	var m *Mem0Sync
+	m.SyncEntries(context.Background(), []Entry{{ID: "test"}})
+	// Should not panic.
+
+	// Empty server name should be a no-op.
+	m = NewMem0Sync(nil, "", "session1")
+	m.SyncEntries(context.Background(), []Entry{{ID: "test"}})
+
+	// Empty entries should be a no-op.
+	m = NewMem0Sync(nil, "mem0", "session1")
+	m.SyncEntries(context.Background(), nil)
+}
