@@ -44,6 +44,7 @@ type Entry struct {
 	EventType        string
 	Title            string
 	EntryText        string
+	EntryTextFull    string // Original uncompressed text; empty if same as EntryText.
 	TokenCount       int64
 	CompressionLevel int64
 	CreatedAt        int64

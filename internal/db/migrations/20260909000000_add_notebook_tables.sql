@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS notebook_entries (
     event_type TEXT NOT NULL DEFAULT 'general',
     title TEXT NOT NULL DEFAULT '',
     entry_text TEXT NOT NULL,
+    entry_text_full TEXT,
     token_count INTEGER NOT NULL DEFAULT 0,
     compression_level INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,

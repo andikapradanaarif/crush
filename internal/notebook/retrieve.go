@@ -99,6 +99,7 @@ func (s *service) enrichEntries(ctx context.Context, rows []db.NotebookEntry) ([
 			EventType:        row.EventType,
 			Title:            row.Title,
 			EntryText:        row.EntryText,
+			EntryTextFull:    row.EntryTextFull.String,
 			TokenCount:       row.TokenCount,
 			CompressionLevel: row.CompressionLevel,
 			CreatedAt:        row.CreatedAt,

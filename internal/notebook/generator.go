@@ -17,7 +17,6 @@ var notebookEntryPrompt []byte
 // model to produce structured notebook entries.
 type llmGenerator struct {
 	resolveModel   func() fantasy.LanguageModel
-	maxTokens      int64
 	maxEntryTokens int64
 }
 

@@ -49,7 +49,14 @@ func NewRecallTool(svc notebook.Service) fantasy.AgentTool {
 			var sb strings.Builder
 			for _, e := range entries {
 				sb.WriteString(fmt.Sprintf("## Turn %d.%d — %s\n", e.TurnNumber, e.EventNumber, e.Title))
-				sb.WriteString(e.EntryText)
+				// Return the full uncompressed text when available,
+				// so recall always provides the original detail even
+				// after compaction has replaced entry_text.
+				text := e.EntryText
+				if e.EntryTextFull != "" {
+					text = e.EntryTextFull
+				}
+				sb.WriteString(text)
 				if len(e.Tags) > 0 {
 					sb.WriteString("\nTags: ")
 					sb.WriteString(strings.Join(e.Tags, " "))
@@ -74,7 +81,9 @@ func searchNotebook(ctx context.Context, svc notebook.Service, sessionID, query 
 		return svc.SearchByTag(ctx, sessionID, query)
 	case strings.HasPrefix(query, "turn:"):
 		var turn int64
-		fmt.Sscanf(query, "turn:%d", &turn)
+		if n, _ := fmt.Sscanf(query, "turn:%d", &turn); n != 1 {
+			return nil, fmt.Errorf("invalid turn: query %q: expected turn:<number>", query)
+		}
 		return svc.GetByTurn(ctx, sessionID, turn)
 	case query == "command" || query == "decision" || query == "file_read" || query == "file_edit" || query == "exploration":
 		return svc.SearchByEventType(ctx, sessionID, query)

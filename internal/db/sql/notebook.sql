@@ -7,11 +7,12 @@ INSERT INTO notebook_entries (
     event_type,
     title,
     entry_text,
+    entry_text_full,
     token_count,
     compression_level,
     created_at
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 ) RETURNING *;
 
 -- name: CreateNotebookTag :exec

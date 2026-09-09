@@ -36,16 +36,17 @@ type Message struct {
 }
 
 type NotebookEntry struct {
-	ID               string `json:"id"`
-	SessionID        string `json:"session_id"`
-	TurnNumber       int64  `json:"turn_number"`
-	EventNumber      int64  `json:"event_number"`
-	EventType        string `json:"event_type"`
-	Title            string `json:"title"`
-	EntryText        string `json:"entry_text"`
-	TokenCount       int64  `json:"token_count"`
-	CompressionLevel int64  `json:"compression_level"`
-	CreatedAt        int64  `json:"created_at"`
+	ID               string         `json:"id"`
+	SessionID        string         `json:"session_id"`
+	TurnNumber       int64          `json:"turn_number"`
+	EventNumber      int64          `json:"event_number"`
+	EventType        string         `json:"event_type"`
+	Title            string         `json:"title"`
+	EntryText        string         `json:"entry_text"`
+	TokenCount       int64          `json:"token_count"`
+	CompressionLevel int64          `json:"compression_level"`
+	CreatedAt        int64          `json:"created_at"`
+	EntryTextFull    sql.NullString `json:"entry_text_full"`
 }
 
 type NotebookTag struct {

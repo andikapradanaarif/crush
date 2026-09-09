@@ -2,6 +2,7 @@ package notebook
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -278,6 +279,7 @@ func (s *service) storeEntry(ctx context.Context, sessionID string, turnNumber, 
 		EventType:        entry.EventType,
 		Title:            entry.Title,
 		EntryText:        entry.Text,
+		EntryTextFull:    sql.NullString{String: entry.Text, Valid: true},
 		TokenCount:       tokenCount,
 		CompressionLevel: CompressionFull,
 		CreatedAt:        now,
