@@ -42,6 +42,7 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/notebook"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/stringext"
@@ -181,6 +182,15 @@ type sessionAgent struct {
 	notify               pubsub.Publisher[notify.Notification]
 	runComplete          pubsub.Publisher[notify.RunComplete]
 
+	// notebook provides per-event context summarization. Nil when
+	// notebook is disabled.
+	notebook notebook.Service
+	// notebookEnabled controls whether notebook context compaction is
+	// used instead of the legacy Summarize path.
+	notebookEnabled bool
+	// rawTokenBudget is the token budget for raw recent turns.
+	rawTokenBudget int
+
 	messageQueue   *csync.Map[string, []SessionAgentCall]
 	activeRequests *csync.Map[string, *activeCancel]
 
@@ -235,6 +245,15 @@ type SessionAgentOptions struct {
 	Tools                []fantasy.AgentTool
 	Notify               pubsub.Publisher[notify.Notification]
 	RunComplete          pubsub.Publisher[notify.RunComplete]
+	// Notebook is the per-event context notebook service. May be nil
+	// when notebook is disabled.
+	Notebook notebook.Service
+	// NotebookEnabled controls whether the notebook is used for context
+	// compaction. When false, the existing Summarize path is used.
+	NotebookEnabled bool
+	// RawTokenBudget is the token budget for raw recent turns in
+	// notebook mode.
+	RawTokenBudget int
 }
 
 func NewSessionAgent(
@@ -258,6 +277,9 @@ func NewSessionAgent(
 		dispatchMu:           csync.NewMap[string, *sync.Mutex](),
 		acceptedRuns:         csync.NewMap[string, int](),
 		cancelMark:           csync.NewMap[string, uint64](),
+		notebook:             opts.Notebook,
+		notebookEnabled:      opts.NotebookEnabled,
+		rawTokenBudget:       opts.RawTokenBudget,
 	}
 }
 
@@ -700,6 +722,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		return nil, fmt.Errorf("failed to get session messages: %w", err)
 	}
 
+	// Record the message count before the user message is created so
+	// we can identify the current turn's messages after the turn
+	// completes. This is used for notebook entry generation.
+	preTurnMsgCount := len(msgs)
+	// Turn number is the number of user messages before this turn
+	// (0-indexed). Each user message starts a new turn.
+	turnNumber := int64(countUserMessages(msgs))
+
 	// Generate title from the first real (non-shell) user prompt.
 	// can take tens of seconds. Blocking Run on it delays the
 	// response to the caller. Use a detached context so the title
@@ -1052,7 +1082,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				} else {
 					threshold = int64(float64(cw) * smallContextWindowRatio)
 				}
-				if (remaining <= threshold) && !a.disableAutoSummarize {
+				if (remaining <= threshold) && !a.disableAutoSummarize && !a.notebookEnabled {
 					shouldSummarize = true
 					return true
 				}
@@ -1194,6 +1224,45 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			return nil, updateErr
 		}
 		return nil, err
+	}
+
+	// Generate notebook entries asynchronously when notebook is
+	// enabled. This runs in the background so the user sees the
+	// response immediately. Entries are ready before the next turn
+	// (typically 5-30 seconds of user think time). If the user sends
+	// the next message before generation completes, the notebook will
+	// be one turn stale — preparePrompt handles this by including
+	// unprocessed turns as raw.
+	if a.notebookEnabled && a.notebook != nil {
+		notebookCtx := context.WithoutCancel(ctx)
+		notebookTurnNumber := turnNumber
+		notebookSessionID := call.SessionID
+		notebookPreTurnCount := preTurnMsgCount
+		go func() {
+			// Re-fetch messages to get the current turn's messages
+			// (user message + assistant response + tool calls/results).
+			allMsgs, err := a.messages.List(notebookCtx, notebookSessionID)
+			if err != nil {
+				slog.Error("Failed to list messages for notebook generation", "error", err, "session_id", notebookSessionID)
+				return
+			}
+			// Extract only the current turn's messages. Stop at
+			// the next user message to avoid including the next
+			// turn's messages if the user sent a new message before
+			// this goroutine ran.
+			if notebookPreTurnCount >= len(allMsgs) {
+				return
+			}
+			turnMsgs := extractCurrentTurnMessages(allMsgs, notebookPreTurnCount)
+			if len(turnMsgs) == 0 {
+				return
+			}
+			// Skip if no significant events (avoids duplicate
+			// entries for trivial turns).
+			if err := a.notebook.GenerateEntries(notebookCtx, notebookSessionID, notebookTurnNumber, turnMsgs); err != nil {
+				slog.Error("Failed to generate notebook entries", "error", err, "session_id", notebookSessionID)
+			}
+		}()
 	}
 
 	if shouldSummarize {
@@ -1543,13 +1612,50 @@ If not, please feel free to ignore. Again do not mention this message to the use
 			),
 		))
 	}
+
+	// When notebook is enabled, split messages into notebook (old
+	// turns) and raw (recent turns within token budget). The notebook
+	// entries are injected as a system message before the raw history.
+	notebookEnabled := a.notebookEnabled && a.notebook != nil
+	var rawMsgs []message.Message
+	if notebookEnabled {
+		budget := a.rawTokenBudget
+		if budget <= 0 {
+			budget = notebook.DefaultRawTokenBudget
+		}
+		boundary := findTurnBoundaryByTokenBudget(msgs, budget, estimateRawMessageTokens)
+		boundaryTurn := int64(countUserMessages(msgs[:boundary]))
+		// buildNotebookMessage filters entries to only include turns
+		// before boundaryTurn, so there is no overlap between the
+		// notebook system message and the raw window.
+		notebookMsg := a.buildNotebookMessage(msgs[:boundary], msgs[boundary:], boundaryTurn)
+		// Stale-turn fallback: if any turns before the boundary
+		// don't have notebook entries yet (async generation hasn't
+		// finished), extend the raw window to include those
+		// unprocessed turns so their context isn't lost.
+		if notebookMsg.turnsWithEntries != nil && boundary > 0 {
+			staleBoundary := findStaleTurnBoundary(msgs[:boundary], boundaryTurn, notebookMsg.turnsWithEntries)
+			if staleBoundary < boundary {
+				boundary = staleBoundary
+				boundaryTurn = int64(countUserMessages(msgs[:boundary]))
+				notebookMsg = a.buildNotebookMessage(msgs[:boundary], msgs[boundary:], boundaryTurn)
+			}
+		}
+		if notebookMsg.msg != nil {
+			history = append(history, *notebookMsg.msg)
+		}
+		rawMsgs = msgs[boundary:]
+	} else {
+		rawMsgs = msgs
+	}
+
 	// Collect all tool call IDs present in assistant messages and all tool
 	// result IDs present in tool messages. This lets us detect both orphaned
 	// tool results (result without a call) and orphaned tool calls (call
 	// without a result).
 	knownToolCallIDs := make(map[string]struct{})
 	knownToolResultIDs := make(map[string]struct{})
-	for _, m := range msgs {
+	for _, m := range rawMsgs {
 		switch m.Role {
 		case message.Assistant:
 			for _, tc := range m.ToolCalls() {
@@ -1562,7 +1668,7 @@ If not, please feel free to ignore. Again do not mention this message to the use
 		}
 	}
 
-	for _, m := range msgs {
+	for _, m := range rawMsgs {
 		if len(m.Parts) == 0 {
 			continue
 		}
@@ -1609,6 +1715,69 @@ If not, please feel free to ignore. Again do not mention this message to the use
 	}
 
 	return history, files
+}
+
+// notebookMessageResult holds the rendered notebook system message and
+// the set of turn numbers that have notebook entries.
+type notebookMessageResult struct {
+	msg     *fantasy.Message
+	maxTurn int64
+	// turnsWithEntries is the set of turn numbers that have at
+	// least one notebook entry.
+	turnsWithEntries map[int64]bool
+}
+
+// buildNotebookMessage reconstructs the notebook system message from
+// DB state. It queries entries for the session, filters to only
+// include turns before the raw window, and renders them into a single
+// system message. Returns the message and the set of turns that have
+// entries.
+func (a *sessionAgent) buildNotebookMessage(oldMsgs []message.Message, rawMsgs []message.Message, boundaryTurn int64) notebookMessageResult {
+	if a.notebook == nil || len(oldMsgs) == 0 {
+		return notebookMessageResult{}
+	}
+	// Derive the session ID from the messages.
+	sessionID := oldMsgs[0].SessionID
+	if sessionID == "" && len(oldMsgs) > 1 {
+		sessionID = oldMsgs[1].SessionID
+	}
+	if sessionID == "" && len(rawMsgs) > 0 {
+		sessionID = rawMsgs[0].SessionID
+	}
+	if sessionID == "" {
+		return notebookMessageResult{}
+	}
+	// Use a bounded context so we don't block indefinitely during
+	// prompt preparation.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	entries, err := a.notebook.GetEntries(ctx, sessionID)
+	if err != nil {
+		slog.Error("Failed to get notebook entries", "error", err)
+		return notebookMessageResult{}
+	}
+	// Track which turns have entries, regardless of boundary.
+	turnsWithEntries := make(map[int64]bool)
+	var filtered []notebook.Entry
+	var maxTurn int64
+	for _, e := range entries {
+		turnsWithEntries[e.TurnNumber] = true
+		if e.TurnNumber < boundaryTurn {
+			filtered = append(filtered, e)
+			if e.TurnNumber > maxTurn {
+				maxTurn = e.TurnNumber
+			}
+		}
+	}
+	if len(filtered) == 0 {
+		return notebookMessageResult{maxTurn: maxTurn, turnsWithEntries: turnsWithEntries}
+	}
+	rendered := notebook.RenderEntries(filtered)
+	if rendered == "" {
+		return notebookMessageResult{maxTurn: maxTurn, turnsWithEntries: turnsWithEntries}
+	}
+	msg := fantasy.NewSystemMessage("<notebook>\n" + rendered + "</notebook>")
+	return notebookMessageResult{msg: &msg, maxTurn: maxTurn, turnsWithEntries: turnsWithEntries}
 }
 
 // filterFileParts removes fantasy.FilePart entries from a slice of message
@@ -1713,6 +1882,37 @@ func (a *sessionAgent) getSessionMessages(ctx context.Context, session session.S
 		}
 	}
 	return msgs, nil
+}
+
+// countUserMessages counts the number of user messages in the slice.
+// Each user message starts a new turn.
+func countUserMessages(msgs []message.Message) int {
+	count := 0
+	for _, msg := range msgs {
+		if msg.Role == message.User {
+			count++
+		}
+	}
+	return count
+}
+
+// extractCurrentTurnMessages returns the messages belonging to the
+// current turn, starting at startIndex. The turn ends at the next
+// user message (exclusive) or the end of the slice. This prevents
+// the async notebook goroutine from including the next turn's
+// messages if the user sent a new message before the goroutine ran.
+func extractCurrentTurnMessages(msgs []message.Message, startIndex int) []message.Message {
+	if startIndex >= len(msgs) {
+		return nil
+	}
+	end := len(msgs)
+	for i := startIndex + 1; i < len(msgs); i++ {
+		if msgs[i].Role == message.User {
+			end = i
+			break
+		}
+	}
+	return msgs[startIndex:end]
 }
 
 // hasUserTextMessage reports whether any user message in msgs contains

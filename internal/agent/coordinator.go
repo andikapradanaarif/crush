@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/catwalk/pkg/catwalk"
@@ -24,6 +25,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
+	"github.com/charmbracelet/crush/internal/agent/tools/notebooktools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/discover"
 	"github.com/charmbracelet/crush/internal/event"
@@ -33,6 +35,7 @@ import (
 	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/notebook"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/charmbracelet/crush/internal/permission"
@@ -150,6 +153,16 @@ type coordinator struct {
 	runComplete pubsub.Publisher[notify.RunComplete]
 	interactive bool
 
+	// notebook provides per-event context summarization. May be nil
+	// when notebook is disabled in config.
+	notebook notebook.Service
+	// notebookModelResolver is set once by buildAgent so the
+	// notebook generator can obtain the small model lazily. Uses
+	// sync.Once to avoid races when concurrent buildAgent calls
+	// (e.g., sub-agents) try to set it simultaneously.
+	notebookModelResolver *func() fantasy.LanguageModel
+	notebookResolverOnce  sync.Once
+
 	currentAgent SessionAgent
 	agents       map[string]SessionAgent
 
@@ -177,6 +190,13 @@ type CoordinatorOptions struct {
 	RunComplete pubsub.Publisher[notify.RunComplete]
 	Skills      *skills.Manager
 	Interactive bool
+	// Notebook is the per-event context notebook service. May be nil
+	// when notebook is disabled.
+	Notebook notebook.Service
+	// NotebookModelResolver is a pointer to a function that returns
+	// the small model. The coordinator sets this so the notebook
+	// generator can obtain the model lazily.
+	NotebookModelResolver *func() fantasy.LanguageModel
 }
 
 func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, error) {
@@ -194,21 +214,23 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 	skillTracker := skills.NewTracker(activeSkills)
 
 	c := &coordinator{
-		cfg:          opts.Config,
-		sessions:     opts.Sessions,
-		messages:     opts.Messages,
-		permissions:  opts.Permissions,
-		questions:    opts.Questions,
-		history:      opts.History,
-		filetracker:  opts.FileTracker,
-		lspManager:   opts.LSPManager,
-		notify:       opts.Notify,
-		runComplete:  opts.RunComplete,
-		agents:       make(map[string]SessionAgent),
-		allSkills:    allSkills,
-		activeSkills: activeSkills,
-		skillTracker: skillTracker,
-		interactive:  opts.Interactive,
+		cfg:                   opts.Config,
+		sessions:              opts.Sessions,
+		messages:              opts.Messages,
+		permissions:           opts.Permissions,
+		questions:             opts.Questions,
+		history:               opts.History,
+		filetracker:           opts.FileTracker,
+		lspManager:            opts.LSPManager,
+		notify:                opts.Notify,
+		runComplete:           opts.RunComplete,
+		agents:                make(map[string]SessionAgent),
+		allSkills:             allSkills,
+		activeSkills:          activeSkills,
+		skillTracker:          skillTracker,
+		interactive:           opts.Interactive,
+		notebook:              opts.Notebook,
+		notebookModelResolver: opts.NotebookModelResolver,
 	}
 
 	agentCfg, ok := opts.Config.Config().Agents[config.AgentCoder]
@@ -704,7 +726,24 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		Tools:                nil,
 		Notify:               c.notify,
 		RunComplete:          c.runComplete,
+		Notebook:             c.notebook,
+		NotebookEnabled:      c.cfg.Config().Options.NotebookIsEnabled(),
+		RawTokenBudget:       c.cfg.Config().Options.NotebookRawTokenBudget,
 	})
+
+	// Wire the notebook model resolver once so the generator can
+	// obtain the small model lazily. Using sync.Once avoids races
+	// when concurrent buildAgent calls (e.g., sub-agents) try to
+	// set the same shared resolver. The small model is config-driven
+	// and identical across all agent builds.
+	if c.notebookModelResolver != nil {
+		c.notebookResolverOnce.Do(func() {
+			smallModelRef := small
+			*c.notebookModelResolver = func() fantasy.LanguageModel {
+				return smallModelRef.Model
+			}
+		})
+	}
 
 	// The readiness goroutines below perform one-time setup — building the
 	// system prompt and the initial tool list — whose results the
@@ -792,6 +831,14 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewViewTool(c.lspManager, c.permissions, c.filetracker, c.skillTracker, c.cfg.WorkingDir(), c.cfg.Config().Options.SkillsPaths...),
 		tools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 	)
+
+	// Add notebook tools (recall + notebook_search) when notebook
+	// is enabled. These let the model retrieve compacted context
+	// from previous turns instead of re-reading files.
+	if c.notebook != nil && c.cfg.Config().Options.NotebookIsEnabled() {
+		nbTools := notebooktools.Build(c.notebook)
+		allTools = append(allTools, nbTools...)
+	}
 
 	// Question tool is interactive-only and not available to sub-agents.
 	if !isSubAgent && c.interactive {
