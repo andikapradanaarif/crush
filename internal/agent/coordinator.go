@@ -729,6 +729,10 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		Notebook:             c.notebook,
 		NotebookEnabled:      c.cfg.Config().Options.NotebookIsEnabled(),
 		RawTokenBudget:       c.cfg.Config().Options.NotebookRawTokenBudget,
+		ConfigStore:          c.cfg,
+		NotebookSyncMem0:     c.cfg.Config().Options.NotebookSyncMem0Enabled(),
+		NotebookMemoryServer: c.cfg.Config().Options.NotebookMemoryServerName(),
+		NotebookAutoInject:   c.cfg.Config().Options.NotebookAutoInjectEnabled(),
 	})
 
 	// Wire the notebook model resolver once so the generator can
@@ -836,7 +840,12 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	// is enabled. These let the model retrieve compacted context
 	// from previous turns instead of re-reading files.
 	if c.notebook != nil && c.cfg.Config().Options.NotebookIsEnabled() {
-		nbTools := notebooktools.Build(c.notebook)
+		nbTools := notebooktools.Build(
+			c.notebook,
+			c.cfg,
+			c.cfg.Config().Options.NotebookMemoryServerName(),
+			c.cfg.Config().Options.NotebookSyncMem0Enabled(),
+		)
 		allTools = append(allTools, nbTools...)
 	}
 

@@ -552,6 +552,13 @@ func (c *Config) NormalizeOptions() {
 	if c.Options.NotebookEnabled == nil {
 		c.Options.NotebookEnabled = ptr(true)
 	}
+	// mem0 sync and auto-inject default to false (opt-in).
+	if c.Options.NotebookSyncMem0 == nil {
+		c.Options.NotebookSyncMem0 = ptr(false)
+	}
+	if c.Options.NotebookAutoInject == nil {
+		c.Options.NotebookAutoInject = ptr(false)
+	}
 }
 
 func (c *Config) setDefaults(workingDir, dataDir string) {

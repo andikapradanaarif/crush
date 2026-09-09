@@ -258,3 +258,38 @@ func TestExtractCurrentTurnMessages_StartAtEnd(t *testing.T) {
 	turnMsgs := extractCurrentTurnMessages(msgs, 1)
 	require.Nil(t, turnMsgs)
 }
+
+func TestExtractExplicitFilePaths(t *testing.T) {
+	// Full paths with separators are extracted.
+	refs := extractExplicitFilePaths("fix the bug in internal/middleware/auth.go")
+	require.Contains(t, refs, "file:auth.go")
+}
+
+func TestExtractExplicitFilePaths_NoBareFilenames(t *testing.T) {
+	// Bare filenames without separators should not match.
+	refs := extractExplicitFilePaths("fix the bug in auth.go")
+	require.NotContains(t, refs, "file:auth.go")
+}
+
+func TestExtractExplicitFilePaths_MultiplePaths(t *testing.T) {
+	refs := extractExplicitFilePaths("edit internal/middleware/auth.go and internal/config/load.go")
+	require.Contains(t, refs, "file:auth.go")
+	require.Contains(t, refs, "file:load.go")
+}
+
+func TestExtractExplicitFilePaths_Deduplicates(t *testing.T) {
+	refs := extractExplicitFilePaths("edit internal/middleware/auth.go and internal/auth.go")
+	// Same basename should only appear once.
+	count := 0
+	for _, r := range refs {
+		if r == "file:auth.go" {
+			count++
+		}
+	}
+	require.Equal(t, 1, count, "file:auth.go should appear only once")
+}
+
+func TestExtractExplicitFilePaths_RelativePath(t *testing.T) {
+	refs := extractExplicitFilePaths("fix ./src/main.go")
+	require.Contains(t, refs, "file:main.go")
+}

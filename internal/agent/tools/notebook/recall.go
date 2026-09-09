@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/notebook"
 )
 
@@ -18,12 +19,27 @@ var recallDescription []byte
 
 // RecallParams holds the parameters for the recall tool.
 type RecallParams struct {
-	Query string `json:"query" description:"Search query: a tag (file:auth.go), event type (command, decision), turn number (turn:5), or text to search for."`
+	Query string `json:"query" description:"Search query: a tag (file:auth.go), event type (command, decision), turn number (turn:5), or text to search for. Use cross: prefix to search across sessions via mem0."`
+}
+
+// recallContext holds dependencies for the recall tool.
+type recallContext struct {
+	svc        notebook.Service
+	cfg        *config.ConfigStore
+	mem0Server string
+	syncMem0   bool
 }
 
 // NewRecallTool creates a tool that retrieves full notebook entries by
-// tag, event type, turn number, or text search.
-func NewRecallTool(svc notebook.Service) fantasy.AgentTool {
+// tag, event type, turn number, or text search. When mem0 sync is
+// enabled, cross-session search is available via the "cross:" prefix.
+func NewRecallTool(svc notebook.Service, cfg *config.ConfigStore, mem0Server string, syncMem0 bool) fantasy.AgentTool {
+	rc := &recallContext{
+		svc:        svc,
+		cfg:        cfg,
+		mem0Server: mem0Server,
+		syncMem0:   syncMem0,
+	}
 	return fantasy.NewAgentTool(
 		RecallToolName,
 		string(recallDescription),
@@ -32,12 +48,28 @@ func NewRecallTool(svc notebook.Service) fantasy.AgentTool {
 				return fantasy.NewTextErrorResponse("query parameter is required"), nil
 			}
 
+			// Cross-session search via mem0.
+			if strings.HasPrefix(params.Query, "cross:") {
+				if !rc.syncMem0 || rc.cfg == nil || rc.mem0Server == "" {
+					return fantasy.NewTextErrorResponse("cross-session search requires mem0 sync to be enabled"), nil
+				}
+				query := strings.TrimPrefix(params.Query, "cross:")
+				result, err := notebook.SearchMem0(ctx, rc.cfg, rc.mem0Server, query)
+				if err != nil {
+					return fantasy.NewTextErrorResponse(fmt.Sprintf("mem0 search failed: %v", err)), nil
+				}
+				if result == "" {
+					return fantasy.NewTextResponse("No cross-session memories found."), nil
+				}
+				return fantasy.NewTextResponse(result), nil
+			}
+
 			sessionID := getSessionID(ctx)
 			if sessionID == "" {
 				return fantasy.NewTextErrorResponse("session ID is required for recall"), nil
 			}
 
-			entries, err := searchNotebook(ctx, svc, sessionID, params.Query)
+			entries, err := searchNotebook(ctx, rc.svc, sessionID, params.Query)
 			if err != nil {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("failed to search notebook: %v", err)), nil
 			}

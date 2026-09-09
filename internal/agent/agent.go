@@ -190,6 +190,16 @@ type sessionAgent struct {
 	notebookEnabled bool
 	// rawTokenBudget is the token budget for raw recent turns.
 	rawTokenBudget int
+	// configStore provides access to config for mem0 sync and
+	// auto-inject lookups.
+	configStore *config.ConfigStore
+	// notebookSyncMem0 controls whether entries are synced to mem0.
+	notebookSyncMem0 bool
+	// notebookMemoryServer is the MCP server name for mem0.
+	notebookMemoryServer string
+	// notebookAutoInject controls whether file references in the
+	// user message trigger auto-injection of full notebook entries.
+	notebookAutoInject bool
 
 	messageQueue   *csync.Map[string, []SessionAgentCall]
 	activeRequests *csync.Map[string, *activeCancel]
@@ -254,6 +264,17 @@ type SessionAgentOptions struct {
 	// RawTokenBudget is the token budget for raw recent turns in
 	// notebook mode.
 	RawTokenBudget int
+	// ConfigStore provides access to config for mem0 sync and
+	// auto-inject lookups. May be nil when notebook is disabled.
+	ConfigStore *config.ConfigStore
+	// NotebookSyncMem0 controls whether entries are synced to mem0
+	// for cross-session search.
+	NotebookSyncMem0 bool
+	// NotebookMemoryServer is the MCP server name for mem0.
+	NotebookMemoryServer string
+	// NotebookAutoInject controls whether file references in the user
+	// message trigger auto-injection of full notebook entries.
+	NotebookAutoInject bool
 }
 
 func NewSessionAgent(
@@ -280,6 +301,10 @@ func NewSessionAgent(
 		notebook:             opts.Notebook,
 		notebookEnabled:      opts.NotebookEnabled,
 		rawTokenBudget:       opts.RawTokenBudget,
+		configStore:          opts.ConfigStore,
+		notebookSyncMem0:     opts.NotebookSyncMem0,
+		notebookMemoryServer: opts.NotebookMemoryServer,
+		notebookAutoInject:   opts.NotebookAutoInject,
 	}
 }
 
@@ -1262,6 +1287,17 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			if err := a.notebook.GenerateEntries(notebookCtx, notebookSessionID, notebookTurnNumber, turnMsgs); err != nil {
 				slog.Error("Failed to generate notebook entries", "error", err, "session_id", notebookSessionID)
 			}
+			// Sync to mem0 if enabled. This is best-effort and
+			// runs after entries are stored.
+			if a.notebookSyncMem0 && a.configStore != nil {
+				entries, err := a.notebook.GetByTurn(notebookCtx, notebookSessionID, notebookTurnNumber)
+				if err != nil {
+					slog.Error("Failed to get entries for mem0 sync", "error", err)
+				} else {
+					mem0 := notebook.NewMem0Sync(a.configStore, a.notebookMemoryServer, notebookSessionID)
+					mem0.SyncEntries(notebookCtx, entries)
+				}
+			}
 		}()
 	}
 
@@ -1644,7 +1680,31 @@ If not, please feel free to ignore. Again do not mention this message to the use
 		if notebookMsg.msg != nil {
 			history = append(history, *notebookMsg.msg)
 		}
+		// Auto-injection: when enabled, extract file paths from the
+		// latest user message and inject full notebook entries for
+		// any compressed references. This is best-effort and
+		// disabled by default.
+		if a.notebookAutoInject && len(msgs) > 0 {
+			sessionID := msgs[len(msgs)-1].SessionID
+			if sessionID == "" && len(msgs) > 1 {
+				sessionID = msgs[len(msgs)-2].SessionID
+			}
+			if sessionID != "" {
+				injectMsg := a.maybeAutoInject(msgs, sessionID, boundaryTurn)
+				if injectMsg != nil {
+					history = append(history, *injectMsg)
+				}
+			}
+		}
 		rawMsgs = msgs[boundary:]
+		// Store the boundary message ID as the active-range marker
+		// so getSessionMessages can skip old messages that are
+		// already represented in the notebook. This is an advisory
+		// optimization — preparePrompt still recomputes the boundary
+		// dynamically from the loaded messages.
+		if boundary > 0 && boundary < len(msgs) {
+			a.storeActiveRangeMarker(msgs[boundary].SessionID, msgs[boundary].ID)
+		}
 	} else {
 		rawMsgs = msgs
 	}
@@ -1780,6 +1840,100 @@ func (a *sessionAgent) buildNotebookMessage(oldMsgs []message.Message, rawMsgs [
 	return notebookMessageResult{msg: &msg, maxTurn: maxTurn, turnsWithEntries: turnsWithEntries}
 }
 
+// fullPathRegex matches file paths with at least one separator.
+// Does NOT match bare filenames like "auth.go" — too many false positives.
+var fullPathRegex = regexp.MustCompile(`(?:^|\s)((?:\./)?(?:[a-zA-Z0-9_-]+/)+[a-zA-Z0-9_.-]+)`)
+
+// extractExplicitFilePaths finds file paths in the user's message
+// and returns them as "file:basename" tags for notebook lookup.
+func extractExplicitFilePaths(msg string) []string {
+	var refs []string
+	matches := fullPathRegex.FindAllStringSubmatch(msg, -1)
+	seen := make(map[string]bool)
+	for _, m := range matches {
+		path := m[1]
+		basename := path
+		if idx := strings.LastIndex(path, "/"); idx >= 0 {
+			basename = path[idx+1:]
+		}
+		tag := "file:" + basename
+		if !seen[tag] {
+			seen[tag] = true
+			refs = append(refs, tag)
+		}
+	}
+	return refs
+}
+
+// maybeAutoInject searches the notebook for entries matching file
+// paths mentioned in the latest user message. If any compressed
+// entries are found, it returns a system message with their full
+// text so the model has the original detail without needing to call
+// recall. Returns nil if no entries are found or auto-inject is off.
+func (a *sessionAgent) maybeAutoInject(msgs []message.Message, sessionID string, boundaryTurn int64) *fantasy.Message {
+	if a.notebook == nil || len(msgs) == 0 {
+		return nil
+	}
+	// Find the latest user message text.
+	var userText string
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == message.User {
+			userText = msgs[i].Content().Text
+			break
+		}
+	}
+	if userText == "" {
+		return nil
+	}
+	refs := extractExplicitFilePaths(userText)
+	if len(refs) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var sb strings.Builder
+	sb.WriteString("<notebook_auto_inject>\n")
+	injected := 0
+	for _, tag := range refs {
+		entries, err := a.notebook.SearchByTag(ctx, sessionID, tag)
+		if err != nil {
+			continue
+		}
+		// Only inject entries that have been compressed (level > 0)
+		// — uncompressed entries are already in the notebook message
+		// at full detail.
+		for _, e := range entries {
+			if e.CompressionLevel == 0 || e.TurnNumber >= boundaryTurn {
+				continue
+			}
+			text := e.EntryTextFull
+			if text == "" {
+				text = e.EntryText
+			}
+			sb.WriteString(fmt.Sprintf("## Turn %d.%d — %s\n", e.TurnNumber, e.EventNumber, e.Title))
+			sb.WriteString(text)
+			if len(e.Tags) > 0 {
+				sb.WriteString("\nTags: ")
+				sb.WriteString(strings.Join(e.Tags, " "))
+			}
+			sb.WriteString("\n\n---\n\n")
+			injected++
+			if injected >= 2 {
+				break
+			}
+		}
+		if injected >= 2 {
+			break
+		}
+	}
+	if injected == 0 {
+		return nil
+	}
+	sb.WriteString("</notebook_auto_inject>")
+	msg := fantasy.NewSystemMessage(sb.String())
+	return &msg
+}
+
 // filterFileParts removes fantasy.FilePart entries from a slice of message
 // parts. Used to strip image attachments from historical user messages when
 // the current model does not support them.
@@ -1862,25 +2016,74 @@ func syntheticToolResultsForOrphanedCalls(m message.Message, knownToolResultIDs 
 	}, true
 }
 
+// storeActiveRangeMarker stores the boundary message ID as the
+// session's summary_message_id. In notebook mode, this serves as an
+// advisory active-range marker: getSessionMessages uses it to skip
+// old messages already represented in the notebook, with a buffer for
+// stale-turn fallback.
+func (a *sessionAgent) storeActiveRangeMarker(sessionID, msgID string) {
+	if sessionID == "" || msgID == "" {
+		return
+	}
+	sess, err := a.sessions.Get(context.Background(), sessionID)
+	if err != nil {
+		return
+	}
+	if sess.SummaryMessageID == msgID {
+		return
+	}
+	sess.SummaryMessageID = msgID
+	if _, err := a.sessions.Save(context.Background(), sess); err != nil {
+		slog.Warn("Failed to store active-range marker", "error", err, "session_id", sessionID)
+	}
+}
+
 func (a *sessionAgent) getSessionMessages(ctx context.Context, session session.Session) ([]message.Message, error) {
 	msgs, err := a.messages.List(ctx, session.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list messages: %w", err)
 	}
 
-	if session.SummaryMessageID != "" {
-		summaryMsgIndex := -1
-		for i, msg := range msgs {
-			if msg.ID == session.SummaryMessageID {
-				summaryMsgIndex = i
-				break
-			}
-		}
-		if summaryMsgIndex != -1 {
-			msgs = msgs[summaryMsgIndex:]
-			msgs[0].Role = message.User
+	if session.SummaryMessageID == "" {
+		return msgs, nil
+	}
+
+	// Find the marker message index.
+	markerIdx := -1
+	for i, msg := range msgs {
+		if msg.ID == session.SummaryMessageID {
+			markerIdx = i
+			break
 		}
 	}
+	if markerIdx == -1 {
+		return msgs, nil
+	}
+
+	if a.notebookEnabled {
+		// Notebook mode: the marker is the boundary message.
+		// Keep a buffer of messages before the marker for
+		// stale-turn fallback. The buffer is 2 turns worth
+		// of messages (approximate: count back to the 2nd
+		// previous user message).
+		bufferStart := markerIdx
+		userCount := 0
+		for i := markerIdx - 1; i >= 0 && userCount < 2; i-- {
+			if msgs[i].Role == message.User {
+				userCount++
+			}
+			bufferStart = i
+		}
+		if bufferStart > 0 {
+			msgs = msgs[bufferStart:]
+		}
+		return msgs, nil
+	}
+
+	// Legacy summary mode: trim to the summary message and
+	// treat it as a user message.
+	msgs = msgs[markerIdx:]
+	msgs[0].Role = message.User
 	return msgs, nil
 }
 

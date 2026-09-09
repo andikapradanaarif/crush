@@ -379,6 +379,9 @@ type Options struct {
 	NotebookRawTokenBudget int      `json:"notebook_raw_token_budget,omitempty" jsonschema:"description=Token budget for raw recent turns in notebook mode,default=25000"`
 	NotebookMaxTokens      int64    `json:"notebook_max_tokens,omitempty" jsonschema:"description=Maximum total tokens for notebook entries before compaction,default=100000"`
 	NotebookMaxEntryTokens int64    `json:"notebook_max_entry_tokens,omitempty" jsonschema:"description=Maximum tokens per notebook entry,default=1000"`
+	NotebookSyncMem0       *bool    `json:"notebook_sync_mem0,omitempty" jsonschema:"description=Sync notebook entries to mem0 for cross-session search,default=false"`
+	NotebookMemoryServer   string   `json:"notebook_memory_server,omitempty" jsonschema:"description=Name of the MCP server to use for mem0 cross-session memory sync and search,default=mem0"`
+	NotebookAutoInject     *bool    `json:"notebook_auto_inject,omitempty" jsonschema:"description=Auto-inject full notebook entries for files mentioned in the user message,default=false"`
 	InitializeAs           string   `json:"initialize_as,omitempty" jsonschema:"description=Name of the context file to create/update during project initialization,default=AGENTS.md,example=AGENTS.md,example=CRUSH.md,example=CLAUDE.md,example=docs/LLMs.md"`
 	AutoLSP                *bool    `json:"auto_lsp,omitempty" jsonschema:"description=Automatically setup LSPs based on root markers,default=true"`
 	Progress               *bool    `json:"progress,omitempty" jsonschema:"description=Show indeterminate progress updates during long operations,default=true"`
@@ -1153,4 +1156,31 @@ func (o *Options) NotebookIsEnabled() bool {
 		return true
 	}
 	return *o.NotebookEnabled
+}
+
+// NotebookSyncMem0Enabled returns the resolved mem0 sync setting,
+// defaulting to false when not explicitly set.
+func (o *Options) NotebookSyncMem0Enabled() bool {
+	if o.NotebookSyncMem0 == nil {
+		return false
+	}
+	return *o.NotebookSyncMem0
+}
+
+// NotebookAutoInjectEnabled returns the resolved auto-inject setting,
+// defaulting to false when not explicitly set.
+func (o *Options) NotebookAutoInjectEnabled() bool {
+	if o.NotebookAutoInject == nil {
+		return false
+	}
+	return *o.NotebookAutoInject
+}
+
+// NotebookMemoryServerName returns the resolved memory server name,
+// defaulting to "mem0" when not explicitly set.
+func (o *Options) NotebookMemoryServerName() string {
+	if o.NotebookMemoryServer == "" {
+		return "mem0"
+	}
+	return o.NotebookMemoryServer
 }
