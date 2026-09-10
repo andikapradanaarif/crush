@@ -176,7 +176,12 @@ type sessionAgent struct {
 
 	// promptSections holds the per-section measurements of the last
 	// built system prompt, used for request composition telemetry.
-	promptSections       *csync.Slice[prompt.PromptSection]
+	promptSections *csync.Slice[prompt.PromptSection]
+	// fullPrompt/fullPromptKey cache the system prompt with MCP
+	// instructions appended; rebuilt only when the base prompt or the
+	// MCP instruction set changes.
+	fullPrompt           *csync.Value[string]
+	fullPromptKey        *csync.Value[string]
 	isSubAgent           bool
 	sessions             session.Service
 	messages             message.Service
@@ -289,6 +294,8 @@ func NewSessionAgent(
 		systemPromptPrefix:   csync.NewValue(opts.SystemPromptPrefix),
 		systemPrompt:         csync.NewValue(opts.SystemPrompt),
 		promptSections:       csync.NewSlice[prompt.PromptSection](),
+		fullPrompt:           csync.NewValue(""),
+		fullPromptKey:        csync.NewValue(""),
 		isSubAgent:           opts.IsSubAgent,
 		sessions:             opts.Sessions,
 		messages:             opts.Messages,
@@ -714,14 +721,22 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	promptPrefix := a.systemPromptPrefix.Get()
 	mcpInstructions := collectMCPInstructions()
 	basePromptBytes := len(systemPrompt)
-
-	if mcpInstructions != "" {
-		systemPrompt += "\n\n<mcp-instructions>\n" + mcpInstructions + "\n</mcp-instructions>"
-	}
+	systemPrompt = a.fullSystemPrompt(systemPrompt, mcpInstructions)
 
 	if len(agentTools) > 0 {
 		// Add Anthropic caching to the last tool.
 		agentTools[len(agentTools)-1].SetProviderOptions(a.getCacheControlOptions())
+		// When MCP tools are present, add a breakpoint after the last
+		// built-in tool too: the stable built-in prefix survives MCP
+		// servers connecting or changing their tool sets.
+		for i := len(agentTools) - 1; i >= 0; i-- {
+			if !isMCPTool(agentTools[i]) {
+				if i < len(agentTools)-1 {
+					agentTools[i].SetProviderOptions(a.getCacheControlOptions())
+				}
+				break
+			}
+		}
 	}
 
 	logPromptComposition(call.SessionID, basePromptBytes, mcpInstructions, agentTools, a.promptSections.Copy())
@@ -889,6 +904,21 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 
 			prepared.Messages = a.workaroundProviderMediaLimitations(prepared.Messages, largeModel)
 
+			// Anthropic allows at most 4 cache breakpoints per request.
+			// With MCP tools present, Run adds a second tool breakpoint
+			// (after the built-in partition), so cache only the last
+			// message instead of the last two to stay under the limit.
+			mcpToolsPresent := false
+			for _, t := range prepared.Tools {
+				if isMCPTool(t) {
+					mcpToolsPresent = true
+					break
+				}
+			}
+			tailStart := len(prepared.Messages) - 2
+			if mcpToolsPresent {
+				tailStart = len(prepared.Messages) - 1
+			}
 			lastSystemRoleInx := 0
 			systemMessageUpdated := false
 			for i, msg := range prepared.Messages {
@@ -899,8 +929,8 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 					prepared.Messages[lastSystemRoleInx].ProviderOptions = a.getCacheControlOptions()
 					systemMessageUpdated = true
 				}
-				// Than add cache control to the last 2 messages.
-				if i > len(prepared.Messages)-3 {
+				// Than add cache control to the tail messages.
+				if i >= tailStart {
 					prepared.Messages[i].ProviderOptions = a.getCacheControlOptions()
 				}
 			}
@@ -2528,6 +2558,24 @@ func (a *sessionAgent) SetTools(tools []fantasy.AgentTool) {
 func (a *sessionAgent) SetSystemPrompt(systemPrompt prompt.BuiltPrompt) {
 	a.systemPrompt.Set(systemPrompt.Text)
 	a.promptSections.SetSlice(systemPrompt.Sections)
+}
+
+// fullSystemPrompt returns the system prompt with the MCP instruction
+// block appended. The assembled result is cached and reused while the
+// base prompt and MCP instruction set are unchanged, so per-turn
+// requests keep byte-identical prompt prefixes for cache reuse.
+func (a *sessionAgent) fullSystemPrompt(base, mcpInstructions string) string {
+	key := base + "\x00" + mcpInstructions
+	if a.fullPromptKey.Get() == key {
+		return a.fullPrompt.Get()
+	}
+	full := base
+	if mcpInstructions != "" {
+		full += "\n\n<mcp-instructions>\n" + mcpInstructions + "\n</mcp-instructions>"
+	}
+	a.fullPrompt.Set(full)
+	a.fullPromptKey.Set(key)
+	return full
 }
 
 func (a *sessionAgent) Model() Model {
