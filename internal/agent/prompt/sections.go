@@ -197,7 +197,7 @@ func TruncateToTokenLimitKeepEnds(s string, tokenLimit int) string {
 	if tokenLimit <= 0 {
 		return ""
 	}
-	half := tokenLimitToBytes(tokenLimit) / 2
+	half := tokenLimit * 4 / 2 // ~4 bytes per token heuristic.
 	return truncateUTF8Prefix(s, half) + "\n[...truncated...]\n" + truncateUTF8Suffix(s, half)
 }
 
