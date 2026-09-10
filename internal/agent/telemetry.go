@@ -38,29 +38,37 @@ func logPromptComposition(sessionID string, systemPromptBytes int, mcpInstructio
 
 // logStepComposition logs the byte size of each per-step request
 // component. It runs inside PrepareStep, where the message list and
-// tool list for the step are finalized.
+// tool list for the step are finalized. System-role messages are
+// bucketed separately from conversation history: the main system
+// prompt (and any system prompt prefix) counts toward system_bytes,
+// while notebook recall blobs count toward notebook_bytes.
 func logStepComposition(sessionID string, messages []fantasy.Message, agentTools []fantasy.AgentTool) {
-	var historyBytes, notebookBytes int
+	var historyBytes, notebookBytes, systemBytes int
 	for _, msg := range messages {
 		n := messageContentBytes(msg)
-		if msg.Role == fantasy.MessageRoleSystem && len(msg.Content) > 0 {
-			var text string
-			switch tp := msg.Content[0].(type) {
-			case fantasy.TextPart:
-				text = tp.Text
-			case *fantasy.TextPart:
-				text = tp.Text
+		if msg.Role == fantasy.MessageRoleSystem {
+			if len(msg.Content) > 0 {
+				var text string
+				switch tp := msg.Content[0].(type) {
+				case fantasy.TextPart:
+					text = tp.Text
+				case *fantasy.TextPart:
+					text = tp.Text
+				}
+				if strings.HasPrefix(text, "<notebook>") {
+					notebookBytes += n
+					continue
+				}
 			}
-			if strings.HasPrefix(text, "<notebook>") {
-				notebookBytes += n
-				continue
-			}
+			systemBytes += n
+			continue
 		}
 		historyBytes += n
 	}
 	builtinSchemaBytes, mcpSchemaBytes := toolSchemaBytes(agentTools)
 	slog.Debug("Step request composition",
 		"session_id", sessionID,
+		"system_bytes", systemBytes,
 		"raw_history_bytes", historyBytes,
 		"notebook_bytes", notebookBytes,
 		"builtin_tool_schema_bytes", builtinSchemaBytes,
@@ -309,6 +317,13 @@ func (r *reportingReadCloser) report() {
 // byte-counting transport, preserving any existing transport (e.g. the
 // debug round-trip logger) underneath. A nil client yields a client
 // measuring http.DefaultTransport.
+//
+// Coverage is asymmetric by necessity: REST providers (Anthropic,
+// OpenAI, OpenRouter, Vercel, Azure, OpenAI-compatible) always get an
+// instrumented client since they accept WithHTTPClient, while
+// Bedrock/Vertex/Google SDK-managed transports are measured only when
+// the caller injects a client (debug mode); otherwise transport
+// measurement is unavailable for them.
 func instrumentedHTTPClient(client *http.Client) *http.Client {
 	if client == nil {
 		client = &http.Client{}

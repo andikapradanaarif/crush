@@ -112,6 +112,11 @@ func extractSections(text string) []PromptSection {
 // newline): rendered sections always start on their own line, while
 // prose mentions like `<available_skills>` inside backticks appear
 // mid-line and must not be mistaken for the real block.
+//
+// Known limitation: a context file that itself contains a literal
+// line-anchored <tag> or </tag> will confuse extraction — a closing tag
+// inside <project_context> truncates that section's measurement. This
+// is acceptable for telemetry-only attribution.
 func extractTag(text, tag string) (string, int, bool) {
 	open := "<" + tag + ">"
 	closeTag := "</" + tag + ">"
@@ -146,12 +151,6 @@ func approxTokenCount(s string) int64 {
 		return 0
 	}
 	return int64((len(s) + 3) / 4)
-}
-
-// tokenLimitToBytes converts a token limit to a conservative byte limit
-// using the same ~4 bytes per token heuristic.
-func tokenLimitToBytes(tokenLimit int) int {
-	return tokenLimit * 4
 }
 
 // truncateUTF8Prefix normalizes invalid UTF-8 and trims so that the
