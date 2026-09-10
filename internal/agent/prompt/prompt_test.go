@@ -29,8 +29,8 @@ func TestLoadContextFilesDeterministicOrder(t *testing.T) {
 
 	store := newTestStore(t, dir)
 
-	// Paths listed out of order; directory contents come back sorted
-	// alongside the explicit file.
+	// Configured order is preserved for explicit paths; directory
+	// contents come back in lexical order.
 	files := loadContextFiles([]string{
 		filepath.Join(dir, "sub"),
 		filepath.Join(dir, "b.md"),
@@ -42,9 +42,9 @@ func TestLoadContextFilesDeterministicOrder(t *testing.T) {
 		paths = append(paths, f.Path)
 	}
 	require.Equal(t, []string{
-		filepath.Join(dir, "a.md"),
-		filepath.Join(dir, "b.md"),
 		filepath.Join(dir, "sub", "c.md"),
+		filepath.Join(dir, "b.md"),
+		filepath.Join(dir, "a.md"),
 	}, paths)
 }
 
@@ -130,10 +130,10 @@ func TestBuildDeterministicAcrossBuilds(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, first.Text, second.Text)
 
-	// Sorted by path: a.md before b.md regardless of config order.
+	// Configured order is preserved: b.md listed before a.md.
 	idxA := strings.Index(first.Text, filepath.Join(dir, "a.md"))
 	idxB := strings.Index(first.Text, filepath.Join(dir, "b.md"))
 	require.GreaterOrEqual(t, idxA, 0)
 	require.GreaterOrEqual(t, idxB, 0)
-	require.Less(t, idxA, idxB)
+	require.Less(t, idxB, idxA)
 }

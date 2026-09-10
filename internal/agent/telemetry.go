@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync/atomic"
 
 	"charm.land/fantasy"
@@ -43,7 +44,14 @@ func logStepComposition(sessionID string, messages []fantasy.Message, agentTools
 	for _, msg := range messages {
 		n := messageContentBytes(msg)
 		if msg.Role == fantasy.MessageRoleSystem && len(msg.Content) > 0 {
-			if tp, ok := msg.Content[0].(fantasy.TextPart); ok && len(tp.Text) >= len("<notebook>") && tp.Text[:len("<notebook>")] == "<notebook>" {
+			var text string
+			switch tp := msg.Content[0].(type) {
+			case fantasy.TextPart:
+				text = tp.Text
+			case *fantasy.TextPart:
+				text = tp.Text
+			}
+			if strings.HasPrefix(text, "<notebook>") {
 				notebookBytes += n
 				continue
 			}
@@ -181,7 +189,12 @@ func logStepUsage(sessionID string, usage fantasy.Usage, estimated bool) {
 // schemas, provider options, base64 attachments, headers).
 //
 // Streaming (SSE) responses are counted incrementally and reported when
-// the body reaches EOF or is closed.
+// the body reaches EOF or is closed. The request-byte count is read at
+// report time rather than when RoundTrip returns: with HTTP/2 or
+// "Expect: 100-continue", response headers can arrive while the request
+// body is still streaming, so an early sample can under-report. For
+// early error responses the count may still be partial — provider
+// payloads are buffered JSON, so this is a known but minor limitation.
 type byteCountingTransport struct {
 	next http.RoundTripper
 }
@@ -193,14 +206,14 @@ func (t *byteCountingTransport) RoundTrip(req *http.Request) (*http.Response, er
 		req.Body = reqCounter
 	}
 	resp, err := t.next.RoundTrip(req)
-	var reqBytes int64
-	if reqCounter != nil {
-		reqBytes = reqCounter.n.Load()
-	}
 	sessionHash := req.Header.Get("x-session-id")
 	if err != nil {
+		var reqBytes int64
+		if reqCounter != nil {
+			reqBytes = reqCounter.n.Load()
+		}
 		slog.Debug("LLM transport",
-			"session_id", sessionHash,
+			"session_hash", sessionHash,
 			"host", req.URL.Host,
 			"request_bytes", reqBytes,
 			"error", err,
@@ -213,11 +226,15 @@ func (t *byteCountingTransport) RoundTrip(req *http.Request) (*http.Response, er
 			sessionID:  sessionHash,
 			host:       req.URL.Host,
 			statusCode: resp.StatusCode,
-			reqBytes:   reqBytes,
+			reqCounter: reqCounter,
 		}
 	} else {
+		var reqBytes int64
+		if reqCounter != nil {
+			reqBytes = reqCounter.n.Load()
+		}
 		slog.Debug("LLM transport",
-			"session_id", sessionHash,
+			"session_hash", sessionHash,
 			"host", req.URL.Host,
 			"status", resp.StatusCode,
 			"request_bytes", reqBytes,
@@ -242,13 +259,15 @@ func (c *countingReadCloser) Read(p []byte) (int, error) {
 func (c *countingReadCloser) Close() error { return c.inner.Close() }
 
 // reportingReadCloser counts response-body bytes and logs the
-// request/response pair once the body is fully consumed or closed.
+// request/response pair once the body is fully consumed or closed. The
+// request counter is read at report time so the request_bytes figure
+// reflects as much of the streamed upload as completed.
 type reportingReadCloser struct {
 	inner      io.ReadCloser
 	sessionID  string
 	host       string
 	statusCode int
-	reqBytes   int64
+	reqCounter *countingReadCloser
 	respBytes  int64
 	reported   bool
 }
@@ -273,11 +292,15 @@ func (r *reportingReadCloser) report() {
 		return
 	}
 	r.reported = true
+	var reqBytes int64
+	if r.reqCounter != nil {
+		reqBytes = r.reqCounter.n.Load()
+	}
 	slog.Debug("LLM transport",
-		"session_id", r.sessionID,
+		"session_hash", r.sessionID,
 		"host", r.host,
 		"status", r.statusCode,
-		"request_bytes", r.reqBytes,
+		"request_bytes", reqBytes,
 		"response_bytes", r.respBytes,
 	)
 }

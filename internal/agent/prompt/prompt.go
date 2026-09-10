@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"text/template"
 	"time"
@@ -162,8 +161,10 @@ func expandPath(path string, store *config.ConfigStore) string {
 }
 
 // loadContextFiles loads and deduplicates context files from a list of
-// paths. Results are sorted by path so the rendered prompt is
-// deterministic across builds within each precedence group.
+// paths. The configured order is preserved for explicit paths — a user
+// who deliberately orders context files (general rules before specific
+// overrides) keeps that order — and directory walks already return
+// entries in lexical order, so the result is deterministic.
 func loadContextFiles(paths []string, store *config.ConfigStore) []ContextFile {
 	var files []ContextFile
 	seen := map[string]bool{}
@@ -176,9 +177,6 @@ func loadContextFiles(paths []string, store *config.ConfigStore) []ContextFile {
 		seen[pathKey] = true
 		files = append(files, processContextPath(expanded, store)...)
 	}
-	slices.SortFunc(files, func(a, b ContextFile) int {
-		return strings.Compare(a.Path, b.Path)
-	})
 	return files
 }
 
