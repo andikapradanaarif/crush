@@ -1,7 +1,6 @@
 package prompt
 
 import (
-	"fmt"
 	"io"
 	"os"
 	"sort"
@@ -108,18 +107,36 @@ func extractSections(text string) []PromptSection {
 // extractTag returns the "<tag>...</tag>" region of text including the
 // tags themselves, along with its start offset. The bool reports whether
 // both markers were found in order.
+//
+// The open tag must sit at a line boundary (start of text or after a
+// newline): rendered sections always start on their own line, while
+// prose mentions like `<available_skills>` inside backticks appear
+// mid-line and must not be mistaken for the real block.
 func extractTag(text, tag string) (string, int, bool) {
 	open := "<" + tag + ">"
 	closeTag := "</" + tag + ">"
-	start := strings.Index(text, open)
-	if start < 0 {
-		return "", 0, false
-	}
-	end := strings.Index(text[start:], closeTag)
+	end := strings.Index(text, closeTag)
 	if end < 0 {
 		return "", 0, false
 	}
-	return text[start : start+end+len(closeTag)], start, true
+	// Use the last line-anchored open tag before the close tag.
+	start := -1
+	searchFrom := 0
+	for searchFrom < end {
+		idx := strings.Index(text[searchFrom:end], "\n"+open)
+		if idx < 0 {
+			break
+		}
+		start = searchFrom + idx + 1 // Skip the newline.
+		searchFrom = start + len(open)
+	}
+	if start < 0 && strings.HasPrefix(text, open) {
+		start = 0
+	}
+	if start < 0 {
+		return "", 0, false
+	}
+	return text[start : end+len(closeTag)], start, true
 }
 
 // approxTokenCount estimates a token count using the same ~4 bytes per
@@ -152,26 +169,6 @@ func truncateUTF8Prefix(s string, maxBytes int) string {
 	return ""
 }
 
-// truncateToTokenLimit truncates s so that approxTokenCount(result) <=
-// tokenLimit. It binary-searches the byte limit, which keeps large
-// dense-token inputs linear instead of quadratic.
-func truncateToTokenLimit(s string, tokenLimit int) string {
-	s = strings.ToValidUTF8(s, "")
-	if approxTokenCount(s) <= int64(tokenLimit) {
-		return s
-	}
-	lo, hi := 0, tokenLimitToBytes(tokenLimit)
-	for lo < hi {
-		mid := (lo + hi + 1) / 2
-		if approxTokenCount(truncateUTF8Prefix(s, mid)) <= int64(tokenLimit) {
-			lo = mid
-		} else {
-			hi = mid - 1
-		}
-	}
-	return truncateUTF8Prefix(s, lo)
-}
-
 // maxContextFileReadSize is the hard process-protection limit for a
 // single context file. Files larger than this are truncated; the limit
 // is measured in bytes and guards against unbounded context files
@@ -199,30 +196,4 @@ func readBounded(path string) (content string, truncated bool, err error) {
 		// Read succeeded for max+1 bytes — file is larger than the hard limit.
 		return truncateUTF8Prefix(string(buf[:maxContextFileReadSize]), maxContextFileReadSize), true, nil
 	}
-}
-
-// readContextFile reads a context file enforcing both the hard byte
-// limit (via readBounded) and a soft token budget. required controls
-// overflow behavior:
-//   - required, over soft budget: error. Interactive prompting for this
-//     case requires plumbing that does not exist yet (the loader runs
-//     far below any TUI question machinery), so the interactive flag
-//     currently only documents intent.
-//   - optional, over soft budget: truncate via truncateToTokenLimit.
-func readContextFile(path string, softTokenLimit int, required, _ bool) (content string, truncated bool, err error) {
-	raw, hardTruncated, err := readBounded(path)
-	if err != nil {
-		return "", false, err
-	}
-	if approxTokenCount(raw) <= int64(softTokenLimit) {
-		return raw, hardTruncated, nil
-	}
-	if required {
-		return "", false, fmt.Errorf(
-			"required context file %s exceeds soft token budget (%d tokens); "+
-				"reduce the file or raise the budget", path, softTokenLimit,
-		)
-	}
-	// Optional file over budget: truncate.
-	return truncateToTokenLimit(raw, softTokenLimit), true, nil
 }

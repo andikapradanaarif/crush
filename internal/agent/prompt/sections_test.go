@@ -65,45 +65,6 @@ func TestTruncateUTF8Prefix(t *testing.T) {
 	})
 }
 
-func TestTruncateToTokenLimit(t *testing.T) {
-	t.Parallel()
-
-	t.Run("under limit passthrough", func(t *testing.T) {
-		t.Parallel()
-		s := "hello world"
-		require.Equal(t, s, truncateToTokenLimit(s, 100))
-	})
-
-	t.Run("result does not exceed limit", func(t *testing.T) {
-		t.Parallel()
-		s := strings.Repeat("x", 10_000)
-		got := truncateToTokenLimit(s, 100)
-		require.LessOrEqual(t, approxTokenCount(got), int64(100))
-	})
-
-	t.Run("dense tokens shrink", func(t *testing.T) {
-		t.Parallel()
-		// Each CJK rune is 3 bytes but ~1 token under the 4-bytes-per-
-		// token heuristic only in aggregate; what matters is the
-		// post-truncation estimate respects the limit.
-		s := strings.Repeat("日", 1_000)
-		got := truncateToTokenLimit(s, 50)
-		require.LessOrEqual(t, approxTokenCount(got), int64(50))
-		require.NotEmpty(t, got)
-	})
-
-	t.Run("very small limit does not return empty for CJK", func(t *testing.T) {
-		t.Parallel()
-		got := truncateToTokenLimit("日本語", 1)
-		require.LessOrEqual(t, approxTokenCount(got), int64(1))
-	})
-
-	t.Run("zero limit", func(t *testing.T) {
-		t.Parallel()
-		require.Equal(t, "", truncateToTokenLimit("hello", 0))
-	})
-}
-
 func TestReadBounded(t *testing.T) {
 	t.Parallel()
 
@@ -151,62 +112,20 @@ func TestReadBounded(t *testing.T) {
 	})
 }
 
-func TestReadContextFile(t *testing.T) {
+func TestExtractTagSkipsProseMention(t *testing.T) {
 	t.Parallel()
 
-	t.Run("under budget passthrough", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		path := filepath.Join(dir, "ok.md")
-		require.NoError(t, os.WriteFile(path, []byte("short"), 0o644))
-		content, truncated, err := readContextFile(path, 1000, true, false)
-		require.NoError(t, err)
-		require.False(t, truncated)
-		require.Equal(t, "short", content)
-	})
+	// A mid-line backtick mention of <available_skills> (as the coder
+	// template's LOAD MATCHING SKILLS rule contains) must not be
+	// mistaken for the real block that starts on its own line.
+	text := "14. **LOAD MATCHING SKILLS**: call `view` on `<available_skills>` entries first.\n" +
+		"more prose\n<available_skills>\n<skill>real</skill>\n</available_skills>\n"
 
-	t.Run("required over budget errors non-interactive", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		path := filepath.Join(dir, "required.md")
-		require.NoError(t, os.WriteFile(path, []byte(strings.Repeat("x", 10_000)), 0o644))
-		_, _, err := readContextFile(path, 100, true, false)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "required context file")
-	})
-
-	t.Run("required over budget errors interactive", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		path := filepath.Join(dir, "required.md")
-		require.NoError(t, os.WriteFile(path, []byte(strings.Repeat("x", 10_000)), 0o644))
-		// Interactive prompting has no plumbing yet; required overflow
-		// is an error in both modes.
-		_, _, err := readContextFile(path, 100, true, true)
-		require.Error(t, err)
-	})
-
-	t.Run("optional over budget truncates", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		path := filepath.Join(dir, "optional.md")
-		require.NoError(t, os.WriteFile(path, []byte(strings.Repeat("x", 10_000)), 0o644))
-		content, truncated, err := readContextFile(path, 100, false, false)
-		require.NoError(t, err)
-		require.True(t, truncated)
-		require.LessOrEqual(t, approxTokenCount(content), int64(100))
-	})
-
-	t.Run("hard limit truncation propagates", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		path := filepath.Join(dir, "huge.md")
-		require.NoError(t, os.WriteFile(path, []byte(strings.Repeat("a", maxContextFileReadSize+10)), 0o644))
-		content, truncated, err := readContextFile(path, maxContextFileReadSize, false, false)
-		require.NoError(t, err)
-		require.True(t, truncated)
-		require.LessOrEqual(t, len(content), maxContextFileReadSize)
-	})
+	got, start, ok := extractTag(text, "available_skills")
+	require.True(t, ok)
+	require.Equal(t, "<available_skills>\n<skill>real</skill>\n</available_skills>", got)
+	require.Equal(t, strings.Index(text, "\n<available_skills>")+1, start)
+	require.Less(t, len(got), 60, "must not swallow the prose up to the real block")
 }
 
 func TestExtractSections(t *testing.T) {
