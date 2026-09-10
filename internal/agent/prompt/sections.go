@@ -168,6 +168,39 @@ func truncateUTF8Prefix(s string, maxBytes int) string {
 	return ""
 }
 
+// truncateUTF8Suffix normalizes invalid UTF-8 and keeps the last
+// maxBytes bytes, starting on a rune boundary.
+func truncateUTF8Suffix(s string, maxBytes int) string {
+	s = strings.ToValidUTF8(s, "")
+	if maxBytes >= len(s) {
+		return s
+	}
+	start := len(s) - maxBytes
+	for start < len(s) {
+		if utf8.RuneStart(s[start]) {
+			return s[start:]
+		}
+		start++
+	}
+	return ""
+}
+
+// TruncateToTokenLimitKeepEnds truncates s to approximately tokenLimit
+// estimated tokens, keeping the beginning and the end — appropriate for
+// instructional text where a prefix-only cut can drop the most
+// important rules. A "[truncated]" marker separates the halves.
+func TruncateToTokenLimitKeepEnds(s string, tokenLimit int) string {
+	s = strings.ToValidUTF8(s, "")
+	if approxTokenCount(s) <= int64(tokenLimit) {
+		return s
+	}
+	if tokenLimit <= 0 {
+		return ""
+	}
+	half := tokenLimitToBytes(tokenLimit) / 2
+	return truncateUTF8Prefix(s, half) + "\n[...truncated...]\n" + truncateUTF8Suffix(s, half)
+}
+
 // maxContextFileReadSize is the hard process-protection limit for a
 // single context file. Files larger than this are truncated; the limit
 // is measured in bytes and guards against unbounded context files
