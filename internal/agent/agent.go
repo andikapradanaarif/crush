@@ -1814,12 +1814,52 @@ func (a *sessionAgent) buildNotebookMessage(oldMsgs []message.Message, rawMsgs [
 	if len(filtered) == 0 {
 		return notebookMessageResult{maxTurn: maxTurn, turnsWithEntries: turnsWithEntries}
 	}
-	rendered := notebook.RenderEntries(filtered)
+
+	// Relevance-select entries instead of rendering all of them: the
+	// notebook retains the full record, and recall can fetch anything
+	// not injected here.
+	refs := notebookRelevanceRefs(ctx, a.sessions, sessionID, rawMsgs)
+	selected := selectNotebookEntries(filtered, refs, maxTurn)
+	if len(selected) == 0 {
+		return notebookMessageResult{maxTurn: maxTurn, turnsWithEntries: turnsWithEntries}
+	}
+	rendered := notebook.RenderEntries(selected)
 	if rendered == "" {
 		return notebookMessageResult{maxTurn: maxTurn, turnsWithEntries: turnsWithEntries}
 	}
 	msg := fantasy.NewSystemMessage("<notebook>\n" + rendered + "</notebook>")
 	return notebookMessageResult{msg: &msg, maxTurn: maxTurn, turnsWithEntries: turnsWithEntries}
+}
+
+// notebookRelevanceRefs gathers "file:basename" refs from the latest
+// user message in the raw window and from the session's active
+// (pending/in-progress) todos. If the session lookup fails, the user
+// message alone is used.
+func notebookRelevanceRefs(ctx context.Context, sessions session.Service, sessionID string, rawMsgs []message.Message) []string {
+	var refs []string
+	seen := map[string]bool{}
+	add := func(text string) {
+		for _, ref := range extractExplicitFilePaths(text) {
+			if !seen[ref] {
+				seen[ref] = true
+				refs = append(refs, ref)
+			}
+		}
+	}
+	for i := len(rawMsgs) - 1; i >= 0; i-- {
+		if rawMsgs[i].Role == message.User {
+			add(rawMsgs[i].Content().Text)
+			break
+		}
+	}
+	if sess, err := sessions.Get(ctx, sessionID); err == nil {
+		for _, todo := range sess.Todos {
+			if todo.Status == session.TodoStatusPending || todo.Status == session.TodoStatusInProgress {
+				add(todo.Content)
+			}
+		}
+	}
+	return refs
 }
 
 // fullPathRegex matches file paths with at least one separator.
