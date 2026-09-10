@@ -451,7 +451,6 @@ func (c *Commands) defaultCommands() []*CommandItem {
 		NewCommandItem(c.com.Styles, "new_session", "New Session", "ctrl+n", ActionNewSession{}).WithAliases("clear"),
 		NewCommandItem(c.com.Styles, "switch_session", "Sessions", "ctrl+s", ActionOpenDialog{SessionsID}),
 		NewCommandItem(c.com.Styles, "switch_model", "Switch Model", "ctrl+l", ActionOpenDialog{ModelsID}),
-		NewCommandItem(c.com.Styles, "switch_summary_model", "Switch Model Summary", "", ActionOpenDialog{DialogID: SummaryModelsID}),
 	}
 
 	// Only show compact command if there's an active session
@@ -484,6 +483,21 @@ func (c *Commands) defaultCommands() []*CommandItem {
 			}
 		}
 	}
+
+	// Add "Switch Model Summary" with a dynamic description that warns
+	// when no summary model is configured. The description appears below
+	// the command title in the palette, so the user sees the warning
+	// exactly when they're looking at the command.
+	summaryDesc := ""
+	if _, ok := cfg.Models[config.SelectedModelTypeSummary]; !ok {
+		summaryDesc = "No summary model set — using small model. Select to configure."
+	} else {
+		summaryDesc = "Choose a model for notebook summary generation"
+	}
+	commands = append(commands, NewCommandItem(c.com.Styles, "switch_summary_model", "Switch Model Summary", "", ActionOpenDialog{
+		DialogID: SummaryModelsID,
+	}).WithDescription(summaryDesc))
+
 	// Only show toggle compact mode command if window width is larger than compact breakpoint (120)
 	if c.windowWidth >= sidebarCompactModeBreakpoint && c.hasSession {
 		commands = append(commands, NewCommandItem(c.com.Styles, "toggle_sidebar", "Toggle Sidebar", "", ActionToggleCompactMode{}))
