@@ -317,7 +317,7 @@ func (m *Models) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 
 	rc := NewRenderContext(t, width)
 	if m.summaryMode {
-		rc.Title = "Switch Model Summary"
+		rc.Title = "Switch Summary Model"
 	} else {
 		rc.Title = "Switch Model"
 	}

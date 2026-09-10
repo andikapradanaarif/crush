@@ -484,7 +484,7 @@ func (c *Commands) defaultCommands() []*CommandItem {
 		}
 	}
 
-	// Add "Switch Model Summary" with a dynamic description that warns
+	// Add "Switch Summary Model" with a dynamic description that warns
 	// when no summary model is configured. The description appears below
 	// the command title in the palette, so the user sees the warning
 	// exactly when they're looking at the command.
@@ -494,7 +494,7 @@ func (c *Commands) defaultCommands() []*CommandItem {
 	} else {
 		summaryDesc = "Choose a model for notebook summary generation"
 	}
-	commands = append(commands, NewCommandItem(c.com.Styles, "switch_summary_model", "Switch Model Summary", "", ActionOpenDialog{
+	commands = append(commands, NewCommandItem(c.com.Styles, "switch_summary_model", "Switch Summary Model", "", ActionOpenDialog{
 		DialogID: SummaryModelsID,
 	}).WithDescription(summaryDesc))
 

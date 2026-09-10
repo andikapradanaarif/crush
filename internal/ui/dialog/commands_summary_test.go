@@ -20,7 +20,7 @@ type stubWorkspace struct {
 
 func (s *stubWorkspace) Config() *config.Config { return s.cfg }
 
-// findSummaryCommand returns the "Switch Model Summary" item from
+// findSummaryCommand returns the "Switch Summary Model" item from
 // the default commands list, or nil if absent.
 func findSummaryCommand(commands []*CommandItem) *CommandItem {
 	for _, cmd := range commands {
@@ -45,7 +45,7 @@ func TestSummaryCommandDescriptionWhenAbsent(t *testing.T) {
 	require.NoError(t, err)
 
 	summaryCmd := findSummaryCommand(cmds.defaultCommands())
-	require.NotNil(t, summaryCmd, "Switch Model Summary command must exist")
+	require.NotNil(t, summaryCmd, "Switch Summary Model command must exist")
 	require.Contains(t, summaryCmd.Description(), "No summary model set")
 }
 
@@ -67,7 +67,7 @@ func TestSummaryCommandDescriptionWhenConfigured(t *testing.T) {
 	require.NoError(t, err)
 
 	summaryCmd := findSummaryCommand(cmds.defaultCommands())
-	require.NotNil(t, summaryCmd, "Switch Model Summary command must exist")
+	require.NotNil(t, summaryCmd, "Switch Summary Model command must exist")
 	require.Equal(t, "Choose a model for notebook summary generation", summaryCmd.Description())
 	require.NotContains(t, summaryCmd.Description(), "No summary model set")
 }
