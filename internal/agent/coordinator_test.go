@@ -89,6 +89,24 @@ func agentResultWithText(text string) *fantasy.AgentResult {
 	}
 }
 
+func TestPartitionToolsForCacheStability(t *testing.T) {
+	t.Parallel()
+
+	// MCP tools can't be constructed without a live MCP session; the
+	// built-in partition sorting is the part under test here, and
+	// MCP-side classification is covered by TestIsMCPTool.
+	b := &fakeTool{name: "b"}
+	a := &fakeTool{name: "a"}
+	c := &fakeTool{name: "c"}
+
+	got := partitionToolsForCacheStability([]fantasy.AgentTool{b, a, c})
+	names := make([]string, len(got))
+	for i, tool := range got {
+		names[i] = tool.Info().Name
+	}
+	require.Equal(t, []string{"a", "b", "c"}, names)
+}
+
 func TestCopilotResponsesModels(t *testing.T) {
 	t.Parallel()
 

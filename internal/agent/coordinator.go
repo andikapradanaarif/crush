@@ -946,12 +946,26 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 			slog.Debug("MCP not allowed", "tool", tool.Name(), "agent", agent.Name)
 		}
 	}
-	// Two-partition sort: core built-ins first (alphabetical), then MCP
-	// tools (alphabetical). If an MCP server connects or changes its tool
-	// set, only the MCP partition shifts position — the stable built-in
-	// prefix keeps prompt-cache reuse intact.
+	filteredTools = partitionToolsForCacheStability(filteredTools)
+
+	// Wrap tools with hook interception for the top-level agent only.
+	// Sub-agents (the `agent` task tool, `agentic_fetch`, etc.) run
+	// without hook interception to avoid firing the user's hook N times
+	// per delegated turn. The top-level invocation of the sub-agent tool
+	// itself is still wrapped from the coder's side.
+	filteredTools = wrapToolsWithHooks(filteredTools, hookRunner, isSubAgent)
+
+	return filteredTools, nil
+}
+
+// partitionToolsForCacheStability returns the tool list in a
+// two-partition order: core built-ins first (alphabetical), then MCP
+// tools (alphabetical). If an MCP server connects or changes its tool
+// set, only the MCP partition shifts position — the stable built-in
+// prefix keeps prompt-cache reuse intact.
+func partitionToolsForCacheStability(all []fantasy.AgentTool) []fantasy.AgentTool {
 	var builtinTools, mcpTools []fantasy.AgentTool
-	for _, tool := range filteredTools {
+	for _, tool := range all {
 		if _, ok := tool.(*tools.Tool); ok {
 			mcpTools = append(mcpTools, tool)
 		} else {
@@ -965,16 +979,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	}
 	sortByName(builtinTools)
 	sortByName(mcpTools)
-	filteredTools = append(builtinTools, mcpTools...)
-
-	// Wrap tools with hook interception for the top-level agent only.
-	// Sub-agents (the `agent` task tool, `agentic_fetch`, etc.) run
-	// without hook interception to avoid firing the user's hook N times
-	// per delegated turn. The top-level invocation of the sub-agent tool
-	// itself is still wrapped from the coder's side.
-	filteredTools = wrapToolsWithHooks(filteredTools, hookRunner, isSubAgent)
-
-	return filteredTools, nil
+	return append(builtinTools, mcpTools...)
 }
 
 // buildSelectedModel resolves a single model from a SelectedModel

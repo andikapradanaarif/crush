@@ -55,7 +55,9 @@ func logStepComposition(sessionID string, messages []fantasy.Message, agentTools
 				case *fantasy.TextPart:
 					text = tp.Text
 				}
-				if strings.HasPrefix(text, "<notebook>") {
+				// Matches both the assembled <notebook> block and
+				// maybeAutoInject's <notebook_auto_inject> recall blob.
+				if strings.HasPrefix(text, "<notebook") {
 					notebookBytes += n
 					continue
 				}
