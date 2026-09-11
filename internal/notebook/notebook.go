@@ -49,6 +49,11 @@ type Entry struct {
 	CompressionLevel int64
 	CreatedAt        int64
 	Tags             []string
+	// Succeeded reports whether the underlying tool event completed
+	// without error. Only successful events may supersede earlier
+	// same-file entries: a failed edit leaves the file — and every
+	// prior read of it — untouched.
+	Succeeded bool
 }
 
 // EntryInput is the input for generating a notebook entry from a
@@ -60,6 +65,9 @@ type EntryInput struct {
 	Description string // Human-readable description of the event.
 	ToolCall    *message.ToolCall
 	ToolResult  *message.ToolResult
+	// Succeeded mirrors !ToolResult.IsError for tool events. Entries
+	// without a tool result (decisions) are always successful.
+	Succeeded bool
 }
 
 // Service is the interface for notebook operations.

@@ -10,6 +10,10 @@ import (
 )
 
 func nbEntry(id string, turn, event int64, eventType, text string, tokens int64, tags ...string) notebook.Entry {
+	return nbEntryResult(id, turn, event, eventType, text, tokens, true, tags...)
+}
+
+func nbEntryResult(id string, turn, event int64, eventType, text string, tokens int64, succeeded bool, tags ...string) notebook.Entry {
 	return notebook.Entry{
 		ID:          id,
 		TurnNumber:  turn,
@@ -18,6 +22,7 @@ func nbEntry(id string, turn, event int64, eventType, text string, tokens int64,
 		EntryText:   text,
 		TokenCount:  tokens,
 		Tags:        tags,
+		Succeeded:   succeeded,
 	}
 }
 
@@ -154,6 +159,41 @@ func TestSelectNotebookEntries(t *testing.T) {
 		got := selectNotebookEntries(entries, nil, 2)
 		require.NotContains(t, entryIDs(got), "read")
 		require.Contains(t, entryIDs(got), "edit")
+	})
+
+	t.Run("failed edit does not supersede older read", func(t *testing.T) {
+		t.Parallel()
+		entries := []notebook.Entry{
+			nbEntry("read", 1, 1, notebook.EventFileRead, "read auth.go", 10, "file:auth.go"),
+			nbEntryResult("edit", 2, 1, notebook.EventFileEdit, "failed edit auth.go", 10, false, "file:auth.go"),
+		}
+		got := selectNotebookEntries(entries, nil, 2)
+		require.Contains(t, entryIDs(got), "read")
+		require.Contains(t, entryIDs(got), "edit")
+	})
+
+	t.Run("failed read does not supersede older read", func(t *testing.T) {
+		t.Parallel()
+		entries := []notebook.Entry{
+			nbEntry("read1", 1, 1, notebook.EventFileRead, "first read of auth.go", 10, "file:auth.go"),
+			nbEntryResult("read2", 3, 1, notebook.EventFileRead, "failed re-read", 10, false, "file:auth.go"),
+		}
+		got := selectNotebookEntries(entries, nil, 3)
+		require.Contains(t, entryIDs(got), "read1")
+		require.Contains(t, entryIDs(got), "read2")
+	})
+
+	t.Run("failed edit does not mask a later successful edit", func(t *testing.T) {
+		t.Parallel()
+		entries := []notebook.Entry{
+			nbEntry("read", 1, 1, notebook.EventFileRead, "read auth.go", 10, "file:auth.go"),
+			nbEntryResult("badedit", 2, 1, notebook.EventFileEdit, "failed edit", 10, false, "file:auth.go"),
+			nbEntry("goodedit", 3, 1, notebook.EventFileEdit, "edited auth.go", 10, "file:auth.go"),
+		}
+		got := selectNotebookEntries(entries, nil, 3)
+		require.NotContains(t, entryIDs(got), "read")
+		require.Contains(t, entryIDs(got), "badedit")
+		require.Contains(t, entryIDs(got), "goodedit")
 	})
 
 	t.Run("output chronological", func(t *testing.T) {

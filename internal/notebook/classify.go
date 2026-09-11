@@ -53,6 +53,10 @@ func classifyEvents(msgs []message.Message) (significant []EntryInput, trivial [
 				input := EntryInput{
 					ToolCall:   &tc,
 					ToolResult: result,
+					// A missing result means the call is still in flight
+					// or its message was lost; treat as successful so it
+					// does not poison supersession bookkeeping.
+					Succeeded: result == nil || !result.IsError,
 				}
 				input.EventType = eventTypeForTool(tc.Name)
 				input.Title = titleForTool(tc)
@@ -265,8 +269,10 @@ func buildTrivialExplorationEntry(trivial []EntryInput) GeneratedEntry {
 	}
 }
 
-// storeEntry persists a generated entry to the database.
-func (s *service) storeEntry(ctx context.Context, sessionID string, turnNumber, eventNumber int64, entry GeneratedEntry) error {
+// storeEntry persists a generated entry to the database. succeeded is
+// the success flag of the originating event; entries not backed by a
+// tool result are stored as succeeded.
+func (s *service) storeEntry(ctx context.Context, sessionID string, turnNumber, eventNumber int64, entry GeneratedEntry, succeeded bool) error {
 	tokenCount := estimateTokens(entry.Text)
 	id := uuid.New().String()
 	now := time.Now().Unix()
@@ -282,6 +288,7 @@ func (s *service) storeEntry(ctx context.Context, sessionID string, turnNumber, 
 		EntryTextFull:    sql.NullString{String: entry.Text, Valid: true},
 		TokenCount:       tokenCount,
 		CompressionLevel: CompressionFull,
+		Succeeded:        boolToInt64(succeeded),
 		CreatedAt:        now,
 	})
 	if err != nil {
@@ -304,6 +311,23 @@ func estimateTokens(text string) int64 {
 	return int64(len(text) / 4)
 }
 
+// eventsSucceeded reports whether every classified event succeeded.
+func eventsSucceeded(events []EntryInput) bool {
+	for _, e := range events {
+		if !e.Succeeded {
+			return false
+		}
+	}
+	return true
+}
+
+func boolToInt64(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // GenerateEntries implements the Service interface.
 func (s *service) GenerateEntries(ctx context.Context, sessionID string, turnNumber int64, msgs []message.Message) error {
 	significant, trivial := classifyEvents(msgs)
@@ -318,6 +342,7 @@ func (s *service) GenerateEntries(ctx context.Context, sessionID string, turnNum
 			EventType:   EventDecision,
 			Title:       "Decision",
 			Description: extractAssistantText(msgs),
+			Succeeded:   true,
 		})
 	}
 
@@ -330,7 +355,7 @@ func (s *service) GenerateEntries(ctx context.Context, sessionID string, turnNum
 	// Store trivial exploration mini-entry.
 	if len(trivial) > 0 {
 		entry := buildTrivialExplorationEntry(trivial)
-		if err := s.storeEntry(ctx, sessionID, turnNumber, 0, entry); err != nil {
+		if err := s.storeEntry(ctx, sessionID, turnNumber, 0, entry, eventsSucceeded(trivial)); err != nil {
 			slog.Error("Failed to store trivial exploration entry", "error", err)
 		}
 	}
@@ -350,7 +375,11 @@ func (s *service) GenerateEntries(ctx context.Context, sessionID string, turnNum
 		if estimateTokens(entry.Text) > s.opts.MaxEntryTokens {
 			entry.Text = truncateEntry(entry.Text, s.opts.MaxEntryTokens)
 		}
-		if err := s.storeEntry(ctx, sessionID, turnNumber, int64(i+1), entry); err != nil {
+		// Entries are index-aligned with significant events; entries
+		// beyond the input list are generator extras and default to
+		// succeeded.
+		succeeded := i >= len(significant) || significant[i].Succeeded
+		if err := s.storeEntry(ctx, sessionID, turnNumber, int64(i+1), entry, succeeded); err != nil {
 			slog.Error("Failed to store notebook entry", "error", err)
 		}
 	}

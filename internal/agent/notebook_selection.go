@@ -135,12 +135,17 @@ func entryMatchesRefs(e notebook.Entry, refs []string) bool {
 
 // dropSupersededReads drops older file_read entries when a newer entry
 // for the same file exists — a re-read or an edit makes the earlier
-// read's snapshot stale. Entries without file tags are untouched.
+// read's snapshot stale. Only successful events supersede: a failed
+// edit leaves the file — and the earlier read — untouched. Entries
+// without file tags are untouched.
 func dropSupersededReads(entries []notebook.Entry) []notebook.Entry {
 	// newestForFile maps a file: tag to the newest entry tagged with it.
 	type key struct{ turn, event int64 }
 	newestForFile := map[string]key{}
 	for _, e := range entries {
+		if !e.Succeeded {
+			continue
+		}
 		for _, tag := range e.Tags {
 			if !strings.HasPrefix(tag, "file:") {
 				continue

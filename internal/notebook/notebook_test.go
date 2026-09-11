@@ -15,11 +15,26 @@ import (
 type mockGenerator struct {
 	entries []GeneratedEntry
 	err     error
+	// echo produces one generated entry per input event, preserving
+	// index alignment with the significant-event list.
+	echo bool
 }
 
 func (m *mockGenerator) Generate(ctx context.Context, sessionID string, events []EntryInput) ([]GeneratedEntry, error) {
 	if m.err != nil {
 		return nil, m.err
+	}
+	if m.echo {
+		entries := make([]GeneratedEntry, len(events))
+		for i, ev := range events {
+			entries[i] = GeneratedEntry{
+				EventType: ev.EventType,
+				Title:     ev.Title,
+				Text:      "## " + ev.Title + "\ncontent",
+				Tags:      defaultTagsForEvent(ev),
+			}
+		}
+		return entries, nil
 	}
 	return m.entries, nil
 }
@@ -135,6 +150,45 @@ func TestGenerateEntries_WithSignificantEvent(t *testing.T) {
 	require.Len(t, entries, 1)
 	require.Equal(t, "Read auth.go", entries[0].Title)
 	require.Contains(t, entries[0].Tags, "file:auth.go")
+}
+
+func TestGenerateEntries_RecordsSucceeded(t *testing.T) {
+	svc, _, sessionID := newTestService(t, &mockGenerator{echo: true})
+
+	msgs := []message.Message{
+		{Role: message.Assistant, Parts: []message.ContentPart{
+			message.ToolCall{ID: "tc1", Name: "edit", Input: `{"file_path":"auth.go"}`, Finished: true},
+			message.ToolCall{ID: "tc2", Name: "bash", Input: `{"command":"make test"}`, Finished: true},
+		}},
+		{Role: message.Tool, Parts: []message.ContentPart{
+			message.ToolResult{ToolCallID: "tc1", Name: "edit", Content: "old_string not found", IsError: true},
+			message.ToolResult{ToolCallID: "tc2", Name: "bash", Content: "ok"},
+		}},
+	}
+	err := svc.GenerateEntries(context.Background(), sessionID, 1, msgs)
+	require.NoError(t, err)
+	entries, err := svc.GetEntries(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	require.False(t, entries[0].Succeeded, "failed edit should record succeeded=false")
+	require.True(t, entries[1].Succeeded)
+}
+
+func TestClassifyEvents_SucceededFromResult(t *testing.T) {
+	msgs := []message.Message{
+		{Role: message.Assistant, Parts: []message.ContentPart{
+			message.ToolCall{ID: "tc1", Name: "edit", Input: `{"file_path":"a.go"}`, Finished: true},
+			message.ToolCall{ID: "tc2", Name: "edit", Input: `{"file_path":"b.go"}`, Finished: true},
+		}},
+		{Role: message.Tool, Parts: []message.ContentPart{
+			message.ToolResult{ToolCallID: "tc1", Name: "edit", Content: "boom", IsError: true},
+			message.ToolResult{ToolCallID: "tc2", Name: "edit", Content: "ok"},
+		}},
+	}
+	significant, _ := classifyEvents(msgs)
+	require.Len(t, significant, 2)
+	require.False(t, significant[0].Succeeded)
+	require.True(t, significant[1].Succeeded)
 }
 
 func TestSearchByTag(t *testing.T) {

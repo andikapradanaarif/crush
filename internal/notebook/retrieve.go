@@ -104,6 +104,7 @@ func (s *service) enrichEntries(ctx context.Context, rows []db.NotebookEntry) ([
 			CompressionLevel: row.CompressionLevel,
 			CreatedAt:        row.CreatedAt,
 			Tags:             tags,
+			Succeeded:        row.Succeeded != 0,
 		})
 	}
 	return entries, nil
