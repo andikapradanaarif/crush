@@ -330,8 +330,11 @@ func NewSessionAgent(
 		stubStats:            csync.NewMap[string, stubStats](),
 	}
 	// Drop per-session stub bookkeeping when a session is deleted so
-	// the maps don't grow unbounded across a process's lifetime.
-	if a.sessions != nil {
+	// the maps don't grow unbounded across a process's lifetime. Only
+	// watch when stubbing is active — callers like agentic_fetch build
+	// session agents that never populate these maps, and the watcher
+	// would be a pure goroutine+broker-subscriber leak per call.
+	if a.sessions != nil && a.stubSuperseded {
 		go a.watchSessionDeletions()
 	}
 	return a

@@ -81,12 +81,16 @@ func toolCallFilePath(input string) string {
 	return ""
 }
 
-// normalizedPath resolves a tool-call path the way the file tools
-// resolve them — filepath.Abs anchors relative paths to the process
-// working directory — so "internal/x.go" and "x.go" correctly compare
-// as different files while "./a.go", "a.go", and its absolute spelling
-// all match. On case-insensitive filesystems (darwin, windows) the key
-// is case-folded so "Foo.go" and "foo.go" alias the same file.
+// normalizedPath resolves a tool-call path for comparison: filepath.Abs
+// anchors relative paths to the process working directory (the file
+// tools resolve against the configured working dir — equal in
+// practice, differing only when WorkingDir != process CWD *and* the
+// call spells the path absolutely). "internal/x.go" and "x.go" thus
+// correctly compare as different files while "./a.go", "a.go", and its
+// absolute spelling all match. On case-insensitive filesystems
+// (darwin, windows) the key is case-folded so "Foo.go" and "foo.go"
+// alias — a deliberate false-positive risk on case-sensitive APFS
+// volumes, where the cost is a recoverable extra supersession.
 func normalizedPath(p string) string {
 	abs, err := filepath.Abs(p)
 	if err != nil {
@@ -96,12 +100,6 @@ func normalizedPath(p string) string {
 		abs = strings.ToLower(abs)
 	}
 	return abs
-}
-
-// sameFilePath reports whether two tool-call paths refer to the same
-// file after normalization.
-func sameFilePath(a, b string) bool {
-	return normalizedPath(a) == normalizedPath(b)
 }
 
 // flagSupersededViewResults marks prior file-read tool results as
@@ -188,9 +186,10 @@ func (a *sessionAgent) flagSupersededViewResults(ctx context.Context, msgs []mes
 			// The bucket is in message order, so the first later one
 			// owns the flag.
 			var best *writeEvent
-			for k, w := range writesByPath[normalizedPath(call.path)] {
-				if w.msgIdx > i {
-					best = &writesByPath[normalizedPath(call.path)][k]
+			pathWrites := writesByPath[normalizedPath(call.path)]
+			for k := range pathWrites {
+				if pathWrites[k].msgIdx > i {
+					best = &pathWrites[k]
 					break
 				}
 			}

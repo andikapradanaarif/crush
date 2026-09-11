@@ -441,15 +441,15 @@ func TestApplySupersededStubs(t *testing.T) {
 	require.Equal(t, bigContent(), m.ToolResults()[1].Content)
 }
 
-func TestSameFilePath(t *testing.T) {
+func TestNormalizedPath(t *testing.T) {
 	t.Parallel()
 
-	require.True(t, sameFilePath("a.go", "a.go"))
-	require.True(t, sameFilePath("./x.go", "x.go"))
-	// Different directories — the file that exists is resolved
-	// against the working dir, not suffix-matched.
-	require.False(t, sameFilePath("internal/x.go", "x.go"))
-	require.False(t, sameFilePath("x.go", "internal/x.go"))
-	require.False(t, sameFilePath("a/x.go", "b/x.go"))
-	require.False(t, sameFilePath("x.go", "y.go"))
+	require.Equal(t, normalizedPath("a.go"), normalizedPath("a.go"))
+	require.Equal(t, normalizedPath("./x.go"), normalizedPath("x.go"))
+	// Different directories — paths resolve against the working dir,
+	// not suffix-match.
+	require.NotEqual(t, normalizedPath("internal/x.go"), normalizedPath("x.go"))
+	require.NotEqual(t, normalizedPath("x.go"), normalizedPath("internal/x.go"))
+	require.NotEqual(t, normalizedPath("a/x.go"), normalizedPath("b/x.go"))
+	require.NotEqual(t, normalizedPath("x.go"), normalizedPath("y.go"))
 }
