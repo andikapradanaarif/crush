@@ -262,8 +262,11 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 
 	// Share stub bookkeeping maps across all built agents and run one
 	// deletion watcher here — a per-agent watcher would leak a
-	// goroutine and broker subscriber on every agent rebuild.
-	if opts.Sessions != nil && opts.Config.Config().Options.NotebookStubSupersededEnabled() {
+	// goroutine and broker subscriber on every agent rebuild. Stubbing
+	// only runs when the notebook is also enabled, so gate both.
+	if opts.Sessions != nil &&
+		opts.Config.Config().Options.NotebookStubSupersededEnabled() &&
+		opts.Config.Config().Options.NotebookIsEnabled() {
 		c.stubBoundary = csync.NewMap[string, int]()
 		c.stubStats = csync.NewMap[string, stubStats]()
 		go c.watchSessionDeletions()
