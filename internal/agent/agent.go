@@ -177,12 +177,7 @@ type sessionAgent struct {
 
 	// promptSections holds the per-section measurements of the last
 	// built system prompt, used for request composition telemetry.
-	promptSections *csync.Slice[prompt.PromptSection]
-	// fullPrompt/fullPromptKey cache the system prompt with MCP
-	// instructions appended; rebuilt only when the base prompt or the
-	// MCP instruction set changes.
-	fullPrompt           *csync.Value[string]
-	fullPromptKey        *csync.Value[string]
+	promptSections       *csync.Slice[prompt.PromptSection]
 	isSubAgent           bool
 	sessions             session.Service
 	messages             message.Service
@@ -295,8 +290,6 @@ func NewSessionAgent(
 		systemPromptPrefix:   csync.NewValue(opts.SystemPromptPrefix),
 		systemPrompt:         csync.NewValue(opts.SystemPrompt),
 		promptSections:       csync.NewSlice[prompt.PromptSection](),
-		fullPrompt:           csync.NewValue(""),
-		fullPromptKey:        csync.NewValue(""),
 		isSubAgent:           opts.IsSubAgent,
 		sessions:             opts.Sessions,
 		messages:             opts.Messages,
@@ -722,7 +715,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	promptPrefix := a.systemPromptPrefix.Get()
 	mcpInstructions := collectMCPInstructions()
 	basePromptBytes := len(systemPrompt)
-	systemPrompt = a.fullSystemPrompt(systemPrompt, mcpInstructions)
+	// base + name-sorted MCP instructions is already deterministic, so
+	// the provider sees byte-identical prefixes every turn; a plain
+	// concat is all that is needed.
+	if mcpInstructions != "" {
+		systemPrompt += "\n\n<mcp-instructions>\n" + mcpInstructions + "\n</mcp-instructions>"
+	}
 
 	if len(agentTools) > 0 {
 		// Add Anthropic caching to the last tool.
@@ -2584,24 +2582,6 @@ func (a *sessionAgent) SetTools(tools []fantasy.AgentTool) {
 func (a *sessionAgent) SetSystemPrompt(systemPrompt prompt.BuiltPrompt) {
 	a.systemPrompt.Set(systemPrompt.Text)
 	a.promptSections.SetSlice(systemPrompt.Sections)
-}
-
-// fullSystemPrompt returns the system prompt with the MCP instruction
-// block appended. The assembled result is cached and reused while the
-// base prompt and MCP instruction set are unchanged, so per-turn
-// requests keep byte-identical prompt prefixes for cache reuse.
-func (a *sessionAgent) fullSystemPrompt(base, mcpInstructions string) string {
-	key := base + "\x00" + mcpInstructions
-	if a.fullPromptKey.Get() == key {
-		return a.fullPrompt.Get()
-	}
-	full := base
-	if mcpInstructions != "" {
-		full += "\n\n<mcp-instructions>\n" + mcpInstructions + "\n</mcp-instructions>"
-	}
-	a.fullPrompt.Set(full)
-	a.fullPromptKey.Set(key)
-	return full
 }
 
 func (a *sessionAgent) Model() Model {

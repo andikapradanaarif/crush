@@ -346,7 +346,13 @@ one specific event (file read, file edit, command, decision).
 - Do NOT re-read files with notebook entries — use `recall` first.
   It is 16x cheaper than re-reading the file.
 - If recall doesn't have what you need, then use `view` to re-read.
-{{end}}
+{{end}}{{/*
+env lives last so the stable sections above it form a cacheable
+prefix. This is inert today — the system prompt is one flat string
+with no internal cache boundary; it pays off when a deferred
+multipart system split lands (cross-session reuse of the stable
+prefix). Per-turn prefixes are already byte-identical regardless.
+*/}}
 <env>
 Working directory: {{.WorkingDir}}
 Is directory a git repo: {{if .IsGitRepo}}yes{{else}}no{{end}}
