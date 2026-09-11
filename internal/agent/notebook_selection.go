@@ -15,9 +15,10 @@ const maxNotebookInjectionTokens = 12_000
 // selectNotebookEntries chooses which notebook entries to render into
 // the request. Selection order:
 //
-//  1. Entries relevant to refs (file paths from the current user
+//  1. Entries from the two most recent turns (immediate context) —
+//     recency runs first so a large ref set can't starve it.
+//  2. Entries relevant to refs (file paths from the current user
 //     message and active todos).
-//  2. Entries from the two most recent turns (immediate context).
 //  3. Remaining entries, newest first, until the token cap.
 //
 // Entries are deduplicated by ID, superseded file reads are dropped in
@@ -41,25 +42,26 @@ func selectNotebookEntries(entries []notebook.Entry, refs []string, maxTurn int6
 			tokens = approxTokenCount(e.EntryText)
 		}
 		// Skip oversized entries but keep looking — a large entry must
-		// not stop smaller ones from filling the budget.
-		if used+tokens > maxNotebookInjectionTokens {
+		// not stop smaller ones from filling the budget. +1 token
+		// accounts for the "\n\n" join separator RenderEntries emits.
+		if used+tokens+1 > maxNotebookInjectionTokens {
 			return
 		}
 		seen[e.ID] = true
-		used += tokens
+		used += tokens + 1
 		selected = append(selected, e)
 	}
 
-	// Pass 1: entries matching explicit file paths from the user
-	// prompt and active todos.
+	// Pass 1: the two most recent turns.
 	for _, e := range entries {
-		if entryMatchesRefs(e, refs) {
+		if e.TurnNumber >= maxTurn-1 {
 			trySelect(e)
 		}
 	}
-	// Pass 2: the two most recent turns.
+	// Pass 2: entries matching explicit file paths from the user
+	// prompt and active todos.
 	for _, e := range entries {
-		if e.TurnNumber >= maxTurn-1 {
+		if entryMatchesRefs(e, refs) {
 			trySelect(e)
 		}
 	}
@@ -89,7 +91,8 @@ func entryMatchesRefs(e notebook.Entry, refs []string) bool {
 				return true
 			}
 		}
-		if basename != "" && strings.Contains(e.EntryText, basename) {
+		if basename != "" && (strings.Contains(e.EntryText, basename) ||
+			strings.Contains(e.EntryTextFull, basename)) {
 			return true
 		}
 	}

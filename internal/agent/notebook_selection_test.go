@@ -65,6 +65,27 @@ func TestSelectNotebookEntries(t *testing.T) {
 		require.Contains(t, entryIDs(got), "new")
 	})
 
+	t.Run("recency survives a large ref set", func(t *testing.T) {
+		t.Parallel()
+		// Many ref-matching entries plus two recent-turn entries; if
+		// refs ran before recency, the ref set would exhaust the
+		// budget and the recent entries would be dropped.
+		var entries []notebook.Entry
+		for i := range 200 {
+			entries = append(entries, nbEntry(
+				fmt.Sprintf("ref%d", i), int64(1+i), 1,
+				notebook.EventFileRead, "content of target.go", 200,
+				"file:target.go"))
+		}
+		entries = append(entries,
+			nbEntry("recent1", 300, 1, notebook.EventGeneral, "recent", 10),
+			nbEntry("recent2", 301, 1, notebook.EventGeneral, "recent", 10),
+		)
+		got := selectNotebookEntries(entries, []string{"file:target.go"}, 301)
+		require.Contains(t, entryIDs(got), "recent1")
+		require.Contains(t, entryIDs(got), "recent2")
+	})
+
 	t.Run("fills remaining budget newest first", func(t *testing.T) {
 		t.Parallel()
 		entries := []notebook.Entry{
