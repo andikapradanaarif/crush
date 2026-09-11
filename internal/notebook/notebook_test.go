@@ -194,6 +194,20 @@ func TestClassifyEvents_SucceededFromResult(t *testing.T) {
 	require.True(t, significant[1].Succeeded)
 }
 
+func TestClassifyEvents_MissingResultIsNotSuccess(t *testing.T) {
+	// A finished call with no result (interrupted turn) must not
+	// count as successful — an edit that may never have run cannot
+	// supersede a still-accurate read.
+	msgs := []message.Message{
+		{Role: message.Assistant, Parts: []message.ContentPart{
+			message.ToolCall{ID: "tc1", Name: "edit", Input: `{"file_path":"a.go"}`, Finished: true},
+		}},
+	}
+	significant, _ := classifyEvents(msgs)
+	require.Len(t, significant, 1)
+	require.False(t, significant[0].Succeeded)
+}
+
 func TestGenerateEntries_RecordsErrorHeadline(t *testing.T) {
 	svc, _, sessionID := newTestService(t, &mockGenerator{echo: true})
 
@@ -213,6 +227,21 @@ func TestGenerateEntries_RecordsErrorHeadline(t *testing.T) {
 	require.Len(t, entries, 1)
 	require.False(t, entries[0].Succeeded)
 	require.Equal(t, "main.go:12: undefined: foo", entries[0].ErrorHeadline)
+}
+
+func TestErrorHeadline(t *testing.T) {
+	t.Parallel()
+
+	// First non-empty line.
+	require.Equal(t, "boom", errorHeadline("\n\nboom\nmore\n"))
+	// Exit code from failed bash output is appended.
+	require.Equal(t,
+		"main.go:12: undefined: foo — Exit code 2",
+		errorHeadline("main.go:12: undefined: foo\n\nExit code 2"))
+	// No duplication when the first line already is the exit line.
+	require.Equal(t, "Exit code 1", errorHeadline("Exit code 1"))
+	// Empty content.
+	require.Equal(t, "", errorHeadline("\n\n"))
 }
 
 func TestCompressEntryPreservesErrorHeadline(t *testing.T) {

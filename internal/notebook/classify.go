@@ -53,10 +53,11 @@ func classifyEvents(msgs []message.Message) (significant []EntryInput, trivial [
 				input := EntryInput{
 					ToolCall:   &tc,
 					ToolResult: result,
-					// A missing result means the call is still in flight
-					// or its message was lost; treat as successful so it
-					// does not poison supersession bookkeeping.
-					Succeeded: result == nil || !result.IsError,
+					// A missing result means the call never completed —
+					// the session was interrupted between the call and
+					// its result. Unknown is not success: a write that
+					// may never have run must not supersede reads.
+					Succeeded: result != nil && !result.IsError,
 				}
 				if result != nil && result.IsError {
 					input.ErrorHeadline = errorHeadline(result.Content)
@@ -273,20 +274,31 @@ func buildTrivialExplorationEntry(trivial []EntryInput) GeneratedEntry {
 }
 
 // errorHeadline extracts a one-line digest from a failed tool result:
-// the first non-empty line, truncated. It survives entry compaction so
-// later turns can compare repeated failures.
+// the first non-empty line plus the trailing exit code when the result
+// carries one (failed bash output ends with "Exit code N"). It
+// survives entry compaction so later turns can compare repeated
+// failures.
 func errorHeadline(content string) string {
+	var first, exitCode string
 	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		if len(line) > 200 {
-			line = line[:199] + "…"
+		if first == "" {
+			first = line
 		}
-		return line
+		if strings.HasPrefix(line, "Exit code") {
+			exitCode = line
+		}
 	}
-	return ""
+	if len(first) > 200 {
+		first = first[:199] + "…"
+	}
+	if exitCode != "" && exitCode != first {
+		return first + " — " + exitCode
+	}
+	return first
 }
 
 // storeEntry persists a generated entry to the database. succeeded is

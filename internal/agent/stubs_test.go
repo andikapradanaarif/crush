@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/session"
@@ -24,7 +25,10 @@ func newStubTestAgent(t *testing.T) (*sessionAgent, message.Service, string) {
 	require.NoError(t, err)
 
 	svc := message.NewService(q)
-	return &sessionAgent{messages: svc}, svc, sess.ID
+	return &sessionAgent{
+		messages:  svc,
+		stubStats: csync.NewMap[string, stubStats](),
+	}, svc, sess.ID
 }
 
 func mkMsg(t *testing.T, svc message.Service, sessionID string, role message.MessageRole, parts ...message.ContentPart) message.Message {

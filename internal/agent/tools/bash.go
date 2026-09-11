@@ -485,6 +485,32 @@ var buildTestRunTargets = []string{
 	"build", "test", "lint", "check", "typecheck", "type-check", "tsc", "ci",
 }
 
+// commandWrappers are leading words that wrap the real command.
+var commandWrappers = map[string]bool{
+	"sudo": true, "env": true, "time": true,
+	"nice": true, "nohup": true, "command": true, "exec": true,
+}
+
+// isEnvAssignment reports whether a leading field is a KEY=VALUE env
+// assignment rather than the command name.
+func isEnvAssignment(field string) bool {
+	if strings.HasPrefix(field, "-") {
+		return false
+	}
+	idx := strings.IndexByte(field, '=')
+	if idx <= 0 {
+		return false
+	}
+	for i := range idx {
+		c := field[i]
+		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' ||
+			'0' <= c && c <= '9' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 // isBuildOrTestCommand reports whether command invokes a known build,
 // test, or lint tool. Each segment separated by shell chaining
 // operators is checked, so "cd x && go test" still matches.
@@ -494,6 +520,13 @@ func isBuildOrTestCommand(command string) bool {
 	})
 	for _, seg := range segments {
 		fields := strings.Fields(seg)
+		// Skip leading env assignments and command wrappers so
+		// "CGO_ENABLED=0 go test", "sudo make", or "env X=1 pytest"
+		// still classify.
+		for len(fields) > 0 &&
+			(isEnvAssignment(fields[0]) || commandWrappers[fields[0]]) {
+			fields = fields[1:]
+		}
 		if len(fields) == 0 {
 			continue
 		}

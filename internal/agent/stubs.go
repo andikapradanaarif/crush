@@ -35,6 +35,20 @@ type stubReport struct {
 	savedBytes int64
 }
 
+// stubStats accumulates per-session stubbing telemetry. Keyed by
+// session ID on the agent so concurrent sessions sharing an agent do
+// not bleed each other's numbers.
+type stubStats struct {
+	// Invalidations counts promotion events — each one changes the
+	// prompt prefix, i.e. one cache invalidation.
+	Invalidations int
+	// Results is the cumulative count of results stubbed across
+	// renders.
+	Results int
+	// SavedBytes is the cumulative original content replaced by stubs.
+	SavedBytes int64
+}
+
 // messageTurns returns the turn index of each message: the number of
 // user messages strictly before it. Turn numbering matches
 // countUserMessages — the first user message starts turn 0.
@@ -198,10 +212,16 @@ func (a *sessionAgent) flagSupersededViewResults(ctx context.Context, msgs []mes
 // invalidates the prompt-cache prefix, so stubbing piggybacks on it
 // rather than paying an invalidation mid-window. Results in the last
 // two completed turns are left pending.
-func (a *sessionAgent) promoteSupersededStubs(ctx context.Context, msgs []message.Message, boundary int) {
+//
+// Returns false when any persistence write failed; callers should then
+// leave the recorded boundary alone so promotion retries next render
+// instead of flip-flopping between stubbed and verbatim renders.
+func (a *sessionAgent) promoteSupersededStubs(ctx context.Context, msgs []message.Message, boundary int) bool {
 	currentTurn := int64(countUserMessages(msgs))
 	turns := messageTurns(msgs)
 	promoted := 0
+	var saved int64
+	persistFailed := false
 	for i := boundary; i < len(msgs); i++ {
 		m := &msgs[i]
 		if m.Role != message.Tool || turns[i] >= currentTurn-stubRecentTurnGuard {
@@ -213,6 +233,7 @@ func (a *sessionAgent) promoteSupersededStubs(ctx context.Context, msgs []messag
 			if !ok || tr.Superseded == nil || tr.Superseded.Applied || tr.IsError {
 				continue
 			}
+			saved += int64(len(tr.Content)) - int64(len(supersededStubText(*tr.Superseded, tr.ToolCallID)))
 			tr.Superseded.Applied = true
 			m.Parts[j] = tr
 			changed = true
@@ -220,6 +241,7 @@ func (a *sessionAgent) promoteSupersededStubs(ctx context.Context, msgs []messag
 		}
 		if changed {
 			if err := a.messages.Update(ctx, *m); err != nil {
+				persistFailed = true
 				slog.Warn("Failed to persist superseded stub", "session_id", m.SessionID, "error", err)
 			}
 		}
@@ -228,6 +250,15 @@ func (a *sessionAgent) promoteSupersededStubs(ctx context.Context, msgs []messag
 		slog.Debug("Promoted superseded tool results to stubs",
 			"session_id", sessionIDFromMessages(msgs), "count", promoted, "boundary", boundary)
 	}
+	if !persistFailed && promoted > 0 && a.stubStats != nil {
+		sessionID := sessionIDFromMessages(msgs)
+		stats, _ := a.stubStats.Get(sessionID)
+		stats.Invalidations++
+		stats.Results += promoted
+		stats.SavedBytes += saved
+		a.stubStats.Set(sessionID, stats)
+	}
+	return !persistFailed
 }
 
 // supersededStubText renders the placeholder that replaces a stubbed

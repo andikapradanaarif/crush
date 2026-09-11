@@ -212,9 +212,9 @@ type sessionAgent struct {
 	// session, so pending superseded flags promote to stubs only on
 	// boundary moves.
 	stubBoundary *csync.Map[string, int]
-	// stubReport holds the most recent render's stubbing stats for
-	// step-composition telemetry.
-	stubReport *csync.Value[stubReport]
+	// stubStats accumulates per-session stubbing telemetry for
+	// step-composition logging.
+	stubStats *csync.Map[string, stubStats]
 
 	messageQueue   *csync.Map[string, []SessionAgentCall]
 	activeRequests *csync.Map[string, *activeCancel]
@@ -327,7 +327,7 @@ func NewSessionAgent(
 		notebookAutoInject:   opts.NotebookAutoInject,
 		stubSuperseded:       opts.StubSuperseded,
 		stubBoundary:         csync.NewMap[string, int](),
-		stubReport:           csync.NewValue(stubReport{}),
+		stubStats:            csync.NewMap[string, stubStats](),
 	}
 }
 
@@ -956,7 +956,8 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(promptPrefix)}, prepared.Messages...)
 			}
 
-			logStepComposition(call.SessionID, prepared.Messages, prepared.Tools, a.stubReport.Get())
+			stats, _ := a.stubStats.Get(call.SessionID)
+			logStepComposition(call.SessionID, prepared.Messages, prepared.Tools, stats)
 
 			sessionLock.Lock()
 			stepMessages = cloneFantasyMessages(prepared.Messages)
@@ -1746,10 +1747,15 @@ func (a *sessionAgent) preparePrompt(msgs []message.Message, supportsImages bool
 			sessionID := sessionIDFromMessages(msgs)
 			if last, ok := a.stubBoundary.Get(sessionID); !ok || last != boundary {
 				promoteCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				a.promoteSupersededStubs(promoteCtx, msgs, boundary)
+				persisted := a.promoteSupersededStubs(promoteCtx, msgs, boundary)
 				cancel()
+				// Only record the boundary when persistence succeeded;
+				// otherwise the next render would flip back to verbatim
+				// and promotion would never retry.
+				if persisted {
+					a.stubBoundary.Set(sessionID, boundary)
+				}
 			}
-			a.stubBoundary.Set(sessionID, boundary)
 		}
 		rawMsgs = msgs[boundary:]
 	} else {
@@ -1836,7 +1842,6 @@ func (a *sessionAgent) preparePrompt(msgs []message.Message, supportsImages bool
 			"stubbed_saved_bytes", stubs.savedBytes,
 		)
 	}
-	a.stubReport.Set(stubs)
 
 	return history, files
 }

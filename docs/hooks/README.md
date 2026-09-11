@@ -51,20 +51,20 @@ a global hook (`~/.config/crush/crush.json`), use an absolute path instead.
 
 ```jsonc
 {
-	// As expected, hooks go in a "hooks" object.
-	"hooks": {
-		// PreToolUse is an event that fires before a tool is used.
-		"PreToolUse": [
-			{
-				// What tool do we want to hook into? In this case, Bash, because it
-				// runs the stuff we wanna block.
-				"matcher": "^bash$",
+  // As expected, hooks go in a "hooks" object.
+  "hooks": {
+    // PreToolUse is an event that fires before a tool is used.
+    "PreToolUse": [
+      {
+        // What tool do we want to hook into? In this case, Bash, because it
+        // runs the stuff we wanna block.
+        "matcher": "^bash$",
 
-				// The path to our actual hook script.
-				"command": "./no-haskell.sh",
-			},
-		],
-	},
+        // The path to our actual hook script.
+        "command": "./no-haskell.sh",
+      },
+    ],
+  },
 }
 ```
 
@@ -137,16 +137,16 @@ and project-level, with project level hooks taking precedence.
 
 ```jsonc
 {
-	"hooks": {
-		"PreToolUse": [
-			{
-				"name": "no-rm-rf", // friendly name shown in the TUI
-				"matcher": "bash", // regex tested against the tool name
-				"command": "./hooks/my-hot-hook.sh", // the path to the hook
-				"timeout": 10, // in seconds; default 30
-			},
-		],
-	},
+  "hooks": {
+    "PreToolUse": [
+      {
+        "name": "no-rm-rf", // friendly name shown in the TUI
+        "matcher": "bash", // regex tested against the tool name
+        "command": "./hooks/my-hot-hook.sh", // the path to the hook
+        "timeout": 10, // in seconds; default 30
+      },
+    ],
+  },
 }
 ```
 
@@ -160,15 +160,15 @@ and project-level, with project level hooks taking precedence.
 > ```jsonc
 > // Global ~/.config/crush/crush.json
 > {
-> 	"hooks": {
-> 		"PreToolUse": [
-> 			{
-> 				"command": "/home/you/.config/crush/hooks/no-haskell.sh",
-> 				// or use an inline command:
-> 				// "command": "echo '{\"decision\":\"allow\"}'"
-> 			},
-> 		],
-> 	},
+>   "hooks": {
+>     "PreToolUse": [
+>       {
+>         "command": "/home/you/.config/crush/hooks/no-haskell.sh"
+>         // or use an inline command:
+>         // "command": "echo '{\"decision\":\"allow\"}'"
+>       }
+>     ]
+>   }
 > }
 > ```
 
@@ -215,11 +215,11 @@ pending compaction:
 
 ```jsonc
 {
-	"event": "PreCompact",
-	"session_id": "313909e",
-	"cwd": "/home/user/project",
-	"tool_name": "compact",
-	"tool_input": {"token_count": 103200, "max_tokens": 100000},
+  "event": "PreCompact",
+  "session_id": "313909e",
+  "cwd": "/home/user/project",
+  "tool_name": "compact",
+  "tool_input": { "token_count": 103200, "max_tokens": 100000 },
 }
 ```
 
@@ -284,11 +284,11 @@ Standard input provides the full context as JSON:
 
 ```jsonc
 {
-	"event": "PreToolUse", // Hook event name
-	"session_id": "313909e", // Current session ID
-	"cwd": "/home/user/project", // Working directory
-	"tool_name": "bash", // The tool being called
-	"tool_input": {"command": "rm -rf /"}, // The tool's input
+  "event": "PreToolUse", // Hook event name
+  "session_id": "313909e", // Current session ID
+  "cwd": "/home/user/project", // Working directory
+  "tool_name": "bash", // The tool being called
+  "tool_input": { "command": "rm -rf /" }, // The tool's input
 }
 ```
 
@@ -352,12 +352,12 @@ the input, or still deny/halt with a reason:
 
 ```jsonc
 {
-	"version": 1, // Output envelope version. Optional; defaults to 1.
-	"decision": "allow", // "allow", "deny", or null. Omit for no opinion.
-	"halt": false, // If true, halts the turn entirely.
-	"reason": "LGTM", // Shown when denying or halting.
-	"context": "Scrubbed secrets", // String or array of strings. Appended to what the model sees.
-	"updated_input": {"command": "…"}, // Shallow-merged into the tool's input before execution.
+  "version": 1, // Output envelope version. Optional; defaults to 1.
+  "decision": "allow", // "allow", "deny", or null. Omit for no opinion.
+  "halt": false, // If true, halts the turn entirely.
+  "reason": "LGTM", // Shown when denying or halting.
+  "context": "Scrubbed secrets", // String or array of strings. Appended to what the model sees.
+  "updated_input": { "command": "…" }, // Shallow-merged into the tool's input before execution.
 }
 ```
 
@@ -443,14 +443,14 @@ Prevent the agent from running `rm -rf` in bash:
 
 ```json
 {
-	"hooks": {
-		"PreToolUse": [
-			{
-				"matcher": "^bash$",
-				"command": "./hooks/no-rm-rf.sh"
-			}
-		]
-	}
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^bash$",
+        "command": "./hooks/no-rm-rf.sh"
+      }
+    ]
+  }
 }
 ```
 
@@ -476,14 +476,14 @@ returns `decision: "allow"`, which tells Crush to pre-approve the call:
 
 ```jsonc
 {
-	"hooks": {
-		"PreToolUse": [
-			{
-				"matcher": "^(view|ls|grep|glob)$",
-				"command": "echo '{\"decision\":\"allow\"}'",
-			},
-		],
-	},
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(view|ls|grep|glob)$",
+        "command": "echo '{\"decision\":\"allow\"}'",
+      },
+    ],
+  },
 }
 ```
 
@@ -512,14 +512,14 @@ Add a reminder to the model whenever it writes a Go file:
 
 ```json
 {
-	"hooks": {
-		"PreToolUse": [
-			{
-				"matcher": "^(edit|write|multiedit)$",
-				"command": "./hooks/go-context.sh"
-			}
-		]
-	}
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(edit|write|multiedit)$",
+        "command": "./hooks/go-context.sh"
+      }
+    ]
+  }
 }
 ```
 
@@ -544,7 +544,7 @@ The `command` can be inline. This one-liner matches all MCP tools and blocks
 them:
 
 ```jsonc
-{"matcher": "^mcp_", "command": "echo 'MCP tools are disabled' >&2; exit 2"}
+{ "matcher": "^mcp_", "command": "echo 'MCP tools are disabled' >&2; exit 2" }
 ```
 
 ### Log every tool call
@@ -553,7 +553,7 @@ With no `matcher` this fires for every tool. It exits 0 with no stdout so the
 tool call always proceeds.
 
 ```jsonc
-{"command": "echo \"$(date -Iseconds) $CRUSH_TOOL_NAME\" >> ./tools.log"}
+{ "command": "echo \"$(date -Iseconds) $CRUSH_TOOL_NAME\" >> ./tools.log" }
 ```
 
 ### A real-world Example:
@@ -589,12 +589,12 @@ end
 let input = "";
 process.stdin.on("data", (chunk) => (input += chunk));
 process.stdin.on("end", () => {
-	const {tool_input: toolInput} = JSON.parse(input);
+  const { tool_input: toolInput } = JSON.parse(input);
 
-	if (/rm\s+-[rf]{2}\s+\//.test(toolInput.command)) {
-		process.stderr.write("Refusing to run rm -rf against root\n");
-		process.exit(2);
-	}
+  if (/rm\s+-[rf]{2}\s+\//.test(toolInput.command)) {
+    process.stderr.write("Refusing to run rm -rf against root\n");
+    process.exit(2);
+  }
 });
 ```
 
@@ -630,18 +630,18 @@ Each entry under a `hooks.<EventName>` array:
 
 ```jsonc
 {
-	// string. Optional. Friendly display name shown in the TUI. Falls back to
-	// command when omitted.
-	"name": "no-rm-rf",
+  // string. Optional. Friendly display name shown in the TUI. Falls back to
+  // command when omitted.
+  "name": "no-rm-rf",
 
-	// string. Optional. Regex tested against the tool name. Omit to match all.
-	"matcher": "^bash$",
+  // string. Optional. Regex tested against the tool name. Omit to match all.
+  "matcher": "^bash$",
 
-	// string. Required. Shell command to run.
-	"command": "./hooks/my-hook.sh",
+  // string. Required. Shell command to run.
+  "command": "./hooks/my-hook.sh",
 
-	// number. Optional. Seconds before the hook is killed. Defaults to 30.
-	"timeout": 10,
+  // number. Optional. Seconds before the hook is killed. Defaults to 30.
+  "timeout": 10,
 }
 ```
 
@@ -651,14 +651,14 @@ Present in every hook event:
 
 ```jsonc
 {
-	// string. Hook event name.
-	"event": "PreToolUse",
+  // string. Hook event name.
+  "event": "PreToolUse",
 
-	// string. Current session ID.
-	"session_id": "313909e",
+  // string. Current session ID.
+  "session_id": "313909e",
 
-	// string. Working directory when invoked.
-	"cwd": "/home/user/project",
+  // string. Working directory when invoked.
+  "cwd": "/home/user/project",
 }
 ```
 
@@ -668,15 +668,15 @@ Extends the common payload:
 
 ```jsonc
 {
-	// ...common fields...
+  // ...common fields...
 
-	// string. The tool being called.
-	"tool_name": "bash",
+  // string. The tool being called.
+  "tool_name": "bash",
 
-	// object. Raw JSON input the model sent to the tool. Shape is per-tool.
-	"tool_input": {
-		"command": "npm test",
-	},
+  // object. Raw JSON input the model sent to the tool. Shape is per-tool.
+  "tool_input": {
+    "command": "npm test",
+  },
 }
 ```
 
@@ -687,20 +687,20 @@ event:
 
 ```jsonc
 {
-	// number. Defaults to 1. Unknown higher values still parse; exists for
-	// forward-compat.
-	"version": 1,
+  // number. Defaults to 1. Unknown higher values still parse; exists for
+  // forward-compat.
+  "version": 1,
 
-	// boolean. If true, ends the turn entirely. User takes over.
-	"halt": false,
+  // boolean. If true, ends the turn entirely. User takes over.
+  "halt": false,
 
-	// string. Shown when denying (to the model) or halting (to the model and
-	// user).
-	"reason": "not allowed",
+  // string. Shown when denying (to the model) or halting (to the model and
+  // user).
+  "reason": "not allowed",
 
-	// string | string[]. Appended to what the model sees. Empty entries are
-	// dropped.
-	"context": "Rewrote with RTK",
+  // string | string[]. Appended to what the model sees. Empty entries are
+  // dropped.
+  "context": "Rewrote with RTK",
 }
 ```
 
@@ -710,19 +710,19 @@ Extends the common envelope:
 
 ```jsonc
 {
-	// ...common fields...
+  // ...common fields...
 
-	// "allow" | "deny" | null. null/omitted = no opinion, the tool still goes
-	// through the normal permission prompt. "allow" is affirmative: pre-approves
-	// the tool call and bypasses the prompt. "deny" blocks the call; the model
-	// sees the error and may try something else.
-	"decision": "allow",
+  // "allow" | "deny" | null. null/omitted = no opinion, the tool still goes
+  // through the normal permission prompt. "allow" is affirmative: pre-approves
+  // the tool call and bypasses the prompt. "deny" blocks the call; the model
+  // sees the error and may try something else.
+  "decision": "allow",
 
-	// object. Shallow-merge patch against tool_input. Nested objects are
-	// replaced wholesale, not deep-merged.
-	"updated_input": {
-		"command": "bun test",
-	},
+  // object. Shallow-merge patch against tool_input. Nested objects are
+  // replaced wholesale, not deep-merged.
+  "updated_input": {
+    "command": "bun test",
+  },
 }
 ```
 
