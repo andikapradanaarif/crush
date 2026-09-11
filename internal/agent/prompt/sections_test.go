@@ -90,6 +90,13 @@ func TestTruncateToTokenLimitKeepEnds(t *testing.T) {
 		require.True(t, utf8.ValidString(got))
 	})
 
+	t.Run("tiny limit falls back to prefix", func(t *testing.T) {
+		t.Parallel()
+		got := TruncateToTokenLimitKeepEnds(strings.Repeat("x", 1_000), 3)
+		require.LessOrEqual(t, approxTokenCount(got), int64(3))
+		require.NotContains(t, got, "truncated")
+	})
+
 	t.Run("zero limit", func(t *testing.T) {
 		t.Parallel()
 		require.Equal(t, "", TruncateToTokenLimitKeepEnds("hello", 0))

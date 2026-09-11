@@ -204,11 +204,13 @@ func TruncateToTokenLimitKeepEnds(s string, tokenLimit int) string {
 	if tokenLimit <= 0 {
 		return ""
 	}
+	// When the marker alone would exceed the budget, fall back to a
+	// plain prefix so the limit still holds.
+	if tokenLimit*4 <= len(truncationMarker) {
+		return truncateUTF8Prefix(s, tokenLimit*4)
+	}
 	// ~4 bytes per token heuristic, minus the marker's own bytes.
 	half := (tokenLimit*4 - len(truncationMarker)) / 2
-	if half < 0 {
-		half = 0
-	}
 	return truncateUTF8Prefix(s, half) + truncationMarker + truncateUTF8Suffix(s, half)
 }
 
