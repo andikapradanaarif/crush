@@ -1785,11 +1785,13 @@ func (a *sessionAgent) preparePrompt(msgs []message.Message, supportsImages bool
 			continue
 		}
 		if m.Role == message.Tool {
-			var count int
-			var saved int64
-			m, count, saved = applySupersededStubs(m)
-			stubs.results += count
-			stubs.savedBytes += saved
+			if a.stubSuperseded {
+				var count int
+				var saved int64
+				m, count, saved = applySupersededStubs(m)
+				stubs.results += count
+				stubs.savedBytes += saved
+			}
 			if msg, ok := filterOrphanedToolResults(m, knownToolCallIDs); ok {
 				history = append(history, msg)
 			}
