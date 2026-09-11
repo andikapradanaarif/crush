@@ -29,6 +29,16 @@ func entryIDs(entries []notebook.Entry) []string {
 	return ids
 }
 
+func TestFormatTurnRanges(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "", formatTurnRanges(nil))
+	require.Equal(t, "3", formatTurnRanges([]int64{3}))
+	require.Equal(t, "3-5", formatTurnRanges([]int64{3, 4, 5}))
+	require.Equal(t, "3-5, 9, 11-12", formatTurnRanges([]int64{3, 4, 5, 9, 11, 12}))
+	require.Equal(t, "1, 3", formatTurnRanges([]int64{1, 3}))
+}
+
 func TestSelectNotebookEntries(t *testing.T) {
 	t.Parallel()
 

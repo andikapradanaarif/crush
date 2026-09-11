@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1798,7 +1799,11 @@ func (a *sessionAgent) buildNotebookMessage(oldMsgs []message.Message, rawMsgs [
 		slog.Error("Failed to get notebook entries", "error", err)
 		return notebookMessageResult{}
 	}
-	// Track which turns have entries, regardless of boundary.
+	// Track which turns have entries, regardless of boundary. This set
+	// marks coverage for the stale-turn fallback: a turn counts as
+	// covered when entries exist for it, even if the injection cap
+	// later evicts them — budget-evicted turns are pointed at by the
+	// breadcrumb below rather than extending the raw window.
 	turnsWithEntries := make(map[int64]bool)
 	var filtered []notebook.Entry
 	var maxTurn int64
@@ -1826,6 +1831,27 @@ func (a *sessionAgent) buildNotebookMessage(oldMsgs []message.Message, rawMsgs [
 	rendered := notebook.RenderEntries(selected)
 	if rendered == "" {
 		return notebookMessageResult{maxTurn: maxTurn, turnsWithEntries: turnsWithEntries}
+	}
+	// Turns whose every entry was budget-evicted have entries but
+	// nothing rendered. Emit a breadcrumb so the omission isn't
+	// silent — the raw window intentionally does not extend to them:
+	// evicted turns are the oldest, and extending to the oldest could
+	// dwarf the raw token budget.
+	selectedTurns := make(map[int64]bool, len(selected))
+	for _, e := range selected {
+		selectedTurns[e.TurnNumber] = true
+	}
+	var omitted []int64
+	for _, e := range filtered {
+		if !selectedTurns[e.TurnNumber] && !slices.Contains(omitted, e.TurnNumber) {
+			omitted = append(omitted, e.TurnNumber)
+		}
+	}
+	if len(omitted) > 0 {
+		slices.Sort(omitted)
+		rendered += fmt.Sprintf(
+			"\n\n[turns %s omitted by the %d-token injection cap — recallable via recall/notebook_search]",
+			formatTurnRanges(omitted), maxNotebookInjectionTokens)
 	}
 	msg := fantasy.NewSystemMessage("<notebook>\n" + rendered + "</notebook>")
 	return notebookMessageResult{msg: &msg, maxTurn: maxTurn, turnsWithEntries: turnsWithEntries}

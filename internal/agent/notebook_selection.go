@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 
@@ -24,6 +25,34 @@ const maxNotebookInjectionTokens = 12_000
 // Entries are deduplicated by ID, superseded file reads are dropped in
 // favor of newer entries for the same file, and the result is returned
 // in chronological order for rendering.
+// formatTurnRanges renders a sorted turn list compactly, grouping
+// consecutive numbers: 3,4,5,9 -> "3-5, 9".
+func formatTurnRanges(turns []int64) string {
+	if len(turns) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	start, prev := turns[0], turns[0]
+	flush := func() {
+		if start == prev {
+			fmt.Fprintf(&b, "%d", start)
+		} else {
+			fmt.Fprintf(&b, "%d-%d", start, prev)
+		}
+	}
+	for _, t := range turns[1:] {
+		if t == prev+1 {
+			prev = t
+			continue
+		}
+		flush()
+		b.WriteString(", ")
+		start, prev = t, t
+	}
+	flush()
+	return b.String()
+}
+
 func selectNotebookEntries(entries []notebook.Entry, refs []string, maxTurn int64) []notebook.Entry {
 	if len(entries) == 0 {
 		return nil
@@ -41,6 +70,9 @@ func selectNotebookEntries(entries []notebook.Entry, refs []string, maxTurn int6
 		if tokens <= 0 {
 			tokens = approxTokenCount(e.EntryText)
 		}
+		// Note: the budget measures pre-render tokens, while
+		// RenderEntries may emit compressEntry output — imprecise but
+		// fine for a soft cap.
 		// Skip oversized entries but keep looking — a large entry must
 		// not stop smaller ones from filling the budget. +1 token
 		// accounts for the "\n\n" join separator RenderEntries emits.
@@ -82,7 +114,9 @@ func selectNotebookEntries(entries []notebook.Entry, refs []string, maxTurn int6
 
 // entryMatchesRefs reports whether an entry is relevant to any of the
 // "file:basename" refs: a matching tag, or the basename appearing in the
-// entry text.
+// entry text. The basename substring match is intentionally loose —
+// it is a prioritization hint: false positives (auth.go matching
+// oauth.go) waste a little budget rather than corrupting output.
 func entryMatchesRefs(e notebook.Entry, refs []string) bool {
 	for _, ref := range refs {
 		basename := strings.TrimPrefix(ref, "file:")
