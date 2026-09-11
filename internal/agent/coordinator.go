@@ -177,6 +177,13 @@ type coordinator struct {
 	currentAgent SessionAgent
 	agents       map[string]SessionAgent
 
+	// stubBoundary/stubStats are shared across every agent this
+	// coordinator builds so agent rebuilds (UpdateModels, task-agent
+	// churn) reuse one watcher and one map pair instead of leaking a
+	// per-agent subscription. Nil when stubbing is disabled.
+	stubBoundary *csync.Map[string, int]
+	stubStats    *csync.Map[string, stubStats]
+
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
 	activeSkills []*skills.Skill // Post-filter: active skills only.
@@ -253,6 +260,15 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		summaryModel:          csync.NewValue(Model{}),
 	}
 
+	// Share stub bookkeeping maps across all built agents and run one
+	// deletion watcher here — a per-agent watcher would leak a
+	// goroutine and broker subscriber on every agent rebuild.
+	if opts.Sessions != nil && opts.Config.Config().Options.NotebookStubSupersededEnabled() {
+		c.stubBoundary = csync.NewMap[string, int]()
+		c.stubStats = csync.NewMap[string, stubStats]()
+		go c.watchSessionDeletions()
+	}
+
 	agentCfg, ok := opts.Config.Config().Agents[config.AgentCoder]
 	if !ok {
 		return nil, errCoderAgentNotConfigured
@@ -271,6 +287,20 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 	c.currentAgent = agent
 	c.agents[config.AgentCoder] = agent
 	return c, nil
+}
+
+// watchSessionDeletions drops per-session stub bookkeeping when a
+// session is deleted so the shared stub maps don't grow unbounded
+// across a process's lifetime. Runs once per coordinator.
+func (c *coordinator) watchSessionDeletions() {
+	ch := c.sessions.Subscribe(context.Background())
+	for ev := range ch {
+		if ev.Type != pubsub.DeletedEvent {
+			continue
+		}
+		c.stubBoundary.Del(ev.Payload.ID)
+		c.stubStats.Del(ev.Payload.ID)
+	}
 }
 
 // Run implements Coordinator.
@@ -754,10 +784,12 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		NotebookMemoryServer: c.cfg.Config().Options.NotebookMemoryServerName(),
 		NotebookAutoInject:   c.cfg.Config().Options.NotebookAutoInjectEnabled(),
 		StubSuperseded:       c.cfg.Config().Options.NotebookStubSupersededEnabled(),
+		StubBoundary:         c.stubBoundary,
+		StubStats:            c.stubStats,
 	})
 
 	if c.cfg.Config().Options.NotebookStubSupersededEnabled() && !c.cfg.Config().Options.NotebookIsEnabled() {
-		slog.Warn("notebook_stub_superseded is enabled but the context notebook is disabled; supersession stubbing is inactive")
+		slog.Warn("Option notebook_stub_superseded is enabled but the context notebook is disabled; supersession stubbing is inactive")
 	}
 
 	// Initialize the summary model before installing the resolver.

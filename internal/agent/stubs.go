@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/crush/internal/message"
-	"github.com/charmbracelet/crush/internal/pubsub"
 )
 
 // stubMinContentBytes is the minimum result size worth stubbing — below
@@ -209,9 +208,14 @@ func (a *sessionAgent) flagSupersededViewResults(ctx context.Context, msgs []mes
 		}
 	}
 
-	for _, m := range updated {
-		if err := a.messages.Update(ctx, m); err != nil {
-			slog.Warn("Failed to flag superseded tool result", "session_id", m.SessionID, "error", err)
+	for i := range updated {
+		// Merge stored marks first: this snapshot may predate a
+		// concurrent promotion — without the union the whole-message
+		// write would clobber Applied and flip the next render back
+		// to verbatim.
+		a.mergeSupersededMarks(ctx, &updated[i])
+		if err := a.messages.Update(ctx, updated[i]); err != nil {
+			slog.Warn("Failed to flag superseded tool result", "session_id", updated[i].SessionID, "error", err)
 		}
 	}
 	if len(updated) > 0 {
@@ -255,6 +259,7 @@ func (a *sessionAgent) promoteSupersededStubs(ctx context.Context, msgs []messag
 		if len(flipped) == 0 {
 			continue
 		}
+		a.mergeSupersededMarks(ctx, m)
 		if err := a.messages.Update(ctx, *m); err != nil {
 			persistFailed = true
 			// Revert the in-memory marks so this render matches the
@@ -274,12 +279,15 @@ func (a *sessionAgent) promoteSupersededStubs(ctx context.Context, msgs []messag
 			"session_id", sessionIDFromMessages(msgs), "count", promoted, "boundary", boundary)
 	}
 	if !persistFailed && promoted > 0 && a.stubStats != nil {
-		sessionID := sessionIDFromMessages(msgs)
-		stats, _ := a.stubStats.Get(sessionID)
-		stats.Invalidations++
-		stats.Results += promoted
-		stats.SavedBytes += saved
-		a.stubStats.Set(sessionID, stats)
+		// Guard the empty session ID: a sessionless list would leak a
+		// "" key the deletion watcher can never clean.
+		if sessionID := sessionIDFromMessages(msgs); sessionID != "" {
+			stats, _ := a.stubStats.Get(sessionID)
+			stats.Invalidations++
+			stats.Results += promoted
+			stats.SavedBytes += saved
+			a.stubStats.Set(sessionID, stats)
+		}
 	}
 	return !persistFailed
 }
@@ -316,18 +324,35 @@ func applySupersededStubs(m message.Message) (stubbed message.Message, count int
 	return m, count, saved
 }
 
-// watchSessionDeletions drops per-session stub bookkeeping when a
-// session is deleted so stubBoundary/stubStats don't grow unbounded
-// across a process's lifetime. Runs for the agent's lifetime;
-// subscribes on a never-cancelled context like other agent watchers.
-func (a *sessionAgent) watchSessionDeletions() {
-	ch := a.sessions.Subscribe(context.Background())
-	for ev := range ch {
-		if ev.Type != pubsub.DeletedEvent {
+// mergeSupersededMarks unions superseded marks from the stored version
+// of m into m's parts before a whole-message Update. The flag and
+// promote paths both rewrite whole messages from independent snapshots,
+// so a stale copy must not lose marks the other path persisted —
+// Superseded and Applied are monotonic and merge by union.
+func (a *sessionAgent) mergeSupersededMarks(ctx context.Context, m *message.Message) {
+	stored, err := a.messages.Get(ctx, m.ID)
+	if err != nil {
+		return
+	}
+	storedResults := make(map[string]message.ToolResult)
+	for _, tr := range stored.ToolResults() {
+		storedResults[tr.ToolCallID] = tr
+	}
+	for j, part := range m.Parts {
+		tr, ok := part.(message.ToolResult)
+		if !ok {
 			continue
 		}
-		a.stubBoundary.Del(ev.Payload.ID)
-		a.stubStats.Del(ev.Payload.ID)
+		s, ok := storedResults[tr.ToolCallID]
+		if !ok || s.Superseded == nil {
+			continue
+		}
+		if tr.Superseded == nil {
+			tr.Superseded = s.Superseded
+		} else {
+			tr.Superseded.Applied = tr.Superseded.Applied || s.Superseded.Applied
+		}
+		m.Parts[j] = tr
 	}
 }
 

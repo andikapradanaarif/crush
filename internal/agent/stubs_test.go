@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"database/sql"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -389,6 +390,31 @@ func TestPromoteSupersededStubs(t *testing.T) {
 		require.False(t, mark.Applied)
 	})
 
+	t.Run("stale flag write does not clobber promoted mark", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newStubTestAgent(t)
+		ctx := t.Context()
+		msgs := viewThenEdit(t, svc, sessionID, bigContent(), true)
+		msgs = append(msgs, mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "later"}))
+		a.flagSupersededViewResults(ctx, msgs)
+
+		// Stale snapshot as the async flag path would hold it:
+		// pending mark, fetched before promotion lands.
+		stale, err := svc.Get(ctx, msgs[2].ID)
+		require.NoError(t, err)
+		require.False(t, resultOf(t, stale, "tc-view").Superseded.Applied)
+
+		require.True(t, a.promoteSupersededStubs(ctx, msgs, 0))
+
+		// The stale whole-message write merges stored marks, so the
+		// promoted Applied bit survives the clobber.
+		a.mergeSupersededMarks(ctx, &stale)
+		require.NoError(t, svc.Update(ctx, stale))
+		persisted, err := svc.Get(ctx, msgs[2].ID)
+		require.NoError(t, err)
+		require.True(t, resultOf(t, persisted, "tc-view").Superseded.Applied)
+	})
+
 	t.Run("flags before the boundary are left alone", func(t *testing.T) {
 		t.Parallel()
 		a, svc, sessionID := newStubTestAgent(t)
@@ -452,4 +478,7 @@ func TestNormalizedPath(t *testing.T) {
 	require.NotEqual(t, normalizedPath("x.go"), normalizedPath("internal/x.go"))
 	require.NotEqual(t, normalizedPath("a/x.go"), normalizedPath("b/x.go"))
 	require.NotEqual(t, normalizedPath("x.go"), normalizedPath("y.go"))
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		require.Equal(t, normalizedPath("Foo.go"), normalizedPath("foo.go"))
+	}
 }
