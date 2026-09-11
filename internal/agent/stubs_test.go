@@ -1,15 +1,103 @@
 package agent
 
 import (
+	"database/sql"
 	"strings"
 	"testing"
 
+	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/notebook"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
+
+// newNotebookTestAgent builds a sessionAgent wired to a real notebook
+// service on a scratch DB, for auto-inject and selection tests.
+func newNotebookTestAgent(t *testing.T) (*sessionAgent, *db.Queries, string) {
+	t.Helper()
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	q := db.New(conn)
+	sess, err := session.NewService(q, conn).Create(t.Context(), "test")
+	require.NoError(t, err)
+	return &sessionAgent{notebook: notebook.NewService(q, nil, notebook.Options{})}, q, sess.ID
+}
+
+func insertNotebookEntry(t *testing.T, q *db.Queries, sessionID string, turn int64, eventType, fullText string, level int64, tags ...string) {
+	t.Helper()
+	entry, err := q.CreateNotebookEntry(t.Context(), db.CreateNotebookEntryParams{
+		ID:               uuid.New().String(),
+		SessionID:        sessionID,
+		TurnNumber:       turn,
+		EventNumber:      1,
+		EventType:        eventType,
+		Title:            "entry",
+		EntryText:        "compressed",
+		EntryTextFull:    sql.NullString{String: fullText, Valid: fullText != ""},
+		TokenCount:       5,
+		CompressionLevel: level,
+		Succeeded:        1,
+		CreatedAt:        turn,
+	})
+	require.NoError(t, err)
+	for _, tag := range tags {
+		require.NoError(t, q.CreateNotebookTag(t.Context(), db.CreateNotebookTagParams{EntryID: entry.ID, Tag: tag}))
+	}
+}
+
+// TestMaybeAutoInject_SkipsSupersededRead covers the phantom-state
+// hazard: a compressed read entry whose file was later edited must not
+// be auto-injected with pre-edit content.
+func TestMaybeAutoInject_SkipsSupersededRead(t *testing.T) {
+	t.Parallel()
+	agent, q, sessionID := newNotebookTestAgent(t)
+
+	// Turn 1: compressed read of auth.go. Turn 2: successful edit.
+	insertNotebookEntry(t, q, sessionID, 1, notebook.EventFileRead, "PRE-EDIT ORIGINAL", 1, "file:auth.go")
+	insertNotebookEntry(t, q, sessionID, 2, notebook.EventFileEdit, "edit applied", 0, "file:auth.go")
+
+	msgs := []message.Message{
+		{Role: message.User, Parts: []message.ContentPart{
+			message.TextContent{Text: "look at internal/auth.go please"},
+		}},
+	}
+	msg := agent.maybeAutoInject(msgs, sessionID, 10)
+	if msg != nil {
+		for _, part := range msg.Content {
+			if tp, ok := part.(fantasy.TextPart); ok {
+				require.NotContains(t, tp.Text, "PRE-EDIT ORIGINAL")
+			}
+		}
+	}
+}
+
+// TestMaybeAutoInject_InjectsUnsupersededRead is the positive control.
+func TestMaybeAutoInject_InjectsUnsupersededRead(t *testing.T) {
+	t.Parallel()
+	agent, q, sessionID := newNotebookTestAgent(t)
+
+	insertNotebookEntry(t, q, sessionID, 1, notebook.EventFileRead, "ORIGINAL CONTENT", 1, "file:auth.go")
+
+	msgs := []message.Message{
+		{Role: message.User, Parts: []message.ContentPart{
+			message.TextContent{Text: "look at internal/auth.go please"},
+		}},
+	}
+	msg := agent.maybeAutoInject(msgs, sessionID, 10)
+	require.NotNil(t, msg)
+	var text string
+	for _, part := range msg.Content {
+		if tp, ok := part.(fantasy.TextPart); ok {
+			text += tp.Text
+		}
+	}
+	require.Contains(t, text, "ORIGINAL CONTENT")
+}
 
 // newStubTestAgent builds a sessionAgent backed by a real message
 // service on a scratch SQLite DB, plus a session to attach messages to.
@@ -268,9 +356,11 @@ func TestSameFilePath(t *testing.T) {
 	t.Parallel()
 
 	require.True(t, sameFilePath("a.go", "a.go"))
-	require.True(t, sameFilePath("internal/x.go", "x.go"))
-	require.True(t, sameFilePath("x.go", "internal/x.go"))
 	require.True(t, sameFilePath("./x.go", "x.go"))
+	// Different directories — the file that exists is resolved
+	// against the working dir, not suffix-matched.
+	require.False(t, sameFilePath("internal/x.go", "x.go"))
+	require.False(t, sameFilePath("x.go", "internal/x.go"))
 	require.False(t, sameFilePath("a/x.go", "b/x.go"))
 	require.False(t, sameFilePath("x.go", "y.go"))
 }

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
-	"strings"
 
 	"github.com/charmbracelet/crush/internal/message"
 )
@@ -80,17 +79,18 @@ func toolCallFilePath(input string) string {
 }
 
 // sameFilePath reports whether two tool-call paths refer to the same
-// file: equal after cleaning, or one is a path-suffix of the other so
-// relative and absolute spellings match. Bare basename matching is
-// deliberately avoided — two files sharing a basename in different
-// directories must not supersede each other.
+// file. Both are resolved the way the file tools resolve them —
+// filepath.Abs anchors relative paths to the process working
+// directory — so "internal/x.go" and "x.go" correctly compare as
+// different files while "./a.go", "a.go", and its absolute spelling
+// all match.
 func sameFilePath(a, b string) bool {
-	ca, cb := filepath.Clean(a), filepath.Clean(b)
-	if ca == cb {
-		return true
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA == nil && errB == nil {
+		return absA == absB
 	}
-	return strings.HasSuffix(ca, string(filepath.Separator)+cb) ||
-		strings.HasSuffix(cb, string(filepath.Separator)+ca)
+	return filepath.Clean(a) == filepath.Clean(b)
 }
 
 // flagSupersededViewResults marks prior file-read tool results as

@@ -843,12 +843,12 @@ func TestPinnedFileTags(t *testing.T) {
 		require.False(t, pinned["file:old.go"])
 	})
 
-	t.Run("failed edit does not pin", func(t *testing.T) {
+	t.Run("failed edit still pins", func(t *testing.T) {
 		t.Parallel()
 		entries := []Entry{
 			edit(5, "broken.go", false),
 		}
-		require.Empty(t, PinnedFileTags(entries))
+		require.True(t, PinnedFileTags(entries)["file:broken.go"])
 	})
 
 	t.Run("non-edit entries never contribute pins", func(t *testing.T) {

@@ -213,8 +213,10 @@ func TestSelectNotebookEntries(t *testing.T) {
 		require.Contains(t, entryIDs(got), "edit")
 	})
 
-	t.Run("failed edit does not pin", func(t *testing.T) {
+	t.Run("failed edit still pins", func(t *testing.T) {
 		t.Parallel()
+		// A file in an edit-fail-retry loop is still under active
+		// edit — its older entries stay pinned.
 		entries := []notebook.Entry{
 			nbEntry("old-pinned", 0, 1, notebook.EventExploration, "explored a.go", 400, "file:a.go"),
 			nbEntry("old-free", 0, 2, notebook.EventExploration, "unrelated", 400),
@@ -222,10 +224,8 @@ func TestSelectNotebookEntries(t *testing.T) {
 			nbEntryResult("edit", 2, 2, notebook.EventFileEdit, "failed edit a.go", 100, false, "file:a.go"),
 		}
 		got := selectNotebookEntries(entries, nil, 2)
-		// With no successful edit, file:a.go is not pinned — the
-		// untagged old entry wins the fill pass on ordering instead.
-		require.NotContains(t, entryIDs(got), "old-pinned")
-		require.Contains(t, entryIDs(got), "old-free")
+		require.Contains(t, entryIDs(got), "old-pinned")
+		require.NotContains(t, entryIDs(got), "old-free")
 	})
 
 	t.Run("output chronological", func(t *testing.T) {

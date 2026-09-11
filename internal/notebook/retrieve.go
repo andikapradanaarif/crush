@@ -114,9 +114,10 @@ func (s *service) enrichEntries(ctx context.Context, rows []db.NotebookEntry) ([
 	return entries, nil
 }
 
-// PinnedFileTags returns the file: tags whose files had a successful
-// edit entry in the last two turns present in entries. Entries carrying
-// a pinned tag describe files under active edit — they are prioritized
+// PinnedFileTags returns the file: tags whose files had an edit entry
+// in the last two turns present in entries — successful or not. A file
+// stuck in an edit-fail-retry loop is just as "under active edit" as
+// one whose edits landed. Entries carrying a pinned tag are prioritized
 // during selection and never compressed by compaction.
 func PinnedFileTags(entries []Entry) map[string]bool {
 	if len(entries) == 0 {
@@ -130,7 +131,7 @@ func PinnedFileTags(entries []Entry) map[string]bool {
 	}
 	pinned := make(map[string]bool)
 	for _, e := range entries {
-		if e.EventType != EventFileEdit || !e.Succeeded || e.TurnNumber < maxTurn-1 {
+		if e.EventType != EventFileEdit || e.TurnNumber < maxTurn-1 {
 			continue
 		}
 		for _, tag := range e.Tags {

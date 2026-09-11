@@ -2033,37 +2033,51 @@ func (a *sessionAgent) maybeAutoInject(msgs []message.Message, sessionID string,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	var sb strings.Builder
-	sb.WriteString("<notebook_auto_inject>\n")
-	injected := 0
+
+	// Gather all entries matching the refs, deduplicated, then drop
+	// superseded reads — injecting a stale pre-edit snapshot would
+	// reintroduce the phantom-state hazard stubbing exists to remove.
+	// The superseding edit must be in the set for the check to see it,
+	// so compression/turn filters apply only afterwards.
+	seen := make(map[string]bool)
+	var tagged []notebook.Entry
 	for _, tag := range refs {
 		entries, err := a.notebook.SearchByTag(ctx, sessionID, tag)
 		if err != nil {
 			continue
 		}
+		for _, e := range entries {
+			if seen[e.ID] {
+				continue
+			}
+			seen[e.ID] = true
+			tagged = append(tagged, e)
+		}
+	}
+	tagged = dropSupersededReads(tagged)
+
+	var sb strings.Builder
+	sb.WriteString("<notebook_auto_inject>\n")
+	injected := 0
+	for _, e := range tagged {
 		// Only inject entries that have been compressed (level > 0)
 		// — uncompressed entries are already in the notebook message
 		// at full detail.
-		for _, e := range entries {
-			if e.CompressionLevel == 0 || e.TurnNumber >= boundaryTurn {
-				continue
-			}
-			text := e.EntryTextFull
-			if text == "" {
-				text = e.EntryText
-			}
-			sb.WriteString(fmt.Sprintf("## Turn %d.%d — %s\n", e.TurnNumber, e.EventNumber, e.Title))
-			sb.WriteString(text)
-			if len(e.Tags) > 0 {
-				sb.WriteString("\nTags: ")
-				sb.WriteString(strings.Join(e.Tags, " "))
-			}
-			sb.WriteString("\n\n---\n\n")
-			injected++
-			if injected >= 2 {
-				break
-			}
+		if e.CompressionLevel == 0 || e.TurnNumber >= boundaryTurn {
+			continue
 		}
+		text := e.EntryTextFull
+		if text == "" {
+			text = e.EntryText
+		}
+		sb.WriteString(fmt.Sprintf("## Turn %d.%d — %s\n", e.TurnNumber, e.EventNumber, e.Title))
+		sb.WriteString(text)
+		if len(e.Tags) > 0 {
+			sb.WriteString("\nTags: ")
+			sb.WriteString(strings.Join(e.Tags, " "))
+		}
+		sb.WriteString("\n\n---\n\n")
+		injected++
 		if injected >= 2 {
 			break
 		}
