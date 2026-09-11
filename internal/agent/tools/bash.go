@@ -491,6 +491,16 @@ var commandWrappers = map[string]bool{
 	"nice": true, "nohup": true, "command": true, "exec": true,
 }
 
+// wrapperFlagArgs are wrapper flags that consume a following value
+// argument (e.g. "env -u NAME", "nice -n 5", "sudo -u root"). Keyed by
+// flag name without leading dashes.
+var wrapperFlagArgs = map[string]bool{
+	"u": true, "g": true, "h": true, "unset": true,
+	"C": true, "chdir": true, "S": true, "split-string": true,
+	"P": true, "alternate-argv": true,
+	"n": true, "adjustment": true,
+}
+
 // isEnvAssignment reports whether a leading field is a KEY=VALUE env
 // assignment rather than the command name.
 func isEnvAssignment(field string) bool {
@@ -520,12 +530,27 @@ func isBuildOrTestCommand(command string) bool {
 	})
 	for _, seg := range segments {
 		fields := strings.Fields(seg)
-		// Skip leading env assignments and command wrappers so
-		// "CGO_ENABLED=0 go test", "sudo make", or "env X=1 pytest"
-		// still classify.
-		for len(fields) > 0 &&
-			(isEnvAssignment(fields[0]) || commandWrappers[fields[0]]) {
-			fields = fields[1:]
+		// Skip leading env assignments, command wrappers, and wrapper
+		// flags so "CGO_ENABLED=0 go test", "env -i go test", or
+		// "nice -n 5 make" still classify.
+		sawWrapper := false
+	fieldsLoop:
+		for len(fields) > 0 {
+			f := fields[0]
+			switch {
+			case isEnvAssignment(f):
+				fields = fields[1:]
+			case commandWrappers[f]:
+				sawWrapper = true
+				fields = fields[1:]
+			case sawWrapper && strings.HasPrefix(f, "-"):
+				fields = fields[1:]
+				if wrapperFlagArgs[strings.TrimLeft(f, "-")] && len(fields) > 0 {
+					fields = fields[1:]
+				}
+			default:
+				break fieldsLoop
+			}
 		}
 		if len(fields) == 0 {
 			continue

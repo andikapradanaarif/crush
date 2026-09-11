@@ -292,11 +292,17 @@ func errorHeadline(content string) string {
 			exitCode = line
 		}
 	}
+	if exitCode != "" && exitCode != first {
+		// Keep the exit code intact; trim the first line so the
+		// combined digest still fits.
+		limit := 200 - len(exitCode) - 3
+		if limit > 0 && len(first) > limit {
+			first = first[:limit-1] + "…"
+		}
+		return first + " — " + exitCode
+	}
 	if len(first) > 200 {
 		first = first[:199] + "…"
-	}
-	if exitCode != "" && exitCode != first {
-		return first + " — " + exitCode
 	}
 	return first
 }
