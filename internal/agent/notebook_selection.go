@@ -18,9 +18,11 @@ const maxNotebookInjectionTokens = 12_000
 //
 //  1. Entries from the two most recent turns (immediate context) —
 //     recency runs first so a large ref set can't starve it.
-//  2. Entries relevant to refs (file paths from the current user
+//  2. Entries pinned to files under active edit (a successful edit
+//     entry in the last two turns pins all entries for that file).
+//  3. Entries relevant to refs (file paths from the current user
 //     message and active todos).
-//  3. Remaining entries, newest first, until the token cap.
+//  4. Remaining entries, newest first, until the token cap.
 //
 // Entries are deduplicated by ID, superseded file reads are dropped in
 // favor of newer entries for the same file, and the result is returned
@@ -60,6 +62,19 @@ func selectNotebookEntries(entries []notebook.Entry, refs []string, maxTurn int6
 	for _, e := range entries {
 		if e.TurnNumber >= maxTurn-1 {
 			trySelect(e)
+		}
+	}
+	// Pass 1.5: entries pinned to files under active edit — an edit
+	// in the last two turns keeps every entry for that file alive.
+	pinned := notebook.PinnedFileTags(entries)
+	if len(pinned) > 0 {
+		for _, e := range entries {
+			for _, tag := range e.Tags {
+				if pinned[tag] {
+					trySelect(e)
+					break
+				}
+			}
 		}
 	}
 	// Pass 2: entries matching explicit file paths from the user

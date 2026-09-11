@@ -3,7 +3,10 @@ package notebook
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+
+	"github.com/charmbracelet/crush/internal/hooks"
 
 	"github.com/charmbracelet/crush/internal/db"
 )
@@ -111,10 +114,56 @@ func (s *service) enrichEntries(ctx context.Context, rows []db.NotebookEntry) ([
 	return entries, nil
 }
 
+// PinnedFileTags returns the file: tags whose files had a successful
+// edit entry in the last two turns present in entries. Entries carrying
+// a pinned tag describe files under active edit — they are prioritized
+// during selection and never compressed by compaction.
+func PinnedFileTags(entries []Entry) map[string]bool {
+	if len(entries) == 0 {
+		return nil
+	}
+	maxTurn := entries[len(entries)-1].TurnNumber
+	for _, e := range entries {
+		if e.TurnNumber > maxTurn {
+			maxTurn = e.TurnNumber
+		}
+	}
+	pinned := make(map[string]bool)
+	for _, e := range entries {
+		if e.EventType != EventFileEdit || !e.Succeeded || e.TurnNumber < maxTurn-1 {
+			continue
+		}
+		for _, tag := range e.Tags {
+			if strings.HasPrefix(tag, "file:") {
+				pinned[tag] = true
+			}
+		}
+	}
+	return pinned
+}
+
+// entryPinned reports whether a stored entry carries a pinned file tag.
+func (s *service) entryPinned(ctx context.Context, entryID string, pinned map[string]bool) bool {
+	if len(pinned) == 0 {
+		return false
+	}
+	tags, err := s.q.GetNotebookTagsByEntry(ctx, entryID)
+	if err != nil {
+		return false
+	}
+	for _, tag := range tags {
+		if pinned[tag] {
+			return true
+		}
+	}
+	return false
+}
+
 // Compact compresses the oldest entries when the notebook exceeds the
 // max token limit. It incrementally compresses entries oldest-first,
 // using GetOldestNotebookEntries, until the total is under the limit.
-// Compression progresses through levels 0 → 1 → 2.
+// Compression progresses through levels 0 → 1 → 2. Entries pinned to
+// files under active edit are skipped.
 func (s *service) Compact(ctx context.Context, sessionID string) error {
 	total, err := s.GetTokenCount(ctx, sessionID)
 	if err != nil {
@@ -124,9 +173,26 @@ func (s *service) Compact(ctx context.Context, sessionID string) error {
 		return nil
 	}
 
+	// Fire PreCompact hooks; a deny or halt skips this round.
+	if s.opts.PreCompactRunner != nil {
+		input := fmt.Sprintf(`{"token_count":%d,"max_tokens":%d}`, total, s.opts.MaxNotebookTokens)
+		result, err := s.opts.PreCompactRunner.Run(ctx, hooks.EventPreCompact, sessionID, "compact", input)
+		if err != nil {
+			slog.Warn("PreCompact hook failed; proceeding", "session_id", sessionID, "error", err)
+		} else if result.Decision == hooks.DecisionDeny || result.Halt {
+			slog.Info("PreCompact hook blocked compaction", "session_id", sessionID, "reason", result.Reason)
+			return nil
+		}
+	}
+
+	pinned, err := s.pinnedTags(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+
 	// Phase 1: Compress oldest level-0 entries to level 1 (tags + 1
 	// sentence), one batch at a time, until under the limit.
-	if err := s.compactOldestToLevel(ctx, sessionID, CompressionFull, CompressionSummary); err != nil {
+	if err := s.compactOldestToLevel(ctx, sessionID, CompressionFull, CompressionSummary, pinned); err != nil {
 		return err
 	}
 
@@ -139,18 +205,29 @@ func (s *service) Compact(ctx context.Context, sessionID string) error {
 	}
 
 	// Phase 2: Compress oldest level-1 entries to level 2 (tags only).
-	if err := s.compactOldestToLevel(ctx, sessionID, CompressionSummary, CompressionTagsOnly); err != nil {
+	if err := s.compactOldestToLevel(ctx, sessionID, CompressionSummary, CompressionTagsOnly, pinned); err != nil {
 		return err
 	}
 
 	return nil
 }
 
+// pinnedTags returns the file: tags whose files were successfully
+// edited in the session's last two notebook turns.
+func (s *service) pinnedTags(ctx context.Context, sessionID string) (map[string]bool, error) {
+	entries, err := s.GetEntries(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return PinnedFileTags(entries), nil
+}
+
 // compactOldestToLevel compresses the oldest entries at fromLevel to
 // toLevel, one entry at a time, checking the token count after each
 // compression. This ensures earlier turns are always compressed before
-// later ones, and we stop as soon as we're under the limit.
-func (s *service) compactOldestToLevel(ctx context.Context, sessionID string, fromLevel, toLevel int64) error {
+// later ones, and we stop as soon as we're under the limit. Entries
+// carrying a pinned file tag are skipped.
+func (s *service) compactOldestToLevel(ctx context.Context, sessionID string, fromLevel, toLevel int64, pinned map[string]bool) error {
 	for {
 		total, err := s.GetTokenCount(ctx, sessionID)
 		if err != nil {
@@ -160,22 +237,29 @@ func (s *service) compactOldestToLevel(ctx context.Context, sessionID string, fr
 			return nil
 		}
 
-		// Get the single oldest entry at the source compression
-		// level. This guarantees earlier turns are compressed
-		// before later ones.
+		// Fetch the oldest entries at the source compression level
+		// and pick the first that is not pinned. A batch is needed
+		// because a pinned oldest entry must not stall the loop.
 		entries, err := s.q.GetOldestNotebookEntries(ctx, db.GetOldestNotebookEntriesParams{
 			SessionID:        sessionID,
 			CompressionLevel: fromLevel,
-			Limit:            1,
+			Limit:            64,
 		})
 		if err != nil {
 			return err
 		}
-		if len(entries) == 0 {
-			return nil // No more entries at this level.
+		var entry *db.NotebookEntry
+		for i := range entries {
+			if s.entryPinned(ctx, entries[i].ID, pinned) {
+				continue
+			}
+			entry = &entries[i]
+			break
 		}
-
-		entry := entries[0]
+		if entry == nil {
+			// No unpinned entries at this level (or none at all).
+			return nil
+		}
 		tags, err := s.q.GetNotebookTagsByEntry(ctx, entry.ID)
 		if err != nil {
 			tags = nil

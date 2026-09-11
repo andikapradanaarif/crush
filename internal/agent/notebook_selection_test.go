@@ -196,6 +196,38 @@ func TestSelectNotebookEntries(t *testing.T) {
 		require.Contains(t, entryIDs(got), "goodedit")
 	})
 
+	t.Run("pinned file entries beat unpinned fill under budget pressure", func(t *testing.T) {
+		t.Parallel()
+		// Recent turns consume almost the whole injection budget; a
+		// pinned entry from an old turn wins the remainder over an
+		// equally old unpinned entry.
+		entries := []notebook.Entry{
+			nbEntry("old-pinned", 0, 1, notebook.EventExploration, "explored a.go", 400, "file:a.go"),
+			nbEntry("old-free", 0, 2, notebook.EventExploration, "unrelated", 400),
+			nbEntry("filler", 2, 1, notebook.EventGeneral, "big", 11400),
+			nbEntry("edit", 2, 2, notebook.EventFileEdit, "edited a.go", 100, "file:a.go"),
+		}
+		got := selectNotebookEntries(entries, nil, 2)
+		require.Contains(t, entryIDs(got), "old-pinned")
+		require.NotContains(t, entryIDs(got), "old-free")
+		require.Contains(t, entryIDs(got), "edit")
+	})
+
+	t.Run("failed edit does not pin", func(t *testing.T) {
+		t.Parallel()
+		entries := []notebook.Entry{
+			nbEntry("old-pinned", 0, 1, notebook.EventExploration, "explored a.go", 400, "file:a.go"),
+			nbEntry("old-free", 0, 2, notebook.EventExploration, "unrelated", 400),
+			nbEntry("filler", 2, 1, notebook.EventGeneral, "big", 11400),
+			nbEntryResult("edit", 2, 2, notebook.EventFileEdit, "failed edit a.go", 100, false, "file:a.go"),
+		}
+		got := selectNotebookEntries(entries, nil, 2)
+		// With no successful edit, file:a.go is not pinned — the
+		// untagged old entry wins the fill pass on ordering instead.
+		require.NotContains(t, entryIDs(got), "old-pinned")
+		require.Contains(t, entryIDs(got), "old-free")
+	})
+
 	t.Run("output chronological", func(t *testing.T) {
 		t.Parallel()
 		entries := []notebook.Entry{

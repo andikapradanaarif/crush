@@ -8,6 +8,7 @@ import (
 	"context"
 
 	"github.com/charmbracelet/crush/internal/db"
+	"github.com/charmbracelet/crush/internal/hooks"
 	"github.com/charmbracelet/crush/internal/message"
 )
 
@@ -123,6 +124,10 @@ type service struct {
 type Options struct {
 	MaxEntryTokens    int64
 	MaxNotebookTokens int64
+	// PreCompactRunner, when set, fires PreCompact hooks before
+	// Compact compresses entries. A deny or halt decision skips
+	// compaction for that round.
+	PreCompactRunner *hooks.Runner
 }
 
 // Generator generates notebook entries from classified events using an
