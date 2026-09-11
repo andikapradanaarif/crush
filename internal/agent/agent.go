@@ -204,6 +204,17 @@ type sessionAgent struct {
 	// notebookAutoInject controls whether file references in the
 	// user message trigger auto-injection of full notebook entries.
 	notebookAutoInject bool
+	// stubSuperseded enables replacing superseded file-read tool
+	// results in the raw window with stub text once the notebook
+	// boundary advances.
+	stubSuperseded bool
+	// stubBoundary records the last raw-window boundary index per
+	// session, so pending superseded flags promote to stubs only on
+	// boundary moves.
+	stubBoundary *csync.Map[string, int]
+	// stubReport holds the most recent render's stubbing stats for
+	// step-composition telemetry.
+	stubReport *csync.Value[stubReport]
 
 	messageQueue   *csync.Map[string, []SessionAgentCall]
 	activeRequests *csync.Map[string, *activeCancel]
@@ -279,6 +290,10 @@ type SessionAgentOptions struct {
 	// NotebookAutoInject controls whether file references in the user
 	// message trigger auto-injection of full notebook entries.
 	NotebookAutoInject bool
+	// StubSuperseded enables replacing superseded file-read tool
+	// results in raw history with stub text once the notebook
+	// boundary advances. Only takes effect in notebook mode.
+	StubSuperseded bool
 }
 
 func NewSessionAgent(
@@ -310,6 +325,9 @@ func NewSessionAgent(
 		notebookSyncMem0:     opts.NotebookSyncMem0,
 		notebookMemoryServer: opts.NotebookMemoryServer,
 		notebookAutoInject:   opts.NotebookAutoInject,
+		stubSuperseded:       opts.StubSuperseded,
+		stubBoundary:         csync.NewMap[string, int](),
+		stubReport:           csync.NewValue(stubReport{}),
 	}
 }
 
@@ -938,7 +956,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(promptPrefix)}, prepared.Messages...)
 			}
 
-			logStepComposition(call.SessionID, prepared.Messages, prepared.Tools)
+			logStepComposition(call.SessionID, prepared.Messages, prepared.Tools, a.stubReport.Get())
 
 			sessionLock.Lock()
 			stepMessages = cloneFantasyMessages(prepared.Messages)
@@ -1299,6 +1317,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			if err != nil {
 				slog.Error("Failed to list messages for notebook generation", "error", err, "session_id", notebookSessionID)
 				return
+			}
+			// Flag file-read results superseded by this turn's writes.
+			// The flag is metadata only; stub application waits for a
+			// boundary move in preparePrompt.
+			if a.stubSuperseded {
+				a.flagSupersededViewResults(notebookCtx, allMsgs)
 			}
 			// Extract only the current turn's messages. Stop at
 			// the next user message to avoid including the next
@@ -1715,6 +1739,18 @@ func (a *sessionAgent) preparePrompt(msgs []message.Message, supportsImages bool
 				}
 			}
 		}
+		if a.stubSuperseded {
+			// Boundary moves already invalidate the prompt-cache
+			// prefix, so pending superseded flags promote to stubs
+			// only here — never mid-window.
+			sessionID := sessionIDFromMessages(msgs)
+			if last, ok := a.stubBoundary.Get(sessionID); !ok || last != boundary {
+				promoteCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				a.promoteSupersededStubs(promoteCtx, msgs, boundary)
+				cancel()
+			}
+			a.stubBoundary.Set(sessionID, boundary)
+		}
 		rawMsgs = msgs[boundary:]
 	} else {
 		rawMsgs = msgs
@@ -1739,6 +1775,7 @@ func (a *sessionAgent) preparePrompt(msgs []message.Message, supportsImages bool
 		}
 	}
 
+	var stubs stubReport
 	for _, m := range rawMsgs {
 		if len(m.Parts) == 0 {
 			continue
@@ -1748,6 +1785,11 @@ func (a *sessionAgent) preparePrompt(msgs []message.Message, supportsImages bool
 			continue
 		}
 		if m.Role == message.Tool {
+			var count int
+			var saved int64
+			m, count, saved = applySupersededStubs(m)
+			stubs.results += count
+			stubs.savedBytes += saved
 			if msg, ok := filterOrphanedToolResults(m, knownToolCallIDs); ok {
 				history = append(history, msg)
 			}
@@ -1784,6 +1826,15 @@ func (a *sessionAgent) preparePrompt(msgs []message.Message, supportsImages bool
 			MediaType: attachment.MimeType,
 		})
 	}
+
+	if stubs.results > 0 {
+		slog.Debug("Tool result stubs in prompt",
+			"session_id", sessionIDFromMessages(msgs),
+			"stubbed_results", stubs.results,
+			"stubbed_saved_bytes", stubs.savedBytes,
+		)
+	}
+	a.stubReport.Set(stubs)
 
 	return history, files
 }
