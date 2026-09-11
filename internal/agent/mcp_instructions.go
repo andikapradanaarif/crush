@@ -21,8 +21,9 @@ const (
 	// tokens.
 	maxMCPInstructionsTotal = 4_000
 	// markerReserveTokens approximates the keep-ends "[...truncated...]"
-	// marker overhead so the marker itself doesn't push output past the
-	// total cap; budgets at or below it are treated as exhausted.
+	// marker size in tokens. Budgets at or below it can't hold a useful
+	// excerpt — the marker alone would consume most of them — so such
+	// servers are skipped entirely.
 	markerReserveTokens = 8
 )
 
@@ -52,7 +53,7 @@ func collectMCPInstructions() string {
 func capMCPInstructions(raw map[string]string) string {
 	names := slices.Sorted(maps.Keys(raw))
 
-	var out strings.Builder
+	var parts []string
 	var total int64
 	for _, name := range names {
 		s := strings.ToValidUTF8(raw[name], "")
@@ -79,12 +80,13 @@ func capMCPInstructions(raw map[string]string) string {
 				"server", name,
 				"est_tokens", est,
 				"remaining", remaining)
-			s = prompt.TruncateToTokenLimitKeepEnds(s, int(remaining-markerReserveTokens))
+			s = prompt.TruncateToTokenLimitKeepEnds(s, int(remaining))
 			est = approxTokenCount(s)
 		}
-		out.WriteString(s)
-		out.WriteString("\n\n")
-		total += est
+		parts = append(parts, s)
+		// +1 token covers the "\n\n" join separator so the emitted
+		// string stays within the cap, not just the summed excerpts.
+		total += est + 1
 	}
-	return out.String()
+	return strings.Join(parts, "\n\n")
 }

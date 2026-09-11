@@ -185,10 +185,17 @@ func truncateUTF8Suffix(s string, maxBytes int) string {
 	return ""
 }
 
+// truncationMarker separates the kept halves of a keep-ends
+// truncation. Its byte length is subtracted from the split budget so
+// the total output still respects the limit.
+const truncationMarker = "\n[...truncated...]\n"
+
 // TruncateToTokenLimitKeepEnds truncates s to approximately tokenLimit
 // estimated tokens, keeping the beginning and the end — appropriate for
 // instructional text where a prefix-only cut can drop the most
-// important rules. A "[truncated]" marker separates the halves.
+// important rules. The marker's bytes are deducted from the split
+// budget, so the result stays within the limit rather than
+// overshooting by the marker's length.
 func TruncateToTokenLimitKeepEnds(s string, tokenLimit int) string {
 	s = strings.ToValidUTF8(s, "")
 	if approxTokenCount(s) <= int64(tokenLimit) {
@@ -197,8 +204,12 @@ func TruncateToTokenLimitKeepEnds(s string, tokenLimit int) string {
 	if tokenLimit <= 0 {
 		return ""
 	}
-	half := tokenLimit * 4 / 2 // ~4 bytes per token heuristic.
-	return truncateUTF8Prefix(s, half) + "\n[...truncated...]\n" + truncateUTF8Suffix(s, half)
+	// ~4 bytes per token heuristic, minus the marker's own bytes.
+	half := (tokenLimit*4 - len(truncationMarker)) / 2
+	if half < 0 {
+		half = 0
+	}
+	return truncateUTF8Prefix(s, half) + truncationMarker + truncateUTF8Suffix(s, half)
 }
 
 // maxContextFileReadSize is the hard process-protection limit for a

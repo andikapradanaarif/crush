@@ -28,7 +28,7 @@ func TestCapMCPInstructions(t *testing.T) {
 		tail := " TAIL-MARKER"
 		verbose := head + strings.Repeat("verbose rule text. ", 500) + tail
 		out := capMCPInstructions(map[string]string{"verbose": verbose})
-		require.LessOrEqual(t, approxTokenCount(out), int64(maxMCPInstructionsPerServer)+8)
+		require.LessOrEqual(t, approxTokenCount(out), int64(maxMCPInstructionsPerServer))
 		require.Contains(t, out, "HEAD-MARKER")
 		require.Contains(t, out, "TAIL-MARKER")
 		require.Contains(t, out, "[...truncated...]")
@@ -44,7 +44,7 @@ func TestCapMCPInstructions(t *testing.T) {
 			raw[name] = strings.Repeat(name+" rule. ", 300)
 		}
 		out := capMCPInstructions(raw)
-		require.LessOrEqual(t, approxTokenCount(out), int64(maxMCPInstructionsTotal)+8)
+		require.LessOrEqual(t, approxTokenCount(out), int64(maxMCPInstructionsTotal))
 	})
 
 	t.Run("normal instructions pass through", func(t *testing.T) {
