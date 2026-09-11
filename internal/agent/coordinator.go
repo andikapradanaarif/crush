@@ -756,6 +756,10 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		StubSuperseded:       c.cfg.Config().Options.NotebookStubSupersededEnabled(),
 	})
 
+	if c.cfg.Config().Options.NotebookStubSupersededEnabled() && !c.cfg.Config().Options.NotebookIsEnabled() {
+		slog.Warn("notebook_stub_superseded is enabled but the context notebook is disabled; supersession stubbing is inactive")
+	}
+
 	// Initialize the summary model before installing the resolver.
 	// Only the top-level agent build (not sub-agents) sets this —
 	// sub-agent builds share the same coordinator and must not

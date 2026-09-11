@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"runtime"
+	"strings"
 
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/pubsub"
 )
 
 // stubMinContentBytes is the minimum result size worth stubbing — below
@@ -78,19 +81,27 @@ func toolCallFilePath(input string) string {
 	return ""
 }
 
-// sameFilePath reports whether two tool-call paths refer to the same
-// file. Both are resolved the way the file tools resolve them —
-// filepath.Abs anchors relative paths to the process working
-// directory — so "internal/x.go" and "x.go" correctly compare as
-// different files while "./a.go", "a.go", and its absolute spelling
-// all match.
-func sameFilePath(a, b string) bool {
-	absA, errA := filepath.Abs(a)
-	absB, errB := filepath.Abs(b)
-	if errA == nil && errB == nil {
-		return absA == absB
+// normalizedPath resolves a tool-call path the way the file tools
+// resolve them — filepath.Abs anchors relative paths to the process
+// working directory — so "internal/x.go" and "x.go" correctly compare
+// as different files while "./a.go", "a.go", and its absolute spelling
+// all match. On case-insensitive filesystems (darwin, windows) the key
+// is case-folded so "Foo.go" and "foo.go" alias the same file.
+func normalizedPath(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		abs = filepath.Clean(p)
 	}
-	return filepath.Clean(a) == filepath.Clean(b)
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		abs = strings.ToLower(abs)
+	}
+	return abs
+}
+
+// sameFilePath reports whether two tool-call paths refer to the same
+// file after normalization.
+func sameFilePath(a, b string) bool {
+	return normalizedPath(a) == normalizedPath(b)
 }
 
 // flagSupersededViewResults marks prior file-read tool results as
@@ -105,12 +116,14 @@ func (a *sessionAgent) flagSupersededViewResults(ctx context.Context, msgs []mes
 	turns := messageTurns(msgs)
 
 	type writeEvent struct {
-		path   string
 		msgIdx int
 		turn   int64
 		tool   string
 	}
-	var writes []writeEvent
+	// writesByPath indexes successful writes by normalized path, each
+	// bucket in message order — O(W) to build instead of scanning all
+	// writes per read.
+	writesByPath := make(map[string][]writeEvent)
 
 	// Index read/write calls by ID so results can be traced back to
 	// their inputs.
@@ -145,10 +158,11 @@ func (a *sessionAgent) flagSupersededViewResults(ctx context.Context, msgs []mes
 			if !ok || !writeToolNames[call.name] || call.path == "" || tr.IsError {
 				continue
 			}
-			writes = append(writes, writeEvent{path: call.path, msgIdx: i, turn: turns[i], tool: call.name})
+			key := normalizedPath(call.path)
+			writesByPath[key] = append(writesByPath[key], writeEvent{msgIdx: i, turn: turns[i], tool: call.name})
 		}
 	}
-	if len(writes) == 0 {
+	if len(writesByPath) == 0 {
 		return
 	}
 
@@ -170,14 +184,14 @@ func (a *sessionAgent) flagSupersededViewResults(ctx context.Context, msgs []mes
 			if !ok || !readToolNames[call.name] || call.path == "" {
 				continue
 			}
+			// Writes to the same file that follow this read's message.
+			// The bucket is in message order, so the first later one
+			// owns the flag.
 			var best *writeEvent
-			for k := range writes {
-				w := &writes[k]
-				if w.msgIdx <= i || !sameFilePath(w.path, call.path) {
-					continue
-				}
-				if best == nil || w.msgIdx < best.msgIdx {
-					best = w
+			for k, w := range writesByPath[normalizedPath(call.path)] {
+				if w.msgIdx > i {
+					best = &writesByPath[normalizedPath(call.path)][k]
+					break
 				}
 			}
 			if best == nil {
@@ -227,24 +241,34 @@ func (a *sessionAgent) promoteSupersededStubs(ctx context.Context, msgs []messag
 		if m.Role != message.Tool || turns[i] >= currentTurn-stubRecentTurnGuard {
 			continue
 		}
-		changed := false
+		var flipped []*message.SupersededMark
+		var msgSaved int64
 		for j, part := range m.Parts {
 			tr, ok := part.(message.ToolResult)
 			if !ok || tr.Superseded == nil || tr.Superseded.Applied || tr.IsError {
 				continue
 			}
-			saved += int64(len(tr.Content)) - int64(len(supersededStubText(*tr.Superseded, tr.ToolCallID)))
+			msgSaved += int64(len(tr.Content)) - int64(len(supersededStubText(*tr.Superseded, tr.ToolCallID)))
 			tr.Superseded.Applied = true
 			m.Parts[j] = tr
-			changed = true
-			promoted++
+			flipped = append(flipped, tr.Superseded)
 		}
-		if changed {
-			if err := a.messages.Update(ctx, *m); err != nil {
-				persistFailed = true
-				slog.Warn("Failed to persist superseded stub", "session_id", m.SessionID, "error", err)
+		if len(flipped) == 0 {
+			continue
+		}
+		if err := a.messages.Update(ctx, *m); err != nil {
+			persistFailed = true
+			// Revert the in-memory marks so this render matches the
+			// DB — otherwise this render stubs while the next flips
+			// back to verbatim, flip-flopping the prompt prefix.
+			for _, mark := range flipped {
+				mark.Applied = false
 			}
+			slog.Warn("Failed to persist superseded stub", "session_id", m.SessionID, "error", err)
+			continue
 		}
+		promoted += len(flipped)
+		saved += msgSaved
 	}
 	if promoted > 0 {
 		slog.Debug("Promoted superseded tool results to stubs",
@@ -291,6 +315,21 @@ func applySupersededStubs(m message.Message) (stubbed message.Message, count int
 		count++
 	}
 	return m, count, saved
+}
+
+// watchSessionDeletions drops per-session stub bookkeeping when a
+// session is deleted so stubBoundary/stubStats don't grow unbounded
+// across a process's lifetime. Runs for the agent's lifetime;
+// subscribes on a never-cancelled context like other agent watchers.
+func (a *sessionAgent) watchSessionDeletions() {
+	ch := a.sessions.Subscribe(context.Background())
+	for ev := range ch {
+		if ev.Type != pubsub.DeletedEvent {
+			continue
+		}
+		a.stubBoundary.Del(ev.Payload.ID)
+		a.stubStats.Del(ev.Payload.ID)
+	}
 }
 
 // sessionIDFromMessages extracts the session ID shared by a message

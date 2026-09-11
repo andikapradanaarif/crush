@@ -299,7 +299,7 @@ type SessionAgentOptions struct {
 func NewSessionAgent(
 	opts SessionAgentOptions,
 ) SessionAgent {
-	return &sessionAgent{
+	a := &sessionAgent{
 		largeModel:           csync.NewValue(opts.LargeModel),
 		smallModel:           csync.NewValue(opts.SmallModel),
 		systemPromptPrefix:   csync.NewValue(opts.SystemPromptPrefix),
@@ -329,6 +329,12 @@ func NewSessionAgent(
 		stubBoundary:         csync.NewMap[string, int](),
 		stubStats:            csync.NewMap[string, stubStats](),
 	}
+	// Drop per-session stub bookkeeping when a session is deleted so
+	// the maps don't grow unbounded across a process's lifetime.
+	if a.sessions != nil {
+		go a.watchSessionDeletions()
+	}
+	return a
 }
 
 // AcceptedRun owns exactly one accept reservation taken by

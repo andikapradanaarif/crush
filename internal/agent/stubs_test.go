@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"database/sql"
 	"strings"
 	"testing"
@@ -152,6 +153,69 @@ func bigContent() string {
 	return strings.Repeat("file content line\n", 30) // ~540 bytes.
 }
 
+// echoEntryGen produces one generated entry per input event carrying
+// the result's full content — standing in for the LLM generator's
+// capture of the original tool output.
+type echoEntryGen struct{}
+
+func (echoEntryGen) Generate(_ context.Context, _ string, events []notebook.EntryInput) ([]notebook.GeneratedEntry, error) {
+	entries := make([]notebook.GeneratedEntry, len(events))
+	for i, ev := range events {
+		text := "## " + ev.Title
+		if ev.ToolResult != nil {
+			text += "\n" + ev.ToolResult.Content
+		}
+		entries[i] = notebook.GeneratedEntry{
+			EventType: ev.EventType,
+			Title:     ev.Title,
+			Text:      text,
+		}
+	}
+	return entries, nil
+}
+
+// TestStubRenderKeepsNotebookOriginal is the combined invariant: after
+// a boundary advance promotes the raw-window result to a stub, the same
+// turn's notebook generation still sees the full original content.
+func TestStubRenderKeepsNotebookOriginal(t *testing.T) {
+	t.Parallel()
+
+	a, svc, sessionID := newStubTestAgent(t)
+	ctx := t.Context()
+
+	msgs := viewThenEdit(t, svc, sessionID, bigContent(), true)
+	msgs = append(msgs, mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "later"}))
+	a.flagSupersededViewResults(ctx, msgs)
+	require.True(t, a.promoteSupersededStubs(ctx, msgs, 0))
+
+	// Raw render shows the stub, not the original.
+	stubbed, count, _ := applySupersededStubs(msgs[2])
+	require.Equal(t, 1, count)
+	require.Contains(t, resultOf(t, stubbed, "tc-view").Content, "superseded by edit")
+	require.NotContains(t, resultOf(t, stubbed, "tc-view").Content, "file content line")
+
+	// Notebook generation over the same messages stores the original.
+	conn, err := db.Connect(ctx, t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	q := db.New(conn)
+	nbSession, err := session.NewService(q, conn).Create(ctx, "nb")
+	require.NoError(t, err)
+	nbSvc := notebook.NewService(q, echoEntryGen{}, notebook.Options{MaxEntryTokens: 10000})
+	require.NoError(t, nbSvc.GenerateEntries(ctx, nbSession.ID, 1, msgs[:3]))
+
+	entries, err := nbSvc.GetEntries(ctx, nbSession.ID)
+	require.NoError(t, err)
+	require.NotEmpty(t, entries)
+	found := false
+	for _, e := range entries {
+		if strings.Contains(e.EntryText, "file content line") || strings.Contains(e.EntryTextFull, "file content line") {
+			found = true
+		}
+	}
+	require.True(t, found, "notebook entry must retain the pre-stub original content")
+}
+
 func resultOf(t *testing.T, m message.Message, callID string) message.ToolResult {
 	t.Helper()
 	for _, tr := range m.ToolResults() {
@@ -296,6 +360,31 @@ func TestPromoteSupersededStubs(t *testing.T) {
 		a.promoteSupersededStubs(t.Context(), rebuilt, 0)
 
 		mark := resultOf(t, rebuilt[4], "tc-view2").Superseded
+		require.NotNil(t, mark)
+		require.False(t, mark.Applied)
+	})
+
+	t.Run("reverts in-memory marks when persistence fails", func(t *testing.T) {
+		t.Parallel()
+		conn, err := db.Connect(t.Context(), t.TempDir())
+		require.NoError(t, err)
+		q := db.New(conn)
+		sess, err := session.NewService(q, conn).Create(t.Context(), "test")
+		require.NoError(t, err)
+		svc := message.NewService(q)
+		a := &sessionAgent{messages: svc, stubStats: csync.NewMap[string, stubStats]()}
+
+		msgs := viewThenEdit(t, svc, sess.ID, bigContent(), true)
+		msgs = append(msgs, mkMsg(t, svc, sess.ID, message.User, message.TextContent{Text: "later"}))
+		a.flagSupersededViewResults(t.Context(), msgs)
+
+		// With the DB closed the update fails: promotion reports
+		// false and the in-memory marks revert so this render stays
+		// consistent with the stored verbatim content.
+		require.NoError(t, conn.Close())
+		ok := a.promoteSupersededStubs(t.Context(), msgs, 0)
+		require.False(t, ok)
+		mark := resultOf(t, msgs[2], "tc-view").Superseded
 		require.NotNil(t, mark)
 		require.False(t, mark.Applied)
 	})
