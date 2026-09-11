@@ -308,6 +308,13 @@ the request-budget manager. This plan defines only the soft token-budget
 values, the required/optional overflow policy, and the conversion
 helpers that `readContextFile` consumes.
 
+> **Status:** `readContextFile`, `tokenLimitToBytes`, and
+> `truncateToTokenLimit` below are proposed, not implemented — they
+> were dropped during review for lack of production callers and should
+> land together with this overflow-handling work. `readBounded` and
+> `truncateUTF8Prefix`/`truncateUTF8Suffix` are the only implemented
+> helpers.
+
 `truncateUTF8Prefix` is also defined in `PROMPT_OPTIMIZATION.md`
 (Defensive helpers). It takes a `string` and `maxBytes` and returns
 valid UTF-8 no longer than `maxBytes`.

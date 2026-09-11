@@ -1063,7 +1063,15 @@ func readBounded(path string) (content string, truncated bool, err error) {
 wrapper `readContextFile` (below) layers required/optional handling on
 top of it.
 
-### Context-file soft-budget wrapper
+> **Status:** `readContextFile`, `truncateToTokenLimit`, and
+> `tokenLimitToBytes` are proposed helpers, not landed code. They were
+> removed during review because they had no production callers; they
+> should be reintroduced together with the context-file overflow
+> handling in `CONTEXT_WINDOW_SAFETY.md` that consumes them. Only
+> `readBounded` and `truncateUTF8Prefix`/`truncateUTF8Suffix` are
+> implemented today.
+
+### Context-file soft-budget wrapper (proposed)
 
 `readBounded` knows nothing about required vs. optional files or token
 budgets. The soft-budget logic that decides whether to prompt, error, or
