@@ -67,6 +67,32 @@ Example:
 }
 ```
 
+Batched example (tabbed form + confirmation screen):
+
+```json
+{
+	"questions": [
+		{
+			"type": "single_choice",
+			"question": "Which database?",
+			"label": "Database",
+			"description": "Determines the driver and migration target.",
+			"choices": [
+				{"id": "sqlite", "label": "SQLite"},
+				{"id": "postgres", "label": "PostgreSQL"}
+			]
+		},
+		{
+			"type": "yes_no",
+			"question": "Enable foreign keys?",
+			"description": "Recommended unless bulk import order is unmanaged."
+		}
+	],
+	"confirm_title": "Ready to go?",
+	"confirm_description": "Creates the database with the chosen engine and settings."
+}
+```
+
 ## When to use
 
 - Confirm destructive or ambiguous actions, or pick between

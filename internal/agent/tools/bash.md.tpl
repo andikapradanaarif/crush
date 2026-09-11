@@ -57,6 +57,8 @@ These rules apply whenever creating or updating commit messages, PR titles, or P
 
 <commit_messages>
 Commit messages are for future readers scanning history. Follow <git_message_quality>: draft a concise 1-2 sentence message focusing on why the change exists and what outcome it enables, using clear, accurate verbs ("add"=new capability, "update"=enhancement, "fix"=bug fix). The first line MUST be under 72 characters; add a body only when needed to explain reasoning or tradeoffs, wrapped at 72 characters.
+- Bad: "fix: nil pointer in session.go"
+- Good: "fix: prevent session loading from crashing on missing metadata"
 </commit_messages>
 
 <git_commits>
@@ -109,7 +111,7 @@ When user asks you to create or update a PR:
 EOF
 )"
 
-Return empty response - user sees gh output. Never update git config.
+Return empty response - user sees gh output.
 </pull_requests>
 
 <examples>
