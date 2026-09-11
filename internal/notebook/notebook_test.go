@@ -191,6 +191,48 @@ func TestClassifyEvents_SucceededFromResult(t *testing.T) {
 	require.True(t, significant[1].Succeeded)
 }
 
+func TestGenerateEntries_RecordsErrorHeadline(t *testing.T) {
+	svc, _, sessionID := newTestService(t, &mockGenerator{echo: true})
+
+	msgs := []message.Message{
+		{Role: message.Assistant, Parts: []message.ContentPart{
+			message.ToolCall{ID: "tc1", Name: "bash", Input: `{"command":"go build ."}`, Finished: true},
+		}},
+		{Role: message.Tool, Parts: []message.ContentPart{
+			message.ToolResult{ToolCallID: "tc1", Name: "bash",
+				Content: "\nmain.go:12: undefined: foo\nmain.go:13: missing return", IsError: true},
+		}},
+	}
+	require.NoError(t, svc.GenerateEntries(context.Background(), sessionID, 1, msgs))
+
+	entries, err := svc.GetEntries(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.False(t, entries[0].Succeeded)
+	require.Equal(t, "main.go:12: undefined: foo", entries[0].ErrorHeadline)
+}
+
+func TestCompressEntryPreservesErrorHeadline(t *testing.T) {
+	entry := "some long entry body\nwith details"
+	headline := "exit status 1: build failed"
+
+	summary := compressEntry(entry, "Title", []string{"file:x.go"}, headline, CompressionSummary)
+	require.Contains(t, summary, "some long entry body")
+	require.Contains(t, summary, "Error: "+headline)
+
+	tagsOnly := compressEntry(entry, "Title", []string{"file:x.go"}, headline, CompressionTagsOnly)
+	require.Contains(t, tagsOnly, "file:x.go")
+	require.Contains(t, tagsOnly, "Error: "+headline)
+
+	// Headline not injected at full-fidelity level.
+	full := compressEntry(entry, "Title", nil, headline, CompressionFull)
+	require.NotContains(t, full, "Error:")
+	require.Equal(t, entry, full)
+
+	// No headline → output unchanged.
+	require.Equal(t, "file:x.go", compressEntry(entry, "Title", []string{"file:x.go"}, "", CompressionTagsOnly))
+}
+
 func TestSearchByTag(t *testing.T) {
 	svc, _, sessionID := newTestService(t, nil)
 

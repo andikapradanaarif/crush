@@ -54,6 +54,10 @@ type Entry struct {
 	// same-file entries: a failed edit leaves the file — and every
 	// prior read of it — untouched.
 	Succeeded bool
+	// ErrorHeadline is a one-line digest of the underlying failure for
+	// failed tool events. It survives compaction so later turns can
+	// compare repeated failures against it.
+	ErrorHeadline string
 }
 
 // EntryInput is the input for generating a notebook entry from a
@@ -68,6 +72,9 @@ type EntryInput struct {
 	// Succeeded mirrors !ToolResult.IsError for tool events. Entries
 	// without a tool result (decisions) are always successful.
 	Succeeded bool
+	// ErrorHeadline carries a one-line digest of the failure for
+	// entries whose tool result is an error.
+	ErrorHeadline string
 }
 
 // Service is the interface for notebook operations.

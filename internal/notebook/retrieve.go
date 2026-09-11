@@ -105,6 +105,7 @@ func (s *service) enrichEntries(ctx context.Context, rows []db.NotebookEntry) ([
 			CreatedAt:        row.CreatedAt,
 			Tags:             tags,
 			Succeeded:        row.Succeeded != 0,
+			ErrorHeadline:    row.ErrorHeadline,
 		})
 	}
 	return entries, nil
@@ -179,7 +180,7 @@ func (s *service) compactOldestToLevel(ctx context.Context, sessionID string, fr
 		if err != nil {
 			tags = nil
 		}
-		compressed := compressEntry(entry.EntryText, entry.Title, tags, toLevel)
+		compressed := compressEntry(entry.EntryText, entry.Title, tags, entry.ErrorHeadline, toLevel)
 		newTokens := estimateTokens(compressed)
 		if err := s.q.UpdateNotebookCompression(ctx, db.UpdateNotebookCompressionParams{
 			EntryText:        compressed,
@@ -193,8 +194,10 @@ func (s *service) compactOldestToLevel(ctx context.Context, sessionID string, fr
 }
 
 // compressEntry produces a compressed version of an entry at the given
-// level.
-func compressEntry(text, title string, tags []string, level int64) string {
+// level. A stored error headline survives every level — the digest is
+// the part of a failure that stays useful after the body is gone.
+func compressEntry(text, title string, tags []string, headline string, level int64) string {
+	var out string
 	switch level {
 	case CompressionSummary:
 		// Tags + first sentence of the entry.
@@ -211,18 +214,23 @@ func compressEntry(text, title string, tags []string, level int64) string {
 			sb.WriteString("\n")
 			sb.WriteString(strings.Join(tags, " "))
 		}
-		return sb.String()
+		out = sb.String()
 
 	case CompressionTagsOnly:
 		// Tags only.
 		if len(tags) > 0 {
-			return strings.Join(tags, " ")
+			out = strings.Join(tags, " ")
+		} else {
+			out = title
 		}
-		return title
 
 	default:
-		return text
+		out = text
 	}
+	if headline != "" && level >= CompressionSummary {
+		out += "\nError: " + headline
+	}
+	return out
 }
 
 // RenderEntries renders a list of entries into a single text block for
@@ -235,7 +243,7 @@ func RenderEntries(entries []Entry) string {
 	for _, e := range entries {
 		text := e.EntryText
 		if e.CompressionLevel > 0 {
-			text = compressEntry(e.EntryText, e.Title, e.Tags, e.CompressionLevel)
+			text = compressEntry(e.EntryText, e.Title, e.Tags, e.ErrorHeadline, e.CompressionLevel)
 		}
 		sb.WriteString(text)
 		sb.WriteString("\n\n")

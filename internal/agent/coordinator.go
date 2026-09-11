@@ -882,6 +882,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	if c.notebook != nil && c.cfg.Config().Options.NotebookIsEnabled() {
 		nbTools := notebooktools.Build(
 			c.notebook,
+			c.messages,
 			c.cfg,
 			c.cfg.Config().Options.NotebookMemoryServerName(),
 			c.cfg.Config().Options.NotebookSyncMem0Enabled(),

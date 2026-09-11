@@ -48,6 +48,7 @@ type NotebookEntry struct {
 	CompressionLevel int64          `json:"compression_level"`
 	CreatedAt        int64          `json:"created_at"`
 	Succeeded        int64          `json:"succeeded"`
+	ErrorHeadline    string         `json:"error_headline"`
 }
 
 type NotebookTag struct {
