@@ -20,6 +20,10 @@ const (
 	// maxMCPInstructionsTotal caps the combined block at ~4K estimated
 	// tokens.
 	maxMCPInstructionsTotal = 4_000
+	// markerReserveTokens approximates the keep-ends "[...truncated...]"
+	// marker overhead so the marker itself doesn't push output past the
+	// total cap; budgets at or below it are treated as exhausted.
+	markerReserveTokens = 8
 )
 
 // collectMCPInstructions gathers InitializeResult instructions from
@@ -42,7 +46,9 @@ func collectMCPInstructions() string {
 // capMCPInstructions concatenates per-server instructions in
 // deterministic name order, truncating over-limit servers (keeping the
 // beginning and end) and skipping servers that no longer fit the total
-// budget. Every truncation is logged with the server identity.
+// budget. Alphabetical processing means the total budget is claimed in
+// name order — late-sorted servers lose first. Every truncation is
+// logged with the server identity.
 func capMCPInstructions(raw map[string]string) string {
 	names := slices.Sorted(maps.Keys(raw))
 
@@ -60,7 +66,10 @@ func capMCPInstructions(raw map[string]string) string {
 		est := approxTokenCount(s)
 		if total+est > maxMCPInstructionsTotal {
 			remaining := maxMCPInstructionsTotal - total
-			if remaining <= 0 {
+			if remaining <= markerReserveTokens {
+				// The keep-ends marker costs ~markerReserveTokens; a
+				// remaining budget that small can't hold a useful
+				// excerpt without overshooting the cap.
 				slog.Warn("Skipping MCP server instructions; total cap reached",
 					"server", name,
 					"total_limit", maxMCPInstructionsTotal)
@@ -70,10 +79,10 @@ func capMCPInstructions(raw map[string]string) string {
 				"server", name,
 				"est_tokens", est,
 				"remaining", remaining)
-			s = prompt.TruncateToTokenLimitKeepEnds(s, int(remaining))
+			s = prompt.TruncateToTokenLimitKeepEnds(s, int(remaining-markerReserveTokens))
 			est = approxTokenCount(s)
 		}
-			out.WriteString(s)
+		out.WriteString(s)
 		out.WriteString("\n\n")
 		total += est
 	}
