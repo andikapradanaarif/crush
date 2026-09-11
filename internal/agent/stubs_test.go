@@ -482,3 +482,37 @@ func TestNormalizedPath(t *testing.T) {
 		require.Equal(t, normalizedPath("Foo.go"), normalizedPath("foo.go"))
 	}
 }
+
+// TestStubSupersededRequiresNotebook covers the misconfig where
+// notebook_stub_superseded is on but the notebook is off: stubbing
+// must be fully inactive — flagging, promotion, and rendering alike —
+// since the recall escape hatch the stub text advertises is only
+// registered in notebook mode.
+func TestStubSupersededRequiresNotebook(t *testing.T) {
+	t.Parallel()
+
+	crushJSON := func(extraOptions string) string {
+		return `{
+  "options": {"disable_default_providers": true, "disable_provider_auto_update": true` + extraOptions + `},
+  "providers": {"mock": {"id": "mock", "name": "Mock", "type": "openai",
+    "base_url": "http://127.0.0.1:9/v1", "api_key": "test-key",
+    "models": [{"id": "mock-model", "name": "Mock", "context_window": 8192, "default_max_tokens": 128}]}},
+  "models": {"large": {"provider": "mock", "model": "mock-model"},
+             "small": {"provider": "mock", "model": "mock-model"}}
+}`
+	}
+
+	t.Run("option without notebook keeps stubbing off", func(t *testing.T) {
+		coord := newSummaryTestCoordinator(t, crushJSON(`, "notebook_stub_superseded": true, "notebook_enabled": false`))
+		sa, ok := coord.currentAgent.(*sessionAgent)
+		require.True(t, ok)
+		require.False(t, sa.stubSuperseded)
+	})
+
+	t.Run("option with notebook enables stubbing", func(t *testing.T) {
+		coord := newSummaryTestCoordinator(t, crushJSON(`, "notebook_stub_superseded": true`))
+		sa, ok := coord.currentAgent.(*sessionAgent)
+		require.True(t, ok)
+		require.True(t, sa.stubSuperseded)
+	})
+}
