@@ -1850,8 +1850,8 @@ func (a *sessionAgent) buildNotebookMessage(oldMsgs []message.Message, rawMsgs [
 	if len(omitted) > 0 {
 		slices.Sort(omitted)
 		rendered += fmt.Sprintf(
-			"\n\n[turns %s omitted by the %d-token injection cap — recallable via recall/notebook_search]",
-			formatTurnRanges(omitted), maxNotebookInjectionTokens)
+			"\n\n[turns %s have notebook entries not injected here — recallable via recall/notebook_search]",
+			formatTurnRanges(omitted))
 	}
 	msg := fantasy.NewSystemMessage("<notebook>\n" + rendered + "</notebook>")
 	return notebookMessageResult{msg: &msg, maxTurn: maxTurn, turnsWithEntries: turnsWithEntries}

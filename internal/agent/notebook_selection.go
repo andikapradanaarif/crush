@@ -25,34 +25,6 @@ const maxNotebookInjectionTokens = 12_000
 // Entries are deduplicated by ID, superseded file reads are dropped in
 // favor of newer entries for the same file, and the result is returned
 // in chronological order for rendering.
-// formatTurnRanges renders a sorted turn list compactly, grouping
-// consecutive numbers: 3,4,5,9 -> "3-5, 9".
-func formatTurnRanges(turns []int64) string {
-	if len(turns) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	start, prev := turns[0], turns[0]
-	flush := func() {
-		if start == prev {
-			fmt.Fprintf(&b, "%d", start)
-		} else {
-			fmt.Fprintf(&b, "%d-%d", start, prev)
-		}
-	}
-	for _, t := range turns[1:] {
-		if t == prev+1 {
-			prev = t
-			continue
-		}
-		flush()
-		b.WriteString(", ")
-		start, prev = t, t
-	}
-	flush()
-	return b.String()
-}
-
 func selectNotebookEntries(entries []notebook.Entry, refs []string, maxTurn int64) []notebook.Entry {
 	if len(entries) == 0 {
 		return nil
@@ -110,6 +82,34 @@ func selectNotebookEntries(entries []notebook.Entry, refs []string, maxTurn int6
 		return int(a.EventNumber - b.EventNumber)
 	})
 	return selected
+}
+
+// formatTurnRanges renders a sorted turn list compactly, grouping
+// consecutive numbers: 3,4,5,9 -> "3-5, 9".
+func formatTurnRanges(turns []int64) string {
+	if len(turns) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	start, prev := turns[0], turns[0]
+	flush := func() {
+		if start == prev {
+			fmt.Fprintf(&b, "%d", start)
+		} else {
+			fmt.Fprintf(&b, "%d-%d", start, prev)
+		}
+	}
+	for _, t := range turns[1:] {
+		if t == prev+1 {
+			prev = t
+			continue
+		}
+		flush()
+		b.WriteString(", ")
+		start, prev = t, t
+	}
+	flush()
+	return b.String()
 }
 
 // entryMatchesRefs reports whether an entry is relevant to any of the
