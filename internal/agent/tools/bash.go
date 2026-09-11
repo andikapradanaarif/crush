@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/fsext"
+	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/shell"
 )
@@ -194,7 +196,7 @@ func blockFuncs() []shell.BlockFunc {
 	}
 }
 
-func NewBashTool(permissions permission.Service, workingDir string, attribution *config.Attribution, modelID string) fantasy.AgentTool {
+func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workingDir string, attribution *config.Attribution, modelID string) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		BashToolName,
 		string(bashDescription(attribution, modelID)),
@@ -271,6 +273,7 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 					}
 
 					stdout = formatOutput(stdout, stderr, execErr)
+					stdout += lspDiagnosticsForFailure(params.Command, exitCode, interrupted, lspManager)
 
 					metadata := BashResponseMetadata{
 						StartTime:        startTime.UnixMilli(),
@@ -355,6 +358,7 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 				}
 
 				stdout = formatOutput(stdout, stderr, execErr)
+				stdout += lspDiagnosticsForFailure(params.Command, exitCode, interrupted, lspManager)
 
 				metadata := BashResponseMetadata{
 					StartTime:        startTime.UnixMilli(),
@@ -446,4 +450,89 @@ func normalizeWorkingDir(path string) string {
 		path = strings.ReplaceAll(path, fsext.WindowsWorkingDirDrive(), "")
 	}
 	return filepath.ToSlash(path)
+}
+
+// buildTestCommands maps a command name to the subcommands that mark a
+// build, test, or lint invocation. An empty slice means the command is
+// itself a build/test tool and needs no subcommand. The "run" and
+// "exec" subcommands are handled separately via buildTestRunTargets.
+var buildTestCommands = map[string][]string{
+	"go":            {"build", "test", "vet"},
+	"cargo":         {"build", "test", "check", "clippy"},
+	"npm":           {"test", "ci"},
+	"pnpm":          {"test", "build", "lint"},
+	"yarn":          {"test", "build", "lint"},
+	"bun":           {"test", "build"},
+	"deno":          {"test", "check", "lint"},
+	"dotnet":        {"build", "test"},
+	"mvn":           {"compile", "test", "verify", "package"},
+	"gradle":        {"build", "test", "check"},
+	"gradlew":       {"build", "test", "check"},
+	"cmake":         {"--build"},
+	"pytest":        {},
+	"tsc":           {},
+	"make":          {},
+	"task":          {},
+	"just":          {},
+	"ctest":         {},
+	"golangci-lint": {},
+	"staticcheck":   {},
+}
+
+// buildTestRunTargets lists script names accepted after a "run"
+// subcommand (e.g. "npm run build").
+var buildTestRunTargets = []string{
+	"build", "test", "lint", "check", "typecheck", "type-check", "tsc", "ci",
+}
+
+// isBuildOrTestCommand reports whether command invokes a known build,
+// test, or lint tool. Each segment separated by shell chaining
+// operators is checked, so "cd x && go test" still matches.
+func isBuildOrTestCommand(command string) bool {
+	segments := strings.FieldsFunc(command, func(r rune) bool {
+		return r == ';' || r == '&' || r == '|' || r == '\n'
+	})
+	for _, seg := range segments {
+		fields := strings.Fields(seg)
+		if len(fields) == 0 {
+			continue
+		}
+		name := strings.TrimSuffix(filepath.Base(fields[0]), ".exe")
+		subs, ok := buildTestCommands[name]
+		if !ok {
+			continue
+		}
+		if len(subs) == 0 {
+			return true
+		}
+		if len(fields) < 2 {
+			continue
+		}
+		if fields[1] == "run" || fields[1] == "exec" {
+			if len(fields) >= 3 && slices.Contains(buildTestRunTargets, fields[2]) {
+				return true
+			}
+			continue
+		}
+		if slices.Contains(subs, fields[1]) {
+			return true
+		}
+	}
+	return false
+}
+
+// lspDiagnosticsForFailure appends current LSP project diagnostics to
+// failed build/test command output so the model gets ground truth to
+// fix against without a separate lsp_diagnostics call. Returns "" when
+// the command is not a known build/test invocation, when the command
+// did not fail, or when no diagnostics are available.
+func lspDiagnosticsForFailure(command string, exitCode int, interrupted bool, lspManager *lsp.Manager) string {
+	if interrupted || exitCode == 0 || lspManager == nil || !isBuildOrTestCommand(command) {
+		return ""
+	}
+	diags := getDiagnostics("", lspManager)
+	if diags == "" {
+		return ""
+	}
+	return "\n\n" + diags
 }
