@@ -54,7 +54,7 @@ func TestSelectNotebookEntries(t *testing.T) {
 			nbEntry("e2", 1, 2, notebook.EventGeneral, "unrelated", 10, "phase:general"),
 			nbEntry("e3", 2, 1, notebook.EventDecision, "decided X", 10, "phase:decision"),
 		}
-		got := selectNotebookEntries(entries, []string{"file:auth.go"}, 2)
+		got := selectNotebookEntries(entries, []string{"file:auth.go"}, segmentKey{turn: 1})
 		require.Contains(t, entryIDs(got), "e1")
 	})
 
@@ -64,7 +64,7 @@ func TestSelectNotebookEntries(t *testing.T) {
 			nbEntry("e1", 1, 1, notebook.EventGeneral, "we discussed auth.go briefly", 10),
 			nbEntry("e2", 3, 1, notebook.EventGeneral, "totally different", 10),
 		}
-		got := selectNotebookEntries(entries, []string{"file:auth.go"}, 3)
+		got := selectNotebookEntries(entries, []string{"file:auth.go"}, segmentKey{turn: 2})
 		require.Contains(t, entryIDs(got), "e1")
 	})
 
@@ -75,7 +75,7 @@ func TestSelectNotebookEntries(t *testing.T) {
 			nbEntry("mid", 3, 1, notebook.EventGeneral, "mid", 10),
 			nbEntry("new", 4, 1, notebook.EventGeneral, "new", 10),
 		}
-		got := selectNotebookEntries(entries, nil, 4)
+		got := selectNotebookEntries(entries, nil, segmentKey{turn: 3})
 		require.Contains(t, entryIDs(got), "mid")
 		require.Contains(t, entryIDs(got), "new")
 	})
@@ -96,7 +96,7 @@ func TestSelectNotebookEntries(t *testing.T) {
 			nbEntry("recent1", 300, 1, notebook.EventGeneral, "recent", 10),
 			nbEntry("recent2", 301, 1, notebook.EventGeneral, "recent", 10),
 		)
-		got := selectNotebookEntries(entries, []string{"file:target.go"}, 301)
+		got := selectNotebookEntries(entries, []string{"file:target.go"}, segmentKey{turn: 300})
 		require.Contains(t, entryIDs(got), "recent1")
 		require.Contains(t, entryIDs(got), "recent2")
 	})
@@ -108,7 +108,7 @@ func TestSelectNotebookEntries(t *testing.T) {
 			nbEntry("mid", 5, 1, notebook.EventGeneral, "mid", 10),
 			nbEntry("new", 10, 1, notebook.EventGeneral, "new", 10),
 		}
-		got := selectNotebookEntries(entries, nil, 10)
+		got := selectNotebookEntries(entries, nil, segmentKey{turn: 9})
 		require.ElementsMatch(t, []string{"old", "mid", "new"}, entryIDs(got))
 	})
 
@@ -120,7 +120,7 @@ func TestSelectNotebookEntries(t *testing.T) {
 		for i := range 100 {
 			entries = append(entries, nbEntry(fmt.Sprintf("s%d", i), int64(2+i), 1, notebook.EventGeneral, "small", 200))
 		}
-		got := selectNotebookEntries(entries, nil, 101)
+		got := selectNotebookEntries(entries, nil, segmentKey{turn: 100})
 		var total int64
 		for _, e := range got {
 			total += e.TokenCount
@@ -134,7 +134,7 @@ func TestSelectNotebookEntries(t *testing.T) {
 		t.Parallel()
 		e := nbEntry("dup", 5, 1, notebook.EventFileRead, "auth.go", 10, "file:auth.go")
 		entries := []notebook.Entry{e, e}
-		got := selectNotebookEntries(entries, []string{"file:auth.go"}, 5)
+		got := selectNotebookEntries(entries, []string{"file:auth.go"}, segmentKey{turn: 4})
 		require.Len(t, got, 1)
 	})
 
@@ -145,7 +145,7 @@ func TestSelectNotebookEntries(t *testing.T) {
 			nbEntry("read2", 3, 1, notebook.EventFileRead, "second read of auth.go", 10, "file:auth.go"),
 			nbEntry("other", 3, 2, notebook.EventGeneral, "unrelated", 10),
 		}
-		got := selectNotebookEntries(entries, nil, 3)
+		got := selectNotebookEntries(entries, nil, segmentKey{turn: 1})
 		require.NotContains(t, entryIDs(got), "read1")
 		require.Contains(t, entryIDs(got), "read2")
 	})
@@ -156,7 +156,7 @@ func TestSelectNotebookEntries(t *testing.T) {
 			nbEntry("read", 1, 1, notebook.EventFileRead, "read auth.go", 10, "file:auth.go"),
 			nbEntry("edit", 2, 1, notebook.EventFileEdit, "edited auth.go", 10, "file:auth.go"),
 		}
-		got := selectNotebookEntries(entries, nil, 2)
+		got := selectNotebookEntries(entries, nil, segmentKey{turn: 1})
 		require.NotContains(t, entryIDs(got), "read")
 		require.Contains(t, entryIDs(got), "edit")
 	})
@@ -167,7 +167,7 @@ func TestSelectNotebookEntries(t *testing.T) {
 			nbEntry("read", 1, 1, notebook.EventFileRead, "read auth.go", 10, "file:auth.go"),
 			nbEntryResult("edit", 2, 1, notebook.EventFileEdit, "failed edit auth.go", 10, false, "file:auth.go"),
 		}
-		got := selectNotebookEntries(entries, nil, 2)
+		got := selectNotebookEntries(entries, nil, segmentKey{turn: 2})
 		require.Contains(t, entryIDs(got), "read")
 		require.Contains(t, entryIDs(got), "edit")
 	})
@@ -178,7 +178,7 @@ func TestSelectNotebookEntries(t *testing.T) {
 			nbEntry("read1", 1, 1, notebook.EventFileRead, "first read of auth.go", 10, "file:auth.go"),
 			nbEntryResult("read2", 3, 1, notebook.EventFileRead, "failed re-read", 10, false, "file:auth.go"),
 		}
-		got := selectNotebookEntries(entries, nil, 3)
+		got := selectNotebookEntries(entries, nil, segmentKey{turn: 2})
 		require.Contains(t, entryIDs(got), "read1")
 		require.Contains(t, entryIDs(got), "read2")
 	})
@@ -190,7 +190,7 @@ func TestSelectNotebookEntries(t *testing.T) {
 			nbEntryResult("badedit", 2, 1, notebook.EventFileEdit, "failed edit", 10, false, "file:auth.go"),
 			nbEntry("goodedit", 3, 1, notebook.EventFileEdit, "edited auth.go", 10, "file:auth.go"),
 		}
-		got := selectNotebookEntries(entries, nil, 3)
+		got := selectNotebookEntries(entries, nil, segmentKey{turn: 1})
 		require.NotContains(t, entryIDs(got), "read")
 		require.Contains(t, entryIDs(got), "badedit")
 		require.Contains(t, entryIDs(got), "goodedit")
@@ -207,7 +207,7 @@ func TestSelectNotebookEntries(t *testing.T) {
 			nbEntry("filler", 2, 1, notebook.EventGeneral, "big", 11400),
 			nbEntry("edit", 2, 2, notebook.EventFileEdit, "edited a.go", 100, "file:a.go"),
 		}
-		got := selectNotebookEntries(entries, nil, 2)
+		got := selectNotebookEntries(entries, nil, segmentKey{turn: 1})
 		require.Contains(t, entryIDs(got), "old-pinned")
 		require.NotContains(t, entryIDs(got), "old-free")
 		require.Contains(t, entryIDs(got), "edit")
@@ -223,7 +223,7 @@ func TestSelectNotebookEntries(t *testing.T) {
 			nbEntry("filler", 2, 1, notebook.EventGeneral, "big", 11400),
 			nbEntryResult("edit", 2, 2, notebook.EventFileEdit, "failed edit a.go", 100, false, "file:a.go"),
 		}
-		got := selectNotebookEntries(entries, nil, 2)
+		got := selectNotebookEntries(entries, nil, segmentKey{turn: 1})
 		require.Contains(t, entryIDs(got), "old-pinned")
 		require.NotContains(t, entryIDs(got), "old-free")
 	})
@@ -235,7 +235,7 @@ func TestSelectNotebookEntries(t *testing.T) {
 			nbEntry("b", 1, 1, notebook.EventGeneral, "b", 10),
 			nbEntry("c", 3, 1, notebook.EventGeneral, "c", 10),
 		}
-		got := selectNotebookEntries(entries, nil, 5)
+		got := selectNotebookEntries(entries, nil, segmentKey{turn: 0})
 		require.Equal(t, []string{"b", "c", "a"}, entryIDs(got))
 	})
 
@@ -244,7 +244,7 @@ func TestSelectNotebookEntries(t *testing.T) {
 		entries := []notebook.Entry{
 			nbEntry("e", 1, 1, notebook.EventGeneral, strings.Repeat("x", 400), 0),
 		}
-		got := selectNotebookEntries(entries, nil, 1)
+		got := selectNotebookEntries(entries, nil, segmentKey{turn: 0})
 		require.Len(t, got, 1)
 	})
 }
