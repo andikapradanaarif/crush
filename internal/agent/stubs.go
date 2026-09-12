@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/message"
 )
 
@@ -297,7 +298,7 @@ func (a *sessionAgent) flagPrunableToolResults(ctx context.Context, msgs []messa
 			if !ok || !readToolNames[call.name] || call.path == "" {
 				continue
 			}
-			fi, err := os.Stat(call.path)
+			fi, err := os.Stat(a.resolveReadPath(call.path))
 			switch {
 			case errors.Is(err, fs.ErrNotExist):
 				mark(i, j, message.SupersededMark{
@@ -412,11 +413,22 @@ func (a *sessionAgent) flagPrunableToolResults(ctx context.Context, msgs []messa
 	}
 }
 
+// resolveReadPath resolves a read call's path the same way the view
+// tool does — relative paths join the configured working directory,
+// not the process CWD, so a same-named file under CWD can't trigger a
+// false modified/deleted flag.
+func (a *sessionAgent) resolveReadPath(p string) string {
+	wd := ""
+	if a.configStore != nil {
+		wd = a.configStore.WorkingDir()
+	}
+	return filepathext.SmartJoin(wd, p)
+}
+
 // stampReadMtime records the file's modification time on a successful
 // file-read result, anchoring pass-2 supersession to the state the
-// read actually observed. Path resolution matches the file tools:
-// relative paths land on the process working directory.
-func stampReadMtime(tr *message.ToolResult, calls []message.ToolCall) {
+// read actually observed.
+func (a *sessionAgent) stampReadMtime(tr *message.ToolResult, calls []message.ToolCall) {
 	if tr.IsError || !readToolNames[tr.Name] {
 		return
 	}
@@ -425,7 +437,7 @@ func stampReadMtime(tr *message.ToolResult, calls []message.ToolCall) {
 			continue
 		}
 		if p := toolCallFilePath(tc.Input); p != "" {
-			if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			if fi, err := os.Stat(a.resolveReadPath(p)); err == nil {
 				tr.FileMtime = fi.ModTime().UnixNano()
 			}
 		}

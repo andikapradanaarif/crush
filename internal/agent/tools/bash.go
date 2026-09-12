@@ -393,8 +393,8 @@ func formatOutput(stdout, stderr string, execErr error) string {
 	interrupted := shell.IsInterrupt(execErr)
 	exitCode := shell.ExitCode(execErr)
 
-	stdout = truncateOutput(stdout)
-	stderr = truncateOutput(stderr)
+	stdout = TruncateOutput(stdout)
+	stderr = TruncateOutput(stderr)
 
 	errorMessage := stderr
 	if errorMessage == "" && execErr != nil {

@@ -47,10 +47,6 @@ func TruncateOutput(content string) string {
 	return TruncateHeadTail(content, MaxOutputLength, TruncatedAtCapture)
 }
 
-func truncateOutput(content string) string {
-	return TruncateOutput(content)
-}
-
 func humanBytes(n int64) string {
 	switch {
 	case n >= 1<<20:

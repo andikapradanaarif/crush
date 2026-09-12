@@ -747,16 +747,17 @@ func TestStampReadMtime(t *testing.T) {
 	input, _ := json.Marshal(map[string]string{"file_path": path})
 	calls := []message.ToolCall{{ID: "tc-1", Name: "view", Input: string(input), Finished: true}}
 
+	a := &sessionAgent{}
 	tr := message.ToolResult{ToolCallID: "tc-1", Name: "view", Content: "x"}
-	stampReadMtime(&tr, calls)
+	a.stampReadMtime(&tr, calls)
 	require.Equal(t, fi.ModTime().UnixNano(), tr.FileMtime)
 
 	// Errors and non-read tools are never stamped.
 	trErr := message.ToolResult{ToolCallID: "tc-1", Name: "view", IsError: true}
-	stampReadMtime(&trErr, calls)
+	a.stampReadMtime(&trErr, calls)
 	require.Zero(t, trErr.FileMtime)
 	trOther := message.ToolResult{ToolCallID: "tc-1", Name: "bash"}
-	stampReadMtime(&trOther, calls)
+	a.stampReadMtime(&trOther, calls)
 	require.Zero(t, trOther.FileMtime)
 }
 
