@@ -66,9 +66,12 @@ func (s segment) key() segmentKey {
 	return segmentKey{turn: s.turn, segment: s.number}
 }
 
-// allCallsResolved is the reference predicate for segment safety —
-// segmentBoundaries implements the same invariant inline via its
-// pending map, and tests assert every closed boundary satisfies this.
+// allCallsResolved is the reference predicate for segment safety.
+// segmentBoundaries implements a strictly stricter variant inline via
+// its pending map — it keeps a call pending until the LAST position
+// of its results, while this predicate accepts the first — so tests
+// asserting this on every closed boundary verify the minimum
+// invariant the implementation must satisfy.
 //
 // allCallsResolved reports whether index i is a safe cut: every tool
 // call in msgs[:i] has its result in msgs[:i], or has no result

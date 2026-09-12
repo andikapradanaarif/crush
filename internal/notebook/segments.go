@@ -201,6 +201,7 @@ func (s *service) GenerateSegmentEntries(ctx context.Context, sessionID string, 
 		}
 	}
 
+	committed := false
 	err := s.withTx(ctx, func(q *db.Queries) error {
 		// Record the extent for the run-end tail path, whose segment
 		// was never closed by mid-run detection.
@@ -241,6 +242,7 @@ func (s *service) GenerateSegmentEntries(ctx context.Context, sessionID string, 
 				return err
 			}
 		}
+		committed = true
 		return q.MarkSegmentProcessed(ctx, db.MarkSegmentProcessedParams{
 			SessionID:     sessionID,
 			TurnNumber:    turnNumber,
@@ -249,6 +251,9 @@ func (s *service) GenerateSegmentEntries(ctx context.Context, sessionID string, 
 	})
 	if err != nil {
 		return fmt.Errorf("failed to commit segment entries: %w", err)
+	}
+	if !committed {
+		return nil
 	}
 
 	// Compact if needed.
