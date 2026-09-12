@@ -210,7 +210,7 @@ func (m SupersededMark) StubText(tr ToolResult) string {
 		if total == 0 {
 			total = int64(len(tr.Content))
 		}
-		return fmt.Sprintf("%s\n[rest of %s output elided (%d bytes, turn %d); %s or re-run for the rest]",
+		return fmt.Sprintf("%s\n[rest of %s output elided (%d bytes total, turn %d); %s or re-run for the rest]",
 			headPrefix(tr.Content, stubHeadPrefixBytes), tr.Name, total, m.Turn, recall)
 	default:
 		return fmt.Sprintf("[content of %s superseded by %s at turn %d; re-view for current state, or %s for the pre-edit snapshot]",
