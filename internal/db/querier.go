@@ -39,6 +39,7 @@ type Querier interface {
 	GetNotebookTokenCount(ctx context.Context, sessionID string) (int64, error)
 	GetNotebookTurnsWithEntries(ctx context.Context, sessionID string) ([]int64, error)
 	GetOldestNotebookEntries(ctx context.Context, arg GetOldestNotebookEntriesParams) ([]NotebookEntry, error)
+	GetProcessedSegment(ctx context.Context, arg GetProcessedSegmentParams) (ProcessedSegment, error)
 	// One row per tool result that renders as a stub (applied superseded
 	// mark). content_head carries the first 1024 chars so callers can
 	// recompute exact stub text for prefix-bearing stub kinds.

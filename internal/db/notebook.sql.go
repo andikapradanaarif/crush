@@ -471,6 +471,35 @@ func (q *Queries) GetOldestNotebookEntries(ctx context.Context, arg GetOldestNot
 	return items, nil
 }
 
+const getProcessedSegment = `-- name: GetProcessedSegment :one
+SELECT session_id, turn_number, segment_number, start_index, end_index, state, retry_count, last_attempt_at, created_at
+FROM processed_segments
+WHERE session_id = ? AND turn_number = ? AND segment_number = ?
+`
+
+type GetProcessedSegmentParams struct {
+	SessionID     string `json:"session_id"`
+	TurnNumber    int64  `json:"turn_number"`
+	SegmentNumber int64  `json:"segment_number"`
+}
+
+func (q *Queries) GetProcessedSegment(ctx context.Context, arg GetProcessedSegmentParams) (ProcessedSegment, error) {
+	row := q.queryRow(ctx, q.getProcessedSegmentStmt, getProcessedSegment, arg.SessionID, arg.TurnNumber, arg.SegmentNumber)
+	var i ProcessedSegment
+	err := row.Scan(
+		&i.SessionID,
+		&i.TurnNumber,
+		&i.SegmentNumber,
+		&i.StartIndex,
+		&i.EndIndex,
+		&i.State,
+		&i.RetryCount,
+		&i.LastAttemptAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const listProcessedSegments = `-- name: ListProcessedSegments :many
 SELECT session_id, turn_number, segment_number, start_index, end_index, state, retry_count, last_attempt_at, created_at
 FROM processed_segments

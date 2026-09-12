@@ -627,3 +627,55 @@ func TestRebuildStepMessages_PreservesSystemAndTail(t *testing.T) {
 	require.Equal(t, fantasy.MessageRoleSystem, out[0].Role)
 	require.NotEmpty(t, out)
 }
+
+// TestRebuildStepMessages_TailByteIdentical is the tail-fidelity check:
+// with no coverage committed (boundary 0), the rebuilt list must equal
+// Fantasy's accumulated list part-for-part.
+func TestRebuildStepMessages_TailByteIdentical(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.segmentMaxSteps = 100 // nothing closes — boundary stays 0.
+
+	msgs := segBuildTurn(t, svc, sessionID, "work", 4, "step content")
+	require.NoError(t, svc.FlushAll(t.Context()))
+
+	options := []fantasy.Message{fantasy.NewSystemMessage("sys")}
+	for _, m := range msgs {
+		options = append(options, m.ToAIMessage()...)
+	}
+
+	out, ok := a.rebuildStepMessages(t.Context(), sessionID, options, false)
+	require.True(t, ok)
+	require.Len(t, out, len(options))
+	for i := range options {
+		require.True(t, fantasyMessageEqual(options[i], out[i]),
+			"rebuilt message %d diverges from Fantasy's accumulated message", i)
+	}
+}
+
+// TestSegmentBoundaries_StableUnderAppliedStubs is the drift
+// regression: promoting a superseded mark inside a segment must not
+// shift its recomputed close point, or coverage and content would
+// silently disagree.
+func TestSegmentBoundaries_StableUnderAppliedStubs(t *testing.T) {
+	t.Parallel()
+
+	big := strings.Repeat("x", 4000)
+	build := func(applied bool) []message.Message {
+		res := message.ToolResult{ToolCallID: "tc1", Name: "view", Content: big}
+		res.Superseded = &message.SupersededMark{Path: "a.go", ByTool: "edit", Applied: applied}
+		var msgs []message.Message
+		msgs = append(msgs, segUser("go"))
+		msgs = append(msgs, segAssistant(big, message.ToolCall{ID: "tc1", Name: "view"}))
+		msgs = append(msgs, segTool(res))
+		for range 8 {
+			msgs = append(msgs, segAssistant(big))
+		}
+		return msgs
+	}
+
+	verbatim := segmentBoundaries(build(false), 2000, 3)
+	stubbed := segmentBoundaries(build(true), 2000, 3)
+	require.Equal(t, verbatim, stubbed, "applied stubs must not shift segment boundaries")
+}

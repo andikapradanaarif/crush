@@ -125,6 +125,21 @@ func TestRecordSegmentClose_Idempotent(t *testing.T) {
 	require.Equal(t, int64(5), rows[0].EndIndex)
 }
 
+func TestGenerateSegmentEntries_ReentrySkipsDuplicateContent(t *testing.T) {
+	svc, _, sessionID := newSegmentTestService(t, nil)
+	ctx := context.Background()
+
+	require.NoError(t, svc.GenerateSegmentEntries(ctx, sessionID, 0, 0, 0, 2, segmentEditMsgs()))
+	// A second generation for the same segment — e.g. a caller that
+	// bypassed the in-flight mark — must not insert duplicate
+	// content under fresh event numbers.
+	require.NoError(t, svc.GenerateSegmentEntries(ctx, sessionID, 0, 0, 0, 2, segmentEditMsgs()))
+
+	entries, err := svc.GetEntries(ctx, sessionID)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+}
+
 func TestDeleteEntries_CascadesSegments(t *testing.T) {
 	svc, _, sessionID := newSegmentTestService(t, nil)
 	ctx := context.Background()

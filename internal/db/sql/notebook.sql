@@ -119,6 +119,11 @@ ON CONFLICT(session_id, turn_number, segment_number) DO UPDATE SET
     end_index = excluded.end_index
 WHERE processed_segments.state = 'unprocessed';
 
+-- name: GetProcessedSegment :one
+SELECT *
+FROM processed_segments
+WHERE session_id = ? AND turn_number = ? AND segment_number = ?;
+
 -- name: ListProcessedSegments :many
 SELECT *
 FROM processed_segments

@@ -214,6 +214,21 @@ func (s *service) GenerateSegmentEntries(ctx context.Context, sessionID string, 
 		}); err != nil {
 			return err
 		}
+		// Re-entry guard: a concurrent caller (another process, or a
+		// caller that bypassed the in-flight mark) may have committed
+		// this segment already — never insert duplicate content under
+		// fresh event numbers.
+		existing, err := q.GetProcessedSegment(ctx, db.GetProcessedSegmentParams{
+			SessionID:     sessionID,
+			TurnNumber:    turnNumber,
+			SegmentNumber: segmentNumber,
+		})
+		if err != nil {
+			return err
+		}
+		if existing.State == SegmentProcessed {
+			return nil
+		}
 		maxEvent, err := q.GetMaxNotebookEventNumber(ctx, db.GetMaxNotebookEventNumberParams{
 			SessionID:  sessionID,
 			TurnNumber: turnNumber,

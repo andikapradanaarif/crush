@@ -66,6 +66,10 @@ func (s segment) key() segmentKey {
 	return segmentKey{turn: s.turn, segment: s.number}
 }
 
+// allCallsResolved is the reference predicate for segment safety —
+// segmentBoundaries implements the same invariant inline via its
+// pending map, and tests assert every closed boundary satisfies this.
+//
 // allCallsResolved reports whether index i is a safe cut: every tool
 // call in msgs[:i] has its result in msgs[:i], or has no result
 // anywhere in msgs. A call whose result exists but lands after i makes
@@ -113,17 +117,17 @@ func segmentBoundaries(msgs []message.Message, tokenThreshold, maxSteps int) []s
 	if len(msgs) == 0 {
 		return nil
 	}
-	// Index the first position of each call's result so the walk can
-	// track calls whose result has not been reached yet.
+	// Index the LAST position of each call's result so the walk keeps
+	// a call pending until every stored result for it has been passed
+	// — a call whose results span multiple tool messages must not be
+	// cut between them.
 	resultPos := make(map[string]int)
 	for i, m := range msgs {
 		if m.Role != message.Tool {
 			continue
 		}
 		for _, tr := range m.ToolResults() {
-			if _, ok := resultPos[tr.ToolCallID]; !ok {
-				resultPos[tr.ToolCallID] = i
-			}
+			resultPos[tr.ToolCallID] = i
 		}
 	}
 	// pending holds calls whose result lands at or after the current
@@ -711,14 +715,19 @@ func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msg
 		slog.Error("Failed to get notebook entries", "error", err)
 		return nil
 	}
-	refs := notebookRelevanceRefs(detCtx, a.sessions, sessionID, msgs[boundary:])
+	// Refs and auto-inject scan the FULL message list for the latest
+	// user message: once a long turn's initiating prompt is covered by
+	// the notebook, the raw window holds no user message at all, and
+	// restricting the scan to it would silently drop file: refs for
+	// the rest of the run.
+	refs := notebookRelevanceRefs(detCtx, a.sessions, sessionID, msgs)
 	fp := prefixFingerprint(boundary, bKey, entries, refs)
 	if a.prefixCache != nil {
 		if c, ok := a.prefixCache.Get(sessionID); ok && c.boundary == boundary && c.fingerprint == fp {
 			return c.msgs
 		}
 	}
-	prefix := a.renderNotebookPrefix(detCtx, sessionID, entries, msgs[boundary:], bKey, coveredSegmentFloor(segs, boundary), refs)
+	prefix := a.renderNotebookPrefix(detCtx, sessionID, entries, msgs, bKey, coveredSegmentFloor(segs, boundary), refs)
 	if a.prefixCache != nil {
 		a.prefixCache.Set(sessionID, cachedPrefix{boundary: boundary, fingerprint: fp, msgs: prefix})
 	}
@@ -875,8 +884,10 @@ func fantasyToolResultOutputEqual(a, b fantasy.ToolResultOutputContent) bool {
 
 // renderNotebookPrefix filters entries to segments covered before the
 // boundary, relevance-selects them, and renders the notebook system
-// message plus the optional auto-inject blob.
-func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID string, entries []notebook.Entry, rawMsgs []message.Message, bKey segmentKey, floor segmentKey, refs []string) []fantasy.Message {
+// message plus the optional auto-inject blob. msgs is the full stored
+// history — auto-inject scans it for the latest user message, which
+// may itself sit inside the covered prefix of a long turn.
+func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID string, entries []notebook.Entry, msgs []message.Message, bKey segmentKey, floor segmentKey, refs []string) []fantasy.Message {
 	var filtered []notebook.Entry
 	for _, e := range entries {
 		if e.TurnNumber < bKey.turn || (e.TurnNumber == bKey.turn && e.SegmentNumber < bKey.segment) {
@@ -909,8 +920,8 @@ func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID strin
 			out = append(out, msg)
 		}
 	}
-	if a.notebookAutoInject && len(rawMsgs) > 0 {
-		if injectMsg := a.maybeAutoInject(ctx, rawMsgs, sessionID, bKey); injectMsg != nil {
+	if a.notebookAutoInject && len(msgs) > 0 {
+		if injectMsg := a.maybeAutoInject(ctx, msgs, sessionID, bKey); injectMsg != nil {
 			out = append(out, *injectMsg)
 		}
 	}

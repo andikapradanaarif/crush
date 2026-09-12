@@ -935,6 +935,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			fold, canceledRunIDs := a.drainQueueForStep(call.SessionID)
 			a.publishCanceledQueueDrops(canceledRunIDs)
 			notebookOn := a.notebookEnabled && a.notebook != nil
+			var folded []message.Message
 			for _, queued := range fold {
 				userMessage, createErr := a.createUserMessage(callContext, queued)
 				if createErr != nil {
@@ -945,6 +946,8 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				// duplicate it.
 				if !notebookOn {
 					prepared.Messages = append(prepared.Messages, userMessage.ToAIMessage()...)
+				} else {
+					folded = append(folded, userMessage)
 				}
 			}
 
@@ -958,6 +961,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			if notebookOn {
 				if rebuilt, ok := a.rebuildStepMessages(callContext, call.SessionID, prepared.Messages, largeModel.CatwalkCfg.SupportsImages); ok {
 					prepared.Messages = rebuilt
+				} else {
+					// Rebuild failed — fall back to Fantasy's list and
+					// append the folded messages it is missing.
+					for _, um := range folded {
+						prepared.Messages = append(prepared.Messages, um.ToAIMessage()...)
+					}
 				}
 			}
 
