@@ -169,19 +169,26 @@ func segmentBoundaries(msgs []message.Message, tokenThreshold, maxSteps int) []s
 			break
 		}
 		resolvedBefore(cut)
-		if len(pending) > 0 {
-			// Unsafe: a call opened before the cut resolves after
-			// it. Keep accumulating until the run completes.
-			continue
-		}
-		switch {
-		case msgs[cut].Role == message.User:
+		if msgs[cut].Role == message.User {
+			// A user message is a hard boundary and wins over the
+			// pending guard: a call whose results straddle the fold
+			// cannot block it, or the segment would swallow the user
+			// message and mislabel every following segment's turn.
+			// The straggler result lands in the next segment as an
+			// orphan, which the renderer drops gracefully.
 			segs = append(segs, segment{turn: curTurn, number: segNum, start: start, end: cut})
 			start = cut
 			acc, steps = 0, 0
 			curTurn = turns[cut]
 			segNum = 0
-		case acc >= tokenThreshold || steps >= maxSteps:
+			continue
+		}
+		if len(pending) > 0 {
+			// Unsafe: a call opened before the cut resolves after
+			// it. Keep accumulating until the run completes.
+			continue
+		}
+		if acc >= tokenThreshold || steps >= maxSteps {
 			segs = append(segs, segment{turn: curTurn, number: segNum, start: start, end: cut})
 			start = cut
 			acc, steps = 0, 0

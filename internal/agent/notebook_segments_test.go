@@ -143,6 +143,28 @@ func TestSegmentBoundaries_WaitsForCallResolution(t *testing.T) {
 	require.True(t, segs[1].open)
 }
 
+func TestSegmentBoundaries_StragglerResultDoesNotBlockUserClose(t *testing.T) {
+	t.Parallel()
+
+	// A call whose results straddle a user message — e.g. a cancelled
+	// tool's late second result landing after a folded prompt — must
+	// not block the user-boundary close. The straggler becomes an
+	// orphan in the next segment, which the renderer drops.
+	msgs := []message.Message{
+		segUser("first"),
+		segAssistant("a", message.ToolCall{ID: "tc1", Name: "bash"}),
+		segTool(message.ToolResult{ToolCallID: "tc1"}),
+		segUser("folded"),
+		segAssistant("b"),
+		segTool(message.ToolResult{ToolCallID: "tc1"}), // straggler
+	}
+	segs := segmentBoundaries(msgs, 1<<30, 100)
+	require.Len(t, segs, 2)
+	require.Equal(t, 3, segs[1].start)
+	require.Equal(t, int64(1), segs[1].turn)
+	require.Equal(t, int64(0), segs[0].turn)
+}
+
 func TestSegmentBoundaries_FoldedUserMessageIsHardBoundary(t *testing.T) {
 	t.Parallel()
 
