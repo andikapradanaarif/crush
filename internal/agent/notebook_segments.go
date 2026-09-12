@@ -290,16 +290,18 @@ func segmentRetryDue(seg notebook.ProcessedSegment, now time.Time) bool {
 
 // segmentTracker holds the per-session in-memory segment state: which
 // segments have a generation goroutine in flight (intra-process dedup
-// — detection re-runs every step while generation is async) and
-// whether the pre-upgrade backfill has been attempted.
+// — detection re-runs every step while generation is async), whether
+// the pre-upgrade backfill has been attempted, and which drifted
+// processed rows have already been logged.
 type segmentTracker struct {
 	mu                sync.Mutex
 	inflight          map[segmentKey]bool
 	backfillAttempted bool
+	driftLogged       map[segmentKey]bool
 }
 
 func newSegmentTracker() *segmentTracker {
-	return &segmentTracker{inflight: make(map[segmentKey]bool)}
+	return &segmentTracker{inflight: make(map[segmentKey]bool), driftLogged: make(map[segmentKey]bool)}
 }
 
 // markInflight atomically claims a segment for generation. The mark is
@@ -338,6 +340,19 @@ func (t *segmentTracker) resetBackfill() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.backfillAttempted = false
+}
+
+// claimDriftLog returns true the first time a drifted processed row is
+// reported — the condition never self-resolves, so without the claim
+// every detection pass would emit the same warning.
+func (t *segmentTracker) claimDriftLog(key segmentKey) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.driftLogged[key] {
+		return false
+	}
+	t.driftLogged[key] = true
+	return true
 }
 
 // cachedPrefix is the rendered notebook prefix (notebook system
@@ -411,6 +426,7 @@ func (a *sessionAgent) detectSegments(ctx context.Context, sessionID string, msg
 
 	genCtx := context.WithoutCancel(ctx)
 	fired := 0
+	closed := false
 	for _, s := range segs {
 		if s.open {
 			continue
@@ -424,6 +440,7 @@ func (a *sessionAgent) detectSegments(ctx context.Context, sessionID string, msg
 				slog.Warn("Failed to record segment close", "session_id", sessionID, "turn", s.turn, "segment", s.number, "error", err)
 				continue
 			}
+			closed = true
 			row = notebook.ProcessedSegment{TurnNumber: s.turn, SegmentNumber: s.number, State: notebook.SegmentUnprocessed}
 			registry[key] = row
 		} else if row.State == notebook.SegmentUnprocessed &&
@@ -444,7 +461,7 @@ func (a *sessionAgent) detectSegments(ctx context.Context, sessionID string, msg
 			// messages it may not actually summarize.
 			if row.StartIndex == int64(s.start) && row.EndIndex == int64(s.end) {
 				processed[key] = true
-			} else {
+			} else if tracker.claimDriftLog(key) {
 				slog.Warn("Processed segment extent drifted; keeping raw",
 					"session_id", sessionID, "turn", s.turn, "segment", s.number,
 					"recorded", fmt.Sprintf("[%d,%d)", row.StartIndex, row.EndIndex),
@@ -474,10 +491,11 @@ func (a *sessionAgent) detectSegments(ctx context.Context, sessionID string, msg
 		}
 	}
 	// Flag superseded tool results once per pass that fired generation
-	// — the mid-run stub win ("a read superseded two segments ago gets
-	// stubbed") needs a pass over the full history, and one flag pass
-	// per segment goroutine would multiply the same DB writes.
-	if fired > 0 && a.stubSuperseded {
+	// or recorded a close — the mid-run stub win ("a read superseded
+	// two segments ago gets stubbed") needs a pass over the full
+	// history; running it only on fires would delay supersession while
+	// a slow generation sits in-flight.
+	if (fired > 0 || closed) && a.stubSuperseded {
 		flagMsgs := cloneMessagesForGen(msgs)
 		if a.syncSegmentGen {
 			a.flagPrunableToolResults(genCtx, flagMsgs)
