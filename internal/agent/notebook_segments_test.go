@@ -541,6 +541,71 @@ func TestPromoteSupersededStubs_SegmentRecencyGuard(t *testing.T) {
 	require.True(t, res.Superseded.Applied, "stale read in an old segment should promote on a boundary move")
 }
 
+// TestRenderNotebookPrefix_SegmentCoverageFilter exercises the
+// (turn, segment) coverage compare: entries from the boundary's own
+// segment or later must not render into the prefix.
+func TestRenderNotebookPrefix_SegmentCoverageFilter(t *testing.T) {
+	t.Parallel()
+
+	a := &sessionAgent{}
+	entries := []notebook.Entry{
+		nbSegEntry("e00", 0, 0, 1, notebook.EventGeneral, "segment zero content", 10),
+		nbSegEntry("e01", 0, 1, 1, notebook.EventGeneral, "segment one content", 10),
+		nbSegEntry("e02", 0, 2, 1, notebook.EventGeneral, "segment two content", 10),
+	}
+	rawMsgs := []message.Message{segUser("go"), segAssistant("work")}
+	prefix := a.renderNotebookPrefix(t.Context(), "sess", entries, rawMsgs,
+		segmentKey{turn: 0, segment: 2}, segmentKey{turn: 0, segment: 0}, nil)
+	require.Len(t, prefix, 1)
+	require.Equal(t, fantasy.MessageRoleSystem, prefix[0].Role)
+	text := prefix[0].Content[0].(fantasy.TextPart).Text
+	require.Contains(t, text, "segment zero content")
+	require.Contains(t, text, "segment one content")
+	require.NotContains(t, text, "segment two content")
+}
+
+// TestDetectSegments_AsyncCloses exercises the real goroutine path —
+// multiple segments firing generation and flagging concurrently. Run
+// with -race to cover the per-goroutine clone isolation.
+func TestDetectSegments_AsyncCloses(t *testing.T) {
+	t.Parallel()
+
+	a, svc, nb, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.stubSuperseded = true
+	a.syncSegmentGen = false
+	a.segmentMaxSteps = 2
+
+	// Read then edit the same file across segments so flagging has
+	// work to do concurrently with generation.
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "go"})
+	for i := range 6 {
+		name := "view"
+		if i%2 == 1 {
+			name = "edit"
+		}
+		mkMsg(t, svc, sessionID, message.Assistant,
+			message.ToolCall{ID: "tc" + string(rune('a'+i)), Name: name, Input: `{"file_path":"a.go"}`, Finished: true})
+		mkMsg(t, svc, sessionID, message.Tool,
+			message.ToolResult{ToolCallID: "tc" + string(rune('a'+i)), Name: name, Content: bigContent()})
+	}
+	msgs, err := svc.List(t.Context(), sessionID)
+	require.NoError(t, err)
+
+	a.detectSegments(t.Context(), sessionID, msgs)
+	require.Eventually(t, func() bool {
+		rows, err := nb.ProcessedSegments(t.Context(), sessionID)
+		if err != nil {
+			return false
+		}
+		for _, r := range rows {
+			if r.State != notebook.SegmentProcessed {
+				return false
+			}
+		}
+		return len(rows) > 0
+	}, 10*time.Second, 10*time.Millisecond, "closed segments should reach processed")
+}
+
 func TestRebuildStepMessages_PreservesSystemAndTail(t *testing.T) {
 	t.Parallel()
 

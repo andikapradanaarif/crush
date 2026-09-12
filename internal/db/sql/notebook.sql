@@ -105,7 +105,7 @@ WHERE session_id = ?
 ORDER BY turn_number ASC;
 
 -- name: RecordProcessedSegment :exec
-INSERT OR IGNORE INTO processed_segments (
+INSERT INTO processed_segments (
     session_id,
     turn_number,
     segment_number,
@@ -113,7 +113,11 @@ INSERT OR IGNORE INTO processed_segments (
     end_index,
     state,
     created_at
-) VALUES (?, ?, ?, ?, ?, 'unprocessed', ?);
+) VALUES (?, ?, ?, ?, ?, 'unprocessed', ?)
+ON CONFLICT(session_id, turn_number, segment_number) DO UPDATE SET
+    start_index = excluded.start_index,
+    end_index = excluded.end_index
+WHERE processed_segments.state = 'unprocessed';
 
 -- name: ListProcessedSegments :many
 SELECT *

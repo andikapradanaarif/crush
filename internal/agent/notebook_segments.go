@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"hash/fnv"
 	"log/slog"
 	"os"
@@ -33,6 +34,12 @@ const (
 	// applied to failed segment generation attempts.
 	segmentRetryBase = 30 * time.Second
 	segmentRetryMax  = 10 * time.Minute
+	// segmentGenBurstLimit caps how many segment generations one
+	// detection pass may fire. A legacy session or crash-recovery
+	// backlog would otherwise launch a small-model call per uncovered
+	// segment at once; uncovered segments stay raw via pull-back and
+	// are picked up by later passes.
+	segmentGenBurstLimit = 4
 )
 
 // segmentKey identifies a segment within a session: its turn number
@@ -403,18 +410,7 @@ func (a *sessionAgent) detectSegments(ctx context.Context, sessionID string, msg
 	}
 
 	genCtx := context.WithoutCancel(ctx)
-	// Generation goroutines read the message slice concurrently with
-	// stub promotion mutating parts in place — hand them clones.
-	var sharedMsgs []message.Message
-	shared := func() []message.Message {
-		if sharedMsgs == nil {
-			sharedMsgs = make([]message.Message, len(msgs))
-			for i := range msgs {
-				sharedMsgs[i] = msgs[i].Clone()
-			}
-		}
-		return sharedMsgs
-	}
+	fired := 0
 	for _, s := range segs {
 		if s.open {
 			continue
@@ -430,24 +426,86 @@ func (a *sessionAgent) detectSegments(ctx context.Context, sessionID string, msg
 			}
 			row = notebook.ProcessedSegment{TurnNumber: s.turn, SegmentNumber: s.number, State: notebook.SegmentUnprocessed}
 			registry[key] = row
+		} else if row.State == notebook.SegmentUnprocessed &&
+			(row.StartIndex != int64(s.start) || row.EndIndex != int64(s.end)) {
+			// The recomputed extent drifted from what was recorded —
+			// refresh the row (upsert applies while unprocessed) so
+			// generation covers the current extent.
+			if err := a.notebook.RecordSegmentClose(detCtx, sessionID, s.turn, s.number, int64(s.start), int64(s.end)); err == nil {
+				row.StartIndex = int64(s.start)
+				row.EndIndex = int64(s.end)
+				registry[key] = row
+			}
 		}
 		if row.State == notebook.SegmentProcessed {
-			processed[key] = true
+			// Coverage claims are extent-checked: a processed row
+			// whose recorded extent no longer matches the recomputed
+			// segment fails closed and stays raw rather than dropping
+			// messages it may not actually summarize.
+			if row.StartIndex == int64(s.start) && row.EndIndex == int64(s.end) {
+				processed[key] = true
+			} else {
+				slog.Warn("Processed segment extent drifted; keeping raw",
+					"session_id", sessionID, "turn", s.turn, "segment", s.number,
+					"recorded", fmt.Sprintf("[%d,%d)", row.StartIndex, row.EndIndex),
+					"recomputed", fmt.Sprintf("[%d,%d)", s.start, s.end))
+			}
 			continue
 		}
-		if !segmentRetryDue(row, time.Now()) || !tracker.markInflight(key) {
+		if fired >= segmentGenBurstLimit ||
+			!segmentRetryDue(row, time.Now()) || !tracker.markInflight(key) {
 			continue
 		}
 		if err := a.notebook.RecordSegmentAttempt(detCtx, sessionID, s.turn, s.number); err != nil {
 			slog.Warn("Failed to record segment attempt", "session_id", sessionID, "error", err)
+			tracker.clearInflight(key)
+			continue
 		}
+		fired++
+		// Each goroutine gets a private deep clone: flagging and
+		// promotion mutate tool-result parts and mark pointers, so a
+		// shared or shallow clone would race with sibling goroutines
+		// and with stub promotion on this goroutine.
+		genMsgs := cloneMessagesForGen(msgs)
 		if a.syncSegmentGen {
-			a.generateSegment(genCtx, sessionID, s, shared()[s.start:s.end], shared(), tracker)
+			a.generateSegment(genCtx, sessionID, s, genMsgs[s.start:s.end], tracker)
 		} else {
-			go a.generateSegment(genCtx, sessionID, s, shared()[s.start:s.end], shared(), tracker)
+			go a.generateSegment(genCtx, sessionID, s, genMsgs[s.start:s.end], tracker)
+		}
+	}
+	// Flag superseded tool results once per pass that fired generation
+	// — the mid-run stub win ("a read superseded two segments ago gets
+	// stubbed") needs a pass over the full history, and one flag pass
+	// per segment goroutine would multiply the same DB writes.
+	if fired > 0 && a.stubSuperseded {
+		flagMsgs := cloneMessagesForGen(msgs)
+		if a.syncSegmentGen {
+			a.flagPrunableToolResults(genCtx, flagMsgs)
+		} else {
+			go a.flagPrunableToolResults(genCtx, flagMsgs)
 		}
 	}
 	return segs, processed
+}
+
+// cloneMessagesForGen deep-copies messages for a generation goroutine.
+// Message.Clone copies the parts slice but shares pointer fields —
+// ToolResult.Superseded is a *SupersededMark that stub flagging and
+// promotion both mutate, so the mark must be copied too or a
+// generation goroutine still aliases the live message's marks.
+func cloneMessagesForGen(msgs []message.Message) []message.Message {
+	out := make([]message.Message, len(msgs))
+	for i := range msgs {
+		out[i] = msgs[i].Clone()
+		for j, p := range out[i].Parts {
+			if tr, ok := p.(message.ToolResult); ok && tr.Superseded != nil {
+				mark := *tr.Superseded
+				tr.Superseded = &mark
+				out[i].Parts[j] = tr
+			}
+		}
+	}
+	return out
 }
 
 // segmentRegistry loads the processed_segments table into a lookup
@@ -499,15 +557,9 @@ func (a *sessionAgent) backfillSegmentRegistry(ctx context.Context, sessionID st
 // Completion — entries and the processed marker — lands in one
 // transaction inside GenerateSegmentEntries; on failure the in-flight
 // mark clears and the segment stays unprocessed, retryable under
-// backoff. Flagging runs over the full history, not the segment
-// slice: the mid-run stub win ("a read superseded two segments ago
-// gets stubbed") needs the later segment's pass over all messages to
-// see the write.
-func (a *sessionAgent) generateSegment(ctx context.Context, sessionID string, s segment, segMsgs, allMsgs []message.Message, tracker *segmentTracker) {
+// backoff.
+func (a *sessionAgent) generateSegment(ctx context.Context, sessionID string, s segment, segMsgs []message.Message, tracker *segmentTracker) {
 	defer tracker.clearInflight(s.key())
-	if a.stubSuperseded {
-		a.flagPrunableToolResults(ctx, allMsgs)
-	}
 	if err := a.notebook.GenerateSegmentEntries(ctx, sessionID, s.turn, s.number, int64(s.start), int64(s.end), segMsgs); err != nil {
 		slog.Error("Failed to generate segment entries", "session_id", sessionID, "turn", s.turn, "segment", s.number, "error", err)
 		return
@@ -580,16 +632,11 @@ func (a *sessionAgent) generateRunEndSegments(ctx context.Context, sessionID str
 		if row.State == notebook.SegmentProcessed || !tracker.markInflight(key) {
 			continue
 		}
-		segMsgs := make([]message.Message, s.end-s.start)
-		allMsgs := make([]message.Message, len(msgs))
-		for i := range msgs {
-			allMsgs[i] = msgs[i].Clone()
-		}
-		copy(segMsgs, allMsgs[s.start:s.end])
+		genMsgs := cloneMessagesForGen(msgs)
 		if a.syncSegmentGen {
-			a.generateSegment(ctx, sessionID, s, segMsgs, allMsgs, tracker)
+			a.generateSegment(ctx, sessionID, s, genMsgs[s.start:s.end], tracker)
 		} else {
-			go a.generateSegment(ctx, sessionID, s, segMsgs, allMsgs, tracker)
+			go a.generateSegment(ctx, sessionID, s, genMsgs[s.start:s.end], tracker)
 		}
 	}
 }
@@ -616,7 +663,13 @@ func prefixFingerprint(boundary int, bKey segmentKey, entries []notebook.Entry, 
 		write(e.EventNumber)
 		write(e.CompressionLevel)
 		write(e.TokenCount)
+		// Hash the text itself, not just its length: compaction
+		// rewrites entry text and only convention bumps the numeric
+		// fields the fingerprint reads.
+		h.Write([]byte(e.EntryText))
 		write(int64(len(e.EntryText)))
+		h.Write([]byte(e.EntryTextFull))
+		write(int64(len(e.EntryTextFull)))
 	}
 	for _, r := range refs {
 		h.Write([]byte(r))

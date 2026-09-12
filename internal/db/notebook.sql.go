@@ -529,7 +529,7 @@ func (q *Queries) MarkSegmentProcessed(ctx context.Context, arg MarkSegmentProce
 }
 
 const recordProcessedSegment = `-- name: RecordProcessedSegment :exec
-INSERT OR IGNORE INTO processed_segments (
+INSERT INTO processed_segments (
     session_id,
     turn_number,
     segment_number,
@@ -538,6 +538,10 @@ INSERT OR IGNORE INTO processed_segments (
     state,
     created_at
 ) VALUES (?, ?, ?, ?, ?, 'unprocessed', ?)
+ON CONFLICT(session_id, turn_number, segment_number) DO UPDATE SET
+    start_index = excluded.start_index,
+    end_index = excluded.end_index
+WHERE processed_segments.state = 'unprocessed'
 `
 
 type RecordProcessedSegmentParams struct {
