@@ -213,6 +213,7 @@ func (a *sessionAgent) flagPrunableToolResults(ctx context.Context, msgs []messa
 		if !ok || tr.Superseded != nil {
 			return
 		}
+		mk.Bytes = int64(len(tr.Content))
 		tr.Superseded = &mk
 		msgs[msgIdx].Parts[partIdx] = tr
 		dirty[msgIdx] = true
@@ -277,7 +278,10 @@ func (a *sessionAgent) flagPrunableToolResults(ctx context.Context, msgs []messa
 	// mtime whose file has since changed (or vanished) is stale
 	// regardless of which tool mutated it. Results without a recorded
 	// mtime are skipped: a failed stat can't distinguish a deleted
-	// file from a read that never touched the filesystem.
+	// file from a read that never touched the filesystem. Marks are
+	// attributed to the latest turn — countUserMessages is one past
+	// the maximum turn index.
+	detectTurn := max(currentTurn-1, 0)
 	for i, m := range msgs {
 		if m.Role != message.Tool {
 			continue
@@ -298,13 +302,13 @@ func (a *sessionAgent) flagPrunableToolResults(ctx context.Context, msgs []messa
 			case errors.Is(err, fs.ErrNotExist):
 				mark(i, j, message.SupersededMark{
 					Path: call.path,
-					Turn: currentTurn,
+					Turn: detectTurn,
 					Kind: message.StubKindDeleted,
 				})
 			case err == nil && fi.ModTime().UnixNano() != tr.FileMtime:
 				mark(i, j, message.SupersededMark{
 					Path: call.path,
-					Turn: currentTurn,
+					Turn: detectTurn,
 					Kind: message.StubKindModified,
 				})
 			}

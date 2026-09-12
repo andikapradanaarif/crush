@@ -728,7 +728,7 @@ func TestApplySupersededStubs_Kinds(t *testing.T) {
 	require.Contains(t, got[3].Content, "differed from a re-run")
 	require.Contains(t, got[3].Content, `"first line"`)
 	require.Contains(t, got[4].Content, "head")
-	require.Contains(t, got[4].Content, "bytes of ls output")
+	require.Contains(t, got[4].Content, "rest of ls output elided")
 	require.Contains(t, got[4].Content, "result:tc-stale")
 
 	// Originals untouched.

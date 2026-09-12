@@ -101,7 +101,7 @@ SELECT
     json_extract(value, '$.data.tool_call_id') as tool_call_id,
     json_extract(value, '$.data.name') as tool_name,
     json_extract(value, '$.data.superseded') as mark_json,
-    LENGTH(CAST(json_extract(value, '$.data.content') AS TEXT)) as content_bytes,
+    LENGTH(CAST(json_extract(value, '$.data.content') AS BLOB)) as content_bytes,
     SUBSTR(CAST(json_extract(value, '$.data.content') AS TEXT), 1, 1024) as content_head
 FROM messages, json_each(parts)
 WHERE json_extract(value, '$.type') = 'tool_result'

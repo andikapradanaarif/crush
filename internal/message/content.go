@@ -173,6 +173,10 @@ type SupersededMark struct {
 	Turn    int64    `json:"turn"`    // Turn containing the superseding event.
 	Applied bool     `json:"applied"` // True once the result renders as a stub.
 	Kind    StubKind `json:"kind,omitempty"`
+	// Bytes is the result's total content length at flag time — the
+	// stub label reports it and stats recompute exact savings from it
+	// without fetching full content.
+	Bytes int64 `json:"bytes,omitempty"`
 }
 
 // stubHeadPrefixBytes caps the head-prefix kept inside stale-result
@@ -202,8 +206,12 @@ func (m SupersededMark) StubText(tr ToolResult) string {
 		return fmt.Sprintf("[earlier %s output differed from a re-run at turn %d — it began %q; %s for the full output]",
 			tr.Name, m.Turn, headLine(tr.Content, stubHeadLineBytes), recall)
 	case StubKindStale:
-		return fmt.Sprintf("%s\n[%d bytes of %s output from turn %d elided; %s or re-run for the rest]",
-			headPrefix(tr.Content, stubHeadPrefixBytes), len(tr.Content), tr.Name, m.Turn, recall)
+		total := m.Bytes
+		if total == 0 {
+			total = int64(len(tr.Content))
+		}
+		return fmt.Sprintf("%s\n[rest of %s output elided (%d bytes, turn %d); %s or re-run for the rest]",
+			headPrefix(tr.Content, stubHeadPrefixBytes), tr.Name, total, m.Turn, recall)
 	default:
 		return fmt.Sprintf("[content of %s superseded by %s at turn %d; re-view for current state, or %s for the pre-edit snapshot]",
 			m.Path, m.ByTool, m.Turn, recall)
@@ -211,7 +219,8 @@ func (m SupersededMark) StubText(tr ToolResult) string {
 }
 
 // headPrefix returns the first n bytes of s, preferring a line
-// boundary inside the last quarter and never splitting a rune.
+// boundary inside the last quarter and never splitting a rune or an
+// ANSI escape sequence.
 func headPrefix(s string, n int) string {
 	if len(s) <= n {
 		return s
@@ -220,24 +229,17 @@ func headPrefix(s string, n int) string {
 	if i := strings.LastIndexByte(s[:cut], '\n'); i >= n*3/4 {
 		cut = i + 1
 	}
-	for cut > 0 && s[cut]&0xC0 == 0x80 {
-		cut--
-	}
-	return s[:cut]
+	return s[:stringext.CutANSISafeLeft(s, cut)]
 }
 
 // headLine returns the first line of s, capped at n bytes on a rune
-// boundary.
+// and ANSI-escape boundary.
 func headLine(s string, n int) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
 	}
 	if len(s) > n {
-		cut := n
-		for cut > 0 && s[cut]&0xC0 == 0x80 {
-			cut--
-		}
-		s = s[:cut] + "…"
+		s = s[:stringext.CutANSISafeLeft(s, n)] + "…"
 	}
 	return s
 }

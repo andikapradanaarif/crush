@@ -3,6 +3,8 @@ package tools
 import (
 	"fmt"
 	"strings"
+
+	"github.com/charmbracelet/crush/internal/stringext"
 )
 
 // TruncationProvenance records where content was cut: at capture,
@@ -22,15 +24,16 @@ const (
 
 // TruncateHeadTail caps content at maxBytes, keeping the head and tail
 // and replacing the middle with a labeled marker: what was cut, how
-// much, where the cut happened, and how to recover. It is byte-based
-// and never splits a UTF-8 rune.
+// much, where the cut happened, and how to recover. It is byte-based,
+// never splits a UTF-8 rune, and never leaves a partial ANSI escape at
+// the cut.
 func TruncateHeadTail(content string, maxBytes int, prov TruncationProvenance) string {
 	if len(content) <= maxBytes {
 		return content
 	}
 	half := maxBytes / 2
-	headEnd := cutRuneBoundaryLeft(content, half)
-	tailStart := cutRuneBoundaryRight(content, len(content)-half)
+	headEnd := stringext.CutANSISafeLeft(content, half)
+	tailStart := stringext.CutANSISafeRight(content, len(content)-half)
 	head := content[:headEnd]
 	tail := content[tailStart:]
 	omitted := content[headEnd:tailStart]
@@ -46,30 +49,6 @@ func TruncateOutput(content string) string {
 
 func truncateOutput(content string) string {
 	return TruncateOutput(content)
-}
-
-// cutRuneBoundaryLeft backs n off to a rune boundary so s[:n] never
-// splits a multi-byte UTF-8 rune.
-func cutRuneBoundaryLeft(s string, n int) int {
-	if n > len(s) {
-		n = len(s)
-	}
-	for n > 0 && n < len(s) && s[n]&0xC0 == 0x80 {
-		n--
-	}
-	return n
-}
-
-// cutRuneBoundaryRight advances start to a rune boundary so s[start:]
-// never splits a multi-byte UTF-8 rune.
-func cutRuneBoundaryRight(s string, start int) int {
-	if start < 0 {
-		start = 0
-	}
-	for start < len(s) && s[start]&0xC0 == 0x80 {
-		start++
-	}
-	return start
 }
 
 func humanBytes(n int64) string {
