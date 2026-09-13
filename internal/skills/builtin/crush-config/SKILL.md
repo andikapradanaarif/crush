@@ -169,10 +169,11 @@ verify remove [--name NAME]    # alias: rm; without --name clears every check
 
 Verification commands are deterministic checks the end-of-turn gate runs
 before a run may report completion; the command's exit code is the verdict.
-They run without the bash tool's permission prompt and banned-command
-blocking — declaring one pre-approves it — once per gate turn and once per
-retry, so they must be idempotent and side-effect-safe. Only named checks
-can be removed individually.
+They gate every file mutation — a dependency or manifest edit breaks builds
+as readily as source does. They run without the bash tool's permission
+prompt and banned-command blocking — declaring one pre-approves it — once
+per gate turn and once per retry, so they must be idempotent and
+side-effect-safe. Only named checks can be removed individually.
 
 ```bash
 verify add --command "go test ./..." --name tests --timeout 300

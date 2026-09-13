@@ -48,9 +48,12 @@ type BashResponseMetadata struct {
 	// Done/ExitCode record the run's verdict when the command completed
 	// within the tool call. A non-zero exit is reported as text output,
 	// not an error response — consumers that need the verdict (e.g. the
-	// verification gate) must read exit_code, not the result type.
-	Done     bool `json:"done,omitempty"`
-	ExitCode int  `json:"exit_code,omitempty"`
+	// verification gate) must read exit_code, not the result type. Both
+	// marshal explicitly (no omitempty) so done:true + exit_code:0 is
+	// distinguishable from a still-running command by a consumer that
+	// checks key presence.
+	Done     bool `json:"done"`
+	ExitCode int  `json:"exit_code"`
 }
 
 const (

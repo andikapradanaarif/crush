@@ -28,9 +28,11 @@ type JobOutputResponseMetadata struct {
 	Description      string `json:"description"`
 	Done             bool   `json:"done"`
 	WorkingDirectory string `json:"working_directory"`
-	// ExitCode is the completed command's verdict. Like bash, a non-zero
-	// exit is text output — consumers must read this field.
-	ExitCode int `json:"exit_code,omitempty"`
+	// ExitCode is the completed command's verdict — marshaled explicitly
+	// so done:true + exit_code:0 is distinguishable by key presence.
+	// Like bash, a non-zero exit is text output — consumers must read
+	// this field, not the result type. Only meaningful when Done.
+	ExitCode int `json:"exit_code"`
 }
 
 func NewJobOutputTool() fantasy.AgentTool {

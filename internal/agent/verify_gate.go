@@ -285,7 +285,9 @@ func (a *sessionAgent) runGateChecks(ctx context.Context, workingDir string, pen
 			// the rest pending; a cancelled run must not record a failed
 			// verdict for a check that never completed.
 			return out
-		case err != nil && checkCtx.Err() == context.DeadlineExceeded:
+		case checkCtx.Err() == context.DeadlineExceeded:
+			// The deadline fired — a kill may surface as a bare exit
+			// code with no error, so check the context first.
 			out[uc.check.Check] = resolvedCheck{
 				state:  message.VerificationFailed,
 				detail: fmt.Sprintf("timed out after %s", timeout),

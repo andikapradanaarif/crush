@@ -271,21 +271,24 @@ Deterministic classification on the touched path — biased toward
 verifying, since a false negative (skipping a needed check) costs a
 silently wrong "done" while a false positive costs one lint run:
 
-| Edit class                     | Check                         | Runs      |
-| ------------------------------ | ----------------------------- | --------- |
-| Source file, LSP handles it    | diagnostics delta             | decorator |
-| Source file (LSP or not)       | + every configured verify cmd | gate      |
-| Source file on a tested path   | + targeted test (same pkg)    | gate      |
-| Config/docs/comments-only      | none, or lint                 | gate      |
-| Non-code (markdown, JSON data) | syntax check if cheap         | decorator |
+| Edit class                  | Check                         | Runs      |
+| --------------------------- | ----------------------------- | --------- |
+| Source file, LSP handles it | diagnostics delta             | decorator |
+| Any file mutation           | + every configured verify cmd | gate      |
+| Go file on a tested path    | + targeted test (same pkg)    | gate      |
+
+Declared verify commands are not a compile-check fallback — a user who
+configures `make check` is declaring a project gate, and a `go.mod` or
+`Makefile` edit breaks builds as readily as source does. They apply to
+every mutation the write tools make; the diagnostics delta stays
+LSP-gated and the package test stays `.go`-gated.
 
 The Runs column is the spec: the decorator runs only what is free
-inline — the diagnostics delta (already inline today) and trivially
-cheap syntax validation. Anything that spawns a build/test/lint
-process defers to the gate, once per turn rather than per edit; the
-decorator records it `pending` in the `"verification"` metadata —
-which is what "never ran" means to the trigger below, distinct from
-_unverified_ (no check applies at all).
+inline — the diagnostics delta (already inline today). Anything that
+spawns a build/test/lint process defers to the gate, once per turn
+rather than per edit; the decorator records it `pending` in the
+`"verification"` metadata — which is what "never ran" means to the
+trigger below, distinct from _unverified_ (no check applies at all).
 
 "Targeted test" = tests in the same package/directory as the changed
 file, using the `normalizedPath` signal. Full suite is a periodic or

@@ -62,26 +62,33 @@ func openInLSPs(
 // waitForLSPDiagnostics waits briefly for diagnostics publication after a file
 // has been opened. Intended for read-only situations where viewing up-to-date
 // files matters but latency should remain low (i.e. when using the view tool).
+// It reports whether every handling client settled before its deadline —
+// false means a snapshot read now may be stale.
 func waitForLSPDiagnostics(
 	ctx context.Context,
 	manager *lsp.Manager,
 	filepath string,
 	timeout time.Duration,
-) {
+) bool {
 	if filepath == "" || manager == nil || timeout <= 0 {
-		return
+		return true
 	}
 
 	var wg sync.WaitGroup
+	var settled atomic.Bool
+	settled.Store(true)
 	for client := range manager.Clients().Seq() {
 		if !client.HandlesFile(filepath) {
 			continue
 		}
 		wg.Go(func() {
-			client.WaitForDiagnostics(ctx, timeout)
+			if !client.WaitForDiagnostics(ctx, timeout) {
+				settled.Store(false)
+			}
 		})
 	}
 	wg.Wait()
+	return settled.Load()
 }
 
 // NotifyLSPs notifies LSP servers that a file has changed and waits for
@@ -342,8 +349,10 @@ func AnyClientHandles(manager *lsp.Manager, filepath string) bool {
 
 // PrepareDiagnosticsBaseline ensures the file is open in its LSP clients
 // and waits briefly for initial diagnostics — the pre-mutation step so a
-// never-opened file does not read an empty baseline.
-func PrepareDiagnosticsBaseline(ctx context.Context, manager *lsp.Manager, filepath string, timeout time.Duration) {
+// never-opened file does not read an empty baseline. It reports whether
+// the baseline settled: false means a snapshot taken now may be stale or
+// empty, so a delta computed against it is untrustworthy.
+func PrepareDiagnosticsBaseline(ctx context.Context, manager *lsp.Manager, filepath string, timeout time.Duration) bool {
 	openInLSPs(ctx, manager, filepath)
-	waitForLSPDiagnostics(ctx, manager, filepath, timeout)
+	return waitForLSPDiagnostics(ctx, manager, filepath, timeout)
 }

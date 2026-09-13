@@ -11,27 +11,14 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 )
 
-// sourceFileExts are the file extensions the check selector treats as
-// source code. Non-source files (docs, config, data) select no gate
-// checks.
-var sourceFileExts = map[string]bool{
-	".go": true, ".ts": true, ".tsx": true, ".js": true, ".jsx": true,
-	".mjs": true, ".cjs": true, ".py": true, ".rs": true, ".c": true,
-	".cc": true, ".cpp": true, ".h": true, ".hpp": true, ".java": true,
-	".rb": true, ".php": true, ".cs": true, ".swift": true, ".kt": true,
-	".kts": true, ".m": true, ".scala": true, ".ex": true, ".exs": true,
-	".erl": true, ".hrl": true, ".hs": true, ".clj": true, ".lua": true,
-}
-
 // pendingChecksForEdit returns the gate-run checks a mutation to absPath
 // selects: every configured verify command (a declared project check
-// applies whether or not an LSP covers the file — `make check` is not a
-// compile-check fallback), plus a same-package test for Go files in a
+// gates ANY file mutation — a dependency or manifest edit breaks builds
+// as readily as source does), plus a same-package test for Go files in a
 // tested directory. The decorator records the result as pending entries
 // in the verification metadata.
 func pendingChecksForEdit(cfg *config.Config, workingDir, absPath string) []message.VerificationCheck {
-	ext := strings.ToLower(filepath.Ext(absPath))
-	if cfg == nil || !sourceFileExts[ext] {
+	if cfg == nil {
 		return nil
 	}
 	var checks []message.VerificationCheck
@@ -43,7 +30,7 @@ func pendingChecksForEdit(cfg *config.Config, workingDir, absPath string) []mess
 			Timeout: int(v.TimeoutDuration() / time.Second),
 		})
 	}
-	if ext == ".go" {
+	if strings.EqualFold(filepath.Ext(absPath), ".go") {
 		dir := filepath.Dir(absPath)
 		rel, err := filepath.Rel(workingDir, dir)
 		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && dirHasGoTestFile(dir) {

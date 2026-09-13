@@ -422,7 +422,9 @@ Flags:
 
 Manage verification commands — deterministic checks the end-of-turn gate
 runs before a run may report completion. A command's exit code is the
-verdict; the model's summary of the output is not consulted.
+verdict; the model's summary of the output is not consulted. Declared
+checks gate every file mutation — a dependency or manifest edit breaks
+builds as readily as source does.
 
 ```text
 Usage:

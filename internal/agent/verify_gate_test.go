@@ -43,9 +43,11 @@ func TestPendingChecksForEdit(t *testing.T) {
 		path string
 		want []string // expected check names
 	}{
-		{name: "non-source file selects nothing", cfg: cfgWithVerify, path: filepath.Join(dir, "README.md")},
-		{name: "source without LSP gets verify commands", cfg: cfgWithVerify, path: filepath.Join(plain, "bar.go"), want: []string{"verify:build"}},
+		{name: "non-source file still gets declared checks", cfg: cfgWithVerify, path: filepath.Join(dir, "README.md"), want: []string{"verify:build"}},
+		{name: "manifest edit gets declared checks", cfg: cfgWithVerify, path: filepath.Join(dir, "go.mod"), want: []string{"verify:build"}},
+		{name: "source gets verify commands", cfg: cfgWithVerify, path: filepath.Join(plain, "bar.go"), want: []string{"verify:build"}},
 		{name: "no verify config yields no pending", cfg: cfgEmpty, path: filepath.Join(plain, "bar.go"), want: nil},
+		{name: "non-source without config selects nothing", cfg: cfgEmpty, path: filepath.Join(dir, "README.md"), want: nil},
 		{name: "go file in tested dir gets package test", cfg: cfgEmpty, path: filepath.Join(pkgDir, "foo.go"), want: []string{"package-test:pkg"}},
 		{name: "verify and package test compose", cfg: cfgWithVerify, path: filepath.Join(pkgDir, "foo.go"), want: []string{"verify:build", "package-test:pkg"}},
 		{name: "file outside working dir gets no package test", cfg: cfgEmpty, path: filepath.Join(t.TempDir(), "x.go"), want: nil},
@@ -227,6 +229,26 @@ func TestRunGateChecks(t *testing.T) {
 		})
 		require.Equal(t, message.VerificationPassed, res["verify:test"].state)
 	})
+
+	t.Run("hung check times out as failed", func(t *testing.T) {
+		res := a.runGateChecks(t.Context(), dir, []gateCheckOutcome{
+			{toolCallID: "tc-hang", stepIndex: 0, check: message.VerificationCheck{
+				Check: "verify:slow", State: message.VerificationPending,
+				Command: "sleep 60", Timeout: 1,
+			}},
+		}, nil)
+		require.Equal(t, message.VerificationFailed, res["verify:slow"].state)
+		require.Contains(t, res["verify:slow"].detail, "timed out")
+	})
+
+	t.Run("run cancel aborts remaining checks", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel() // cancelled before the first check runs
+		res := a.runGateChecks(ctx, dir, []gateCheckOutcome{
+			mkPending("verify:x", "exit 1", 0),
+		}, nil)
+		require.Empty(t, res, "a cancelled run records no verdict for unrunnable checks")
+	})
 }
 
 func TestMergeVerificationResolved(t *testing.T) {
@@ -376,6 +398,28 @@ func TestRunVerificationGate(t *testing.T) {
 		msgs, err := svc.List(t.Context(), sessionID)
 		require.NoError(t, err)
 		require.Contains(t, msgs[0].ToolResults()[0].Metadata, `"state":"failed"`)
+	})
+
+	t.Run("retry prepends ahead of a queued user prompt", func(t *testing.T) {
+		t.Parallel()
+		a, _, sessionID := newGateTestAgent(t, &config.Config{})
+		// A user prompt submitted during the run sits behind the gate's
+		// retry — the repair turn runs first.
+		a.messageQueue.Set(sessionID, []SessionAgentCall{{
+			SessionID: sessionID, Prompt: "user follow-up",
+		}})
+		result := &fantasy.AgentResult{Steps: []fantasy.StepResult{
+			stepWith(fantasy.FinishReasonToolCalls, editWith(`{"verification":[{"check":"diagnostics","state":"failed"}]}`)),
+			stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),
+		}}
+		queued := a.runVerificationGate(t.Context(), SessionAgentCall{
+			SessionID: sessionID, RunID: "run-1",
+		}, result, assistantMsg())
+		require.True(t, queued)
+		q, _ := a.messageQueue.Get(sessionID)
+		require.Len(t, q, 2)
+		require.Contains(t, q[0].Prompt, "Verification failed", "retry is prepended")
+		require.Equal(t, "user follow-up", q[1].Prompt)
 	})
 
 	t.Run("exhausted budget surfaces on the assistant message", func(t *testing.T) {

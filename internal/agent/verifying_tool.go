@@ -96,7 +96,7 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 
 	// Baseline before the mutation: open the file so a first-ever edit
 	// does not read an empty snapshot, then wait for the publish.
-	tools.PrepareDiagnosticsBaseline(ctx, v.lspManager, absPath, diagnosticsBaselineTimeout)
+	baselineSettled := tools.PrepareDiagnosticsBaseline(ctx, v.lspManager, absPath, diagnosticsBaselineTimeout)
 	baseline := tools.SnapshotDiagnostics(v.lspManager)
 
 	resp, err := v.inner.Run(ctx, call)
@@ -115,6 +115,12 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 	state := message.VerificationPassed
 	detail := ""
 	switch {
+	case !baselineSettled:
+		// A timed-out baseline can be empty — every pre-existing error
+		// would read as "new". The delta is untrustworthy in both
+		// directions: record unverified, not fail or pass.
+		state = message.VerificationUnverified
+		detail = "baseline diagnostics did not settle before timeout"
 	case !settled:
 		// A timed-out settle can read a stale snapshot — record
 		// unverified, not a pass that was never earned.
