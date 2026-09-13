@@ -835,3 +835,60 @@ func TestCountNotebookReViews_PendingCallFinishes(t *testing.T) {
 	p, _ = pending.Get("sess")
 	require.NotContains(t, p, "tc-1")
 }
+
+// taggedGen emits one entry per event tagged to file:x.go — enough to
+// make the rendered selection inject that basename into the covered
+// file set.
+type taggedGen struct{}
+
+func (taggedGen) Generate(_ context.Context, _ string, events []notebook.EntryInput) ([]notebook.GeneratedEntry, error) {
+	entries := make([]notebook.GeneratedEntry, len(events))
+	for i, ev := range events {
+		entries[i] = notebook.GeneratedEntry{
+			EventType: ev.EventType,
+			Title:     ev.Title,
+			Text:      "## " + ev.Title,
+			Tags:      []string{"file:x.go"},
+		}
+	}
+	return entries, nil
+}
+
+// TestCoveredReViews_CountsViewOnInjectedFile is the positive half of
+// the re-view instrumentation: render a prefix that injects the x.go
+// entry, then a finished view call on that file must count as a
+// covered re-view — the signal the whole track exists to measure.
+func TestCoveredReViews_CountsViewOnInjectedFile(t *testing.T) {
+	t.Parallel()
+
+	a, _, nb, sessionID := newSegmentTestAgent(t, taggedGen{})
+	a.nbStats = csync.NewMap[string, notebook.Stats]()
+	a.nbScanIdx = csync.NewMap[string, int]()
+	a.nbPendingReads = csync.NewMap[string, map[string]string]()
+
+	// Commit an entry tagged file:x.go as turn 1, segment 1.
+	editMsgs := []message.Message{
+		segAssistant("", message.ToolCall{ID: "tc-e", Name: "edit", Input: `{"file_path":"internal/x.go"}`, Finished: true}),
+		segTool(message.ToolResult{ToolCallID: "tc-e", Name: "edit", Content: "ok"}),
+	}
+	require.NoError(t, nb.GenerateSegmentEntries(t.Context(), sessionID, 1, 1, 0, 2, editMsgs))
+
+	// Render — the covered entry is selected, so its basename lands
+	// in the cached file set.
+	msgs := []message.Message{segUser("go")}
+	prefix := a.notebookPrefix(t.Context(), sessionID, msgs, len(msgs), segmentKey{turn: 2, segment: 0}, nil)
+	require.NotEmpty(t, prefix)
+	cached, ok := a.prefixCache.Get(sessionID)
+	require.True(t, ok)
+	require.Contains(t, cached.files, "x.go")
+
+	// The first scan initializes the cursor; the second finds the
+	// finished view call and joins it against the injected set.
+	a.countNotebookReViews(sessionID, msgs)
+	msgs = append(msgs, segAssistant("", message.ToolCall{
+		ID: "tc-1", Name: "view", Input: `{"file_path":"internal/x.go"}`, Finished: true,
+	}))
+	a.countNotebookReViews(sessionID, msgs)
+	got, _ := a.nbStats.Get(sessionID)
+	require.Equal(t, 1, got.CoveredReViews)
+}

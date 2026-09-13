@@ -45,6 +45,11 @@ func (s *Status) ClearInfoMsg() {
 	s.msg = util.InfoMsg{}
 }
 
+// InfoMsg returns the currently displayed info message.
+func (s *Status) InfoMsg() util.InfoMsg {
+	return s.msg
+}
+
 // SetWidth sets the width of the status bar and help view.
 func (s *Status) SetWidth(width int) {
 	helpStyle := s.com.Styles.Status.Help

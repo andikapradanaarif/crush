@@ -112,7 +112,8 @@ func (sel selectionInput) workingSetMatch(e notebook.Entry) (confident, ambiguou
 // full tracked path or a distinctive suffix of it (two or more
 // components, e.g. "api/auth.go"). Generated entry text spells paths
 // relative to the working dir, so only suffixes with a directory
-// component count as disambiguation.
+// component count as disambiguation. The match must sit at a
+// boundary — "webapi/auth.go" must not satisfy "api/auth.go".
 func textNamesPath(text, p string) bool {
 	if text == "" {
 		return false
@@ -120,13 +121,39 @@ func textNamesPath(text, p string) bool {
 	if strings.Contains(text, p) {
 		return true
 	}
-	parts := strings.FieldsFunc(p, func(r rune) bool { return r == '/' })
+	parts := strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' })
 	for k := len(parts); k >= 2; k-- {
-		if strings.Contains(text, strings.Join(parts[len(parts)-k:], "/")) {
+		suffix := strings.Join(parts[len(parts)-k:], "/")
+		if containsPathBounded(text, suffix) {
 			return true
 		}
 	}
 	return false
+}
+
+// containsPathBounded reports whether text contains sub at a path
+// boundary — neither the byte before nor after may extend the path.
+func containsPathBounded(text, sub string) bool {
+	for idx := strings.Index(text, sub); idx >= 0; {
+		beforeOK := idx == 0 || !isPathByte(text[idx-1])
+		after := idx + len(sub)
+		afterOK := after == len(text) || !isPathByte(text[after])
+		if beforeOK && afterOK {
+			return true
+		}
+		n := strings.Index(text[idx+1:], sub)
+		if n < 0 {
+			return false
+		}
+		idx += n + 1
+	}
+	return false
+}
+
+// isPathByte reports whether b can be part of a file path token.
+func isPathByte(b byte) bool {
+	return b == '/' || b == '\\' || b == '.' || b == '-' || b == '_' ||
+		'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || '0' <= b && b <= '9'
 }
 
 // entryIsDead reports whether every resolved file: tag on the entry
@@ -258,7 +285,11 @@ func selectNotebookEntries(entries []notebook.Entry, refs []string, floor segmen
 		}
 	}
 	// Pass 2.5: entries tagged to the session working set, newest
-	// first. Confident matches run before ambiguous collisions — a
+	// first. The bound is file recency, not entry age: a recently
+	// touched file's older entries still promote — deliberate, since
+	// a file touched this segment keeps all its history relevant;
+	// the 64-file recency cap bounds the set itself.
+	// Confident matches run before ambiguous collisions — a
 	// basename shared by two tracked files only promotes entries
 	// whose text names one of the tracked paths. Dead entries are
 	// skipped entirely: a dead tag is by definition a working-set

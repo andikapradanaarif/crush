@@ -779,7 +779,12 @@ func (a *sessionAgent) buildSelectionInput(ctx context.Context, sessionID string
 		return sel
 	}
 	paths, err := a.filetracker.ListRecentReadFiles(ctx, sessionID, workingSetFileCap)
-	if err != nil || len(paths) == 0 {
+	if err != nil {
+		// Silent here would disable the pass invisibly every step.
+		slog.Debug("Working-set read list failed; skipping pass", "session_id", sessionID, "error", err)
+		return sel
+	}
+	if len(paths) == 0 {
 		return sel
 	}
 	sel.workingSet = make(map[string][]string, len(paths))

@@ -212,10 +212,13 @@ type UI struct {
 
 	focus uiFocusState
 	state uiState
-	// nbStallWarned records that the status bar currently shows our
-	// notebook-stall warning, so the resolved notification only
-	// clears a warning this model set.
-	nbStallWarned bool
+	// nbStallWarned records that this model raised a notebook-stall
+	// warning; nbStallSession/nbStallReason scope the resolved
+	// notification so a different session's recovery — or an
+	// unrelated info message that replaced ours — isn't cleared.
+	nbStallWarned  bool
+	nbStallSession string
+	nbStallReason  string
 
 	// Frame memoization (see framecache.go). scrollOnlyUpdate is set by
 	// handlers that change nothing but the chat scroll position; frameDirty
@@ -4883,19 +4886,23 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 		return m.handleAWSSSOAuthResult(n.Message)
 	case notify.TypeNotebookStall:
 		// No TTL — a stalled condition may persist far longer than
-		// any timeout; the resolved notification clears it. The flag
-		// scopes the clear so a resolved event can't wipe an
-		// unrelated info message.
+		// any timeout; the resolved notification clears it.
 		m.nbStallWarned = true
+		m.nbStallSession = n.SessionID
+		m.nbStallReason = n.Message
 		m.status.SetInfoMsg(util.InfoMsg{
 			Type: util.InfoTypeWarn,
 			Msg:  n.Message,
 		})
 		return nil
 	case notify.TypeNotebookStallResolved:
-		if m.nbStallWarned {
+		if m.nbStallWarned && n.SessionID == m.nbStallSession {
 			m.nbStallWarned = false
-			m.status.ClearInfoMsg()
+			// Clear only if our warning is still what's displayed —
+			// a newer info message may have replaced it.
+			if m.status.InfoMsg().Msg == m.nbStallReason {
+				m.status.ClearInfoMsg()
+			}
 		}
 		return nil
 	default:
