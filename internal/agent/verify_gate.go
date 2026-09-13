@@ -132,6 +132,11 @@ func (a *sessionAgent) runVerificationGate(ctx context.Context, call SessionAgen
 				len(failed), call.VerificationAttempts, headline))
 			if err := a.messages.Update(ctx, *currentAssistant); err != nil {
 				slog.Error("Failed to record verification exhaustion", "error", err, "session_id", call.SessionID)
+			} else if err := a.messages.FlushAll(ctx); err != nil {
+				// Same flush race as the outcome writes: a fast notebook
+				// goroutine would generate this turn's entries without
+				// the exhaustion line.
+				slog.Error("Failed to flush verification exhaustion", "error", err, "session_id", call.SessionID)
 			}
 		}
 		return false
