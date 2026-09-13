@@ -2139,10 +2139,13 @@ func (a *sessionAgent) countNotebookReViews(sessionID string, msgs []message.Mes
 			if !readToolNames[tc.Name] {
 				continue
 			}
-			if tc.Finished {
-				newCalls = append(newCalls, toolCallFilePath(tc.Input))
-			} else {
-				pending[tc.ID] = toolCallFilePath(tc.Input)
+			p := toolCallFilePath(tc.Input)
+			switch {
+			case tc.Finished:
+				newCalls = append(newCalls, p)
+			case p != "":
+				// No path to join against later — don't queue it.
+				pending[tc.ID] = p
 			}
 		}
 	}

@@ -222,7 +222,10 @@ type Options struct {
 	// OnCompactionStall fires when Compact makes no progress for
 	// several consecutive rounds — a PreCompact hook denying forever,
 	// or every remaining entry pinned. It never overrides the deny or
-	// pin; it only warns. reason describes the cause.
+	// pin; it only warns. reason describes the cause; an EMPTY reason
+	// signals resolution — fired once on the progress round that ends
+	// a warned streak, letting the UI clear the warning instead of
+	// waiting out a TTL.
 	OnCompactionStall func(sessionID, reason string)
 }
 

@@ -212,13 +212,10 @@ type UI struct {
 
 	focus uiFocusState
 	state uiState
-	// nbStallWarned records that this model raised a notebook-stall
-	// warning; nbStallSession/nbStallReason scope the resolved
-	// notification so a different session's recovery — or an
-	// unrelated info message that replaced ours — isn't cleared.
-	nbStallWarned  bool
-	nbStallSession string
-	nbStallReason  string
+	// nbStallWarned records the stall warning text this model raised
+	// per session, so a resolved notification only clears its own
+	// session's warning — and only while it's still displayed.
+	nbStallWarned map[string]string
 
 	// Frame memoization (see framecache.go). scrollOnlyUpdate is set by
 	// handlers that change nothing but the chat scroll position; frameDirty
@@ -1382,7 +1379,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if ttl <= 0 {
 			ttl = DefaultStatusTTL
 		}
-		cmds = append(cmds, clearInfoMsgCmd(ttl))
+		cmds = append(cmds, clearInfoMsgCmd(ttl, m.status.MsgSeq()))
 	case app.UpdateAvailableMsg:
 		text := fmt.Sprintf("Crush update available: v%s → v%s.", msg.CurrentVersion, msg.LatestVersion)
 		if msg.IsDevelopment {
@@ -1394,11 +1391,11 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Msg:  text,
 			TTL:  ttl,
 		})
-		cmds = append(cmds, clearInfoMsgCmd(ttl))
+		cmds = append(cmds, clearInfoMsgCmd(ttl, m.status.MsgSeq()))
 	case workspace.ConnectionEvent:
 		cmds = append(cmds, m.handleConnectionEvent(msg)...)
 	case util.ClearStatusMsg:
-		m.status.ClearInfoMsg()
+		m.status.ClearInfoMsgIf(msg.Seq)
 	case completions.CompletionItemsLoadedMsg:
 		if m.completionsOpen {
 			m.completions.SetItems(msg.Files, msg.Resources)
@@ -1569,7 +1566,7 @@ func (m *UI) handleConnectionEvent(msg workspace.ConnectionEvent) []tea.Cmd {
 		}
 	}
 	m.status.SetInfoMsg(info)
-	cmds := []tea.Cmd{clearInfoMsgCmd(info.TTL)}
+	cmds := []tea.Cmd{clearInfoMsgCmd(info.TTL, m.status.MsgSeq())}
 	if msg.State == workspace.ConnectionRecovered && m.session != nil {
 		cmds = append(cmds, m.loadSession(m.session.ID))
 	}
@@ -4887,20 +4884,22 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 	case notify.TypeNotebookStall:
 		// No TTL — a stalled condition may persist far longer than
 		// any timeout; the resolved notification clears it.
-		m.nbStallWarned = true
-		m.nbStallSession = n.SessionID
-		m.nbStallReason = n.Message
+		if m.nbStallWarned == nil {
+			m.nbStallWarned = map[string]string{}
+		}
+		m.nbStallWarned[n.SessionID] = n.Message
 		m.status.SetInfoMsg(util.InfoMsg{
 			Type: util.InfoTypeWarn,
 			Msg:  n.Message,
 		})
 		return nil
 	case notify.TypeNotebookStallResolved:
-		if m.nbStallWarned && n.SessionID == m.nbStallSession {
-			m.nbStallWarned = false
-			// Clear only if our warning is still what's displayed —
-			// a newer info message may have replaced it.
-			if m.status.InfoMsg().Msg == m.nbStallReason {
+		// Clear only the warning this session raised, and only if it
+		// is still what's displayed — a newer info message may have
+		// replaced it.
+		if reason, warned := m.nbStallWarned[n.SessionID]; warned {
+			delete(m.nbStallWarned, n.SessionID)
+			if m.status.InfoMsg().Msg == reason {
 				m.status.ClearInfoMsg()
 			}
 		}
