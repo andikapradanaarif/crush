@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"charm.land/fantasy"
@@ -87,33 +88,44 @@ func waitForLSPDiagnostics(
 // updated diagnostics. Use this after edit/multiedit operations.
 // When filepath is empty, refreshes all open files across all LSP clients
 // and sends a workspace-level change notification for full re-analysis.
+//
+// It reports whether the post-change diagnostics settled within the wait:
+// false means at least one handling client timed out or was cancelled, so
+// a snapshot taken now may be stale — a verification caller must treat
+// that as unknown, not clean.
 func NotifyLSPs(
 	ctx context.Context,
 	manager *lsp.Manager,
 	filepath string,
-) {
+) bool {
 	if manager == nil {
-		return
+		return true
 	}
 	if filepath == "" {
 		// No specific file — refresh all open files for all clients.
 		var wg sync.WaitGroup
+		var settled atomic.Bool
+		settled.Store(true)
 		for client := range manager.Clients().Seq() {
 			wg.Go(func() {
 				client.RefreshOpenFiles(ctx)
 				if err := client.NotifyWorkspaceChange(ctx); err != nil {
 					slog.WarnContext(ctx, "Failed to notify workspace change", "error", err)
 				}
-				client.WaitForDiagnostics(ctx, 5*time.Second)
+				if !client.WaitForDiagnostics(ctx, 5*time.Second) {
+					settled.Store(false)
+				}
 			})
 		}
 		wg.Wait()
-		return
+		return settled.Load()
 	}
 
 	manager.Start(ctx, filepath)
 
 	var wg sync.WaitGroup
+	var settled atomic.Bool
+	settled.Store(true)
 	for client := range manager.Clients().Seq() {
 		if !client.HandlesFile(filepath) {
 			continue
@@ -121,10 +133,13 @@ func NotifyLSPs(
 		_ = client.OpenFileOnDemand(ctx, filepath)
 		_ = client.NotifyChange(ctx, filepath)
 		wg.Go(func() {
-			client.WaitForDiagnostics(ctx, 5*time.Second)
+			if !client.WaitForDiagnostics(ctx, 5*time.Second) {
+				settled.Store(false)
+			}
 		})
 	}
 	wg.Wait()
+	return settled.Load()
 }
 
 // FormatDiagnostics renders the file and project diagnostics as a
@@ -271,7 +286,10 @@ func countSeverity(diagnostics []string, severity string) int {
 type DiagnosticsSnapshot map[string]int
 
 // SnapshotDiagnostics returns the current project-wide error diagnostics
-// as a multiset keyed by "path|line|character|message".
+// as a multiset keyed by "path|message". Position is deliberately
+// excluded: an edit that shifts a pre-existing error's line must not
+// read as a new error — that is the failure mode the baseline delta
+// exists to absorb.
 func SnapshotDiagnostics(manager *lsp.Manager) DiagnosticsSnapshot {
 	snapshot := DiagnosticsSnapshot{}
 	if manager == nil {
@@ -288,9 +306,7 @@ func SnapshotDiagnostics(manager *lsp.Manager) DiagnosticsSnapshot {
 				if diag.Severity != protocol.SeverityError {
 					continue
 				}
-				key := fmt.Sprintf("%s|%d|%d|%s", path,
-					diag.Range.Start.Line, diag.Range.Start.Character,
-					diag.Message)
+				key := fmt.Sprintf("%s|%s", path, diag.Message)
 				snapshot[key]++
 			}
 		}

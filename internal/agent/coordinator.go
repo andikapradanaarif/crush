@@ -1053,8 +1053,8 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	cfg := c.cfg.Config()
 	workingDir := c.cfg.WorkingDir()
 	filteredTools = wrapToolsWithVerification(filteredTools, c.lspManager, workingDir,
-		func(absPath string, lspCovered bool) []message.VerificationCheck {
-			return pendingChecksForEdit(cfg, workingDir, absPath, lspCovered)
+		func(absPath string) []message.VerificationCheck {
+			return pendingChecksForEdit(cfg, workingDir, absPath)
 		})
 
 	// Wrap tools with hook interception for the top-level agent only.

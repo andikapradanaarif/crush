@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,25 +24,24 @@ var sourceFileExts = map[string]bool{
 }
 
 // pendingChecksForEdit returns the gate-run checks a mutation to absPath
-// selects: the configured verify commands when no LSP covers the file
-// (the diagnostics delta is the LSP-covered compile check), plus a
-// same-package test for Go files in a tested directory. The decorator
-// records the result as pending entries in the verification metadata.
-func pendingChecksForEdit(cfg *config.Config, workingDir, absPath string, lspCovered bool) []message.VerificationCheck {
+// selects: every configured verify command (a declared project check
+// applies whether or not an LSP covers the file — `make check` is not a
+// compile-check fallback), plus a same-package test for Go files in a
+// tested directory. The decorator records the result as pending entries
+// in the verification metadata.
+func pendingChecksForEdit(cfg *config.Config, workingDir, absPath string) []message.VerificationCheck {
 	ext := strings.ToLower(filepath.Ext(absPath))
 	if cfg == nil || !sourceFileExts[ext] {
 		return nil
 	}
 	var checks []message.VerificationCheck
-	if !lspCovered {
-		for _, v := range cfg.Verify {
-			checks = append(checks, message.VerificationCheck{
-				Check:   "verify:" + v.DisplayName(),
-				State:   message.VerificationPending,
-				Command: v.Command,
-				Timeout: int(v.TimeoutDuration() / time.Second),
-			})
-		}
+	for _, v := range cfg.Verify {
+		checks = append(checks, message.VerificationCheck{
+			Check:   "verify:" + v.DisplayName(),
+			State:   message.VerificationPending,
+			Command: v.Command,
+			Timeout: int(v.TimeoutDuration() / time.Second),
+		})
 	}
 	if ext == ".go" {
 		dir := filepath.Dir(absPath)
@@ -50,7 +50,7 @@ func pendingChecksForEdit(cfg *config.Config, workingDir, absPath string, lspCov
 			checks = append(checks, message.VerificationCheck{
 				Check:   "package-test:" + rel,
 				State:   message.VerificationPending,
-				Command: "go test ./" + rel,
+				Command: fmt.Sprintf("go test %q", "./"+rel),
 				Timeout: 120,
 			})
 		}

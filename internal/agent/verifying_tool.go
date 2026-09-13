@@ -27,14 +27,14 @@ type verifyingTool struct {
 	workingDir string
 	// pendingChecks resolves the gate-run checks a mutation selects;
 	// recorded as pending entries for the end-of-turn gate to collect.
-	pendingChecks func(absPath string, lspCovered bool) []message.VerificationCheck
+	pendingChecks func(absPath string) []message.VerificationCheck
 }
 
 // wrapToolsWithVerification wraps each write-class tool in a
 // verifyingTool. Unlike hooks there is no sub-agent exemption — the
 // decorator fires no user code, and a sub-agent's own run gate consumes
 // the metadata on its child session.
-func wrapToolsWithVerification(toolList []fantasy.AgentTool, lspManager *lsp.Manager, workingDir string, pendingChecks func(absPath string, lspCovered bool) []message.VerificationCheck) []fantasy.AgentTool {
+func wrapToolsWithVerification(toolList []fantasy.AgentTool, lspManager *lsp.Manager, workingDir string, pendingChecks func(absPath string) []message.VerificationCheck) []fantasy.AgentTool {
 	out := make([]fantasy.AgentTool, len(toolList))
 	for i, tool := range toolList {
 		if writeToolNames[tool.Info().Name] {
@@ -71,17 +71,15 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 	}
 	absPath := filepathext.SmartJoin(v.workingDir, filePath)
 	lspCovered := tools.AnyClientHandles(v.lspManager, absPath)
-	var pending []message.VerificationCheck
-	if v.pendingChecks != nil {
-		pending = v.pendingChecks(absPath, lspCovered)
-	}
 
 	if !lspCovered {
 		resp, err := v.inner.Run(ctx, call)
 		if err != nil || resp.IsError {
 			return resp, err
 		}
-		checks := pending
+		// Select after the mutation so a newly created file (e.g. the
+		// first _test.go in a package) is seen by the selector.
+		checks := v.selectPending(absPath)
 		if len(checks) == 0 {
 			checks = []message.VerificationCheck{{
 				Check:  "diagnostics",
@@ -108,7 +106,7 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 		return resp, err
 	}
 
-	tools.NotifyLSPs(ctx, v.lspManager, absPath)
+	settled := tools.NotifyLSPs(ctx, v.lspManager, absPath)
 	after := tools.SnapshotDiagnostics(v.lspManager)
 	newErrs := after.NewErrorsSince(baseline)
 
@@ -116,7 +114,13 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 
 	state := message.VerificationPassed
 	detail := ""
-	if len(newErrs) > 0 {
+	switch {
+	case !settled:
+		// A timed-out settle can read a stale snapshot — record
+		// unverified, not a pass that was never earned.
+		state = message.VerificationUnverified
+		detail = "diagnostics did not settle before timeout"
+	case len(newErrs) > 0:
 		state = message.VerificationFailed
 		detail = fmt.Sprintf("%d new error(s)", len(newErrs))
 	}
@@ -124,9 +128,17 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 		Check:  "diagnostics",
 		State:  state,
 		Detail: detail,
-	}}, pending...)
+	}}, v.selectPending(absPath)...)
 	resp.Metadata = mergeVerificationMetadata(resp.Metadata, checks)
 	return resp, nil
+}
+
+// selectPending runs the configured check selector when one is wired.
+func (v *verifyingTool) selectPending(absPath string) []message.VerificationCheck {
+	if v.pendingChecks == nil {
+		return nil
+	}
+	return v.pendingChecks(absPath)
 }
 
 // mergeVerificationMetadata sets the "verification" key on existing tool

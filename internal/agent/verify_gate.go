@@ -85,6 +85,12 @@ func (a *sessionAgent) runVerificationGate(ctx context.Context, call SessionAgen
 		}
 		a.notifyVerifying(call, len(unique))
 		resolved := a.runGateChecks(ctx, a.configStore.WorkingDir(), pending, observed)
+		if ctx.Err() != nil {
+			// Cancelled mid-gate: leave pending entries pending (the
+			// notebook maps them to unverified) rather than writing
+			// failed verdicts for checks that never completed.
+			return false
+		}
 		for i := range pending {
 			out, ok := resolved[pending[i].check.Check]
 			if !ok {
@@ -163,15 +169,32 @@ func scanVerification(steps []fantasy.StepResult) (failed, pending []gateCheckOu
 		}
 		for _, tr := range step.Content.ToolResults() {
 			switch {
-			case tr.ToolName == tools.BashToolName:
+			case tr.ToolName == tools.BashToolName || tr.ToolName == tools.JobOutputToolName:
+				// The verdict lives in metadata: a non-zero exit is a
+				// text response, never an error result. `done` marks a
+				// completed run — a still-running backgrounded command
+				// is not a verdict.
+				if !gjson.Get(tr.ClientMetadata, "done").Bool() &&
+					(tr.Result == nil || tr.Result.GetType() != fantasy.ToolResultContentTypeError) {
+					continue
+				}
 				cmd := bashCmds[tr.ToolCallID]
+				if tr.ToolName == tools.JobOutputToolName {
+					// JobOutput's input is a shell_id; the command
+					// comes from its response metadata.
+					cmd = gjson.Get(tr.ClientMetadata, "command").String()
+				}
 				if cmd == "" {
 					continue
+				}
+				isErr := tr.Result != nil && tr.Result.GetType() == fantasy.ToolResultContentTypeError
+				if ec := gjson.Get(tr.ClientMetadata, "exit_code"); ec.Exists() {
+					isErr = ec.Int() != 0
 				}
 				observed = append(observed, observedBash{
 					stepIdx: stepIdx,
 					command: cmd,
-					isError: tr.Result != nil && tr.Result.GetType() == fantasy.ToolResultContentTypeError,
+					isError: isErr,
 					output:  toolResultText(tr),
 				})
 			case writeToolNames[tr.ToolName] && tr.ClientMetadata != "":
@@ -257,6 +280,11 @@ func (a *sessionAgent) runGateChecks(ctx context.Context, workingDir string, pen
 		})
 		cancel()
 		switch {
+		case ctx.Err() != nil:
+			// The run was cancelled mid-check — stop resolving and leave
+			// the rest pending; a cancelled run must not record a failed
+			// verdict for a check that never completed.
+			return out
 		case err != nil && checkCtx.Err() == context.DeadlineExceeded:
 			out[uc.check.Check] = resolvedCheck{
 				state:  message.VerificationFailed,
@@ -361,7 +389,10 @@ func mergeVerificationResolved(existing string, updates []message.VerificationCh
 
 // unionToolMetadata merges stored metadata keys the incoming copy lacks —
 // stored first, incoming wins on conflicts — so a whole-message rewrite
-// built from a pre-verification snapshot cannot drop the key.
+// built from a pre-verification snapshot cannot drop the key. The
+// "verification" list merges state-aware: a stored terminal verdict
+// (passed/failed/unverified) does not regress to pending when the
+// incoming copy was snapshotted before the gate resolved it.
 func unionToolMetadata(stored, incoming string) string {
 	if stored == "" {
 		return incoming
@@ -376,7 +407,57 @@ func unionToolMetadata(stored, incoming string) string {
 			merged = out
 		}
 	}
+	if checks := unionVerificationChecks(
+		gjson.Get(stored, "verification"),
+		gjson.Get(incoming, "verification"),
+	); checks != "" {
+		if out, err := sjson.SetRaw(merged, "verification", checks); err == nil {
+			merged = out
+		}
+	}
 	return merged
+}
+
+// unionVerificationChecks merges two verification lists by check
+// identity. An entry present only on one side is kept; where both sides
+// carry the same check, a resolved stored state beats a stale pending —
+// the race this guards is a whole-message rewrite built from a pre-gate
+// snapshot, which would otherwise regress the verdict.
+func unionVerificationChecks(stored, incoming gjson.Result) string {
+	if !stored.Exists() {
+		return ""
+	}
+	order := []string{}
+	merged := map[string]message.VerificationCheck{}
+	for _, s := range []gjson.Result{stored, incoming} {
+		for _, raw := range s.Array() {
+			var chk message.VerificationCheck
+			if json.Unmarshal([]byte(raw.Raw), &chk) != nil || chk.Check == "" {
+				continue
+			}
+			prev, ok := merged[chk.Check]
+			if !ok {
+				order = append(order, chk.Check)
+				merged[chk.Check] = chk
+				continue
+			}
+			// Terminal states stick; otherwise the later (incoming) copy
+			// wins so a re-flag can update detail/output.
+			if prev.State != message.VerificationPending {
+				continue
+			}
+			merged[chk.Check] = chk
+		}
+	}
+	checks := make([]message.VerificationCheck, 0, len(order))
+	for _, name := range order {
+		checks = append(checks, merged[name])
+	}
+	data, err := json.Marshal(checks)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 // notifyVerifying publishes the verify-in-progress notification so the

@@ -271,13 +271,13 @@ Deterministic classification on the touched path — biased toward
 verifying, since a false negative (skipping a needed check) costs a
 silently wrong "done" while a false positive costs one lint run:
 
-| Edit class                     | Check                        | Runs      |
-| ------------------------------ | ---------------------------- | --------- |
-| Source file, LSP handles it    | diagnostics delta            | decorator |
-| Source file, no LSP            | configured compile/build cmd | gate      |
-| Source file on a tested path   | + targeted test (same pkg)   | gate      |
-| Config/docs/comments-only      | none, or lint                | gate      |
-| Non-code (markdown, JSON data) | syntax check if cheap        | decorator |
+| Edit class                     | Check                         | Runs      |
+| ------------------------------ | ----------------------------- | --------- |
+| Source file, LSP handles it    | diagnostics delta             | decorator |
+| Source file (LSP or not)       | + every configured verify cmd | gate      |
+| Source file on a tested path   | + targeted test (same pkg)    | gate      |
+| Config/docs/comments-only      | none, or lint                 | gate      |
+| Non-code (markdown, JSON data) | syntax check if cheap         | decorator |
 
 The Runs column is the spec: the decorator runs only what is free
 inline — the diagnostics delta (already inline today) and trivially
@@ -435,14 +435,19 @@ the deferred `RunComplete`, and the queued retry indefinitely;
 timeout records `failed` with a duration headline. (b) Dedup pending checks by check identity — N edits in
 one package produce N identical targeted-test pendings; the gate
 runs each once. (c) Satisfy pending checks from observed bash runs:
-if the model already ran the configured command this turn and its
-result is `IsError=false`, the exit code already answered the check
-— re-running is the design's largest recurring waste. Exact command
-match only (a prefix match invites `cmd && rm -rf` trickery), and
-only when the observed run postdates the writes it covers — a test
-pass before the last edit verifies nothing. (d) Truncate the retry
-prompt's check output via `tools.TruncateHeadTail`/
-`MaxOutputLength` — a raw test log can be megabytes.
+if the model already ran the configured command this turn, its exit
+code already answered the check — re-running is the design's largest
+recurring waste. Note the verdict is NOT the result type: bash and
+job_output report a non-zero exit as a text response (`bash.go`),
+never an error result — the gate reads `exit_code`/`done` from
+`BashResponseMetadata`/`JobOutputResponseMetadata` on the step's
+`ClientMetadata` (a still-running backgrounded command has `done`
+absent and is not a verdict). Exact command match only (a prefix
+match invites `cmd && rm -rf` trickery), and only when the observed
+run postdates the LAST write it covers — a test pass before the
+last edit verifies nothing. (d) Truncate the retry prompt's check
+output via `tools.TruncateHeadTail`/`MaxOutputLength` — a raw test
+log can be megabytes.
 
 `shouldSummarize` composes safely by ordering: the continuation only
 re-queues when the stopped assistant message still has tool calls —

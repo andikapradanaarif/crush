@@ -1,17 +1,23 @@
 package agent
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/stretchr/testify/require"
 )
@@ -32,24 +38,22 @@ func TestPendingChecksForEdit(t *testing.T) {
 	cfgEmpty := &config.Config{}
 
 	tests := []struct {
-		name       string
-		cfg        *config.Config
-		path       string
-		lspCovered bool
-		want       []string // expected check names
+		name string
+		cfg  *config.Config
+		path string
+		want []string // expected check names
 	}{
 		{name: "non-source file selects nothing", cfg: cfgWithVerify, path: filepath.Join(dir, "README.md")},
 		{name: "source without LSP gets verify commands", cfg: cfgWithVerify, path: filepath.Join(plain, "bar.go"), want: []string{"verify:build"}},
-		{name: "source with LSP skips verify commands", cfg: cfgWithVerify, path: filepath.Join(plain, "bar.go"), lspCovered: true, want: nil},
 		{name: "no verify config yields no pending", cfg: cfgEmpty, path: filepath.Join(plain, "bar.go"), want: nil},
 		{name: "go file in tested dir gets package test", cfg: cfgEmpty, path: filepath.Join(pkgDir, "foo.go"), want: []string{"package-test:pkg"}},
-		{name: "tested-dir check also applies with LSP", cfg: cfgEmpty, path: filepath.Join(pkgDir, "foo.go"), lspCovered: true, want: []string{"package-test:pkg"}},
+		{name: "verify and package test compose", cfg: cfgWithVerify, path: filepath.Join(pkgDir, "foo.go"), want: []string{"verify:build", "package-test:pkg"}},
 		{name: "file outside working dir gets no package test", cfg: cfgEmpty, path: filepath.Join(t.TempDir(), "x.go"), want: nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			checks := pendingChecksForEdit(tc.cfg, dir, tc.path, tc.lspCovered)
+			checks := pendingChecksForEdit(tc.cfg, dir, tc.path)
 			var got []string
 			for _, c := range checks {
 				require.Equal(t, message.VerificationPending, c.State)
@@ -87,9 +91,34 @@ func TestScanVerification(t *testing.T) {
 		stepWith(fantasy.FinishReasonToolCalls,
 			fantasy.ToolCallContent{ToolCallID: "tc-bash", ToolName: "bash", Input: `{"command":"go test ./pkg"}`},
 			fantasy.ToolResultContent{
-				ToolCallID: "tc-bash",
-				ToolName:   "bash",
-				Result:     fantasy.ToolResultOutputContentText{Text: "ok pkg\nPASS"},
+				ToolCallID:     "tc-bash",
+				ToolName:       "bash",
+				Result:         fantasy.ToolResultOutputContentText{Text: "ok pkg\nPASS"},
+				ClientMetadata: `{"done":true,"exit_code":0}`,
+			},
+			fantasy.ToolCallContent{ToolCallID: "tc-bash2", ToolName: "bash", Input: `{"command":"go test ./bad"}`},
+			fantasy.ToolResultContent{
+				ToolCallID:     "tc-bash2",
+				ToolName:       "bash",
+				Result:         fantasy.ToolResultOutputContentText{Text: "FAIL\nExit code 1"},
+				ClientMetadata: `{"done":true,"exit_code":1}`,
+			},
+			// A still-running background command is not a verdict.
+			fantasy.ToolCallContent{ToolCallID: "tc-bash3", ToolName: "bash", Input: `{"command":"go test ./slow"}`},
+			fantasy.ToolResultContent{
+				ToolCallID:     "tc-bash3",
+				ToolName:       "bash",
+				Result:         fantasy.ToolResultOutputContentText{Text: "Background shell started with ID: bg1"},
+				ClientMetadata: `{"background":true,"shell_id":"bg1"}`,
+			},
+			// A completed background job inspected via job_output is a
+			// verdict — the command comes from the result metadata.
+			fantasy.ToolCallContent{ToolCallID: "tc-job", ToolName: "job_output", Input: `{"shell_id":"bg2","wait":true}`},
+			fantasy.ToolResultContent{
+				ToolCallID:     "tc-job",
+				ToolName:       "job_output",
+				Result:         fantasy.ToolResultOutputContentText{Text: "Status: completed\nFAIL"},
+				ClientMetadata: `{"command":"go test ./job","done":true,"exit_code":1}`,
 			},
 		),
 		stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),
@@ -100,9 +129,18 @@ func TestScanVerification(t *testing.T) {
 	require.Len(t, pending, 1)
 	require.Equal(t, "package-test:pkg", pending[0].check.Check)
 	require.Equal(t, "tc-edit", pending[0].toolCallID)
-	require.Len(t, observed, 1)
+	require.Len(t, observed, 3)
+
 	require.Equal(t, "go test ./pkg", observed[0].command)
 	require.False(t, observed[0].isError)
+
+	// A non-zero exit is a text response — the verdict comes from
+	// exit_code in the metadata, not the result type.
+	require.Equal(t, "go test ./bad", observed[1].command)
+	require.True(t, observed[1].isError)
+
+	require.Equal(t, "go test ./job", observed[2].command)
+	require.True(t, observed[2].isError)
 }
 
 func TestRunGateChecks(t *testing.T) {
@@ -210,9 +248,21 @@ func TestUnionToolMetadata(t *testing.T) {
 	require.Contains(t, merged, `"verification"`)
 	require.Contains(t, merged, `"hook"`)
 
-	// Incoming wins on conflicts.
-	merged = unionToolMetadata(`{"verification":[{"state":"pending"}]}`, `{"verification":[{"state":"passed"}]}`)
-	require.Contains(t, merged, "passed")
+	// A resolved stored verdict does not regress to pending when the
+	// incoming copy was snapshotted before the gate wrote outcomes.
+	merged = unionToolMetadata(
+		`{"verification":[{"check":"verify:x","state":"failed"}]}`,
+		`{"verification":[{"check":"verify:x","state":"pending"}]}`,
+	)
+	require.Contains(t, merged, `"state":"failed"`)
+	require.NotContains(t, merged, `"state":"pending"`)
+
+	// Incoming can still resolve a stored pending.
+	merged = unionToolMetadata(
+		`{"verification":[{"check":"verify:x","state":"pending"}]}`,
+		`{"verification":[{"check":"verify:x","state":"passed"}]}`,
+	)
+	require.Contains(t, merged, `"state":"passed"`)
 }
 
 // newGateTestAgent builds a sessionAgent with the pieces the gate
@@ -308,9 +358,12 @@ func TestRunVerificationGate(t *testing.T) {
 			stepWith(fantasy.FinishReasonToolCalls, editWith(`{"verification":[{"check":"verify:test","state":"pending","command":"go test ./x"}]}`)),
 			stepWith(fantasy.FinishReasonToolCalls,
 				fantasy.ToolCallContent{ToolCallID: "tc-bash", ToolName: "bash", Input: `{"command":"go test ./x"}`},
+				// A real bash failure is a TEXT result — the exit_code
+				// metadata is the verdict.
 				fantasy.ToolResultContent{
 					ToolCallID: "tc-bash", ToolName: "bash",
-					Result: fantasy.ToolResultOutputContentError{Error: errTest},
+					Result:         fantasy.ToolResultOutputContentText{Text: "FAIL\nExit code 1"},
+					ClientMetadata: `{"done":true,"exit_code":1}`,
 				},
 			),
 			stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),
@@ -341,4 +394,185 @@ func TestRunVerificationGate(t *testing.T) {
 	})
 }
 
-var errTest = errors.New("exit code 1")
+// gateScriptModel drives sessionAgent.Run end-to-end: the first Stream
+// emits an edit tool call (whose decorator records a pending check), the
+// second ends turn one on a clean stop, and the third is the gate's
+// retry turn. Prompts are captured per call.
+type gateScriptModel struct {
+	calls    atomic.Int32
+	mu       sync.Mutex
+	prompts  []string
+	editPath string
+}
+
+func (m *gateScriptModel) Provider() string { return "fake" }
+func (m *gateScriptModel) Model() string    { return "fake-model" }
+
+func (m *gateScriptModel) Generate(context.Context, fantasy.Call) (*fantasy.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (m *gateScriptModel) GenerateObject(context.Context, fantasy.ObjectCall) (*fantasy.ObjectResponse, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (m *gateScriptModel) StreamObject(context.Context, fantasy.ObjectCall) (fantasy.ObjectStreamResponse, error) {
+	return nil, errors.New("not implemented")
+}
+
+// promptText flattens a fantasy prompt's text for assertions.
+func promptText(p fantasy.Prompt) string {
+	var b strings.Builder
+	for _, msg := range p {
+		for _, part := range msg.Content {
+			if t, ok := fantasy.AsMessagePart[fantasy.TextPart](part); ok {
+				b.WriteString(t.Text)
+				b.WriteByte('\n')
+			}
+		}
+	}
+	return b.String()
+}
+
+func (m *gateScriptModel) Stream(_ context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
+	text := promptText(call.Prompt)
+	if strings.Contains(text, "Generate a concise title") {
+		// Title generation shares the model — answer it without
+		// consuming a main-turn call.
+		return gateTextStream("title"), nil
+	}
+
+	n := m.calls.Add(1)
+	m.mu.Lock()
+	m.prompts = append(m.prompts, text)
+	m.mu.Unlock()
+
+	if n != 1 {
+		return gateTextStream("done"), nil
+	}
+
+	input := fmt.Sprintf(`{"file_path":%q,"old_string":"a","new_string":"b"}`, m.editPath)
+	return func(yield func(fantasy.StreamPart) bool) {
+		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeToolInputStart, ID: "tc1", ToolCallName: "edit"}) {
+			return
+		}
+		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeToolInputDelta, ID: "tc1", Delta: input}) {
+			return
+		}
+		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeToolInputEnd, ID: "tc1"}) {
+			return
+		}
+		if !yield(fantasy.StreamPart{
+			Type:          fantasy.StreamPartTypeToolCall,
+			ID:            "tc1",
+			ToolCallName:  "edit",
+			ToolCallInput: input,
+		}) {
+			return
+		}
+		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonToolCalls})
+	}, nil
+}
+
+// gateTextStream emits a trivial text response ending on Stop.
+func gateTextStream(text string) fantasy.StreamResponse {
+	return func(yield func(fantasy.StreamPart) bool) {
+		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextStart, ID: "t"}) {
+			return
+		}
+		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, ID: "t", Delta: text}) {
+			return
+		}
+		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextEnd, ID: "t"}) {
+			return
+		}
+		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonStop})
+	}
+}
+
+// TestRunGate_EndToEnd exercises the full recursion path: an edit
+// records a pending check, the gate runs it (exit 1 → failed), a retry
+// call is prepended under the same RunID, the recursive Run executes it,
+// and exactly one RunComplete publishes for the lifecycle.
+func TestRunGate_EndToEnd(t *testing.T) {
+	t.Parallel()
+	env := testEnv(t)
+	dir := env.workingDir
+	editPath := filepath.Join(dir, "x.go")
+
+	model := &gateScriptModel{editPath: editPath}
+	tool := &verifyingTool{
+		inner:      &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")},
+		workingDir: dir,
+		pendingChecks: func(string) []message.VerificationCheck {
+			return []message.VerificationCheck{{
+				Check:   "verify:test",
+				State:   message.VerificationPending,
+				Command: "exit 1",
+				Timeout: 30,
+			}}
+		},
+	}
+
+	broker := pubsub.NewBroker[notify.RunComplete]()
+	t.Cleanup(broker.Shutdown)
+	sa := testSessionAgent(env, model, model, "system", tool).(*sessionAgent)
+	sa.configStore = config.NewTestStoreWithDir(&config.Config{}, dir)
+	sa.runComplete = broker
+
+	sess, err := env.sessions.Create(t.Context(), "session")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	events := broker.Subscribe(ctx)
+
+	_, err = sa.Run(t.Context(), SessionAgentCall{
+		SessionID: sess.ID,
+		RunID:     "run-e2e",
+		Prompt:    "edit the file",
+	})
+	require.NoError(t, err)
+
+	// Three Stream calls: edit step, turn-one stop step, retry turn.
+	require.Equal(t, int32(3), model.calls.Load())
+	model.mu.Lock()
+	for i, p := range model.prompts {
+		t.Logf("prompt[%d]: %q", i, p)
+	}
+	retry := model.prompts[2]
+	require.Contains(t, retry, "verify:test")
+	require.Contains(t, retry, "exit code")
+	model.mu.Unlock()
+
+	// Exactly one RunComplete for the shared RunID — the outer turn's
+	// publish is suppressed while the retry is queued.
+	var completes []notify.RunComplete
+drain:
+	for {
+		select {
+		case ev := <-events:
+			if ev.Payload.RunID == "run-e2e" {
+				completes = append(completes, ev.Payload)
+			}
+		default:
+			break drain
+		}
+	}
+	require.Len(t, completes, 1)
+
+	// The stored tool result carries the gate-resolved verdict.
+	msgs, err := env.messages.List(t.Context(), sess.ID)
+	require.NoError(t, err)
+	found := false
+	for _, m := range msgs {
+		for _, tr := range m.ToolResults() {
+			if tr.ToolCallID == "tc1" {
+				found = true
+				require.Contains(t, tr.Metadata, `"check":"verify:test"`)
+				require.Contains(t, tr.Metadata, `"state":"failed"`)
+			}
+		}
+	}
+	require.True(t, found, "stored tool result for tc1 not found")
+}

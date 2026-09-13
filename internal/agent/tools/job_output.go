@@ -28,6 +28,9 @@ type JobOutputResponseMetadata struct {
 	Description      string `json:"description"`
 	Done             bool   `json:"done"`
 	WorkingDirectory string `json:"working_directory"`
+	// ExitCode is the completed command's verdict. Like bash, a non-zero
+	// exit is text output — consumers must read this field.
+	ExitCode int `json:"exit_code,omitempty"`
 }
 
 func NewJobOutputTool() fantasy.AgentTool {
@@ -60,13 +63,12 @@ func NewJobOutputTool() fantasy.AgentTool {
 			}
 
 			status := "running"
+			exitCode := 0
 			if done {
 				status = "completed"
-				if err != nil {
-					exitCode := shell.ExitCode(err)
-					if exitCode != 0 {
-						outputParts = append(outputParts, fmt.Sprintf("Exit code %d", exitCode))
-					}
+				exitCode = shell.ExitCode(err)
+				if exitCode != 0 {
+					outputParts = append(outputParts, fmt.Sprintf("Exit code %d", exitCode))
 				}
 			}
 
@@ -79,6 +81,7 @@ func NewJobOutputTool() fantasy.AgentTool {
 				Description:      bgShell.Description,
 				Done:             done,
 				WorkingDirectory: bgShell.WorkingDir,
+				ExitCode:         exitCode,
 			}
 
 			if output == "" {
