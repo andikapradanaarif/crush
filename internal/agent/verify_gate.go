@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -533,14 +534,9 @@ func (a *sessionAgent) incompleteTodos(ctx context.Context, sessionID string) []
 	if a.sessions == nil || a.tools == nil {
 		return nil
 	}
-	hasTodos := false
-	for _, tool := range a.tools.Copy() {
-		if tool.Info().Name == tools.TodosToolName {
-			hasTodos = true
-			break
-		}
-	}
-	if !hasTodos {
+	if !slices.ContainsFunc(a.tools.Copy(), func(t fantasy.AgentTool) bool {
+		return t.Info().Name == tools.TodosToolName
+	}) {
 		return nil
 	}
 	sess, err := a.sessions.Get(ctx, sessionID)
