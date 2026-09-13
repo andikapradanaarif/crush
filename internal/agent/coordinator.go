@@ -192,9 +192,12 @@ type coordinator struct {
 	// nbStats accumulates per-session notebook sufficiency telemetry,
 	// shared across agent rebuilds and with the recall tool.
 	// nbScanIdx is the per-session high-water message index for
-	// re-view scanning. Both nil when the notebook is disabled.
-	nbStats   *csync.Map[string, notebook.Stats]
-	nbScanIdx *csync.Map[string, int]
+	// re-view scanning; nbPendingReads holds view/read calls seen
+	// mid-flight so a call finishing later still counts. All nil when
+	// the notebook is disabled.
+	nbStats        *csync.Map[string, notebook.Stats]
+	nbScanIdx      *csync.Map[string, int]
+	nbPendingReads *csync.Map[string, map[string]string]
 
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
@@ -282,6 +285,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		c.prefixCache = csync.NewMap[string, cachedPrefix]()
 		c.nbStats = csync.NewMap[string, notebook.Stats]()
 		c.nbScanIdx = csync.NewMap[string, int]()
+		c.nbPendingReads = csync.NewMap[string, map[string]string]()
 		if opts.Config.Config().Options.NotebookStubSupersededEnabled() {
 			c.stubBoundary = csync.NewMap[string, int]()
 			c.stubStats = csync.NewMap[string, stubStats]()
@@ -335,6 +339,9 @@ func (c *coordinator) watchSessionDeletions() {
 		}
 		if c.nbScanIdx != nil {
 			c.nbScanIdx.Del(ev.Payload.ID)
+		}
+		if c.nbPendingReads != nil {
+			c.nbPendingReads.Del(ev.Payload.ID)
 		}
 	}
 }
@@ -827,13 +834,14 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		NotebookAutoInject:   c.cfg.Config().Options.NotebookAutoInjectEnabled(),
 		StubSuperseded: c.cfg.Config().Options.NotebookStubSupersededEnabled() &&
 			c.cfg.Config().Options.NotebookIsEnabled(),
-		StubBoundary:    c.stubBoundary,
-		StubStats:       c.stubStats,
-		SegmentTrackers: c.segmentTrackers,
-		PrefixCache:     c.prefixCache,
-		NotebookStats:   c.nbStats,
-		NotebookScanIdx: c.nbScanIdx,
-		FileTracker:     c.filetracker,
+		StubBoundary:         c.stubBoundary,
+		StubStats:            c.stubStats,
+		SegmentTrackers:      c.segmentTrackers,
+		PrefixCache:          c.prefixCache,
+		NotebookStats:        c.nbStats,
+		NotebookScanIdx:      c.nbScanIdx,
+		NotebookPendingReads: c.nbPendingReads,
+		FileTracker:          c.filetracker,
 	})
 
 	if c.cfg.Config().Options.NotebookStubSupersededEnabled() && !c.cfg.Config().Options.NotebookIsEnabled() {

@@ -248,7 +248,7 @@ func (s *service) Compact(ctx context.Context, sessionID string) error {
 		s.noteCompactProgress(sessionID)
 	default:
 		s.noteCompactStall(sessionID,
-			"Notebook compaction stalled: every remaining entry is pinned; notebook DB grows unbounded — prompt unaffected")
+			"Notebook compaction stalled: no compressible entries remain (all pinned or already at maximum compression); notebook DB grows unbounded — prompt unaffected")
 	}
 	return nil
 }

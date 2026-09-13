@@ -422,12 +422,13 @@ func TestSelectNotebookEntries_DeadDemotion(t *testing.T) {
 
 	t.Run("dead-file entry demotes below same-age live entry", func(t *testing.T) {
 		t.Parallel()
-		// Both entries sit beyond the band at the same age; only
-		// gone.go's tracked path is dead, so under budget pressure the
-		// dead entry loses.
+		// The dead entry is NEWER than the live one — without
+		// demotion inside the working-set pass it would be tried
+		// first and win the budget. gone.go's tracked path is dead,
+		// so the live entry must win instead.
 		entries := []notebook.Entry{
-			nbSegEntry("dead", 0, 0, 1, notebook.EventFileRead, "read gone.go", 6000, "file:gone.go"),
-			nbSegEntry("alive", 0, 0, 2, notebook.EventFileRead, "read here.go", 6000, "file:here.go"),
+			nbSegEntry("alive", 0, 0, 1, notebook.EventFileRead, "read here.go", 6000, "file:here.go"),
+			nbSegEntry("dead", 0, 0, 2, notebook.EventFileRead, "read gone.go", 6000, "file:gone.go"),
 		}
 		sel := selectionInput{
 			bandFloor:  segmentKey{turn: 0, segment: 10},

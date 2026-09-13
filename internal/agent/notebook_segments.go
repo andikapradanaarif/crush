@@ -712,7 +712,7 @@ func (a *sessionAgent) generateRunEndSegments(ctx context.Context, sessionID str
 // and the selection inputs — working set, file liveness, fill band.
 // Identical inputs must render byte-identical output, so the cache
 // key is the input set itself.
-func prefixFingerprint(boundary int, bKey segmentKey, entries []notebook.Entry, refs []string, sel selectionInput) uint64 {
+func prefixFingerprint(boundary int, bKey, floor segmentKey, entries []notebook.Entry, refs []string, sel selectionInput) uint64 {
 	h := fnv.New64a()
 	var scratch [8]byte
 	write := func(v int64) {
@@ -722,6 +722,11 @@ func prefixFingerprint(boundary int, bKey segmentKey, entries []notebook.Entry, 
 	write(int64(boundary))
 	write(bKey.turn)
 	write(bKey.segment)
+	// The pass-1 recency floor moves when a zero-entry segment
+	// commits inside the covered region — entries, refs, and the
+	// boundary can all stay put while the render changes.
+	write(floor.turn)
+	write(floor.segment)
 	write(sel.bandFloor.turn)
 	write(sel.bandFloor.segment)
 	for _, e := range entries {
@@ -826,13 +831,14 @@ func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msg
 	// the rest of the run.
 	refs := notebookRelevanceRefs(detCtx, a.sessions, sessionID, msgs)
 	sel := a.buildSelectionInput(detCtx, sessionID, entries, segs, boundary)
-	fp := prefixFingerprint(boundary, bKey, entries, refs, sel)
+	floor := coveredSegmentFloor(segs, boundary)
+	fp := prefixFingerprint(boundary, bKey, floor, entries, refs, sel)
 	if a.prefixCache != nil {
 		if c, ok := a.prefixCache.Get(sessionID); ok && c.boundary == boundary && c.fingerprint == fp {
 			return c.msgs
 		}
 	}
-	prefix, files := a.renderNotebookPrefix(detCtx, sessionID, entries, msgs, bKey, coveredSegmentFloor(segs, boundary), refs, sel)
+	prefix, files := a.renderNotebookPrefix(detCtx, sessionID, entries, msgs, bKey, floor, refs, sel)
 	if a.prefixCache != nil {
 		a.prefixCache.Set(sessionID, cachedPrefix{boundary: boundary, fingerprint: fp, msgs: prefix, files: files})
 	}

@@ -778,3 +778,58 @@ func TestCanonicalToolInput(t *testing.T) {
 		canonicalToolInput("bash", `{"command":"ls -la"}`))
 	require.Empty(t, canonicalToolInput("bash", "not json"))
 }
+
+// TestCountNotebookReViews_PendingCallFinishes covers the in-flight
+// window: a view call seen unfinished counts when a later scan finds
+// it finished — the scan cursor must not lose it.
+func TestCountNotebookReViews_PendingCallFinishes(t *testing.T) {
+	t.Parallel()
+
+	statsMap := csync.NewMap[string, notebook.Stats]()
+	scanIdx := csync.NewMap[string, int]()
+	pending := csync.NewMap[string, map[string]string]()
+	a := &sessionAgent{
+		nbStats:        statsMap,
+		nbScanIdx:      scanIdx,
+		nbPendingReads: pending,
+		prefixCache:    csync.NewMap[string, cachedPrefix](),
+	}
+
+	view := func(id, path string, finished bool) message.Message {
+		return segAssistant("", message.ToolCall{
+			ID:       id,
+			Name:     "view",
+			Input:    `{"file_path":"` + path + `"}`,
+			Finished: finished,
+		})
+	}
+
+	// First sight initializes the cursor without counting.
+	a.countNotebookReViews("sess", []message.Message{segUser("go")})
+
+	// The view call arrives unfinished — nothing counts yet, but the
+	// call is queued under its ID.
+	a.countNotebookReViews("sess", []message.Message{
+		segUser("go"),
+		view("tc-1", "a.go", false),
+	})
+	got, _ := statsMap.Get("sess")
+	require.Equal(t, 0, got.StubReViews+got.CoveredReViews)
+	p, _ := pending.Get("sess")
+	require.Contains(t, p, "tc-1")
+
+	// A stubbed result for a.go makes the later finish count as stub
+	// re-view pressure.
+	stubRes := message.ToolResult{ToolCallID: "tc-0", Name: "view", Content: "x"}
+	stubRes.Superseded = &message.SupersededMark{Path: "a.go", Applied: true}
+	a.countNotebookReViews("sess", []message.Message{
+		segUser("go"),
+		view("tc-1", "a.go", true),
+		segTool(stubRes),
+		segUser("next"),
+	})
+	got, _ = statsMap.Get("sess")
+	require.Equal(t, 1, got.StubReViews, "the late-finishing call must count")
+	p, _ = pending.Get("sess")
+	require.NotContains(t, p, "tc-1")
+}

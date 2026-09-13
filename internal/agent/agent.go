@@ -223,6 +223,10 @@ type sessionAgent struct {
 	// nbScanIdx is the per-session high-water message index for
 	// re-view scanning — only view/read calls past it count.
 	nbScanIdx *csync.Map[string, int]
+	// nbPendingReads holds view/read calls first seen unfinished
+	// (toolCallID → file basename) so a call that completes after
+	// the cursor swept past its index still counts once.
+	nbPendingReads *csync.Map[string, map[string]string]
 	// filetracker provides the session's read/write working set for
 	// notebook selection. Nil skips the working-set and liveness
 	// passes.
@@ -332,9 +336,12 @@ type SessionAgentOptions struct {
 	PrefixCache     *csync.Map[string, cachedPrefix]
 	// NotebookStats/NotebookScanIdx share per-session notebook
 	// sufficiency telemetry and the re-view scan cursor across agent
-	// rebuilds. When nil the agent allocates its own.
-	NotebookStats   *csync.Map[string, notebook.Stats]
-	NotebookScanIdx *csync.Map[string, int]
+	// rebuilds; NotebookPendingReads tracks in-flight view/read
+	// calls so a late finish still counts. When nil the agent
+	// allocates its own.
+	NotebookStats        *csync.Map[string, notebook.Stats]
+	NotebookScanIdx      *csync.Map[string, int]
+	NotebookPendingReads *csync.Map[string, map[string]string]
 	// FileTracker provides the session's read/write working set for
 	// notebook selection. May be nil — the working-set and liveness
 	// passes are skipped without it.
@@ -377,6 +384,7 @@ func NewSessionAgent(
 		prefixCache:          cmp.Or(opts.PrefixCache, csync.NewMap[string, cachedPrefix]()),
 		nbStats:              cmp.Or(opts.NotebookStats, csync.NewMap[string, notebook.Stats]()),
 		nbScanIdx:            cmp.Or(opts.NotebookScanIdx, csync.NewMap[string, int]()),
+		nbPendingReads:       cmp.Or(opts.NotebookPendingReads, csync.NewMap[string, map[string]string]()),
 		filetracker:          opts.FileTracker,
 	}
 	return a
@@ -2081,10 +2089,12 @@ func (a *sessionAgent) maybeAutoInject(ctx context.Context, msgs []message.Messa
 // files the previous prefix render injected and the set of stubbed
 // read paths — the sufficiency signals for entry quality. Only calls
 // past the session's scan high-water mark count, so each call counts
-// once. The first sight of a session initializes the mark without
-// counting — pre-resume history is not re-view pressure.
+// once; calls first seen unfinished are remembered by ID and counted
+// when a later scan finds them finished. The first sight of a session
+// initializes the mark without counting — pre-resume history is not
+// re-view pressure.
 func (a *sessionAgent) countNotebookReViews(sessionID string, msgs []message.Message) {
-	if a.nbStats == nil || a.nbScanIdx == nil || sessionID == "" {
+	if a.nbStats == nil || a.nbScanIdx == nil || a.nbPendingReads == nil || sessionID == "" {
 		return
 	}
 	last, ok := a.nbScanIdx.Get(sessionID)
@@ -2095,19 +2105,51 @@ func (a *sessionAgent) countNotebookReViews(sessionID string, msgs []message.Mes
 	if last > len(msgs) {
 		last = 0
 	}
-	var newCalls []message.ToolCall
+
+	// Resolve pending calls first: a view seen Finished=false at
+	// index i stays countable when it completes, even though the
+	// cursor moved past i.
+	pending, _ := a.nbPendingReads.Get(sessionID)
+	if pending == nil {
+		pending = map[string]string{}
+	}
+	var newCalls []string // Basenames of files re-viewed.
+	if len(pending) > 0 {
+		for _, m := range msgs {
+			if m.Role != message.Assistant {
+				continue
+			}
+			for _, tc := range m.ToolCalls() {
+				base, wasPending := pending[tc.ID]
+				if wasPending && tc.Finished {
+					newCalls = append(newCalls, base)
+					delete(pending, tc.ID)
+				}
+			}
+		}
+		a.nbPendingReads.Set(sessionID, pending)
+	}
 	for i := last; i < len(msgs); i++ {
 		m := msgs[i]
 		if m.Role != message.Assistant {
 			continue
 		}
 		for _, tc := range m.ToolCalls() {
-			if tc.Finished && readToolNames[tc.Name] {
-				newCalls = append(newCalls, tc)
+			if !readToolNames[tc.Name] {
+				continue
+			}
+			base := filepath.Base(toolCallFilePath(tc.Input))
+			if tc.Finished {
+				newCalls = append(newCalls, base)
+			} else {
+				pending[tc.ID] = base
 			}
 		}
 	}
 	a.nbScanIdx.Set(sessionID, len(msgs))
+	if len(pending) > 0 {
+		a.nbPendingReads.Set(sessionID, pending)
+	}
 	if len(newCalls) == 0 {
 		return
 	}
@@ -2134,15 +2176,14 @@ func (a *sessionAgent) countNotebookReViews(sessionID string, msgs []message.Mes
 		}
 	}
 	stats, _ := a.nbStats.Get(sessionID)
-	for _, tc := range newCalls {
-		p := toolCallFilePath(tc.Input)
-		if p == "" {
+	for _, base := range newCalls {
+		if base == "" {
 			continue
 		}
-		if injected[filepath.Base(p)] {
+		if injected[base] {
 			stats.CoveredReViews++
 		}
-		if stubbed[normalizedPath(a.resolveReadPath(p))] {
+		if stubbed[normalizedPath(a.resolveReadPath(base))] {
 			stats.StubReViews++
 		}
 	}

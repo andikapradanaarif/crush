@@ -230,4 +230,7 @@ func TestRecallStatsByQueryType(t *testing.T) {
 	require.Equal(t, 1, got.ResultRecalls)
 	require.Equal(t, 3, got.EntryRecalls)
 	require.Equal(t, 0, got.CrossRecalls)
+	// All three entry queries returned nothing — misses counted
+	// separately from attempts.
+	require.Equal(t, 3, got.EmptyRecalls)
 }

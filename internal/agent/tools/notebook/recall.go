@@ -91,6 +91,7 @@ func NewRecallTool(svc notebook.Service, messages message.Service, cfg *config.C
 					return fantasy.NewTextErrorResponse(fmt.Sprintf("mem0 search failed: %v", err)), nil
 				}
 				if result == "" {
+					rc.bump(sessionID, func(s *notebook.Stats) { s.EmptyRecalls++ })
 					return fantasy.NewTextResponse("No cross-session memories found."), nil
 				}
 				return fantasy.NewTextResponse(result), nil
@@ -115,6 +116,7 @@ func NewRecallTool(svc notebook.Service, messages message.Service, cfg *config.C
 			}
 
 			if len(entries) == 0 {
+				rc.bump(sessionID, func(s *notebook.Stats) { s.EmptyRecalls++ })
 				return fantasy.NewTextResponse("No notebook entries found matching the query."), nil
 			}
 

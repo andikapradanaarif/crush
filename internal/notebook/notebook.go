@@ -101,6 +101,10 @@ type Stats struct {
 	// CrossRecalls counts cross: queries — mem0 cross-session
 	// lookups.
 	CrossRecalls int
+	// EmptyRecalls counts entry/cross queries that returned nothing
+	// — distinct from attempts: "recall that found nothing" is its
+	// own sufficiency signal (missing entries, not thin ones).
+	EmptyRecalls int
 	// StubReViews counts view/read calls on files whose earlier read
 	// result was stubbed — expected pressure, cheap to satisfy.
 	StubReViews int

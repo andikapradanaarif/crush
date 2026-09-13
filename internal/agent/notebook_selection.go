@@ -238,18 +238,27 @@ func selectNotebookEntries(entries []notebook.Entry, refs []string, floor segmen
 	// Pass 2.5: entries tagged to the session working set, newest
 	// first. Confident matches run before ambiguous collisions — a
 	// basename shared by two tracked files only promotes entries
-	// whose text names one of the tracked paths.
+	// whose text names one of the tracked paths. Dead entries run
+	// last: a dead tag is by definition resolved, hence a working-set
+	// member, so this pass — not fill — is where the demotion bites.
 	if len(sel.workingSet) > 0 {
+		var confLive, ambigLive, confDead, ambigDead []notebook.Entry
 		for i := len(entries) - 1; i >= 0; i-- {
-			if confident, _ := sel.workingSetMatch(entries[i]); confident {
-				trySelect(entries[i], working)
+			e := entries[i]
+			confident, ambiguous := sel.workingSetMatch(e)
+			switch dead := sel.entryIsDead(e); {
+			case confident && !dead:
+				confLive = append(confLive, e)
+			case ambiguous && !dead:
+				ambigLive = append(ambigLive, e)
+			case confident:
+				confDead = append(confDead, e)
+			case ambiguous:
+				ambigDead = append(ambigDead, e)
 			}
 		}
-		for i := len(entries) - 1; i >= 0; i-- {
-			confident, ambiguous := sel.workingSetMatch(entries[i])
-			if !confident && ambiguous {
-				trySelect(entries[i], working)
-			}
+		for _, e := range slices.Concat(confLive, ambigLive, confDead, ambigDead) {
+			trySelect(e, working)
 		}
 	}
 	// Pass 3: fill the remaining budget. Live entries first — entries
