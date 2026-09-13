@@ -13,6 +13,7 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/db"
@@ -329,9 +330,12 @@ func newGateTestAgent(t *testing.T, cfg *config.Config) (*sessionAgent, message.
 
 	svc := message.NewService(q)
 	return &sessionAgent{
-		configStore:  config.NewTestStore(cfg),
-		sessions:     sessions,
-		messages:     svc,
+		configStore: config.NewTestStore(cfg),
+		sessions:    sessions,
+		messages:    svc,
+		// A non-nil toolset containing todos, matching production —
+		// incompleteTodos skips when the toolset is unknown or lacks it.
+		tools:        csync.NewSliceFrom([]fantasy.AgentTool{&fakeTool{name: tools.TodosToolName}}),
 		messageQueue: csync.NewMap[string, []SessionAgentCall](),
 		dispatchMu:   csync.NewMap[string, *sync.Mutex](),
 	}, svc, sess.ID
@@ -545,6 +549,25 @@ func TestRunVerificationGate(t *testing.T) {
 			SessionID: sessionID, VerificationAttempts: maxVerificationAttempts,
 		}, result, asst)
 		require.False(t, queued)
+		require.Contains(t, asst.Content().Text, "todo item(s) still incomplete")
+	})
+
+	t.Run("exhausted budget surfaces checks and todos together", func(t *testing.T) {
+		t.Parallel()
+		a, _, sessionID := newGateTestAgent(t, &config.Config{})
+		setTodos(t, a.sessions, sessionID,
+			session.Todo{Content: "run the tests", Status: session.TodoStatusPending},
+		)
+		asst := assistantMsg()
+		result := &fantasy.AgentResult{Steps: []fantasy.StepResult{
+			stepWith(fantasy.FinishReasonToolCalls, editWith(`{"verification":[{"check":"diagnostics","state":"failed","detail":"1 new error(s)"}]}`)),
+			stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),
+		}}
+		queued := a.runVerificationGate(t.Context(), SessionAgentCall{
+			SessionID: sessionID, VerificationAttempts: maxVerificationAttempts,
+		}, result, asst)
+		require.False(t, queued)
+		require.Contains(t, asst.Content().Text, "still failing")
 		require.Contains(t, asst.Content().Text, "todo item(s) still incomplete")
 	})
 

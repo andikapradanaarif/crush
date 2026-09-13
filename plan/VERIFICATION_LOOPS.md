@@ -387,6 +387,13 @@ Guard: skip when the `todos` tool isn't in the toolset — a model
 that can't write the list can't reconcile it, and the retry would
 be guaranteed thrash.
 
+Semantic consequence worth stating: todos are session-scoped while
+the gate is per-turn. An item deliberately parked for a later turn
+("phase 2, after user confirms") gets force-reconciled at every
+clean stop — the list can no longer serve as a cross-turn backlog;
+dropping the item is the honest out. That is the intended semantic
+of #29, not an accident of it.
+
 On trigger, the scan sorts this run's write-tool results into three
 states: _failed_ or _pending_ (a check was selected but deferred)
 proceed to the gate; _unverified_ (no check applies — no LSP, no

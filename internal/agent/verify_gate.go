@@ -53,11 +53,11 @@ type resolvedCheck struct {
 }
 
 // runVerificationGate implements the end-of-turn verification gate. When
-// the run ended on a clean stop with failed or pending checks, it
-// resolves them, lands the outcomes on the stored tool-result metadata,
-// and — within budget — prepends a retry call carrying the check output.
-// Returns true when a retry was queued so the caller can suppress the
-// finished notification.
+// the run ended on a clean stop with failed or pending checks — or left
+// session todos open — it resolves the checks, lands outcomes on stored
+// tool-result metadata, and — within budget — prepends a retry call
+// carrying the check output and open items. Returns true when a retry
+// was queued so the caller can suppress the finished notification.
 func (a *sessionAgent) runVerificationGate(ctx context.Context, call SessionAgentCall, result *fantasy.AgentResult, currentAssistant *message.Message) bool {
 	if a.configStore == nil || result == nil || len(result.Steps) == 0 {
 		return false
@@ -526,24 +526,22 @@ func (a *sessionAgent) notifyVerifying(call SessionAgentCall, n int) {
 }
 
 // incompleteTodos returns the session's open todo items — the model's
-// own declared checklist. Returns nil when the todos tool is not in the
-// toolset: a model that cannot write the list cannot reconcile it, and
-// the retry would be a guaranteed thrash.
+// own declared checklist. Returns nil when the toolset is unknown (nil)
+// or lacks the todos tool: a model that cannot write the list cannot
+// reconcile it, and the retry would be a guaranteed thrash.
 func (a *sessionAgent) incompleteTodos(ctx context.Context, sessionID string) []session.Todo {
-	if a.sessions == nil {
+	if a.sessions == nil || a.tools == nil {
 		return nil
 	}
-	if a.tools != nil {
-		hasTodos := false
-		for _, tool := range a.tools.Copy() {
-			if tool.Info().Name == tools.TodosToolName {
-				hasTodos = true
-				break
-			}
+	hasTodos := false
+	for _, tool := range a.tools.Copy() {
+		if tool.Info().Name == tools.TodosToolName {
+			hasTodos = true
+			break
 		}
-		if !hasTodos {
-			return nil
-		}
+	}
+	if !hasTodos {
+		return nil
 	}
 	sess, err := a.sessions.Get(ctx, sessionID)
 	if err != nil {
@@ -578,7 +576,12 @@ func gateRetryPrompt(failed []gateCheckOutcome, openTodos []session.Todo) string
 	}
 	if len(openTodos) > 0 {
 		b.WriteString("\nThe todo list still has incomplete item(s) — a turn is not done while its declared tasks are open:\n")
-		for _, t := range openTodos {
+		const maxListedTodos = 20
+		for i, t := range openTodos {
+			if i >= maxListedTodos {
+				fmt.Fprintf(&b, "- … and %d more\n", len(openTodos)-maxListedTodos)
+				break
+			}
 			fmt.Fprintf(&b, "- [%s] %s\n", t.Status, t.Content)
 		}
 		b.WriteString("Finish the remaining work, or reconcile the list with the todos tool (mark genuinely done items completed; drop abandoned ones). Do not report the task finished while the list says otherwise.\n")
