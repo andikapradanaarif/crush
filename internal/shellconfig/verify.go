@@ -92,7 +92,11 @@ func verifyRemove(b *ConfigBuilder, args []string, stderr io.Writer) error {
 		}
 		kept = append(kept, item)
 	}
-	b.root["verify"] = kept
+	if len(kept) == 0 {
+		delete(b.root, "verify")
+	} else {
+		b.root["verify"] = kept
+	}
 
 	slog.Info("Verify check removed in shell config", "name", name)
 	return nil

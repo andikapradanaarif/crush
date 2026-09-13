@@ -160,6 +160,10 @@ func (a *sessionAgent) runVerificationGate(ctx context.Context, call SessionAgen
 // verification entries by state plus observed bash runs for
 // satisfy-from-observed matching.
 func scanVerification(steps []fantasy.StepResult) (failed, pending []gateCheckOutcome, observed []observedBash) {
+	// jobLaunches maps a background job's shell_id to the step the bash
+	// tool launched it on. A job_output poll is not when the command
+	// ran — the launch step is what a poll verdict must postdate.
+	jobLaunches := map[string]int{}
 	for stepIdx, step := range steps {
 		bashCmds := map[string]string{}
 		for _, tc := range step.Content.ToolCalls() {
@@ -170,19 +174,37 @@ func scanVerification(steps []fantasy.StepResult) (failed, pending []gateCheckOu
 		for _, tr := range step.Content.ToolResults() {
 			switch {
 			case tr.ToolName == tools.BashToolName || tr.ToolName == tools.JobOutputToolName:
+				shellID := gjson.Get(tr.ClientMetadata, "shell_id").String()
+				done := gjson.Get(tr.ClientMetadata, "done").Bool()
+				if tr.ToolName == tools.BashToolName && shellID != "" && !done {
+					// Still-running background start: not a verdict —
+					// record the launch step for a later job_output.
+					jobLaunches[shellID] = stepIdx
+					continue
+				}
 				// The verdict lives in metadata: a non-zero exit is a
 				// text response, never an error result. `done` marks a
-				// completed run — a still-running backgrounded command
-				// is not a verdict.
-				if !gjson.Get(tr.ClientMetadata, "done").Bool() &&
+				// completed run — a still-running command or a poll of
+				// one is not a verdict.
+				if !done &&
 					(tr.Result == nil || tr.Result.GetType() != fantasy.ToolResultContentTypeError) {
 					continue
 				}
 				cmd := bashCmds[tr.ToolCallID]
+				verdictStep := stepIdx
 				if tr.ToolName == tools.JobOutputToolName {
 					// JobOutput's input is a shell_id; the command
-					// comes from its response metadata.
+					// comes from its response metadata, and the step
+					// the verdict postdates from is the job's launch.
 					cmd = gjson.Get(tr.ClientMetadata, "command").String()
+					launch, ok := jobLaunches[shellID]
+					if !ok {
+						// Launched in an earlier run — predates every
+						// write this run made.
+						verdictStep = -1
+					} else {
+						verdictStep = launch
+					}
 				}
 				if cmd == "" {
 					continue
@@ -192,7 +214,7 @@ func scanVerification(steps []fantasy.StepResult) (failed, pending []gateCheckOu
 					isErr = ec.Int() != 0
 				}
 				observed = append(observed, observedBash{
-					stepIdx: stepIdx,
+					stepIdx: verdictStep,
 					command: cmd,
 					isError: isErr,
 					output:  toolResultText(tr),

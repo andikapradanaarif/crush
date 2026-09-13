@@ -120,7 +120,25 @@ func TestScanVerification(t *testing.T) {
 				ToolCallID:     "tc-job",
 				ToolName:       "job_output",
 				Result:         fantasy.ToolResultOutputContentText{Text: "Status: completed\nFAIL"},
-				ClientMetadata: `{"command":"go test ./job","done":true,"exit_code":1}`,
+				ClientMetadata: `{"command":"go test ./job","done":true,"exit_code":1,"shell_id":"bg2"}`,
+			},
+			// A job launched this run and polled later: the verdict's
+			// step for postdating is the launch, not the poll.
+			fantasy.ToolCallContent{ToolCallID: "tc-bash4", ToolName: "bash", Input: `{"command":"go test ./bg","run_in_background":true}`},
+			fantasy.ToolResultContent{
+				ToolCallID:     "tc-bash4",
+				ToolName:       "bash",
+				Result:         fantasy.ToolResultOutputContentText{Text: "Background shell started with ID: bg9"},
+				ClientMetadata: `{"background":true,"shell_id":"bg9"}`,
+			},
+		),
+		stepWith(fantasy.FinishReasonToolCalls,
+			fantasy.ToolCallContent{ToolCallID: "tc-job2", ToolName: "job_output", Input: `{"shell_id":"bg9","wait":true}`},
+			fantasy.ToolResultContent{
+				ToolCallID:     "tc-job2",
+				ToolName:       "job_output",
+				Result:         fantasy.ToolResultOutputContentText{Text: "Status: completed\nok"},
+				ClientMetadata: `{"command":"go test ./bg","done":true,"exit_code":0,"shell_id":"bg9"}`,
 			},
 		),
 		stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),
@@ -131,7 +149,7 @@ func TestScanVerification(t *testing.T) {
 	require.Len(t, pending, 1)
 	require.Equal(t, "package-test:pkg", pending[0].check.Check)
 	require.Equal(t, "tc-edit", pending[0].toolCallID)
-	require.Len(t, observed, 3)
+	require.Len(t, observed, 4)
 
 	require.Equal(t, "go test ./pkg", observed[0].command)
 	require.False(t, observed[0].isError)
@@ -141,8 +159,17 @@ func TestScanVerification(t *testing.T) {
 	require.Equal(t, "go test ./bad", observed[1].command)
 	require.True(t, observed[1].isError)
 
+	// A job launched before this run predates every write it made —
+	// the poll's step must not count.
 	require.Equal(t, "go test ./job", observed[2].command)
 	require.True(t, observed[2].isError)
+	require.Equal(t, -1, observed[2].stepIdx)
+
+	// Launched at step 1 (with the edit), polled at step 2 — the
+	// verdict postdates from the launch step, not the poll step.
+	require.Equal(t, "go test ./bg", observed[3].command)
+	require.False(t, observed[3].isError)
+	require.Equal(t, 1, observed[3].stepIdx)
 }
 
 func TestRunGateChecks(t *testing.T) {
