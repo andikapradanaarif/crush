@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +9,19 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
 )
+
+// sourceFileExts are the file extensions treated as source code — used to
+// scope the unverified-in-context suffix (a README edit has nothing to
+// hedge about). Check selection itself is not ext-gated: declared verify
+// commands gate every mutation.
+var sourceFileExts = map[string]bool{
+	".go": true, ".ts": true, ".tsx": true, ".js": true, ".jsx": true,
+	".mjs": true, ".cjs": true, ".py": true, ".rs": true, ".c": true,
+	".cc": true, ".cpp": true, ".h": true, ".hpp": true, ".java": true,
+	".rb": true, ".php": true, ".cs": true, ".swift": true, ".kt": true,
+	".kts": true, ".m": true, ".scala": true, ".ex": true, ".exs": true,
+	".erl": true, ".hrl": true, ".hs": true, ".clj": true, ".lua": true,
+}
 
 // pendingChecksForEdit returns the gate-run checks a mutation to absPath
 // selects: every configured verify command (a declared project check
@@ -34,10 +46,14 @@ func pendingChecksForEdit(cfg *config.Config, workingDir, absPath string) []mess
 		dir := filepath.Dir(absPath)
 		rel, err := filepath.Rel(workingDir, dir)
 		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && dirHasGoTestFile(dir) {
+			// Unquoted on purpose: observed-bash satisfaction is an exact
+			// command match, and a model naturally runs `go test ./pkg` —
+			// quoting would dead-end the check's biggest cost saver. Go
+			// package paths cannot contain spaces anyway.
 			checks = append(checks, message.VerificationCheck{
 				Check:   "package-test:" + rel,
 				State:   message.VerificationPending,
-				Command: fmt.Sprintf("go test %q", "./"+rel),
+				Command: "go test ./" + rel,
 				Timeout: 120,
 			})
 		}

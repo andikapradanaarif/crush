@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 )
 
 // handleVerify implements the `verify` builtin.
@@ -53,8 +54,8 @@ func verifyAdd(b *ConfigBuilder, args []string, stderr io.Writer) error {
 	if err := applyFlags(verifyAddFlags, args, 2, h, "verify add", stderr); err != nil {
 		return err
 	}
-	if _, ok := h["command"]; !ok {
-		return usage(stderr, "verify add: --command is required")
+	if cmd, ok := h["command"].(string); !ok || strings.TrimSpace(cmd) == "" {
+		return usage(stderr, "verify add: --command is required and must not be empty")
 	}
 
 	arr, _ := b.root["verify"].([]any)

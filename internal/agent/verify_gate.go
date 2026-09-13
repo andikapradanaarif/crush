@@ -205,7 +205,16 @@ func scanVerification(steps []fantasy.StepResult) (failed, pending []gateCheckOu
 					continue
 				}
 				for _, chk := range meta.Verification {
-					outcome := gateCheckOutcome{toolCallID: tr.ToolCallID, stepIndex: stepIdx, check: chk}
+					outcome := gateCheckOutcome{
+						toolCallID: tr.ToolCallID,
+						stepIndex:  stepIdx,
+						check:      chk,
+						// Carry the result text so a retry prompt is
+						// self-contained — a decorator-failed check's
+						// detail is only "N new error(s)"; the errors
+						// themselves live on the result.
+						output: toolResultText(tr),
+					}
 					switch chk.State {
 					case message.VerificationFailed:
 						failed = append(failed, outcome)

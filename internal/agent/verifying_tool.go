@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"charm.land/fantasy"
@@ -70,6 +72,13 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 		return v.inner.Run(ctx, call)
 	}
 	absPath := filepathext.SmartJoin(v.workingDir, filePath)
+	// Start configured-but-not-running servers before the coverage check —
+	// AnyClientHandles only sees running clients, and the pre-decorator
+	// flow started them on every edit via notifyLSPs. Skipping this lost
+	// lazy startup for headless runs and edit-before-view sessions.
+	if v.lspManager != nil {
+		v.lspManager.Start(ctx, absPath)
+	}
 	lspCovered := tools.AnyClientHandles(v.lspManager, absPath)
 
 	if !lspCovered {
@@ -77,6 +86,9 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 		if err != nil || resp.IsError {
 			return resp, err
 		}
+		// Keep the project-diagnostics append the tools used to produce
+		// even when no client handles this file.
+		resp.Content += tools.FormatDiagnostics(absPath, v.lspManager)
 		// Select after the mutation so a newly created file (e.g. the
 		// first _test.go in a package) is seen by the selector.
 		checks := v.selectPending(absPath)
@@ -87,8 +99,11 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 				Detail: "no LSP client handles the file",
 			}}
 			// Surface the unverified state in the result so the model can
-			// hedge instead of silently claiming the change is done.
-			resp.Content += "\n\n<verification status=\"unverified\">No automated check covers this change — the end-of-turn gate has nothing to run. Claim it verified only after running a check yourself.</verification>"
+			// hedge — scoped to source files, where a missing check is
+			// meaningful; a README edit has nothing to hedge about.
+			if sourceFileExts[strings.ToLower(filepath.Ext(absPath))] {
+				resp.Content += "\n\n<verification status=\"unverified\">No automated check covers this change — the end-of-turn gate has nothing to run. Claim it verified only after running a check yourself.</verification>"
+			}
 		}
 		resp.Metadata = mergeVerificationMetadata(resp.Metadata, checks)
 		return resp, nil
