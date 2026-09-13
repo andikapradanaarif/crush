@@ -81,7 +81,7 @@ func (s *service) GetTokenCount(ctx context.Context, sessionID string) (int64, e
 // DeleteEntries removes all notebook entries and segment coverage
 // rows for a session.
 func (s *service) DeleteEntries(ctx context.Context, sessionID string) error {
-	s.stallCounts.Del(sessionID)
+	s.ForgetSession(sessionID)
 	return s.withTx(ctx, func(q *db.Queries) error {
 		if err := q.DeleteNotebookEntriesBySession(ctx, sessionID); err != nil {
 			return fmt.Errorf("failed to delete notebook entries: %w", err)
@@ -258,6 +258,13 @@ func (s *service) Compact(ctx context.Context, sessionID string) error {
 // segment commit, so a streak this long can accrue within one turn.
 const compactionStallThreshold = 3
 
+// ForgetSession drops the session's in-memory stall counter.
+func (s *service) ForgetSession(sessionID string) {
+	s.stallMu.Lock()
+	defer s.stallMu.Unlock()
+	s.stallCounts.Del(sessionID)
+}
+
 // noteCompactStall counts a no-progress compaction round and fires the
 // stall callback once the streak reaches the threshold — on every
 // further round too, so the warning stays live while the condition
@@ -266,6 +273,8 @@ func (s *service) noteCompactStall(sessionID, reason string) {
 	if sessionID == "" {
 		return
 	}
+	s.stallMu.Lock()
+	defer s.stallMu.Unlock()
 	n, _ := s.stallCounts.Get(sessionID)
 	n++
 	s.stallCounts.Set(sessionID, n)
@@ -285,6 +294,8 @@ func (s *service) noteCompactProgress(sessionID string) {
 	if sessionID == "" {
 		return
 	}
+	s.stallMu.Lock()
+	defer s.stallMu.Unlock()
 	n, _ := s.stallCounts.Get(sessionID)
 	s.stallCounts.Del(sessionID)
 	if n >= compactionStallThreshold && s.opts.OnCompactionStall != nil {

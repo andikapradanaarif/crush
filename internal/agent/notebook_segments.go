@@ -771,9 +771,10 @@ func prefixFingerprint(boundary int, bKey, floor segmentKey, entries []notebook.
 // buildSelectionInput assembles the working set and file-liveness
 // inputs for selection. The working set is the session's most recently
 // touched files (basename -> tracked absolute paths); livePaths stats
-// only the tracked paths whose basename appears on a candidate entry,
-// so the cost is bounded by tagged files, not the whole tracker.
-func (a *sessionAgent) buildSelectionInput(ctx context.Context, sessionID string, entries []notebook.Entry, segs []segment, boundary int) selectionInput {
+// only the tracked paths whose basename appears on a COVERED candidate
+// entry — bKey-scoped, so a post-boundary file's deletion can't churn
+// the fingerprint into a byte-identical re-render.
+func (a *sessionAgent) buildSelectionInput(ctx context.Context, sessionID string, entries []notebook.Entry, segs []segment, boundary int, bKey segmentKey) selectionInput {
 	sel := selectionInput{bandFloor: fillBandFloor(segs, boundary)}
 	if a.filetracker == nil {
 		return sel
@@ -792,10 +793,14 @@ func (a *sessionAgent) buildSelectionInput(ctx context.Context, sessionID string
 		base := filepath.Base(p)
 		sel.workingSet[base] = append(sel.workingSet[base], p)
 	}
-	// Stat only the tracked paths whose basename some candidate entry
-	// carries — the demotion check can't see untagged basenames.
+	// Stat only the tracked paths whose basename some covered
+	// candidate entry carries — the demotion check can't see untagged
+	// basenames, and entries at/after the boundary never render.
 	want := make(map[string]bool)
 	for _, e := range entries {
+		if e.TurnNumber > bKey.turn || (e.TurnNumber == bKey.turn && e.SegmentNumber >= bKey.segment) {
+			continue
+		}
 		for _, tag := range e.Tags {
 			if base, ok := strings.CutPrefix(tag, "file:"); ok {
 				want[base] = true
@@ -835,7 +840,7 @@ func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msg
 	// restricting the scan to it would silently drop file: refs for
 	// the rest of the run.
 	refs := notebookRelevanceRefs(detCtx, a.sessions, sessionID, msgs)
-	sel := a.buildSelectionInput(detCtx, sessionID, entries, segs, boundary)
+	sel := a.buildSelectionInput(detCtx, sessionID, entries, segs, boundary, bKey)
 	floor := coveredSegmentFloor(segs, boundary)
 	fp := prefixFingerprint(boundary, bKey, floor, entries, refs, sel)
 	if a.prefixCache != nil {

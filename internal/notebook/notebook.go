@@ -7,6 +7,7 @@ package notebook
 import (
 	"context"
 	"database/sql"
+	"sync"
 
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/db"
@@ -101,9 +102,10 @@ type Stats struct {
 	// CrossRecalls counts cross: queries — mem0 cross-session
 	// lookups.
 	CrossRecalls int
-	// EmptyRecalls counts entry/cross queries that returned nothing
-	// — distinct from attempts: "recall that found nothing" is its
-	// own sufficiency signal (missing entries, not thin ones).
+	// EmptyRecalls counts recall queries that returned nothing —
+	// entry, cross, and result lookups alike. Distinct from attempts:
+	// "recall that found nothing" is its own sufficiency signal
+	// (missing entries or a broken stub pointer, not thin ones).
 	EmptyRecalls int
 	// StubReViews counts view/read calls on files whose earlier read
 	// result was stubbed — expected pressure, cheap to satisfy.
@@ -192,6 +194,10 @@ type Service interface {
 
 	// DeleteEntries removes all notebook entries for a session.
 	DeleteEntries(ctx context.Context, sessionID string) error
+	// ForgetSession drops the service's in-memory per-session state
+	// (the compaction-stall counter). Called on session deletion; the
+	// DB rows are already cascade-deleted.
+	ForgetSession(sessionID string)
 }
 
 // service implements the notebook Service interface.
@@ -202,8 +208,11 @@ type service struct {
 	opts      Options
 	// stallCounts tracks consecutive compaction rounds that made no
 	// progress, per session — hook denials and all-pinned stalls share
-	// one counter.
+	// one counter. stallMu serializes the counter's get-modify-set
+	// (and the ordering of stall vs. resolve callbacks) because
+	// per-segment generation runs Compacts on concurrent goroutines.
 	stallCounts *csync.Map[string, int]
+	stallMu     sync.Mutex
 }
 
 // Options configures the notebook service.

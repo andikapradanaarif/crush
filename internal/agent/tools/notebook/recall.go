@@ -176,6 +176,7 @@ func (rc *recallContext) recallToolResult(ctx context.Context, sessionID, toolCa
 			return fantasy.NewTextResponse(sb.String()), nil
 		}
 	}
+	rc.bump(sessionID, func(s *notebook.Stats) { s.EmptyRecalls++ })
 	return fantasy.NewTextResponse(fmt.Sprintf("No tool result found for %q in this session.", toolCallID)), nil
 }
 
