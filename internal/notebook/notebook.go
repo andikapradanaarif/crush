@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 
+	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/hooks"
 	"github.com/charmbracelet/crush/internal/message"
@@ -82,6 +83,40 @@ type EntryInput struct {
 	// ErrorHeadline carries a one-line digest of the failure for
 	// entries whose tool result is an error.
 	ErrorHeadline string
+}
+
+// Stats accumulates per-session sufficiency telemetry for the
+// notebook layer: how often the model reaches back for detail
+// (recalls, re-views) and which selection pass is doing the work.
+// Shared across the agent and the recall tool via a csync map so the
+// step-composition log line can emit one picture per session.
+type Stats struct {
+	// EntryRecalls counts recall queries that hit the notebook
+	// (tag/turn/segment/type/text). This layer's sufficiency signal.
+	EntryRecalls int
+	// ResultRecalls counts result: queries — raw tool-result lookups.
+	// A stubbing signal, not a notebook one; interpret it against the
+	// stub track's metrics.
+	ResultRecalls int
+	// CrossRecalls counts cross: queries — mem0 cross-session
+	// lookups.
+	CrossRecalls int
+	// StubReViews counts view/read calls on files whose earlier read
+	// result was stubbed — expected pressure, cheap to satisfy.
+	StubReViews int
+	// CoveredReViews counts view/read calls on files whose entries
+	// the last prefix render injected — the entry-sufficiency signal.
+	CoveredReViews int
+	// Selection pass contributions, cumulative across renders:
+	// SelPassRecency is the recency floor pass, SelPassPinned the
+	// active-edit pin pass, SelPassRefs the prompt/todo ref pass,
+	// SelPassWorking the working-set pass, SelPassFill the
+	// newest-first fill.
+	SelPassRecency int
+	SelPassPinned  int
+	SelPassRefs    int
+	SelPassWorking int
+	SelPassFill    int
 }
 
 // Service is the interface for notebook operations.
@@ -161,6 +196,10 @@ type service struct {
 	db        *sql.DB
 	generator Generator
 	opts      Options
+	// stallCounts tracks consecutive compaction rounds that made no
+	// progress, per session — hook denials and all-pinned stalls share
+	// one counter.
+	stallCounts *csync.Map[string, int]
 }
 
 // Options configures the notebook service.
@@ -176,6 +215,11 @@ type Options struct {
 	// offset is read inside the write lock. Nil falls back to
 	// sequential statements.
 	DB *sql.DB
+	// OnCompactionStall fires when Compact makes no progress for
+	// several consecutive rounds — a PreCompact hook denying forever,
+	// or every remaining entry pinned. It never overrides the deny or
+	// pin; it only warns. reason describes the cause.
+	OnCompactionStall func(sessionID, reason string)
 }
 
 // Generator generates notebook entries from classified events using an
@@ -208,9 +252,10 @@ func NewService(q *db.Queries, generator Generator, opts Options) Service {
 		llmGen.maxEntryTokens = opts.MaxEntryTokens
 	}
 	return &service{
-		q:         q,
-		db:        opts.DB,
-		generator: generator,
-		opts:      opts,
+		q:           q,
+		db:          opts.DB,
+		generator:   generator,
+		opts:        opts,
+		stallCounts: csync.NewMap[string, int](),
 	}
 }

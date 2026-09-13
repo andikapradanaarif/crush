@@ -2424,9 +2424,7 @@ func (m *UI) handleSelectModel(msg dialog.ActionSelectModel) tea.Cmd {
 						"The notebook will continue using the previous model.",
 					err))
 			}
-			var (
-				modelName = msg.Model.Model
-			)
+			modelName := msg.Model.Model
 			if catwalkModel := cfg.GetModel(msg.Model.Provider, msg.Model.Model); catwalkModel != nil && catwalkModel.Name != "" {
 				modelName = catwalkModel.Name
 			}
@@ -4879,6 +4877,15 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 		return m.handleAWSSSOAuth(n.AWSSOCommand, n.AWSSOURL)
 	case notify.TypeAWSSSOAuthResult:
 		return m.handleAWSSSOAuthResult(n.Message)
+	case notify.TypeNotebookStall:
+		// Persistent: the stall republishes on each further no-progress
+		// round, so a long TTL keeps the warning visible while the
+		// condition persists without pinning it forever after it clears.
+		m.status.SetInfoMsg(util.InfoMsg{
+			Type: util.InfoTypeWarn,
+			Msg:  n.Message,
+		})
+		return clearInfoMsgCmd(time.Minute)
 	default:
 		return nil
 	}

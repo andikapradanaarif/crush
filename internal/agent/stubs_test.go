@@ -73,7 +73,7 @@ func TestMaybeAutoInject_SkipsSupersededRead(t *testing.T) {
 			message.TextContent{Text: "look at internal/auth.go please"},
 		}},
 	}
-	msg := agent.maybeAutoInject(t.Context(), msgs, sessionID, segmentKey{turn: 10})
+	msg := agent.maybeAutoInject(t.Context(), msgs, sessionID, segmentKey{turn: 10}, nil)
 	if msg != nil {
 		for _, part := range msg.Content {
 			if tp, ok := part.(fantasy.TextPart); ok {
@@ -95,7 +95,7 @@ func TestMaybeAutoInject_InjectsUnsupersededRead(t *testing.T) {
 			message.TextContent{Text: "look at internal/auth.go please"},
 		}},
 	}
-	msg := agent.maybeAutoInject(t.Context(), msgs, sessionID, segmentKey{turn: 10})
+	msg := agent.maybeAutoInject(t.Context(), msgs, sessionID, segmentKey{turn: 10}, nil)
 	require.NotNil(t, msg)
 	var text string
 	for _, part := range msg.Content {
