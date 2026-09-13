@@ -1,0 +1,67 @@
+package app
+
+import (
+	"encoding/json"
+	"os"
+
+	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/agent"
+	"github.com/charmbracelet/crush/internal/config"
+)
+
+// EvalTelemetryEnvVar names the file a non-interactive run writes its
+// per-run telemetry to when set — the eval harness's extraction path
+// for numbers that only exist in-process (steps, usage, stub stats,
+// recalls). Kept in sync with internal/eval.EvalTelemetryEnvVar; the
+// constant is duplicated so app doesn't import eval.
+const EvalTelemetryEnvVar = "CRUSH_EVAL_TELEMETRY"
+
+// emitEvalTelemetry writes the run's telemetry JSON when
+// CRUSH_EVAL_TELEMETRY is set. Best-effort: a write failure must never
+// fail the run itself.
+func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult, runErr error) {
+	path := os.Getenv(EvalTelemetryEnvVar)
+	if path == "" || app.AgentCoordinator == nil {
+		return
+	}
+	doc := map[string]any{
+		"session_id": sessionID,
+	}
+	if result != nil {
+		doc["steps"] = len(result.Steps)
+		doc["tokens"] = map[string]int64{
+			"input":       result.TotalUsage.InputTokens,
+			"output":      result.TotalUsage.OutputTokens,
+			"cache_read":  result.TotalUsage.CacheReadTokens,
+			"cache_write": result.TotalUsage.CacheCreationTokens,
+		}
+	}
+	// SessionTelemetry is not on the Coordinator interface — assert so
+	// test stubs and alternate coordinators needn't implement it.
+	if c, ok := app.AgentCoordinator.(interface {
+		SessionTelemetry(string) agent.SessionTelemetry
+	}); ok {
+		tel := c.SessionTelemetry(sessionID)
+		doc["stub_stats"] = map[string]any{
+			"invalidations":     tel.StubInvalidations,
+			"results":           tel.StubResults,
+			"saved_bytes":       tel.StubSavedBytes,
+			"boundary_advances": tel.BoundaryAdvances,
+		}
+		doc["recalls"] = map[string]any{
+			"result": tel.ResultRecalls,
+			"entry":  tel.EntryRecalls,
+			"empty":  tel.EmptyRecalls,
+			"cross":  tel.CrossRecalls,
+		}
+	}
+	if m, ok := app.config.Config().Models[config.SelectedModelTypeLarge]; ok {
+		doc["model"] = m.Provider + "/" + m.Model
+	}
+	if runErr != nil {
+		doc["error"] = runErr.Error()
+	}
+	if data, err := json.Marshal(doc); err == nil {
+		_ = os.WriteFile(path, data, 0o644)
+	}
+}

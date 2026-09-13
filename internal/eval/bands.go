@@ -1,0 +1,377 @@
+package eval
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"time"
+)
+
+// Characterization constants. The boundary positions belong to the
+// characterization doc, not the schema — these are the initial values.
+const (
+	// GenesisRuns is the genesis characterization sample size. N=5 has
+	// a uselessly wide CI — bands are provisional and revised from
+	// accumulated run records.
+	GenesisRuns = 5
+
+	// BaselineWindowRuns and BaselineWindowDays bound the rolling
+	// baseline window — min(K runs, D days): a count bound alone
+	// retains arbitrarily old runs in quiet periods.
+	BaselineWindowRuns = 30
+	BaselineWindowDays = 30
+
+	// StablePHatFloor and StableMinN bound the stable band. Stable is
+	// deliberately conservative: the catastrophic tier protects only
+	// near-pristine baselines at small arm N anyway.
+	StablePHatFloor = 0.9
+	StableMinN      = GenesisRuns
+
+	// PromotionStreakRequired implements the asymmetric hysteresis:
+	// demotion on one bad characterization, promotion on two
+	// consecutive good ones — so a stable trajectory producing a
+	// suspect characterization doesn't keep catastrophic eligibility
+	// through the confirmation window.
+	PromotionStreakRequired = 2
+
+	// NeverPassedFails routes a trajectory to quarantined with
+	// never_passed when it has zero passes in this many trailing
+	// conclusive runs. Genesis 0/5 doesn't qualify — a real p=0.3
+	// task would be ejected ~17% of the time at 0/5, ~3% at 0/10.
+	NeverPassedFails = 10
+)
+
+// FlagsManifest is eval/flags.json — the declared projection of options
+// experiments may touch (the context-management flag set) plus each
+// flag's current default. Baseline keys are hashed over this
+// projection; extending the list re-keys every baseline.
+type FlagsManifest struct {
+	Defaults map[string]any `json:"flag_defaults"`
+}
+
+// LoadFlagsManifest reads eval/flags.json. A missing manifest yields an
+// empty projection — legal until the first experiment needs it.
+func LoadFlagsManifest(evalDir string) (*FlagsManifest, error) {
+	data, err := os.ReadFile(filepath.Join(evalDir, "flags.json"))
+	if os.IsNotExist(err) {
+		return &FlagsManifest{Defaults: map[string]any{}}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read flags manifest: %w", err)
+	}
+	var m FlagsManifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, fmt.Errorf("parse flags.json: %w", err)
+	}
+	if m.Defaults == nil {
+		m.Defaults = map[string]any{}
+	}
+	return &m, nil
+}
+
+// EffectiveConfig resolves the flag projection's value for a run:
+// manifest defaults overlaid with the arm's options delta.
+func (m *FlagsManifest) EffectiveConfig(armOptions map[string]any) map[string]any {
+	out := make(map[string]any, len(m.Defaults))
+	for k, v := range m.Defaults {
+		out[k] = v
+	}
+	for k := range m.Defaults {
+		if v, ok := armOptions[k]; ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// BaselineKey is the config hash a run belongs under for baseline
+// purposes — the projection of its effective config.
+func (m *FlagsManifest) BaselineKey(armOptions map[string]any) string {
+	return BaselineConfigHash(sortedKeys(m.Defaults), m.EffectiveConfig(armOptions))
+}
+
+// ValidateArmFlags enforces the declared-manifest rule: an option an
+// arm varies must be a manifest flag, otherwise flips would rotate
+// baselines without re-keying.
+func (m *FlagsManifest) ValidateArmFlags(e *Experiment) error {
+	for armName, arm := range e.Arms {
+		for k := range arm.Config.Options {
+			if _, ok := m.Defaults[k]; !ok {
+				return fmt.Errorf("arm %q sets option %q which is not in eval/flags.json — flags under test must be declared so baseline keys rotate correctly", armName, k)
+			}
+		}
+	}
+	return nil
+}
+
+// LoadBands reads bands.json; a missing file yields empty state.
+func LoadBands(evalDir string) (*Bands, error) {
+	path := filepath.Join(evalDir, "bands.json")
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return &Bands{SchemaVersion: 1, Entries: map[string]BandEntry{}}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read bands.json: %w", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parse bands.json: %w", err)
+	}
+	b := &Bands{SchemaVersion: 1, Entries: map[string]BandEntry{}}
+	for k, v := range raw {
+		if k == "_schema_version" {
+			continue
+		}
+		var e BandEntry
+		if err := json.Unmarshal(v, &e); err != nil {
+			return nil, fmt.Errorf("parse bands entry %q: %w", k, err)
+		}
+		b.Entries[k] = e
+	}
+	return b, nil
+}
+
+// Save writes bands.json.
+func (b *Bands) Save(evalDir string) error {
+	raw := map[string]any{"_schema_version": b.SchemaVersion}
+	for k, v := range b.Entries {
+		raw[k] = v
+	}
+	data, err := json.MarshalIndent(raw, "", "\t")
+	if err != nil {
+		return fmt.Errorf("marshal bands.json: %w", err)
+	}
+	return os.WriteFile(filepath.Join(evalDir, "bands.json"), data, 0o644)
+}
+
+// Band returns the trajectory's band, defaulting to uncharacterized.
+func (b *Bands) Band(id string) Band {
+	if e, ok := b.Entries[id]; ok {
+		return e.Band
+	}
+	return BandUncharacterized
+}
+
+// Entry returns the band entry, creating an empty one if absent.
+func (b *Bands) Entry(id string) *BandEntry {
+	if b.Entries == nil {
+		b.Entries = map[string]BandEntry{}
+	}
+	e, ok := b.Entries[id]
+	if !ok {
+		e = BandEntry{Band: BandUncharacterized}
+	}
+	return &e
+}
+
+// Put stores the entry back.
+func (b *Bands) Put(id string, e BandEntry) {
+	if b.Entries == nil {
+		b.Entries = map[string]BandEntry{}
+	}
+	b.Entries[id] = e
+}
+
+// Baseline returns the windowed counts for a (model, baselineKey) pair.
+func (b *Bands) Baseline(id, model, baselineKey string) BaselineCounts {
+	e, ok := b.Entries[id]
+	if !ok {
+		return BaselineCounts{}
+	}
+	byCfg, ok := e.Baselines[model]
+	if !ok {
+		return BaselineCounts{}
+	}
+	return byCfg[baselineKey]
+}
+
+// Recompute rebuilds a trajectory's characterization state from the
+// accumulated run records. It is the byproduct pass: every paired
+// comparison adds baseline samples for the keys it ran under.
+//
+// records are all known run records for this trajectory (any
+// experiment, including _characterize). contentHash is the trajectory's
+// current corpus hash — samples scored under a different revision are
+// discarded (a check fix invalidates the old scoring function).
+// baselineKey selects which effective-config condition the run counted
+// toward; each record carries its own baseline_key.
+func (b *Bands) Recompute(id string, records []RunRecord, contentHash string, now time.Time) {
+	e := b.Entry(id)
+	// Put via closure: defer evaluates arguments immediately, so
+	// defer b.Put(id, *e) would snapshot the pre-Recompute entry.
+	defer func() { b.Put(id, *e) }()
+
+	if e.Band == BandQuarantined {
+		// Stays until re-validated by the quarantine pass — even
+		// across content changes, since a new revision still needs
+		// explicit re-validation, not silent release.
+		e.ContentHash = contentHash
+		return
+	}
+
+	if e.ContentHash != contentHash {
+		// Corpus revision changed — samples scored by the old
+		// function are a different trajectory's data.
+		e.Baselines = nil
+		e.Band = BandUncharacterized
+		e.QuarantineReason = ""
+		e.PromotionStreak = 0
+		e.ContentHash = contentHash
+	}
+
+	// Group conclusive records by (model, baseline_key), windowed.
+	type key struct{ model, cfg string }
+	grouped := map[key][]RunRecord{}
+	for _, r := range records {
+		if !r.Outcome.Conclusive() {
+			continue
+		}
+		if r.Env.ContentHash != "" && r.Env.ContentHash != contentHash {
+			continue
+		}
+		k := key{r.Env.ModelResolved, r.BaselineKey}
+		grouped[k] = append(grouped[k], r)
+	}
+
+	e.Baselines = map[string]map[string]BaselineCounts{}
+	for k, recs := range grouped {
+		sort.Slice(recs, func(i, j int) bool { return recs[i].StartedAt.After(recs[j].StartedAt) })
+		windowed := recs
+		if len(windowed) > BaselineWindowRuns {
+			windowed = windowed[:BaselineWindowRuns]
+		}
+		cutoff := now.AddDate(0, 0, -BaselineWindowDays)
+		n := 0
+		passes := 0
+		for _, r := range windowed {
+			if r.StartedAt.Before(cutoff) {
+				break
+			}
+			n++
+			if r.Outcome == OutcomePass {
+				passes++
+			}
+		}
+		if n == 0 {
+			continue
+		}
+		if e.Baselines[k.model] == nil {
+			e.Baselines[k.model] = map[string]BaselineCounts{}
+		}
+		e.Baselines[k.model][k.cfg] = BaselineCounts{
+			Passes:  passes,
+			N:       n,
+			LastRun: windowed[0].StartedAt.Format("2006-01-02"),
+		}
+	}
+
+	b.assignBand(e, records)
+	e.LastCharacterized = now.Format("2006-01-02")
+}
+
+// assignBand classifies the trajectory from its recomputed state,
+// applying hysteresis: demote on one bad characterization, promote on
+// two consecutive good ones.
+func (b *Bands) assignBand(e *BandEntry, records []RunRecord) {
+	// never_passed: zero passes in the trailing NeverPassedFails
+	// conclusive runs. A trajectory with lifetime passes hitting the
+	// same streak is rot, not beyond-model — that routes through
+	// suspect_check/environment alarms, not here.
+	consecFails := 0
+	everPassed := false
+	ordered := append([]RunRecord(nil), records...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].StartedAt.After(ordered[j].StartedAt) })
+	for _, r := range ordered {
+		if !r.Outcome.Conclusive() {
+			continue
+		}
+		if r.Outcome == OutcomePass {
+			everPassed = true
+			break
+		}
+		consecFails++
+	}
+	if !everPassed && consecFails >= NeverPassedFails {
+		e.Band = BandQuarantined
+		e.QuarantineReason = ReasonNeverPassed
+		return
+	}
+
+	// suspect_check: quarantine exercises agent-free states, so a
+	// check flaky only on agent-produced states (port binding, races)
+	// passes quarantine then masquerades as mid band. Consecutive
+	// within-arm pass/fail alternation is the empirical net.
+	if suspectCheck(ordered) {
+		e.Band = BandQuarantined
+		e.QuarantineReason = ReasonSuspectCheck
+		return
+	}
+
+	// Band reads the baseline under the current default condition —
+	// the key with the most samples is the characterization driver.
+	best := BaselineCounts{}
+	for _, byCfg := range e.Baselines {
+		for _, c := range byCfg {
+			if c.N > best.N {
+				best = c
+			}
+		}
+	}
+
+	good := best.N >= StableMinN && best.PHat() >= StablePHatFloor
+	switch e.Band {
+	case BandStable:
+		if !good {
+			// One bad characterization demotes immediately.
+			e.Band = bandFor(best)
+			e.PromotionStreak = 0
+		}
+	default:
+		if good {
+			e.PromotionStreak++
+			if e.PromotionStreak >= PromotionStreakRequired {
+				e.Band = BandStable
+				e.PromotionStreak = 0
+			} else {
+				e.Band = bandFor(best)
+			}
+		} else {
+			e.PromotionStreak = 0
+			e.Band = bandFor(best)
+		}
+	}
+}
+
+// bandFor classifies counts without hysteresis.
+func bandFor(c BaselineCounts) Band {
+	if c.N < GenesisRuns {
+		return BandUncharacterized
+	}
+	return BandMid // Stable additionally requires the promotion streak.
+}
+
+// suspectCheck reports whether the conclusive sequence alternates
+// pass/fail more than any stable check should — a runs-style heuristic:
+// ≥8 conclusive samples with alternation rate above 0.7 flags the
+// check rather than letting the noise absorb into p̂.
+func suspectCheck(orderedDesc []RunRecord) bool {
+	var outcomes []Outcome
+	for _, r := range orderedDesc {
+		if r.Outcome == OutcomePass || r.Outcome == OutcomeFail {
+			outcomes = append(outcomes, r.Outcome)
+		}
+	}
+	if len(outcomes) < 8 {
+		return false
+	}
+	alternations := 0
+	for i := 1; i < len(outcomes); i++ {
+		if outcomes[i] != outcomes[i-1] {
+			alternations++
+		}
+	}
+	return float64(alternations)/float64(len(outcomes)-1) > 0.7
+}

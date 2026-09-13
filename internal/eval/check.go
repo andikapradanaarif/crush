@@ -1,0 +1,96 @@
+package eval
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+// CheckResult is what check.sh produced.
+type CheckResult struct {
+	// Exit is the script's exit code; -1 when the script could not be
+	// executed at all (missing, not executable, timed out).
+	Exit   int
+	Detail map[string]any // parsed EVAL_JSON line, if any
+	Stdout string
+	Stderr string
+	// Err is set when the harness broke rather than the check judging:
+	// cannot execute, or timed out. Distinct from a non-zero exit —
+	// infra errors never count against the model.
+	Err error
+}
+
+// RunCheck executes the trajectory's check.sh with cwd = workdir, on
+// the working tree as the agent left it. The runner exports
+// EVAL_WORKDIR and EVAL_TRAJECTORY_DIR for checks needing oracles.
+func RunCheck(ctx context.Context, traj *Trajectory, trajDir, workdir string) CheckResult {
+	// The check chdirs into the workdir; a relative trajDir would
+	// resolve against it, so absolutize first.
+	if abs, err := filepath.Abs(trajDir); err == nil {
+		trajDir = abs
+	}
+	timeout := time.Duration(traj.Check.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	script := filepath.Join(trajDir, traj.Check.Script)
+	cmd := exec.CommandContext(ctx, "bash", script)
+	cmd.Dir = workdir
+	cmd.Env = append(os.Environ(),
+		"EVAL_WORKDIR="+workdir,
+		"EVAL_TRAJECTORY_DIR="+trajDir,
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	res := CheckResult{Exit: -1}
+	err := cmd.Run()
+	res.Stdout = stdout.String()
+	res.Stderr = stderr.String()
+	res.Detail = parseEvalJSON(res.Stdout)
+
+	if ctx.Err() == context.DeadlineExceeded {
+		res.Err = fmt.Errorf("check timed out after %s", timeout)
+		return res
+	}
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			res.Exit = exitErr.ExitCode()
+			return res
+		}
+		res.Err = fmt.Errorf("check could not execute: %w", err)
+		return res
+	}
+	res.Exit = 0
+	return res
+}
+
+// parseEvalJSON returns the last EVAL_JSON {...} line's object. A
+// malformed line never changes the verdict; it just leaves Detail nil.
+// Trailing output may follow the matching line.
+func parseEvalJSON(stdout string) map[string]any {
+	var detail map[string]any
+	for line := range strings.Lines(stdout) {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "EVAL_JSON ")
+		if !ok {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(rest), &m); err == nil {
+			detail = m
+		}
+	}
+	return detail
+}
