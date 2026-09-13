@@ -24,8 +24,13 @@ const stubMinContentBytes = 200
 const stubCommandMinBytes = 512
 
 // writeToolNames mutate files; a successful result supersedes earlier
-// reads of the same path.
-var writeToolNames = map[string]bool{"edit": true, "write": true, "multiedit": true}
+// reads of the same path. The set is also the verifyingTool wrap set and
+// the gate's metadata-scan set — lsp_rename/lsp_replace_symbol mutate
+// via workspace edits, the canonical caller-breaker.
+var writeToolNames = map[string]bool{
+	"edit": true, "write": true, "multiedit": true,
+	"lsp_rename": true, "lsp_replace_symbol": true,
+}
 
 // readToolNames capture file content; their results go stale on writes.
 var readToolNames = map[string]bool{"view": true, "read": true}

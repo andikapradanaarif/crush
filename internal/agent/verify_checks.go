@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,14 +47,18 @@ func pendingChecksForEdit(cfg *config.Config, workingDir, absPath string) []mess
 		dir := filepath.Dir(absPath)
 		rel, err := filepath.Rel(workingDir, dir)
 		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && dirHasGoTestFile(dir) {
-			// Unquoted on purpose: observed-bash satisfaction is an exact
+			// Unquoted by default: observed-bash satisfaction is an exact
 			// command match, and a model naturally runs `go test ./pkg` —
-			// quoting would dead-end the check's biggest cost saver. Go
-			// package paths cannot contain spaces anyway.
+			// quoting would dead-end the check's biggest cost saver. Quote
+			// only when the relative path actually needs it.
+			target := "./" + rel
+			if strings.ContainsAny(rel, " \t\"'") {
+				target = fmt.Sprintf("%q", target)
+			}
 			checks = append(checks, message.VerificationCheck{
 				Check:   "package-test:" + rel,
 				State:   message.VerificationPending,
-				Command: "go test ./" + rel,
+				Command: "go test " + target,
 				Timeout: 120,
 			})
 		}

@@ -16,6 +16,8 @@ func TestWrapToolsWithVerification(t *testing.T) {
 		&fakeTool{name: "edit"},
 		&fakeTool{name: "write"},
 		&fakeTool{name: "multiedit"},
+		&fakeTool{name: "lsp_rename"},
+		&fakeTool{name: "lsp_replace_symbol"},
 		&fakeTool{name: "bash"},
 		&fakeTool{name: "view"},
 	}
@@ -23,9 +25,12 @@ func TestWrapToolsWithVerification(t *testing.T) {
 	out := wrapToolsWithVerification(inputs, nil, t.TempDir(), nil)
 	require.Len(t, out, len(inputs))
 	for i, tool := range inputs {
-		_, wrapped := out[i].(*verifyingTool)
-		require.Equal(t, writeToolNames[tool.Info().Name], wrapped,
-			"tool %q wrap = %v, want %v", tool.Info().Name, wrapped, writeToolNames[tool.Info().Name])
+		wrapped, isWrapped := out[i].(*verifyingTool)
+		require.Equal(t, writeToolNames[tool.Info().Name], isWrapped,
+			"tool %q wrap = %v, want %v", tool.Info().Name, isWrapped, writeToolNames[tool.Info().Name])
+		if isWrapped && tool.Info().Name == "lsp_rename" {
+			require.True(t, wrapped.projectWide, "rename refreshes all open files")
+		}
 	}
 }
 

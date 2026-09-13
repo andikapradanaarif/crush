@@ -629,7 +629,11 @@ metadata disagrees (should be structurally zero).
 - Verifying mutations with no path signal — `bash` redirections and
   MCP writes escape the edit-class table. Observed-mutation flagging
   detects them after the fact; gate participation needs a follow-up
-  (e.g. diffing the filetracker read-set around bash calls).
+  (e.g. diffing the filetracker read-set around bash calls). Note that
+  `lsp_rename`/`lsp_replace_symbol` ARE covered — they mutate via
+  workspace edits (the canonical caller-breaker) and sit in the
+  decorator's wrap set; `lsp_rename` gets a project-wide post-mutation
+  refresh rather than anchor-file notify.
 - Full-suite runs per edit — explicitly a periodic/pre-completion
   check only.
 - Turn-state machine / durable task objects — the gate is a run

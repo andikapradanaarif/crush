@@ -313,9 +313,13 @@ func errorHeadline(content string) string {
 
 // isMutationTool reports whether a tool mutates files — the set the
 // verifyingTool decorator covers and the only events that carry
-// verification state.
+// verification state. Keep it in sync with writeToolNames.
 func isMutationTool(name string) bool {
-	return name == "edit" || name == "write" || name == "multiedit"
+	switch name {
+	case "edit", "write", "multiedit", "lsp_rename", "lsp_replace_symbol":
+		return true
+	}
+	return false
 }
 
 // Entry-level verification states. The check-level states on tool

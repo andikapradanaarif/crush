@@ -30,6 +30,10 @@ type verifyingTool struct {
 	// pendingChecks resolves the gate-run checks a mutation selects;
 	// recorded as pending entries for the end-of-turn gate to collect.
 	pendingChecks func(absPath string) []message.VerificationCheck
+	// projectWide marks tools that mutate many files via workspace edits
+	// (lsp_rename): the post-mutation notify refreshes all open files
+	// rather than just the anchor file.
+	projectWide bool
 }
 
 // wrapToolsWithVerification wraps each write-class tool in a
@@ -40,7 +44,13 @@ func wrapToolsWithVerification(toolList []fantasy.AgentTool, lspManager *lsp.Man
 	out := make([]fantasy.AgentTool, len(toolList))
 	for i, tool := range toolList {
 		if writeToolNames[tool.Info().Name] {
-			out[i] = &verifyingTool{inner: tool, lspManager: lspManager, workingDir: workingDir, pendingChecks: pendingChecks}
+			out[i] = &verifyingTool{
+				inner:         tool,
+				lspManager:    lspManager,
+				workingDir:    workingDir,
+				pendingChecks: pendingChecks,
+				projectWide:   tool.Info().Name == "lsp_rename",
+			}
 		} else {
 			out[i] = tool
 		}
@@ -121,7 +131,13 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 		return resp, err
 	}
 
-	settled := tools.NotifyLSPs(ctx, v.lspManager, absPath)
+	// A workspace-edit tool touches many files — refresh all open files,
+	// not just the anchor.
+	notifyPath := absPath
+	if v.projectWide {
+		notifyPath = ""
+	}
+	settled := tools.NotifyLSPs(ctx, v.lspManager, notifyPath)
 	after := tools.SnapshotDiagnostics(v.lspManager)
 	newErrs := after.NewErrorsSince(baseline)
 
