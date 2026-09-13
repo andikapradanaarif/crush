@@ -569,7 +569,7 @@ func lspDiagnosticsForFailure(command string, exitCode int, interrupted bool, ls
 	if interrupted || exitCode == 0 || lspManager == nil || !isBuildOrTestCommand(command) {
 		return ""
 	}
-	diags := getDiagnostics("", lspManager)
+	diags := FormatDiagnostics("", lspManager)
 	if diags == "" {
 		return ""
 	}

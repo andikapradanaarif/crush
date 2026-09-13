@@ -101,7 +101,7 @@ func NewRenameTool(
 				}
 			}
 
-			notifyLSPs(ctx, lspManager, "")
+			NotifyLSPs(ctx, lspManager, "")
 
 			var b strings.Builder
 			fmt.Fprintf(&b, "Renamed '%s' to '%s' in %d file(s):\n\n", params.Symbol, params.NewName, len(affectedFiles))
@@ -111,7 +111,7 @@ func NewRenameTool(
 
 			text := b.String()
 			if len(affectedFiles) > 0 {
-				text += "\n" + getDiagnostics(affectedFiles[0], lspManager)
+				text += "\n" + FormatDiagnostics(affectedFiles[0], lspManager)
 			}
 
 			return fantasy.NewTextResponse(text), nil

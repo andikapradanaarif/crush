@@ -1,0 +1,148 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/filepathext"
+	"github.com/charmbracelet/crush/internal/lsp"
+	"github.com/charmbracelet/crush/internal/message"
+	"github.com/tidwall/sjson"
+)
+
+// diagnosticsBaselineTimeout bounds the pre-mutation LSP settle wait so a
+// never-opened file does not read an empty baseline forever.
+const diagnosticsBaselineTimeout = 3 * time.Second
+
+// verifyingTool wraps a file-mutation tool to record an LSP diagnostics
+// delta on the result: a baseline snapshot before the inner call, a fresh
+// snapshot after, and a passed/failed verdict over new errors.
+type verifyingTool struct {
+	inner      fantasy.AgentTool
+	lspManager *lsp.Manager
+	workingDir string
+	// pendingChecks resolves the gate-run checks a mutation selects;
+	// recorded as pending entries for the end-of-turn gate to collect.
+	pendingChecks func(absPath string, lspCovered bool) []message.VerificationCheck
+}
+
+// wrapToolsWithVerification wraps each write-class tool in a
+// verifyingTool. Unlike hooks there is no sub-agent exemption — the
+// decorator fires no user code, and a sub-agent's own run gate consumes
+// the metadata on its child session.
+func wrapToolsWithVerification(toolList []fantasy.AgentTool, lspManager *lsp.Manager, workingDir string, pendingChecks func(absPath string, lspCovered bool) []message.VerificationCheck) []fantasy.AgentTool {
+	out := make([]fantasy.AgentTool, len(toolList))
+	for i, tool := range toolList {
+		if writeToolNames[tool.Info().Name] {
+			out[i] = &verifyingTool{inner: tool, lspManager: lspManager, workingDir: workingDir, pendingChecks: pendingChecks}
+		} else {
+			out[i] = tool
+		}
+	}
+	return out
+}
+
+// Unwrap returns the wrapped tool, matching hookedTool's convention for
+// callers that need the concrete type.
+func (v *verifyingTool) Unwrap() fantasy.AgentTool {
+	return v.inner
+}
+
+func (v *verifyingTool) Info() fantasy.ToolInfo {
+	return v.inner.Info()
+}
+
+func (v *verifyingTool) ProviderOptions() fantasy.ProviderOptions {
+	return v.inner.ProviderOptions()
+}
+
+func (v *verifyingTool) SetProviderOptions(opts fantasy.ProviderOptions) {
+	v.inner.SetProviderOptions(opts)
+}
+
+func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+	filePath := toolCallFilePath(call.Input)
+	if filePath == "" {
+		return v.inner.Run(ctx, call)
+	}
+	absPath := filepathext.SmartJoin(v.workingDir, filePath)
+	lspCovered := tools.AnyClientHandles(v.lspManager, absPath)
+	var pending []message.VerificationCheck
+	if v.pendingChecks != nil {
+		pending = v.pendingChecks(absPath, lspCovered)
+	}
+
+	if !lspCovered {
+		resp, err := v.inner.Run(ctx, call)
+		if err != nil || resp.IsError {
+			return resp, err
+		}
+		checks := pending
+		if len(checks) == 0 {
+			checks = []message.VerificationCheck{{
+				Check:  "diagnostics",
+				State:  message.VerificationUnverified,
+				Detail: "no LSP client handles the file",
+			}}
+			// Surface the unverified state in the result so the model can
+			// hedge instead of silently claiming the change is done.
+			resp.Content += "\n\n<verification status=\"unverified\">No automated check covers this change — the end-of-turn gate has nothing to run. Claim it verified only after running a check yourself.</verification>"
+		}
+		resp.Metadata = mergeVerificationMetadata(resp.Metadata, checks)
+		return resp, nil
+	}
+
+	// Baseline before the mutation: open the file so a first-ever edit
+	// does not read an empty snapshot, then wait for the publish.
+	tools.PrepareDiagnosticsBaseline(ctx, v.lspManager, absPath, diagnosticsBaselineTimeout)
+	baseline := tools.SnapshotDiagnostics(v.lspManager)
+
+	resp, err := v.inner.Run(ctx, call)
+	if err != nil || resp.IsError {
+		// Preserve the tools' early return: no diagnostics append and no
+		// verification write on a failed mutation.
+		return resp, err
+	}
+
+	tools.NotifyLSPs(ctx, v.lspManager, absPath)
+	after := tools.SnapshotDiagnostics(v.lspManager)
+	newErrs := after.NewErrorsSince(baseline)
+
+	resp.Content += tools.FormatDiagnostics(absPath, v.lspManager)
+
+	state := message.VerificationPassed
+	detail := ""
+	if len(newErrs) > 0 {
+		state = message.VerificationFailed
+		detail = fmt.Sprintf("%d new error(s)", len(newErrs))
+	}
+	checks := append([]message.VerificationCheck{{
+		Check:  "diagnostics",
+		State:  state,
+		Detail: detail,
+	}}, pending...)
+	resp.Metadata = mergeVerificationMetadata(resp.Metadata, checks)
+	return resp, nil
+}
+
+// mergeVerificationMetadata sets the "verification" key on existing tool
+// metadata via sjson so it composes with the "hook" key rather than
+// clobbering it.
+func mergeVerificationMetadata(existing string, checks []message.VerificationCheck) string {
+	data, err := json.Marshal(checks)
+	if err != nil {
+		return existing
+	}
+	if existing == "" {
+		existing = "{}"
+	}
+	merged, err := sjson.SetRaw(existing, "verification", string(data))
+	if err != nil {
+		return existing
+	}
+	return merged
+}

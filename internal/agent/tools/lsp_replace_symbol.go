@@ -165,7 +165,7 @@ func NewReplaceSymbolTool(
 				filetracker.RecordRead(ctx, sessionID, params.FilePath)
 			}
 
-			notifyLSPs(ctx, lspManager, params.FilePath)
+			NotifyLSPs(ctx, lspManager, params.FilePath)
 
 			var summary string
 			switch action {
@@ -179,7 +179,7 @@ func NewReplaceSymbolTool(
 				summary = fmt.Sprintf("Deleted symbol '%s' from %s (lines %d-%d)", params.Symbol, params.FilePath, startLine+1, endLine+1)
 			}
 
-			resp := fantasy.NewTextResponse(summary + "\n" + getDiagnostics(params.FilePath, lspManager))
+			resp := fantasy.NewTextResponse(summary + "\n" + FormatDiagnostics(params.FilePath, lspManager))
 			resp = fantasy.WithResponseMetadata(resp, ReplaceSymbolResponseMetadata{
 				FilePath:   params.FilePath,
 				OldContent: string(content),
