@@ -2121,14 +2121,12 @@ func (a *sessionAgent) countNotebookReViews(sessionID string, msgs []message.Mes
 				continue
 			}
 			for _, tc := range m.ToolCalls() {
-				p, wasPending := pending[tc.ID]
-				if wasPending && tc.Finished {
+				if p, wasPending := pending[tc.ID]; wasPending && tc.Finished {
 					newCalls = append(newCalls, p)
 					delete(pending, tc.ID)
 				}
 			}
 		}
-		a.nbPendingReads.Set(sessionID, pending)
 	}
 	for i := last; i < len(msgs); i++ {
 		m := msgs[i]
@@ -2136,22 +2134,24 @@ func (a *sessionAgent) countNotebookReViews(sessionID string, msgs []message.Mes
 			continue
 		}
 		for _, tc := range m.ToolCalls() {
-			if !readToolNames[tc.Name] {
-				continue
-			}
 			p := toolCallFilePath(tc.Input)
 			switch {
+			case !readToolNames[tc.Name] || p == "":
+				// Not a read call, or no path to join against later.
 			case tc.Finished:
 				newCalls = append(newCalls, p)
-			case p != "":
-				// No path to join against later — don't queue it.
+			default:
 				pending[tc.ID] = p
 			}
 		}
 	}
 	a.nbScanIdx.Set(sessionID, len(msgs))
+	// Persist once — Del drops the drained map so an empty pending
+	// set doesn't linger for the session's lifetime.
 	if len(pending) > 0 {
 		a.nbPendingReads.Set(sessionID, pending)
+	} else {
+		a.nbPendingReads.Del(sessionID)
 	}
 	if len(newCalls) == 0 {
 		return
