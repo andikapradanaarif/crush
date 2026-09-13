@@ -358,6 +358,23 @@ func TestSelectNotebookEntries_WorkingSet(t *testing.T) {
 		require.Contains(t, entryIDs(got), "recent2")
 	})
 
+	t.Run("relative-path suffix disambiguates a collision", func(t *testing.T) {
+		t.Parallel()
+		// Entry text spells the path relative to the working dir;
+		// "api/auth.go" is a >=2-component suffix of exactly one
+		// tracked path, so the match is confident.
+		entries := []notebook.Entry{
+			nbEntry("clear", 1, 1, notebook.EventFileRead, "read internal/api/auth.go", 10, "file:auth.go"),
+		}
+		sel := selForFiles(
+			map[string][]string{"auth.go": {"/w/internal/api/auth.go", "/w/web/auth.go"}},
+			nil,
+		)
+		got, diff := selectNotebookEntries(entries, nil, segmentKey{turn: 2}, sel)
+		require.Equal(t, []string{"clear"}, entryIDs(got))
+		require.Equal(t, 1, diff.working)
+	})
+
 	t.Run("collided basename without disambiguation runs second", func(t *testing.T) {
 		t.Parallel()
 		// Two tracked files share the basename; only the entry whose
@@ -476,6 +493,27 @@ func TestSelectNotebookEntries_DeadDemotion(t *testing.T) {
 		}
 		got, _ := selectNotebookEntries(entries, nil, segmentKey{turn: 0, segment: 21}, sel)
 		require.ElementsMatch(t, []string{"untracked", "alive"}, entryIDs(got))
+	})
+
+	t.Run("dead ws entry loses to a live fill entry", func(t *testing.T) {
+		t.Parallel()
+		// The live entry's file was never tracked — it can only win
+		// via fill. The dead entry IS working-set tagged, so this
+		// proves dead working-set entries demote below live fill.
+		entries := []notebook.Entry{
+			nbSegEntry("dead", 0, 0, 2, notebook.EventFileRead, "read gone.go", 6000, "file:gone.go"),
+			nbSegEntry("alive", 0, 0, 1, notebook.EventFileRead, "read here.go", 6000, "file:here.go"),
+		}
+		sel := selectionInput{
+			bandFloor:  segmentKey{turn: 0, segment: 10},
+			workingSet: map[string][]string{"gone.go": {"/w/gone.go"}},
+			livePaths:  map[string]bool{"/w/gone.go": false},
+		}
+		got, diff := selectNotebookEntries(entries, nil, segmentKey{turn: 0, segment: 21}, sel)
+		require.Contains(t, entryIDs(got), "alive")
+		require.NotContains(t, entryIDs(got), "dead")
+		require.Equal(t, 0, diff.working)
+		require.Equal(t, 1, diff.fill)
 	})
 
 	t.Run("dead demotion does not apply to explicit refs", func(t *testing.T) {

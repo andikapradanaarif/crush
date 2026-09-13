@@ -91,20 +91,42 @@ func (sel selectionInput) workingSetMatch(e notebook.Entry) (confident, ambiguou
 			confident = true
 			continue
 		}
-		matched := false
+		// Confident only when the text names exactly one tracked
+		// path — a suffix matching two of them stays ambiguous.
+		matched := 0
 		for _, p := range paths {
-			if strings.Contains(e.EntryTextFull, p) || strings.Contains(e.EntryText, p) {
-				matched = true
-				break
+			if textNamesPath(e.EntryTextFull, p) || textNamesPath(e.EntryText, p) {
+				matched++
 			}
 		}
-		if matched {
+		if matched == 1 {
 			confident = true
 		} else {
 			ambiguous = true
 		}
 	}
 	return confident, ambiguous
+}
+
+// textNamesPath reports whether text mentions path p — either the
+// full tracked path or a distinctive suffix of it (two or more
+// components, e.g. "api/auth.go"). Generated entry text spells paths
+// relative to the working dir, so only suffixes with a directory
+// component count as disambiguation.
+func textNamesPath(text, p string) bool {
+	if text == "" {
+		return false
+	}
+	if strings.Contains(text, p) {
+		return true
+	}
+	parts := strings.FieldsFunc(p, func(r rune) bool { return r == '/' })
+	for k := len(parts); k >= 2; k-- {
+		if strings.Contains(text, strings.Join(parts[len(parts)-k:], "/")) {
+			return true
+		}
+	}
+	return false
 }
 
 // entryIsDead reports whether every resolved file: tag on the entry
@@ -238,27 +260,22 @@ func selectNotebookEntries(entries []notebook.Entry, refs []string, floor segmen
 	// Pass 2.5: entries tagged to the session working set, newest
 	// first. Confident matches run before ambiguous collisions — a
 	// basename shared by two tracked files only promotes entries
-	// whose text names one of the tracked paths. Dead entries run
-	// last: a dead tag is by definition resolved, hence a working-set
-	// member, so this pass — not fill — is where the demotion bites.
+	// whose text names one of the tracked paths. Dead entries are
+	// skipped entirely: a dead tag is by definition a working-set
+	// member, so they fall through to the fill pass's dead buckets —
+	// demotion below every live entry, not just live working-set
+	// entries.
 	if len(sel.workingSet) > 0 {
-		var confLive, ambigLive, confDead, ambigDead []notebook.Entry
 		for i := len(entries) - 1; i >= 0; i-- {
-			e := entries[i]
-			confident, ambiguous := sel.workingSetMatch(e)
-			switch dead := sel.entryIsDead(e); {
-			case confident && !dead:
-				confLive = append(confLive, e)
-			case ambiguous && !dead:
-				ambigLive = append(ambigLive, e)
-			case confident:
-				confDead = append(confDead, e)
-			case ambiguous:
-				ambigDead = append(ambigDead, e)
+			if confident, _ := sel.workingSetMatch(entries[i]); confident && !sel.entryIsDead(entries[i]) {
+				trySelect(entries[i], working)
 			}
 		}
-		for _, e := range slices.Concat(confLive, ambigLive, confDead, ambigDead) {
-			trySelect(e, working)
+		for i := len(entries) - 1; i >= 0; i-- {
+			confident, ambiguous := sel.workingSetMatch(entries[i])
+			if !confident && ambiguous && !sel.entryIsDead(entries[i]) {
+				trySelect(entries[i], working)
+			}
 		}
 	}
 	// Pass 3: fill the remaining budget. Live entries first — entries

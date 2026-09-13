@@ -2108,21 +2108,22 @@ func (a *sessionAgent) countNotebookReViews(sessionID string, msgs []message.Mes
 
 	// Resolve pending calls first: a view seen Finished=false at
 	// index i stays countable when it completes, even though the
-	// cursor moved past i.
+	// cursor moved past i. Paths are carried raw — the injected join
+	// wants the basename, the stubbed join the resolved full path.
 	pending, _ := a.nbPendingReads.Get(sessionID)
 	if pending == nil {
 		pending = map[string]string{}
 	}
-	var newCalls []string // Basenames of files re-viewed.
+	var newCalls []string // Raw read paths of re-viewed files.
 	if len(pending) > 0 {
 		for _, m := range msgs {
 			if m.Role != message.Assistant {
 				continue
 			}
 			for _, tc := range m.ToolCalls() {
-				base, wasPending := pending[tc.ID]
+				p, wasPending := pending[tc.ID]
 				if wasPending && tc.Finished {
-					newCalls = append(newCalls, base)
+					newCalls = append(newCalls, p)
 					delete(pending, tc.ID)
 				}
 			}
@@ -2138,11 +2139,10 @@ func (a *sessionAgent) countNotebookReViews(sessionID string, msgs []message.Mes
 			if !readToolNames[tc.Name] {
 				continue
 			}
-			base := filepath.Base(toolCallFilePath(tc.Input))
 			if tc.Finished {
-				newCalls = append(newCalls, base)
+				newCalls = append(newCalls, toolCallFilePath(tc.Input))
 			} else {
-				pending[tc.ID] = base
+				pending[tc.ID] = toolCallFilePath(tc.Input)
 			}
 		}
 	}
@@ -2176,14 +2176,14 @@ func (a *sessionAgent) countNotebookReViews(sessionID string, msgs []message.Mes
 		}
 	}
 	stats, _ := a.nbStats.Get(sessionID)
-	for _, base := range newCalls {
-		if base == "" {
+	for _, p := range newCalls {
+		if p == "" {
 			continue
 		}
-		if injected[base] {
+		if injected[filepath.Base(p)] {
 			stats.CoveredReViews++
 		}
-		if stubbed[normalizedPath(a.resolveReadPath(base))] {
+		if stubbed[normalizedPath(a.resolveReadPath(p))] {
 			stats.StubReViews++
 		}
 	}

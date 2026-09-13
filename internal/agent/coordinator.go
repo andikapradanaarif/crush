@@ -343,6 +343,15 @@ func (c *coordinator) watchSessionDeletions() {
 		if c.nbPendingReads != nil {
 			c.nbPendingReads.Del(ev.Payload.ID)
 		}
+		// The DB cascade removes the rows; DeleteEntries also drops
+		// the service's in-memory compaction-stall counter.
+		if c.notebook != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := c.notebook.DeleteEntries(ctx, ev.Payload.ID); err != nil {
+				slog.Warn("Failed to clean notebook state for deleted session", "session_id", ev.Payload.ID, "error", err)
+			}
+			cancel()
+		}
 	}
 }
 

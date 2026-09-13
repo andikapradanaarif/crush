@@ -212,6 +212,10 @@ type UI struct {
 
 	focus uiFocusState
 	state uiState
+	// nbStallWarned records that the status bar currently shows our
+	// notebook-stall warning, so the resolved notification only
+	// clears a warning this model set.
+	nbStallWarned bool
 
 	// Frame memoization (see framecache.go). scrollOnlyUpdate is set by
 	// handlers that change nothing but the chat scroll position; frameDirty
@@ -4878,14 +4882,22 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 	case notify.TypeAWSSSOAuthResult:
 		return m.handleAWSSSOAuthResult(n.Message)
 	case notify.TypeNotebookStall:
-		// Persistent: the stall republishes on each further no-progress
-		// round, so a long TTL keeps the warning visible while the
-		// condition persists without pinning it forever after it clears.
+		// No TTL — a stalled condition may persist far longer than
+		// any timeout; the resolved notification clears it. The flag
+		// scopes the clear so a resolved event can't wipe an
+		// unrelated info message.
+		m.nbStallWarned = true
 		m.status.SetInfoMsg(util.InfoMsg{
 			Type: util.InfoTypeWarn,
 			Msg:  n.Message,
 		})
-		return clearInfoMsgCmd(time.Minute)
+		return nil
+	case notify.TypeNotebookStallResolved:
+		if m.nbStallWarned {
+			m.nbStallWarned = false
+			m.status.ClearInfoMsg()
+		}
+		return nil
 	default:
 		return nil
 	}

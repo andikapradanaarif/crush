@@ -153,9 +153,13 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 	// notification — a hook denying forever or all-pinned stalls grow
 	// the notebook DB unbounded otherwise invisible.
 	notebookOpts.OnCompactionStall = func(sessionID, reason string) {
+		nt := notify.TypeNotebookStall
+		if reason == "" {
+			nt = notify.TypeNotebookStallResolved
+		}
 		app.agentNotifications.Publish(pubsub.CreatedEvent, notify.Notification{
 			SessionID: sessionID,
-			Type:      notify.TypeNotebookStall,
+			Type:      nt,
 			Message:   reason,
 		})
 	}

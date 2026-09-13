@@ -811,20 +811,22 @@ func TestCountNotebookReViews_PendingCallFinishes(t *testing.T) {
 	// call is queued under its ID.
 	a.countNotebookReViews("sess", []message.Message{
 		segUser("go"),
-		view("tc-1", "a.go", false),
+		view("tc-1", "internal/x.go", false),
 	})
 	got, _ := statsMap.Get("sess")
 	require.Equal(t, 0, got.StubReViews+got.CoveredReViews)
 	p, _ := pending.Get("sess")
 	require.Contains(t, p, "tc-1")
 
-	// A stubbed result for a.go makes the later finish count as stub
-	// re-view pressure.
+	// A stubbed result for a NESTED path makes the later finish
+	// count as stub re-view pressure — regression: the join must
+	// resolve the call's raw path, not its basename (a basename
+	// resolves to <wd>/<base> and never matches a nested mark).
 	stubRes := message.ToolResult{ToolCallID: "tc-0", Name: "view", Content: "x"}
-	stubRes.Superseded = &message.SupersededMark{Path: "a.go", Applied: true}
+	stubRes.Superseded = &message.SupersededMark{Path: "internal/x.go", Applied: true}
 	a.countNotebookReViews("sess", []message.Message{
 		segUser("go"),
-		view("tc-1", "a.go", true),
+		view("tc-1", "internal/x.go", true),
 		segTool(stubRes),
 		segUser("next"),
 	})

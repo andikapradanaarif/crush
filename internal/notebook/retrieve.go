@@ -277,10 +277,18 @@ func (s *service) noteCompactStall(sessionID, reason string) {
 }
 
 // noteCompactProgress resets the stall counter for a round that
-// compressed something or ended under budget.
+// compressed something or ended under budget. When the reset streak
+// had already warned, the callback fires once more with an empty
+// reason — the resolution signal that lets the UI clear the warning
+// instead of waiting out a TTL.
 func (s *service) noteCompactProgress(sessionID string) {
-	if sessionID != "" {
-		s.stallCounts.Del(sessionID)
+	if sessionID == "" {
+		return
+	}
+	n, _ := s.stallCounts.Get(sessionID)
+	s.stallCounts.Del(sessionID)
+	if n >= compactionStallThreshold && s.opts.OnCompactionStall != nil {
+		s.opts.OnCompactionStall(sessionID, "")
 	}
 }
 

@@ -987,10 +987,17 @@ func TestCompact_PinStallWarnsAndProgressResets(t *testing.T) {
 	require.NoError(t, err)
 
 	var reasons []string
+	var resolved int
 	svc := NewService(q, &mockGenerator{echo: true}, Options{
 		MaxEntryTokens:    10000,
 		MaxNotebookTokens: 5,
-		OnCompactionStall: func(_, reason string) { reasons = append(reasons, reason) },
+		OnCompactionStall: func(_, reason string) {
+			if reason == "" {
+				resolved++
+				return
+			}
+			reasons = append(reasons, reason)
+		},
 	})
 
 	// Turn 1: a big read of pinned.go. Turn 2: an edit to the same
@@ -1038,6 +1045,7 @@ func TestCompact_PinStallWarnsAndProgressResets(t *testing.T) {
 	require.True(t, ok)
 	n, _ := inner.stallCounts.Get(sessionID)
 	require.Equal(t, 0, n, "a progress round must reset the stall counter")
+	require.Equal(t, 1, resolved, "ending a warned streak must republish once to clear the warning")
 }
 
 func TestBuildGeneratePrompt_IncludesErrorHeadline(t *testing.T) {
