@@ -234,7 +234,8 @@ type Options struct {
 	// pin; it only warns. reason describes the cause; an EMPTY reason
 	// signals resolution — fired once on the progress round that ends
 	// a warned streak, letting the UI clear the warning instead of
-	// waiting out a TTL.
+	// waiting out a TTL. It runs under the service's stall mutex:
+	// implementations must not block or call back into the service.
 	OnCompactionStall func(sessionID, reason string)
 }
 

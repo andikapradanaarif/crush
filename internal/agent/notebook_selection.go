@@ -118,7 +118,7 @@ func textNamesPath(text, p string) bool {
 	if text == "" {
 		return false
 	}
-	if strings.Contains(text, p) {
+	if containsPathBounded(text, p) {
 		return true
 	}
 	parts := strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' })

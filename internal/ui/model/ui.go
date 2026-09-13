@@ -906,6 +906,9 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case pubsub.Event[session.Session]:
 		if msg.Type == pubsub.DeletedEvent {
+			// A session deleted mid-stall leaves no resolve event —
+			// drop its warn record so the map can't grow stale.
+			delete(m.nbStallWarned, msg.Payload.ID)
 			if m.session != nil && m.session.ID == msg.Payload.ID {
 				if cmd := m.newSession(); cmd != nil {
 					cmds = append(cmds, cmd)
