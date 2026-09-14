@@ -220,11 +220,18 @@ func ValidateExperiment(e *Experiment) error {
 	if len(e.Arms) != 2 {
 		return fmt.Errorf("analysis is defined for two arms, got %d", len(e.Arms))
 	}
-	if _, ok := e.Arms["control"]; !ok {
+	if _, ok := e.Arms[ArmControl]; !ok {
 		return fmt.Errorf("arms must include \"control\", got %v", sortedKeys(e.Arms))
 	}
-	if _, ok := e.Arms["treatment"]; !ok {
+	if _, ok := e.Arms[ArmTreatment]; !ok {
 		return fmt.Errorf("arms must include \"treatment\", got %v", sortedKeys(e.Arms))
+	}
+	// Temperature is a run condition hashed into baseline keys —
+	// characterize/smoke always pin it, so an unpinned experiment's
+	// control records land in a "default"-temp cell no baseline can
+	// join, silently darkening the catastrophic tier.
+	if e.Temperature == nil {
+		return fmt.Errorf("temperature must be pinned — unpinned arms never join characterized baselines")
 	}
 	if len(e.Corpus) == 0 {
 		return fmt.Errorf("corpus selector is required")

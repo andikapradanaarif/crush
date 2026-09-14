@@ -133,10 +133,12 @@ func WriteArmConfig(workdir string, exp *Experiment, arm Arm, manifest *FlagsMan
 		"data_directory": DataDirFor(workdir),
 	}
 	for k, v := range arm.Config.Options {
-		// Harness-managed keys an arm must not override — relocating
-		// the data dir breaks telemetry/session-DB paths and leaves
-		// harness files inside the tree checks observe.
-		if k == "data_directory" {
+		// Harness invariants an arm must not override — data dir
+		// relocation breaks telemetry/session-DB paths and litters
+		// the tree checks observe; metrics/auto-update re-enable
+		// nondeterministic side effects in measured runs.
+		switch k {
+		case "data_directory", "disable_metrics", "disable_provider_auto_update":
 			return fmt.Errorf("arm sets %q which the harness manages — remove it from the experiment", k)
 		}
 		options[k] = v
@@ -173,6 +175,26 @@ func WriteArmConfig(workdir string, exp *Experiment, arm Arm, manifest *FlagsMan
 			existing["options"] = options
 		}
 		doc = existing
+	}
+	// crush.json merges at lower precedence — still an error when it
+	// pins a manifest flag (same foreign-condition trap).
+	lowPath := filepath.Join(workdir, "crush.json")
+	if fileExists(lowPath) {
+		raw, err := os.ReadFile(lowPath)
+		if err != nil {
+			return fmt.Errorf("read existing crush.json: %w", err)
+		}
+		var existing map[string]any
+		if err := json.Unmarshal(raw, &existing); err != nil {
+			return fmt.Errorf("existing crush.json does not parse: %w", err)
+		}
+		if opts, ok := existing["options"].(map[string]any); ok {
+			for k := range opts {
+				if _, declared := manifest.Defaults[k]; declared {
+					return fmt.Errorf("existing crush.json sets manifest flag %q — the fixture would pin a flag under test; remove it or drop the flag from flags.json", k)
+				}
+			}
+		}
 	}
 	data, err := json.MarshalIndent(doc, "", "\t")
 	if err != nil {

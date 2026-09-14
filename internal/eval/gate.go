@@ -280,12 +280,12 @@ func excludedCounts(recs []RunRecord) (et, ec, tt, tc int) {
 	for _, r := range recs {
 		excluded := r.Outcome == OutcomeInconclusive || r.Outcome == OutcomeError
 		switch r.Arm {
-		case "treatment":
+		case ArmTreatment:
 			tt++
 			if excluded {
 				et++
 			}
-		case "control":
+		case ArmControl:
 			tc++
 			if excluded {
 				ec++

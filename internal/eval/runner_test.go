@@ -234,7 +234,7 @@ func experimentFixture(t *testing.T, r *Runner, root string, flag string) {
 	bands := &Bands{SchemaVersion: 1, Entries: map[string]BandEntry{
 		"stable-t": {
 			Band:        BandStable,
-			Baselines:   map[string]map[string]BaselineCounts{"mock/m": {manifest.BaselineKey(map[string]any{flag: false}): {Passes: 29, N: 30}}},
+			Baselines:   map[string]map[string]BaselineCounts{"mock/m": {manifest.keyWith(map[string]any{flag: false}, map[string]any{"$temperature": "0"}): {Passes: 29, N: 30}}},
 			ContentHash: mustHash(t, filepath.Join(root, "corpus", "stable-t")),
 		},
 		"mid-t": {Band: BandMid, ContentHash: mustHash(t, filepath.Join(root, "corpus", "mid-t"))},
@@ -267,7 +267,7 @@ func TestRunExperiment_CatastrophicFires(t *testing.T) {
 	// COLLAPSE instead, invert: treatment has flag false? Simpler:
 	// flip which arm enables the marker.
 	exp := &Experiment{
-		Name: "exp1", Model: "mock/m",
+		Name: "exp1", Model: "mock/m", Temperature: ptr(0.0),
 		Corpus:            []string{"*"},
 		RunsPerTrajectory: map[Band]int{BandStable: 3, BandMid: 3, BandUncharacterized: 3},
 		Arms: map[string]Arm{
@@ -315,7 +315,7 @@ func TestRunExperiment_DiffuseAlarmOnUniformShift(t *testing.T) {
 	require.NoError(t, bands.Save(root))
 
 	exp := &Experiment{
-		Name: "exp2", Model: "mock/m",
+		Name: "exp2", Model: "mock/m", Temperature: ptr(0.0),
 		Corpus:            []string{"band:mid"},
 		RunsPerTrajectory: map[Band]int{BandMid: 5},
 		Arms: map[string]Arm{
@@ -468,7 +468,7 @@ func TestRunExperiment_AllSkippedFailsClosed(t *testing.T) {
 	})
 
 	exp := &Experiment{
-		Name: "exp-skip", Model: "mock/m", Corpus: []string{"*"},
+		Name: "exp-skip", Model: "mock/m", Corpus: []string{"*"}, Temperature: ptr(0.0),
 		RunsPerTrajectory: map[Band]int{BandUncharacterized: 2},
 		Arms: map[string]Arm{
 			"control":   {Config: ArmConfig{Options: map[string]any{"debug": false}}},
@@ -502,7 +502,7 @@ func TestRunExperiment_CoincidentCollapse(t *testing.T) {
 	experimentFixture(t, r, root, flag)
 
 	exp := &Experiment{
-		Name: "exp-coincident", Model: "mock/m",
+		Name: "exp-coincident", Model: "mock/m", Temperature: ptr(0.0),
 		Corpus:            []string{"*"},
 		RunsPerTrajectory: map[Band]int{BandStable: 3, BandMid: 3, BandUncharacterized: 3},
 		Arms: map[string]Arm{
@@ -552,7 +552,7 @@ func TestRunExperiment_NoopFlagAlarm(t *testing.T) {
 	require.NoError(t, bands.Save(root))
 
 	exp := &Experiment{
-		Name: "noop-exp", Model: "mock/m",
+		Name: "noop-exp", Model: "mock/m", Temperature: ptr(0.0),
 		Arms: map[string]Arm{
 			"control":   {Config: ArmConfig{Options: map[string]any{"debug": false}}},
 			"treatment": {Config: ArmConfig{Options: map[string]any{"debug": true}}},
@@ -620,4 +620,52 @@ func TestRecomputeAll_ResolvedKeyJoins(t *testing.T) {
 	require.Equal(t, 30, entry.Baselines["mock/m"][resolvedKey].N)
 	require.Zero(t, entry.Baselines["mock/m"][intentKey].N)
 	require.Equal(t, BandMid, entry.Band)
+}
+
+// Harness invariants can't be arm-overridden — data_directory
+// relocation would break telemetry/session-DB paths.
+func TestWriteArmConfig_RejectsHarnessInvariants(t *testing.T) {
+	t.Parallel()
+	wd := t.TempDir()
+	exp := &Experiment{Model: "hyper/x", Temperature: ptr(0.0)}
+	manifest := &FlagsManifest{Defaults: map[string]any{"data_directory": "/x"}}
+	err := WriteArmConfig(wd, exp, Arm{Config: ArmConfig{Options: map[string]any{"data_directory": "evil"}}}, manifest)
+	require.ErrorContains(t, err, "harness manages")
+	err = WriteArmConfig(t.TempDir(), exp, Arm{Config: ArmConfig{Options: map[string]any{"disable_metrics": false}}}, manifest)
+	require.ErrorContains(t, err, "harness manages")
+}
+
+// A fixture pinning a manifest flag — in EITHER config file — keys
+// the trajectory under a foreign condition forever.
+func TestWriteArmConfig_RejectsFixtureManifestFlags(t *testing.T) {
+	t.Parallel()
+	manifest := &FlagsManifest{Defaults: map[string]any{"auto_lsp": true}}
+	exp := &Experiment{Model: "hyper/x", Temperature: ptr(0.0)}
+	arm := Arm{Config: ArmConfig{Options: map[string]any{"auto_lsp": false}}}
+
+	wd := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wd, ".crush.json"),
+		[]byte(`{"options":{"auto_lsp":false}}`), 0o644))
+	require.ErrorContains(t, WriteArmConfig(wd, exp, arm, manifest), "manifest flag")
+
+	// crush.json too — lower precedence, same trap.
+	wd2 := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wd2, "crush.json"),
+		[]byte(`{"options":{"auto_lsp":false}}`), 0o644))
+	require.ErrorContains(t, WriteArmConfig(wd2, exp, arm, manifest), "manifest flag")
+}
+
+// Experiments must pin temperature — unpinned arms land in the
+// "default" temp cell no characterized baseline joins.
+func TestValidateExperiment_RequiresTemperature(t *testing.T) {
+	t.Parallel()
+	exp := &Experiment{
+		Name: "x", Model: "mock/m", Corpus: []string{"*"},
+		RunsPerTrajectory: map[Band]int{BandMid: 1},
+		Arms: map[string]Arm{
+			ArmControl:   {},
+			ArmTreatment: {},
+		},
+	}
+	require.ErrorContains(t, ValidateExperiment(exp), "temperature")
 }

@@ -238,10 +238,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	rec.Env.ContentHash = contentHash
 	// Temperature is a run condition — an unpinned temp and temp-0
 	// are different baselines, invisible unless hashed.
-	tempKey := "default"
-	if exp.Temperature != nil {
-		tempKey = strconv.FormatFloat(*exp.Temperature, 'g', -1, 64)
-	}
+	tempKey := temperatureKey(exp.Temperature)
 	rec.Env.Temperature = tempKey
 	rec.BaselineKey = manifest.keyWith(arm.Config.Options, map[string]any{"$temperature": tempKey})
 
@@ -459,7 +456,8 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 		return Report{}, fmt.Errorf("corpus selection %v matched no runnable trajectories", exp.Corpus)
 	}
 
-	baselineKey := manifest.BaselineKey(exp.Arms["control"].Config.Options)
+	baselineKey := manifest.keyWith(exp.Arms[ArmControl].Config.Options,
+		map[string]any{"$temperature": temperatureKey(exp.Temperature)})
 	// Invocation scopes this call's records: re-running an experiment
 	// under a new build must not pool stale records into the gate.
 	inv := fmt.Sprintf("%s-%04x", r.now().UTC().Format("20060102T150405Z"), r.rng().Uint64()&0xffff)
@@ -560,15 +558,15 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 		rep.Skipped = strings.Join(missing, ",")
 		return rep
 	}
-	armNames := []string{"control", "treatment"}
+	armNames := []string{ArmControl, ArmTreatment}
 	maxAttempts := int(float64(n) * r.attemptsFactor())
-	conclusive := map[string]int{"control": 0, "treatment": 0}
-	attempts := map[string]int{"control": 0, "treatment": 0}
+	conclusive := map[string]int{ArmControl: 0, ArmTreatment: 0}
+	attempts := map[string]int{ArmControl: 0, ArmTreatment: 0}
 	excluded := map[string]map[Outcome]int{
-		"control": {}, "treatment": {},
+		ArmControl: {}, ArmTreatment: {},
 	}
 
-	for conclusive["control"] < n || conclusive["treatment"] < n {
+	for conclusive[ArmControl] < n || conclusive[ArmTreatment] < n {
 		if ctx.Err() != nil {
 			// Stop cleanly on cancellation — don't materialize and
 			// error-append up to ~2N records per remaining trajectory.
@@ -708,7 +706,7 @@ func (r *Runner) Characterize(ctx context.Context, model string, temperature *fl
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			rec, err := r.ExecuteRun(ctx, exp, traj, trajDir, "baseline", Arm{}, manifest, i+1, charInv)
+			rec, err := r.ExecuteRun(ctx, exp, traj, trajDir, ArmBaseline, Arm{}, manifest, i+1, charInv)
 			if err != nil {
 				return fmt.Errorf("characterize %s: %w", traj.ID, err)
 			}
@@ -769,7 +767,7 @@ func (r *Runner) Smoke(ctx context.Context, model string, temperature *float64, 
 			if ctx.Err() != nil {
 				return alarms, ctx.Err()
 			}
-			rec, err := r.ExecuteRun(ctx, exp, traj, trajDir, "baseline", Arm{}, manifest, i+1, smokeInv)
+			rec, err := r.ExecuteRun(ctx, exp, traj, trajDir, ArmBaseline, Arm{}, manifest, i+1, smokeInv)
 			if err != nil {
 				return alarms, fmt.Errorf("smoke %s: %w", traj.ID, err)
 			}
@@ -971,4 +969,13 @@ func goToolchain() string {
 		return strings.TrimSpace(string(out))
 	}
 	return runtime.Version()
+}
+
+// temperatureKey renders the run's temperature condition for the
+// baseline hash — "default" when unpinned.
+func temperatureKey(t *float64) string {
+	if t == nil {
+		return "default"
+	}
+	return strconv.FormatFloat(*t, 'g', -1, 64)
 }
