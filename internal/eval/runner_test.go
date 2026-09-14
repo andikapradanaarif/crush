@@ -428,3 +428,53 @@ func TestWriteArmConfig_MergesJSONConfig(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(wd2, "crush.json"), []byte(`{}`), 0o644))
 	require.NoError(t, WriteArmConfig(wd2, exp, arm))
 }
+
+func TestBands_PinSpellingVsResolved(t *testing.T) {
+	t.Parallel()
+	b := &Bands{Entries: map[string]BandEntry{}}
+	now := time.Now()
+	// Records stamped with the pin's alias spelling but a canonical
+	// resolved model — banding must follow the resolved key.
+	var recs []RunRecord
+	for i := range 25 {
+		r := recFor("t", "canonical/x", "cfg", OutcomePass, now.Add(time.Duration(i)*time.Minute))
+		r.Env.ModelPin = "alias/x"
+		recs = append(recs, r)
+	}
+	b.Recompute("t", recs, "h", now, "alias/x", "cfg")
+	b.Recompute("t", recs, "h", now, "alias/x", "cfg")
+	require.Equal(t, BandStable, b.Band("t"))
+
+	// A different pin's records never count toward this condition.
+	var other []RunRecord
+	for i := range 25 {
+		r := recFor("t", "canonical/x", "cfg", OutcomePass, now.Add(time.Duration(i)*time.Minute))
+		r.Env.ModelPin = "other/x"
+		other = append(other, r)
+	}
+	b2 := &Bands{Entries: map[string]BandEntry{}}
+	b2.Recompute("t", other, "h", now, "alias/x", "cfg")
+	require.Equal(t, BandUncharacterized, b2.Band("t"))
+}
+
+func TestRunExperiment_AllSkippedFailsClosed(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	r := &Runner{EvalDir: root, Driver: fakeRunner{flag: "f"}, WorkParent: t.TempDir()}
+	writeTrajectory(t, filepath.Join(root, "corpus"), "needs-missing", map[string]any{
+		"requires": map[string]any{"tools": []string{"definitely-not-a-real-binary-xyz"}},
+	})
+	require.NoError(t, os.WriteFile(filepath.Join(root, "flags.json"), []byte(`{"flag_defaults":{"f":false}}`), 0o644))
+
+	exp := &Experiment{
+		Name: "exp-skip", Model: "mock/m", Corpus: []string{"*"},
+		RunsPerTrajectory: map[Band]int{BandUncharacterized: 2},
+		Arms: map[string]Arm{
+			"control":   {Config: ArmConfig{Options: map[string]any{"f": false}}},
+			"treatment": {Config: ArmConfig{Options: map[string]any{"f": true}}},
+		},
+	}
+	rep, err := r.RunExperiment(context.Background(), exp)
+	require.Error(t, err) // Fail closed — no PASS on zero samples.
+	require.NotEmpty(t, rep.Skipped)
+}

@@ -195,7 +195,12 @@ type Recalls struct {
 // Env is the forensic record: when a trajectory rots, the diff between
 // last-green and first-red env blocks is the first place to look.
 type Env struct {
-	CrushSHA      string `json:"crush_sha"`
+	CrushSHA string `json:"crush_sha"`
+	// ModelPin is the experiment's model string as spelled in the
+	// pin; ModelResolved is what the run actually resolved to. They
+	// can differ (aliases, normalization) — the pin defines the
+	// condition, the resolved form is the baseline storage key.
+	ModelPin      string `json:"model_pin,omitempty"`
 	ModelResolved string `json:"model_resolved"`
 	Go            string `json:"go"`
 	OS            string `json:"os"`

@@ -48,7 +48,8 @@ type Report struct {
 // Fired reports whether any alarm tripped.
 func (r Report) Fired() bool {
 	return len(r.Catastrophic) > 0 || len(r.ExcludedDifferential) > 0 ||
-		len(r.Starved) > 0 || len(r.Saturated) > 0 || len(r.Smoke) > 0
+		len(r.Starved) > 0 || len(r.Saturated) > 0 || len(r.Smoke) > 0 ||
+		len(r.Skipped) > 0 // Corpus shrinkage is an alarm.
 }
 
 // Summary renders the report for the CLI.

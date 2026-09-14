@@ -253,6 +253,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	rec.Tokens = res.Tokens
 	rec.StubStats = res.StubStats
 	rec.Recalls = res.Recalls
+	rec.Env.ModelPin = exp.Model
 	rec.Env.ModelResolved = res.ModelResolved
 
 	// Preserve the session DB — the failed-run debugging artifact is
@@ -417,12 +418,14 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 	baselineKey := manifest.BaselineKey(exp.Arms["control"].Config.Options)
 	rep := Report{CatastrophicEligible: map[string]bool{}, DiffuseP: 1}
 
+	runnable := 0
 	for _, traj := range trajs {
 		band := frozen.Band(traj.ID)
 		n := exp.RunsPerTrajectory[band]
 		if n == 0 {
 			continue
 		}
+		runnable++
 		trajDir := filepath.Join(r.EvalDir, "corpus", traj.ID)
 		trep := r.runTrajectory(ctx, exp, traj, trajDir, manifest, n)
 		rep.Starved = append(rep.Starved, trep.Starved...)
@@ -430,6 +433,12 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 		if trep.Skipped != "" {
 			rep.Skipped = append(rep.Skipped, fmt.Sprintf("%s: %s", traj.ID, trep.Skipped))
 		}
+	}
+	// Fail closed: a corpus whose every runnable trajectory skipped
+	// would otherwise report PASS on zero samples.
+	if runnable > 0 && len(rep.Skipped) == runnable {
+		return rep, fmt.Errorf("all %d runnable trajectories skipped requires pre-flight: %s",
+			runnable, strings.Join(rep.Skipped, "; "))
 	}
 
 	// Gate on the frozen snapshot — the current experiment's own
@@ -487,6 +496,11 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 	}
 
 	for conclusive["control"] < n || conclusive["treatment"] < n {
+		if ctx.Err() != nil {
+			// Stop cleanly on cancellation — don't materialize and
+			// error-append up to ~2N records per remaining trajectory.
+			return rep
+		}
 		progressed := false
 		for _, armName := range armNames {
 			if conclusive[armName] >= n || attempts[armName] >= maxAttempts {
@@ -585,6 +599,9 @@ func (r *Runner) Characterize(ctx context.Context, model string, temperature *fl
 		}
 		trajDir := filepath.Join(r.EvalDir, "corpus", traj.ID)
 		for i := range n {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			rec, err := r.ExecuteRun(ctx, exp, traj, trajDir, "baseline", Arm{}, manifest, i+1)
 			if err != nil {
 				return fmt.Errorf("characterize %s: %w", traj.ID, err)
@@ -636,6 +653,9 @@ func (r *Runner) Smoke(ctx context.Context, model string, temperature *float64, 
 		trajDir := filepath.Join(r.EvalDir, "corpus", traj.ID)
 		passes := 0
 		for i := range n {
+			if ctx.Err() != nil {
+				return alarms, ctx.Err()
+			}
 			rec, err := r.ExecuteRun(ctx, exp, traj, trajDir, "baseline", Arm{}, manifest, i+1)
 			if err != nil {
 				return alarms, fmt.Errorf("smoke %s: %w", traj.ID, err)

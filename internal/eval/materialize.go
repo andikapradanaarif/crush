@@ -131,16 +131,24 @@ func WriteArmConfig(workdir string, exp *Experiment, arm Arm) error {
 	// applies across config layers.
 	jsonPath := filepath.Join(workdir, ".crush.json")
 	if fileExists(jsonPath) {
-		var existing map[string]any
-		if raw, err := os.ReadFile(jsonPath); err == nil && json.Unmarshal(raw, &existing) == nil {
-			if opts, ok := existing["options"].(map[string]any); ok {
-				for k, v := range options {
-					opts[k] = v
-				}
-				existing["options"] = opts
-				doc = existing
-			}
+		raw, err := os.ReadFile(jsonPath)
+		if err != nil {
+			return fmt.Errorf("read existing .crush.json: %w", err)
 		}
+		var existing map[string]any
+		if err := json.Unmarshal(raw, &existing); err != nil {
+			// A corrupt fixture config must not be silently clobbered.
+			return fmt.Errorf("existing .crush.json does not parse: %w", err)
+		}
+		if opts, ok := existing["options"].(map[string]any); ok {
+			for k, v := range options {
+				opts[k] = v
+			}
+			existing["options"] = opts
+		} else {
+			existing["options"] = options
+		}
+		doc = existing
 	}
 	data, err := json.MarshalIndent(doc, "", "\t")
 	if err != nil {

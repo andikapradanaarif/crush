@@ -282,21 +282,52 @@ func (b *Bands) Recompute(id string, records []RunRecord, contentHash string, no
 // applying hysteresis: demote on one bad characterization, promote on
 // two consecutive good ones.
 func (b *Bands) assignBand(e *BandEntry, records []RunRecord, contentHash, curModel, curKey string) {
-	// Diagnostics and banding read only the current default
-	// condition's records: trailing counts are per baseline key, and
-	// samples scored under a different corpus revision or condition
-	// are a different trajectory's data.
-	var current []RunRecord
+	// revision = all records scored under the current corpus hash —
+	// suspect_check scans this whole set (a flaky check is a script
+	// property, not a per-condition one).
+	var revision []RunRecord
 	for _, r := range records {
-		if r.Env.ModelResolved != curModel || r.BaselineKey != curKey {
-			continue
-		}
 		if r.Env.ContentHash != "" && r.Env.ContentHash != contentHash {
 			continue
 		}
-		current = append(current, r)
+		revision = append(revision, r)
 	}
-	sort.Slice(current, func(i, j int) bool { return current[i].StartedAt.After(current[j].StartedAt) })
+	sort.Slice(revision, func(i, j int) bool { return revision[i].StartedAt.After(revision[j].StartedAt) })
+
+	// matchesPin reports whether a record was produced under the
+	// current pin: stamped pins compare exactly, so a re-pinned
+	// model's records never count toward the new pin's condition.
+	// Unstamped (pre-field) records fall back to resolved-model
+	// equality.
+	matchesPin := func(r RunRecord) bool {
+		if r.Env.ModelPin != "" {
+			return r.Env.ModelPin == curModel
+		}
+		return r.Env.ModelResolved == curModel
+	}
+
+	// effModel is the resolved spelling of the current pin — the
+	// baseline storage key — taken from the newest record produced
+	// under it. When the pin has produced nothing yet (fresh re-pin),
+	// curModel itself is the lookup and the scans legitimately empty.
+	effModel := curModel
+	var latest time.Time
+	for _, r := range revision {
+		if r.BaselineKey == curKey && r.Outcome.Conclusive() &&
+			r.Env.ModelResolved != "" && matchesPin(r) && r.StartedAt.After(latest) {
+			latest = r.StartedAt
+			effModel = r.Env.ModelResolved
+		}
+	}
+
+	// current = records under this (pin, baseline key) condition —
+	// never_passed's trailing count is per baseline key.
+	var current []RunRecord
+	for _, r := range revision {
+		if r.BaselineKey == curKey && matchesPin(r) {
+			current = append(current, r)
+		}
+	}
 
 	// never_passed: zero passes in the trailing NeverPassedFails
 	// conclusive runs under this condition. A trajectory with
@@ -326,8 +357,12 @@ func (b *Bands) assignBand(e *BandEntry, records []RunRecord, contentHash, curMo
 	// passes quarantine then masquerades as mid band. Consecutive
 	// within-arm pass/fail alternation is the empirical net — arms
 	// run interleaved, so the scan must split by arm or a real
-	// treatment effect (P,F,P,F…) reads as flakiness.
-	if suspectCheck(current) {
+	// treatment effect (P,F,P,F…) reads as flakiness. The scan covers
+	// every current-revision record, not just the current key: a
+	// check flaky only under the flag-on config alternates inside
+	// the treatment arm and must not surface as an apparent
+	// regression.
+	if suspectCheck(revision) {
 		e.Band = BandQuarantined
 		e.QuarantineReason = ReasonSuspectCheck
 		return
@@ -335,7 +370,7 @@ func (b *Bands) assignBand(e *BandEntry, records []RunRecord, contentHash, curMo
 
 	// Band reads the baseline under the current default condition.
 	best := BaselineCounts{}
-	if byCfg, ok := e.Baselines[curModel]; ok {
+	if byCfg, ok := e.Baselines[effModel]; ok {
 		best = byCfg[curKey]
 	}
 
