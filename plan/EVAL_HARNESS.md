@@ -282,6 +282,10 @@ rotted trajectory needs agent runs, which is a runner mode
 (characterize), not an experiment arm.
 
 `model` + `temperature` pin at the experiment level —
+`temperature` is required (unpinned arms land in a `default`-
+temperature baseline cell no characterize output joins); run
+characterize at the temperature your experiments pin — self-seeding
+heals a mismatch, but the first run's catastrophic tier stays dark.
 `temperature` via `SessionAgentCall.Temperature` (`agent.go:94`);
 `SessionAgentCall` carries no model field, so `model` rides the
 generated `.crushrc` as a `model` builtin identical in both arms

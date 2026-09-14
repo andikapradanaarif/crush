@@ -529,7 +529,7 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 	// Every paired comparison adds baseline samples as a byproduct —
 	// recompute characterization state after gating so the frozen
 	// snapshot stays clean for the coincidence-detector role.
-	if err := r.RecomputeAll(bands, corpus, manifest, exp.Model); err != nil {
+	if err := r.RecomputeAll(bands, corpus, manifest, exp.Model, temperatureKey(exp.Temperature)); err != nil {
 		slog.Warn("Failed to recompute bands", "error", err)
 	}
 	if err := bands.Save(r.EvalDir); err != nil {
@@ -626,7 +626,7 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 // manifest. Band assignment and the never_passed/suspect_check scans
 // read only that (model, key) pair — a stale model's deep baseline
 // must not hold a trajectory stable across a re-pin.
-func (r *Runner) RecomputeAll(bands *Bands, corpus map[string]*Trajectory, manifest *FlagsManifest, model string) error {
+func (r *Runner) RecomputeAll(bands *Bands, corpus map[string]*Trajectory, manifest *FlagsManifest, model, temp string) error {
 	// curKey joins banding to the records' own resolved keys — the
 	// resolved projection can diverge from manifest intent on
 	// non-materialized options, and keying the gate/bands off intent
@@ -653,7 +653,9 @@ func (r *Runner) RecomputeAll(bands *Bands, corpus map[string]*Trajectory, manif
 		curKey = currentConditionKey(all, model, ArmControl)
 	}
 	if curKey == "" {
-		curKey = manifest.BaselineKey(nil)
+		// Bootstrap fallback — hashed with temperature so the intent
+		// namespace stays coherent with what records would stamp.
+		curKey = manifest.keyWith(nil, map[string]any{"$temperature": temp})
 	}
 	for id := range corpus {
 		trajDir := filepath.Join(r.EvalDir, "corpus", id)
@@ -716,7 +718,7 @@ func (r *Runner) Characterize(ctx context.Context, model string, temperature *fl
 			slog.Info("Characterize run", "trajectory", traj.ID, "outcome", rec.Outcome)
 		}
 	}
-	if err := r.RecomputeAll(bands, corpus, manifest, model); err != nil {
+	if err := r.RecomputeAll(bands, corpus, manifest, model, temperatureKey(temperature)); err != nil {
 		return err
 	}
 	return bands.Save(r.EvalDir)
@@ -748,6 +750,11 @@ func (r *Runner) Smoke(ctx context.Context, model string, temperature *float64, 
 	trajs, err := SelectCorpus(corpus, bands, []string{"band:stable"})
 	if err != nil {
 		return nil, err
+	}
+	if len(trajs) == 0 {
+		// An empty stable band must not report "smoke: clean" — zero
+		// trajectories checked is a confidence hole, not a pass.
+		return nil, fmt.Errorf("no stable-band trajectories to smoke — run characterize first")
 	}
 	if n <= 0 {
 		n = 5
@@ -789,7 +796,7 @@ func (r *Runner) Smoke(ctx context.Context, model string, temperature *float64, 
 			alarms = append(alarms, traj.ID)
 		}
 	}
-	if err := r.RecomputeAll(bands, corpus, manifest, model); err != nil {
+	if err := r.RecomputeAll(bands, corpus, manifest, model, temperatureKey(temperature)); err != nil {
 		return alarms, err
 	}
 	return alarms, bands.Save(r.EvalDir)

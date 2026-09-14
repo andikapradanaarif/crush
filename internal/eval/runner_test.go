@@ -611,7 +611,7 @@ func TestRecomputeAll_ResolvedKeyJoins(t *testing.T) {
 	bands := &Bands{Entries: map[string]BandEntry{}}
 	corpus, err := LoadCorpus(root)
 	require.NoError(t, err)
-	require.NoError(t, r.RecomputeAll(bands, corpus, manifest, "mock/m"))
+	require.NoError(t, r.RecomputeAll(bands, corpus, manifest, "mock/m", "0"))
 
 	entry := bands.Entry("t1")
 	// The baseline accumulated under the RESOLVED key — intent key
