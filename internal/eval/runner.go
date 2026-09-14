@@ -631,6 +631,7 @@ func (r *Runner) Characterize(ctx context.Context, model string, temperature *fl
 		n = GenesisRuns
 	}
 	exp := &Experiment{Name: CharacterizeExperiment, Model: model, Temperature: temperature}
+	charInv := fmt.Sprintf("characterize-%s-%04x", r.now().UTC().Format("20060102T150405Z"), r.rng().Uint64()&0xffff)
 	for _, traj := range trajs {
 		if missing := CheckRequires(traj); len(missing) > 0 {
 			slog.Warn("Skipping trajectory — unmet requires", "trajectory", traj.ID, "missing", missing)
@@ -641,7 +642,7 @@ func (r *Runner) Characterize(ctx context.Context, model string, temperature *fl
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			rec, err := r.ExecuteRun(ctx, exp, traj, trajDir, "baseline", Arm{}, manifest, i+1, "characterize")
+			rec, err := r.ExecuteRun(ctx, exp, traj, trajDir, "baseline", Arm{}, manifest, i+1, charInv)
 			if err != nil {
 				return fmt.Errorf("characterize %s: %w", traj.ID, err)
 			}
@@ -683,6 +684,7 @@ func (r *Runner) Smoke(ctx context.Context, model string, temperature *float64, 
 		n = 5
 	}
 	exp := &Experiment{Name: CharacterizeExperiment, Model: model, Temperature: temperature}
+	smokeInv := fmt.Sprintf("smoke-%s-%04x", r.now().UTC().Format("20060102T150405Z"), r.rng().Uint64()&0xffff)
 	var alarms []string
 	for _, traj := range trajs {
 		if missing := CheckRequires(traj); len(missing) > 0 {
@@ -696,7 +698,7 @@ func (r *Runner) Smoke(ctx context.Context, model string, temperature *float64, 
 			if ctx.Err() != nil {
 				return alarms, ctx.Err()
 			}
-			rec, err := r.ExecuteRun(ctx, exp, traj, trajDir, "baseline", Arm{}, manifest, i+1, "smoke")
+			rec, err := r.ExecuteRun(ctx, exp, traj, trajDir, "baseline", Arm{}, manifest, i+1, smokeInv)
 			if err != nil {
 				return alarms, fmt.Errorf("smoke %s: %w", traj.ID, err)
 			}

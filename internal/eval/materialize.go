@@ -51,6 +51,10 @@ func Materialize(ctx context.Context, traj *Trajectory, trajDir, parentDir strin
 // gitCheckout clones repo and checks out ref. A local source may use
 // --shared (objects shared via alternates); --shared is meaningless —
 // and wrong to emit — for remote URLs.
+// gitCheckout deliberately runs under the ambient environment, not
+// the pinned eval env: git credentials (ssh keys, credential helpers,
+// .gitconfig) live in the real HOME, and cloning is materialization —
+// not part of the measured run.
 func gitCheckout(ctx context.Context, repo, ref, dest string) error {
 	args := []string{"clone", "--quiet"}
 	if isLocalRepo(repo) {

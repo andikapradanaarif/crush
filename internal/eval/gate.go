@@ -120,10 +120,6 @@ func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRe
 
 		switch bands.Band(id) {
 		case BandStable:
-			n := len(treat)
-			if n == 0 {
-				continue
-			}
 			// Baselines are keyed on the resolved model observed in
 			// the runs, not the experiment's spelling — an alias or
 			// normalization difference must not silently darken the
@@ -141,17 +137,13 @@ func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRe
 			}
 			base := bands.Baseline(id, model, baselineKey)
 			baseFails := base.N - base.Passes
-			// Eligibility is computed, not a fixed n: the trajectory
-			// qualifies when a 0/N result would reach corrected
-			// significance against its baseline.
-			pMin := FisherExactCollapse(n, n, baseFails, base.N)
-			eligible := pMin < corrAlpha
-			rep.CatastrophicEligible[id] = eligible
 			// Coincidence detector: a control arm that collapses
 			// against the same baseline signals trajectory rot or
 			// model drift — alarming regardless of the treatment
 			// outcome, and it disqualifies the catastrophic verdict
-			// (the collapse isn't attributable to the flag).
+			// (the collapse isn't attributable to the flag). Checked
+			// before the treatment-emptiness bail: an all-excluded
+			// treatment arm doesn't excuse a rotted control.
 			ctrlFails := 0
 			for _, ok := range ctrl {
 				if !ok {
@@ -163,6 +155,16 @@ func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRe
 			if ctrlCollapsed {
 				rep.Coincident = append(rep.Coincident, fmt.Sprintf("%s (control %d/%d vs baseline %d/%d)", id, len(ctrl)-ctrlFails, len(ctrl), base.Passes, base.N))
 			}
+			n := len(treat)
+			if n == 0 {
+				continue
+			}
+			// Eligibility is computed, not a fixed n: the trajectory
+			// qualifies when a 0/N result would reach corrected
+			// significance against its baseline.
+			pMin := FisherExactCollapse(n, n, baseFails, base.N)
+			eligible := pMin < corrAlpha
+			rep.CatastrophicEligible[id] = eligible
 			if eligible {
 				fails := 0
 				for _, ok := range treat {
