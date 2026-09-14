@@ -43,9 +43,11 @@ type Report struct {
 	// still a gate: an ineligible trajectory collapsing to 0/N is the
 	// detector working, not a false alarm (p̂≈0.9 → P(0/3|null)≈1e-3).
 	Smoke []string
-	// Skipped lists trajectories the requires pre-flight rejected
-	// ("id: tool:go os:linux") — environment rot made explicit
-	// instead of surfacing as error outcomes.
+	// Skipped lists trajectories the experiment didn't run —
+	// requires pre-flight rejects ("id: tool:go os:linux") or
+	// bands absent from runs_per_trajectory. Environment rot and
+	// config gaps made explicit instead of error outcomes or
+	// silence.
 	Skipped []string
 	// NoopFlags lists trajectories whose arms resolved to identical
 	// flag projections — the flag under test did nothing and the
@@ -80,7 +82,7 @@ func (r Report) Summary(alpha float64) string {
 	fire("coincident-collapse", r.Coincident)
 	fire("noop-flag", r.NoopFlags)
 	if len(r.Skipped) > 0 {
-		fmt.Fprintf(&b, "  SKIP requires-unmet: %s\n", strings.Join(r.Skipped, ", "))
+		fmt.Fprintf(&b, "  SKIP: %s\n", strings.Join(r.Skipped, ", "))
 	}
 	eligible := 0
 	for _, ok := range r.CatastrophicEligible {

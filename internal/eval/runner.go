@@ -142,19 +142,24 @@ func (r *Runner) Quarantine(ctx context.Context, traj *Trajectory, trajDir strin
 	// check runs the check n times against a materialization and
 	// reports whether results were consistent and what they said.
 	check := func(patch string) (allPass, allFail bool, err error) {
-		wd, err := Materialize(ctx, traj, trajDir, r.workParent(), r.checkEnv())
-		if err != nil {
-			return false, false, err
-		}
-		defer os.RemoveAll(wd)
-		if patch != "" {
-			if err := ApplyPatch(ctx, wd, patch); err != nil {
-				return false, false, err
-			}
-		}
 		outs := map[bool]int{}
 		for range m {
+			// Fresh materialization per repetition — a check flaky
+			// only across fresh trees (setup races, git-state drift)
+			// must surface as flaky, not hide in a reused workdir.
+			wd, err := Materialize(ctx, traj, trajDir, r.workParent(), r.checkEnv())
+			if err != nil {
+				return false, false, err
+			}
+			if patch != "" {
+				if err := ApplyPatch(ctx, wd, patch); err != nil {
+					os.RemoveAll(wd)
+					return false, false, err
+				}
+			}
 			res := RunCheck(ctx, traj, trajDir, wd, r.checkEnv())
+			os.RemoveAll(wd)
+			os.RemoveAll(DataDirFor(wd))
 			if res.Err != nil {
 				return false, false, res.Err
 			}
@@ -400,6 +405,7 @@ func (r *Runner) loadRecordsFiltered(match func(RunRecord) bool) ([]RunRecord, e
 			}
 			var rec RunRecord
 			if err := json.Unmarshal([]byte(line), &rec); err != nil {
+				slog.Warn("Skipping unparseable record line — possible mid-file corruption", "path", path, "err", err)
 				continue // Tolerate a torn final line.
 			}
 			if match(rec) {
@@ -468,6 +474,11 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 		band := frozen.Band(traj.ID)
 		n := exp.RunsPerTrajectory[band]
 		if n == 0 {
+			// Partial undercoverage must be visible — a selection
+			// whose band isn't in runs_per_trajectory silently
+			// measures nothing.
+			rep.Skipped = append(rep.Skipped,
+				fmt.Sprintf("%s: band %q has no runs_per_trajectory entry", traj.ID, band))
 			continue
 		}
 		runnable++

@@ -161,8 +161,10 @@ func TestQuarantine_Flaky(t *testing.T) {
 	r, root := quarantineRunner(t)
 	// Alternating pass/fail on the same state → flaky.
 	dir := writeTrajectory(t, filepath.Join(root, "corpus"), "t1", map[string]any{
+		// Fresh materialization per rep — the flip marker lives in
+		// the shared work parent so it alternates across reps.
 		"check_script_body": `#!/bin/bash
-f="$EVAL_WORKDIR/.flip"
+f="$(dirname "$EVAL_WORKDIR")/.flip"
 if [ -f "$f" ]; then rm "$f"; exit 0; else touch "$f"; exit 1; fi
 `,
 	})
