@@ -2,7 +2,6 @@ package eval
 
 import (
 	"fmt"
-	"sort"
 
 	"github.com/charmbracelet/crush/internal/config"
 )
@@ -26,9 +25,7 @@ func validateFlagSet(keys []string, where string) []string {
 // flagNames is the deterministic env list ordering for
 // CRUSH_EVAL_FLAGS.
 func flagNames(m *FlagsManifest) []string {
-	names := sortedKeys(m.Defaults)
-	sort.Strings(names)
-	return names
+	return sortedKeys(m.Defaults)
 }
 
 // resolvedEqual reports whether two resolved-options projections are

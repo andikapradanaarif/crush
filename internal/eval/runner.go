@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/crush/internal/version"
@@ -504,6 +506,12 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 			records = append(records, rec)
 		}
 	}
+	// The gate's baseline key joins on the control arm's resolved
+	// condition — what actually ran — falling back to intent only
+	// when no control record carried a resolved key.
+	if k := currentConditionKey(records, exp.Model); k != "" {
+		baselineKey = k
+	}
 	gate := Evaluate(exp, frozen, baselineKey, records, corpusIDs(corpus), r.alpha(), r.permReplicates(), r.rng())
 	rep.Coincident = gate.Coincident
 	rep.NoopFlags = gate.NoopFlags
@@ -614,18 +622,32 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 // read only that (model, key) pair — a stale model's deep baseline
 // must not hold a trajectory stable across a re-pin.
 func (r *Runner) RecomputeAll(bands *Bands, corpus map[string]*Trajectory, manifest *FlagsManifest, model string) error {
-	curKey := manifest.BaselineKey(nil)
+	// curKey joins banding to the records' own resolved keys — the
+	// resolved projection can diverge from manifest intent on
+	// non-materialized options, and keying the gate/bands off intent
+	// would orphan every record under its real condition. Intent is
+	// the fallback only until a control-condition record exists.
+	perTraj := make(map[string][]RunRecord, len(corpus))
+	var all []RunRecord
+	for id := range corpus {
+		records, err := r.LoadRecords(id)
+		if err != nil {
+			return err
+		}
+		perTraj[id] = records
+		all = append(all, records...)
+	}
+	curKey := currentConditionKey(all, model)
+	if curKey == "" {
+		curKey = manifest.BaselineKey(nil)
+	}
 	for id := range corpus {
 		trajDir := filepath.Join(r.EvalDir, "corpus", id)
 		hash, err := ContentHash(trajDir)
 		if err != nil {
 			return fmt.Errorf("content hash %s: %w", id, err)
 		}
-		records, err := r.LoadRecords(id)
-		if err != nil {
-			return err
-		}
-		bands.Recompute(id, records, hash, r.now(), model, curKey)
+		bands.Recompute(id, perTraj[id], hash, r.now(), model, curKey)
 	}
 	return nil
 }
@@ -890,13 +912,34 @@ func corpusIDs(corpus map[string]*Trajectory) map[string]bool {
 // `crush eval` invocations would otherwise clobber.
 func (r *Runner) acquireLock() (func(), error) {
 	dir := filepath.Join(r.EvalDir, ".eval-lock")
+	pidFile := filepath.Join(dir, "pid")
 	for range 100 {
 		if err := os.Mkdir(dir, 0o755); err == nil {
+			_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o644)
 			return func() { _ = os.RemoveAll(dir) }, nil
+		}
+		// Break a lock whose holder is dead — a killed `crush eval`
+		// would otherwise wedge the dir forever.
+		if data, err := os.ReadFile(pidFile); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && !pidAlive(pid) {
+				_ = os.RemoveAll(dir)
+				continue
+			}
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	return nil, fmt.Errorf("another eval process holds %s", dir)
+}
+
+// pidAlive reports whether a lock holder still runs. Signal 0 is a
+// Unix existence probe; on other platforms assume alive — a stale
+// lock there expires only by removal.
+func pidAlive(pid int) bool {
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return p.Signal(syscall.Signal(0)) == nil
 }
 
 // goToolchain records the `go` on PATH — the check script's toolchain

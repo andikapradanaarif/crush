@@ -576,3 +576,48 @@ func TestLoadFlagsManifest_RejectsUnknownKeys(t *testing.T) {
 	_, err := LoadFlagsManifest(root)
 	require.ErrorContains(t, err, "not a config.Options key")
 }
+
+// Resolved-vs-intent key divergence: the record's resolved
+// baseline_key must be what banding joins on — manifest intent keys
+// would orphan every record under a different namespace.
+func TestRecomputeAll_ResolvedKeyJoins(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	writeTrajectory(t, filepath.Join(root, "corpus"), "t1", nil)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "flags.json"),
+		[]byte(`{"flag_defaults":{"debug":false}}`), 0o644))
+	manifest, err := LoadFlagsManifest(root)
+	require.NoError(t, err)
+
+	// Resolved says true where intent says false — stands in for the
+	// nil-vs-default divergence on non-materialized options.
+	resolved := map[string]any{"debug": true}
+	resolvedKey := manifest.BaselineKey(resolved)
+	intentKey := manifest.BaselineKey(nil)
+	require.NotEqual(t, intentKey, resolvedKey)
+
+	r := &Runner{EvalDir: root}
+	hash := mustHash(t, filepath.Join(root, "corpus", "t1"))
+	base := time.Now()
+	for i := range 30 {
+		require.NoError(t, r.appendRecord(RunRecord{
+			Experiment: "char", TrajectoryID: "t1", Arm: "baseline",
+			BaselineKey: resolvedKey, ResolvedOptions: resolved,
+			Outcome: OutcomePass, StartedAt: base.Add(time.Duration(i) * time.Second),
+			Env: Env{ModelPin: "mock/m", ModelResolved: "mock/m", ContentHash: hash},
+		}))
+	}
+
+	bands := &Bands{Entries: map[string]BandEntry{}}
+	corpus, err := LoadCorpus(root)
+	require.NoError(t, err)
+	require.NoError(t, r.RecomputeAll(bands, corpus, manifest, "mock/m"))
+
+	entry := bands.Entry("t1")
+	// The baseline accumulated under the RESOLVED key — intent key
+	// must stay empty, and 30/30 passes move the band off
+	// uncharacterized (stable itself needs a promotion streak).
+	require.Equal(t, 30, entry.Baselines["mock/m"][resolvedKey].N)
+	require.Zero(t, entry.Baselines["mock/m"][intentKey].N)
+	require.Equal(t, BandMid, entry.Band)
+}

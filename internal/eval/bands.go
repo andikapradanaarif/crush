@@ -294,21 +294,46 @@ func (b *Bands) Recompute(id string, records []RunRecord, contentHash string, no
 	e.LastCharacterized = now.Format("2006-01-02")
 }
 
+// recordMatchesPin reports whether a record was produced under the
+// given pin: stamped pins compare exactly, so a re-pinned model's
+// records never count toward the new pin's condition. Unstamped
+// (pre-field) records fall back to resolved-model equality.
+func recordMatchesPin(r RunRecord, model string) bool {
+	if r.Env.ModelPin != "" {
+		return r.Env.ModelPin == model
+	}
+	return r.Env.ModelResolved == model
+}
+
+// currentConditionKey returns the resolved baseline key stamped on
+// the newest control-condition ("control"/"baseline" arm) record
+// under the current pin — the join key for bands and the gate.
+// Records hash what actually ran; resolved values can diverge from
+// manifest intent on options NormalizeOptions doesn't materialize
+// (nil *bool, 0 int), so intent is only the bootstrap fallback for
+// record-less calls. Returns "" when no such record exists.
+func currentConditionKey(records []RunRecord, model string) string {
+	key := ""
+	var latest time.Time
+	for _, r := range records {
+		if r.BaselineKey == "" || (r.Arm != "control" && r.Arm != "baseline") {
+			continue
+		}
+		if model != "" && !recordMatchesPin(r, model) {
+			continue
+		}
+		if r.StartedAt.After(latest) {
+			latest, key = r.StartedAt, r.BaselineKey
+		}
+	}
+	return key
+}
+
 // assignBand classifies the trajectory from its recomputed state,
 // applying hysteresis: demote on one bad characterization, promote on
 // two consecutive good ones.
 func (b *Bands) assignBand(e *BandEntry, records []RunRecord, contentHash, curModel, curKey string) {
-	// matchesPin reports whether a record was produced under the
-	// current pin: stamped pins compare exactly, so a re-pinned
-	// model's records never count toward the new pin's condition.
-	// Unstamped (pre-field) records fall back to resolved-model
-	// equality.
-	matchesPin := func(r RunRecord) bool {
-		if r.Env.ModelPin != "" {
-			return r.Env.ModelPin == curModel
-		}
-		return r.Env.ModelResolved == curModel
-	}
+	matchesPin := func(r RunRecord) bool { return recordMatchesPin(r, curModel) }
 
 	// revision = current-pin records scored under the current corpus
 	// hash — suspect_check scans this whole set (a flaky check is a

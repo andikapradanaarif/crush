@@ -126,7 +126,10 @@ func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRe
 
 		// No-op detection: if both arms' latest resolved projections
 		// are identical, the flag under test did nothing — the null
-		// is guaranteed and the verdict is meaningless.
+		// is guaranteed and the verdict is meaningless. Arms whose
+		// runs never reported telemetry (crashed/fake drivers) carry
+		// no projection and are skipped — the alarm is telemetry-
+		// dependent by design.
 		var ctrlRes, treatRes map[string]any
 		for _, r := range recs {
 			if len(r.ResolvedOptions) > 0 {
