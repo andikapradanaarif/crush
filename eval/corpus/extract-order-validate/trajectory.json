@@ -1,0 +1,22 @@
+{
+	"id": "extract-order-validate",
+	"schema_version": 1,
+	"origin": {"kind": "synthetic"},
+	"start_state": {"kind": "fixture", "fixture_dir": "fixture"},
+	"task": {
+		"turns": [
+			"The three handlers in internal/handlers each duplicate the same item-validation rules (email required, at least one item, positive quantities, totals matching the item sum). Extract that logic into a shared package internal/order exporting Validate, and have all three handlers call it. Keep `go build ./...` green and don't change the validation behavior."
+		]
+	},
+	"check": {
+		"script": "check.sh",
+		"expect_start_state": "fail",
+		"timeout_seconds": 120
+	},
+	"coverage": {
+		"min_steps": 6,
+		"min_stub_stats.boundary_advances": 1
+	},
+	"requires": {"tools": ["go"]},
+	"budget": {"run_timeout_seconds": 900, "max_steps": 30}
+}

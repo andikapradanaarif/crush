@@ -1,0 +1,15 @@
+diff --git a/internal/inventory/inventory.go b/internal/inventory/inventory.go
+index ae20a89..84df9a5 100644
+--- a/internal/inventory/inventory.go
++++ b/internal/inventory/inventory.go
+@@ -54,8 +54,8 @@ func (i *Inventory) Reserve(item string, qty int) error {
+ 	if _, ok := i.stock[item]; !ok {
+ 		return fmt.Errorf("%w: %s", ErrUnknownItem, item)
+ 	}
+-	if i.stock[item] < qty {
+-		return fmt.Errorf("%w: %s (have %d, want %d)", ErrInsufficient, item, i.stock[item], qty)
++	if i.Available(item) < qty {
++		return fmt.Errorf("%w: %s (available %d, want %d)", ErrInsufficient, item, i.Available(item), qty)
+ 	}
+ 	i.reserved[item] += qty
+ 	return nil

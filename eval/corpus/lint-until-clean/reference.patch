@@ -1,0 +1,102 @@
+diff --git a/internal/config/load.go b/internal/config/load.go
+index 2d2ffae..e1d19b1 100644
+--- a/internal/config/load.go
++++ b/internal/config/load.go
+@@ -5,6 +5,8 @@ import (
+ 	"fmt"
+ 	"os"
+ 	"strings"
++
++	"toolkit/internal/log"
+ )
+ 
+ // Config carries toolkit settings.
+@@ -17,7 +19,7 @@ type Config struct {
+ func Load(path string) (Config, error) {
+ 	data, err := os.ReadFile(path)
+ 	if err != nil {
+-		panic(fmt.Sprintf("cannot read config %s", path))
++		return Config{}, fmt.Errorf("cannot read config %s: %w", path, err)
+ 	}
+ 	var cfg Config
+ 	for _, line := range strings.Split(string(data), "\n") {
+@@ -37,7 +39,7 @@ func Load(path string) (Config, error) {
+ 		}
+ 	}
+ 	if cfg.Workspace == "" {
+-		fmt.Println("config: workspace not set, using .")
++		log.Infof("config: workspace not set, using .")
+ 		cfg.Workspace = "."
+ 	}
+ 	return cfg, nil
+diff --git a/internal/fileutil/copy.go b/internal/fileutil/copy.go
+index 03cfc64..6fb4778 100644
+--- a/internal/fileutil/copy.go
++++ b/internal/fileutil/copy.go
+@@ -5,6 +5,8 @@ import (
+ 	"fmt"
+ 	"io"
+ 	"os"
++
++	"toolkit/internal/log"
+ )
+ 
+ // DescribeCopy returns a human-readable description of a copy
+@@ -31,7 +33,7 @@ func Copy(src, dst string) (int64, error) {
+ 	if err != nil {
+ 		return 0, fmt.Errorf("copy data: %w", err)
+ 	}
+-	fmt.Printf("copied %d bytes from %s to %s\n", n, src, dst)
++	log.Infof("copied %d bytes from %s to %s", n, src, dst)
+ 	return n, nil
+ }
+ 
+@@ -42,7 +44,7 @@ func Size(path string) (int64, error) {
+ 		return 0, fmt.Errorf("stat: %w", err)
+ 	}
+ 	if fi.IsDir() {
+-		panic("Size called on directory")
++		return 0, fmt.Errorf("Size called on directory %s", path)
+ 	}
+ 	return fi.Size(), nil
+ }
+diff --git a/internal/fileutil/move.go b/internal/fileutil/move.go
+index e36ac20..fa1e57e 100644
+--- a/internal/fileutil/move.go
++++ b/internal/fileutil/move.go
+@@ -3,18 +3,26 @@ package fileutil
+ import (
+ 	"fmt"
+ 	"os"
++
++	"toolkit/internal/log"
+ )
+ 
+-// Move renames src to dst, refusing to overwrite a directory.
++// Move renames src to dst, refusing to overwrite a directory. When
++// the rename fails across filesystems it falls back to copy+delete.
+ func Move(src, dst string) error {
+ 	fi, err := os.Stat(dst)
+ 	if err == nil && fi.IsDir() {
+ 		return fmt.Errorf("destination %s is a directory", dst)
+ 	}
+ 	if err := os.Rename(src, dst); err != nil {
+-		return fmt.Errorf("rename: %w", err)
++		if _, cerr := Copy(src, dst); cerr != nil {
++			return fmt.Errorf("rename: %w", err)
++		}
++		if cerr := os.Remove(src); cerr != nil {
++			return fmt.Errorf("remove source after copy: %w", cerr)
++		}
+ 	}
+-	fmt.Println("moved", src, "to", dst)
++	log.Infof("moved %s to %s", src, dst)
+ 	return nil
+ }
+ 
+@@ -23,5 +31,3 @@ func Exists(path string) bool {
+ 	_, err := os.Stat(path)
+ 	return err == nil
+ }
+-
+-// TODO: support copying across filesystems (rename fails with EXDEV).

@@ -1,0 +1,82 @@
+diff --git a/internal/client/client.go b/internal/client/client.go
+index 3c18329..0c61e28 100644
+--- a/internal/client/client.go
++++ b/internal/client/client.go
+@@ -24,14 +24,18 @@ func New(cfg config.Config) *Client {
+ 	}
+ }
+ 
+-// Do issues req once and returns the response. Callers that need
+-// retries must loop themselves — there is no retry support yet.
++// Do issues req, retrying a failed attempt up to cfg.Retries
++// additional times and returning the last error when exhausted.
+ func (c *Client) Do(req *http.Request) (*http.Response, error) {
+-	resp, err := c.hc.Do(req)
+-	if err != nil {
+-		return nil, fmt.Errorf("do %s %s: %w", req.Method, req.URL, err)
++	var lastErr error
++	for attempt := 0; attempt <= c.cfg.Retries; attempt++ {
++		resp, err := c.hc.Do(req)
++		if err == nil {
++			return resp, nil
++		}
++		lastErr = fmt.Errorf("do %s %s: %w", req.Method, req.URL, err)
+ 	}
+-	return resp, nil
++	return nil, lastErr
+ }
+ 
+ // Get issues a GET against endpoint+path.
+diff --git a/internal/config/config.go b/internal/config/config.go
+index 4a8f8d5..05e255b 100644
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -13,6 +13,9 @@ import (
+ type Config struct {
+ 	// Endpoint is the base URL requests are issued against.
+ 	Endpoint string
++
++	// Retries is how many additional attempts a failed request gets.
++	Retries int
+ }
+ 
+ // Load reads the config file at path.
+@@ -42,10 +45,14 @@ func parse(text string) Config {
+ 		}
+ 		key = strings.TrimSpace(key)
+ 		value = strings.TrimSpace(value)
+-		if key == "endpoint" {
++		switch key {
++		case "endpoint":
+ 			cfg.Endpoint = value
++		case "retries":
++			if n, err := strconv.Atoi(value); err == nil {
++				cfg.Retries = n
++			}
+ 		}
+-		_ = strconv.Itoa // reserved for future numeric keys
+ 	}
+ 	return cfg
+ }
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+index 355c36e..b7da38f 100644
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -15,3 +15,17 @@ func TestParseEmpty(t *testing.T) {
+ 		t.Fatalf("Endpoint = %q, want empty", cfg.Endpoint)
+ 	}
+ }
++
++func TestParseRetries(t *testing.T) {
++	cfg := Parse("retries: 3\n")
++	if cfg.Retries != 3 {
++		t.Fatalf("Retries = %d, want 3", cfg.Retries)
++	}
++}
++
++func TestRetriesDefaultsToZero(t *testing.T) {
++	cfg := Parse("endpoint: http://x\n")
++	if cfg.Retries != 0 {
++		t.Fatalf("Retries = %d, want 0", cfg.Retries)
++	}
++}

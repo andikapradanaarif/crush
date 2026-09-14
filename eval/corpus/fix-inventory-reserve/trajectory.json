@@ -1,0 +1,19 @@
+{
+	"id": "fix-inventory-reserve",
+	"schema_version": 1,
+	"origin": {"kind": "synthetic"},
+	"start_state": {"kind": "fixture", "fixture_dir": "fixture"},
+	"task": {
+		"turns": [
+			"`go test ./...` has a failing test in internal/inventory. Fix the implementation so all tests pass — do not modify any _test.go file."
+		]
+	},
+	"check": {
+		"script": "check.sh",
+		"expect_start_state": "fail",
+		"timeout_seconds": 120
+	},
+	"coverage": {"min_steps": 4},
+	"requires": {"tools": ["go"]},
+	"budget": {"run_timeout_seconds": 600, "max_steps": 20}
+}
