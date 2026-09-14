@@ -236,7 +236,14 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 		return rec, fmt.Errorf("content hash: %w", err)
 	}
 	rec.Env.ContentHash = contentHash
-	rec.BaselineKey = manifest.BaselineKey(arm.Config.Options)
+	// Temperature is a run condition — an unpinned temp and temp-0
+	// are different baselines, invisible unless hashed.
+	tempKey := "default"
+	if exp.Temperature != nil {
+		tempKey = strconv.FormatFloat(*exp.Temperature, 'g', -1, 64)
+	}
+	rec.Env.Temperature = tempKey
+	rec.BaselineKey = manifest.keyWith(arm.Config.Options, map[string]any{"$temperature": tempKey})
 
 	workdir, err := Materialize(ctx, traj, trajDir, r.workParent(), r.checkEnv())
 	if err != nil {
@@ -247,7 +254,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	defer os.RemoveAll(workdir)
 	defer os.RemoveAll(DataDirFor(workdir))
 
-	if err := WriteArmConfig(workdir, exp, arm); err != nil {
+	if err := WriteArmConfig(workdir, exp, arm, manifest); err != nil {
 		rec.Outcome = OutcomeError
 		rec.CheckDetail = map[string]any{"harness": err.Error()}
 		return rec, nil
@@ -271,7 +278,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	// it — arm intent can silently no-op; resolved state is truth.
 	if len(res.ResolvedOptions) > 0 {
 		rec.ResolvedOptions = res.ResolvedOptions
-		rec.BaselineKey = manifest.BaselineKey(res.ResolvedOptions)
+		rec.BaselineKey = manifest.keyWith(res.ResolvedOptions, map[string]any{"$temperature": tempKey})
 	}
 	rec.Env.ModelSmall = res.ModelSmall
 	rec.Env.ModelSummary = res.ModelSummary
@@ -509,7 +516,7 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 	// The gate's baseline key joins on the control arm's resolved
 	// condition — what actually ran — falling back to intent only
 	// when no control record carried a resolved key.
-	if k := currentConditionKey(records, exp.Model); k != "" {
+	if k := currentConditionKey(records, exp.Model, ArmControl); k != "" {
 		baselineKey = k
 	}
 	gate := Evaluate(exp, frozen, baselineKey, records, corpusIDs(corpus), r.alpha(), r.permReplicates(), r.rng())
@@ -637,7 +644,16 @@ func (r *Runner) RecomputeAll(bands *Bands, corpus map[string]*Trajectory, manif
 		perTraj[id] = records
 		all = append(all, records...)
 	}
-	curKey := currentConditionKey(all, model)
+	// The canonical default comes from baseline-arm records
+	// (characterize/smoke run the empty arm — true defaults).
+	// Control-arm records are the fallback for corpora that only
+	// ever ran experiments; a non-default control's key is itself
+	// correct for banding but must not redefine "default" when
+	// baseline records exist.
+	curKey := currentConditionKey(all, model, ArmBaseline)
+	if curKey == "" {
+		curKey = currentConditionKey(all, model, ArmControl)
+	}
 	if curKey == "" {
 		curKey = manifest.BaselineKey(nil)
 	}
@@ -884,7 +900,7 @@ func (r *Runner) checkEnv() []string {
 	env := make([]string, 0, len(os.Environ()))
 	for _, kv := range os.Environ() {
 		k, _, _ := strings.Cut(kv, "=")
-		if strings.HasPrefix(k, "CRUSH_") {
+		if strings.HasPrefix(k, "CRUSH_") || strings.HasPrefix(k, "EVAL_") {
 			continue
 		}
 		if _, overridden := pinned[k]; !overridden {
@@ -935,6 +951,11 @@ func (r *Runner) acquireLock() (func(), error) {
 // Unix existence probe; on other platforms assume alive — a stale
 // lock there expires only by removal.
 func pidAlive(pid int) bool {
+	if runtime.GOOS == "windows" {
+		// Signal(0) is unsupported — assume alive rather than
+		// steal a live lock.
+		return true
+	}
 	p, err := os.FindProcess(pid)
 	if err != nil {
 		return false

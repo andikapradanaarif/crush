@@ -121,8 +121,8 @@ func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRe
 	var exclP []float64
 
 	for id, recs := range byTraj {
-		ctrl := conclusiveByArm(recs, "control")
-		treat := conclusiveByArm(recs, "treatment")
+		ctrl := conclusiveByArm(recs, ArmControl)
+		treat := conclusiveByArm(recs, ArmTreatment)
 
 		// No-op detection: if both arms' latest resolved projections
 		// are identical, the flag under test did nothing — the null
@@ -132,11 +132,12 @@ func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRe
 		// dependent by design.
 		var ctrlRes, treatRes map[string]any
 		for _, r := range recs {
+			// Records append chronologically — last non-empty wins.
 			if len(r.ResolvedOptions) > 0 {
-				if r.Arm == "control" && ctrlRes == nil {
+				if r.Arm == ArmControl {
 					ctrlRes = r.ResolvedOptions
 				}
-				if r.Arm == "treatment" && treatRes == nil {
+				if r.Arm == ArmTreatment {
 					treatRes = r.ResolvedOptions
 				}
 			}

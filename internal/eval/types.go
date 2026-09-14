@@ -55,6 +55,16 @@ const (
 	ReasonNeverPassed   QuarantineReason = "never_passed"
 )
 
+// Arm names are load-bearing across ExecuteRun callers, gate pairing,
+// and the condition-key join — const, not literals.
+const (
+	ArmControl   = "control"
+	ArmTreatment = "treatment"
+	// ArmBaseline is the characterize/smoke arm name — runs under the
+	// empty arm, i.e. the true default condition.
+	ArmBaseline = "baseline"
+)
+
 // CharacterizeExperiment is the reserved experiment name for genesis
 // and re-characterization runs — non-comparison samples that flow
 // through the same run-record pipeline.
@@ -218,9 +228,14 @@ type Env struct {
 	// compaction-flag experiment can audit which summarizer ran.
 	ModelSmall   string `json:"model_small,omitempty"`
 	ModelSummary string `json:"model_summary,omitempty"`
-	Go           string `json:"go"`
-	OS           string `json:"os"`
-	ContentHash  string `json:"content_hash"`
+	// Temperature is part of the run's condition — a characterize at
+	// temp 0 vs an experiment at model-default are different
+	// conditions the baseline key must not merge. "default" marks
+	// an unpinned temperature.
+	Temperature string `json:"temperature,omitempty"`
+	Go          string `json:"go"`
+	OS          string `json:"os"`
+	ContentHash string `json:"content_hash"`
 }
 
 // BaselineCounts are the integer cells Fisher's exact needs; p̂ is

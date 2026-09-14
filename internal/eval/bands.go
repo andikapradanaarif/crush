@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -94,7 +95,17 @@ func (m *FlagsManifest) EffectiveConfig(armOptions map[string]any) map[string]an
 // BaselineKey is the config hash a run belongs under for baseline
 // purposes — the projection of its effective config.
 func (m *FlagsManifest) BaselineKey(armOptions map[string]any) string {
-	return BaselineConfigHash(sortedKeys(m.Defaults), m.EffectiveConfig(armOptions))
+	return m.keyWith(armOptions, nil)
+}
+
+// keyWith is BaselineKey plus extra dimensions folded into the hash
+// (e.g. "$temperature") — run conditions that aren't config.Options.
+func (m *FlagsManifest) keyWith(armOptions map[string]any, extra map[string]any) string {
+	cfg := m.EffectiveConfig(armOptions)
+	for k, v := range extra {
+		cfg[k] = v
+	}
+	return BaselineConfigHash(append(sortedKeys(m.Defaults), sortedKeys(extra)...), cfg)
 }
 
 // ValidateArmFlags enforces the declared-manifest rule: an option an
@@ -306,17 +317,26 @@ func recordMatchesPin(r RunRecord, model string) bool {
 }
 
 // currentConditionKey returns the resolved baseline key stamped on
-// the newest control-condition ("control"/"baseline" arm) record
-// under the current pin — the join key for bands and the gate.
-// Records hash what actually ran; resolved values can diverge from
-// manifest intent on options NormalizeOptions doesn't materialize
-// (nil *bool, 0 int), so intent is only the bootstrap fallback for
-// record-less calls. Returns "" when no such record exists.
-func currentConditionKey(records []RunRecord, model string) string {
+// the newest record under the given arms and current pin — the join
+// key for bands and the gate. Records hash what actually ran;
+// resolved values can diverge from manifest intent on options
+// NormalizeOptions doesn't materialize (nil *bool, 0 int), so intent
+// is only the bootstrap fallback for record-less calls.
+//
+// Only records carrying ResolvedOptions may be join sources: a run
+// that died before telemetry (config-load failure, hard kill) keeps
+// the intent key stamped at ExecuteRun start — accepting it would
+// flip curKey back to the intent namespace and orphan every
+// resolved-keyed baseline cell. Returns "" when no qualifying
+// record exists.
+func currentConditionKey(records []RunRecord, model string, arms ...string) string {
 	key := ""
 	var latest time.Time
 	for _, r := range records {
-		if r.BaselineKey == "" || (r.Arm != "control" && r.Arm != "baseline") {
+		if r.BaselineKey == "" || len(r.ResolvedOptions) == 0 {
+			continue
+		}
+		if !slices.Contains(arms, r.Arm) {
 			continue
 		}
 		if model != "" && !recordMatchesPin(r, model) {

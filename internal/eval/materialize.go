@@ -102,7 +102,7 @@ func ApplyPatch(ctx context.Context, workdir, patchPath string) error {
 // arm's same-named keys — an error. A start-state .crush.json merges
 // with the arm options winning; crush.json is lower precedence than
 // .crush.json outright, so it never shadows.
-func WriteArmConfig(workdir string, exp *Experiment, arm Arm) error {
+func WriteArmConfig(workdir string, exp *Experiment, arm Arm, manifest *FlagsManifest) error {
 	for _, name := range []string{".crushrc", "crushrc"} {
 		if fileExists(filepath.Join(workdir, name)) {
 			return fmt.Errorf("workdir already carries %s — a shell config shadows the .crush.json arm; fixtures must not ship crush shell config", name)
@@ -133,6 +133,12 @@ func WriteArmConfig(workdir string, exp *Experiment, arm Arm) error {
 		"data_directory": DataDirFor(workdir),
 	}
 	for k, v := range arm.Config.Options {
+		// Harness-managed keys an arm must not override — relocating
+		// the data dir breaks telemetry/session-DB paths and leaves
+		// harness files inside the tree checks observe.
+		if k == "data_directory" {
+			return fmt.Errorf("arm sets %q which the harness manages — remove it from the experiment", k)
+		}
 		options[k] = v
 	}
 	doc := map[string]any{"options": options}
@@ -151,6 +157,14 @@ func WriteArmConfig(workdir string, exp *Experiment, arm Arm) error {
 			return fmt.Errorf("existing .crush.json does not parse: %w", err)
 		}
 		if opts, ok := existing["options"].(map[string]any); ok {
+			// A fixture pinning a manifest flag keys this trajectory's
+			// runs under a foreign condition — every characterization
+			// lands in a cell the gate never reads.
+			for k := range opts {
+				if _, declared := manifest.Defaults[k]; declared {
+					return fmt.Errorf("existing .crush.json sets manifest flag %q — the fixture would pin a flag under test; remove it or drop the flag from flags.json", k)
+				}
+			}
 			for k, v := range options {
 				opts[k] = v
 			}

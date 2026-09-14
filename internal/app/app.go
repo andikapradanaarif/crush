@@ -507,7 +507,9 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 			}
 			select {
 			case result := <-done:
-				app.emitEvalTelemetry(sess.ID, result.result, result.err, 0)
+				// An errored run may carry a nil result — still record
+				// the approximate step burn.
+				app.emitEvalTelemetry(sess.ID, result.result, result.err, len(messageReadBytes))
 				if result.err != nil &&
 					!errors.Is(result.err, context.Canceled) &&
 					!errors.Is(result.err, agent.ErrRequestCancelled) {

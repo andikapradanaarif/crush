@@ -334,7 +334,7 @@ func TestWriteArmConfig_CollisionAndContent(t *testing.T) {
 	wd := t.TempDir()
 	exp := &Experiment{Model: "hyper/x", Temperature: ptr(0.0)}
 	arm := Arm{Config: ArmConfig{Options: map[string]any{"flag_a": true}}}
-	require.NoError(t, WriteArmConfig(wd, exp, arm))
+	require.NoError(t, WriteArmConfig(wd, exp, arm, &FlagsManifest{Defaults: map[string]any{}}))
 
 	rc, err := os.ReadFile(filepath.Join(wd, ".crushrc"))
 	require.NoError(t, err)
@@ -349,7 +349,7 @@ func TestWriteArmConfig_CollisionAndContent(t *testing.T) {
 	// A pre-existing config is an error, not a silent override.
 	wd2 := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wd2, "crushrc"), []byte("x"), 0o644))
-	require.Error(t, WriteArmConfig(wd2, exp, arm))
+	require.Error(t, WriteArmConfig(wd2, exp, arm, &FlagsManifest{Defaults: map[string]any{}}))
 }
 
 func ptr[T any](v T) *T { return &v }
@@ -416,7 +416,7 @@ func TestWriteArmConfig_MergesJSONConfig(t *testing.T) {
 	wd := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wd, ".crush.json"),
 		[]byte(`{"options":{"fixture_key":"keep","flag_a":false},"other":"x"}`), 0o644))
-	require.NoError(t, WriteArmConfig(wd, exp, arm))
+	require.NoError(t, WriteArmConfig(wd, exp, arm, &FlagsManifest{Defaults: map[string]any{}}))
 	raw, err := os.ReadFile(filepath.Join(wd, ".crush.json"))
 	require.NoError(t, err)
 	require.Contains(t, string(raw), `"fixture_key": "keep"`)
@@ -426,7 +426,7 @@ func TestWriteArmConfig_MergesJSONConfig(t *testing.T) {
 	// crush.json is lower precedence than .crush.json — allowed.
 	wd2 := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wd2, "crush.json"), []byte(`{}`), 0o644))
-	require.NoError(t, WriteArmConfig(wd2, exp, arm))
+	require.NoError(t, WriteArmConfig(wd2, exp, arm, &FlagsManifest{Defaults: map[string]any{}}))
 }
 
 func TestBands_PinSpellingVsResolved(t *testing.T) {
