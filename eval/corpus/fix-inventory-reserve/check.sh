@@ -9,3 +9,6 @@ go test ./... >/dev/null
 
 grep -q "func TestReserveBeyondAvailable" internal/inventory/inventory_test.go
 grep -q "ErrInsufficient" internal/inventory/inventory_test.go
+
+# Turn 2's work must exist: a Release-related test.
+grep -q "Release" internal/inventory/inventory_test.go

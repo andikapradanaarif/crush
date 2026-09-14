@@ -21,7 +21,7 @@ index 60e58d3..3e1822a 100644
  	}
  }
 diff --git a/internal/config/config.go b/internal/config/config.go
-index 46e7187..38080f1 100644
+index 46e7187..34c9455 100644
 --- a/internal/config/config.go
 +++ b/internal/config/config.go
 @@ -16,9 +16,9 @@ type Config struct {
@@ -48,6 +48,22 @@ index 46e7187..38080f1 100644
  			}
  		case "max_connections":
  			if n, err := strconv.Atoi(value); err == nil {
+@@ -68,3 +68,15 @@ func parse(text string) Config {
+ 	}
+ 	return cfg
+ }
++
++// Validate reports an error for an empty endpoint or a non-positive
++// timeout.
++func (c Config) Validate() error {
++	if c.Endpoint == "" {
++		return fmt.Errorf("endpoint is required")
++	}
++	if c.TimeoutSeconds <= 0 {
++		return fmt.Errorf("timeout_seconds must be positive")
++	}
++	return nil
++}
 diff --git a/internal/config/config_test.go b/internal/config/config_test.go
 index 4820619..2f32e10 100644
 --- a/internal/config/config_test.go
@@ -131,10 +147,20 @@ index f2e52a6..b857b0f 100644
 +		s.cfg.Endpoint, s.cfg.TimeoutSeconds, s.cfg.MaxConnections)
  }
 diff --git a/main.go b/main.go
-index 05bf5a6..88e606c 100644
+index 05bf5a6..cfe785f 100644
 --- a/main.go
 +++ b/main.go
-@@ -22,7 +22,7 @@ func main() {
+@@ -16,13 +16,17 @@ func main() {
+ 		fmt.Fprintln(os.Stderr, "load config:", err)
+ 		os.Exit(1)
+ 	}
++	if err := cfg.Validate(); err != nil {
++		fmt.Fprintln(os.Stderr, "invalid config:", err)
++		os.Exit(1)
++	}
+ 
+ 	srv := server.New(cfg)
+ 	cli := client.New(cfg)
  	policy := retry.DefaultPolicy(cfg)
  
  	fmt.Println("endpoint:", cfg.Endpoint)

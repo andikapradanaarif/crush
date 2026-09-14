@@ -183,3 +183,21 @@ index e567002..604faad 100644
  }
  
  // Index stores a document under its key.
+diff --git a/internal/store/store_test.go b/internal/store/store_test.go
+new file mode 100644
+index 0000000..3892bdd
+--- /dev/null
++++ b/internal/store/store_test.go
+@@ -0,0 +1,12 @@
++package store
++
++import "testing"
++
++func TestGetMissIncrementsMisses(t *testing.T) {
++	s := New()
++	s.Get("absent")
++	hits, misses := s.Stats()
++	if misses != 1 || hits != 0 {
++		t.Fatalf("Stats() = %d hits, %d misses; want 0 hits, 1 miss", hits, misses)
++	}
++}

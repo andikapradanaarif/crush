@@ -5,7 +5,8 @@
 	"start_state": {"kind": "fixture", "fixture_dir": "fixture"},
 	"task": {
 		"turns": [
-			"The three handlers in internal/handlers each duplicate the same item-validation rules (email required, at least one item, positive quantities, totals matching the item sum). Extract that logic into a shared package internal/order exporting Validate, and have all three handlers call it. Keep `go build ./...` green and don't change the validation behavior."
+			"The three handlers in internal/handlers each duplicate the same item-validation rules (email required, at least one item, positive quantities, totals matching the item sum). Extract that logic into a shared package internal/order exporting Validate, and have all three handlers call it. Keep `go build ./...` green and don't change the validation behavior.",
+			"Add a table-driven test for the shared validator covering each validation failure case, and keep `go test ./...` green."
 		]
 	},
 	"check": {
@@ -14,8 +15,7 @@
 		"timeout_seconds": 120
 	},
 	"coverage": {
-		"min_steps": 6,
-		"min_stub_stats.boundary_advances": 1
+		"min_steps": 10
 	},
 	"requires": {"tools": ["go"]},
 	"budget": {"run_timeout_seconds": 900, "max_steps": 30}

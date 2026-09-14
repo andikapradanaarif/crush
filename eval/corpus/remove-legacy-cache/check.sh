@@ -20,3 +20,6 @@ fi
 # Services must now use internal/store.
 grep -q "catalog/internal/store" internal/service/catalog.go
 grep -q "catalog/internal/store" internal/service/search.go
+
+# Turn 2's work must exist: a test exercising Stats/miss counters.
+grep -rln "Stats()" --include="*_test.go" .

@@ -165,3 +165,42 @@ index 0000000..c510c33
 +	}
 +	return nil
 +}
+diff --git a/internal/order/validate_test.go b/internal/order/validate_test.go
+new file mode 100644
+index 0000000..9f93092
+--- /dev/null
++++ b/internal/order/validate_test.go
+@@ -0,0 +1,33 @@
++package order
++
++import (
++	"testing"
++
++	"shop/internal/model"
++)
++
++func TestValidateFailures(t *testing.T) {
++	cases := []struct {
++		name  string
++		email string
++		items []model.Item
++	}{
++		{"empty email", "", []model.Item{{SKU: "a", Qty: 1, Price: 100}}},
++		{"no items", "a@b.co", nil},
++		{"zero qty", "a@b.co", []model.Item{{SKU: "a", Qty: 0, Price: 100}}},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			if err := Validate(tc.email, tc.items); err == nil {
++				t.Fatal("expected validation error")
++			}
++		})
++	}
++}
++
++func TestValidateAccepts(t *testing.T) {
++	items := []model.Item{{SKU: "a", Qty: 2, Price: 100}}
++	if err := Validate("a@b.co", items); err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++}

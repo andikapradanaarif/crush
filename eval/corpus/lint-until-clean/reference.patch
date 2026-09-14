@@ -1,5 +1,5 @@
 diff --git a/internal/config/load.go b/internal/config/load.go
-index 2d2ffae..e1d19b1 100644
+index 2d2ffae..8e46866 100644
 --- a/internal/config/load.go
 +++ b/internal/config/load.go
 @@ -5,6 +5,8 @@ import (
@@ -20,7 +20,7 @@ index 2d2ffae..e1d19b1 100644
  	}
  	var cfg Config
  	for _, line := range strings.Split(string(data), "\n") {
-@@ -37,7 +39,7 @@ func Load(path string) (Config, error) {
+@@ -37,8 +39,15 @@ func Load(path string) (Config, error) {
  		}
  	}
  	if cfg.Workspace == "" {
@@ -29,8 +29,16 @@ index 2d2ffae..e1d19b1 100644
  		cfg.Workspace = "."
  	}
  	return cfg, nil
+ }
++
++// DryRun reports whether TOOLKIT_DRY_RUN preview mode is on.
++// Environment access is centralized here so lint can forbid
++// os.Getenv elsewhere.
++func DryRun() bool {
++	return os.Getenv("TOOLKIT_DRY_RUN") != ""
++}
 diff --git a/internal/fileutil/copy.go b/internal/fileutil/copy.go
-index 03cfc64..6fb4778 100644
+index 03cfc64..ce411bc 100644
 --- a/internal/fileutil/copy.go
 +++ b/internal/fileutil/copy.go
 @@ -5,6 +5,8 @@ import (
@@ -56,29 +64,33 @@ index 03cfc64..6fb4778 100644
  	}
  	if fi.IsDir() {
 -		panic("Size called on directory")
-+		return 0, fmt.Errorf("Size called on directory %s", path)
++		return 0, fmt.Errorf("size: %s is a directory", path)
  	}
  	return fi.Size(), nil
  }
 diff --git a/internal/fileutil/move.go b/internal/fileutil/move.go
-index e36ac20..fa1e57e 100644
+index 3c08e81..7d79318 100644
 --- a/internal/fileutil/move.go
 +++ b/internal/fileutil/move.go
-@@ -3,18 +3,26 @@ package fileutil
+@@ -3,6 +3,9 @@ package fileutil
  import (
  	"fmt"
  	"os"
 +
++	"toolkit/internal/config"
 +	"toolkit/internal/log"
  )
  
--// Move renames src to dst, refusing to overwrite a directory.
-+// Move renames src to dst, refusing to overwrite a directory. When
-+// the rename fails across filesystems it falls back to copy+delete.
- func Move(src, dst string) error {
- 	fi, err := os.Stat(dst)
+ // Move renames src to dst, refusing to overwrite a directory.
+@@ -12,14 +15,19 @@ func Move(src, dst string) error {
  	if err == nil && fi.IsDir() {
  		return fmt.Errorf("destination %s is a directory", dst)
+ 	}
+-	if os.Getenv("TOOLKIT_DRY_RUN") != "" {
+-		fmt.Println("dry run: would move", src, "to", dst)
++	if config.DryRun() {
++		log.Infof("dry run: would move %s to %s", src, dst)
+ 		return nil
  	}
  	if err := os.Rename(src, dst); err != nil {
 -		return fmt.Errorf("rename: %w", err)
@@ -94,9 +106,33 @@ index e36ac20..fa1e57e 100644
  	return nil
  }
  
-@@ -23,5 +31,3 @@ func Exists(path string) bool {
+@@ -28,5 +36,3 @@ func Exists(path string) bool {
  	_, err := os.Stat(path)
  	return err == nil
  }
 -
 -// TODO: support copying across filesystems (rename fails with EXDEV).
+diff --git a/lint.sh b/lint.sh
+index 5f3426d..83cf081 100755
+--- a/lint.sh
++++ b/lint.sh
+@@ -3,6 +3,7 @@
+ #   1. no fmt.Print* calls outside main.go — use the logger
+ #   2. no panic( outside main.go — return errors instead
+ #   3. no TODO/FIXME markers — resolve or remove them
++#   4. no os.Getenv outside internal/config — env lives in config
+ set -u
+ cd "$(dirname "$0")"
+ 
+@@ -23,6 +24,11 @@ while IFS= read -r line; do
+ 	violations=$((violations + 1))
+ done < <(grep -rn "TODO\|FIXME" --include="*.go" . || true)
+ 
++while IFS= read -r line; do
++	echo "getenv: $line"
++	violations=$((violations + 1))
++done < <(grep -rn "os.Getenv" --include="*.go" . | grep -v "internal/config" || true)
++
+ if [ "$violations" -eq 0 ]; then
+ 	echo "lint: clean"
+ 	exit 0

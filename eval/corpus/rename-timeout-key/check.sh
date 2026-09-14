@@ -16,3 +16,6 @@ fi
 # New names must be present in code and config.
 grep -rn "TimeoutSeconds" --include="*.go" . >/dev/null
 grep -q "timeout_seconds" config.yaml
+
+# Turn 2's work must exist: a Validate method on the config type.
+grep -q "func.*Validate" internal/config/config.go

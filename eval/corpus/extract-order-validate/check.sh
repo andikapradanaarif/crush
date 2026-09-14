@@ -15,3 +15,6 @@ grep -rq "package order" internal/order/
 for f in order.go return.go exchange.go; do
 	grep -q "shop/internal/order" "internal/handlers/$f"
 done
+
+# Turn 2's work must exist: a test for the shared validator.
+grep -rq "func Test" internal/order/
