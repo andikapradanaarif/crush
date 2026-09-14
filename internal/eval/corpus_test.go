@@ -17,7 +17,7 @@ func TestExampleCorpus_QuarantineClean(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-		r := &Runner{EvalDir: "../..", QuarantineRepeats: 2, WorkParent: t.TempDir()}
+	r := &Runner{EvalDir: "../..", QuarantineRepeats: 2, WorkParent: t.TempDir()}
 	t.Cleanup(r.Close)
 	reason, err := r.Quarantine(context.Background(), tr, dir)
 	if err != nil {
