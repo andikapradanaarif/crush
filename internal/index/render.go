@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // skeletonTopFiles caps how many high-centrality files the skeleton
@@ -245,8 +247,6 @@ func (s *Service) renderDirTree(ctx context.Context, b *strings.Builder, maxOut 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
 			CASE WHEN instr(path, '/') = 0 THEN '.'
-			     ELSE substr(path, 1, instr(path, '/') - 1) END AS top,
-			CASE WHEN instr(path, '/') = 0 THEN '.'
 			     WHEN instr(substr(path, instr(path, '/') + 1), '/') = 0
 			     THEN substr(path, 1, instr(path, '/') - 1)
 			     ELSE substr(path, 1, instr(path, '/') - 1) ||
@@ -263,9 +263,9 @@ func (s *Service) renderDirTree(ctx context.Context, b *strings.Builder, maxOut 
 	b.WriteString("\nLayout:\n")
 	start := b.Len()
 	for rows.Next() {
-		var top, dir string
+		var dir string
 		var n int
-		if err := rows.Scan(&top, &dir, &n); err != nil {
+		if err := rows.Scan(&dir, &n); err != nil {
 			return err
 		}
 		if b.Len()-start > maxOut {
@@ -278,44 +278,71 @@ func (s *Service) renderDirTree(ctx context.Context, b *strings.Builder, maxOut 
 }
 
 // renderTopFiles writes the most-referenced files with their exported
-// symbols.
+// symbols. In-degree is computed in Go — a file inherits refs to
+// itself plus every ancestor directory (Go package-dir imports) —
+// because expressing that join in SQL degenerates to a nested loop
+// of files × distinct ref targets with no usable index.
 func (s *Service) renderTopFiles(ctx context.Context, b *strings.Builder, limit int) error {
-	// In-degree sums every ref row hitting the file itself or one of
-	// its ancestor dirs (Go refs resolve to package dirs) — SUM keeps
-	// the score deterministic when a file matches several dst_paths.
-	// The substr test is a literal prefix match so metacharacters in
-	// stored dst_paths can't act as a GLOB pattern.
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT f.path, COALESCE(SUM(deg.n), 0) AS in_degree
-		FROM files f
-		LEFT JOIN (
-			SELECT dst_path, COUNT(*) AS n FROM refs GROUP BY dst_path
-		) deg ON deg.dst_path = f.path
-		     OR substr(f.path, 1, length(deg.dst_path) + 1) = deg.dst_path || '/'
-		GROUP BY f.path
-		ORDER BY in_degree DESC, f.path
-		LIMIT ?`, limit)
+	degRows, err := s.db.QueryContext(ctx,
+		`SELECT dst_path, COUNT(*) FROM refs GROUP BY dst_path`)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-
-	var paths []string
-	deg := map[string]int{}
-	for rows.Next() {
-		var p string
+	refDeg := map[string]int{}
+	for degRows.Next() {
+		var dst string
 		var n int
-		if err := rows.Scan(&p, &n); err != nil {
+		if err := degRows.Scan(&dst, &n); err != nil {
+			degRows.Close()
+			return err
+		}
+		refDeg[dst] = n
+	}
+	if err := degRows.Err(); err != nil {
+		degRows.Close()
+		return err
+	}
+	degRows.Close()
+
+	fileRows, err := s.db.QueryContext(ctx, `SELECT path FROM files`)
+	if err != nil {
+		return err
+	}
+	var paths []string
+	for fileRows.Next() {
+		var p string
+		if err := fileRows.Scan(&p); err != nil {
+			fileRows.Close()
 			return err
 		}
 		paths = append(paths, p)
-		deg[p] = n
 	}
-	if err := rows.Err(); err != nil {
+	if err := fileRows.Err(); err != nil {
+		fileRows.Close()
 		return err
 	}
+	fileRows.Close()
 	if len(paths) == 0 {
 		return nil
+	}
+
+	// O(F × depth): a file's degree sums ref counts over itself and
+	// each ancestor dir.
+	deg := make(map[string]int, len(paths))
+	for _, p := range paths {
+		deg[p] = refDeg[p]
+		for d := path.Dir(p); d != "." && d != "/" && d != ""; d = path.Dir(d) {
+			deg[p] += refDeg[d]
+		}
+	}
+	sort.Slice(paths, func(i, j int) bool {
+		if deg[paths[i]] != deg[paths[j]] {
+			return deg[paths[i]] > deg[paths[j]]
+		}
+		return paths[i] < paths[j]
+	})
+	if len(paths) > limit {
+		paths = paths[:limit]
 	}
 	s.refreshPaths(ctx, paths)
 
@@ -394,9 +421,16 @@ func escapeLike(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }
 
+// maxOutputTokens ceilings the caller-supplied budget — a model
+// asking for max_tokens=50000 shouldn't get a 200KB response.
+const maxOutputTokens = 2000
+
 func maxChars(maxTokens int) int {
 	if maxTokens <= 0 {
 		maxTokens = 500
+	}
+	if maxTokens > maxOutputTokens {
+		maxTokens = maxOutputTokens
 	}
 	return maxTokens * 4
 }
@@ -406,5 +440,10 @@ func capOutput(s string, maxTokens int) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max] + "\n\n[Map truncated to stay within token budget]"
+	// Cut on a rune boundary so the output never ends mid-character.
+	cut := max
+	for cut > 0 && !utf8.ValidString(s[:cut]) {
+		cut--
+	}
+	return s[:cut] + "\n\n[Map truncated to stay within token budget]"
 }

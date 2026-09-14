@@ -150,11 +150,11 @@ func NotifyWritten(absPath string) {
 // refreshIfStale handles both stale and never-indexed paths, so a
 // newly created file lands in the index on its first write.
 func (s *Service) touchFile(absPath string) {
-	if err := s.init(); err != nil {
-		return
-	}
 	rel, err := filepath.Rel(s.root, absPath)
-	if err != nil || strings.HasPrefix(rel, "..") {
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return // Outside this project — don't even open the DB.
+	}
+	if err := s.init(); err != nil {
 		return
 	}
 	info, err := os.Stat(absPath)
@@ -178,6 +178,13 @@ func (s *Service) Ready() error {
 // init opens the sidecar database and creates the schema, once.
 func (s *Service) init() error {
 	s.once.Do(func() {
+		if s.dataDir == "" || s.root == "" {
+			// Shared skips Open's validation — an empty data dir
+			// would otherwise write index.db into the process CWD,
+			// dodging the .crush gitignore self-protection.
+			s.initErr = fmt.Errorf("index requires data dir and working dir")
+			return
+		}
 		conn, err := db.OpenDBFile(filepath.Join(s.dataDir, IndexFilename))
 		if err != nil {
 			s.initErr = err
@@ -286,8 +293,12 @@ func (s *Service) EnsureIndexed(ctx context.Context) error {
 	s.buildMu.Lock()
 	done := s.buildDone
 	s.buildMu.Unlock()
-	<-done
-	return s.err()
+	select {
+	case <-done:
+		return s.err()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // indexedFile returns the recorded {mtime, size} for a path; found is

@@ -124,7 +124,9 @@ var jsSpec = langSpec{
 		{regexp.MustCompile(`^\s*(?:export\s+)?(?:abstract\s+)?class\s+(\w+)`), "class"},
 		{regexp.MustCompile(`^\s*(?:export\s+)?(?:interface|type|enum)\s+(\w+)`), "type"},
 		{regexp.MustCompile(`^\s*(?:export\s+)?(?:const|let|var)\s+(\w+)`), "var"},
-		{regexp.MustCompile(`^\s+(?:(?:public|private|protected|static|async|readonly|override|abstract)\s+)*(?:get\s+|set\s+)?(\w+)\s*\(`), "method"},
+		// Method rules must end in `{` (with optional TS return type) or
+		// every indented call site gets tagged as a definition.
+		{regexp.MustCompile(`^\s+(?:(?:public|private|protected|static|async|readonly|override|abstract)\s+)*(?:get\s+|set\s+)?(\w+)\s*\([^)]*\)\s*(?::\s*[\w<>\[\]|&]+\s*)?\{`), "method"},
 	},
 	export: lineHas("export"),
 	imports: []*regexp.Regexp{

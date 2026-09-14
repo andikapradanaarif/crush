@@ -111,7 +111,9 @@ export async function getUser(id: string) {}
 const timeout = 5000
 
 class UserService {
-	async find(id: string) {}
+	async find(id: string) {
+		doSomething()
+	}
 	if (x) { return }
 }
 `)
@@ -139,6 +141,8 @@ class UserService {
 	// Control-flow keywords must not leak in as methods.
 	require.NotContains(t, names, "if")
 	require.NotContains(t, names, "return")
+	// Call sites must not tag as method definitions.
+	require.NotContains(t, names, "doSomething")
 
 	require.Equal(t, []string{"src/db/client.ts"}, refs)
 }

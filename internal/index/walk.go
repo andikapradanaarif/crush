@@ -199,8 +199,10 @@ func (s *tagStmts) tag(ctx context.Context, path string, f walkedFile, now int64
 	return nil
 }
 
-// collect walks the working tree with gitignore/crushignore/hidden
-// rules and returns every indexable file.
+// collect walks the working tree with gitignore/crushignore rules
+// plus the unconditional fastIgnoreDirs/commonIgnorePatterns set —
+// dot-files like .github/ and .env ARE indexed (only dot-dirs in
+// the built-in list are skipped).
 func (s *Service) collect(ctx context.Context) ([]walkedFile, error) {
 	walker := fsext.NewFastGlobWalker(s.root)
 	var files []walkedFile
@@ -240,6 +242,12 @@ func (s *Service) collect(ctx context.Context) ([]walkedFile, error) {
 		})
 		return nil
 	})
+	// fastwalk surfaces our ctx-cancel SkipAll as an error, not a
+	// clean stop — translate it back to the context error so a
+	// timed-out collect reports the real cause.
+	if errors.Is(err, filepath.SkipAll) {
+		return files, ctx.Err()
+	}
 	return files, err
 }
 

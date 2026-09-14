@@ -15,4 +15,4 @@ Division of labor:
 - `view` reads the actual code — always read a file before editing it; the map is navigation, not content.
 - `lsp_references`, `lsp_definition`, `lsp_call_hierarchy` give precise answers once you know the file.
 
-Limitations: the index tracks top-level declarations only (it may miss deeply nested or generated symbols), and it reflects the last full scan — files _created_ since then won't appear until the index rebuilds; fall back to glob/grep when you suspect something is missing.
+Limitations: the index tracks top-level declarations only (it may miss deeply nested or generated symbols), and it refreshes incrementally — files you create or edit through tools appear immediately, but files created outside the tools (bash redirection, your own edits) may take up to a few minutes to appear; fall back to glob/grep when you suspect something is missing.
