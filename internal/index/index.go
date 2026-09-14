@@ -52,6 +52,9 @@ CREATE TABLE IF NOT EXISTS refs (
 );
 CREATE INDEX IF NOT EXISTS refs_dst ON refs(dst_path);
 CREATE INDEX IF NOT EXISTS refs_src ON refs(src_path);
+-- In-degree ranking assumes dedup'd (src, dst) pairs — pin it in the
+-- schema, not just in the tagger's refSet convention.
+CREATE UNIQUE INDEX IF NOT EXISTS refs_pair ON refs(src_path, dst_path);
 CREATE TABLE IF NOT EXISTS chunks (
 	id         INTEGER PRIMARY KEY,
 	path       TEXT NOT NULL,
@@ -204,6 +207,11 @@ func (s *Service) Close() error {
 // re-walk over a quiet tree costs only the stat pass.
 const rewalkInterval = 5 * time.Minute
 
+// failRetryInterval replaces rewalkInterval after a failed build —
+// a transient walk error must not suppress retries for five minutes,
+// but a persistent failure shouldn't be retried per query either.
+const failRetryInterval = 30 * time.Second
+
 // walkTimeout bounds a single build — a pathological tree or network
 // filesystem must not hang the background walk forever; a timed-out
 // build surfaces as buildErr in the skeleton header.
@@ -214,9 +222,30 @@ const walkTimeout = 10 * time.Minute
 // Query paths serve whatever has committed so far — the walk writes
 // in batches, so a map call mid-build returns the current index
 // instead of blocking on the tree.
+// buildInterval returns how long the last build stays authoritative
+// — shorter after a failure so transient errors retry quickly.
+// Caller supplies the last build's error; pass s.buildErr while
+// holding buildMu or s.err() otherwise.
+func buildInterval(err error) time.Duration {
+	if err != nil {
+		return failRetryInterval
+	}
+	return rewalkInterval
+}
+
+// err returns the last build's error under buildMu — a plain field
+// read without the lock would be correct only via the atomic
+// ordering on indexing/buildDone, which is easy to break in a
+// future edit.
+func (s *Service) err() error {
+	s.buildMu.Lock()
+	defer s.buildMu.Unlock()
+	return s.buildErr
+}
+
 func (s *Service) ensureStarted(ctx context.Context) {
 	fresh := s.lastBuild.Load()
-	if fresh != 0 && time.Since(time.Unix(0, fresh)) < rewalkInterval {
+	if fresh != 0 && time.Since(time.Unix(0, fresh)) < buildInterval(s.err()) {
 		return
 	}
 	s.buildMu.Lock()
@@ -224,7 +253,7 @@ func (s *Service) ensureStarted(ctx context.Context) {
 	if s.indexing.Load() {
 		return // A walk is already running.
 	}
-	if fresh != 0 && time.Since(time.Unix(0, fresh)) < rewalkInterval {
+	if fresh != 0 && time.Since(time.Unix(0, fresh)) < buildInterval(s.buildErr) {
 		return // Re-check under the lock.
 	}
 	done := make(chan struct{})
@@ -235,7 +264,10 @@ func (s *Service) ensureStarted(ctx context.Context) {
 		// triggered it; bounded so it cannot run forever.
 		bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), walkTimeout)
 		defer cancel()
-		s.buildErr = s.walk(bctx)
+		err := s.walk(bctx)
+		s.buildMu.Lock()
+		s.buildErr = err
+		s.buildMu.Unlock()
 		s.lastBuild.Store(time.Now().UnixNano())
 		s.indexing.Store(false)
 		close(done)
@@ -255,7 +287,7 @@ func (s *Service) EnsureIndexed(ctx context.Context) error {
 	done := s.buildDone
 	s.buildMu.Unlock()
 	<-done
-	return s.buildErr
+	return s.err()
 }
 
 // indexedFile returns the recorded {mtime, size} for a path; found is

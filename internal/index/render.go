@@ -38,8 +38,8 @@ func (s *Service) Skeleton(ctx context.Context, maxTokens int) (string, error) {
 	switch {
 	case s.indexing.Load():
 		fmt.Fprintf(&b, "Project map — indexing in progress, %d files so far (partial; call again shortly for the full map)\n", s.fileCount(ctx))
-	case s.buildErr != nil:
-		fmt.Fprintf(&b, "Project map — index build failed: %v. Fall back to grep/glob.\n", s.buildErr)
+	case s.err() != nil:
+		fmt.Fprintf(&b, "Project map — index build failed: %v. Fall back to grep/glob.\n", s.err())
 	default:
 		fmt.Fprintf(&b, "Project map — %d files indexed (built %s)\n", s.fileCount(ctx), stamp)
 	}

@@ -25,8 +25,8 @@ type MapParams struct {
 }
 
 // NewMapTool exposes the persistent project index. The shared Service
-// opens the sidecar database lazily on first call; the first index
-// build walks the working tree synchronously inside that call. The
+// opens the sidecar database lazily on first call; the index build
+// runs in the background, so early calls return partial results. The
 // tool itself stays read-only against the project tree.
 func NewMapTool(cfg *config.ConfigStore) fantasy.AgentTool {
 	svc := index.Shared(
