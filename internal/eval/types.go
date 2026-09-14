@@ -173,7 +173,11 @@ type RunRecord struct {
 	// toward. Computed at run time so merged experiments' treatment
 	// arms self-seed post-flip baselines.
 	BaselineKey string `json:"baseline_key,omitempty"`
-	Env         Env    `json:"env"`
+	// ResolvedOptions is the child's report of what each manifest flag
+	// actually resolved to — arm intent can silently no-op on a
+	// renamed/shadowed option; resolved state is the truth.
+	ResolvedOptions map[string]any `json:"resolved_options,omitempty"`
+	Env             Env            `json:"env"`
 }
 
 // TokenUsage mirrors fantasy.Usage for the record.

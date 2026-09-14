@@ -460,7 +460,7 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 		select {
 		case result := <-done:
 			stopSpinner()
-			app.emitEvalTelemetry(sess.ID, result.result, result.err)
+			app.emitEvalTelemetry(sess.ID, result.result, result.err, 0)
 			if result.err != nil {
 				if errors.Is(result.err, context.Canceled) || errors.Is(result.err, agent.ErrRequestCancelled) {
 					slog.Debug("Non-interactive: agent processing cancelled", "session_id", sess.ID)
@@ -499,20 +499,24 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 
 		case <-ctx.Done():
 			stopSpinner()
-			// Give the in-flight run a beat to surface whatever error
-			// it was hitting when the cancellation landed — the eval
-			// harness distinguishes "timed out while erroring" from a
-			// clean timeout through this telemetry.
+			// The 2s grace exists only for the eval harness — the
+			// telemetry distinguishes "timed out while erroring" from
+			// a clean timeout. Without it, exit promptly on cancel.
+			if os.Getenv(EvalTelemetryEnvVar) == "" {
+				return ctx.Err()
+			}
 			select {
 			case result := <-done:
-				app.emitEvalTelemetry(sess.ID, result.result, result.err)
+				app.emitEvalTelemetry(sess.ID, result.result, result.err, 0)
 				if result.err != nil &&
 					!errors.Is(result.err, context.Canceled) &&
 					!errors.Is(result.err, agent.ErrRequestCancelled) {
 					return fmt.Errorf("agent processing failed: %w", result.err)
 				}
 			case <-time.After(2 * time.Second):
-				app.emitEvalTelemetry(sess.ID, nil, ctx.Err())
+				// len(messageReadBytes) approximates steps burned —
+				// distinct assistant messages seen before the kill.
+				app.emitEvalTelemetry(sess.ID, nil, ctx.Err(), len(messageReadBytes))
 			}
 			return ctx.Err()
 		}

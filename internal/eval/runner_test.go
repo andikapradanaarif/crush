@@ -252,7 +252,7 @@ func mustHash(t *testing.T, dir string) string {
 func TestRunExperiment_CatastrophicFires(t *testing.T) {
 	t.Parallel()
 	root := newEvalDir(t)
-	flag := "eval_test_flag"
+	flag := "debug"
 	r := &Runner{
 		EvalDir:        root,
 		Driver:         fakeRunner{flag: flag},
@@ -292,7 +292,7 @@ func TestRunExperiment_CatastrophicFires(t *testing.T) {
 func TestRunExperiment_DiffuseAlarmOnUniformShift(t *testing.T) {
 	t.Parallel()
 	root := newEvalDir(t)
-	flag := "eval_test_flag"
+	flag := "debug"
 	r := &Runner{
 		EvalDir:        root,
 		Driver:         fakeRunner{flag: flag},
@@ -460,18 +460,19 @@ func TestBands_PinSpellingVsResolved(t *testing.T) {
 func TestRunExperiment_AllSkippedFailsClosed(t *testing.T) {
 	t.Parallel()
 	root := newEvalDir(t)
-	r := &Runner{EvalDir: root, Driver: fakeRunner{flag: "f"}, WorkParent: t.TempDir()}
+	r := &Runner{EvalDir: root, Driver: fakeRunner{flag: "debug"}, WorkParent: t.TempDir()}
+	require.NoError(t, os.WriteFile(filepath.Join(root, "flags.json"),
+		[]byte(`{"flag_defaults":{"debug":false}}`), 0o644))
 	writeTrajectory(t, filepath.Join(root, "corpus"), "needs-missing", map[string]any{
 		"requires": map[string]any{"tools": []string{"definitely-not-a-real-binary-xyz"}},
 	})
-	require.NoError(t, os.WriteFile(filepath.Join(root, "flags.json"), []byte(`{"flag_defaults":{"f":false}}`), 0o644))
 
 	exp := &Experiment{
 		Name: "exp-skip", Model: "mock/m", Corpus: []string{"*"},
 		RunsPerTrajectory: map[Band]int{BandUncharacterized: 2},
 		Arms: map[string]Arm{
-			"control":   {Config: ArmConfig{Options: map[string]any{"f": false}}},
-			"treatment": {Config: ArmConfig{Options: map[string]any{"f": true}}},
+			"control":   {Config: ArmConfig{Options: map[string]any{"debug": false}}},
+			"treatment": {Config: ArmConfig{Options: map[string]any{"debug": true}}},
 		},
 	}
 	rep, err := r.RunExperiment(context.Background(), exp)
@@ -490,7 +491,7 @@ func (fakeRunnerFail) Run(_ context.Context, _ string, _ []string, _ Budget) Run
 func TestRunExperiment_CoincidentCollapse(t *testing.T) {
 	t.Parallel()
 	root := newEvalDir(t)
-	flag := "eval_test_flag"
+	flag := "debug"
 	r := &Runner{
 		EvalDir:        root,
 		Driver:         fakeRunnerFail{},
@@ -515,4 +516,63 @@ func TestRunExperiment_CoincidentCollapse(t *testing.T) {
 	// attribute rot/drift, not the flag.
 	require.NotEmpty(t, rep.Coincident)
 	require.Empty(t, rep.Catastrophic)
+}
+
+// fakeRunnerResolved reports a fixed resolved projection regardless
+// of arm — the flag under test no-ops.
+type fakeRunnerResolved struct {
+	resolved map[string]any
+	pass     bool
+}
+
+func (f fakeRunnerResolved) Run(_ context.Context, workdir string, _ []string, _ Budget) RunResult {
+	if f.pass {
+		_ = os.WriteFile(filepath.Join(workdir, "fixed.marker"), []byte("x"), 0o644)
+	}
+	return RunResult{Steps: 3, ModelResolved: "mock/m", ResolvedOptions: f.resolved}
+}
+
+// Identical resolved projections under differing arm intents →
+// noop-flag alarm: the pairing is a guaranteed null.
+func TestRunExperiment_NoopFlagAlarm(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	r := &Runner{
+		EvalDir:    root,
+		Driver:     fakeRunnerResolved{resolved: map[string]any{"debug": false}, pass: true},
+		WorkParent: t.TempDir(),
+		RNG:        rand.New(rand.NewPCG(1, 2)),
+	}
+	writeTrajectory(t, filepath.Join(root, "corpus"), "stable-t", nil)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "flags.json"),
+		[]byte(`{"flag_defaults":{"debug":false}}`), 0o644))
+	bands := &Bands{SchemaVersion: 1, Entries: map[string]BandEntry{
+		"stable-t": {Band: BandMid, ContentHash: mustHash(t, filepath.Join(root, "corpus", "stable-t"))},
+	}}
+	require.NoError(t, bands.Save(root))
+
+	exp := &Experiment{
+		Name: "noop-exp", Model: "mock/m",
+		Arms: map[string]Arm{
+			"control":   {Config: ArmConfig{Options: map[string]any{"debug": false}}},
+			"treatment": {Config: ArmConfig{Options: map[string]any{"debug": true}}},
+		},
+		Corpus:            []string{"*"},
+		RunsPerTrajectory: map[Band]int{BandMid: 3},
+	}
+	rep, err := r.RunExperiment(t.Context(), exp)
+	require.NoError(t, err)
+	require.Contains(t, rep.NoopFlags, "stable-t")
+	require.True(t, rep.Fired(0.05))
+}
+
+// A manifest key that isn't a config.Options field must be rejected —
+// otherwise the flag silently no-ops and both arms resolve identically.
+func TestLoadFlagsManifest_RejectsUnknownKeys(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "flags.json"),
+		[]byte(`{"flag_defaults":{"notebook_stub_superseeded":false}}`), 0o644))
+	_, err := LoadFlagsManifest(root)
+	require.ErrorContains(t, err, "not a config.Options key")
 }

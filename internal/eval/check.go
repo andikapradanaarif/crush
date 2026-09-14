@@ -49,10 +49,20 @@ func RunCheck(ctx context.Context, traj *Trajectory, trajDir, workdir string, en
 	if env == nil {
 		env = os.Environ()
 	}
-	cmd.Env = append(env,
+	// Strip inherited EVAL_* — an exported EVAL_WORKDIR in the
+	// operator's env would otherwise shadow ours (first-match wins).
+	cmdEnv := make([]string, 0, len(env)+2)
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "EVAL_") {
+			continue
+		}
+		cmdEnv = append(cmdEnv, kv)
+	}
+	cmdEnv = append(cmdEnv,
 		"EVAL_WORKDIR="+workdir,
 		"EVAL_TRAJECTORY_DIR="+trajDir,
 	)
+	cmd.Env = cmdEnv
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

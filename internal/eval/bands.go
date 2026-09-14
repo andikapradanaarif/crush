@@ -2,10 +2,12 @@ package eval
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -67,6 +69,9 @@ func LoadFlagsManifest(evalDir string) (*FlagsManifest, error) {
 	}
 	if m.Defaults == nil {
 		m.Defaults = map[string]any{}
+	}
+	if problems := validateFlagSet(sortedKeys(m.Defaults), "flags.json key"); len(problems) > 0 {
+		return nil, errors.New(strings.Join(problems, "; "))
 	}
 	return &m, nil
 }
@@ -284,6 +289,8 @@ func (b *Bands) Recompute(id string, records []RunRecord, contentHash string, no
 	}
 
 	b.assignBand(e, records, contentHash, curModel, curKey)
+	// "Last recompute" rather than "last new data" — callers can't
+	// distinguish a no-sample pass without diffing record counts.
 	e.LastCharacterized = now.Format("2006-01-02")
 }
 
@@ -350,16 +357,24 @@ func (b *Bands) assignBand(e *BandEntry, records []RunRecord, contentHash, curMo
 	// beyond-model — that routes through suspect_check/environment
 	// alarms, not here.
 	consecFails := 0
-	everPassed := false
 	for _, r := range current {
 		if !r.Outcome.Conclusive() {
 			continue
 		}
 		if r.Outcome == OutcomePass {
-			everPassed = true
 			break
 		}
 		consecFails++
+	}
+	// everPassed is lifetime: passes under a different baseline key
+	// (treatment arm, pre-flip default) still mean "can pass" — a
+	// 0/N streak after that is rot, not beyond-model.
+	everPassed := false
+	for _, r := range revision {
+		if r.Outcome == OutcomePass {
+			everPassed = true
+			break
+		}
 	}
 	if !everPassed && consecFails >= NeverPassedFails {
 		e.Band = BandQuarantined

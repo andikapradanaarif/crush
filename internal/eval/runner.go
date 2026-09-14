@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
@@ -223,7 +224,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 		StartedAt:    r.now(),
 		Env: Env{
 			CrushSHA: crushSHA(),
-			Go:       runtime.Version(),
+			Go:       goToolchain(),
 			OS:       runtime.GOOS,
 		},
 	}
@@ -251,7 +252,12 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	}
 
 	rec.StartedAt = r.now()
-	res := r.driver().Run(ctx, workdir, traj.Task.Turns, traj.Budget)
+	drv := r.driver()
+	if cr, ok := drv.(CrushRunner); ok {
+		cr.FlagKeys = flagNames(manifest)
+		drv = cr
+	}
+	res := drv.Run(ctx, workdir, traj.Task.Turns, traj.Budget)
 	rec.DurationS = r.now().Sub(rec.StartedAt).Seconds()
 	rec.Steps = res.Steps
 	rec.Tokens = res.Tokens
@@ -259,6 +265,12 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	rec.Recalls = res.Recalls
 	rec.Env.ModelPin = exp.Model
 	rec.Env.ModelResolved = res.ModelResolved
+	// The baseline key hashes resolved config when the child reported
+	// it — arm intent can silently no-op; resolved state is truth.
+	if len(res.ResolvedOptions) > 0 {
+		rec.ResolvedOptions = res.ResolvedOptions
+		rec.BaselineKey = manifest.BaselineKey(res.ResolvedOptions)
+	}
 	rec.Env.ModelSmall = res.ModelSmall
 	rec.Env.ModelSummary = res.ModelSummary
 
@@ -401,6 +413,16 @@ func (r *Runner) loadRecordsFiltered(match func(RunRecord) bool) ([]RunRecord, e
 // time so provider drift lands on both and cancels in the pairing.
 // Returns the gate report.
 func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, error) {
+	// Programmatic callers bypass LoadExperiment's validation — the
+	// corpus-shape and arm checks still apply.
+	if err := ValidateExperiment(exp); err != nil {
+		return Report{}, err
+	}
+	unlock, err := r.acquireLock()
+	if err != nil {
+		return Report{}, err
+	}
+	defer unlock()
 	corpus, err := LoadCorpus(r.EvalDir)
 	if err != nil {
 		return Report{}, err
@@ -484,6 +506,7 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 	}
 	gate := Evaluate(exp, frozen, baselineKey, records, corpusIDs(corpus), r.alpha(), r.permReplicates(), r.rng())
 	rep.Coincident = gate.Coincident
+	rep.NoopFlags = gate.NoopFlags
 	rep.Catastrophic = gate.Catastrophic
 	rep.CatastrophicEligible = gate.CatastrophicEligible
 	rep.DiffuseP = gate.DiffuseP
@@ -611,6 +634,11 @@ func (r *Runner) RecomputeAll(bands *Bands, corpus map[string]*Trajectory, manif
 // under the current default condition (empty arm options → the
 // manifest's baseline key), then recompute.
 func (r *Runner) Characterize(ctx context.Context, model string, temperature *float64, n int, selectors []string) error {
+	unlock, err := r.acquireLock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	corpus, err := LoadCorpus(r.EvalDir)
 	if err != nil {
 		return err
@@ -664,6 +692,11 @@ func (r *Runner) Characterize(ctx context.Context, model string, temperature *fl
 // through the _characterize pipeline anyway since they're
 // baseline-eligible under current defaults.
 func (r *Runner) Smoke(ctx context.Context, model string, temperature *float64, n int) ([]string, error) {
+	unlock, err := r.acquireLock()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	corpus, err := LoadCorpus(r.EvalDir)
 	if err != nil {
 		return nil, err
@@ -729,6 +762,11 @@ func (r *Runner) Smoke(ctx context.Context, model string, temperature *float64, 
 // QuarantineCorpus runs the quarantine pass over every corpus
 // trajectory and records verdicts into bands.
 func (r *Runner) QuarantineCorpus(ctx context.Context, selectors []string) (map[string]QuarantineReason, error) {
+	unlock, err := r.acquireLock()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	corpus, err := LoadCorpus(r.EvalDir)
 	if err != nil {
 		return nil, err
@@ -746,6 +784,7 @@ func (r *Runner) QuarantineCorpus(ctx context.Context, selectors []string) (map[
 	for _, traj := range trajs {
 		if missing := CheckRequires(traj); len(missing) > 0 {
 			slog.Warn("Skipping quarantine — unmet requires", "trajectory", traj.ID, "missing", missing)
+			verdicts[traj.ID] = QuarantineReason("skipped: " + strings.Join(missing, ", "))
 			continue
 		}
 		trajDir := filepath.Join(r.EvalDir, "corpus", traj.ID)
@@ -844,4 +883,28 @@ func corpusIDs(corpus map[string]*Trajectory) map[string]bool {
 		out[id] = true
 	}
 	return out
+}
+
+// acquireLock is a mkdir-based mutual exclusion over the eval dir —
+// bands.json/records are load-modify-append state that two concurrent
+// `crush eval` invocations would otherwise clobber.
+func (r *Runner) acquireLock() (func(), error) {
+	dir := filepath.Join(r.EvalDir, ".eval-lock")
+	for range 100 {
+		if err := os.Mkdir(dir, 0o755); err == nil {
+			return func() { _ = os.RemoveAll(dir) }, nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("another eval process holds %s", dir)
+}
+
+// goToolchain records the `go` on PATH — the check script's toolchain
+// — not the harness binary's runtime.Version(). Toolchain rot shows in
+// env diffs; the binary's own version never changes.
+func goToolchain() string {
+	if out, err := exec.Command("go", "version").Output(); err == nil {
+		return strings.TrimSpace(string(out))
+	}
+	return runtime.Version()
 }

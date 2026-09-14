@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/charmbracelet/crush/internal/eval"
@@ -55,9 +56,12 @@ trajectory until the check is fixed and re-validated.`,
 			return err
 		}
 		for id, reason := range verdicts {
-			if reason == "" {
+			switch {
+			case reason == "":
 				fmt.Printf("%s: clean\n", id)
-			} else {
+			case strings.HasPrefix(string(reason), "skipped:"):
+				fmt.Printf("%s: SKIPPED (%s)\n", id, strings.TrimPrefix(string(reason), "skipped:"))
+			default:
 				fmt.Printf("%s: QUARANTINED (%s)\n", id, reason)
 			}
 		}

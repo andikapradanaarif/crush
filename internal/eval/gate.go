@@ -47,6 +47,10 @@ type Report struct {
 	// ("id: tool:go os:linux") — environment rot made explicit
 	// instead of surfacing as error outcomes.
 	Skipped []string
+	// NoopFlags lists trajectories whose arms resolved to identical
+	// flag projections — the flag under test did nothing and the
+	// pairing is a guaranteed null. Fails closed.
+	NoopFlags []string
 }
 
 // Fired reports whether any alarm tripped — including the diffuse
@@ -56,7 +60,8 @@ func (r Report) Fired(alpha float64) bool {
 		len(r.Catastrophic) > 0 || len(r.ExcludedDifferential) > 0 ||
 		len(r.Starved) > 0 || len(r.Saturated) > 0 || len(r.Smoke) > 0 ||
 		len(r.Coincident) > 0 ||
-		len(r.Skipped) > 0 // Corpus shrinkage is an alarm.
+		len(r.Skipped) > 0 || // Corpus shrinkage is an alarm.
+		len(r.NoopFlags) > 0
 }
 
 // Summary renders the report for the CLI.
@@ -73,6 +78,7 @@ func (r Report) Summary(alpha float64) string {
 	fire("error-saturated", r.Saturated)
 	fire("smoke", r.Smoke)
 	fire("coincident-collapse", r.Coincident)
+	fire("noop-flag", r.NoopFlags)
 	if len(r.Skipped) > 0 {
 		fmt.Fprintf(&b, "  SKIP requires-unmet: %s\n", strings.Join(r.Skipped, ", "))
 	}
@@ -117,6 +123,24 @@ func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRe
 	for id, recs := range byTraj {
 		ctrl := conclusiveByArm(recs, "control")
 		treat := conclusiveByArm(recs, "treatment")
+
+		// No-op detection: if both arms' latest resolved projections
+		// are identical, the flag under test did nothing — the null
+		// is guaranteed and the verdict is meaningless.
+		var ctrlRes, treatRes map[string]any
+		for _, r := range recs {
+			if len(r.ResolvedOptions) > 0 {
+				if r.Arm == "control" && ctrlRes == nil {
+					ctrlRes = r.ResolvedOptions
+				}
+				if r.Arm == "treatment" && treatRes == nil {
+					treatRes = r.ResolvedOptions
+				}
+			}
+		}
+		if ctrlRes != nil && treatRes != nil && resolvedEqual(ctrlRes, treatRes) {
+			rep.NoopFlags = append(rep.NoopFlags, id)
+		}
 
 		switch bands.Band(id) {
 		case BandStable:

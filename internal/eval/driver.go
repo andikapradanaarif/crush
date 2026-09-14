@@ -22,6 +22,10 @@ const EvalTelemetryEnvVar = "CRUSH_EVAL_TELEMETRY"
 // passes the remaining budget (plus one) each turn.
 const EvalMaxStepsEnvVar = "CRUSH_EVAL_MAX_STEPS"
 
+// EvalFlagsEnvVar carries the manifest flag names the subprocess
+// should report resolved values for.
+const EvalFlagsEnvVar = "CRUSH_EVAL_FLAGS"
+
 // RunResult is what one trajectory run (all turns) produced.
 type RunResult struct {
 	Steps         int
@@ -32,6 +36,9 @@ type RunResult struct {
 	ModelResolved string
 	ModelSmall    string
 	ModelSummary  string
+	// ResolvedOptions is the child's report of what each manifest
+	// flag resolved to — the truth the baseline key hashes.
+	ResolvedOptions map[string]any
 	// TimedOut is set when the run hit the trajectory's
 	// run_timeout_seconds or max_steps budget.
 	TimedOut bool
@@ -57,8 +64,13 @@ type CrushRunner struct {
 	// Home is the pinned HOME for subprocesses; XDG dirs are derived
 	// from it.
 	Home string
-	// ExtraEnv entries override os.Environ for the subprocess.
+	// ExtraEnv entries override os.Environ for the subprocess — they
+	// precede inherited vars so duplicates resolve to these values.
+	// Harness-pinned keys (HOME, telemetry, flags) still win.
 	ExtraEnv []string
+	// FlagKeys are the manifest flag names the child reports resolved
+	// values for, via CRUSH_EVAL_FLAGS.
+	FlagKeys []string
 }
 
 // runTelemetry is the JSON the agent subprocess drops at
@@ -87,7 +99,10 @@ type runTelemetry struct {
 	Model        string `json:"model"`
 	ModelSmall   string `json:"model_small"`
 	ModelSummary string `json:"model_summary"`
-	Error        string `json:"error,omitempty"`
+	// ResolvedOptions is the child's effective config projected onto
+	// the manifest flags — what actually ran, not what the arm asked.
+	ResolvedOptions map[string]any `json:"resolved_options"`
+	Error           string         `json:"error,omitempty"`
 }
 
 // Run executes the trajectory's turns sequentially — each turn a
@@ -175,6 +190,9 @@ func (c CrushRunner) Run(ctx context.Context, workdir string, turns []string, bu
 		if tel.ModelSummary != "" {
 			res.ModelSummary = tel.ModelSummary
 		}
+		if len(tel.ResolvedOptions) > 0 {
+			res.ResolvedOptions = tel.ResolvedOptions
+		}
 
 		// Timeout/error carve-out: a run that hit the deadline while
 		// its API calls were already erroring classifies as `error`,
@@ -240,22 +258,32 @@ func (c CrushRunner) subprocessEnv(telemetryFile string, maxSteps int) []string 
 	if maxSteps > 0 {
 		pinned[EvalMaxStepsEnvVar] = strconv.Itoa(maxSteps)
 	}
+	if len(c.FlagKeys) > 0 {
+		pinned[EvalFlagsEnvVar] = strings.Join(c.FlagKeys, ",")
+	}
 	// Replace rather than append: duplicated keys in environ are
 	// resolved first-match by getenv, so a second HOME wouldn't pin.
 	env := make([]string, 0, len(os.Environ()))
 	for _, kv := range os.Environ() {
 		k, _, _ := strings.Cut(kv, "=")
-		if strings.HasPrefix(k, "CRUSH_") {
+		// Harness-prefixed vars never inherit — an exported
+		// EVAL_WORKDIR or CRUSH_MODE would shadow/derail the run.
+		if strings.HasPrefix(k, "CRUSH_") || strings.HasPrefix(k, "EVAL_") {
 			continue
 		}
 		if _, overridden := pinned[k]; !overridden {
 			env = append(env, kv)
 		}
 	}
+	// First-match wins on duplicate keys: pinned (harness
+	// invariants), then ExtraEnv (caller intent over inherited vars),
+	// then the filtered parent environment.
+	out := make([]string, 0, len(env)+len(pinned)+len(c.ExtraEnv))
 	for k, v := range pinned {
-		env = append(env, k+"="+v)
+		out = append(out, k+"="+v)
 	}
-	return append(env, c.ExtraEnv...)
+	out = append(out, c.ExtraEnv...)
+	return append(out, env...)
 }
 
 func readTelemetry(path string) (runTelemetry, error) {

@@ -152,12 +152,6 @@ func ValidateTrajectory(t *Trajectory, trajDir string) []string {
 		problems = append(problems, fmt.Sprintf("check.expect_start_state %q is not fail|pass", t.Check.ExpectStartState))
 	}
 
-	for key := range t.Coverage {
-		if _, _, err := ParseCoverageKey(key); err != nil {
-			problems = append(problems, fmt.Sprintf("coverage key %q: %v", key, err))
-		}
-	}
-
 	if t.Budget.MaxSteps < 0 || t.Budget.RunTimeoutSeconds < 0 {
 		problems = append(problems, "budget values must be non-negative")
 	}

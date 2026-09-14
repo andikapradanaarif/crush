@@ -44,6 +44,9 @@ eval/
       fixture/             optional synthetic start state
       reference.patch      known-good diff (required for regression)
       counterexample.patch known-bad diff (required for pass-guards)
+  flags.json               declared flag projection + defaults — arm
+                           options must be manifest keys; baseline keys
+                           hash this projection
   experiments/
     <name>.json            a paired comparison (arms × corpus slice)
   results/
