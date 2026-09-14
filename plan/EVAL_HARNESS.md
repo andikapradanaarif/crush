@@ -83,7 +83,7 @@ every characterization pass a diff to reviewed files.
 		"timeout_seconds": 300
 	},
 	"coverage": {
-		"min_boundary_advances": 2
+		"min_stub_stats.boundary_advances": 2
 	},
 	"requires": {
 		"network": false,

@@ -147,19 +147,27 @@ type ArmConfig struct {
 
 // RunRecord is one append-only results/*.jsonl line.
 type RunRecord struct {
-	Experiment   string         `json:"experiment"`
-	TrajectoryID string         `json:"trajectory_id"`
-	Arm          string         `json:"arm"`
-	RunIndex     int            `json:"run_index"` // attempt index, sparse under resampling
-	Outcome      Outcome        `json:"outcome"`
-	CheckDetail  map[string]any `json:"check_detail,omitempty"`
-	StartedAt    time.Time      `json:"started_at"`
-	DurationS    float64        `json:"duration_s"`
-	Steps        int            `json:"steps"`
-	Tokens       TokenUsage     `json:"tokens"`
-	StubStats    StubStats      `json:"stub_stats"`
-	Recalls      Recalls        `json:"recalls"`
-	SessionDB    string         `json:"session_db,omitempty"`
+	Experiment   string `json:"experiment"`
+	TrajectoryID string `json:"trajectory_id"`
+	Arm          string `json:"arm"`
+	// Invocation scopes records to one RunExperiment call — re-running
+	// an experiment under a new build must not pool records into the
+	// gate's arm samples (the "same build both arms" invariant).
+	Invocation  string         `json:"invocation,omitempty"`
+	RunIndex    int            `json:"run_index"` // attempt index, sparse under resampling
+	Outcome     Outcome        `json:"outcome"`
+	CheckDetail map[string]any `json:"check_detail,omitempty"`
+	// Bounded tails of check.sh output — the first forensic stop on
+	// failure is what the check actually said.
+	CheckStdout string     `json:"check_stdout,omitempty"`
+	CheckStderr string     `json:"check_stderr,omitempty"`
+	StartedAt   time.Time  `json:"started_at"`
+	DurationS   float64    `json:"duration_s"`
+	Steps       int        `json:"steps"`
+	Tokens      TokenUsage `json:"tokens"`
+	StubStats   StubStats  `json:"stub_stats"`
+	Recalls     Recalls    `json:"recalls"`
+	SessionDB   string     `json:"session_db,omitempty"`
 	// BaselineKey is the hash of the run's effective config over the
 	// flag projection — which baseline condition this run counts
 	// toward. Computed at run time so merged experiments' treatment
@@ -202,9 +210,13 @@ type Env struct {
 	// condition, the resolved form is the baseline storage key.
 	ModelPin      string `json:"model_pin,omitempty"`
 	ModelResolved string `json:"model_resolved"`
-	Go            string `json:"go"`
-	OS            string `json:"os"`
-	ContentHash   string `json:"content_hash"`
+	// Small/summary resolve from ambient config — recorded so a
+	// compaction-flag experiment can audit which summarizer ran.
+	ModelSmall   string `json:"model_small,omitempty"`
+	ModelSummary string `json:"model_summary,omitempty"`
+	Go           string `json:"go"`
+	OS           string `json:"os"`
+	ContentHash  string `json:"content_hash"`
 }
 
 // BaselineCounts are the integer cells Fisher's exact needs; p̂ is

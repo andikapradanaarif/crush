@@ -30,7 +30,7 @@ type CheckResult struct {
 // RunCheck executes the trajectory's check.sh with cwd = workdir, on
 // the working tree as the agent left it. The runner exports
 // EVAL_WORKDIR and EVAL_TRAJECTORY_DIR for checks needing oracles.
-func RunCheck(ctx context.Context, traj *Trajectory, trajDir, workdir string) CheckResult {
+func RunCheck(ctx context.Context, traj *Trajectory, trajDir, workdir string, env []string) CheckResult {
 	// The check chdirs into the workdir; a relative trajDir would
 	// resolve against it, so absolutize first.
 	if abs, err := filepath.Abs(trajDir); err == nil {
@@ -46,7 +46,10 @@ func RunCheck(ctx context.Context, traj *Trajectory, trajDir, workdir string) Ch
 	script := filepath.Join(trajDir, traj.Check.Script)
 	cmd := exec.CommandContext(ctx, "bash", script)
 	cmd.Dir = workdir
-	cmd.Env = append(os.Environ(),
+	if env == nil {
+		env = os.Environ()
+	}
+	cmd.Env = append(env,
 		"EVAL_WORKDIR="+workdir,
 		"EVAL_TRAJECTORY_DIR="+trajDir,
 	)

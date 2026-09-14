@@ -478,3 +478,41 @@ func TestRunExperiment_AllSkippedFailsClosed(t *testing.T) {
 	require.Error(t, err) // Fail closed — no PASS on zero samples.
 	require.NotEmpty(t, rep.Skipped)
 }
+
+// fakeRunnerFail fails every run regardless of arm — the
+// model-drift/rot case the coincidence detector exists for.
+type fakeRunnerFail struct{}
+
+func (fakeRunnerFail) Run(_ context.Context, _ string, _ []string, _ Budget) RunResult {
+	return RunResult{Steps: 3, ModelResolved: "mock/m"}
+}
+
+func TestRunExperiment_CoincidentCollapse(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	flag := "eval_test_flag"
+	r := &Runner{
+		EvalDir:        root,
+		Driver:         fakeRunnerFail{},
+		WorkParent:     t.TempDir(),
+		PermReplicates: 500,
+		RNG:            rand.New(rand.NewPCG(7, 8)),
+	}
+	experimentFixture(t, r, root, flag)
+
+	exp := &Experiment{
+		Name: "exp-coincident", Model: "mock/m",
+		Corpus:            []string{"*"},
+		RunsPerTrajectory: map[Band]int{BandStable: 3, BandMid: 3, BandUncharacterized: 3},
+		Arms: map[string]Arm{
+			"control":   {Config: ArmConfig{Options: map[string]any{flag: false}}},
+			"treatment": {Config: ArmConfig{Options: map[string]any{flag: true}}},
+		},
+	}
+	rep, err := r.RunExperiment(context.Background(), exp)
+	require.NoError(t, err)
+	// Both arms failed vs the same deep baseline — the gate must
+	// attribute rot/drift, not the flag.
+	require.NotEmpty(t, rep.Coincident)
+	require.Empty(t, rep.Catastrophic)
+}

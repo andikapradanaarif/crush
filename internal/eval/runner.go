@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -150,7 +151,7 @@ func (r *Runner) Quarantine(ctx context.Context, traj *Trajectory, trajDir strin
 		}
 		outs := map[bool]int{}
 		for range m {
-			res := RunCheck(ctx, traj, trajDir, wd)
+			res := RunCheck(ctx, traj, trajDir, wd, r.checkEnv())
 			if res.Err != nil {
 				return false, false, res.Err
 			}
@@ -212,15 +213,16 @@ func (r *Runner) Quarantine(ctx context.Context, traj *Trajectory, trajDir strin
 // Precedence: error (transport) > timeout (budget) > fail >
 // inconclusive (coverage unmet) > pass. A timeout run never reaches
 // check.sh — the bound preempts the verdict.
-func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajectory, trajDir, armName string, arm Arm, manifest *FlagsManifest, attempt int) (RunRecord, error) {
+func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajectory, trajDir, armName string, arm Arm, manifest *FlagsManifest, attempt int, inv string) (RunRecord, error) {
 	rec := RunRecord{
 		Experiment:   exp.Name,
+		Invocation:   inv,
 		TrajectoryID: traj.ID,
 		Arm:          armName,
 		RunIndex:     attempt,
 		StartedAt:    r.now(),
 		Env: Env{
-			CrushSHA: version.Commit,
+			CrushSHA: crushSHA(),
 			Go:       runtime.Version(),
 			OS:       runtime.GOOS,
 		},
@@ -255,11 +257,13 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	rec.Recalls = res.Recalls
 	rec.Env.ModelPin = exp.Model
 	rec.Env.ModelResolved = res.ModelResolved
+	rec.Env.ModelSmall = res.ModelSmall
+	rec.Env.ModelSummary = res.ModelSummary
 
 	// Preserve the session DB — the failed-run debugging artifact is
 	// the full message/tool trace, free.
 	if res.SessionID != "" {
-		if dst, err := r.preserveSessionDB(exp.Name, traj.ID, armName, attempt, workdir); err == nil {
+		if dst, err := r.preserveSessionDB(exp.Name, traj.ID, armName, inv, attempt, workdir); err == nil {
 			rec.SessionDB = dst
 		}
 	}
@@ -275,7 +279,9 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 		return rec, nil
 	}
 
-	chk := RunCheck(ctx, traj, trajDir, workdir)
+	chk := RunCheck(ctx, traj, trajDir, workdir, r.checkEnv())
+	rec.CheckStdout = string(tail([]byte(chk.Stdout), 4096))
+	rec.CheckStderr = string(tail([]byte(chk.Stderr), 4096))
 	if chk.Err != nil {
 		rec.Outcome = OutcomeError
 		rec.CheckDetail = map[string]any{"check_error": chk.Err.Error()}
@@ -302,9 +308,9 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 }
 
 // preserveSessionDB copies the run's SQLite DB into
-// results/<experiment>/artifacts/<trajectory>-<arm>-<run_index>.db.
-func (r *Runner) preserveSessionDB(expName, trajID, arm string, runIndex int, workdir string) (string, error) {
-	src := filepath.Join(workdir, ".crush", "crush.db")
+// results/<experiment>/artifacts/<trajectory>-<arm>-<inv>-<run_index>.db.
+func (r *Runner) preserveSessionDB(expName, trajID, arm, inv string, runIndex int, workdir string) (string, error) {
+	src := filepath.Join(DataDirFor(workdir), "crush.db")
 	if !fileExists(src) {
 		return "", fmt.Errorf("no session db at %s", src)
 	}
@@ -312,7 +318,7 @@ func (r *Runner) preserveSessionDB(expName, trajID, arm string, runIndex int, wo
 	if err := os.MkdirAll(dstDir, 0o755); err != nil {
 		return "", err
 	}
-	dst := filepath.Join(dstDir, fmt.Sprintf("%s-%s-%d.db", trajID, arm, runIndex))
+	dst := filepath.Join(dstDir, fmt.Sprintf("%s-%s-%s-%d.db", trajID, arm, inv, runIndex))
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return "", err
@@ -416,6 +422,9 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 	}
 
 	baselineKey := manifest.BaselineKey(exp.Arms["control"].Config.Options)
+	// Invocation scopes this call's records: re-running an experiment
+	// under a new build must not pool stale records into the gate.
+	inv := fmt.Sprintf("%s-%04x", r.now().UTC().Format("20060102T150405Z"), r.rng().Uint64()&0xffff)
 	rep := Report{CatastrophicEligible: map[string]bool{}, DiffuseP: 1}
 
 	runnable := 0
@@ -427,7 +436,7 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 		}
 		runnable++
 		trajDir := filepath.Join(r.EvalDir, "corpus", traj.ID)
-		trep := r.runTrajectory(ctx, exp, traj, trajDir, manifest, n)
+		trep := r.runTrajectory(ctx, exp, traj, trajDir, manifest, n, inv)
 		rep.Starved = append(rep.Starved, trep.Starved...)
 		rep.Saturated = append(rep.Saturated, trep.Saturated...)
 		if trep.Skipped != "" {
@@ -454,11 +463,20 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 	// Gate on the frozen snapshot — the current experiment's own
 	// control arm is excluded from baselines automatically because
 	// bands were frozen before it ran.
-	records, err := r.LoadExperimentRecords(exp.Name)
+	allRecords, err := r.LoadExperimentRecords(exp.Name)
 	if err != nil {
 		return rep, err
 	}
-	gate := Evaluate(exp, frozen, baselineKey, records, r.alpha(), r.permReplicates(), r.rng())
+	// Only this invocation's records feed the gate — earlier runs of
+	// the same-named experiment were a different build's data.
+	var records []RunRecord
+	for _, rec := range allRecords {
+		if rec.Invocation == inv {
+			records = append(records, rec)
+		}
+	}
+	gate := Evaluate(exp, frozen, baselineKey, records, corpusIDs(corpus), r.alpha(), r.permReplicates(), r.rng())
+	rep.Coincident = gate.Coincident
 	rep.Catastrophic = gate.Catastrophic
 	rep.CatastrophicEligible = gate.CatastrophicEligible
 	rep.DiffuseP = gate.DiffuseP
@@ -489,7 +507,7 @@ type trajReport struct {
 // alternating arms each round — per-run interleaving, the finest
 // granularity, is what makes within-trajectory runs approximately
 // exchangeable for the permutation test.
-func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Trajectory, trajDir string, manifest *FlagsManifest, n int) trajReport {
+func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Trajectory, trajDir string, manifest *FlagsManifest, n int, inv string) trajReport {
 	rep := trajReport{}
 	if missing := CheckRequires(traj); len(missing) > 0 {
 		// Environment pre-flight: a missing tool is a skip-report,
@@ -519,19 +537,23 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 			progressed = true
 			attempts[armName]++
 
-			rec, err := r.ExecuteRun(ctx, exp, traj, trajDir, armName, exp.Arms[armName], manifest, attempts[armName])
+			rec, err := r.ExecuteRun(ctx, exp, traj, trajDir, armName, exp.Arms[armName], manifest, attempts[armName], inv)
 			if err != nil {
 				slog.Warn("Run harness failed", "trajectory", traj.ID, "arm", armName, "error", err)
 				rec = RunRecord{Experiment: exp.Name, TrajectoryID: traj.ID, Arm: armName, Outcome: OutcomeError}
 				rec.RunIndex = attempts[armName]
 			}
+			if err := r.appendRecord(rec); err != nil {
+				// The sample is lost — a full disk silently shrinking
+				// N is worse than burning an attempt on an error.
+				slog.Warn("Failed to append run record", "error", err)
+				excluded[armName][OutcomeError]++
+				continue
+			}
 			if rec.Outcome.Conclusive() {
 				conclusive[armName]++
 			} else {
 				excluded[armName][rec.Outcome]++
-			}
-			if err := r.appendRecord(rec); err != nil {
-				slog.Warn("Failed to append run record", "error", err)
 			}
 			slog.Info("Eval run", "trajectory", traj.ID, "arm", armName, "outcome", rec.Outcome,
 				"conclusive", conclusive[armName], "attempts", attempts[armName])
@@ -612,7 +634,7 @@ func (r *Runner) Characterize(ctx context.Context, model string, temperature *fl
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			rec, err := r.ExecuteRun(ctx, exp, traj, trajDir, "baseline", Arm{}, manifest, i+1)
+			rec, err := r.ExecuteRun(ctx, exp, traj, trajDir, "baseline", Arm{}, manifest, i+1, "characterize")
 			if err != nil {
 				return fmt.Errorf("characterize %s: %w", traj.ID, err)
 			}
@@ -662,24 +684,30 @@ func (r *Runner) Smoke(ctx context.Context, model string, temperature *float64, 
 		}
 		trajDir := filepath.Join(r.EvalDir, "corpus", traj.ID)
 		passes := 0
+		conclusive := 0
 		for i := range n {
 			if ctx.Err() != nil {
 				return alarms, ctx.Err()
 			}
-			rec, err := r.ExecuteRun(ctx, exp, traj, trajDir, "baseline", Arm{}, manifest, i+1)
+			rec, err := r.ExecuteRun(ctx, exp, traj, trajDir, "baseline", Arm{}, manifest, i+1, "smoke")
 			if err != nil {
 				return alarms, fmt.Errorf("smoke %s: %w", traj.ID, err)
 			}
-			if rec.Outcome == OutcomePass {
-				passes++
+			if rec.Outcome.Conclusive() {
+				conclusive++
+				if rec.Outcome == OutcomePass {
+					passes++
+				}
 			}
 			if err := r.appendRecord(rec); err != nil {
 				return alarms, err
 			}
 		}
-		// Strict 0/N — a single failure at p=0.95, N=5 is a 23% false
-		// alarm; smoke catches collapses, not drift.
-		if passes == 0 {
+		// Strict 0/N over conclusive runs — a single failure at
+		// p=0.95, N=5 is a 23% false alarm; smoke catches collapses,
+		// not drift. Zero conclusive runs is a provider outage, not a
+		// collapse.
+		if conclusive > 0 && passes == 0 {
 			alarms = append(alarms, traj.ID)
 		}
 	}
@@ -751,6 +779,60 @@ func deepCopyBands(b *Bands) *Bands {
 			}
 		}
 		out.Entries[k] = cp
+	}
+	return out
+}
+
+// crushSHA resolves the build's VCS revision — version.Commit is a
+// ldflags placeholder ("unknown") for plain `go build`, while
+// ReadBuildInfo stamps vcs.revision for module builds. BuildID (exe
+// mtime fingerprint) is the last resort.
+func crushSHA() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range info.Settings {
+			if s.Key == "vcs.revision" && s.Value != "" {
+				return s.Value
+			}
+		}
+	}
+	if version.Commit != "" && version.Commit != "unknown" {
+		return version.Commit
+	}
+	return version.BuildID
+}
+
+// checkEnv gives check.sh the same hermeticity the agent subprocess
+// gets — pinned HOME/XDG, parent's CRUSH_* stripped — so a check
+// can't leak the operator's real config into outcomes.
+func (r *Runner) checkEnv() []string {
+	pinned := map[string]string{
+		"HOME":            r.home(),
+		"XDG_CONFIG_HOME": filepath.Join(r.home(), ".config"),
+		"XDG_DATA_HOME":   filepath.Join(r.home(), ".local", "share"),
+		"XDG_STATE_HOME":  filepath.Join(r.home(), ".local", "state"),
+	}
+	env := make([]string, 0, len(os.Environ()))
+	for _, kv := range os.Environ() {
+		k, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(k, "CRUSH_") {
+			continue
+		}
+		if _, overridden := pinned[k]; !overridden {
+			env = append(env, kv)
+		}
+	}
+	for k, v := range pinned {
+		env = append(env, k+"="+v)
+	}
+	return env
+}
+
+// corpusIDs returns the corpus's trajectory id set — gates filter
+// band tables to live corpus members.
+func corpusIDs(corpus map[string]*Trajectory) map[string]bool {
+	out := make(map[string]bool, len(corpus))
+	for id := range corpus {
+		out[id] = true
 	}
 	return out
 }

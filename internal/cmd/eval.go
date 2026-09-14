@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"syscall"
 
 	"github.com/charmbracelet/crush/internal/eval"
 	"github.com/spf13/cobra"
@@ -42,7 +43,7 @@ trajectory until the check is fixed and re-validated.`,
 			return err
 		}
 		defer r.Close()
-		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
 
 		sel := args
@@ -76,7 +77,7 @@ var evalCharacterizeCmd = &cobra.Command{
 			return err
 		}
 		defer r.Close()
-		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
 		sel := args
 		if len(sel) == 0 {
@@ -102,15 +103,19 @@ var evalRunCmd = &cobra.Command{
 			return err
 		}
 		defer r.Close()
-		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
 
 		rep, err := r.RunExperiment(ctx, exp)
 		if err != nil {
 			return err
 		}
-		fmt.Print(rep.Summary(0.05))
-		if rep.Fired() || rep.DiffuseP < 0.05 {
+		alpha := r.Alpha
+		if alpha <= 0 {
+			alpha = 0.05
+		}
+		fmt.Print(rep.Summary(alpha))
+		if rep.Fired(alpha) {
 			return fmt.Errorf("gate fired")
 		}
 		return nil
@@ -129,7 +134,7 @@ var evalSmokeCmd = &cobra.Command{
 			return err
 		}
 		defer r.Close()
-		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
 
 		alarms, err := r.Smoke(ctx, model, &temp, n)

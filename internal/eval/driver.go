@@ -30,6 +30,8 @@ type RunResult struct {
 	Recalls       Recalls
 	SessionID     string
 	ModelResolved string
+	ModelSmall    string
+	ModelSummary  string
 	// TimedOut is set when the run hit the trajectory's
 	// run_timeout_seconds or max_steps budget.
 	TimedOut bool
@@ -82,8 +84,10 @@ type runTelemetry struct {
 		Empty  int `json:"empty"`
 		Cross  int `json:"cross"`
 	} `json:"recalls"`
-	Model string `json:"model"`
-	Error string `json:"error,omitempty"`
+	Model        string `json:"model"`
+	ModelSmall   string `json:"model_small"`
+	ModelSummary string `json:"model_summary"`
+	Error        string `json:"error,omitempty"`
 }
 
 // Run executes the trajectory's turns sequentially — each turn a
@@ -117,7 +121,7 @@ func (c CrushRunner) Run(ctx context.Context, workdir string, turns []string, bu
 		if sessionID != "" {
 			args = append(args, "--session", sessionID)
 		}
-		args = append(args, turn)
+		args = append(args, "--", turn)
 
 		bin := c.Bin
 		if bin == "" {
@@ -165,6 +169,12 @@ func (c CrushRunner) Run(ctx context.Context, workdir string, turns []string, bu
 		if tel.Model != "" {
 			res.ModelResolved = tel.Model
 		}
+		if tel.ModelSmall != "" {
+			res.ModelSmall = tel.ModelSmall
+		}
+		if tel.ModelSummary != "" {
+			res.ModelSummary = tel.ModelSummary
+		}
 
 		// Timeout/error carve-out: a run that hit the deadline while
 		// its API calls were already erroring classifies as `error`,
@@ -183,7 +193,7 @@ func (c CrushRunner) Run(ctx context.Context, workdir string, turns []string, bu
 			return res
 		}
 		if err != nil {
-			res.Err = fmt.Errorf("crush run failed: %w: %s", err, out)
+			res.Err = fmt.Errorf("crush run failed: %w: %s", err, tail(out, 4096))
 			return res
 		}
 		if tel.Error != "" {
@@ -255,4 +265,13 @@ func readTelemetry(path string) (runTelemetry, error) {
 		return t, err
 	}
 	return t, json.Unmarshal(data, &t)
+}
+
+// tail keeps the last n bytes of output — the diagnostically useful
+// end without the bulk.
+func tail(b []byte, n int) []byte {
+	if len(b) <= n {
+		return b
+	}
+	return b[len(b)-n:]
 }

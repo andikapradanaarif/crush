@@ -144,7 +144,14 @@ func (b *Bands) Save(evalDir string) error {
 	if err != nil {
 		return fmt.Errorf("marshal bands.json: %w", err)
 	}
-	return os.WriteFile(filepath.Join(evalDir, "bands.json"), data, 0o644)
+	// Write-then-rename: a crash mid-write must not corrupt the file
+	// every gate reads.
+	path := filepath.Join(evalDir, "bands.json")
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // Band returns the trajectory's band, defaulting to uncharacterized.
@@ -156,6 +163,8 @@ func (b *Bands) Band(id string) Band {
 }
 
 // Entry returns the band entry, creating an empty one if absent.
+// The pointer addresses a COPY — mutations evaporate unless followed
+// by Put(id, *e).
 func (b *Bands) Entry(id string) *BandEntry {
 	if b.Entries == nil {
 		b.Entries = map[string]BandEntry{}
@@ -421,10 +430,13 @@ func bandFor(c BaselineCounts) Band {
 // round) alternates perfectly in the pooled stream while each arm is
 // individually constant.
 func suspectCheck(orderedDesc []RunRecord) bool {
+	// Group by (arm, baseline key): two experiments' same-named arms
+	// under different flag configs must not pool into one stream.
 	byArm := map[string][]Outcome{}
 	for _, r := range orderedDesc {
 		if r.Outcome == OutcomePass || r.Outcome == OutcomeFail {
-			byArm[r.Arm] = append(byArm[r.Arm], r.Outcome)
+			k := r.Arm + "|" + r.BaselineKey
+			byArm[k] = append(byArm[k], r.Outcome)
 		}
 	}
 	for _, outcomes := range byArm {

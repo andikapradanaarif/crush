@@ -33,6 +33,10 @@ type Report struct {
 	// summary, not persisted trajectory states.
 	Starved   []string
 	Saturated []string
+	// Coincident lists trajectories where treatment AND the current
+	// control arm both collapsed against baseline — suspect
+	// trajectory rot or model drift, not the change under test.
+	Coincident []string
 	// Smoke lists stable-band trajectories showing the strict 0/N
 	// collapse pattern — used by the smoke tier, which must work
 	// where baselines are thin. In a normal experiment report it is
@@ -45,10 +49,13 @@ type Report struct {
 	Skipped []string
 }
 
-// Fired reports whether any alarm tripped.
-func (r Report) Fired() bool {
-	return len(r.Catastrophic) > 0 || len(r.ExcludedDifferential) > 0 ||
+// Fired reports whether any alarm tripped — including the diffuse
+// tier's corpus-level p against alpha.
+func (r Report) Fired(alpha float64) bool {
+	return r.DiffuseP < alpha ||
+		len(r.Catastrophic) > 0 || len(r.ExcludedDifferential) > 0 ||
 		len(r.Starved) > 0 || len(r.Saturated) > 0 || len(r.Smoke) > 0 ||
+		len(r.Coincident) > 0 ||
 		len(r.Skipped) > 0 // Corpus shrinkage is an alarm.
 }
 
@@ -65,11 +72,19 @@ func (r Report) Summary(alpha float64) string {
 	fire("coverage-starved", r.Starved)
 	fire("error-saturated", r.Saturated)
 	fire("smoke", r.Smoke)
+	fire("coincident-collapse", r.Coincident)
 	if len(r.Skipped) > 0 {
 		fmt.Fprintf(&b, "  SKIP requires-unmet: %s\n", strings.Join(r.Skipped, ", "))
 	}
+	eligible := 0
+	for _, ok := range r.CatastrophicEligible {
+		if ok {
+			eligible++
+		}
+	}
+	fmt.Fprintf(&b, "  catastrophic coverage: %d/%d stable trajectories eligible\n", eligible, len(r.CatastrophicEligible))
 	fmt.Fprintf(&b, "  diffuse p = %.4g (alpha %.3g)\n", r.DiffuseP, alpha)
-	if !r.Fired() && r.DiffuseP >= alpha {
+	if !r.Fired(alpha) {
 		b.WriteString("  verdict: PASS\n")
 	} else {
 		b.WriteString("  verdict: FAIL\n")
@@ -81,7 +96,7 @@ func (r Report) Summary(alpha float64) string {
 // frozen experiment-start snapshot; baselineKey is the experiment's
 // baseline condition (control arm's effective-config hash); alpha is
 // the per-family significance level before correction.
-func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRecord, alpha float64, replicates int, rng *rand.Rand) Report {
+func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRecord, corpusIDs map[string]bool, alpha float64, replicates int, rng *rand.Rand) Report {
 	rep := Report{CatastrophicEligible: map[string]bool{}, DiffuseP: 1}
 
 	byTraj := map[string][]RunRecord{}
@@ -89,7 +104,7 @@ func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRe
 		byTraj[r.TrajectoryID] = append(byTraj[r.TrajectoryID], r)
 	}
 
-	stable := stableBandSize(bands)
+	stable := stableBandSize(bands, corpusIDs)
 	if stable == 0 {
 		stable = 1
 	}
@@ -140,7 +155,20 @@ func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRe
 					}
 				}
 				if p := FisherExactCollapse(fails, n, baseFails, base.N); p < corrAlpha {
-					rep.Catastrophic = append(rep.Catastrophic, fmt.Sprintf("%s (%d/%d vs baseline %d/%d, p=%.2g)", id, n-fails, n, base.Passes, base.N, p))
+					// Coincidence detector: if the control arm also
+					// collapsed against the same baseline, suspect
+					// trajectory rot or model drift — not the flag.
+					ctrlFails := 0
+					for _, ok := range ctrl {
+						if !ok {
+							ctrlFails++
+						}
+					}
+					if len(ctrl) > 0 && FisherExactCollapse(ctrlFails, len(ctrl), baseFails, base.N) < corrAlpha {
+						rep.Coincident = append(rep.Coincident, fmt.Sprintf("%s (control %d/%d also vs baseline %d/%d)", id, len(ctrl)-ctrlFails, len(ctrl), base.Passes, base.N))
+					} else {
+						rep.Catastrophic = append(rep.Catastrophic, fmt.Sprintf("%s (%d/%d vs baseline %d/%d, p=%.2g)", id, n-fails, n, base.Passes, base.N, p))
+					}
 				}
 			}
 			// Smoke pattern: strict 0/N, no baseline required.
@@ -183,13 +211,17 @@ func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRe
 	return rep
 }
 
-// stableBandSize counts the full stable band for the Bonferroni
-// denominator — correcting across only eligible trajectories would be
+// stableBandSize counts the live corpus's stable band for the
+// Bonferroni denominator — correcting across only eligible
+// trajectories would be
 // circular, since eligibility is defined by reaching that alpha.
-func stableBandSize(bands *Bands) int {
+// stableBandSize counts stable-band members of the live corpus —
+// entries for trajectories removed from the corpus must not inflate
+// the Bonferroni denominator.
+func stableBandSize(bands *Bands, corpusIDs map[string]bool) int {
 	n := 0
-	for _, e := range bands.Entries {
-		if e.Band == BandStable {
+	for id, e := range bands.Entries {
+		if e.Band == BandStable && corpusIDs[id] {
 			n++
 		}
 	}

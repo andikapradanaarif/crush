@@ -121,6 +121,9 @@ func WriteArmConfig(workdir string, exp *Experiment, arm Arm) error {
 	options := map[string]any{
 		"disable_metrics":              true,
 		"disable_provider_auto_update": true,
+		// Harness state (crush.db, logs) beside the workdir, not in
+		// it: check.sh sees the tree exactly as the agent left it.
+		"data_directory": DataDirFor(workdir),
 	}
 	for k, v := range arm.Config.Options {
 		options[k] = v
@@ -239,4 +242,10 @@ func copyTree(src, dst string) error {
 		}
 		return os.WriteFile(target, data, info.Mode())
 	})
+}
+
+// DataDirFor locates the run's .crush state beside the workdir so the
+// checked tree carries no harness litter.
+func DataDirFor(workdir string) string {
+	return filepath.Join(filepath.Dir(workdir), filepath.Base(workdir)+".crush-data")
 }

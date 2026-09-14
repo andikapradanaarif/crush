@@ -61,11 +61,10 @@ func ValidateTrajectory(t *Trajectory, trajDir string) []string {
 		if t.Origin.Kind == "production" && (t.Origin.Scrubbed == nil || !*t.Origin.Scrubbed) {
 			problems = append(problems, "origin.scrubbed must be true for production trajectories")
 		}
-		// A regression sourced from a real session or bug report
-		// carries the same scrubbing requirement as production.
-		realSource := strings.HasPrefix(t.Origin.Source, "session:") || strings.HasPrefix(t.Origin.Source, "bug:")
-		if t.Origin.Kind == "regression" && realSource && (t.Origin.Scrubbed == nil || !*t.Origin.Scrubbed) {
-			problems = append(problems, "origin.scrubbed must be true for regression trajectories sourced from a real session or bug report (session:/bug:) ")
+		// A regression carrying any source reference is a real-world
+		// artifact — same scrubbing requirement as production.
+		if t.Origin.Kind == "regression" && t.Origin.Source != "" && (t.Origin.Scrubbed == nil || !*t.Origin.Scrubbed) {
+			problems = append(problems, "origin.scrubbed must be true for regression trajectories with a real source")
 		}
 	case "":
 		problems = append(problems, "origin.kind is required")
@@ -92,6 +91,19 @@ func ValidateTrajectory(t *Trajectory, trajDir string) []string {
 
 	// A git start state under network:false must resolve repo to a
 	// local source — the clone itself is egress.
+	// Coverage must be achievable within budget — a min_steps
+	// predicate above the step cap is permanently inconclusive and
+	// burns attempts to the starvation cap forever.
+	for key, v := range t.Coverage {
+		op, field, err := ParseCoverageKey(key)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("coverage %q: %v", key, err))
+			continue
+		}
+		if op == "min" && field == "steps" && t.Budget.MaxSteps > 0 && int(v) > t.Budget.MaxSteps {
+			problems = append(problems, fmt.Sprintf("coverage min_steps=%v exceeds budget.max_steps=%d — permanently inconclusive", v, t.Budget.MaxSteps))
+		}
+	}
 	if t.Requires.Network != nil && !*t.Requires.Network && t.StartState.Kind == "git" {
 		repo := t.StartState.Repo
 		if strings.HasPrefix(repo, "http://") || strings.HasPrefix(repo, "https://") || strings.HasPrefix(repo, "git@") {

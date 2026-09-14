@@ -153,7 +153,7 @@ func TestRunCheck_PassFailAndEvalJSON(t *testing.T) {
 	tr, err := LoadTrajectory(dir)
 	require.NoError(t, err)
 	wd := t.TempDir()
-	res := RunCheck(context.Background(), tr, dir, wd)
+	res := RunCheck(context.Background(), tr, dir, wd, nil)
 	require.NoError(t, res.Err)
 	require.Equal(t, 1, res.Exit)
 	require.Equal(t, "marker missing", res.Detail["why"])
@@ -164,7 +164,7 @@ func TestRunCheck_PassFailAndEvalJSON(t *testing.T) {
 	})
 	tr2, err := LoadTrajectory(dir2)
 	require.NoError(t, err)
-	res2 := RunCheck(context.Background(), tr2, dir2, wd)
+	res2 := RunCheck(context.Background(), tr2, dir2, wd, nil)
 	require.Equal(t, 0, res2.Exit)
 	require.Nil(t, res2.Detail)
 }
@@ -178,7 +178,7 @@ func TestRunCheck_TimeoutIsError(t *testing.T) {
 	})
 	tr, err := LoadTrajectory(dir)
 	require.NoError(t, err)
-	res := RunCheck(context.Background(), tr, dir, t.TempDir())
+	res := RunCheck(context.Background(), tr, dir, t.TempDir(), nil)
 	require.Error(t, res.Err)
 	require.Contains(t, res.Err.Error(), "timed out")
 }
