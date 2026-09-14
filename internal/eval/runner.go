@@ -51,6 +51,8 @@ type Runner struct {
 	// homeCreated marks Home as runner-allocated so Close can
 	// remove it; a caller-provided Home is the caller's to clean.
 	homeCreated bool
+	// workParentChecked gates the once-per-runner repo-leak warning.
+	workParentChecked bool
 }
 
 // Close removes the pinned-HOME tempdir when the runner created it.
@@ -470,6 +472,7 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 	rep := Report{CatastrophicEligible: map[string]bool{}, DiffuseP: 1}
 
 	runnable := 0
+	requiresSkipped := 0
 	for _, traj := range trajs {
 		band := frozen.Band(traj.ID)
 		n := exp.RunsPerTrajectory[band]
@@ -487,12 +490,15 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 		rep.Starved = append(rep.Starved, trep.Starved...)
 		rep.Saturated = append(rep.Saturated, trep.Saturated...)
 		if trep.Skipped != "" {
+			requiresSkipped++
 			rep.Skipped = append(rep.Skipped, fmt.Sprintf("%s: %s", traj.ID, trep.Skipped))
 		}
 	}
 	// Fail closed: a corpus whose every runnable trajectory skipped
-	// would otherwise report PASS on zero samples.
-	if runnable > 0 && len(rep.Skipped) == runnable {
+	// would otherwise report PASS on zero samples. requiresSkipped
+	// counts only requires-misses — band-uncovered entries share
+	// rep.Skipped but aren't runnable.
+	if runnable > 0 && requiresSkipped == runnable {
 		return rep, fmt.Errorf("all %d runnable trajectories skipped requires pre-flight: %s",
 			runnable, strings.Join(rep.Skipped, "; "))
 	}
@@ -577,14 +583,20 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 		ArmControl: {}, ArmTreatment: {},
 	}
 
+	round := 0
 	for conclusive[ArmControl] < n || conclusive[ArmTreatment] < n {
 		if ctx.Err() != nil {
 			// Stop cleanly on cancellation — don't materialize and
 			// error-append up to ~2N records per remaining trajectory.
 			return rep
 		}
+		// Alternate which arm leads each round — under monotonic
+		// provider drift a fixed control-first order systematically
+		// hands treatment the later sample and biases the pairing.
+		lead := round % 2
+		round++
 		progressed := false
-		for _, armName := range armNames {
+		for _, armName := range append(armNames[lead:], armNames[:lead]...) {
 			if conclusive[armName] >= n || attempts[armName] >= maxAttempts {
 				continue
 			}
@@ -805,10 +817,11 @@ func (r *Runner) Smoke(ctx context.Context, model string, temperature *float64, 
 		}
 		// Strict 0/N over conclusive runs — a single failure at
 		// p=0.95, N=5 is a 23% false alarm; smoke catches collapses,
-		// not drift. Zero conclusive runs is a provider outage, not a
-		// collapse.
-		if conclusive > 0 && passes == 0 {
-			alarms = append(alarms, traj.ID)
+		// not drift. Require a conclusive majority: four errors and
+		// one fail is an outage, not a collapse. Zero conclusive runs
+		// is a provider outage, not a collapse.
+		if passes == 0 && conclusive*2 > n {
+			alarms = append(alarms, fmt.Sprintf("%s (0/%d conclusive)", traj.ID, conclusive))
 		}
 	}
 	if err := r.RecomputeAll(bands, corpus, manifest, model, temperatureKey(temperature)); err != nil {

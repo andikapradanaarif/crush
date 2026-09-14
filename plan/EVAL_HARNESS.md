@@ -274,6 +274,13 @@ runner isolates the run from user-level config (pinned
 options/MCPs/models into results. Credentials come from the eval
 environment, never the corpus.
 
+Agent subprocesses inherit the operator's full credential environment
+(provider keys, `GITHUB_TOKEN`, `AWS_*`, `SSH_AUTH_SOCK`) — pinning is
+on `HOME`/`XDG` config, not on secrets. `origin.kind: production`
+prompts replay verbatim; run experiments that replay real prompts in a
+credential-scoped environment or accept that exposure as the runner's
+documented posture.
+
 `corpus` selects trajectory ids by glob (`["*"]` = everything) or
 `"band:<name>"` for a band slice — `"band:stable"` is how the smoke
 tier expresses its corpus. `quarantined` is excluded even under

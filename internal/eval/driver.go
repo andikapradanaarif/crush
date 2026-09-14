@@ -289,15 +289,16 @@ func (c CrushRunner) subprocessEnv(telemetryFile string, maxSteps int) []string 
 			env = append(env, kv)
 		}
 	}
-	// First-match wins on duplicate keys: pinned (harness
-	// invariants), then ExtraEnv (caller intent over inherited vars),
-	// then the filtered parent environment.
+	// exec.Cmd.Env dedupes LAST-wins: the filtered parent env first,
+	// then ExtraEnv (caller intent overrides inherited vars), then
+	// pinned (harness invariants override everything).
 	out := make([]string, 0, len(env)+len(pinned)+len(c.ExtraEnv))
+	out = append(out, env...)
+	out = append(out, c.ExtraEnv...)
 	for k, v := range pinned {
 		out = append(out, k+"="+v)
 	}
-	out = append(out, c.ExtraEnv...)
-	return append(out, env...)
+	return out
 }
 
 func readTelemetry(path string) (runTelemetry, error) {

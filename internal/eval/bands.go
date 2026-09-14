@@ -139,6 +139,10 @@ func LoadBands(evalDir string) (*Bands, error) {
 	b := &Bands{SchemaVersion: 1, Entries: map[string]BandEntry{}}
 	for k, v := range raw {
 		if k == "_schema_version" {
+			var ver int
+			if err := json.Unmarshal(v, &ver); err == nil && ver != 1 {
+				return nil, fmt.Errorf("bands.json schema_version %d unsupported (want 1)", ver)
+			}
 			continue
 		}
 		var e BandEntry
@@ -260,7 +264,9 @@ func (b *Bands) Recompute(id string, records []RunRecord, contentHash string, no
 		if !r.Outcome.Conclusive() {
 			continue
 		}
-		if r.Env.ContentHash != "" && r.Env.ContentHash != contentHash {
+		if r.Env.ContentHash != contentHash {
+			// Empty-hash records (pre-field) are stale too — they
+			// can't be proven current.
 			continue
 		}
 		if r.Env.ModelResolved == "" {
