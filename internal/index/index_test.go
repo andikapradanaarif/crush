@@ -2,7 +2,9 @@ package index
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -481,4 +483,114 @@ func TestCapOutput_UTF8(t *testing.T) {
 	out = capOutput("a\xff"+strings.Repeat("x", 100), 10)
 	require.Contains(t, out, "truncated")
 	require.Greater(t, len(out), 30)
+}
+
+func TestTagFile_RustImplFor(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, root, "src/foo.rs", `pub struct Foo;
+
+impl Foo {
+	pub fn new() -> Self { Self {} }
+}
+
+impl Display for Foo {
+	fn fmt(&self) {}
+}
+
+fn publish() {}
+`)
+	exists := func(string) bool { return true }
+	tags, _, err := tagFile(root, "src/foo.rs", "", exists)
+	require.NoError(t, err)
+
+	impls := map[string]bool{}
+	for _, tg := range tags {
+		if tg.kind == "impl" {
+			impls[tg.name] = true
+		}
+	}
+	// `impl Display for Foo` must tag Foo, not Display.
+	require.True(t, impls["Foo"])
+	require.False(t, impls["Display"])
+
+	// Word-boundary export check: `publish` is not `pub`.
+	for _, tg := range tags {
+		if tg.name == "publish" {
+			require.False(t, tg.exported)
+		}
+	}
+}
+
+func TestTagFile_PythonRelative(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, root, "src/mypkg/a.py", `from .sibling import helper
+from ..top import util
+from mypkg.other import thing
+`)
+	writeFile(t, root, "src/mypkg/sibling.py", "def helper(): pass\n")
+	writeFile(t, root, "src/top.py", "def util(): pass\n")
+	writeFile(t, root, "src/mypkg/other.py", "def thing(): pass\n")
+
+	exists := func(p string) bool {
+		switch p {
+		case "src/mypkg/a.py", "src/mypkg/sibling.py", "src/top.py",
+			"src/mypkg/other.py":
+			return true
+		}
+		return false
+	}
+	_, refs, err := tagFile(root, "src/mypkg/a.py", "", exists)
+	require.NoError(t, err)
+
+	// `.sibling` resolves beside the file; `..top` one level up;
+	// absolute `mypkg.other` resolves under the src/ layout.
+	require.ElementsMatch(t, []string{
+		"src/mypkg/sibling.py", "src/top.py", "src/mypkg/other.py",
+	}, refs)
+}
+
+func TestTouchFile_NoDBNoIndex(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	writeFile(t, root, "main.go", "package main\n\nfunc main() {}\n")
+
+	// Shared-style lazy service: the DB is created on first index
+	// use, not at construction.
+	svc := newService(dataDir, root)
+	defer svc.Close()
+
+	// With the DB never created (map disabled / never called), a
+	// write notification must not create index.db.
+	svc.touchFile(filepath.Join(root, "main.go"))
+	_, err := os.Stat(filepath.Join(dataDir, IndexFilename))
+	require.True(t, errors.Is(err, fs.ErrNotExist))
+}
+
+func TestTouchFile_ZeroByteDrops(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	writeFile(t, root, "f.go", "package main\n\nfunc F() {}\n")
+
+	svc, err := Open(dataDir, root)
+	require.NoError(t, err)
+	defer svc.Close()
+	ctx := context.Background()
+	require.NoError(t, svc.EnsureIndexed(ctx))
+
+	_, _, found := svc.indexedFile(ctx, "f.go")
+	require.True(t, found)
+
+	// Truncating to zero bytes drops the row immediately — the walk
+	// never indexes empty files.
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.go"), nil, 0o644))
+	svc.touchFile(filepath.Join(root, "f.go"))
+
+	_, _, found = svc.indexedFile(ctx, "f.go")
+	require.False(t, found)
 }

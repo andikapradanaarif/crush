@@ -92,6 +92,8 @@ type Service struct {
 
 	modPathOnce sync.Once
 	modPath     string
+	walkerOnce  sync.Once
+	walker      *fsext.FastGlobWalker
 }
 
 // modulePath caches the go.mod module path — refreshDirty would
@@ -101,6 +103,15 @@ func (s *Service) modulePath() string {
 		s.modPath = readModulePath(s.root)
 	})
 	return s.modPath
+}
+
+// skipWalker caches the ignore-rule walker so per-write checks don't
+// re-parse ignore files on every notification.
+func (s *Service) skipWalker() *fsext.FastGlobWalker {
+	s.walkerOnce.Do(func() {
+		s.walker = fsext.NewFastGlobWalker(s.root)
+	})
+	return s.walker
 }
 
 var shared sync.Map // (dataDir, workingDir) -> *Service
@@ -165,7 +176,31 @@ func NotifyWritten(absPath string) {
 func (s *Service) touchFile(absPath string) {
 	rel, err := filepath.Rel(s.root, absPath)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return // Outside this project — don't even open the DB.
+		// Callers like LSP may pass canonicalized paths while
+		// workingDir itself contains a symlink (macOS /var →
+		// /private/var) — retry with both sides resolved. The file
+		// itself may not exist (a delete notification), so fall back
+		// to resolving its parent.
+		p := absPath
+		if r, e := filepath.EvalSymlinks(absPath); e == nil {
+			p = r
+		} else if d, e := filepath.EvalSymlinks(filepath.Dir(absPath)); e == nil {
+			p = filepath.Join(d, filepath.Base(absPath))
+		}
+		root := s.root
+		if r, e := filepath.EvalSymlinks(s.root); e == nil {
+			root = r
+		}
+		rel, err = filepath.Rel(root, p)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return // Outside this project — don't even open the DB.
+		}
+	}
+	// No index.db → nothing to maintain: a disabled `map` must not
+	// create the DB purely from writes. Anything written before the
+	// first `map` call is picked up by that call's walk anyway.
+	if _, err := os.Stat(filepath.Join(s.dataDir, IndexFilename)); err != nil {
+		return
 	}
 	if err := s.init(); err != nil {
 		return
@@ -179,11 +214,12 @@ func (s *Service) touchFile(absPath string) {
 		return // Transient stat failure — keep the row, stay stale.
 	}
 	// Mirror the walk's collect filter: no dirs, no empty files, and
-	// nothing the ignore rules would skip — otherwise a write into
-	// node_modules or .crush would upsert a phantom row the walk
-	// never produced.
+	// nothing the ignore rules would skip. Drop rather than return —
+	// e.g. a file truncated to zero bytes should lose its stale row
+	// now, matching what the next reconcile would do.
 	if info.IsDir() || info.Size() == 0 ||
-		fsext.NewFastGlobWalker(s.root).ShouldSkip(absPath) {
+		s.skipWalker().ShouldSkip(absPath) {
+		s.dropFile(context.Background(), filepath.ToSlash(rel))
 		return
 	}
 	s.refreshIfStale(context.Background(), filepath.ToSlash(rel),

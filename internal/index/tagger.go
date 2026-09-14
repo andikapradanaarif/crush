@@ -59,8 +59,10 @@ func pyExport(name, _ string) bool {
 }
 
 func lineHas(marker string) func(string, string) bool {
+	// Word-boundary match — `publish`/`reexport` aren't `pub`/`export`.
+	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(marker) + `\b`)
 	return func(_, line string) bool {
-		return strings.Contains(line, marker)
+		return re.MatchString(line)
 	}
 }
 
@@ -98,6 +100,9 @@ var langByExt = map[string]langSpec{
 		rules: []declRule{
 			{regexp.MustCompile(`^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)`), "func"},
 			{regexp.MustCompile(`^\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait|union)\s+(\w+)`), "type"},
+			// `impl Trait for Type` must capture Type (the implementor),
+			// not the trait — the `for` rule runs first.
+			{regexp.MustCompile(`^\s*impl(?:<[^>]*>)?\s+(?:[\w:]+::)*\w+(?:<[^>]*>)?\s+for\s+(?:[\w:]+::)*(\w+)`), "impl"},
 			{regexp.MustCompile(`^\s*impl(?:<[^>]*>)?\s+(?:[\w:]+::)*(\w+)`), "impl"},
 			{regexp.MustCompile(`^\s*(?:pub\s+)?mod\s+(\w+)`), "mod"},
 		},
@@ -292,13 +297,32 @@ func resolveJSImport(imp, srcDir, _ string, exists func(string) bool) string {
 	return probeExt(base+"/index", exists, ".ts", ".tsx", ".js", ".jsx")
 }
 
-func resolvePyImport(imp, _, _ string, exists func(string) bool) string {
-	base := strings.ReplaceAll(imp, ".", "/")
-	if p := probeExt(base, exists, ".py"); p != "" {
-		return p
+func resolvePyImport(imp, srcDir, _ string, exists func(string) bool) string {
+	var bases []string
+	if strings.HasPrefix(imp, ".") {
+		// Relative import: leading dots walk up from the file's dir —
+		// `from .sibling import x` inside pkg/a.py means pkg/sibling.py.
+		dots := len(imp) - len(strings.TrimLeft(imp, "."))
+		rest := strings.TrimLeft(imp, ".")
+		dir := srcDir
+		for range dots - 1 {
+			dir = filepath.Dir(dir)
+		}
+		base := filepath.ToSlash(filepath.Join(dir, strings.ReplaceAll(rest, ".", "/")))
+		bases = append(bases, base)
+	} else {
+		base := strings.ReplaceAll(imp, ".", "/")
+		// Absolute imports resolve from root, or from src/ under the
+		// common src-layout.
+		bases = append(bases, base, "src/"+base)
 	}
-	if exists(base + "/__init__.py") {
-		return base + "/__init__.py"
+	for _, base := range bases {
+		if p := probeExt(base, exists, ".py"); p != "" {
+			return p
+		}
+		if exists(base + "/__init__.py") {
+			return base + "/__init__.py"
+		}
 	}
 	return ""
 }

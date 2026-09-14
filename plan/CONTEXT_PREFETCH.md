@@ -350,9 +350,26 @@ Fixed during review (kept as documentation of the failure shapes):
   `crate::a::b::Item` resolves by probing `src/a/b.rs` and
   `src/a/b/mod.rs`, which is where virtually all `use` refs live.
 - **Write events must mirror the walk's filters.** `touchFile`
-  now re-checks `ShouldSkip` and rejects dirs/empty files, so a
-  tool write into `node_modules` or `.crush` can't upsert a row
-  the walk would never produce.
+  re-checks `ShouldSkip` and drops the row for dirs/empty/ignored
+  paths (a file truncated to zero bytes loses its stale symbols
+  immediately, matching reconcile). And it no-ops when
+  `index.db` doesn't exist — with `map` disabled via
+  `disabled_tools`, writes must not create the sidecar; the first
+  `map` call's walk covers everything written meanwhile.
+- **`impl Trait for Type` names the implementor.** Capturing the
+  trait made `map symbol=Foo` miss its impls and `symbol=Display`
+  point at every impl site. A `for`-clause rule now runs first.
+- **Python imports are relative to the file.** `from .sibling
+import x` resolves against the file's dir (dots walk up), and
+  absolute imports also probe `src/` — without both, refs stay
+  flat on most real Python repos.
+- **Exported checks need word boundaries.** Substring `lineHas`
+  marked `publish()`/`reexport()` exported; `\b` matching fixes
+  the marker and skeleton ordering.
+- **Roots can be symlinked.** `touchFile` retries the root check
+  with `EvalSymlinks` on both sides (parent-dir fallback for
+  deleted files) — a canonicalized LSP path under a symlinked
+  workingDir would otherwise skip notifications silently.
 
 Resolved since the first draft:
 
@@ -380,7 +397,10 @@ Resolved since the first draft:
   every file-mutating tool (`edit`, `write`, `multiedit`,
   `download`, `lsp_rename` per affected file,
   `lsp_replace_symbol`); `refreshIfStale` tags never-indexed paths,
-  so a new file lands in the index on its first write. Boundary:
+  so a new file lands in the index on its first write. `touchFile`
+  skips when `index.db` doesn't exist, so `index.db` is created by
+  the first `map` call — not by writes, and not at all when `map`
+  is disabled via `disabled_tools`. Boundary:
   `bash` redirection and external edits rely on the dirty-scan
   fallback / the 5-minute re-walk — same gap class as the stub
   system's observed-mutation pass.

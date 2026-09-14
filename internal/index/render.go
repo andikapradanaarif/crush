@@ -356,7 +356,10 @@ func (s *Service) renderTopFiles(ctx context.Context, b *strings.Builder, limit 
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(b, "  %s (%d refs)", p, deg[p])
+		// deg includes ancestor-dir (package) refs — label it so a
+		// zero-direct-ref file in a hot package doesn't read as a
+		// lie.
+		fmt.Fprintf(b, "  %s (%d refs incl. pkg)", p, deg[p])
 		if len(syms) > 0 {
 			names := make([]string, 0, len(syms))
 			for _, t := range syms {
