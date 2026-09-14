@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -36,9 +37,9 @@ func TestBands_WindowAndAssign(t *testing.T) {
 	for i := range 25 {
 		recs = append(recs, recFor("t", "m", "cfg", OutcomePass, now.Add(time.Duration(i)*time.Hour)))
 	}
-	b.Recompute("t", recs, "h", now)
+	b.Recompute("t", recs, "h", now, "m", "cfg")
 	require.Equal(t, BandMid, b.Band("t")) // First good char → streak 1.
-	b.Recompute("t", recs, "h", now.Add(time.Hour))
+	b.Recompute("t", recs, "h", now.Add(time.Hour), "m", "cfg")
 	require.Equal(t, BandStable, b.Band("t")) // Second good → promote.
 
 	// Enough fails to push the windowed p̂ below the stable floor
@@ -46,7 +47,7 @@ func TestBands_WindowAndAssign(t *testing.T) {
 	for i := range 5 {
 		recs = append(recs, recFor("t", "m", "cfg", OutcomeFail, now.Add(time.Duration(100+i)*time.Hour)))
 	}
-	b.Recompute("t", recs, "h", now.Add(110*time.Hour))
+	b.Recompute("t", recs, "h", now.Add(110*time.Hour), "m", "cfg")
 	require.Equal(t, BandMid, b.Band("t"))
 }
 
@@ -58,14 +59,14 @@ func TestBands_NeverPassedTrailing(t *testing.T) {
 	for i := range NeverPassedFails {
 		recs = append(recs, recFor("t", "m", "c", OutcomeFail, now.Add(time.Duration(i)*time.Minute)))
 	}
-	b.Recompute("t", recs, "h", now)
+	b.Recompute("t", recs, "h", now, "m", "c")
 	require.Equal(t, BandQuarantined, b.Band("t"))
 	require.Equal(t, ReasonNeverPassed, b.Entries["t"].QuarantineReason)
 
 	// With a lifetime pass, the same streak is rot, not never_passed.
 	b2 := &Bands{Entries: map[string]BandEntry{}}
 	recs2 := append([]RunRecord{recFor("t", "m", "c", OutcomePass, now.Add(-time.Hour))}, recs...)
-	b2.Recompute("t", recs2, "h", now)
+	b2.Recompute("t", recs2, "h", now, "m", "c")
 	require.NotEqual(t, ReasonNeverPassed, b2.Entries["t"].QuarantineReason)
 }
 
@@ -77,13 +78,13 @@ func TestBands_ContentHashChangeResets(t *testing.T) {
 	for i := range 10 {
 		recs = append(recs, recFor("t", "m", "c", OutcomePass, now.Add(time.Duration(i)*time.Minute)))
 	}
-	b.Recompute("t", recs, "h", now)
-	b.Recompute("t", recs, "h", now)
+	b.Recompute("t", recs, "h", now, "m", "c")
+	b.Recompute("t", recs, "h", now, "m", "c")
 	require.Equal(t, BandStable, b.Band("t"))
 
 	// Corpus revision change → baselines discarded, back to
 	// uncharacterized pending re-characterization.
-	b.Recompute("t", recs, "h2", now)
+	b.Recompute("t", recs, "h2", now, "m", "c")
 	require.Equal(t, BandUncharacterized, b.Band("t"))
 	require.Empty(t, b.Entries["t"].Baselines)
 }
@@ -100,7 +101,7 @@ func TestBands_SuspectCheckAlternation(t *testing.T) {
 		}
 		recs = append(recs, recFor("t", "m", "c", o, now.Add(time.Duration(i)*time.Minute)))
 	}
-	b.Recompute("t", recs, "h", now)
+	b.Recompute("t", recs, "h", now, "m", "c")
 	require.Equal(t, BandQuarantined, b.Band("t"))
 	require.Equal(t, ReasonSuspectCheck, b.Entries["t"].QuarantineReason)
 }
@@ -116,7 +117,7 @@ func TestBands_BaselineKeyedByConfig(t *testing.T) {
 	for i := range 6 {
 		recs = append(recs, recFor("t", "m", "cfgB", OutcomeFail, now.Add(time.Duration(60+i)*time.Minute)))
 	}
-	b.Recompute("t", recs, "h", now)
+	b.Recompute("t", recs, "h", now, "m", "cfgA")
 	require.Equal(t, 6, b.Baseline("t", "m", "cfgA").Passes)
 	require.Equal(t, 0, b.Baseline("t", "m", "cfgB").Passes)
 	require.Equal(t, 6, b.Baseline("t", "m", "cfgB").N)
@@ -352,3 +353,78 @@ func TestWriteArmConfig_CollisionAndContent(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+func TestBands_SuspectCheckIgnoresArmCorrelation(t *testing.T) {
+	t.Parallel()
+	b := &Bands{Entries: map[string]BandEntry{}}
+	now := time.Now()
+	// A real treatment effect — control passes, treatment fails every
+	// interleaved round — must NOT read as a flaky check: each arm is
+	// individually constant.
+	var recs []RunRecord
+	for i := range 12 {
+		c := recFor("t", "m", "c", OutcomePass, now.Add(time.Duration(2*i)*time.Minute))
+		c.Arm = "control"
+		tr := recFor("t", "m", "c", OutcomeFail, now.Add(time.Duration(2*i+1)*time.Minute))
+		tr.Arm = "treatment"
+		recs = append(recs, c, tr)
+	}
+	b.Recompute("t", recs, "h", now, "m", "c")
+	require.NotEqual(t, ReasonSuspectCheck, b.Entries["t"].QuarantineReason)
+}
+
+func TestBands_StaleModelBaselineDoesNotHoldStable(t *testing.T) {
+	t.Parallel()
+	b := &Bands{Entries: map[string]BandEntry{}}
+	now := time.Now()
+	// Deep baseline under the OLD model; the current pin has nothing.
+	var recs []RunRecord
+	for i := range 25 {
+		recs = append(recs, recFor("t", "old/model", "cfg", OutcomePass, now.Add(time.Duration(i)*time.Minute)))
+	}
+	b.Recompute("t", recs, "h", now, "old/model", "cfg")
+	b.Recompute("t", recs, "h", now, "old/model", "cfg")
+	require.Equal(t, BandStable, b.Band("t"))
+
+	// Re-pin: current condition is a different model — the stale
+	// baseline must not hold the band.
+	b.Recompute("t", recs, "h", now, "new/model", "cfg")
+	require.Equal(t, BandUncharacterized, b.Band("t"))
+}
+
+func TestCheckRequires(t *testing.T) {
+	t.Parallel()
+	missing := CheckRequires(&Trajectory{
+		Requires: Requires{Tools: []string{"definitely-not-a-real-binary-xyz"}},
+	})
+	require.Equal(t, []string{"tool:definitely-not-a-real-binary-xyz"}, missing)
+
+	require.Empty(t, CheckRequires(&Trajectory{
+		Requires: Requires{Tools: []string{"go"}, OS: []string{runtime.GOOS}},
+	}))
+	require.NotEmpty(t, CheckRequires(&Trajectory{
+		Requires: Requires{OS: []string{"plan9"}},
+	}))
+}
+
+func TestWriteArmConfig_MergesJSONConfig(t *testing.T) {
+	t.Parallel()
+	exp := &Experiment{Model: "hyper/x"}
+	arm := Arm{Config: ArmConfig{Options: map[string]any{"flag_a": true}}}
+
+	// A start-state .crush.json merges: its keys survive, arm wins.
+	wd := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wd, ".crush.json"),
+		[]byte(`{"options":{"fixture_key":"keep","flag_a":false},"other":"x"}`), 0o644))
+	require.NoError(t, WriteArmConfig(wd, exp, arm))
+	raw, err := os.ReadFile(filepath.Join(wd, ".crush.json"))
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"fixture_key": "keep"`)
+	require.Contains(t, string(raw), `"flag_a": true`)
+	require.Contains(t, string(raw), `"other": "x"`)
+
+	// crush.json is lower precedence than .crush.json — allowed.
+	wd2 := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wd2, "crush.json"), []byte(`{}`), 0o644))
+	require.NoError(t, WriteArmConfig(wd2, exp, arm))
+}

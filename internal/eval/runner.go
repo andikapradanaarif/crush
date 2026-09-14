@@ -44,6 +44,17 @@ type Runner struct {
 	RNG        *rand.Rand
 	// Now is the clock, injectable for tests.
 	Now func() time.Time
+	// homeCreated marks Home as runner-allocated so Close can
+	// remove it; a caller-provided Home is the caller's to clean.
+	homeCreated bool
+}
+
+// Close removes the pinned-HOME tempdir when the runner created it.
+func (r *Runner) Close() {
+	if r.homeCreated && r.Home != "" {
+		os.RemoveAll(r.Home)
+		r.homeCreated = false
+	}
 }
 
 func (r *Runner) now() time.Time {
@@ -74,6 +85,7 @@ func (r *Runner) home() string {
 	h, err := os.MkdirTemp("", "crush-eval-home-*")
 	if err == nil {
 		r.Home = h
+		r.homeCreated = true
 	}
 	return r.Home
 }
@@ -415,6 +427,9 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 		trep := r.runTrajectory(ctx, exp, traj, trajDir, manifest, n)
 		rep.Starved = append(rep.Starved, trep.Starved...)
 		rep.Saturated = append(rep.Saturated, trep.Saturated...)
+		if trep.Skipped != "" {
+			rep.Skipped = append(rep.Skipped, fmt.Sprintf("%s: %s", traj.ID, trep.Skipped))
+		}
 	}
 
 	// Gate on the frozen snapshot — the current experiment's own
@@ -434,7 +449,7 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 	// Every paired comparison adds baseline samples as a byproduct —
 	// recompute characterization state after gating so the frozen
 	// snapshot stays clean for the coincidence-detector role.
-	if err := r.RecomputeAll(bands, corpus); err != nil {
+	if err := r.RecomputeAll(bands, corpus, manifest, exp.Model); err != nil {
 		slog.Warn("Failed to recompute bands", "error", err)
 	}
 	if err := bands.Save(r.EvalDir); err != nil {
@@ -448,6 +463,7 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 type trajReport struct {
 	Starved   []string
 	Saturated []string
+	Skipped   string
 }
 
 // runTrajectory samples one trajectory to N conclusive runs per arm,
@@ -456,6 +472,12 @@ type trajReport struct {
 // exchangeable for the permutation test.
 func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Trajectory, trajDir string, manifest *FlagsManifest, n int) trajReport {
 	rep := trajReport{}
+	if missing := CheckRequires(traj); len(missing) > 0 {
+		// Environment pre-flight: a missing tool is a skip-report,
+		// not an error outcome masquerading as flakiness.
+		rep.Skipped = strings.Join(missing, ",")
+		return rep
+	}
 	armNames := []string{"control", "treatment"}
 	maxAttempts := int(float64(n) * r.attemptsFactor())
 	conclusive := map[string]int{"control": 0, "treatment": 0}
@@ -510,8 +532,13 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 }
 
 // RecomputeAll rebuilds characterization state from accumulated run
-// records — bands are revised, never trusted from genesis.
-func (r *Runner) RecomputeAll(bands *Bands, corpus map[string]*Trajectory) error {
+// records — bands are revised, never trusted from genesis. model is
+// the current pin; the default-condition baseline key comes from the
+// manifest. Band assignment and the never_passed/suspect_check scans
+// read only that (model, key) pair — a stale model's deep baseline
+// must not hold a trajectory stable across a re-pin.
+func (r *Runner) RecomputeAll(bands *Bands, corpus map[string]*Trajectory, manifest *FlagsManifest, model string) error {
+	curKey := manifest.BaselineKey(nil)
 	for id := range corpus {
 		trajDir := filepath.Join(r.EvalDir, "corpus", id)
 		hash, err := ContentHash(trajDir)
@@ -522,7 +549,7 @@ func (r *Runner) RecomputeAll(bands *Bands, corpus map[string]*Trajectory) error
 		if err != nil {
 			return err
 		}
-		bands.Recompute(id, records, hash, r.now())
+		bands.Recompute(id, records, hash, r.now(), model, curKey)
 	}
 	return nil
 }
@@ -552,6 +579,10 @@ func (r *Runner) Characterize(ctx context.Context, model string, temperature *fl
 	}
 	exp := &Experiment{Name: CharacterizeExperiment, Model: model, Temperature: temperature}
 	for _, traj := range trajs {
+		if missing := CheckRequires(traj); len(missing) > 0 {
+			slog.Warn("Skipping trajectory — unmet requires", "trajectory", traj.ID, "missing", missing)
+			continue
+		}
 		trajDir := filepath.Join(r.EvalDir, "corpus", traj.ID)
 		for i := range n {
 			rec, err := r.ExecuteRun(ctx, exp, traj, trajDir, "baseline", Arm{}, manifest, i+1)
@@ -564,7 +595,7 @@ func (r *Runner) Characterize(ctx context.Context, model string, temperature *fl
 			slog.Info("Characterize run", "trajectory", traj.ID, "outcome", rec.Outcome)
 		}
 	}
-	if err := r.RecomputeAll(bands, corpus); err != nil {
+	if err := r.RecomputeAll(bands, corpus, manifest, model); err != nil {
 		return err
 	}
 	return bands.Save(r.EvalDir)
@@ -598,6 +629,10 @@ func (r *Runner) Smoke(ctx context.Context, model string, temperature *float64, 
 	exp := &Experiment{Name: CharacterizeExperiment, Model: model, Temperature: temperature}
 	var alarms []string
 	for _, traj := range trajs {
+		if missing := CheckRequires(traj); len(missing) > 0 {
+			slog.Warn("Skipping trajectory — unmet requires", "trajectory", traj.ID, "missing", missing)
+			continue
+		}
 		trajDir := filepath.Join(r.EvalDir, "corpus", traj.ID)
 		passes := 0
 		for i := range n {
@@ -618,7 +653,7 @@ func (r *Runner) Smoke(ctx context.Context, model string, temperature *float64, 
 			alarms = append(alarms, traj.ID)
 		}
 	}
-	if err := r.RecomputeAll(bands, corpus); err != nil {
+	if err := r.RecomputeAll(bands, corpus, manifest, model); err != nil {
 		return alarms, err
 	}
 	return alarms, bands.Save(r.EvalDir)
@@ -642,6 +677,10 @@ func (r *Runner) QuarantineCorpus(ctx context.Context, selectors []string) (map[
 	}
 	verdicts := map[string]QuarantineReason{}
 	for _, traj := range trajs {
+		if missing := CheckRequires(traj); len(missing) > 0 {
+			slog.Warn("Skipping quarantine — unmet requires", "trajectory", traj.ID, "missing", missing)
+			continue
+		}
 		trajDir := filepath.Join(r.EvalDir, "corpus", traj.ID)
 		reason, err := r.Quarantine(ctx, traj, trajDir)
 		if err != nil {

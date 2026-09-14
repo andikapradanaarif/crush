@@ -499,6 +499,21 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 
 		case <-ctx.Done():
 			stopSpinner()
+			// Give the in-flight run a beat to surface whatever error
+			// it was hitting when the cancellation landed — the eval
+			// harness distinguishes "timed out while erroring" from a
+			// clean timeout through this telemetry.
+			select {
+			case result := <-done:
+				app.emitEvalTelemetry(sess.ID, result.result, result.err)
+				if result.err != nil &&
+					!errors.Is(result.err, context.Canceled) &&
+					!errors.Is(result.err, agent.ErrRequestCancelled) {
+					return fmt.Errorf("agent processing failed: %w", result.err)
+				}
+			case <-time.After(2 * time.Second):
+				app.emitEvalTelemetry(sess.ID, nil, ctx.Err())
+			}
 			return ctx.Err()
 		}
 	}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestExampleCorpus_QuarantineClean(t *testing.T) {
@@ -20,5 +22,7 @@ func TestExampleCorpus_QuarantineClean(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("quarantine verdict: %q", reason)
+	// A rotted seed must fail CI, not just log — caveat: its declared
+	// requires.tools only pre-flight on machines that have them.
+	require.Empty(t, reason, "seeded trajectory quarantined: %s", reason)
 }

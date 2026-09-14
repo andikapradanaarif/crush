@@ -58,6 +58,17 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 	if m, ok := app.config.Config().Models[config.SelectedModelTypeLarge]; ok {
 		doc["model"] = m.Provider + "/" + m.Model
 	}
+	// The pin covers only the large slot — small/summary resolve from
+	// ambient config. Record what they resolved to so a compaction-
+	// flag experiment can audit which summarizer actually ran.
+	for _, slot := range []config.SelectedModelType{
+		config.SelectedModelTypeSmall,
+		config.SelectedModelTypeSummary,
+	} {
+		if m, ok := app.config.Config().Models[slot]; ok {
+			doc["model_"+string(slot)] = m.Provider + "/" + m.Model
+		}
+	}
 	if runErr != nil {
 		doc["error"] = runErr.Error()
 	}

@@ -198,7 +198,13 @@ func (b *Bands) Baseline(id, model, baselineKey string) BaselineCounts {
 // discarded (a check fix invalidates the old scoring function).
 // baselineKey selects which effective-config condition the run counted
 // toward; each record carries its own baseline_key.
-func (b *Bands) Recompute(id string, records []RunRecord, contentHash string, now time.Time) {
+//
+// curModel/curKey name the current default condition — the model pin
+// plus the manifest-default baseline key. Band assignment and the
+// diagnostic scans read only that key: a stale model's deep baseline
+// must not keep a trajectory stable after a re-pin, and a fixed check
+// must not be re-quarantined by its own pre-fix failures.
+func (b *Bands) Recompute(id string, records []RunRecord, contentHash string, now time.Time, curModel, curKey string) {
 	e := b.Entry(id)
 	// Put via closure: defer evaluates arguments immediately, so
 	// defer b.Put(id, *e) would snapshot the pre-Recompute entry.
@@ -268,23 +274,38 @@ func (b *Bands) Recompute(id string, records []RunRecord, contentHash string, no
 		}
 	}
 
-	b.assignBand(e, records)
+	b.assignBand(e, records, contentHash, curModel, curKey)
 	e.LastCharacterized = now.Format("2006-01-02")
 }
 
 // assignBand classifies the trajectory from its recomputed state,
 // applying hysteresis: demote on one bad characterization, promote on
 // two consecutive good ones.
-func (b *Bands) assignBand(e *BandEntry, records []RunRecord) {
+func (b *Bands) assignBand(e *BandEntry, records []RunRecord, contentHash, curModel, curKey string) {
+	// Diagnostics and banding read only the current default
+	// condition's records: trailing counts are per baseline key, and
+	// samples scored under a different corpus revision or condition
+	// are a different trajectory's data.
+	var current []RunRecord
+	for _, r := range records {
+		if r.Env.ModelResolved != curModel || r.BaselineKey != curKey {
+			continue
+		}
+		if r.Env.ContentHash != "" && r.Env.ContentHash != contentHash {
+			continue
+		}
+		current = append(current, r)
+	}
+	sort.Slice(current, func(i, j int) bool { return current[i].StartedAt.After(current[j].StartedAt) })
+
 	// never_passed: zero passes in the trailing NeverPassedFails
-	// conclusive runs. A trajectory with lifetime passes hitting the
-	// same streak is rot, not beyond-model — that routes through
-	// suspect_check/environment alarms, not here.
+	// conclusive runs under this condition. A trajectory with
+	// lifetime passes hitting the same streak is rot, not
+	// beyond-model — that routes through suspect_check/environment
+	// alarms, not here.
 	consecFails := 0
 	everPassed := false
-	ordered := append([]RunRecord(nil), records...)
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].StartedAt.After(ordered[j].StartedAt) })
-	for _, r := range ordered {
+	for _, r := range current {
 		if !r.Outcome.Conclusive() {
 			continue
 		}
@@ -303,22 +324,19 @@ func (b *Bands) assignBand(e *BandEntry, records []RunRecord) {
 	// suspect_check: quarantine exercises agent-free states, so a
 	// check flaky only on agent-produced states (port binding, races)
 	// passes quarantine then masquerades as mid band. Consecutive
-	// within-arm pass/fail alternation is the empirical net.
-	if suspectCheck(ordered) {
+	// within-arm pass/fail alternation is the empirical net — arms
+	// run interleaved, so the scan must split by arm or a real
+	// treatment effect (P,F,P,F…) reads as flakiness.
+	if suspectCheck(current) {
 		e.Band = BandQuarantined
 		e.QuarantineReason = ReasonSuspectCheck
 		return
 	}
 
-	// Band reads the baseline under the current default condition —
-	// the key with the most samples is the characterization driver.
+	// Band reads the baseline under the current default condition.
 	best := BaselineCounts{}
-	for _, byCfg := range e.Baselines {
-		for _, c := range byCfg {
-			if c.N > best.N {
-				best = c
-			}
-		}
+	if byCfg, ok := e.Baselines[curModel]; ok {
+		best = byCfg[curKey]
 	}
 
 	good := best.N >= StableMinN && best.PHat() >= StablePHatFloor
@@ -353,25 +371,34 @@ func bandFor(c BaselineCounts) Band {
 	return BandMid // Stable additionally requires the promotion streak.
 }
 
-// suspectCheck reports whether the conclusive sequence alternates
-// pass/fail more than any stable check should — a runs-style heuristic:
-// ≥8 conclusive samples with alternation rate above 0.7 flags the
-// check rather than letting the noise absorb into p̂.
+// suspectCheck reports whether any arm's conclusive sequence
+// alternates pass/fail more than a real check should — a runs-style
+// heuristic: ≥8 conclusive samples within one arm with alternation
+// rate above 0.7 flags the check rather than letting the noise absorb
+// into p̂. Splitting by arm is load-bearing: arms interleave in time,
+// so a genuine treatment effect (control passes, treatment fails every
+// round) alternates perfectly in the pooled stream while each arm is
+// individually constant.
 func suspectCheck(orderedDesc []RunRecord) bool {
-	var outcomes []Outcome
+	byArm := map[string][]Outcome{}
 	for _, r := range orderedDesc {
 		if r.Outcome == OutcomePass || r.Outcome == OutcomeFail {
-			outcomes = append(outcomes, r.Outcome)
+			byArm[r.Arm] = append(byArm[r.Arm], r.Outcome)
 		}
 	}
-	if len(outcomes) < 8 {
-		return false
-	}
-	alternations := 0
-	for i := 1; i < len(outcomes); i++ {
-		if outcomes[i] != outcomes[i-1] {
-			alternations++
+	for _, outcomes := range byArm {
+		if len(outcomes) < 8 {
+			continue
+		}
+		alternations := 0
+		for i := 1; i < len(outcomes); i++ {
+			if outcomes[i] != outcomes[i-1] {
+				alternations++
+			}
+		}
+		if float64(alternations)/float64(len(outcomes)-1) > 0.7 {
+			return true
 		}
 	}
-	return float64(alternations)/float64(len(outcomes)-1) > 0.7
+	return false
 }

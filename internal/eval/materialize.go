@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -89,14 +90,15 @@ func ApplyPatch(ctx context.Context, workdir, patchPath string) error {
 // directory precedence order, so it overrides anything a fixture or
 // cloned repo carries). Options go to .crush.json: the `option`
 // builtin's key set is closed and flags without a builtin path
-// (notebook_*) can only be expressed in JSON. Per-key merge means a
-// start-state shell config would shadow same-named JSON keys — so a
-// materialized workdir that already carries crush config is a
-// validation error, not a silent override.
+// (notebook_*) can only be expressed in JSON. Collision is per-key:
+// a start-state shell config (.crushrc/crushrc) would shadow the JSON
+// arm's same-named keys — an error. A start-state .crush.json merges
+// with the arm options winning; crush.json is lower precedence than
+// .crush.json outright, so it never shadows.
 func WriteArmConfig(workdir string, exp *Experiment, arm Arm) error {
-	for _, name := range []string{".crushrc", "crushrc", ".crush.json", "crush.json"} {
+	for _, name := range []string{".crushrc", "crushrc"} {
 		if fileExists(filepath.Join(workdir, name)) {
-			return fmt.Errorf("workdir already carries %s — arm config would collide; fixtures must not ship crush config", name)
+			return fmt.Errorf("workdir already carries %s — a shell config shadows the .crush.json arm; fixtures must not ship crush shell config", name)
 		}
 	}
 
@@ -124,14 +126,57 @@ func WriteArmConfig(workdir string, exp *Experiment, arm Arm) error {
 		options[k] = v
 	}
 	doc := map[string]any{"options": options}
+	// A start-state .crush.json merges under the arm: the fixture's
+	// keys survive, the arm's win — same per-key rule the loader
+	// applies across config layers.
+	jsonPath := filepath.Join(workdir, ".crush.json")
+	if fileExists(jsonPath) {
+		var existing map[string]any
+		if raw, err := os.ReadFile(jsonPath); err == nil && json.Unmarshal(raw, &existing) == nil {
+			if opts, ok := existing["options"].(map[string]any); ok {
+				for k, v := range options {
+					opts[k] = v
+				}
+				existing["options"] = opts
+				doc = existing
+			}
+		}
+	}
 	data, err := json.MarshalIndent(doc, "", "\t")
 	if err != nil {
 		return fmt.Errorf("marshal arm config: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(workdir, ".crush.json"), data, 0o644); err != nil {
+	if err := os.WriteFile(jsonPath, data, 0o644); err != nil {
 		return fmt.Errorf("write .crush.json: %w", err)
 	}
 	return nil
+}
+
+// CheckRequires reports which declared environment preconditions this
+// machine can't honor — the pre-flight half of `requires`. A missing
+// `go` or `jq` must surface as a skip-report, not as check `error`
+// outcomes masquerading as flakiness. `network` has no cheap probe;
+// its constraint is enforced at load (local-path git rules), not here.
+func CheckRequires(t *Trajectory) []string {
+	var missing []string
+	for _, tool := range append(t.Requires.Tools, t.Requires.LSP...) {
+		if _, err := exec.LookPath(tool); err != nil {
+			missing = append(missing, "tool:"+tool)
+		}
+	}
+	if len(t.Requires.OS) > 0 {
+		ok := false
+		for _, osname := range t.Requires.OS {
+			if osname == runtime.GOOS {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			missing = append(missing, "os:"+runtime.GOOS)
+		}
+	}
+	return missing
 }
 
 // BaselineConfigHash keys a baseline by the run's effective config over

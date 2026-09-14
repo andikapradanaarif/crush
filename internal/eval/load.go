@@ -61,6 +61,12 @@ func ValidateTrajectory(t *Trajectory, trajDir string) []string {
 		if t.Origin.Kind == "production" && (t.Origin.Scrubbed == nil || !*t.Origin.Scrubbed) {
 			problems = append(problems, "origin.scrubbed must be true for production trajectories")
 		}
+		// A regression sourced from a real session or bug report
+		// carries the same scrubbing requirement as production.
+		realSource := strings.HasPrefix(t.Origin.Source, "session:") || strings.HasPrefix(t.Origin.Source, "bug:")
+		if t.Origin.Kind == "regression" && realSource && (t.Origin.Scrubbed == nil || !*t.Origin.Scrubbed) {
+			problems = append(problems, "origin.scrubbed must be true for regression trajectories sourced from a real session or bug report (session:/bug:) ")
+		}
 	case "":
 		problems = append(problems, "origin.kind is required")
 	default:

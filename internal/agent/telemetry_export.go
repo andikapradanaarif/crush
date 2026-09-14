@@ -1,5 +1,12 @@
 package agent
 
+import (
+	"os"
+	"strconv"
+
+	"charm.land/fantasy"
+)
+
 // SessionTelemetry is the per-session counter snapshot the eval
 // harness records into run records — the stub-track and
 // notebook-recall splits that a flat count can't express.
@@ -37,4 +44,20 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 		t.CrossRecalls = n.CrossRecalls
 	}
 	return t
+}
+
+// EvalMaxStepsEnvVar caps a single run's steps when the eval harness
+// is driving — the run-side enforcement of the trajectory-wide
+// max_steps budget. The driver passes the remaining budget (plus one)
+// per turn; kept in sync with internal/eval.EvalMaxStepsEnvVar.
+const EvalMaxStepsEnvVar = "CRUSH_EVAL_MAX_STEPS"
+
+// evalStepCaps returns the eval step cap as a StopCondition, or nil
+// when the harness isn't driving this process.
+func evalStepCaps() []fantasy.StopCondition {
+	n, err := strconv.Atoi(os.Getenv(EvalMaxStepsEnvVar))
+	if err != nil || n <= 0 {
+		return nil
+	}
+	return []fantasy.StopCondition{fantasy.StepCountIs(n)}
 }

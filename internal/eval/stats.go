@@ -108,25 +108,3 @@ func rate(s []bool) float64 {
 	}
 	return float64(n) / float64(len(s))
 }
-
-// BinomialAtLeast returns P(X ≥ k) for X ~ Binomial(n, p).
-func BinomialAtLeast(n, k int, p float64) float64 {
-	var sum float64
-	for i := k; i <= n; i++ {
-		sum += binomFloat(n, i) * pow(p, i) * pow(1-p, n-i)
-	}
-	return sum
-}
-
-func binomFloat(n, k int) float64 {
-	f, _ := new(big.Float).SetInt(binom(n, k)).Float64()
-	return f
-}
-
-func pow(x float64, n int) float64 {
-	r := 1.0
-	for range n {
-		r *= x
-	}
-	return r
-}

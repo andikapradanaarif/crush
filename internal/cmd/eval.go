@@ -41,6 +41,7 @@ trajectory until the check is fixed and re-validated.`,
 		if err != nil {
 			return err
 		}
+		defer r.Close()
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer cancel()
 
@@ -74,6 +75,7 @@ var evalCharacterizeCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		defer r.Close()
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer cancel()
 		sel := args
@@ -99,6 +101,7 @@ var evalRunCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		defer r.Close()
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer cancel()
 
@@ -125,6 +128,7 @@ var evalSmokeCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		defer r.Close()
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer cancel()
 
@@ -153,5 +157,7 @@ func init() {
 	evalSmokeCmd.Flags().IntP("runs", "n", 5, "runs per stable trajectory")
 	evalSmokeCmd.Flags().StringP("model", "m", "", "model pin (provider/model)")
 	evalSmokeCmd.Flags().Float64("temperature", 0, "sampling temperature")
+	_ = evalCharacterizeCmd.MarkFlagRequired("model")
+	_ = evalSmokeCmd.MarkFlagRequired("model")
 	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd)
 }

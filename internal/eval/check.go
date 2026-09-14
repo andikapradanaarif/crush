@@ -78,19 +78,22 @@ func RunCheck(ctx context.Context, traj *Trajectory, trajDir, workdir string) Ch
 }
 
 // parseEvalJSON returns the last EVAL_JSON {...} line's object. A
-// malformed line never changes the verdict; it just leaves Detail nil.
-// Trailing output may follow the matching line.
+// malformed line never changes the verdict; it just leaves Detail nil
+// — a malformed *final* match does not fall back to an earlier
+// parseable one. Trailing output may follow the matching line.
 func parseEvalJSON(stdout string) map[string]any {
-	var detail map[string]any
+	var last string
 	for line := range strings.Lines(stdout) {
-		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "EVAL_JSON ")
-		if !ok {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(rest), &m); err == nil {
-			detail = m
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "EVAL_JSON "); ok {
+			last = rest
 		}
 	}
-	return detail
+	if last == "" {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(last), &m); err != nil {
+		return nil
+	}
+	return m
 }

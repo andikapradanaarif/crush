@@ -2,6 +2,7 @@ package eval
 
 import (
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"sort"
 	"strings"
@@ -34,8 +35,14 @@ type Report struct {
 	Saturated []string
 	// Smoke lists stable-band trajectories showing the strict 0/N
 	// collapse pattern — used by the smoke tier, which must work
-	// where baselines are thin.
+	// where baselines are thin. In a normal experiment report it is
+	// still a gate: an ineligible trajectory collapsing to 0/N is the
+	// detector working, not a false alarm (p̂≈0.9 → P(0/3|null)≈1e-3).
 	Smoke []string
+	// Skipped lists trajectories the requires pre-flight rejected
+	// ("id: tool:go os:linux") — environment rot made explicit
+	// instead of surfacing as error outcomes.
+	Skipped []string
 }
 
 // Fired reports whether any alarm tripped.
@@ -57,6 +64,9 @@ func (r Report) Summary(alpha float64) string {
 	fire("coverage-starved", r.Starved)
 	fire("error-saturated", r.Saturated)
 	fire("smoke", r.Smoke)
+	if len(r.Skipped) > 0 {
+		fmt.Fprintf(&b, "  SKIP requires-unmet: %s\n", strings.Join(r.Skipped, ", "))
+	}
 	fmt.Fprintf(&b, "  diffuse p = %.4g (alpha %.3g)\n", r.DiffuseP, alpha)
 	if !r.Fired() && r.DiffuseP >= alpha {
 		b.WriteString("  verdict: PASS\n")
@@ -85,7 +95,7 @@ func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRe
 	corrAlpha := alpha / float64(stable) // Bonferroni over the FULL stable band.
 
 	var diffusePairs []ArmPair
-	var exclTraj, exclTests []string
+	var exclTraj []string
 	var exclP []float64
 
 	for id, recs := range byTraj {
@@ -98,7 +108,22 @@ func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRe
 			if n == 0 {
 				continue
 			}
-			base := bands.Baseline(id, exp.Model, baselineKey)
+			// Baselines are keyed on the resolved model observed in
+			// the runs, not the experiment's spelling — an alias or
+			// normalization difference must not silently darken the
+			// catastrophic tier. Warn on divergence.
+			model := exp.Model
+			for _, rec := range recs {
+				if rec.Env.ModelResolved != "" {
+					model = rec.Env.ModelResolved
+					break
+				}
+			}
+			if model != exp.Model {
+				slog.Warn("Resolved model differs from experiment pin; baselines keyed on resolved",
+					"trajectory", id, "resolved", model, "pin", exp.Model)
+			}
+			base := bands.Baseline(id, model, baselineKey)
 			baseFails := base.N - base.Passes
 			// Eligibility is computed, not a fixed n: the trajectory
 			// qualifies when a 0/N result would reach corrected
@@ -133,7 +158,6 @@ func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRe
 		et, ec, tt, tc := excludedCounts(recs)
 		if tt+tc > 0 {
 			exclTraj = append(exclTraj, id)
-			exclTests = append(exclTests, id)
 			exclP = append(exclP, FisherExactCollapse(et, tt, ec, tc))
 		}
 	}
@@ -143,8 +167,8 @@ func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRe
 	}
 
 	// Third family: Bonferroni over the trajectories actually tested.
-	if len(exclTests) > 0 {
-		corr := alpha / float64(len(exclTests))
+	if len(exclTraj) > 0 {
+		corr := alpha / float64(len(exclTraj))
 		for i, p := range exclP {
 			if p < corr {
 				rep.ExcludedDifferential = append(rep.ExcludedDifferential, exclTraj[i])
