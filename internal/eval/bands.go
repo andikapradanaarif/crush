@@ -263,6 +263,13 @@ func (b *Bands) Recompute(id string, records []RunRecord, contentHash string, no
 		if r.Env.ContentHash != "" && r.Env.ContentHash != contentHash {
 			continue
 		}
+		if r.Env.ModelResolved == "" {
+			// Telemetry-less records (pre-field, crashed pre-emission)
+			// keep intent keys under an empty model — accumulating
+			// them litters bands.json with Baselines[""] cells that
+			// nothing joins. Still valid outcomes elsewhere.
+			continue
+		}
 		k := key{r.Env.ModelResolved, r.BaselineKey}
 		grouped[k] = append(grouped[k], r)
 	}

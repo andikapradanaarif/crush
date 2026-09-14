@@ -122,6 +122,13 @@ func (c CrushRunner) Run(ctx context.Context, workdir string, turns []string, bu
 
 	var sessionID string
 	for i, turn := range turns {
+		// A multi-turn trajectory must continue the SAME session —
+		// launching turn i+1 without --session silently degrades to a
+		// fresh session and the check may still pass.
+		if i > 0 && sessionID == "" {
+			res.Err = fmt.Errorf("turn %d: session continuation lost — turn %d's telemetry had no session_id", i+1, i)
+			return res
+		}
 		if budget.MaxSteps > 0 && res.Steps >= budget.MaxSteps {
 			// Trajectory-wide budget already consumed — don't launch
 			// the next turn at all.
@@ -158,7 +165,7 @@ func (c CrushRunner) Run(ctx context.Context, workdir string, turns []string, bu
 		cmd.Env = c.subprocessEnv(tfile, remainingSteps(budget, res.Steps))
 		out, err := cmd.CombinedOutput()
 
-		tel, _ := readTelemetry(tfile)
+		tel, telErr := readTelemetry(tfile)
 		_ = os.Remove(tfile)
 		res.Steps += tel.Steps
 		res.Tokens.Input += tel.Tokens.Input
@@ -212,6 +219,13 @@ func (c CrushRunner) Run(ctx context.Context, workdir string, turns []string, bu
 		}
 		if err != nil {
 			res.Err = fmt.Errorf("crush run failed: %w: %s", err, tail(out, 4096))
+			return res
+		}
+		if telErr != nil {
+			// The child exited clean but the telemetry contract broke
+			// — zeroed stats would read as coverage-starved
+			// inconclusive instead of the error this is.
+			res.Err = fmt.Errorf("telemetry unreadable after clean run: %w", telErr)
 			return res
 		}
 		if tel.Error != "" {

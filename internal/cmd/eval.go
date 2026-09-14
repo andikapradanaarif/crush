@@ -3,8 +3,10 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -55,7 +57,8 @@ trajectory until the check is fixed and re-validated.`,
 		if err != nil {
 			return err
 		}
-		for id, reason := range verdicts {
+		for _, id := range slices.Sorted(maps.Keys(verdicts)) {
+			reason := verdicts[id]
 			switch {
 			case reason == "":
 				fmt.Printf("%s: clean\n", id)

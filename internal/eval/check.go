@@ -45,6 +45,11 @@ func RunCheck(ctx context.Context, traj *Trajectory, trajDir, workdir string, en
 
 	script := filepath.Join(trajDir, traj.Check.Script)
 	cmd := exec.CommandContext(ctx, "bash", script)
+	// Kill the whole process group — a timed-out check's children
+	// (go run, spawned servers, bound ports) must not outlive the
+	// workdir and poison later runs.
+	checkProcAttr(cmd)
+	cmd.Cancel = func() error { return killCheckGroup(cmd) }
 	cmd.Dir = workdir
 	if env == nil {
 		env = os.Environ()
@@ -73,8 +78,15 @@ func RunCheck(ctx context.Context, traj *Trajectory, trajDir, workdir string, en
 	res.Stderr = stderr.String()
 	res.Detail = parseEvalJSON(res.Stdout)
 
-	if ctx.Err() == context.DeadlineExceeded {
-		res.Err = fmt.Errorf("check timed out after %s", timeout)
+	if ctx.Err() != nil {
+		// Any context-done is a harness error — timeout or parent
+		// cancel. A killed check's ExitError is not a model outcome;
+		// recording it as `fail` would pollute baselines.
+		if ctx.Err() == context.DeadlineExceeded {
+			res.Err = fmt.Errorf("check timed out after %s", timeout)
+		} else {
+			res.Err = fmt.Errorf("check interrupted: %w", ctx.Err())
+		}
 		return res
 	}
 	if err != nil {

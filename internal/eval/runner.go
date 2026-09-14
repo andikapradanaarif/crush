@@ -767,6 +767,10 @@ func (r *Runner) Smoke(ctx context.Context, model string, temperature *float64, 
 		// trajectories checked is a confidence hole, not a pass.
 		return nil, fmt.Errorf("no stable-band trajectories to smoke — run characterize first")
 	}
+	if dropped := len(corpus) - len(trajs); dropped > 0 {
+		slog.Warn("Smoke covers a shrunken corpus — corpus-size drop is an environment-rot signal",
+			"stable", len(trajs), "corpus", len(corpus))
+	}
 	if n <= 0 {
 		n = 5
 	}
