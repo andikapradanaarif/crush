@@ -215,6 +215,11 @@ outcome either way).
   harness broke. Infra errors never count against the model.
 - Checks must be deterministic and hermetic. `check.timeout_seconds`
   bounds them; a timed-out check is an `error`, not a `fail`.
+- The tree contains the arm's generated config — `.crushrc` (model
+  pin) and `.crush.json` (options delta) are harness materialization,
+  identical modulo arm options and part of the run's environment, not
+  the agent's output. A `git status --porcelain`-style tree-equality
+  check must ignore them (`.crush/` data lives outside the tree).
 
 The two-directional validity rule: for `expect_start_state: "fail"`,
 the check MUST fail on unmodified start state and MUST pass on

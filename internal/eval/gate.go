@@ -147,6 +147,22 @@ func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRe
 			pMin := FisherExactCollapse(n, n, baseFails, base.N)
 			eligible := pMin < corrAlpha
 			rep.CatastrophicEligible[id] = eligible
+			// Coincidence detector: a control arm that collapses
+			// against the same baseline signals trajectory rot or
+			// model drift — alarming regardless of the treatment
+			// outcome, and it disqualifies the catastrophic verdict
+			// (the collapse isn't attributable to the flag).
+			ctrlFails := 0
+			for _, ok := range ctrl {
+				if !ok {
+					ctrlFails++
+				}
+			}
+			ctrlCollapsed := len(ctrl) > 0 && base.N > 0 &&
+				FisherExactCollapse(ctrlFails, len(ctrl), baseFails, base.N) < corrAlpha
+			if ctrlCollapsed {
+				rep.Coincident = append(rep.Coincident, fmt.Sprintf("%s (control %d/%d vs baseline %d/%d)", id, len(ctrl)-ctrlFails, len(ctrl), base.Passes, base.N))
+			}
 			if eligible {
 				fails := 0
 				for _, ok := range treat {
@@ -154,21 +170,8 @@ func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRe
 						fails++
 					}
 				}
-				if p := FisherExactCollapse(fails, n, baseFails, base.N); p < corrAlpha {
-					// Coincidence detector: if the control arm also
-					// collapsed against the same baseline, suspect
-					// trajectory rot or model drift — not the flag.
-					ctrlFails := 0
-					for _, ok := range ctrl {
-						if !ok {
-							ctrlFails++
-						}
-					}
-					if len(ctrl) > 0 && FisherExactCollapse(ctrlFails, len(ctrl), baseFails, base.N) < corrAlpha {
-						rep.Coincident = append(rep.Coincident, fmt.Sprintf("%s (control %d/%d also vs baseline %d/%d)", id, len(ctrl)-ctrlFails, len(ctrl), base.Passes, base.N))
-					} else {
-						rep.Catastrophic = append(rep.Catastrophic, fmt.Sprintf("%s (%d/%d vs baseline %d/%d, p=%.2g)", id, n-fails, n, base.Passes, base.N, p))
-					}
+				if p := FisherExactCollapse(fails, n, baseFails, base.N); p < corrAlpha && !ctrlCollapsed {
+					rep.Catastrophic = append(rep.Catastrophic, fmt.Sprintf("%s (%d/%d vs baseline %d/%d, p=%.2g)", id, n-fails, n, base.Passes, base.N, p))
 				}
 			}
 			// Smoke pattern: strict 0/N, no baseline required.

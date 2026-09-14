@@ -139,7 +139,7 @@ func (r *Runner) Quarantine(ctx context.Context, traj *Trajectory, trajDir strin
 	// check runs the check n times against a materialization and
 	// reports whether results were consistent and what they said.
 	check := func(patch string) (allPass, allFail bool, err error) {
-		wd, err := Materialize(ctx, traj, trajDir, r.workParent())
+		wd, err := Materialize(ctx, traj, trajDir, r.workParent(), r.checkEnv())
 		if err != nil {
 			return false, false, err
 		}
@@ -235,12 +235,14 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	rec.Env.ContentHash = contentHash
 	rec.BaselineKey = manifest.BaselineKey(arm.Config.Options)
 
-	workdir, err := Materialize(ctx, traj, trajDir, r.workParent())
+	workdir, err := Materialize(ctx, traj, trajDir, r.workParent(), r.checkEnv())
 	if err != nil {
 		rec.Outcome = OutcomeError
 		return rec, nil
 	}
+	// The data dir is a sibling, not inside the workdir — clean both.
 	defer os.RemoveAll(workdir)
+	defer os.RemoveAll(DataDirFor(workdir))
 
 	if err := WriteArmConfig(workdir, exp, arm); err != nil {
 		rec.Outcome = OutcomeError
@@ -420,6 +422,11 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 	if err != nil {
 		return Report{}, err
 	}
+	if len(trajs) == 0 {
+		// Fail closed: an empty selection must not reach the gate —
+		// a verdict over zero trajectories is a PASS on nothing.
+		return Report{}, fmt.Errorf("corpus selection %v matched no runnable trajectories", exp.Corpus)
+	}
 
 	baselineKey := manifest.BaselineKey(exp.Arms["control"].Config.Options)
 	// Invocation scopes this call's records: re-running an experiment
@@ -540,7 +547,7 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 			rec, err := r.ExecuteRun(ctx, exp, traj, trajDir, armName, exp.Arms[armName], manifest, attempts[armName], inv)
 			if err != nil {
 				slog.Warn("Run harness failed", "trajectory", traj.ID, "arm", armName, "error", err)
-				rec = RunRecord{Experiment: exp.Name, TrajectoryID: traj.ID, Arm: armName, Outcome: OutcomeError}
+				rec = RunRecord{Experiment: exp.Name, TrajectoryID: traj.ID, Arm: armName, Invocation: inv, Outcome: OutcomeError}
 				rec.RunIndex = attempts[armName]
 			}
 			if err := r.appendRecord(rec); err != nil {

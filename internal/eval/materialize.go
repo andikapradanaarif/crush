@@ -17,7 +17,10 @@ import (
 // Materialize builds a fresh workdir for a run inside parentDir and
 // returns its path. Every run gets a new tempdir — never the corpus or
 // the real repo.
-func Materialize(ctx context.Context, traj *Trajectory, trajDir, parentDir string) (string, error) {
+// env supplies the setup commands' environment — pass the runner's
+// pinned env so e.g. `go mod download` populates the pinned module
+// cache, not the operator's real HOME.
+func Materialize(ctx context.Context, traj *Trajectory, trajDir, parentDir string, env []string) (string, error) {
 	workdir, err := os.MkdirTemp(parentDir, "eval-run-*")
 	if err != nil {
 		return "", fmt.Errorf("create workdir: %w", err)
@@ -38,7 +41,7 @@ func Materialize(ctx context.Context, traj *Trajectory, trajDir, parentDir strin
 	}
 
 	for _, cmdLine := range traj.StartState.Setup {
-		if err := runShell(ctx, workdir, cmdLine); err != nil {
+		if err := runShell(ctx, workdir, cmdLine, env); err != nil {
 			return "", fmt.Errorf("setup %q: %w", cmdLine, err)
 		}
 	}
@@ -212,10 +215,12 @@ func BaselineConfigHash(projection []string, effective map[string]any) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-// runShell executes a setup command in the workdir via bash.
-func runShell(ctx context.Context, dir, cmdLine string) error {
+// runShell executes a setup command in the workdir via bash under
+// the pinned eval environment (nil env inherits os.Environ).
+func runShell(ctx context.Context, dir, cmdLine string, env []string) error {
 	cmd := exec.CommandContext(ctx, "bash", "-c", cmdLine)
 	cmd.Dir = dir
+	cmd.Env = env
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%w: %s", err, out)
 	}
