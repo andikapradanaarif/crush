@@ -440,6 +440,16 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 		return rep, fmt.Errorf("all %d runnable trajectories skipped requires pre-flight: %s",
 			runnable, strings.Join(rep.Skipped, "; "))
 	}
+	// A selection whose bands are all absent from runs_per_trajectory
+	// schedules nothing — a config error, not a clean gate.
+	if len(trajs) > 0 && runnable == 0 {
+		return rep, fmt.Errorf("no selected trajectory's band is covered by runs_per_trajectory")
+	}
+	// Cancellation aborts cleanly — don't evaluate the gate on a
+	// partial record set and print a misleading verdict.
+	if err := ctx.Err(); err != nil {
+		return rep, err
+	}
 
 	// Gate on the frozen snapshot — the current experiment's own
 	// control arm is excluded from baselines automatically because

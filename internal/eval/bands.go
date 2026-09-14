@@ -282,18 +282,6 @@ func (b *Bands) Recompute(id string, records []RunRecord, contentHash string, no
 // applying hysteresis: demote on one bad characterization, promote on
 // two consecutive good ones.
 func (b *Bands) assignBand(e *BandEntry, records []RunRecord, contentHash, curModel, curKey string) {
-	// revision = all records scored under the current corpus hash —
-	// suspect_check scans this whole set (a flaky check is a script
-	// property, not a per-condition one).
-	var revision []RunRecord
-	for _, r := range records {
-		if r.Env.ContentHash != "" && r.Env.ContentHash != contentHash {
-			continue
-		}
-		revision = append(revision, r)
-	}
-	sort.Slice(revision, func(i, j int) bool { return revision[i].StartedAt.After(revision[j].StartedAt) })
-
 	// matchesPin reports whether a record was produced under the
 	// current pin: stamped pins compare exactly, so a re-pinned
 	// model's records never count toward the new pin's condition.
@@ -305,6 +293,24 @@ func (b *Bands) assignBand(e *BandEntry, records []RunRecord, contentHash, curMo
 		}
 		return r.Env.ModelResolved == curModel
 	}
+
+	// revision = current-pin records scored under the current corpus
+	// hash — suspect_check scans this whole set (a flaky check is a
+	// script property, not a per-condition one), but it must still be
+	// pin-filtered: characterize/smoke records share the "baseline"
+	// arm name across pins, so a re-pin boundary would interleave
+	// pass/fail into a false alternation.
+	var revision []RunRecord
+	for _, r := range records {
+		if r.Env.ContentHash != "" && r.Env.ContentHash != contentHash {
+			continue
+		}
+		if !matchesPin(r) {
+			continue
+		}
+		revision = append(revision, r)
+	}
+	sort.Slice(revision, func(i, j int) bool { return revision[i].StartedAt.After(revision[j].StartedAt) })
 
 	// effModel is the resolved spelling of the current pin — the
 	// baseline storage key — taken from the newest record produced
