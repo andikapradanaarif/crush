@@ -96,7 +96,7 @@ func (s *Service) Subtree(ctx context.Context, relPath string, maxTokens int) (s
 	}
 	pathRows.Close()
 	if len(paths) == 0 {
-		return fmt.Sprintf("No indexed files under %q.", relPath), nil
+		return fmt.Sprintf("No indexed files under %q.%s", relPath, s.indexingSuffix()), nil
 	}
 	s.refreshPaths(ctx, paths)
 
@@ -124,7 +124,11 @@ func (s *Service) Subtree(ctx context.Context, relPath string, maxTokens int) (s
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "Contents of %s/:\n", relPath)
+	if len(paths) == 1 && paths[0] == relPath {
+		fmt.Fprintf(&b, "File %s:\n", relPath)
+	} else {
+		fmt.Fprintf(&b, "Contents of %s/:\n", relPath)
+	}
 	for _, p := range paths {
 		fmt.Fprintf(&b, "\n%s\n", p)
 		writeTags(&b, byFile[p])
@@ -155,7 +159,7 @@ func (s *Service) Symbol(ctx context.Context, name string, maxTokens int) (strin
 		}
 	}
 	if len(defs) == 0 {
-		return fmt.Sprintf("No symbol named %q in the index.", name), nil
+		return fmt.Sprintf("No symbol named %q in the index.%s", name, s.indexingSuffix()), nil
 	}
 
 	var b strings.Builder
@@ -440,10 +444,25 @@ func capOutput(s string, maxTokens int) string {
 	if len(s) <= max {
 		return s
 	}
-	// Cut on a rune boundary so the output never ends mid-character.
+	// Back the cut off a truncated tail rune only — validating the
+	// whole prefix is O(cut²) and one bad byte anywhere would eat
+	// the output.
 	cut := max
-	for cut > 0 && !utf8.ValidString(s[:cut]) {
-		cut--
+	for cut > 0 {
+		r, size := utf8.DecodeLastRuneInString(s[:cut])
+		if r != utf8.RuneError || size > 1 {
+			break
+		}
+		cut -= size
 	}
 	return s[:cut] + "\n\n[Map truncated to stay within token budget]"
+}
+
+// indexingSuffix marks misses produced while a build is in flight —
+// a partial-build "not found" must not read as authoritative.
+func (s *Service) indexingSuffix() string {
+	if s.indexing.Load() {
+		return " (index still building — result may be incomplete; retry shortly or fall back to grep/glob)"
+	}
+	return ""
 }

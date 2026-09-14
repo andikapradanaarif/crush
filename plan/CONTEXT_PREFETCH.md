@@ -1,7 +1,8 @@
 # Context Prefetch — Persistent Project Index & `map` Tool
 
-> **Status:** Implemented (uncommitted, `feat/context-prefetch`
-> worktree). Part of a plan series — continuation: `SEMANTIC_INDEX.md`;
+> **Status:** Implemented — PR #34 on `feat/context-prefetch`
+> (plan doc committed in-branch for reviewers). Part of a plan
+> series — continuation: `SEMANTIC_INDEX.md`;
 > consumers: `HARNESS_TOPOLOGY.md` (edge evidence), `SESSION_KNOWLEDGE.md`
 > (session-hot ranking); gate: `EVAL_HARNESS.md`.
 >
@@ -155,10 +156,14 @@ imports still resolve.
 
 `.crush/` itself is excluded — `directoryLister.shouldIgnore` always
 skips a built-in dir set (`fastIgnoreDirs`: `.crush`, `.git`,
-`node_modules`, …) plus `commonIgnorePatterns` (`vendor`, build
-outputs, …) independent of the project's `.gitignore`, so the
-indexer never walks its own DB, session artifacts, or vendored
-deps even in a repo that doesn't ignore them. And `.crush/` self-protects in git too: Crush writes a
+`node_modules`, …) plus `commonIgnorePatterns` (`vendor`, `bin`,
+`build`, `dist`, `out`, `target`, lockfiles, …) independent of the
+project's `.gitignore`, so the indexer never walks its own DB,
+session artifacts, or vendored deps even in a repo that doesn't
+ignore them — and the skeleton's completeness claim carries that
+boundary. `web_fetch`'s `page-*.md` scratch files already land
+under `DataDirectory` (`crush-fetch-*` temp dirs), so they neither
+index nor pollute the tree. And `.crush/` self-protects in git too: Crush writes a
 generated `.gitignore` (`*` plus `!skills/` negations) into the
 data directory at startup, so `index.db` can't be committed by
 accident. Files in untagged
@@ -318,6 +323,36 @@ Fixed during review (kept as documentation of the failure shapes):
   symbols. (The tagger comment had always claimed this; the walker
   actually excluded them.) Lazy re-tag also no longer drops a file
   on a transient read error, matching walk semantics.
+- **Declaration regexes must prove declaration.** The JS/TS method
+  rule matched any indented `ident(...)` — call sites tagged as
+  definitions, the wrong-pointer failure this doc's constraints
+  exist to prevent. The rule now requires `{` after the arg list
+  (optional TS return type admitted, incl. `,`/space for generics);
+  control-flow names stay filtered via `jsKeywords`.
+- **Skeleton ranking can't join files × ref-targets.** The
+  in-degree query nested-looped every file against every distinct
+  `refs` dst with unindexable `substr` — O(F×D) on the single
+  connection. Now: `GROUP BY dst_path` counts into a Go map, then
+  each file sums its own plus ancestor-dir counts — O(F×depth).
+- **fastwalk callbacks are concurrent.** `collect`'s
+  `files = append(...)` raced across fastwalk worker goroutines —
+  caught by a mid-build race test, not by review. The `files`
+  slice is mutex-guarded; `FastGlobWalker`'s `csync` caches were
+  already safe.
+- **A miss during a build must not read as authoritative.**
+  `Symbol`/`Subtree` empty results now carry an "index still
+  building" suffix while `indexing` is set — the same
+  wrong-pointer-class bug as rendering stale rows, one level up.
+- **Import extraction needs block context.** Go string literals
+  outside `import (...)` blocks produced candidate refs; the Go
+  spec now gates import regexes on an in-block/`import`-line
+  state. Rust `use`'s last segment is an _item_, not a file —
+  `crate::a::b::Item` resolves by probing `src/a/b.rs` and
+  `src/a/b/mod.rs`, which is where virtually all `use` refs live.
+- **Write events must mirror the walk's filters.** `touchFile`
+  now re-checks `ShouldSkip` and rejects dirs/empty files, so a
+  tool write into `node_modules` or `.crush` can't upsert a row
+  the walk would never produce.
 
 Resolved since the first draft:
 

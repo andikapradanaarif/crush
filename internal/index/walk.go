@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charlievieth/fastwalk"
@@ -23,9 +24,10 @@ type walkedFile struct {
 
 // walk performs a full index pass: collects every candidate file,
 // drops rows for vanished files, and re-tags new or mtime-changed
-// files in a single transaction. Refs resolve against the complete
-// post-walk path set — imports pointing at files already walked still
-// resolve.
+// files. Commits happen in batches bounded by walkBatchSize and
+// walkBatchMax so queries can serve partial results during the build.
+// Refs resolve against the complete post-walk path set — imports
+// pointing at files already walked still resolve.
 func (s *Service) walk(ctx context.Context) error {
 	files, err := s.collect(ctx)
 	if err != nil {
@@ -48,7 +50,7 @@ func (s *Service) walk(ctx context.Context) error {
 		}
 		return knownDirs[p]
 	}
-	modulePath := readModulePath(s.root)
+	modulePath := s.modulePath()
 
 	// Reconcile: drop rows for files that vanished since last walk.
 	stored, err := s.storedFiles(ctx)
@@ -205,6 +207,7 @@ func (s *tagStmts) tag(ctx context.Context, path string, f walkedFile, now int64
 // the built-in list are skipped).
 func (s *Service) collect(ctx context.Context) ([]walkedFile, error) {
 	walker := fsext.NewFastGlobWalker(s.root)
+	var mu sync.Mutex // fastwalk invokes the callback from worker goroutines
 	var files []walkedFile
 	conf := fastwalk.Config{
 		Follow:  false,
@@ -235,11 +238,13 @@ func (s *Service) collect(ctx context.Context) ([]walkedFile, error) {
 		if err != nil {
 			return nil
 		}
+		mu.Lock()
 		files = append(files, walkedFile{
 			path:  filepath.ToSlash(rel),
 			mtime: info.ModTime().UnixNano(),
 			size:  info.Size(),
 		})
+		mu.Unlock()
 		return nil
 	})
 	// fastwalk surfaces our ctx-cancel SkipAll as an error, not a
@@ -300,7 +305,7 @@ func (s *Service) refreshIfStale(ctx context.Context, relPath string, currentMti
 		}
 		return s.knownDir(ctx, p)
 	}
-	tags, refs, err := tagFile(s.root, relPath, readModulePath(s.root), exists)
+	tags, refs, err := tagFile(s.root, relPath, s.modulePath(), exists)
 	if err != nil {
 		// Keep the stale row on a transient read failure, same as the
 		// walk's tagErr path — drops happen only when the file stat

@@ -39,6 +39,10 @@ type langSpec struct {
 	rules   []declRule
 	export  func(name, line string) bool
 	imports []*regexp.Regexp
+	// importsInBlock, when true, applies the import regexes only inside
+	// an `import ( ... )` block or on an `import` line — prevents bare
+	// string literals elsewhere from producing candidate refs (Go).
+	importsInBlock bool
 	// resolve maps an import specifier to a project-relative file or
 	// directory path. It returns "" when the specifier can't be
 	// resolved inside the project (external deps, stdlib).
@@ -74,7 +78,8 @@ var langByExt = map[string]langSpec{
 			regexp.MustCompile(`^\s*(?:\w+\s+)?"([^"]+)"`),
 			regexp.MustCompile(`^import\s+"([^"]+)"`),
 		},
-		resolve: resolveGoImport,
+		importsInBlock: true,
+		resolve:        resolveGoImport,
 	},
 	".py": {
 		rules: []declRule{
@@ -125,8 +130,10 @@ var jsSpec = langSpec{
 		{regexp.MustCompile(`^\s*(?:export\s+)?(?:interface|type|enum)\s+(\w+)`), "type"},
 		{regexp.MustCompile(`^\s*(?:export\s+)?(?:const|let|var)\s+(\w+)`), "var"},
 		// Method rules must end in `{` (with optional TS return type) or
-		// every indented call site gets tagged as a definition.
-		{regexp.MustCompile(`^\s+(?:(?:public|private|protected|static|async|readonly|override|abstract)\s+)*(?:get\s+|set\s+)?(\w+)\s*\([^)]*\)\s*(?::\s*[\w<>\[\]|&]+\s*)?\{`), "method"},
+		// every indented call site gets tagged as a definition. The
+		// return-type class admits space and comma for e.g.
+		// `Map<string, number>`.
+		{regexp.MustCompile(`^\s+(?:(?:public|private|protected|static|async|readonly|override|abstract)\s+)*(?:get\s+|set\s+)?(\w+)\s*\([^)]*\)\s*(?::\s*[\w<>\[\]|&,\s]+\s*)?\{`), "method"},
 	},
 	export: lineHas("export"),
 	imports: []*regexp.Regexp{
@@ -179,6 +186,7 @@ func tagFile(root, relPath, modulePath string, exists func(string) bool) ([]tag,
 	sc := bufio.NewScanner(br)
 	sc.Buffer(make([]byte, 64*1024), maxIndexFileSize)
 	lineNo := 0
+	inImportBlock := false
 	for sc.Scan() {
 		lineNo++
 		line := sc.Text()
@@ -186,6 +194,16 @@ func tagFile(root, relPath, modulePath string, exists func(string) bool) ([]tag,
 		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "#") ||
 			strings.HasPrefix(trimmed, "*") {
 			continue
+		}
+		if spec.importsInBlock {
+			switch {
+			case strings.HasPrefix(trimmed, "import (") || trimmed == "import(":
+				inImportBlock = true
+				continue
+			case inImportBlock && trimmed == ")":
+				inImportBlock = false
+				continue
+			}
 		}
 		for _, rule := range spec.rules {
 			m := rule.re.FindStringSubmatch(line)
@@ -204,12 +222,14 @@ func tagFile(root, relPath, modulePath string, exists func(string) bool) ([]tag,
 			})
 			break
 		}
-		for _, re := range spec.imports {
-			if m := re.FindStringSubmatch(line); m != nil {
-				if dst := spec.resolve(m[1], srcDir, modulePath, exists); dst != "" {
-					refSet[dst] = true
+		if !spec.importsInBlock || inImportBlock || strings.HasPrefix(trimmed, "import") {
+			for _, re := range spec.imports {
+				if m := re.FindStringSubmatch(line); m != nil {
+					if dst := spec.resolve(m[1], srcDir, modulePath, exists); dst != "" {
+						refSet[dst] = true
+					}
+					break
 				}
-				break
 			}
 		}
 	}
@@ -290,12 +310,21 @@ func resolveRsImport(imp, srcDir, _ string, exists func(string) bool) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	// Rust paths resolve relative to the crate src dir or the current
-	// file's dir for `mod` declarations; probe both shapes.
-	for _, base := range []string{
-		filepath.ToSlash(filepath.Join("src", filepath.Join(parts[:len(parts)-1]...))) + "/" + parts[len(parts)-1],
-		filepath.ToSlash(filepath.Join(srcDir, parts[len(parts)-1])),
-	} {
+	last := parts[len(parts)-1]
+	// The last `use` segment is usually an ITEM (a symbol), not a
+	// file: `use crate::a::b::Item` lives in src/a/b.rs or
+	// src/a/b/mod.rs. `mod foo;` declarations instead name the file
+	// directly. Probe item-first, then the file shape.
+	parent := filepath.ToSlash(filepath.Join(parts[:len(parts)-1]...))
+	bases := []string{}
+	if parent != "" {
+		bases = append(bases,
+			"src/"+parent, // src/a/b.rs or src/a/b/mod.rs
+			"src/"+parent+"/"+last,
+		)
+	}
+	bases = append(bases, filepath.ToSlash(filepath.Join(srcDir, last)))
+	for _, base := range bases {
 		if p := probeExt(base, exists, ".rs"); p != "" {
 			return p
 		}

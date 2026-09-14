@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/crush/internal/db"
+	"github.com/charmbracelet/crush/internal/fsext"
 )
 
 // IndexFilename is the sidecar database name inside the project data
@@ -88,6 +89,18 @@ type Service struct {
 	lastBuild atomic.Int64 // unixnano of last completed walk
 
 	lastDirtyScan atomic.Int64 // unixnano; bounds refreshDirty frequency
+
+	modPathOnce sync.Once
+	modPath     string
+}
+
+// modulePath caches the go.mod module path — refreshDirty would
+// otherwise re-read it once per dirty file.
+func (s *Service) modulePath() string {
+	s.modPathOnce.Do(func() {
+		s.modPath = readModulePath(s.root)
+	})
+	return s.modPath
 }
 
 var shared sync.Map // (dataDir, workingDir) -> *Service
@@ -164,6 +177,14 @@ func (s *Service) touchFile(absPath string) {
 	}
 	if err != nil {
 		return // Transient stat failure — keep the row, stay stale.
+	}
+	// Mirror the walk's collect filter: no dirs, no empty files, and
+	// nothing the ignore rules would skip — otherwise a write into
+	// node_modules or .crush would upsert a phantom row the walk
+	// never produced.
+	if info.IsDir() || info.Size() == 0 ||
+		fsext.NewFastGlobWalker(s.root).ShouldSkip(absPath) {
+		return
 	}
 	s.refreshIfStale(context.Background(), filepath.ToSlash(rel),
 		info.ModTime().UnixNano(), info.Size())

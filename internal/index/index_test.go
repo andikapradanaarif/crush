@@ -2,10 +2,13 @@ package index
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 )
@@ -246,4 +249,236 @@ func main() { api.NewHandler() }
 	sub, err = svc2.Subtree(ctx, ".", 500)
 	require.NoError(t, err)
 	require.Contains(t, sub, "big.go")
+}
+
+func TestTagFile_Rust(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, root, "src/lib.rs", `use crate::a::b::Item;
+mod util;
+
+pub struct Root;
+
+pub fn run() {}
+`)
+	writeFile(t, root, "src/a/b.rs", "pub struct Item;\n")
+	writeFile(t, root, "src/util.rs", "pub fn help() {}\n")
+
+	exists := func(p string) bool {
+		switch p {
+		case "src/lib.rs", "src/a/b.rs", "src/util.rs",
+			"src", "src/a", "src/a/b":
+			return true
+		}
+		return false
+	}
+	tags, refs, err := tagFile(root, "src/lib.rs", "", exists)
+	require.NoError(t, err)
+
+	names := map[string]tag{}
+	for _, tg := range tags {
+		names[tg.name] = tg
+	}
+	require.Contains(t, names, "Root")
+	require.True(t, names["Root"].exported)
+	require.Contains(t, names, "run")
+	require.Contains(t, names, "util")
+
+	// `use crate::a::b::Item` must resolve to the containing module
+	// file — the last path segment is an item, not a file. `mod util`
+	// names the file directly.
+	require.ElementsMatch(t, []string{"src/a/b.rs", "src/util.rs"}, refs)
+}
+
+func TestTagFile_GoImportBlock(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, root, "main.go", `package main
+
+import (
+	"example.com/proj/internal/store"
+)
+
+var url = "example.com/proj/internal/other"
+
+func main() {
+	switch url {
+	case "example.com/proj/internal/third":
+	}
+}
+`)
+	writeFile(t, root, "go.mod", "module example.com/proj\n")
+	writeFile(t, root, "internal/store/store.go", "package store\n")
+	writeFile(t, root, "internal/other/other.go", "package other\n")
+	writeFile(t, root, "internal/third/third.go", "package third\n")
+
+	exists := func(p string) bool {
+		switch p {
+		case "main.go", "internal/store", "internal/other", "internal/third",
+			"internal":
+			return true
+		}
+		return false
+	}
+	_, refs, err := tagFile(root, "main.go", "example.com/proj", exists)
+	require.NoError(t, err)
+
+	// String literals outside the import block are not imports.
+	require.Equal(t, []string{"internal/store"}, refs)
+}
+
+func TestTagFile_Java(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, root, "src/main/java/com/ex/UserService.java", `package com.ex;
+
+import com.ex.util.Helper;
+
+public class UserService {
+	public void find() {}
+}
+`)
+	writeFile(t, root, "src/main/java/com/ex/util/Helper.java",
+		"package com.ex.util;\npublic class Helper {}\n")
+
+	exists := func(p string) bool {
+		switch p {
+		case "src/main/java/com/ex/UserService.java",
+			"src/main/java/com/ex/util/Helper.java":
+			return true
+		}
+		return false
+	}
+	tags, refs, err := tagFile(root, "src/main/java/com/ex/UserService.java", "", exists)
+	require.NoError(t, err)
+
+	names := map[string]tag{}
+	for _, tg := range tags {
+		names[tg.name] = tg
+	}
+	require.Contains(t, names, "UserService")
+	require.Equal(t, "type", names["UserService"].kind)
+	require.True(t, names["UserService"].exported)
+	require.Equal(t, []string{"src/main/java/com/ex/util/Helper.java"}, refs)
+}
+
+func TestSubtree_PathHandling(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	writeFile(t, root, "main.go", "package main\n\nfunc main() {}\n")
+	// LIKE metacharacters in the directory name must stay literal.
+	writeFile(t, root, "100%_real/f.go", "package real\n\nfunc F() {}\n")
+	writeFile(t, root, "100Xreal/g.go", "package other\n\nfunc G() {}\n")
+
+	svc, err := Open(dataDir, root)
+	require.NoError(t, err)
+	defer svc.Close()
+	ctx := context.Background()
+	require.NoError(t, svc.EnsureIndexed(ctx))
+
+	// Absolute and escaping paths get guidance, not empty results.
+	out, err := svc.Subtree(ctx, "/etc", 500)
+	require.NoError(t, err)
+	require.Contains(t, out, "absolute")
+	out, err = svc.Subtree(ctx, "../outside", 500)
+	require.NoError(t, err)
+	require.Contains(t, out, "escapes")
+
+	// A literal "%_" name matches itself only — not the 100Xreal dir.
+	out, err = svc.Subtree(ctx, "100%_real", 500)
+	require.NoError(t, err)
+	require.Contains(t, out, "f.go")
+	require.NotContains(t, out, "g.go")
+
+	// A file argument renders the file's symbols, not a dir listing.
+	out, err = svc.Subtree(ctx, "main.go", 500)
+	require.NoError(t, err)
+	require.Contains(t, out, "File main.go:")
+	require.Contains(t, out, "main")
+}
+
+func TestNotifyWritten_DropsDeleted(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	writeFile(t, root, "gone.go", "package main\n\nfunc Gone() {}\n")
+	writeFile(t, root, "keep.go", "package main\n\nfunc Keep() {}\n")
+
+	svc, err := Open(dataDir, root)
+	require.NoError(t, err)
+	defer svc.Close()
+	ctx := context.Background()
+	require.NoError(t, svc.EnsureIndexed(ctx))
+
+	_, _, found := svc.indexedFile(ctx, "gone.go")
+	require.True(t, found)
+
+	require.NoError(t, os.Remove(filepath.Join(root, "gone.go")))
+	svc.touchFile(filepath.Join(root, "gone.go"))
+
+	_, _, found = svc.indexedFile(ctx, "gone.go")
+	require.False(t, found)
+}
+
+func TestSkeleton_DuringBuild(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	// Enough files that the build is still in flight when the query
+	// lands — the point is that reads don't block on the build.
+	for i := range 400 {
+		writeFile(t, root, fmt.Sprintf("pkg/f%04d.go", i),
+			fmt.Sprintf("package pkg\n\nfunc F%d() {}\n", i))
+	}
+
+	svc, err := Open(dataDir, root)
+	require.NoError(t, err)
+	defer svc.Close()
+	ctx := context.Background()
+
+	done := make(chan string, 1)
+	go func() {
+		out, err := svc.Skeleton(ctx, 500)
+		if err != nil {
+			done <- "ERR:" + err.Error()
+			return
+		}
+		done <- out
+	}()
+
+	var out string
+	select {
+	case out = <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Skeleton blocked on the in-flight build")
+	}
+	require.Contains(t, out, "Project map —")
+
+	// Repeated queries during the build must all return — partial
+	// results are the design, blocking is the bug.
+	deadline := time.Now().Add(30 * time.Second)
+	for svc.indexing.Load() && time.Now().Before(deadline) {
+		sub, err := svc.Subtree(ctx, "pkg", 500)
+		require.NoError(t, err)
+		require.NotEmpty(t, sub)
+	}
+	require.NoError(t, svc.EnsureIndexed(ctx))
+}
+
+func TestCapOutput_UTF8(t *testing.T) {
+	t.Parallel()
+
+	// Multibyte rune straddling the cut — output stays valid UTF-8.
+	out := capOutput(strings.Repeat("é", 100), 10) // 40-byte cap
+	require.True(t, utf8.ValidString(out))
+	require.Contains(t, out, "truncated")
+
+	// An invalid byte early in the string must not eat the output.
+	out = capOutput("a\xff"+strings.Repeat("x", 100), 10)
+	require.Contains(t, out, "truncated")
+	require.Greater(t, len(out), 30)
 }
