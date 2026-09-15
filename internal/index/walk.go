@@ -139,10 +139,16 @@ func (s *Service) walk(ctx context.Context) error {
 		if tx, err := s.db.BeginTx(ctx, nil); err == nil {
 			if stmts, err := prepareTagStmts(ctx, tx); err == nil {
 				for p := range pend {
-					f, ok := seen[p]
-					if !ok {
+					// Re-stat rather than trusting `seen` — a
+					// concurrent touchFile may have moved the file
+					// past collect's pair, and a stat-keep survivor
+					// (live on disk, absent from seen) still
+					// deserves its refs re-resolved.
+					info, statErr := os.Stat(filepath.Join(s.root, filepath.FromSlash(p)))
+					if statErr != nil || info.IsDir() || info.Size() == 0 {
 						continue
 					}
+					f := walkedFile{path: p, mtime: info.ModTime().UnixNano(), size: info.Size()}
 					tags, refs, tagErr := tagFile(s.root, p, modulePath, exists)
 					if tagErr != nil || stmts.tag(ctx, p, f, now, tags, refs) != nil {
 						continue
@@ -287,7 +293,9 @@ func (s *Service) collect(ctx context.Context) ([]walkedFile, error) {
 			// mtime doesn't trigger a re-tag on every refresh.
 			info, err = os.Stat(path)
 		}
-		if err != nil || info.Size() == 0 {
+		// IsDir: a symlink pointing at a directory reaches here (the
+		// DirEntry check used lstat) — don't record it as a file.
+		if err != nil || info.IsDir() || info.Size() == 0 {
 			return nil
 		}
 		rel, err := filepath.Rel(s.root, path)
@@ -349,6 +357,10 @@ func readModulePath(root string) string {
 // differs from the indexed pair — the lazy half of invalidation, used
 // by renderers before they serve paths to the model.
 func (s *Service) refreshIfStale(ctx context.Context, relPath string, currentMtime, size int64) {
+	// Capture at entry: if a build is running, the exists probes
+	// below may see committed-so-far rows — the commit-window check
+	// at the end alone would miss probes that ran mid-build.
+	midBuild := s.indexing.Load()
 	if m, sz, found := s.indexedFile(ctx, relPath); found && m == currentMtime && sz == size {
 		return
 	}
@@ -400,7 +412,7 @@ func (s *Service) refreshIfStale(ctx context.Context, relPath string, currentMti
 	tx.Commit()
 	// Refs just resolved against a possibly in-flight build — flag
 	// for re-resolution at walk end so the undercount isn't sticky.
-	if s.indexing.Load() {
+	if midBuild || s.indexing.Load() {
 		s.markRefix(relPath)
 	}
 }

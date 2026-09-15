@@ -142,6 +142,13 @@ ever bites, is keying the file by working-dir hash. Mirror image:
 workingDir alone while `shared` is keyed on `(dataDir, workingDir)`
 — two data dirs on one working dir makes a write notification
 last-writer-wins. Same nonstandard-config edge class; noted.
+A third route to the same collision needs no config at all:
+`LookupClosestBounded` can return an _ancestor's_ `.crush` when
+Crush runs in a project subdir — two roots then share one
+`index.db` with different path bases, and each walk's reconcile
+drops the other's rows (stat-keep doesn't save them — the paths
+don't exist under the other root). Rebuildable-cache cost, same
+fix path (working-dir keying) if it ever bites.
 
 ### Builder — walk once, tag cheaply
 
@@ -381,7 +388,10 @@ import x` resolves against the file's dir (dots walk up), and
   Dropping on `stored \ seen` alone erases the row until the next
   write or re-walk; reconcile now stats the candidate first,
   keeping the same keep-stale-over-erase-live rule as everywhere
-  else.
+  else. Broadening this accepts: a file that _becomes_ ignored
+  mid-session (`.gitignore` edit) or externally truncated to zero
+  bytes also keeps its row until deleted — for a nav index,
+  pointing at a live file isn't a wrong pointer.
 - **Refs resolved against a partial index don't self-heal.**
   Files lazily tagged mid-build probed `exists` against
   committed-so-far rows — a not-yet-indexed import target dropped
