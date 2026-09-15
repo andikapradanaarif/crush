@@ -1,6 +1,6 @@
 Persistent project index for codebase navigation — answers "where does X live" without grep roundtrips.
 
-Backed by a per-project index (files, top-level symbols, references) stored on disk and shared across sessions. It survives compaction and new sessions; results reflect the current index, so re-calling is cheap and safe. The skeleton header reports when the index was built; files edited since indexing are re-read on access.
+Backed by a per-project index (files, top-level symbols, references) stored on disk and shared across sessions. It survives compaction and new sessions; results reflect the current index, so re-calling is cheap and safe. The skeleton header reports when the index was built; files edited since indexing are re-indexed on access.
 
 Modes:
 

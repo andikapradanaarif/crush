@@ -370,6 +370,11 @@ import x` resolves against the file's dir (dots walk up), and
   with `EvalSymlinks` on both sides (parent-dir fallback for
   deleted files) — a canonicalized LSP path under a symlinked
   workingDir would otherwise skip notifications silently.
+- **Process-lifetime caches are the accepted staleness class.**
+  `modulePath` (go.mod) and `skipWalker` (ignore rules) are
+  `sync.Once` caches — a mid-session edit to either isn't seen by
+  `touchFile` until restart, but every re-walk reparses from disk
+  so the index self-corrects within `rewalkInterval`.
 
 Resolved since the first draft:
 

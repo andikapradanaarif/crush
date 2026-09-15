@@ -345,10 +345,10 @@ func (s *Service) refreshIfStale(ctx context.Context, relPath string, currentMti
 // must not pay a full stat-scan per miss.
 func (s *Service) refreshDirty(ctx context.Context) {
 	now := time.Now().UnixNano()
-	if last := s.lastDirtyScan.Load(); now-last < int64(dirtyScanInterval) {
+	if last := s.lastDirtyScan.Load(); now-last < int64(dirtyScanInterval) ||
+		!s.lastDirtyScan.CompareAndSwap(last, now) {
 		return
 	}
-	s.lastDirtyScan.Store(now)
 
 	stored, err := s.storedFiles(ctx)
 	if err != nil {

@@ -246,7 +246,10 @@ func tagFile(root, relPath, modulePath string, exists func(string) bool) ([]tag,
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return tags, nil, nil // Truncated/binary tail: keep what we got.
+		// Truncated/binary tail: keep the tags collected so far but
+		// drop refs — a partial ref set would poison in-degree
+		// ranking until the file is next re-tagged.
+		return tags, nil, nil
 	}
 	refs := make([]string, 0, len(refSet))
 	for r := range refSet {
@@ -263,14 +266,12 @@ func isProbablyBinary(head []byte) bool {
 // resolveGoImport maps a Go import path to the project-relative
 // package directory when it lives under the module path.
 func resolveGoImport(imp, _, modulePath string, exists func(string) bool) string {
-	if modulePath == "" || !strings.HasPrefix(imp, modulePath) {
+	// The "/" boundary matters: `example.com/proj2/...` must not
+	// strip to `2/...` under module `example.com/proj`.
+	if modulePath == "" || !strings.HasPrefix(imp, modulePath+"/") {
 		return ""
 	}
-	dir := strings.TrimPrefix(imp, modulePath)
-	dir = strings.TrimPrefix(dir, "/")
-	if dir == "" {
-		return ""
-	}
+	dir := strings.TrimPrefix(imp, modulePath+"/")
 	// A package dir counts when indexed files sit under it — exists
 	// covers directories as well as files.
 	if exists(dir) {

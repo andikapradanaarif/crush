@@ -294,11 +294,6 @@ const failRetryInterval = 30 * time.Second
 // build surfaces as buildErr in the skeleton header.
 const walkTimeout = 10 * time.Minute
 
-// ensureStarted starts a walk in the background when the index has
-// never been built or the last build is older than rewalkInterval.
-// Query paths serve whatever has committed so far — the walk writes
-// in batches, so a map call mid-build returns the current index
-// instead of blocking on the tree.
 // buildInterval returns how long the last build stays authoritative
 // — shorter after a failure so transient errors retry quickly.
 // Caller supplies the last build's error; pass s.buildErr while
@@ -320,7 +315,15 @@ func (s *Service) err() error {
 	return s.buildErr
 }
 
+// ensureStarted starts a walk in the background when the index has
+// never been built or the last build is older than rewalkInterval.
+// Query paths serve whatever has committed so far — the walk writes
+// in batches, so a map call mid-build returns the current index
+// instead of blocking on the tree.
 func (s *Service) ensureStarted(ctx context.Context) {
+	if s.init() != nil {
+		return // No DB — nothing to build into.
+	}
 	fresh := s.lastBuild.Load()
 	if fresh != 0 && time.Since(time.Unix(0, fresh)) < buildInterval(s.err()) {
 		return
