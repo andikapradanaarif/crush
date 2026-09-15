@@ -208,7 +208,12 @@ every characterization pass a diff to reviewed files.
   metric measures what map replaces). The discovery cutoff is
   `first_write_attempt_index` — a canceled write placeholder keeps
   its tool name, so the window closes when the model tried to act,
-  not only when a write landed. The axes overlap deliberately: a
+  not only when a write landed; `requests_to_first_edit` anchors on
+  the same attempt, since the gate measures time-to-action.
+  `read_files_rows` is a loose bound on `files_viewed`, not an
+  equality — the tracker also records writes and keys rows on the
+  raw param path, so `read_files_rows >= files_viewed` is expected.
+  The axes overlap deliberately: a
   pre-write `view`-on-directory lands in both
   `view_directory_errors` and `discovery_calls_before_write`.
   `crush eval analyze <session_db>` runs the same pass standalone

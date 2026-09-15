@@ -61,7 +61,9 @@ type CallMetrics struct {
 	// landed write.
 	FirstWriteAttemptIndex int `json:"first_write_attempt_index"`
 	// RequestsToFirstEdit is the 1-based request count through the
-	// request carrying the first write call, -1 when none ran.
+	// request carrying the first write ATTEMPT — the gate measures
+	// time-to-action, so a canceled write's request counts. -1 when
+	// none ran.
 	RequestsToFirstEdit int `json:"requests_to_first_edit"`
 	// DiscoveryCallsBeforeWrite counts discovery-class calls before
 	// the first write attempt: grep/glob/ls, the LSP read tools,
@@ -80,9 +82,11 @@ type CallMetrics struct {
 	// least one successful view/read. Cross-checkable against the
 	// read_files table.
 	FilesViewed int `json:"files_viewed"`
-	// ReadFilesRows is the session's read_files table count — the
-	// machine-checkable cross-validation of FilesViewed (-1 when the
-	// artifact predates the table).
+	// ReadFilesRows is the session's read_files table count — a loose
+	// bound on FilesViewed, not an equality: the tracker also records
+	// successful writes and keys rows on the raw param path while the
+	// analyzer normalizes, so read_files_rows >= files_viewed is the
+	// expected relationship. -1 when the artifact predates the table.
 	ReadFilesRows int `json:"read_files_rows"`
 
 	// EditFailures counts is_error results on write-class calls,
@@ -355,7 +359,7 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 	// Pass 2 — join results, then walk the sequence in order: seen-set
 	// updates, discovery counting, and first-write detection all depend
 	// on call position.
-	seen := map[string]seenPath{}
+	seen := map[string]map[string]int{} // path → window → last-read turn
 	for i := range pending {
 		c := &pending[i]
 		res, hasResult := results[c.rec.ID]
@@ -369,6 +373,7 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 		// so the attempt index is set before the placeholder branch.
 		if tools.WriteToolNames[c.rec.Name] && cm.FirstWriteAttemptIndex < 0 {
 			cm.FirstWriteAttemptIndex = c.rec.Seq
+			cm.RequestsToFirstEdit = c.rec.Step + 1
 		}
 		// Labeled in the sequence, never counted as a real call.
 		switch placeholderKind(c.input, c.finished, hasResult, &res) {
@@ -428,30 +433,30 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 		}
 		if isRead && path != "" {
 			win := viewWindow(c.input)
-			if sp, ok := seen[path]; ok && sp.windows[win] {
-				// Same path AND same offset/limit window already read —
-				// a redundant re-fetch. A different window is paging.
-				cm.Rereads++
-				if c.rec.Turn == sp.lastTurn {
-					cm.RereadsSameTurn++
-				} else {
-					cm.RereadsCrossTurn++
+			if windows, ok := seen[path]; ok {
+				// Same path AND same effective offset/limit window
+				// already read — a redundant re-fetch. A different
+				// window is paging. The same/cross split compares
+				// against the turn that read THIS window last.
+				if lastTurn, read := windows[win]; read {
+					cm.Rereads++
+					if c.rec.Turn == lastTurn {
+						cm.RereadsSameTurn++
+					} else {
+						cm.RereadsCrossTurn++
+					}
 				}
 			}
 			if hasResult && !res.IsError {
-				sp := seen[path]
-				if sp.windows == nil {
-					sp.windows = map[string]bool{}
+				if seen[path] == nil {
+					seen[path] = map[string]int{}
 				}
-				sp.windows[win] = true
-				sp.lastTurn = c.rec.Turn
-				seen[path] = sp
+				seen[path][win] = c.rec.Turn
 			}
 		}
 
 		if tools.WriteToolNames[c.rec.Name] && cm.FirstWriteIndex < 0 {
 			cm.FirstWriteIndex = c.rec.Seq
-			cm.RequestsToFirstEdit = c.rec.Step + 1
 		}
 		if c.rec.IsError && tools.WriteToolNames[c.rec.Name] {
 			cm.EditFailures++
@@ -492,18 +497,12 @@ type pendingCall struct {
 	finished bool
 }
 
-// seenPath is the per-path seen-set entry: the turn of the last
-// successful read plus the offset/limit windows already read, so a
-// re-view paging into new content isn't mislabeled a reread.
-type seenPath struct {
-	lastTurn int
-	windows  map[string]bool
-}
-
-// viewWindow extracts the paging window from a read-class call's
-// input. A re-view of a seen path with a different offset/limit is
-// legitimate paging, not a reread; the empty window marks an unpaged
-// read.
+// viewWindow extracts the effective paging window from a read-class
+// call's input, resolved against the tool's defaults: a bare
+// `view f.go`, `offset=0`, and the 200-line default limit all fetch
+// the same head, so they must share a key or genuine re-reads alias
+// into "paging". A re-view of a seen path with a different effective
+// window is legitimate paging, not a reread.
 func viewWindow(input string) string {
 	var f struct {
 		Offset *int `json:"offset"`
@@ -512,10 +511,7 @@ func viewWindow(input string) string {
 	if json.Unmarshal([]byte(input), &f) != nil {
 		return ""
 	}
-	if f.Offset == nil && f.Limit == nil {
-		return ""
-	}
-	off, lim := -1, -1
+	off, lim := 0, tools.DefaultReadLimit
 	if f.Offset != nil {
 		off = *f.Offset
 	}
@@ -739,7 +735,7 @@ func errorCause(res *rawToolResult) string {
 // isDiscoveryCall reports whether a call belongs to the
 // discovery-before-write class. Attempts count uniformly: a failed
 // read still spent the roundtrip — it just never joins the seen-set.
-func isDiscoveryCall(name string, isRead bool, path string, seen map[string]seenPath) bool {
+func isDiscoveryCall(name string, isRead bool, path string, seen map[string]map[string]int) bool {
 	if discoveryToolNames[name] {
 		return true
 	}

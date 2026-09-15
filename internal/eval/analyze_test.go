@@ -167,6 +167,11 @@ func writeFixtureDB(t *testing.T) string {
 		// failure.
 		{"m48", "assistant", `[` + tcPart("c25", "map", `{"symbol":"Late"}`) + `]`, 0},
 		{"m49", "tool", `[` + trPart("c25", "project index unavailable — fall back to grep/glob", true, "") + `]`, 0},
+		// Same content, different spelling: offset=0/limit=200 is the
+		// tool's default window — it must alias to the bare view's
+		// window, i.e. a reread of the SAME content, not paging.
+		{"m50", "assistant", `[` + tcPart("c26", "view", `{"file_path":"/w/a.go","offset":0,"limit":200}`) + `]`, 0},
+		{"m51", "tool", `[` + trPart("c26", "package a", false, "") + `]`, 0},
 	}
 	for _, m := range msgs {
 		insertMsg(t, conn, m.id, "s1", m.role, m.parts, 1000, m.summary)
@@ -200,12 +205,12 @@ func TestAnalyzeSessionDB_Fixture(t *testing.T) {
 		require.Equal(t, "s1", cm.SessionID)
 		// Summary row and the finish-only canceled-turn row are not
 		// requests; m42's mid-stream cancel IS (real parts + finish).
-		require.Equal(t, 26, cm.Requests)
+		require.Equal(t, 27, cm.Requests)
 		// c10+c2c canceled, c16 interrupted, c21 truncated — labeled,
 		// not counted; c17's real arg-validation error, c20's map{}
 		// skeleton, and c22's mid-stream-cancel call ARE real calls.
-		require.Equal(t, 24, cm.Calls)
-		require.Len(t, cm.ToolCalls, 28)
+		require.Equal(t, 25, cm.Calls)
+		require.Len(t, cm.ToolCalls, 29)
 		require.Equal(t, 2, cm.CanceledCalls) // c10 + c2c.
 		require.Equal(t, 1, cm.InterruptedCalls)
 		require.Equal(t, 1, cm.TruncatedCalls)
@@ -214,7 +219,8 @@ func TestAnalyzeSessionDB_Fixture(t *testing.T) {
 		// c2c's canceled edit keeps its name — the attempt marks the
 		// model acting and closes the discovery window early.
 		require.Equal(t, 3, cm.FirstWriteAttemptIndex)
-		require.Equal(t, 7, cm.RequestsToFirstEdit)
+		// Anchored on the ATTEMPT — c2c's request index is 3.
+		require.Equal(t, 4, cm.RequestsToFirstEdit)
 		// c1 view-unseen + c2 grep + c2b dir-view attempt; c2d's grep
 		// lands after the write attempt and does NOT count.
 		require.Equal(t, 3, cm.DiscoveryCallsBeforeWrite)
@@ -236,10 +242,12 @@ func TestAnalyzeSessionDB_Fixture(t *testing.T) {
 		require.Equal(t, 1, cm.QuestionCallsErrored)
 
 		// c3 same-turn, c11 same-turn (repair prompt stayed in-process),
-		// c12 cross-turn, c24 same-window re-view same-turn. c23's
-		// offset=500 view is paging — a new window, not a reread.
-		require.Equal(t, 4, cm.Rereads)
-		require.Equal(t, 3, cm.RereadsSameTurn)
+		// c12 cross-turn, c24 same-window re-view same-turn, c26 the
+		// explicit-default window (offset=0/limit=200 aliases to bare
+		// view's window — same content, reread). c23's offset=500 view
+		// is paging — a new window, not a reread.
+		require.Equal(t, 5, cm.Rereads)
+		require.Equal(t, 4, cm.RereadsSameTurn)
 		require.Equal(t, 1, cm.RereadsCrossTurn)
 
 		// c6 map(symbol=Config) → c8 grep Config. c18's result never
