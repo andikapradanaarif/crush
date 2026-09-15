@@ -22,6 +22,7 @@ func TestIsVaguePrompt(t *testing.T) {
 		{"it crashes on startup", true},
 		{"update the config", true},
 		{"the test fails", true},
+		{"run the tests", false},
 		{"fix the bug in internal/agent/agent.go", false},
 		{"fix internal/agent/agent.go", false},
 		{"", false},
@@ -123,6 +124,15 @@ func TestAmbiguityDirective(t *testing.T) {
 		}, []message.Message{userMsg("auth.go panics on nil tokens")}))
 	})
 
+	t.Run("a bare greeting does not suppress the gate", func(t *testing.T) {
+		t.Parallel()
+		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.ambiguityClarification = true
+		require.NotEmpty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
+			SessionID: sessionID, Prompt: "fix it",
+		}, []message.Message{userMsg("hi")}))
+	})
+
 	t.Run("long prompt does not fire", func(t *testing.T) {
 		t.Parallel()
 		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})
@@ -198,5 +208,9 @@ func TestTurnTailMessages(t *testing.T) {
 		SessionID: sessionID, Prompt: "fix the bug",
 	}, nil)
 	require.Len(t, tail, 1)
-	require.Equal(t, fantasy.MessageRoleSystem, tail[0].Role)
+	// User role, not system: the Anthropic and Google converters drop
+	// system blocks that follow non-system content, so a system-role
+	// tail would never reach the model on those providers.
+	require.Equal(t, fantasy.MessageRoleUser, tail[0].Role)
+	require.Contains(t, tail[0].Content[0].(fantasy.TextPart).Text, "<ambiguity_gate>")
 }

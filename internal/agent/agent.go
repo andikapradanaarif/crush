@@ -882,7 +882,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// can take tens of seconds. Blocking Run on it delays the
 	// response to the caller. Use a detached context so the title
 	// goroutine survives Run's cancel.
-	if !hasUserTextMessage(msgs) {
+	if !hasSubstantiveUserMessage(msgs) {
 		titleCtx := context.WithoutCancel(ctx)
 		go a.GenerateTitle(titleCtx, call.SessionID, call.Prompt)
 	}
@@ -1071,9 +1071,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 					break
 				}
 			}
-			tailStart := len(prepared.Messages) - 2
+			tailStart := max(len(prepared.Messages)-2, 0)
 			if mcpToolsPresent {
-				tailStart = len(prepared.Messages) - 1
+				tailStart = max(len(prepared.Messages)-1, 0)
 			}
 			lastSystemRoleInx := 0
 			systemMessageUpdated := false
@@ -2363,15 +2363,21 @@ func countUserMessages(msgs []message.Message) int {
 	return count
 }
 
-// hasUserTextMessage reports whether any user message in msgs contains
-// text content (as opposed to only shell commands or other non-text parts).
-func hasUserTextMessage(msgs []message.Message) bool {
+// hasSubstantiveUserMessage reports whether any user message in msgs
+// contains text that can carry context — explicit paths or more than a
+// couple of words. A bare greeting or acknowledgement ("hi", "ok
+// thanks") does not suppress downstream context checks.
+func hasSubstantiveUserMessage(msgs []message.Message) bool {
 	for _, msg := range msgs {
 		if msg.Role != message.User {
 			continue
 		}
 		for _, part := range msg.Parts {
-			if tc, ok := part.(message.TextContent); ok && tc.Text != "" {
+			tc, ok := part.(message.TextContent)
+			if !ok || tc.Text == "" {
+				continue
+			}
+			if len(extractExplicitFilePaths(tc.Text)) > 0 || len(strings.Fields(tc.Text)) >= 3 {
 				return true
 			}
 		}

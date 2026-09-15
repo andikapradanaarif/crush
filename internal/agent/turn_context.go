@@ -28,11 +28,12 @@ const (
 
 // vagueReferentRe matches prompts that lean on a definite or anaphoric
 // referent whose target context must supply — "the bug", "it", "this
-// crash". The noun list is deliberately referent-shaped: "run the
-// tests" stays actionable on its own, "fix the bug" does not.
+// crash". The noun list is deliberately referent-shaped and singular:
+// "run the tests" acts on the whole suite and stays actionable on its
+// own; "the test" names a specific one the context must supply.
 var vagueReferentRe = regexp.MustCompile(`(?i)\b(it|its|this|that|them|they)\b|` +
 	`\bthe\s+(bug|bugfix|crash|error|errors|failure|fail|issue|problem|panic|regression|leak|typo|warnings?|` +
-	`config|configuration|test|tests|spec|endpoint|handler|route|feature|changes?|fix|workaround|hack|todo|fixme)\b`)
+	`config|configuration|test|spec|endpoint|handler|route|feature|changes?|fix|workaround|hack|todo|fixme)\b`)
 
 // isVaguePrompt reports whether the prompt is underspecified in the way
 // the pre-filter cares about: short enough to carry no context of its
@@ -55,30 +56,31 @@ func isVaguePrompt(prompt string) bool {
 // rebuild and stay byte-stable across the turn's steps: the history
 // prefix still cache-reads and the blob rides in the tail that is new
 // anyway.
+//
+// The tail is a user-role message, not a system message: the Anthropic
+// and Google providers drop every system block that appears after
+// non-system content (finishedSystemBlock in both toPrompt
+// converters), which would silently discard the tail on exactly the
+// providers where cache stability matters most. A user-role tail
+// survives every provider.
 func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCall, msgs []message.Message) []fantasy.Message {
-	var out []fantasy.Message
+	var sections []string
 	if blob := a.turnContextBlob(ctx, call); blob != "" {
-		out = append(out, fantasy.NewSystemMessage(blob))
+		sections = append(sections, blob)
 	}
 	if directive := a.ambiguityDirective(ctx, call, msgs); directive != "" {
-		out = append(out, fantasy.NewSystemMessage(directive))
+		sections = append(sections, directive)
 	}
-	if len(out) > 0 {
-		var bytes int
-		for _, m := range out {
-			for _, p := range m.Content {
-				if tp, ok := p.(fantasy.TextPart); ok {
-					bytes += len(tp.Text)
-				}
-			}
-		}
-		slog.Debug("Turn tail augmentation",
-			"session_id", call.SessionID,
-			"sections", len(out),
-			"bytes", bytes,
-		)
+	if len(sections) == 0 {
+		return nil
 	}
-	return out
+	text := strings.Join(sections, "\n\n")
+	slog.Debug("Turn tail augmentation",
+		"session_id", call.SessionID,
+		"sections", len(sections),
+		"bytes", len(text),
+	)
+	return []fantasy.Message{fantasy.NewUserMessage(text)}
 }
 
 // turnContextBlob renders the <turn_context> blob for the session and
@@ -88,7 +90,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 // when it lands. Returns "" when the tier is off, the agent is a
 // sub-agent, or no signal has content.
 func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCall) string {
-	if (a.turnContext != "session" && a.turnContext != "semantic") || a.isSubAgent {
+	if a.turnContext != "session" || a.isSubAgent {
 		return ""
 	}
 	var b strings.Builder
@@ -156,15 +158,16 @@ func (a *sessionAgent) relWorkdir(p string) string {
 // short, referent-leaning prompt with no explicit paths and nothing in
 // session context to resolve against takes the forced
 // clarify-or-state-assumptions path. The gate fires only when no
-// resolvable signal exists — a working set or earlier user text means
-// the referent has candidates — and stays opt-in behind
+// resolvable signal exists — a working set or earlier substantive user
+// text means the referent has candidates — and stays opt-in behind
 // options.ambiguity_clarification.
 func (a *sessionAgent) ambiguityDirective(ctx context.Context, call SessionAgentCall, msgs []message.Message) string {
 	if !a.ambiguityClarification || a.isSubAgent || !isVaguePrompt(call.Prompt) {
 		return ""
 	}
-	// Earlier user text in the session can supply the referent.
-	if hasUserTextMessage(msgs) {
+	// Earlier substantive user text can supply the referent — a bare
+	// greeting or acknowledgement cannot.
+	if hasSubstantiveUserMessage(msgs) {
 		return ""
 	}
 	// A non-empty working set gives the referent candidates.

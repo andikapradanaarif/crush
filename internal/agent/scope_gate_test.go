@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"charm.land/fantasy"
@@ -16,6 +17,7 @@ type fakeQuestionService struct {
 	selected []string
 	err      error
 	asks     int
+	texts    []string
 }
 
 func (f *fakeQuestionService) Subscribe(context.Context) <-chan pubsub.Event[question.Request] {
@@ -26,8 +28,11 @@ func (f *fakeQuestionService) SubscribeNotifications(context.Context) <-chan pub
 	return nil
 }
 
-func (f *fakeQuestionService) Ask(_ context.Context, _ question.Request) ([]question.Answer, error) {
+func (f *fakeQuestionService) Ask(_ context.Context, req question.Request) ([]question.Answer, error) {
 	f.asks++
+	for _, q := range req.Questions {
+		f.texts = append(f.texts, q.Text)
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -105,6 +110,56 @@ func TestScopeGate(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, resp.IsError, "narrow answer must not execute the write")
 		require.False(t, write.called)
+		require.Equal(t, 1, svc.asks)
+	})
+
+	t.Run("the question reports the real exploration count", func(t *testing.T) {
+		t.Parallel()
+		svc, _, readTool, writeTool := newGate(t, []string{"proceed"})
+		ctx := gateCtx("s1", 1)
+		exploreN(t, ctx, readTool, scopeGateMinExploration+4)
+		_, err := writeTool.Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
+		require.NoError(t, err)
+		require.Len(t, svc.texts, 1)
+		require.Contains(t, svc.texts[0], fmt.Sprintf("explored %d steps", scopeGateMinExploration+4))
+	})
+
+	t.Run("mutating bash gates like a write", func(t *testing.T) {
+		t.Parallel()
+		svc := &fakeQuestionService{selected: []string{"proceed"}}
+		bash := &fakeTool{name: "bash", resp: fantasy.NewTextResponse("done")}
+		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
+		wrapped := wrapToolsWithScopeGate([]fantasy.AgentTool{read, bash}, svc, true)
+		ctx := gateCtx("s1", 1)
+		exploreN(t, ctx, wrapped[0], scopeGateMinExploration)
+
+		resp, err := wrapped[1].Run(ctx, fantasy.ToolCall{
+			ID: "b", Name: "bash", Input: `{"command":"rm -rf dist"}`,
+		})
+		require.NoError(t, err)
+		require.False(t, resp.IsError)
+		require.Equal(t, 1, svc.asks)
+		require.True(t, bash.called)
+	})
+
+	t.Run("read-only bash counts as exploration", func(t *testing.T) {
+		t.Parallel()
+		svc := &fakeQuestionService{selected: []string{"proceed"}}
+		bash := &fakeTool{name: "bash", resp: fantasy.NewTextResponse("ok")}
+		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
+		wrapped := wrapToolsWithScopeGate([]fantasy.AgentTool{bash, write}, svc, true)
+		ctx := gateCtx("s1", 1)
+		for range scopeGateMinExploration {
+			resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{
+				ID: "b", Name: "bash", Input: `{"command":"go test ./internal/..."}`,
+			})
+			require.NoError(t, err)
+			require.False(t, resp.IsError)
+		}
+		require.Equal(t, 0, svc.asks)
+		// The accumulated bash exploration arms the gate for the write.
+		_, err := wrapped[1].Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
+		require.NoError(t, err)
 		require.Equal(t, 1, svc.asks)
 	})
 

@@ -2,9 +2,12 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"strings"
 	"sync"
 
 	"charm.land/fantasy"
@@ -70,16 +73,58 @@ func wrapToolsWithScopeGate(all []fantasy.AgentTool, svc question.Service, inter
 	return out
 }
 
+// mutatingBashRe matches shell commands that mutate files or git state
+// — the "large, destructive, hard to reverse" calls that must not
+// bypass the gate just because they arrive through bash instead of a
+// write tool. Deliberately conservative: mutations hidden inside
+// scripts, make targets, or build commands still pass un-gated, and a
+// false positive costs one confirmation question.
+var mutatingBashRe = regexp.MustCompile(`\b(rm|rmdir|mv|cp|dd|truncate|shred|chmod|chown|chgrp|ln|tee|patch|install|touch|mkdir)\b|` +
+	`\b(sed|perl)\s+-\S*i|\b(go\s+generate|make)\b|` +
+	`\bgit\s+(commit|push|reset|checkout|switch|restore|clean|rebase|merge|am|apply|stash|tag|revert|cherry-pick|mv|rm|init|config|clone|pull|fetch|worktree|bisect|submodule)\b`)
+
+// redirectTargetRe finds shell redirects and their targets; writing to
+// a real file mutates it, while fd duplication and /dev/null do not.
+var redirectTargetRe = regexp.MustCompile(`>>?\s*(\S+)`)
+
+// isMutatingCall classifies a call as a write for gate purposes: a
+// write-tool name, or a bash command whose text matches a mutating
+// pattern or a file-writing redirect.
+func isMutatingCall(call fantasy.ToolCall) bool {
+	if writeToolNames[call.Name] {
+		return true
+	}
+	if call.Name != "bash" {
+		return false
+	}
+	var params struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal([]byte(call.Input), &params); err != nil || params.Command == "" {
+		return false
+	}
+	if mutatingBashRe.MatchString(params.Command) {
+		return true
+	}
+	for _, m := range redirectTargetRe.FindAllStringSubmatch(params.Command, -1) {
+		if m[1] != "/dev/null" && !strings.HasPrefix(m[1], "&") {
+			return true
+		}
+	}
+	return false
+}
+
 // observe records one tool call against the session's run state and
-// reports the gate's verdict. A new run stamp resets the state — the
-// boundary is per turn, not per session. gateConfirm claims the one
-// in-flight question slot (the service supports a single pending
-// question); a parallel gated write in the same step gets gateWait and
-// is told to re-issue after the question resolves.
-func (g *scopeGate) observe(ctx context.Context, toolName string) gateVerdict {
+// reports the gate's verdict plus the exploration count the verdict was
+// reached at. A new run stamp resets the state — the boundary is per
+// turn, not per session. gateConfirm claims the one in-flight question
+// slot (the service supports a single pending question); a parallel
+// gated write in the same step gets gateWait and is told to re-issue
+// after the question resolves.
+func (g *scopeGate) observe(ctx context.Context, call fantasy.ToolCall) (gateVerdict, int) {
 	sessionID := tools.GetSessionFromContext(ctx)
 	if sessionID == "" {
-		return gatePass
+		return gatePass, 0
 	}
 	stamp := tools.GetRunStampFromContext(ctx)
 
@@ -90,25 +135,25 @@ func (g *scopeGate) observe(ctx context.Context, toolName string) gateVerdict {
 		st = &scopeGateState{stamp: stamp}
 		g.states[sessionID] = st
 	}
-	if writeToolNames[toolName] {
+	if isMutatingCall(call) {
 		switch {
 		case st.resolved || st.explore < scopeGateMinExploration:
-			return gatePass
+			return gatePass, st.explore
 		case st.asking:
-			return gateWait
+			return gateWait, st.explore
 		default:
 			st.asking = true
-			return gateConfirm
+			return gateConfirm, st.explore
 		}
 	}
 	// A declared plan or an in-flight question already externalized the
 	// scope decision — the gate is satisfied for the rest of the run.
-	if toolName == tools.TodosToolName || toolName == tools.QuestionToolName {
+	if call.Name == tools.TodosToolName || call.Name == tools.QuestionToolName {
 		st.resolved = true
-		return gatePass
+		return gatePass, st.explore
 	}
 	st.explore++
-	return gatePass
+	return gatePass, st.explore
 }
 
 // resolve marks the session's current run gated — the checkpoint fired
@@ -185,7 +230,8 @@ func (t *scopeGateTool) SetProviderOptions(opts fantasy.ProviderOptions) {
 }
 
 func (t *scopeGateTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-	switch t.gate.observe(ctx, call.Name) {
+	verdict, explore := t.gate.observe(ctx, call)
+	switch verdict {
 	case gatePass:
 		return t.inner.Run(ctx, call)
 	case gateWait:
@@ -205,7 +251,7 @@ func (t *scopeGateTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 		return t.inner.Run(ctx, call)
 	}
 
-	proceed, err := t.gate.confirm(ctx, scopeGateMinExploration)
+	proceed, err := t.gate.confirm(ctx, explore)
 	t.gate.resolve(ctx)
 	switch {
 	case err == nil && proceed:

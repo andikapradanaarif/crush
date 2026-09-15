@@ -410,12 +410,10 @@ type Options struct {
 	DisabledSkills         []string `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=crush-config"`
 	RequestTimeout         *int     `json:"request_timeout,omitempty" jsonschema:"description=Timeout in seconds for each LLM API request. Streaming responses are aborted only after this much inactivity\\, so slow but active streams are never killed. 0 disables it\\, negative values are invalid.,default=60,example=120,example=300,example=0"`
 	// TurnContext selects the per-turn context augmentation tier:
-	// off (default), session (deterministic session signals — working
-	// set, open todos — appended at the request tail), or semantic
-	// (reserved for meaning-based retrieval; currently behaves as
-	// session). The value names the scope of context drawn on, not
-	// the mechanism.
-	TurnContext string `json:"turn_context,omitempty" jsonschema:"description=Per-turn context augmentation tier. session injects deterministic session signals (working set\\, open todos) at the request tail; semantic is reserved for retrieval and currently behaves as session.,enum=off,enum=session,enum=semantic,default=off"`
+	// off (default) or session (deterministic session signals —
+	// working set, open todos — appended at the request tail). The
+	// value names the scope of context drawn on, not the mechanism.
+	TurnContext string `json:"turn_context,omitempty" jsonschema:"description=Per-turn context augmentation tier. session injects deterministic session signals (working set\\, open todos) at the request tail.,enum=off,enum=session,default=off"`
 	// AmbiguityClarification enables the calibrated-autonomy gates:
 	// the turn-zero vagueness pre-filter, the first-write scope gate,
 	// and the loop-stop escalation edge. Experimental; default off
@@ -1328,12 +1326,12 @@ func (o *Options) NotebookStubSupersededEnabled() bool {
 	return *o.NotebookStubSuperseded
 }
 
-// TurnContextMode returns the resolved per-turn context tier —
-// "off", "session", or "semantic". Unrecognized values resolve to
-// "off" so a typo disables rather than silently selecting a tier.
+// TurnContextMode returns the resolved per-turn context tier — "off"
+// or "session". Unrecognized values resolve to "off" so a typo
+// disables rather than silently selecting a tier.
 func (o *Options) TurnContextMode() string {
 	switch o.TurnContext {
-	case "session", "semantic":
+	case "session":
 		return o.TurnContext
 	default:
 		return "off"

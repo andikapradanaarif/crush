@@ -85,7 +85,7 @@ func (a *sessionAgent) runEdgeSet() []runEdge {
 			name:    "stall",
 			scan:    a.scanStallEdge,
 			resolve: a.resolveStallEdge,
-			prompt:  a.stallRetrySection,
+			prompt:  stallRetrySection,
 			note:    stallExhaustNote,
 		},
 	}
@@ -100,7 +100,7 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		return false
 	}
 
-	var prompts, notes []string
+	var prompts, notes, noteEdges []string
 	for _, edge := range a.runEdgeSet() {
 		t := edge.scan(ctx, call, in)
 		if t == nil {
@@ -125,6 +125,7 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		if edge.note != nil {
 			if n := edge.note(t, call.RepairAttempts); n != "" {
 				notes = append(notes, n)
+				noteEdges = append(noteEdges, edge.name)
 			}
 		}
 	}
@@ -136,7 +137,7 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		// Budget exhausted: surface the terminal state on the final
 		// assistant message — it is the last assistant message of the
 		// run, so the text reaches RunComplete.Text for `crush run`.
-		a.writeRepairExhaustion(ctx, call, in.currentAssistant, notes)
+		a.writeRepairExhaustion(ctx, call, in.currentAssistant, noteEdges, notes)
 		return false
 	}
 
@@ -181,12 +182,16 @@ func cleanStop(in edgeInput) bool {
 
 // writeRepairExhaustion appends the merged exhaustion notes to the
 // final assistant message so the terminal state is visible in the TUI
-// and reaches RunComplete.Text for `crush run`.
-func (a *sessionAgent) writeRepairExhaustion(ctx context.Context, call SessionAgentCall, currentAssistant *message.Message, notes []string) {
+// and reaches RunComplete.Text for `crush run`. The label names the
+// edges whose budget ran out.
+func (a *sessionAgent) writeRepairExhaustion(ctx context.Context, call SessionAgentCall, currentAssistant *message.Message, edgeNames, notes []string) {
 	if currentAssistant == nil || len(notes) == 0 {
 		return
 	}
-	currentAssistant.AppendContent("\n\nVerification: " + strings.Join(notes, " "))
+	for i, name := range edgeNames {
+		edgeNames[i] = strings.ToUpper(name[:1]) + name[1:]
+	}
+	currentAssistant.AppendContent("\n\n" + strings.Join(edgeNames, ", ") + ": " + strings.Join(notes, " "))
 	if err := a.messages.Update(ctx, *currentAssistant); err != nil {
 		slog.Error("Failed to record verification exhaustion", "error", err, "session_id", call.SessionID)
 	} else if err := a.messages.FlushAll(ctx); err != nil {
@@ -407,7 +412,7 @@ func stallBlockerReport(result *fantasy.AgentResult) string {
 // stallRetrySection renders the escalation prompt for a loop-stopped
 // interactive run — what was tried, what's blocking, options with
 // tradeoffs via the question tool's single_choice.
-func (a *sessionAgent) stallRetrySection(_ *edgeTrigger) string {
+func stallRetrySection(_ *edgeTrigger) string {
 	return "The previous attempt was stopped: the same tool calls repeated without making progress. " +
 		"Do not retry the same approach. Escalate with ONE question-tool call — a single_choice question " +
 		"naming what you tried and what is blocking, with each choice describing the tradeoff of that " +
