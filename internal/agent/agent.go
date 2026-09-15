@@ -140,6 +140,12 @@ type SessionAgentCall struct {
 	// propagates across the recursive Run boundary where a Run-local
 	// counter would reset.
 	RepairAttempts int
+	// RunStamp identifies the user turn's run boundary for the scope
+	// gate's explore→execute bookkeeping. Run stamps a zero value
+	// once; repair retries clone the caller and keep it, so a user
+	// turn gets one boundary check regardless of transport (TUI,
+	// `crush run`, backend) rather than one per retry Run.
+	RunStamp uint64
 }
 
 type SessionAgent interface {
@@ -252,10 +258,6 @@ type sessionAgent struct {
 	// gate uses to reset its explore→execute boundary bookkeeping.
 	// Atomic: Run invocations on different sessions can race on it.
 	runStampGen atomic.Uint64
-	// runStamps memoizes the stamp per RunID: repair retries are clones
-	// of the caller carrying the same RunID, so they share the gate
-	// boundary of the turn that spawned them instead of re-arming it.
-	runStamps *csync.Map[string, uint64]
 	// segmentTrackers holds per-session intra-turn segment state:
 	// in-flight generation marks and backfill claims, shared across
 	// agent rebuilds so a rebuilt coordinator cannot double-fire.
@@ -416,7 +418,6 @@ func NewSessionAgent(
 		stubBoundary:           cmp.Or(opts.StubBoundary, csync.NewMap[string, int]()),
 		stubStats:              cmp.Or(opts.StubStats, csync.NewMap[string, stubStats]()),
 		segmentTrackers:        cmp.Or(opts.SegmentTrackers, csync.NewMap[string, *segmentTracker]()),
-		runStamps:              csync.NewMap[string, uint64](),
 		prefixCache:            cmp.Or(opts.PrefixCache, csync.NewMap[string, cachedPrefix]()),
 		nbStats:                cmp.Or(opts.NotebookStats, csync.NewMap[string, notebook.Stats]()),
 		nbScanIdx:              cmp.Or(opts.NotebookScanIdx, csync.NewMap[string, int]()),
@@ -808,18 +809,13 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// Idle: become the active run. Register the cancel func before dropping
 	// the lock so a Cancel that arrives between here and assistant creation
 	// is not lost. The run stamp distinguishes this user turn's runs —
-	// repair retries keep the caller's RunID and share its stamp so the
+	// repair retries clone the caller and carry its stamp forward, so the
 	// scope gate boundary is per turn, not per Run invocation.
-	runStamp := a.runStampGen.Add(1)
-	if call.RunID != "" && a.runStamps != nil {
-		if s, ok := a.runStamps.Get(call.RunID); ok {
-			runStamp = s
-		} else {
-			a.runStamps.Set(call.RunID, runStamp)
-		}
+	if call.RunStamp == 0 {
+		call.RunStamp = a.runStampGen.Add(1)
 	}
 	runCtx := context.WithValue(ctx, tools.SessionIDContextKey, call.SessionID)
-	runCtx = context.WithValue(runCtx, tools.RunStampContextKey, runStamp)
+	runCtx = context.WithValue(runCtx, tools.RunStampContextKey, call.RunStamp)
 	genCtx, cancel = context.WithCancel(runCtx)
 	ac := &activeCancel{cancel: cancel}
 	a.activeRequests.Set(call.SessionID, ac)

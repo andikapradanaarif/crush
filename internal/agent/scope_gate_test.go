@@ -73,6 +73,7 @@ func TestIsMutatingCall(t *testing.T) {
 		{"redirect to dev null", bash("go test ./... > /dev/null"), false},
 		{"stderr dup", bash("go test ./... 2>&1"), false},
 		{"quoted redirect", bash(`echo "progress > bar"`), false},
+		{"quoted redirect target", bash(`echo x > 'out'`), true},
 		{"go test", bash("go test ./..."), false},
 		{"make test", bash("make test"), false},
 		{"empty input", fantasy.ToolCall{Name: "bash"}, false},

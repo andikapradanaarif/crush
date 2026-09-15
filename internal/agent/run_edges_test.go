@@ -37,13 +37,16 @@ func TestStallEdge(t *testing.T) {
 			&fakeTool{name: tools.TodosToolName},
 			&fakeTool{name: tools.QuestionToolName},
 		})
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID, RunID: "r"},
+		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID, RunID: "r", RunStamp: 42},
 			edgeInput{result: stallResult(), stalled: true})
 		require.True(t, queued)
 		q, _ := a.messageQueue.Get(sessionID)
 		require.Len(t, q, 1)
 		require.Equal(t, "r", q[0].RunID)
 		require.Equal(t, 1, q[0].RepairAttempts)
+		// The retry clone keeps the turn's stamp so the scope gate
+		// does not re-arm mid-turn.
+		require.Equal(t, uint64(42), q[0].RunStamp)
 		require.Contains(t, q[0].Prompt, "question")
 	})
 

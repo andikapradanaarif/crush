@@ -101,8 +101,10 @@ var mutatingBashRe = regexp.MustCompile(`\b(rm|rmdir|mv|cp|dd|truncate|shred|chm
 // a real file mutates it, while fd duplication and /dev/null do not.
 var redirectTargetRe = regexp.MustCompile(`>>?\s*(\S+)`)
 
-// quotedSpanRe strips single- and double-quoted spans before the
-// redirect scan so a `>` inside a string literal doesn't gate.
+// quotedSpanRe masks single- and double-quoted spans before the
+// redirect scan: a `>` inside a string literal must not gate, while a
+// quoted *target* (`> 'out'`) still counts — masking to a placeholder
+// keeps the target position occupied.
 var quotedSpanRe = regexp.MustCompile(`'[^']*'|"[^"]*"`)
 
 // isMutatingCall classifies a call as a write for gate purposes: a
@@ -124,7 +126,7 @@ func isMutatingCall(call fantasy.ToolCall) bool {
 	if mutatingBashRe.MatchString(params.Command) {
 		return true
 	}
-	for _, m := range redirectTargetRe.FindAllStringSubmatch(quotedSpanRe.ReplaceAllString(params.Command, ""), -1) {
+	for _, m := range redirectTargetRe.FindAllStringSubmatch(quotedSpanRe.ReplaceAllString(params.Command, "f"), -1) {
 		if m[1] != "/dev/null" && !strings.HasPrefix(m[1], "&") {
 			return true
 		}
