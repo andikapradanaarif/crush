@@ -58,6 +58,7 @@ func TestIsMutatingCall(t *testing.T) {
 		{"sed -i", bash(`sed -i 's/a/b/' f.go`), true},
 		{"sed -n -i", bash(`sed -n -i 's/a/b/' f.go`), true},
 		{"sed --in-place", bash(`sed --in-place 's/a/b/' f.go`), true},
+		{"sed -ie bundled", bash(`sed -ie 's/a/b/' f.go`), true},
 		{"sed stream-only", bash(`sed -n 's/a/b/p' f.go`), false},
 		{"git commit", bash("git commit -m x"), true},
 		{"git config --get", bash("git config --get user.name"), false},

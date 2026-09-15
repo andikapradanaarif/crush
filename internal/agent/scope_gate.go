@@ -20,9 +20,11 @@ import (
 // a handful of reads before the edit — pass un-gated.
 const scopeGateMinExploration = 8
 
-// scopeGateState is the per-session gate bookkeeping for one turn. A new
-// run stamp resets it; repair retries share the turn's stamp via the
-// RunID memoization in Run, so each user turn gets one boundary check.
+// scopeGateState is the per-session gate bookkeeping for one turn — one
+// entry per session ID, negligible growth. A new run stamp resets it;
+// repair retries share the turn's stamp via SessionAgentCall.RunStamp
+// carried through the retry clone, so each user turn gets one boundary
+// check.
 type scopeGateState struct {
 	stamp    uint64
 	explore  int
@@ -32,10 +34,11 @@ type scopeGateState struct {
 
 // gateVerdict is observe's tri-state: pass the call through, hold it
 // while a scope question is already in flight, or confirm scope with
-// the user before the write executes. gateWait is defensive — all
-// tools currently execute sequentially under sequentialMu, so a second
-// gated call cannot observe st.asking mid-question; it stays as
-// insurance for parallel tool execution.
+// the user before the write executes. gateWait is defensive — parallel
+// tools (download, fetch, web_*, MCP reads) run concurrently under
+// parallelSem, and a parallel-classified mutating tool like download
+// could observe st.asking mid-question if the fantasy executor ever
+// pipelines a step's calls; it stays as insurance.
 type gateVerdict int
 
 const (
@@ -95,8 +98,12 @@ func (g *scopeGate) wrap(all []fantasy.AgentTool) []fantasy.AgentTool {
 // un-gated, and read-ish commands that merely touch state (git config
 // --get) stay exploration. A false positive costs one confirmation
 // question; a false negative skips the checkpoint.
+//
+// The scan runs on the raw command text — command names inside quoted
+// spans still match ("bash -c 'rm -rf /'" gates) — while the redirect
+// check below masks quoted spans so "echo 'a > b'" stays exploration.
 var mutatingBashRe = regexp.MustCompile(`\b(rm|rmdir|mv|cp|dd|truncate|shred|chmod|chown|chgrp|ln|tee|patch|install|touch|mkdir|rsync|scp)\b|` +
-	`\b(sed|perl)\s+(-\S+\s+)*(-\S*i|--in-place)\b|` +
+	`\b(sed|perl)\s+(-\S+\s+)*(-\S*i|-i\S*|--in-place)\b|` +
 	`\bgit\s+(commit|push|reset|checkout|switch|restore|clean|rebase|merge|am|apply|stash|tag|revert|cherry-pick|mv|rm|init|clone|pull|bisect|submodule|update-ref|notes|branch\s+-[dDmM])\b|` +
 	`\bapt(-get)?\s+(install|remove|purge|upgrade|update|dist-upgrade)\b|` +
 	`\bkubectl\s+(delete|apply|create|patch|edit|replace|scale|drain|cordon|uncordon)\b`)
