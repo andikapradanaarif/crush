@@ -1,6 +1,9 @@
 package cache
 
-import "container/list"
+import (
+	"container/list"
+	"sync"
+)
 
 // LRU is a bounded Cache variant evicting the least recently used
 // entry once Cap is exceeded.

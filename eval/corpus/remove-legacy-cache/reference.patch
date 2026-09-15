@@ -60,13 +60,16 @@ index c9cdcfe..0000000
 -package cache
 diff --git a/internal/cache/lru.go b/internal/cache/lru.go
 deleted file mode 100644
-index 94ca1f8..0000000
+index bbbbd22..0000000
 --- a/internal/cache/lru.go
 +++ /dev/null
-@@ -1,66 +0,0 @@
+@@ -1,69 +0,0 @@
 -package cache
 -
--import "container/list"
+-import (
+-	"container/list"
+-	"sync"
+-)
 -
 -// LRU is a bounded Cache variant evicting the least recently used
 -// entry once Cap is exceeded.
