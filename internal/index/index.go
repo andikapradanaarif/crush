@@ -56,6 +56,13 @@ CREATE INDEX IF NOT EXISTS refs_src ON refs(src_path);
 -- In-degree ranking assumes dedup'd (src, dst) pairs — pin it in the
 -- schema, not just in the tagger's refSet convention.
 CREATE UNIQUE INDEX IF NOT EXISTS refs_pair ON refs(src_path, dst_path);
+-- Churn is touches-per-file over recent git history, rebuilt once per
+-- walk by a single git log pass — a ranking hint for the skeleton,
+-- inert when the project isn't a work tree.
+CREATE TABLE IF NOT EXISTS churn (
+	path    TEXT PRIMARY KEY,
+	touches INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS chunks (
 	id         INTEGER PRIMARY KEY,
 	path       TEXT NOT NULL,
