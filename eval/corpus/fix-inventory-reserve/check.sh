@@ -11,8 +11,8 @@ grep -q "func TestReserveBeyondAvailable" internal/inventory/inventory_test.go
 grep -q "ErrInsufficient" internal/inventory/inventory_test.go
 
 # Turn 2's work must exist: a Release-related test — file-agnostic,
-# the prompt does not constrain the filename.
-grep -rq "Release" --include="*_test.go" internal/inventory/
+# and a test exercising Release through internal/order counts too.
+grep -rq "Release" --include="*_test.go" .
 
 # Turn 3's work must exist: InUse on Inventory (file-agnostic),
 # surfaced in report.Stock — the prompt names that function.
