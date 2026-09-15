@@ -179,8 +179,8 @@ every characterization pass a diff to reviewed files.
   `requests_to_first_edit`, `discovery_calls_before_write`,
   `files_viewed`, `edit_failures` (cause-bucketed),
   `rereads{,_same_turn,_cross_turn}`, `canceled_calls`,
-  `interrupted_calls`, `view_directory_errors`, plus the
-  flag-dependent forensics
+  `interrupted_calls`, `truncated_calls`, `view_directory_errors`,
+  plus the flag-dependent forensics
   (`map_*`, `question_*`, `wrong_pointer_events`) that can never
   be predicates — `map` isn't registered in a `project_index`-off
   arm and `question` isn't registered headless, so those fields
@@ -190,6 +190,12 @@ every characterization pass a diff to reviewed files.
   populated before `CoverageMet` reads them; an analyzer failure
   lands as `call_metrics_error` on the record —
   inconclusive-by-absence and analyzer-broke stay distinguishable.
+  Semantics: `requests` counts billed requests — the finish-only
+  canceled-turn placeholder is excluded, but a mid-stream cancel
+  (real parts + `finish{canceled}`) still counts. Discovery and
+  rereads count _attempts_ — the gate measures roundtrips spent
+  before acting, so a failed read is a spent discovery attempt that
+  just never joins the seen-set.
   `crush eval analyze <session_db>` runs the same pass standalone
   and backfills old artifacts; the record carries `workdir` so a
   post-hoc analyze can anchor relative call paths. Known blind

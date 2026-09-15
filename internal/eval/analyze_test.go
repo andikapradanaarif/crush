@@ -85,8 +85,9 @@ func writeFixtureDB(t *testing.T) string {
 		{"m03", "tool", `[` + trPart("c1", "package a", false, "") + `]`, 0},
 		{"m04", "assistant", `[` + tcPart("c2", "grep", `{"pattern":"needle"}`) + `]`, 0},
 		{"m05", "tool", `[` + trPart("c2", "a.go:1:needle", false, "") + `]`, 0},
-		// Errored read of an unseen path — a directory view is a
-		// failed read: neither discovery nor reread, even pre-write.
+		// Errored read of an unseen path — attempts count: the
+		// roundtrip was spent, so it is discovery (and a
+		// view_directory_error); it just never joins the seen-set.
 		{"m05b", "assistant", `[` + tcPart("c2b", "view", `{"file_path":"/w/missing-dir"}`) + `]`, 0},
 		{"m05c", "tool", `[` + trPart("c2b", "Path is a directory, not a file: /w/missing-dir", true, "") + `]`, 0},
 		{"m06", "assistant", `[` + tcPart("c3", "view", `{"file_path":"/w/a.go"}`) + `]`, 0},
@@ -143,6 +144,11 @@ func writeFixtureDB(t *testing.T) string {
 		// Truncated stream: finished=false, input="" — labeled
 		// truncated, not canceled.
 		{"m41", "assistant", `[` + tcPartUnfinished("c21", "view") + `]`, 0},
+		// Mid-stream cancel: a real billed request that completed a
+		// call, then got Finish{canceled} — the request counts and the
+		// call takes this request's index.
+		{"m42", "assistant", `[` + tcPart("c22", "grep", `{"pattern":"late"}`) + `,{"type":"finish","data":{"reason":"canceled","time":1000,"message":"User canceled request"}}]`, 0},
+		{"m43", "tool", `[` + trPart("c22", "b.go:2:late", false, "") + `]`, 0},
 	}
 	for _, m := range msgs {
 		insertMsg(t, conn, m.id, "s1", m.role, m.parts, 1000, m.summary)
@@ -168,21 +174,22 @@ func TestAnalyzeSessionDB_Fixture(t *testing.T) {
 		require.NoError(t, err)
 
 		require.Equal(t, "s1", cm.SessionID)
-		// Summary row and the canceled-turn row are not requests.
-		require.Equal(t, 20, cm.Requests)
+		// Summary row and the finish-only canceled-turn row are not
+		// requests; m42's mid-stream cancel IS (real parts + finish).
+		require.Equal(t, 21, cm.Requests)
 		// c10 canceled, c16 interrupted, c21 truncated — labeled, not
-		// counted; c17's real arg-validation error and c20's map{}
-		// skeleton ARE real calls.
-		require.Equal(t, 19, cm.Calls)
-		require.Len(t, cm.ToolCalls, 22)
+		// counted; c17's real arg-validation error, c20's map{}
+		// skeleton, and c22's mid-stream-cancel call ARE real calls.
+		require.Equal(t, 20, cm.Calls)
+		require.Len(t, cm.ToolCalls, 23)
 		require.Equal(t, 1, cm.CanceledCalls)
 		require.Equal(t, 1, cm.InterruptedCalls)
 		require.Equal(t, 1, cm.TruncatedCalls)
 
 		require.Equal(t, 4, cm.FirstWriteIndex) // c4 — first attempted write.
 		require.Equal(t, 5, cm.RequestsToFirstEdit)
-		// c1 view-unseen + c2 grep; c2b's failed read is neither.
-		require.Equal(t, 2, cm.DiscoveryCallsBeforeWrite)
+		// c1 view-unseen + c2 grep + c2b dir-view attempt.
+		require.Equal(t, 3, cm.DiscoveryCallsBeforeWrite)
 		require.Equal(t, 1, cm.FilesViewed)
 
 		require.Equal(t, 2, cm.EditFailures)
@@ -232,6 +239,17 @@ func TestAnalyzeSessionDB_Fixture(t *testing.T) {
 		require.Equal(t, 1, interrupted)
 		require.Equal(t, 1, truncated)
 		require.Equal(t, 3, noResult) // c15, c18, c21.
+
+		// c22 belongs to the mid-stream-canceled request — its own
+		// request index (20), not the previous request's.
+		var c22 *CallRecord
+		for i := range cm.ToolCalls {
+			if cm.ToolCalls[i].ID == "c22" {
+				c22 = &cm.ToolCalls[i]
+			}
+		}
+		require.NotNil(t, c22)
+		require.Equal(t, 20, c22.Step)
 	}
 }
 

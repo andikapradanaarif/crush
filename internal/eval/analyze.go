@@ -58,12 +58,13 @@ type CallMetrics struct {
 	RequestsToFirstEdit int `json:"requests_to_first_edit"`
 	// DiscoveryCallsBeforeWrite counts discovery-class calls before
 	// the first write: grep/glob/ls, the LSP read tools, sourcegraph,
-	// agent delegation, and view/read that successfully read a
-	// not-yet-viewed file (a failed read delivered nothing — it is
-	// neither discovery nor reread; view-on-directory lands in
-	// ViewDirectoryErrors). map is deliberately excluded — the metric
-	// is the traditional-discovery roundtrip count map is meant to
-	// replace.
+	// agent delegation, and view/read of a not-yet-viewed file.
+	// Attempts count — the gate measures roundtrips spent before
+	// acting, so a failed view or bad-regex grep still counts (a
+	// failed read never joins the seen-set, so it can't become a
+	// reread; view-on-directory also lands in ViewDirectoryErrors).
+	// map is deliberately excluded — the metric is the
+	// traditional-discovery roundtrip count map is meant to replace.
 	DiscoveryCallsBeforeWrite int `json:"discovery_calls_before_write"`
 	// FilesViewed is the reconstructed seen-set size — paths with at
 	// least one successful view/read. Cross-checkable against the
@@ -262,10 +263,12 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 				// stray part can't land a call on the wrong request.
 				continue
 			}
-			// persistCanceledTurn writes a Finish{reason:"canceled"}
-			// part — the canceled-turn row never produced a model
-			// response, so it is not a request.
-			if !hasCanceledFinish(parts) {
+			// persistCanceledTurn writes a Finish{reason:"canceled"}-only
+			// row — the canceled turn never produced a model response, so
+			// it is not a request. A mid-stream cancel keeps its streamed
+			// parts alongside the finish marker; that WAS a billed request
+			// and its calls need this request's index.
+			if !hasCanceledFinish(parts) || hasNonFinishPart(parts) {
 				request++
 			}
 			for _, p := range parts {
@@ -363,10 +366,11 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 		}
 
 		// Discovery and rereads classify against the seen-set as it
-		// stood at this call — updates happen after classification. A
-		// failed read is neither discovery nor reread: it delivered no
-		// context (view-on-directory lands in ViewDirectoryErrors).
-		if cm.FirstWriteIndex < 0 && isDiscoveryCall(c.rec.Name, isRead, hasResult && !res.IsError, path, seenTurn) {
+		// stood at this call — updates happen after classification.
+		// Both count attempts (roundtrips spent); only the seen-set
+		// update is success-gated, so a failed read is a spent
+		// discovery attempt that can't later become a reread.
+		if cm.FirstWriteIndex < 0 && isDiscoveryCall(c.rec.Name, isRead, path, seenTurn) {
 			cm.DiscoveryCallsBeforeWrite++
 		}
 		if isRead && path != "" {
@@ -435,9 +439,22 @@ func hasColumn(ctx context.Context, conn *sql.DB, table, col string) bool {
 	return found && rows.Err() == nil
 }
 
-// hasCanceledFinish detects the canceled-turn assistant row —
-// persistCanceledTurn stamps Finish{reason:"canceled"} — so it is not
-// counted as a request (the model never produced a response).
+// hasCanceledFinish detects a finish marker with reason "canceled".
+// Combined with hasNonFinishPart it distinguishes the finish-only
+// persistCanceledTurn placeholder (not a request) from a mid-stream
+// cancel (a real request that was cut off).
+// hasNonFinishPart reports whether a row carries anything besides a finish
+// marker — a mid-stream-canceled request is still a real billed request and
+// its calls need their own request index.
+func hasNonFinishPart(parts []rawPart) bool {
+	for _, p := range parts {
+		if p.Type != "finish" {
+			return true
+		}
+	}
+	return false
+}
+
 func hasCanceledFinish(parts []rawPart) bool {
 	for _, p := range parts {
 		if p.Type != "finish" {
@@ -608,18 +625,17 @@ func errorCause(res *rawToolResult) string {
 }
 
 // isDiscoveryCall reports whether a call belongs to the
-// discovery-before-write class. Read-class calls qualify only when
-// they succeeded on a path not yet viewed — a re-read is a reread and
-// a failed read delivered nothing.
-func isDiscoveryCall(name string, isRead, readOK bool, path string, seen map[string]int) bool {
+// discovery-before-write class. Attempts count uniformly: a failed
+// read still spent the roundtrip — it just never joins the seen-set.
+func isDiscoveryCall(name string, isRead bool, path string, seen map[string]int) bool {
 	if discoveryToolNames[name] {
 		return true
 	}
-	if !isRead || !readOK {
+	if !isRead {
 		return false
 	}
 	if path == "" {
-		// A successful read with no extractable path is still a
+		// A read-class call with no extractable path is still a
 		// discovery act.
 		return true
 	}
