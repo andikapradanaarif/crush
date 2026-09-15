@@ -21,8 +21,9 @@ import (
 // a handful of reads before the edit — pass un-gated.
 const scopeGateMinExploration = 8
 
-// scopeGateState is the per-session gate bookkeeping for one run. A new
-// run stamp resets it: each user turn gets one boundary check.
+// scopeGateState is the per-session gate bookkeeping for one turn. A new
+// run stamp resets it; repair retries share the turn's stamp via the
+// RunID memoization in Run, so each user turn gets one boundary check.
 type scopeGateState struct {
 	stamp    uint64
 	explore  int
@@ -32,7 +33,10 @@ type scopeGateState struct {
 
 // gateVerdict is observe's tri-state: pass the call through, hold it
 // while a scope question is already in flight, or confirm scope with
-// the user before the write executes.
+// the user before the write executes. gateWait is defensive — all
+// tools currently execute sequentially under sequentialMu, so a second
+// gated call cannot observe st.asking mid-question; it stays as
+// insurance for parallel tool execution.
 type gateVerdict int
 
 const (
@@ -50,6 +54,12 @@ const (
 // asking. In non-interactive runs the same boundary degrades to
 // proceed-with-logged-assumption — a question nobody can answer must
 // never stall.
+//
+// Known routes around the checkpoint, accepted by design: delegating
+// the write to a task agent (the agent tool isn't a mutating call and
+// sub-agent toolsets are unwrapped), and mutating MCP tools whose
+// effects can't be classified. The gate is a heuristic checkpoint for
+// scope confirmation, not a security boundary.
 type scopeGate struct {
 	svc         question.Service
 	interactive bool
@@ -83,7 +93,7 @@ func wrapToolsWithScopeGate(all []fantasy.AgentTool, svc question.Service, inter
 // question; a false negative skips the checkpoint.
 var mutatingBashRe = regexp.MustCompile(`\b(rm|rmdir|mv|cp|dd|truncate|shred|chmod|chown|chgrp|ln|tee|patch|install|touch|mkdir|rsync|scp)\b|` +
 	`\b(sed|perl)\s+(-\S+\s+)*(-\S*i|--in-place)\b|` +
-	`\bgit\s+(commit|push|reset|checkout|switch|restore|clean|rebase|merge|am|apply|stash|tag|revert|cherry-pick|mv|rm|init|clone|pull|fetch|worktree|bisect|submodule)\b|` +
+	`\bgit\s+(commit|push|reset|checkout|switch|restore|clean|rebase|merge|am|apply|stash|tag|revert|cherry-pick|mv|rm|init|clone|pull|bisect|submodule)\b|` +
 	`\bapt(-get)?\s+(install|remove|purge|upgrade|update|dist-upgrade)\b|` +
 	`\bkubectl\s+(delete|apply|create|patch|edit|replace|scale|drain|cordon|uncordon)\b`)
 
@@ -91,11 +101,15 @@ var mutatingBashRe = regexp.MustCompile(`\b(rm|rmdir|mv|cp|dd|truncate|shred|chm
 // a real file mutates it, while fd duplication and /dev/null do not.
 var redirectTargetRe = regexp.MustCompile(`>>?\s*(\S+)`)
 
+// quotedSpanRe strips single- and double-quoted spans before the
+// redirect scan so a `>` inside a string literal doesn't gate.
+var quotedSpanRe = regexp.MustCompile(`'[^']*'|"[^"]*"`)
+
 // isMutatingCall classifies a call as a write for gate purposes: a
-// write-tool name, or a bash command whose text matches a mutating
-// pattern or a file-writing redirect.
+// write-tool name, a file-writing download, or a bash command whose
+// text matches a mutating pattern or a file-writing redirect.
 func isMutatingCall(call fantasy.ToolCall) bool {
-	if writeToolNames[call.Name] {
+	if writeToolNames[call.Name] || call.Name == tools.DownloadToolName {
 		return true
 	}
 	if call.Name != "bash" {
@@ -110,7 +124,7 @@ func isMutatingCall(call fantasy.ToolCall) bool {
 	if mutatingBashRe.MatchString(params.Command) {
 		return true
 	}
-	for _, m := range redirectTargetRe.FindAllStringSubmatch(params.Command, -1) {
+	for _, m := range redirectTargetRe.FindAllStringSubmatch(quotedSpanRe.ReplaceAllString(params.Command, ""), -1) {
 		if m[1] != "/dev/null" && !strings.HasPrefix(m[1], "&") {
 			return true
 		}
@@ -176,7 +190,11 @@ func (g *scopeGate) resolve(ctx context.Context) {
 }
 
 // confirm asks the scope question. The choice descriptions are where
-// the tradeoffs live.
+// the tradeoffs live. The question service keeps a single pending
+// question globally — a concurrent Ask from another session would
+// clobber it; that hazard pre-dates the gate (the question tool
+// exposes it too) and same-session serialization keeps it from
+// firing here.
 func (g *scopeGate) confirm(ctx context.Context, explore int) (proceed bool, err error) {
 	answers, err := g.svc.Ask(ctx, question.Request{
 		SessionID: tools.GetSessionFromContext(ctx),

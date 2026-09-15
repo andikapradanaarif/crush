@@ -83,12 +83,10 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	return []fantasy.Message{fantasy.NewUserMessage(text)}
 }
 
-// turnContextBlob renders the <turn_context> blob for the session and
-// semantic tiers — deterministic session signals, each in a labeled
-// section, appended at the request tail. The semantic tier currently
-// resolves to the same signals; meaning-based retrieval plugs in here
-// when it lands. Returns "" when the tier is off, the agent is a
-// sub-agent, or no signal has content.
+// turnContextBlob renders the <turn_context> blob for the session
+// tier — deterministic session signals, each in a labeled section,
+// appended at the request tail. Returns "" when the tier is off, the
+// agent is a sub-agent, or no signal has content.
 func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCall) string {
 	if a.turnContext != "session" || a.isSubAgent {
 		return ""

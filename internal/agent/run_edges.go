@@ -100,7 +100,7 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		return false
 	}
 
-	var prompts, notes, noteEdges []string
+	var prompts, notes, noteEdges, reports []string
 	for _, edge := range a.runEdgeSet() {
 		t := edge.scan(ctx, call, in)
 		if t == nil {
@@ -128,6 +128,12 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 				noteEdges = append(noteEdges, edge.name)
 			}
 		}
+		// A firing trigger can still carry a structured report (the
+		// stall edge's blocker summary) — budget exhaustion shows the
+		// terse note but must not lose it.
+		if t.report != "" {
+			reports = append(reports, t.report)
+		}
 	}
 	if len(prompts) == 0 {
 		return false
@@ -137,7 +143,7 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		// Budget exhausted: surface the terminal state on the final
 		// assistant message — it is the last assistant message of the
 		// run, so the text reaches RunComplete.Text for `crush run`.
-		a.writeRepairExhaustion(ctx, call, in.currentAssistant, noteEdges, notes)
+		a.writeRepairExhaustion(ctx, call, in.currentAssistant, noteEdges, notes, reports)
 		return false
 	}
 
@@ -184,7 +190,7 @@ func cleanStop(in edgeInput) bool {
 // final assistant message so the terminal state is visible in the TUI
 // and reaches RunComplete.Text for `crush run`. The label names the
 // edges whose budget ran out.
-func (a *sessionAgent) writeRepairExhaustion(ctx context.Context, call SessionAgentCall, currentAssistant *message.Message, edgeNames, notes []string) {
+func (a *sessionAgent) writeRepairExhaustion(ctx context.Context, call SessionAgentCall, currentAssistant *message.Message, edgeNames, notes, reports []string) {
 	if currentAssistant == nil || len(notes) == 0 {
 		return
 	}
@@ -192,13 +198,16 @@ func (a *sessionAgent) writeRepairExhaustion(ctx context.Context, call SessionAg
 		edgeNames[i] = strings.ToUpper(name[:1]) + name[1:]
 	}
 	currentAssistant.AppendContent("\n\n" + strings.Join(edgeNames, ", ") + ": " + strings.Join(notes, " "))
+	for _, report := range reports {
+		currentAssistant.AppendContent("\n\n" + report)
+	}
 	if err := a.messages.Update(ctx, *currentAssistant); err != nil {
-		slog.Error("Failed to record verification exhaustion", "error", err, "session_id", call.SessionID)
+		slog.Error("Failed to record repair exhaustion", "error", err, "session_id", call.SessionID)
 	} else if err := a.messages.FlushAll(ctx); err != nil {
 		// Same flush race as the outcome writes: a fast notebook
 		// goroutine would generate this turn's entries without
 		// the exhaustion line.
-		slog.Error("Failed to flush verification exhaustion", "error", err, "session_id", call.SessionID)
+		slog.Error("Failed to flush repair exhaustion", "error", err, "session_id", call.SessionID)
 	}
 }
 
@@ -386,8 +395,29 @@ func (a *sessionAgent) resolveStallEdge(ctx context.Context, call SessionAgentCa
 // way forward.
 func stallBlockerReport(result *fantasy.AgentResult) string {
 	tool := "the same tool call"
-	for i := len(result.Steps) - 1; i >= 0; i-- {
-		for _, c := range result.Steps[i].Content {
+	if name := repeatedToolName(result.Steps); name != "" {
+		tool = fmt.Sprintf("%q", name)
+	}
+	return fmt.Sprintf("Stopped: %s repeated without making progress. "+
+		"What's blocking: identical input produced identical output, so no state changed. "+
+		"Ways forward: restate the task with a concrete file or command, narrow the scope, or grant the missing access.",
+		tool)
+}
+
+// repeatedToolName approximates which tool the loop detector tripped
+// on: the most-frequent tool-call name in the detection window. The
+// detector's exact repeated signature isn't plumbed through, but the
+// signature repeats tool+input+output, so the window's dominant tool
+// name is the best available answer.
+func repeatedToolName(steps []fantasy.StepResult) string {
+	window := steps
+	if len(window) > loopDetectionWindowSize {
+		window = window[len(window)-loopDetectionWindowSize:]
+	}
+	counts := make(map[string]int)
+	best, bestN := "", 0
+	for _, step := range window {
+		for _, c := range step.Content {
 			var name string
 			switch tc := c.(type) {
 			case fantasy.ToolCallContent:
@@ -395,18 +425,16 @@ func stallBlockerReport(result *fantasy.AgentResult) string {
 			case fantasy.ToolResultContent:
 				name = tc.ToolName
 			}
-			if name != "" {
-				tool = fmt.Sprintf("%q", name)
+			if name == "" {
+				continue
+			}
+			counts[name]++
+			if counts[name] > bestN {
+				best, bestN = name, counts[name]
 			}
 		}
-		if tool != "the same tool call" {
-			break
-		}
 	}
-	return fmt.Sprintf("Stopped: %s repeated without making progress. "+
-		"What's blocking: identical input produced identical output, so no state changed. "+
-		"Ways forward: restate the task with a concrete file or command, narrow the scope, or grant the missing access.",
-		tool)
+	return best
 }
 
 // stallRetrySection renders the escalation prompt for a loop-stopped

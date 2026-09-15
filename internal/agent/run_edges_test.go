@@ -94,6 +94,10 @@ func TestStallEdge(t *testing.T) {
 		}, edgeInput{result: stallResult(), currentAssistant: asst, stalled: true})
 		require.False(t, queued)
 		require.Contains(t, asst.Content().Text, "repair attempt")
+		// The structured blocker report survives exhaustion too —
+		// interactive runs get the same what's-blocking detail
+		// headless runs get from resolve.
+		require.Contains(t, asst.Content().Text, "What's blocking:")
 	})
 
 	t.Run("one escalation per blocker via the shared budget", func(t *testing.T) {
