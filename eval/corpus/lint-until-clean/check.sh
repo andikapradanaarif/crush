@@ -20,3 +20,21 @@ fi
 grep -rq "func Test" internal/fileutil/
 
 bash ./lint.sh
+
+# Probe: a seeded os.Getenv violation must make lint.sh fail — the
+# rule must actually fire, not just exist as text.
+probe=internal/fileutil/lint_probe.go
+cat > "$probe" <<'EOF'
+package fileutil
+
+import "os"
+
+var probeEnv = os.Getenv("TOOLKIT_LINT_PROBE")
+EOF
+trap 'rm -f "$probe"' EXIT
+if bash ./lint.sh >/dev/null 2>&1; then
+	echo "lint.sh did not fire on a seeded os.Getenv violation" >&2
+	exit 1
+fi
+rm -f "$probe"
+trap - EXIT

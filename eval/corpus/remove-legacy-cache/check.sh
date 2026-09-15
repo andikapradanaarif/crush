@@ -21,7 +21,8 @@ fi
 grep -q "catalog/internal/store" internal/service/catalog.go
 grep -q "catalog/internal/store" internal/service/search.go
 
-# Turns 2 and 3 must both exist: two test functions under
-# internal/store exercising Stats (miss counter + hit counter).
-test "$(grep -r "func Test" --include="*_test.go" internal/store/ | wc -l)" -ge 2
+# Turns 2 and 3 must both exist: at least two test entry points
+# under internal/store — a merged table-driven test counts via its
+# t.Run subtests.
+test "$(grep -rE "func Test|t\.Run" --include="*_test.go" internal/store/ | wc -l)" -ge 2
 grep -rq "Stats" --include="*_test.go" internal/store/
