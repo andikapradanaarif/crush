@@ -19,8 +19,9 @@ grep -q "timeout_seconds" config.yaml
 
 # Turn 2's work must exist: a Validate method on the config type —
 # file-agnostic, a validate.go sibling is valid, but TestValidate in
-# a _test.go does not count.
+# a _test.go does not count — and the prompt wires it into main.
 grep -rq "func.*Validate" --include="*.go" --exclude="*_test.go" internal/config/
+grep -q "Validate" main.go
 
 # Turn 3's work must exist: Validate coverage in a test file.
 grep -rq "Validate" --include="*_test.go" internal/config/

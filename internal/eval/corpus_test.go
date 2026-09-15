@@ -2,10 +2,7 @@ package eval
 
 import (
 	"context"
-	"os/exec"
 	"path/filepath"
-	"runtime"
-	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -22,13 +19,11 @@ func TestCorpus_QuarantineClean(t *testing.T) {
 		tr := tr
 		t.Run(id, func(t *testing.T) {
 			t.Parallel()
-			for _, tool := range tr.Requires.Tools {
-				if _, err := exec.LookPath(tool); err != nil {
-					t.Skipf("required tool %q not on PATH", tool)
-				}
-			}
-			if len(tr.Requires.OS) > 0 && !slices.Contains(tr.Requires.OS, runtime.GOOS) {
-				t.Skipf("requires os %v, running on %s", tr.Requires.OS, runtime.GOOS)
+			// Quarantine doesn't consult requires — a host missing a
+			// declared tool would report every state as broken rather
+			// than judging the check, so skip instead of failing.
+			if missing := CheckRequires(tr); len(missing) > 0 {
+				t.Skipf("missing requirements: %v", missing)
 			}
 			r := &Runner{EvalDir: evalDir, QuarantineRepeats: 2, WorkParent: t.TempDir()}
 			t.Cleanup(r.Close)
