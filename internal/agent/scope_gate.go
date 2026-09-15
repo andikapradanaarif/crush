@@ -76,12 +76,16 @@ func wrapToolsWithScopeGate(all []fantasy.AgentTool, svc question.Service, inter
 // mutatingBashRe matches shell commands that mutate files or git state
 // — the "large, destructive, hard to reverse" calls that must not
 // bypass the gate just because they arrive through bash instead of a
-// write tool. Deliberately conservative: mutations hidden inside
-// scripts, make targets, or build commands still pass un-gated, and a
-// false positive costs one confirmation question.
-var mutatingBashRe = regexp.MustCompile(`\b(rm|rmdir|mv|cp|dd|truncate|shred|chmod|chown|chgrp|ln|tee|patch|install|touch|mkdir)\b|` +
-	`\b(sed|perl)\s+-\S*i|\b(go\s+generate|make)\b|` +
-	`\bgit\s+(commit|push|reset|checkout|switch|restore|clean|rebase|merge|am|apply|stash|tag|revert|cherry-pick|mv|rm|init|config|clone|pull|fetch|worktree|bisect|submodule)\b`)
+// write tool. Deliberately conservative in both directions: mutations
+// hidden inside scripts or build targets (make, go generate) pass
+// un-gated, and read-ish commands that merely touch state (git config
+// --get) stay exploration. A false positive costs one confirmation
+// question; a false negative skips the checkpoint.
+var mutatingBashRe = regexp.MustCompile(`\b(rm|rmdir|mv|cp|dd|truncate|shred|chmod|chown|chgrp|ln|tee|patch|install|touch|mkdir|rsync|scp)\b|` +
+	`\b(sed|perl)\s+(-\S+\s+)*(-\S*i|--in-place)\b|` +
+	`\bgit\s+(commit|push|reset|checkout|switch|restore|clean|rebase|merge|am|apply|stash|tag|revert|cherry-pick|mv|rm|init|clone|pull|fetch|worktree|bisect|submodule)\b|` +
+	`\bapt(-get)?\s+(install|remove|purge|upgrade|update|dist-upgrade)\b|` +
+	`\bkubectl\s+(delete|apply|create|patch|edit|replace|scale|drain|cordon|uncordon)\b`)
 
 // redirectTargetRe finds shell redirects and their targets; writing to
 // a real file mutates it, while fd duplication and /dev/null do not.

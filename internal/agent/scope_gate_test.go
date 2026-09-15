@@ -42,6 +42,45 @@ func (f *fakeQuestionService) Ask(_ context.Context, req question.Request) ([]qu
 func (f *fakeQuestionService) Answer([]question.Answer) bool { return false }
 func (f *fakeQuestionService) Cancel() bool                  { return false }
 
+func TestIsMutatingCall(t *testing.T) {
+	t.Parallel()
+	bash := func(cmd string) fantasy.ToolCall {
+		return fantasy.ToolCall{Name: "bash", Input: fmt.Sprintf(`{"command":%q}`, cmd)}
+	}
+	tests := []struct {
+		name string
+		call fantasy.ToolCall
+		want bool
+	}{
+		{"write tool", fantasy.ToolCall{Name: "edit"}, true},
+		{"read tool", fantasy.ToolCall{Name: "view"}, false},
+		{"rm", bash("rm -rf dist"), true},
+		{"sed -i", bash(`sed -i 's/a/b/' f.go`), true},
+		{"sed -n -i", bash(`sed -n -i 's/a/b/' f.go`), true},
+		{"sed --in-place", bash(`sed --in-place 's/a/b/' f.go`), true},
+		{"sed stream-only", bash(`sed -n 's/a/b/p' f.go`), false},
+		{"git commit", bash("git commit -m x"), true},
+		{"git config --get", bash("git config --get user.name"), false},
+		{"kubectl delete", bash("kubectl delete pod x"), true},
+		{"kubectl get", bash("kubectl get pods"), false},
+		{"apt-get remove", bash("apt-get remove pkg"), true},
+		{"rsync", bash("rsync -a src dst"), true},
+		{"scp", bash("scp f host:/tmp"), true},
+		{"redirect to file", bash("go build -o /dev/null && go test > out.log ./..."), true},
+		{"redirect to dev null", bash("go test ./... > /dev/null"), false},
+		{"stderr dup", bash("go test ./... 2>&1"), false},
+		{"go test", bash("go test ./..."), false},
+		{"make test", bash("make test"), false},
+		{"empty input", fantasy.ToolCall{Name: "bash"}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, isMutatingCall(tc.call))
+		})
+	}
+}
+
 // gateCtx stamps the session and run identity the gate keys on.
 func gateCtx(sessionID string, stamp uint64) context.Context {
 	ctx := context.WithValue(context.Background(), tools.SessionIDContextKey, sessionID)
