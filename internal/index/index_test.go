@@ -329,6 +329,50 @@ func main() {
 	require.Equal(t, []string{"internal/store"}, refs)
 }
 
+func TestTagFile_GoImportBlockEdgeCases(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	// A `) // comment` closer and a single-line `import ("x")` must
+	// not stick the gate open — literals after them aren't imports.
+	writeFile(t, root, "a.go", `package main
+
+import (
+	"example.com/proj/internal/store"
+) // grouped imports
+
+var url = "example.com/proj/internal/other"
+`)
+	writeFile(t, root, "b.go", `package main
+
+import ("example.com/proj/internal/third")
+
+var dep = "example.com/proj/internal/other"
+`)
+	writeFile(t, root, "go.mod", "module example.com/proj\n")
+	writeFile(t, root, "internal/store/store.go", "package store\n")
+	writeFile(t, root, "internal/other/other.go", "package other\n")
+	writeFile(t, root, "internal/third/third.go", "package third\n")
+
+	exists := func(p string) bool {
+		switch p {
+		case "a.go", "b.go", "internal/store", "internal/other",
+			"internal/third", "internal":
+			return true
+		}
+		return false
+	}
+
+	_, refs, err := tagFile(root, "a.go", "example.com/proj", exists)
+	require.NoError(t, err)
+	require.Equal(t, []string{"internal/store"}, refs)
+
+	// The single-line form still captures its spec, and the gate
+	// stays closed for the literal below it.
+	_, refs, err = tagFile(root, "b.go", "example.com/proj", exists)
+	require.NoError(t, err)
+	require.Equal(t, []string{"internal/third"}, refs)
+}
+
 func TestTagFile_Java(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -593,4 +637,31 @@ func TestTouchFile_ZeroByteDrops(t *testing.T) {
 
 	_, _, found = svc.indexedFile(ctx, "f.go")
 	require.False(t, found)
+}
+
+func TestTouchFile_AncestorDirSkipped(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	writeFile(t, root, "main.go", "package main\n\nfunc main() {}\n")
+	// Not gitignored — only the built-in dir-level ignore applies.
+	writeFile(t, root, "node_modules/pkg/index.js", "exports.x = 1\n")
+
+	svc, err := Open(dataDir, root)
+	require.NoError(t, err)
+	defer svc.Close()
+	ctx := context.Background()
+	require.NoError(t, svc.EnsureIndexed(ctx))
+
+	// The walk never emits files under node_modules; a write
+	// notification must not upsert one either.
+	svc.touchFile(filepath.Join(root, "node_modules/pkg/index.js"))
+	_, _, found := svc.indexedFile(ctx, "node_modules/pkg/index.js")
+	require.False(t, found)
+
+	// A write under a normal directory still lands.
+	svc.touchFile(filepath.Join(root, "main.go"))
+	_, _, found = svc.indexedFile(ctx, "main.go")
+	require.True(t, found)
 }

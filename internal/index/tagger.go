@@ -78,7 +78,7 @@ var langByExt = map[string]langSpec{
 		export: goExport,
 		imports: []*regexp.Regexp{
 			regexp.MustCompile(`^\s*(?:\w+\s+)?"([^"]+)"`),
-			regexp.MustCompile(`^import\s+"([^"]+)"`),
+			regexp.MustCompile(`^import\s+\(?\s*"([^"]+)"`),
 		},
 		importsInBlock: true,
 		resolve:        resolveGoImport,
@@ -203,9 +203,16 @@ func tagFile(root, relPath, modulePath string, exists func(string) bool) ([]tag,
 		if spec.importsInBlock {
 			switch {
 			case strings.HasPrefix(trimmed, "import (") || trimmed == "import(":
+				// A `)` or quote on the opener line means a
+				// single-line form (`import ("fmt")`, `import ()`)
+				// — fall through so it's scanned below instead of
+				// sticking the gate open.
+				if strings.ContainsAny(line, `")`) {
+					break
+				}
 				inImportBlock = true
 				continue
-			case inImportBlock && trimmed == ")":
+			case inImportBlock && strings.HasPrefix(trimmed, ")"):
 				inImportBlock = false
 				continue
 			}

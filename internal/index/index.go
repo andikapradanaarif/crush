@@ -218,12 +218,25 @@ func (s *Service) touchFile(absPath string) {
 	// e.g. a file truncated to zero bytes should lose its stale row
 	// now, matching what the next reconcile would do.
 	if info.IsDir() || info.Size() == 0 ||
-		s.skipWalker().ShouldSkip(absPath) {
+		s.skipWalker().ShouldSkip(absPath) || s.ancestorSkipped(rel) {
 		s.dropFile(context.Background(), filepath.ToSlash(rel))
 		return
 	}
 	s.refreshIfStale(context.Background(), filepath.ToSlash(rel),
 		info.ModTime().UnixNano(), info.Size())
+}
+
+// ancestorSkipped mirrors collect's dir-level ignore check on the
+// file's ancestors — ShouldSkip only matches the file's base name,
+// so a write under node_modules/ would otherwise upsert a row the
+// walk would never emit.
+func (s *Service) ancestorSkipped(rel string) bool {
+	for dir := filepath.Dir(rel); dir != "."; dir = filepath.Dir(dir) {
+		if s.skipWalker().ShouldSkipDir(filepath.Join(s.root, dir)) {
+			return true
+		}
+	}
+	return false
 }
 
 // Ready reports whether the index database could be opened and
