@@ -292,15 +292,22 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	// the full message/tool trace, free. Attempted regardless of
 	// whether telemetry reported a session: a turn-0 hard-kill writes
 	// no telemetry but still leaves a DB worth keeping.
-	if dst, err := r.preserveSessionDB(ctx, exp.Name, traj.ID, armName, inv, attempt, workdir); err == nil {
+	dst, walSafe, err := r.preserveSessionDB(ctx, exp.Name, traj.ID, armName, inv, attempt, workdir)
+	if err != nil {
+		// Record why the metrics are absent — indistinguishable from
+		// "no metrics by design" otherwise.
+		rec.CallMetricsError = fmt.Sprintf("session db not preserved: %v", err)
+	} else {
 		rec.SessionDB = dst
 		rec.Workdir = workdir
+		rec.SessionDBIncomplete = !walSafe
 		// Sequence analysis runs on the preserved artifact, not the
 		// about-to-be-deleted source — `crush eval analyze <artifact>`
 		// then reproduces exactly what the record carries.
 		metrics, aerr := AnalyzeSessionDB(ctx, filepath.Join(r.EvalDir, dst), AnalyzeOptions{
-			Workdir: workdir,
-			Turns:   traj.Task.Turns,
+			SessionID: res.SessionID,
+			Workdir:   workdir,
+			Turns:     traj.Task.Turns,
 		})
 		if aerr != nil {
 			rec.CallMetricsError = aerr.Error()
@@ -355,15 +362,17 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 // still sitting in crush.db-wal — on WaitDelay hard-kills (timeout
 // runs) that tail is exactly the derailment trace the artifact exists
 // for. VACUUM INTO produces a consistent single-file snapshot including
-// un-checkpointed commits; a raw copy is the last-resort fallback.
-func (r *Runner) preserveSessionDB(ctx context.Context, expName, trajID, arm, inv string, runIndex int, workdir string) (string, error) {
+// un-checkpointed commits; a raw copy is the last-resort fallback and
+// reports walSafe=false so the record can flag a possibly-truncated
+// artifact.
+func (r *Runner) preserveSessionDB(ctx context.Context, expName, trajID, arm, inv string, runIndex int, workdir string) (rel string, walSafe bool, err error) {
 	src := filepath.Join(DataDirFor(workdir), "crush.db")
 	if !fileExists(src) {
-		return "", fmt.Errorf("no session db at %s", src)
+		return "", false, fmt.Errorf("no session db at %s", src)
 	}
 	dstDir := filepath.Join(r.EvalDir, "results", expName, "artifacts")
 	if err := os.MkdirAll(dstDir, 0o755); err != nil {
-		return "", err
+		return "", false, err
 	}
 	dst := filepath.Join(dstDir, fmt.Sprintf("%s-%s-%s-%d.db", trajID, arm, inv, runIndex))
 
@@ -378,13 +387,16 @@ func (r *Runner) preserveSessionDB(ctx context.Context, expName, trajID, arm, in
 			"src", src, "error", err)
 		data, rerr := os.ReadFile(src)
 		if rerr != nil {
-			return "", rerr
+			return "", false, rerr
 		}
 		if werr := os.WriteFile(dst, data, 0o644); werr != nil {
-			return "", werr
+			return "", false, werr
 		}
+		rel, err = filepath.Rel(r.EvalDir, dst)
+		return rel, false, err
 	}
-	return filepath.Rel(r.EvalDir, dst)
+	rel, err = filepath.Rel(r.EvalDir, dst)
+	return rel, true, err
 }
 
 // appendRecord writes one line to results/<experiment>/<traj>.jsonl.

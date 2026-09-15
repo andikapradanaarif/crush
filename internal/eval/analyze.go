@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/db"
 )
@@ -113,12 +114,14 @@ type CallMetrics struct {
 	// positives poison the gate.
 	WrongPointerEvents int `json:"wrong_pointer_events"`
 	// CanceledCalls counts user-cancel placeholders (finished=true,
-	// input="{}", cancel-marked result); InterruptedCalls counts the
-	// other never-executed placeholders — a generic cleanup error or a
-	// hard-kill between the call record and its result. Both are
-	// labeled in the sequence and neither counts as a real call.
+	// input="{}", cancel-marked result); InterruptedCalls counts
+	// never-executed placeholders from other causes (generic cleanup
+	// error or no result); TruncatedCalls counts input=""/
+	// finished=false rows — a stream cut mid-call. All are labeled in
+	// the sequence and none count as real calls.
 	CanceledCalls    int `json:"canceled_calls"`
 	InterruptedCalls int `json:"interrupted_calls"`
+	TruncatedCalls   int `json:"truncated_calls"`
 	// ViewDirectoryErrors counts view/read calls that failed with
 	// "is a directory" — classified explicitly rather than counted
 	// as reads.
@@ -140,9 +143,11 @@ type CallRecord struct {
 	// Canceled is the user-cancel placeholder (finished=true,
 	// input="{}", cancel-marked result); Interrupted is the
 	// never-executed placeholder from any other cause (generic cleanup
-	// error, or no result at all). Neither counts as a real call.
+	// error, or no result at all); Truncated is a stream cut mid-call
+	// (input="" or finished=false). None count as a real call.
 	Canceled    bool     `json:"canceled,omitempty"`
 	Interrupted bool     `json:"interrupted,omitempty"`
+	Truncated   bool     `json:"truncated,omitempty"`
 	Cause       string   `json:"cause,omitempty"` // Error bucket: hook|not_found|cancelled|permission|other.
 	Files       []string `json:"files,omitempty"` // Normalized paths referenced by the call input.
 }
@@ -185,15 +190,8 @@ var discoveryToolNames = map[string]bool{
 	"sourcegraph": true, "agent": true,
 }
 
-// repairPromptPrefixes identify harness-authored retry prompts the run
-// edges enqueue inside the same `crush run` process (run_edges.go) —
-// they carry a user role but do not start a new process turn. Keep in
-// sync with verificationRetrySection/todosRetrySection/stallRetrySection.
-var repairPromptPrefixes = []string{
-	"Verification failed.",
-	"The todo list still has",
-	"The previous attempt was stopped",
-}
+// Repair-prompt fingerprints live in agent.RepairPromptPrefixes —
+// the run_edges section builders render from the same constants.
 
 // AnalyzeSessionDB reconstructs the tool-call sequence of a session DB
 // and derives the call-level gate metrics from it. dbPath is a
@@ -259,10 +257,15 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 				turn++
 			}
 		case "assistant":
+			if summary != 0 {
+				// Summary rows carry no calls — don't scan parts, so a
+				// stray part can't land a call on the wrong request.
+				continue
+			}
 			// persistCanceledTurn writes a Finish{reason:"canceled"}
 			// part — the canceled-turn row never produced a model
 			// response, so it is not a request.
-			if summary == 0 && !hasCanceledFinish(parts) {
+			if !hasCanceledFinish(parts) {
 				request++
 			}
 			for _, p := range parts {
@@ -283,7 +286,7 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 				if f := tools.ToolCallFilePath(tc.Input); f != "" {
 					rec.Files = []string{normalizeCallPath(opts.Workdir, f)}
 				}
-				pending = append(pending, pendingCall{rec: rec, input: tc.Input})
+				pending = append(pending, pendingCall{rec: rec, input: tc.Input, finished: tc.Finished})
 			}
 		case "tool":
 			for _, p := range parts {
@@ -315,16 +318,21 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 			c.rec.IsError = res.IsError
 			c.rec.Cause = errorCause(&res)
 		}
-		canceled, interrupted := placeholderKind(c.input, hasResult, &res)
-		if canceled || interrupted {
-			// Labeled in the sequence, never counted as a real call.
-			c.rec.Canceled = canceled
-			c.rec.Interrupted = interrupted
-			if canceled {
-				cm.CanceledCalls++
-			} else {
-				cm.InterruptedCalls++
-			}
+		// Labeled in the sequence, never counted as a real call.
+		switch placeholderKind(c.input, c.finished, hasResult, &res) {
+		case callCanceled:
+			c.rec.Canceled = true
+			cm.CanceledCalls++
+			cm.ToolCalls = append(cm.ToolCalls, c.rec)
+			continue
+		case callInterrupted:
+			c.rec.Interrupted = true
+			cm.InterruptedCalls++
+			cm.ToolCalls = append(cm.ToolCalls, c.rec)
+			continue
+		case callTruncated:
+			c.rec.Truncated = true
+			cm.TruncatedCalls++
 			cm.ToolCalls = append(cm.ToolCalls, c.rec)
 			continue
 		}
@@ -400,11 +408,13 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 	return cm, nil
 }
 
-// pendingCall is a call record mid-reconstruction — the input is kept
-// off the emitted record but is needed for canceled/symbol checks.
+// pendingCall is a call record mid-reconstruction — the input and
+// finished state are kept off the emitted record but needed for
+// placeholder/symbol checks.
 type pendingCall struct {
-	rec   CallRecord
-	input string
+	rec      CallRecord
+	input    string
+	finished bool
 }
 
 // hasColumn reports whether a table carries a column, for analyzing
@@ -464,9 +474,10 @@ type rawPart struct {
 }
 
 type rawToolCall struct {
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-	Input string `json:"input"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Input    string `json:"input"`
+	Finished bool   `json:"finished"`
 }
 
 type rawToolResult struct {
@@ -514,7 +525,7 @@ func isProcessBoundary(text string, turns []string, nextTurn int) bool {
 		}
 		return false
 	}
-	for _, p := range repairPromptPrefixes {
+	for _, p := range agent.RepairPromptPrefixes {
 		if strings.HasPrefix(text, p) {
 			return false
 		}
@@ -522,31 +533,42 @@ func isProcessBoundary(text string, turns []string, nextTurn int) bool {
 	return true
 }
 
-// placeholderKind classifies the finished=true, input="{}" rows the
-// cleanup path persists for calls that never executed. The result
-// content discriminates cause: a "cancelled" marker means a user
-// cancel; the generic "There was an error while executing the tool"
-// (or a missing result) means the call was interrupted another way —
-// that string is written for any missing-result cleanup, not just
-// cancels. An input="{}" call with a real result is a genuine
-// zero-argument call (e.g. the map skeleton) — never a placeholder.
-func placeholderKind(input string, hasResult bool, res *rawToolResult) (canceled, interrupted bool) {
-	if input != "{}" && input != "" {
-		return false, false
+// Placeholder dispositions — none count as real calls.
+const (
+	// callCanceled is the user-cancel placeholder: the cancel path
+	// stamps finished=true, input="{}" and writes a cancel-marked
+	// is_error result.
+	callCanceled = "canceled"
+	// callInterrupted is the never-executed placeholder from any other
+	// cause — the generic "There was an error while executing the
+	// tool" cleanup result (written for any missing-result cleanup,
+	// not just cancels) or no result at all.
+	callInterrupted = "interrupted"
+	// callTruncated is a different artifact shape: input="" or
+	// finished=false — OnToolInputStart persisted the part and
+	// OnToolCall never ran, i.e. a stream cut mid-call (hard-kill).
+	callTruncated = "truncated"
+)
+
+// placeholderKind classifies rows that never executed a tool,
+// discriminating on shape and result content. An input="{}" call with
+// a real result is a genuine zero-argument call (e.g. the map
+// skeleton) — never a placeholder.
+func placeholderKind(input string, finished bool, hasResult bool, res *rawToolResult) string {
+	if input == "" || !finished {
+		return callTruncated
 	}
-	if !hasResult {
-		return false, true
+	if input != "{}" {
+		return ""
 	}
-	if !res.IsError {
-		return false, false
+	if hasResult && res.IsError &&
+		(strings.Contains(res.Content, "cancelled") || strings.Contains(res.Content, "canceled")) {
+		return callCanceled
 	}
-	if strings.Contains(res.Content, "cancelled") || strings.Contains(res.Content, "canceled") {
-		return true, false
+	if !hasResult || (res.IsError && res.Content == "There was an error while executing the tool") {
+		return callInterrupted
 	}
-	if res.Content == "There was an error while executing the tool" {
-		return false, true
-	}
-	return false, false
+	return ""
 }
 
 // errorCause buckets an errored tool result. The hook bucket reads the

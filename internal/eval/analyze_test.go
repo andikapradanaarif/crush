@@ -20,6 +20,13 @@ func tcPart(id, name, input string) string {
 		id, name, input)
 }
 
+// tcPartUnfinished emits the truncated-stream shape: OnToolInputStart
+// persisted the part and OnToolCall never ran.
+func tcPartUnfinished(id, name string) string {
+	return fmt.Sprintf(`{"type":"tool_call","data":{"id":%q,"name":%q,"input":"","provider_executed":false,"finished":false}}`,
+		id, name)
+}
+
 func trPart(callID, content string, isErr bool, meta string) string {
 	return fmt.Sprintf(`{"type":"tool_result","data":{"tool_call_id":%q,"name":"x","content":%q,"data":"","mime_type":"","metadata":%q,"is_error":%v}}`,
 		callID, content, meta, isErr)
@@ -78,9 +85,10 @@ func writeFixtureDB(t *testing.T) string {
 		{"m03", "tool", `[` + trPart("c1", "package a", false, "") + `]`, 0},
 		{"m04", "assistant", `[` + tcPart("c2", "grep", `{"pattern":"needle"}`) + `]`, 0},
 		{"m05", "tool", `[` + trPart("c2", "a.go:1:needle", false, "") + `]`, 0},
-		// Errored read of an unseen file — neither discovery nor reread.
-		{"m05b", "assistant", `[` + tcPart("c2b", "view", `{"file_path":"/w/missing.go"}`) + `]`, 0},
-		{"m05c", "tool", `[` + trPart("c2b", "file does not exist: /w/missing.go", true, "") + `]`, 0},
+		// Errored read of an unseen path — a directory view is a
+		// failed read: neither discovery nor reread, even pre-write.
+		{"m05b", "assistant", `[` + tcPart("c2b", "view", `{"file_path":"/w/missing-dir"}`) + `]`, 0},
+		{"m05c", "tool", `[` + trPart("c2b", "Path is a directory, not a file: /w/missing-dir", true, "") + `]`, 0},
 		{"m06", "assistant", `[` + tcPart("c3", "view", `{"file_path":"/w/a.go"}`) + `]`, 0},
 		{"m07", "tool", `[` + trPart("c3", "package a", false, "") + `]`, 0},
 		{"m08", "assistant", `[` + tcPart("c4", "edit", `{"file_path":"/w/a.go","old_string":"x"}`) + `]`, 0},
@@ -128,6 +136,13 @@ func writeFixtureDB(t *testing.T) string {
 		// wrong-pointer event.
 		{"m37", "assistant", `[` + tcPart("c18", "map", `{"symbol":"Zebra"}`) + `,` + tcPart("c19", "grep", `{"pattern":"Zebra"}`) + `]`, 0},
 		{"m38", "tool", `[` + trPart("c19", "z.go:1:Zebra", false, "") + `]`, 0},
+		// map{} skeleton is a REAL zero-arg call — same input shape as
+		// the placeholders, discriminated by the successful result.
+		{"m39", "assistant", `[` + tcPart("c20", "map", `{}`) + `]`, 0},
+		{"m40", "tool", `[` + trPart("c20", "map skeleton output", false, "") + `]`, 0},
+		// Truncated stream: finished=false, input="" — labeled
+		// truncated, not canceled.
+		{"m41", "assistant", `[` + tcPartUnfinished("c21", "view") + `]`, 0},
 	}
 	for _, m := range msgs {
 		insertMsg(t, conn, m.id, "s1", m.role, m.parts, 1000, m.summary)
@@ -154,13 +169,15 @@ func TestAnalyzeSessionDB_Fixture(t *testing.T) {
 
 		require.Equal(t, "s1", cm.SessionID)
 		// Summary row and the canceled-turn row are not requests.
-		require.Equal(t, 18, cm.Requests)
-		// c10 canceled, c16 interrupted — labeled, not counted; c17's
-		// real arg-validation error IS a real call.
-		require.Equal(t, 18, cm.Calls)
-		require.Len(t, cm.ToolCalls, 20)
+		require.Equal(t, 20, cm.Requests)
+		// c10 canceled, c16 interrupted, c21 truncated — labeled, not
+		// counted; c17's real arg-validation error and c20's map{}
+		// skeleton ARE real calls.
+		require.Equal(t, 19, cm.Calls)
+		require.Len(t, cm.ToolCalls, 22)
 		require.Equal(t, 1, cm.CanceledCalls)
 		require.Equal(t, 1, cm.InterruptedCalls)
+		require.Equal(t, 1, cm.TruncatedCalls)
 
 		require.Equal(t, 4, cm.FirstWriteIndex) // c4 — first attempted write.
 		require.Equal(t, 5, cm.RequestsToFirstEdit)
@@ -172,10 +189,11 @@ func TestAnalyzeSessionDB_Fixture(t *testing.T) {
 		require.Equal(t, 1, cm.EditFailuresHook)
 		require.Equal(t, 1, cm.EditFailuresOther)
 
-		// c6 ok + c14 hallucinated "tool not found" + c18 no result.
-		require.Equal(t, 3, cm.MapCalls)
-		require.Equal(t, 1, cm.MapCallsOK)
-		require.Equal(t, int64(len("Config defined at a.go:12")), cm.MapResultBytes)
+		// c6 ok + c14 hallucinated "tool not found" + c18 no result +
+		// c20 skeleton ok.
+		require.Equal(t, 4, cm.MapCalls)
+		require.Equal(t, 2, cm.MapCallsOK)
+		require.Equal(t, int64(len("Config defined at a.go:12")+len("map skeleton output")), cm.MapResultBytes)
 
 		require.Equal(t, 1, cm.QuestionCalls)
 		require.Equal(t, 1, cm.QuestionCallsErrored)
@@ -190,9 +208,9 @@ func TestAnalyzeSessionDB_Fixture(t *testing.T) {
 		// landed — no pointer delivered — so c19's grep Zebra is not
 		// an event.
 		require.Equal(t, 1, cm.WrongPointerEvents)
-		require.Equal(t, 1, cm.ViewDirectoryErrors)
+		require.Equal(t, 2, cm.ViewDirectoryErrors) // c2b + c9.
 
-		var canceled, interrupted, noResult int
+		var canceled, interrupted, truncated, noResult int
 		for i := range cm.ToolCalls {
 			rec := &cm.ToolCalls[i]
 			if rec.Canceled {
@@ -202,13 +220,18 @@ func TestAnalyzeSessionDB_Fixture(t *testing.T) {
 			if rec.Interrupted {
 				interrupted++
 			}
+			if rec.Truncated {
+				truncated++
+				require.Equal(t, "view", rec.Name)
+			}
 			if rec.NoResult {
 				noResult++
 			}
 		}
 		require.Equal(t, 1, canceled)
 		require.Equal(t, 1, interrupted)
-		require.Equal(t, 2, noResult) // c15 and c18.
+		require.Equal(t, 1, truncated)
+		require.Equal(t, 3, noResult) // c15, c18, c21.
 	}
 }
 
@@ -241,8 +264,9 @@ func TestPreserveSessionDB_CapturesWALTail(t *testing.T) {
 	insertMsg(t, conn, "m1", "s1", "assistant", `[`+tcPart("c1", "edit", `{"file_path":"/w/a.go"}`)+`]`, 1000, 0)
 
 	r := &Runner{EvalDir: t.TempDir()}
-	dst, err := r.preserveSessionDB(context.Background(), "exp", "traj", "control", "inv", 0, workdir)
+	dst, walSafe, err := r.preserveSessionDB(context.Background(), "exp", "traj", "control", "inv", 0, workdir)
 	require.NoError(t, err)
+	require.True(t, walSafe)
 	require.NoError(t, db.Release(dataDir))
 
 	ro, err := db.ConnectReadOnly(context.Background(), filepath.Join(r.EvalDir, dst))
@@ -328,10 +352,16 @@ func TestCallMetricsCoverage(t *testing.T) {
 		require.Error(t, err, "%s must not be a coverage predicate", key)
 	}
 
-	// Absent analysis reads as zero — min_* starves to inconclusive.
-	met, err := CoverageMet(Coverage{"min_call_metrics.requests": 1}, &RunRecord{})
-	require.NoError(t, err)
-	require.False(t, met)
+	// Absent analysis starves predicates in BOTH directions — min_*
+	// and max_* are both inconclusive, never pass-on-missing.
+	for _, cov := range []Coverage{
+		{"min_call_metrics.requests": 1},
+		{"max_call_metrics.rereads": 3},
+	} {
+		met, err := CoverageMet(cov, &RunRecord{})
+		require.NoError(t, err)
+		require.False(t, met)
+	}
 }
 
 func TestAnalyzeSessionDB_SessionSelect(t *testing.T) {

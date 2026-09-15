@@ -182,6 +182,9 @@ type RunRecord struct {
 	// post-hoc `crush eval analyze` on the artifact can anchor relative
 	// call paths correctly (the directory itself is deleted).
 	Workdir string `json:"workdir,omitempty"`
+	// SessionDBIncomplete marks a raw-copy fallback snapshot — the WAL
+	// tail may be missing, so call_metrics underreports.
+	SessionDBIncomplete bool `json:"session_db_incomplete,omitempty"`
 	// CallMetrics is the post-run sequence analysis of SessionDB —
 	// populated between preserveSessionDB and record append so
 	// min_call_metrics.* predicates can read it during CoverageMet.

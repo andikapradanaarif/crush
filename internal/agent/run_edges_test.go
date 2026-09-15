@@ -128,18 +128,17 @@ func TestStallEdge(t *testing.T) {
 	})
 }
 
-// TestRepairPromptPrefixes_Stable pins the literal prefixes the eval
-// analyzer fingerprints to keep repair turns inside the firing
-// process-turn (internal/eval/analyze.go repairPromptPrefixes) —
-// changing this wording must update the analyzer.
+// TestRepairPromptPrefixes_Stable pins the repair-prompt wording to
+// the exported RepairPromptPrefixes — the eval analyzer fingerprints
+// those literals to keep repair turns inside the firing process-turn.
 func TestRepairPromptPrefixes_Stable(t *testing.T) {
 	t.Parallel()
 	v := verificationRetrySection(&edgeTrigger{failed: []gateCheckOutcome{{
 		check: message.VerificationCheck{Check: "c"}, output: "out",
 	}}})
-	require.True(t, strings.HasPrefix(v, "Verification failed."))
+	require.True(t, strings.HasPrefix(v, verificationRetryPrefix))
 	require.True(t, strings.HasPrefix(
 		todosRetrySection(&edgeTrigger{todos: []session.Todo{{Content: "x", Status: "pending"}}}),
-		"The todo list still has"))
-	require.True(t, strings.HasPrefix(stallRetrySection(nil), "The previous attempt was stopped"))
+		todosRetryPrefix))
+	require.True(t, strings.HasPrefix(stallRetrySection(nil), stallRetryPrefix))
 }

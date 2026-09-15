@@ -58,12 +58,13 @@ var coverageFields = map[string]func(*RunRecord) float64{
 	"call_metrics.rereads_cross_turn":       func(r *RunRecord) float64 { return float64(callMetrics(r).RereadsCrossTurn) },
 	"call_metrics.canceled_calls":           func(r *RunRecord) float64 { return float64(callMetrics(r).CanceledCalls) },
 	"call_metrics.interrupted_calls":        func(r *RunRecord) float64 { return float64(callMetrics(r).InterruptedCalls) },
+	"call_metrics.truncated_calls":          func(r *RunRecord) float64 { return float64(callMetrics(r).TruncatedCalls) },
 	"call_metrics.view_directory_errors":    func(r *RunRecord) float64 { return float64(callMetrics(r).ViewDirectoryErrors) },
 }
 
-// callMetrics dereferences the optional analysis sub-object — absent
-// metrics read as zero so a missing analysis starves min_* predicates
-// into inconclusive rather than erroring the coverage check.
+// callMetrics dereferences the optional analysis sub-object. CoverageMet
+// short-circuits nil CallMetrics before reaching field funcs, so this
+// only runs when analysis is present.
 func callMetrics(r *RunRecord) CallMetrics {
 	if r.CallMetrics == nil {
 		return CallMetrics{}
@@ -107,6 +108,11 @@ func CoverageMet(cov Coverage, rec *RunRecord) (bool, error) {
 		op, field, err := ParseCoverageKey(key)
 		if err != nil {
 			return false, err
+		}
+		// Absent analysis starves call_metrics predicates in BOTH
+		// directions — max_* must not pass on a missing analysis.
+		if strings.HasPrefix(field, "call_metrics.") && rec.CallMetrics == nil {
+			return false, nil
 		}
 		got := coverageFields[field](rec)
 		switch op {
