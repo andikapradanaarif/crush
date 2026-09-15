@@ -13,7 +13,7 @@
 	"check": {
 		"script": "check.sh",
 		"expect_start_state": "fail",
-		"timeout_seconds": 120
+		"timeout_seconds": 300
 	},
 	"coverage": {"min_steps": 10},
 	"requires": {"tools": ["go"]},

@@ -15,8 +15,10 @@ for f in order.go return.go exchange.go; do
 	grep -q "shop/internal/order" "internal/handlers/$f"
 done
 
-# Turn 2's work must exist: a test for the shared validator.
-grep -rq "func Test" internal/order/
+# Turn 2's work must exist: a test for the shared validator. The
+# fixture ships no test files, so any _test.go is turn work — an
+# in-package order test, an importing test, or a handlers-level one.
+grep -rq "func Test" --include="*_test.go" .
 
 # Turn 3's work must exist: an IsValid helper wired into main.
 grep -rq "IsValid" internal/order/
