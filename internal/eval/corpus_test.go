@@ -8,22 +8,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestExampleCorpus_QuarantineClean(t *testing.T) {
-	dir, err := filepath.Abs(filepath.Join("..", "..", "eval", "corpus", "fix-nil-map-write"))
-	if err != nil {
-		t.Fatal(err)
+func TestCorpus_QuarantineClean(t *testing.T) {
+	evalDir, err := filepath.Abs(filepath.Join("..", "..", "eval"))
+	require.NoError(t, err)
+	corpus, err := LoadCorpus(evalDir)
+	require.NoError(t, err)
+	require.NotEmpty(t, corpus)
+
+	for id, tr := range corpus {
+		tr := tr
+		t.Run(id, func(t *testing.T) {
+			t.Parallel()
+			r := &Runner{EvalDir: evalDir, QuarantineRepeats: 2, WorkParent: t.TempDir()}
+			t.Cleanup(r.Close)
+			dir := filepath.Join(evalDir, "corpus", id)
+			reason, err := r.Quarantine(context.Background(), tr, dir)
+			require.NoError(t, err)
+			// A rotted seed must fail CI, not just log — caveat: its
+			// declared requires.tools only pre-flight on machines that
+			// have them.
+			require.Empty(t, reason, "trajectory %s quarantined: %s", id, reason)
+		})
 	}
-	tr, err := LoadTrajectory(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := &Runner{EvalDir: "../..", QuarantineRepeats: 2, WorkParent: t.TempDir()}
-	t.Cleanup(r.Close)
-	reason, err := r.Quarantine(context.Background(), tr, dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// A rotted seed must fail CI, not just log — caveat: its declared
-	// requires.tools only pre-flight on machines that have them.
-	require.Empty(t, reason, "seeded trajectory quarantined: %s", reason)
 }

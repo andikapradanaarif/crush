@@ -65,7 +65,7 @@ index 46e7187..34c9455 100644
 +	return nil
 +}
 diff --git a/internal/config/config_test.go b/internal/config/config_test.go
-index 4820619..2f32e10 100644
+index 4820619..b5e3b24 100644
 --- a/internal/config/config_test.go
 +++ b/internal/config/config_test.go
 @@ -2,13 +2,13 @@ package config
@@ -86,7 +86,7 @@ index 4820619..2f32e10 100644
  	}
  	if cfg.MaxConnections != 4 {
  		t.Fatalf("MaxConnections = %d, want 4", cfg.MaxConnections)
-@@ -17,7 +17,7 @@ func TestParseTimeoutMS(t *testing.T) {
+@@ -17,7 +17,28 @@ func TestParseTimeoutMS(t *testing.T) {
  
  func TestParseMissingKeys(t *testing.T) {
  	cfg := Parse("")
@@ -94,6 +94,27 @@ index 4820619..2f32e10 100644
 -		t.Fatalf("TimeoutMS = %d, want 0", cfg.TimeoutMS)
 +	if cfg.TimeoutSeconds != 0 {
 +		t.Fatalf("TimeoutSeconds = %d, want 0", cfg.TimeoutSeconds)
++	}
++}
++
++func TestValidate(t *testing.T) {
++	cases := []struct {
++		name string
++		cfg  Config
++	}{
++		{"empty endpoint", Config{TimeoutSeconds: 5}},
++		{"zero timeout", Config{Endpoint: "http://x"}},
++		{"negative timeout", Config{Endpoint: "http://x", TimeoutSeconds: -1}},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			if err := tc.cfg.Validate(); err == nil {
++				t.Fatal("expected validation error")
++			}
++		})
++	}
++	if err := (Config{Endpoint: "http://x", TimeoutSeconds: 5}).Validate(); err != nil {
++		t.Fatalf("valid config rejected: %v", err)
  	}
  }
 diff --git a/internal/retry/backoff.go b/internal/retry/backoff.go

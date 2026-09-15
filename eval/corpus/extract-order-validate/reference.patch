@@ -1,3 +1,23 @@
+diff --git a/cmd/shop/main.go b/cmd/shop/main.go
+index 94cae4a..35ac543 100644
+--- a/cmd/shop/main.go
++++ b/cmd/shop/main.go
+@@ -4,6 +4,7 @@ import (
+ 	"fmt"
+ 
+ 	"shop/internal/model"
++	"shop/internal/order"
+ 	"shop/internal/service"
+ )
+ 
+@@ -16,6 +17,7 @@ func main() {
+ 		Items: []model.Item{{SKU: "w-1", Qty: 2, Price: 999}},
+ 		Total: 1998,
+ 	}
++	fmt.Println("valid:", order.IsValid(o.Email, o.Items))
+ 	id, err := svc.Orders().CreateOrder(o)
+ 	fmt.Println("created:", id, "err:", err)
+ }
 diff --git a/internal/handlers/exchange.go b/internal/handlers/exchange.go
 index e169f2e..63f0ba4 100644
 --- a/internal/handlers/exchange.go
@@ -121,10 +141,10 @@ index 26080c1..2a5cf89 100644
  		return errors.New("return reason is required")
 diff --git a/internal/order/validate.go b/internal/order/validate.go
 new file mode 100644
-index 0000000..c510c33
+index 0000000..a3e5ef2
 --- /dev/null
 +++ b/internal/order/validate.go
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,45 @@
 +// Package order holds the shared order-validation rules extracted
 +// from the handlers.
 +package order
@@ -152,6 +172,11 @@ index 0000000..c510c33
 +		}
 +	}
 +	return nil
++}
++
++// IsValid reports whether the common item rules pass.
++func IsValid(email string, items []model.Item) bool {
++	return Validate(email, items) == nil
 +}
 +
 +// CheckTotal verifies a declared total equals the item sum.

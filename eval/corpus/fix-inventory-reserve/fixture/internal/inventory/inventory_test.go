@@ -57,3 +57,20 @@ func TestCommitMovesStock(t *testing.T) {
 		t.Fatalf("Reserved = %d, want 0", got)
 	}
 }
+
+func TestItemsReturnsSorted(t *testing.T) {
+	inv := New()
+	inv.Restock("zebra", 1)
+	inv.Restock("apple", 2)
+	inv.Restock("mango", 3)
+	got := inv.Items()
+	want := []string{"apple", "mango", "zebra"}
+	if len(got) != len(want) {
+		t.Fatalf("Items = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Items[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

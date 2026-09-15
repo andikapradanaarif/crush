@@ -8,7 +8,7 @@ go build ./...
 go test ./... >/dev/null
 
 # Old names must be gone from Go sources and the YAML file.
-if grep -rn "TimeoutMS\|timeout_ms" --include="*.go" --include="*.yaml" . | grep -v "^Binary"; then
+if grep -rn "TimeoutMS\|timeout_ms" --include="*.go" --include="*.yaml" . ; then
 	echo "old timeout_ms identifiers still present" >&2
 	exit 1
 fi
@@ -19,3 +19,6 @@ grep -q "timeout_seconds" config.yaml
 
 # Turn 2's work must exist: a Validate method on the config type.
 grep -q "func.*Validate" internal/config/config.go
+
+# Turn 3's work must exist: Validate coverage in a test file.
+grep -rq "Validate" --include="*_test.go" internal/config/

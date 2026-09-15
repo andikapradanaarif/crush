@@ -185,10 +185,10 @@ index e567002..604faad 100644
  // Index stores a document under its key.
 diff --git a/internal/store/store_test.go b/internal/store/store_test.go
 new file mode 100644
-index 0000000..3892bdd
+index 0000000..8827b13
 --- /dev/null
 +++ b/internal/store/store_test.go
-@@ -0,0 +1,12 @@
+@@ -0,0 +1,24 @@
 +package store
 +
 +import "testing"
@@ -199,5 +199,17 @@ index 0000000..3892bdd
 +	hits, misses := s.Stats()
 +	if misses != 1 || hits != 0 {
 +		t.Fatalf("Stats() = %d hits, %d misses; want 0 hits, 1 miss", hits, misses)
++	}
++}
++
++func TestGetHitIncrementsHits(t *testing.T) {
++	s := New()
++	s.Set("sku-1", "widget")
++	if _, ok := s.Get("sku-1"); !ok {
++		t.Fatal("Get returned miss for a stored key")
++	}
++	hits, misses := s.Stats()
++	if hits != 1 || misses != 0 {
++		t.Fatalf("Stats() = %d hits, %d misses; want 1 hit, 0 misses", hits, misses)
 +	}
 +}

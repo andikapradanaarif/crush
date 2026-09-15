@@ -9,4 +9,7 @@ go test ./... >/dev/null
 # Turn 2's lint rule must exist — env access belongs to config.
 grep -q "os.Getenv" lint.sh
 
+# Turn 3's work must exist: a test under internal/fileutil.
+grep -rq "func Test" internal/fileutil/
+
 bash ./lint.sh

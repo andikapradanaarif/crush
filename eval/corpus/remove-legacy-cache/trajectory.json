@@ -6,7 +6,8 @@
 	"task": {
 		"turns": [
 			"internal/cache is deprecated — internal/store exposes the same Get/Set/Delete API. Migrate internal/service/catalog.go and internal/service/search.go to internal/store, then delete the internal/cache package entirely. `go build ./...` and `go test ./...` must stay green.",
-			"Add a test asserting that a Store.Get miss increments the miss counter reported by Stats, and keep `go test ./...` green."
+			"Add a test asserting that a Store.Get miss increments the miss counter reported by Stats, and keep `go test ./...` green.",
+			"Add a test asserting that a Store.Get hit increments the hit counter reported by Stats, and keep `go test ./...` green."
 		]
 	},
 	"check": {
@@ -15,8 +16,8 @@
 		"timeout_seconds": 120
 	},
 	"coverage": {
-		"min_steps": 8
+		"min_steps": 10
 	},
 	"requires": {"tools": ["go"]},
-	"budget": {"run_timeout_seconds": 900, "max_steps": 30}
+	"budget": {"run_timeout_seconds": 900, "max_steps": 45}
 }

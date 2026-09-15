@@ -112,8 +112,36 @@ index 3c08e81..7d79318 100644
  }
 -
 -// TODO: support copying across filesystems (rename fails with EXDEV).
+diff --git a/internal/fileutil/move_test.go b/internal/fileutil/move_test.go
+new file mode 100644
+index 0000000..b787a46
+--- /dev/null
++++ b/internal/fileutil/move_test.go
+@@ -0,0 +1,22 @@
++package fileutil
++
++import (
++	"os"
++	"path/filepath"
++	"testing"
++)
++
++func TestMoveRefusesDirectory(t *testing.T) {
++	dir := t.TempDir()
++	src := filepath.Join(dir, "src.txt")
++	if err := os.WriteFile(src, []byte("data"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	dst := filepath.Join(dir, "dstdir")
++	if err := os.Mkdir(dst, 0o755); err != nil {
++		t.Fatal(err)
++	}
++	if err := Move(src, dst); err == nil {
++		t.Fatal("Move onto a directory: expected error, got nil")
++	}
++}
 diff --git a/lint.sh b/lint.sh
-index 5f3426d..83cf081 100755
+index 83fa1a9..bdf1da2 100755
 --- a/lint.sh
 +++ b/lint.sh
 @@ -3,6 +3,7 @@
@@ -124,7 +152,7 @@ index 5f3426d..83cf081 100755
  set -u
  cd "$(dirname "$0")"
  
-@@ -23,6 +24,11 @@ while IFS= read -r line; do
+@@ -36,6 +37,11 @@ while IFS= read -r line; do
  	violations=$((violations + 1))
  done < <(grep -rn "TODO\|FIXME" --include="*.go" . || true)
  
@@ -133,6 +161,6 @@ index 5f3426d..83cf081 100755
 +	violations=$((violations + 1))
 +done < <(grep -rn "os.Getenv" --include="*.go" . | grep -v "internal/config" || true)
 +
+ echo "lint: scanned $scanned file(s)"
  if [ "$violations" -eq 0 ]; then
  	echo "lint: clean"
- 	exit 0

@@ -18,3 +18,7 @@ done
 
 # Turn 2's work must exist: a test for the shared validator.
 grep -rq "func Test" internal/order/
+
+# Turn 3's work must exist: an IsValid helper wired into main.
+grep -rq "IsValid" internal/order/
+grep -q "internal/order" cmd/shop/main.go
