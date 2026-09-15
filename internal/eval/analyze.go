@@ -255,8 +255,15 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 		}
 		switch role {
 		case "user":
-			if isProcessBoundary(messageText(parts), opts.Turns, nextTurn) {
-				nextTurn++
+			if len(opts.Turns) > 0 {
+				if j := matchTurn(messageText(parts), opts.Turns, nextTurn); j >= 0 {
+					nextTurn = j + 1
+					turn = j
+				}
+			} else if isRepairPrompt(messageText(parts)) {
+				// Repair prompts are enqueued inside the same process —
+				// not a boundary.
+			} else {
 				turn++
 			}
 		case "assistant":
@@ -446,13 +453,9 @@ func hasColumn(ctx context.Context, conn *sql.DB, table, col string) bool {
 	return found && rows.Err() == nil
 }
 
-// hasCanceledFinish detects a finish marker with reason "canceled".
-// Combined with hasNonFinishPart it distinguishes the finish-only
-// persistCanceledTurn placeholder (not a request) from a mid-stream
-// cancel (a real request that was cut off).
-// hasNonFinishPart reports whether a row carries anything besides a finish
-// marker — a mid-stream-canceled request is still a real billed request and
-// its calls need their own request index.
+// hasNonFinishPart reports whether a row carries anything besides a
+// finish marker — a mid-stream-canceled request is still a real billed
+// request and its calls need their own request index.
 func hasNonFinishPart(parts []rawPart) bool {
 	for _, p := range parts {
 		if p.Type != "finish" {
@@ -462,6 +465,10 @@ func hasNonFinishPart(parts []rawPart) bool {
 	return false
 }
 
+// hasCanceledFinish detects a finish marker with reason "canceled".
+// Combined with hasNonFinishPart it distinguishes the finish-only
+// persistCanceledTurn placeholder (not a request) from a mid-stream
+// cancel (a real request that was cut off).
 func hasCanceledFinish(parts []rawPart) bool {
 	for _, p := range parts {
 		if p.Type != "finish" {
@@ -537,24 +544,32 @@ func messageText(parts []rawPart) string {
 	return b.String()
 }
 
-// isProcessBoundary reports whether a user message starts a new
-// process turn. With the trajectory's turns known, an exact match
-// against the next expected turn is authoritative — unmatched user
-// messages are repair-turn prompts enqueued inside the same process.
-// Without turns, the fixed repair-prompt prefixes are the fingerprint.
-func isProcessBoundary(text string, turns []string, nextTurn int) bool {
-	if len(turns) > 0 {
-		if nextTurn < len(turns) && text == turns[nextTurn] {
-			return true
+// matchTurn returns the index of the trajectory turn a user message
+// opens, or -1 when the message is an in-process prompt (repair turns
+// enqueue user messages inside the same process). Any j >= nextTurn
+// matches — not only the exact next — so a turn whose user message
+// never persisted (the turn-0-kill artifact shape) doesn't collapse
+// the rest of the trajectory into one process-turn; the cost is
+// admitting out-of-order or duplicated prompt texts.
+func matchTurn(text string, turns []string, nextTurn int) int {
+	for j := nextTurn; j < len(turns); j++ {
+		if text == turns[j] {
+			return j
 		}
-		return false
 	}
+	return -1
+}
+
+// isRepairPrompt reports whether a user message is a harness-authored
+// repair prompt — the fingerprint fallback when the trajectory's turn
+// texts aren't known (standalone `eval analyze` without --trajectory).
+func isRepairPrompt(text string) bool {
 	for _, p := range agent.RepairPromptPrefixes {
 		if strings.HasPrefix(text, p) {
-			return false
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 // Placeholder dispositions — none count as real calls.

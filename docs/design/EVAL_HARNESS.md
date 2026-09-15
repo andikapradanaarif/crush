@@ -195,7 +195,9 @@ every characterization pass a diff to reviewed files.
   (real parts + `finish{canceled}`) still counts. Discovery and
   rereads count _attempts_ — the gate measures roundtrips spent
   before acting, so a failed read is a spent discovery attempt that
-  just never joins the seen-set.
+  just never joins the seen-set. The axes overlap deliberately: a
+  pre-write `view`-on-directory lands in both
+  `view_directory_errors` and `discovery_calls_before_write`.
   `crush eval analyze <session_db>` runs the same pass standalone
   and backfills old artifacts; the record carries `workdir` so a
   post-hoc analyze can anchor relative call paths. Known blind

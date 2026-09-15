@@ -316,6 +316,42 @@ func TestAnalyzeSessionDB_LegacySchema(t *testing.T) {
 	require.Equal(t, 1, cm.DiscoveryCallsBeforeWrite)
 }
 
+// TestAnalyzeSessionDB_TurnSkip pins self-healing turn matching: when a
+// turn's user message never persisted (the turn-0-kill shape), later
+// turns still advance the process index rather than collapsing into
+// the previous one.
+func TestAnalyzeSessionDB_TurnSkip(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	conn, err := db.Connect(context.Background(), dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Release(dir)) })
+
+	insertSession(t, conn, "s1", "")
+	// Turn t2's user message never landed — the process was killed
+	// between session continuation and createUserMessage.
+	for _, m := range []struct{ id, role, parts string }{
+		{"m1", "user", `[` + txtPart("t1") + `]`},
+		{"m2", "assistant", `[` + tcPart("c1", "view", `{"file_path":"/w/a.go"}`) + `]`},
+		{"m3", "tool", `[` + trPart("c1", "package a", false, "") + `]`},
+		{"m4", "user", `[` + txtPart("t3") + `]`},
+		{"m5", "assistant", `[` + tcPart("c2", "view", `{"file_path":"/w/a.go"}`) + `]`},
+		{"m6", "tool", `[` + trPart("c2", "package a", false, "") + `]`},
+	} {
+		insertMsg(t, conn, m.id, "s1", m.role, m.parts, 1000, 0)
+	}
+
+	cm, err := AnalyzeSessionDB(context.Background(), filepath.Join(dir, "crush.db"),
+		AnalyzeOptions{Workdir: "/w", Turns: []string{"t1", "t2", "t3"}})
+	require.NoError(t, err)
+	// c2 lands on trajectory index 2 — not collapsed into turn 0, and
+	// the second view is a cross-turn reread, not same-turn.
+	require.Equal(t, 2, cm.ToolCalls[1].Turn)
+	require.Equal(t, 1, cm.Rereads)
+	require.Equal(t, 0, cm.RereadsSameTurn)
+	require.Equal(t, 1, cm.RereadsCrossTurn)
+}
+
 // TestPreserveSessionDB_CapturesWALTail pins the fix at the source: the
 // run's DB is WAL-mode, so a bare crush.db copy drops committed rows
 // still in the -wal tail — the derailment tail on WaitDelay hard-kills.
