@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"charm.land/fantasy"
@@ -129,6 +130,14 @@ func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCal
 		return ""
 	}
 	return "<turn_context>\n" + b.String() + "</turn_context>"
+}
+
+// hasTool reports whether the agent's current toolset includes the
+// named tool — the check for whether a run can actually ask questions.
+func (a *sessionAgent) hasTool(name string) bool {
+	return slices.ContainsFunc(a.tools.Copy(), func(t fantasy.AgentTool) bool {
+		return t.Info().Name == name
+	})
 }
 
 // relWorkdir renders p relative to the working directory when possible,
