@@ -85,10 +85,11 @@ type runTelemetry struct {
 		CacheWrite int64 `json:"cache_write"`
 	} `json:"tokens"`
 	StubStats struct {
-		Invalidations    int   `json:"invalidations"`
-		Results          int   `json:"results"`
-		SavedBytes       int64 `json:"saved_bytes"`
-		BoundaryAdvances int   `json:"boundary_advances"`
+		Invalidations    int            `json:"invalidations"`
+		Results          int            `json:"results"`
+		SavedBytes       int64          `json:"saved_bytes"`
+		BoundaryAdvances int            `json:"boundary_advances"`
+		Kinds            map[string]int `json:"kinds"`
 	} `json:"stub_stats"`
 	Recalls struct {
 		Result int `json:"result"`
@@ -180,6 +181,16 @@ func (c CrushRunner) Run(ctx context.Context, workdir string, turns []string, bu
 		res.StubStats.Results += tel.StubStats.Results
 		res.StubStats.SavedBytes += tel.StubStats.SavedBytes
 		res.StubStats.BoundaryAdvances += tel.StubStats.BoundaryAdvances
+		// Per-kind counts are per-turn deltas like the aggregates —
+		// sum them into the trajectory totals.
+		if len(tel.StubStats.Kinds) > 0 {
+			if res.StubStats.Kinds == nil {
+				res.StubStats.Kinds = make(map[string]int, len(tel.StubStats.Kinds))
+			}
+			for kind, n := range tel.StubStats.Kinds {
+				res.StubStats.Kinds[kind] += n
+			}
+		}
 		res.Recalls.Result += tel.Recalls.Result
 		res.Recalls.Entry += tel.Recalls.Entry
 		res.Recalls.Empty += tel.Recalls.Empty

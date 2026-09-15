@@ -165,6 +165,17 @@ const (
 	StubKindStale StubKind = "stale"
 )
 
+// String returns the kind's telemetry label. StubKindSuperseded is the
+// empty string so marks written before kinds existed keep their
+// meaning — wherever kinds become map keys it must surface as
+// "superseded", never "".
+func (k StubKind) String() string {
+	if k == StubKindSuperseded {
+		return "superseded"
+	}
+	return string(k)
+}
+
 // SupersededMark records why a tool result's stored content no longer
 // needs to replay verbatim in the raw window.
 type SupersededMark struct {

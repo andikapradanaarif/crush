@@ -205,6 +205,36 @@ func TestCoverage_MinMaxAndClosedGrammar(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestCoverage_StubKinds(t *testing.T) {
+	t.Parallel()
+	rec := &RunRecord{}
+	rec.StubStats.Kinds = map[string]int{"deleted": 2, "superseded": 1}
+
+	for _, kind := range []string{"superseded", "modified", "deleted", "duplicate", "rerun", "stale"} {
+		_, _, err := ParseCoverageKey("min_stub_stats.kinds." + kind)
+		require.NoError(t, err, "kind %q must be a valid coverage field", kind)
+	}
+
+	met, err := CoverageMet(Coverage{"min_stub_stats.kinds.deleted": 1}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+
+	// The empty-string superseded mark spells "superseded" in the
+	// kinds map — and is a valid predicate.
+	met, err = CoverageMet(Coverage{"min_stub_stats.kinds.superseded": 1}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+
+	// Kinds absent from the map count as 0.
+	met, err = CoverageMet(Coverage{"min_stub_stats.kinds.rerun": 1}, rec)
+	require.NoError(t, err)
+	require.False(t, met)
+
+	// An unknown kind is still rejected by the closed grammar.
+	_, _, err = ParseCoverageKey("min_stub_stats.kinds.bogus")
+	require.Error(t, err)
+}
+
 // --- stats ---
 
 func TestFisherExactCollapse_KnownValues(t *testing.T) {
