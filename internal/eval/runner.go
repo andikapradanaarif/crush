@@ -348,10 +348,30 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	}
 
 	// Coverage masks passes only: a check-fail is a real outcome
-	// whether or not the mechanism fired.
+	// whether or not the mechanism fired. Trajectory coverage is
+	// flag-invariant by construction; the arm's own block is where
+	// flag-gated firing assertions live (a treatment arm asserting
+	// stubbing actually fired starves itself otherwise — the pairing
+	// can't pass on evidence of nothing).
 	met, err := CoverageMet(traj.Coverage, &rec)
 	if err != nil {
 		return rec, fmt.Errorf("coverage eval: %w", err)
+	}
+	if met {
+		armMet, aerr := ArmCoverageMet(arm.Coverage, &rec)
+		if aerr != nil {
+			return rec, fmt.Errorf("arm coverage eval: %w", aerr)
+		}
+		if !armMet {
+			// Record which scope starved the run — an arm-coverage
+			// miss after a trajectory-coverage pass is the firing
+			// assertion tripping, not generic undercoverage.
+			if rec.CheckDetail == nil {
+				rec.CheckDetail = map[string]any{}
+			}
+			rec.CheckDetail["coverage_scope"] = "arm"
+			met = false
+		}
 	}
 	if !met {
 		rec.Outcome = OutcomeInconclusive

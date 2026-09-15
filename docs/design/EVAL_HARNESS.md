@@ -347,6 +347,24 @@ prompts replay verbatim; run experiments that replay real prompts in a
 credential-scoped environment or accept that exposure as the runner's
 documented posture.
 
+An arm may also carry `coverage` — predicates applied only to that
+arm's runs, evaluated after the trajectory's shared coverage at the
+same gate point (pass → `inconclusive`, and the run's
+`check_detail.coverage_scope` records `"arm"` so forensics can tell
+which scope starved it). This is where flag-gated firing assertions
+live: a treatment arm enabling `notebook_stub_superseded` asserts
+`min_stub_stats.results: 1` so a run where stubbing never fired is a
+non-sample, not evidence of nothing. The arm grammar is the
+trajectory grammar plus the flag-dependent `call_metrics` fields
+(`map_*`, `question_*`, `wrong_pointer_events`, `read_files_rows`) —
+inside an arm scope flag-dependence is the point, not a footgun. The
+mirror-image guard lives in trajectory validation: a shared `min_`
+over `stub_stats.*` or `recalls.*` is a load error because it would
+starve the arm where the flag is off — move it to arm coverage.
+`max_` stays legal unscoped (bounding both arms is meaningful). Runs
+of an arm with no coverage block — `baseline` characterize runs
+always — see trajectory predicates only.
+
 `corpus` selects trajectory ids by glob (`["*"]` = everything) or
 `"band:<name>"` for a band slice — `"band:stable"` is how the smoke
 tier expresses its corpus. `quarantined` is excluded even under

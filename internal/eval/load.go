@@ -93,7 +93,10 @@ func ValidateTrajectory(t *Trajectory, trajDir string) []string {
 	// local source — the clone itself is egress.
 	// Coverage must be achievable within budget — a min_steps
 	// predicate above the step cap is permanently inconclusive and
-	// burns attempts to the starvation cap forever.
+	// burns attempts to the starvation cap forever. min_ over a
+	// flag-gated field is worse: the counter is structurally absent
+	// on the arm where the flag is off, so the pairing starves by
+	// construction — those assertions belong in arm coverage.
 	for key, v := range t.Coverage {
 		op, field, err := ParseCoverageKey(key)
 		if err != nil {
@@ -102,6 +105,13 @@ func ValidateTrajectory(t *Trajectory, trajDir string) []string {
 		}
 		if op == "min" && field == "steps" && t.Budget.MaxSteps > 0 && int(v) > t.Budget.MaxSteps {
 			problems = append(problems, fmt.Sprintf("coverage min_steps=%v exceeds budget.max_steps=%d — permanently inconclusive", v, t.Budget.MaxSteps))
+		}
+		if op == "min" {
+			for _, p := range flagGatedPrefixes {
+				if strings.HasPrefix(field, p) {
+					problems = append(problems, fmt.Sprintf("coverage %q: %s is flag-gated — a shared min_ predicate starves the arm where the flag is off; move it to arm coverage in the experiment", key, field))
+				}
+			}
 		}
 	}
 	if t.Requires.Network != nil && !*t.Requires.Network && t.StartState.Kind == "git" {
@@ -251,6 +261,13 @@ func ValidateExperiment(e *Experiment) error {
 		}
 		if n <= 0 {
 			return fmt.Errorf("runs_per_trajectory[%s] must be > 0", band)
+		}
+	}
+	for name, arm := range e.Arms {
+		for key := range arm.Coverage {
+			if _, _, err := ParseArmCoverageKey(key); err != nil {
+				return fmt.Errorf("arm %q coverage %q: %w", name, key, err)
+			}
 		}
 	}
 	return nil

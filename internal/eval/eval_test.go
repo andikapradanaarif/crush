@@ -238,6 +238,95 @@ func TestCoverage_StubKinds(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestCoverage_ArmScoped(t *testing.T) {
+	t.Parallel()
+
+	// The arm grammar reaches the flag-dependent call_metrics fields
+	// trajectory coverage excludes — asserting "the model called map"
+	// is legal only where the arm itself fixes project_index.
+	_, _, err := ParseArmCoverageKey("min_call_metrics.map_calls_ok")
+	require.NoError(t, err)
+	_, _, err = ParseCoverageKey("min_call_metrics.map_calls_ok")
+	require.Error(t, err)
+
+	// Shared fields work in both grammars.
+	_, _, err = ParseArmCoverageKey("min_stub_stats.results")
+	require.NoError(t, err)
+
+	rec := &RunRecord{CallMetrics: &CallMetrics{MapCalls: 3, MapCallsOK: 2}}
+	met, err := ArmCoverageMet(Coverage{"min_call_metrics.map_calls": 1}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+
+	met, err = ArmCoverageMet(Coverage{"min_call_metrics.map_calls_ok": 3}, rec)
+	require.NoError(t, err)
+	require.False(t, met)
+
+	// Same fail-closed rule as trajectory coverage: absent analysis
+	// starves call_metrics predicates, even max_ ones.
+	met, err = ArmCoverageMet(Coverage{"max_call_metrics.map_result_bytes": 1024}, &RunRecord{})
+	require.NoError(t, err)
+	require.False(t, met)
+
+	// Unknown fields stay rejected.
+	_, _, err = ParseArmCoverageKey("min_call_metrics.bogus")
+	require.Error(t, err)
+}
+
+func TestValidateExperiment_ArmCoverage(t *testing.T) {
+	t.Parallel()
+	temp := 0.0
+	exp := &Experiment{
+		Name:              "x",
+		Model:             "p/m",
+		Temperature:       &temp,
+		Corpus:            []string{"*"},
+		RunsPerTrajectory: map[Band]int{BandUncharacterized: 1},
+		Arms: map[string]Arm{
+			ArmControl:   {},
+			ArmTreatment: {Coverage: Coverage{"min_call_metrics.map_calls": 1}},
+		},
+	}
+	require.NoError(t, ValidateExperiment(exp))
+
+	exp.Arms[ArmTreatment] = Arm{Coverage: Coverage{"min_bogus_field": 1}}
+	require.Error(t, ValidateExperiment(exp))
+}
+
+func TestValidateTrajectory_FlagGatedMinRejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "fixture"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "check.sh"), []byte("#!/bin/sh\nexit 1\n"), 0o755))
+	mk := func(cov Coverage) *Trajectory {
+		return &Trajectory{
+			ID: "x", SchemaVersion: 1,
+			Origin:     Origin{Kind: "synthetic"},
+			StartState: StartState{Kind: "fixture", FixtureDir: "fixture"},
+			Task:       Task{Turns: []string{"do it"}},
+			Check:      Check{Script: "check.sh", ExpectStartState: "fail"},
+			Coverage:   cov,
+		}
+	}
+
+	// A shared min_ on a flag-gated field starves the flag-off arm —
+	// load-time error, not a surprise at run time.
+	problems := ValidateTrajectory(mk(Coverage{"min_stub_stats.results": 1}), dir)
+	require.NotEmpty(t, problems)
+	require.Contains(t, problems[0], "flag-gated")
+
+	problems = ValidateTrajectory(mk(Coverage{"min_recalls.entry": 1}), dir)
+	require.NotEmpty(t, problems)
+
+	// max_ bounds both arms legitimately — still legal unscoped.
+	problems = ValidateTrajectory(mk(Coverage{"max_stub_stats.results": 10}), dir)
+	require.Empty(t, problems)
+
+	// Flag-invariant fields unaffected.
+	problems = ValidateTrajectory(mk(Coverage{"min_steps": 1}), dir)
+	require.Empty(t, problems)
+}
+
 // --- run telemetry ---
 
 // TestRunTelemetry_StubKinds pins the telemetry contract end to end:

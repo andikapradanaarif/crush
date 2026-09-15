@@ -2,6 +2,7 @@ package eval
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/charmbracelet/crush/internal/message"
@@ -65,6 +66,35 @@ var coverageFields = map[string]func(*RunRecord) float64{
 	"call_metrics.view_directory_errors":    func(r *RunRecord) float64 { return float64(callMetrics(r).ViewDirectoryErrors) },
 }
 
+// armOnlyCoverageFields holds the flag-dependent call_metrics fields:
+// structurally absent in the arm where the feature is off, so they can
+// never join trajectory coverage (one arm would starve on every run).
+// Arm-scoped coverage exists precisely to assert them — a treatment
+// arm enabling project_index may demand the model actually reached for
+// map, or bound the bytes it paid for results.
+var armOnlyCoverageFields = map[string]func(*RunRecord) float64{
+	"call_metrics.map_calls":                   func(r *RunRecord) float64 { return float64(callMetrics(r).MapCalls) },
+	"call_metrics.map_calls_ok":                func(r *RunRecord) float64 { return float64(callMetrics(r).MapCallsOK) },
+	"call_metrics.map_calls_index_unavailable": func(r *RunRecord) float64 { return float64(callMetrics(r).MapCallsIndexUnavailable) },
+	"call_metrics.map_result_bytes":            func(r *RunRecord) float64 { return float64(callMetrics(r).MapResultBytes) },
+	"call_metrics.question_calls":              func(r *RunRecord) float64 { return float64(callMetrics(r).QuestionCalls) },
+	"call_metrics.question_calls_errored":      func(r *RunRecord) float64 { return float64(callMetrics(r).QuestionCallsErrored) },
+	"call_metrics.wrong_pointer_events":        func(r *RunRecord) float64 { return float64(callMetrics(r).WrongPointerEvents) },
+	"call_metrics.read_files_rows":             func(r *RunRecord) float64 { return float64(callMetrics(r).ReadFilesRows) },
+}
+
+// armFields is the arm-coverage grammar: every trajectory-coverage
+// field plus the flag-dependent set above. Built in init after the
+// kinds loop so stub_stats.kinds.* is reachable from arm coverage too.
+var armFields map[string]func(*RunRecord) float64
+
+// flagGatedPrefixes name coverage fields whose counters only exist
+// when a feature flag is on — stub_stats.* need notebook_stub_superseded,
+// recalls.* need a registered recall tool. An unscoped min_ predicate
+// over one of these starves the arm where the flag is off, so
+// trajectory coverage rejects them; scope them per-arm instead.
+var flagGatedPrefixes = []string{"stub_stats.", "recalls."}
+
 // callMetrics dereferences the optional analysis sub-object. CoverageMet
 // short-circuits nil CallMetrics before reaching field funcs, so this
 // only runs when analysis is present.
@@ -86,6 +116,8 @@ func init() {
 			return float64(r.StubStats.Kinds[name])
 		}
 	}
+	armFields = maps.Clone(coverageFields)
+	maps.Copy(armFields, armOnlyCoverageFields)
 }
 
 // ParseCoverageKey validates a coverage predicate key at load time:
@@ -103,21 +135,52 @@ func ParseCoverageKey(key string) (op, field string, err error) {
 	return op, field, nil
 }
 
+// ParseArmCoverageKey validates an arm-scoped coverage key — the same
+// grammar as ParseCoverageKey but the field set is wider: arm coverage
+// may name flag-dependent fields because the arm itself fixes the
+// flag's value, so "did the mechanism fire" is assertable there.
+func ParseArmCoverageKey(key string) (op, field string, err error) {
+	op, field, ok := strings.Cut(key, "_")
+	if !ok || (op != "min" && op != "max") {
+		return "", "", fmt.Errorf("expected min_<field> or max_<field>")
+	}
+	if _, ok := armFields[field]; !ok {
+		return "", "", fmt.Errorf("unknown field %q", field)
+	}
+	return op, field, nil
+}
+
 // CoverageMet reports whether a run's record satisfies every predicate.
 // Evaluated only on runs that produced a verdict — coverage unmet
 // converts pass to inconclusive; fails stand regardless.
 func CoverageMet(cov Coverage, rec *RunRecord) (bool, error) {
+	return coverageMet(cov, rec, coverageFields)
+}
+
+// ArmCoverageMet is CoverageMet over the arm grammar — the flag-
+// dependent call_metrics fields are reachable here because the arm
+// fixes the flag. Runs of other arms never see this arm's predicates;
+// the caller passes the run's own arm's coverage block.
+func ArmCoverageMet(cov Coverage, rec *RunRecord) (bool, error) {
+	return coverageMet(cov, rec, armFields)
+}
+
+func coverageMet(cov Coverage, rec *RunRecord, fields map[string]func(*RunRecord) float64) (bool, error) {
 	for key, want := range cov {
-		op, field, err := ParseCoverageKey(key)
-		if err != nil {
-			return false, err
+		op, field, ok := strings.Cut(key, "_")
+		if !ok || (op != "min" && op != "max") {
+			return false, fmt.Errorf("coverage %q: expected min_<field> or max_<field>", key)
+		}
+		fn, ok := fields[field]
+		if !ok {
+			return false, fmt.Errorf("coverage %q: unknown field %q", key, field)
 		}
 		// Absent analysis starves call_metrics predicates in BOTH
 		// directions — max_* must not pass on a missing analysis.
 		if strings.HasPrefix(field, "call_metrics.") && rec.CallMetrics == nil {
 			return false, nil
 		}
-		got := coverageFields[field](rec)
+		got := fn(rec)
 		switch op {
 		case "min":
 			if got < want {
