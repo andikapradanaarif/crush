@@ -178,6 +178,14 @@ type RunRecord struct {
 	StubStats   StubStats  `json:"stub_stats"`
 	Recalls     Recalls    `json:"recalls"`
 	SessionDB   string     `json:"session_db,omitempty"`
+	// CallMetrics is the post-run sequence analysis of SessionDB —
+	// populated between preserveSessionDB and record append so
+	// min_call_metrics.* predicates can read it during CoverageMet.
+	CallMetrics *CallMetrics `json:"call_metrics,omitempty"`
+	// CallMetricsError records analyzer failure instead of silently
+	// absent metrics — inconclusive-by-absence and analyzer-broke are
+	// operationally different and must not conflate.
+	CallMetricsError string `json:"call_metrics_error,omitempty"`
 	// BaselineKey is the hash of the run's effective config over the
 	// flag projection — which baseline condition this run counts
 	// toward. Computed at run time so merged experiments' treatment

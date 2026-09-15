@@ -157,7 +157,8 @@ every characterization pass a diff to reviewed files.
   would otherwise pass on runs where the trigger never fired.
   Coverage-starved trajectories alarm like corpus shrinkage. The
   predicate grammar is closed — comparisons against run-record
-  fields only (`stub_stats`, `recalls`, `steps`, `tokens`;
+  fields only (`stub_stats`, `recalls`, `steps`, `tokens`,
+  `call_metrics`;
   `edge_firings` joins the grammar when named transitions land —
   `HARNESS_TOPOLOGY.md` promises them as assertable checkpoints),
   no arbitrary expressions — and coverage must be achievable within
@@ -170,6 +171,29 @@ every characterization pass a diff to reviewed files.
   of grepping message metadata. Like every `stub_stats.*` field the
   counters only exist once stubbing ran, so per-kind predicates are
   safe on stubbing-enabled arms only.
+  `call_metrics.*` is the sequence-analysis record: after each run
+  the preserved `session_db` is replayed into an ordered
+  `tool_calls[]` (joined to results by call ID, ordered
+  `created_at, rowid`) and reduced to per-call metrics on the
+  record — `requests`, `calls`, `first_write_index`,
+  `requests_to_first_edit`, `discovery_calls_before_write`,
+  `files_viewed`, `edit_failures` (cause-bucketed),
+  `rereads{,_same_turn,_cross_turn}`, `canceled_calls`,
+  `view_directory_errors`, plus the flag-dependent forensics
+  (`map_*`, `question_*`, `wrong_pointer_events`) that can never
+  be predicates — `map` isn't registered in a `project_index`-off
+  arm and `question` isn't registered headless, so those fields
+  are absent-by-construction in one arm and same-arm-invariance is
+  the registration rule. The analyzer runs inside `ExecuteRun`
+  between `preserveSessionDB` and record append, so predicates are
+  populated before `CoverageMet` reads them; an analyzer failure
+  lands as `call_metrics_error` on the record —
+  inconclusive-by-absence and analyzer-broke stay distinguishable.
+  `crush eval analyze <session_db>` runs the same pass standalone
+  and backfills old artifacts. Known blind spot: discovery done
+  through `bash` (`cat`, `find`, `rg`, `go doc`) is invisible to
+  tool-name classification — `discovery_calls_before_write`
+  undercounts systematically.
   `inconclusive` does not
   consume a `runs_per_trajectory` slot: the runner resamples to N
   conclusive runs with an attempts cap (~2N) before flagging the

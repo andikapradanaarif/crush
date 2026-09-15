@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/version"
 )
 
@@ -288,10 +289,22 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	rec.Env.ModelSummary = res.ModelSummary
 
 	// Preserve the session DB — the failed-run debugging artifact is
-	// the full message/tool trace, free.
-	if res.SessionID != "" {
-		if dst, err := r.preserveSessionDB(exp.Name, traj.ID, armName, inv, attempt, workdir); err == nil {
-			rec.SessionDB = dst
+	// the full message/tool trace, free. Attempted regardless of
+	// whether telemetry reported a session: a turn-0 hard-kill writes
+	// no telemetry but still leaves a DB worth keeping.
+	if dst, err := r.preserveSessionDB(ctx, exp.Name, traj.ID, armName, inv, attempt, workdir); err == nil {
+		rec.SessionDB = dst
+		// Sequence analysis runs on the preserved artifact, not the
+		// about-to-be-deleted source — `crush eval analyze <artifact>`
+		// then reproduces exactly what the record carries.
+		metrics, aerr := AnalyzeSessionDB(ctx, filepath.Join(r.EvalDir, dst), AnalyzeOptions{
+			Workdir: workdir,
+			Turns:   traj.Task.Turns,
+		})
+		if aerr != nil {
+			rec.CallMetricsError = aerr.Error()
+		} else {
+			rec.CallMetrics = metrics
 		}
 	}
 
@@ -334,9 +347,15 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	return rec, nil
 }
 
-// preserveSessionDB copies the run's SQLite DB into
+// preserveSessionDB snapshots the run's SQLite DB into
 // results/<experiment>/artifacts/<trajectory>-<arm>-<inv>-<run_index>.db.
-func (r *Runner) preserveSessionDB(expName, trajID, arm, inv string, runIndex int, workdir string) (string, error) {
+//
+// The source is WAL-mode: a bare file copy drops the committed tail
+// still sitting in crush.db-wal — on WaitDelay hard-kills (timeout
+// runs) that tail is exactly the derailment trace the artifact exists
+// for. VACUUM INTO produces a consistent single-file snapshot including
+// un-checkpointed commits; a raw copy is the last-resort fallback.
+func (r *Runner) preserveSessionDB(ctx context.Context, expName, trajID, arm, inv string, runIndex int, workdir string) (string, error) {
 	src := filepath.Join(DataDirFor(workdir), "crush.db")
 	if !fileExists(src) {
 		return "", fmt.Errorf("no session db at %s", src)
@@ -346,12 +365,23 @@ func (r *Runner) preserveSessionDB(expName, trajID, arm, inv string, runIndex in
 		return "", err
 	}
 	dst := filepath.Join(dstDir, fmt.Sprintf("%s-%s-%s-%d.db", trajID, arm, inv, runIndex))
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return "", err
+
+	conn, err := db.ConnectReadOnly(ctx, src)
+	if err == nil {
+		// VACUUM INTO takes a string literal, not a bound parameter.
+		_, err = conn.ExecContext(ctx, `VACUUM INTO '`+strings.ReplaceAll(dst, "'", "''")+`'`)
+		conn.Close()
 	}
-	if err := os.WriteFile(dst, data, 0o644); err != nil {
-		return "", err
+	if err != nil {
+		slog.Warn("VACUUM INTO failed, falling back to raw copy (WAL tail may be lost)",
+			"src", src, "error", err)
+		data, rerr := os.ReadFile(src)
+		if rerr != nil {
+			return "", rerr
+		}
+		if werr := os.WriteFile(dst, data, 0o644); werr != nil {
+			return "", werr
+		}
 	}
 	return filepath.Rel(r.EvalDir, dst)
 }
