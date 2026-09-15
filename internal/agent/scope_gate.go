@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 
 	"charm.land/fantasy"
@@ -38,29 +39,30 @@ const (
 )
 
 // scopeGate wraps the tool list to intercept the first mutating call of
-// a run when deep exploration suggests a non-routine scope. The gate
-// asks one structured question — proceed, narrow, or stop — and then
-// resolves for the rest of the run: the confirmation is a checkpoint,
-// not a toll booth. Tools the model uses to externalize a plan (todos,
-// question) satisfy the gate without asking.
-//
-// Headless runs build no gate: a question nobody can answer must
-// degrade, never stall.
+// a run when deep exploration suggests a non-routine scope. In
+// interactive runs the gate asks one structured question — proceed,
+// narrow, or stop — and then resolves for the rest of the run: the
+// confirmation is a checkpoint, not a toll booth. Tools the model uses
+// to externalize a plan (todos, question) satisfy the gate without
+// asking. In non-interactive runs the same boundary degrades to
+// proceed-with-logged-assumption — a question nobody can answer must
+// never stall.
 type scopeGate struct {
-	svc    question.Service
-	mu     sync.Mutex
-	states map[string]*scopeGateState
+	svc         question.Service
+	interactive bool
+	mu          sync.Mutex
+	states      map[string]*scopeGateState
 }
 
 // wrapToolsWithScopeGate wraps every tool so the gate sees exploration
 // calls as well as writes. Only mutating calls are ever intercepted.
-// Returns the slice unchanged when the service is nil (non-interactive
-// runs, tests) or the flag is off.
-func wrapToolsWithScopeGate(all []fantasy.AgentTool, svc question.Service) []fantasy.AgentTool {
-	if svc == nil {
+// Returns the slice unchanged when an interactive run has no question
+// service to ask through.
+func wrapToolsWithScopeGate(all []fantasy.AgentTool, svc question.Service, interactive bool) []fantasy.AgentTool {
+	if interactive && svc == nil {
 		return all
 	}
-	g := &scopeGate{svc: svc, states: map[string]*scopeGateState{}}
+	g := &scopeGate{svc: svc, interactive: interactive, states: map[string]*scopeGateState{}}
 	out := make([]fantasy.AgentTool, len(all))
 	for i, tool := range all {
 		out[i] = &scopeGateTool{inner: tool, gate: g}
@@ -190,6 +192,17 @@ func (t *scopeGateTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 		return fantasy.NewTextErrorResponse(
 			"Scope check in progress — re-issue this call after the pending question resolves.",
 		), nil
+	}
+
+	if !t.gate.interactive {
+		// Headless degrade: proceed with a logged assumption — the
+		// boundary is observed and recorded, never asked.
+		t.gate.resolve(ctx)
+		slog.Info("Scope gate: proceeding on stated assumptions",
+			"tool", call.Name,
+			"session_id", tools.GetSessionFromContext(ctx),
+		)
+		return t.inner.Run(ctx, call)
 	}
 
 	proceed, err := t.gate.confirm(ctx, scopeGateMinExploration)

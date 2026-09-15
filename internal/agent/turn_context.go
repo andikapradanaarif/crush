@@ -173,7 +173,7 @@ func (a *sessionAgent) ambiguityDirective(ctx context.Context, call SessionAgent
 			return ""
 		}
 	}
-	if a.hasTool(tools.QuestionToolName) {
+	if a.interactive && a.hasTool(tools.QuestionToolName) {
 		return `<ambiguity_gate>
 The user's request appears underspecified: it names no files and this
 session has no working set or earlier context to resolve the referent
@@ -187,9 +187,9 @@ from. Resolve it before executing:
   option.
 </ambiguity_gate>`
 	}
-	// Headless degradation: no question tool means the clause collapses
-	// to "state assumptions, proceed" — an unanswerable question must
-	// degrade, never stall.
+	// Headless degradation: the clause collapses to "state assumptions,
+	// proceed" — an unanswerable question must degrade, never stall,
+	// and the directive never names a tool the run doesn't have.
 	return `<ambiguity_gate>
 The user's request appears underspecified: it names no files and this
 session has no working set or earlier context to resolve the referent

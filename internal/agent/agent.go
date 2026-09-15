@@ -241,9 +241,12 @@ type sessionAgent struct {
 	// (options.turn_context): "off", "session", or "semantic".
 	turnContext string
 	// ambiguityClarification enables the calibrated-autonomy gates:
-	// the turn-zero vagueness pre-filter and the stall-escalation
-	// edge (options.ambiguity_clarification).
+	// the turn-zero vagueness pre-filter and the first-write scope
+	// gate (options.ambiguity_clarification).
 	ambiguityClarification bool
+	// interactive records whether the run can ask the user — the
+	// mode the clarification gates degrade on.
+	interactive bool
 	// runStampGen is the monotonic source of per-Run stamps the scope
 	// gate uses to reset its explore→execute boundary bookkeeping.
 	// Atomic: Run invocations on different sessions can race on it.
@@ -369,6 +372,10 @@ type SessionAgentOptions struct {
 	// AmbiguityClarification enables the calibrated-autonomy gates
 	// (options.ambiguity_clarification).
 	AmbiguityClarification bool
+	// Interactive reports whether the run can ask the user —
+	// coordinator's interactive flag threaded through for the gate
+	// degrade branches.
+	Interactive bool
 }
 
 func NewSessionAgent(
@@ -411,6 +418,7 @@ func NewSessionAgent(
 		filetracker:            opts.FileTracker,
 		turnContext:            opts.TurnContext,
 		ambiguityClarification: opts.AmbiguityClarification,
+		interactive:            opts.Interactive,
 	}
 	return a
 }

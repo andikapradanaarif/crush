@@ -59,7 +59,7 @@ func TestScopeGate(t *testing.T) {
 		svc := &fakeQuestionService{selected: selected}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("file contents")}
-		wrapped := wrapToolsWithScopeGate([]fantasy.AgentTool{read, write}, svc)
+		wrapped := wrapToolsWithScopeGate([]fantasy.AgentTool{read, write}, svc, true)
 		return svc, write, wrapped[0], wrapped[1]
 	}
 
@@ -116,7 +116,7 @@ func TestScopeGate(t *testing.T) {
 			&fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextResponse("ok")},
 			&fakeTool{name: "view", resp: fantasy.NewTextResponse("x")},
 			write,
-		}, svc)
+		}, svc, true)
 		ctx := gateCtx("s1", 1)
 		exploreN(t, ctx, shared[1], scopeGateMinExploration)
 		_, err := shared[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName})
@@ -145,7 +145,20 @@ func TestScopeGate(t *testing.T) {
 		svc := &fakeQuestionService{err: context.DeadlineExceeded}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
-		wrapped := wrapToolsWithScopeGate([]fantasy.AgentTool{read, write}, svc)
+		wrapped := wrapToolsWithScopeGate([]fantasy.AgentTool{read, write}, svc, true)
+		ctx := gateCtx("s1", 1)
+		exploreN(t, ctx, wrapped[0], scopeGateMinExploration)
+		resp, err := wrapped[1].Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
+		require.NoError(t, err)
+		require.False(t, resp.IsError)
+		require.True(t, write.called)
+	})
+
+	t.Run("headless degrade proceeds without asking", func(t *testing.T) {
+		t.Parallel()
+		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
+		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
+		wrapped := wrapToolsWithScopeGate([]fantasy.AgentTool{read, write}, nil, false)
 		ctx := gateCtx("s1", 1)
 		exploreN(t, ctx, wrapped[0], scopeGateMinExploration)
 		resp, err := wrapped[1].Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
@@ -157,6 +170,6 @@ func TestScopeGate(t *testing.T) {
 	t.Run("nil service returns the tools unchanged", func(t *testing.T) {
 		t.Parallel()
 		tl := []fantasy.AgentTool{&fakeTool{name: "edit"}}
-		require.Equal(t, tl, wrapToolsWithScopeGate(tl, nil))
+		require.Equal(t, tl, wrapToolsWithScopeGate(tl, nil, true))
 	})
 }

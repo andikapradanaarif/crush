@@ -87,6 +87,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		t.Parallel()
 		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})
 		a.ambiguityClarification = true
+		a.interactive = true
 		a.tools = csync.NewSliceFrom([]fantasy.AgentTool{&fakeTool{name: tools.QuestionToolName}})
 		d := a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "fix the bug",

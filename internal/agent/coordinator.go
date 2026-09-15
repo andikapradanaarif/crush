@@ -299,7 +299,10 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 	}
 
 	// TODO: make this dynamic when we support multiple agents
-	prompt, err := coderPrompt(prompt.WithWorkingDir(c.cfg.WorkingDir()))
+	prompt, err := coderPrompt(
+		prompt.WithWorkingDir(c.cfg.WorkingDir()),
+		prompt.WithInteractive(c.interactive),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -849,6 +852,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		FileTracker:            c.filetracker,
 		TurnContext:            c.cfg.Config().Options.TurnContextMode(),
 		AmbiguityClarification: c.cfg.Config().Options.AmbiguityClarificationEnabled(),
+		Interactive:            c.interactive,
 	})
 
 	if c.cfg.Config().Options.NotebookStubSupersededEnabled() && !c.cfg.Config().Options.NotebookIsEnabled() {
@@ -1074,11 +1078,11 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 
 	// The scope gate sits outermost: the explore→execute boundary must
 	// see every call, and a confirmed write then flows through hooks,
-	// permissions, and verification unchanged. Interactive top-level
-	// runs only — a question nobody can answer must degrade, never
-	// stall.
-	if !isSubAgent && c.interactive && cfg.Options.AmbiguityClarificationEnabled() {
-		filteredTools = wrapToolsWithScopeGate(filteredTools, c.questions)
+	// permissions, and verification unchanged. Headless wraps too —
+	// the degrade branch is proceed-with-logged-assumption, since a
+	// question nobody can answer must never stall.
+	if !isSubAgent && cfg.Options.AmbiguityClarificationEnabled() {
+		filteredTools = wrapToolsWithScopeGate(filteredTools, c.questions, c.interactive)
 	}
 
 	return filteredTools, nil
