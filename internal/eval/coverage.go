@@ -39,9 +39,12 @@ var coverageFields = map[string]func(*RunRecord) float64{
 	"recalls.empty":                func(r *RunRecord) float64 { return float64(r.Recalls.Empty) },
 	"recalls.cross":                func(r *RunRecord) float64 { return float64(r.Recalls.Cross) },
 	// Flag-invariant call_metrics subset — see the comment above.
-	"call_metrics.requests":               func(r *RunRecord) float64 { return float64(callMetrics(r).Requests) },
-	"call_metrics.calls":                  func(r *RunRecord) float64 { return float64(callMetrics(r).Calls) },
-	"call_metrics.first_write_index":      func(r *RunRecord) float64 { return float64(callMetrics(r).FirstWriteIndex) },
+	"call_metrics.requests":          func(r *RunRecord) float64 { return float64(callMetrics(r).Requests) },
+	"call_metrics.calls":             func(r *RunRecord) float64 { return float64(callMetrics(r).Calls) },
+	"call_metrics.first_write_index": func(r *RunRecord) float64 { return float64(callMetrics(r).FirstWriteIndex) },
+	"call_metrics.first_write_attempt_index": func(r *RunRecord) float64 {
+		return float64(callMetrics(r).FirstWriteAttemptIndex)
+	},
 	"call_metrics.requests_to_first_edit": func(r *RunRecord) float64 { return float64(callMetrics(r).RequestsToFirstEdit) },
 	"call_metrics.discovery_calls_before_write": func(r *RunRecord) float64 {
 		return float64(callMetrics(r).DiscoveryCallsBeforeWrite)

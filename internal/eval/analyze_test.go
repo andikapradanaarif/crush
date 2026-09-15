@@ -90,6 +90,14 @@ func writeFixtureDB(t *testing.T) string {
 		// view_directory_error); it just never joins the seen-set.
 		{"m05b", "assistant", `[` + tcPart("c2b", "view", `{"file_path":"/w/missing-dir"}`) + `]`, 0},
 		{"m05c", "tool", `[` + trPart("c2b", "Path is a directory, not a file: /w/missing-dir", true, "") + `]`, 0},
+		// Canceled write placeholder: the name survives the input
+		// rewrite, so first_write_attempt_index lands here — before
+		// the first landed write — and closes the discovery window.
+		{"m05d", "assistant", `[` + tcPart("c2c", "edit", `{}`) + `]`, 0},
+		{"m05e", "tool", `[` + trPart("c2c", "Error: user cancelled assistant tool calling", true, "") + `]`, 0},
+		// Post-attempt pre-write discovery — must NOT count.
+		{"m05f", "assistant", `[` + tcPart("c2d", "grep", `{"pattern":"late"}`) + `]`, 0},
+		{"m05g", "tool", `[` + trPart("c2d", "a.go:9:late", false, "") + `]`, 0},
 		{"m06", "assistant", `[` + tcPart("c3", "view", `{"file_path":"/w/a.go"}`) + `]`, 0},
 		{"m07", "tool", `[` + trPart("c3", "package a", false, "") + `]`, 0},
 		{"m08", "assistant", `[` + tcPart("c4", "edit", `{"file_path":"/w/a.go","old_string":"x"}`) + `]`, 0},
@@ -149,10 +157,26 @@ func writeFixtureDB(t *testing.T) string {
 		// call takes this request's index.
 		{"m42", "assistant", `[` + tcPart("c22", "grep", `{"pattern":"late"}`) + `,{"type":"finish","data":{"reason":"canceled","time":1000,"message":"User canceled request"}}]`, 0},
 		{"m43", "tool", `[` + trPart("c22", "b.go:2:late", false, "") + `]`, 0},
+		// Paging: a re-view of a seen path with a different window is
+		// legitimate paging, not a reread; the same window again IS.
+		{"m44", "assistant", `[` + tcPart("c23", "view", `{"file_path":"/w/a.go","offset":500}`) + `]`, 0},
+		{"m45", "tool", `[` + trPart("c23", "...500-600...", false, "") + `]`, 0},
+		{"m46", "assistant", `[` + tcPart("c24", "view", `{"file_path":"/w/a.go","offset":500}`) + `]`, 0},
+		{"m47", "tool", `[` + trPart("c24", "...500-600...", false, "") + `]`, 0},
+		// Index-not-ready map — its own sub-count, not a generic
+		// failure.
+		{"m48", "assistant", `[` + tcPart("c25", "map", `{"symbol":"Late"}`) + `]`, 0},
+		{"m49", "tool", `[` + trPart("c25", "project index unavailable — fall back to grep/glob", true, "") + `]`, 0},
 	}
 	for _, m := range msgs {
 		insertMsg(t, conn, m.id, "s1", m.role, m.parts, 1000, m.summary)
 	}
+
+	// One tracker row — the read_files cross-check against the
+	// reconstructed seen-set.
+	_, err = conn.ExecContext(t.Context(),
+		`INSERT INTO read_files (session_id, path, read_at) VALUES ('s1', '/w/a.go', 1000)`)
+	require.NoError(t, err)
 
 	// Child-session rows that must never leak into parent metrics.
 	insertMsg(t, conn, "k1", "s2", "user", `[`+txtPart("sub")+`]`, 1000, 0)
@@ -176,39 +200,46 @@ func TestAnalyzeSessionDB_Fixture(t *testing.T) {
 		require.Equal(t, "s1", cm.SessionID)
 		// Summary row and the finish-only canceled-turn row are not
 		// requests; m42's mid-stream cancel IS (real parts + finish).
-		require.Equal(t, 21, cm.Requests)
-		// c10 canceled, c16 interrupted, c21 truncated — labeled, not
-		// counted; c17's real arg-validation error, c20's map{}
+		require.Equal(t, 26, cm.Requests)
+		// c10+c2c canceled, c16 interrupted, c21 truncated — labeled,
+		// not counted; c17's real arg-validation error, c20's map{}
 		// skeleton, and c22's mid-stream-cancel call ARE real calls.
-		require.Equal(t, 20, cm.Calls)
-		require.Len(t, cm.ToolCalls, 23)
-		require.Equal(t, 1, cm.CanceledCalls)
+		require.Equal(t, 24, cm.Calls)
+		require.Len(t, cm.ToolCalls, 28)
+		require.Equal(t, 2, cm.CanceledCalls) // c10 + c2c.
 		require.Equal(t, 1, cm.InterruptedCalls)
 		require.Equal(t, 1, cm.TruncatedCalls)
 
-		require.Equal(t, 4, cm.FirstWriteIndex) // c4 — first attempted write.
-		require.Equal(t, 5, cm.RequestsToFirstEdit)
-		// c1 view-unseen + c2 grep + c2b dir-view attempt.
+		require.Equal(t, 6, cm.FirstWriteIndex) // c4 — first landed write.
+		// c2c's canceled edit keeps its name — the attempt marks the
+		// model acting and closes the discovery window early.
+		require.Equal(t, 3, cm.FirstWriteAttemptIndex)
+		require.Equal(t, 7, cm.RequestsToFirstEdit)
+		// c1 view-unseen + c2 grep + c2b dir-view attempt; c2d's grep
+		// lands after the write attempt and does NOT count.
 		require.Equal(t, 3, cm.DiscoveryCallsBeforeWrite)
 		require.Equal(t, 1, cm.FilesViewed)
+		require.Equal(t, 1, cm.ReadFilesRows)
 
 		require.Equal(t, 2, cm.EditFailures)
 		require.Equal(t, 1, cm.EditFailuresHook)
 		require.Equal(t, 1, cm.EditFailuresOther)
 
 		// c6 ok + c14 hallucinated "tool not found" + c18 no result +
-		// c20 skeleton ok.
-		require.Equal(t, 4, cm.MapCalls)
+		// c20 skeleton ok + c25 index-unavailable.
+		require.Equal(t, 5, cm.MapCalls)
 		require.Equal(t, 2, cm.MapCallsOK)
+		require.Equal(t, 1, cm.MapCallsIndexUnavailable)
 		require.Equal(t, int64(len("Config defined at a.go:12")+len("map skeleton output")), cm.MapResultBytes)
 
 		require.Equal(t, 1, cm.QuestionCalls)
 		require.Equal(t, 1, cm.QuestionCallsErrored)
 
 		// c3 same-turn, c11 same-turn (repair prompt stayed in-process),
-		// c12 cross-turn.
-		require.Equal(t, 3, cm.Rereads)
-		require.Equal(t, 2, cm.RereadsSameTurn)
+		// c12 cross-turn, c24 same-window re-view same-turn. c23's
+		// offset=500 view is paging — a new window, not a reread.
+		require.Equal(t, 4, cm.Rereads)
+		require.Equal(t, 3, cm.RereadsSameTurn)
 		require.Equal(t, 1, cm.RereadsCrossTurn)
 
 		// c6 map(symbol=Config) → c8 grep Config. c18's result never
@@ -218,11 +249,12 @@ func TestAnalyzeSessionDB_Fixture(t *testing.T) {
 		require.Equal(t, 2, cm.ViewDirectoryErrors) // c2b + c9.
 
 		var canceled, interrupted, truncated, noResult int
+		canceledNames := map[string]bool{}
 		for i := range cm.ToolCalls {
 			rec := &cm.ToolCalls[i]
 			if rec.Canceled {
 				canceled++
-				require.Equal(t, "bash", rec.Name)
+				canceledNames[rec.Name] = true
 			}
 			if rec.Interrupted {
 				interrupted++
@@ -235,13 +267,14 @@ func TestAnalyzeSessionDB_Fixture(t *testing.T) {
 				noResult++
 			}
 		}
-		require.Equal(t, 1, canceled)
+		require.Equal(t, 2, canceled)
+		require.True(t, canceledNames["bash"] && canceledNames["edit"])
 		require.Equal(t, 1, interrupted)
 		require.Equal(t, 1, truncated)
 		require.Equal(t, 3, noResult) // c15, c18, c21.
 
 		// c22 belongs to the mid-stream-canceled request — its own
-		// request index (20), not the previous request's.
+		// request index (22), not the previous request's.
 		var c22 *CallRecord
 		for i := range cm.ToolCalls {
 			if cm.ToolCalls[i].ID == "c22" {
@@ -249,7 +282,7 @@ func TestAnalyzeSessionDB_Fixture(t *testing.T) {
 			}
 		}
 		require.NotNil(t, c22)
-		require.Equal(t, 20, c22.Step)
+		require.Equal(t, 22, c22.Step)
 	}
 }
 

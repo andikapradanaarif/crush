@@ -176,8 +176,9 @@ every characterization pass a diff to reviewed files.
   `tool_calls[]` (joined to results by call ID, ordered
   `created_at, rowid`) and reduced to per-call metrics on the
   record — `requests`, `calls`, `first_write_index`,
-  `requests_to_first_edit`, `discovery_calls_before_write`,
-  `files_viewed`, `edit_failures` (cause-bucketed),
+  `first_write_attempt_index`, `requests_to_first_edit`,
+  `discovery_calls_before_write`, `files_viewed`,
+  `read_files_rows`, `edit_failures` (cause-bucketed),
   `rereads{,_same_turn,_cross_turn}`, `canceled_calls`,
   `interrupted_calls`, `truncated_calls`, `view_directory_errors`,
   plus the flag-dependent forensics
@@ -195,7 +196,19 @@ every characterization pass a diff to reviewed files.
   (real parts + `finish{canceled}`) still counts. Discovery and
   rereads count _attempts_ — the gate measures roundtrips spent
   before acting, so a failed read is a spent discovery attempt that
-  just never joins the seen-set. The axes overlap deliberately: a
+  just never joins the seen-set; but a re-view of a seen path with a
+  different `offset`/`limit` is legitimate paging, not a reread —
+  only a re-read of the same window counts. The discovery set is
+  enumerated: grep/glob/ls, the LSP read tools, sourcegraph, agent
+  delegation, and view/read of unseen paths. Excluded deliberately:
+  `recall`/`notebook_search` (notebook_enabled-gated — counting
+  them would make this registered metric flag-variant),
+  `fetch`/`agentic_fetch`/`web_fetch`/`web_search`/`download`
+  (external fetching, not codebase discovery), and `map` (the
+  metric measures what map replaces). The discovery cutoff is
+  `first_write_attempt_index` — a canceled write placeholder keeps
+  its tool name, so the window closes when the model tried to act,
+  not only when a write landed. The axes overlap deliberately: a
   pre-write `view`-on-directory lands in both
   `view_directory_errors` and `discovery_calls_before_write`.
   `crush eval analyze <session_db>` runs the same pass standalone

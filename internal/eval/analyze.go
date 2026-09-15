@@ -53,11 +53,19 @@ type CallMetrics struct {
 	// scope gate (isMutatingCall); this metric deliberately tracks
 	// the stub-machinery write class the gates assert on.
 	FirstWriteIndex int `json:"first_write_index"`
+	// FirstWriteAttemptIndex is the index of the first write-class
+	// call INCLUDING labeled placeholders — a canceled edit keeps its
+	// name even though the cleanup rewrote its input to "{}", so it
+	// still marks the moment the model tried to act. -1 when none
+	// ran. The discovery window closes on the attempt, not only on a
+	// landed write.
+	FirstWriteAttemptIndex int `json:"first_write_attempt_index"`
 	// RequestsToFirstEdit is the 1-based request count through the
 	// request carrying the first write call, -1 when none ran.
 	RequestsToFirstEdit int `json:"requests_to_first_edit"`
 	// DiscoveryCallsBeforeWrite counts discovery-class calls before
-	// the first write: grep/glob/ls, the LSP read tools, sourcegraph,
+	// the first write attempt: grep/glob/ls, the LSP read tools,
+	// sourcegraph,
 	// agent delegation, and view/read of a not-yet-viewed file.
 	// Attempts count — the gate measures roundtrips spent before
 	// acting, so a failed view or bad-regex grep still counts (a
@@ -65,11 +73,17 @@ type CallMetrics struct {
 	// reread; view-on-directory also lands in ViewDirectoryErrors).
 	// map is deliberately excluded — the metric is the
 	// traditional-discovery roundtrip count map is meant to replace.
+	// The cutoff is FirstWriteAttemptIndex, not FirstWriteIndex — a
+	// canceled write placeholder still marks the model acting.
 	DiscoveryCallsBeforeWrite int `json:"discovery_calls_before_write"`
 	// FilesViewed is the reconstructed seen-set size — paths with at
 	// least one successful view/read. Cross-checkable against the
 	// read_files table.
 	FilesViewed int `json:"files_viewed"`
+	// ReadFilesRows is the session's read_files table count — the
+	// machine-checkable cross-validation of FilesViewed (-1 when the
+	// artifact predates the table).
+	ReadFilesRows int `json:"read_files_rows"`
 
 	// EditFailures counts is_error results on write-class calls,
 	// bucketed by cause: a hook halt, a hallucinated tool name, a
@@ -87,6 +101,10 @@ type CallMetrics struct {
 	// "tool not found" results; MapCallsOK counts non-error calls.
 	MapCalls   int `json:"map_calls"`
 	MapCallsOK int `json:"map_calls_ok"`
+	// MapCallsIndexUnavailable counts map calls that errored with the
+	// index-not-ready response — a warming-index artifact distinct
+	// from hallucinated-name or real failures.
+	MapCallsIndexUnavailable int `json:"map_calls_index_unavailable"`
 	// MapResultBytes is the injected-context size of successful map
 	// results — the map tax. Per-call input tokens don't exist (usage
 	// is per-request); the compounding cost of re-reading the result
@@ -183,7 +201,12 @@ const wrongPointerWindow = 10
 // sourcegraph, and agent delegation, all of which are discovery in
 // eval runs (auto_lsp is default-on and the sub-agent is read-only).
 // view/read join conditionally — a read of an unseen file is
-// discovery, a re-read is a reread.
+// discovery, a re-read is a reread. Excluded deliberately:
+// recall/notebook_search are notebook_enabled-gated (counting them
+// would make this registered metric flag-variant), and
+// fetch/agentic_fetch/web_fetch/web_search/download are external
+// fetching, not codebase discovery. map is likewise excluded — the
+// metric is the traditional-discovery roundtrip count map replaces.
 var discoveryToolNames = map[string]bool{
 	"grep": true, "glob": true, "ls": true,
 	"lsp_definition": true, "lsp_references": true, "lsp_symbols": true,
@@ -231,7 +254,13 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 	defer rows.Close()
 
 	var (
-		cm       = &CallMetrics{SessionID: sessionID, FirstWriteIndex: -1, RequestsToFirstEdit: -1}
+		cm = &CallMetrics{
+			SessionID:              sessionID,
+			FirstWriteIndex:        -1,
+			FirstWriteAttemptIndex: -1,
+			RequestsToFirstEdit:    -1,
+			ReadFilesRows:          -1,
+		}
 		pending  []pendingCall
 		results  = map[string]rawToolResult{}
 		request  = -1
@@ -326,7 +355,7 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 	// Pass 2 — join results, then walk the sequence in order: seen-set
 	// updates, discovery counting, and first-write detection all depend
 	// on call position.
-	seenTurn := map[string]int{}
+	seen := map[string]seenPath{}
 	for i := range pending {
 		c := &pending[i]
 		res, hasResult := results[c.rec.ID]
@@ -334,6 +363,12 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 		if hasResult {
 			c.rec.IsError = res.IsError
 			c.rec.Cause = errorCause(&res)
+		}
+		// The name survives the cancel-cleanup input rewrite — a
+		// canceled edit still marks the moment the model tried to act,
+		// so the attempt index is set before the placeholder branch.
+		if tools.WriteToolNames[c.rec.Name] && cm.FirstWriteAttemptIndex < 0 {
+			cm.FirstWriteAttemptIndex = c.rec.Seq
 		}
 		// Labeled in the sequence, never counted as a real call.
 		switch placeholderKind(c.input, c.finished, hasResult, &res) {
@@ -359,6 +394,10 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 		switch c.rec.Name {
 		case "map":
 			cm.MapCalls++
+			if hasResult && res.IsError &&
+				strings.Contains(res.Content, "project index unavailable") {
+				cm.MapCallsIndexUnavailable++
+			}
 			if hasResult && !res.IsError {
 				cm.MapCallsOK++
 				cm.MapResultBytes += int64(len(res.Content))
@@ -384,20 +423,29 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 		// Both count attempts (roundtrips spent); only the seen-set
 		// update is success-gated, so a failed read is a spent
 		// discovery attempt that can't later become a reread.
-		if cm.FirstWriteIndex < 0 && isDiscoveryCall(c.rec.Name, isRead, path, seenTurn) {
+		if cm.FirstWriteAttemptIndex < 0 && isDiscoveryCall(c.rec.Name, isRead, path, seen) {
 			cm.DiscoveryCallsBeforeWrite++
 		}
 		if isRead && path != "" {
-			if lastTurn, seen := seenTurn[path]; seen {
+			win := viewWindow(c.input)
+			if sp, ok := seen[path]; ok && sp.windows[win] {
+				// Same path AND same offset/limit window already read —
+				// a redundant re-fetch. A different window is paging.
 				cm.Rereads++
-				if c.rec.Turn == lastTurn {
+				if c.rec.Turn == sp.lastTurn {
 					cm.RereadsSameTurn++
 				} else {
 					cm.RereadsCrossTurn++
 				}
 			}
 			if hasResult && !res.IsError {
-				seenTurn[path] = c.rec.Turn
+				sp := seen[path]
+				if sp.windows == nil {
+					sp.windows = map[string]bool{}
+				}
+				sp.windows[win] = true
+				sp.lastTurn = c.rec.Turn
+				seen[path] = sp
 			}
 		}
 
@@ -421,8 +469,17 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 			}
 		}
 	}
-	cm.FilesViewed = len(seenTurn)
+	cm.FilesViewed = len(seen)
 	cm.WrongPointerEvents = wrongPointerEvents(pending)
+
+	// The read_files table is the tracker's own seen-set — a
+	// machine-checkable divergence signal against FilesViewed. -1
+	// when the artifact predates the table.
+	if hasColumn(ctx, conn, "read_files", "session_id") {
+		_ = conn.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM read_files WHERE session_id = ?`, sessionID).
+			Scan(&cm.ReadFilesRows)
+	}
 	return cm, nil
 }
 
@@ -433,6 +490,39 @@ type pendingCall struct {
 	rec      CallRecord
 	input    string
 	finished bool
+}
+
+// seenPath is the per-path seen-set entry: the turn of the last
+// successful read plus the offset/limit windows already read, so a
+// re-view paging into new content isn't mislabeled a reread.
+type seenPath struct {
+	lastTurn int
+	windows  map[string]bool
+}
+
+// viewWindow extracts the paging window from a read-class call's
+// input. A re-view of a seen path with a different offset/limit is
+// legitimate paging, not a reread; the empty window marks an unpaged
+// read.
+func viewWindow(input string) string {
+	var f struct {
+		Offset *int `json:"offset"`
+		Limit  *int `json:"limit"`
+	}
+	if json.Unmarshal([]byte(input), &f) != nil {
+		return ""
+	}
+	if f.Offset == nil && f.Limit == nil {
+		return ""
+	}
+	off, lim := -1, -1
+	if f.Offset != nil {
+		off = *f.Offset
+	}
+	if f.Limit != nil {
+		lim = *f.Limit
+	}
+	return fmt.Sprintf("%d:%d", off, lim)
 }
 
 // hasColumn reports whether a table carries a column, for analyzing
@@ -649,7 +739,7 @@ func errorCause(res *rawToolResult) string {
 // isDiscoveryCall reports whether a call belongs to the
 // discovery-before-write class. Attempts count uniformly: a failed
 // read still spent the roundtrip — it just never joins the seen-set.
-func isDiscoveryCall(name string, isRead bool, path string, seen map[string]int) bool {
+func isDiscoveryCall(name string, isRead bool, path string, seen map[string]seenPath) bool {
 	if discoveryToolNames[name] {
 		return true
 	}
