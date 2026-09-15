@@ -33,9 +33,14 @@ func (s *Service) Skeleton(ctx context.Context, maxTokens int) (string, error) {
 	}
 	s.ensureStarted(ctx)
 	var b strings.Builder
+	// Report the last completed WALK, not MAX(indexed_at) — lazy
+	// re-tags bump indexed_at per write, which would claim the whole
+	// layout is fresher than it is.
 	stamp := "never"
-	if ts := s.indexedAt(ctx); !ts.IsZero() {
-		stamp = ts.Format(time.RFC3339)
+	if lb := s.lastBuild.Load(); lb != 0 {
+		stamp = time.Unix(0, lb).Format(time.RFC3339)
+	} else if ts := s.indexedAt(ctx); !ts.IsZero() {
+		stamp = ts.Format(time.RFC3339) // Process restart fallback.
 	}
 	switch {
 	case s.indexing.Load():
@@ -173,22 +178,42 @@ func (s *Service) Symbol(ctx context.Context, name string, maxTokens int) (strin
 	}
 
 	// Referrers: files whose refs point at a defining file or its dir.
-	seen := map[string]bool{}
-	for _, d := range defs {
-		dir := filepath.ToSlash(filepath.Dir(d.path))
-		rows, err := s.db.QueryContext(ctx, `
-			SELECT DISTINCT src_path FROM refs
-			WHERE dst_path = ? OR dst_path = ?`, d.path, dir)
-		if err != nil {
+	queryRefs := func() (map[string]bool, error) {
+		seen := map[string]bool{}
+		for _, d := range defs {
+			dir := filepath.ToSlash(filepath.Dir(d.path))
+			rows, err := s.db.QueryContext(ctx, `
+				SELECT DISTINCT src_path FROM refs
+				WHERE dst_path = ? OR dst_path = ?`, d.path, dir)
+			if err != nil {
+				return nil, err
+			}
+			for rows.Next() {
+				var src string
+				if err := rows.Scan(&src); err == nil && !seen[src] {
+					seen[src] = true
+				}
+			}
+			rows.Close()
+		}
+		return seen, nil
+	}
+	seen, err := queryRefs()
+	if err != nil {
+		return "", err
+	}
+	if len(seen) > 0 {
+		// Refresh candidates so a file that dropped the import in an
+		// external edit doesn't still render as a referrer — then
+		// re-query against the post-refresh refs.
+		cands := make([]string, 0, len(seen))
+		for r := range seen {
+			cands = append(cands, r)
+		}
+		s.refreshPaths(ctx, cands)
+		if seen, err = queryRefs(); err != nil {
 			return "", err
 		}
-		for rows.Next() {
-			var src string
-			if err := rows.Scan(&src); err == nil && !seen[src] {
-				seen[src] = true
-			}
-		}
-		rows.Close()
 	}
 	if len(seen) > 0 {
 		var refs []string

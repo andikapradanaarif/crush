@@ -94,6 +94,10 @@ type Service struct {
 	modPath     string
 	walkerOnce  sync.Once
 	walker      *fsext.FastGlobWalker
+
+	refixMu  sync.Mutex
+	refix    map[string]bool // lazily tagged mid-build — refs may undercount
+	tagFails sync.Map        // path → walkedFile: skip re-tagging unchanged failures
 }
 
 // modulePath caches the go.mod module path — refreshDirty would
@@ -112,6 +116,27 @@ func (s *Service) skipWalker() *fsext.FastGlobWalker {
 		s.walker = fsext.NewFastGlobWalker(s.root)
 	})
 	return s.walker
+}
+
+// markRefix records a file tagged while a build was in flight — its
+// refs were resolved against a partial index and get re-resolved at
+// the end of the walk.
+func (s *Service) markRefix(path string) {
+	s.refixMu.Lock()
+	defer s.refixMu.Unlock()
+	if s.refix == nil {
+		s.refix = map[string]bool{}
+	}
+	s.refix[path] = true
+}
+
+// drainRefix returns and clears the pending mid-build tag set.
+func (s *Service) drainRefix() map[string]bool {
+	s.refixMu.Lock()
+	defer s.refixMu.Unlock()
+	p := s.refix
+	s.refix = nil
+	return p
 }
 
 var shared sync.Map // (dataDir, workingDir) -> *Service

@@ -375,6 +375,41 @@ import x` resolves against the file's dir (dots walk up), and
   `sync.Once` caches — a mid-session edit to either isn't seen by
   `touchFile` until restart, but every re-walk reparses from disk
   so the index self-corrects within `rewalkInterval`.
+- **Reconcile must stat before it drops.** A `NotifyWritten` row
+  can commit while a background walk is in flight — absent from
+  `seen` (its dir was collected pre-write) but live on disk.
+  Dropping on `stored \ seen` alone erases the row until the next
+  write or re-walk; reconcile now stats the candidate first,
+  keeping the same keep-stale-over-erase-live rule as everywhere
+  else.
+- **Refs resolved against a partial index don't self-heal.**
+  Files lazily tagged mid-build probed `exists` against
+  committed-so-far rows — a not-yet-indexed import target dropped
+  the ref, and matching `{mtime,size}` meant it stayed dropped
+  forever. Lazy tags now record a `refix` set when `indexing` is
+  on, and the walk re-resolves those files against the complete
+  `seen` set at build end.
+- **"Built" means last walk, not last write.** `MAX(indexed_at)`
+  is bumped by every lazy re-tag — a skeleton rendered after a
+  session of writes would claim the layout is minutes old. The
+  header renders `lastBuild` (process-local) with `indexed_at`
+  only as the cross-restart fallback.
+- **Referrers refresh too.** `symbol=` refreshed def paths but
+  printed referrer files straight from `refs` — a file that
+  dropped the import externally still listed. Candidates are
+  refreshed then re-queried.
+- **Store the stat the tagger actually reads.** `collect` used
+  lstat pairs for symlinks while `tagFile` reads the target —
+  pairs never matched, so symlinked files re-tagged forever and
+  target edits went unseen. Symlinks now stat through.
+- **The data dir is only auto-excluded at `.crush`.** A
+  `data-directory` configured inside the project (`./.data/`)
+  would self-index `index.db` and fetch scratch; `collect` skips
+  any in-root `dataDir` explicitly.
+- **Failed tags get one retry per content.** An unreadable file
+  kept its stale row AND paid a failed open+scan on every query;
+  `tagFails` remembers the `{mtime,size}` pair and skips until
+  the file changes.
 
 Resolved since the first draft:
 

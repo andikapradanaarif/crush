@@ -665,3 +665,70 @@ func TestTouchFile_AncestorDirSkipped(t *testing.T) {
 	_, _, found = svc.indexedFile(ctx, "main.go")
 	require.True(t, found)
 }
+
+func TestWalk_ReconcileKeepsLiveRows(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	writeFile(t, root, "main.go", "package main\n\nfunc main() {}\n")
+	// A path the walk never collects (ignored dir) but that exists
+	// on disk — simulates a NotifyWritten row committed mid-walk.
+	writeFile(t, root, "node_modules/pkg/x.js", "export const x = 1\n")
+
+	svc, err := Open(dataDir, root)
+	require.NoError(t, err)
+	defer svc.Close()
+	ctx := context.Background()
+	require.NoError(t, svc.EnsureIndexed(ctx))
+
+	// Simulate the mid-walk write: a row lands for a path collect
+	// already passed. Stat must keep it — a live file's row is
+	// stale-healable, an erased row is invisible until next write.
+	_, err = svc.db.ExecContext(ctx,
+		`INSERT INTO files (path, mtime, size, indexed_at) VALUES (?, 1, 1, 1)`,
+		"node_modules/pkg/x.js")
+	require.NoError(t, err)
+
+	require.NoError(t, svc.walk(ctx))
+	_, _, found := svc.indexedFile(ctx, "node_modules/pkg/x.js")
+	require.True(t, found)
+}
+
+func TestWalk_RefixResolvesMidBuildTags(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	writeFile(t, root, "go.mod", "module example.com/p\n")
+	writeFile(t, root, "a/a.go", `package a
+
+import "example.com/p/b"
+
+func A() { b.B() }
+`)
+	writeFile(t, root, "b/b.go", "package b\n\nfunc B() {}\n")
+
+	svc, err := Open(dataDir, root)
+	require.NoError(t, err)
+	defer svc.Close()
+	ctx := context.Background()
+
+	// Lazily tag a.go while a build is "in flight" — the ref target
+	// isn't indexed yet, so the ref drops and refix records it.
+	svc.indexing.Store(true)
+	info, err := os.Stat(filepath.Join(root, "a/a.go"))
+	require.NoError(t, err)
+	svc.refreshIfStale(ctx, "a/a.go", info.ModTime().UnixNano(), info.Size())
+	svc.indexing.Store(false)
+
+	// Without the refix pass this row would stay missing — the
+	// file's {mtime,size} pair matches, so walks never re-tag it.
+	require.NoError(t, svc.walk(ctx))
+
+	var dst string
+	err = svc.db.QueryRowContext(ctx,
+		`SELECT dst_path FROM refs WHERE src_path = 'a/a.go'`).Scan(&dst)
+	require.NoError(t, err)
+	require.Equal(t, "b", dst)
+}

@@ -53,14 +53,22 @@ func (s *Service) walk(ctx context.Context) error {
 	modulePath := s.modulePath()
 
 	// Reconcile: drop rows for files that vanished since last walk.
+	// A NotifyWritten row can land after its directory was already
+	// collected — absent from `seen` but live on disk — so stat
+	// before dropping; a stale row self-heals via refreshPaths,
+	// an erased live file doesn't.
 	stored, err := s.storedFiles(ctx)
 	if err != nil {
 		return err
 	}
 	for p := range stored {
-		if _, ok := seen[p]; !ok {
-			s.dropFile(ctx, p)
+		if _, ok := seen[p]; ok {
+			continue
 		}
+		if _, err := os.Stat(filepath.Join(s.root, filepath.FromSlash(p))); err == nil {
+			continue
+		}
+		s.dropFile(ctx, p)
 	}
 
 	// Tag new and changed files in batches. The walk runs in the
@@ -119,7 +127,33 @@ func (s *Service) walk(ctx context.Context) error {
 			}
 		}
 	}
-	return commit()
+	if err := commit(); err != nil {
+		return err
+	}
+
+	// Files lazily tagged while this build was in flight resolved
+	// refs against a partial index — re-resolve them against the
+	// complete `seen` set, or the undercount sticks until each file
+	// next changes on disk.
+	if pend := s.drainRefix(); len(pend) > 0 {
+		if tx, err := s.db.BeginTx(ctx, nil); err == nil {
+			if stmts, err := prepareTagStmts(ctx, tx); err == nil {
+				for p := range pend {
+					f, ok := seen[p]
+					if !ok {
+						continue
+					}
+					tags, refs, tagErr := tagFile(s.root, p, modulePath, exists)
+					if tagErr != nil || stmts.tag(ctx, p, f, now, tags, refs) != nil {
+						continue
+					}
+				}
+				stmts.close()
+			}
+			tx.Commit()
+		}
+	}
+	return nil
 }
 
 // walkBatchSize is how many files a tagging transaction covers before
@@ -209,6 +243,15 @@ func (s *Service) collect(ctx context.Context) ([]walkedFile, error) {
 	walker := fsext.NewFastGlobWalker(s.root)
 	var mu sync.Mutex // fastwalk invokes the callback from worker goroutines
 	var files []walkedFile
+	// A data-directory configured inside the project would otherwise
+	// index its own scratch (index.db, crush-fetch-* dumps).
+	var dataAbs string
+	if filepath.IsAbs(s.dataDir) {
+		if rel, err := filepath.Rel(s.root, s.dataDir); err == nil && rel != ".." &&
+			!strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			dataAbs = filepath.Join(s.root, rel)
+		}
+	}
 	conf := fastwalk.Config{
 		Follow:  false,
 		ToSlash: fastwalk.DefaultToSlash(),
@@ -221,6 +264,13 @@ func (s *Service) collect(ctx context.Context) ([]walkedFile, error) {
 		if err != nil {
 			return nil
 		}
+		if dataAbs != "" &&
+			(path == dataAbs || strings.HasPrefix(path, dataAbs+string(filepath.Separator))) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if d.IsDir() {
 			if walker.ShouldSkipDir(path) {
 				return filepath.SkipDir
@@ -231,6 +281,12 @@ func (s *Service) collect(ctx context.Context) ([]walkedFile, error) {
 			return nil
 		}
 		info, err := d.Info()
+		if err == nil && d.Type()&os.ModeSymlink != 0 {
+			// tagFile reads the target — store the target's pair so a
+			// target edit registers as staleness and the link's own
+			// mtime doesn't trigger a re-tag on every refresh.
+			info, err = os.Stat(path)
+		}
 		if err != nil || info.Size() == 0 {
 			return nil
 		}
@@ -296,6 +352,11 @@ func (s *Service) refreshIfStale(ctx context.Context, relPath string, currentMti
 	if m, sz, found := s.indexedFile(ctx, relPath); found && m == currentMtime && sz == size {
 		return
 	}
+	if prev, ok := s.tagFails.Load(relPath); ok {
+		if f := prev.(walkedFile); f.mtime == currentMtime && f.size == size {
+			return // Same file already failed tagging — retry on change.
+		}
+	}
 	// exists covers directories too: Go imports resolve to package
 	// dirs, and a probe limited to file rows would silently drop
 	// every outgoing ref on each lazy re-tag.
@@ -309,9 +370,12 @@ func (s *Service) refreshIfStale(ctx context.Context, relPath string, currentMti
 	if err != nil {
 		// Keep the stale row on a transient read failure, same as the
 		// walk's tagErr path — drops happen only when the file stat
-		// fails outright.
+		// fails outright. Remember the pair so a permanently
+		// unreadable file isn't re-attempted on every query.
+		s.tagFails.Store(relPath, walkedFile{path: relPath, mtime: currentMtime, size: size})
 		return
 	}
+	s.tagFails.Delete(relPath)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return
@@ -334,6 +398,11 @@ func (s *Service) refreshIfStale(ctx context.Context, relPath string, currentMti
 		tx.ExecContext(ctx, `INSERT INTO refs (src_path, dst_path) VALUES (?, ?)`, relPath, dst)
 	}
 	tx.Commit()
+	// Refs just resolved against a possibly in-flight build — flag
+	// for re-resolution at walk end so the undercount isn't sticky.
+	if s.indexing.Load() {
+		s.markRefix(relPath)
+	}
 }
 
 // refreshDirty stat-scans every indexed file and re-tags those whose
