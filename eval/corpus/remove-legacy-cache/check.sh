@@ -21,6 +21,7 @@ fi
 grep -q "catalog/internal/store" internal/service/catalog.go
 grep -q "catalog/internal/store" internal/service/search.go
 
-# Turns 2 and 3 must both exist: at least two Stats() references
-# across test files (miss-counter test + hit-counter test).
-test "$(grep -r "Stats()" --include="*_test.go" . | wc -l)" -ge 2
+# Turns 2 and 3 must both exist: two test functions under
+# internal/store exercising Stats (miss counter + hit counter).
+test "$(grep -r "func Test" --include="*_test.go" internal/store/ | wc -l)" -ge 2
+grep -rq "Stats" --include="*_test.go" internal/store/

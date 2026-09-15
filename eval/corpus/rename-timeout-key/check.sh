@@ -17,8 +17,9 @@ fi
 grep -rn "TimeoutSeconds" --include="*.go" . >/dev/null
 grep -q "timeout_seconds" config.yaml
 
-# Turn 2's work must exist: a Validate method on the config type.
-grep -q "func.*Validate" internal/config/config.go
+# Turn 2's work must exist: a Validate method on the config type —
+# file-agnostic, a validate.go sibling is valid.
+grep -rq "func.*Validate" internal/config/
 
 # Turn 3's work must exist: Validate coverage in a test file.
 grep -rq "Validate" --include="*_test.go" internal/config/

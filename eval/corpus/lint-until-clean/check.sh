@@ -7,7 +7,14 @@ go build ./...
 go test ./... >/dev/null
 
 # Turn 2's lint rule must exist — env access belongs to config.
-grep -q "os.Getenv" lint.sh
+# Match "Getenv" loosely: the fixture style escapes dots (os\.Getenv).
+grep -q "Getenv" lint.sh
+
+# The rule must have teeth: no os.Getenv in Go sources outside config.
+if grep -rn "os.Getenv" --include="*.go" . | grep -v "internal/config"; then
+	echo "os.Getenv still used outside internal/config" >&2
+	exit 1
+fi
 
 # Turn 3's work must exist: a test under internal/fileutil.
 grep -rq "func Test" internal/fileutil/

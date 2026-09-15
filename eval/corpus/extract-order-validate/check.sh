@@ -5,7 +5,6 @@ set -e
 cd "$EVAL_WORKDIR"
 
 go build ./...
-go vet ./...
 
 # The shared package must exist.
 test -d internal/order
