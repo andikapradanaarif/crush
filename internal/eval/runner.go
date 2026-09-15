@@ -311,6 +311,9 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 			SessionID: res.SessionID,
 			Workdir:   workdir,
 			Turns:     traj.Task.Turns,
+			// The producing host's conventions — rec.Env.OS — not the
+			// analyzer's, in case artifacts are analyzed cross-platform.
+			GOOS: rec.Env.OS,
 		})
 		if aerr != nil {
 			rec.CallMetricsError = aerr.Error()

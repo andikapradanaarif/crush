@@ -169,10 +169,12 @@ repair-prompt fingerprinted.`,
 			workdir, _ = os.Getwd()
 		}
 
+		goos, _ := cmd.Flags().GetString("goos")
 		metrics, err := eval.AnalyzeSessionDB(cmd.Context(), dbPath, eval.AnalyzeOptions{
 			SessionID: sessionID,
 			Workdir:   workdir,
 			Turns:     turns,
+			GOOS:      goos,
 		})
 		if err != nil {
 			return err
@@ -231,5 +233,6 @@ func init() {
 	evalAnalyzeCmd.Flags().String("workdir", "", "run working dir for normalizing relative call paths (default: CWD)")
 	evalAnalyzeCmd.Flags().String("session", "", "session ID to analyze (default: latest parent session)")
 	evalAnalyzeCmd.Flags().String("trajectory", "", "corpus trajectory ID — supplies turns for process-turn segmentation")
+	evalAnalyzeCmd.Flags().String("goos", "", "OS whose path conventions produced the artifact (default: this machine)")
 	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd)
 }

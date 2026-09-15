@@ -424,11 +424,85 @@ func TestPreserveSessionDB_CapturesWALTail(t *testing.T) {
 	require.Equal(t, 1, n, "artifact must carry the un-checkpointed WAL tail")
 }
 
+// TestPreserveSessionDB_IncompleteFlag: when VACUUM INTO fails the raw
+// copy may lack the WAL tail — the caller must learn that via
+// walSafe=false so the record can stamp session_db_incomplete.
+// VACUUM INTO refuses an existing target file, which is the seam.
+func TestPreserveSessionDB_IncompleteFlag(t *testing.T) {
+	t.Parallel()
+	workParent := t.TempDir()
+	workdir := filepath.Join(workParent, "w")
+	dataDir := DataDirFor(workdir)
+
+	conn, err := db.Connect(context.Background(), dataDir)
+	require.NoError(t, err)
+	insertSession(t, conn, "s1", "")
+	require.NoError(t, db.Release(dataDir))
+
+	r := &Runner{EvalDir: t.TempDir()}
+	dstDir := filepath.Join(r.EvalDir, "results", "exp", "artifacts")
+	require.NoError(t, os.MkdirAll(dstDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dstDir, "traj-control-inv-0.db"), []byte("exists"), 0o644))
+
+	dst, walSafe, err := r.preserveSessionDB(
+		context.Background(), "exp", "traj", "control", "inv", 0, workdir)
+	require.NoError(t, err)
+	require.False(t, walSafe)
+	require.NotEmpty(t, dst)
+}
+
+// TestExecuteRun_PreserveFailure pins the failure stamps: a run that
+// left no session DB records WHY the metrics are absent instead of
+// silently reporting none — and still carries workdir for forensics.
+func TestExecuteRun_PreserveFailure(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "t1", nil)
+	traj, err := LoadTrajectory(trajDir)
+	require.NoError(t, err)
+	exp := &Experiment{
+		Name: "e1", Model: "mock/m", Temperature: ptr(0.0),
+		Arms: map[string]Arm{ArmControl: {}},
+	}
+	r := &Runner{EvalDir: root, Driver: noDBDriver{}, WorkParent: t.TempDir()}
+
+	rec, err := r.ExecuteRun(context.Background(), exp, traj, trajDir,
+		ArmControl, Arm{}, &FlagsManifest{Defaults: map[string]any{}}, 1, "inv1")
+	require.NoError(t, err)
+	require.Empty(t, rec.SessionDB)
+	require.Nil(t, rec.CallMetrics)
+	require.Contains(t, rec.CallMetricsError, "session db not preserved")
+	require.NotEmpty(t, rec.Workdir)
+}
+
+// TestExecuteRun_AnalyzerFailure pins the stamp for a preserved-but-
+// unanalyzable artifact: telemetry reported a session the DB lacks.
+func TestExecuteRun_AnalyzerFailure(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "t1", nil)
+	traj, err := LoadTrajectory(trajDir)
+	require.NoError(t, err)
+	exp := &Experiment{
+		Name: "e1", Model: "mock/m", Temperature: ptr(0.0),
+		Arms: map[string]Arm{ArmControl: {}},
+	}
+	r := &Runner{EvalDir: root, Driver: dbDriver{sessionID: "missing"}, WorkParent: t.TempDir()}
+
+	rec, err := r.ExecuteRun(context.Background(), exp, traj, trajDir,
+		ArmControl, Arm{}, &FlagsManifest{Defaults: map[string]any{}}, 1, "inv1")
+	require.NoError(t, err)
+	require.NotEmpty(t, rec.SessionDB) // Preserved — it's the analysis that failed.
+	require.Nil(t, rec.CallMetrics)
+	require.Contains(t, rec.CallMetricsError, "no messages")
+}
+
 // dbDriver is a fake AgentRunner that leaves a real session DB behind —
 // ExecuteRun's preserve+analyze path end-to-end, no provider.
-type dbDriver struct{}
+type dbDriver struct{ sessionID string }
 
-func (dbDriver) Run(_ context.Context, workdir string, _ []string, _ Budget) RunResult {
+func (d dbDriver) Run(_ context.Context, workdir string, _ []string, _ Budget) RunResult {
 	dataDir := DataDirFor(workdir)
 	conn, err := db.Connect(context.Background(), dataDir)
 	if err != nil {
@@ -448,6 +522,14 @@ func (dbDriver) Run(_ context.Context, workdir string, _ []string, _ Budget) Run
 			return RunResult{Err: err}
 		}
 	}
+	_ = os.WriteFile(filepath.Join(workdir, "fixed.marker"), []byte("x"), 0o644)
+	return RunResult{Steps: 1, ModelResolved: "mock/m", SessionID: d.sessionID}
+}
+
+// noDBDriver leaves no session DB — the preserve-failure shape.
+type noDBDriver struct{}
+
+func (noDBDriver) Run(_ context.Context, workdir string, _ []string, _ Budget) RunResult {
 	_ = os.WriteFile(filepath.Join(workdir, "fixed.marker"), []byte("x"), 0o644)
 	return RunResult{Steps: 1, ModelResolved: "mock/m"}
 }

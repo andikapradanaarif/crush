@@ -198,7 +198,11 @@ every characterization pass a diff to reviewed files.
   before acting, so a failed read is a spent discovery attempt that
   just never joins the seen-set; but a re-view of a seen path with a
   different `offset`/`limit` is legitimate paging, not a reread —
-  only a re-read of the same window counts. The discovery set is
+  only a re-read of the same window counts. Window keys are the
+  _requested_ window resolved to the tool's defaults
+  (`offset=0`/`limit<=0` alias to the unpaged head), so a
+  contained-window re-read of a short file still undercounts —
+  conservative, never fabricated. The discovery set is
   enumerated: grep/glob/ls, the LSP read tools, sourcegraph, agent
   delegation, and view/read of unseen paths. Excluded deliberately:
   `recall`/`notebook_search` (notebook_enabled-gated — counting

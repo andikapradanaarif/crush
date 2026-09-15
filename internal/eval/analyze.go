@@ -33,10 +33,12 @@ type CallMetrics struct {
 	// sessions are excluded — their work is charged to the parent's
 	// `agent` call.
 	SessionID string `json:"session_id"`
-	// Requests counts non-summary assistant messages — one per
-	// PrepareStep, i.e. one per model request. Divergence from
-	// RunRecord.Steps flags the edge rows (canceled pre-request turns,
-	// mid-request errors) the correctness rules exist for.
+	// Requests counts non-summary assistant messages — one per step.
+	// Provider retries reuse the same row (OnRetry resets content), so
+	// this is steps attempted, not billed API calls — tokens.* carries
+	// real spend. Divergence from RunRecord.Steps flags the edge rows
+	// (canceled pre-request turns, mid-request errors) the correctness
+	// rules exist for.
 	Requests int `json:"requests"`
 	// Calls counts real tool calls — canceled mid-stream placeholders
 	// are labeled and excluded.
@@ -192,6 +194,12 @@ type AnalyzeOptions struct {
 	// turn; any other user message is an in-process repair turn. Empty
 	// falls back to repair-prompt fingerprinting.
 	Turns []string
+	// GOOS is the OS whose path conventions produced the artifact —
+	// the run host, recorded on the run record as env.os. Empty
+	// defaults to the analyzer host; only cross-platform standalone
+	// analysis (a Windows-produced artifact on a unix machine) needs
+	// the override.
+	GOOS string
 }
 
 // wrongPointerWindow bounds the call lookahead for wrong-pointer
@@ -237,6 +245,10 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 		if err != nil {
 			return nil, err
 		}
+	}
+	goos := opts.GOOS
+	if goos == "" {
+		goos = runtime.GOOS
 	}
 
 	// is_summary_message postdates early schemas — a preserved DB from
@@ -328,8 +340,12 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 					Turn: max(turn, 0),
 					Name: tc.Name,
 				}
-				if f := tools.ToolCallFilePath(tc.Input); f != "" {
-					rec.Files = []string{normalizeCallPath(opts.Workdir, f)}
+				// lsp_rename's `path` param is a search-scope directory,
+				// not a file — extracting it would mislead files[].
+				if tc.Name != "lsp_rename" {
+					if f := tools.ToolCallFilePath(tc.Input); f != "" {
+						rec.Files = []string{normalizeCallPath(opts.Workdir, f, goos)}
+					}
 				}
 				pending = append(pending, pendingCall{rec: rec, input: tc.Input, finished: tc.Finished})
 			}
@@ -341,6 +357,17 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 				var tr rawToolResult
 				if err := json.Unmarshal(p.Data, &tr); err != nil {
 					continue
+				}
+				// Content is retained only for errored results — every
+				// reader (errorCause, the directory and
+				// index-unavailable markers, placeholder
+				// discrimination) needs it solely there; successes
+				// contribute only their length to map_result_bytes.
+				// Holding a large session's full tool output doesn't
+				// scale.
+				tr.ContentLen = len(tr.Content)
+				if !tr.IsError {
+					tr.Content = ""
 				}
 				results[tr.ToolCallID] = tr
 			}
@@ -405,7 +432,7 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 			}
 			if hasResult && !res.IsError {
 				cm.MapCallsOK++
-				cm.MapResultBytes += int64(len(res.Content))
+				cm.MapResultBytes += int64(res.ContentLen)
 			}
 		case "question":
 			cm.QuestionCalls++
@@ -518,6 +545,9 @@ func viewWindow(input string) string {
 	if f.Limit != nil {
 		lim = *f.Limit
 	}
+	if lim <= 0 {
+		lim = tools.DefaultReadLimit // The tool resolves non-positive to the default.
+	}
 	return fmt.Sprintf("%d:%d", off, lim)
 }
 
@@ -602,6 +632,10 @@ type rawToolResult struct {
 	Content    string `json:"content"`
 	Metadata   string `json:"metadata"`
 	IsError    bool   `json:"is_error"`
+	// ContentLen is len(content), captured before Content is dropped
+	// for non-error results — map_result_bytes needs the size, not
+	// the body.
+	ContentLen int `json:"-"`
 }
 
 func decodeParts(partsJS string) ([]rawPart, error) {
@@ -754,14 +788,25 @@ func isDiscoveryCall(name string, isRead bool, path string, seen map[string]map[
 // normalizeCallPath keys a tool-call path for seen-set comparison.
 // Unlike the agent's normalizedPath it never resolves against the
 // analyzer's CWD — relative spellings were relative to the run's
-// workdir. Same-case-folding rule as the agent (darwin/windows) so a
-// spelling variant can't dodge the seen-set.
-func normalizeCallPath(workdir, p string) string {
-	if !filepath.IsAbs(p) && workdir != "" {
+// workdir. goos is the artifact producer's OS: Windows spellings are
+// separator-normalized so `C:\x` and `C:/x` share a key even when the
+// analyzer runs on unix. Same case-folding rule as the agent
+// (darwin/windows) so a spelling variant can't dodge the seen-set.
+func normalizeCallPath(workdir, p, goos string) string {
+	if goos == "windows" {
+		p = strings.ReplaceAll(p, `\`, "/")
+		workdir = strings.ReplaceAll(workdir, `\`, "/")
+	}
+	abs := strings.HasPrefix(p, "/")
+	if goos == "windows" && !abs {
+		// Drive-letter or UNC form, post-separator-normalization.
+		abs = len(p) >= 3 && p[1] == ':' && p[2] == '/' || strings.HasPrefix(p, "//")
+	}
+	if !abs && workdir != "" {
 		p = filepath.Join(workdir, p)
 	}
 	p = filepath.Clean(p)
-	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+	if goos == "darwin" || goos == "windows" {
 		p = strings.ToLower(p)
 	}
 	return p
