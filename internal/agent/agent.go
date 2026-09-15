@@ -133,12 +133,13 @@ type SessionAgentCall struct {
 	// fantasy retries the stream transparently. Returning an error
 	// surfaces the original auth error without retry.
 	OnAuthRefresh func(ctx context.Context, err *fantasy.ProviderError) error
-	// VerificationAttempts counts the verification-repair retries this
-	// call has already consumed. The end-of-turn gate builds each retry
-	// as a clone of the caller with this field incremented, so the
-	// budget propagates across the recursive Run boundary where a
-	// Run-local counter would reset.
-	VerificationAttempts int
+	// RepairAttempts counts the repair retries this call has already
+	// consumed across every run-boundary edge (verification, todos,
+	// stall). The edge layer builds each retry as a clone of the
+	// caller with this field incremented, so the shared budget
+	// propagates across the recursive Run boundary where a Run-local
+	// counter would reset.
+	RepairAttempts int
 }
 
 type SessionAgent interface {
@@ -968,6 +969,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	startTime := time.Now()
 	a.eventPromptSent(call.SessionID)
 
+	// loopStopped records that the loop detector's StopWhen ended the
+	// run — the stall edge's trigger at the run boundary.
+	var loopStopped bool
+
 	var stepMessages []fantasy.Message
 	var shouldSummarize bool
 	sanitizedToolCalls := make(map[string]bool)
@@ -1298,7 +1303,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				return false
 			},
 			func(steps []fantasy.StepResult) bool {
-				return hasRepeatedToolCalls(steps, loopDetectionWindowSize, loopDetectionMaxRepeats)
+				if hasRepeatedToolCalls(steps, loopDetectionWindowSize, loopDetectionMaxRepeats) {
+					loopStopped = true
+					return true
+				}
+				return false
 			},
 		}, evalStepCaps()...),
 	})
@@ -1435,14 +1444,20 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		return nil, err
 	}
 
-	// Verification gate: a run ending on a clean stop with failed or
+	// Run-boundary edges: a run ending on a clean stop with failed or
 	// pending checks — or session todos still open — does not get to
-	// report done — the gate resolves the checks, lands outcomes on
-	// stored tool-result metadata (flushed so the notebook goroutine
-	// below observes them), and prepends a bounded retry ahead of
-	// queued prompts. Must run before the notebook goroutine spawn AND
-	// before the queue dequeue.
-	verifyRetryQueued := a.runVerificationGate(ctx, call, result, currentAssistant)
+	// report done; a loop-detector stop escalates instead of dying
+	// silently. The verification edge resolves its checks, lands
+	// outcomes on stored tool-result metadata (flushed so the
+	// notebook goroutine below observes them), and all firing edges
+	// merge into one bounded retry prepended ahead of queued prompts.
+	// Must run before the notebook goroutine spawn AND before the
+	// queue dequeue.
+	repairQueued := a.runEdges(ctx, call, edgeInput{
+		result:           result,
+		currentAssistant: currentAssistant,
+		stalled:          loopStopped,
+	})
 
 	// Generate notebook entries asynchronously when notebook is
 	// enabled. This runs in the background so the user sees the
@@ -1513,7 +1528,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// nested/non-interactive sessions, and when a gate retry is queued —
 	// the session is about to go busy again and the finished→busy flap
 	// would flicker the TUI on every attempt).
-	if !call.NonInteractive && a.notify != nil && !verifyRetryQueued {
+	if !call.NonInteractive && a.notify != nil && !repairQueued {
 		a.notify.Publish(pubsub.CreatedEvent, notify.Notification{
 			SessionID:    call.SessionID,
 			SessionTitle: currentSession.Title,
