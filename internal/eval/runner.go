@@ -293,13 +293,16 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	// whether telemetry reported a session: a turn-0 hard-kill writes
 	// no telemetry but still leaves a DB worth keeping.
 	dst, walSafe, err := r.preserveSessionDB(ctx, exp.Name, traj.ID, armName, inv, attempt, workdir)
+	// Record the run's workdir unconditionally — the materialized dir is
+	// deleted after the run, and the anchor is the only way a post-hoc
+	// `eval analyze` can resolve relative call paths correctly.
+	rec.Workdir = workdir
 	if err != nil {
 		// Record why the metrics are absent — indistinguishable from
 		// "no metrics by design" otherwise.
 		rec.CallMetricsError = fmt.Sprintf("session db not preserved: %v", err)
 	} else {
 		rec.SessionDB = dst
-		rec.Workdir = workdir
 		rec.SessionDBIncomplete = !walSafe
 		// Sequence analysis runs on the preserved artifact, not the
 		// about-to-be-deleted source — `crush eval analyze <artifact>`

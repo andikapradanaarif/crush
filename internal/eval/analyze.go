@@ -237,8 +237,10 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 		request  = -1
 		turn     = -1
 		nextTurn = 0
+		nRows    int
 	)
 	for rows.Next() {
+		nRows++
 		var (
 			role    string
 			partsJS string
@@ -306,6 +308,11 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if nRows == 0 {
+		// A missing or empty session must not report as a valid
+		// zero-call run — the distinction matters on the record.
+		return nil, fmt.Errorf("session %q has no messages", sessionID)
 	}
 	cm.Requests = request + 1
 

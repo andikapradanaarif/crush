@@ -264,6 +264,58 @@ func TestAnalyzeSessionDB_NoSession(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestAnalyzeSessionDB_EmptySession pins the failure mode: a session ID
+// that resolves to zero messages must error, not report a valid
+// zero-call run.
+func TestAnalyzeSessionDB_EmptySession(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	conn, err := db.Connect(context.Background(), dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Release(dir)) })
+	insertSession(t, conn, "s1", "")
+
+	// Both the missing-session and the empty-session shapes.
+	for _, id := range []string{"missing", "s1"} {
+		_, err = AnalyzeSessionDB(context.Background(), filepath.Join(dir, "crush.db"),
+			AnalyzeOptions{SessionID: id})
+		require.Error(t, err, "session %q", id)
+	}
+}
+
+// TestAnalyzeSessionDB_LegacySchema pins the pre-20250810 fallback:
+// artifacts from before is_summary_message existed must analyze via
+// the hasColumn backfill rather than erroring on the column.
+func TestAnalyzeSessionDB_LegacySchema(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	conn, err := db.Connect(context.Background(), dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Release(dir)) })
+
+	_, err = conn.ExecContext(t.Context(), `ALTER TABLE messages DROP COLUMN is_summary_message`)
+	require.NoError(t, err)
+
+	insertSession(t, conn, "s1", "")
+	for _, m := range []struct{ id, role, parts string }{
+		{"m1", "user", `[` + txtPart("turn") + `]`},
+		{"m2", "assistant", `[` + tcPart("c1", "view", `{"file_path":"/w/a.go"}`) + `]`},
+		{"m3", "tool", `[` + trPart("c1", "package a", false, "") + `]`},
+	} {
+		_, err := conn.ExecContext(t.Context(),
+			`INSERT INTO messages (id, session_id, role, parts, created_at, updated_at)
+			 VALUES (?, 's1', ?, ?, 1000, 1000)`, m.id, m.role, m.parts)
+		require.NoError(t, err)
+	}
+
+	cm, err := AnalyzeSessionDB(context.Background(), filepath.Join(dir, "crush.db"),
+		AnalyzeOptions{Workdir: "/w"})
+	require.NoError(t, err)
+	require.Equal(t, 1, cm.Requests)
+	require.Equal(t, 1, cm.Calls)
+	require.Equal(t, 1, cm.DiscoveryCallsBeforeWrite)
+}
+
 // TestPreserveSessionDB_CapturesWALTail pins the fix at the source: the
 // run's DB is WAL-mode, so a bare crush.db copy drops committed rows
 // still in the -wal tail — the derailment tail on WaitDelay hard-kills.
