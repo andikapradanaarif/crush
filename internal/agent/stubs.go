@@ -522,12 +522,17 @@ func (a *sessionAgent) promoteSupersededStubs(ctx context.Context, msgs []messag
 			stats.Invalidations++
 			stats.Results += promoted
 			stats.SavedBytes += saved
-			if stats.Kinds == nil {
-				stats.Kinds = make(map[message.StubKind]int, len(promotedKinds))
+			// Merge into a fresh map rather than mutating the stored
+			// one in place — a reader holding the pre-Set snapshot
+			// keeps a consistent view.
+			kinds := make(map[message.StubKind]int, len(stats.Kinds)+len(promotedKinds))
+			for kind, n := range stats.Kinds {
+				kinds[kind] = n
 			}
 			for kind, n := range promotedKinds {
-				stats.Kinds[kind] += n
+				kinds[kind] += n
 			}
+			stats.Kinds = kinds
 			a.stubStats.Set(sessionID, stats)
 		}
 	}

@@ -40,14 +40,7 @@ func init() {
 	// message.StubKind, keyed by the kind's telemetry label — the
 	// empty-string superseded kind spells "superseded", so
 	// min_stub_stats.kinds.superseded is a real predicate.
-	for _, kind := range []message.StubKind{
-		message.StubKindSuperseded,
-		message.StubKindModified,
-		message.StubKindDeleted,
-		message.StubKindDuplicate,
-		message.StubKindRerun,
-		message.StubKindStale,
-	} {
+	for _, kind := range message.StubKinds() {
 		name := kind.String()
 		coverageFields["stub_stats.kinds."+name] = func(r *RunRecord) float64 {
 			return float64(r.StubStats.Kinds[name])

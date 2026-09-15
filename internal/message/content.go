@@ -176,6 +176,20 @@ func (k StubKind) String() string {
 	return string(k)
 }
 
+// StubKinds enumerates every declared stub kind — the canonical list
+// for places that must cover all of them (eval coverage fields,
+// tests), so a new kind can't silently lack a telemetry field.
+func StubKinds() []StubKind {
+	return []StubKind{
+		StubKindSuperseded,
+		StubKindModified,
+		StubKindDeleted,
+		StubKindDuplicate,
+		StubKindRerun,
+		StubKindStale,
+	}
+}
+
 // SupersededMark records why a tool result's stored content no longer
 // needs to replay verbatim in the raw window.
 type SupersededMark struct {

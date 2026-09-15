@@ -168,33 +168,7 @@ func (c CrushRunner) Run(ctx context.Context, workdir string, turns []string, bu
 
 		tel, telErr := readTelemetry(tfile)
 		_ = os.Remove(tfile)
-		res.Steps += tel.Steps
-		res.Tokens.Input += tel.Tokens.Input
-		res.Tokens.Output += tel.Tokens.Output
-		res.Tokens.CacheRead += tel.Tokens.CacheRead
-		res.Tokens.CacheWrite += tel.Tokens.CacheWrite
-		// Per-turn counters reset with each fresh `crush run` process
-		// (the stats maps are in-memory per session, not rehydrated on
-		// --session resume), so the trajectory totals are the SUM of
-		// per-turn deltas, not the last turn's value.
-		res.StubStats.Invalidations += tel.StubStats.Invalidations
-		res.StubStats.Results += tel.StubStats.Results
-		res.StubStats.SavedBytes += tel.StubStats.SavedBytes
-		res.StubStats.BoundaryAdvances += tel.StubStats.BoundaryAdvances
-		// Per-kind counts are per-turn deltas like the aggregates —
-		// sum them into the trajectory totals.
-		if len(tel.StubStats.Kinds) > 0 {
-			if res.StubStats.Kinds == nil {
-				res.StubStats.Kinds = make(map[string]int, len(tel.StubStats.Kinds))
-			}
-			for kind, n := range tel.StubStats.Kinds {
-				res.StubStats.Kinds[kind] += n
-			}
-		}
-		res.Recalls.Result += tel.Recalls.Result
-		res.Recalls.Entry += tel.Recalls.Entry
-		res.Recalls.Empty += tel.Recalls.Empty
-		res.Recalls.Cross += tel.Recalls.Cross
+		res.addTurnTelemetry(tel)
 		if tel.SessionID != "" {
 			sessionID = tel.SessionID
 			res.SessionID = sessionID
@@ -245,6 +219,35 @@ func (c CrushRunner) Run(ctx context.Context, workdir string, turns []string, bu
 		}
 	}
 	return res
+}
+
+// addTurnTelemetry folds one turn's telemetry counters into the run
+// totals. Per-turn counters reset with each fresh `crush run` process
+// (the stats maps are in-memory per session, not rehydrated on
+// --session resume), so the trajectory totals are the SUM of per-turn
+// deltas, not the last turn's value — per-kind counts included.
+func (res *RunResult) addTurnTelemetry(tel runTelemetry) {
+	res.Steps += tel.Steps
+	res.Tokens.Input += tel.Tokens.Input
+	res.Tokens.Output += tel.Tokens.Output
+	res.Tokens.CacheRead += tel.Tokens.CacheRead
+	res.Tokens.CacheWrite += tel.Tokens.CacheWrite
+	res.StubStats.Invalidations += tel.StubStats.Invalidations
+	res.StubStats.Results += tel.StubStats.Results
+	res.StubStats.SavedBytes += tel.StubStats.SavedBytes
+	res.StubStats.BoundaryAdvances += tel.StubStats.BoundaryAdvances
+	if len(tel.StubStats.Kinds) > 0 {
+		if res.StubStats.Kinds == nil {
+			res.StubStats.Kinds = make(map[string]int, len(tel.StubStats.Kinds))
+		}
+		for kind, n := range tel.StubStats.Kinds {
+			res.StubStats.Kinds[kind] += n
+		}
+	}
+	res.Recalls.Result += tel.Recalls.Result
+	res.Recalls.Entry += tel.Recalls.Entry
+	res.Recalls.Empty += tel.Recalls.Empty
+	res.Recalls.Cross += tel.Recalls.Cross
 }
 
 // remainingSteps converts the trajectory-wide max_steps budget into
