@@ -57,6 +57,7 @@ var coverageFields = map[string]func(*RunRecord) float64{
 	"call_metrics.rereads_same_turn":        func(r *RunRecord) float64 { return float64(callMetrics(r).RereadsSameTurn) },
 	"call_metrics.rereads_cross_turn":       func(r *RunRecord) float64 { return float64(callMetrics(r).RereadsCrossTurn) },
 	"call_metrics.canceled_calls":           func(r *RunRecord) float64 { return float64(callMetrics(r).CanceledCalls) },
+	"call_metrics.interrupted_calls":        func(r *RunRecord) float64 { return float64(callMetrics(r).InterruptedCalls) },
 	"call_metrics.view_directory_errors":    func(r *RunRecord) float64 { return float64(callMetrics(r).ViewDirectoryErrors) },
 }
 

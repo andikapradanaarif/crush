@@ -78,6 +78,9 @@ func writeFixtureDB(t *testing.T) string {
 		{"m03", "tool", `[` + trPart("c1", "package a", false, "") + `]`, 0},
 		{"m04", "assistant", `[` + tcPart("c2", "grep", `{"pattern":"needle"}`) + `]`, 0},
 		{"m05", "tool", `[` + trPart("c2", "a.go:1:needle", false, "") + `]`, 0},
+		// Errored read of an unseen file — neither discovery nor reread.
+		{"m05b", "assistant", `[` + tcPart("c2b", "view", `{"file_path":"/w/missing.go"}`) + `]`, 0},
+		{"m05c", "tool", `[` + trPart("c2b", "file does not exist: /w/missing.go", true, "") + `]`, 0},
 		{"m06", "assistant", `[` + tcPart("c3", "view", `{"file_path":"/w/a.go"}`) + `]`, 0},
 		{"m07", "tool", `[` + trPart("c3", "package a", false, "") + `]`, 0},
 		{"m08", "assistant", `[` + tcPart("c4", "edit", `{"file_path":"/w/a.go","old_string":"x"}`) + `]`, 0},
@@ -102,6 +105,8 @@ func writeFixtureDB(t *testing.T) string {
 		{"m24", "assistant", `[` + tcPart("c12", "view", `{"file_path":"./a.go"}`) + `]`, 0},
 		{"m25", "tool", `[` + trPart("c12", "package a", false, "") + `]`, 0},
 		{"m26", "assistant", `[` + txtPart("summary") + `]`, 1}, // Summary row — not a request.
+		// Canceled-turn row — the finish part marks it; not a request.
+		{"m26b", "assistant", `[{"type":"finish","data":{"reason":"canceled","time":1000,"message":"User canceled request"}}]`, 0},
 		{"m27", "assistant", `[` + txtPart("done") + `]`, 0},
 		{"m28", "assistant", `[` + tcPart("c13", "edit", `{"file_path":"/w/b.go"}`) + `]`, 0},
 		{"m29", "tool", `[` + trPart("c13", "Tool call blocked by hook. Reason: nope", true, `{"hook":{"hook_count":1,"decision":"deny"}}`) + `]`, 0},
@@ -109,6 +114,20 @@ func writeFixtureDB(t *testing.T) string {
 		{"m31", "tool", `[` + trPart("c14", "tool not found: map", true, "") + `]`, 0},
 		{"m32", "assistant", `[` + tcPart("c15", "view", `{"file_path":"/w/c.go"}`) + `]`, 0},
 		// c15 gets no result — the hard-kill shape.
+		// Generic cleanup error on a "{}" call — interrupted, not
+		// canceled: the string is written for any missing-result
+		// cleanup, not only cancels.
+		{"m33", "assistant", `[` + tcPart("c16", "bash", `{}`) + `]`, 0},
+		{"m34", "tool", `[` + trPart("c16", "There was an error while executing the tool", true, "") + `]`, 0},
+		// A real zero-arg call that errored on validation — a genuine
+		// dispatched call, not a placeholder.
+		{"m35", "assistant", `[` + tcPart("c17", "view", `{}`) + `]`, 0},
+		{"m36", "tool", `[` + trPart("c17", "file_path is required", true, "") + `]`, 0},
+		// map call whose result never landed — gave the model no
+		// pointer, so the following grep must NOT count as a
+		// wrong-pointer event.
+		{"m37", "assistant", `[` + tcPart("c18", "map", `{"symbol":"Zebra"}`) + `,` + tcPart("c19", "grep", `{"pattern":"Zebra"}`) + `]`, 0},
+		{"m38", "tool", `[` + trPart("c19", "z.go:1:Zebra", false, "") + `]`, 0},
 	}
 	for _, m := range msgs {
 		insertMsg(t, conn, m.id, "s1", m.role, m.parts, 1000, m.summary)
@@ -134,21 +153,27 @@ func TestAnalyzeSessionDB_Fixture(t *testing.T) {
 		require.NoError(t, err)
 
 		require.Equal(t, "s1", cm.SessionID)
-		require.Equal(t, 14, cm.Requests) // Summary row excluded.
-		require.Equal(t, 14, cm.Calls)    // c10 canceled — labeled, not counted.
-		require.Len(t, cm.ToolCalls, 15)
+		// Summary row and the canceled-turn row are not requests.
+		require.Equal(t, 18, cm.Requests)
+		// c10 canceled, c16 interrupted — labeled, not counted; c17's
+		// real arg-validation error IS a real call.
+		require.Equal(t, 18, cm.Calls)
+		require.Len(t, cm.ToolCalls, 20)
 		require.Equal(t, 1, cm.CanceledCalls)
+		require.Equal(t, 1, cm.InterruptedCalls)
 
-		require.Equal(t, 3, cm.FirstWriteIndex) // c4 — first attempted write.
-		require.Equal(t, 4, cm.RequestsToFirstEdit)
-		require.Equal(t, 2, cm.DiscoveryCallsBeforeWrite) // c1 view-unseen + c2 grep.
+		require.Equal(t, 4, cm.FirstWriteIndex) // c4 — first attempted write.
+		require.Equal(t, 5, cm.RequestsToFirstEdit)
+		// c1 view-unseen + c2 grep; c2b's failed read is neither.
+		require.Equal(t, 2, cm.DiscoveryCallsBeforeWrite)
 		require.Equal(t, 1, cm.FilesViewed)
 
 		require.Equal(t, 2, cm.EditFailures)
 		require.Equal(t, 1, cm.EditFailuresHook)
 		require.Equal(t, 1, cm.EditFailuresOther)
 
-		require.Equal(t, 2, cm.MapCalls) // c6 ok + c14 hallucinated "tool not found".
+		// c6 ok + c14 hallucinated "tool not found" + c18 no result.
+		require.Equal(t, 3, cm.MapCalls)
 		require.Equal(t, 1, cm.MapCallsOK)
 		require.Equal(t, int64(len("Config defined at a.go:12")), cm.MapResultBytes)
 
@@ -161,19 +186,29 @@ func TestAnalyzeSessionDB_Fixture(t *testing.T) {
 		require.Equal(t, 2, cm.RereadsSameTurn)
 		require.Equal(t, 1, cm.RereadsCrossTurn)
 
-		require.Equal(t, 1, cm.WrongPointerEvents) // c6 map(symbol=Config) → c8 grep Config.
+		// c6 map(symbol=Config) → c8 grep Config. c18's result never
+		// landed — no pointer delivered — so c19's grep Zebra is not
+		// an event.
+		require.Equal(t, 1, cm.WrongPointerEvents)
 		require.Equal(t, 1, cm.ViewDirectoryErrors)
 
-		// Path normalization: "a.go", "/w/a.go", and "./a.go" all keyed
-		// to the run workdir's /w/a.go — one file, three spellings.
-		var canceled *CallRecord
+		var canceled, interrupted, noResult int
 		for i := range cm.ToolCalls {
-			if cm.ToolCalls[i].Canceled {
-				canceled = &cm.ToolCalls[i]
+			rec := &cm.ToolCalls[i]
+			if rec.Canceled {
+				canceled++
+				require.Equal(t, "bash", rec.Name)
+			}
+			if rec.Interrupted {
+				interrupted++
+			}
+			if rec.NoResult {
+				noResult++
 			}
 		}
-		require.NotNil(t, canceled)
-		require.Equal(t, "bash", canceled.Name)
+		require.Equal(t, 1, canceled)
+		require.Equal(t, 1, interrupted)
+		require.Equal(t, 2, noResult) // c15 and c18.
 	}
 }
 

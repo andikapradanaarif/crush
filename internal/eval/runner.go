@@ -294,6 +294,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	// no telemetry but still leaves a DB worth keeping.
 	if dst, err := r.preserveSessionDB(ctx, exp.Name, traj.ID, armName, inv, attempt, workdir); err == nil {
 		rec.SessionDB = dst
+		rec.Workdir = workdir
 		// Sequence analysis runs on the preserved artifact, not the
 		// about-to-be-deleted source — `crush eval analyze <artifact>`
 		// then reproduces exactly what the record carries.

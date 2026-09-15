@@ -44,16 +44,25 @@ type CallMetrics struct {
 	ToolCalls []CallRecord `json:"tool_calls,omitempty"`
 
 	// FirstWriteIndex is the call-sequence index of the first
-	// write-class call, -1 when none ran.
+	// write-class call (tools.WriteToolNames), -1 when none ran.
+	// Blind spot: bash mutations (sed -i, redirects) and download
+	// writes are invisible to the tool-name vocabulary — a run that
+	// mutates only through bash keeps accruing discovery calls and
+	// shows -1 here. The wider mutation vocabulary lives in the
+	// scope gate (isMutatingCall); this metric deliberately tracks
+	// the stub-machinery write class the gates assert on.
 	FirstWriteIndex int `json:"first_write_index"`
 	// RequestsToFirstEdit is the 1-based request count through the
 	// request carrying the first write call, -1 when none ran.
 	RequestsToFirstEdit int `json:"requests_to_first_edit"`
 	// DiscoveryCallsBeforeWrite counts discovery-class calls before
 	// the first write: grep/glob/ls, the LSP read tools, sourcegraph,
-	// agent delegation, and view/read of a not-yet-viewed file. map is
-	// deliberately excluded — the metric is the traditional-discovery
-	// roundtrip count map is meant to replace.
+	// agent delegation, and view/read that successfully read a
+	// not-yet-viewed file (a failed read delivered nothing — it is
+	// neither discovery nor reread; view-on-directory lands in
+	// ViewDirectoryErrors). map is deliberately excluded — the metric
+	// is the traditional-discovery roundtrip count map is meant to
+	// replace.
 	DiscoveryCallsBeforeWrite int `json:"discovery_calls_before_write"`
 	// FilesViewed is the reconstructed seen-set size — paths with at
 	// least one successful view/read. Cross-checkable against the
@@ -103,9 +112,13 @@ type CallMetrics struct {
 	// Conservative by design: false negatives are acceptable, false
 	// positives poison the gate.
 	WrongPointerEvents int `json:"wrong_pointer_events"`
-	// CanceledCalls counts mid-stream placeholders (finished=true,
-	// input="{}") — labeled, never counted as real calls.
-	CanceledCalls int `json:"canceled_calls"`
+	// CanceledCalls counts user-cancel placeholders (finished=true,
+	// input="{}", cancel-marked result); InterruptedCalls counts the
+	// other never-executed placeholders — a generic cleanup error or a
+	// hard-kill between the call record and its result. Both are
+	// labeled in the sequence and neither counts as a real call.
+	CanceledCalls    int `json:"canceled_calls"`
+	InterruptedCalls int `json:"interrupted_calls"`
 	// ViewDirectoryErrors counts view/read calls that failed with
 	// "is a directory" — classified explicitly rather than counted
 	// as reads.
@@ -120,13 +133,18 @@ type CallRecord struct {
 	// Turn is the process-turn index (0-based): a new `crush run`
 	// process on the session, not a user-message count — repair turns
 	// enqueued by the run edges stay inside the firing process.
-	Turn     int      `json:"turn"`
-	Name     string   `json:"name"`
-	IsError  bool     `json:"is_error"`
-	NoResult bool     `json:"no_result,omitempty"` // Call persisted, result never landed (hard kill).
-	Canceled bool     `json:"canceled,omitempty"`  // finished=true input="{}" placeholder — not a real call.
-	Cause    string   `json:"cause,omitempty"`     // Error bucket: hook|not_found|cancelled|permission|other.
-	Files    []string `json:"files,omitempty"`     // Normalized paths referenced by the call input.
+	Turn     int    `json:"turn"`
+	Name     string `json:"name"`
+	IsError  bool   `json:"is_error"`
+	NoResult bool   `json:"no_result,omitempty"` // Call persisted, result never landed (hard kill).
+	// Canceled is the user-cancel placeholder (finished=true,
+	// input="{}", cancel-marked result); Interrupted is the
+	// never-executed placeholder from any other cause (generic cleanup
+	// error, or no result at all). Neither counts as a real call.
+	Canceled    bool     `json:"canceled,omitempty"`
+	Interrupted bool     `json:"interrupted,omitempty"`
+	Cause       string   `json:"cause,omitempty"` // Error bucket: hook|not_found|cancelled|permission|other.
+	Files       []string `json:"files,omitempty"` // Normalized paths referenced by the call input.
 }
 
 // AnalyzeOptions scopes one analysis pass.
@@ -195,11 +213,18 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 		}
 	}
 
+	// is_summary_message postdates early schemas — a preserved DB from
+	// before that migration must still analyze.
+	summaryCol := "0"
+	if hasColumn(ctx, conn, "messages", "is_summary_message") {
+		summaryCol = "is_summary_message"
+	}
+
 	// created_at is second-granularity and steps routinely share a
 	// second — rowid (insertion order) is the tiebreaker. Ordering by
 	// created_at alone would silently corrupt first_write_index.
 	rows, err := conn.QueryContext(ctx,
-		`SELECT role, parts, is_summary_message FROM messages
+		`SELECT role, parts, `+summaryCol+` FROM messages
 		 WHERE session_id = ? ORDER BY created_at, rowid`, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("list messages: %w", err)
@@ -234,7 +259,10 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 				turn++
 			}
 		case "assistant":
-			if summary == 0 {
+			// persistCanceledTurn writes a Finish{reason:"canceled"}
+			// part — the canceled-turn row never produced a model
+			// response, so it is not a request.
+			if summary == 0 && !hasCanceledFinish(parts) {
 				request++
 			}
 			for _, p := range parts {
@@ -287,10 +315,16 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 			c.rec.IsError = res.IsError
 			c.rec.Cause = errorCause(&res)
 		}
-		if isCanceledCall(c.input, hasResult, &res) {
+		canceled, interrupted := placeholderKind(c.input, hasResult, &res)
+		if canceled || interrupted {
 			// Labeled in the sequence, never counted as a real call.
-			c.rec.Canceled = true
-			cm.CanceledCalls++
+			c.rec.Canceled = canceled
+			c.rec.Interrupted = interrupted
+			if canceled {
+				cm.CanceledCalls++
+			} else {
+				cm.InterruptedCalls++
+			}
 			cm.ToolCalls = append(cm.ToolCalls, c.rec)
 			continue
 		}
@@ -321,8 +355,10 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 		}
 
 		// Discovery and rereads classify against the seen-set as it
-		// stood at this call — updates happen after classification.
-		if cm.FirstWriteIndex < 0 && isDiscoveryCall(c.rec.Name, isRead, path, seenTurn) {
+		// stood at this call — updates happen after classification. A
+		// failed read is neither discovery nor reread: it delivered no
+		// context (view-on-directory lands in ViewDirectoryErrors).
+		if cm.FirstWriteIndex < 0 && isDiscoveryCall(c.rec.Name, isRead, hasResult && !res.IsError, path, seenTurn) {
 			cm.DiscoveryCallsBeforeWrite++
 		}
 		if isRead && path != "" {
@@ -369,6 +405,42 @@ func AnalyzeSessionDB(ctx context.Context, dbPath string, opts AnalyzeOptions) (
 type pendingCall struct {
 	rec   CallRecord
 	input string
+}
+
+// hasColumn reports whether a table carries a column, for analyzing
+// artifacts produced before a migration landed.
+func hasColumn(ctx context.Context, conn *sql.DB, table, col string) bool {
+	rows, err := conn.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	var found bool
+	for rows.Next() {
+		var name string
+		if rows.Scan(&name) == nil && name == col {
+			found = true
+		}
+	}
+	return found && rows.Err() == nil
+}
+
+// hasCanceledFinish detects the canceled-turn assistant row —
+// persistCanceledTurn stamps Finish{reason:"canceled"} — so it is not
+// counted as a request (the model never produced a response).
+func hasCanceledFinish(parts []rawPart) bool {
+	for _, p := range parts {
+		if p.Type != "finish" {
+			continue
+		}
+		var f struct {
+			Reason string `json:"reason"`
+		}
+		if json.Unmarshal(p.Data, &f) == nil && f.Reason == "canceled" {
+			return true
+		}
+	}
+	return false
 }
 
 // latestParentSession picks the most recently created top-level
@@ -450,30 +522,40 @@ func isProcessBoundary(text string, turns []string, nextTurn int) bool {
 	return true
 }
 
-// isCanceledCall identifies the placeholder rows a mid-stream cancel
-// persists: the error path stamps finished=true, input="{}" and writes
-// a synthetic is_error result. A real map{} skeleton call shares the
-// input shape, so the result content (or its absence) is the
-// discriminator.
-func isCanceledCall(input string, hasResult bool, res *rawToolResult) bool {
+// placeholderKind classifies the finished=true, input="{}" rows the
+// cleanup path persists for calls that never executed. The result
+// content discriminates cause: a "cancelled" marker means a user
+// cancel; the generic "There was an error while executing the tool"
+// (or a missing result) means the call was interrupted another way —
+// that string is written for any missing-result cleanup, not just
+// cancels. An input="{}" call with a real result is a genuine
+// zero-argument call (e.g. the map skeleton) — never a placeholder.
+func placeholderKind(input string, hasResult bool, res *rawToolResult) (canceled, interrupted bool) {
 	if input != "{}" && input != "" {
-		return false
+		return false, false
 	}
 	if !hasResult {
-		return true
+		return false, true
 	}
 	if !res.IsError {
-		return false
+		return false, false
 	}
-	return strings.Contains(res.Content, "cancelled") ||
-		strings.Contains(res.Content, "canceled") ||
-		res.Content == "There was an error while executing the tool"
+	if strings.Contains(res.Content, "cancelled") || strings.Contains(res.Content, "canceled") {
+		return true, false
+	}
+	if res.Content == "There was an error while executing the tool" {
+		return false, true
+	}
+	return false, false
 }
 
 // errorCause buckets an errored tool result. The hook bucket reads the
 // persisted metadata, not content — hooked_tool stamps
 // {"hook":{"decision":"deny"|"halt":true}} onto blocked calls. The rest
-// discriminate on stable content markers; permission denials are
+// discriminate on stable content markers. All permission denials funnel
+// through tools.NewPermissionDeniedResponse ("User denied permission");
+// matching that literal avoids the lsp_rename infra string
+// "permission request failed" misreading as a denial. Denials are
 // vacuous under eval (non-interactive sessions auto-approve) but real
 // sessions produce them.
 func errorCause(res *rawToolResult) string {
@@ -496,8 +578,7 @@ func errorCause(res *rawToolResult) string {
 		return "not_found"
 	case strings.Contains(res.Content, "cancelled"), strings.Contains(res.Content, "canceled"):
 		return "cancelled"
-	case strings.Contains(strings.ToLower(res.Content), "permission denied"),
-		strings.Contains(strings.ToLower(res.Content), "permission request"):
+	case strings.Contains(res.Content, "denied permission"):
 		return "permission"
 	default:
 		return "other"
@@ -505,18 +586,19 @@ func errorCause(res *rawToolResult) string {
 }
 
 // isDiscoveryCall reports whether a call belongs to the
-// discovery-before-write class. Read-class calls qualify only on a
-// path not yet successfully viewed — a re-read is a reread.
-func isDiscoveryCall(name string, isRead bool, path string, seen map[string]int) bool {
+// discovery-before-write class. Read-class calls qualify only when
+// they succeeded on a path not yet viewed — a re-read is a reread and
+// a failed read delivered nothing.
+func isDiscoveryCall(name string, isRead, readOK bool, path string, seen map[string]int) bool {
 	if discoveryToolNames[name] {
 		return true
 	}
-	if !isRead {
+	if !isRead || !readOK {
 		return false
 	}
 	if path == "" {
-		// No extractable path — unseen-ness unknowable, but the call
-		// is still a discovery act.
+		// A successful read with no extractable path is still a
+		// discovery act.
 		return true
 	}
 	_, ok := seen[path]
@@ -547,7 +629,11 @@ func wrongPointerEvents(calls []pendingCall) int {
 	var n int
 	for i := range calls {
 		c := &calls[i]
-		if c.rec.Name != "map" || c.rec.Canceled || c.rec.IsError {
+		// The source map call must have delivered a result — a call
+		// whose result never persisted gave the model no pointer to
+		// re-search.
+		if c.rec.Name != "map" || c.rec.Canceled || c.rec.Interrupted ||
+			c.rec.IsError || c.rec.NoResult {
 			continue
 		}
 		var in struct {

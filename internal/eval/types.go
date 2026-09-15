@@ -178,6 +178,10 @@ type RunRecord struct {
 	StubStats   StubStats  `json:"stub_stats"`
 	Recalls     Recalls    `json:"recalls"`
 	SessionDB   string     `json:"session_db,omitempty"`
+	// Workdir is the materialized run directory — recorded so a
+	// post-hoc `crush eval analyze` on the artifact can anchor relative
+	// call paths correctly (the directory itself is deleted).
+	Workdir string `json:"workdir,omitempty"`
 	// CallMetrics is the post-run sequence analysis of SessionDB —
 	// populated between preserveSessionDB and record append so
 	// min_call_metrics.* predicates can read it during CoverageMet.

@@ -179,7 +179,8 @@ every characterization pass a diff to reviewed files.
   `requests_to_first_edit`, `discovery_calls_before_write`,
   `files_viewed`, `edit_failures` (cause-bucketed),
   `rereads{,_same_turn,_cross_turn}`, `canceled_calls`,
-  `view_directory_errors`, plus the flag-dependent forensics
+  `interrupted_calls`, `view_directory_errors`, plus the
+  flag-dependent forensics
   (`map_*`, `question_*`, `wrong_pointer_events`) that can never
   be predicates — `map` isn't registered in a `project_index`-off
   arm and `question` isn't registered headless, so those fields
@@ -190,10 +191,13 @@ every characterization pass a diff to reviewed files.
   lands as `call_metrics_error` on the record —
   inconclusive-by-absence and analyzer-broke stay distinguishable.
   `crush eval analyze <session_db>` runs the same pass standalone
-  and backfills old artifacts. Known blind spot: discovery done
-  through `bash` (`cat`, `find`, `rg`, `go doc`) is invisible to
-  tool-name classification — `discovery_calls_before_write`
-  undercounts systematically.
+  and backfills old artifacts; the record carries `workdir` so a
+  post-hoc analyze can anchor relative call paths. Known blind
+  spots, both bash-side: discovery through `cat`/`find`/`rg`/`go doc`
+  is invisible to tool-name classification so
+  `discovery_calls_before_write` undercounts systematically, and
+  mutations through `sed -i`/redirects/`download` are equally
+  invisible so a bash-only mutating run shows `first_write_index=-1`.
   `inconclusive` does not
   consume a `runs_per_trajectory` slot: the runner resamples to N
   conclusive runs with an attempts cap (~2N) before flagging the
