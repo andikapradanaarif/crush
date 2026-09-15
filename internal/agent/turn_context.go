@@ -160,7 +160,9 @@ func (a *sessionAgent) relWorkdir(p string) string {
 // text means the referent has candidates — and stays opt-in behind
 // options.ambiguity_clarification.
 func (a *sessionAgent) ambiguityDirective(ctx context.Context, call SessionAgentCall, msgs []message.Message) string {
-	if !a.ambiguityClarification || a.isSubAgent || !isVaguePrompt(call.Prompt) {
+	// An attached file is almost certainly the referent — "fix it"
+	// with a file dropped on the prompt needs no clarification.
+	if !a.ambiguityClarification || a.isSubAgent || len(call.Attachments) > 0 || !isVaguePrompt(call.Prompt) {
 		return ""
 	}
 	// Earlier substantive user text can supply the referent — a bare

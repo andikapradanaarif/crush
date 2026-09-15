@@ -124,6 +124,17 @@ func TestAmbiguityDirective(t *testing.T) {
 		}, []message.Message{userMsg("auth.go panics on nil tokens")}))
 	})
 
+	t.Run("an attachment suppresses the gate", func(t *testing.T) {
+		t.Parallel()
+		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.ambiguityClarification = true
+		require.Empty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
+			SessionID:   sessionID,
+			Prompt:      "fix it",
+			Attachments: []message.Attachment{{FileName: "main.go"}},
+		}, nil))
+	})
+
 	t.Run("a bare greeting does not suppress the gate", func(t *testing.T) {
 		t.Parallel()
 		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})

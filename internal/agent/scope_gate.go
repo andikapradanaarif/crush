@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
-	"strings"
 	"sync"
 
 	"charm.land/fantasy"
@@ -67,15 +66,20 @@ type scopeGate struct {
 	states      map[string]*scopeGateState
 }
 
-// wrapToolsWithScopeGate wraps every tool so the gate sees exploration
-// calls as well as writes. Only mutating calls are ever intercepted.
-// Returns the slice unchanged when an interactive run has no question
-// service to ask through.
-func wrapToolsWithScopeGate(all []fantasy.AgentTool, svc question.Service, interactive bool) []fantasy.AgentTool {
+// newScopeGate builds the gate. Returns nil when an interactive run
+// has no question service to ask through.
+func newScopeGate(svc question.Service, interactive bool) *scopeGate {
 	if interactive && svc == nil {
-		return all
+		return nil
 	}
-	g := &scopeGate{svc: svc, interactive: interactive, states: map[string]*scopeGateState{}}
+	return &scopeGate{svc: svc, interactive: interactive, states: map[string]*scopeGateState{}}
+}
+
+// wrap decorates every tool so the gate sees exploration calls as well
+// as writes. Only mutating calls are ever intercepted. The gate object
+// is long-lived — it survives SetTools rebuilds so per-turn
+// exploration bookkeeping and the resolved mark persist across wraps.
+func (g *scopeGate) wrap(all []fantasy.AgentTool) []fantasy.AgentTool {
 	out := make([]fantasy.AgentTool, len(all))
 	for i, tool := range all {
 		out[i] = &scopeGateTool{inner: tool, gate: g}
@@ -93,13 +97,18 @@ func wrapToolsWithScopeGate(all []fantasy.AgentTool, svc question.Service, inter
 // question; a false negative skips the checkpoint.
 var mutatingBashRe = regexp.MustCompile(`\b(rm|rmdir|mv|cp|dd|truncate|shred|chmod|chown|chgrp|ln|tee|patch|install|touch|mkdir|rsync|scp)\b|` +
 	`\b(sed|perl)\s+(-\S+\s+)*(-\S*i|--in-place)\b|` +
-	`\bgit\s+(commit|push|reset|checkout|switch|restore|clean|rebase|merge|am|apply|stash|tag|revert|cherry-pick|mv|rm|init|clone|pull|bisect|submodule)\b|` +
+	`\bgit\s+(commit|push|reset|checkout|switch|restore|clean|rebase|merge|am|apply|stash|tag|revert|cherry-pick|mv|rm|init|clone|pull|bisect|submodule|update-ref|notes|branch\s+-[dDmM])\b|` +
 	`\bapt(-get)?\s+(install|remove|purge|upgrade|update|dist-upgrade)\b|` +
 	`\bkubectl\s+(delete|apply|create|patch|edit|replace|scale|drain|cordon|uncordon)\b`)
 
 // redirectTargetRe finds shell redirects and their targets; writing to
 // a real file mutates it, while fd duplication and /dev/null do not.
 var redirectTargetRe = regexp.MustCompile(`>>?\s*(\S+)`)
+
+// fdDupTargetRe matches the fd-duplication redirect targets that are
+// not file writes — `>&1`, `>&-` — as opposed to `>&out`, which is
+// bash's stdout+stderr-to-file form and does mutate.
+var fdDupTargetRe = regexp.MustCompile(`^&[-\d]`)
 
 // quotedSpanRe masks single- and double-quoted spans before the
 // redirect scan: a `>` inside a string literal must not gate, while a
@@ -127,7 +136,7 @@ func isMutatingCall(call fantasy.ToolCall) bool {
 		return true
 	}
 	for _, m := range redirectTargetRe.FindAllStringSubmatch(quotedSpanRe.ReplaceAllString(params.Command, "f"), -1) {
-		if m[1] != "/dev/null" && !strings.HasPrefix(m[1], "&") {
+		if m[1] != "/dev/null" && !fdDupTargetRe.MatchString(m[1]) {
 			return true
 		}
 	}

@@ -156,6 +156,10 @@ type coordinator struct {
 	notify      pubsub.Publisher[notify.Notification]
 	runComplete pubsub.Publisher[notify.RunComplete]
 	interactive bool
+	// scopeGate is the coordinator's long-lived first-write gate —
+	// one instance wraps every tool rebuild so per-turn bookkeeping
+	// survives SetTools.
+	scopeGate *scopeGate
 
 	// notebook provides per-event context summarization. May be nil
 	// when notebook is disabled in config.
@@ -270,6 +274,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		activeSkills:          activeSkills,
 		skillTracker:          skillTracker,
 		interactive:           opts.Interactive,
+		scopeGate:             newScopeGate(opts.Questions, opts.Interactive),
 		notebook:              opts.Notebook,
 		notebookModelResolver: opts.NotebookModelResolver,
 		summaryModel:          csync.NewValue(Model{}),
@@ -1081,8 +1086,8 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	// permissions, and verification unchanged. Headless wraps too —
 	// the degrade branch is proceed-with-logged-assumption, since a
 	// question nobody can answer must never stall.
-	if !isSubAgent && cfg.Options.AmbiguityClarificationEnabled() {
-		filteredTools = wrapToolsWithScopeGate(filteredTools, c.questions, c.interactive)
+	if !isSubAgent && cfg.Options.AmbiguityClarificationEnabled() && c.scopeGate != nil {
+		filteredTools = c.scopeGate.wrap(filteredTools)
 	}
 
 	return filteredTools, nil
