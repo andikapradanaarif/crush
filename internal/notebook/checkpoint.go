@@ -241,7 +241,7 @@ func buildCheckpointInput(entries []Entry, tail []EntryInput, cutoffTurn, cutoff
 		b := fmt.Sprintf("### %s — %s\n%s\n\n", ev.EventType, ev.Title, ev.Description)
 		if tailUsed+len(b) > checkpointTailMaxBytes {
 			tailTruncated = true
-			break
+			continue // Skip the oversized event; smaller older ones may fit.
 		}
 		tailUsed += len(b)
 		tailBlocks = append(tailBlocks, b)
@@ -264,7 +264,7 @@ func buildCheckpointInput(entries []Entry, tail []EntryInput, cutoffTurn, cutoff
 	}
 	sb.WriteString("Recent uncovered events (oldest first):\n\n")
 	if tailTruncated {
-		sb.WriteString("(older tail events elided — see committed entries)\n\n")
+		sb.WriteString("(older tail events elided)\n\n")
 	}
 	for _, b := range tailBlocks {
 		sb.WriteString(b)

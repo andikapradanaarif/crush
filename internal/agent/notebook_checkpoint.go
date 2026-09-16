@@ -263,7 +263,11 @@ func (a *sessionAgent) generateRunEndCheckpoint(ctx context.Context, sessionID s
 	// pass — if it fails the run still gets its checkpoint, and if it
 	// commits the in-transaction run-tag re-check short-circuits this
 	// one before the write. The claim is cost control, not
-	// correctness.
+	// correctness, and its return is deliberately discarded: when a
+	// mid-run generation holds the slot this spawn runs unclaimed,
+	// and its finishCheckpoint can clear the mid-run claim's
+	// in-flight flag early — the run-tag dedup makes that overlap
+	// cost a redundant model call at most.
 	tracker.retryCheckpoint(stamp)
 	segs := segmentBoundaries(msgs, a.segTokenBudget(), a.segMaxSteps())
 	key, ok := checkpointSegmentKey(segs)
