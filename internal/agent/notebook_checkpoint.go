@@ -19,10 +19,13 @@ func checkpointRunTag(stamp uint64) string {
 }
 
 // runStartIndex returns the index just past the last user message —
-// this run's calls start there. The run stamp identifies one user
-// turn (repair retries share it, a folded prompt starts a new turn
-// with a new stamp), so a previous run's writes can never trip this
-// run's boundary pre-scan.
+// this run's calls start there, so a previous run's writes can never
+// trip this run's boundary pre-scan. Caveat: drainQueueForStep folds
+// no-RunID prompts into the SAME run — the stamp survives a fold —
+// so post-fold the scan bounds to the folded turn and a write
+// boundary crossed just before the fold becomes invisible to mid-run
+// detection. The run-end fallback still catches it, so the fold edge
+// degrades to run-end consolidation rather than losing the checkpoint.
 func runStartIndex(msgs []message.Message) int {
 	start := 0
 	for i, m := range msgs {
@@ -33,14 +36,25 @@ func runStartIndex(msgs []message.Message) int {
 	return start
 }
 
+// checkpointRetryBudget caps mid-run generation attempts per run —
+// firstMutatingResult stays true for the rest of the run, so without
+// a cap a persistent generator failure would serialize a retry on
+// every step.
+const checkpointRetryBudget = 2
+
 // claimCheckpoint takes the run's checkpoint slot for the mid-run
 // boundary trigger — the inflight claim that dedups detection passes
-// while generation is async. False when the stamp already claimed or
-// a generation is still in flight.
+// while generation is async. False when the stamp already claimed, a
+// generation is still in flight, or the run's failure budget is spent.
 func (t *segmentTracker) claimCheckpoint(stamp uint64) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.checkpointStamp == stamp || t.checkpointInFlight {
+	failures := 0
+	if t.checkpointFailureRun == stamp {
+		failures = t.checkpointFailures
+	}
+	if t.checkpointStamp == stamp || t.checkpointInFlight ||
+		failures >= checkpointRetryBudget {
 		return false
 	}
 	t.checkpointStamp = stamp
@@ -66,13 +80,18 @@ func (t *segmentTracker) retryCheckpoint(stamp uint64) bool {
 // finishCheckpoint resolves the claim. A committed checkpoint or a
 // clean not-due outcome keeps the slot claimed for the rest of the
 // run — the boundary was evaluated once. A failure releases it so the
-// run-end pass can retry.
+// run-end pass can retry, and counts against the per-run retry budget
+// so a persistent generator failure cannot loop every step.
 func (t *segmentTracker) finishCheckpoint(stamp uint64, failed bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.checkpointInFlight = false
 	if failed {
 		t.checkpointStamp = 0
+		// The failure budget is per-run: record the stamp it belongs
+		// to so a later run starts fresh.
+		t.checkpointFailures++
+		t.checkpointFailureRun = stamp
 	}
 }
 
@@ -238,10 +257,19 @@ func (a *sessionAgent) generateRunEndCheckpoint(ctx context.Context, sessionID s
 		tracker.finishCheckpoint(stamp, true)
 		return
 	}
+	// Coverage claims are extent-checked, matching detectSegments: a
+	// processed row whose recorded extent no longer matches the
+	// recomputed segment is not coverage — its messages belong in
+	// the tail.
 	processed := make(map[segmentKey]bool, len(registry))
-	for k, row := range registry {
-		if row.State == notebook.SegmentProcessed {
-			processed[k] = true
+	for _, s := range segs {
+		if s.open {
+			continue
+		}
+		row, ok := registry[s.key()]
+		if ok && row.State == notebook.SegmentProcessed &&
+			row.StartIndex == int64(s.start) && row.EndIndex == int64(s.end) {
+			processed[s.key()] = true
 		}
 	}
 	a.spawnCheckpoint(ctx, sessionID, tracker, stamp, notebook.CheckpointRequest{

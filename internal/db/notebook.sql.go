@@ -400,7 +400,7 @@ func (q *Queries) GetNotebookTokenCount(ctx context.Context, sessionID string) (
 const getNotebookTurnsWithEntries = `-- name: GetNotebookTurnsWithEntries :many
 SELECT DISTINCT turn_number
 FROM notebook_entries
-WHERE session_id = ? AND event_type != ?
+WHERE session_id = ? AND event_type != ?2
 ORDER BY turn_number ASC
 `
 

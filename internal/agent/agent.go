@@ -2156,8 +2156,11 @@ func (a *sessionAgent) maybeAutoInject(ctx context.Context, msgs []message.Messa
 		// — uncompressed entries are already in the notebook message
 		// at full detail. The coverage compare is segment-keyed so an
 		// entry from the boundary's own segment does not double into
-		// both prefix and raw.
-		if e.CompressionLevel == 0 || e.TurnNumber > bKey.turn || (e.TurnNumber == bKey.turn && e.SegmentNumber >= bKey.segment) {
+		// both prefix and raw. Checkpoints never inject: the live one
+		// is compression-exempt (level 0, already skipped), and a
+		// compressed checkpoint is a superseded position — injecting
+		// it on a file: mention would restate stale facts.
+		if e.CompressionLevel == 0 || e.EventType == notebook.EventCheckpoint || e.TurnNumber > bKey.turn || (e.TurnNumber == bKey.turn && e.SegmentNumber >= bKey.segment) {
 			continue
 		}
 		text := e.EntryTextFull

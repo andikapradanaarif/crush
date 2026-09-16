@@ -321,10 +321,14 @@ type segmentTracker struct {
 	inflight          map[segmentKey]bool
 	backfillAttempted bool
 	driftLogged       map[segmentKey]bool
-	// checkpointStamp/checkpointInFlight are the per-run generation
-	// claim — see notebook_checkpoint.go.
-	checkpointStamp    uint64
-	checkpointInFlight bool
+	// Checkpoint bookkeeping: checkpointStamp/checkpointInFlight are
+	// the per-run generation claim; checkpointFailures counts mid-run
+	// failures against checkpointFailureRun's stamp — see
+	// notebook_checkpoint.go.
+	checkpointStamp      uint64
+	checkpointInFlight   bool
+	checkpointFailures   int
+	checkpointFailureRun uint64
 }
 
 func newSegmentTracker() *segmentTracker {
