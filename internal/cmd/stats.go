@@ -737,19 +737,14 @@ func gatherStats(ctx context.Context, conn *sql.DB) (*Stats, error) {
 	}
 	stats.Pruning = pruning
 
-	// Project index (`map`) adoption — raw query, the generated
-	// tool-usage aggregate loses the per-session split this needs.
-	var mapCalls, mapSessions int64
-	err = conn.QueryRowContext(ctx, `
-		SELECT COUNT(*), COUNT(DISTINCT session_id)
-		FROM messages, json_each(parts)
-		WHERE json_extract(value, '$.type') = 'tool_call'
-		  AND json_extract(value, '$.data.name') = 'map'`).Scan(&mapCalls, &mapSessions)
+	// Project index (`map`) adoption — GetToolUsage's GROUP BY loses
+	// the per-session split, so this has its own query.
+	mapUsage, err := queries.GetMapUsage(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get map usage: %w", err)
 	}
-	if mapCalls > 0 {
-		stats.ProjectIndex = &ProjectIndexStats{MapCalls: mapCalls, Sessions: mapSessions}
+	if mapUsage.MapCalls > 0 {
+		stats.ProjectIndex = &ProjectIndexStats{MapCalls: mapUsage.MapCalls, Sessions: mapUsage.Sessions}
 	}
 
 	return stats, nil

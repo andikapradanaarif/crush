@@ -411,8 +411,10 @@ func (s *Service) renderTopFiles(ctx context.Context, b *strings.Builder, limit 
 		// zero-direct-ref file in a hot package doesn't read as a
 		// lie. The commits count is the churn half of the blend.
 		fmt.Fprintf(b, "  %s (%d refs incl. pkg", p, deg[p])
-		if churn[p] > 0 {
-			fmt.Fprintf(b, ", %d commits", churn[p])
+		if n := churn[p]; n == 1 {
+			b.WriteString(", 1 commit")
+		} else if n > 0 {
+			fmt.Fprintf(b, ", %d commits", n)
 		}
 		b.WriteString(")")
 		if len(syms) > 0 {

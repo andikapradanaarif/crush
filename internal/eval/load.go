@@ -291,7 +291,11 @@ func armStarvationRequires(field string) []string {
 	switch field {
 	case "call_metrics.map_calls_ok",
 		"call_metrics.map_calls_index_unavailable",
-		"call_metrics.map_result_bytes":
+		"call_metrics.map_result_bytes",
+		// The wrong-pointer detector requires a successful map call
+		// (analyze.go skips is_error records) — structurally zero
+		// wherever map isn't registered.
+		"call_metrics.wrong_pointer_events":
 		return []string{"project_index"}
 	}
 	if strings.HasPrefix(field, "stub_stats.") {
@@ -317,18 +321,19 @@ func armOptionResolver(arm Arm) func(string) (bool, bool) {
 	}
 }
 
-// checkArmStarvation rejects min_ predicates that can never fire —
-// flag-gated fields whose gating option resolves off, and question_*
-// counters (the question tool is interactive-only, so headless eval
-// runs never register it on any arm). resolve reports (value, known);
-// unknown options are skipped so the check only rejects what it can
-// prove starves.
+// checkArmStarvation rejects min_ predicates that can't measure what
+// they claim — flag-gated fields whose gating option resolves off,
+// and question_* counters: the question tool is interactive-only, so
+// headless eval calls only ever register as is_error tool-not-found
+// attempts — a min_ asserts hallucination, not firing. resolve
+// reports (value, known); unknown options are skipped so the check
+// only rejects what it can prove starves.
 func checkArmStarvation(armName, key, op, field string, resolve func(string) (bool, bool)) error {
 	if op != "min" {
 		return nil
 	}
 	if strings.HasPrefix(field, "call_metrics.question_") {
-		return fmt.Errorf("arm %q coverage %q: the question tool is interactive-only — min_ predicates starve in headless eval runs", armName, key)
+		return fmt.Errorf("arm %q coverage %q: the question tool is interactive-only — headless calls only register as is_error, so a min_ asserts a hallucination", armName, key)
 	}
 	for _, opt := range armStarvationRequires(field) {
 		if v, known := resolve(opt); known && !v {

@@ -15,10 +15,10 @@ import (
 const churnCommits = 2000
 
 // rebuildChurn rewrites the churn table from one `git log` pass:
-// touches-per-file over recent history. Silent no-op when git is
-// unavailable, the project isn't a work tree, or history is empty —
-// churn is a ranking hint, not correctness, and a failed refresh just
-// leaves the previous build's rows in place.
+// touches-per-file over recent history. A failed refresh (git missing,
+// not a work tree, no commits) keeps the previous build's rows; a
+// successful pass that produced nothing still rewrites — the same
+// staleness by another route.
 func (s *Service) rebuildChurn(ctx context.Context, seen map[string]walkedFile) {
 	top, err := gitOutput(ctx, s.root, "rev-parse", "--show-toplevel")
 	if err != nil {
@@ -56,9 +56,8 @@ func (s *Service) rebuildChurn(ctx context.Context, seen map[string]walkedFile) 
 			touches[name]++
 		}
 	}
-	if len(touches) == 0 {
-		return
-	}
+	// The log pass succeeded — rewrite unconditionally so an empty
+	// result clears rows that no longer reflect history.
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return

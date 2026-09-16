@@ -345,6 +345,14 @@ func TestValidateExperiment_ArmCoverageStarvation(t *testing.T) {
 		Coverage: Coverage{"min_call_metrics.map_calls": 1},
 	}
 	require.NoError(t, ValidateExperiment(exp))
+
+	// wrong_pointer_events needs a successful map call — zero on
+	// flag-off arms, so min_ starves there.
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"project_index": false}},
+		Coverage: Coverage{"min_call_metrics.wrong_pointer_events": 1},
+	}
+	require.Error(t, ValidateExperiment(exp))
 }
 
 func TestValidateArmCoverageResolved(t *testing.T) {
