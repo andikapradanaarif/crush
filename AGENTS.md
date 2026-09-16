@@ -11,45 +11,97 @@ agent skills.
 
 The module path is `github.com/charmbracelet/crush`.
 
+This fork's direction and divergences from upstream are documented in
+`VISION.md`, and `docs/design/`.
+
+## Fork & Remotes
+
+This repository is a fork of `charmbracelet/crush`. The remotes are:
+
+- `origin` → `andikapradanaarif/crush` — **the fork**. All branches are
+  pushed here and all PRs are opened against this repo's `main`.
+- `upstream` → `charmbracelet/crush` — **read-only reference** remote.
+  Fetch from it to stay current, but never push to it or open PRs against
+  it.
+
+The Go module path stays `github.com/charmbracelet/crush` — do not rename
+it for the fork.
+
 ## Architecture
 
 ```
 main.go                            CLI entry point (cobra via internal/cmd)
 internal/
   app/app.go                       Top-level wiring: DB, config, agents, LSP, MCP, events
-  cmd/                             CLI commands (root, run, login, models, stats, sessions)
+  backend/                         Transport-agnostic ops (workspaces, sessions,
+                                   agents, permissions, events); consumed by
+                                   server (HTTP) and ACP
+  server/                          HTTP/Unix-socket server exposing the backend
+  client/                          HTTP client SDK for the server
+  proto/                           Wire types shared by client, server, backend
+  apigen/                          OpenAPI doc generation for the server API
+  workspace/                       Workspace interface for frontends (TUI, CLI);
+                                   backed by a local app.App or the HTTP client
+  cmd/                             CLI commands (root, run, server, eval, login,
+                                   logout, models, stats, session, projects, ...)
   config/
     config.go                      Config struct, context file paths, agent definitions
     load.go                        crushrc and crush.json loading and validation
     provider.go                    Provider configuration and model resolution
-  shellconfig/                      Bash-powered config format (crushrc builtins)
+  shellconfig/                     Bash-powered config format (crushrc builtins)
   agent/
     agent.go                       SessionAgent: runs LLM conversations per session
     coordinator.go                 Coordinator: manages named agents ("coder", "task")
     hooked_tool.go                 Decorator that runs PreToolUse hooks before tool execution
     prompts.go                     Loads Go-template system prompts
+    prompt/                        System prompt section assembly
     templates/                     System prompt templates (coder.md.tpl, task.md.tpl, etc.)
-    tools/                         All built-in tools (bash, edit, view, grep, glob, etc.)
+    tools/                         All built-in tools (bash, edit, view, grep, glob,
+                                   LSP tools, web fetch/search, todos, notebook, ...)
       mcp/                         MCP client integration
+      notebook/                    Notebook recall/search tools
+    notify/                        Turn-completion notifications
+    hyper/                         Hyper provider integration
+    agenttest/                     Agent test helpers
   hooks/                           Hook engine: runs user shell commands on hook events
     hooks.go                       Decision types, aggregation logic, event constants
     runner.go                      Parallel hook execution, timeout, dedup
-    input.go                       Stdin payload builder, env vars, stdout parsing (Crush + Claude Code compat)
+    input.go                       Stdin payload builder, env vars, stdout parsing
+                                   (Crush + Claude Code compat)
   session/session.go               Session CRUD backed by SQLite
   message/                         Message model and content types
+  notebook/                        Per-event context summarization for sessions
+  index/                           Persistent per-project source map (symbols, refs)
   db/                              SQLite via sqlc, with migrations
     sql/                           Raw SQL queries (consumed by sqlc)
     migrations/                    Schema migrations
   lsp/                             LSP client manager, auto-discovery, on-demand startup
   ui/                              Bubble Tea v2 TUI (see internal/ui/AGENTS.md)
   permission/                      Tool permission checking and allow-lists
-  skills/                          Skill file discovery and loading
+  question/                        Ask-the-user service over pubsub
+  skills/                          Skill file discovery and loading (incl. builtin/)
   shell/                           Bash command execution with background job support
+  commands/                        Custom slash commands and MCP prompts
+  projects/                        Project registry
+  eval/                            Eval harness (driver, runner, coverage, gates)
+  discover/                        Local LLM server discovery (Ollama, llama.cpp,
+                                   LM Studio, LiteLLM, MLX)
+  oauth/                           OAuth flows (callback, copilot, hyper, mcp, openai)
+  login/, logout/                  CLI auth flows (TUI + non-interactive)
+  update/                          Update checks against GitHub releases
+  herdr/                           herdr terminal multiplexer integration
   event/                           Telemetry (PostHog)
   pubsub/                          Internal pub/sub for cross-component messaging
   filetracker/                     Tracks files touched per session
   history/                         Prompt history
+eval/                              Eval corpus, experiments, and flags
+docs/                              Docs: config/, design/ (design docs), hooks/
 ```
+
+The remaining `internal/` packages are small utilities: `ansiext`,
+`clipboard`, `csync` (concurrent data structures), `diff`, `diffdetect`,
+`dns`, `env`, `filepathext`, `format`, `fsext`, `home`, `lock`, `log`,
+`stringext`, `version`.
 
 ### Key Dependency Roles
 
@@ -59,14 +111,23 @@ internal/
 - **`charm.land/bubbletea/v2`**: TUI framework powering the interactive UI.
 - **`charm.land/lipgloss/v2`**: Terminal styling.
 - **`charm.land/glamour/v2`**: Markdown rendering in the terminal.
-- **`charm.land/catwalk`**: Snapshot/golden-file testing for TUI components.
+- **`charm.land/catwalk`**: Provider/model catalog (model metadata used by
+  `internal/config` and provider resolution).
+- **`github.com/charmbracelet/x/exp/golden`**: Golden-file testing for TUI
+  components (`golden.RequireEqual`, `-update` flag).
+- **`charm.land/x/vcr`**: HTTP cassettes for LLM provider tests (see
+  Testing Without API Calls).
 - **`sqlc`**: Generates Go code from SQL queries in `internal/db/sql/`.
 
 ### Key Patterns
 
 - **Config is a Service**: accessed via `config.Service`, not global state.
+- **Client/server mode**: `crush server` exposes `internal/backend`
+  operations over HTTP/Unix socket (`internal/server`, `internal/client`,
+  `internal/proto`). Frontends code against `internal/workspace.Workspace`,
+  which wraps either a local `app.App` or the remote client.
 - **Tools are self-documenting**: each tool has a `.go` implementation and a
-  `.md` description file in `internal/agent/tools/`.
+  `.md`/`.md.tpl` description file in `internal/agent/tools/`.
 - **System prompts are Go templates**: `internal/agent/templates/*.md.tpl`
   with runtime data injected.
 - **Context files**: Crush reads AGENTS.md, CRUSH.md, CLAUDE.md, GEMINI.md
@@ -90,8 +151,8 @@ internal/
   independent of fantasy and agent — it takes inputs, runs commands,
   returns decisions. The `hookedTool` decorator in
   `internal/agent/hooked_tool.go` wraps tools at the coordinator level.
-  Hooks run before permission checks. See `HOOKS.md` for the user-facing
-  protocol.
+  Hooks run before permission checks. See `docs/hooks/README.md` for the
+  user-facing protocol.
 - **CGO disabled**: builds with `CGO_ENABLED=0` and
   `GOEXPERIMENT=greenteagc`.
 
@@ -99,12 +160,12 @@ internal/
 
 - **Build**: `go build .` or `go run .`
 - **Test**: `task test` or `go test ./...` (run single test:
-  `go test ./internal/llm/prompt -run TestGetContextFromPaths`)
+  `go test ./internal/agent/prompt -run TestBuildSectionsPopulated`)
 - **Update Golden Files**: `go test ./... -update` (regenerates `.golden`
   files when test output changes)
   - Update specific package:
-    `go test ./internal/tui/components/core -update` (in this case,
-    we're updating "core")
+    `go test ./internal/ui/diffview -update` (in this case,
+    we're updating "diffview")
 - **Lint**: `task lint:fix`
 - **Format**: `task fmt` (`gofumpt -w .`)
 - **Modernize**: `task modernize` (runs `modernize` which makes code
@@ -143,29 +204,15 @@ internal/
 - **Comments**: End comments in periods unless comments are at the end of the
   line.
 
-## Testing with Mock Providers
+## Testing Without API Calls
 
-When writing tests that involve provider configurations, use the mock
-providers to avoid API calls:
-
-```go
-func TestYourFunction(t *testing.T) {
-    // Enable mock providers for testing
-    originalUseMock := config.UseMockProviders
-    config.UseMockProviders = true
-    defer func() {
-        config.UseMockProviders = originalUseMock
-        config.ResetProviders()
-    }()
-
-    // Reset providers to ensure fresh mock data
-    config.ResetProviders()
-
-    // Your test code here - providers will now return mock data
-    providers := config.Providers()
-    // ... test logic
-}
-```
+- Tests that hit LLM providers use `charm.land/x/vcr` cassettes — see
+  `internal/agent/*_test.go`. Re-record all cassettes with
+  `task test:record`.
+- For tests that need provider configurations, build fixtures directly as
+  `map[string]config.ProviderConfig` with `catwalk.Model` entries — see
+  `setupMockProviders` in `internal/app/provider_test.go`. There is no
+  global mock-providers switch.
 
 ## Formatting
 
@@ -190,15 +237,16 @@ func TestYourFunction(t *testing.T) {
 - NEVER force-push. To update a stacked branch onto a new base, merge the
   base branch into it (`git merge <base>`) instead of rebasing — merge
   commits are fine since PRs are squash-merged.
+- Push to `origin` (the fork) only — never `upstream`.
 
 ## Pull Requests
 
-- Always open PRs against this fork — `andikapradanaarif/crush`
-  (`origin`), never upstream `charmbracelet/crush`. `gh` defaults to
-  upstream when an `upstream` remote exists, so pass
-  `--repo andikapradanaarif/crush` explicitly.
-- Upstream `charmbracelet/crush` is a read-only reference remote: fetch
-  from it, never push or open PRs against it.
+- Always open PRs against the fork `andikapradanaarif/crush` (base
+  `main`), never upstream `charmbracelet/crush`.
+- `gh` defaults to the upstream repo when an `upstream` remote exists —
+  always pass `--repo andikapradanaarif/crush` to `gh` commands like
+  `gh pr create`.
+- Push the PR branch to `origin` before creating the PR.
 
 ## Working on the TUI (UI)
 
