@@ -8,16 +8,22 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/db"
+	"github.com/charmbracelet/crush/internal/toolclass"
 )
 
-// checkpointInputMaxBytes bounds the rendered consolidation input —
-// committed entry digests plus tail event descriptions. Newest
-// entries win the budget: the checkpoint restates the current
-// position, and the oldest history is the most likely to already be
-// consolidated into an earlier finer-grain entry.
+// checkpointInputMaxBytes bounds the committed-entries portion of the
+// consolidation input. Newest entries win the budget: the checkpoint
+// restates the current position, and the oldest history is the most
+// likely to already be consolidated into an earlier finer-grain entry.
 const checkpointInputMaxBytes = 48_000
+
+// checkpointTailMaxBytes bounds the uncovered-tail event descriptions.
+// The tail is the newest evidence so it wins newest-first within its
+// own budget — a long uncovered tail (segment generation failing, or
+// the first run after enabling the notebook on a big session) must not
+// produce an unbounded small-model prompt.
+const checkpointTailMaxBytes = 24_000
 
 // GenerateCheckpoint implements the Service interface.
 //
@@ -58,10 +64,13 @@ func (s *service) GenerateCheckpoint(ctx context.Context, sessionID string, req 
 	haveCutoff := false
 	var inputEntries []Entry
 	for _, e := range entries {
-		if req.RunTag != "" && slices.Contains(e.Tags, req.RunTag) {
-			return false, nil
-		}
 		if e.EventType == EventCheckpoint {
+			// The run tag dedups checkpoints only — a model that
+			// happens to emit #run:<n> on an ordinary entry must not
+			// suppress this run's checkpoint.
+			if req.RunTag != "" && slices.Contains(e.Tags, req.RunTag) {
+				return false, nil
+			}
 			g := CheckpointGranularity(e)
 			if granularityRank(g) >= cutoffRank {
 				if !haveCutoff || e.TurnNumber > cutoffTurn ||
@@ -89,7 +98,7 @@ func (s *service) GenerateCheckpoint(ctx context.Context, sessionID string, req 
 		// the position — but only non-mutating exploration counts
 		// toward the floor: the floor measures investigation depth,
 		// not write volume.
-		if ev.ToolCall == nil || !tools.IsMutatingCall(ev.ToolCall.Name, ev.ToolCall.Input) {
+		if ev.ToolCall == nil || !toolclass.IsMutatingCall(ev.ToolCall.Name, ev.ToolCall.Input) {
 			gathered++
 		}
 		tailInputs = append(tailInputs, ev)
@@ -99,9 +108,6 @@ func (s *service) GenerateCheckpoint(ctx context.Context, sessionID string, req 
 	}
 
 	input := buildCheckpointInput(inputEntries, tailInputs, cutoffTurn, cutoffEvent)
-	if input == "" {
-		return false, nil
-	}
 	entry, err := s.generator.GenerateCheckpoint(ctx, sessionID, input)
 	if err != nil {
 		return false, fmt.Errorf("failed to generate checkpoint: %w", err)
@@ -112,12 +118,18 @@ func (s *service) GenerateCheckpoint(ctx context.Context, sessionID string, req 
 	}
 	// Structural tags are stamped, not generated: granularity and the
 	// run dedup tag must exist regardless of what the model wrote.
-	entry.Tags = append(entry.Tags, "phase:checkpoint")
+	// Deduped — the prompt asks the model for #phase:checkpoint too.
+	stampTag := func(tag string) {
+		if !slices.Contains(entry.Tags, tag) {
+			entry.Tags = append(entry.Tags, tag)
+		}
+	}
+	stampTag("phase:checkpoint")
 	if req.Granularity != "" {
-		entry.Tags = append(entry.Tags, granularityTagPrefix+req.Granularity)
+		stampTag(granularityTagPrefix + req.Granularity)
 	}
 	if req.RunTag != "" {
-		entry.Tags = append(entry.Tags, req.RunTag)
+		stampTag(req.RunTag)
 	}
 	if estimateTokens(entry.Text) > s.opts.MaxEntryTokens {
 		entry.Text = truncateEntry(entry.Text, s.opts.MaxEntryTokens)
@@ -135,8 +147,10 @@ func (s *service) GenerateCheckpoint(ctx context.Context, sessionID string, req 
 			if err != nil {
 				return err
 			}
-			if len(dup) > 0 {
-				return errCheckpointExists
+			for _, row := range dup {
+				if row.EventType == EventCheckpoint {
+					return errCheckpointExists
+				}
 			}
 		}
 		maxEvent, err := q.GetMaxNotebookEventNumber(ctx, db.GetMaxNotebookEventNumberParams{
@@ -194,6 +208,24 @@ func buildCheckpointInput(entries []Entry, tail []EntryInput, cutoffTurn, cutoff
 	}
 	slices.Reverse(blocks)
 
+	// The tail gets its own newest-first budget — it is the newest
+	// evidence and the reason the checkpoint exists, but a long
+	// uncovered tail must not overflow the small-model prompt.
+	var tailBlocks []string
+	tailUsed := 0
+	tailTruncated := false
+	for i := len(tail) - 1; i >= 0; i-- {
+		ev := tail[i]
+		b := fmt.Sprintf("### %s — %s\n%s\n\n", ev.EventType, ev.Title, ev.Description)
+		if tailUsed+len(b) > checkpointTailMaxBytes {
+			tailTruncated = true
+			break
+		}
+		tailUsed += len(b)
+		tailBlocks = append(tailBlocks, b)
+	}
+	slices.Reverse(tailBlocks)
+
 	var sb strings.Builder
 	sb.WriteString("Committed notebook entries (oldest first):\n\n")
 	if len(blocks) == 0 {
@@ -203,8 +235,11 @@ func buildCheckpointInput(entries []Entry, tail []EntryInput, cutoffTurn, cutoff
 		sb.WriteString(b)
 	}
 	sb.WriteString("Recent uncovered events (oldest first):\n\n")
-	for _, ev := range tail {
-		fmt.Fprintf(&sb, "### %s — %s\n%s\n\n", ev.EventType, ev.Title, ev.Description)
+	if tailTruncated {
+		sb.WriteString("(older tail events elided — see committed entries)\n\n")
+	}
+	for _, b := range tailBlocks {
+		sb.WriteString(b)
 	}
 	return sb.String()
 }

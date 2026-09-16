@@ -1088,6 +1088,8 @@ func (a *sessionAgent) noteSelectionDiff(sessionID string, diff selectionDiff) {
 	stats.SelPassRefs += diff.refs
 	stats.SelPassWorking += diff.working
 	stats.SelPassFill += diff.fill
-	stats.CheckpointRenders += diff.checkpoints
+	if diff.checkpoints > 0 {
+		stats.CheckpointRenders++
+	}
 	a.nbStats.Set(sessionID, stats)
 }

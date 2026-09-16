@@ -166,7 +166,7 @@ func TestGenerateRunEndCheckpoint(t *testing.T) {
 	a.notebookCheckpoint = true
 
 	msgs := append([]message.Message{segUser("look")}, cpViewCall("v1")...)
-	a.generateRunEndCheckpoint(t.Context(), sessionID, msgs, 11, nil)
+	a.generateRunEndCheckpoint(t.Context(), sessionID, msgs, 11, nil, "")
 
 	entries, err := nb.GetEntries(t.Context(), sessionID)
 	require.NoError(t, err)
@@ -175,7 +175,7 @@ func TestGenerateRunEndCheckpoint(t *testing.T) {
 
 	// The run-tag check dedups a second run-end pass — the durable
 	// form of the claim.
-	a.generateRunEndCheckpoint(t.Context(), sessionID, msgs, 11, nil)
+	a.generateRunEndCheckpoint(t.Context(), sessionID, msgs, 11, nil, "")
 	entries, err = nb.GetEntries(t.Context(), sessionID)
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
@@ -193,9 +193,39 @@ func TestGenerateRunEndCheckpoint_EmptyRun(t *testing.T) {
 		segUser("hi"),
 		segAssistant("hello"),
 	}
-	a.generateRunEndCheckpoint(t.Context(), sessionID, msgs, 12, nil)
+	a.generateRunEndCheckpoint(t.Context(), sessionID, msgs, 12, nil, "")
 
 	entries, err := nb.GetEntries(t.Context(), sessionID)
 	require.NoError(t, err)
 	require.Empty(t, entries)
+}
+
+// TestUncoveredTail_FirstGap: a closed-but-unprocessed segment opens
+// the tail at its start — a later processed segment must not bury a
+// generation hole.
+func TestUncoveredTail_FirstGap(t *testing.T) {
+	t.Parallel()
+
+	msgs := []message.Message{
+		segUser("go"),
+		segAssistant("s1"), segAssistant("s2"), segAssistant("s3"),
+		segAssistant("s4"), segAssistant("s5"), segAssistant("s6"),
+	}
+	segs := []segment{
+		{turn: 1, number: 1, start: 1, end: 3},
+		{turn: 1, number: 2, start: 3, end: 5}, // Unprocessed hole.
+		{turn: 1, number: 3, start: 5, end: 6},
+		{turn: 1, number: 4, start: 6, end: 7, open: true},
+	}
+	processed := map[segmentKey]bool{
+		{turn: 1, segment: 1}: true,
+		{turn: 1, segment: 3}: true,
+	}
+	tail := uncoveredTail(msgs, segs, processed)
+	require.Equal(t, msgs[3:], tail, "the tail opens at the hole's start")
+
+	// All closed segments covered: tail is just the open tail.
+	processed[segmentKey{turn: 1, segment: 2}] = true
+	tail = uncoveredTail(msgs, segs, processed)
+	require.Equal(t, msgs[6:], tail)
 }

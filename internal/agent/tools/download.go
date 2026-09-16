@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/index"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/toolclass"
 )
 
 type DownloadParams struct {
@@ -31,7 +32,7 @@ type DownloadPermissionsParams struct {
 	Timeout  int    `json:"timeout,omitempty"`
 }
 
-const DownloadToolName = "download"
+const DownloadToolName = toolclass.DownloadToolName
 
 //go:embed download.md.tpl
 var downloadDescriptionTmpl []byte

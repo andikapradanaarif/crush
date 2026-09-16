@@ -252,3 +252,24 @@ func TestTurnsWithEntries_CheckpointDoesNotCover(t *testing.T) {
 	require.NotContains(t, turns, int64(3),
 		"a checkpoint-only turn is not a covered turn")
 }
+
+func TestGenerateCheckpoint_RunTagOnNonCheckpointDoesNotDedup(t *testing.T) {
+	// A model that happens to emit #run:99 on an ordinary entry must
+	// not suppress this run's checkpoint — the tag dedups checkpoints
+	// only.
+	svc, _, sessionID := newTestService(t, &mockGenerator{entries: []GeneratedEntry{
+		{EventType: EventGeneral, Title: "Note", Text: "note", Tags: []string{"run:99"}},
+	}})
+	require.NoError(t, svc.GenerateSegmentEntries(context.Background(), sessionID, 1, 1, 0, 2, viewMsgs("tc1")))
+
+	committed, err := svc.GenerateCheckpoint(context.Background(), sessionID, CheckpointRequest{
+		TurnNumber:     1,
+		SegmentNumber:  1,
+		Granularity:    GranularityBoundary,
+		RunTag:         "run:99",
+		MinExploration: 1,
+		Msgs:           viewMsgs("tc2"),
+	})
+	require.NoError(t, err)
+	require.True(t, committed)
+}

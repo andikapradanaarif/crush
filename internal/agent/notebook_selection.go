@@ -34,10 +34,13 @@ const fillRecencyBandSegments = 8
 // Checkpoints split on granularity and freshness: only the LATEST
 // boundary or session checkpoint takes the top rank — it is the
 // consolidated position the model should consult first. A superseded
-// checkpoint ranks below everything: its position is restated by the
-// newer one, so letting it outrank real entries would render stale
-// "established" facts forever. Turn-grain digests are middle rank —
-// a finer consolidation, still compressible and ordinary.
+// checkpoint ranks below everything in the fill pass: its position is
+// restated by the newer one, so letting it outrank real entries would
+// render stale "established" facts forever. (The recency pass may
+// still surface it for a segment or two while both sit inside the
+// band — a bounded overlap, not permanent top rank.) Turn-grain
+// digests are middle rank — a finer consolidation, still compressible
+// and ordinary.
 func entryTypeRank(e notebook.Entry, latestCkpt map[string]bool) int {
 	if e.EventType == notebook.EventCheckpoint {
 		switch {

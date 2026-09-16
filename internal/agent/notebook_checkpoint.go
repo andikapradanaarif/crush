@@ -125,15 +125,23 @@ func checkpointSegmentKey(segs []segment) (segmentKey, bool) {
 	return segmentKey{}, false
 }
 
-// uncoveredTail returns the messages past the last segment with
-// committed coverage — the raw slice whose classified events join the
-// checkpoint's input.
+// uncoveredTail returns the messages past the last contiguous run of
+// covered segments — the raw slice whose classified events join the
+// checkpoint's input. First-gap semantics: a closed-but-unprocessed
+// segment (a generation failure) opens the tail at its start, so its
+// events are never dropped from the input even when a later segment
+// already committed.
 func uncoveredTail(msgs []message.Message, segs []segment, processed map[segmentKey]bool) []message.Message {
 	tailStart := 0
 	for _, s := range segs {
-		if !s.open && processed[s.key()] {
-			tailStart = s.end
+		if s.open {
+			continue
 		}
+		if !processed[s.key()] {
+			tailStart = s.start
+			break
+		}
+		tailStart = s.end
 	}
 	if tailStart > len(msgs) {
 		tailStart = len(msgs)
@@ -149,7 +157,7 @@ func uncoveredTail(msgs []message.Message, segs []segment, processed map[segment
 // under PrepareStep's callContext — the Run-start and summarize
 // preparePrompt paths carry no stamp and correctly skip.
 func (a *sessionAgent) maybeCheckpointBoundary(ctx context.Context, sessionID string, msgs []message.Message, segs []segment, processed map[segmentKey]bool) {
-	if !a.notebookCheckpoint {
+	if !a.notebookCheckpoint || a.notebook == nil {
 		return
 	}
 	stamp := tools.GetRunStampFromContext(ctx)
@@ -183,9 +191,28 @@ func (a *sessionAgent) maybeCheckpointBoundary(ctx context.Context, sessionID st
 // mid-run checkpoint failed or fell under the boundary threshold —
 // consolidates at run end. The run-tag existence check doubles as the
 // durable dedup when the in-memory claim was lost to a rebuild.
-func (a *sessionAgent) generateRunEndCheckpoint(ctx context.Context, sessionID string, msgs []message.Message, stamp uint64, registry map[segmentKey]notebook.ProcessedSegment) {
+// lastAssistantID bounds the input to this run — a user message
+// created by a later run (visible past this run's final assistant
+// message) means the tail belongs to that run, the same ownership
+// rule generateRunEndSegments applies.
+func (a *sessionAgent) generateRunEndCheckpoint(ctx context.Context, sessionID string, msgs []message.Message, stamp uint64, registry map[segmentKey]notebook.ProcessedSegment, lastAssistantID string) {
 	if !a.notebookCheckpoint || a.notebook == nil || stamp == 0 || sessionID == "" {
 		return
+	}
+	if lastAssistantID != "" {
+		lastAsst := -1
+		for i := len(msgs) - 1; i >= 0; i-- {
+			if msgs[i].ID == lastAssistantID {
+				lastAsst = i
+				break
+			}
+		}
+		for i := lastAsst + 1; i < len(msgs); i++ {
+			if msgs[i].Role == message.User {
+				msgs = msgs[:i]
+				break
+			}
+		}
 	}
 	runTag := checkpointRunTag(stamp)
 	existing, err := a.notebook.SearchByTag(ctx, sessionID, runTag)
@@ -193,13 +220,18 @@ func (a *sessionAgent) generateRunEndCheckpoint(ctx context.Context, sessionID s
 		slog.Warn("Failed to check run checkpoint tag", "session_id", sessionID, "error", err)
 		return
 	}
-	if len(existing) > 0 {
-		return
+	for _, e := range existing {
+		if e.EventType == notebook.EventCheckpoint {
+			return
+		}
 	}
 	tracker := a.segmentTracker(sessionID)
-	if !tracker.retryCheckpoint(stamp) {
-		return
-	}
+	// A mid-run generation still in flight does not block the run-end
+	// pass — if it fails the run still gets its checkpoint, and if it
+	// commits the in-transaction run-tag re-check short-circuits this
+	// one before the write. The claim is cost control, not
+	// correctness.
+	tracker.retryCheckpoint(stamp)
 	segs := segmentBoundaries(msgs, a.segTokenBudget(), a.segMaxSteps())
 	key, ok := checkpointSegmentKey(segs)
 	if !ok {
