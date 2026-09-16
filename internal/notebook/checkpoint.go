@@ -43,7 +43,13 @@ const checkpointTailMaxBytes = 24_000
 // checkpoint already written under req.RunTag) and the gathered-count
 // floor (req.MinExploration, in classified non-trivial non-mutating
 // event units — consciously different units from the scope gate's
-// raw call count). The entry commits inside the same write
+// raw call count). Two imprecisions are accepted here: a run of only
+// trivial calls (grep, glob, small views) plus writes tallies zero —
+// it self-heals when the next run sees the committed segment entries
+// — and a segment that commits between tail computation and this
+// read appears both as an entry and as raw tail events, counted
+// twice (bounded to one segment's worth). The entry commits inside
+// the same write
 // transaction that allocates its event number, matching segment
 // generation's collision discipline; a tag re-check inside the
 // transaction closes the claim/land gap between concurrent

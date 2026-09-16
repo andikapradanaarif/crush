@@ -362,7 +362,10 @@ func selectNotebookEntries(entries []notebook.Entry, refs []string, floor segmen
 	// Pass 3: fill the remaining budget. Live entries first — entries
 	// tagged only to deleted files demote below them — and within each
 	// half: inside the recency band newest-first, beyond it type rank
-	// then recency.
+	// then recency. Checkpoints are not exempt from entryIsDead on
+	// purpose: a position whose every cited file is gone is genuinely
+	// stale. The latest checkpoint's top rank still leads its dead
+	// bucket; every live entry simply outranks it.
 	var bandLive, oldLive, bandDead, oldDead []notebook.Entry
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
