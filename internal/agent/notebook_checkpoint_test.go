@@ -88,6 +88,20 @@ func TestCheckpointClaimLifecycle(t *testing.T) {
 	require.True(t, tr2.claimCheckpoint(2))
 	tr2.finishCheckpoint(2, true)
 	require.True(t, tr2.claimCheckpoint(2), "failure releases the claim")
+
+	// The budget is per-run: two failures under run 1 spend run 1's
+	// budget, and run 2 still gets its full allowance.
+	tr3 := &segmentTracker{}
+	require.True(t, tr3.claimCheckpoint(1))
+	tr3.finishCheckpoint(1, true)
+	require.True(t, tr3.claimCheckpoint(1))
+	tr3.finishCheckpoint(1, true)
+	require.False(t, tr3.claimCheckpoint(1), "run 1's budget is spent")
+	require.True(t, tr3.claimCheckpoint(2), "run 2 starts with a fresh budget")
+	tr3.finishCheckpoint(2, true)
+	require.True(t, tr3.claimCheckpoint(2), "run 2's second attempt is allowed")
+	tr3.finishCheckpoint(2, true)
+	require.False(t, tr3.claimCheckpoint(2), "run 2's budget is spent")
 }
 
 // TestMaybeCheckpointBoundary_WritesCheckpoint is the mid-run trigger:

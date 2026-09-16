@@ -212,7 +212,7 @@ func buildCheckpointInput(entries []Entry, tail []EntryInput, cutoffTurn, cutoff
 		b.WriteString(text)
 		b.WriteString("\n\n")
 		if used+b.Len() > checkpointInputMaxBytes {
-			break
+			continue
 		}
 		used += b.Len()
 		if e.TurnNumber > cutoffTurn || (e.TurnNumber == cutoffTurn && e.EventNumber > cutoffEvent) {

@@ -641,8 +641,14 @@ func (a *sessionAgent) generateSegment(ctx context.Context, sessionID string, s 
 		if err != nil {
 			slog.Error("Failed to get segment entries for mem0 sync", "error", err)
 		} else {
+			// A checkpoint keyed to this segment can land while its
+			// generation was in flight — runCheckpoint syncs those
+			// itself, so syncing them here would double-push.
+			fresh := slices.DeleteFunc(entries, func(e notebook.Entry) bool {
+				return e.EventType == notebook.EventCheckpoint
+			})
 			mem0 := notebook.NewMem0Sync(a.configStore, a.notebookMemoryServer)
-			mem0.SyncEntries(ctx, entries)
+			mem0.SyncEntries(ctx, fresh)
 		}
 	}
 }

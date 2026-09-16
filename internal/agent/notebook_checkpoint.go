@@ -88,8 +88,11 @@ func (t *segmentTracker) finishCheckpoint(stamp uint64, failed bool) {
 	t.checkpointInFlight = false
 	if failed {
 		t.checkpointStamp = 0
-		// The failure budget is per-run: record the stamp it belongs
-		// to so a later run starts fresh.
+		// The failure budget is per-run: the counter belongs to the
+		// stamp that accrued it, so a later run starts fresh.
+		if t.checkpointFailureRun != stamp {
+			t.checkpointFailures = 0
+		}
 		t.checkpointFailures++
 		t.checkpointFailureRun = stamp
 	}
@@ -345,9 +348,8 @@ func (a *sessionAgent) runCheckpoint(ctx context.Context, sessionID string, req 
 				fresh = append(fresh, e)
 			}
 		}
-		// Checkpoint sync is explicit — segment generation is the
-		// only other SyncEntries call site, and it never sees these
-		// entries.
+		// Checkpoint sync is explicit — the only other SyncEntries
+		// call site, segment generation, filters these out.
 		notebook.NewMem0Sync(a.configStore, a.notebookMemoryServer).SyncEntries(ctx, fresh)
 	}
 }
