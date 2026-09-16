@@ -60,7 +60,7 @@ func TestSearchMem0_PartitionsByWorkingDir(t *testing.T) {
 		{"id":"2","memory":"dir B secret","metadata":{"working_dir":%q,"session_id":"sB"}},
 		{"id":"3","memory":"legacy memory","metadata":{"session_id":"sOld"}},
 		{"id":"4","memory":"malformed","metadata":"not-an-object"}
-	]}`, normalizeWorkingDir(dirA), normalizeWorkingDir(dirB))
+	]}`, canonicalizeWorkingDir(dirA), canonicalizeWorkingDir(dirB))
 
 	var gotTool, gotInput string
 	stubRunMCPTool(t, func(_ context.Context, _ *config.ConfigStore, name, toolName, input string) (mcp.ToolResult, error) {
@@ -108,9 +108,41 @@ func TestSearchMem0_ServerSideFilter(t *testing.T) {
 	require.Equal(t, map[string]any{
 		"AND": []any{
 			map[string]any{"agent_id": mem0AgentID},
-			map[string]any{"metadata.working_dir": normalizeWorkingDir(workDir)},
+			map[string]any{"metadata.working_dir": canonicalizeWorkingDir(workDir)},
 		},
 	}, args["filters"])
+}
+
+func TestSearchMem0_FilteredErrorRetriesUnfiltered(t *testing.T) {
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+	cfg := mem0TestStore(t, dirA)
+	stubFilterCapable(t, true)
+
+	var inputs []string
+	stubRunMCPTool(t, func(_ context.Context, _ *config.ConfigStore, _, _, input string) (mcp.ToolResult, error) {
+		inputs = append(inputs, input)
+		if len(inputs) == 1 {
+			// Server declares filters but rejects the grammar.
+			return mcp.ToolResult{}, fmt.Errorf("unknown filter operator")
+		}
+		payload := fmt.Sprintf(`[{"memory":"dir A fact","metadata":{"working_dir":%q}},
+			{"memory":"dir B secret","metadata":{"working_dir":%q}}]`,
+			canonicalizeWorkingDir(dirA), canonicalizeWorkingDir(dirB))
+		return mcp.ToolResult{Type: "text", Content: payload}, nil
+	})
+
+	result, err := SearchMem0(context.Background(), cfg, "mem0", "fact")
+	require.NoError(t, err)
+	require.Len(t, inputs, 2, "a failed filtered call must retry unfiltered")
+	require.Contains(t, result, "dir A fact")
+	require.NotContains(t, result, "dir B secret")
+
+	var retryArgs map[string]any
+	require.NoError(t, json.Unmarshal([]byte(inputs[1]), &retryArgs))
+	_, hasFilters := retryArgs["filters"]
+	require.False(t, hasFilters, "retry drops the rejected filters arg")
+	require.Equal(t, float64(mem0SearchFetchK), retryArgs["top_k"])
 }
 
 func TestSearchMem0_UnparseableUnfilteredReturnsEmpty(t *testing.T) {
@@ -180,7 +212,7 @@ func TestSyncEntries_WorkingDirMetadata(t *testing.T) {
 	require.Equal(t, mem0AgentID, args["agent_id"])
 	metadata, ok := args["metadata"].(map[string]any)
 	require.True(t, ok)
-	require.Equal(t, normalizeWorkingDir(workDir), metadata["working_dir"])
+	require.Equal(t, canonicalizeWorkingDir(workDir), metadata["working_dir"])
 	require.Equal(t, "session1", metadata["session_id"])
 	require.Equal(t, "session1", metadata["origin_session_id"])
 }
@@ -198,18 +230,18 @@ func TestSyncEntries_SkipsWhenWorkingDirUnknown(t *testing.T) {
 	require.False(t, called, "entries without a partition key must not sync")
 }
 
-func TestNormalizeWorkingDir(t *testing.T) {
+func TestCanonicalizeWorkingDir(t *testing.T) {
 	dir := t.TempDir()
 
 	// A symlinked spelling resolves to the same partition.
 	link := filepath.Join(t.TempDir(), "link")
 	require.NoError(t, os.Symlink(dir, link))
-	require.Equal(t, normalizeWorkingDir(dir), normalizeWorkingDir(link))
+	require.Equal(t, canonicalizeWorkingDir(dir), canonicalizeWorkingDir(link))
 
 	// On case-insensitive filesystems a case-variant spelling aliases.
 	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
-		require.Equal(t, normalizeWorkingDir(dir), normalizeWorkingDir(strings.ToUpper(dir)))
-		require.Equal(t, strings.ToLower(normalizeWorkingDir(dir)), normalizeWorkingDir(dir))
+		require.Equal(t, canonicalizeWorkingDir(dir), canonicalizeWorkingDir(strings.ToUpper(dir)))
+		require.Equal(t, strings.ToLower(canonicalizeWorkingDir(dir)), canonicalizeWorkingDir(dir))
 	}
 }
 

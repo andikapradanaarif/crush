@@ -85,7 +85,7 @@ func (m *Mem0Sync) SyncEntries(ctx context.Context, entries []Entry) {
 		slog.Warn("Mem0 sync skipped: working directory is unknown", "server", m.serverName)
 		return
 	}
-	workDir := normalizeWorkingDir(raw)
+	workDir := canonicalizeWorkingDir(raw)
 	for _, entry := range entries {
 		if slices.Contains(entry.Tags, TagHydrated) {
 			// Seeds hydrated from mem0 carry their origin session as a
@@ -127,12 +127,14 @@ func (m *Mem0Sync) SyncEntries(ctx context.Context, entries []Entry) {
 // SearchMem0 searches cross-session memories via the MCP server's
 // search_memories tool, restricted to memories written from the
 // current working directory. When the tool's schema accepts a
-// filters argument the partition is applied server-side; otherwise
-// a wide fetch is partitioned and ranked client-side. Results that
-// can neither be filtered server-side nor verified against
-// working_dir metadata are dropped — an empty result beats a
-// wrong-project one. The result text is truncated to
-// mem0SearchMaxTokens to avoid prompt inflation.
+// filters argument the partition is applied server-side — a filtered
+// call that errors retries unfiltered, since a server may declare
+// the argument yet reject the grammar — and otherwise a wide fetch
+// is partitioned and ranked client-side. Results that can neither
+// be filtered server-side nor verified against working_dir metadata
+// are dropped — an empty result beats a wrong-project one. The
+// result text is truncated to mem0SearchMaxTokens to avoid prompt
+// inflation.
 func SearchMem0(ctx context.Context, cfg *config.ConfigStore, serverName, query string) (string, error) {
 	if cfg == nil || serverName == "" || strings.TrimSpace(query) == "" {
 		return "", nil
@@ -142,7 +144,7 @@ func SearchMem0(ctx context.Context, cfg *config.ConfigStore, serverName, query 
 		slog.Warn("Mem0 search skipped: working directory is unknown", "server", serverName)
 		return "", nil
 	}
-	workDir := normalizeWorkingDir(raw)
+	workDir := canonicalizeWorkingDir(raw)
 	args := map[string]any{
 		"query":    query,
 		"agent_id": mem0AgentID,
@@ -155,6 +157,17 @@ func SearchMem0(ctx context.Context, cfg *config.ConfigStore, serverName, query 
 	}
 	input, _ := json.Marshal(args)
 	result, err := runMCPTool(ctx, cfg, serverName, "search_memories", string(input))
+	if err != nil && serverFiltered {
+		slog.Warn("Mem0 filtered search failed; retrying without server-side filter",
+			"server", serverName,
+			"error", err,
+		)
+		serverFiltered = false
+		args["top_k"] = mem0SearchFetchK
+		delete(args, "filters")
+		input, _ = json.Marshal(args)
+		result, err = runMCPTool(ctx, cfg, serverName, "search_memories", string(input))
+	}
 	if err != nil {
 		return "", fmt.Errorf("mem0 search failed: %w", err)
 	}
@@ -172,13 +185,14 @@ func SearchMem0(ctx context.Context, cfg *config.ConfigStore, serverName, query 
 	return truncateTextToTokens(filtered, mem0SearchMaxTokens), nil
 }
 
-// normalizeWorkingDir canonicalizes a working directory for use as
+// canonicalizeWorkingDir canonicalizes a working directory for use as
 // the mem0 partition key: filepath.Abs anchors it, EvalSymlinks
 // collapses symlinked spellings (macOS /var → /private/var), and on
-// case-insensitive filesystems the key is case-folded — the same rule
-// as the agent's normalizedPath — so symlinked or case-variant
-// spellings share one partition instead of fragmenting it.
-func normalizeWorkingDir(dir string) string {
+// case-insensitive filesystems the key is case-folded — the Abs +
+// case-fold half matches the agent's normalizedPath — so symlinked
+// or case-variant spellings share one partition instead of
+// fragmenting it.
+func canonicalizeWorkingDir(dir string) string {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		abs = filepath.Clean(dir)
