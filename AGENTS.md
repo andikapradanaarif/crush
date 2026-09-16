@@ -191,6 +191,15 @@ func TestYourFunction(t *testing.T) {
   base branch into it (`git merge <base>`) instead of rebasing — merge
   commits are fine since PRs are squash-merged.
 
+## Pull Requests
+
+- Always open PRs against this fork — `andikapradanaarif/crush`
+  (`origin`), never upstream `charmbracelet/crush`. `gh` defaults to
+  upstream when an `upstream` remote exists, so pass
+  `--repo andikapradanaarif/crush` explicitly.
+- Upstream `charmbracelet/crush` is a read-only reference remote: fetch
+  from it, never push or open PRs against it.
+
 ## Working on the TUI (UI)
 
 Anytime you need to work on the TUI, read `internal/ui/AGENTS.md` before
