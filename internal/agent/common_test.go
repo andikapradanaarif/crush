@@ -159,6 +159,10 @@ func coderAgent(r *vcr.Recorder, env fakeEnv, large, small fantasy.LanguageModel
 	// matching.
 	notebookOff := false
 	cfg.Config().Options.NotebookEnabled = &notebookOff
+	// Same for project-index: the map hint is gated on the flag, so an
+	// ambient `option project-index true` would inject it into the
+	// recorded system prompt and break cassette matching.
+	cfg.Config().Options.ProjectIndex = &notebookOff
 
 	systemPrompt, err := prompt.Build(context.TODO(), large.Provider(), large.Model(), cfg)
 	if err != nil {

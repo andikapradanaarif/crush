@@ -357,23 +357,24 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	if err != nil {
 		return rec, fmt.Errorf("coverage eval: %w", err)
 	}
-	if met {
-		armMet, aerr := ArmCoverageMet(arm.Coverage, &rec)
-		if aerr != nil {
-			return rec, fmt.Errorf("arm coverage eval: %w", aerr)
-		}
-		if !armMet {
-			// Record which scope starved the run — an arm-coverage
-			// miss after a trajectory-coverage pass is the firing
-			// assertion tripping, not generic undercoverage.
-			if rec.CheckDetail == nil {
-				rec.CheckDetail = map[string]any{}
-			}
-			rec.CheckDetail["coverage_scope"] = "arm"
-			met = false
-		}
+	scope := ""
+	if !met {
+		scope = "trajectory"
+	} else if armMet, aerr := ArmCoverageMet(arm.Coverage, &rec); aerr != nil {
+		return rec, fmt.Errorf("arm coverage eval: %w", aerr)
+	} else if !armMet {
+		// An arm-coverage miss after a trajectory-coverage pass is
+		// the firing assertion tripping, not generic undercoverage.
+		scope = "arm"
+		met = false
 	}
 	if !met {
+		// Record which scope starved the run so forensics can tell
+		// a firing assertion from generic undercoverage.
+		if rec.CheckDetail == nil {
+			rec.CheckDetail = map[string]any{}
+		}
+		rec.CheckDetail["coverage_scope"] = scope
 		rec.Outcome = OutcomeInconclusive
 		return rec, nil
 	}

@@ -350,14 +350,25 @@ documented posture.
 An arm may also carry `coverage` — predicates applied only to that
 arm's runs, evaluated after the trajectory's shared coverage at the
 same gate point (pass → `inconclusive`, and the run's
-`check_detail.coverage_scope` records `"arm"` so forensics can tell
-which scope starved it). This is where flag-gated firing assertions
-live: a treatment arm enabling `notebook_stub_superseded` asserts
-`min_stub_stats.results: 1` so a run where stubbing never fired is a
-non-sample, not evidence of nothing. The arm grammar is the
-trajectory grammar plus the flag-dependent `call_metrics` fields
+`check_detail.coverage_scope` records which scope starved it —
+`"trajectory"` or `"arm"`). This is where flag-gated firing
+assertions live: a treatment arm enabling `notebook_stub_superseded`
+asserts `min_stub_stats.results: 1` so a run where stubbing never
+fired is a non-sample, not evidence of nothing. The arm grammar is
+the trajectory grammar plus the flag-dependent `call_metrics` fields
 (`map_*`, `question_*`, `wrong_pointer_events`, `read_files_rows`) —
-inside an arm scope flag-dependence is the point, not a footgun. The
+inside an arm scope flag-dependence is the point, not a footgun.
+Firing assertions are for arms where the mechanism firing is
+_required_ evidence; they are wrong where firing is the measured
+signal — the `project-index` experiment's treatment arm carries no
+`map_*` predicate because map non-adoption is itself a datum, not a
+non-sample.
+
+Experiment validation catches the arm-level starvation traps it can
+see: `min_` over `stub_stats.*`/`recalls.*`/`call_metrics.map_*` on an
+arm that explicitly sets the gating option `false`, and `min_` over
+`call_metrics.question_*` on any arm (the question tool is
+interactive-only — headless runs never register it). The
 mirror-image guard lives in trajectory validation: a shared `min_`
 over `stub_stats.*` or `recalls.*` is a load error because it would
 starve the arm where the flag is off — move it to arm coverage.

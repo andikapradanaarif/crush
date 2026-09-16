@@ -457,6 +457,7 @@ func (s *Service) dropFile(ctx context.Context, path string) {
 		`DELETE FROM files WHERE path = ?`,
 		`DELETE FROM symbols WHERE path = ?`,
 		`DELETE FROM refs WHERE src_path = ?`,
+		`DELETE FROM churn WHERE path = ?`,
 	} {
 		if _, err := s.db.ExecContext(ctx, q, path); err != nil {
 			slog.Debug("Index drop failed", "path", path, "error", err)

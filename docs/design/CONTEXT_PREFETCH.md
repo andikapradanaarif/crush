@@ -565,7 +565,7 @@ feature.
    **done**.
 3. ~~Background first-build + partial results; `project_index`
    default (off); new-file visibility (write-event retag);
-   tool-level test~~ — **done**. `task fmt` still owed before merge.
+   tool-level test~~ — **done**.
 4. Extensions (`parent`/`sig` columns, `map impact=`, fuzzy
    `symbol=` fallback, coder prompt hint) — see Extensions section.
 5. ~~Git-churn ranking~~ — **done** (`churn.go`, one `git log` pass

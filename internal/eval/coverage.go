@@ -145,7 +145,7 @@ func ParseArmCoverageKey(key string) (op, field string, err error) {
 		return "", "", fmt.Errorf("expected min_<field> or max_<field>")
 	}
 	if _, ok := armFields[field]; !ok {
-		return "", "", fmt.Errorf("unknown field %q", field)
+		return "", "", fmt.Errorf("unknown field %q (have: %s)", field, strings.Join(coverageFieldNamesFor(armFields), ", "))
 	}
 	return op, field, nil
 }
@@ -196,5 +196,9 @@ func coverageMet(cov Coverage, rec *RunRecord, fields map[string]func(*RunRecord
 }
 
 func coverageFieldNames() []string {
-	return sortedKeys(coverageFields)
+	return coverageFieldNamesFor(coverageFields)
+}
+
+func coverageFieldNamesFor(fields map[string]func(*RunRecord) float64) []string {
+	return sortedKeys(fields)
 }

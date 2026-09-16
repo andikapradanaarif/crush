@@ -293,6 +293,45 @@ func TestValidateExperiment_ArmCoverage(t *testing.T) {
 	require.Error(t, ValidateExperiment(exp))
 }
 
+func TestValidateExperiment_ArmCoverageStarvation(t *testing.T) {
+	t.Parallel()
+	temp := 0.0
+	exp := &Experiment{
+		Name:              "x",
+		Model:             "p/m",
+		Temperature:       &temp,
+		Corpus:            []string{"*"},
+		RunsPerTrajectory: map[Band]int{BandUncharacterized: 1},
+		Arms:              map[string]Arm{ArmControl: {}, ArmTreatment: {}},
+	}
+
+	// min_ on a flag-gated field where the arm sets the flag off —
+	// every run starves, so this is a load error.
+	exp.Arms[ArmControl] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"notebook_stub_superseded": false}},
+		Coverage: Coverage{"min_stub_stats.results": 1},
+	}
+	require.Error(t, ValidateExperiment(exp))
+
+	// Same predicate on the arm that enables the flag is the intended
+	// firing assertion — legal.
+	exp.Arms[ArmControl] = Arm{}
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"notebook_stub_superseded": true}},
+		Coverage: Coverage{"min_stub_stats.results": 1},
+	}
+	require.NoError(t, ValidateExperiment(exp))
+
+	// The question tool is interactive-only — min_ predicates on
+	// question_* starve in headless runs regardless of flags.
+	exp.Arms[ArmTreatment] = Arm{Coverage: Coverage{"min_call_metrics.question_calls": 1}}
+	require.Error(t, ValidateExperiment(exp))
+
+	// max_ is a bound, not a firing assertion — still legal.
+	exp.Arms[ArmTreatment] = Arm{Coverage: Coverage{"max_call_metrics.question_calls": 0}}
+	require.NoError(t, ValidateExperiment(exp))
+}
+
 func TestValidateTrajectory_FlagGatedMinRejected(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

@@ -265,8 +265,50 @@ func ValidateExperiment(e *Experiment) error {
 	}
 	for name, arm := range e.Arms {
 		for key := range arm.Coverage {
-			if _, _, err := ParseArmCoverageKey(key); err != nil {
+			op, field, err := ParseArmCoverageKey(key)
+			if err != nil {
 				return fmt.Errorf("arm %q coverage %q: %w", name, key, err)
+			}
+			if err := checkArmStarvation(name, key, op, field, arm); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// minStarvationGuards maps arm-coverage field prefixes to the option
+// keys whose absence makes the counter structurally zero. A min_
+// predicate over one of these on an arm that explicitly disables the
+// flag puts every run of that arm into permanent inconclusive with no
+// signal why — the same copy-paste trap the trajectory-level
+// flagGatedPrefixes check guards, one scope down. Only explicit
+// false is judged: an absent option defers to flags.json defaults,
+// which validation doesn't see.
+var minStarvationGuards = map[string][]string{
+	"stub_stats.":       {"notebook_enabled", "notebook_stub_superseded"},
+	"recalls.":          {"notebook_enabled"},
+	"call_metrics.map_": {"project_index"},
+}
+
+// checkArmStarvation rejects min_ predicates that can never fire —
+// flag-gated fields on an arm that disables the flag, and question_*
+// counters (the question tool is interactive-only, so headless eval
+// runs never register it on any arm).
+func checkArmStarvation(armName, key, op, field string, arm Arm) error {
+	if op != "min" {
+		return nil
+	}
+	if strings.HasPrefix(field, "call_metrics.question_") {
+		return fmt.Errorf("arm %q coverage %q: the question tool is interactive-only — min_ predicates starve in headless eval runs", armName, key)
+	}
+	for prefix, opts := range minStarvationGuards {
+		if !strings.HasPrefix(field, prefix) {
+			continue
+		}
+		for _, opt := range opts {
+			if v, ok := arm.Config.Options[opt]; ok && v == false {
+				return fmt.Errorf("arm %q coverage %q: %s is flag-gated and the arm sets %s=false — every run starves", armName, key, field, opt)
 			}
 		}
 	}

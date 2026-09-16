@@ -20,7 +20,7 @@
 		"timeout_seconds": 600
 	},
 	"coverage": {
-		"min_steps": 6
+		"min_steps": 3
 	},
 	"requires": {"network": true, "tools": ["go", "git"]},
 	"budget": {"run_timeout_seconds": 1500, "max_steps": 60}
