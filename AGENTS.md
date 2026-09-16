@@ -70,7 +70,10 @@ internal/
                                    (Crush + Claude Code compat)
   session/session.go               Session CRUD backed by SQLite
   message/                         Message model and content types
-  notebook/                        Per-event context summarization for sessions
+  notebook/                        Per-event context summarization + consolidated
+                                   checkpoints for sessions
+  toolclass/                       Mutating-call classification vocabulary (leaf;
+                                   re-exported by agent/tools)
   index/                           Persistent per-project source map (symbols, refs)
   db/                              SQLite via sqlc, with migrations
     sql/                           Raw SQL queries (consumed by sqlc)

@@ -3,8 +3,8 @@
 > **Status:** Partially shipped. PR 1 shipped (#56 — `working_dir`
 > partition, capability-detected server-side filters, fail-closed
 > client verification); §1's within-session `checkpoint` entry type
-> lands via #48. §2 (cold-start hydration) remains spec — tracked in
-> #53. Covers two halves of one gap — the notebook is an
+> shipped (#57, closing #48). §2 (cold-start hydration) remains spec
+> — tracked in #53. Covers two halves of one gap — the notebook is an
 > event log with no consolidated position (within-session), and its
 > mem0 sync is write-only in practice because retrieval is pull-only
 > (cross-session). Proposes a `checkpoint` entry type plus session
@@ -70,7 +70,8 @@ artifact:
   a checkpoint's self-pin will hang off, though today's pin is
   file-tag-driven so a type-driven exemption is new code (§1).
 - **The investigation→execution boundary is observable for free.**
-  `tools.WriteToolNames` (`internal/agent/tools/toolclass.go:9`) is a
+  `toolclass.WriteToolNames` (`internal/toolclass/toolclass.go`,
+  re-exported from `internal/agent/tools`) is a
   deterministic classifier;
   the first successful write-class call after a run of
   exploration-class events is a detectable transition — no model
@@ -159,7 +160,7 @@ event_type, tags, compression, working_dir}`
 
 ## Design
 
-### 1. `checkpoint` event type — the consolidated position
+### 1. `checkpoint` event type — the consolidated position — **shipped (#57)**
 
 A checkpoint entry consolidates the run's investigation into two
 lists:
@@ -186,9 +187,10 @@ Open:
   - First successful write-class call in a run containing ≥N
     exploration events with no checkpoint **this run** — the
     investigation→execution boundary. **The boundary already has a
-    detector: `scopeGate`** (`scope_gate.go` — `isMutatingCall`
+    detector: `scopeGate`** (`scope_gate.go` — `IsMutatingCall`,
+    vocabulary in `internal/toolclass`
     after `scopeGateMinExploration = 8` non-mutating calls). Reuse
-    its vocabulary — `isMutatingCall` is a superset of
+    its vocabulary — `IsMutatingCall` is a superset of
     `WriteToolNames` (catches `git commit`, `sed -i`, download);
     one boundary, one definition. But **don't hang the checkpoint
     off the gate's wrap path** — it's option-gated
@@ -512,12 +514,13 @@ never writes back.
    client-side verification, `canonicalizeWorkingDir`
    normalization. Resolved the cross-project bleed and the
    server-filter hard-dependency question.
-2. `checkpoint` event type: generator prompt with granularity-
-   aware input filter, deterministic triggers (write-boundary +
-   run-end) with the async-input rule, **type-driven pin at
-   boundary/session granularity with latest-only retention**,
+2. ~~`checkpoint` event type~~ — **shipped (#57).** Generator prompt
+   with granularity-aware input filter, deterministic triggers
+   (write-boundary + run-end) with the async-input rule, type-driven
+   pin at boundary/session granularity with latest-only retention,
    explicit `entryTypeRank`, `recall` dispatch, `coder.md.tpl`
-   pointer line.
+   pointer line. Deviations landed: per-run retry budget, in-tx
+   `run:` tag re-check, mem0 sync filtered in segment generation.
 3. Hydration seeding: mem0 fetch (metadata-ordered) → write seed
    entries with sentinel keys, provenance tags, stripped handles,
    date-in-text; `SyncEntries` skip for `hydrated`; **the render
