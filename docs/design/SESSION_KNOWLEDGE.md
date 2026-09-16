@@ -195,9 +195,9 @@ if non-notebook users matter.
 
 ### 3. mem0 partition key — `working_dir`
 
-- `SyncEntries` metadata gains `working_dir` (raw path — `file:`
-  tags already leak paths, so this adds nothing new sensitivity-wise)
-  and the session's origin provenance.
+- `SyncEntries` metadata gains `working_dir` (normalized path —
+  `file:` tags already leak paths, so this adds nothing new
+  sensitivity-wise) and the session's origin provenance.
 - `SearchMem0` filters by it: server-side metadata filter if the
   MCP `search_memories` tool accepts one (check the server's schema —
   `mcp.RunTool` passes arbitrary args); otherwise post-filter on

@@ -39,19 +39,20 @@ func stubRunMCPTool(t *testing.T, fn func(ctx context.Context, cfg *config.Confi
 	t.Cleanup(func() { runMCPTool = orig })
 }
 
-// stubFilterCapable forces the search_memories filters capability
-// check. No t.Parallel(): it mutates a package global.
-func stubFilterCapable(t *testing.T, capable bool) {
+// stubSearchCaps forces the search_memories schema capability check.
+// No t.Parallel(): it mutates a package global.
+func stubSearchCaps(t *testing.T, caps mem0SearchCaps) {
 	t.Helper()
-	orig := mem0SearchFilterCapable
-	mem0SearchFilterCapable = func(string) bool { return capable }
-	t.Cleanup(func() { mem0SearchFilterCapable = orig })
+	orig := mem0SearchCapsFor
+	mem0SearchCapsFor = func(string) mem0SearchCaps { return caps }
+	t.Cleanup(func() { mem0SearchCapsFor = orig })
 }
 
 func TestSearchMem0_PartitionsByWorkingDir(t *testing.T) {
 	dirA := t.TempDir()
 	dirB := t.TempDir()
 	cfgA := mem0TestStore(t, dirA)
+	stubSearchCaps(t, mem0SearchCaps{limitArg: "limit"})
 
 	// Metadata carries the normalized spelling — the same key
 	// SyncEntries writes.
@@ -76,19 +77,23 @@ func TestSearchMem0_PartitionsByWorkingDir(t *testing.T) {
 	require.NotContains(t, result, "legacy memory")
 	require.NotContains(t, result, "malformed")
 
-	// With no filters-capable server registered, the request
-	// over-fetches so the client-side partition doesn't drop
+	// With a schema declaring a limit argument but no filters, the
+	// request over-fetches so the client-side partition doesn't drop
 	// same-project memories that didn't rank in a global top-10.
 	var args map[string]any
 	require.NoError(t, json.Unmarshal([]byte(gotInput), &args))
 	require.Equal(t, mem0AgentID, args["agent_id"])
-	require.Equal(t, float64(mem0SearchFetchK), args["top_k"])
+	require.Equal(t, float64(mem0SearchFetchK), args["limit"])
+	_, hasTopK := args["top_k"]
+	require.False(t, hasTopK, "the limit arg name comes from the server schema")
+	_, hasFilters := args["filters"]
+	require.False(t, hasFilters)
 }
 
 func TestSearchMem0_ServerSideFilter(t *testing.T) {
 	workDir := t.TempDir()
 	cfg := mem0TestStore(t, workDir)
-	stubFilterCapable(t, true)
+	stubSearchCaps(t, mem0SearchCaps{filters: true, limitArg: "top_k"})
 
 	var gotInput string
 	stubRunMCPTool(t, func(_ context.Context, _ *config.ConfigStore, _, _, input string) (mcp.ToolResult, error) {
@@ -117,7 +122,7 @@ func TestSearchMem0_FilteredErrorRetriesUnfiltered(t *testing.T) {
 	dirA := t.TempDir()
 	dirB := t.TempDir()
 	cfg := mem0TestStore(t, dirA)
-	stubFilterCapable(t, true)
+	stubSearchCaps(t, mem0SearchCaps{filters: true, limitArg: "top_k"})
 
 	var inputs []string
 	stubRunMCPTool(t, func(_ context.Context, _ *config.ConfigStore, _, _, input string) (mcp.ToolResult, error) {
@@ -183,7 +188,7 @@ func TestSyncEntries_WorkingDirMetadata(t *testing.T) {
 		return mcp.ToolResult{Type: "text", Content: "ok"}, nil
 	})
 
-	m := NewMem0Sync(cfg, "mem0", "session1")
+	m := NewMem0Sync(cfg, "mem0")
 	m.SyncEntries(context.Background(), []Entry{
 		{
 			ID:          "e1",
@@ -226,7 +231,7 @@ func TestSyncEntries_SkipsWhenWorkingDirUnknown(t *testing.T) {
 		return mcp.ToolResult{Type: "text", Content: "ok"}, nil
 	})
 
-	NewMem0Sync(cfg, "mem0", "session1").SyncEntries(context.Background(), []Entry{{ID: "e1"}})
+	NewMem0Sync(cfg, "mem0").SyncEntries(context.Background(), []Entry{{ID: "e1"}})
 	require.False(t, called, "entries without a partition key must not sync")
 }
 
@@ -378,6 +383,10 @@ func TestSchemaHasProperty(t *testing.T) {
 	}, "filters"))
 	require.True(t, schemaHasProperty(json.RawMessage(`{"properties":{"filters":{}}}`), "filters"))
 	require.False(t, schemaHasProperty(json.RawMessage(`{broken`), "filters"))
+	// Marshalable schema structs (in-process tool sources) work too.
+	require.True(t, schemaHasProperty(struct {
+		Properties map[string]any `json:"properties"`
+	}{map[string]any{"filters": map[string]any{}}}, "filters"))
 	require.False(t, schemaHasProperty(nil, "filters"))
 	require.False(t, schemaHasProperty("not a schema", "filters"))
 }

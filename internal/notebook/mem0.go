@@ -57,15 +57,13 @@ var runMCPTool = mcp.RunTool
 type Mem0Sync struct {
 	cfg        *config.ConfigStore
 	serverName string
-	sessionID  string
 }
 
-// NewMem0Sync creates a mem0 sync helper for the given session.
-func NewMem0Sync(cfg *config.ConfigStore, serverName, sessionID string) *Mem0Sync {
+// NewMem0Sync creates a mem0 sync helper.
+func NewMem0Sync(cfg *config.ConfigStore, serverName string) *Mem0Sync {
 	return &Mem0Sync{
 		cfg:        cfg,
 		serverName: serverName,
-		sessionID:  sessionID,
 	}
 }
 
@@ -145,14 +143,23 @@ func SearchMem0(ctx context.Context, cfg *config.ConfigStore, serverName, query 
 		return "", nil
 	}
 	workDir := canonicalizeWorkingDir(raw)
+	caps := mem0SearchCapsFor(serverName)
+	serverFiltered := caps.filters
 	args := map[string]any{
 		"query":    query,
 		"agent_id": mem0AgentID,
-		"top_k":    mem0SearchFetchK,
 	}
-	serverFiltered := mem0SearchFilterCapable(serverName)
+	if caps.limitArg != "" {
+		limit := mem0SearchFetchK
+		if serverFiltered {
+			limit = mem0SearchTopK
+		}
+		args[caps.limitArg] = limit
+	} else if !serverFiltered {
+		slog.Warn("Mem0 search cannot request an over-fetch: the server accepts no known limit argument",
+			"server", serverName)
+	}
 	if serverFiltered {
-		args["top_k"] = mem0SearchTopK
 		args["filters"] = mem0WorkingDirFilter(workDir)
 	}
 	input, _ := json.Marshal(args)
@@ -163,8 +170,10 @@ func SearchMem0(ctx context.Context, cfg *config.ConfigStore, serverName, query 
 			"error", err,
 		)
 		serverFiltered = false
-		args["top_k"] = mem0SearchFetchK
 		delete(args, "filters")
+		if caps.limitArg != "" {
+			args[caps.limitArg] = mem0SearchFetchK
+		}
 		input, _ = json.Marshal(args)
 		result, err = runMCPTool(ctx, cfg, serverName, "search_memories", string(input))
 	}
@@ -217,29 +226,56 @@ func mem0WorkingDirFilter(workDir string) map[string]any {
 	}
 }
 
-// mem0SearchFilterCapable reports whether the server's registered
-// search_memories tool declares a filters argument in its input
-// schema. The registry is empty until the server connects — in that
-// case the client-side over-fetch and filter still partition
-// results. A package-level var so tests can force either path.
-var mem0SearchFilterCapable = func(serverName string) bool {
+// mem0SearchCaps describes which search_memories arguments a server
+// declares in its input schema.
+type mem0SearchCaps struct {
+	// filters reports whether the tool accepts a filters argument,
+	// enabling server-side partitioning.
+	filters bool
+	// limitArg is the result-count argument the server accepts —
+	// top_k, limit, or k — or empty when it declares none.
+	limitArg string
+}
+
+// mem0SearchCapsFor inspects the server's registered search_memories
+// tool schema. The registry is empty until the server connects —
+// RunTool can lazily connect on the first call — so the first-ever
+// search takes the client-side partition path; results stay correct
+// either way. A package-level var so tests can force either path.
+var mem0SearchCapsFor = func(serverName string) mem0SearchCaps {
 	for name, tools := range mcp.Tools() {
 		if name != serverName {
 			continue
 		}
 		for _, tool := range tools {
 			if tool != nil && tool.Name == "search_memories" {
-				return schemaHasProperty(tool.InputSchema, "filters")
+				return mem0SearchCaps{
+					filters:  schemaHasProperty(tool.InputSchema, "filters"),
+					limitArg: mem0LimitArg(tool.InputSchema),
+				}
 			}
 		}
 	}
-	return false
+	return mem0SearchCaps{}
+}
+
+// mem0LimitArg returns the result-count argument a search_memories
+// schema declares — top_k, limit, or k — or "" when it accepts none.
+// Server vocabularies differ (the official mem0-mcp uses limit).
+func mem0LimitArg(schema any) string {
+	for _, key := range []string{"top_k", "limit", "k"} {
+		if schemaHasProperty(schema, key) {
+			return key
+		}
+	}
+	return ""
 }
 
 // schemaHasProperty reports whether a JSON Schema object declares
 // prop in its properties. The SDK hands the client the server's
-// schema as a map[string]any, but tests and raw payloads may carry
-// it as json.RawMessage — both are handled.
+// schema as a map[string]any; raw payloads may carry it as
+// json.RawMessage, and in-process tool sources may hand over a
+// marshalable schema struct — all are handled.
 func schemaHasProperty(schema any, prop string) bool {
 	var m map[string]any
 	switch s := schema.(type) {
@@ -250,7 +286,10 @@ func schemaHasProperty(schema any, prop string) bool {
 			return false
 		}
 	default:
-		return false
+		raw, err := json.Marshal(schema)
+		if err != nil || json.Unmarshal(raw, &m) != nil {
+			return false
+		}
 	}
 	props, _ := m["properties"].(map[string]any)
 	_, ok := props[prop]
@@ -274,24 +313,36 @@ func filterMem0Results(content, workDir, serverName string) (string, bool) {
 		return "", false
 	}
 	var kept []map[string]any
-	dropped := 0
+	foreign, malformed := 0, 0
 	for _, item := range items {
 		m, ok := item.(map[string]any)
 		if !ok {
-			dropped++
+			malformed++
 			continue
 		}
 		wd, ok := mem0ItemWorkingDir(m)
-		if !ok || wd != workDir {
-			dropped++
-			continue
+		switch {
+		case !ok:
+			malformed++
+		case wd != workDir:
+			foreign++
+		default:
+			kept = append(kept, m)
 		}
-		kept = append(kept, m)
 	}
-	if dropped > 0 {
-		slog.Warn("Excluded mem0 memories with missing, malformed, or foreign working_dir metadata",
+	if malformed > 0 {
+		slog.Warn("Excluded mem0 memories with missing or malformed working_dir metadata",
 			"server", serverName,
-			"excluded", dropped,
+			"excluded", malformed,
+			"kept", len(kept),
+		)
+	}
+	if foreign > 0 {
+		// Foreign drops are the expected case on every partitioned
+		// search in a multi-project store — not a warning.
+		slog.Debug("Excluded mem0 memories from other working directories",
+			"server", serverName,
+			"excluded", foreign,
 			"kept", len(kept),
 		)
 	}
