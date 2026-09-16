@@ -278,6 +278,7 @@ func TestExecuteRun_ArmCoverageGate(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, OutcomeInconclusive, rec.Outcome)
 	require.Equal(t, "arm", rec.CheckDetail["coverage_scope"])
+	require.Equal(t, "min_steps", rec.CheckDetail["coverage_key"])
 
 	// Same run shape under a starving trajectory predicate → the
 	// trajectory scope is recorded instead.
@@ -286,6 +287,7 @@ func TestExecuteRun_ArmCoverageGate(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, OutcomeInconclusive, rec.Outcome)
 	require.Equal(t, "trajectory", rec.CheckDetail["coverage_scope"])
+	require.Equal(t, "min_steps", rec.CheckDetail["coverage_key"])
 
 	// No coverage anywhere → pass, no scope recorded.
 	tr.Coverage = nil

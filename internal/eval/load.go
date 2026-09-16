@@ -269,7 +269,12 @@ func ValidateExperiment(e *Experiment) error {
 			if err != nil {
 				return fmt.Errorf("arm %q coverage %q: %w", name, key, err)
 			}
-			if err := checkArmStarvation(name, key, op, field, arm); err != nil {
+			// At experiment load only the arm's literal options are
+			// visible — an absent key defers to flags.json defaults
+			// and can't be judged here. RunExperiment re-checks
+			// against resolved options once the manifest is loaded.
+			resolve := armOptionResolver(arm)
+			if err := checkArmStarvation(name, key, op, field, resolve); err != nil {
 				return err
 			}
 		}
@@ -277,38 +282,103 @@ func ValidateExperiment(e *Experiment) error {
 	return nil
 }
 
-// minStarvationGuards maps arm-coverage field prefixes to the option
-// keys whose absence makes the counter structurally zero. A min_
-// predicate over one of these on an arm that explicitly disables the
-// flag puts every run of that arm into permanent inconclusive with no
-// signal why — the same copy-paste trap the trajectory-level
-// flagGatedPrefixes check guards, one scope down. Only explicit
-// false is judged: an absent option defers to flags.json defaults,
-// which validation doesn't see.
-var minStarvationGuards = map[string][]string{
-	"stub_stats.":       {"notebook_enabled", "notebook_stub_superseded"},
-	"recalls.":          {"notebook_enabled"},
-	"call_metrics.map_": {"project_index"},
+// armStarvationRequires maps a coverage field to the option keys that
+// must resolve true for its counter to be reachable. map_calls is
+// absent deliberately: tool-not-found attempts still count, so a
+// flag-off arm can measure unprompted map reach — only the *_ok /
+// *_index_unavailable / result_bytes fields are truly unreachable.
+func armStarvationRequires(field string) []string {
+	switch field {
+	case "call_metrics.map_calls_ok",
+		"call_metrics.map_calls_index_unavailable",
+		"call_metrics.map_result_bytes":
+		return []string{"project_index"}
+	}
+	if strings.HasPrefix(field, "stub_stats.") {
+		return []string{"notebook_stub_superseded", "notebook_enabled"}
+	}
+	if strings.HasPrefix(field, "recalls.") {
+		return []string{"notebook_enabled"}
+	}
+	return nil
+}
+
+// armOptionResolver resolves only the arm's literal options — an
+// absent key reports unknown so load-time validation can't flag what
+// flags.json might enable.
+func armOptionResolver(arm Arm) func(string) (bool, bool) {
+	return func(opt string) (bool, bool) {
+		v, ok := arm.Config.Options[opt]
+		if !ok {
+			return false, false
+		}
+		b, ok := v.(bool)
+		return b, ok
+	}
 }
 
 // checkArmStarvation rejects min_ predicates that can never fire —
-// flag-gated fields on an arm that disables the flag, and question_*
+// flag-gated fields whose gating option resolves off, and question_*
 // counters (the question tool is interactive-only, so headless eval
-// runs never register it on any arm).
-func checkArmStarvation(armName, key, op, field string, arm Arm) error {
+// runs never register it on any arm). resolve reports (value, known);
+// unknown options are skipped so the check only rejects what it can
+// prove starves.
+func checkArmStarvation(armName, key, op, field string, resolve func(string) (bool, bool)) error {
 	if op != "min" {
 		return nil
 	}
 	if strings.HasPrefix(field, "call_metrics.question_") {
 		return fmt.Errorf("arm %q coverage %q: the question tool is interactive-only — min_ predicates starve in headless eval runs", armName, key)
 	}
-	for prefix, opts := range minStarvationGuards {
-		if !strings.HasPrefix(field, prefix) {
-			continue
+	for _, opt := range armStarvationRequires(field) {
+		if v, known := resolve(opt); known && !v {
+			return fmt.Errorf("arm %q coverage %q: %s needs %s, which resolves off for this arm — every run starves", armName, key, field, opt)
 		}
-		for _, opt := range opts {
-			if v, ok := arm.Config.Options[opt]; ok && v == false {
-				return fmt.Errorf("arm %q coverage %q: %s is flag-gated and the arm sets %s=false — every run starves", armName, key, field, opt)
+	}
+	return nil
+}
+
+// flagCodeDefaults mirror the Options helper defaults for the flag-
+// gated coverage counters — the last resolution step when neither the
+// arm nor the flags manifest names the key.
+var flagCodeDefaults = map[string]bool{
+	"notebook_enabled":         true,
+	"notebook_stub_superseded": false,
+	"project_index":            false,
+}
+
+// ValidateArmCoverageResolved re-runs the starvation check against
+// fully resolved options — arm option, then flags.json default, then
+// the code default. This catches the likelier footgun the load-time
+// check can't see: a firing assertion on an arm that omits the flag
+// entirely (notebook_stub_superseded defaults false).
+func ValidateArmCoverageResolved(e *Experiment, manifest *FlagsManifest) error {
+	for name, arm := range e.Arms {
+		for key := range arm.Coverage {
+			op, field, err := ParseArmCoverageKey(key)
+			if err != nil {
+				return fmt.Errorf("arm %q coverage %q: %w", name, key, err)
+			}
+			resolve := func(opt string) (bool, bool) {
+				if v, ok := arm.Config.Options[opt]; ok {
+					b, isBool := v.(bool)
+					return b, isBool
+				}
+				if manifest != nil {
+					if v, ok := manifest.Defaults[opt]; ok {
+						b, isBool := v.(bool)
+						return b, isBool
+					}
+				}
+				if d, ok := flagCodeDefaults[opt]; ok {
+					return d, true
+				}
+				// An unnamed flag defaults off — the counter is
+				// unreachable either way.
+				return false, true
+			}
+			if err := checkArmStarvation(name, key, op, field, resolve); err != nil {
+				return err
 			}
 		}
 	}

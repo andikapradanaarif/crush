@@ -330,6 +330,51 @@ func TestValidateExperiment_ArmCoverageStarvation(t *testing.T) {
 	// max_ is a bound, not a firing assertion — still legal.
 	exp.Arms[ArmTreatment] = Arm{Coverage: Coverage{"max_call_metrics.question_calls": 0}}
 	require.NoError(t, ValidateExperiment(exp))
+
+	// map_calls_ok needs the flag; an arm that sets it off starves.
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"project_index": false}},
+		Coverage: Coverage{"min_call_metrics.map_calls_ok": 1},
+	}
+	require.Error(t, ValidateExperiment(exp))
+
+	// map_calls itself is NOT guarded — tool-not-found attempts count,
+	// so flag-off arms can measure unprompted map reach.
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"project_index": false}},
+		Coverage: Coverage{"min_call_metrics.map_calls": 1},
+	}
+	require.NoError(t, ValidateExperiment(exp))
+}
+
+func TestValidateArmCoverageResolved(t *testing.T) {
+	t.Parallel()
+	manifest := &FlagsManifest{Defaults: map[string]any{
+		"notebook_stub_superseded": false,
+		"notebook_enabled":         true,
+		"project_index":            false,
+	}}
+	exp := &Experiment{Arms: map[string]Arm{
+		ArmControl:   {},
+		ArmTreatment: {},
+	}}
+
+	// Firing assertion with NO config: the flag resolves to the
+	// manifest's false default — silent starvation, now an error.
+	exp.Arms[ArmTreatment] = Arm{Coverage: Coverage{"min_stub_stats.results": 1}}
+	require.Error(t, ValidateArmCoverageResolved(exp, manifest))
+
+	// Enabled by the arm — resolves on.
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"notebook_stub_superseded": true}},
+		Coverage: Coverage{"min_stub_stats.results": 1},
+	}
+	require.NoError(t, ValidateArmCoverageResolved(exp, manifest))
+
+	// Enabled by manifest default — resolves on without arm config.
+	manifest.Defaults["project_index"] = true
+	exp.Arms[ArmTreatment] = Arm{Coverage: Coverage{"min_call_metrics.map_result_bytes": 1}}
+	require.NoError(t, ValidateArmCoverageResolved(exp, manifest))
 }
 
 func TestValidateTrajectory_FlagGatedMinRejected(t *testing.T) {

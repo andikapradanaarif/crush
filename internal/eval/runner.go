@@ -353,28 +353,30 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	// flag-gated firing assertions live (a treatment arm asserting
 	// stubbing actually fired starves itself otherwise — the pairing
 	// can't pass on evidence of nothing).
-	met, err := CoverageMet(traj.Coverage, &rec)
+	met, failedKey, err := coverageMet(traj.Coverage, &rec, coverageFields)
 	if err != nil {
 		return rec, fmt.Errorf("coverage eval: %w", err)
 	}
 	scope := ""
 	if !met {
 		scope = "trajectory"
-	} else if armMet, aerr := ArmCoverageMet(arm.Coverage, &rec); aerr != nil {
+	} else if armMet, akey, aerr := coverageMet(arm.Coverage, &rec, armFields); aerr != nil {
 		return rec, fmt.Errorf("arm coverage eval: %w", aerr)
 	} else if !armMet {
 		// An arm-coverage miss after a trajectory-coverage pass is
 		// the firing assertion tripping, not generic undercoverage.
-		scope = "arm"
+		scope, failedKey = "arm", akey
 		met = false
 	}
 	if !met {
-		// Record which scope starved the run so forensics can tell
-		// a firing assertion from generic undercoverage.
+		// Record which scope and predicate starved the run so
+		// forensics can tell a firing assertion from generic
+		// undercoverage.
 		if rec.CheckDetail == nil {
 			rec.CheckDetail = map[string]any{}
 		}
 		rec.CheckDetail["coverage_scope"] = scope
+		rec.CheckDetail["coverage_key"] = failedKey
 		rec.Outcome = OutcomeInconclusive
 		return rec, nil
 	}
@@ -516,6 +518,9 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 		return Report{}, err
 	}
 	if err := manifest.ValidateArmFlags(exp); err != nil {
+		return Report{}, err
+	}
+	if err := ValidateArmCoverageResolved(exp, manifest); err != nil {
 		return Report{}, err
 	}
 	bands, err := LoadBands(r.EvalDir)
