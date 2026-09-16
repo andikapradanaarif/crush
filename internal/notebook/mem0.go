@@ -14,6 +14,7 @@ import (
 
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/csync"
 )
 
 const (
@@ -46,11 +47,18 @@ const (
 	// results returned to the model. Results beyond this are
 	// truncated to avoid prompt inflation.
 	mem0SearchMaxTokens = 4000
+	// mem0SearchMaxChars is the byte budget matching
+	// mem0SearchMaxTokens at the 4-chars-per-token estimate.
+	mem0SearchMaxChars = mem0SearchMaxTokens * 4
 )
 
 // runMCPTool delegates to mcp.RunTool. It is a package-level var so
 // tests can stub the MCP round-trip.
 var runMCPTool = mcp.RunTool
+
+// mem0LimitWarned records which servers have already logged the
+// no-limit-argument warning.
+var mem0LimitWarned = csync.NewMap[string, struct{}]()
 
 // Mem0Sync provides cross-session memory sync via an MCP server
 // (typically mem0). It is optional and only active when
@@ -160,8 +168,14 @@ func SearchMem0(ctx context.Context, cfg *config.ConfigStore, serverName, query 
 		}
 		args[caps.limitArg] = limit
 	} else if !serverFiltered {
-		slog.Warn("Mem0 search cannot request an over-fetch: the server accepts no known limit argument",
-			"server", serverName)
+		// Once per server per process: a no-limit server keeps
+		// under-returning for every search, but the warning only
+		// needs to fire once.
+		if _, warned := mem0LimitWarned.Get(serverName); !warned {
+			mem0LimitWarned.Set(serverName, struct{}{})
+			slog.Warn("Mem0 search cannot request an over-fetch: the server accepts no known limit argument",
+				"server", serverName)
+		}
 	}
 	if serverFiltered {
 		args["filters"] = mem0WorkingDirFilter(workDir)
@@ -370,11 +384,44 @@ func filterMem0Results(content, workDir, serverName string) (string, bool) {
 	if len(kept) == 0 {
 		return "", true
 	}
+	return renderMem0Results(kept), true
+}
+
+// renderMem0Results marshals kept memories to JSON that fits the
+// token budget, dropping the lowest-ranked items rather than cutting
+// mid-token. When items were dropped, a trailing note element reports
+// the omission if it fits. A single oversized memory falls back to
+// plain truncation so it still surfaces something.
+func renderMem0Results(kept []map[string]any) string {
+	dropped := 0
+	for len(kept) > 1 {
+		out, err := json.Marshal(kept)
+		if err != nil {
+			return ""
+		}
+		if len(out) <= mem0SearchMaxChars {
+			break
+		}
+		kept = kept[:len(kept)-1]
+		dropped++
+	}
 	out, err := json.Marshal(kept)
 	if err != nil {
-		return "", false
+		return ""
 	}
-	return string(out), true
+	if len(out) > mem0SearchMaxChars {
+		return truncateTextToTokens(string(out), mem0SearchMaxTokens)
+	}
+	if dropped == 0 {
+		return string(out)
+	}
+	noted := append(slices.Clone(kept), map[string]any{
+		"note": fmt.Sprintf("%d additional same-project memories omitted to fit the token budget", dropped),
+	})
+	if out2, err := json.Marshal(noted); err == nil && len(out2) <= mem0SearchMaxChars {
+		return string(out2)
+	}
+	return string(out)
 }
 
 // mem0ResultItems extracts the list of memory items from a parsed
@@ -387,11 +434,20 @@ func mem0ResultItems(payload any) ([]any, bool) {
 		return p, true
 	case map[string]any:
 		for _, key := range []string{"results", "memories", "data", "items"} {
-			switch v := p[key].(type) {
+			v, exists := p[key]
+			if !exists {
+				continue
+			}
+			switch t := v.(type) {
 			case []any:
-				return v, true
+				return t, true
 			case map[string]any:
-				return []any{v}, true
+				return []any{t}, true
+			default:
+				// A wrapper key holding neither a list nor a single
+				// memory means the envelope is malformed — don't
+				// mistake the envelope itself for a memory.
+				return nil, false
 			}
 		}
 		if _, ok := p["metadata"]; ok {

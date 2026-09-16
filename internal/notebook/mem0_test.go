@@ -164,6 +164,36 @@ func TestSearchMem0_UnparseableUnfilteredReturnsEmpty(t *testing.T) {
 	require.Equal(t, "", result, "unverifiable results must not leak cross-project memories")
 }
 
+func TestSearchMem0_NoLimitArgStillPartitions(t *testing.T) {
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+	cfg := mem0TestStore(t, dirA)
+	// Server declares neither filters nor a limit argument — the
+	// client's only leverage is post-filtering the default page.
+	stubSearchCaps(t, mem0SearchCaps{})
+
+	var gotInput string
+	stubRunMCPTool(t, func(_ context.Context, _ *config.ConfigStore, _, _, input string) (mcp.ToolResult, error) {
+		gotInput = input
+		payload := fmt.Sprintf(`[{"memory":"dir A fact","metadata":{"working_dir":%q}},
+			{"memory":"dir B secret","metadata":{"working_dir":%q}}]`,
+			canonicalizeWorkingDir(dirA), canonicalizeWorkingDir(dirB))
+		return mcp.ToolResult{Type: "text", Content: payload}, nil
+	})
+
+	result, err := SearchMem0(context.Background(), cfg, "mem0", "fact")
+	require.NoError(t, err)
+	require.Contains(t, result, "dir A fact")
+	require.NotContains(t, result, "dir B secret")
+
+	var args map[string]any
+	require.NoError(t, json.Unmarshal([]byte(gotInput), &args))
+	for _, key := range []string{"top_k", "limit", "k", "filters"} {
+		_, present := args[key]
+		require.False(t, present, "args must not send %q the server never declared", key)
+	}
+}
+
 func TestSearchMem0_PropagatesToolError(t *testing.T) {
 	cfg := mem0TestStore(t, t.TempDir())
 
@@ -370,6 +400,58 @@ func TestFilterMem0Results_SortsByScoreAndCaps(t *testing.T) {
 		require.GreaterOrEqual(t, mem0Score(kept[i]), mem0Score(kept[i+1]))
 	}
 	require.Equal(t, "m14", kept[0]["memory"], "highest-scoring same-dir memory ranks first")
+}
+
+func TestFilterMem0Results_EnvelopeEdgeCases(t *testing.T) {
+	// A wrapper key holding neither a list nor a memory is a
+	// malformed envelope, not a single memory carrying metadata.
+	out, ok := filterMem0Results(`{"results":"oops","metadata":{"working_dir":"/repo/a"}}`, "/repo/a", "mem0")
+	require.False(t, ok)
+	require.Equal(t, "", out)
+
+	// A wrapper key holding one memory object unwraps it.
+	out, ok = filterMem0Results(`{"results":{"memory":"a1","metadata":{"working_dir":"/repo/a"}}}`, "/repo/a", "mem0")
+	require.True(t, ok)
+	require.Contains(t, out, "a1")
+}
+
+func TestRenderMem0Results_FitsBudget(t *testing.T) {
+	// Many same-project memories, best first (the order
+	// filterMem0Results produces): the output must stay within the
+	// budget and remain valid JSON — items are dropped, never cut.
+	var kept []map[string]any
+	for i := range 500 {
+		kept = append(kept, map[string]any{
+			"memory": strings.Repeat("x", 500),
+			"score":  float64(500 - i),
+		})
+	}
+	out := renderMem0Results(kept)
+	require.LessOrEqual(t, len(out), mem0SearchMaxChars)
+	var items []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &items))
+	require.Less(t, len(items), len(kept))
+
+	var scores []float64
+	noted := false
+	for _, m := range items {
+		if _, ok := m["note"]; ok {
+			noted = true
+			continue
+		}
+		s, ok := m["score"].(float64)
+		require.True(t, ok)
+		scores = append(scores, s)
+	}
+	require.True(t, noted, "dropped memories should leave a note element")
+	require.Equal(t, float64(500), scores[0], "best-ranked memories survive")
+}
+
+func TestRenderMem0Results_SingleOversizedFallsBack(t *testing.T) {
+	kept := []map[string]any{{"memory": strings.Repeat("x", mem0SearchMaxChars*2)}}
+	out := renderMem0Results(kept)
+	require.LessOrEqual(t, len(out), mem0SearchMaxChars+200)
+	require.Contains(t, out, "truncated")
 }
 
 func TestSchemaHasProperty(t *testing.T) {
