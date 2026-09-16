@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
@@ -95,7 +96,10 @@ func (m *Mem0Sync) SyncEntries(ctx context.Context, entries []Entry) {
 			text = entry.EntryText
 		}
 		metadata := map[string]any{
-			"session_id":        entry.SessionID,
+			"session_id": entry.SessionID,
+			// Always equal to session_id today; kept distinct so
+			// hydrated entries (when hydration lands) can carry their
+			// true origin session rather than the seeded one.
 			"origin_session_id": entry.SessionID,
 			"working_dir":       workDir,
 			"turn_number":       entry.TurnNumber,
@@ -183,8 +187,12 @@ func SearchMem0(ctx context.Context, cfg *config.ConfigStore, serverName, query 
 	filtered, ok := filterMem0Results(result.Content, workDir, serverName)
 	if !ok {
 		if serverFiltered {
-			// The server enforced the partition; the response simply
-			// isn't per-memory JSON we can re-check.
+			// The response isn't per-memory JSON we can re-check, so
+			// the partition rests entirely on the declared filters
+			// contract — a server that accepts the arg but silently
+			// ignores it would still leak cross-project memories.
+			// Dropping instead would break servers that legitimately
+			// filter-and-return-prose.
 			return truncateTextToTokens(result.Content, mem0SearchMaxTokens), nil
 		}
 		slog.Warn("Mem0 search dropped: response is not parseable and no server-side filter was applied",
@@ -238,10 +246,14 @@ type mem0SearchCaps struct {
 }
 
 // mem0SearchCapsFor inspects the server's registered search_memories
-// tool schema. The registry is empty until the server connects —
-// RunTool can lazily connect on the first call — so the first-ever
-// search takes the client-side partition path; results stay correct
-// either way. A package-level var so tests can force either path.
+// tool schema. The registry is empty until the server connects and
+// lists its tools — getOrRenewClient only renews a dead session, so
+// an unconnected server yields zero caps: the client-side partition
+// path runs without a limit arg, post-filtering the server's default
+// top-N. The partition guarantee holds (no cross-project results),
+// but that first search can silently under-return — same-project
+// memories beyond the server's default page are missed. A
+// package-level var so tests can force either path.
 var mem0SearchCapsFor = func(serverName string) mem0SearchCaps {
 	for name, tools := range mcp.Tools() {
 		if name != serverName {
@@ -375,8 +387,11 @@ func mem0ResultItems(payload any) ([]any, bool) {
 		return p, true
 	case map[string]any:
 		for _, key := range []string{"results", "memories", "data", "items"} {
-			if items, ok := p[key].([]any); ok {
-				return items, true
+			switch v := p[key].(type) {
+			case []any:
+				return v, true
+			case map[string]any:
+				return []any{v}, true
 			}
 		}
 		if _, ok := p["metadata"]; ok {
@@ -399,11 +414,16 @@ func mem0ItemWorkingDir(item map[string]any) (string, bool) {
 }
 
 // mem0Score extracts a relevance score from a memory item for
-// client-side ranking; absent or non-numeric scores rank last.
+// client-side ranking; absent or unparseable scores rank last.
 func mem0Score(item map[string]any) float64 {
 	for _, key := range []string{"score", "similarity", "relevance"} {
-		if v, ok := item[key].(float64); ok {
+		switch v := item[key].(type) {
+		case float64:
 			return v
+		case string:
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				return f
+			}
 		}
 	}
 	return 0
