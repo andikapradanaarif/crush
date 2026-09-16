@@ -1522,7 +1522,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				if regErr != nil {
 					slog.Warn("Failed to list processed segments for checkpoint", "session_id", notebookSessionID, "error", regErr)
 				} else {
-					a.generateRunEndCheckpoint(notebookCtx, notebookSessionID, allMsgs, call.RunStamp, registry, lastAssistantID)
+					a.generateRunEndCheckpoint(notebookCtx, notebookSessionID, allMsgs, notebookPreTurnCount, call.RunStamp, registry, lastAssistantID)
 				}
 			}
 		}()

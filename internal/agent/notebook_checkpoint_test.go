@@ -166,7 +166,7 @@ func TestGenerateRunEndCheckpoint(t *testing.T) {
 	a.notebookCheckpoint = true
 
 	msgs := append([]message.Message{segUser("look")}, cpViewCall("v1")...)
-	a.generateRunEndCheckpoint(t.Context(), sessionID, msgs, 11, nil, "")
+	a.generateRunEndCheckpoint(t.Context(), sessionID, msgs, 0, 11, nil, "")
 
 	entries, err := nb.GetEntries(t.Context(), sessionID)
 	require.NoError(t, err)
@@ -175,7 +175,7 @@ func TestGenerateRunEndCheckpoint(t *testing.T) {
 
 	// The run-tag check dedups a second run-end pass — the durable
 	// form of the claim.
-	a.generateRunEndCheckpoint(t.Context(), sessionID, msgs, 11, nil, "")
+	a.generateRunEndCheckpoint(t.Context(), sessionID, msgs, 0, 11, nil, "")
 	entries, err = nb.GetEntries(t.Context(), sessionID)
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
@@ -193,7 +193,7 @@ func TestGenerateRunEndCheckpoint_EmptyRun(t *testing.T) {
 		segUser("hi"),
 		segAssistant("hello"),
 	}
-	a.generateRunEndCheckpoint(t.Context(), sessionID, msgs, 12, nil, "")
+	a.generateRunEndCheckpoint(t.Context(), sessionID, msgs, 0, 12, nil, "")
 
 	entries, err := nb.GetEntries(t.Context(), sessionID)
 	require.NoError(t, err)

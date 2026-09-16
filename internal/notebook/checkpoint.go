@@ -116,9 +116,16 @@ func (s *service) GenerateCheckpoint(ctx context.Context, sessionID string, req 
 	if entry.Title == "" || entry.Title == "Entry" {
 		entry.Title = "Checkpoint"
 	}
-	// Structural tags are stamped, not generated: granularity and the
-	// run dedup tag must exist regardless of what the model wrote.
-	// Deduped — the prompt asks the model for #phase:checkpoint too.
+	// Structural tags are stamped, not generated: granularity, run
+	// dedup, and phase must reflect the request, not the model's
+	// output. Strip model-emitted tags in those namespaces first — a
+	// hallucinated #granularity:session would misrank the entry (the
+	// first granularity: tag wins) and a spurious #run:N could falsely
+	// dedup a future run's checkpoint.
+	entry.Tags = slices.DeleteFunc(entry.Tags, func(t string) bool {
+		return strings.HasPrefix(t, granularityTagPrefix) ||
+			strings.HasPrefix(t, "run:") || strings.HasPrefix(t, "phase:")
+	})
 	stampTag := func(tag string) {
 		if !slices.Contains(entry.Tags, tag) {
 			entry.Tags = append(entry.Tags, tag)
@@ -183,12 +190,16 @@ var errCheckpointExists = errors.New("checkpoint already exists for run")
 // buildCheckpointInput renders the consolidation input: committed
 // entries in chronological order, newest filling the byte budget
 // first, then the raw descriptions of the uncovered tail's
-// significant events. The tail is never budget-dropped — it is the
-// newest evidence and the reason the checkpoint exists.
+// significant events within their own newest-first budget. The
+// (cutoffTurn, cutoffEvent) divider marks where the previous
+// same-or-coarser checkpoint's coverage ended, so the model can tell
+// already-consolidated history from newly gathered work.
 func buildCheckpointInput(entries []Entry, tail []EntryInput, cutoffTurn, cutoffEvent int64) string {
 	// Walk newest-first to spend the budget on the freshest state,
-	// then reverse into reading order.
-	var blocks []string
+	// then reverse into reading order. Entries at or below the cutoff
+	// are already consolidated into the previous checkpoint; the rest
+	// are new since it.
+	var blocks, freshBlocks []string
 	used := 0
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
@@ -204,9 +215,14 @@ func buildCheckpointInput(entries []Entry, tail []EntryInput, cutoffTurn, cutoff
 			break
 		}
 		used += b.Len()
-		blocks = append(blocks, b.String())
+		if e.TurnNumber > cutoffTurn || (e.TurnNumber == cutoffTurn && e.EventNumber > cutoffEvent) {
+			freshBlocks = append(freshBlocks, b.String())
+		} else {
+			blocks = append(blocks, b.String())
+		}
 	}
 	slices.Reverse(blocks)
+	slices.Reverse(freshBlocks)
 
 	// The tail gets its own newest-first budget — it is the newest
 	// evidence and the reason the checkpoint exists, but a long
@@ -228,10 +244,16 @@ func buildCheckpointInput(entries []Entry, tail []EntryInput, cutoffTurn, cutoff
 
 	var sb strings.Builder
 	sb.WriteString("Committed notebook entries (oldest first):\n\n")
-	if len(blocks) == 0 {
+	if len(blocks) == 0 && len(freshBlocks) == 0 {
 		sb.WriteString("(none)\n\n")
 	}
 	for _, b := range blocks {
+		sb.WriteString(b)
+	}
+	if cutoffTurn > 0 && len(freshBlocks) > 0 {
+		fmt.Fprintf(&sb, "— gathered since the last checkpoint (turn %d, event %d) —\n\n", cutoffTurn, cutoffEvent)
+	}
+	for _, b := range freshBlocks {
 		sb.WriteString(b)
 	}
 	sb.WriteString("Recent uncovered events (oldest first):\n\n")

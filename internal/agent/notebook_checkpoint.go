@@ -192,7 +192,10 @@ func (a *sessionAgent) maybeCheckpointBoundary(ctx context.Context, sessionID st
 	}
 	key, ok := checkpointSegmentKey(segs)
 	if !ok {
-		tracker.finishCheckpoint(stamp, true)
+		// No key exists — not a generation failure, so the retry
+		// budget is untouched; the slot stays claimed since a
+		// segment-less run can never produce a key.
+		tracker.finishCheckpoint(stamp, false)
 		return
 	}
 	a.spawnCheckpoint(ctx, sessionID, tracker, stamp, notebook.CheckpointRequest{
@@ -210,12 +213,15 @@ func (a *sessionAgent) maybeCheckpointBoundary(ctx context.Context, sessionID st
 // mid-run checkpoint failed or fell under the boundary threshold —
 // consolidates at run end. The run-tag existence check doubles as the
 // durable dedup when the in-memory claim was lost to a rebuild.
-// lastAssistantID bounds the input to this run — a user message
-// created by a later run (visible past this run's final assistant
-// message) means the tail belongs to that run, the same ownership
-// rule generateRunEndSegments applies.
-func (a *sessionAgent) generateRunEndCheckpoint(ctx context.Context, sessionID string, msgs []message.Message, stamp uint64, registry map[segmentKey]notebook.ProcessedSegment, lastAssistantID string) {
-	if !a.notebookCheckpoint || a.notebook == nil || stamp == 0 || sessionID == "" {
+// preTurnMsgCount guards the no-op run — a run that appended no
+// messages has nothing new to consolidate under its stamp, matching
+// generateRunEndSegments. lastAssistantID bounds the input to this
+// run — a user message created by a later run (visible past this
+// run's final assistant message) means the tail belongs to that run,
+// the same ownership rule generateRunEndSegments applies.
+func (a *sessionAgent) generateRunEndCheckpoint(ctx context.Context, sessionID string, msgs []message.Message, preTurnMsgCount int, stamp uint64, registry map[segmentKey]notebook.ProcessedSegment, lastAssistantID string) {
+	if !a.notebookCheckpoint || a.notebook == nil || stamp == 0 || sessionID == "" ||
+		preTurnMsgCount >= len(msgs) {
 		return
 	}
 	if lastAssistantID != "" {
@@ -226,10 +232,15 @@ func (a *sessionAgent) generateRunEndCheckpoint(ctx context.Context, sessionID s
 				break
 			}
 		}
-		for i := lastAsst + 1; i < len(msgs); i++ {
-			if msgs[i].Role == message.User {
-				msgs = msgs[:i]
-				break
+		// lastAsst < 0 means the run's final assistant message isn't
+		// in this list — keep msgs whole rather than cutting at the
+		// first user message in history.
+		if lastAsst >= 0 {
+			for i := lastAsst + 1; i < len(msgs); i++ {
+				if msgs[i].Role == message.User {
+					msgs = msgs[:i]
+					break
+				}
 			}
 		}
 	}
@@ -254,7 +265,7 @@ func (a *sessionAgent) generateRunEndCheckpoint(ctx context.Context, sessionID s
 	segs := segmentBoundaries(msgs, a.segTokenBudget(), a.segMaxSteps())
 	key, ok := checkpointSegmentKey(segs)
 	if !ok {
-		tracker.finishCheckpoint(stamp, true)
+		tracker.finishCheckpoint(stamp, false)
 		return
 	}
 	// Coverage claims are extent-checked, matching detectSegments: a

@@ -51,9 +51,9 @@ type CallMetrics struct {
 	// Blind spot: bash mutations (sed -i, redirects) and download
 	// writes are invisible to the tool-name vocabulary — a run that
 	// mutates only through bash keeps accruing discovery calls and
-	// shows -1 here. The wider mutation vocabulary lives in the
-	// scope gate (isMutatingCall); this metric deliberately tracks
-	// the stub-machinery write class the gates assert on.
+	// shows -1 here. The wider mutation vocabulary lives in
+	// internal/toolclass (IsMutatingCall); this metric deliberately
+	// tracks the stub-machinery write class the gates assert on.
 	FirstWriteIndex int `json:"first_write_index"`
 	// FirstWriteAttemptIndex is the index of the first write-class
 	// call INCLUDING labeled placeholders — a canceled edit keeps its
