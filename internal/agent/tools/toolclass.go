@@ -1,23 +1,25 @@
 package tools
 
-import "encoding/json"
+import (
+	"encoding/json"
 
-// WriteToolNames mutate files; a successful result supersedes earlier
-// reads of the same path. The set is also the verifyingTool wrap set and
-// the gate's metadata-scan set — lsp_rename/lsp_replace_symbol mutate
-// via workspace edits, the canonical caller-breaker.
-var WriteToolNames = map[string]bool{
-	"edit": true, "write": true, "multiedit": true,
-	"lsp_rename": true, "lsp_replace_symbol": true,
+	"github.com/charmbracelet/crush/internal/toolclass"
+)
+
+// The classification vocabulary lives in the internal/toolclass leaf
+// package so the notebook layer can share it without importing the
+// whole tool set — these aliases keep the tools.* call sites and the
+// tools.IsMutatingCall vocabulary path stable.
+var (
+	WriteToolNames   = toolclass.WriteToolNames
+	ReadToolNames    = toolclass.ReadToolNames
+	CommandToolNames = toolclass.CommandToolNames
+)
+
+// IsMutatingCall classifies a call as a write for boundary purposes.
+func IsMutatingCall(name, input string) bool {
+	return toolclass.IsMutatingCall(name, input)
 }
-
-// ReadToolNames capture file content; their results go stale on writes.
-var ReadToolNames = map[string]bool{"view": true, "read": true}
-
-// CommandToolNames emit re-derivable output: once a result is old
-// enough to leave the recency guard, or a re-run makes it redundant,
-// a labeled stub suffices.
-var CommandToolNames = map[string]bool{"bash": true, "grep": true, "glob": true, "ls": true}
 
 // ToolCallFilePath extracts the file path from a tool call's JSON
 // input, trying the conventional keys.

@@ -321,6 +321,14 @@ type segmentTracker struct {
 	inflight          map[segmentKey]bool
 	backfillAttempted bool
 	driftLogged       map[segmentKey]bool
+	// Checkpoint bookkeeping: checkpointStamp/checkpointInFlight are
+	// the per-run generation claim; checkpointFailures counts mid-run
+	// failures against checkpointFailureRun's stamp — see
+	// notebook_checkpoint.go.
+	checkpointStamp      uint64
+	checkpointInFlight   bool
+	checkpointFailures   int
+	checkpointFailureRun uint64
 }
 
 func newSegmentTracker() *segmentTracker {
@@ -522,6 +530,10 @@ func (a *sessionAgent) detectSegments(ctx context.Context, sessionID string, msg
 			}()
 		}
 	}
+	// Write-boundary checkpoint trigger — runs on the same per-step
+	// detection pass, cheap-scan first.
+	a.maybeCheckpointBoundary(ctx, sessionID, msgs, segs, processed)
+
 	// Flag superseded tool results once per pass that fired generation
 	// or recorded a close — the mid-run stub win ("a read superseded
 	// two segments ago gets stubbed") needs a pass over the full
@@ -629,8 +641,14 @@ func (a *sessionAgent) generateSegment(ctx context.Context, sessionID string, s 
 		if err != nil {
 			slog.Error("Failed to get segment entries for mem0 sync", "error", err)
 		} else {
+			// A checkpoint keyed to this segment can land while its
+			// generation was in flight — runCheckpoint syncs those
+			// itself, so syncing them here would double-push.
+			fresh := slices.DeleteFunc(entries, func(e notebook.Entry) bool {
+				return e.EventType == notebook.EventCheckpoint
+			})
 			mem0 := notebook.NewMem0Sync(a.configStore, a.notebookMemoryServer)
-			mem0.SyncEntries(ctx, entries)
+			mem0.SyncEntries(ctx, fresh)
 		}
 	}
 }
@@ -1024,6 +1042,13 @@ func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID strin
 		selected, diff := selectNotebookEntries(filtered, refs, floor, sel)
 		a.noteSelectionDiff(sessionID, diff)
 		for _, e := range selected {
+			// A checkpoint's file: tags cite evidence rather than
+			// cover the file — counting them here would inflate
+			// CoveredReViews, the metric the checkpoint eval arm
+			// reads.
+			if e.EventType == notebook.EventCheckpoint {
+				continue
+			}
 			for _, tag := range e.Tags {
 				if base, ok := strings.CutPrefix(tag, "file:"); ok {
 					files[base] = true
@@ -1073,5 +1098,8 @@ func (a *sessionAgent) noteSelectionDiff(sessionID string, diff selectionDiff) {
 	stats.SelPassRefs += diff.refs
 	stats.SelPassWorking += diff.working
 	stats.SelPassFill += diff.fill
+	if diff.checkpoints > 0 {
+		stats.CheckpointRenders++
+	}
 	a.nbStats.Set(sessionID, stats)
 }
