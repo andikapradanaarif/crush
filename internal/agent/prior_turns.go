@@ -43,7 +43,15 @@ type turnCollapse struct {
 // the stubs' recall pointer. The coordinator already coerces the
 // option to verbatim when the notebook is disabled; this is the belt.
 func (a *sessionAgent) newTurnCollapse(before int64) *turnCollapse {
-	if a.priorTurns != priorTurnsStub || !a.notebookEnabled || a.notebook == nil {
+	// "digest" resolves to stub until turn-digest generation ships —
+	// the coordinator already normalizes via NotebookPriorTurnsMode,
+	// but a directly-set field gets the same belt.
+	switch a.priorTurns {
+	case priorTurnsStub, "digest":
+	default:
+		return nil
+	}
+	if !a.notebookEnabled || a.notebook == nil {
 		return nil
 	}
 	return &turnCollapse{Before: before}
@@ -94,21 +102,32 @@ func collapsedResultText(turn int64, toolCallID string) string {
 }
 
 // collapseAssistantForTurn returns m with prior-turn detail removed:
-// reasoning parts drop with the turn (signature requirements are
-// in-flight-turn-scoped — keeping a signature while mutating the
-// tool_use.input it bound is the fragile combo, so both go together)
-// and tool-call inputs are replaced by collapsedCallInput. question
-// calls are exempt — they carry user decisions, not execution detail.
-// IDs, names, and finish state are preserved. Returns m unchanged
-// when nothing needs collapsing.
+// reasoning parts drop with the turn and tool-call inputs are replaced
+// by collapsedCallInput. question and provider-executed calls are
+// exempt — the former carry user decisions rather than execution
+// detail, and the latter carry typed inputs providers may
+// schema-validate on replay (a stubbed server-tool input can 400 the
+// whole request). Reasoning bound via ToolID to an exempt call is kept:
+// replaying a signed function call without its thought signature is a
+// provider rejection mode, so the signature survives with the call it
+// signs. Reasoning bound to a collapsed call drops — the signature is
+// invalid against the mutated input either way. IDs, names, and finish
+// state are preserved. Returns m unchanged when nothing needs
+// collapsing.
 func collapseAssistantForTurn(m message.Message, turn int64) message.Message {
+	exempt := make(map[string]bool)
+	for _, part := range m.Parts {
+		if tc, ok := part.(message.ToolCall); ok && callIsExempt(tc) {
+			exempt[tc.ID] = true
+		}
+	}
 	needs := false
 	for _, part := range m.Parts {
 		switch p := part.(type) {
 		case message.ReasoningContent:
-			needs = true
+			needs = needs || !exempt[p.ToolID]
 		case message.ToolCall:
-			needs = needs || p.Name != tools.QuestionToolName
+			needs = needs || !exempt[p.ID]
 		}
 		if needs {
 			break
@@ -121,9 +140,12 @@ func collapseAssistantForTurn(m message.Message, turn int64) message.Message {
 	for _, part := range m.Parts {
 		switch p := part.(type) {
 		case message.ReasoningContent:
+			if exempt[p.ToolID] {
+				parts = append(parts, part)
+			}
 			continue
 		case message.ToolCall:
-			if p.Name != tools.QuestionToolName {
+			if !exempt[p.ID] {
 				p.Input = collapsedCallInput(turn)
 				part = p
 			}
@@ -135,17 +157,23 @@ func collapseAssistantForTurn(m message.Message, turn int64) message.Message {
 	return out
 }
 
+// callIsExempt reports whether a tool call stays verbatim inside a
+// collapsed turn — question pairs and provider-executed calls.
+func callIsExempt(tc message.ToolCall) bool {
+	return tc.Name == tools.QuestionToolName || tc.ProviderExecuted
+}
+
 // collapseToolMessageForTurn returns m with each tool result's stored
 // content replaced by collapsedResultText — media payloads included
-// (Data cleared so the text stub is what emits). Results answering a
-// question call stay verbatim with their call. Returns the message and
-// how many results were collapsed.
-func collapseToolMessageForTurn(m message.Message, turn int64, callNames map[string]string) (message.Message, int) {
+// (Data cleared so the text stub is what emits). Results answering an
+// exempt call stay verbatim with it. Returns the message and how many
+// results were collapsed.
+func collapseToolMessageForTurn(m message.Message, turn int64, exemptCalls map[string]bool) (message.Message, int) {
 	var parts []message.ContentPart
 	count := 0
 	for i, part := range m.Parts {
 		tr, ok := part.(message.ToolResult)
-		if !ok || callNames[tr.ToolCallID] == tools.QuestionToolName {
+		if !ok || exemptCalls[tr.ToolCallID] {
 			if parts != nil {
 				parts = append(parts, part)
 			}

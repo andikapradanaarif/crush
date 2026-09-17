@@ -95,12 +95,15 @@ func priorTurnFixture(t *testing.T, svc message.Service, sessionID string) []mes
 	mkMsg(t, svc, sessionID, message.Assistant,
 		message.TextContent{Text: "investigating"},
 		message.ReasoningContent{Thinking: "deep thoughts", ThoughtSignature: "sig", ToolID: "tc-bash"},
+		message.ReasoningContent{Thinking: "signed for question", ThoughtSignature: "sig-q", ToolID: "tc-q"},
 		message.ToolCall{ID: "tc-bash", Name: "bash", Input: `{"command":"cat big.go"}`, Finished: true},
 		message.ToolCall{ID: "tc-q", Name: "question", Input: `{"questions":[{"type":"yes_no","question":"proceed?"}]}`, Finished: true},
+		message.ToolCall{ID: "tc-web", Name: "web_search", Input: `{"query":"golang generics"}`, ProviderExecuted: true, Finished: true},
 	)
 	mkMsg(t, svc, sessionID, message.Tool,
 		message.ToolResult{ToolCallID: "tc-bash", Name: "bash", Content: bigContent()},
 		message.ToolResult{ToolCallID: "tc-q", Name: "question", Content: "yes — proceed"},
+		message.ToolResult{ToolCallID: "tc-web", Name: "web_search", Content: "search result payload"},
 	)
 	mkMsg(t, svc, sessionID, message.Assistant, message.TextContent{Text: "turn zero answer"})
 	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "second prompt"})
@@ -136,9 +139,18 @@ func TestPreparePrompt_CollapsesCoveredPriorTurn(t *testing.T) {
 	require.Contains(t, res, `recall("result:tc-bash")`)
 	require.NotContains(t, res, "file content line")
 
-	// Prior-turn reasoning — including its thought signature — drops
-	// with the turn.
-	require.NotContains(t, renderedReasoning(history), "deep thoughts")
+	// Reasoning bound to a collapsed call drops — its signature is
+	// invalid against the mutated input anyway. Reasoning bound to the
+	// exempt question call keeps both thinking and signature: replaying
+	// a signed call without its thought signature is a rejection mode.
+	reasoning := renderedReasoning(history)
+	require.NotContains(t, reasoning, "deep thoughts")
+	require.Contains(t, reasoning, "signed for question")
+
+	// Provider-executed calls stay verbatim — typed server-tool inputs
+	// may be schema-validated on replay.
+	require.JSONEq(t, `{"query":"golang generics"}`, renderedCall(t, history, "tc-web").Input)
+	require.Equal(t, "search result payload", renderedResultText(t, history, "tc-web"))
 
 	// The conversation plane stays verbatim: user messages, assistant
 	// text, and the question pair.

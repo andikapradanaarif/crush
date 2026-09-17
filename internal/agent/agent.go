@@ -1982,12 +1982,14 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 	// Both maps cover only rawMsgs: pre-boundary messages never render,
 	// and a turn boundary cannot split a call from its result.
 	callNames := make(map[string]string)
+	exemptCalls := make(map[string]bool)
 	for _, m := range rawMsgs {
 		if m.Role != message.Assistant {
 			continue
 		}
 		for _, tc := range m.ToolCalls() {
 			callNames[tc.ID] = tc.Name
+			exemptCalls[tc.ID] = callIsExempt(tc)
 		}
 	}
 	var stubs stubReport
@@ -2001,7 +2003,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 			// Turn collapse is evaluated before other stub kinds —
 			// inside a collapsed turn they are irrelevant.
 			var n int
-			m, n = collapseToolMessageForTurn(m, turn, callNames)
+			m, n = collapseToolMessageForTurn(m, turn, exemptCalls)
 			collapsedResults += n
 		} else if a.stubSuperseded {
 			// Substitute stubs before indexing so the emitted result
