@@ -107,15 +107,26 @@ result: [prior turn 3 — collapsed; recall("result:a91f") to recover]
 digest" — constant per mode, see below.)
 
 - **The predicate is coverage, not age.** `turn < runStartTurn`
-  **and** all of that turn's segments processed — segment generation lags (in-flight, backed-off, or
+  **and** every segment of that turn extent-matched to a processed
+  row — segment generation lags (in-flight, backed-off, or
   burst-limited), and collapsing an uncovered turn produces stubs
-  with no entries behind them: "drop with extra steps." Coverage is
-  the _whole_ gate — the stub's recovery pointer resolves against
-  stored events and needs no digest, so `digest` mode is exactly
-  `stub` + generation; gating collapse on the digest would make
-  generator latency drive collapse timing (async prefix churn). A
-  persistent small-model outage degrades to `verbatim`-like
-  behavior — safe direction.
+  with no entries behind them: "drop with extra steps." **All**
+  segments, not "all non-open": the freeze is computed on the
+  run-start `msgs` fetched before `createUserMessage` — on that
+  slice the last prior turn's tail is `open` only because it is the
+  list-final segment (`notebook_segments.go:206`), while in reality
+  it is closed the moment the new user message lands. Exempting it
+  would let turn `runStartTurn−1` collapse while its tail — the
+  previous run's final assistant steps — has no committed coverage
+  if `generateRunEndSegments` failed or is still in flight. The
+  tail's recorded extent `[start, len(msgs))` is final, so a
+  processed row for it is checkable despite the `open` flag.
+  Coverage is the _whole_ gate — the stub's recovery pointer
+  resolves against stored events and needs no digest, so `digest`
+  mode is exactly `stub` + generation; gating collapse on the
+  digest would make generator latency drive collapse timing (async
+  prefix churn). A persistent small-model outage degrades to
+  `verbatim`-like behavior — safe direction.
 - **Run-start turn, not current turn.** `drainQueueForStep` can fold
   a queued prompt mid-run, advancing `currentTurn` under the active
   run — the predicate uses the turn that _started_ the run so its
@@ -138,11 +149,25 @@ digest" — constant per mode, see below.)
   stub kinds are irrelevant inside a collapsed turn — flagging
   passes may keep marking stored events harmlessly, but render
   checks the turn boundary before consulting them.
-- **Stub text is constant _per mode_.** `stub` mode never says
-  "consolidated in turn digest" — no digest exists; mode-specific
-  constant text costs nothing (mode flips re-render anyway). Never
-  reflects digest availability — async state must not churn the
-  prefix.
+- **Stub text is constant _per mode_ — and doesn't over-promise.**
+  `stub` mode never says "consolidated in turn digest" — no digest
+  exists; mode-specific constant text costs nothing (mode flips
+  re-render anyway). Never reflects digest availability — async
+  state must not churn the prefix. The recovery pointer is honest
+  about its bounds: `recall("result:<id>")` returns the result's
+  stored content capped at `MaxOutputLength` (`recall.go:175`), and
+  the call _input_ is unrecoverable — for write-class tools
+  (`toolclass.IsMutatingCall`) the payload was the input, so their
+  stub reads "call arguments collapsed; re-view the file to
+  reconstruct" instead of implying `result:` recall restores the
+  write material. Recovery path is re-`view` — which is exactly
+  what the edit-failure eval arm measures.
+- **`ProviderExecuted` calls stay verbatim.** Server-side tools
+  carry provider replay semantics a synthetic input may violate.
+  (Vacuous in-repo today — `ProviderExecuted` is hardcoded `false`
+  at `agent.go:1182,1218` and set by fantasy during provider-side
+  streaming — but the exemption is one check and the matrix case
+  costs nothing.)
 
 **What stays verbatim** — the conversation plane:
 
@@ -217,10 +242,12 @@ option notebook-prior-turns digest     # collapse + generated turn digest
 
 - Three values map exactly onto the three eval arms — one knob, no
   mode pair to keep in sync.
-- **Gated by the notebook.** Like `StubSuperseded`
-  (`coordinator.go:848`): notebook disabled → coerced to `verbatim`,
-  because `recall` is the recovery path and invariant 3 forbids dead
-  pointers.
+- **Gated by the notebook _and_ the recall path.** The coercion
+  lives in `buildAgent` next to `StubSuperseded` (`coordinator.go:
+848`), with a warn line like :865: notebook disabled → `verbatim`,
+  **and** `recall` in `options.disabled_tools` (`config.go:391`) →
+  `verbatim` — a stub pointing at a tool that isn't in the toolset
+  is a dead pointer either way (invariant 3).
 - **crushrc wiring:** `optionSpecs` already carries the
   `notebook-*` keys post-#45; `notebook-prior-turns` is a one-line
   `optString` entry plus the `Options` field.
@@ -283,16 +310,25 @@ option notebook-prior-turns digest     # collapse + generated turn digest
   follow-up most likely references. The edit-failure eval arm is
   the gate; graduated recency windows stay deferred to
   `CONTEXT_WINDOW_SAFETY.md`.
-- **`Summarize` sees the collapsed view.** It calls `preparePrompt`
-  (`agent.go:1672`), so post-implementation the summarizer's input
-  is stubs + notebook — accepted, since digests/entries carry the
-  information; if summary quality regresses, `Summarize` can render
-  verbatim.
-- **`runStartTurn` plumbing.** `preparePrompt` has three call
-  sites (run :969, summarize :1672, shared
-  `notebook_segments.go:875`); capture the run-start turn once at
-  run start and thread it through — for the summarize call site all
-  completed turns are prior turns.
+- **`Summarize` renders verbatim — decided, not accidental.** It
+  calls `preparePrompt` (`agent.go:1692`), but its ctx carries no
+  run state, so a ctx-scoped freeze never reaches it. One-shot
+  call, no cache reuse, fidelity is free.
+- **`runStartTurn` and the frozen set ride the run context.** The
+  freeze — `runStartTurn` plus the set of covered turns — is
+  computed once at run start on the pre-`createUserMessage` `msgs`
+  (`agent.go:886`) and stored as a ctx value parallel to
+  `RunStampContextKey` (:827). `rebuildStepMessages` is not
+  context-free — `PrepareStep`'s `callContext` is `genCtx`-derived,
+  so the value is readable there; the run-start `preparePrompt`
+  call at :978 passes the outer `ctx`, so the freeze must be set
+  before it — either on `runCtx` ahead of `createUserMessage`, or
+  by switching that call site to `runCtx`. Write-once per run;
+  `rebuildStepMessages` reads it, never writes. (Alternative:
+  a coordinator-owned map keyed by `(sessionID, RunStamp)`, the
+  `stubBoundary`/`segmentTrackers` injection pattern — survives an
+  agent rebuild mid-session. The ctx form is preferred because
+  Summarize-verbatim falls out for free.)
 
 ## Measurement
 
@@ -355,8 +391,13 @@ Ship gates, mirroring `TOOL_RESULT_PRUNING` acceptance criteria:
    trigger folds into the digest path when mode is `digest`.
 4. Three-arm eval + ship gates; default stays `verbatim`.
 5. Telemetry: turns collapsed, events collapsed, digest
-   present-at-render rate (measures the async race), recall-into-
-   prior-turns count in `stubStats`/`crush stats`.
+   present-at-render rate (measures the async race), and `result:`
+   recalls targeting a call ID in a prior turn — the feasible
+   approximation of "recall into collapsed turns" (collapse leaves
+   no stored mark, so `recallToolResult` can't distinguish a
+   collapsed-turn recall from a superseded-stub one; if even that
+   isn't worth wiring, the existing `ResultRecalls` counter stands
+   in).
 
 ## Risks
 
