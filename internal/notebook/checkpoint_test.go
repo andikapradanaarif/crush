@@ -284,7 +284,7 @@ func TestBuildCheckpointInput_ElidedEntriesMarked(t *testing.T) {
 		{TurnNumber: 2, EventNumber: 1, Title: "New", EventType: EventGeneral, EntryTextFull: "fresh fact"},
 	}
 	input := buildCheckpointInput(entries, nil, 0, 0)
-	require.Contains(t, input, "(older entries elided)")
+	require.Contains(t, input, "(entries elided for budget)")
 	require.Contains(t, input, "fresh fact")
 	require.NotContains(t, input, "(none)")
 

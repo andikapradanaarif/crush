@@ -188,6 +188,12 @@ func (s *service) GenerateCheckpoint(ctx context.Context, sessionID string, req 
 		if serr == nil {
 			for _, e := range existing {
 				if e.EventType == EventCheckpoint {
+					// The dedup outcome holds regardless of why the
+					// commit failed, but keep the swallowed error
+					// reachable — a non-race failure landing beside
+					// a sibling's checkpoint should not be silent.
+					slog.Warn("Checkpoint commit failed after a sibling checkpoint landed; reporting dedup",
+						"session_id", sessionID, "run_tag", req.RunTag, "error", err)
 					return false, nil
 				}
 			}
@@ -269,8 +275,10 @@ func buildCheckpointInput(entries []Entry, tail []EntryInput, cutoffTurn, cutoff
 	sb.WriteString("Committed notebook entries (oldest first):\n\n")
 	if elided {
 		// Without the marker the model cannot tell "no prior
-		// history" from "history crowded out by the budget".
-		sb.WriteString("(older entries elided)\n\n")
+		// history" from "history crowded out by the budget". The
+		// newest-first scan skips any entry that does not fit, so
+		// elided entries are not necessarily the oldest.
+		sb.WriteString("(entries elided for budget)\n\n")
 	}
 	if len(blocks) == 0 && len(freshBlocks) == 0 && !elided {
 		sb.WriteString("(none)\n\n")
@@ -286,7 +294,7 @@ func buildCheckpointInput(entries []Entry, tail []EntryInput, cutoffTurn, cutoff
 	}
 	sb.WriteString("Recent uncovered events (oldest first):\n\n")
 	if tailTruncated {
-		sb.WriteString("(older tail events elided)\n\n")
+		sb.WriteString("(tail events elided for budget)\n\n")
 	}
 	for _, b := range tailBlocks {
 		sb.WriteString(b)

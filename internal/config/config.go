@@ -1318,11 +1318,11 @@ func (o *Options) NotebookAutoInjectEnabled() bool {
 }
 
 // NotebookCheckpointEnabled returns the resolved checkpoint setting,
-// defaulting to true — the consolidated position is part of the
-// notebook's core value, not an experiment.
+// defaulting to the notebook's own enabled state — the consolidated
+// position is part of the notebook's core value, not an experiment.
 func (o *Options) NotebookCheckpointEnabled() bool {
 	if o.NotebookCheckpoint == nil {
-		return true
+		return o.NotebookIsEnabled()
 	}
 	return *o.NotebookCheckpoint
 }
