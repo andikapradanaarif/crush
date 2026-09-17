@@ -288,6 +288,13 @@ func TestBuildCheckpointInput_ElidedEntriesMarked(t *testing.T) {
 	require.Contains(t, input, "fresh fact")
 	require.NotContains(t, input, "(none)")
 
+	// Every entry crowded out: the marker stands in for the missing
+	// history — a bare "(none)" would claim there was none.
+	allElided := []Entry{{TurnNumber: 1, EventNumber: 1, Title: "Big", EventType: EventGeneral, EntryTextFull: huge}}
+	input = buildCheckpointInput(allElided, nil, 0, 0)
+	require.Contains(t, input, "(entries elided for budget)")
+	require.NotContains(t, input, "(none)")
+
 	// When everything fits, no marker.
 	small := []Entry{{TurnNumber: 1, EventNumber: 1, Title: "A", EventType: EventGeneral, EntryTextFull: "fact"}}
 	require.NotContains(t, buildCheckpointInput(small, nil, 0, 0), "elided")

@@ -185,17 +185,20 @@ func (s *service) GenerateCheckpoint(ctx context.Context, sessionID string, req 
 		// real error. If the sibling's checkpoint is now visible,
 		// report the clean dedup outcome.
 		existing, serr := s.SearchByTag(ctx, sessionID, req.RunTag)
-		if serr == nil {
-			for _, e := range existing {
-				if e.EventType == EventCheckpoint {
-					// The dedup outcome holds regardless of why the
-					// commit failed, but keep the swallowed error
-					// reachable — a non-race failure landing beside
-					// a sibling's checkpoint should not be silent.
-					slog.Warn("Checkpoint commit failed after a sibling checkpoint landed; reporting dedup",
-						"session_id", sessionID, "run_tag", req.RunTag, "error", err)
-					return false, nil
-				}
+		if serr != nil {
+			// Best-effort re-check — the commit error below is the
+			// outcome either way.
+			slog.Debug("Checkpoint dedup re-check failed", "session_id", sessionID, "error", serr)
+		}
+		for _, e := range existing {
+			if e.EventType == EventCheckpoint {
+				// The dedup outcome holds regardless of why the
+				// commit failed, but keep the swallowed error
+				// reachable — a non-race failure landing beside
+				// a sibling's checkpoint should not be silent.
+				slog.Warn("Checkpoint commit failed after a sibling checkpoint landed; reporting dedup",
+					"session_id", sessionID, "run_tag", req.RunTag, "error", err)
+				return false, nil
 			}
 		}
 	}
