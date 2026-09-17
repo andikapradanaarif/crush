@@ -231,6 +231,13 @@ func TestGenerateRunEndCheckpoint_ResumedSessionStamps(t *testing.T) {
 	require.NotEqual(t, uint64(1), fresh)
 	require.NotZero(t, fresh>>32, "epoch bits must be populated")
 
+	// The mid-run claim surface rejects the stale stamp the same way:
+	// run:1 stays claimed by the previous lifetime, fresh claims.
+	tr := a2.segmentTracker(sessionID)
+	require.False(t, tr.claimCheckpoint(1))
+	require.True(t, tr.claimCheckpoint(fresh))
+	tr.finishCheckpoint(fresh, false)
+
 	a2.generateRunEndCheckpoint(t.Context(), sessionID, msgs, 0, fresh, nil, "")
 	entries, err = nb.GetEntries(t.Context(), sessionID)
 	require.NoError(t, err)

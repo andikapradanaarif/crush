@@ -330,6 +330,9 @@ func newSegmentTestAgent(t *testing.T, gen notebook.Generator) (*sessionAgent, m
 		stubStats:       csync.NewMap[string, stubStats](),
 		systemPrompt:    csync.NewValue("system"),
 	}
+	// Seed the stamp generator like NewSessionAgent — stamps are
+	// random-epoch, so tests must assert explicit stamps rather than
+	// assuming a run:1 sequence.
 	a.runStampGen.Store(runStampEpoch())
 	return a, svc, nb, sess.ID
 }
