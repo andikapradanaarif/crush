@@ -104,7 +104,10 @@ result: [prior turn 3 — collapsed; recall("result:a91f") to recover]
 ```
 
 (`digest`-mode result text may instead read "consolidated in turn
-digest" — constant per mode, see below.)
+digest — recall(\"result:a91f\") to recover" — constant per mode,
+and it **keeps the recall pointer**: the digest may lag async or
+never land on generator failure, while `result:` recall resolves
+against stored events regardless.)
 
 - **The predicate is coverage, not age.** `turn < runStartTurn`
   **and** every segment of that turn extent-matched to a processed
@@ -212,17 +215,26 @@ Open:
   a digest that loses selection to budget must leave its segment
   entries eligible, or the turn loses representation entirely.
   Demotion keys on the digest being _rendered in this prefix_, not
-  existing — a compressed-away digest demotes nothing. The
-  demoted-turn set freezes at the run's first render alongside
+  existing — a compressed-away digest demotes nothing. The freeze
+  captures **eligibility, not application**: the set of turns
+  holding a digest freezes at the run's first render alongside
   `collapse.Set` — a digest landing mid-run must not demote
-  already-rendered segment entries (a bigger mid-window delta
-  than the freeze tolerates anywhere else). `maybeAutoInject`
-  (`agent.go:2210`) queries `file:` tags independently and
-  **checkpoints never inject** (`agent.go:2264`), so demotion
-  there only removes — it receives the rendered-digest turn set,
-  and only then do its same-turn candidates drop. (Replacing
-  segment entries was the alternative; rejected: it loses file
-  pins and per-segment recall.)
+  already-rendered entries (a bigger mid-window delta than the
+  freeze tolerates anywhere else) — while each render still
+  requires the digest actually selected that render, so an evicted
+  digest can't leave turn N with neither representation. Demotion
+  additionally requires the digest to carry content
+  (`CompressionLevel < CompressionTagsOnly`) — a tags-only digest
+  renders as a bare tag line and must not strip the turn's real
+  entries. Dropped entries' already-accounted tokens aren't
+  refunded — a bounded under-fill of the 12k cap, acceptable; an
+  optional fill-after-demotion pass could reclaim it later.
+  `maybeAutoInject` (`agent.go:2210`) queries `file:` tags
+  independently and **checkpoints never inject** (`agent.go:2264`),
+  so demotion there only removes — it receives the rendered-digest
+  turn set, and only then do its same-turn candidates drop.
+  (Replacing segment entries was the alternative; rejected: it
+  loses file pins and per-segment recall.)
 - **Not self-pinned.** Boundary checkpoints pin because they are
   rare; a pinned entry per turn floods the working set. Turn
   digests are ordinary entries — selectable, compressible, eligible
@@ -235,7 +247,13 @@ Open:
   `drainQueueForStep` folds queued prompts mid-run, so one run can
   finish two turns and each gets its digest. Dedup keys on
   `(turn_number, granularity:turn)` — does a turn digest for turn N
-  already exist — **not** `run:<stamp>`. The run tag's identity is
+  already exist — **not** `run:<stamp>`, re-checked inside the
+  commit transaction like `errCheckpointExists` so concurrent or
+  retried generations can't write two digests for one turn. The
+  entry keys to **that turn's own last segment**, not
+  `checkpointSegmentKey`'s session-wide last closed segment —
+  demotion joins on `TurnNumber == N`, so a digest keyed to an
+  earlier turn would demote the wrong turn. The run tag's identity is
   the run's consolidated _position_, and `GenerateCheckpoint`'s
   tag check is granularity-blind by design: reusing it would let a
   mid-run boundary checkpoint suppress the same run's digests for
@@ -248,15 +266,21 @@ Open:
   would fire alongside — double consolidation, not absorption.
   Under `digest` mode the run-end boundary trigger is disabled
   outright; the turn digest _is_ the run-end consolidation. The
-  mid-run boundary trigger is disabled too — turn-grain becomes
-  the consolidation unit, and a boundary checkpoint plus per-turn
-  digests is the same position paid twice (digests still feed any
-  coarser session checkpoint; nothing is lost). Under `stub`/
-  `verbatim` both boundary triggers stand unchanged.
+  **mid-run boundary trigger stays** — it is the only within-turn
+  consolidation (the dominant-turn machinery this doc's non-goals
+  assign to "stubs + boundary checkpoint," and the payload
+  `RUN_EDGES`' stall-replan will consume). A boundary checkpoint
+  consolidates the position at the write crossing; the turn
+  digest consolidates the turn's whole work at run end —
+  different moments, not the same position paid twice. Under
+  `stub`/`verbatim` both triggers stand unchanged.
 - **Floor units:** ≥1 classified event of _either_ bucket on the
   turn's own events — the floor exists to skip _empty_ turns
-  (pure conversation: "thanks", one-question turns produce zero
-  events), not to filter exploration depth. Trivial events feed
+  (pure conversation: "thanks"-style turns with zero tool calls
+  produce zero events), not to filter exploration depth. A
+  pure-`question` turn does produce a digest — `question` calls
+  classify significant — harmless, since its pairs stay
+  collapse-exempt anyway. Trivial events feed
   the digest input too — a grep-only turn's trail is still the
   turn's evidence. A decision-only turn (assistant answers with no
   tool calls) likewise produces no digest — correct: its text
