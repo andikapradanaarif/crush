@@ -484,7 +484,10 @@ if (stats.pruning && stats.pruning.stubbed_results > 0) {
 }
 
 // Prior-Turn Collapse (only shown when stub/digest mode has fired)
-if (stats.collapse && stats.collapse.turns > 0) {
+if (
+  stats.collapse &&
+  (stats.collapse.turns > 0 || stats.collapse.prior_turn_result_recalls > 0)
+) {
   const section = document.createElement("div");
   section.className = "chart-card full-width";
   section.innerHTML = `

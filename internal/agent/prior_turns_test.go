@@ -3,10 +3,12 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/notebook"
 	"github.com/stretchr/testify/require"
@@ -427,13 +429,15 @@ func TestPreparePrompt_WriteClassStubText(t *testing.T) {
 	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
 
 	// File-write calls: the payload was the input itself — result:
-	// recall can't recover it — so both stubs point at re-view.
+	// recall can't recover it — so both stubs lead with re-view; the
+	// result stub keeps a qualified recall pointer (the result is
+	// still recallable, it just holds only the confirmation).
 	require.JSONEq(t, `{"_collapsed":"prior turn 0 — write args dropped; re-view the file to reconstruct"}`,
 		renderedCall(t, history, "tc-edit").Input)
 	editRes := renderedResultText(t, history, "tc-edit")
 	require.Contains(t, editRes, "prior turn 0")
 	require.Contains(t, editRes, "re-view the file")
-	require.NotContains(t, editRes, "result:tc-edit")
+	require.Contains(t, editRes, `recall("result:tc-edit") holds only the confirmation`)
 
 	// Read-class keeps the generic marker and the recall pointer.
 	require.JSONEq(t, `{"_collapsed":"prior turn 0"}`, renderedCall(t, history, "tc-view").Input)
@@ -524,4 +528,71 @@ func TestRecordCollapsedTurns_SkipsAllExemptTurn(t *testing.T) {
 	inserted, err := nb.RecordCollapsedTurn(ctx, sessionID, 0, 0)
 	require.NoError(t, err)
 	require.True(t, inserted, "turn 0 must not have been recorded")
+}
+
+// summarizeCaptureModel records the prompt each Stream call received
+// and answers with a minimal summary stream.
+type summarizeCaptureModel struct {
+	fakeLanguageModel
+	prompts []fantasy.Prompt
+}
+
+func (m *summarizeCaptureModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
+	m.prompts = append(m.prompts, call.Prompt)
+	return func(yield func(fantasy.StreamPart) bool) {
+		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextStart, ID: "1"}) {
+			return
+		}
+		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, ID: "1", Delta: "summary"}) {
+			return
+		}
+		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextEnd, ID: "1"}) {
+			return
+		}
+		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonStop})
+	}, nil
+}
+
+func TestSummarize_RendersVerbatim(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsStub
+	model := &summarizeCaptureModel{}
+	a.largeModel = csync.NewValue(Model{
+		Model:    model,
+		ModelCfg: config.SelectedModel{Model: "fake-model", Provider: "fake"},
+	})
+	a.systemPromptPrefix = csync.NewValue("")
+	a.activeRequests = csync.NewMap[string, *activeCancel]()
+	a.messageQueue = csync.NewMap[string, []SessionAgentCall]()
+
+	msgs := priorTurnFixture(t, svc, sessionID)
+	ctx := t.Context()
+	a.detectSegments(ctx, sessionID, msgs)
+
+	require.NoError(t, a.Summarize(ctx, sessionID, fantasy.ProviderOptions{}, nil))
+	require.NotEmpty(t, model.prompts)
+
+	// The summary's input must be the verbatim transcript: a collapsed
+	// turn would render the stub marker instead of the stored content,
+	// and the summary seeds the next context window from it.
+	var body strings.Builder
+	for _, m := range model.prompts[0] {
+		for _, p := range m.Content {
+			switch part := p.(type) {
+			case fantasy.ToolCallPart:
+				body.WriteString(part.Input)
+			case fantasy.ToolResultPart:
+				switch out := part.Output.(type) {
+				case fantasy.ToolResultOutputContentText:
+					body.WriteString(out.Text)
+				case fantasy.ToolResultOutputContentError:
+					body.WriteString(out.Error.Error())
+				}
+			}
+		}
+	}
+	require.Contains(t, body.String(), "file content line")
+	require.NotContains(t, body.String(), "_collapsed")
 }

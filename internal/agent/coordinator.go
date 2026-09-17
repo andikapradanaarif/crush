@@ -191,7 +191,7 @@ type coordinator struct {
 	// turns this process already persisted to collapsed_turns.
 	stubBoundary     *csync.Map[string, int]
 	stubStats        *csync.Map[string, stubStats]
-	collapseRecorded *csync.Map[string, map[int64]bool]
+	collapseRecorded *csync.Map[string, *csync.Map[int64, bool]]
 	// segmentTrackers/prefixCache share intra-turn segment state and
 	// the rendered notebook prefix across agent rebuilds. Nil when
 	// the notebook is disabled.
@@ -298,7 +298,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		c.nbStats = csync.NewMap[string, notebook.Stats]()
 		c.nbScanIdx = csync.NewMap[string, int]()
 		c.nbPendingReads = csync.NewMap[string, map[string]string]()
-		c.collapseRecorded = csync.NewMap[string, map[int64]bool]()
+		c.collapseRecorded = csync.NewMap[string, *csync.Map[int64, bool]]()
 		if opts.Config.Config().Options.NotebookStubSupersededEnabled() {
 			c.stubBoundary = csync.NewMap[string, int]()
 		}

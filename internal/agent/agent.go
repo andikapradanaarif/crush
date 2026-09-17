@@ -240,7 +240,7 @@ type sessionAgent struct {
 	// already persisted, so per-step renders don't re-write the
 	// collapsed_turns row — the table's primary key dedupes across
 	// processes.
-	collapseRecorded *csync.Map[string, map[int64]bool]
+	collapseRecorded *csync.Map[string, *csync.Map[int64, bool]]
 	// stubStats accumulates per-session stubbing telemetry for
 	// step-composition logging.
 	stubStats *csync.Map[string, stubStats]
@@ -382,7 +382,7 @@ type SessionAgentOptions struct {
 	// prior-turn collapse. When nil the agent allocates its own.
 	StubBoundary     *csync.Map[string, int]
 	StubStats        *csync.Map[string, stubStats]
-	CollapseRecorded *csync.Map[string, map[int64]bool]
+	CollapseRecorded *csync.Map[string, *csync.Map[int64, bool]]
 	// SegmentTrackers/PrefixCache let a coordinator share segment
 	// bookkeeping and the rendered-prefix cache across agent
 	// rebuilds. When nil the agent allocates its own.
@@ -451,7 +451,7 @@ func NewSessionAgent(
 		priorTurns:             opts.NotebookPriorTurns,
 		stubBoundary:           cmp.Or(opts.StubBoundary, csync.NewMap[string, int]()),
 		stubStats:              cmp.Or(opts.StubStats, csync.NewMap[string, stubStats]()),
-		collapseRecorded:       cmp.Or(opts.CollapseRecorded, csync.NewMap[string, map[int64]bool]()),
+		collapseRecorded:       cmp.Or(opts.CollapseRecorded, csync.NewMap[string, *csync.Map[int64, bool]]()),
 		segmentTrackers:        cmp.Or(opts.SegmentTrackers, csync.NewMap[string, *segmentTracker]()),
 		prefixCache:            cmp.Or(opts.PrefixCache, csync.NewMap[string, cachedPrefix]()),
 		nbStats:                cmp.Or(opts.NotebookStats, csync.NewMap[string, notebook.Stats]()),
@@ -2022,7 +2022,6 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 	// and a turn boundary cannot split a call from its result.
 	callNames := make(map[string]string)
 	exemptCalls := make(map[string]bool)
-	writeCalls := make(map[string]bool)
 	for _, m := range rawMsgs {
 		if m.Role != message.Assistant {
 			continue
@@ -2030,10 +2029,6 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 		for _, tc := range m.ToolCalls() {
 			callNames[tc.ID] = tc.Name
 			exemptCalls[tc.ID] = callIsExempt(tc)
-			// Write-class means a file-writing tool — its dropped
-			// args name a file to re-view. Mutating bash commands
-			// keep the generic stub: their result stays recallable.
-			writeCalls[tc.ID] = tools.WriteToolNames[tc.Name]
 		}
 	}
 	var stubs stubReport
@@ -2048,7 +2043,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 			// Turn collapse is evaluated before other stub kinds —
 			// inside a collapsed turn they are irrelevant.
 			var n int
-			m, n = collapseToolMessageForTurn(m, turn, exemptCalls, writeCalls)
+			m, n = collapseToolMessageForTurn(m, turn, exemptCalls, callNames)
 			collapsedResults += n
 		} else if a.stubSuperseded {
 			// Substitute stubs before indexing so the emitted result

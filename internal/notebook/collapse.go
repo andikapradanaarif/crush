@@ -18,8 +18,9 @@ const CounterPriorTurnResultRecall = "prior_turn_result_recalls"
 // (session, turn) — renders re-collapse the same turn every step and
 // resumed sessions collapse it across processes, so the row's
 // existence is the dedupe. Reports whether the row was new so callers
-// accumulate each turn once; events is the collapsed call/result pair
-// count, fixed once a turn completes.
+// accumulate each turn once; events is the collapsed call count —
+// each collapsed call's result collapses with it, so it doubles as
+// the pair count.
 func (s *service) RecordCollapsedTurn(ctx context.Context, sessionID string, turnNumber int64, events int) (bool, error) {
 	affected, err := s.q.RecordCollapsedTurn(ctx, db.RecordCollapsedTurnParams{
 		SessionID:  sessionID,

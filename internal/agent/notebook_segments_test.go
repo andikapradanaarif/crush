@@ -328,7 +328,7 @@ func newSegmentTestAgent(t *testing.T, gen notebook.Generator) (*sessionAgent, m
 		prefixCache:      csync.NewMap[string, cachedPrefix](),
 		stubBoundary:     csync.NewMap[string, int](),
 		stubStats:        csync.NewMap[string, stubStats](),
-		collapseRecorded: csync.NewMap[string, map[int64]bool](),
+		collapseRecorded: csync.NewMap[string, *csync.Map[int64, bool]](),
 		systemPrompt:     csync.NewValue("system"),
 	}
 	// Seed the stamp generator like NewSessionAgent — stamps are

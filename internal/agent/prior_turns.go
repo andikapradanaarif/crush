@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/message"
 )
 
@@ -107,13 +108,14 @@ func collapsedCallInput(turn int64, write bool) string {
 // result renders. It names the turn and the recovery path and — per
 // the stub contract — never claims a digest exists. The pointer stays
 // honest about its bounds: recall returns the stored result capped at
-// MaxOutputLength, and for file-write calls it holds nothing of the
-// args — those stubs point at re-view instead.
+// MaxOutputLength. For file-write calls the result is only the write
+// confirmation — the args lived in the input — so the stub leads with
+// re-view and qualifies what recall holds.
 func collapsedResultText(turn int64, toolCallID string, write bool) string {
 	if write {
-		return fmt.Sprintf("[prior turn %d — collapsed; write args dropped, re-view the file to reconstruct]", turn)
+		return fmt.Sprintf("[prior turn %d — collapsed; write args dropped — re-view the file to reconstruct; recall(\"result:%s\") holds only the confirmation]", turn, toolCallID)
 	}
-	return fmt.Sprintf("[prior turn %d — collapsed; recall(\"result:%s\") to recover]", turn, toolCallID)
+	return fmt.Sprintf("[prior turn %d — collapsed; recall(\"result:%s\") recovers the stored result, capped]", turn, toolCallID)
 }
 
 // collapseAssistantForTurn returns m with prior-turn detail removed:
@@ -185,9 +187,9 @@ func callIsExempt(tc message.ToolCall) bool {
 // content replaced by collapsedResultText — media payloads included
 // (Data cleared so the text stub is what emits). Results answering an
 // exempt call stay verbatim with it; results answering a file-write
-// call get the re-view stub instead of the recall pointer. Returns the
-// message and how many results were collapsed.
-func collapseToolMessageForTurn(m message.Message, turn int64, exemptCalls, writeCalls map[string]bool) (message.Message, int) {
+// call get the re-view-led stub. Returns the message and how many
+// results were collapsed.
+func collapseToolMessageForTurn(m message.Message, turn int64, exemptCalls map[string]bool, callNames map[string]string) (message.Message, int) {
 	var parts []message.ContentPart
 	count := 0
 	for i, part := range m.Parts {
@@ -198,7 +200,7 @@ func collapseToolMessageForTurn(m message.Message, turn int64, exemptCalls, writ
 			}
 			continue
 		}
-		tr.Content = collapsedResultText(turn, tr.ToolCallID, writeCalls[tr.ToolCallID])
+		tr.Content = collapsedResultText(turn, tr.ToolCallID, tools.WriteToolNames[callNames[tr.ToolCallID]])
 		tr.Data = ""
 		tr.MIMEType = ""
 		// The stub is informational, not the failure it replaces —
@@ -232,31 +234,33 @@ func (a *sessionAgent) recordCollapsedTurns(ctx context.Context, sessionID strin
 	if sessionID == "" || a.notebook == nil {
 		return
 	}
-	var recorded map[int64]bool
+	var recorded *csync.Map[int64, bool]
 	if a.collapseRecorded != nil {
 		recorded, _ = a.collapseRecorded.Get(sessionID)
+		if recorded == nil {
+			recorded = csync.NewMap[int64, bool]()
+			a.collapseRecorded.Set(sessionID, recorded)
+		}
 	}
 	for turn, events := range byTurn {
-		if recorded[turn] {
-			continue
+		if recorded != nil {
+			if _, ok := recorded.Get(turn); ok {
+				continue
+			}
 		}
 		inserted, err := a.notebook.RecordCollapsedTurn(ctx, sessionID, turn, events)
 		if err != nil {
 			slog.Warn("Failed to record collapsed turn", "session_id", sessionID, "turn", turn, "error", err)
 			continue
 		}
-		if recorded == nil {
-			recorded = make(map[int64]bool)
+		if recorded != nil {
+			recorded.Set(turn, true)
 		}
-		recorded[turn] = true
 		if inserted && a.stubStats != nil {
 			stats, _ := a.stubStats.Get(sessionID)
 			stats.TurnsCollapsed++
 			stats.EventsCollapsed += events
 			a.stubStats.Set(sessionID, stats)
 		}
-	}
-	if recorded != nil && a.collapseRecorded != nil {
-		a.collapseRecorded.Set(sessionID, recorded)
 	}
 }

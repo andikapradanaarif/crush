@@ -166,7 +166,8 @@ type ProjectIndexStats struct {
 // rendered as stubs, and the result: recalls that reached back into
 // a prior turn — the flag-flip evidence for the stub/digest modes.
 // Rows persist only when collapse actually fired, so an all-verbatim
-// database simply has no section.
+// database simply has no section. Events counts collapsed calls; each
+// call's result collapses with it, so it is also the pair count.
 type CollapseStats struct {
 	Turns                  int64 `json:"turns"`
 	Events                 int64 `json:"events"`
