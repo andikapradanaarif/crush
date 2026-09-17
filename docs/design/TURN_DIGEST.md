@@ -258,7 +258,9 @@ Open:
   (pure conversation: "thanks", one-question turns produce zero
   events), not to filter exploration depth. Trivial events feed
   the digest input too — a grep-only turn's trail is still the
-  turn's evidence. Do **not** reuse `GenerateCheckpoint`'s
+  turn's evidence. A decision-only turn (assistant answers with no
+  tool calls) likewise produces no digest — correct: its text
+  stays verbatim in the transcript anyway. Do **not** reuse `GenerateCheckpoint`'s
   `gathered` count: it tallies post-cutoff entries plus
   non-mutating tail events, so `MinExploration: 1` against it is
   async-timing-dependent (a write-only turn passes only if its
