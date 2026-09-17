@@ -318,7 +318,7 @@ func newSegmentTestAgent(t *testing.T, gen notebook.Generator) (*sessionAgent, m
 	svc := message.NewService(q)
 	nb := notebook.NewService(q, gen, notebook.Options{DB: conn, MaxEntryTokens: 10000, MaxNotebookTokens: 100000})
 
-	return &sessionAgent{
+	a := &sessionAgent{
 		messages:        svc,
 		sessions:        sessions,
 		notebook:        nb,
@@ -329,7 +329,12 @@ func newSegmentTestAgent(t *testing.T, gen notebook.Generator) (*sessionAgent, m
 		stubBoundary:    csync.NewMap[string, int](),
 		stubStats:       csync.NewMap[string, stubStats](),
 		systemPrompt:    csync.NewValue("system"),
-	}, svc, nb, sess.ID
+	}
+	// Seed the stamp generator like NewSessionAgent — stamps are
+	// random-epoch, so tests must assert explicit stamps rather than
+	// assuming a run:1 sequence.
+	a.runStampGen.Store(runStampEpoch())
+	return a, svc, nb, sess.ID
 }
 
 // segBuildTurn appends a turn of n assistant+tool steps to the service
