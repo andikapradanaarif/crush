@@ -91,12 +91,13 @@ func coveredPriorTurns(segs []segment, processed map[segmentKey]bool, before int
 // collapsedCallInput is the replacement tool-call input for a
 // collapsed turn. It must stay a valid JSON object — providers
 // (Anthropic tool_use.input, Gemini args) reject prose — so the label
-// rides inside the payload rather than replacing it. For write-class
+// rides inside the payload rather than replacing it. For file-write
 // calls the payload was the input itself — recall("result:<id>")
 // cannot recover it — so the stub names the real recovery path:
-// re-viewing the file.
-func collapsedCallInput(turn int64, mutating bool) string {
-	if mutating {
+// re-viewing the file. Other calls (reads, and bash mutations whose
+// output remains recallable) keep the generic marker.
+func collapsedCallInput(turn int64, write bool) string {
+	if write {
 		return fmt.Sprintf(`{"_collapsed":"prior turn %d — write args dropped; re-view the file to reconstruct"}`, turn)
 	}
 	return fmt.Sprintf(`{"_collapsed":"prior turn %d"}`, turn)
@@ -106,10 +107,10 @@ func collapsedCallInput(turn int64, mutating bool) string {
 // result renders. It names the turn and the recovery path and — per
 // the stub contract — never claims a digest exists. The pointer stays
 // honest about its bounds: recall returns the stored result capped at
-// MaxOutputLength, and for write-class calls it holds nothing of the
+// MaxOutputLength, and for file-write calls it holds nothing of the
 // args — those stubs point at re-view instead.
-func collapsedResultText(turn int64, toolCallID string, mutating bool) string {
-	if mutating {
+func collapsedResultText(turn int64, toolCallID string, write bool) string {
+	if write {
 		return fmt.Sprintf("[prior turn %d — collapsed; write args dropped, re-view the file to reconstruct]", turn)
 	}
 	return fmt.Sprintf("[prior turn %d — collapsed; recall(\"result:%s\") to recover]", turn, toolCallID)
@@ -162,7 +163,7 @@ func collapseAssistantForTurn(m message.Message, turn int64) (message.Message, i
 			continue
 		case message.ToolCall:
 			if !exempt[p.ID] {
-				p.Input = collapsedCallInput(turn, tools.IsMutatingCall(p.Name, p.Input))
+				p.Input = collapsedCallInput(turn, tools.WriteToolNames[p.Name])
 				part = p
 				collapsed++
 			}
@@ -183,10 +184,10 @@ func callIsExempt(tc message.ToolCall) bool {
 // collapseToolMessageForTurn returns m with each tool result's stored
 // content replaced by collapsedResultText — media payloads included
 // (Data cleared so the text stub is what emits). Results answering an
-// exempt call stay verbatim with it; results answering a write-class
+// exempt call stay verbatim with it; results answering a file-write
 // call get the re-view stub instead of the recall pointer. Returns the
 // message and how many results were collapsed.
-func collapseToolMessageForTurn(m message.Message, turn int64, exemptCalls, mutatingCalls map[string]bool) (message.Message, int) {
+func collapseToolMessageForTurn(m message.Message, turn int64, exemptCalls, writeCalls map[string]bool) (message.Message, int) {
 	var parts []message.ContentPart
 	count := 0
 	for i, part := range m.Parts {
@@ -197,7 +198,7 @@ func collapseToolMessageForTurn(m message.Message, turn int64, exemptCalls, muta
 			}
 			continue
 		}
-		tr.Content = collapsedResultText(turn, tr.ToolCallID, mutatingCalls[tr.ToolCallID])
+		tr.Content = collapsedResultText(turn, tr.ToolCallID, writeCalls[tr.ToolCallID])
 		tr.Data = ""
 		tr.MIMEType = ""
 		// The stub is informational, not the failure it replaces —

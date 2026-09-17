@@ -412,10 +412,12 @@ func TestPreparePrompt_WriteClassStubText(t *testing.T) {
 	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "first"})
 	mkMsg(t, svc, sessionID, message.Assistant,
 		message.ToolCall{ID: "tc-edit", Name: "edit", Input: `{"file_path":"a.go","old_string":"x","new_string":"y"}`, Finished: true},
-		message.ToolCall{ID: "tc-view", Name: "view", Input: `{"file_path":"a.go"}`, Finished: true})
+		message.ToolCall{ID: "tc-view", Name: "view", Input: `{"file_path":"a.go"}`, Finished: true},
+		message.ToolCall{ID: "tc-rm", Name: "bash", Input: `{"command":"rm tmp.txt"}`, Finished: true})
 	mkMsg(t, svc, sessionID, message.Tool,
 		message.ToolResult{ToolCallID: "tc-edit", Name: "edit", Content: "edited a.go"},
-		message.ToolResult{ToolCallID: "tc-view", Name: "view", Content: "package a"})
+		message.ToolResult{ToolCallID: "tc-view", Name: "view", Content: "package a"},
+		message.ToolResult{ToolCallID: "tc-rm", Name: "bash", Content: "removed tmp.txt"})
 	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "second"})
 	msgs, err := svc.List(t.Context(), sessionID)
 	require.NoError(t, err)
@@ -424,8 +426,8 @@ func TestPreparePrompt_WriteClassStubText(t *testing.T) {
 	a.detectSegments(ctx, sessionID, msgs)
 	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
 
-	// Write-class: the payload was the input itself — result: recall
-	// can't recover it — so both stubs point at re-view, not recall.
+	// File-write calls: the payload was the input itself — result:
+	// recall can't recover it — so both stubs point at re-view.
 	require.JSONEq(t, `{"_collapsed":"prior turn 0 — write args dropped; re-view the file to reconstruct"}`,
 		renderedCall(t, history, "tc-edit").Input)
 	editRes := renderedResultText(t, history, "tc-edit")
@@ -436,6 +438,12 @@ func TestPreparePrompt_WriteClassStubText(t *testing.T) {
 	// Read-class keeps the generic marker and the recall pointer.
 	require.JSONEq(t, `{"_collapsed":"prior turn 0"}`, renderedCall(t, history, "tc-view").Input)
 	require.Contains(t, renderedResultText(t, history, "tc-view"), `recall("result:tc-view")`)
+
+	// A mutating bash call is mutating but not file-write — there is
+	// no single file to re-view, and its output stays recallable, so
+	// it keeps the generic marker and pointer.
+	require.JSONEq(t, `{"_collapsed":"prior turn 0"}`, renderedCall(t, history, "tc-rm").Input)
+	require.Contains(t, renderedResultText(t, history, "tc-rm"), `recall("result:tc-rm")`)
 }
 
 func TestRecordCollapsedTurns_PersistsAndDedupes(t *testing.T) {
@@ -469,4 +477,51 @@ func TestRecordCollapsedTurns_PersistsAndDedupes(t *testing.T) {
 	inserted, err := nb.RecordCollapsedTurn(ctx, sessionID, 0, 99)
 	require.NoError(t, err)
 	require.False(t, inserted)
+}
+
+func TestRecordCollapsedTurns_SkipsAllExemptTurn(t *testing.T) {
+	t.Parallel()
+
+	a, svc, nb, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsStub
+	// Turn 0 carries only an exempt call — the turn is covered and
+	// eligible, but collapse finds nothing to stub inside it.
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "first"})
+	mkMsg(t, svc, sessionID, message.Assistant,
+		message.ToolCall{ID: "tc-q", Name: "question", Input: `{"questions":[{"type":"yes_no","question":"go?"}]}`, Finished: true})
+	mkMsg(t, svc, sessionID, message.Tool,
+		message.ToolResult{ToolCallID: "tc-q", Name: "question", Content: "yes"})
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "second"})
+	msgs, err := svc.List(t.Context(), sessionID)
+	require.NoError(t, err)
+
+	ctx := t.Context()
+	// Commit coverage directly — generation emits no entries for an
+	// exempt-only turn, so detectSegments would leave it uncovered.
+	segs := segmentBoundaries(msgs, a.segTokenBudget(), a.segMaxSteps())
+	covered := make([]notebook.ProcessedSegment, 0, len(segs))
+	for _, s := range segs {
+		covered = append(covered, notebook.ProcessedSegment{
+			TurnNumber:    s.turn,
+			SegmentNumber: s.number,
+			StartIndex:    int64(s.start),
+			EndIndex:      int64(s.end),
+			State:         notebook.SegmentProcessed,
+		})
+	}
+	require.NoError(t, nb.MarkSegmentsProcessed(ctx, sessionID, covered))
+
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	// The exempt pair renders verbatim even inside a covered turn.
+	require.JSONEq(t, `{"questions":[{"type":"yes_no","question":"go?"}]}`,
+		renderedCall(t, history, "tc-q").Input)
+
+	// Nothing collapsed, so nothing records — a covered-but-untouched
+	// turn must not inflate the counters.
+	stats, _ := a.stubStats.Get(sessionID)
+	require.Equal(t, 0, stats.TurnsCollapsed)
+	require.Equal(t, 0, stats.EventsCollapsed)
+	inserted, err := nb.RecordCollapsedTurn(ctx, sessionID, 0, 0)
+	require.NoError(t, err)
+	require.True(t, inserted, "turn 0 must not have been recorded")
 }

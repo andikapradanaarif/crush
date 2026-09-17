@@ -2022,7 +2022,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 	// and a turn boundary cannot split a call from its result.
 	callNames := make(map[string]string)
 	exemptCalls := make(map[string]bool)
-	mutatingCalls := make(map[string]bool)
+	writeCalls := make(map[string]bool)
 	for _, m := range rawMsgs {
 		if m.Role != message.Assistant {
 			continue
@@ -2030,7 +2030,10 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 		for _, tc := range m.ToolCalls() {
 			callNames[tc.ID] = tc.Name
 			exemptCalls[tc.ID] = callIsExempt(tc)
-			mutatingCalls[tc.ID] = tools.IsMutatingCall(tc.Name, tc.Input)
+			// Write-class means a file-writing tool — its dropped
+			// args name a file to re-view. Mutating bash commands
+			// keep the generic stub: their result stays recallable.
+			writeCalls[tc.ID] = tools.WriteToolNames[tc.Name]
 		}
 	}
 	var stubs stubReport
@@ -2045,7 +2048,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 			// Turn collapse is evaluated before other stub kinds —
 			// inside a collapsed turn they are irrelevant.
 			var n int
-			m, n = collapseToolMessageForTurn(m, turn, exemptCalls, mutatingCalls)
+			m, n = collapseToolMessageForTurn(m, turn, exemptCalls, writeCalls)
 			collapsedResults += n
 		} else if a.stubSuperseded {
 			// Substitute stubs before indexing so the emitted result
@@ -2086,7 +2089,11 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 			// the emptiness checks below must see the stripped copy.
 			var n int
 			m, n = collapseAssistantForTurn(m, turn)
-			collapsedEvents[turn] += n
+			// A covered turn whose calls are all exempt renders
+			// verbatim — it must not count as collapsed.
+			if n > 0 {
+				collapsedEvents[turn] += n
+			}
 		}
 		if len(m.Parts) == 0 {
 			continue

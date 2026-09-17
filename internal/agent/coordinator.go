@@ -288,7 +288,10 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 	// run one deletion watcher here — a per-agent watcher would leak
 	// a goroutine and broker subscriber on every agent rebuild. The
 	// segment maps exist whenever the notebook is on; stub maps
-	// additionally need stubbing enabled.
+	// additionally need stubbing enabled. stubStats also carries the
+	// collapse counters, so it must be shared whenever prior-turns is
+	// enabled too — a private map would reset on agent rebuild while
+	// the persisted rows keep deduping, under-reporting telemetry.
 	if opts.Sessions != nil && opts.Config.Config().Options.NotebookIsEnabled() {
 		c.segmentTrackers = csync.NewMap[string, *segmentTracker]()
 		c.prefixCache = csync.NewMap[string, cachedPrefix]()
@@ -298,6 +301,9 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		c.collapseRecorded = csync.NewMap[string, map[int64]bool]()
 		if opts.Config.Config().Options.NotebookStubSupersededEnabled() {
 			c.stubBoundary = csync.NewMap[string, int]()
+		}
+		if opts.Config.Config().Options.NotebookStubSupersededEnabled() ||
+			opts.Config.Config().Options.NotebookPriorTurnsMode() != "verbatim" {
 			c.stubStats = csync.NewMap[string, stubStats]()
 		}
 		go c.watchSessionDeletions()
