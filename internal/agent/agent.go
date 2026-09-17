@@ -236,6 +236,11 @@ type sessionAgent struct {
 	// session, so pending superseded flags promote to stubs only on
 	// boundary moves.
 	stubBoundary *csync.Map[string, int]
+	// collapseRecorded marks prior turns whose collapse this process
+	// already persisted, so per-step renders don't re-write the
+	// collapsed_turns row — the table's primary key dedupes across
+	// processes.
+	collapseRecorded *csync.Map[string, map[int64]bool]
 	// stubStats accumulates per-session stubbing telemetry for
 	// step-composition logging.
 	stubStats *csync.Map[string, stubStats]
@@ -373,9 +378,11 @@ type SessionAgentOptions struct {
 	// disabled, since recall is the stub's recovery path.
 	NotebookPriorTurns string
 	// StubBoundary/StubStats let a coordinator share stub bookkeeping
-	// across agent rebuilds. When nil the agent allocates its own.
-	StubBoundary *csync.Map[string, int]
-	StubStats    *csync.Map[string, stubStats]
+	// across agent rebuilds; CollapseRecorded is the same for
+	// prior-turn collapse. When nil the agent allocates its own.
+	StubBoundary     *csync.Map[string, int]
+	StubStats        *csync.Map[string, stubStats]
+	CollapseRecorded *csync.Map[string, map[int64]bool]
 	// SegmentTrackers/PrefixCache let a coordinator share segment
 	// bookkeeping and the rendered-prefix cache across agent
 	// rebuilds. When nil the agent allocates its own.
@@ -444,6 +451,7 @@ func NewSessionAgent(
 		priorTurns:             opts.NotebookPriorTurns,
 		stubBoundary:           cmp.Or(opts.StubBoundary, csync.NewMap[string, int]()),
 		stubStats:              cmp.Or(opts.StubStats, csync.NewMap[string, stubStats]()),
+		collapseRecorded:       cmp.Or(opts.CollapseRecorded, csync.NewMap[string, map[int64]bool]()),
 		segmentTrackers:        cmp.Or(opts.SegmentTrackers, csync.NewMap[string, *segmentTracker]()),
 		prefixCache:            cmp.Or(opts.PrefixCache, csync.NewMap[string, cachedPrefix]()),
 		nbStats:                cmp.Or(opts.NotebookStats, csync.NewMap[string, notebook.Stats]()),
@@ -1742,12 +1750,10 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		return nil
 	}
 
-	// Summarize has no active run — every completed turn is a prior
-	// turn, so the collapse horizon sits one past the last user turn.
-	// The summarizer's input becomes stubs + notebook; digests and
-	// entries carry the collapsed detail.
-	aiMsgs, _ := a.preparePrompt(ctx, msgs, largeModel.CatwalkCfg.SupportsImages,
-		a.newTurnCollapse(int64(countUserMessages(msgs))))
+	// Summarize renders verbatim: the call is one-shot with no cache
+	// reuse, and the summary is the seed the next context window grows
+	// from — stubs would amplify whatever the notebook dropped.
+	aiMsgs, _ := a.preparePrompt(ctx, msgs, largeModel.CatwalkCfg.SupportsImages, nil)
 
 	genCtx, cancel := context.WithCancel(ctx)
 	ac := &activeCancel{cancel: cancel}
@@ -2016,6 +2022,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 	// and a turn boundary cannot split a call from its result.
 	callNames := make(map[string]string)
 	exemptCalls := make(map[string]bool)
+	mutatingCalls := make(map[string]bool)
 	for _, m := range rawMsgs {
 		if m.Role != message.Assistant {
 			continue
@@ -2023,10 +2030,12 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 		for _, tc := range m.ToolCalls() {
 			callNames[tc.ID] = tc.Name
 			exemptCalls[tc.ID] = callIsExempt(tc)
+			mutatingCalls[tc.ID] = tools.IsMutatingCall(tc.Name, tc.Input)
 		}
 	}
 	var stubs stubReport
 	var collapsedResults int
+	collapsedEvents := make(map[int64]int)
 	toolResultsByCall := make(map[string][]fantasy.MessagePart)
 	for i, m := range rawMsgs {
 		if m.Role != message.Tool {
@@ -2036,7 +2045,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 			// Turn collapse is evaluated before other stub kinds —
 			// inside a collapsed turn they are irrelevant.
 			var n int
-			m, n = collapseToolMessageForTurn(m, turn, exemptCalls)
+			m, n = collapseToolMessageForTurn(m, turn, exemptCalls, mutatingCalls)
 			collapsedResults += n
 		} else if a.stubSuperseded {
 			// Substitute stubs before indexing so the emitted result
@@ -2075,7 +2084,9 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 		if turn, yes := collapsedTurn(i); yes && m.Role == message.Assistant {
 			// Reasoning drops with the turn and call inputs collapse;
 			// the emptiness checks below must see the stripped copy.
-			m = collapseAssistantForTurn(m, turn)
+			var n int
+			m, n = collapseAssistantForTurn(m, turn)
+			collapsedEvents[turn] += n
 		}
 		if len(m.Parts) == 0 {
 			continue
@@ -2125,10 +2136,12 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 			"stubbed_saved_bytes", stubs.savedBytes,
 		)
 	}
-	if collapsedResults > 0 && collapse != nil {
+	if len(collapsedEvents) > 0 && collapse != nil {
+		sessionID := sessionIDFromMessages(msgs)
+		a.recordCollapsedTurns(ctx, sessionID, collapsedEvents)
 		slog.Debug("Prior-turn tool pairs collapsed in prompt",
-			"session_id", sessionIDFromMessages(msgs),
-			"collapsed_turns", len(collapse.Set),
+			"session_id", sessionID,
+			"collapsed_turns", len(collapsedEvents),
 			"collapsed_results", collapsedResults,
 		)
 	}

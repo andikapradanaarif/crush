@@ -184,6 +184,7 @@ type RunRecord struct {
 	Steps       int         `json:"steps"`
 	Tokens      TokenUsage  `json:"tokens"`
 	StubStats   StubStats   `json:"stub_stats"`
+	PriorTurns  PriorTurns  `json:"prior_turns"`
 	Recalls     Recalls     `json:"recalls"`
 	Checkpoints Checkpoints `json:"checkpoints"`
 	SessionDB   string      `json:"session_db,omitempty"`
@@ -235,12 +236,23 @@ type StubStats struct {
 	Kinds map[string]int `json:"kinds,omitempty"`
 }
 
+// PriorTurns mirrors the agent's prior-turn collapse telemetry:
+// distinct turns rendered collapsed and the call/result pairs inside
+// them — the flag-flip evidence for notebook_prior_turns.
+type PriorTurns struct {
+	TurnsCollapsed  int `json:"turns_collapsed"`
+	EventsCollapsed int `json:"events_collapsed"`
+}
+
 // Recalls mirrors notebook.Stats' recall split.
 type Recalls struct {
 	Result int `json:"result"`
 	Entry  int `json:"entry"`
 	Empty  int `json:"empty"`
 	Cross  int `json:"cross"`
+	// PriorTurnResult counts result: recalls into prior turns — the
+	// approximation of recall-into-collapsed.
+	PriorTurnResult int `json:"prior_turn_result"`
 }
 
 // Checkpoints mirrors the checkpoint telemetry split: written counts

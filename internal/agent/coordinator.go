@@ -187,8 +187,11 @@ type coordinator struct {
 	// coordinator builds so agent rebuilds (UpdateModels, task-agent
 	// churn) reuse one watcher and one map pair instead of leaking a
 	// per-agent subscription. Nil when stubbing is disabled.
-	stubBoundary *csync.Map[string, int]
-	stubStats    *csync.Map[string, stubStats]
+	// collapseRecorded is the same for prior-turn collapse — the
+	// turns this process already persisted to collapsed_turns.
+	stubBoundary     *csync.Map[string, int]
+	stubStats        *csync.Map[string, stubStats]
+	collapseRecorded *csync.Map[string, map[int64]bool]
 	// segmentTrackers/prefixCache share intra-turn segment state and
 	// the rendered notebook prefix across agent rebuilds. Nil when
 	// the notebook is disabled.
@@ -292,6 +295,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		c.nbStats = csync.NewMap[string, notebook.Stats]()
 		c.nbScanIdx = csync.NewMap[string, int]()
 		c.nbPendingReads = csync.NewMap[string, map[string]string]()
+		c.collapseRecorded = csync.NewMap[string, map[int64]bool]()
 		if opts.Config.Config().Options.NotebookStubSupersededEnabled() {
 			c.stubBoundary = csync.NewMap[string, int]()
 			c.stubStats = csync.NewMap[string, stubStats]()
@@ -348,6 +352,9 @@ func (c *coordinator) watchSessionDeletions() {
 		}
 		if c.nbScanIdx != nil {
 			c.nbScanIdx.Del(ev.Payload.ID)
+		}
+		if c.collapseRecorded != nil {
+			c.collapseRecorded.Del(ev.Payload.ID)
 		}
 		if c.nbPendingReads != nil {
 			c.nbPendingReads.Del(ev.Payload.ID)
@@ -863,6 +870,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		NotebookPriorTurns:     priorTurns,
 		StubBoundary:           c.stubBoundary,
 		StubStats:              c.stubStats,
+		CollapseRecorded:       c.collapseRecorded,
 		SegmentTrackers:        c.segmentTrackers,
 		PrefixCache:            c.prefixCache,
 		NotebookStats:          c.nbStats,

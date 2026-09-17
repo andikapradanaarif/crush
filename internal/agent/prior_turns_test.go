@@ -328,7 +328,7 @@ func TestPreparePrompt_CollapsedTurnOrphanCallKeepsPairing(t *testing.T) {
 	}
 }
 
-func TestPreparePrompt_OpenTailCoverageForSummarize(t *testing.T) {
+func TestPreparePrompt_OpenTailCoverage(t *testing.T) {
 	t.Parallel()
 
 	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
@@ -350,8 +350,8 @@ func TestPreparePrompt_OpenTailCoverageForSummarize(t *testing.T) {
 	ctx := t.Context()
 	a.generateRunEndSegments(ctx, sessionID, msgs, 0, msgs[1].ID)
 
-	// The Summarize call site: no active run, so every completed turn
-	// is prior — the horizon sits one past the last user turn.
+	// No active run, so every completed turn is prior — the horizon
+	// sits one past the last user turn.
 	collapse := a.newTurnCollapse(int64(countUserMessages(msgs)))
 	history, _ := a.preparePrompt(ctx, msgs, false, collapse)
 	require.JSONEq(t, `{"_collapsed":"prior turn 0"}`, renderedCall(t, history, "tc-0").Input)
@@ -402,4 +402,71 @@ func TestBuildAgent_PriorTurnsCoercesWhenRecallDisabled(t *testing.T) {
 	a, ok = coord.agents[config.AgentCoder].(*sessionAgent)
 	require.True(t, ok)
 	require.Equal(t, "stub", a.priorTurns)
+}
+
+func TestPreparePrompt_WriteClassStubText(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsStub
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "first"})
+	mkMsg(t, svc, sessionID, message.Assistant,
+		message.ToolCall{ID: "tc-edit", Name: "edit", Input: `{"file_path":"a.go","old_string":"x","new_string":"y"}`, Finished: true},
+		message.ToolCall{ID: "tc-view", Name: "view", Input: `{"file_path":"a.go"}`, Finished: true})
+	mkMsg(t, svc, sessionID, message.Tool,
+		message.ToolResult{ToolCallID: "tc-edit", Name: "edit", Content: "edited a.go"},
+		message.ToolResult{ToolCallID: "tc-view", Name: "view", Content: "package a"})
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "second"})
+	msgs, err := svc.List(t.Context(), sessionID)
+	require.NoError(t, err)
+
+	ctx := t.Context()
+	a.detectSegments(ctx, sessionID, msgs)
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+
+	// Write-class: the payload was the input itself — result: recall
+	// can't recover it — so both stubs point at re-view, not recall.
+	require.JSONEq(t, `{"_collapsed":"prior turn 0 — write args dropped; re-view the file to reconstruct"}`,
+		renderedCall(t, history, "tc-edit").Input)
+	editRes := renderedResultText(t, history, "tc-edit")
+	require.Contains(t, editRes, "prior turn 0")
+	require.Contains(t, editRes, "re-view the file")
+	require.NotContains(t, editRes, "result:tc-edit")
+
+	// Read-class keeps the generic marker and the recall pointer.
+	require.JSONEq(t, `{"_collapsed":"prior turn 0"}`, renderedCall(t, history, "tc-view").Input)
+	require.Contains(t, renderedResultText(t, history, "tc-view"), `recall("result:tc-view")`)
+}
+
+func TestRecordCollapsedTurns_PersistsAndDedupes(t *testing.T) {
+	t.Parallel()
+
+	a, svc, nb, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsStub
+	msgs := priorTurnFixture(t, svc, sessionID)
+	ctx := t.Context()
+	a.detectSegments(ctx, sessionID, msgs)
+
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	require.JSONEq(t, `{"_collapsed":"prior turn 0"}`, renderedCall(t, history, "tc-bash").Input)
+
+	// Turn 0 persisted once; tc-bash + tc-shot collapsed while the
+	// exempt question and provider-executed pairs stayed verbatim.
+	stats, ok := a.stubStats.Get(sessionID)
+	require.True(t, ok)
+	require.Equal(t, 1, stats.TurnsCollapsed)
+	require.Equal(t, 2, stats.EventsCollapsed)
+
+	// Re-renders collapse the same turn every step — the recorded set
+	// and the persisted row keep the counters flat.
+	_, _ = a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	stats, _ = a.stubStats.Get(sessionID)
+	require.Equal(t, 1, stats.TurnsCollapsed)
+	require.Equal(t, 2, stats.EventsCollapsed)
+
+	// The row itself is the cross-process dedupe: a fresh agent's
+	// insert reports nothing new.
+	inserted, err := nb.RecordCollapsedTurn(ctx, sessionID, 0, 99)
+	require.NoError(t, err)
+	require.False(t, inserted)
 }

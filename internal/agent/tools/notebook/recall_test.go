@@ -147,7 +147,7 @@ func (echoGenerator) GenerateCheckpoint(ctx context.Context, sessionID, input st
 
 // newNotebookTestEnv builds a session, a real notebook service, and a
 // recall tool wired to both.
-func newNotebookTestEnv(t *testing.T) (notebook.Service, message.Service, string, *csync.Map[string, notebook.Stats]) {
+func newNotebookTestEnv(t *testing.T) (notebook.Service, message.Service, string, *csync.Map[string, notebook.Stats], *db.Queries) {
 	t.Helper()
 	conn, err := db.Connect(t.Context(), t.TempDir())
 	require.NoError(t, err)
@@ -161,13 +161,13 @@ func newNotebookTestEnv(t *testing.T) (notebook.Service, message.Service, string
 		MaxEntryTokens:    1000,
 		MaxNotebookTokens: 100000,
 	})
-	return svc, message.NewService(q), sess.ID, csync.NewMap[string, notebook.Stats]()
+	return svc, message.NewService(q), sess.ID, csync.NewMap[string, notebook.Stats](), q
 }
 
 func TestRecallSegmentQuery(t *testing.T) {
 	t.Parallel()
 
-	svc, msgs, sessionID, stats := newNotebookTestEnv(t)
+	svc, msgs, sessionID, stats, _ := newNotebookTestEnv(t)
 	tool := NewRecallTool(svc, msgs, nil, "", false, stats)
 	ctx := context.WithValue(t.Context(), tools.SessionIDContextKey, sessionID)
 
@@ -206,7 +206,7 @@ func TestRecallSegmentQuery(t *testing.T) {
 func TestRecallStatsByQueryType(t *testing.T) {
 	t.Parallel()
 
-	svc, msgs, sessionID, stats := newNotebookTestEnv(t)
+	svc, msgs, sessionID, stats, _ := newNotebookTestEnv(t)
 	tool := NewRecallTool(svc, msgs, nil, "", false, stats)
 	ctx := context.WithValue(t.Context(), tools.SessionIDContextKey, sessionID)
 
@@ -246,7 +246,7 @@ func TestRecallStatsByQueryType(t *testing.T) {
 func TestRecallCheckpointQuery(t *testing.T) {
 	t.Parallel()
 
-	svc, msgs, sessionID, stats := newNotebookTestEnv(t)
+	svc, msgs, sessionID, stats, _ := newNotebookTestEnv(t)
 	tool := NewRecallTool(svc, msgs, nil, "", false, stats)
 	ctx := context.WithValue(t.Context(), tools.SessionIDContextKey, sessionID)
 
@@ -272,4 +272,45 @@ func TestRecallCheckpointQuery(t *testing.T) {
 	resp := runRecall(t, tool, ctx, "checkpoint")
 	require.False(t, resp.IsError)
 	require.Contains(t, resp.Content, "Checkpoint")
+}
+
+func TestRecallPriorTurnResult(t *testing.T) {
+	t.Parallel()
+
+	svc, msgs, sessionID, stats, q := newNotebookTestEnv(t)
+	tool := NewRecallTool(svc, msgs, nil, "", false, stats)
+	ctx := context.WithValue(t.Context(), tools.SessionIDContextKey, sessionID)
+
+	mk := func(role message.MessageRole, parts ...message.ContentPart) {
+		_, err := msgs.Create(ctx, sessionID, message.CreateMessageParams{Role: role, Parts: parts})
+		require.NoError(t, err)
+	}
+	// Turn 0: prompt plus a tool pair. Turn 1: the current prompt plus
+	// another pair, so result:tc-old resolves into a prior turn.
+	mk(message.User, message.TextContent{Text: "first"})
+	mk(message.Assistant, message.ToolCall{ID: "tc-old", Name: "bash", Input: `{"command":"ls"}`, Finished: true})
+	mk(message.Tool, message.ToolResult{ToolCallID: "tc-old", Name: "bash", Content: "old output"})
+	mk(message.User, message.TextContent{Text: "second"})
+	mk(message.Assistant, message.ToolCall{ID: "tc-new", Name: "bash", Input: `{"command":"pwd"}`, Finished: true})
+	mk(message.Tool, message.ToolResult{ToolCallID: "tc-new", Name: "bash", Content: "new output"})
+
+	// A result: recall into a prior turn counts on the prior-turn
+	// counter, both in memory and persisted.
+	resp := runRecall(t, tool, ctx, "result:tc-old")
+	require.False(t, resp.IsError)
+	got, ok := stats.Get(sessionID)
+	require.True(t, ok)
+	require.Equal(t, 1, got.PriorTurnResultRecalls)
+
+	// A same-turn recall does not bump it.
+	resp = runRecall(t, tool, ctx, "result:tc-new")
+	require.False(t, resp.IsError)
+	got, _ = stats.Get(sessionID)
+	require.Equal(t, 1, got.PriorTurnResultRecalls)
+
+	counters, err := q.ListSessionCounters(ctx)
+	require.NoError(t, err)
+	require.Len(t, counters, 1)
+	require.Equal(t, notebook.CounterPriorTurnResultRecall, counters[0].Name)
+	require.EqualValues(t, 1, counters[0].Value)
 }

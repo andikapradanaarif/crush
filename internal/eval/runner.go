@@ -276,6 +276,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	rec.Steps = res.Steps
 	rec.Tokens = res.Tokens
 	rec.StubStats = res.StubStats
+	rec.PriorTurns = res.PriorTurns
 	rec.Recalls = res.Recalls
 	rec.Checkpoints = res.Checkpoints
 	rec.Env.ModelPin = exp.Model

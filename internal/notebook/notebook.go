@@ -190,6 +190,11 @@ type Stats struct {
 	// CheckpointsWritten counts committed checkpoint entries — the
 	// firing side of the same metric.
 	CheckpointsWritten int
+	// PriorTurnResultRecalls counts result: recalls that resolved to
+	// a tool call in a prior turn — the feasible approximation of
+	// recall-into-collapsed-turn (collapse leaves no stored mark).
+	// The persistent half lives in session_counters.
+	PriorTurnResultRecalls int
 }
 
 // Service is the interface for notebook operations.
@@ -260,6 +265,16 @@ type Service interface {
 	// TurnsWithEntries returns the set of turn numbers that have at
 	// least one entry.
 	TurnsWithEntries(ctx context.Context, sessionID string) (map[int64]bool, error)
+
+	// RecordCollapsedTurn persists that a prior turn rendered
+	// collapsed. Idempotent per (session, turn); reports whether the
+	// row was new so callers count each turn once.
+	RecordCollapsedTurn(ctx context.Context, sessionID string, turnNumber int64, events int) (bool, error)
+
+	// BumpSessionCounter adds delta to a named per-session counter —
+	// scalar telemetry that doesn't fit the per-turn grain of
+	// collapsed_turns (e.g. CounterPriorTurnResultRecall).
+	BumpSessionCounter(ctx context.Context, sessionID, name string, delta int64) error
 
 	// GetTokenCount returns the total token count of all entries for a
 	// session.

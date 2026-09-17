@@ -9,6 +9,7 @@ import (
 )
 
 type Querier interface {
+	BumpSessionCounter(ctx context.Context, arg BumpSessionCounterParams) error
 	CreateFile(ctx context.Context, arg CreateFileParams) (File, error)
 	CreateMessage(ctx context.Context, arg CreateMessageParams) (Message, error)
 	CreateNotebookEntry(ctx context.Context, arg CreateNotebookEntryParams) (NotebookEntry, error)
@@ -22,6 +23,7 @@ type Querier interface {
 	DeleteSessionFiles(ctx context.Context, sessionID string) error
 	DeleteSessionMessages(ctx context.Context, sessionID string) error
 	GetAverageResponseTime(ctx context.Context) (int64, error)
+	GetCollapsedTurnStats(ctx context.Context) (GetCollapsedTurnStatsRow, error)
 	GetFile(ctx context.Context, id string) (File, error)
 	GetFileByPathAndSession(ctx context.Context, arg GetFileByPathAndSessionParams) (File, error)
 	GetFileRead(ctx context.Context, arg GetFileReadParams) (ReadFile, error)
@@ -64,10 +66,15 @@ type Querier interface {
 	ListMessagesBySession(ctx context.Context, sessionID string) ([]Message, error)
 	ListNewFiles(ctx context.Context) ([]File, error)
 	ListProcessedSegments(ctx context.Context, sessionID string) ([]ProcessedSegment, error)
+	ListSessionCounters(ctx context.Context) ([]ListSessionCountersRow, error)
 	ListSessionReadFiles(ctx context.Context, sessionID string) ([]ReadFile, error)
 	ListSessions(ctx context.Context) ([]Session, error)
 	ListUserMessagesBySession(ctx context.Context, sessionID string) ([]Message, error)
 	MarkSegmentProcessed(ctx context.Context, arg MarkSegmentProcessedParams) error
+	// One row per collapsed prior turn; INSERT OR IGNORE makes the write
+	// idempotent across renders and across processes sharing the session
+	// DB, so callers count a turn only when this reports a new row.
+	RecordCollapsedTurn(ctx context.Context, arg RecordCollapsedTurnParams) (int64, error)
 	RecordFileRead(ctx context.Context, arg RecordFileReadParams) error
 	RecordProcessedSegment(ctx context.Context, arg RecordProcessedSegmentParams) error
 	RecordSegmentAttempt(ctx context.Context, arg RecordSegmentAttemptParams) error

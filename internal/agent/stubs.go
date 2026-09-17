@@ -58,6 +58,14 @@ type stubStats struct {
 	// telemetry counterpart of Invalidations for turns long enough
 	// to have moved the boundary without promoting anything.
 	BoundaryAdvances int
+	// TurnsCollapsed counts distinct prior turns rendered collapsed
+	// — deduped against the collapsed_turns table, so each turn
+	// counts once no matter how many renders or processes collapse
+	// it. The flag-flip evidence for notebook_prior_turns.
+	TurnsCollapsed int
+	// EventsCollapsed counts collapsed call/result pairs across those
+	// turns.
+	EventsCollapsed int
 	// Kinds splits Results by stub kind — the counter backing the
 	// eval harness's min_stub_stats.kinds.* coverage predicates.
 	// Like Results it counts promoted stubs only; a flag still

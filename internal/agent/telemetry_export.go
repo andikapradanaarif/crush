@@ -23,10 +23,18 @@ type SessionTelemetry struct {
 	EntryRecalls  int            `json:"entry_recalls"`
 	EmptyRecalls  int            `json:"empty_recalls"`
 	CrossRecalls  int            `json:"cross_recalls"`
+	// PriorTurnResultRecalls counts result: recalls that resolved to
+	// a call in a prior turn — the recall-into-collapsed approximation.
+	PriorTurnResultRecalls int `json:"prior_turn_result_recalls"`
 	// Checkpoint telemetry: written counts committed checkpoint
 	// entries; rendered counts prefix renders that included one.
 	CheckpointsWritten int `json:"checkpoints_written"`
 	CheckpointRenders  int `json:"checkpoint_renders"`
+	// Prior-turn collapse telemetry: distinct turns collapsed and the
+	// call/result pairs inside them — deduped against the persisted
+	// collapsed_turns rows.
+	TurnsCollapsed  int `json:"turns_collapsed"`
+	EventsCollapsed int `json:"events_collapsed"`
 }
 
 // SessionTelemetry returns the coordinator's per-session counters.
@@ -44,6 +52,8 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 		t.StubResults = s.Results
 		t.StubSavedBytes = s.SavedBytes
 		t.BoundaryAdvances = s.BoundaryAdvances
+		t.TurnsCollapsed = s.TurnsCollapsed
+		t.EventsCollapsed = s.EventsCollapsed
 		if len(s.Kinds) > 0 {
 			t.StubKinds = make(map[string]int, len(s.Kinds))
 			for kind, n := range s.Kinds {
@@ -58,6 +68,7 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 		t.CrossRecalls = n.CrossRecalls
 		t.CheckpointsWritten = n.CheckpointsWritten
 		t.CheckpointRenders = n.CheckpointRenders
+		t.PriorTurnResultRecalls = n.PriorTurnResultRecalls
 	}
 	return t
 }
