@@ -236,7 +236,7 @@ func buildDigestInput(events []EntryInput, interrupted bool) string {
 	if interrupted {
 		sb.WriteString("This turn was interrupted before it finished — its events are partial.\n\n")
 	}
-	sb.WriteString("Classified tool events from one finished turn (oldest first):\n\n")
+	sb.WriteString("Classified events from one finished turn (oldest first):\n\n")
 	if truncated {
 		sb.WriteString("(events elided for budget)\n\n")
 	}
