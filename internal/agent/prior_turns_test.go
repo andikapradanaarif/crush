@@ -113,12 +113,18 @@ func priorTurnFixture(t *testing.T, svc message.Service, sessionID string) []mes
 		message.ToolCall{ID: "tc-bash", Name: "bash", Input: `{"command":"cat big.go"}`, Finished: true},
 		message.ToolCall{ID: "tc-q", Name: "question", Input: `{"questions":[{"type":"yes_no","question":"proceed?"}]}`, Finished: true},
 		message.ToolCall{ID: "tc-web", Name: "web_search", Input: `{"query":"golang generics"}`, ProviderExecuted: true, Finished: true},
+		message.ToolCall{ID: "tc-shot", Name: "view", Input: `{"file_path":"shot.png"}`, Finished: true},
 	)
 	mkMsg(t, svc, sessionID, message.Tool,
 		message.ToolResult{ToolCallID: "tc-bash", Name: "bash", Content: bigContent(), IsError: true},
 		message.ToolResult{ToolCallID: "tc-q", Name: "question", Content: "yes — proceed"},
 		message.ToolResult{ToolCallID: "tc-web", Name: "web_search", Content: "search result payload"},
+		message.ToolResult{ToolCallID: "tc-shot", Name: "view", Content: "screenshot", Data: "aGVsbG8=", MIMEType: "image/png"},
 	)
+	// A reasoning-only assistant message: collapse must drop it whole
+	// rather than emit an empty bubble.
+	mkMsg(t, svc, sessionID, message.Assistant,
+		message.ReasoningContent{Thinking: "unsigned musing"})
 	mkMsg(t, svc, sessionID, message.Assistant, message.TextContent{Text: "turn zero answer"})
 	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "second prompt"})
 	msgs, err := svc.List(t.Context(), sessionID)
@@ -157,6 +163,20 @@ func TestPreparePrompt_CollapsesCoveredPriorTurn(t *testing.T) {
 	// must not render it as an error.
 	require.IsType(t, fantasy.ToolResultOutputContentText{},
 		renderedResult(t, history, "tc-bash").Output)
+
+	// A media result collapses to the text stub — the base64 payload
+	// must not leak through as ToolResultOutputContentMedia.
+	require.IsType(t, fantasy.ToolResultOutputContentText{},
+		renderedResult(t, history, "tc-shot").Output)
+
+	// A reasoning-only assistant message in a collapsed turn emits no
+	// empty bubble.
+	for _, m := range history {
+		if m.Role == fantasy.MessageRoleAssistant {
+			require.NotEmpty(t, m.Content)
+		}
+	}
+	require.NotContains(t, renderedReasoning(history), "unsigned musing")
 
 	// Reasoning bound to a collapsed call drops — its signature is
 	// invalid against the mutated input anyway. Reasoning bound to the
