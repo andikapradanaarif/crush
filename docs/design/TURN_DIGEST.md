@@ -206,31 +206,70 @@ Open:
   on top means the same work twice in the notebook. Rule: when a
   `granularity:turn` entry for turn N is selected, same-turn
   segment entries are skipped — applied to the candidate set, so
-  it covers `maybeAutoInject` (`agent.go:2089`) too, which queries
-  by `file:` tags independently of selection. (Replacing segment
-  entries was the alternative; rejected: it loses file pins and
-  per-segment recall.)
+  it covers `maybeAutoInject` (`agent.go:2210`) too, which queries
+  by `file:` tags independently of selection. Demotion keys on
+  _selected_ digests, not existing ones — a compressed-away digest
+  leaves its segment entries eligible — so the check runs
+  post-selection and the set of digest-selected turns must be
+  plumbed into `maybeAutoInject` (it has no access to the
+  selection result today). (Replacing segment entries was the
+  alternative; rejected: it loses file pins and per-segment
+  recall.)
 - **Not self-pinned.** Boundary checkpoints pin because they are
   rare; a pinned entry per turn floods the working set. Turn
   digests are ordinary entries — selectable, compressible, eligible
   for the summary/tags tiers. If a digest compresses away, the
   stub's `recall` pointer still resolves (stored events are
   untouched), so no dead pointer is created.
-- **Trigger:** run end, when mode is `digest` **and** the turn
-  produced ≥1 classified event — a ≥1-event floor keeps trivial
-  turns ("thanks", one-question turns) from burning a small-model
-  call for an empty digest. This absorbs
+- **Trigger and dedup identity: the turn, not the run.** Fires at
+  run end for **each turn the run finished**, when mode is
+  `digest` **and** the turn produced ≥1 classified event —
+  `drainQueueForStep` folds queued prompts mid-run, so one run can
+  finish two turns and each gets its digest. Dedup keys on
+  `(turn_number, granularity:turn)` — does a turn digest for turn N
+  already exist — **not** `run:<stamp>`. The run tag's identity is
+  the run's consolidated _position_, and `GenerateCheckpoint`'s
+  tag check is granularity-blind by design: reusing it would let a
+  mid-run boundary checkpoint suppress the same run's digests for
+  exactly the write-heavy turns that need them most. The two
+  dedup scopes coexist: `run:<stamp>` for boundary/session
+  positions, per-turn for digests. This absorbs
   `SESSION_KNOWLEDGE.md`'s run-end trigger ("if context was
   gathered and no checkpoint exists") — under digest mode the
-  run-end checkpoint _is_ the turn digest; under other modes the
-  original conditional trigger stands.
-- **Generator input:** the turn's _classified events_, not its
-  entries — so no exclusion filter is needed (entries never enter
-  classification; if it ever generates over entries instead, filter
-  `granularity:turn` there).
+  run-end consolidation _is_ the turn digest; under other modes
+  the original conditional trigger stands.
+- **Floor units:** ≥1 classified event of _either_ bucket on the
+  turn's own events — the floor exists to skip _empty_ turns
+  (pure conversation: "thanks", one-question turns produce zero
+  events), not to filter exploration depth. Trivial events feed
+  the digest input too — a grep-only turn's trail is still the
+  turn's evidence. Do **not** reuse `GenerateCheckpoint`'s
+  `gathered` count: it tallies post-cutoff entries plus
+  non-mutating tail events, so `MinExploration: 1` against it is
+  async-timing-dependent (a write-only turn passes only if its
+  segment entries committed first).
+- **Generator input:** the finished turn's _classified events_,
+  not its entries — **and not `GenerateCheckpoint`'s cumulative
+  input** (all committed entries + uncovered tail restates the
+  session position; a digest wants only the turn's evidence). The
+  implementation is a sibling service method, not a
+  `CheckpointRequest` flag: input builder, floor, and dedup all
+  differ. `buildCheckpointInput`/`checkpoint_entry.md` emit
+  `Established/Open` with no `Files touched` section — the digest
+  needs a prompt variant carrying that shape. Entries never enter
+  classification, so no exclusion filter is needed.
 - **Placement:** the notebook splice (`PrepareStep`), like every
   entry — selection (with the demotion rule), compaction, recall,
   auto-inject. The only new render-path logic is the demotion skip.
+- **Not synced to mem0.** Turn digests are session-internal work
+  logs — one per turn would flood the cross-session memory pool
+  with fragments. Consolidated positions (`boundary`/`session`)
+  remain the hydration surface; `granularity:turn` is excluded
+  from `SyncEntries` even if digest generation rides the
+  checkpoint spawn path.
+- **Interrupted runs annotate the digest.** The spec edge case
+  stands: an aborted turn's digest headline notes "interrupted" so
+  a partial turn isn't read as finished work.
 
 ### 3. Flag: `notebook-prior-turns` (tri-state)
 
@@ -251,6 +290,13 @@ option notebook-prior-turns digest     # collapse + generated turn digest
 - **crushrc wiring:** `optionSpecs` already carries the
   `notebook-*` keys post-#45; `notebook-prior-turns` is a one-line
   `optString` entry plus the `Options` field.
+- **`digest` must resolve to `digest` end-to-end.** Until
+  generation ships, `NotebookPriorTurnsMode` (`config.go:1364`)
+  resolves `digest`→`stub`, `newTurnCollapse` accepts `"digest"`
+  as a stub alias, and the coordinator debug line reflects that —
+  all three flip when this feature lands, and the mode threads
+  into `collapsedResultText`/`collapsedCallInput` so `digest`
+  mode's stub text can say "consolidated in turn digest" (§1).
 - **Escape hatch:** set back to `verbatim` — takes effect on the
   next agent build (options are captured at agent construction,
   `coordinator.go:848`), after which the next `PrepareStep` shows
