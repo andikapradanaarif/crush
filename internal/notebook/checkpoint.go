@@ -178,6 +178,21 @@ func (s *service) GenerateCheckpoint(ctx context.Context, sessionID string, req 
 	if errors.Is(err, errCheckpointExists) {
 		return false, nil
 	}
+	if err != nil && req.RunTag != "" {
+		// withTx opens a deferred SQLite transaction: a sibling that
+		// commits between the in-tx re-check and this write fails the
+		// commit with SQLITE_BUSY_SNAPSHOT — a lost dedup race, not a
+		// real error. If the sibling's checkpoint is now visible,
+		// report the clean dedup outcome.
+		existing, serr := s.SearchByTag(ctx, sessionID, req.RunTag)
+		if serr == nil {
+			for _, e := range existing {
+				if e.EventType == EventCheckpoint {
+					return false, nil
+				}
+			}
+		}
+	}
 	if err != nil {
 		return false, fmt.Errorf("failed to commit checkpoint: %w", err)
 	}
@@ -207,6 +222,7 @@ func buildCheckpointInput(entries []Entry, tail []EntryInput, cutoffTurn, cutoff
 	// are new since it.
 	var blocks, freshBlocks []string
 	used := 0
+	elided := false
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
 		var b strings.Builder
@@ -218,6 +234,7 @@ func buildCheckpointInput(entries []Entry, tail []EntryInput, cutoffTurn, cutoff
 		b.WriteString(text)
 		b.WriteString("\n\n")
 		if used+b.Len() > checkpointInputMaxBytes {
+			elided = true
 			continue
 		}
 		used += b.Len()
@@ -250,7 +267,12 @@ func buildCheckpointInput(entries []Entry, tail []EntryInput, cutoffTurn, cutoff
 
 	var sb strings.Builder
 	sb.WriteString("Committed notebook entries (oldest first):\n\n")
-	if len(blocks) == 0 && len(freshBlocks) == 0 {
+	if elided {
+		// Without the marker the model cannot tell "no prior
+		// history" from "history crowded out by the budget".
+		sb.WriteString("(older entries elided)\n\n")
+	}
+	if len(blocks) == 0 && len(freshBlocks) == 0 && !elided {
 		sb.WriteString("(none)\n\n")
 	}
 	for _, b := range blocks {

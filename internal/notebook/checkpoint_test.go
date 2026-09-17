@@ -273,3 +273,22 @@ func TestGenerateCheckpoint_RunTagOnNonCheckpointDoesNotDedup(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, committed)
 }
+
+func TestBuildCheckpointInput_ElidedEntriesMarked(t *testing.T) {
+	// Entries crowded out by the shared budget must leave a marker —
+	// without it the model cannot tell "no prior history" from
+	// "history elided".
+	huge := strings.Repeat("x", checkpointInputMaxBytes)
+	entries := []Entry{
+		{TurnNumber: 1, EventNumber: 1, Title: "Old", EventType: EventGeneral, EntryTextFull: huge},
+		{TurnNumber: 2, EventNumber: 1, Title: "New", EventType: EventGeneral, EntryTextFull: "fresh fact"},
+	}
+	input := buildCheckpointInput(entries, nil, 0, 0)
+	require.Contains(t, input, "(older entries elided)")
+	require.Contains(t, input, "fresh fact")
+	require.NotContains(t, input, "(none)")
+
+	// When everything fits, no marker.
+	small := []Entry{{TurnNumber: 1, EventNumber: 1, Title: "A", EventType: EventGeneral, EntryTextFull: "fact"}}
+	require.NotContains(t, buildCheckpointInput(small, nil, 0, 0), "elided")
+}

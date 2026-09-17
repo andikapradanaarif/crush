@@ -148,6 +148,36 @@ func TestMaybeCheckpointBoundary_WritesCheckpoint(t *testing.T) {
 	require.Len(t, entries, 1)
 }
 
+// TestMaybeCheckpointBoundary_UnstampedContextSkips: Run-start
+// preparePrompt and Summarize rebuilds carry no run stamp — the
+// trigger must not fire on those passes even with the write boundary
+// crossed.
+func TestMaybeCheckpointBoundary_UnstampedContextSkips(t *testing.T) {
+	t.Parallel()
+
+	a, _, nb, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.notebookCheckpoint = true
+
+	var msgs []message.Message
+	msgs = append(msgs, segUser("investigate"))
+	for i := range scopeGateMinExploration {
+		msgs = append(msgs, cpViewCall("v"+string(rune('a'+i)))...)
+	}
+	msgs = append(msgs,
+		segAssistant("", message.ToolCall{ID: "e1", Name: "edit", Input: `{"file_path":"a.go"}`, Finished: true}),
+		segTool(message.ToolResult{ToolCallID: "e1", Name: "edit", Content: "ok"}),
+	)
+	segs := segmentBoundaries(msgs, a.segTokenBudget(), a.segMaxSteps())
+
+	// No RunStampContextKey — the stamp resolves to 0 and the pass
+	// must be a no-op despite the boundary-crossing write.
+	a.maybeCheckpointBoundary(t.Context(), sessionID, msgs, segs, nil)
+
+	entries, err := nb.GetEntries(t.Context(), sessionID)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
 // TestMaybeCheckpointBoundary_NoWriteNoCheckpoint: exploration without
 // a crossed write boundary never reaches generation.
 func TestMaybeCheckpointBoundary_NoWriteNoCheckpoint(t *testing.T) {
