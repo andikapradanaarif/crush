@@ -203,18 +203,26 @@ Open:
   entries (coverage requires segment processing, and they're the
   substrate for `PinnedFileTags` — which only fires on
   `EventFileEdit` — plus per-segment `recall` granularity). A digest
-  on top means the same work twice in the notebook. Rule: when a
-  `granularity:turn` entry for turn N is selected, same-turn
-  segment entries are skipped — applied to the candidate set, so
-  it covers `maybeAutoInject` (`agent.go:2210`) too, which queries
-  by `file:` tags independently of selection. Demotion keys on
-  _selected_ digests, not existing ones — a compressed-away digest
-  leaves its segment entries eligible — so the check runs
-  post-selection and the set of digest-selected turns must be
-  plumbed into `maybeAutoInject` (it has no access to the
-  selection result today). (Replacing segment entries was the
-  alternative; rejected: it loses file pins and per-segment
-  recall.)
+  on top means the same work twice in the notebook. Rule: **post-
+  selection**, within the selected set — when a `granularity:turn`
+  entry for turn N rendered, drop selected entries with
+  `TurnNumber == N && EventType != EventCheckpoint` (a boundary
+  checkpoint keyed into turn N via `checkpointSegmentKey` is a
+  different granularity and survives). Not candidate-set removal:
+  a digest that loses selection to budget must leave its segment
+  entries eligible, or the turn loses representation entirely.
+  Demotion keys on the digest being _rendered in this prefix_, not
+  existing — a compressed-away digest demotes nothing. The
+  demoted-turn set freezes at the run's first render alongside
+  `collapse.Set` — a digest landing mid-run must not demote
+  already-rendered segment entries (a bigger mid-window delta
+  than the freeze tolerates anywhere else). `maybeAutoInject`
+  (`agent.go:2210`) queries `file:` tags independently and
+  **checkpoints never inject** (`agent.go:2264`), so demotion
+  there only removes — it receives the rendered-digest turn set,
+  and only then do its same-turn candidates drop. (Replacing
+  segment entries was the alternative; rejected: it loses file
+  pins and per-segment recall.)
 - **Not self-pinned.** Boundary checkpoints pin because they are
   rare; a pinned entry per turn floods the working set. Turn
   digests are ordinary entries — selectable, compressible, eligible
@@ -234,10 +242,17 @@ Open:
   exactly the write-heavy turns that need them most. The two
   dedup scopes coexist: `run:<stamp>` for boundary/session
   positions, per-turn for digests. This absorbs
-  `SESSION_KNOWLEDGE.md`'s run-end trigger ("if context was
-  gathered and no checkpoint exists") — under digest mode the
-  run-end consolidation _is_ the turn digest; under other modes
-  the original conditional trigger stands.
+  `SESSION_KNOWLEDGE.md`'s run-end trigger — **explicitly, not via
+  dedup**: digests carry no `run:` tag, so
+  `generateRunEndCheckpoint`'s existence check never sees them and
+  would fire alongside — double consolidation, not absorption.
+  Under `digest` mode the run-end boundary trigger is disabled
+  outright; the turn digest _is_ the run-end consolidation. The
+  mid-run boundary trigger is disabled too — turn-grain becomes
+  the consolidation unit, and a boundary checkpoint plus per-turn
+  digests is the same position paid twice (digests still feed any
+  coarser session checkpoint; nothing is lost). Under `stub`/
+  `verbatim` both boundary triggers stand unchanged.
 - **Floor units:** ≥1 classified event of _either_ bucket on the
   turn's own events — the floor exists to skip _empty_ turns
   (pure conversation: "thanks", one-question turns produce zero
