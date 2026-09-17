@@ -8,6 +8,13 @@ import (
 	"database/sql"
 )
 
+type CollapsedTurn struct {
+	SessionID  string `json:"session_id"`
+	TurnNumber int64  `json:"turn_number"`
+	Events     int64  `json:"events"`
+	CreatedAt  int64  `json:"created_at"`
+}
+
 type File struct {
 	ID        string `json:"id"`
 	SessionID string `json:"session_id"`
@@ -88,4 +95,10 @@ type Session struct {
 	CreatedAt        int64          `json:"created_at"`
 	SummaryMessageID sql.NullString `json:"summary_message_id"`
 	Todos            sql.NullString `json:"todos"`
+}
+
+type SessionCounter struct {
+	SessionID string `json:"session_id"`
+	Name      string `json:"name"`
+	Value     int64  `json:"value"`
 }

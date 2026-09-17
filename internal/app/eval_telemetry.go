@@ -72,11 +72,16 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 			"boundary_advances": tel.BoundaryAdvances,
 			"kinds":             kinds,
 		}
+		doc["prior_turns"] = map[string]any{
+			"turns_collapsed":  tel.TurnsCollapsed,
+			"events_collapsed": tel.EventsCollapsed,
+		}
 		doc["recalls"] = map[string]any{
-			"result": tel.ResultRecalls,
-			"entry":  tel.EntryRecalls,
-			"empty":  tel.EmptyRecalls,
-			"cross":  tel.CrossRecalls,
+			"result":            tel.ResultRecalls,
+			"entry":             tel.EntryRecalls,
+			"empty":             tel.EmptyRecalls,
+			"cross":             tel.CrossRecalls,
+			"prior_turn_result": tel.PriorTurnResultRecalls,
 		}
 		doc["checkpoints"] = map[string]any{
 			"written":  tel.CheckpointsWritten,

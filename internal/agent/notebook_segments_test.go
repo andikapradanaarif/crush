@@ -319,16 +319,17 @@ func newSegmentTestAgent(t *testing.T, gen notebook.Generator) (*sessionAgent, m
 	nb := notebook.NewService(q, gen, notebook.Options{DB: conn, MaxEntryTokens: 10000, MaxNotebookTokens: 100000})
 
 	a := &sessionAgent{
-		messages:        svc,
-		sessions:        sessions,
-		notebook:        nb,
-		notebookEnabled: true,
-		syncSegmentGen:  true,
-		segmentTrackers: csync.NewMap[string, *segmentTracker](),
-		prefixCache:     csync.NewMap[string, cachedPrefix](),
-		stubBoundary:    csync.NewMap[string, int](),
-		stubStats:       csync.NewMap[string, stubStats](),
-		systemPrompt:    csync.NewValue("system"),
+		messages:         svc,
+		sessions:         sessions,
+		notebook:         nb,
+		notebookEnabled:  true,
+		syncSegmentGen:   true,
+		segmentTrackers:  csync.NewMap[string, *segmentTracker](),
+		prefixCache:      csync.NewMap[string, cachedPrefix](),
+		stubBoundary:     csync.NewMap[string, int](),
+		stubStats:        csync.NewMap[string, stubStats](),
+		collapseRecorded: csync.NewMap[string, *csync.Map[int64, bool]](),
+		systemPrompt:     csync.NewValue("system"),
 	}
 	// Seed the stamp generator like NewSessionAgent — stamps are
 	// random-epoch, so tests must assert explicit stamps rather than

@@ -1,9 +1,12 @@
 package agent
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/message"
 )
 
@@ -89,16 +92,30 @@ func coveredPriorTurns(segs []segment, processed map[segmentKey]bool, before int
 // collapsedCallInput is the replacement tool-call input for a
 // collapsed turn. It must stay a valid JSON object — providers
 // (Anthropic tool_use.input, Gemini args) reject prose — so the label
-// rides inside the payload rather than replacing it.
-func collapsedCallInput(turn int64) string {
+// rides inside the payload rather than replacing it. For file-write
+// calls the payload was the input itself — recall("result:<id>")
+// cannot recover it — so the stub names the real recovery path:
+// re-viewing the file. Other calls (reads, and bash mutations whose
+// output remains recallable) keep the generic marker.
+func collapsedCallInput(turn int64, write bool) string {
+	if write {
+		return fmt.Sprintf(`{"_collapsed":"prior turn %d — write args dropped; re-view the file to reconstruct"}`, turn)
+	}
 	return fmt.Sprintf(`{"_collapsed":"prior turn %d"}`, turn)
 }
 
 // collapsedResultText is the constant stub text a collapsed tool
 // result renders. It names the turn and the recovery path and — per
-// the stub contract — never claims a digest exists.
-func collapsedResultText(turn int64, toolCallID string) string {
-	return fmt.Sprintf("[prior turn %d — collapsed; recall(\"result:%s\") to recover]", turn, toolCallID)
+// the stub contract — never claims a digest exists. The pointer stays
+// honest about its bounds: recall returns the stored result capped at
+// MaxOutputLength. For file-write calls the result is only the write
+// confirmation — the args lived in the input — so the stub leads with
+// re-view and qualifies what recall holds.
+func collapsedResultText(turn int64, toolCallID string, write bool) string {
+	if write {
+		return fmt.Sprintf("[prior turn %d — collapsed; write args dropped — re-view the file to reconstruct; recall(\"result:%s\") holds only the confirmation]", turn, toolCallID)
+	}
+	return fmt.Sprintf("[prior turn %d — collapsed; recall(\"result:%s\") recovers the stored result, capped]", turn, toolCallID)
 }
 
 // collapseAssistantForTurn returns m with prior-turn detail removed:
@@ -113,8 +130,9 @@ func collapsedResultText(turn int64, toolCallID string) string {
 // signs. Reasoning bound to a collapsed call drops — the signature is
 // invalid against the mutated input either way. IDs, names, and finish
 // state are preserved. Returns m unchanged when nothing needs
-// collapsing.
-func collapseAssistantForTurn(m message.Message, turn int64) message.Message {
+// collapsing, plus the number of collapsed calls — the per-turn event
+// count the collapse telemetry records.
+func collapseAssistantForTurn(m message.Message, turn int64) (message.Message, int) {
 	exempt := make(map[string]bool)
 	for _, part := range m.Parts {
 		if tc, ok := part.(message.ToolCall); ok && callIsExempt(tc) {
@@ -134,9 +152,10 @@ func collapseAssistantForTurn(m message.Message, turn int64) message.Message {
 		}
 	}
 	if !needs {
-		return m
+		return m, 0
 	}
 	parts := make([]message.ContentPart, 0, len(m.Parts))
+	collapsed := 0
 	for _, part := range m.Parts {
 		switch p := part.(type) {
 		case message.ReasoningContent:
@@ -146,15 +165,16 @@ func collapseAssistantForTurn(m message.Message, turn int64) message.Message {
 			continue
 		case message.ToolCall:
 			if !exempt[p.ID] {
-				p.Input = collapsedCallInput(turn)
+				p.Input = collapsedCallInput(turn, tools.WriteToolNames[p.Name])
 				part = p
+				collapsed++
 			}
 		}
 		parts = append(parts, part)
 	}
 	out := m
 	out.Parts = parts
-	return out
+	return out, collapsed
 }
 
 // callIsExempt reports whether a tool call stays verbatim inside a
@@ -166,9 +186,10 @@ func callIsExempt(tc message.ToolCall) bool {
 // collapseToolMessageForTurn returns m with each tool result's stored
 // content replaced by collapsedResultText — media payloads included
 // (Data cleared so the text stub is what emits). Results answering an
-// exempt call stay verbatim with it. Returns the message and how many
+// exempt call stay verbatim with it; results answering a file-write
+// call get the re-view-led stub. Returns the message and how many
 // results were collapsed.
-func collapseToolMessageForTurn(m message.Message, turn int64, exemptCalls map[string]bool) (message.Message, int) {
+func collapseToolMessageForTurn(m message.Message, turn int64, exemptCalls map[string]bool, callNames map[string]string) (message.Message, int) {
 	var parts []message.ContentPart
 	count := 0
 	for i, part := range m.Parts {
@@ -179,7 +200,7 @@ func collapseToolMessageForTurn(m message.Message, turn int64, exemptCalls map[s
 			}
 			continue
 		}
-		tr.Content = collapsedResultText(turn, tr.ToolCallID)
+		tr.Content = collapsedResultText(turn, tr.ToolCallID, tools.WriteToolNames[callNames[tr.ToolCallID]])
 		tr.Data = ""
 		tr.MIMEType = ""
 		// The stub is informational, not the failure it replaces —
@@ -199,4 +220,47 @@ func collapseToolMessageForTurn(m message.Message, turn int64, exemptCalls map[s
 	out := m
 	out.Parts = parts
 	return out, count
+}
+
+// recordCollapsedTurns persists newly collapsed turns and accumulates
+// the session's collapse telemetry. byTurn maps each collapsed turn to
+// its collapsed call/result pair count. A turn is counted once: the
+// collapsed_turns row's existence dedupes across renders and across
+// the processes a resumed session passes through, and the in-memory
+// recorded set skips the write entirely once this process has logged
+// the turn. Counter bumps follow the DB row — a turn another process
+// already recorded doesn't double-count.
+func (a *sessionAgent) recordCollapsedTurns(ctx context.Context, sessionID string, byTurn map[int64]int) {
+	if sessionID == "" || a.notebook == nil {
+		return
+	}
+	var recorded *csync.Map[int64, bool]
+	if a.collapseRecorded != nil {
+		recorded, _ = a.collapseRecorded.Get(sessionID)
+		if recorded == nil {
+			recorded = csync.NewMap[int64, bool]()
+			a.collapseRecorded.Set(sessionID, recorded)
+		}
+	}
+	for turn, events := range byTurn {
+		if recorded != nil {
+			if _, ok := recorded.Get(turn); ok {
+				continue
+			}
+		}
+		inserted, err := a.notebook.RecordCollapsedTurn(ctx, sessionID, turn, events)
+		if err != nil {
+			slog.Warn("Failed to record collapsed turn", "session_id", sessionID, "turn", turn, "error", err)
+			continue
+		}
+		if recorded != nil {
+			recorded.Set(turn, true)
+		}
+		if inserted && a.stubStats != nil {
+			stats, _ := a.stubStats.Get(sessionID)
+			stats.TurnsCollapsed++
+			stats.EventsCollapsed += events
+			a.stubStats.Set(sessionID, stats)
+		}
+	}
 }

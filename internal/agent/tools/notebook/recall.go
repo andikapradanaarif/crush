@@ -157,10 +157,34 @@ func (rc *recallContext) recallToolResult(ctx context.Context, sessionID, toolCa
 	if err != nil {
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("failed to list messages: %v", err)), nil
 	}
+	// Turn numbers are positional — the count of user messages before
+	// the message, so the current turn is the last one's index. A
+	// result sitting in an earlier turn is a prior-turn recall: the
+	// feasible approximation of "recall into a collapsed turn", since
+	// collapse leaves no stored mark to read.
+	userCount := 0
 	for _, m := range msgs {
+		if m.Role == message.User {
+			userCount++
+		}
+	}
+	currentTurn := int64(userCount - 1)
+	var turn int64 = -1
+	for _, m := range msgs {
+		if m.Role == message.User {
+			turn++
+		}
 		for _, tr := range m.ToolResults() {
 			if tr.ToolCallID != toolCallID {
 				continue
+			}
+			if turn >= 0 && turn < currentTurn {
+				rc.bump(sessionID, func(s *notebook.Stats) { s.PriorTurnResultRecalls++ })
+				if rc.svc != nil {
+					if err := rc.svc.BumpSessionCounter(ctx, sessionID, notebook.CounterPriorTurnResultRecall, 1); err != nil {
+						slog.Warn("Failed to record prior-turn result recall", "session_id", sessionID, "error", err)
+					}
+				}
 			}
 			var sb strings.Builder
 			fmt.Fprintf(&sb, "## Tool result %s — %s", tr.ToolCallID, tr.Name)

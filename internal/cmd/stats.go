@@ -21,6 +21,7 @@ import (
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/event"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/notebook"
 	"github.com/charmbracelet/crush/internal/projects"
 	"github.com/pkg/browser"
 	"github.com/spf13/cobra"
@@ -73,6 +74,7 @@ type Stats struct {
 	HourDayHeatmap    []HourDayHeatmapPt `json:"hour_day_heatmap"`
 	Pruning           *PruningStats      `json:"pruning,omitempty"`
 	ProjectIndex      *ProjectIndexStats `json:"project_index,omitempty"`
+	Collapse          *CollapseStats     `json:"collapse,omitempty"`
 }
 
 type TotalStats struct {
@@ -157,6 +159,20 @@ type PruningStats struct {
 type ProjectIndexStats struct {
 	MapCalls int64 `json:"map_calls"`
 	Sessions int64 `json:"sessions"`
+}
+
+// CollapseStats summarizes prior-turn collapse (options
+// notebook_prior_turns): distinct turns whose tool call/result pairs
+// rendered as stubs, and the result: recalls that reached back into
+// a prior turn — the flag-flip evidence for the stub/digest modes.
+// Rows persist only when collapse actually fired, so an all-verbatim
+// database simply has no section. Events counts collapsed calls; each
+// call's result collapses with it, so it is also the pair count.
+type CollapseStats struct {
+	Turns                  int64 `json:"turns"`
+	Events                 int64 `json:"events"`
+	Sessions               int64 `json:"sessions"`
+	PriorTurnResultRecalls int64 `json:"prior_turn_result_recalls"`
 }
 
 // ProjectStats associates stats with a project path.
@@ -542,6 +558,17 @@ func mergeStats(projectStats []ProjectStats) *Stats {
 			merged.ProjectIndex.Sessions += s.ProjectIndex.Sessions
 		}
 
+		// Aggregate prior-turn collapse.
+		if s.Collapse != nil {
+			if merged.Collapse == nil {
+				merged.Collapse = &CollapseStats{}
+			}
+			merged.Collapse.Turns += s.Collapse.Turns
+			merged.Collapse.Events += s.Collapse.Events
+			merged.Collapse.Sessions += s.Collapse.Sessions
+			merged.Collapse.PriorTurnResultRecalls += s.Collapse.PriorTurnResultRecalls
+		}
+
 		// Accumulate response time for averaging.
 		if s.AvgResponseTimeMs > 0 {
 			totalResponseTimeMs += s.AvgResponseTimeMs * float64(s.Total.TotalMessages)
@@ -747,7 +774,44 @@ func gatherStats(ctx context.Context, conn *sql.DB) (*Stats, error) {
 		stats.ProjectIndex = &ProjectIndexStats{MapCalls: mapUsage.MapCalls, Sessions: mapUsage.Sessions}
 	}
 
+	// Prior-turn collapse — persisted per collapsed turn, so the
+	// aggregate is exact across renders and resumed-session processes.
+	collapse, err := gatherCollapseStats(ctx, queries)
+	if err != nil {
+		return nil, err
+	}
+	stats.Collapse = collapse
+
 	return stats, nil
+}
+
+// gatherCollapseStats aggregates the persisted prior-turn collapse
+// rows plus the scalar session counters (result: recalls into prior
+// turns — the recall-into-collapsed approximation).
+func gatherCollapseStats(ctx context.Context, queries *db.Queries) (*CollapseStats, error) {
+	turns, err := queries.GetCollapsedTurnStats(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get collapse stats: %w", err)
+	}
+	counters, err := queries.ListSessionCounters(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list session counters: %w", err)
+	}
+	var recalls int64
+	for _, c := range counters {
+		if c.Name == notebook.CounterPriorTurnResultRecall {
+			recalls = toInt64(c.Value)
+		}
+	}
+	if turns.Turns == 0 && recalls == 0 {
+		return nil, nil
+	}
+	return &CollapseStats{
+		Turns:                  turns.Turns,
+		Events:                 toInt64(turns.Events),
+		Sessions:               turns.Sessions,
+		PriorTurnResultRecalls: recalls,
+	}, nil
 }
 
 // gatherPruningStats aggregates applied superseded marks persisted on

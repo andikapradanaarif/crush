@@ -187,8 +187,11 @@ type coordinator struct {
 	// coordinator builds so agent rebuilds (UpdateModels, task-agent
 	// churn) reuse one watcher and one map pair instead of leaking a
 	// per-agent subscription. Nil when stubbing is disabled.
-	stubBoundary *csync.Map[string, int]
-	stubStats    *csync.Map[string, stubStats]
+	// collapseRecorded is the same for prior-turn collapse — the
+	// turns this process already persisted to collapsed_turns.
+	stubBoundary     *csync.Map[string, int]
+	stubStats        *csync.Map[string, stubStats]
+	collapseRecorded *csync.Map[string, *csync.Map[int64, bool]]
 	// segmentTrackers/prefixCache share intra-turn segment state and
 	// the rendered notebook prefix across agent rebuilds. Nil when
 	// the notebook is disabled.
@@ -285,15 +288,22 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 	// run one deletion watcher here — a per-agent watcher would leak
 	// a goroutine and broker subscriber on every agent rebuild. The
 	// segment maps exist whenever the notebook is on; stub maps
-	// additionally need stubbing enabled.
+	// additionally need stubbing enabled. stubStats also carries the
+	// collapse counters, so it must be shared whenever prior-turns is
+	// enabled too — a private map would reset on agent rebuild while
+	// the persisted rows keep deduping, under-reporting telemetry.
 	if opts.Sessions != nil && opts.Config.Config().Options.NotebookIsEnabled() {
 		c.segmentTrackers = csync.NewMap[string, *segmentTracker]()
 		c.prefixCache = csync.NewMap[string, cachedPrefix]()
 		c.nbStats = csync.NewMap[string, notebook.Stats]()
 		c.nbScanIdx = csync.NewMap[string, int]()
 		c.nbPendingReads = csync.NewMap[string, map[string]string]()
+		c.collapseRecorded = csync.NewMap[string, *csync.Map[int64, bool]]()
 		if opts.Config.Config().Options.NotebookStubSupersededEnabled() {
 			c.stubBoundary = csync.NewMap[string, int]()
+		}
+		if opts.Config.Config().Options.NotebookStubSupersededEnabled() ||
+			opts.Config.Config().Options.NotebookPriorTurnsMode() != "verbatim" {
 			c.stubStats = csync.NewMap[string, stubStats]()
 		}
 		go c.watchSessionDeletions()
@@ -348,6 +358,9 @@ func (c *coordinator) watchSessionDeletions() {
 		}
 		if c.nbScanIdx != nil {
 			c.nbScanIdx.Del(ev.Payload.ID)
+		}
+		if c.collapseRecorded != nil {
+			c.collapseRecorded.Del(ev.Payload.ID)
 		}
 		if c.nbPendingReads != nil {
 			c.nbPendingReads.Del(ev.Payload.ID)
@@ -863,6 +876,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		NotebookPriorTurns:     priorTurns,
 		StubBoundary:           c.stubBoundary,
 		StubStats:              c.stubStats,
+		CollapseRecorded:       c.collapseRecorded,
 		SegmentTrackers:        c.segmentTrackers,
 		PrefixCache:            c.prefixCache,
 		NotebookStats:          c.nbStats,

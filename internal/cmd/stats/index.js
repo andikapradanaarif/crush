@@ -483,6 +483,28 @@ if (stats.pruning && stats.pruning.stubbed_results > 0) {
   }
 }
 
+// Prior-Turn Collapse (only shown when stub/digest mode has fired)
+if (
+  stats.collapse &&
+  (stats.collapse.turns > 0 || stats.collapse.prior_turn_result_recalls > 0)
+) {
+  const section = document.createElement("div");
+  section.className = "chart-card full-width";
+  section.innerHTML = `
+    <h2>Prior-Turn Collapse</h2>
+    <p style="color: var(--text-muted); margin: 0">
+      ${formatNumber(stats.collapse.turns)} prior turns collapsed —
+      ${formatNumber(stats.collapse.events)} tool call/result pairs rendered as stubs across
+      ${formatNumber(stats.collapse.sessions)} sessions.
+      ${formatNumber(stats.collapse.prior_turn_result_recalls)} result: recalls reached back into a prior turn.
+    </p>
+  `;
+  const container = document.querySelector(".charts-grid");
+  if (container) {
+    container.appendChild(section);
+  }
+}
+
 // Project Index (only shown when the map tool has been called)
 if (stats.project_index && stats.project_index.map_calls > 0) {
   const section = document.createElement("div");

@@ -24,6 +24,9 @@ func New(db DBTX) *Queries {
 func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	q := Queries{db: db}
 	var err error
+	if q.bumpSessionCounterStmt, err = db.PrepareContext(ctx, bumpSessionCounter); err != nil {
+		return nil, fmt.Errorf("error preparing query BumpSessionCounter: %w", err)
+	}
 	if q.createFileStmt, err = db.PrepareContext(ctx, createFile); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateFile: %w", err)
 	}
@@ -62,6 +65,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.getAverageResponseTimeStmt, err = db.PrepareContext(ctx, getAverageResponseTime); err != nil {
 		return nil, fmt.Errorf("error preparing query GetAverageResponseTime: %w", err)
+	}
+	if q.getCollapsedTurnStatsStmt, err = db.PrepareContext(ctx, getCollapsedTurnStats); err != nil {
+		return nil, fmt.Errorf("error preparing query GetCollapsedTurnStats: %w", err)
 	}
 	if q.getFileStmt, err = db.PrepareContext(ctx, getFile); err != nil {
 		return nil, fmt.Errorf("error preparing query GetFile: %w", err)
@@ -168,6 +174,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listProcessedSegmentsStmt, err = db.PrepareContext(ctx, listProcessedSegments); err != nil {
 		return nil, fmt.Errorf("error preparing query ListProcessedSegments: %w", err)
 	}
+	if q.listSessionCountersStmt, err = db.PrepareContext(ctx, listSessionCounters); err != nil {
+		return nil, fmt.Errorf("error preparing query ListSessionCounters: %w", err)
+	}
 	if q.listSessionReadFilesStmt, err = db.PrepareContext(ctx, listSessionReadFiles); err != nil {
 		return nil, fmt.Errorf("error preparing query ListSessionReadFiles: %w", err)
 	}
@@ -179,6 +188,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.markSegmentProcessedStmt, err = db.PrepareContext(ctx, markSegmentProcessed); err != nil {
 		return nil, fmt.Errorf("error preparing query MarkSegmentProcessed: %w", err)
+	}
+	if q.recordCollapsedTurnStmt, err = db.PrepareContext(ctx, recordCollapsedTurn); err != nil {
+		return nil, fmt.Errorf("error preparing query RecordCollapsedTurn: %w", err)
 	}
 	if q.recordFileReadStmt, err = db.PrepareContext(ctx, recordFileRead); err != nil {
 		return nil, fmt.Errorf("error preparing query RecordFileRead: %w", err)
@@ -215,6 +227,11 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 
 func (q *Queries) Close() error {
 	var err error
+	if q.bumpSessionCounterStmt != nil {
+		if cerr := q.bumpSessionCounterStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing bumpSessionCounterStmt: %w", cerr)
+		}
+	}
 	if q.createFileStmt != nil {
 		if cerr := q.createFileStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing createFileStmt: %w", cerr)
@@ -278,6 +295,11 @@ func (q *Queries) Close() error {
 	if q.getAverageResponseTimeStmt != nil {
 		if cerr := q.getAverageResponseTimeStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getAverageResponseTimeStmt: %w", cerr)
+		}
+	}
+	if q.getCollapsedTurnStatsStmt != nil {
+		if cerr := q.getCollapsedTurnStatsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getCollapsedTurnStatsStmt: %w", cerr)
 		}
 	}
 	if q.getFileStmt != nil {
@@ -455,6 +477,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listProcessedSegmentsStmt: %w", cerr)
 		}
 	}
+	if q.listSessionCountersStmt != nil {
+		if cerr := q.listSessionCountersStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listSessionCountersStmt: %w", cerr)
+		}
+	}
 	if q.listSessionReadFilesStmt != nil {
 		if cerr := q.listSessionReadFilesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listSessionReadFilesStmt: %w", cerr)
@@ -473,6 +500,11 @@ func (q *Queries) Close() error {
 	if q.markSegmentProcessedStmt != nil {
 		if cerr := q.markSegmentProcessedStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing markSegmentProcessedStmt: %w", cerr)
+		}
+	}
+	if q.recordCollapsedTurnStmt != nil {
+		if cerr := q.recordCollapsedTurnStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing recordCollapsedTurnStmt: %w", cerr)
 		}
 	}
 	if q.recordFileReadStmt != nil {
@@ -564,6 +596,7 @@ func (q *Queries) queryRow(ctx context.Context, stmt *sql.Stmt, query string, ar
 type Queries struct {
 	db                                   DBTX
 	tx                                   *sql.Tx
+	bumpSessionCounterStmt               *sql.Stmt
 	createFileStmt                       *sql.Stmt
 	createMessageStmt                    *sql.Stmt
 	createNotebookEntryStmt              *sql.Stmt
@@ -577,6 +610,7 @@ type Queries struct {
 	deleteSessionFilesStmt               *sql.Stmt
 	deleteSessionMessagesStmt            *sql.Stmt
 	getAverageResponseTimeStmt           *sql.Stmt
+	getCollapsedTurnStatsStmt            *sql.Stmt
 	getFileStmt                          *sql.Stmt
 	getFileByPathAndSessionStmt          *sql.Stmt
 	getFileReadStmt                      *sql.Stmt
@@ -612,10 +646,12 @@ type Queries struct {
 	listMessagesBySessionStmt            *sql.Stmt
 	listNewFilesStmt                     *sql.Stmt
 	listProcessedSegmentsStmt            *sql.Stmt
+	listSessionCountersStmt              *sql.Stmt
 	listSessionReadFilesStmt             *sql.Stmt
 	listSessionsStmt                     *sql.Stmt
 	listUserMessagesBySessionStmt        *sql.Stmt
 	markSegmentProcessedStmt             *sql.Stmt
+	recordCollapsedTurnStmt              *sql.Stmt
 	recordFileReadStmt                   *sql.Stmt
 	recordProcessedSegmentStmt           *sql.Stmt
 	recordSegmentAttemptStmt             *sql.Stmt
@@ -632,6 +668,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 	return &Queries{
 		db:                                   tx,
 		tx:                                   tx,
+		bumpSessionCounterStmt:               q.bumpSessionCounterStmt,
 		createFileStmt:                       q.createFileStmt,
 		createMessageStmt:                    q.createMessageStmt,
 		createNotebookEntryStmt:              q.createNotebookEntryStmt,
@@ -645,6 +682,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		deleteSessionFilesStmt:               q.deleteSessionFilesStmt,
 		deleteSessionMessagesStmt:            q.deleteSessionMessagesStmt,
 		getAverageResponseTimeStmt:           q.getAverageResponseTimeStmt,
+		getCollapsedTurnStatsStmt:            q.getCollapsedTurnStatsStmt,
 		getFileStmt:                          q.getFileStmt,
 		getFileByPathAndSessionStmt:          q.getFileByPathAndSessionStmt,
 		getFileReadStmt:                      q.getFileReadStmt,
@@ -680,10 +718,12 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listMessagesBySessionStmt:            q.listMessagesBySessionStmt,
 		listNewFilesStmt:                     q.listNewFilesStmt,
 		listProcessedSegmentsStmt:            q.listProcessedSegmentsStmt,
+		listSessionCountersStmt:              q.listSessionCountersStmt,
 		listSessionReadFilesStmt:             q.listSessionReadFilesStmt,
 		listSessionsStmt:                     q.listSessionsStmt,
 		listUserMessagesBySessionStmt:        q.listUserMessagesBySessionStmt,
 		markSegmentProcessedStmt:             q.markSegmentProcessedStmt,
+		recordCollapsedTurnStmt:              q.recordCollapsedTurnStmt,
 		recordFileReadStmt:                   q.recordFileReadStmt,
 		recordProcessedSegmentStmt:           q.recordProcessedSegmentStmt,
 		recordSegmentAttemptStmt:             q.recordSegmentAttemptStmt,

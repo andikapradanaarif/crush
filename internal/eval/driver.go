@@ -31,6 +31,7 @@ type RunResult struct {
 	Steps         int
 	Tokens        TokenUsage
 	StubStats     StubStats
+	PriorTurns    PriorTurns
 	Recalls       Recalls
 	Checkpoints   Checkpoints
 	SessionID     string
@@ -92,11 +93,19 @@ type runTelemetry struct {
 		BoundaryAdvances int            `json:"boundary_advances"`
 		Kinds            map[string]int `json:"kinds"`
 	} `json:"stub_stats"`
+	// PriorTurns carries the collapse telemetry: each turn counts once
+	// trajectory-wide because the persisted collapsed_turns row is the
+	// dedupe across the per-turn subprocesses.
+	PriorTurns struct {
+		TurnsCollapsed  int `json:"turns_collapsed"`
+		EventsCollapsed int `json:"events_collapsed"`
+	} `json:"prior_turns"`
 	Recalls struct {
-		Result int `json:"result"`
-		Entry  int `json:"entry"`
-		Empty  int `json:"empty"`
-		Cross  int `json:"cross"`
+		Result          int `json:"result"`
+		Entry           int `json:"entry"`
+		Empty           int `json:"empty"`
+		Cross           int `json:"cross"`
+		PriorTurnResult int `json:"prior_turn_result"`
 	} `json:"recalls"`
 	// Checkpoints carries the checkpoint telemetry: written counts
 	// committed checkpoint entries, rendered counts prefix renders
@@ -252,10 +261,13 @@ func (res *RunResult) addTurnTelemetry(tel runTelemetry) {
 			res.StubStats.Kinds[kind] += n
 		}
 	}
+	res.PriorTurns.TurnsCollapsed += tel.PriorTurns.TurnsCollapsed
+	res.PriorTurns.EventsCollapsed += tel.PriorTurns.EventsCollapsed
 	res.Recalls.Result += tel.Recalls.Result
 	res.Recalls.Entry += tel.Recalls.Entry
 	res.Recalls.Empty += tel.Recalls.Empty
 	res.Recalls.Cross += tel.Recalls.Cross
+	res.Recalls.PriorTurnResult += tel.Recalls.PriorTurnResult
 	res.Checkpoints.Written += tel.Checkpoints.Written
 	res.Checkpoints.Rendered += tel.Checkpoints.Rendered
 }
