@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -74,13 +75,15 @@ func TestCheckpointClaimLifecycle(t *testing.T) {
 
 	require.True(t, tr.claimCheckpoint(1))
 	require.False(t, tr.claimCheckpoint(1), "the run claims once")
-	require.False(t, tr.retryCheckpoint(1), "an in-flight generation blocks the run-end retry")
+	tr.retryCheckpoint(2) // An in-flight generation holds its stamp.
+	require.Equal(t, uint64(1), tr.checkpointStamp)
 
 	// A clean finish keeps the slot claimed — the boundary is
-	// evaluated once per run.
+	// evaluated once per run — but the run-end pass may retry it.
 	tr.finishCheckpoint(1, false)
 	require.False(t, tr.claimCheckpoint(1))
-	require.True(t, tr.retryCheckpoint(1), "the run-end pass may retry a finished claim")
+	tr.retryCheckpoint(1)
+	require.True(t, tr.checkpointInFlight)
 	tr.finishCheckpoint(1, false)
 
 	// A failed finish releases the slot for the run-end fallback.
@@ -193,6 +196,46 @@ func TestGenerateRunEndCheckpoint(t *testing.T) {
 	entries, err = nb.GetEntries(t.Context(), sessionID)
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
+}
+
+// TestGenerateRunEndCheckpoint_ResumedSessionStamps: run stamps are
+// seeded with a per-agent epoch — a prior process lifetime's run:1
+// tag, or the tracker claim it left behind, must not suppress the
+// first run after a rebuild/restart.
+func TestGenerateRunEndCheckpoint_ResumedSessionStamps(t *testing.T) {
+	t.Parallel()
+
+	a, _, nb, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.notebookCheckpoint = true
+
+	msgs := append([]message.Message{segUser("look")}, cpViewCall("v1")...)
+
+	// A previous lifetime's run stamped and committed run:1.
+	a.generateRunEndCheckpoint(t.Context(), sessionID, msgs, 0, 1, nil, "")
+	entries, err := nb.GetEntries(t.Context(), sessionID)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Contains(t, entries[0].Tags, "run:1")
+
+	// A rebuilt agent — sharing the session's tracker map, as
+	// coordinator rebuilds do — gets a disjoint stamp space.
+	a2 := &sessionAgent{
+		notebook:           nb,
+		notebookEnabled:    true,
+		notebookCheckpoint: true,
+		syncSegmentGen:     true,
+		segmentTrackers:    a.segmentTrackers,
+	}
+	a2.runStampGen.Store(runStampEpoch())
+	fresh := a2.runStampGen.Add(1)
+	require.NotEqual(t, uint64(1), fresh)
+	require.NotZero(t, fresh>>32, "epoch bits must be populated")
+
+	a2.generateRunEndCheckpoint(t.Context(), sessionID, msgs, 0, fresh, nil, "")
+	entries, err = nb.GetEntries(t.Context(), sessionID)
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	require.Contains(t, entries[1].Tags, fmt.Sprintf("run:%d", fresh))
 }
 
 // TestGenerateRunEndCheckpoint_EmptyRun: nothing gathered, nothing

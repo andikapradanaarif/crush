@@ -65,16 +65,17 @@ func (t *segmentTracker) claimCheckpoint(stamp uint64) bool {
 // retryCheckpoint re-claims the slot for the run-end pass. A mid-run
 // claim that completed without committing (below the boundary
 // threshold) must not block the run-end floor — but a genuinely
-// in-flight generation does.
-func (t *segmentTracker) retryCheckpoint(stamp uint64) bool {
+// in-flight generation does. The claim is cost control, not
+// correctness — the run-tag dedup is authoritative — so the caller
+// deliberately discards whether the slot was already held.
+func (t *segmentTracker) retryCheckpoint(stamp uint64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.checkpointInFlight {
-		return false
+		return
 	}
 	t.checkpointStamp = stamp
 	t.checkpointInFlight = true
-	return true
 }
 
 // finishCheckpoint resolves the claim. A committed checkpoint or a
@@ -262,12 +263,10 @@ func (a *sessionAgent) generateRunEndCheckpoint(ctx context.Context, sessionID s
 	// A mid-run generation still in flight does not block the run-end
 	// pass — if it fails the run still gets its checkpoint, and if it
 	// commits the in-transaction run-tag re-check short-circuits this
-	// one before the write. The claim is cost control, not
-	// correctness, and its return is deliberately discarded: when a
-	// mid-run generation holds the slot this spawn runs unclaimed,
-	// and its finishCheckpoint can clear the mid-run claim's
-	// in-flight flag early — the run-tag dedup makes that overlap
-	// cost a redundant model call at most.
+	// one before the write. When a mid-run generation holds the slot
+	// this spawn runs unclaimed, and its finishCheckpoint can clear
+	// the mid-run claim's in-flight flag early — the run-tag dedup
+	// makes that overlap cost a redundant model call at most.
 	tracker.retryCheckpoint(stamp)
 	segs := segmentBoundaries(msgs, a.segTokenBudget(), a.segMaxSteps())
 	key, ok := checkpointSegmentKey(segs)

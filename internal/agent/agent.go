@@ -10,8 +10,10 @@ package agent
 import (
 	"cmp"
 	"context"
+	cryptorand "crypto/rand"
 	_ "embed"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -260,6 +262,11 @@ type sessionAgent struct {
 	// runStampGen is the monotonic source of per-Run stamps the scope
 	// gate uses to reset its explore→execute boundary bookkeeping.
 	// Atomic: Run invocations on different sessions can race on it.
+	// The counter is seeded with a random epoch in the high bits —
+	// checkpoint run:<stamp> tags are durable and segmentTrackers are
+	// shared across rebuilds, so a stamp sequence that restarted at 1
+	// would let a resumed session's stale tags and claims suppress
+	// fresh checkpoints.
 	runStampGen atomic.Uint64
 	// segmentTrackers holds per-session intra-turn segment state:
 	// in-flight generation marks and backfill claims, shared across
@@ -436,7 +443,28 @@ func NewSessionAgent(
 		ambiguityClarification: opts.AmbiguityClarification,
 		interactive:            opts.Interactive,
 	}
+	a.runStampGen.Store(runStampEpoch())
 	return a
+}
+
+// runStampEpoch returns the high-bit seed for runStampGen: a random
+// 32-bit epoch per agent build, so each build owns a distinct stamp
+// space. Checkpoint run:<stamp> tags persist in the session DB and the
+// shared segmentTrackers claim survives agent rebuilds — a plain
+// 1,2,3… sequence would collide with a previous build's (or process
+// lifetime's) tags and suppress fresh checkpoints. The low 32 bits
+// stay a per-agent monotonic sequence. A zero epoch keeps stamp 0 free
+// as the "no stamp" sentinel.
+func runStampEpoch() uint64 {
+	var b [4]byte
+	if _, err := cryptorand.Read(b[:]); err != nil {
+		return uint64(time.Now().UnixNano()) << 32
+	}
+	epoch := uint64(binary.BigEndian.Uint32(b[:])&0x7FFFFFFF) << 32
+	if epoch == 0 {
+		epoch = 1 << 32
+	}
+	return epoch
 }
 
 // AcceptedRun owns exactly one accept reservation taken by
