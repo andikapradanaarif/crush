@@ -26,6 +26,20 @@ func renderedCall(t *testing.T, history []fantasy.Message, id string) fantasy.To
 	return fantasy.ToolCallPart{}
 }
 
+// renderedResult returns the rendered result part paired with call id.
+func renderedResult(t *testing.T, history []fantasy.Message, id string) fantasy.ToolResultPart {
+	t.Helper()
+	for _, m := range history {
+		for _, p := range m.Content {
+			if tr, ok := p.(fantasy.ToolResultPart); ok && tr.ToolCallID == id {
+				return tr
+			}
+		}
+	}
+	t.Fatalf("tool result %s missing from rendered history", id)
+	return fantasy.ToolResultPart{}
+}
+
 // renderedResultText returns the rendered text (or error text) of the
 // tool result paired with call id.
 func renderedResultText(t *testing.T, history []fantasy.Message, id string) string {
@@ -101,7 +115,7 @@ func priorTurnFixture(t *testing.T, svc message.Service, sessionID string) []mes
 		message.ToolCall{ID: "tc-web", Name: "web_search", Input: `{"query":"golang generics"}`, ProviderExecuted: true, Finished: true},
 	)
 	mkMsg(t, svc, sessionID, message.Tool,
-		message.ToolResult{ToolCallID: "tc-bash", Name: "bash", Content: bigContent()},
+		message.ToolResult{ToolCallID: "tc-bash", Name: "bash", Content: bigContent(), IsError: true},
 		message.ToolResult{ToolCallID: "tc-q", Name: "question", Content: "yes — proceed"},
 		message.ToolResult{ToolCallID: "tc-web", Name: "web_search", Content: "search result payload"},
 	)
@@ -138,6 +152,11 @@ func TestPreparePrompt_CollapsesCoveredPriorTurn(t *testing.T) {
 	require.Contains(t, res, "prior turn 0")
 	require.Contains(t, res, `recall("result:tc-bash")`)
 	require.NotContains(t, res, "file content line")
+
+	// The stub is informational — the replaced result's IsError flag
+	// must not render it as an error.
+	require.IsType(t, fantasy.ToolResultOutputContentText{},
+		renderedResult(t, history, "tc-bash").Output)
 
 	// Reasoning bound to a collapsed call drops — its signature is
 	// invalid against the mutated input anyway. Reasoning bound to the

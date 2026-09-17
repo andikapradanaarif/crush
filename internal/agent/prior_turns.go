@@ -182,6 +182,10 @@ func collapseToolMessageForTurn(m message.Message, turn int64, exemptCalls map[s
 		tr.Content = collapsedResultText(turn, tr.ToolCallID)
 		tr.Data = ""
 		tr.MIMEType = ""
+		// The stub is informational, not the failure it replaces —
+		// rendering is_error=true on collapsed text is structurally
+		// valid but semantically wrong.
+		tr.IsError = false
 		if parts == nil {
 			parts = make([]message.ContentPart, 0, len(m.Parts))
 			parts = append(parts, m.Parts[:i]...)
