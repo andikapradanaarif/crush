@@ -217,13 +217,25 @@ Open:
   Demotion keys on the digest being _rendered in this prefix_, not
   existing — a compressed-away digest demotes nothing. The freeze
   captures **eligibility, not application**: the set of turns
-  holding a digest freezes at the run's first render alongside
-  `collapse.Set` — a digest landing mid-run must not demote
-  already-rendered entries (a bigger mid-window delta than the
-  freeze tolerates anywhere else) — while each render still
-  requires the digest actually selected that render, so an evicted
-  digest can't leave turn N with neither representation. Demotion
-  additionally requires the digest to carry content
+  holding a digest freezes at the run's first render — a digest
+  landing mid-run must not demote already-rendered entries (a
+  bigger mid-window delta than the freeze tolerates anywhere
+  else) — while each render still requires the digest actually
+  selected that render, so an evicted digest can't leave turn N
+  with neither representation. Mechanically it is a lazy-once
+  field on `turnCollapse` populated inside `renderNotebookPrefix`
+  — `collapse.Set` freezes in `preparePrompt` where no entries are
+  fetched, so "alongside" means the same struct, not the same
+  line; `collapse` must be threaded through (`notebookPrefix`'s
+  signature doesn't take it today). The prefix-cache interplay is
+  safe: `prefixFingerprint` includes entries, so a mid-run digest
+  busts the cache and renders — it just must not demote. Demotion
+  runs **before** the `files`/`CoveredReViews` loop
+  (`notebook_segments.go:1054`) — demoted entries' `file:` tags
+  must not inflate coverage for content that never rendered — and
+  **before** `dropSupersededReads`, so a read superseded only by a
+  demoted entry isn't dropped with no rendered superseder.
+  Demotion additionally requires the digest to carry content
   (`CompressionLevel < CompressionTagsOnly`) — a tags-only digest
   renders as a bare tag line and must not strip the turn's real
   entries. Dropped entries' already-accounted tokens aren't
@@ -242,10 +254,21 @@ Open:
   stub's `recall` pointer still resolves (stored events are
   untouched), so no dead pointer is created.
 - **Trigger and dedup identity: the turn, not the run.** Fires at
-  run end for **each turn the run finished**, when mode is
-  `digest` **and** the turn produced ≥1 classified event —
-  `drainQueueForStep` folds queued prompts mid-run, so one run can
-  finish two turns and each gets its digest. Dedup keys on
+  run end for **each finished turn lacking a `granularity:turn`
+  entry** — catch-up semantics, not "turns this run finished." The
+  run-end goroutine only runs on the success path (`agent.go:1513`
+  returns before :1534 on cancel/error), so an aborted run's end
+  pass never executes and a this-run-only rule would leave its
+  turn undigested forever; the same rule covers generator-failure
+  retries and `drainQueueForStep` folds (one run finishing two
+  turns) uniformly. Oldest-first, **bounded by a per-pass cap**
+  (~4 digests) — first enabling `digest` mode mid-session leaves
+  every prior turn undigested, and an unbounded catch-up is a
+  burst of small-model calls; uncovered turns fill over
+  successive runs (segment entries carry their coverage
+  regardless). The "interrupted" headline needs
+  `FinishReasonCanceled` plumbed into the input builder —
+  `EntryInput` carries no finish state today. Dedup keys on
   `(turn_number, granularity:turn)` — does a turn digest for turn N
   already exist — **not** `run:<stamp>`, re-checked inside the
   commit transaction like `errCheckpointExists` so concurrent or
@@ -299,15 +322,24 @@ Open:
   `Established/Open` with no `Files touched` section — the digest
   needs a prompt variant carrying that shape. Entries never enter
   classification, so no exclusion filter is needed.
+- **Gated on the mode, not the checkpoint flag.** Digest
+  generation checks `priorTurns == "digest"`, not
+  `a.notebookCheckpoint` — sharing the flag would silently degrade
+  digest mode to stub when `notebook_checkpoint=false`, an
+  undocumented interaction. The flag owns boundary/session
+  consolidation only.
 - **Placement:** the notebook splice (`PrepareStep`), like every
   entry — selection (with the demotion rule), compaction, recall,
   auto-inject. The only new render-path logic is the demotion skip.
-- **Not synced to mem0.** Turn digests are session-internal work
-  logs — one per turn would flood the cross-session memory pool
-  with fragments. Consolidated positions (`boundary`/`session`)
-  remain the hydration surface; `granularity:turn` is excluded
-  from `SyncEntries` even if digest generation rides the
-  checkpoint spawn path.
+- **Not synced to mem0 — structurally, not coincidentally.** Turn
+  digests are session-internal work logs — one per turn would
+  flood the cross-session memory pool with fragments.
+  Consolidated positions (`boundary`/`session`) remain the
+  hydration surface. Exclusion is enforced by filtering
+  `CheckpointGranularity(e) == GranularityTurn` at the sync site —
+  relying on `req.RunTag == ""` making the tag check miss is
+  coincidental (any future dedup tag passed as `RunTag` would
+  leak digests into sync).
 - **Interrupted runs annotate the digest.** The spec edge case
   stands: an aborted turn's digest headline notes "interrupted" so
   a partial turn isn't read as finished work.
@@ -458,7 +490,11 @@ Ship gates, mirroring `TOOL_RESULT_PRUNING` acceptance criteria:
   the session checkpoint, which summarizes digests rather than raw
   events — and it's the _checkpoint's_ sync that touches mem0; the
   `working_dir` partition (shipped in #56) keeps consolidated
-  digests from bleeding cross-project downstream.
+  digests from bleeding cross-project downstream. **Forward note
+  for #53:** under `digest` mode the run-end boundary trigger is
+  absorbed, so "latest boundary checkpoint = session position"
+  becomes "latest boundary checkpoint + subsequent turn digests" —
+  hydration must not assume a run-end checkpoint always exists.
 - **No model-chosen collapse.** The predicate is deterministic;
   letting the model exempt its own transcript is how pruning
   becomes optional.
