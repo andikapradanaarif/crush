@@ -178,6 +178,30 @@ func (s *service) GenerateCheckpoint(ctx context.Context, sessionID string, req 
 	if errors.Is(err, errCheckpointExists) {
 		return false, nil
 	}
+	if err != nil && req.RunTag != "" {
+		// withTx opens a deferred SQLite transaction: a sibling that
+		// commits between the in-tx re-check and this write fails the
+		// commit with SQLITE_BUSY_SNAPSHOT — a lost dedup race, not a
+		// real error. If the sibling's checkpoint is now visible,
+		// report the clean dedup outcome.
+		existing, serr := s.SearchByTag(ctx, sessionID, req.RunTag)
+		if serr != nil {
+			// Best-effort re-check — the commit error below is the
+			// outcome either way.
+			slog.Debug("Checkpoint dedup re-check failed", "session_id", sessionID, "error", serr)
+		}
+		for _, e := range existing {
+			if e.EventType == EventCheckpoint {
+				// The dedup outcome holds regardless of why the
+				// commit failed, but keep the swallowed error
+				// reachable — a non-race failure landing beside
+				// a sibling's checkpoint should not be silent.
+				slog.Warn("Checkpoint commit failed after a sibling checkpoint landed; reporting dedup",
+					"session_id", sessionID, "run_tag", req.RunTag, "error", err)
+				return false, nil
+			}
+		}
+	}
 	if err != nil {
 		return false, fmt.Errorf("failed to commit checkpoint: %w", err)
 	}
@@ -207,6 +231,7 @@ func buildCheckpointInput(entries []Entry, tail []EntryInput, cutoffTurn, cutoff
 	// are new since it.
 	var blocks, freshBlocks []string
 	used := 0
+	elided := false
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
 		var b strings.Builder
@@ -218,6 +243,7 @@ func buildCheckpointInput(entries []Entry, tail []EntryInput, cutoffTurn, cutoff
 		b.WriteString(text)
 		b.WriteString("\n\n")
 		if used+b.Len() > checkpointInputMaxBytes {
+			elided = true
 			continue
 		}
 		used += b.Len()
@@ -250,7 +276,14 @@ func buildCheckpointInput(entries []Entry, tail []EntryInput, cutoffTurn, cutoff
 
 	var sb strings.Builder
 	sb.WriteString("Committed notebook entries (oldest first):\n\n")
-	if len(blocks) == 0 && len(freshBlocks) == 0 {
+	if elided {
+		// Without the marker the model cannot tell "no prior
+		// history" from "history crowded out by the budget". The
+		// newest-first scan skips any entry that does not fit, so
+		// elided entries are not necessarily the oldest.
+		sb.WriteString("(entries elided for budget)\n\n")
+	}
+	if len(blocks) == 0 && len(freshBlocks) == 0 && !elided {
 		sb.WriteString("(none)\n\n")
 	}
 	for _, b := range blocks {
@@ -264,7 +297,7 @@ func buildCheckpointInput(entries []Entry, tail []EntryInput, cutoffTurn, cutoff
 	}
 	sb.WriteString("Recent uncovered events (oldest first):\n\n")
 	if tailTruncated {
-		sb.WriteString("(older tail events elided)\n\n")
+		sb.WriteString("(tail events elided for budget)\n\n")
 	}
 	for _, b := range tailBlocks {
 		sb.WriteString(b)

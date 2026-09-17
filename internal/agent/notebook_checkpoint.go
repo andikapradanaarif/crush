@@ -62,6 +62,23 @@ func (t *segmentTracker) claimCheckpoint(stamp uint64) bool {
 	return true
 }
 
+// checkpointSettled reports whether this run's checkpoint slot is
+// already resolved for detection purposes — claimed for this stamp, a
+// generation in flight, or the per-run retry budget spent. It mirrors
+// claimCheckpoint's rejection conditions without claiming, so the
+// per-step trigger can skip the mutating-result pre-scan once the
+// run's checkpoint is settled.
+func (t *segmentTracker) checkpointSettled(stamp uint64) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	failures := 0
+	if t.checkpointFailureRun == stamp {
+		failures = t.checkpointFailures
+	}
+	return t.checkpointStamp == stamp || t.checkpointInFlight ||
+		failures >= checkpointRetryBudget
+}
+
 // retryCheckpoint re-claims the slot for the run-end pass. A mid-run
 // claim that completed without committing (below the boundary
 // threshold) must not block the run-end floor — but a genuinely
@@ -188,6 +205,11 @@ func (a *sessionAgent) maybeCheckpointBoundary(ctx context.Context, sessionID st
 		return
 	}
 	tracker := a.segmentTracker(sessionID)
+	// Settled peek before the O(run-messages) pre-scan: once the run's
+	// checkpoint is resolved, later steps skip the scan entirely.
+	if tracker.checkpointSettled(stamp) {
+		return
+	}
 	if !firstMutatingResult(msgs[runStartIndex(msgs):]) {
 		return
 	}
