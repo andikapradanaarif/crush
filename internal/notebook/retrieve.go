@@ -327,6 +327,11 @@ func (s *service) pinnedEntryIDs(ctx context.Context, sessionID string) (map[str
 		return nil, nil
 	}
 	for _, e := range entries {
+		// Checkpoints are pinned only via LatestCheckpointIDs above —
+		// a stale checkpoint's file: tags must not keep it pinned.
+		if e.EventType == EventCheckpoint {
+			continue
+		}
 		for _, tag := range e.Tags {
 			if tags[tag] {
 				ids[e.ID] = true

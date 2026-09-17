@@ -51,12 +51,12 @@ func TestFirstMutatingResult(t *testing.T) {
 func TestCheckpointSegmentKey_PrefersLastClosed(t *testing.T) {
 	t.Parallel()
 	segs := []segment{
-		{turn: 1, number: 1, start: 0, end: 4},
-		{turn: 1, number: 2, start: 4, end: 9, open: true},
+		{turn: 1, number: 0, start: 0, end: 4},
+		{turn: 1, number: 1, start: 4, end: 9, open: true},
 	}
 	key, ok := checkpointSegmentKey(segs)
 	require.True(t, ok)
-	require.Equal(t, segmentKey{turn: 1, segment: 1}, key,
+	require.Equal(t, segmentKey{turn: 1, segment: 0}, key,
 		"an open-segment key can never render mid-run — the closed segment wins")
 
 	// No closed segment: the open tail is the fallback key.

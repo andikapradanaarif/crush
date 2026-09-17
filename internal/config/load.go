@@ -566,10 +566,10 @@ func (c *Config) NormalizeOptions() {
 		c.Options.NotebookAutoInject = ptr(false)
 	}
 	// Checkpoint entries default on with the notebook — the resolved
-	// value is materialized so the eval harness's resolved-options
-	// projection reports it.
+	// value is materialized (and gated on the resolved notebook flag)
+	// so the eval harness's resolved-options projection reports it.
 	if c.Options.NotebookCheckpoint == nil {
-		c.Options.NotebookCheckpoint = ptr(true)
+		c.Options.NotebookCheckpoint = ptr(*c.Options.NotebookEnabled)
 	}
 	// These read sites default nil/zero at use; materialize them so
 	// the resolved config (what the eval harness's resolved-options
