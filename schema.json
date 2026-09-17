@@ -629,10 +629,25 @@
           "description": "Auto-inject full notebook entries for files mentioned in the user message",
           "default": false
         },
+        "notebook_checkpoint": {
+          "type": "boolean",
+          "description": "Write a consolidated checkpoint entry (established facts vs open questions) at the write boundary and run end",
+          "default": true
+        },
         "notebook_stub_superseded": {
           "type": "boolean",
           "description": "Replace stale or superseded tool results in raw history with labeled stubs (experimental)",
           "default": false
+        },
+        "notebook_prior_turns": {
+          "type": "string",
+          "enum": [
+            "verbatim",
+            "stub",
+            "digest"
+          ],
+          "description": "Render mode for completed covered turns: verbatim keeps the full transcript, stub collapses prior-turn tool pairs to labeled stubs, digest adds a generated turn digest (experimental).",
+          "default": "verbatim"
         },
         "project_index": {
           "type": "boolean",

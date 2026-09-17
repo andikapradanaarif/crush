@@ -461,11 +461,21 @@ func (a *sessionAgent) detectSegments(ctx context.Context, sessionID string, msg
 	fired := 0
 	closed := false
 	for _, s := range segs {
-		if s.open {
-			continue
-		}
 		key := s.key()
 		row, recorded := registry[key]
+		if s.open {
+			// The trailing segment stays open until the next user
+			// message lands, but a run-end pass may already have
+			// committed coverage for its current extent — an
+			// extent-matching processed row counts as covered so the
+			// just-finished turn satisfies the prior-turn collapse
+			// gate at the next run's start.
+			if recorded && row.State == notebook.SegmentProcessed &&
+				row.StartIndex == int64(s.start) && row.EndIndex == int64(s.end) {
+				processed[key] = true
+			}
+			continue
+		}
 		if !recorded {
 			// Record the close before the boundary walk so this same
 			// render's pull-back already sees the segment.
@@ -879,7 +889,7 @@ func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msg
 // re-attach the leading system message from the request's own message
 // list. Returns false on any failure — the caller keeps Fantasy's
 // accumulated messages, which is always a safe fallback.
-func (a *sessionAgent) rebuildStepMessages(ctx context.Context, sessionID string, optionsMsgs []fantasy.Message, supportsImages bool) ([]fantasy.Message, bool) {
+func (a *sessionAgent) rebuildStepMessages(ctx context.Context, sessionID string, optionsMsgs []fantasy.Message, supportsImages bool, collapse *turnCollapse) ([]fantasy.Message, bool) {
 	// Update is debounced; List reads storage. Flush first so the
 	// boundary never computes against a stale view.
 	if err := a.messages.FlushAll(ctx); err != nil {
@@ -890,7 +900,7 @@ func (a *sessionAgent) rebuildStepMessages(ctx context.Context, sessionID string
 	if err != nil || len(msgs) == 0 {
 		return nil, false
 	}
-	history, _ := a.preparePrompt(ctx, msgs, supportsImages)
+	history, _ := a.preparePrompt(ctx, msgs, supportsImages, collapse)
 	out := history
 	if a.systemPrompt.Get() != "" && len(optionsMsgs) > 0 && optionsMsgs[0].Role == fantasy.MessageRoleSystem {
 		out = make([]fantasy.Message, 0, len(history)+1)

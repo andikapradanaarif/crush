@@ -3,6 +3,8 @@ package config_test
 import (
 	"testing"
 
+	"github.com/charmbracelet/crush/internal/config"
+
 	"github.com/stretchr/testify/require"
 )
 
@@ -92,6 +94,20 @@ func TestShellConfigOptionAttributionRejectsInvalidStyle(t *testing.T) {
 	_, err := loadCrushShErr(t, `option attribution-trailer-style bogus`)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "expects none, co-authored-by, or assisted-by")
+}
+
+func TestShellConfigOptionPriorTurns(t *testing.T) {
+	store := loadCrushSh(t, `option notebook-prior-turns stub`)
+	require.Equal(t, "stub", store.Config().Options.NotebookPriorTurns)
+	require.Equal(t, "stub", store.Config().Options.NotebookPriorTurnsMode())
+}
+
+func TestNotebookPriorTurnsModeResolves(t *testing.T) {
+	require.Equal(t, "verbatim", (&config.Options{}).NotebookPriorTurnsMode())
+	require.Equal(t, "verbatim", (&config.Options{NotebookPriorTurns: "bogus"}).NotebookPriorTurnsMode())
+	require.Equal(t, "stub", (&config.Options{NotebookPriorTurns: "stub"}).NotebookPriorTurnsMode())
+	// digest resolves to stub until turn-digest generation ships.
+	require.Equal(t, "stub", (&config.Options{NotebookPriorTurns: "digest"}).NotebookPriorTurnsMode())
 }
 
 func TestShellConfigOptionListAppends(t *testing.T) {

@@ -225,6 +225,11 @@ type sessionAgent struct {
 	// results in the raw window with stub text once the notebook
 	// boundary advances.
 	stubSuperseded bool
+	// priorTurns is the resolved options.notebook_prior_turns mode:
+	// "verbatim" or "stub" ("digest" resolves to stub until turn
+	// digest generation ships). Stub mode collapses completed,
+	// covered turns' tool pairs at render.
+	priorTurns string
 	// stubBoundary records the last raw-window boundary index per
 	// session, so pending superseded flags promote to stubs only on
 	// boundary moves.
@@ -355,6 +360,11 @@ type SessionAgentOptions struct {
 	// results in raw history with stub text once the notebook
 	// boundary advances. Only takes effect in notebook mode.
 	StubSuperseded bool
+	// NotebookPriorTurns is the resolved options.notebook_prior_turns
+	// mode ("verbatim" or "stub"). Only takes effect in notebook mode
+	// — the coordinator coerces it to verbatim when the notebook is
+	// disabled, since recall is the stub's recovery path.
+	NotebookPriorTurns string
 	// StubBoundary/StubStats let a coordinator share stub bookkeeping
 	// across agent rebuilds. When nil the agent allocates its own.
 	StubBoundary *csync.Map[string, int]
@@ -424,6 +434,7 @@ func NewSessionAgent(
 		notebookAutoInject:     opts.NotebookAutoInject,
 		notebookCheckpoint:     opts.NotebookCheckpoint,
 		stubSuperseded:         opts.StubSuperseded,
+		priorTurns:             opts.NotebookPriorTurns,
 		stubBoundary:           cmp.Or(opts.StubBoundary, csync.NewMap[string, int]()),
 		stubStats:              cmp.Or(opts.StubStats, csync.NewMap[string, stubStats]()),
 		segmentTrackers:        cmp.Or(opts.SegmentTrackers, csync.NewMap[string, *segmentTracker]()),
@@ -975,7 +986,16 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		a.publishRunComplete(ctx, call, complete)
 	}()
 
-	history, files := a.preparePrompt(ctx, msgs, largeModel.CatwalkCfg.SupportsImages, call.Attachments...)
+	// Prior-turn collapse compares against the turn that STARTED the
+	// run, not the recomputed current turn: drainQueueForStep can fold
+	// a queued prompt mid-run, advancing the positional turn count
+	// under the active run, and the fold must not collapse the run's
+	// own earlier events. msgs predates this run's user message, so
+	// its user-message count is the new turn's index. The resolved
+	// set freezes inside this first render — later coverage commits
+	// can't flip a turn mid-window.
+	collapse := a.newTurnCollapse(int64(countUserMessages(msgs)))
+	history, files := a.preparePrompt(ctx, msgs, largeModel.CatwalkCfg.SupportsImages, collapse, call.Attachments...)
 
 	// Per-turn tail augmentation: the turn-context blob and the
 	// vagueness pre-filter's clarify directive. Computed once here —
@@ -1057,7 +1077,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			// persisted (and form hard segment boundaries) before the
 			// rebuild lists messages.
 			if notebookOn {
-				if rebuilt, ok := a.rebuildStepMessages(callContext, call.SessionID, prepared.Messages, largeModel.CatwalkCfg.SupportsImages); ok {
+				if rebuilt, ok := a.rebuildStepMessages(callContext, call.SessionID, prepared.Messages, largeModel.CatwalkCfg.SupportsImages, collapse); ok {
 					prepared.Messages = rebuilt
 				} else {
 					// Rebuild failed — fall back to Fantasy's list and
@@ -1689,7 +1709,12 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		return nil
 	}
 
-	aiMsgs, _ := a.preparePrompt(ctx, msgs, largeModel.CatwalkCfg.SupportsImages)
+	// Summarize has no active run — every completed turn is a prior
+	// turn, so the collapse horizon sits one past the last user turn.
+	// The summarizer's input becomes stubs + notebook; digests and
+	// entries carry the collapsed detail.
+	aiMsgs, _ := a.preparePrompt(ctx, msgs, largeModel.CatwalkCfg.SupportsImages,
+		a.newTurnCollapse(int64(countUserMessages(msgs))))
 
 	genCtx, cancel := context.WithCancel(ctx)
 	ac := &activeCancel{cancel: cancel}
@@ -1865,7 +1890,7 @@ func (a *sessionAgent) createUserMessage(ctx context.Context, call SessionAgentC
 	return msg, nil
 }
 
-func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message, supportsImages bool, attachments ...message.Attachment) ([]fantasy.Message, []fantasy.FilePart) {
+func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message, supportsImages bool, collapse *turnCollapse, attachments ...message.Attachment) ([]fantasy.Message, []fantasy.FilePart) {
 	var history []fantasy.Message
 
 	// When notebook is enabled, split messages into notebook (closed
@@ -1877,6 +1902,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 	// implementation, two call sites.
 	notebookEnabled := a.notebookEnabled && a.notebook != nil
 	var rawMsgs []message.Message
+	boundary := 0
 	if notebookEnabled {
 		budget := a.rawTokenBudget
 		if budget <= 0 {
@@ -1884,7 +1910,13 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 		}
 		sessionID := sessionIDFromMessages(msgs)
 		segs, processed := a.detectSegments(ctx, sessionID, msgs)
-		boundary := findSegmentBoundaryByTokenBudget(msgs, budget, segs, processed)
+		boundary = findSegmentBoundaryByTokenBudget(msgs, budget, segs, processed)
+		// Resolve the collapsible-turn set on this pipeline's first
+		// render, then freeze it: a mid-run coverage commit must not
+		// flip a turn from raw to stub mid-window.
+		if collapse != nil && collapse.Set == nil {
+			collapse.Set = coveredPriorTurns(segs, processed, collapse.Before)
+		}
 		bKey := boundarySegmentKey(segs, boundary)
 		// Count before this render refreshes the injected-file set —
 		// the join target is the files the LAST render injected.
@@ -1922,6 +1954,21 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 		rawMsgs = msgs
 	}
 
+	// Per-message turn numbers are absolute over the full stored list —
+	// rawMsgs can begin mid-turn, so numbering the slice would mislabel
+	// turns against the registry.
+	var turns []int64
+	if collapse != nil && len(collapse.Set) > 0 {
+		turns = messageTurns(msgs)
+	}
+	collapsedTurn := func(i int) (int64, bool) {
+		if turns == nil {
+			return 0, false
+		}
+		t := turns[boundary+i]
+		return t, collapse.Set[t]
+	}
+
 	// Collect all tool call IDs present in assistant messages, then index
 	// every tool result by its call ID. Tool results are re-emitted right
 	// after the assistant message that requested them instead of at their
@@ -1934,22 +1981,29 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 	//
 	// Both maps cover only rawMsgs: pre-boundary messages never render,
 	// and a turn boundary cannot split a call from its result.
-	knownToolCallIDs := make(map[string]struct{})
+	callNames := make(map[string]string)
 	for _, m := range rawMsgs {
 		if m.Role != message.Assistant {
 			continue
 		}
 		for _, tc := range m.ToolCalls() {
-			knownToolCallIDs[tc.ID] = struct{}{}
+			callNames[tc.ID] = tc.Name
 		}
 	}
 	var stubs stubReport
+	var collapsedResults int
 	toolResultsByCall := make(map[string][]fantasy.MessagePart)
-	for _, m := range rawMsgs {
+	for i, m := range rawMsgs {
 		if m.Role != message.Tool {
 			continue
 		}
-		if a.stubSuperseded {
+		if turn, yes := collapsedTurn(i); yes {
+			// Turn collapse is evaluated before other stub kinds —
+			// inside a collapsed turn they are irrelevant.
+			var n int
+			m, n = collapseToolMessageForTurn(m, turn, callNames)
+			collapsedResults += n
+		} else if a.stubSuperseded {
 			// Substitute stubs before indexing so the emitted result
 			// parts carry the stub text, not the stored original.
 			var count int
@@ -1970,7 +2024,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 					)
 					continue
 				}
-				if _, known := knownToolCallIDs[tr.ToolCallID]; !known {
+				if _, known := callNames[tr.ToolCallID]; !known {
 					slog.Warn(
 						"Dropping orphaned tool result with no matching tool call",
 						"tool_call_id", tr.ToolCallID,
@@ -1982,7 +2036,12 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 		}
 	}
 
-	for _, m := range rawMsgs {
+	for i, m := range rawMsgs {
+		if turn, yes := collapsedTurn(i); yes && m.Role == message.Assistant {
+			// Reasoning drops with the turn and call inputs collapse;
+			// the emptiness checks below must see the stripped copy.
+			m = collapseAssistantForTurn(m, turn)
+		}
 		if len(m.Parts) == 0 {
 			continue
 		}
@@ -2029,6 +2088,13 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 			"session_id", sessionIDFromMessages(msgs),
 			"stubbed_results", stubs.results,
 			"stubbed_saved_bytes", stubs.savedBytes,
+		)
+	}
+	if collapsedResults > 0 && collapse != nil {
+		slog.Debug("Prior-turn tool pairs collapsed in prompt",
+			"session_id", sessionIDFromMessages(msgs),
+			"collapsed_turns", len(collapse.Set),
+			"collapsed_results", collapsedResults,
 		)
 	}
 

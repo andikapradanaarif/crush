@@ -825,6 +825,13 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 	}
 
 	largeProviderCfg, _ := c.cfg.Config().Providers.Get(large.ModelCfg.Provider)
+	// Prior-turn collapse needs the notebook — recall is the stub's
+	// recovery path — so it coerces to verbatim when disabled, the
+	// same gate StubSuperseded applies.
+	priorTurns := "verbatim"
+	if c.cfg.Config().Options.NotebookIsEnabled() {
+		priorTurns = c.cfg.Config().Options.NotebookPriorTurnsMode()
+	}
 	result := NewSessionAgent(SessionAgentOptions{
 		LargeModel:           large,
 		SmallModel:           small,
@@ -849,6 +856,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 			c.cfg.Config().Options.NotebookIsEnabled(),
 		StubSuperseded: c.cfg.Config().Options.NotebookStubSupersededEnabled() &&
 			c.cfg.Config().Options.NotebookIsEnabled(),
+		NotebookPriorTurns:     priorTurns,
 		StubBoundary:           c.stubBoundary,
 		StubStats:              c.stubStats,
 		SegmentTrackers:        c.segmentTrackers,
@@ -864,6 +872,9 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 
 	if c.cfg.Config().Options.NotebookStubSupersededEnabled() && !c.cfg.Config().Options.NotebookIsEnabled() {
 		slog.Warn("Option notebook_stub_superseded is enabled but the context notebook is disabled; supersession stubbing is inactive")
+	}
+	if c.cfg.Config().Options.NotebookPriorTurnsMode() != "verbatim" && !c.cfg.Config().Options.NotebookIsEnabled() {
+		slog.Warn("Option notebook_prior_turns is enabled but the context notebook is disabled; prior-turn collapse is inactive")
 	}
 
 	// Initialize the summary model before installing the resolver.

@@ -534,8 +534,8 @@ func TestPreparePrompt_LongTurnStaysInSegmentBand(t *testing.T) {
 	ctx := t.Context()
 	// First pass records closes and generates coverage; the second
 	// render sees committed coverage and drops covered segments.
-	a.preparePrompt(ctx, msgs, false)
-	history, _ := a.preparePrompt(ctx, msgs, false)
+	a.preparePrompt(ctx, msgs, false, nil)
+	history, _ := a.preparePrompt(ctx, msgs, false, nil)
 	require.NotEmpty(t, history)
 
 	// Count raw messages in the rebuild: with default 25K-token budget
@@ -704,7 +704,7 @@ func TestRebuildStepMessages_PreservesSystemAndTail(t *testing.T) {
 		options = append(options, m.ToAIMessage()...)
 	}
 
-	out, ok := a.rebuildStepMessages(t.Context(), sessionID, options, false)
+	out, ok := a.rebuildStepMessages(t.Context(), sessionID, options, false, nil)
 	require.True(t, ok)
 	require.Equal(t, fantasy.MessageRoleSystem, out[0].Role)
 	require.NotEmpty(t, out)
@@ -727,7 +727,7 @@ func TestRebuildStepMessages_TailByteIdentical(t *testing.T) {
 		options = append(options, m.ToAIMessage()...)
 	}
 
-	out, ok := a.rebuildStepMessages(t.Context(), sessionID, options, false)
+	out, ok := a.rebuildStepMessages(t.Context(), sessionID, options, false, nil)
 	require.True(t, ok)
 	require.Len(t, out, len(options))
 	for i := range options {

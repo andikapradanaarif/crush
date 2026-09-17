@@ -394,22 +394,28 @@ type Options struct {
 	Attribution               *Attribution `json:"attribution,omitempty" jsonschema:"description=Attribution settings for generated content"`
 	DisableMetrics            bool         `json:"disable_metrics,omitempty" jsonschema:"description=Disable sending metrics,default=false"`
 	// Notebook configuration for per-event context summarization.
-	NotebookEnabled        *bool    `json:"notebook_enabled,omitempty" jsonschema:"description=Enable per-event context notebook for reducing token usage,default=true"`
-	NotebookRawTokenBudget int      `json:"notebook_raw_token_budget,omitempty" jsonschema:"description=Token budget for raw recent turns in notebook mode,default=25000"`
-	NotebookMaxTokens      int64    `json:"notebook_max_tokens,omitempty" jsonschema:"description=Maximum total tokens for notebook entries before compaction,default=100000"`
-	NotebookMaxEntryTokens int64    `json:"notebook_max_entry_tokens,omitempty" jsonschema:"description=Maximum tokens per notebook entry,default=1000"`
-	NotebookSyncMem0       *bool    `json:"notebook_sync_mem0,omitempty" jsonschema:"description=Sync notebook entries to mem0 for cross-session search,default=false"`
-	NotebookMemoryServer   string   `json:"notebook_memory_server,omitempty" jsonschema:"description=Name of the MCP server to use for mem0 cross-session memory sync and search,default=mem0"`
-	NotebookAutoInject     *bool    `json:"notebook_auto_inject,omitempty" jsonschema:"description=Auto-inject full notebook entries for files mentioned in the user message,default=false"`
-	NotebookCheckpoint     *bool    `json:"notebook_checkpoint,omitempty" jsonschema:"description=Write a consolidated checkpoint entry (established facts vs open questions) at the write boundary and run end,default=true"`
-	NotebookStubSuperseded *bool    `json:"notebook_stub_superseded,omitempty" jsonschema:"description=Replace stale or superseded tool results in raw history with labeled stubs (experimental),default=false"`
-	ProjectIndex           *bool    `json:"project_index,omitempty" jsonschema:"description=Enable the persistent per-project symbol index and map tool for codebase navigation,default=false"`
-	InitializeAs           string   `json:"initialize_as,omitempty" jsonschema:"description=Name of the context file to create/update during project initialization,default=AGENTS.md,example=AGENTS.md,example=CRUSH.md,example=CLAUDE.md,example=docs/LLMs.md"`
-	AutoLSP                *bool    `json:"auto_lsp,omitempty" jsonschema:"description=Automatically setup LSPs based on root markers,default=true"`
-	Progress               *bool    `json:"progress,omitempty" jsonschema:"description=Show indeterminate progress updates during long operations,default=true"`
-	Notifications          string   `json:"notifications,omitempty" jsonschema:"description=Notification style to use. Options: auto (default)\\, native\\, osc\\, bell\\, disabled. Auto selects based on environment: native for local sessions\\, osc for SSH (with automatic OSC 99/777 detection).,enum=auto,enum=native,enum=osc,enum=bell,enum=disabled,default=auto"`
-	DisabledSkills         []string `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=crush-config"`
-	RequestTimeout         *int     `json:"request_timeout,omitempty" jsonschema:"description=Timeout in seconds for each LLM API request. Streaming responses are aborted only after this much inactivity\\, so slow but active streams are never killed. 0 disables it\\, negative values are invalid.,default=60,example=120,example=300,example=0"`
+	NotebookEnabled        *bool  `json:"notebook_enabled,omitempty" jsonschema:"description=Enable per-event context notebook for reducing token usage,default=true"`
+	NotebookRawTokenBudget int    `json:"notebook_raw_token_budget,omitempty" jsonschema:"description=Token budget for raw recent turns in notebook mode,default=25000"`
+	NotebookMaxTokens      int64  `json:"notebook_max_tokens,omitempty" jsonschema:"description=Maximum total tokens for notebook entries before compaction,default=100000"`
+	NotebookMaxEntryTokens int64  `json:"notebook_max_entry_tokens,omitempty" jsonschema:"description=Maximum tokens per notebook entry,default=1000"`
+	NotebookSyncMem0       *bool  `json:"notebook_sync_mem0,omitempty" jsonschema:"description=Sync notebook entries to mem0 for cross-session search,default=false"`
+	NotebookMemoryServer   string `json:"notebook_memory_server,omitempty" jsonschema:"description=Name of the MCP server to use for mem0 cross-session memory sync and search,default=mem0"`
+	NotebookAutoInject     *bool  `json:"notebook_auto_inject,omitempty" jsonschema:"description=Auto-inject full notebook entries for files mentioned in the user message,default=false"`
+	NotebookCheckpoint     *bool  `json:"notebook_checkpoint,omitempty" jsonschema:"description=Write a consolidated checkpoint entry (established facts vs open questions) at the write boundary and run end,default=true"`
+	NotebookStubSuperseded *bool  `json:"notebook_stub_superseded,omitempty" jsonschema:"description=Replace stale or superseded tool results in raw history with labeled stubs (experimental),default=false"`
+	// NotebookPriorTurns selects how completed, fully covered turns
+	// render inside the raw window: verbatim keeps the full
+	// transcript, stub collapses tool call/result pairs to labeled
+	// stubs, digest adds a generated turn digest on top. Requires the
+	// notebook — recall is the stub's recovery path.
+	NotebookPriorTurns string   `json:"notebook_prior_turns,omitempty" jsonschema:"description=Render mode for completed covered turns: verbatim keeps the full transcript\\, stub collapses prior-turn tool pairs to labeled stubs\\, digest adds a generated turn digest (experimental).,enum=verbatim,enum=stub,enum=digest,default=verbatim"`
+	ProjectIndex       *bool    `json:"project_index,omitempty" jsonschema:"description=Enable the persistent per-project symbol index and map tool for codebase navigation,default=false"`
+	InitializeAs       string   `json:"initialize_as,omitempty" jsonschema:"description=Name of the context file to create/update during project initialization,default=AGENTS.md,example=AGENTS.md,example=CRUSH.md,example=CLAUDE.md,example=docs/LLMs.md"`
+	AutoLSP            *bool    `json:"auto_lsp,omitempty" jsonschema:"description=Automatically setup LSPs based on root markers,default=true"`
+	Progress           *bool    `json:"progress,omitempty" jsonschema:"description=Show indeterminate progress updates during long operations,default=true"`
+	Notifications      string   `json:"notifications,omitempty" jsonschema:"description=Notification style to use. Options: auto (default)\\, native\\, osc\\, bell\\, disabled. Auto selects based on environment: native for local sessions\\, osc for SSH (with automatic OSC 99/777 detection).,enum=auto,enum=native,enum=osc,enum=bell,enum=disabled,default=auto"`
+	DisabledSkills     []string `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=crush-config"`
+	RequestTimeout     *int     `json:"request_timeout,omitempty" jsonschema:"description=Timeout in seconds for each LLM API request. Streaming responses are aborted only after this much inactivity\\, so slow but active streams are never killed. 0 disables it\\, negative values are invalid.,default=60,example=120,example=300,example=0"`
 	// TurnContext selects the per-turn context augmentation tier:
 	// off (default) or session (deterministic session signals —
 	// working set, open todos — appended at the request tail). The
@@ -1346,6 +1352,21 @@ func (o *Options) TurnContextMode() string {
 		return o.TurnContext
 	default:
 		return "off"
+	}
+}
+
+// NotebookPriorTurnsMode returns the resolved prior-turn render mode —
+// "verbatim", "stub", or "digest". Unrecognized values resolve to
+// "verbatim" so a typo keeps the full transcript rather than silently
+// collapsing it. "digest" resolves to "stub" until turn-digest
+// generation ships: the collapse is identical and a stub text that
+// claims a digest would name a recovery path that does not exist.
+func (o *Options) NotebookPriorTurnsMode() string {
+	switch o.NotebookPriorTurns {
+	case "stub", "digest":
+		return "stub"
+	default:
+		return "verbatim"
 	}
 }
 
