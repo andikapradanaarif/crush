@@ -44,6 +44,8 @@ var coverageFields = map[string]func(*RunRecord) float64{
 	"prior_turns.events_collapsed": func(r *RunRecord) float64 { return float64(r.PriorTurns.EventsCollapsed) },
 	"checkpoints.written":          func(r *RunRecord) float64 { return float64(r.Checkpoints.Written) },
 	"checkpoints.rendered":         func(r *RunRecord) float64 { return float64(r.Checkpoints.Rendered) },
+	"digests.written":              func(r *RunRecord) float64 { return float64(r.Digests.Written) },
+	"digests.rendered":             func(r *RunRecord) float64 { return float64(r.Digests.Rendered) },
 	// Flag-invariant call_metrics subset — see the comment above.
 	"call_metrics.requests":          func(r *RunRecord) float64 { return float64(callMetrics(r).Requests) },
 	"call_metrics.calls":             func(r *RunRecord) float64 { return float64(callMetrics(r).Calls) },
@@ -105,7 +107,7 @@ var armFields map[string]func(*RunRecord) float64
 // a registered recall tool. An unscoped min_ predicate over one of
 // these starves the arm where the flag is off, so trajectory coverage
 // rejects them; scope them per-arm instead.
-var flagGatedPrefixes = []string{"stub_stats.", "prior_turns.", "recalls.", "checkpoints."}
+var flagGatedPrefixes = []string{"stub_stats.", "prior_turns.", "recalls.", "checkpoints.", "digests."}
 
 // callMetrics dereferences the optional analysis sub-object. CoverageMet
 // short-circuits nil CallMetrics before reaching field funcs, so this

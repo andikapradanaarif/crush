@@ -321,6 +321,10 @@ type segmentTracker struct {
 	inflight          map[segmentKey]bool
 	backfillAttempted bool
 	driftLogged       map[segmentKey]bool
+	// digests holds the per-turn digest generation claims — the
+	// in-flight dedup for the run-end catch-up pass; see
+	// notebook_digest.go.
+	digests map[int64]bool
 	// Checkpoint bookkeeping: checkpointStamp/checkpointInFlight are
 	// the per-run generation claim; checkpointFailures counts mid-run
 	// failures against checkpointFailureRun's stamp — see
@@ -332,7 +336,7 @@ type segmentTracker struct {
 }
 
 func newSegmentTracker() *segmentTracker {
-	return &segmentTracker{inflight: make(map[segmentKey]bool), driftLogged: make(map[segmentKey]bool)}
+	return &segmentTracker{inflight: make(map[segmentKey]bool), driftLogged: make(map[segmentKey]bool), digests: make(map[int64]bool)}
 }
 
 // markInflight atomically claims a segment for generation. The mark is
@@ -851,7 +855,9 @@ func (a *sessionAgent) buildSelectionInput(ctx context.Context, sessionID string
 // plus the optional auto-inject blob) for the given boundary. The
 // render is cached on (boundary, fingerprint) so a step where nothing
 // covered changed emits a byte-identical prefix without re-rendering.
-func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msgs []message.Message, boundary int, bKey segmentKey, segs []segment) []fantasy.Message {
+// collapse carries the run's prior-turn collapse state — its
+// digestTurns freeze is populated on the first real render.
+func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msgs []message.Message, boundary int, bKey segmentKey, segs []segment, collapse *turnCollapse) []fantasy.Message {
 	if a.notebook == nil || boundary <= 0 || sessionID == "" {
 		return nil
 	}
@@ -876,7 +882,7 @@ func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msg
 			return c.msgs
 		}
 	}
-	prefix, files := a.renderNotebookPrefix(detCtx, sessionID, entries, msgs, bKey, floor, refs, sel)
+	prefix, files := a.renderNotebookPrefix(detCtx, sessionID, entries, msgs, bKey, floor, refs, sel, collapse)
 	if a.prefixCache != nil {
 		a.prefixCache.Set(sessionID, cachedPrefix{boundary: boundary, fingerprint: fp, msgs: prefix, files: files})
 	}
@@ -1038,19 +1044,43 @@ func fantasyToolResultOutputEqual(a, b fantasy.ToolResultOutputContent) bool {
 // history — auto-inject scans it for the latest user message, which
 // may itself sit inside the covered prefix of a long turn. The
 // returned file set holds the file: basenames this render injected —
-// the coverage signal the re-view counter joins against.
-func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID string, entries []notebook.Entry, msgs []message.Message, bKey segmentKey, floor segmentKey, refs []string, sel selectionInput) ([]fantasy.Message, map[string]bool) {
+// the coverage signal the re-view counter joins against. collapse's
+// digestTurns freezes here, on the run's first real render — entries
+// are not fetched at collapse.Set's freeze site in preparePrompt, so
+// "alongside" means the same struct, not the same line.
+func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID string, entries []notebook.Entry, msgs []message.Message, bKey segmentKey, floor segmentKey, refs []string, sel selectionInput, collapse *turnCollapse) ([]fantasy.Message, map[string]bool) {
 	var filtered []notebook.Entry
 	for _, e := range entries {
 		if e.TurnNumber < bKey.turn || (e.TurnNumber == bKey.turn && e.SegmentNumber < bKey.segment) {
 			filtered = append(filtered, e)
 		}
 	}
+	// Freeze the digest-eligible turn set once per run: the turns
+	// holding a granularity:turn digest at the run's first render.
+	// A digest committing mid-run busts the prefix cache via the
+	// entries fingerprint and renders — but with this frozen set it
+	// can never demote already-rendered entries mid-window.
+	if collapse != nil && collapse.digestTurns == nil {
+		collapse.digestTurns = make(map[int64]bool)
+		for _, e := range filtered {
+			if notebook.CheckpointGranularity(e) == notebook.GranularityTurn {
+				collapse.digestTurns[e.TurnNumber] = true
+			}
+		}
+	}
+	if collapse != nil {
+		sel.digestEligible = collapse.digestTurns
+	}
 	files := make(map[string]bool)
 	var out []fantasy.Message
+	// digested holds the turns whose digest rendered this prefix —
+	// auto-inject drops their same-turn candidates so a digested
+	// turn's entries never double into the prompt.
+	var digested map[int64]bool
 	if len(filtered) > 0 {
 		selected, diff := selectNotebookEntries(filtered, refs, floor, sel)
 		a.noteSelectionDiff(sessionID, diff)
+		digested = renderedDigests(selected, sel.digestEligible)
 		for _, e := range selected {
 			// A checkpoint's file: tags cite evidence rather than
 			// cover the file — counting them here would inflate
@@ -1089,7 +1119,7 @@ func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID strin
 		}
 	}
 	if a.notebookAutoInject && len(msgs) > 0 {
-		if injectMsg := a.maybeAutoInject(ctx, msgs, sessionID, bKey, files); injectMsg != nil {
+		if injectMsg := a.maybeAutoInject(ctx, msgs, sessionID, bKey, files, digested); injectMsg != nil {
 			out = append(out, *injectMsg)
 		}
 	}
@@ -1110,6 +1140,9 @@ func (a *sessionAgent) noteSelectionDiff(sessionID string, diff selectionDiff) {
 	stats.SelPassFill += diff.fill
 	if diff.checkpoints > 0 {
 		stats.CheckpointRenders++
+	}
+	if diff.digests > 0 {
+		stats.DigestRenders++
 	}
 	a.nbStats.Set(sessionID, stats)
 }

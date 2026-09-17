@@ -187,7 +187,11 @@ type RunRecord struct {
 	PriorTurns  PriorTurns  `json:"prior_turns"`
 	Recalls     Recalls     `json:"recalls"`
 	Checkpoints Checkpoints `json:"checkpoints"`
-	SessionDB   string      `json:"session_db,omitempty"`
+	// Digests carries the turn-digest telemetry — same written/
+	// rendered split as Checkpoints, counting granularity:turn
+	// entries.
+	Digests   Checkpoints `json:"digests"`
+	SessionDB string      `json:"session_db,omitempty"`
 	// Workdir is the materialized run directory — recorded so a
 	// post-hoc `crush eval analyze` on the artifact can anchor relative
 	// call paths correctly (the directory itself is deleted).
@@ -258,6 +262,7 @@ type Recalls struct {
 // Checkpoints mirrors the checkpoint telemetry split: written counts
 // committed checkpoint entries, rendered counts prefix renders that
 // included one — the "checkpoint present at render" predicate field.
+// RunRecord reuses it for digests (granularity:turn entries).
 type Checkpoints struct {
 	Written  int `json:"written"`
 	Rendered int `json:"rendered"`

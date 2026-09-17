@@ -145,6 +145,14 @@ func (echoGenerator) GenerateCheckpoint(ctx context.Context, sessionID, input st
 	}, nil
 }
 
+func (echoGenerator) GenerateDigest(ctx context.Context, sessionID, input string) (notebook.GeneratedEntry, error) {
+	return notebook.GeneratedEntry{
+		EventType: notebook.EventCheckpoint,
+		Title:     "Turn digest",
+		Text:      "## Turn digest\n\n" + input,
+	}, nil
+}
+
 // newNotebookTestEnv builds a session, a real notebook service, and a
 // recall tool wired to both.
 func newNotebookTestEnv(t *testing.T) (notebook.Service, message.Service, string, *csync.Map[string, notebook.Stats], *db.Queries) {

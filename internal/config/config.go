@@ -1358,13 +1358,11 @@ func (o *Options) TurnContextMode() string {
 // NotebookPriorTurnsMode returns the resolved prior-turn render mode —
 // "verbatim", "stub", or "digest". Unrecognized values resolve to
 // "verbatim" so a typo keeps the full transcript rather than silently
-// collapsing it. "digest" resolves to "stub" until turn-digest
-// generation ships: the collapse is identical and a stub text that
-// claims a digest would name a recovery path that does not exist.
+// collapsing it.
 func (o *Options) NotebookPriorTurnsMode() string {
 	switch o.NotebookPriorTurns {
 	case "stub", "digest":
-		return "stub"
+		return o.NotebookPriorTurns
 	default:
 		return "verbatim"
 	}

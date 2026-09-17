@@ -252,6 +252,43 @@ func TestSyncEntries_WorkingDirMetadata(t *testing.T) {
 	require.Equal(t, "session1", metadata["origin_session_id"])
 }
 
+func TestSyncEntries_SkipsTurnDigests(t *testing.T) {
+	workDir := t.TempDir()
+	cfg := mem0TestStore(t, workDir)
+
+	var inputs []string
+	stubRunMCPTool(t, func(_ context.Context, _ *config.ConfigStore, _, _, input string) (mcp.ToolResult, error) {
+		inputs = append(inputs, input)
+		return mcp.ToolResult{Type: "text", Content: "ok"}, nil
+	})
+
+	NewMem0Sync(cfg, "mem0").SyncEntries(context.Background(), []Entry{
+		{
+			// A granularity:turn digest is a session-internal work
+			// log — one per turn would flood the pool.
+			ID:        "e1",
+			SessionID: "session1",
+			Title:     "Turn 3 digest",
+			EntryText: "the turn's work",
+			EventType: EventCheckpoint,
+			Tags:      []string{"phase:checkpoint", "granularity:turn"},
+		},
+		{
+			// The consolidated position still syncs — boundary and
+			// session checkpoints remain the hydration surface.
+			ID:        "e2",
+			SessionID: "session1",
+			Title:     "Checkpoint",
+			EntryText: "the consolidated position",
+			EventType: EventCheckpoint,
+			Tags:      []string{"phase:checkpoint", "granularity:boundary"},
+		},
+	})
+
+	require.Len(t, inputs, 1, "turn digests must not sync to mem0")
+	require.Contains(t, inputs[0], "consolidated position")
+}
+
 func TestSyncEntries_SkipsWhenWorkingDirUnknown(t *testing.T) {
 	cfg := mem0TestStore(t, "")
 

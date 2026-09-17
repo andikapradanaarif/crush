@@ -86,6 +86,12 @@ type selectionInput struct {
 	// the boundary; entries at or after it fill newest-first. The
 	// zero key puts every entry inside the band.
 	bandFloor segmentKey
+	// digestEligible holds the turns allowed to demote their segment
+	// entries behind a rendered turn digest — the set frozen on the
+	// run's first prefix render (turnCollapse.digestTurns). A digest
+	// landing mid-run is not in it, so mid-run commits never demote
+	// already-rendered entries.
+	digestEligible map[int64]bool
 }
 
 // withinBand reports whether e falls inside the fill recency band.
@@ -208,9 +214,13 @@ type selectionDiff struct {
 	refs    int
 	working int
 	fill    int
-	// checkpoints counts rendered checkpoint entries — the
-	// "checkpoint-present-at-render" telemetry the eval arm reads.
+	// checkpoints counts rendered boundary/session checkpoint
+	// entries — the "checkpoint-present-at-render" telemetry the
+	// eval arm reads. digests counts rendered granularity:turn
+	// digests separately so a turn digest never counts as a
+	// consolidated position.
 	checkpoints int
+	digests     int
 }
 
 // total returns the number of entries selection produced.
@@ -279,7 +289,11 @@ func selectNotebookEntries(entries []notebook.Entry, refs []string, floor segmen
 		selected = append(selected, e)
 		pass(&diff)
 		if e.EventType == notebook.EventCheckpoint {
-			diff.checkpoints++
+			if notebook.CheckpointGranularity(e) == notebook.GranularityTurn {
+				diff.digests++
+			} else {
+				diff.checkpoints++
+			}
 		}
 	}
 
@@ -386,6 +400,23 @@ func selectNotebookEntries(entries []notebook.Entry, refs []string, floor segmen
 		trySelect(e, fill)
 	}
 
+	// Post-selection demotion: a rendered turn digest stands in for
+	// its turn's segment entries, so same-turn non-checkpoint
+	// entries drop — the turn's work renders once. Eligibility froze
+	// at the run's first render (a digest landing mid-run must not
+	// demote), and the digest must actually be selected this render
+	// with real content — a tags-only digest is a bare tag line, and
+	// an evicted one must not leave its turn with no representation.
+	// Dropped entries' already-accounted tokens are not refunded — a
+	// bounded under-fill of the injection cap. Runs before
+	// dropSupersededReads so a read superseded only by a demoted
+	// entry is not dropped with no rendered superseder.
+	if digested := renderedDigests(selected, sel.digestEligible); len(digested) > 0 {
+		selected = slices.DeleteFunc(selected, func(e notebook.Entry) bool {
+			return digested[e.TurnNumber] && e.EventType != notebook.EventCheckpoint
+		})
+	}
+
 	selected = dropSupersededReads(selected)
 	slices.SortStableFunc(selected, func(a, b notebook.Entry) int {
 		if a.TurnNumber != b.TurnNumber {
@@ -394,6 +425,27 @@ func selectNotebookEntries(entries []notebook.Entry, refs []string, floor segmen
 		return int(a.EventNumber - b.EventNumber)
 	})
 	return selected, diff
+}
+
+// renderedDigests returns the turns whose granularity:turn digest is
+// in the rendered set and demotion-eligible — the demotion key set in
+// selection and the same-turn exclusion set auto-inject consults. A
+// digest counts only when it carries content: a tags-only digest
+// renders as a bare tag line and must not strip its turn's real
+// entries.
+func renderedDigests(selected []notebook.Entry, eligible map[int64]bool) map[int64]bool {
+	var out map[int64]bool
+	for _, e := range selected {
+		if eligible[e.TurnNumber] &&
+			notebook.CheckpointGranularity(e) == notebook.GranularityTurn &&
+			e.CompressionLevel < notebook.CompressionTagsOnly {
+			if out == nil {
+				out = make(map[int64]bool)
+			}
+			out[e.TurnNumber] = true
+		}
+	}
+	return out
 }
 
 // typeThenRecency orders the beyond-band fill: higher type rank first,

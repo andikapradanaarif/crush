@@ -102,6 +102,10 @@ func (failEntryGen) GenerateCheckpoint(context.Context, string, string) (noteboo
 	return notebook.GeneratedEntry{}, errors.New("generation failed")
 }
 
+func (failEntryGen) GenerateDigest(context.Context, string, string) (notebook.GeneratedEntry, error) {
+	return notebook.GeneratedEntry{}, errors.New("generation failed")
+}
+
 // priorTurnFixture stores turn 0 — a user prompt, an assistant step
 // with reasoning plus a bash pair and a question pair, and a closing
 // answer — followed by the next turn's user message.

@@ -6,6 +6,13 @@ The input lists committed notebook entries (digests of earlier work)
 followed by raw descriptions of the most recent tool events. Merge
 them into the current position — do not concatenate a changelog.
 
+Committed entries may include turn digests — entries headed "Turn N
+digest" carrying the granularity:turn tag. They are finer-grain
+consolidations of single turns: treat them as evidence, fold their
+Established facts and Files touched into the current position, and
+note their "interrupted" marker as an unfinished turn rather than
+completed work.
+
 Write exactly this shape:
 
 ## Checkpoint — {one-line topic}

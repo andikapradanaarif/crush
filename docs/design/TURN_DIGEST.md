@@ -1,9 +1,11 @@
 # Turn Digest — Fidelity Drop at the Turn Boundary
 
-> **Status:** Partially shipped. `stub` mode — the `prior_turn`
-> render predicate, frozen collapse set, and `notebook-prior-turns`
-> option — shipped (#58, closing #49); `digest` mode remains spec and
-> resolves to stub until turn-digest generation lands (#50). Splits
+> **Status:** Shipped. `stub` mode — the `prior_turn` render
+> predicate, frozen collapse set, and `notebook-prior-turns` option —
+> shipped (#58, closing #49); `digest` mode — turn-granularity
+> digest generation, the demotion rule, and the run-end trigger
+> absorption — shipped in #50. The default stays `verbatim` pending
+> the paired-eval gates below. Splits
 > context into two planes: the conversation
 > (user messages, assistant answers, question/answer pairs — full
 > continuity) and the execution transcript (tool calls + results —
@@ -363,13 +365,12 @@ option notebook-prior-turns digest     # collapse + generated turn digest
 - **crushrc wiring:** `optionSpecs` already carries the
   `notebook-*` keys post-#45; `notebook-prior-turns` is a one-line
   `optString` entry plus the `Options` field.
-- **`digest` must resolve to `digest` end-to-end.** Until
-  generation ships, `NotebookPriorTurnsMode` (`config.go:1364`)
-  resolves `digest`→`stub`, `newTurnCollapse` accepts `"digest"`
-  as a stub alias, and the coordinator debug line reflects that —
-  all three flip when this feature lands, and the mode threads
-  into `collapsedResultText`/`collapsedCallInput` so `digest`
-  mode's stub text can say "consolidated in turn digest" (§1).
+- **`digest` resolves to `digest` end-to-end.** With generation
+  shipped, `NotebookPriorTurnsMode` returns `digest` verbatim,
+  `newTurnCollapse` accepts it as a collapse mode in its own right,
+  and the mode threads into
+  `collapsedResultText`/`collapsedCallInput` so `digest` mode's
+  stub text says "consolidated in turn digest" (§1).
 - **Escape hatch:** set back to `verbatim` — takes effect on the
   next agent build (options are captured at agent construction,
   `coordinator.go:848`), after which the next `PrepareStep` shows

@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1575,10 +1576,21 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			// segments whose generation failed. Coverage is per
 			// segment, so a covered segment is never re-generated.
 			a.generateRunEndSegments(notebookCtx, notebookSessionID, allMsgs, notebookPreTurnCount, lastAssistantID)
+			// Under digest mode the turn digest IS the run-end
+			// consolidation: the pass digests every finished turn
+			// still lacking one — catch-up, not just this run's turn —
+			// and the cumulative boundary trigger stays off so the
+			// run does not consolidate the same work twice. The
+			// mid-run boundary trigger still fires inside
+			// detectSegments — it is the only within-turn
+			// consolidation.
+			if a.priorTurns == priorTurnsDigest {
+				a.generateTurnDigests(notebookCtx, notebookSessionID, allMsgs, notebookPreTurnCount, lastAssistantID)
+			}
 			// Run-end checkpoint fallback: a run that gathered
 			// context but never crossed the write boundary (or whose
 			// mid-run checkpoint failed) consolidates here.
-			if a.notebookCheckpoint {
+			if a.notebookCheckpoint && a.priorTurns != priorTurnsDigest {
 				registry, regErr := a.segmentRegistry(notebookCtx, notebookSessionID)
 				if regErr != nil {
 					slog.Warn("Failed to list processed segments for checkpoint", "session_id", notebookSessionID, "error", regErr)
@@ -1960,7 +1972,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 		// Count before this render refreshes the injected-file set —
 		// the join target is the files the LAST render injected.
 		a.countNotebookReViews(sessionID, msgs)
-		history = append(history, a.notebookPrefix(ctx, sessionID, msgs, boundary, bKey, segs)...)
+		history = append(history, a.notebookPrefix(ctx, sessionID, msgs, boundary, bKey, segs, collapse)...)
 		if sessionID != "" {
 			if last, ok := a.stubBoundary.Get(sessionID); !ok || last != boundary {
 				moved := ok
@@ -2043,7 +2055,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 			// Turn collapse is evaluated before other stub kinds —
 			// inside a collapsed turn they are irrelevant.
 			var n int
-			m, n = collapseToolMessageForTurn(m, turn, exemptCalls, callNames)
+			m, n = collapseToolMessageForTurn(m, turn, a.priorTurns, exemptCalls, callNames)
 			collapsedResults += n
 		} else if a.stubSuperseded {
 			// Substitute stubs before indexing so the emitted result
@@ -2083,7 +2095,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 			// Reasoning drops with the turn and call inputs collapse;
 			// the emptiness checks below must see the stripped copy.
 			var n int
-			m, n = collapseAssistantForTurn(m, turn)
+			m, n = collapseAssistantForTurn(m, turn, a.priorTurns)
 			// A covered turn whose calls are all exempt renders
 			// verbatim — it must not count as collapsed.
 			if n > 0 {
@@ -2221,8 +2233,11 @@ func extractExplicitFilePaths(msg string) []string {
 // text so the model has the original detail without needing to call
 // recall. Returns nil if no entries are found or auto-inject is off.
 // injectedFiles, when non-nil, collects the file: basenames this call
-// injected so re-view counting sees them as covered.
-func (a *sessionAgent) maybeAutoInject(ctx context.Context, msgs []message.Message, sessionID string, bKey segmentKey, injectedFiles map[string]bool) *fantasy.Message {
+// injected so re-view counting sees them as covered. digested holds
+// the turns whose granularity:turn digest rendered in this prefix —
+// their same-turn non-checkpoint candidates drop here too so a
+// digested turn's entries never double into the prompt.
+func (a *sessionAgent) maybeAutoInject(ctx context.Context, msgs []message.Message, sessionID string, bKey segmentKey, injectedFiles map[string]bool, digested map[int64]bool) *fantasy.Message {
 	if a.notebook == nil || len(msgs) == 0 {
 		return nil
 	}
@@ -2242,11 +2257,13 @@ func (a *sessionAgent) maybeAutoInject(ctx context.Context, msgs []message.Messa
 		return nil
 	}
 
-	// Gather all entries matching the refs, deduplicated, then drop
-	// superseded reads — injecting a stale pre-edit snapshot would
-	// reintroduce the phantom-state hazard stubbing exists to remove.
-	// The superseding edit must be in the set for the check to see it,
-	// so compression/coverage filters apply only afterwards.
+	// Gather all entries matching the refs, deduplicated. Candidates
+	// from a digest-rendered turn drop first — the digest stands in
+	// for them — then superseded reads drop: injecting a stale
+	// pre-edit snapshot would reintroduce the phantom-state hazard
+	// stubbing exists to remove. The superseding edit must be in the
+	// set for the check to see it, so compression/coverage filters
+	// apply only afterwards.
 	seen := make(map[string]bool)
 	var tagged []notebook.Entry
 	for _, tag := range refs {
@@ -2262,6 +2279,9 @@ func (a *sessionAgent) maybeAutoInject(ctx context.Context, msgs []message.Messa
 			tagged = append(tagged, e)
 		}
 	}
+	tagged = slices.DeleteFunc(tagged, func(e notebook.Entry) bool {
+		return digested[e.TurnNumber] && e.EventType != notebook.EventCheckpoint
+	})
 	tagged = dropSupersededReads(tagged)
 
 	var sb strings.Builder

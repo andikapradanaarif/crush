@@ -10,10 +10,13 @@ import (
 )
 
 // recordingCheckpointGen echoes per-event entries and records the
-// rendered consolidation input of every GenerateCheckpoint call.
+// rendered consolidation input of every GenerateCheckpoint and
+// GenerateDigest call.
 type recordingCheckpointGen struct {
-	inputs []string
-	text   string
+	inputs       []string
+	text         string
+	digestInputs []string
+	digestText   string
 }
 
 func (g *recordingCheckpointGen) Generate(_ context.Context, _ string, events []EntryInput) ([]GeneratedEntry, error) {
@@ -35,6 +38,15 @@ func (g *recordingCheckpointGen) GenerateCheckpoint(_ context.Context, _ string,
 		text = "## Checkpoint\n\n### Established\n- fact\n\n### Open\n- question"
 	}
 	return GeneratedEntry{EventType: EventCheckpoint, Title: "Checkpoint", Text: text}, nil
+}
+
+func (g *recordingCheckpointGen) GenerateDigest(_ context.Context, _ string, input string) (GeneratedEntry, error) {
+	g.digestInputs = append(g.digestInputs, input)
+	text := g.digestText
+	if text == "" {
+		text = "## Turn digest\n\n### Established\n- fact\n\n### Files touched\n- auth.go (read)\n\n### Open\n- question"
+	}
+	return GeneratedEntry{EventType: EventCheckpoint, Title: "Turn digest", Text: text}, nil
 }
 
 // viewMsgs builds one finished significant view call — a non-mutating

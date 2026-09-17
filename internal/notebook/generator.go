@@ -16,6 +16,9 @@ var notebookEntryPrompt []byte
 //go:embed checkpoint_entry.md
 var checkpointEntryPrompt []byte
 
+//go:embed turn_digest_entry.md
+var turnDigestPrompt []byte
+
 // llmGenerator implements the Generator interface using a small LLM
 // model to produce structured notebook entries.
 type llmGenerator struct {
@@ -138,6 +141,48 @@ func (g *llmGenerator) GenerateCheckpoint(ctx context.Context, sessionID string,
 			EventType: EventCheckpoint,
 			Title:     "Checkpoint",
 			Text:      "## Checkpoint\n\n" + truncate(input, 2000) + "\n",
+		}, nil
+	}
+	return GeneratedEntry{
+		EventType: EventCheckpoint,
+		Title:     extractTitle(text),
+		Text:      text,
+		Tags:      extractTags(text),
+	}, nil
+}
+
+// GenerateDigest produces one turn-granularity digest entry from the
+// rendered input block — the classified events of a single finished
+// turn. A nil model falls back to a digest of the input head so the
+// turn's summary still lands, thin but structured.
+func (g *llmGenerator) GenerateDigest(ctx context.Context, sessionID string, input string) (GeneratedEntry, error) {
+	model := g.resolveModel()
+	if model == nil {
+		return GeneratedEntry{
+			EventType: EventCheckpoint,
+			Title:     "Turn digest",
+			Text:      "## Turn digest\n\n" + truncate(input, 2000) + "\n",
+		}, nil
+	}
+
+	agent := fantasy.NewAgent(
+		model,
+		fantasy.WithSystemPrompt(string(turnDigestPrompt)),
+		fantasy.WithMaxOutputTokens(g.maxEntryTokens*5/4+500),
+	)
+	resp, err := agent.Stream(ctx, fantasy.AgentStreamCall{
+		Prompt: input,
+	})
+	if err != nil {
+		return GeneratedEntry{}, fmt.Errorf("failed to generate turn digest: %w", err)
+	}
+	text := strings.TrimSpace(resp.Response.Content.Text())
+	if text == "" {
+		slog.Warn("LLM returned an empty turn digest, using fallback")
+		return GeneratedEntry{
+			EventType: EventCheckpoint,
+			Title:     "Turn digest",
+			Text:      "## Turn digest\n\n" + truncate(input, 2000) + "\n",
 		}, nil
 	}
 	return GeneratedEntry{

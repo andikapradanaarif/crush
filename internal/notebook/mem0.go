@@ -99,6 +99,14 @@ func (m *Mem0Sync) SyncEntries(ctx context.Context, entries []Entry) {
 			// tag; re-syncing them would compound one copy per session.
 			continue
 		}
+		// Turn digests are session-internal work logs — one per turn
+		// would flood the cross-session memory pool with fragments.
+		// Consolidated positions (boundary/session) remain the
+		// hydration surface. The check is structural — keyed on the
+		// granularity tag — so no call-site arrangement can leak one.
+		if CheckpointGranularity(entry) == GranularityTurn {
+			continue
+		}
 		text := entry.EntryTextFull
 		if text == "" {
 			text = entry.EntryText
