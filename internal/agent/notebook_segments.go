@@ -856,7 +856,8 @@ func (a *sessionAgent) buildSelectionInput(ctx context.Context, sessionID string
 // render is cached on (boundary, fingerprint) so a step where nothing
 // covered changed emits a byte-identical prefix without re-rendering.
 // collapse carries the run's prior-turn collapse state — its
-// digestTurns freeze is populated on the first real render.
+// digestTurns freeze is populated on the run's first call, before
+// the cache check.
 func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msgs []message.Message, boundary int, bKey segmentKey, segs []segment, collapse *turnCollapse) []fantasy.Message {
 	if a.notebook == nil || boundary <= 0 || sessionID == "" {
 		return nil
@@ -868,6 +869,10 @@ func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msg
 		slog.Error("Failed to get notebook entries", "error", err)
 		return nil
 	}
+	// Freeze digest eligibility here, before the cache check — a
+	// prefix cache hit must not defer the per-run freeze past the
+	// window where a mid-run digest commit could still slip in.
+	freezeDigestEligibility(collapse, entries, bKey)
 	// Refs and auto-inject scan the FULL message list for the latest
 	// user message: once a long turn's initiating prompt is covered by
 	// the notebook, the raw window holds no user message at all, and
@@ -1045,9 +1050,8 @@ func fantasyToolResultOutputEqual(a, b fantasy.ToolResultOutputContent) bool {
 // may itself sit inside the covered prefix of a long turn. The
 // returned file set holds the file: basenames this render injected —
 // the coverage signal the re-view counter joins against. collapse's
-// digestTurns freezes here, on the run's first real render — entries
-// are not fetched at collapse.Set's freeze site in preparePrompt, so
-// "alongside" means the same struct, not the same line.
+// digestTurns freeze happens in notebookPrefix before the cache
+// check; the call here covers direct render callers.
 func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID string, entries []notebook.Entry, msgs []message.Message, bKey segmentKey, floor segmentKey, refs []string, sel selectionInput, collapse *turnCollapse) ([]fantasy.Message, map[string]bool) {
 	var filtered []notebook.Entry
 	for _, e := range entries {
@@ -1055,19 +1059,10 @@ func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID strin
 			filtered = append(filtered, e)
 		}
 	}
-	// Freeze the digest-eligible turn set once per run: the turns
-	// holding a granularity:turn digest at the run's first render.
-	// A digest committing mid-run busts the prefix cache via the
-	// entries fingerprint and renders — but with this frozen set it
-	// can never demote already-rendered entries mid-window.
-	if collapse != nil && collapse.digestTurns == nil {
-		collapse.digestTurns = make(map[int64]bool)
-		for _, e := range filtered {
-			if notebook.CheckpointGranularity(e) == notebook.GranularityTurn {
-				collapse.digestTurns[e.TurnNumber] = true
-			}
-		}
-	}
+	// notebookPrefix freezes digest eligibility before the cache
+	// check; this call covers direct callers and is a no-op once the
+	// run's set exists.
+	freezeDigestEligibility(collapse, entries, bKey)
 	if collapse != nil {
 		sel.digestEligible = collapse.digestTurns
 	}
@@ -1128,6 +1123,28 @@ func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID strin
 
 // noteSelectionDiff folds one render's per-pass contribution counts
 // into the session's sufficiency stats.
+// freezeDigestEligibility lazily fixes the run's set of turns whose
+// rendered digest may demote same-turn entries: the turns holding a
+// granularity:turn digest inside the render boundary at the run's
+// first prefix call. A digest committing mid-run busts the prefix
+// cache via the entries fingerprint and renders — but with this
+// frozen set it can never demote already-rendered entries
+// mid-window.
+func freezeDigestEligibility(collapse *turnCollapse, entries []notebook.Entry, bKey segmentKey) {
+	if collapse == nil || collapse.digestTurns != nil {
+		return
+	}
+	collapse.digestTurns = make(map[int64]bool)
+	for _, e := range entries {
+		if e.TurnNumber > bKey.turn || (e.TurnNumber == bKey.turn && e.SegmentNumber >= bKey.segment) {
+			continue // Past the render boundary — invisible this run.
+		}
+		if notebook.CheckpointGranularity(e) == notebook.GranularityTurn {
+			collapse.digestTurns[e.TurnNumber] = true
+		}
+	}
+}
+
 func (a *sessionAgent) noteSelectionDiff(sessionID string, diff selectionDiff) {
 	if a.nbStats == nil || sessionID == "" || diff.total() == 0 {
 		return

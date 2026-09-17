@@ -4,7 +4,7 @@
 > predicate, frozen collapse set, and `notebook-prior-turns` option —
 > shipped (#58, closing #49); `digest` mode — turn-granularity
 > digest generation, the demotion rule, and the run-end trigger
-> absorption — shipped in #50. The default stays `verbatim` pending
+> absorption — shipped (#63, closing #50). The default stays `verbatim` pending
 > the paired-eval gates below. Splits
 > context into two planes: the conversation
 > (user messages, assistant answers, question/answer pairs — full

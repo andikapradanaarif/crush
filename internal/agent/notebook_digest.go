@@ -112,6 +112,15 @@ func (a *sessionAgent) generateTurnDigests(ctx context.Context, sessionID string
 		if !ok {
 			continue
 		}
+		// The digest floor, checked before claiming: a turn with no
+		// finished tool call can never produce a digest — it would
+		// no-op inside GenerateTurnDigest yet still consume a
+		// catch-up slot, and without an entry it stays undigested
+		// forever, starving every later turn behind a wall of
+		// chitchat.
+		if !notebook.HasFinishedToolCall(msgs[ext[0]:ext[1]]) {
+			continue
+		}
 		if !tracker.claimDigest(t) {
 			continue
 		}

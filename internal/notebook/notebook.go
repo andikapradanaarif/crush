@@ -144,6 +144,10 @@ type EntryInput struct {
 	// the tool result's "verification" metadata — worst wins, pending
 	// counts as unverified. Empty for non-mutation events.
 	Verified string
+	// trivial marks events classifyEvents would group into the
+	// exploration mini-entry — set by classification so merged-order
+	// consumers (the turn digest) can still tell the buckets apart.
+	trivial bool
 }
 
 // Stats accumulates per-session sufficiency telemetry for the

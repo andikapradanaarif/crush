@@ -35,8 +35,8 @@ var errDigestExists = errors.New("turn digest already exists")
 // the turn itself is the identity, and a run-scoped tag would let a
 // mid-run boundary checkpoint's run suppress this run's digests.
 func (s *service) GenerateTurnDigest(ctx context.Context, sessionID string, req DigestRequest) (bool, error) {
-	significant, trivial := classifyEvents(req.Msgs)
-	if len(significant)+len(trivial) == 0 {
+	events := classifyAll(req.Msgs)
+	if len(events) == 0 {
 		return false, nil
 	}
 	// Cheap dedup outside the write lock: an existing digest makes
@@ -51,10 +51,19 @@ func (s *service) GenerateTurnDigest(ctx context.Context, sessionID string, req 
 		}
 	}
 
+	// The turn's decision demotes behind its digest like every other
+	// same-turn entry, so the decision itself must be digest input —
+	// mirror GenerateEntries' fold of assistant-text decisions. It
+	// joins the significant budget class, ordered last.
+	if hasDecision(req.Msgs) {
+		events = append(events, EntryInput{
+			EventType:   EventDecision,
+			Title:       "Decision",
+			Description: truncate(extractAssistantText(req.Msgs), 2000),
+			Succeeded:   true,
+		})
+	}
 	interrupted := turnInterrupted(req.Msgs)
-	events := make([]EntryInput, 0, len(significant)+len(trivial))
-	events = append(events, significant...)
-	events = append(events, trivial...)
 	entry, err := s.generator.GenerateDigest(ctx, sessionID, buildDigestInput(events, interrupted))
 	if err != nil {
 		return false, fmt.Errorf("failed to generate turn digest: %w", err)
@@ -149,32 +158,51 @@ func (s *service) GenerateTurnDigest(ctx context.Context, sessionID string, req 
 	return true, nil
 }
 
+// HasFinishedToolCall reports whether msgs contain a finished tool
+// call — the digest floor. classifyAll emits one event per finished
+// call, so this exactly predicts whether a turn can produce a digest
+// without running the full classification.
+func HasFinishedToolCall(msgs []message.Message) bool {
+	for _, m := range msgs {
+		if m.Role != message.Assistant {
+			continue
+		}
+		for _, tc := range m.ToolCalls() {
+			if tc.Finished {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // turnInterrupted reports whether the turn's last assistant message
 // finished on FinishReasonCanceled — persistCanceledTurn's marker for
-// a turn the user aborted. Its events are partial, so the digest
-// headline notes "interrupted" rather than reading as finished work.
+// a user abort — or FinishReasonError, a provider failure mid-turn.
+// Either way the turn's events are partial, so the digest headline
+// notes "interrupted" rather than reading as finished work.
 func turnInterrupted(msgs []message.Message) bool {
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if msgs[i].Role != message.Assistant {
 			continue
 		}
 		if f := msgs[i].FinishPart(); f != nil {
-			return f.Reason == message.FinishReasonCanceled
+			return f.Reason == message.FinishReasonCanceled ||
+				f.Reason == message.FinishReasonError
 		}
 	}
 	return false
 }
 
 // buildDigestInput renders the turn-digest input: the finished turn's
-// classified events — significant and trivial alike — in
-// chronological order, newest filling the byte budget first.
-// Interrupted turns get a preamble so the model marks the headline.
+// classified events — significant and trivial alike — emitted in
+// chronological order. Significant events are the digest's substance
+// and claim the byte budget first, newest first; trivial exploration
+// fills what remains. Interrupted turns get a preamble so the model
+// marks the headline.
 func buildDigestInput(events []EntryInput, interrupted bool) string {
-	var blocks []string
-	used := 0
-	truncated := false
-	for i := len(events) - 1; i >= 0; i-- {
-		ev := events[i]
+	blocks := make([]string, len(events))
+	for i, ev := range events {
 		var b strings.Builder
 		fmt.Fprintf(&b, "### %s — %s\n%s\n", ev.EventType, ev.Title, ev.Description)
 		if ev.ErrorHeadline != "" {
@@ -184,14 +212,25 @@ func buildDigestInput(events []EntryInput, interrupted bool) string {
 			fmt.Fprintf(&b, "Verification: %s\n", ev.Verified)
 		}
 		b.WriteString("\n")
-		if used+b.Len() > checkpointTailMaxBytes {
-			truncated = true
-			continue // Skip the oversized event; smaller older ones may fit.
-		}
-		used += b.Len()
-		blocks = append(blocks, b.String())
+		blocks[i] = b.String()
 	}
-	slices.Reverse(blocks)
+
+	selected := make([]bool, len(events))
+	used := 0
+	truncated := false
+	for _, wantTrivial := range []bool{false, true} {
+		for i := len(events) - 1; i >= 0; i-- {
+			if events[i].trivial != wantTrivial {
+				continue
+			}
+			if used+len(blocks[i]) > checkpointTailMaxBytes {
+				truncated = true
+				continue // Skip the oversized event; smaller ones may fit.
+			}
+			used += len(blocks[i])
+			selected[i] = true
+		}
+	}
 
 	var sb strings.Builder
 	if interrupted {
@@ -201,8 +240,10 @@ func buildDigestInput(events []EntryInput, interrupted bool) string {
 	if truncated {
 		sb.WriteString("(events elided for budget)\n\n")
 	}
-	for _, b := range blocks {
-		sb.WriteString(b)
+	for i := range events {
+		if selected[i] {
+			sb.WriteString(blocks[i])
+		}
 	}
 	return sb.String()
 }

@@ -2,6 +2,7 @@ package notebook
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/message"
@@ -106,6 +107,67 @@ func TestGenerateTurnDigest_CommitsGranularityTurn(t *testing.T) {
 	for _, tag := range e.Tags {
 		require.NotContains(t, tag, "run:", "turn digests carry no run tag")
 	}
+}
+
+func TestGenerateTurnDigest_ChronologicalOrder(t *testing.T) {
+	gen := &digestEchoGen{}
+	svc, _, sessionID := newTestService(t, gen)
+	// Trivial, significant, trivial — the input must emit them in
+	// event order, not bucket order.
+	msgs := digestTurnMsgs(
+		[]message.ToolCall{
+			{ID: "tc1", Name: "grep", Input: `{"pattern":"first"}`, Finished: true},
+			{ID: "tc2", Name: "edit", Input: `{"file_path":"auth.go"}`, Finished: true},
+			{ID: "tc3", Name: "glob", Input: `{"pattern":"third"}`, Finished: true},
+		},
+		[]message.ToolResult{
+			{ToolCallID: "tc1", Name: "grep", Content: "hit"},
+			{ToolCallID: "tc2", Name: "edit", Content: "edited"},
+			{ToolCallID: "tc3", Name: "glob", Content: "found"},
+		},
+	)
+
+	committed, err := svc.GenerateTurnDigest(t.Context(), sessionID, DigestRequest{
+		TurnNumber:    0,
+		SegmentNumber: 0,
+		Msgs:          msgs,
+	})
+	require.NoError(t, err)
+	require.True(t, committed)
+	require.Len(t, gen.inputs, 1)
+	input := gen.inputs[0]
+	grepAt := strings.Index(input, "Grep")
+	editAt := strings.Index(input, "Edit auth.go")
+	globAt := strings.Index(input, "Glob")
+	require.NotEqual(t, -1, grepAt)
+	require.NotEqual(t, -1, editAt)
+	require.NotEqual(t, -1, globAt)
+	require.Less(t, grepAt, editAt, "events emit in chronological order")
+	require.Less(t, editAt, globAt, "events emit in chronological order")
+}
+
+func TestGenerateTurnDigest_IncludesDecision(t *testing.T) {
+	gen := &digestEchoGen{}
+	svc, _, sessionID := newTestService(t, gen)
+	msgs := digestTurnMsgs(
+		[]message.ToolCall{{ID: "tc1", Name: "edit", Input: `{"file_path":"auth.go"}`, Finished: true}},
+		[]message.ToolResult{{ToolCallID: "tc1", Name: "edit", Content: "edited"}},
+	)
+	// The turn's concluding text carries a decision — the same fold
+	// GenerateEntries applies, so the demoted decision entry is
+	// represented in the digest input.
+	msgs[1].Parts[0] = message.TextContent{Text: "I decided to use JWT for sessions"}
+
+	committed, err := svc.GenerateTurnDigest(t.Context(), sessionID, DigestRequest{
+		TurnNumber:    0,
+		SegmentNumber: 0,
+		Msgs:          msgs,
+	})
+	require.NoError(t, err)
+	require.True(t, committed)
+	require.Len(t, gen.inputs, 1)
+	require.Contains(t, gen.inputs[0], "Decision")
+	require.Contains(t, gen.inputs[0], "decided to use JWT")
 }
 
 func TestGenerateTurnDigest_IncludesTrivialEvents(t *testing.T) {
@@ -270,6 +332,26 @@ func TestGenerateTurnDigest_InterruptedHeadline(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
 	require.Contains(t, entries[0].Title, "interrupted")
+}
+
+func TestTurnInterrupted_FinishReasons(t *testing.T) {
+	t.Parallel()
+
+	mk := func(reason message.FinishReason) []message.Message {
+		return []message.Message{
+			{Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "go"}}},
+			{Role: message.Assistant, Parts: []message.ContentPart{
+				message.TextContent{Text: "working"},
+				message.Finish{Reason: reason},
+			}},
+		}
+	}
+	require.True(t, turnInterrupted(mk(message.FinishReasonCanceled)))
+	require.True(t, turnInterrupted(mk(message.FinishReasonError)),
+		"a provider-failed turn is partial work, not a completion")
+	require.False(t, turnInterrupted(mk(message.FinishReasonEndTurn)))
+	require.False(t, turnInterrupted(mk(message.FinishReasonToolUse)),
+		"a tool-use finish mid-turn is not an interruption")
 }
 
 func TestGenerateTurnDigest_StripsStructuralModelTags(t *testing.T) {

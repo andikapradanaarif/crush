@@ -165,6 +165,39 @@ func TestGenerateTurnDigests_SkipsEmptyTurns(t *testing.T) {
 	require.True(t, got[1])
 }
 
+// TestGenerateTurnDigests_EmptyTurnsDontConsumeCap is the starvation
+// guard: undigestable turns must not burn catch-up slots — without a
+// granularity:turn entry they stay undigested forever, so claiming
+// them would starve real work behind them on every pass.
+func TestGenerateTurnDigests_EmptyTurnsDontConsumeCap(t *testing.T) {
+	t.Parallel()
+
+	gen := &countingGen{}
+	a, svc, nb, sessionID := newSegmentTestAgent(t, gen)
+	a.priorTurns = priorTurnsDigest
+
+	// More conversation-only turns than the whole catch-up cap.
+	for i := range digestCatchUpCap + 1 {
+		mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: fmt.Sprintf("chat %d", i)})
+		mkMsg(t, svc, sessionID, message.Assistant, message.TextContent{Text: "ok"})
+	}
+	// One real turn behind the chitchat wall.
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "now work"})
+	a1 := mkMsg(t, svc, sessionID, message.Assistant,
+		message.ToolCall{ID: "tc-w", Name: "bash", Input: `{"command":"ls"}`, Finished: true})
+	mkMsg(t, svc, sessionID, message.Tool,
+		message.ToolResult{ToolCallID: "tc-w", Name: "bash", Content: "out"})
+	msgs, err := svc.List(t.Context(), sessionID)
+	require.NoError(t, err)
+	// The working turn's user message index is len(msgs)-3.
+	a.generateTurnDigests(t.Context(), sessionID, msgs, len(msgs)-3, a1.ID)
+
+	require.EqualValues(t, 1, gen.digests.Load(),
+		"empty turns must not consume catch-up slots")
+	got := digestTurns(t, nb, sessionID)
+	require.True(t, got[digestCatchUpCap+1], "the working turn digests despite the chitchat backlog")
+}
+
 func TestPreparePrompt_DigestModeStubText(t *testing.T) {
 	t.Parallel()
 
