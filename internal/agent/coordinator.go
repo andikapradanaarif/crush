@@ -25,6 +25,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
+	notebooktool "github.com/charmbracelet/crush/internal/agent/tools/notebook"
 	"github.com/charmbracelet/crush/internal/agent/tools/notebooktools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
@@ -825,11 +826,14 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 	}
 
 	largeProviderCfg, _ := c.cfg.Config().Providers.Get(large.ModelCfg.Provider)
-	// Prior-turn collapse needs the notebook — recall is the stub's
-	// recovery path — so it coerces to verbatim when disabled, the
-	// same gate StubSuperseded applies.
+	// Prior-turn collapse and supersession stubs both print
+	// recall("result:<id>") recovery pointers, so they need the
+	// notebook AND the recall tool — disabling either via config or
+	// disabled_tools would leave dead pointers in the prompt.
+	notebookOn := c.cfg.Config().Options.NotebookIsEnabled()
+	recallOn := slices.Contains(agent.AllowedTools, notebooktool.RecallToolName)
 	priorTurns := "verbatim"
-	if c.cfg.Config().Options.NotebookIsEnabled() {
+	if notebookOn && recallOn {
 		priorTurns = c.cfg.Config().Options.NotebookPriorTurnsMode()
 	}
 	result := NewSessionAgent(SessionAgentOptions{
@@ -855,7 +859,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		NotebookCheckpoint: c.cfg.Config().Options.NotebookCheckpointEnabled() &&
 			c.cfg.Config().Options.NotebookIsEnabled(),
 		StubSuperseded: c.cfg.Config().Options.NotebookStubSupersededEnabled() &&
-			c.cfg.Config().Options.NotebookIsEnabled(),
+			notebookOn && recallOn,
 		NotebookPriorTurns:     priorTurns,
 		StubBoundary:           c.stubBoundary,
 		StubStats:              c.stubStats,
@@ -870,11 +874,14 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		Interactive:            c.interactive,
 	})
 
-	if c.cfg.Config().Options.NotebookStubSupersededEnabled() && !c.cfg.Config().Options.NotebookIsEnabled() {
-		slog.Warn("Option notebook_stub_superseded is enabled but the context notebook is disabled; supersession stubbing is inactive")
+	if c.cfg.Config().Options.NotebookStubSupersededEnabled() && (!notebookOn || !recallOn) {
+		slog.Warn("Option notebook_stub_superseded is enabled but the context notebook or recall tool is disabled; supersession stubbing is inactive")
 	}
-	if c.cfg.Config().Options.NotebookPriorTurnsMode() != "verbatim" && !c.cfg.Config().Options.NotebookIsEnabled() {
-		slog.Warn("Option notebook_prior_turns is enabled but the context notebook is disabled; prior-turn collapse is inactive")
+	if c.cfg.Config().Options.NotebookPriorTurnsMode() != "verbatim" && (!notebookOn || !recallOn) {
+		slog.Warn("Option notebook_prior_turns is enabled but the context notebook or recall tool is disabled; prior-turn collapse is inactive")
+	}
+	if c.cfg.Config().Options.NotebookPriorTurns == "digest" {
+		slog.Debug("Option notebook_prior_turns=digest resolves to stub until turn-digest generation ships")
 	}
 
 	// Initialize the summary model before installing the resolver.

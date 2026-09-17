@@ -1,6 +1,10 @@
 # Turn Digest — Fidelity Drop at the Turn Boundary
 
-> **Status:** Spec. Splits context into two planes: the conversation
+> **Status:** Partially shipped. `stub` mode — the `prior_turn`
+> render predicate, frozen collapse set, and `notebook-prior-turns`
+> option — shipped (#58, closing #49); `digest` mode remains spec and
+> resolves to stub until turn-digest generation lands (#50). Splits
+> context into two planes: the conversation
 > (user messages, assistant answers, question/answer pairs — full
 > continuity) and the execution transcript (tool calls + results —
 > collapsed at turn end). Composes with `TOOL_RESULT_PRUNING.md`

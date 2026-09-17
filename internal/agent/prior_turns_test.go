@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/notebook"
 	"github.com/stretchr/testify/require"
@@ -316,4 +317,38 @@ func TestNewTurnCollapse_Gates(t *testing.T) {
 	require.NotNil(t, a.newTurnCollapse(0))
 	a.notebookEnabled = false
 	require.Nil(t, a.newTurnCollapse(0), "notebook off coerces verbatim")
+}
+
+func TestBuildAgent_PriorTurnsCoercesWhenRecallDisabled(t *testing.T) {
+	// disabled_tools: [recall] removes the recovery path the stubs
+	// advertise — collapse (and supersession stubbing, same pointer)
+	// must coerce off even with the option set.
+	coord := newSummaryTestCoordinator(t, `{
+  "options": {"disable_default_providers": true, "disable_provider_auto_update": true,
+    "notebook_prior_turns": "stub", "notebook_stub_superseded": true,
+    "disabled_tools": ["recall"]},
+  "providers": {"mock": {"id": "mock", "name": "Mock", "type": "openai",
+    "base_url": "http://127.0.0.1:9/v1", "api_key": "test-key",
+    "models": [{"id": "mock-model", "name": "Mock", "context_window": 8192, "default_max_tokens": 128}]}},
+  "models": {"large": {"provider": "mock", "model": "mock-model"},
+             "small": {"provider": "mock", "model": "mock-model"}}
+}`)
+	a, ok := coord.agents[config.AgentCoder].(*sessionAgent)
+	require.True(t, ok)
+	require.Equal(t, "verbatim", a.priorTurns)
+	require.False(t, a.stubSuperseded)
+
+	// Recall present → stub mode flows through.
+	coord = newSummaryTestCoordinator(t, `{
+  "options": {"disable_default_providers": true, "disable_provider_auto_update": true,
+    "notebook_prior_turns": "stub"},
+  "providers": {"mock": {"id": "mock", "name": "Mock", "type": "openai",
+    "base_url": "http://127.0.0.1:9/v1", "api_key": "test-key",
+    "models": [{"id": "mock-model", "name": "Mock", "context_window": 8192, "default_max_tokens": 128}]}},
+  "models": {"large": {"provider": "mock", "model": "mock-model"},
+             "small": {"provider": "mock", "model": "mock-model"}}
+}`)
+	a, ok = coord.agents[config.AgentCoder].(*sessionAgent)
+	require.True(t, ok)
+	require.Equal(t, "stub", a.priorTurns)
 }
