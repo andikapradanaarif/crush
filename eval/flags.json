@@ -9,6 +9,7 @@
 		"project_index": false,
 		"auto_lsp": true,
 		"turn_context": "off",
-		"ambiguity_clarification": false
+		"ambiguity_clarification": false,
+		"notebook_prior_turns": "verbatim"
 	}
 }

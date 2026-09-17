@@ -218,6 +218,7 @@ var optionSpecs = map[string]optionSpec{
 	"initialize-as":          {jsonKey: "initialize_as", kind: optString},
 	"turn-context":           {jsonKey: "turn_context", kind: optString},
 	"notebook-memory-server": {jsonKey: "notebook_memory_server", kind: optString},
+	"notebook-prior-turns":   {jsonKey: "notebook_prior_turns", kind: optString},
 
 	// Integer fields, in seconds.
 	"request-timeout": {jsonKey: "request_timeout", kind: optInt},
