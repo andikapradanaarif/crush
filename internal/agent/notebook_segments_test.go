@@ -648,7 +648,7 @@ func TestRenderNotebookPrefix_SegmentCoverageFilter(t *testing.T) {
 	}
 	rawMsgs := []message.Message{segUser("go"), segAssistant("work")}
 	prefix, files := a.renderNotebookPrefix(t.Context(), "sess", entries, rawMsgs,
-		segmentKey{turn: 0, segment: 2}, segmentKey{turn: 0, segment: 0}, nil, selectionInput{}, nil)
+		segmentKey{turn: 0, segment: 2}, segmentKey{turn: 0, segment: 0}, nil, selectionInput{}, nil, a.recallVia())
 	require.Len(t, prefix, 1)
 	require.Equal(t, fantasy.MessageRoleSystem, prefix[0].Role)
 	require.Empty(t, files)
@@ -674,7 +674,7 @@ func TestRenderNotebookPrefix_OmittedTurnBreadcrumb(t *testing.T) {
 	rawMsgs := []message.Message{segUser("go"), segAssistant("work")}
 	render := func(a *sessionAgent) string {
 		prefix, _ := a.renderNotebookPrefix(t.Context(), "sess", entries, rawMsgs,
-			segmentKey{turn: 2, segment: 0}, segmentKey{turn: 0, segment: 0}, nil, selectionInput{}, nil)
+			segmentKey{turn: 2, segment: 0}, segmentKey{turn: 0, segment: 0}, nil, selectionInput{}, nil, a.recallVia())
 		require.Len(t, prefix, 1)
 		return prefix[0].Content[0].(fantasy.TextPart).Text
 	}
@@ -716,7 +716,7 @@ func TestRenderNotebookPrefix_ScrubsLegacyTruncationMarker(t *testing.T) {
 	rawMsgs := []message.Message{segUser("go"), segAssistant("work")}
 	render := func(a *sessionAgent) string {
 		prefix, _ := a.renderNotebookPrefix(t.Context(), "sess", entries, rawMsgs,
-			segmentKey{turn: 1, segment: 0}, segmentKey{turn: 0, segment: 0}, nil, selectionInput{}, nil)
+			segmentKey{turn: 1, segment: 0}, segmentKey{turn: 0, segment: 0}, nil, selectionInput{}, nil, a.recallVia())
 		require.Len(t, prefix, 1)
 		return prefix[0].Content[0].(fantasy.TextPart).Text
 	}

@@ -900,13 +900,17 @@ func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msg
 		sel.digestEligible = collapse.digestTurns
 	}
 	floor := coveredSegmentFloor(segs, boundary)
-	fp := prefixFingerprint(boundary, bKey, floor, entries, refs, sel, a.recallVia())
+	// Compute the recall-pointer suffix once per render: it feeds both
+	// the fingerprint and the breadcrumb, so a SetTools landing
+	// mid-render cannot split the cache key from the content it keys.
+	toolPtr := a.recallVia()
+	fp := prefixFingerprint(boundary, bKey, floor, entries, refs, sel, toolPtr)
 	if a.prefixCache != nil {
 		if c, ok := a.prefixCache.Get(sessionID); ok && c.boundary == boundary && c.fingerprint == fp {
 			return c.msgs
 		}
 	}
-	prefix, files := a.renderNotebookPrefix(detCtx, sessionID, entries, msgs, bKey, floor, refs, sel, collapse)
+	prefix, files := a.renderNotebookPrefix(detCtx, sessionID, entries, msgs, bKey, floor, refs, sel, collapse, toolPtr)
 	if a.prefixCache != nil {
 		a.prefixCache.Set(sessionID, cachedPrefix{boundary: boundary, fingerprint: fp, msgs: prefix, files: files})
 	}
@@ -1070,8 +1074,11 @@ func fantasyToolResultOutputEqual(a, b fantasy.ToolResultOutputContent) bool {
 // returned file set holds the file: basenames this render injected —
 // the coverage signal the re-view counter joins against. collapse's
 // digestTurns freeze happens in notebookPrefix before the cache
-// check; the call here covers direct render callers.
-func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID string, entries []notebook.Entry, msgs []message.Message, bKey segmentKey, floor segmentKey, refs []string, sel selectionInput, collapse *turnCollapse) ([]fantasy.Message, map[string]bool) {
+// check; the call here covers direct render callers. toolPtr is the
+// recall-pointer suffix the caller computed once for this render —
+// the same value the fingerprint hashed, so content and cache key
+// can never split across a palette swap.
+func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID string, entries []notebook.Entry, msgs []message.Message, bKey segmentKey, floor segmentKey, refs []string, sel selectionInput, collapse *turnCollapse, toolPtr string) ([]fantasy.Message, map[string]bool) {
 	var filtered []notebook.Entry
 	for _, e := range entries {
 		if e.TurnNumber < bKey.turn || (e.TurnNumber == bKey.turn && e.SegmentNumber < bKey.segment) {
@@ -1110,7 +1117,7 @@ func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID strin
 			}
 		}
 		if rendered := notebook.RenderEntries(selected); rendered != "" {
-			rendered = a.scrubDeadRecallPointer(rendered)
+			rendered = notebook.RewriteTruncationMarker(rendered)
 			// Turns whose every entry was budget-evicted have entries
 			// but nothing rendered. Emit a breadcrumb so the omission
 			// isn't silent — the raw window intentionally does not
@@ -1127,7 +1134,7 @@ func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID strin
 			}
 			if len(omitted) > 0 {
 				slices.Sort(omitted)
-				rendered += "\n\n[turns " + formatTurnRanges(omitted) + " have notebook entries not injected here" + a.recallVia() + "]"
+				rendered += "\n\n[turns " + formatTurnRanges(omitted) + " have notebook entries not injected here" + toolPtr + "]"
 			}
 			msg := fantasy.NewSystemMessage("<notebook>\n" + rendered + "</notebook>")
 			out = append(out, msg)
@@ -1160,16 +1167,6 @@ func (a *sessionAgent) recallVia() string {
 		return " — browsable via notebook_search"
 	}
 	return ""
-}
-
-// scrubDeadRecallPointer rewrites the recall pointer baked into entry
-// text stored before the truncation marker went tool-neutral. The
-// scrub is unconditional, not gated on the tool: entry_text_full
-// holds the same truncated body, so recall has no fuller text to
-// return — the pointer overpromises for every agent, not just those
-// without it.
-func (a *sessionAgent) scrubDeadRecallPointer(text string) string {
-	return strings.ReplaceAll(text, notebook.LegacyEntryTruncatedMarker, notebook.EntryTruncatedMarker)
 }
 
 // noteSelectionDiff folds one render's per-pass contribution counts

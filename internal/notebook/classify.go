@@ -553,6 +553,15 @@ const EntryTruncatedMarker = "[Entry truncated.]"
 // entry_text_full holds the same truncated body.
 const LegacyEntryTruncatedMarker = "[Entry truncated. Use recall tool for full details.]"
 
+// RewriteTruncationMarker normalizes stored entry text for render:
+// entries written while the marker named recall carry
+// LegacyEntryTruncatedMarker, and no render path should ship it —
+// entry_text_full holds the same truncated body, so the pointer
+// overpromises regardless of which tools the agent has.
+func RewriteTruncationMarker(text string) string {
+	return strings.ReplaceAll(text, LegacyEntryTruncatedMarker, EntryTruncatedMarker)
+}
+
 // truncateEntry clips an entry to the max token budget, preserving
 // tags at the bottom.
 func truncateEntry(text string, maxTokens int64) string {

@@ -366,7 +366,7 @@ func TestRenderNotebookPrefix_DigestFreezeEligibility(t *testing.T) {
 	// becomes demotion-eligible for the rest of the run.
 	prefix, _ := a.renderNotebookPrefix(t.Context(), sessionID, entries,
 		[]message.Message{segUser("go")}, segmentKey{turn: 1, segment: 0},
-		segmentKey{turn: 0, segment: 0}, nil, selectionInput{}, collapse)
+		segmentKey{turn: 0, segment: 0}, nil, selectionInput{}, collapse, a.recallVia())
 	require.NotNil(t, collapse.digestTurns)
 	require.True(t, collapse.digestTurns[0])
 	require.NotEmpty(t, prefix)
