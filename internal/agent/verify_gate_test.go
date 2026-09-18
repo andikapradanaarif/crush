@@ -334,7 +334,7 @@ func newGateTestAgent(t *testing.T, cfg *config.Config) (*sessionAgent, message.
 		sessions:    sessions,
 		messages:    svc,
 		// A non-nil toolset containing todos, matching production —
-		// incompleteTodos skips when the toolset is unknown or lacks it.
+		// planVerdicts skips when the toolset is unknown or lacks it.
 		tools:        csync.NewSliceFrom([]fantasy.AgentTool{&fakeTool{name: tools.TodosToolName}}),
 		messageQueue: csync.NewMap[string, []SessionAgentCall](),
 		dispatchMu:   csync.NewMap[string, *sync.Mutex](),
@@ -469,7 +469,7 @@ func TestRunVerificationGate(t *testing.T) {
 		require.Contains(t, asst.Content().Text, "still failing")
 	})
 
-	setTodos := func(t *testing.T, sessions session.Service, sessionID string, todos ...session.Todo) {
+	setTodos := func(t *testing.T, sessions session.Service, sessionID string, todos ...session.PlanItem) {
 		t.Helper()
 		sess, err := sessions.Get(t.Context(), sessionID)
 		require.NoError(t, err)
@@ -482,9 +482,9 @@ func TestRunVerificationGate(t *testing.T) {
 		t.Parallel()
 		a, _, sessionID := newGateTestAgent(t, &config.Config{})
 		setTodos(t, a.sessions, sessionID,
-			session.Todo{Content: "implement the fix", Status: session.TodoStatusCompleted},
-			session.Todo{Content: "run the tests", Status: session.TodoStatusInProgress},
-			session.Todo{Content: "update docs", Status: session.TodoStatusPending},
+			session.PlanItem{Content: "implement the fix", Status: session.PlanItemCompleted},
+			session.PlanItem{Content: "run the tests", Status: session.PlanItemInProgress},
+			session.PlanItem{Content: "update docs", Status: session.PlanItemPending},
 		)
 		result := &fantasy.AgentResult{Steps: []fantasy.StepResult{
 			stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),
@@ -508,8 +508,8 @@ func TestRunVerificationGate(t *testing.T) {
 		t.Parallel()
 		a, _, sessionID := newGateTestAgent(t, &config.Config{})
 		setTodos(t, a.sessions, sessionID,
-			session.Todo{Content: "implement the fix", Status: session.TodoStatusCompleted},
-			session.Todo{Content: "run the tests", Status: session.TodoStatusCompleted},
+			session.PlanItem{Content: "implement the fix", Status: session.PlanItemCompleted},
+			session.PlanItem{Content: "run the tests", Status: session.PlanItemCompleted},
 		)
 		result := &fantasy.AgentResult{Steps: []fantasy.StepResult{
 			stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),
@@ -521,7 +521,7 @@ func TestRunVerificationGate(t *testing.T) {
 		t.Parallel()
 		a, _, sessionID := newGateTestAgent(t, &config.Config{})
 		setTodos(t, a.sessions, sessionID,
-			session.Todo{Content: "run the tests", Status: session.TodoStatusPending},
+			session.PlanItem{Content: "run the tests", Status: session.PlanItemPending},
 		)
 		result := &fantasy.AgentResult{Steps: []fantasy.StepResult{
 			stepWith(fantasy.FinishReasonToolCalls, editWith(`{"verification":[{"check":"diagnostics","state":"failed","detail":"1 new error(s)"}]}`)),
@@ -539,7 +539,7 @@ func TestRunVerificationGate(t *testing.T) {
 		t.Parallel()
 		a, _, sessionID := newGateTestAgent(t, &config.Config{})
 		setTodos(t, a.sessions, sessionID,
-			session.Todo{Content: "run the tests", Status: session.TodoStatusPending},
+			session.PlanItem{Content: "run the tests", Status: session.PlanItemPending},
 		)
 		asst := assistantMsg()
 		result := &fantasy.AgentResult{Steps: []fantasy.StepResult{
@@ -549,14 +549,14 @@ func TestRunVerificationGate(t *testing.T) {
 			SessionID: sessionID, RepairAttempts: maxRepairAttempts,
 		}, edgeInput{result: result, currentAssistant: asst})
 		require.False(t, queued)
-		require.Contains(t, asst.Content().Text, "todo item(s) still incomplete")
+		require.Contains(t, asst.Content().Text, "todo item(s) still unresolved")
 	})
 
 	t.Run("exhausted budget surfaces checks and todos together", func(t *testing.T) {
 		t.Parallel()
 		a, _, sessionID := newGateTestAgent(t, &config.Config{})
 		setTodos(t, a.sessions, sessionID,
-			session.Todo{Content: "run the tests", Status: session.TodoStatusPending},
+			session.PlanItem{Content: "run the tests", Status: session.PlanItemPending},
 		)
 		asst := assistantMsg()
 		result := &fantasy.AgentResult{Steps: []fantasy.StepResult{
@@ -568,7 +568,7 @@ func TestRunVerificationGate(t *testing.T) {
 		}, edgeInput{result: result, currentAssistant: asst})
 		require.False(t, queued)
 		require.Contains(t, asst.Content().Text, "still failing")
-		require.Contains(t, asst.Content().Text, "todo item(s) still incomplete")
+		require.Contains(t, asst.Content().Text, "todo item(s) still unresolved")
 	})
 
 	t.Run("open todos do not gate when todos tool is absent", func(t *testing.T) {
@@ -578,7 +578,7 @@ func TestRunVerificationGate(t *testing.T) {
 			&fakeTool{name: "edit", resp: fantasy.NewTextResponse("ok")},
 		})
 		setTodos(t, a.sessions, sessionID,
-			session.Todo{Content: "run the tests", Status: session.TodoStatusPending},
+			session.PlanItem{Content: "run the tests", Status: session.PlanItemPending},
 		)
 		result := &fantasy.AgentResult{Steps: []fantasy.StepResult{
 			stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),

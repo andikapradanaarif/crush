@@ -2188,7 +2188,7 @@ func notebookRelevanceRefs(ctx context.Context, sessions session.Service, sessio
 	}
 	if sess, err := sessions.Get(ctx, sessionID); err == nil {
 		for _, todo := range sess.Todos {
-			if todo.Status == session.TodoStatusPending || todo.Status == session.TodoStatusInProgress {
+			if todo.Status == session.PlanItemPending || todo.Status == session.PlanItemInProgress {
 				add(todo.Content)
 			}
 		}
@@ -3131,7 +3131,7 @@ func (a *sessionAgent) workaroundProviderMediaLimitations(messages []fantasy.Mes
 }
 
 // buildSummaryPrompt constructs the prompt text for session summarization.
-func buildSummaryPrompt(todos []session.Todo) string {
+func buildSummaryPrompt(todos []session.PlanItem) string {
 	var sb strings.Builder
 	sb.WriteString("Provide a detailed summary of our conversation above.")
 	if len(todos) > 0 {

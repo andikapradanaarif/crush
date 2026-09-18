@@ -182,9 +182,9 @@ func TestTurnContextBlob(t *testing.T) {
 		a.turnContext = "session"
 		sess, err := a.sessions.Get(t.Context(), sessionID)
 		require.NoError(t, err)
-		sess.Todos = []session.Todo{
-			{Content: "ship it", Status: session.TodoStatusPending},
-			{Content: "done item", Status: session.TodoStatusCompleted},
+		sess.Todos = []session.PlanItem{
+			{Content: "ship it", Status: session.PlanItemPending},
+			{Content: "done item", Status: session.PlanItemCompleted},
 		}
 		_, err = a.sessions.Save(t.Context(), sess)
 		require.NoError(t, err)

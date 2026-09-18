@@ -136,12 +136,12 @@ func (t *TodosToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 }
 
 // FormatTodosList formats a list of todos for display.
-func FormatTodosList(sty *styles.Styles, todos []session.Todo, inProgressIcon string, width int) string {
+func FormatTodosList(sty *styles.Styles, todos []session.PlanItem, inProgressIcon string, width int) string {
 	if len(todos) == 0 {
 		return ""
 	}
 
-	sorted := make([]session.Todo, len(todos))
+	sorted := make([]session.PlanItem, len(todos))
 	copy(sorted, todos)
 	sortTodos(sorted)
 
@@ -151,16 +151,16 @@ func FormatTodosList(sty *styles.Styles, todos []session.Todo, inProgressIcon st
 		textStyle := sty.Tool.TodoItem
 
 		switch todo.Status {
-		case session.TodoStatusCompleted:
+		case session.PlanItemCompleted:
 			prefix = sty.Tool.TodoCompletedIcon.Render(styles.TodoCompletedIcon) + " "
-		case session.TodoStatusInProgress:
+		case session.PlanItemInProgress:
 			prefix = sty.Tool.TodoInProgressIcon.Render(inProgressIcon + " ")
 		default:
 			prefix = sty.Tool.TodoPendingIcon.Render(styles.TodoPendingIcon) + " "
 		}
 
 		text := todo.Content
-		if todo.Status == session.TodoStatusInProgress && todo.ActiveForm != "" {
+		if todo.Status == session.PlanItemInProgress && todo.ActiveForm != "" {
 			text = todo.ActiveForm
 		}
 		line := prefix + textStyle.Render(text)
@@ -173,18 +173,18 @@ func FormatTodosList(sty *styles.Styles, todos []session.Todo, inProgressIcon st
 }
 
 // sortTodos sorts todos by status: completed, in_progress, pending.
-func sortTodos(todos []session.Todo) {
-	slices.SortStableFunc(todos, func(a, b session.Todo) int {
+func sortTodos(todos []session.PlanItem) {
+	slices.SortStableFunc(todos, func(a, b session.PlanItem) int {
 		return statusOrder(a.Status) - statusOrder(b.Status)
 	})
 }
 
 // statusOrder returns the sort order for a todo status.
-func statusOrder(s session.TodoStatus) int {
+func statusOrder(s session.PlanItemStatus) int {
 	switch s {
-	case session.TodoStatusCompleted:
+	case session.PlanItemCompleted:
 		return 0
-	case session.TodoStatusInProgress:
+	case session.PlanItemInProgress:
 		return 1
 	default:
 		return 2

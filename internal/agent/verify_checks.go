@@ -37,7 +37,7 @@ func pendingChecksForEdit(cfg *config.Config, workingDir, absPath string) []mess
 	var checks []message.VerificationCheck
 	for _, v := range cfg.Verify {
 		checks = append(checks, message.VerificationCheck{
-			Check:   "verify:" + v.DisplayName(),
+			Check:   verifyCheckName(v),
 			State:   message.VerificationPending,
 			Command: v.Command,
 			Timeout: int(v.TimeoutDuration() / time.Second),
@@ -64,6 +64,27 @@ func pendingChecksForEdit(cfg *config.Config, workingDir, absPath string) []mess
 		}
 	}
 	return checks
+}
+
+// verifyCheckName returns the check identity a configured verify
+// command mints on every mutation.
+func verifyCheckName(v config.VerifyConfig) string {
+	return "verify:" + v.DisplayName()
+}
+
+// configuredCheckNames is the bindable evidence-check vocabulary — the
+// names the todos tool surfaces and accepts in evidence_checks. Only
+// configured names are bindable: per-write minted names
+// (package-test:<dir>, diagnostics) are predictable, never bindable.
+func configuredCheckNames(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.Verify))
+	for _, v := range cfg.Verify {
+		names = append(names, verifyCheckName(v))
+	}
+	return names
 }
 
 // dirHasGoTestFile reports whether dir contains a *_test.go file.

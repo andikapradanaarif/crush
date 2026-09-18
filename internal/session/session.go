@@ -16,12 +16,12 @@ import (
 	"github.com/zeebo/xxh3"
 )
 
-type TodoStatus string
+type PlanItemStatus string
 
 const (
-	TodoStatusPending    TodoStatus = "pending"
-	TodoStatusInProgress TodoStatus = "in_progress"
-	TodoStatusCompleted  TodoStatus = "completed"
+	PlanItemPending    PlanItemStatus = "pending"
+	PlanItemInProgress PlanItemStatus = "in_progress"
+	PlanItemCompleted  PlanItemStatus = "completed"
 )
 
 // HashID returns the XXH3 hash of a session ID (UUID) as a hex string.
@@ -31,16 +31,44 @@ func HashID(id string) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-type Todo struct {
-	Content    string     `json:"content"`
-	Status     TodoStatus `json:"status"`
-	ActiveForm string     `json:"active_form"`
+// MintPlanItemID derives a plan item's deterministic ID: keyed items
+// hash their key (a kept key survives content rewording, so inbound
+// DependsOn refs stay valid), keyless items hash their content — the
+// same derivation the legacy shim applies on read, so in-flight
+// sessions mint stable IDs.
+func MintPlanItemID(key, content string) string {
+	h := xxh3.New()
+	if key != "" {
+		h.WriteString("key:" + key)
+	} else {
+		h.WriteString("content:" + content)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+// PlanItem is a typed plan entry: the model-authored content plus the
+// structure the harness can check — dependencies, evidence bindings,
+// and a stable identity the model never writes directly.
+type PlanItem struct {
+	// ID is harness-minted on write (deterministic per MintPlanItemID);
+	// model-authored IDs are ignored.
+	ID string `json:"id,omitempty"`
+	// Key is the model-authored slug DependsOn references — the
+	// authoring handle minted IDs alone can't provide (a first write
+	// has no IDs yet). Optional; required on dep targets in practice.
+	Key            string         `json:"key,omitempty"`
+	Content        string         `json:"content"`
+	Status         PlanItemStatus `json:"status"`
+	ActiveForm     string         `json:"active_form"`
+	DependsOn      []string       `json:"depends_on,omitempty"`      // Minted item IDs.
+	EvidenceChecks []string       `json:"evidence_checks,omitempty"` // Gate-bearing check names.
+	EvidencePaths  []string       `json:"evidence_paths,omitempty"`  // Files/dirs the work must touch.
 }
 
 // HasIncompleteTodos returns true if there are any non-completed todos.
-func HasIncompleteTodos(todos []Todo) bool {
+func HasIncompleteTodos(todos []PlanItem) bool {
 	for _, todo := range todos {
-		if todo.Status != TodoStatusCompleted {
+		if todo.Status != PlanItemCompleted {
 			return true
 		}
 	}
@@ -57,7 +85,7 @@ type Session struct {
 	EstimatedUsage   bool
 	SummaryMessageID string
 	Cost             float64
-	Todos            []Todo
+	Todos            []PlanItem
 	CreatedAt        int64
 	UpdatedAt        int64
 }
@@ -315,7 +343,7 @@ func (s *service) fromDBItem(item db.Session) Session {
 	}
 }
 
-func marshalTodos(todos []Todo) (string, error) {
+func marshalTodos(todos []PlanItem) (string, error) {
 	if len(todos) == 0 {
 		return "", nil
 	}
@@ -326,15 +354,37 @@ func marshalTodos(todos []Todo) (string, error) {
 	return string(data), nil
 }
 
-func unmarshalTodos(data string) ([]Todo, error) {
+func unmarshalTodos(data string) ([]PlanItem, error) {
 	if data == "" {
-		return []Todo{}, nil
+		return []PlanItem{}, nil
 	}
-	var todos []Todo
+	var todos []PlanItem
 	if err := json.Unmarshal([]byte(data), &todos); err != nil {
-		return []Todo{}, err
+		return []PlanItem{}, err
 	}
+	mintPlanItemIDs(todos)
 	return todos, nil
+}
+
+// mintPlanItemIDs is the legacy shim: rows written before PlanItem
+// carried IDs unmarshal with the field empty, and the same
+// deterministic minting the write path uses fills them so every read
+// agrees. Duplicate legacy content collides on the same hash — the
+// ordinal suffix keeps IDs unique without breaking determinism.
+func mintPlanItemIDs(todos []PlanItem) {
+	seen := map[string]int{}
+	for i := range todos {
+		if todos[i].ID != "" {
+			seen[todos[i].ID]++
+			continue
+		}
+		id := MintPlanItemID(todos[i].Key, todos[i].Content)
+		if n := seen[id]; n > 0 {
+			id = fmt.Sprintf("%s#%d", id, n)
+		}
+		seen[id]++
+		todos[i].ID = id
+	}
 }
 
 func NewService(q *db.Queries, conn *sql.DB) Service {

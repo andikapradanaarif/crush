@@ -233,9 +233,9 @@ func TestAutoExpandPillsIfReasonable(t *testing.T) {
 
 		u := newTestUI()
 		u.height = 50
-		u.session = &session.Session{ID: "s1", Todos: []session.Todo{
-			{Status: session.TodoStatusInProgress, Content: "do work"},
-			{Status: session.TodoStatusPending, Content: "do more"},
+		u.session = &session.Session{ID: "s1", Todos: []session.PlanItem{
+			{Status: session.PlanItemInProgress, Content: "do work"},
+			{Status: session.PlanItemPending, Content: "do more"},
 		}}
 
 		u.autoExpandPillsIfReasonable()
@@ -253,8 +253,8 @@ func TestAutoExpandPillsIfReasonable(t *testing.T) {
 
 		u := newTestUI()
 		u.height = 30
-		u.session = &session.Session{ID: "s1", Todos: []session.Todo{
-			{Status: session.TodoStatusInProgress, Content: "do work"},
+		u.session = &session.Session{ID: "s1", Todos: []session.PlanItem{
+			{Status: session.PlanItemInProgress, Content: "do work"},
 		}}
 
 		u.autoExpandPillsIfReasonable()
@@ -269,8 +269,8 @@ func TestAutoExpandPillsIfReasonable(t *testing.T) {
 
 		u := newTestUI()
 		u.height = 50
-		u.session = &session.Session{ID: "s1", Todos: []session.Todo{
-			{Status: session.TodoStatusCompleted, Content: "done"},
+		u.session = &session.Session{ID: "s1", Todos: []session.PlanItem{
+			{Status: session.PlanItemCompleted, Content: "done"},
 		}}
 
 		u.autoExpandPillsIfReasonable()
@@ -286,8 +286,8 @@ func TestAutoExpandPillsIfReasonable(t *testing.T) {
 		u := newTestUI()
 		u.height = 50
 		u.pillsExpanded = true
-		u.session = &session.Session{ID: "s1", Todos: []session.Todo{
-			{Status: session.TodoStatusInProgress, Content: "do work"},
+		u.session = &session.Session{ID: "s1", Todos: []session.PlanItem{
+			{Status: session.PlanItemInProgress, Content: "do work"},
 		}}
 		u.updateLayoutAndSize()
 
@@ -303,7 +303,7 @@ func TestAutoExpandPillsIfReasonable(t *testing.T) {
 
 		u := newTestUI()
 		u.height = 50
-		u.session = &session.Session{ID: "s1", Todos: []session.Todo{}}
+		u.session = &session.Session{ID: "s1", Todos: []session.PlanItem{}}
 		u.promptQueue = 2
 
 		u.autoExpandPillsIfReasonable()

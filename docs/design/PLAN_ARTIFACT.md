@@ -41,8 +41,8 @@ verify.
 
 ## Design
 
-`session.Todo` → `PlanItem{ID, Content, DependsOn []ID, Status,
-Evidence []string}`:
+`session.Todo` → `PlanItem{ID, Key, Content, DependsOn []ID, Status,
+EvidenceChecks []string, EvidencePaths []string}`:
 
 - `DependsOn` is the dispatch unit for fan-out: independent
   subtrees are what a background subagent may be handed, and the

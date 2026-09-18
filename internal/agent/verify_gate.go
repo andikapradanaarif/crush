@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
 	"time"
 
@@ -14,7 +13,6 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/pubsub"
-	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -396,33 +394,6 @@ func (a *sessionAgent) notifyVerifying(call SessionAgentCall, n int) {
 		Type:      notify.TypeVerifying,
 		Message:   fmt.Sprintf("Running %d verification check(s)", n),
 	})
-}
-
-// incompleteTodos returns the session's open todo items — the model's
-// own declared checklist. Returns nil when the toolset is unknown (nil)
-// or lacks the todos tool: a model that cannot write the list cannot
-// reconcile it, and the retry would be a guaranteed thrash.
-func (a *sessionAgent) incompleteTodos(ctx context.Context, sessionID string) []session.Todo {
-	if a.sessions == nil || a.tools == nil {
-		return nil
-	}
-	if !slices.ContainsFunc(a.tools.Copy(), func(t fantasy.AgentTool) bool {
-		return t.Info().Name == tools.TodosToolName
-	}) {
-		return nil
-	}
-	sess, err := a.sessions.Get(ctx, sessionID)
-	if err != nil {
-		slog.Error("Failed to load session todos for verification gate", "error", err, "session_id", sessionID)
-		return nil
-	}
-	var open []session.Todo
-	for _, t := range sess.Todos {
-		if t.Status != session.TodoStatusCompleted {
-			open = append(open, t)
-		}
-	}
-	return open
 }
 
 // toolResultText extracts text from a fantasy tool result for check

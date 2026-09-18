@@ -625,11 +625,11 @@ func TestCoderAgent(t *testing.T) {
 	}
 }
 
-func makeTestTodos(n int) []session.Todo {
-	todos := make([]session.Todo, n)
+func makeTestTodos(n int) []session.PlanItem {
+	todos := make([]session.PlanItem, n)
 	for i := range n {
-		todos[i] = session.Todo{
-			Status:  session.TodoStatusPending,
+		todos[i] = session.PlanItem{
+			Status:  session.PlanItemPending,
 			Content: fmt.Sprintf("Task %d: Implement feature with some description that makes it realistic", i),
 		}
 	}

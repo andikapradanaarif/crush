@@ -105,9 +105,9 @@ func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCal
 
 	if a.sessions != nil {
 		if sess, err := a.sessions.Get(ctx, call.SessionID); err == nil {
-			var open []session.Todo
+			var open []session.PlanItem
 			for _, t := range sess.Todos {
-				if t.Status != session.TodoStatusCompleted {
+				if t.Status != session.PlanItemCompleted {
 					open = append(open, t)
 				}
 			}
