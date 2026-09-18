@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"text/template"
 	"time"
@@ -101,7 +102,14 @@ func NewPrompt(name, promptTemplate string, opts ...Option) (*Prompt, error) {
 }
 
 func (p *Prompt) Build(ctx context.Context, provider, model string, store *config.ConfigStore) (BuiltPrompt, error) {
-	t, err := template.New(p.name).Parse(p.template)
+	// hasTool lets templates gate instructions on whether the agent the
+	// prompt is built for actually carries a tool — e.g. recall guidance
+	// for an agent whose AllowedTools omit it would be a dead pointer.
+	t, err := template.New(p.name).Funcs(template.FuncMap{
+		"hasTool": func(tools []string, name string) bool {
+			return slices.Contains(tools, name)
+		},
+	}).Parse(p.template)
 	if err != nil {
 		return BuiltPrompt{}, fmt.Errorf("parsing template: %w", err)
 	}

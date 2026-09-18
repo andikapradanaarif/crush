@@ -474,9 +474,9 @@ func RenderEntries(entries []Entry) string {
 	}
 	var sb strings.Builder
 	for _, e := range entries {
-		text := e.EntryText
+		text := strings.ReplaceAll(e.EntryText, legacyTruncatedMarker, TruncatedEntryMarker)
 		if e.CompressionLevel > 0 {
-			text = compressEntry(e.EntryText, e.Title, e.Tags, e.ErrorHeadline, e.CompressionLevel)
+			text = compressEntry(text, e.Title, e.Tags, e.ErrorHeadline, e.CompressionLevel)
 		}
 		sb.WriteString(text)
 		sb.WriteString("\n\n")

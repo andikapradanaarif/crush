@@ -537,6 +537,19 @@ func (s *service) GenerateEntries(ctx context.Context, sessionID string, turnNum
 	return nil
 }
 
+const (
+	// TruncatedEntryMarker is the neutral suffix written into stored
+	// entry text when truncateEntry clips it. It deliberately makes no
+	// recovery promise: entry_text_full stores the same truncated text,
+	// so recall cannot return "full details" for entry queries, and any
+	// tool named here might not be in the reading agent's tool set.
+	TruncatedEntryMarker = "[Entry truncated]"
+	// legacyTruncatedMarker is the pre-neutral suffix stored by earlier
+	// versions. RenderEntries replaces it at render time so stored rows
+	// stop advertising recall without needing regeneration.
+	legacyTruncatedMarker = "[Entry truncated. Use recall tool for full details.]"
+)
+
 // truncateEntry clips an entry to the max token budget, preserving
 // tags at the bottom.
 func truncateEntry(text string, maxTokens int64) string {
@@ -556,7 +569,7 @@ func truncateEntry(text string, maxTokens int64) string {
 	}
 	body := strings.Join(lines[:len(lines)-len(tagLines)], "\n")
 	body = body[:maxChars-len(strings.Join(tagLines, "\n"))-50]
-	return body + "\n[Entry truncated. Use recall tool for full details.]\n" + strings.Join(tagLines, "\n")
+	return body + "\n" + TruncatedEntryMarker + "\n" + strings.Join(tagLines, "\n")
 }
 
 // extractAssistantText returns the concatenated text of all assistant

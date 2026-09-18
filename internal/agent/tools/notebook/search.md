@@ -1,7 +1,8 @@
 # notebook_search
 
 List and search notebook entries for the current session. Returns titles
-and tags only — use `recall` to get full content of any entry.
+and tags only — use the `recall` tool (if enabled) to get full content of
+any entry.
 
 Usage:
   notebook_search()           — list all entries

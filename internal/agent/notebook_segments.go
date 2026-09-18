@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	notebooktool "github.com/charmbracelet/crush/internal/agent/tools/notebook"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/notebook"
 )
@@ -422,6 +423,38 @@ func (a *sessionAgent) segMaxSteps() int {
 
 func (a *sessionAgent) segmentTracker(sessionID string) *segmentTracker {
 	return a.segmentTrackers.GetOrSet(sessionID, newSegmentTracker)
+}
+
+// toolEnabled reports whether the agent's live tool set currently
+// exposes name. It reads a.tools — refreshed per run by SetTools — so a
+// config reload disabling a tool takes effect immediately, unlike a
+// build-time AllowedTools snapshot.
+func (a *sessionAgent) toolEnabled(name string) bool {
+	for _, tool := range a.tools.Copy() {
+		if tool.Info().Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// recallHint renders the recovery pointer for omitted notebook entries,
+// naming whichever of recall/notebook_search the agent's live tool set
+// exposes. An agent without either would otherwise get a breadcrumb
+// pointing at a tool it cannot call.
+func (a *sessionAgent) recallHint() string {
+	hasRecall := a.toolEnabled(notebooktool.RecallToolName)
+	hasSearch := a.toolEnabled(notebooktool.SearchToolName)
+	switch {
+	case hasRecall && hasSearch:
+		return " — recallable via recall/notebook_search"
+	case hasRecall:
+		return " — recallable via recall"
+	case hasSearch:
+		return " — recallable via notebook_search"
+	default:
+		return ""
+	}
 }
 
 // detectSegments is the per-step segment pass: recompute segment
@@ -1121,7 +1154,7 @@ func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID strin
 			}
 			if len(omitted) > 0 {
 				slices.Sort(omitted)
-				rendered += "\n\n[turns " + formatTurnRanges(omitted) + " have notebook entries not injected here — recallable via recall/notebook_search]"
+				rendered += "\n\n[turns " + formatTurnRanges(omitted) + " have notebook entries not injected here" + a.recallHint() + "]"
 			}
 			msg := fantasy.NewSystemMessage("<notebook>\n" + rendered + "</notebook>")
 			out = append(out, msg)

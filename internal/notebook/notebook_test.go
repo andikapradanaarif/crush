@@ -409,6 +409,20 @@ func TestRenderEntries_NilEntries(t *testing.T) {
 	require.Equal(t, "", rendered)
 }
 
+// Stored entries written before the neutral marker may still carry the
+// recall pointer — RenderEntries must normalize it so a recall-less
+// agent never sees a dead tool reference, and a recall-enabled agent
+// isn't promised "full details" entry queries can't return.
+func TestRenderEntries_NormalizesLegacyTruncatedMarker(t *testing.T) {
+	entries := []Entry{{
+		Title:     "Edit auth.go",
+		EntryText: "## Edit auth.go\npartial content\n[Entry truncated. Use recall tool for full details.]\n#file:auth.go",
+	}}
+	rendered := RenderEntries(entries)
+	require.Contains(t, rendered, TruncatedEntryMarker)
+	require.NotContains(t, rendered, "recall")
+}
+
 func TestCompact_NoOpUnderLimit(t *testing.T) {
 	svc, _, sessionID := newTestService(t, nil)
 
