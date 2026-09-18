@@ -59,8 +59,11 @@ func (s *service) GenerateTurnDigest(ctx context.Context, sessionID string, req 
 
 	// The turn's decision demotes behind its digest like every other
 	// same-turn entry, so the decision itself must be digest input —
-	// mirror GenerateEntries' fold of assistant-text decisions. It
-	// joins the significant budget class, ordered last.
+	// mirror GenerateEntries' fold of assistant-text decisions.
+	// Appended last it is the newest significant event, so the
+	// newest-first budget pass claims its share ahead of the turn's
+	// older significant events — deliberate: decisions are
+	// high-value.
 	if hasDecision(req.Msgs) {
 		events = append(events, EntryInput{
 			EventType:   EventDecision,
