@@ -2014,7 +2014,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 	// Turn collapse and superseded stubs only render recall pointers —
 	// gate them on the live tool set, not just the build-time flags, so
 	// a runtime disabled_tools: [recall] can't leave dead pointers.
-	recallLive := a.toolEnabled(notebooktool.RecallToolName)
+	recallLive := a.hasTool(notebooktool.RecallToolName)
 	var turns []int64
 	if collapse != nil && len(collapse.Set) > 0 && recallLive {
 		turns = messageTurns(msgs)

@@ -358,9 +358,11 @@ one specific event (file read, file edit, command, decision).
 {{end}}{{if hasTool .AgentTools "recall"}}- Do NOT re-read files with notebook entries — use `recall` first.
   It is 16x cheaper than re-reading the file.
 - If recall doesn't have what you need, then use `view` to re-read.
-{{else}}- Re-read files with `view` when you need details beyond the
+{{else}}{{if hasTool .AgentTools "view"}}- Re-read files with `view` when you need details beyond the
   notebook entries.
-{{end}}- When a `checkpoint` entry is present, consult it before re-reading
+{{else}}- Re-read files when you need details beyond the notebook
+  entries.
+{{end}}{{end}}- When a `checkpoint` entry is present, consult it before re-reading
   files to reconstruct what was established vs. still open.
 {{end}}{{/*
 env lives last so the stable sections above it form a cacheable

@@ -36,7 +36,7 @@ func TestRecallHint(t *testing.T) {
 		" — recallable via recall",
 		agentWith(notebooktool.RecallToolName).recallHint())
 	require.Equal(t,
-		" — recallable via notebook_search",
+		" — searchable via notebook_search",
 		agentWith(notebooktool.SearchToolName).recallHint())
 	require.Equal(t, "", agentWith("view", "grep").recallHint())
 	require.Equal(t, "", agentWith().recallHint())

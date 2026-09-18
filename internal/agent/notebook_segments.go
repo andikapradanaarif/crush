@@ -425,45 +425,24 @@ func (a *sessionAgent) segmentTracker(sessionID string) *segmentTracker {
 	return a.segmentTrackers.GetOrSet(sessionID, newSegmentTracker)
 }
 
-// toolEnabled reports whether the agent's live tool set currently
-// exposes name. It reads a.tools — refreshed per run by SetTools — so a
-// config reload disabling a tool takes effect immediately, unlike a
-// build-time AllowedTools snapshot.
-func (a *sessionAgent) toolEnabled(name string) bool {
-	if a.tools == nil {
-		return false
-	}
-	for _, tool := range a.tools.Copy() {
-		if tool.Info().Name == name {
-			return true
-		}
-	}
-	return false
-}
-
 // recallHint renders the recovery pointer for omitted notebook entries,
 // naming whichever of recall/notebook_search the agent's live tool set
-// exposes. An agent without either would otherwise get a breadcrumb
-// pointing at a tool it cannot call.
+// exposes — hasTool reads a.tools, refreshed per run by SetTools, so a
+// config reload disabling a tool takes effect on the next render. An
+// agent without either would otherwise get a breadcrumb pointing at a
+// tool it cannot call.
 func (a *sessionAgent) recallHint() string {
-	var hasRecall, hasSearch bool
-	if a.tools != nil {
-		for _, tool := range a.tools.Copy() {
-			switch tool.Info().Name {
-			case notebooktool.RecallToolName:
-				hasRecall = true
-			case notebooktool.SearchToolName:
-				hasSearch = true
-			}
-		}
-	}
+	hasRecall := a.hasTool(notebooktool.RecallToolName)
+	hasSearch := a.hasTool(notebooktool.SearchToolName)
 	switch {
 	case hasRecall && hasSearch:
 		return " — recallable via recall/notebook_search"
 	case hasRecall:
 		return " — recallable via recall"
 	case hasSearch:
-		return " — recallable via notebook_search"
+		// notebook_search returns titles/tags only — "recallable" would
+		// overpromise full-content recovery.
+		return " — searchable via notebook_search"
 	default:
 		return ""
 	}

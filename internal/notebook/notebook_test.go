@@ -435,7 +435,7 @@ func TestGetEntries_NormalizesLegacyTruncatedMarker(t *testing.T) {
 	entries, err := svc.GetEntries(context.Background(), sessionID)
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
-	require.Contains(t, entries[0].EntryText, TruncatedEntryMarker)
+	require.Contains(t, entries[0].EntryText, truncatedEntryMarker)
 	require.NotContains(t, entries[0].EntryText, "recall")
 	require.NotContains(t, entries[0].EntryTextFull, "recall")
 }

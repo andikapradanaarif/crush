@@ -134,7 +134,12 @@ func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCal
 
 // hasTool reports whether the agent's current toolset includes the
 // named tool — the check for whether a run can actually ask questions.
+// It reads a.tools, refreshed per run by SetTools, so a config reload
+// disabling a tool takes effect on the next render.
 func (a *sessionAgent) hasTool(name string) bool {
+	if a.tools == nil {
+		return false
+	}
 	return slices.ContainsFunc(a.tools.Copy(), func(t fantasy.AgentTool) bool {
 		return t.Info().Name == name
 	})
