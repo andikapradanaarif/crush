@@ -2,9 +2,11 @@ package notebook
 
 import (
 	"context"
+	"database/sql"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/db"
@@ -410,17 +412,32 @@ func TestRenderEntries_NilEntries(t *testing.T) {
 }
 
 // Stored entries written before the neutral marker may still carry the
-// recall pointer — RenderEntries must normalize it so a recall-less
-// agent never sees a dead tool reference, and a recall-enabled agent
-// isn't promised "full details" entry queries can't return.
-func TestRenderEntries_NormalizesLegacyTruncatedMarker(t *testing.T) {
-	entries := []Entry{{
-		Title:     "Edit auth.go",
-		EntryText: "## Edit auth.go\npartial content\n[Entry truncated. Use recall tool for full details.]\n#file:auth.go",
-	}}
-	rendered := RenderEntries(entries)
-	require.Contains(t, rendered, TruncatedEntryMarker)
-	require.NotContains(t, rendered, "recall")
+// recall pointer — hydration must normalize it so a recall-less agent
+// never sees a dead tool reference, and a recall-enabled agent isn't
+// promised "full details" entry queries can't return.
+func TestGetEntries_NormalizesLegacyTruncatedMarker(t *testing.T) {
+	svc, q, sessionID := newTestService(t, nil)
+
+	const legacy = "## Edit auth.go\npartial\n[Entry truncated. Use recall tool for full details.]\n#file:auth.go"
+	_, err := q.CreateNotebookEntry(context.Background(), db.CreateNotebookEntryParams{
+		ID:               uuid.New().String(),
+		SessionID:        sessionID,
+		TurnNumber:       1,
+		EventType:        "file_edit",
+		Title:            "Edit auth.go",
+		EntryText:        legacy,
+		EntryTextFull:    sql.NullString{String: legacy, Valid: true},
+		CompressionLevel: CompressionFull,
+		CreatedAt:        time.Now().Unix(),
+	})
+	require.NoError(t, err)
+
+	entries, err := svc.GetEntries(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Contains(t, entries[0].EntryText, TruncatedEntryMarker)
+	require.NotContains(t, entries[0].EntryText, "recall")
+	require.NotContains(t, entries[0].EntryTextFull, "recall")
 }
 
 func TestCompact_NoOpUnderLimit(t *testing.T) {

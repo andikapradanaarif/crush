@@ -91,4 +91,20 @@ func TestCoderPromptGatesRecallBullets(t *testing.T) {
 	require.Contains(t, withoutRecall, "Use `notebook_search` to browse")
 	require.Contains(t, withoutRecall, "checkpoint` entry")
 	require.Contains(t, withoutRecall, "Re-read files with `view`")
+
+	// The reverse split: recall survives while its browse companion is
+	// disabled — the section must not advertise notebook_search.
+	withoutSearch := build(t, `, "disabled_tools": ["notebook_search"]`)
+	require.Contains(t, withoutSearch, "Use the `recall` tool")
+	require.NotContains(t, withoutSearch, "Use `notebook_search` to browse")
+
+	// Neither tool: the section still renders (entries inject) but
+	// advertises no recovery path at all.
+	withoutBoth := build(t, `, "disabled_tools": ["recall", "notebook_search"]`)
+	require.Contains(t, withoutBoth, "# Context Notebook")
+	require.NotContains(t, withoutBoth, "Use the `recall` tool")
+	require.NotContains(t, withoutBoth, "use `recall` first")
+	require.NotContains(t, withoutBoth, "notebook_search")
+	require.Contains(t, withoutBoth, "Re-read files with `view`")
+	require.Contains(t, withoutBoth, "checkpoint` entry")
 }

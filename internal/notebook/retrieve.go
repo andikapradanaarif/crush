@@ -109,8 +109,8 @@ func (s *service) enrichEntries(ctx context.Context, rows []db.NotebookEntry) ([
 			EventNumber:      row.EventNumber,
 			EventType:        row.EventType,
 			Title:            row.Title,
-			EntryText:        row.EntryText,
-			EntryTextFull:    row.EntryTextFull.String,
+			EntryText:        normalizeTruncatedMarker(row.EntryText),
+			EntryTextFull:    normalizeTruncatedMarker(row.EntryTextFull.String),
 			TokenCount:       row.TokenCount,
 			CompressionLevel: row.CompressionLevel,
 			CreatedAt:        row.CreatedAt,
@@ -474,7 +474,7 @@ func RenderEntries(entries []Entry) string {
 	}
 	var sb strings.Builder
 	for _, e := range entries {
-		text := strings.ReplaceAll(e.EntryText, legacyTruncatedMarker, TruncatedEntryMarker)
+		text := e.EntryText
 		if e.CompressionLevel > 0 {
 			text = compressEntry(text, e.Title, e.Tags, e.ErrorHeadline, e.CompressionLevel)
 		}

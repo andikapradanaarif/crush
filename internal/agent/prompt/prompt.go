@@ -28,6 +28,7 @@ type Prompt struct {
 	platform    string
 	workingDir  string
 	interactive bool
+	agentName   string
 }
 
 type PromptDat struct {
@@ -53,6 +54,11 @@ type PromptDat struct {
 	// tools — a model that hallucinates a `question` call it doesn't
 	// have burns turns on tool-not-found errors.
 	Interactive bool
+	// AgentTools is the AllowedTools list of the agent this prompt was
+	// built for (see WithAgentName). Nil when the prompt is unbound or
+	// the agent is unknown — templates should treat nil as "not
+	// advertised".
+	AgentTools []string
 }
 
 type ContextFile struct {
@@ -86,6 +92,16 @@ func WithWorkingDir(workingDir string) Option {
 func WithInteractive(interactive bool) Option {
 	return func(p *Prompt) {
 		p.interactive = interactive
+	}
+}
+
+// WithAgentName binds the prompt to a named agent so PromptDat.AgentTools
+// resolves that agent's AllowedTools at build time — letting templates
+// gate instructions on tools the agent actually carries rather than
+// re-indexing .Config.Agents by hardcoded name.
+func WithAgentName(agentName string) Option {
+	return func(p *Prompt) {
+		p.agentName = agentName
 	}
 }
 
@@ -263,6 +279,9 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 		NotebookEnabled:     cfg.Options.NotebookIsEnabled(),
 		ProjectIndexEnabled: cfg.Options.ProjectIndexEnabled(),
 		Interactive:         p.interactive,
+	}
+	if agent, ok := cfg.Agents[p.agentName]; ok {
+		data.AgentTools = agent.AllowedTools
 	}
 	if isGit {
 		var err error

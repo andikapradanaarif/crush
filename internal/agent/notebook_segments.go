@@ -430,6 +430,9 @@ func (a *sessionAgent) segmentTracker(sessionID string) *segmentTracker {
 // config reload disabling a tool takes effect immediately, unlike a
 // build-time AllowedTools snapshot.
 func (a *sessionAgent) toolEnabled(name string) bool {
+	if a.tools == nil {
+		return false
+	}
 	for _, tool := range a.tools.Copy() {
 		if tool.Info().Name == name {
 			return true
@@ -443,8 +446,17 @@ func (a *sessionAgent) toolEnabled(name string) bool {
 // exposes. An agent without either would otherwise get a breadcrumb
 // pointing at a tool it cannot call.
 func (a *sessionAgent) recallHint() string {
-	hasRecall := a.toolEnabled(notebooktool.RecallToolName)
-	hasSearch := a.toolEnabled(notebooktool.SearchToolName)
+	var hasRecall, hasSearch bool
+	if a.tools != nil {
+		for _, tool := range a.tools.Copy() {
+			switch tool.Info().Name {
+			case notebooktool.RecallToolName:
+				hasRecall = true
+			case notebooktool.SearchToolName:
+				hasSearch = true
+			}
+		}
+	}
 	switch {
 	case hasRecall && hasSearch:
 		return " — recallable via recall/notebook_search"

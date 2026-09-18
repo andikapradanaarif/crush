@@ -545,10 +545,17 @@ const (
 	// tool named here might not be in the reading agent's tool set.
 	TruncatedEntryMarker = "[Entry truncated]"
 	// legacyTruncatedMarker is the pre-neutral suffix stored by earlier
-	// versions. RenderEntries replaces it at render time so stored rows
-	// stop advertising recall without needing regeneration.
+	// versions. enrichEntries replaces it at hydration so stored rows
+	// stop advertising recall for every consumer — prompt render,
+	// checkpoint input, compaction — without needing regeneration.
 	legacyTruncatedMarker = "[Entry truncated. Use recall tool for full details.]"
 )
+
+// normalizeTruncatedMarker rewrites the legacy recall-pointer
+// truncation suffix to the neutral marker. Idempotent.
+func normalizeTruncatedMarker(text string) string {
+	return strings.ReplaceAll(text, legacyTruncatedMarker, TruncatedEntryMarker)
+}
 
 // truncateEntry clips an entry to the max token budget, preserving
 // tags at the bottom.

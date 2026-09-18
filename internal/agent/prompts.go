@@ -21,6 +21,7 @@ var planPromptTmpl []byte
 var initializePromptTmpl []byte
 
 func coderPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
+	opts = append([]prompt.Option{prompt.WithAgentName(config.AgentCoder)}, opts...)
 	systemPrompt, err := prompt.NewPrompt("coder", string(coderPromptTmpl), opts...)
 	if err != nil {
 		return nil, err
@@ -29,6 +30,7 @@ func coderPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
 }
 
 func taskPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
+	opts = append([]prompt.Option{prompt.WithAgentName(config.AgentTask)}, opts...)
 	systemPrompt, err := prompt.NewPrompt("task", string(taskPromptTmpl), opts...)
 	if err != nil {
 		return nil, err
@@ -37,6 +39,7 @@ func taskPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
 }
 
 func planPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
+	opts = append([]prompt.Option{prompt.WithAgentName(config.AgentPlan)}, opts...)
 	systemPrompt, err := prompt.NewPrompt("plan", string(planPromptTmpl), opts...)
 	if err != nil {
 		return nil, err

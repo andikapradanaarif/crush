@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	notebooktool "github.com/charmbracelet/crush/internal/agent/tools/notebook"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/message"
@@ -336,6 +337,12 @@ func newSegmentTestAgent(t *testing.T, gen notebook.Generator) (*sessionAgent, m
 		stubStats:        csync.NewMap[string, stubStats](),
 		collapseRecorded: csync.NewMap[string, *csync.Map[int64, bool]](),
 		systemPrompt:     csync.NewValue("system"),
+		// Collapse and stub rendering gate on the live tool set — the
+		// fixture carries recall/notebook_search like a default coder.
+		tools: csync.NewSliceFrom([]fantasy.AgentTool{
+			&fakeTool{name: notebooktool.RecallToolName},
+			&fakeTool{name: notebooktool.SearchToolName},
+		}),
 	}
 	// Seed the stamp generator like NewSessionAgent — stamps are
 	// random-epoch, so tests must assert explicit stamps rather than
