@@ -409,6 +409,11 @@ option notebook-prior-turns digest     # collapse + generated turn digest
 - **Aborted runs.** Their events belong to a completed turn next
   turn and collapse normally; the digest headline notes
   "interrupted" so a partial turn isn't read as finished work.
+  Detection reads the turn's last assistant message: a
+  canceled/error finish reason covers the graceful paths, and an
+  unclosed message with unfinished tool calls is the crash/kill
+  residue — the cleanup path marks stranded calls finished, so a
+  genuinely unfinished one means the run died mid-flight.
 - **The dominant-turn case.** Exploration _and_ execution inside
   one long turn (the token-drain scenario) is not helped by this
   doc — within-turn machinery (stubs, mid-turn checkpoint) owns

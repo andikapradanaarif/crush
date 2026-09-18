@@ -352,6 +352,39 @@ func TestTurnInterrupted_FinishReasons(t *testing.T) {
 	require.False(t, turnInterrupted(mk(message.FinishReasonEndTurn)))
 	require.False(t, turnInterrupted(mk(message.FinishReasonToolUse)),
 		"a tool-use finish mid-turn is not an interruption")
+
+	// The ungraceful end: the last assistant message has no finish
+	// part and a stranded tool call — crash/kill residue the graceful
+	// cancel/error paths would have stamped over.
+	unclosed := []message.Message{
+		{Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "go"}}},
+		{Role: message.Assistant, Parts: []message.ContentPart{
+			message.TextContent{Text: "working"},
+			message.ToolCall{ID: "tc1", Name: "edit", Input: `{"file_path":"a.go"}`, Finished: false},
+		}},
+	}
+	require.True(t, turnInterrupted(unclosed),
+		"an unfinished call on the unclosed last assistant message is a mid-flight end")
+
+	// The same shape with the call finished: the work landed and only
+	// the finish marker is missing — still reads complete. An earlier
+	// finish-marked message must not answer for it.
+	unclosedFinished := []message.Message{
+		{Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "go"}}},
+		{Role: message.Assistant, Parts: []message.ContentPart{
+			message.TextContent{Text: "step one"},
+			message.ToolCall{ID: "tc0", Name: "bash", Input: `{}`, Finished: true},
+			message.Finish{Reason: message.FinishReasonToolUse},
+		}},
+		{Role: message.Tool, Parts: []message.ContentPart{
+			message.ToolResult{ToolCallID: "tc0", Name: "bash", Content: "ok"},
+		}},
+		{Role: message.Assistant, Parts: []message.ContentPart{
+			message.TextContent{Text: "step two"},
+			message.ToolCall{ID: "tc1", Name: "edit", Input: `{"file_path":"a.go"}`, Finished: true},
+		}},
+	}
+	require.False(t, turnInterrupted(unclosedFinished))
 }
 
 func TestGenerateTurnDigest_RestampsWrongTitleNumber(t *testing.T) {

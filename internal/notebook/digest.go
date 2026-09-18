@@ -88,8 +88,10 @@ func (s *service) GenerateTurnDigest(ctx context.Context, sessionID string, req 
 		entry.Title = fmt.Sprintf("Turn %d digest — %s", req.TurnNumber, topic)
 	}
 	// An interrupted turn must not read as finished work — the
-	// headline carries the marker whether or not the model wrote it.
-	if interrupted && !strings.Contains(strings.ToLower(entry.Title), "interrupt") {
+	// headline carries the canonical marker whether or not the model
+	// wrote it. A bare "interrupt" inside the topic is not the
+	// marker.
+	if interrupted && !hasInterruptedMarker(entry.Title) {
 		entry.Title += " — interrupted"
 	}
 	// Structural tags are stamped, not generated — same discipline as
@@ -173,6 +175,17 @@ func (s *service) GenerateTurnDigest(ctx context.Context, sessionID string, req 
 	return true, nil
 }
 
+// hasInterruptedMarker reports whether title already carries the
+// canonical " — interrupted" marker — the structural check the
+// headline append guards on. A topic that merely mentions an
+// interrupt ("Turn 4 digest — interrupt handling") still gains the
+// suffix rather than being misread as already marked.
+func hasInterruptedMarker(title string) bool {
+	l := strings.ToLower(title)
+	return strings.Contains(l, "— interrupted") ||
+		strings.HasSuffix(strings.TrimSpace(l), "interrupted")
+}
+
 // HasFinishedToolCall reports whether msgs contain a finished tool
 // call — the digest floor. classifyAll emits one event per finished
 // call, so this exactly predicts whether a turn can produce a digest
@@ -203,21 +216,33 @@ func digestUserPrompt(msgs []message.Message) string {
 	return ""
 }
 
-// turnInterrupted reports whether the turn's last finish-marked
-// assistant message ended on FinishReasonCanceled —
-// persistCanceledTurn's marker for a user abort — or
-// FinishReasonError, a provider failure mid-turn. Either way the
-// turn's events are partial, so the digest headline notes
-// "interrupted" rather than reading as finished work.
+// turnInterrupted reports whether the turn's last assistant message
+// ended without completing. A finish part settles it directly:
+// FinishReasonCanceled — persistCanceledTurn's marker for a user
+// abort — or FinishReasonError, a provider failure mid-turn. No
+// finish part means the run ended without a graceful close
+// (crash/kill skips the cleanup path that stamps one and marks
+// stranded calls finished): unfinished tool calls are the residue of
+// that mid-flight end, while all-finished calls mean the work landed
+// and only the marker is missing. Either way the turn's events are
+// partial, so the digest headline notes "interrupted" rather than
+// reading as finished work.
 func turnInterrupted(msgs []message.Message) bool {
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if msgs[i].Role != message.Assistant {
 			continue
 		}
-		if f := msgs[i].FinishPart(); f != nil {
+		m := msgs[i]
+		if f := m.FinishPart(); f != nil {
 			return f.Reason == message.FinishReasonCanceled ||
 				f.Reason == message.FinishReasonError
 		}
+		for _, tc := range m.ToolCalls() {
+			if !tc.Finished {
+				return true
+			}
+		}
+		return false
 	}
 	return false
 }
