@@ -946,6 +946,12 @@ func TestTruncateEntry_ToolNeutralMarker(t *testing.T) {
 	require.Contains(t, got, EntryTruncatedMarker)
 	require.NotContains(t, got, "recall")
 	require.True(t, strings.HasSuffix(got, "#t"), "tag lines survive truncation")
+
+	// A tag block bigger than the budget clamps the body cut instead
+	// of slicing out of range.
+	hugeTags := "body\n#" + strings.Repeat("t", 500)
+	got = truncateEntry(hugeTags, 25)
+	require.Contains(t, got, EntryTruncatedMarker)
 }
 
 func TestMem0Sync_NilGuards(t *testing.T) {

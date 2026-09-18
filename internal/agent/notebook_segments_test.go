@@ -703,7 +703,9 @@ func TestRenderNotebookPrefix_OmittedTurnBreadcrumb(t *testing.T) {
 // TestRenderNotebookPrefix_ScrubsLegacyTruncationMarker covers the
 // stored-text wrinkle from issue 66: entries written while the
 // truncation marker named recall keep that pointer in entry_text, so
-// the render scrubs it for agents that cannot call the tool.
+// the render scrubs it. The scrub is unconditional — entry_text_full
+// holds the same truncated body, so the pointer overpromises even
+// for agents that have the tool.
 func TestRenderNotebookPrefix_ScrubsLegacyTruncationMarker(t *testing.T) {
 	t.Parallel()
 
@@ -720,7 +722,8 @@ func TestRenderNotebookPrefix_ScrubsLegacyTruncationMarker(t *testing.T) {
 	}
 
 	withRecall := render(&sessionAgent{tools: csync.NewSliceFrom([]fantasy.AgentTool{&fakeTool{name: "recall"}})})
-	require.Contains(t, withRecall, "Use recall tool for full details")
+	require.Contains(t, withRecall, notebook.EntryTruncatedMarker)
+	require.NotContains(t, withRecall, "recall tool for full details")
 
 	without := render(&sessionAgent{})
 	require.Contains(t, without, notebook.EntryTruncatedMarker)

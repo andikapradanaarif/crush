@@ -1163,13 +1163,12 @@ func (a *sessionAgent) recallVia() string {
 }
 
 // scrubDeadRecallPointer rewrites the recall pointer baked into entry
-// text stored before the truncation marker went tool-neutral. Agents
-// without recall get the plain marker instead of a dead pointer; with
-// it the stored text renders as-is.
+// text stored before the truncation marker went tool-neutral. The
+// scrub is unconditional, not gated on the tool: entry_text_full
+// holds the same truncated body, so recall has no fuller text to
+// return — the pointer overpromises for every agent, not just those
+// without it.
 func (a *sessionAgent) scrubDeadRecallPointer(text string) string {
-	if a.hasTool(notebooktool.RecallToolName) {
-		return text
-	}
 	return strings.ReplaceAll(text, notebook.LegacyEntryTruncatedMarker, notebook.EntryTruncatedMarker)
 }
 

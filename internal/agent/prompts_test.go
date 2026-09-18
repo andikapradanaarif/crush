@@ -74,6 +74,15 @@ func TestCoderPrompt_NotebookToolGating(t *testing.T) {
 	render := func(drop ...string) string {
 		store, err := config.Init(dir, "", false)
 		require.NoError(t, err)
+		// Neutralize ambient global config — a developer's
+		// disabled_tools, agent overrides, or notebook toggle would
+		// otherwise leak into the render and break the assertions.
+		pinCassetteConfig(store)
+		on := true
+		store.Config().Options.NotebookEnabled = &on
+		store.Config().Options.DisabledTools = nil
+		store.Config().Agents = nil
+		store.Config().SetupAgents()
 		coder := store.Config().Agents[config.AgentCoder]
 		coder.AllowedTools = slices.DeleteFunc(coder.AllowedTools, func(name string) bool {
 			return slices.Contains(drop, name)

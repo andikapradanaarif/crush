@@ -570,7 +570,11 @@ func truncateEntry(text string, maxTokens int64) string {
 		break
 	}
 	body := strings.Join(lines[:len(lines)-len(tagLines)], "\n")
-	body = body[:maxChars-len(strings.Join(tagLines, "\n"))-50]
+	// The tag block plus marker can exceed the budget on pathological
+	// entries (huge or all-tag generated text) — clamp the cut rather
+	// than slice out of range.
+	keep := maxChars - len(strings.Join(tagLines, "\n")) - len(EntryTruncatedMarker) - 2
+	body = body[:min(max(keep, 0), len(body))]
 	return body + "\n" + EntryTruncatedMarker + "\n" + strings.Join(tagLines, "\n")
 }
 
