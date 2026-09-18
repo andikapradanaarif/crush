@@ -58,20 +58,46 @@ Evidence []string}`:
     file's path (`verify_checks.go:59`) — the model can only
     _predict_ it, so it is never bound by name; its coverage is
     derived from `EvidencePaths` instead (the harness maps
-    path→dir). Binding is to the **latest instance** of each
-    name. An evidence name that never materializes is a third
+    path→dir). **The names must be surfaced before they can be
+    bound:** configured check names live in tool-result
+    `ClientMetadata` the model never sees — binding is impossible
+    until they render somewhere visible (tool description or a
+    config-rendered block). That's a PR 1 requirement: the tool
+    schema ships with the vocabulary visible or the model invents
+    unbindable names and eats validation errors. Binding is to the
+    **latest instance** of each name, session-scoped — the
+    done-scan reads _stored_ `verification` metadata
+    (`writeVerificationOutcomes` maintains it), not run-local
+    `in.result.Steps`, so a check that ran two turns ago covers an
+    item and a repair retry's fresh steps don't reset the clock.
+    This is also how the two edges unify: the done-definition
+    consults persisted check outcomes directly — no resolved-map
+    threading through `edgeInput` needed (today
+    `resolveVerificationEdge`'s resolved verdicts never reach the
+    todos edge's scan). An evidence name that never materializes is a third
     state — **evidence unmet**, distinct from failed — reported
     to the model as "no check of that name has run" rather than
     a failure it can retry against.
   - `EvidencePaths []string` — the model-known kind, and it does
     carry a weak done-ness rule: **write landed on the path AND
     no check covering it failed**. The path→covering-check map
-    (`package-test:<dir>` included) is the harness's job, not the
-    model's vocabulary. Same paths double as annotation: an item
-    bound to `internal/agent/` lets a repair/replan edge render
-    the current symbols of the files it names
-    (`CONTEXT_PREFETCH.md`) into the prompt — the plan carries
-    its own map.
+    (`package-test:<dir>` **and `diagnostics`** — the third check
+    kind, minted per write when LSP covers the file
+    (`verifying_tool.go:164`); a new-error delta on the path is
+    exactly per-path evidence) is the harness's job, not the
+    model's vocabulary. `unverified` (LSP doesn't cover the
+    file) is not failed — it doesn't block under the weak rule;
+    keep `unverified` / `unmet` / `failed` distinct in gate
+    feedback — three near-synonyms that must not collapse.
+    Known bounds, same as the verify gate's: `package-test` is
+    Go-only, so non-Go trees reduce to "write landed"; mutating
+    bash (`sed -i`, redirects, `go generate`) and multi-file
+    workspace edits (`lsp_rename`, `lsp_replace_symbol`) leave no
+    path metadata an `EvidencePaths` binding can observe. Same
+    paths double as annotation: an item bound to `internal/agent/`
+    lets a repair/replan edge render the current symbols of the
+    files it names (`CONTEXT_PREFETCH.md`) into the prompt — the
+    plan carries its own map.
     This unifies today's two gate triggers (failed checks, open
     todos) into one definition of done instead of two scans of the
     same run — and **done-ness evaluates on final state, not
@@ -87,22 +113,37 @@ evidence` — a completed mark with pending/failed/unmet
   `verify:build` failed / has not run") so the model sees the
   divergence — an invisible override would re-mark every turn:
   thrash.
-- `ID` ownership: the model rewrites the whole list per call and
-  identity today is keyed on mutable `Content`. **The harness
-  mints IDs on write** (model-authored IDs collide); rewrites
-  must preserve IDs for unchanged/matched items — match by
-  content hash, so the legacy `session.Todos` shim can mint the
-  same way. `DependsOn` is validated on write: reject cycles,
-  self-deps, and dangling refs — validation, not the excluded
-  DAG scheduler. Whatever consumes `DependsOn` later snapshots
-  it at dispatch — the model can rewrite the plan (and DAG)
-  mid-run.
+- `ID` ownership — and the authoring handle it requires: the
+  model rewrites the whole list per call and identity today is
+  keyed on mutable `Content`. **The harness mints IDs on write**
+  (model-authored IDs collide), but minted IDs alone make
+  `DependsOn` unauthorable: on the first write no IDs exist, so
+  "B depends on A" can't be declared — exactly the moment
+  declaration-time validation inspects the plan — and rewording
+  a depended-upon item would re-mint its ID and strand inbound
+  refs the model can't repair (it can't predict the new ID).
+  The model-side handle is an optional **`key` field** — a
+  model-authored slug, validated unique within the submitted
+  list. `DependsOn` in the tool input references **keys**, which
+  the write maps to minted IDs. Preservation: key match first
+  (a kept key survives rewording → same ID → inbound refs stay
+  valid), content-hash fallback for legacy/keyless items — the
+  shim mints the same way. Validation rejects duplicate keys,
+  identical-content items (ambiguous dep targets), cycles,
+  self-deps, and dangling refs — with the offending key named so
+  the model can repair in the same call. Whatever consumes
+  `DependsOn` later snapshots it at dispatch — the model can
+  rewrite the plan (and DAG) mid-run.
 - **Structural confidence — mapped to the right seams.**
   `phase-confirm` graduates from "any `todos` call resolves" to a
   gate that validates _what_ the plan declares: at declaration
   time (tool validation + the scope-gate resolution check) every
   item must bind evidence (files or checks) — a plan of bare
-  strings no longer satisfies the gate. **Open items do not block
+  strings no longer satisfies the gate, and an **empty list does
+  not resolve it either**: `todos: []` vacuously satisfies "every
+  item binds evidence," so without the non-empty requirement
+  "declare nothing" becomes the cheapest gate-resolution. **Open
+  items do not block
   `phase-confirm`** — at the first-write boundary every item is
   open by definition, so blocking there deadlocks every plan.
   Open-items-block lives at the **run-end todos edge** (PR 2's
@@ -119,12 +160,22 @@ evidence` — a completed mark with pending/failed/unmet
   from rendered todo tool calls.
 - **Plumbing surface is wider than the tool.** `session.Todo`
   fans out to `proto.Todo`, `server/events.go`,
-  `client_workspace.go`, `ui/chat/todos.go`, `ui/model/pills.go` —
+  `client_workspace.go`, `ui/chat/todos.go`, `ui/model/pills.go`,
+  `ui/chat/tools.go` (three `TodosToolName` routes) —
   `PlanItem` fields need the same path (or the UI keeps the flat
   view and drops the new fields). `tools.TodosToolName` is
-  hard-coded in `incompleteTodos` (`verify_gate.go:410`) and
-  `scopeGate.observe` (`scope_gate.go:125`) — a `plan` rename
-  touches both.
+  hard-coded in `incompleteTodos` (`verify_gate.go:410`),
+  `scopeGate.observe` (`scope_gate.go:125`), the default
+  allowed-tools list (`config.go:1053` — a rename that misses it
+  silently strips the tool), the coder system prompt
+  (`coder.md.tpl:21`), and `buildSummaryPrompt`
+  (`agent.go:3134`). `todosRetryPrefix` is fingerprinted by
+  `RepairPromptPrefixes` (`eval/analyze.go:687`) — changing the
+  retry-prompt text, or adding an `evidence-blocked` report
+  section, breaks eval turn segmentation without a fingerprint
+  update. Synergy worth noting: `notebookRelevanceRefs`
+  (`notebook_selection.go`) already reads open todos for file
+  refs — `EvidencePaths` can feed it directly.
 - The model still writes the plan (the `todos` tool graduates, or
   a `plan` tool replaces it with a migration shim reading old
   `session.Todos`). The harness gains structure to _check_; it
