@@ -21,7 +21,7 @@ var errDigestExists = errors.New("turn digest already exists")
 // digestTitleRe matches a model-emitted "Turn {N} digest" headline
 // prefix — number optional — so GenerateTurnDigest can restamp the
 // structural part while keeping the model's topic.
-var digestTitleRe = regexp.MustCompile(`(?i)^\s*turn\s+\d*\s*digest`)
+var digestTitleRe = regexp.MustCompile(`(?i)^\s*turn\s+\d*\s+digest\b`)
 
 // GenerateTurnDigest implements the Service interface.
 //

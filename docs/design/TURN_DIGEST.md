@@ -225,13 +225,17 @@ Open:
   else) — while each render still requires the digest actually
   selected that render, so an evicted digest can't leave turn N
   with neither representation. Mechanically it is a lazy-once
-  field on `turnCollapse` populated inside `renderNotebookPrefix`
-  — `collapse.Set` freezes in `preparePrompt` where no entries are
-  fetched, so "alongside" means the same struct, not the same
-  line; `collapse` must be threaded through (`notebookPrefix`'s
-  signature doesn't take it today). The prefix-cache interplay is
-  safe: `prefixFingerprint` includes entries, so a mid-run digest
-  busts the cache and renders — it just must not demote. Demotion
+  field on `turnCollapse` populated by `freezeDigestEligibility`,
+  called in `notebookPrefix` ahead of the prefix-cache check — a
+  cache hit must not defer the freeze — and again in
+  `renderNotebookPrefix` for direct callers. `collapse.Set`
+  freezes in `preparePrompt` where no entries are fetched, so
+  "alongside" means the same struct, not the same line. The
+  prefix-cache interplay is safe two ways: `prefixFingerprint`
+  includes entries, so a mid-run digest busts the cache and
+  renders — it just must not demote — and the eligible-turn set
+  itself joins the hash, so a later run's wider frozen set can't
+  be served a stale under-demoted render. Demotion
   runs **before** the `files`/`CoveredReViews` loop
   (`notebook_segments.go:1054`) — demoted entries' `file:` tags
   must not inflate coverage for content that never rendered — and
