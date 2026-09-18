@@ -188,7 +188,7 @@ const maxNotebookEntryTokens = 1000
 // After generation, if entry exceeds cap:
 if entryTokens > maxNotebookEntryTokens {
     // Truncate from the bottom (keep tags + key facts + code)
-    // Add: "[Entry truncated. Use recall tool for full details.]"
+    // Add: "[Entry truncated.]"
 }
 ```
 

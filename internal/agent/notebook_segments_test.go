@@ -691,7 +691,7 @@ func TestRenderNotebookPrefix_OmittedTurnBreadcrumb(t *testing.T) {
 	require.NotContains(t, recallOnly, "notebook_search")
 
 	searchOnly := render(withTools(&fakeTool{name: "notebook_search"}))
-	require.Contains(t, searchOnly, "recallable via notebook_search]")
+	require.Contains(t, searchOnly, "browsable via notebook_search]")
 	require.NotContains(t, searchOnly, "recallable via recall")
 
 	// Neither tool: the omission still reports, but with no pointer.
@@ -854,31 +854,35 @@ func TestPrefixFingerprint_SelectionInputs(t *testing.T) {
 	}
 	refs := []string{"file:a.go"}
 	base := selectionInput{}
-	fp := prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, base)
+	fp := prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, base, "")
 
 	// Identical inputs hash identically.
-	require.Equal(t, fp, prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, selectionInput{}))
+	require.Equal(t, fp, prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, selectionInput{}, ""))
 
 	// Working-set membership changes the hash.
 	withWS := selectionInput{workingSet: map[string][]string{"a.go": {"/w/a.go"}}}
-	require.NotEqual(t, fp, prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, withWS))
+	require.NotEqual(t, fp, prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, withWS, ""))
 
 	// A file dying changes the hash even when the working set is
 	// unchanged.
 	withWS.livePaths = map[string]bool{"/w/a.go": true}
-	live := prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, withWS)
+	live := prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, withWS, "")
 	withWS.livePaths = map[string]bool{"/w/a.go": false}
-	dead := prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, withWS)
+	dead := prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, withWS, "")
 	require.NotEqual(t, live, dead)
 
 	// The fill band position changes the hash.
 	withWS.livePaths = nil
-	noBand := prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, withWS)
+	noBand := prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, withWS, "")
 	withWS.bandFloor = segmentKey{turn: 0, segment: 5}
-	require.NotEqual(t, noBand, prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, withWS))
+	require.NotEqual(t, noBand, prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, withWS, ""))
 
 	// The pass-1 recency floor changes the hash — a zero-entry
 	// segment committing inside coverage shifts it while boundary
 	// and entries stay put.
-	require.NotEqual(t, fp, prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 3}, entries, refs, base))
+	require.NotEqual(t, fp, prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 3}, entries, refs, base, ""))
+
+	// The tool palette changes the hash — a reload dropping recall
+	// must not serve a cached prefix that still points at it.
+	require.NotEqual(t, fp, prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, base, " — recallable via recall"))
 }

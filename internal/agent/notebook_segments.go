@@ -742,10 +742,13 @@ func (a *sessionAgent) generateRunEndSegments(ctx context.Context, sessionID str
 // prefixFingerprint hashes every input the notebook prefix render
 // reads: the boundary position, its coverage key, the entries
 // (identity plus the fields compaction rewrites), the relevance refs,
-// and the selection inputs — working set, file liveness, fill band.
-// Identical inputs must render byte-identical output, so the cache
-// key is the input set itself.
-func prefixFingerprint(boundary int, bKey, floor segmentKey, entries []notebook.Entry, refs []string, sel selectionInput) uint64 {
+// the selection inputs — working set, file liveness, fill band — and
+// toolPtr, the recall-pointer suffix the live tool set produces. The
+// palette changes nothing else in the hash but SetTools can swap it
+// mid-run, and a cached prefix must not serve a pointer to a tool the
+// render would no longer emit. Identical inputs must render
+// byte-identical output, so the cache key is the input set itself.
+func prefixFingerprint(boundary int, bKey, floor segmentKey, entries []notebook.Entry, refs []string, sel selectionInput, toolPtr string) uint64 {
 	h := fnv.New64a()
 	var scratch [8]byte
 	write := func(v int64) {
@@ -804,6 +807,7 @@ func prefixFingerprint(boundary int, bKey, floor segmentKey, entries []notebook.
 	for _, t := range slices.Sorted(maps.Keys(sel.digestEligible)) {
 		write(t)
 	}
+	h.Write([]byte(toolPtr))
 	return h.Sum64()
 }
 
@@ -896,7 +900,7 @@ func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msg
 		sel.digestEligible = collapse.digestTurns
 	}
 	floor := coveredSegmentFloor(segs, boundary)
-	fp := prefixFingerprint(boundary, bKey, floor, entries, refs, sel)
+	fp := prefixFingerprint(boundary, bKey, floor, entries, refs, sel, a.recallVia())
 	if a.prefixCache != nil {
 		if c, ok := a.prefixCache.Get(sessionID); ok && c.boundary == boundary && c.fingerprint == fp {
 			return c.msgs
@@ -1151,7 +1155,9 @@ func (a *sessionAgent) recallVia() string {
 	case hasRecall:
 		return " — recallable via recall"
 	case hasSearch:
-		return " — recallable via notebook_search"
+		// Search returns titles and tags only — the omitted entries'
+		// content is not recoverable through it, only browsable.
+		return " — browsable via notebook_search"
 	}
 	return ""
 }

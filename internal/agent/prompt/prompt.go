@@ -267,7 +267,13 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 		Interactive:         p.interactive,
 	}
 	// The notebook tools register only when the notebook is on —
-	// allowed_tools alone does not make them callable.
+	// allowed_tools alone does not make them callable. The flags
+	// snapshot at Build time: the system prompt renders once per
+	// agent build, so a config reload that swaps the tool palette
+	// leaves them stale until the next build — the same lifecycle as
+	// every other config-derived PromptDat field. (The omitted-turns
+	// breadcrumb in the notebook prefix is live-gated per render
+	// instead, since it regenerates every step.)
 	if agent, ok := cfg.Agents[p.name]; ok && data.NotebookEnabled {
 		data.RecallEnabled = slices.Contains(agent.AllowedTools, notebooktool.RecallToolName)
 		data.NotebookSearchEnabled = slices.Contains(agent.AllowedTools, notebooktool.SearchToolName)
