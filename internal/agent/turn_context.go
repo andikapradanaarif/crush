@@ -133,9 +133,10 @@ func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCal
 }
 
 // hasTool reports whether the agent's current toolset includes the
-// named tool — the check for whether a run can actually ask questions.
+// named tool — the live check for pointers and capabilities rendered
+// into the prompt (question availability, notebook recall pointers).
 func (a *sessionAgent) hasTool(name string) bool {
-	return slices.ContainsFunc(a.tools.Copy(), func(t fantasy.AgentTool) bool {
+	return a.tools != nil && slices.ContainsFunc(a.tools.Copy(), func(t fantasy.AgentTool) bool {
 		return t.Info().Name == name
 	})
 }

@@ -130,7 +130,7 @@ func NewRecallTool(svc notebook.Service, messages message.Service, cfg *config.C
 				if e.EntryTextFull != "" {
 					text = e.EntryTextFull
 				}
-				sb.WriteString(text)
+				sb.WriteString(notebook.RewriteTruncationMarker(text))
 				if len(e.Tags) > 0 {
 					sb.WriteString("\nTags: ")
 					sb.WriteString(strings.Join(e.Tags, " "))

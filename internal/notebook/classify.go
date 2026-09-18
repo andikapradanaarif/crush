@@ -537,6 +537,31 @@ func (s *service) GenerateEntries(ctx context.Context, sessionID string, turnNum
 	return nil
 }
 
+// EntryTruncatedMarker is the line truncateEntry appends where it cut
+// generated text. It names no tool: recovery pointers are a
+// render-time concern gated on the prompted agent's tool set, and a
+// stored pointer to a tool the agent lacks is dead text. The marker
+// stays tool-neutral for a second reason — entry_text_full holds the
+// same truncated body, so recall has no fuller text to return and a
+// "use recall for full details" pointer overpromises even when the
+// tool exists.
+const EntryTruncatedMarker = "[Entry truncated.]"
+
+// LegacyEntryTruncatedMarker is the marker entries stored before it
+// stopped naming recall. Renders rewrite it to EntryTruncatedMarker
+// unconditionally — the pointer overpromises for every agent since
+// entry_text_full holds the same truncated body.
+const LegacyEntryTruncatedMarker = "[Entry truncated. Use recall tool for full details.]"
+
+// RewriteTruncationMarker normalizes stored entry text for render:
+// entries written while the marker named recall carry
+// LegacyEntryTruncatedMarker, and no render path should ship it —
+// entry_text_full holds the same truncated body, so the pointer
+// overpromises regardless of which tools the agent has.
+func RewriteTruncationMarker(text string) string {
+	return strings.ReplaceAll(text, LegacyEntryTruncatedMarker, EntryTruncatedMarker)
+}
+
 // truncateEntry clips an entry to the max token budget, preserving
 // tags at the bottom.
 func truncateEntry(text string, maxTokens int64) string {
@@ -555,8 +580,12 @@ func truncateEntry(text string, maxTokens int64) string {
 		break
 	}
 	body := strings.Join(lines[:len(lines)-len(tagLines)], "\n")
-	body = body[:maxChars-len(strings.Join(tagLines, "\n"))-50]
-	return body + "\n[Entry truncated. Use recall tool for full details.]\n" + strings.Join(tagLines, "\n")
+	// The tag block plus marker can exceed the budget on pathological
+	// entries (huge or all-tag generated text) — clamp the cut rather
+	// than slice out of range.
+	keep := maxChars - len(strings.Join(tagLines, "\n")) - len(EntryTruncatedMarker) - 2
+	body = body[:min(max(keep, 0), len(body))]
+	return body + "\n" + EntryTruncatedMarker + "\n" + strings.Join(tagLines, "\n")
 }
 
 // extractAssistantText returns the concatenated text of all assistant

@@ -934,6 +934,26 @@ func TestTruncateTextToTokens(t *testing.T) {
 	require.Equal(t, exact, truncateTextToTokens(exact, 100))
 }
 
+// TestTruncateEntry_ToolNeutralMarker is the issue-66 contract at the
+// write site: the truncation marker baked into stored entry text names
+// no tool — pointers are rendered per-agent, and entry_text_full holds
+// the same cut text so recall has nothing fuller to return anyway.
+func TestTruncateEntry_ToolNeutralMarker(t *testing.T) {
+	t.Parallel()
+
+	text := strings.Repeat("x", 200) + "\n#t"
+	got := truncateEntry(text, 25) // 100-char budget.
+	require.Contains(t, got, EntryTruncatedMarker)
+	require.NotContains(t, got, "recall")
+	require.True(t, strings.HasSuffix(got, "#t"), "tag lines survive truncation")
+
+	// A tag block bigger than the budget clamps the body cut instead
+	// of slicing out of range.
+	hugeTags := "body\n#" + strings.Repeat("t", 500)
+	got = truncateEntry(hugeTags, 25)
+	require.Contains(t, got, EntryTruncatedMarker)
+}
+
 func TestMem0Sync_NilGuards(t *testing.T) {
 	// Nil sync should be a no-op.
 	var m *Mem0Sync

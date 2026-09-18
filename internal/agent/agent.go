@@ -2306,7 +2306,7 @@ func (a *sessionAgent) maybeAutoInject(ctx context.Context, msgs []message.Messa
 			text = e.EntryText
 		}
 		fmt.Fprintf(&sb, "## Turn %d.%d — %s\n", e.TurnNumber, e.EventNumber, e.Title)
-		sb.WriteString(text)
+		sb.WriteString(notebook.RewriteTruncationMarker(text))
 		for _, tag := range e.Tags {
 			if base, ok := strings.CutPrefix(tag, "file:"); ok && injectedFiles != nil {
 				injectedFiles[base] = true
