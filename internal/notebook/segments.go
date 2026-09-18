@@ -193,7 +193,7 @@ func (s *service) GenerateSegmentEntries(ctx context.Context, sessionID string, 
 		})
 	}
 	if len(significant) > 0 {
-		entries, err := s.generator.Generate(ctx, sessionID, significant)
+		entries, err := s.significantEntries(ctx, sessionID, significant)
 		if err != nil {
 			return fmt.Errorf("failed to generate notebook entries: %w", err)
 		}

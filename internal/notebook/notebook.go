@@ -24,6 +24,11 @@ const (
 	EventDecision    = "decision"
 	EventExploration = "exploration"
 	EventGeneral     = "general"
+	// EventPlan records a plan write: the landed item list rendered
+	// deterministically — items, keys, dependency edges, and evidence
+	// bindings — so plan history survives as replan/hydration ground
+	// truth rather than a paraphrase.
+	EventPlan = "plan"
 	// EventCheckpoint is a consolidated session position — an
 	// Established/Open digest with evidence handles, written at the
 	// investigation→execution boundary and at run end. Unlike other
