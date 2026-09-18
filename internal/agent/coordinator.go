@@ -946,9 +946,9 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		Interactive:            c.interactive,
 	})
 
-	// Warn only for main agents — sub-agents (e.g. task) are recall-less
-	// by design, so flagging their coerced verbatim mode per build is
-	// just log spam before every run.
+	// Warn only for main agents — sub-agent builds happen per run via
+	// the agent tool, so flagging a recall-less sub-agent's coerced
+	// verbatim mode per build is just log spam.
 	if !isSubAgent && c.cfg.Config().Options.NotebookStubSupersededEnabled() && (!notebookOn || !recallOn) {
 		slog.Warn("Option notebook_stub_superseded is enabled but the context notebook or recall tool is disabled; supersession stubbing is inactive")
 	}
