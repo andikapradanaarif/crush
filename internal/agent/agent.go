@@ -229,9 +229,10 @@ type sessionAgent struct {
 	// boundary advances.
 	stubSuperseded bool
 	// priorTurns is the resolved options.notebook_prior_turns mode:
-	// "verbatim" or "stub" ("digest" resolves to stub until turn
-	// digest generation ships). Stub mode collapses completed,
-	// covered turns' tool pairs at render.
+	// "verbatim", "stub", or "digest". Stub mode collapses completed,
+	// covered turns' tool pairs at render; digest mode collapses the
+	// same way and additionally consolidates each finished turn into
+	// a granularity:turn notebook entry at run end.
 	priorTurns string
 	// stubBoundary records the last raw-window boundary index per
 	// session, so pending superseded flags promote to stubs only on
