@@ -106,8 +106,7 @@ func TestNotebookPriorTurnsModeResolves(t *testing.T) {
 	require.Equal(t, "verbatim", (&config.Options{}).NotebookPriorTurnsMode())
 	require.Equal(t, "verbatim", (&config.Options{NotebookPriorTurns: "bogus"}).NotebookPriorTurnsMode())
 	require.Equal(t, "stub", (&config.Options{NotebookPriorTurns: "stub"}).NotebookPriorTurnsMode())
-	// digest resolves to stub until turn-digest generation ships.
-	require.Equal(t, "stub", (&config.Options{NotebookPriorTurns: "digest"}).NotebookPriorTurnsMode())
+	require.Equal(t, "digest", (&config.Options{NotebookPriorTurns: "digest"}).NotebookPriorTurnsMode())
 }
 
 func TestShellConfigOptionListAppends(t *testing.T) {

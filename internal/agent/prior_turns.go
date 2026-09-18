@@ -10,21 +10,25 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 )
 
-// Prior-turn collapse (options.notebook_prior_turns = "stub") renders
-// tool call/result pairs in completed, fully covered turns as minimal
-// stub pairs: structure — IDs, roles, pairing — is preserved and only
-// the content is replaced. Collapse is a pure render-time transform;
-// stored events are never rewritten, so recall("result:<id>") still
-// resolves the original.
+// Prior-turn collapse (options.notebook_prior_turns = "stub" or
+// "digest") renders tool call/result pairs in completed, fully
+// covered turns as minimal stub pairs: structure — IDs, roles,
+// pairing — is preserved and only the content is replaced. Collapse
+// is a pure render-time transform; stored events are never rewritten,
+// so recall("result:<id>") still resolves the original. Under
+// "digest" each finished turn additionally consolidates into a
+// granularity:turn notebook entry at run end — see
+// notebook_digest.go and docs/design/TURN_DIGEST.md.
 
 const (
 	// priorTurnsVerbatim renders the full transcript — the default.
 	priorTurnsVerbatim = "verbatim"
-	// priorTurnsStub collapses covered prior turns to stub pairs. The
-	// "digest" option value resolves here until turn-digest
-	// generation ships — the collapse is identical and the stub text
-	// never claims a digest exists.
+	// priorTurnsStub collapses covered prior turns to stub pairs.
 	priorTurnsStub = "stub"
+	// priorTurnsDigest collapses like stub and additionally
+	// consolidates each finished turn into a granularity:turn
+	// notebook entry — the turn digest.
+	priorTurnsDigest = "digest"
 )
 
 // turnCollapse carries prior-turn collapse state across one run's
@@ -35,10 +39,14 @@ const (
 // earlier events. Set is the resolved collapsible-turn set, computed
 // once on the run's first render and then frozen — a mid-run coverage
 // commit must not flip a turn from raw to stub mid-window (the same
-// prefix-stability rule stub promotion follows).
+// prefix-stability rule stub promotion follows). digestTurns is the
+// set of turns holding a granularity:turn digest, frozen lazily on
+// the run's first prefix render — eligibility, not application: a
+// digest landing mid-run must not demote already-rendered entries.
 type turnCollapse struct {
-	Before int64
-	Set    map[int64]bool
+	Before      int64
+	Set         map[int64]bool
+	digestTurns map[int64]bool
 }
 
 // newTurnCollapse returns the collapse state for one render pipeline,
@@ -46,11 +54,8 @@ type turnCollapse struct {
 // the stubs' recall pointer. The coordinator already coerces the
 // option to verbatim when the notebook is disabled; this is the belt.
 func (a *sessionAgent) newTurnCollapse(before int64) *turnCollapse {
-	// "digest" resolves to stub until turn-digest generation ships —
-	// the coordinator already normalizes via NotebookPriorTurnsMode,
-	// but a directly-set field gets the same belt.
 	switch a.priorTurns {
-	case priorTurnsStub, "digest":
+	case priorTurnsStub, priorTurnsDigest:
 	default:
 		return nil
 	}
@@ -96,31 +101,41 @@ func coveredPriorTurns(segs []segment, processed map[segmentKey]bool, before int
 // calls the payload was the input itself — recall("result:<id>")
 // cannot recover it — so the stub names the real recovery path:
 // re-viewing the file. Other calls (reads, and bash mutations whose
-// output remains recallable) keep the generic marker.
-func collapsedCallInput(turn int64, write bool) string {
+// output remains recallable) keep the generic marker, and digest
+// mode's names the consolidation that stands in for the turn.
+func collapsedCallInput(mode string, turn int64, write bool) string {
 	if write {
 		return fmt.Sprintf(`{"_collapsed":"prior turn %d — write args dropped; re-view the file to reconstruct"}`, turn)
+	}
+	if mode == priorTurnsDigest {
+		return fmt.Sprintf(`{"_collapsed":"prior turn %d — consolidated in turn digest"}`, turn)
 	}
 	return fmt.Sprintf(`{"_collapsed":"prior turn %d"}`, turn)
 }
 
 // collapsedResultText is the constant stub text a collapsed tool
-// result renders. It names the turn and the recovery path and — per
-// the stub contract — never claims a digest exists. The pointer stays
-// honest about its bounds: recall returns the stored result capped at
+// result renders. It names the turn and the recovery path; digest
+// mode's names the turn digest while keeping the same recall pointer
+// — the digest may lag async or never land on generator failure, so
+// the pointer never depends on it. The pointer stays honest about its
+// bounds: recall returns the stored result capped at
 // MaxOutputLength. For file-write calls the result is only the write
 // confirmation — the args lived in the input — so the stub leads with
 // re-view and qualifies what recall holds.
-func collapsedResultText(turn int64, toolCallID string, write bool) string {
+func collapsedResultText(mode string, turn int64, toolCallID string, write bool) string {
 	if write {
 		return fmt.Sprintf("[prior turn %d — collapsed; write args dropped — re-view the file to reconstruct; recall(\"result:%s\") holds only the confirmation]", turn, toolCallID)
+	}
+	if mode == priorTurnsDigest {
+		return fmt.Sprintf("[prior turn %d — consolidated in turn digest; recall(\"result:%s\") recovers the stored result, capped]", turn, toolCallID)
 	}
 	return fmt.Sprintf("[prior turn %d — collapsed; recall(\"result:%s\") recovers the stored result, capped]", turn, toolCallID)
 }
 
 // collapseAssistantForTurn returns m with prior-turn detail removed:
 // reasoning parts drop with the turn and tool-call inputs are replaced
-// by collapsedCallInput. question and provider-executed calls are
+// by collapsedCallInput under the given mode. question and
+// provider-executed calls are
 // exempt — the former carry user decisions rather than execution
 // detail, and the latter carry typed inputs providers may
 // schema-validate on replay (a stubbed server-tool input can 400 the
@@ -132,7 +147,7 @@ func collapsedResultText(turn int64, toolCallID string, write bool) string {
 // state are preserved. Returns m unchanged when nothing needs
 // collapsing, plus the number of collapsed calls — the per-turn event
 // count the collapse telemetry records.
-func collapseAssistantForTurn(m message.Message, turn int64) (message.Message, int) {
+func collapseAssistantForTurn(m message.Message, turn int64, mode string) (message.Message, int) {
 	exempt := make(map[string]bool)
 	for _, part := range m.Parts {
 		if tc, ok := part.(message.ToolCall); ok && callIsExempt(tc) {
@@ -165,7 +180,7 @@ func collapseAssistantForTurn(m message.Message, turn int64) (message.Message, i
 			continue
 		case message.ToolCall:
 			if !exempt[p.ID] {
-				p.Input = collapsedCallInput(turn, tools.WriteToolNames[p.Name])
+				p.Input = collapsedCallInput(mode, turn, tools.WriteToolNames[p.Name])
 				part = p
 				collapsed++
 			}
@@ -184,12 +199,12 @@ func callIsExempt(tc message.ToolCall) bool {
 }
 
 // collapseToolMessageForTurn returns m with each tool result's stored
-// content replaced by collapsedResultText — media payloads included
-// (Data cleared so the text stub is what emits). Results answering an
-// exempt call stay verbatim with it; results answering a file-write
-// call get the re-view-led stub. Returns the message and how many
-// results were collapsed.
-func collapseToolMessageForTurn(m message.Message, turn int64, exemptCalls map[string]bool, callNames map[string]string) (message.Message, int) {
+// content replaced by collapsedResultText under the given mode —
+// media payloads included (Data cleared so the text stub is what
+// emits). Results answering an exempt call stay verbatim with it;
+// results answering a file-write call get the re-view-led stub.
+// Returns the message and how many results were collapsed.
+func collapseToolMessageForTurn(m message.Message, turn int64, mode string, exemptCalls map[string]bool, callNames map[string]string) (message.Message, int) {
 	var parts []message.ContentPart
 	count := 0
 	for i, part := range m.Parts {
@@ -200,7 +215,7 @@ func collapseToolMessageForTurn(m message.Message, turn int64, exemptCalls map[s
 			}
 			continue
 		}
-		tr.Content = collapsedResultText(turn, tr.ToolCallID, tools.WriteToolNames[callNames[tr.ToolCallID]])
+		tr.Content = collapsedResultText(mode, turn, tr.ToolCallID, tools.WriteToolNames[callNames[tr.ToolCallID]])
 		tr.Data = ""
 		tr.MIMEType = ""
 		// The stub is informational, not the failure it replaces —

@@ -28,8 +28,16 @@ type SessionTelemetry struct {
 	PriorTurnResultRecalls int `json:"prior_turn_result_recalls"`
 	// Checkpoint telemetry: written counts committed checkpoint
 	// entries; rendered counts prefix renders that included one.
+	// Boundary/session granularity only — turn digests split off
+	// into the digests counters.
 	CheckpointsWritten int `json:"checkpoints_written"`
 	CheckpointRenders  int `json:"checkpoint_renders"`
+	// Digest telemetry: written counts committed granularity:turn
+	// digests; rendered counts prefix renders that included one —
+	// the "digest present at render" signal that measures the async
+	// generation race.
+	DigestsWritten int `json:"digests_written"`
+	DigestRenders  int `json:"digest_renders"`
 	// Prior-turn collapse telemetry: distinct turns collapsed and the
 	// call/result pairs inside them — deduped against the persisted
 	// collapsed_turns rows.
@@ -68,6 +76,8 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 		t.CrossRecalls = n.CrossRecalls
 		t.CheckpointsWritten = n.CheckpointsWritten
 		t.CheckpointRenders = n.CheckpointRenders
+		t.DigestsWritten = n.DigestsWritten
+		t.DigestRenders = n.DigestRenders
 		t.PriorTurnResultRecalls = n.PriorTurnResultRecalls
 	}
 	return t

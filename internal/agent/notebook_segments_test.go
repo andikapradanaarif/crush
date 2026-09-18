@@ -291,7 +291,8 @@ func TestSegmentRetryDue(t *testing.T) {
 
 // countingGen wraps the echo generator and records invocation count.
 type countingGen struct {
-	calls atomic.Int64
+	calls   atomic.Int64
+	digests atomic.Int64
 }
 
 func (g *countingGen) Generate(ctx context.Context, sessionID string, events []notebook.EntryInput) ([]notebook.GeneratedEntry, error) {
@@ -301,6 +302,11 @@ func (g *countingGen) Generate(ctx context.Context, sessionID string, events []n
 
 func (g *countingGen) GenerateCheckpoint(ctx context.Context, sessionID, input string) (notebook.GeneratedEntry, error) {
 	return echoEntryGen{}.GenerateCheckpoint(ctx, sessionID, input)
+}
+
+func (g *countingGen) GenerateDigest(ctx context.Context, sessionID, input string) (notebook.GeneratedEntry, error) {
+	g.digests.Add(1)
+	return echoEntryGen{}.GenerateDigest(ctx, sessionID, input)
 }
 
 // newSegmentTestAgent builds a sessionAgent on real services with
@@ -583,8 +589,8 @@ func TestNotebookPrefix_ByteIdenticalOnUnmovedBoundary(t *testing.T) {
 	// Seed an entry so the prefix is non-empty.
 	require.NoError(t, nb.GenerateSegmentEntries(ctx, sessionID, segs[0].turn, segs[0].number, int64(segs[0].start), int64(segs[0].end), msgs[segs[0].start:segs[0].end]))
 
-	first := a.notebookPrefix(ctx, sessionID, msgs, boundary, bKey, segs)
-	second := a.notebookPrefix(ctx, sessionID, msgs, boundary, bKey, segs)
+	first := a.notebookPrefix(ctx, sessionID, msgs, boundary, bKey, segs, nil)
+	second := a.notebookPrefix(ctx, sessionID, msgs, boundary, bKey, segs, nil)
 	require.NotEmpty(t, first)
 	require.Equal(t, first, second, "unmoved boundary must render a byte-identical prefix")
 }
@@ -642,7 +648,7 @@ func TestRenderNotebookPrefix_SegmentCoverageFilter(t *testing.T) {
 	}
 	rawMsgs := []message.Message{segUser("go"), segAssistant("work")}
 	prefix, files := a.renderNotebookPrefix(t.Context(), "sess", entries, rawMsgs,
-		segmentKey{turn: 0, segment: 2}, segmentKey{turn: 0, segment: 0}, nil, selectionInput{})
+		segmentKey{turn: 0, segment: 2}, segmentKey{turn: 0, segment: 0}, nil, selectionInput{}, nil)
 	require.Len(t, prefix, 1)
 	require.Equal(t, fantasy.MessageRoleSystem, prefix[0].Role)
 	require.Empty(t, files)

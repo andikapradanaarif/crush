@@ -41,40 +41,53 @@ func isSignificant(toolCall message.ToolCall, toolResult *message.ToolResult) bo
 	}
 }
 
+// classifyAll builds one EntryInput per finished tool call in the
+// messages, in chronological order. Each event's trivial flag records
+// which bucket classifyEvents would place it in — callers needing
+// merge order (the turn digest) consume this directly.
+func classifyAll(msgs []message.Message) []EntryInput {
+	var events []EntryInput
+	for _, msg := range msgs {
+		if msg.Role != message.Assistant {
+			continue
+		}
+		for _, tc := range msg.ToolCalls() {
+			if !tc.Finished {
+				continue
+			}
+			result := findToolResult(msgs, tc.ID)
+			input := EntryInput{
+				ToolCall:   &tc,
+				ToolResult: result,
+				// A missing result means the call never completed —
+				// the session was interrupted between the call and
+				// its result. Unknown is not success: a write that
+				// may never have run must not supersede reads.
+				Succeeded: result != nil && !result.IsError,
+			}
+			if result != nil && result.IsError {
+				input.ErrorHeadline = errorHeadline(result.Content)
+			}
+			input.Verified = verificationState(tc.Name, result)
+			input.EventType = eventTypeForTool(tc.Name)
+			input.Title = titleForTool(tc)
+			input.Description = describeToolCall(tc, result)
+			input.trivial = !isSignificant(tc, result)
+			events = append(events, input)
+		}
+	}
+	return events
+}
+
 // classifyEvents partitions the tool calls in a turn's messages into
 // significant events (each gets its own entry) and trivial events
 // (grouped into one exploration mini-entry).
 func classifyEvents(msgs []message.Message) (significant []EntryInput, trivial []EntryInput) {
-	for _, msg := range msgs {
-		switch msg.Role {
-		case message.Assistant:
-			for _, tc := range msg.ToolCalls() {
-				if !tc.Finished {
-					continue
-				}
-				result := findToolResult(msgs, tc.ID)
-				input := EntryInput{
-					ToolCall:   &tc,
-					ToolResult: result,
-					// A missing result means the call never completed —
-					// the session was interrupted between the call and
-					// its result. Unknown is not success: a write that
-					// may never have run must not supersede reads.
-					Succeeded: result != nil && !result.IsError,
-				}
-				if result != nil && result.IsError {
-					input.ErrorHeadline = errorHeadline(result.Content)
-				}
-				input.Verified = verificationState(tc.Name, result)
-				input.EventType = eventTypeForTool(tc.Name)
-				input.Title = titleForTool(tc)
-				input.Description = describeToolCall(tc, result)
-				if isSignificant(tc, result) {
-					significant = append(significant, input)
-				} else {
-					trivial = append(trivial, input)
-				}
-			}
+	for _, input := range classifyAll(msgs) {
+		if input.trivial {
+			trivial = append(trivial, input)
+		} else {
+			significant = append(significant, input)
 		}
 	}
 	return significant, trivial

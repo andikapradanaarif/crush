@@ -894,10 +894,6 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 	if c.cfg.Config().Options.NotebookPriorTurnsMode() != "verbatim" && (!notebookOn || !recallOn) {
 		slog.Warn("Option notebook_prior_turns is enabled but the context notebook or recall tool is disabled; prior-turn collapse is inactive")
 	}
-	if c.cfg.Config().Options.NotebookPriorTurns == "digest" {
-		slog.Debug("Option notebook_prior_turns=digest resolves to stub until turn-digest generation ships")
-	}
-
 	// Initialize the summary model before installing the resolver.
 	// Only the top-level agent build (not sub-agents) sets this —
 	// sub-agent builds share the same coordinator and must not

@@ -321,6 +321,10 @@ type segmentTracker struct {
 	inflight          map[segmentKey]bool
 	backfillAttempted bool
 	driftLogged       map[segmentKey]bool
+	// digests holds the per-turn digest generation claims — the
+	// in-flight dedup for the run-end catch-up pass; see
+	// notebook_digest.go.
+	digests map[int64]bool
 	// Checkpoint bookkeeping: checkpointStamp/checkpointInFlight are
 	// the per-run generation claim; checkpointFailures counts mid-run
 	// failures against checkpointFailureRun's stamp — see
@@ -332,7 +336,7 @@ type segmentTracker struct {
 }
 
 func newSegmentTracker() *segmentTracker {
-	return &segmentTracker{inflight: make(map[segmentKey]bool), driftLogged: make(map[segmentKey]bool)}
+	return &segmentTracker{inflight: make(map[segmentKey]bool), driftLogged: make(map[segmentKey]bool), digests: make(map[int64]bool)}
 }
 
 // markInflight atomically claims a segment for generation. The mark is
@@ -793,6 +797,12 @@ func prefixFingerprint(boundary int, bKey, floor segmentKey, entries []notebook.
 			write(0)
 		}
 	}
+	// The digest-eligible turn set changes the render (post-selection
+	// demotion) without changing any entry — see the note where it is
+	// populated in notebookPrefix.
+	for _, t := range slices.Sorted(maps.Keys(sel.digestEligible)) {
+		write(t)
+	}
 	return h.Sum64()
 }
 
@@ -851,7 +861,10 @@ func (a *sessionAgent) buildSelectionInput(ctx context.Context, sessionID string
 // plus the optional auto-inject blob) for the given boundary. The
 // render is cached on (boundary, fingerprint) so a step where nothing
 // covered changed emits a byte-identical prefix without re-rendering.
-func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msgs []message.Message, boundary int, bKey segmentKey, segs []segment) []fantasy.Message {
+// collapse carries the run's prior-turn collapse state — its
+// digestTurns freeze is populated on the run's first call, before
+// the cache check.
+func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msgs []message.Message, boundary int, bKey segmentKey, segs []segment, collapse *turnCollapse) []fantasy.Message {
 	if a.notebook == nil || boundary <= 0 || sessionID == "" {
 		return nil
 	}
@@ -862,6 +875,10 @@ func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msg
 		slog.Error("Failed to get notebook entries", "error", err)
 		return nil
 	}
+	// Freeze digest eligibility here, before the cache check — a
+	// prefix cache hit must not defer the per-run freeze past the
+	// window where a mid-run digest commit could still slip in.
+	freezeDigestEligibility(collapse, entries, bKey)
 	// Refs and auto-inject scan the FULL message list for the latest
 	// user message: once a long turn's initiating prompt is covered by
 	// the notebook, the raw window holds no user message at all, and
@@ -869,6 +886,14 @@ func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msg
 	// the rest of the run.
 	refs := notebookRelevanceRefs(detCtx, a.sessions, sessionID, msgs)
 	sel := a.buildSelectionInput(detCtx, sessionID, entries, segs, boundary, bKey)
+	if collapse != nil {
+		// The eligibility set is run-frozen, not entry-derived — a
+		// later run can face the same entry set with a wider frozen
+		// set (an earlier run froze before a digest committed). It
+		// must feed the fingerprint or the cache can serve a render
+		// built under the older, looser eligibility.
+		sel.digestEligible = collapse.digestTurns
+	}
 	floor := coveredSegmentFloor(segs, boundary)
 	fp := prefixFingerprint(boundary, bKey, floor, entries, refs, sel)
 	if a.prefixCache != nil {
@@ -876,7 +901,7 @@ func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msg
 			return c.msgs
 		}
 	}
-	prefix, files := a.renderNotebookPrefix(detCtx, sessionID, entries, msgs, bKey, floor, refs, sel)
+	prefix, files := a.renderNotebookPrefix(detCtx, sessionID, entries, msgs, bKey, floor, refs, sel, collapse)
 	if a.prefixCache != nil {
 		a.prefixCache.Set(sessionID, cachedPrefix{boundary: boundary, fingerprint: fp, msgs: prefix, files: files})
 	}
@@ -1038,19 +1063,33 @@ func fantasyToolResultOutputEqual(a, b fantasy.ToolResultOutputContent) bool {
 // history — auto-inject scans it for the latest user message, which
 // may itself sit inside the covered prefix of a long turn. The
 // returned file set holds the file: basenames this render injected —
-// the coverage signal the re-view counter joins against.
-func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID string, entries []notebook.Entry, msgs []message.Message, bKey segmentKey, floor segmentKey, refs []string, sel selectionInput) ([]fantasy.Message, map[string]bool) {
+// the coverage signal the re-view counter joins against. collapse's
+// digestTurns freeze happens in notebookPrefix before the cache
+// check; the call here covers direct render callers.
+func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID string, entries []notebook.Entry, msgs []message.Message, bKey segmentKey, floor segmentKey, refs []string, sel selectionInput, collapse *turnCollapse) ([]fantasy.Message, map[string]bool) {
 	var filtered []notebook.Entry
 	for _, e := range entries {
 		if e.TurnNumber < bKey.turn || (e.TurnNumber == bKey.turn && e.SegmentNumber < bKey.segment) {
 			filtered = append(filtered, e)
 		}
 	}
+	// notebookPrefix freezes digest eligibility before the cache
+	// check; this call covers direct callers and is a no-op once the
+	// run's set exists.
+	freezeDigestEligibility(collapse, entries, bKey)
+	if collapse != nil {
+		sel.digestEligible = collapse.digestTurns
+	}
 	files := make(map[string]bool)
 	var out []fantasy.Message
+	// digested holds the turns whose digest rendered this prefix —
+	// auto-inject drops their same-turn candidates so a digested
+	// turn's entries never double into the prompt.
+	var digested map[int64]bool
 	if len(filtered) > 0 {
 		selected, diff := selectNotebookEntries(filtered, refs, floor, sel)
 		a.noteSelectionDiff(sessionID, diff)
+		digested = renderedDigests(selected, sel.digestEligible)
 		for _, e := range selected {
 			// A checkpoint's file: tags cite evidence rather than
 			// cover the file — counting them here would inflate
@@ -1089,7 +1128,7 @@ func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID strin
 		}
 	}
 	if a.notebookAutoInject && len(msgs) > 0 {
-		if injectMsg := a.maybeAutoInject(ctx, msgs, sessionID, bKey, files); injectMsg != nil {
+		if injectMsg := a.maybeAutoInject(ctx, msgs, sessionID, bKey, files, digested); injectMsg != nil {
 			out = append(out, *injectMsg)
 		}
 	}
@@ -1098,6 +1137,28 @@ func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID strin
 
 // noteSelectionDiff folds one render's per-pass contribution counts
 // into the session's sufficiency stats.
+// freezeDigestEligibility lazily fixes the run's set of turns whose
+// rendered digest may demote same-turn entries: the turns holding a
+// granularity:turn digest inside the render boundary at the run's
+// first prefix call. A digest committing mid-run busts the prefix
+// cache via the entries fingerprint and renders — but with this
+// frozen set it can never demote already-rendered entries
+// mid-window.
+func freezeDigestEligibility(collapse *turnCollapse, entries []notebook.Entry, bKey segmentKey) {
+	if collapse == nil || collapse.digestTurns != nil {
+		return
+	}
+	collapse.digestTurns = make(map[int64]bool)
+	for _, e := range entries {
+		if e.TurnNumber > bKey.turn || (e.TurnNumber == bKey.turn && e.SegmentNumber >= bKey.segment) {
+			continue // Past the render boundary — invisible this run.
+		}
+		if notebook.CheckpointGranularity(e) == notebook.GranularityTurn {
+			collapse.digestTurns[e.TurnNumber] = true
+		}
+	}
+}
+
 func (a *sessionAgent) noteSelectionDiff(sessionID string, diff selectionDiff) {
 	if a.nbStats == nil || sessionID == "" || diff.total() == 0 {
 		return
@@ -1110,6 +1171,9 @@ func (a *sessionAgent) noteSelectionDiff(sessionID string, diff selectionDiff) {
 	stats.SelPassFill += diff.fill
 	if diff.checkpoints > 0 {
 		stats.CheckpointRenders++
+	}
+	if diff.digests > 0 {
+		stats.DigestRenders++
 	}
 	a.nbStats.Set(sessionID, stats)
 }

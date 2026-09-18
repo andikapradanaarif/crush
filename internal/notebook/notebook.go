@@ -144,6 +144,10 @@ type EntryInput struct {
 	// the tool result's "verification" metadata — worst wins, pending
 	// counts as unverified. Empty for non-mutation events.
 	Verified string
+	// trivial marks events classifyEvents would group into the
+	// exploration mini-entry — set by classification so merged-order
+	// consumers (the turn digest) can still tell the buckets apart.
+	trivial bool
 }
 
 // Stats accumulates per-session sufficiency telemetry for the
@@ -185,11 +189,20 @@ type Stats struct {
 	SelPassFill    int
 	// CheckpointRenders counts renders that included a checkpoint
 	// entry — the "checkpoint present at render" telemetry the
-	// checkpoint eval arm asserts on.
+	// checkpoint eval arm asserts on. Turn digests count separately:
+	// a digest's presence does not mean a consolidated position
+	// rendered.
 	CheckpointRenders int
 	// CheckpointsWritten counts committed checkpoint entries — the
-	// firing side of the same metric.
+	// firing side of the same metric. Boundary/session granularity
+	// only; turn digests count under DigestsWritten.
 	CheckpointsWritten int
+	// DigestRenders counts renders that included a granularity:turn
+	// digest — the "digest present at render" signal that measures
+	// the async generation race.
+	DigestRenders int
+	// DigestsWritten counts committed turn-digest entries.
+	DigestsWritten int
 	// PriorTurnResultRecalls counts result: recalls that resolved to
 	// a tool call in a prior turn — the feasible approximation of
 	// recall-into-collapsed-turn (collapse leaves no stored mark).
@@ -246,6 +259,15 @@ type Service interface {
 	// checkpoint committed; a false return leaves the run free to
 	// retry under a different threshold.
 	GenerateCheckpoint(ctx context.Context, sessionID string, req CheckpointRequest) (bool, error)
+
+	// GenerateTurnDigest writes one granularity:turn checkpoint entry
+	// summarizing a finished turn's own classified events —
+	// significant and trivial alike. The entry keys to the turn's own
+	// last segment so post-selection demotion can join on TurnNumber.
+	// Dedup is per-turn: a turn that already has a turn digest is a
+	// clean no-op, re-checked inside the commit transaction, and a
+	// turn with no classified tool events produces no digest.
+	GenerateTurnDigest(ctx context.Context, sessionID string, req DigestRequest) (bool, error)
 
 	// RecordSegmentClose records a closed segment's extent as
 	// unprocessed. Idempotent under (session, turn, segment).
@@ -360,6 +382,25 @@ type CheckpointRequest struct {
 	Msgs []message.Message
 }
 
+// DigestRequest parameterizes GenerateTurnDigest. The caller slices
+// the finished turn's messages out of the stored history; the
+// digest's input is those messages' classified events and nothing
+// else — unlike a boundary checkpoint's cumulative input, a turn
+// digest restates one turn's work, not the session position.
+type DigestRequest struct {
+	// TurnNumber is the finished turn being digested — the dedup key
+	// and the demotion join.
+	TurnNumber int64
+	// SegmentNumber is the turn's own last segment, the coverage key
+	// the digest is written under. It is NOT checkpointSegmentKey's
+	// session-wide last closed segment: a digest keyed to an earlier
+	// turn would render as that turn's evidence.
+	SegmentNumber int64
+	// Msgs holds the turn's own messages. Their classified events —
+	// significant and trivial — are the digest's whole input.
+	Msgs []message.Message
+}
+
 // Generator generates notebook entries from classified events using an
 // LLM. It is abstracted so tests can provide a mock.
 type Generator interface {
@@ -370,6 +411,10 @@ type Generator interface {
 	// from a rendered input block (committed entry digests plus raw
 	// tail event descriptions).
 	GenerateCheckpoint(ctx context.Context, sessionID, input string) (GeneratedEntry, error)
+	// GenerateDigest produces one turn-granularity digest entry from
+	// a rendered input block (the classified events of one finished
+	// turn).
+	GenerateDigest(ctx context.Context, sessionID, input string) (GeneratedEntry, error)
 }
 
 // GeneratedEntry is the output of the Generator for one event.

@@ -73,7 +73,7 @@ func TestMaybeAutoInject_SkipsSupersededRead(t *testing.T) {
 			message.TextContent{Text: "look at internal/auth.go please"},
 		}},
 	}
-	msg := agent.maybeAutoInject(t.Context(), msgs, sessionID, segmentKey{turn: 10}, nil)
+	msg := agent.maybeAutoInject(t.Context(), msgs, sessionID, segmentKey{turn: 10}, nil, nil)
 	if msg != nil {
 		for _, part := range msg.Content {
 			if tp, ok := part.(fantasy.TextPart); ok {
@@ -95,7 +95,7 @@ func TestMaybeAutoInject_InjectsUnsupersededRead(t *testing.T) {
 			message.TextContent{Text: "look at internal/auth.go please"},
 		}},
 	}
-	msg := agent.maybeAutoInject(t.Context(), msgs, sessionID, segmentKey{turn: 10}, nil)
+	msg := agent.maybeAutoInject(t.Context(), msgs, sessionID, segmentKey{turn: 10}, nil, nil)
 	require.NotNil(t, msg)
 	var text string
 	for _, part := range msg.Content {
@@ -185,6 +185,14 @@ func (echoEntryGen) GenerateCheckpoint(_ context.Context, _ string, input string
 		EventType: notebook.EventCheckpoint,
 		Title:     "Checkpoint",
 		Text:      "## Checkpoint\n\n" + input,
+	}, nil
+}
+
+func (echoEntryGen) GenerateDigest(_ context.Context, _ string, input string) (notebook.GeneratedEntry, error) {
+	return notebook.GeneratedEntry{
+		EventType: notebook.EventCheckpoint,
+		Title:     "Turn digest",
+		Text:      "## Turn digest\n\n" + input,
 	}, nil
 }
 
@@ -872,6 +880,10 @@ func (taggedGen) GenerateCheckpoint(ctx context.Context, sessionID, input string
 	return echoEntryGen{}.GenerateCheckpoint(ctx, sessionID, input)
 }
 
+func (taggedGen) GenerateDigest(ctx context.Context, sessionID, input string) (notebook.GeneratedEntry, error) {
+	return echoEntryGen{}.GenerateDigest(ctx, sessionID, input)
+}
+
 // TestCoveredReViews_CountsViewOnInjectedFile is the positive half of
 // the re-view instrumentation: render a prefix that injects the x.go
 // entry, then a finished view call on that file must count as a
@@ -894,7 +906,7 @@ func TestCoveredReViews_CountsViewOnInjectedFile(t *testing.T) {
 	// Render — the covered entry is selected, so its basename lands
 	// in the cached file set.
 	msgs := []message.Message{segUser("go")}
-	prefix := a.notebookPrefix(t.Context(), sessionID, msgs, len(msgs), segmentKey{turn: 2, segment: 0}, nil)
+	prefix := a.notebookPrefix(t.Context(), sessionID, msgs, len(msgs), segmentKey{turn: 2, segment: 0}, nil, nil)
 	require.NotEmpty(t, prefix)
 	cached, ok := a.prefixCache.Get(sessionID)
 	require.True(t, ok)

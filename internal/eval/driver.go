@@ -34,6 +34,7 @@ type RunResult struct {
 	PriorTurns    PriorTurns
 	Recalls       Recalls
 	Checkpoints   Checkpoints
+	Digests       Checkpoints
 	SessionID     string
 	ModelResolved string
 	ModelSmall    string
@@ -114,6 +115,13 @@ type runTelemetry struct {
 		Written  int `json:"written"`
 		Rendered int `json:"rendered"`
 	} `json:"checkpoints"`
+	// Digests carries the turn-digest telemetry, same written/
+	// rendered split — the "digest present at render" signal that
+	// measures the async generation race.
+	Digests struct {
+		Written  int `json:"written"`
+		Rendered int `json:"rendered"`
+	} `json:"digests"`
 	Model        string `json:"model"`
 	ModelSmall   string `json:"model_small"`
 	ModelSummary string `json:"model_summary"`
@@ -270,6 +278,8 @@ func (res *RunResult) addTurnTelemetry(tel runTelemetry) {
 	res.Recalls.PriorTurnResult += tel.Recalls.PriorTurnResult
 	res.Checkpoints.Written += tel.Checkpoints.Written
 	res.Checkpoints.Rendered += tel.Checkpoints.Rendered
+	res.Digests.Written += tel.Digests.Written
+	res.Digests.Rendered += tel.Digests.Rendered
 }
 
 // remainingSteps converts the trajectory-wide max_steps budget into

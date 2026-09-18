@@ -1,9 +1,11 @@
 # Turn Digest — Fidelity Drop at the Turn Boundary
 
-> **Status:** Partially shipped. `stub` mode — the `prior_turn`
-> render predicate, frozen collapse set, and `notebook-prior-turns`
-> option — shipped (#58, closing #49); `digest` mode remains spec and
-> resolves to stub until turn-digest generation lands (#50). Splits
+> **Status:** Shipped. `stub` mode — the `prior_turn` render
+> predicate, frozen collapse set, and `notebook-prior-turns` option —
+> shipped (#58, closing #49); `digest` mode — turn-granularity
+> digest generation, the demotion rule, and the run-end trigger
+> absorption — shipped (#63, closing #50). The default stays `verbatim` pending
+> the paired-eval gates below. Splits
 > context into two planes: the conversation
 > (user messages, assistant answers, question/answer pairs — full
 > continuity) and the execution transcript (tool calls + results —
@@ -223,13 +225,17 @@ Open:
   else) — while each render still requires the digest actually
   selected that render, so an evicted digest can't leave turn N
   with neither representation. Mechanically it is a lazy-once
-  field on `turnCollapse` populated inside `renderNotebookPrefix`
-  — `collapse.Set` freezes in `preparePrompt` where no entries are
-  fetched, so "alongside" means the same struct, not the same
-  line; `collapse` must be threaded through (`notebookPrefix`'s
-  signature doesn't take it today). The prefix-cache interplay is
-  safe: `prefixFingerprint` includes entries, so a mid-run digest
-  busts the cache and renders — it just must not demote. Demotion
+  field on `turnCollapse` populated by `freezeDigestEligibility`,
+  called in `notebookPrefix` ahead of the prefix-cache check — a
+  cache hit must not defer the freeze — and again in
+  `renderNotebookPrefix` for direct callers. `collapse.Set`
+  freezes in `preparePrompt` where no entries are fetched, so
+  "alongside" means the same struct, not the same line. The
+  prefix-cache interplay is safe two ways: `prefixFingerprint`
+  includes entries, so a mid-run digest busts the cache and
+  renders — it just must not demote — and the eligible-turn set
+  itself joins the hash, so a later run's wider frozen set can't
+  be served a stale under-demoted render. Demotion
   runs **before** the `files`/`CoveredReViews` loop
   (`notebook_segments.go:1054`) — demoted entries' `file:` tags
   must not inflate coverage for content that never rendered — and
@@ -363,13 +369,12 @@ option notebook-prior-turns digest     # collapse + generated turn digest
 - **crushrc wiring:** `optionSpecs` already carries the
   `notebook-*` keys post-#45; `notebook-prior-turns` is a one-line
   `optString` entry plus the `Options` field.
-- **`digest` must resolve to `digest` end-to-end.** Until
-  generation ships, `NotebookPriorTurnsMode` (`config.go:1364`)
-  resolves `digest`→`stub`, `newTurnCollapse` accepts `"digest"`
-  as a stub alias, and the coordinator debug line reflects that —
-  all three flip when this feature lands, and the mode threads
-  into `collapsedResultText`/`collapsedCallInput` so `digest`
-  mode's stub text can say "consolidated in turn digest" (§1).
+- **`digest` resolves to `digest` end-to-end.** With generation
+  shipped, `NotebookPriorTurnsMode` returns `digest` verbatim,
+  `newTurnCollapse` accepts it as a collapse mode in its own right,
+  and the mode threads into
+  `collapsedResultText`/`collapsedCallInput` so `digest` mode's
+  stub text says "consolidated in turn digest" (§1).
 - **Escape hatch:** set back to `verbatim` — takes effect on the
   next agent build (options are captured at agent construction,
   `coordinator.go:848`), after which the next `PrepareStep` shows
@@ -404,6 +409,11 @@ option notebook-prior-turns digest     # collapse + generated turn digest
 - **Aborted runs.** Their events belong to a completed turn next
   turn and collapse normally; the digest headline notes
   "interrupted" so a partial turn isn't read as finished work.
+  Detection reads the turn's last assistant message: a
+  canceled/error finish reason covers the graceful paths, and an
+  unclosed message with unfinished tool calls is the crash/kill
+  residue — the cleanup path marks stranded calls finished, so a
+  genuinely unfinished one means the run died mid-flight.
 - **The dominant-turn case.** Exploration _and_ execution inside
   one long turn (the token-drain scenario) is not helped by this
   doc — within-turn machinery (stubs, mid-turn checkpoint) owns
