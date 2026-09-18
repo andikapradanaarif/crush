@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"charm.land/fantasy"
@@ -276,15 +277,20 @@ func TestSelectNotebookEntries_DigestDemotion(t *testing.T) {
 		nbSegEntry("r1", 1, 0, 0, notebook.EventFileRead, "read a.go", 10, "file:a.go"),
 		nbSegEntry("c1", 1, 0, 1, notebook.EventCommand, "ran ls", 10),
 		nbSegEntry("d1", 1, 0, 2, notebook.EventCheckpoint, "digest", 10, "granularity:turn", "phase:checkpoint"),
+		nbSegEntry("b1", 1, 0, 3, notebook.EventCheckpoint, "boundary ckpt", 10, "granularity:boundary", "phase:checkpoint"),
 		nbSegEntry("r2", 2, 0, 0, notebook.EventFileRead, "read b.go", 10, "file:b.go"),
 	}
 
 	// With the turn's digest eligible and rendered, its same-turn
-	// segment entries demote — the turn's work renders once.
+	// segment entries demote — the turn's work renders once. The
+	// same-turn boundary checkpoint survives: demotion exempts
+	// checkpoint entries by type, or a finer consolidation would
+	// starve a coarser one keyed into the same turn.
 	sel := selectionInput{digestEligible: map[int64]bool{1: true}}
 	got, _ := selectNotebookEntries(entries, nil, segmentKey{turn: 3}, sel)
 	ids := entryIDs(got)
 	require.Contains(t, ids, "d1")
+	require.Contains(t, ids, "b1")
 	require.Contains(t, ids, "r2")
 	require.NotContains(t, ids, "r1")
 	require.NotContains(t, ids, "c1")
@@ -371,4 +377,67 @@ func TestRenderNotebookPrefix_DigestFreezeEligibility(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, 1, stats.DigestRenders)
 	require.Zero(t, stats.CheckpointRenders)
+}
+
+// TestNotebookPrefix_DigestEligibilityBustsPrefixCache is the
+// cross-run stale-render regression: run 1 froze eligibility before
+// the digest committed, so its cached prefix renders the turn's
+// entries alongside the digest; run 2 faces the SAME entries and
+// boundary with a wider frozen set — the eligibility set feeds the
+// fingerprint, so the cache must not serve the under-demoted render.
+func TestNotebookPrefix_DigestEligibilityBustsPrefixCache(t *testing.T) {
+	t.Parallel()
+
+	a, _, nb, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.nbStats = csync.NewMap[string, notebook.Stats]()
+
+	// Turn 0: one covered segment entry plus its digest. The result
+	// tail marker sits past describeToolCall's 2000-char Result:
+	// truncation, so only the real entry text — never the digest's
+	// embedded input — can carry it.
+	content := strings.Repeat("y", 2100) + "\nSEGMENT-ENTRY-TAIL"
+	work := []message.Message{
+		segAssistant("work", message.ToolCall{ID: "tc-0", Name: "edit", Input: `{"file_path":"internal/x.go"}`, Finished: true}),
+		segTool(message.ToolResult{ToolCallID: "tc-0", Name: "edit", Content: content}),
+	}
+	require.NoError(t, nb.GenerateSegmentEntries(t.Context(), sessionID, 0, 0, 0, 2, work))
+	committed, err := nb.GenerateTurnDigest(t.Context(), sessionID, notebook.DigestRequest{
+		TurnNumber:    0,
+		SegmentNumber: 0,
+		Msgs:          work,
+	})
+	require.NoError(t, err)
+	require.True(t, committed)
+
+	msgs := []message.Message{segUser("next")}
+	bKey := segmentKey{turn: 1, segment: 0}
+	prefixText := func(prefix []fantasy.Message) string {
+		var text string
+		for _, m := range prefix {
+			for _, p := range m.Content {
+				if tp, ok := p.(fantasy.TextPart); ok {
+					text += tp.Text
+				}
+			}
+		}
+		return text
+	}
+
+	// Run 1: an earlier run froze before the digest committed —
+	// eligibility stays empty, no demotion.
+	collapse1 := &turnCollapse{Before: 1, digestTurns: map[int64]bool{}}
+	prefix1 := a.notebookPrefix(t.Context(), sessionID, msgs, len(msgs), bKey, nil, collapse1)
+	require.Contains(t, prefixText(prefix1), "SEGMENT-ENTRY-TAIL",
+		"run 1 renders the digested turn's entries alongside the digest")
+
+	// Run 2: same entries and boundary; the fresh freeze now sees
+	// the digest. The widened set changes the fingerprint, so this
+	// re-renders under demotion rather than serving run 1's cache.
+	collapse2 := &turnCollapse{Before: 1}
+	prefix2 := a.notebookPrefix(t.Context(), sessionID, msgs, len(msgs), bKey, nil, collapse2)
+	require.True(t, collapse2.digestTurns[0])
+	text2 := prefixText(prefix2)
+	require.Contains(t, text2, "## Turn digest")
+	require.NotContains(t, text2, "SEGMENT-ENTRY-TAIL",
+		"the widened eligibility must re-render under demotion, not serve the cached prefix")
 }
