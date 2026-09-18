@@ -63,6 +63,8 @@ import (
 // Coordinator errors.
 var (
 	errCoderAgentNotConfigured         = errors.New("coder agent not configured")
+	errPlanAgentNotConfigured          = errors.New("plan agent not configured")
+	errMainAgentNotFound               = errors.New("main agent not found")
 	errModelProviderNotConfigured      = errors.New("model provider not configured")
 	errModelNotFoundInProvider         = errors.New("model not found in provider config")
 	errLargeModelNotSelected           = errors.New("large model not selected")
@@ -119,8 +121,7 @@ func isOpenCodeResponsesModel(modelID string) bool {
 }
 
 type Coordinator interface {
-	// INFO: (kujtim) this is not used yet we will use this when we have multiple agents
-	// SetMainAgent(string)
+	SetMainAgent(agentName string) error
 	Run(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error)
 	// RunAccepted runs a call that was already accepted via
 	// BeginAccepted on the fire-and-forget dispatch path. The handle is
@@ -180,8 +181,13 @@ type coordinator struct {
 	summaryFailure *summaryFailureState
 	summaryErrMu   sync.Mutex
 
-	currentAgent SessionAgent
-	agents       map[string]SessionAgent
+	// agentMu guards mainAgent and mainAgentName: SetMainAgent runs on
+	// HTTP handler goroutines while runs, cancels, and probes read the
+	// current agent from their own goroutines.
+	agentMu       sync.RWMutex
+	mainAgent     SessionAgent
+	mainAgentName string
+	agents        map[string]SessionAgent
 
 	// stubBoundary/stubStats are shared across every agent this
 	// coordinator builds so agent rebuilds (UpdateModels, task-agent
@@ -314,8 +320,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		return nil, errCoderAgentNotConfigured
 	}
 
-	// TODO: make this dynamic when we support multiple agents
-	prompt, err := coderPrompt(
+	coderPrompt, err := coderPrompt(
 		prompt.WithWorkingDir(c.cfg.WorkingDir()),
 		prompt.WithInteractive(c.interactive),
 	)
@@ -323,12 +328,33 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		return nil, err
 	}
 
-	agent, err := c.buildAgent(ctx, prompt, agentCfg, false)
+	agent, err := c.buildAgent(ctx, coderPrompt, agentCfg, false)
 	if err != nil {
 		return nil, err
 	}
-	c.currentAgent = agent
 	c.agents[config.AgentCoder] = agent
+
+	planCfg, ok := c.cfg.Config().Agents[config.AgentPlan]
+	if !ok {
+		return nil, errPlanAgentNotConfigured
+	}
+
+	planSystemPrompt, err := planPrompt(
+		prompt.WithWorkingDir(c.cfg.WorkingDir()),
+		prompt.WithInteractive(c.interactive),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	planAgent, err := c.buildAgent(ctx, planSystemPrompt, planCfg, false)
+	if err != nil {
+		return nil, err
+	}
+	c.agents[config.AgentPlan] = planAgent
+
+	c.mainAgent = agent
+	c.mainAgentName = config.AgentCoder
 	return c, nil
 }
 
@@ -373,6 +399,34 @@ func (c *coordinator) watchSessionDeletions() {
 	}
 }
 
+// activeAgent returns the coordinator's current main agent and its config
+// name as one snapshot. Callers use the snapshot for the whole operation,
+// so a SetMainAgent racing mid-flight never splits a run, model refresh, or
+// summarize across two agents.
+func (c *coordinator) activeAgent() (SessionAgent, string) {
+	c.agentMu.RLock()
+	defer c.agentMu.RUnlock()
+	return c.mainAgent, c.mainAgentName
+}
+
+// currentAgent returns the current main agent.
+func (c *coordinator) currentAgent() SessionAgent {
+	agent, _ := c.activeAgent()
+	return agent
+}
+
+func (c *coordinator) SetMainAgent(agentName string) error {
+	c.agentMu.Lock()
+	defer c.agentMu.Unlock()
+	agent, ok := c.agents[agentName]
+	if !ok {
+		return fmt.Errorf("%w: %s", errMainAgentNotFound, agentName)
+	}
+	c.mainAgent = agent
+	c.mainAgentName = agentName
+	return nil
+}
+
 // Run implements Coordinator.
 func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
 	return c.run(ctx, nil, sessionID, prompt, attachments...)
@@ -415,12 +469,15 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 		}
 	}
 
-	// refresh models before each run
-	if err := c.UpdateModels(ctx); err != nil {
+	// refresh models before each run. Snapshot the agent first: the run,
+	// its model settings, and the model refresh below must all target the
+	// same agent even if SetMainAgent swaps the main agent mid-flight.
+	agent, agentName := c.activeAgent()
+	if err := c.updateAgentModels(ctx, agent, agentName); err != nil {
 		return nil, fmt.Errorf("failed to update models: %w", err)
 	}
 
-	model := c.currentAgent.Model()
+	model := agent.Model()
 	maxTokens := model.CatwalkCfg.DefaultMaxTokens
 	if model.ModelCfg.MaxTokens != 0 {
 		maxTokens = model.ModelCfg.MaxTokens
@@ -464,21 +521,22 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 	// same correlator.
 	runID := RunIDFromContext(ctx)
 	run := func() (*fantasy.AgentResult, error) {
-		return c.currentAgent.Run(ctx, SessionAgentCall{
-			SessionID:        sessionID,
-			RunID:            runID,
-			Prompt:           prompt,
-			Attachments:      attachments,
-			MaxOutputTokens:  maxTokens,
-			ProviderOptions:  mergedOptions,
-			Temperature:      temp,
-			TopP:             topP,
-			TopK:             callTopK(providerCfg, topK),
-			FrequencyPenalty: freqPenalty,
-			PresencePenalty:  presPenalty,
-			OnComplete:       onComplete,
-			Accepted:         accept,
-			OnAuthRefresh:    c.makeAuthRefreshCallback(providerCfg),
+		return agent.Run(ctx, SessionAgentCall{
+			SessionID:         sessionID,
+			RunID:             runID,
+			Prompt:            prompt,
+			HiddenUserMessage: message.HiddenUserMessage(ctx),
+			Attachments:       attachments,
+			MaxOutputTokens:   maxTokens,
+			ProviderOptions:   mergedOptions,
+			Temperature:       temp,
+			TopP:              topP,
+			TopK:              callTopK(providerCfg, topK),
+			FrequencyPenalty:  freqPenalty,
+			PresencePenalty:   presPenalty,
+			OnComplete:        onComplete,
+			Accepted:          accept,
+			OnAuthRefresh:     c.makeAuthRefreshCallback(providerCfg),
 		})
 	}
 	beforeLoaded := c.skillTracker.LoadedNames()
@@ -888,10 +946,13 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		Interactive:            c.interactive,
 	})
 
-	if c.cfg.Config().Options.NotebookStubSupersededEnabled() && (!notebookOn || !recallOn) {
+	// Warn only for main agents — sub-agents (e.g. task) are recall-less
+	// by design, so flagging their coerced verbatim mode per build is
+	// just log spam before every run.
+	if !isSubAgent && c.cfg.Config().Options.NotebookStubSupersededEnabled() && (!notebookOn || !recallOn) {
 		slog.Warn("Option notebook_stub_superseded is enabled but the context notebook or recall tool is disabled; supersession stubbing is inactive")
 	}
-	if c.cfg.Config().Options.NotebookPriorTurnsMode() != "verbatim" && (!notebookOn || !recallOn) {
+	if !isSubAgent && c.cfg.Config().Options.NotebookPriorTurnsMode() != "verbatim" && (!notebookOn || !recallOn) {
 		slog.Warn("Option notebook_prior_turns is enabled but the context notebook or recall tool is disabled; prior-turn collapse is inactive")
 	}
 	// Initialize the summary model before installing the resolver.
@@ -1580,31 +1641,31 @@ func isExactoSupported(modelID string) bool {
 // so a cancel arriving before the run registers in activeRequests is not
 // lost.
 func (c *coordinator) BeginAccepted(sessionID string) *AcceptedRun {
-	return c.currentAgent.BeginAccepted(sessionID)
+	return c.currentAgent().BeginAccepted(sessionID)
 }
 
 func (c *coordinator) Cancel(sessionID string) {
-	c.currentAgent.Cancel(sessionID)
+	c.currentAgent().Cancel(sessionID)
 }
 
 func (c *coordinator) CancelAll() {
-	c.currentAgent.CancelAll()
+	c.currentAgent().CancelAll()
 }
 
 func (c *coordinator) ClearQueue(sessionID string) {
-	c.currentAgent.ClearQueue(sessionID)
+	c.currentAgent().ClearQueue(sessionID)
 }
 
 func (c *coordinator) IsBusy() bool {
-	return c.currentAgent.IsBusy()
+	return c.currentAgent().IsBusy()
 }
 
 func (c *coordinator) IsSessionBusy(sessionID string) bool {
-	return c.currentAgent.IsSessionBusy(sessionID)
+	return c.currentAgent().IsSessionBusy(sessionID)
 }
 
 func (c *coordinator) Model() Model {
-	return c.currentAgent.Model()
+	return c.currentAgent().Model()
 }
 
 func (c *coordinator) UpdateModels(ctx context.Context) error {
@@ -1614,9 +1675,16 @@ func (c *coordinator) UpdateModels(ctx context.Context) error {
 	// this a no-op once the catalog exists.
 	c.cfg.RefetchOpenAIChatGPTModels(ctx)
 
-	agentCfg, ok := c.cfg.Config().Agents[config.AgentCoder]
+	agent, name := c.activeAgent()
+	return c.updateAgentModels(ctx, agent, name)
+}
+
+// updateAgentModels rebuilds the model and tool configuration for the
+// given agent from the current config.
+func (c *coordinator) updateAgentModels(ctx context.Context, agent SessionAgent, name string) error {
+	agentCfg, ok := c.cfg.Config().Agents[name]
 	if !ok {
-		return errCoderAgentNotConfigured
+		return fmt.Errorf("%w: %s", errMainAgentNotFound, name)
 	}
 
 	// build the models again so we make sure we get the latest config
@@ -1624,7 +1692,7 @@ func (c *coordinator) UpdateModels(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	c.currentAgent.SetModels(large, small)
+	agent.SetModels(large, small)
 
 	// Resolve summary model. Failures are logged but never block
 	// the primary agent — the summary model is auxiliary.
@@ -1647,7 +1715,7 @@ func (c *coordinator) UpdateModels(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	c.currentAgent.SetTools(tools)
+	agent.SetTools(tools)
 	return nil
 }
 
@@ -1715,15 +1783,16 @@ func (c *coordinator) UpdateSummaryModel(ctx context.Context) error {
 }
 
 func (c *coordinator) QueuedPrompts(sessionID string) int {
-	return c.currentAgent.QueuedPrompts(sessionID)
+	return c.currentAgent().QueuedPrompts(sessionID)
 }
 
 func (c *coordinator) QueuedPromptsList(sessionID string) []string {
-	return c.currentAgent.QueuedPromptsList(sessionID)
+	return c.currentAgent().QueuedPromptsList(sessionID)
 }
 
 func (c *coordinator) Summarize(ctx context.Context, sessionID string) error {
-	providerCfg, ok := c.cfg.Config().Providers.Get(c.currentAgent.Model().ModelCfg.Provider)
+	agent := c.currentAgent()
+	providerCfg, ok := c.cfg.Config().Providers.Get(agent.Model().ModelCfg.Provider)
 	if !ok {
 		return errModelProviderNotConfigured
 	}
@@ -1734,15 +1803,16 @@ func (c *coordinator) Summarize(ctx context.Context, sessionID string) error {
 
 	// Auth failures during summarize flow through fantasy's OnAuthRefresh,
 	// the same path used by regular turns.
-	return c.currentAgent.Summarize(ctx, sessionID, getProviderOptions(c.currentAgent.Model(), providerCfg), c.makeAuthRefreshCallback(providerCfg))
+	return agent.Summarize(ctx, sessionID, getProviderOptions(agent.Model(), providerCfg), c.makeAuthRefreshCallback(providerCfg))
 }
 
 // GenerateTitle generates a session title using the current agent.
 func (c *coordinator) GenerateTitle(ctx context.Context, sessionID, prompt string) {
-	if c.currentAgent == nil {
+	agent := c.currentAgent()
+	if agent == nil {
 		return
 	}
-	c.currentAgent.GenerateTitle(ctx, sessionID, prompt)
+	agent.GenerateTitle(ctx, sessionID, prompt)
 }
 
 // refreshTokenIfExpired proactively refreshes the OAuth token if it has expired.

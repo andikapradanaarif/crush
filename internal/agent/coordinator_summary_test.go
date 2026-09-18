@@ -42,7 +42,8 @@ func newSummaryTestCoordinator(t *testing.T, crushJSON string) *coordinator {
 
 	agent, err := coord.buildAgent(context.Background(), p, agentCfg, false)
 	require.NoError(t, err)
-	coord.currentAgent = agent
+	coord.mainAgent = agent
+	coord.mainAgentName = config.AgentCoder
 	coord.agents[config.AgentCoder] = agent
 
 	return coord

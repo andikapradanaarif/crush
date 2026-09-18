@@ -60,6 +60,7 @@ const (
 
 const (
 	AgentCoder string = "coder"
+	AgentPlan  string = "plan"
 	AgentTask  string = "task"
 )
 
@@ -415,7 +416,7 @@ type Options struct {
 	Progress           *bool    `json:"progress,omitempty" jsonschema:"description=Show indeterminate progress updates during long operations,default=true"`
 	Notifications      string   `json:"notifications,omitempty" jsonschema:"description=Notification style to use. Options: auto (default)\\, native\\, osc\\, bell\\, disabled. Auto selects based on environment: native for local sessions\\, osc for SSH (with automatic OSC 99/777 detection).,enum=auto,enum=native,enum=osc,enum=bell,enum=disabled,default=auto"`
 	DisabledSkills     []string `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=crush-config"`
-	RequestTimeout     *int     `json:"request_timeout,omitempty" jsonschema:"description=Timeout in seconds for each LLM API request. Streaming responses are aborted only after this much inactivity\\, so slow but active streams are never killed. 0 disables it\\, negative values are invalid.,default=60,example=120,example=300,example=0"`
+	RequestTimeout     *int     `json:"request_timeout,omitempty" jsonschema:"description=Timeout in seconds for each LLM API request. Streaming responses are aborted only after this much inactivity\\, so slow but active streams are never killed. 0 disables it\\, negative values are invalid.,default=120,example=120,example=300,example=0"`
 	// TurnContext selects the per-turn context augmentation tier:
 	// off (default) or session (deterministic session signals —
 	// working set, open todos — appended at the request tail). The
@@ -466,7 +467,7 @@ func OptionsProjection(o Options, keys []string) map[string]any {
 // of blocking a session forever; streamed responses are only aborted after
 // this much inactivity, and users running slow local models can raise or
 // disable it via options.request_timeout.
-const DefaultRequestTimeout = time.Minute
+const DefaultRequestTimeout = 2 * time.Minute
 
 // GetRequestTimeout returns the per-request timeout for LLM API calls (a
 // hard deadline for non-streaming requests and an idle timeout for
@@ -1068,9 +1069,36 @@ func resolveAllowedTools(allTools []string, disabledTools []string) []string {
 }
 
 func resolveReadOnlyTools(tools []string) []string {
-	readOnlyTools := []string{"glob", "grep", "ls", "lsp_call_hierarchy", "lsp_definition", "lsp_symbols", "map", "sourcegraph", "view"}
+	// Recall and notebook_search are read-only too — without them the
+	// task agent cannot follow the recall pointers the notebook renders
+	// into its prompts.
+	readOnlyTools := []string{"glob", "grep", "ls", "lsp_call_hierarchy", "lsp_definition", "lsp_symbols", "map", "recall", "notebook_search", "sourcegraph", "view"}
 	// filter to only include tools that are in allowedtools (include mode)
 	return filterSlice(tools, readOnlyTools, true)
+}
+
+func resolvePlanTools(tools []string) []string {
+	// The read-only LSP lookups mirror the task agent's tool set: planning
+	// needs symbol navigation just as much as research does. Recall,
+	// notebook_search, and map are read-only too — without recall the
+	// plan agent cannot follow the notebook pointers its prompts emit,
+	// and prior-turn collapse coerces to verbatim when recall is absent.
+	planTools := []string{
+		"agent",
+		"glob",
+		"grep",
+		"ls",
+		"lsp_call_hierarchy",
+		"lsp_definition",
+		"lsp_symbols",
+		"map",
+		"notebook_search",
+		"question",
+		"recall",
+		"sourcegraph",
+		"view",
+	}
+	return filterSlice(tools, planTools, true)
 }
 
 func filterSlice(data []string, mask []string, include bool) []string {
@@ -1105,6 +1133,17 @@ func (c *Config) SetupAgents() {
 			Model:        SelectedModelTypeLarge,
 			ContextPaths: c.Options.ContextPaths,
 			AllowedTools: resolveReadOnlyTools(allowedTools),
+			// NO MCPs or LSPs by default
+			AllowedMCP: map[string][]string{},
+		},
+
+		AgentPlan: {
+			ID:           AgentPlan,
+			Name:         "Plan",
+			Description:  "An agent that performs deep analysis and prepares implementation plans without modifying files.",
+			Model:        SelectedModelTypeLarge,
+			ContextPaths: c.Options.ContextPaths,
+			AllowedTools: resolvePlanTools(allowedTools),
 			// NO MCPs or LSPs by default
 			AllowedMCP: map[string][]string{},
 		},
