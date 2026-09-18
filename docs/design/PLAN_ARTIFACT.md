@@ -24,7 +24,7 @@ the ability to verify them.
 ## Problem
 
 `session.Todo` is `{Content, Status, ActiveForm}`
-(`session.go:34-38`) — flat strings, unordered, no dependencies,
+(`session.go:34-38`) — flat strings, no dependencies,
 model-managed. The run-end todos edge (`run_edges.go:334`) can
 ask "are items open?" and nothing more structured. `phase-confirm`
 is weaker than "render the list, ask yes/no" implies: the gate
@@ -51,18 +51,25 @@ Evidence []string}`:
 - `Evidence` is **two kinds, distinct fields** — not one
   `[]string` the done-definition sniffs prefixes on:
   - `EvidenceChecks []string` — gate-bearing: the item is
-    `completed` only when the named checks resolved green. Check
-    instances aren't unique per item (`verify:<name>` fires on
-    _every_ write; `package-test:<dir>` per write into a test
-    dir), so binding semantics need pinning: an item binds to the
-    **latest instance** of each named check. An evidence name
-    that never materializes (`package-test:foo` with no write
-    into `foo/`) is a third state — **evidence unmet**, distinct
-    from failed — reported to the model as "no check of that name
-    has run" rather than a failure it can retry against.
-  - `EvidencePaths []string` — annotation only, never gating: an
-    item bound to `internal/agent/` lets a repair/replan edge
-    render the current symbols of the files it names
+    `completed` only when the named checks resolved green.
+    **Only configured check names are bindable** — `verify:<name>`
+    comes from config, so the model can know it at plan time.
+    `package-test:<dir>` is minted per write from the edited
+    file's path (`verify_checks.go:59`) — the model can only
+    _predict_ it, so it is never bound by name; its coverage is
+    derived from `EvidencePaths` instead (the harness maps
+    path→dir). Binding is to the **latest instance** of each
+    name. An evidence name that never materializes is a third
+    state — **evidence unmet**, distinct from failed — reported
+    to the model as "no check of that name has run" rather than
+    a failure it can retry against.
+  - `EvidencePaths []string` — the model-known kind, and it does
+    carry a weak done-ness rule: **write landed on the path AND
+    no check covering it failed**. The path→covering-check map
+    (`package-test:<dir>` included) is the harness's job, not the
+    model's vocabulary. Same paths double as annotation: an item
+    bound to `internal/agent/` lets a repair/replan edge render
+    the current symbols of the files it names
     (`CONTEXT_PREFETCH.md`) into the prompt — the plan carries
     its own map.
     This unifies today's two gate triggers (failed checks, open
@@ -71,6 +78,15 @@ Evidence []string}`:
     latch**: a check that went green then regressed on a later
     write reopens the item at the run-end edge. "Completed" is a
     property of the clean-stop state, not the mark-time snapshot.
+- **Status is model-marked; effective state is derived.** The
+  model marks `completed`; the effective state is `marked ∧
+evidence` — a completed mark with pending/failed/unmet
+  evidence is _evidence-blocked_, not rejected (rejecting the
+  write would hide the plan from the gate). The run-end edge
+  reports the override with its reason ("marked completed but
+  `verify:build` failed / has not run") so the model sees the
+  divergence — an invisible override would re-mark every turn:
+  thrash.
 - `ID` ownership: the model rewrites the whole list per call and
   identity today is keyed on mutable `Content`. **The harness
   mints IDs on write** (model-authored IDs collide); rewrites
@@ -94,10 +110,21 @@ Evidence []string}`:
   coherent demand. Executor confidence becomes a property of the
   artifact — the harness inspects the plan, it never asks the
   model to self-report a percentage.
-- Persistence: todos already ride the session row; the durable win
-  is a `plan` notebook entry type so the plan survives compaction
-  as ground truth — today the summary has to re-derive what the
-  plan was from rendered todo tool calls.
+- Persistence: open items already survive — `session.Todos` lives
+  on the session row and re-renders into every turn's context
+  (`<open_todos>`, `turn_context.go:115`). What compaction loses
+  is _history_: completed items, dependencies, evidence bindings —
+  a `plan` notebook entry type preserves the plan's structure as
+  ground truth for replan and hydration, instead of re-deriving it
+  from rendered todo tool calls.
+- **Plumbing surface is wider than the tool.** `session.Todo`
+  fans out to `proto.Todo`, `server/events.go`,
+  `client_workspace.go`, `ui/chat/todos.go`, `ui/model/pills.go` —
+  `PlanItem` fields need the same path (or the UI keeps the flat
+  view and drops the new fields). `tools.TodosToolName` is
+  hard-coded in `incompleteTodos` (`verify_gate.go:410`) and
+  `scopeGate.observe` (`scope_gate.go:125`) — a `plan` rename
+  touches both.
 - The model still writes the plan (the `todos` tool graduates, or
   a `plan` tool replaces it with a migration shim reading old
   `session.Todos`). The harness gains structure to _check_; it
