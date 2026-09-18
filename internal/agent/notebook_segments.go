@@ -1117,7 +1117,6 @@ func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID strin
 			}
 		}
 		if rendered := notebook.RenderEntries(selected); rendered != "" {
-			rendered = notebook.RewriteTruncationMarker(rendered)
 			// Turns whose every entry was budget-evicted have entries
 			// but nothing rendered. Emit a breadcrumb so the omission
 			// isn't silent — the raw window intentionally does not

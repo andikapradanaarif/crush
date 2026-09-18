@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	notebooktool "github.com/charmbracelet/crush/internal/agent/tools/notebook"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/message"
@@ -336,6 +337,12 @@ func newSegmentTestAgent(t *testing.T, gen notebook.Generator) (*sessionAgent, m
 		stubStats:        csync.NewMap[string, stubStats](),
 		collapseRecorded: csync.NewMap[string, *csync.Map[int64, bool]](),
 		systemPrompt:     csync.NewValue("system"),
+		// Collapse and stub rendering gate on the live tool set — the
+		// fixture carries recall/notebook_search like a default coder.
+		tools: csync.NewSliceFrom([]fantasy.AgentTool{
+			&fakeTool{name: notebooktool.RecallToolName},
+			&fakeTool{name: notebooktool.SearchToolName},
+		}),
 	}
 	// Seed the stamp generator like NewSessionAgent — stamps are
 	// random-epoch, so tests must assert explicit stamps rather than
@@ -698,36 +705,6 @@ func TestRenderNotebookPrefix_OmittedTurnBreadcrumb(t *testing.T) {
 	none := render(&sessionAgent{})
 	require.Contains(t, none, "turns 0 have notebook entries not injected here]")
 	require.NotContains(t, none, "recallable")
-}
-
-// TestRenderNotebookPrefix_ScrubsLegacyTruncationMarker covers the
-// stored-text wrinkle from issue 66: entries written while the
-// truncation marker named recall keep that pointer in entry_text, so
-// the render scrubs it. The scrub is unconditional — entry_text_full
-// holds the same truncated body, so the pointer overpromises even
-// for agents that have the tool.
-func TestRenderNotebookPrefix_ScrubsLegacyTruncationMarker(t *testing.T) {
-	t.Parallel()
-
-	legacy := "cut content\n" + notebook.LegacyEntryTruncatedMarker + "\nfile:a.go"
-	entries := []notebook.Entry{
-		nbSegEntry("e1", 0, 0, 1, notebook.EventGeneral, legacy, 10),
-	}
-	rawMsgs := []message.Message{segUser("go"), segAssistant("work")}
-	render := func(a *sessionAgent) string {
-		prefix, _ := a.renderNotebookPrefix(t.Context(), "sess", entries, rawMsgs,
-			segmentKey{turn: 1, segment: 0}, segmentKey{turn: 0, segment: 0}, nil, selectionInput{}, nil, a.recallVia())
-		require.Len(t, prefix, 1)
-		return prefix[0].Content[0].(fantasy.TextPart).Text
-	}
-
-	withRecall := render(&sessionAgent{tools: csync.NewSliceFrom([]fantasy.AgentTool{&fakeTool{name: "recall"}})})
-	require.Contains(t, withRecall, notebook.EntryTruncatedMarker)
-	require.NotContains(t, withRecall, "recall tool for full details")
-
-	without := render(&sessionAgent{})
-	require.Contains(t, without, notebook.EntryTruncatedMarker)
-	require.NotContains(t, without, "recall tool for full details")
 }
 
 // TestDetectSegments_AsyncCloses exercises the real goroutine path —

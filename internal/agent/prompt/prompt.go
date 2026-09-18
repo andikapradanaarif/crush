@@ -13,7 +13,6 @@ import (
 	"text/template"
 	"time"
 
-	notebooktool "github.com/charmbracelet/crush/internal/agent/tools/notebook"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/home"
@@ -44,14 +43,15 @@ type PromptDat struct {
 	GlobalContextFiles []ContextFile
 	AvailSkillXML      string
 	NotebookEnabled    bool
-	// RecallEnabled and NotebookSearchEnabled report whether the agent
-	// this prompt is built for can call the notebook lookup tools —
-	// templates must not advertise tools the agent lacks. Resolved
-	// from cfg.Agents[p.name]; prompt names match agent IDs, and
-	// prompts without an agent entry (initialize, agentic_fetch)
-	// leave both false.
-	RecallEnabled         bool
-	NotebookSearchEnabled bool
+	// AgentTools is the AllowedTools list of the agent this prompt is
+	// built for — templates must not advertise tools the agent lacks.
+	// Resolved from cfg.Agents[p.name]; prompt names match agent IDs,
+	// and prompts without an agent entry (initialize, agentic_fetch)
+	// leave it nil. Snapshotted at Build time: the system prompt
+	// renders once per agent build, so a config reload swapping the
+	// tool palette leaves it stale until the next build — the same
+	// lifecycle as every other config-derived PromptDat field.
+	AgentTools []string
 	// ProjectIndexEnabled reports whether the map tool is registered —
 	// the prompt's map hint must not render when the tool is absent, or
 	// the model calls a tool it doesn't have and burns turns on
@@ -111,7 +111,14 @@ func NewPrompt(name, promptTemplate string, opts ...Option) (*Prompt, error) {
 }
 
 func (p *Prompt) Build(ctx context.Context, provider, model string, store *config.ConfigStore) (BuiltPrompt, error) {
-	t, err := template.New(p.name).Parse(p.template)
+	// hasTool lets templates gate instructions on whether the agent the
+	// prompt is built for actually carries a tool — e.g. recall guidance
+	// for an agent whose AllowedTools omit it would be a dead pointer.
+	t, err := template.New(p.name).Funcs(template.FuncMap{
+		"hasTool": func(tools []string, name string) bool {
+			return slices.Contains(tools, name)
+		},
+	}).Parse(p.template)
 	if err != nil {
 		return BuiltPrompt{}, fmt.Errorf("parsing template: %w", err)
 	}
@@ -266,17 +273,12 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 		ProjectIndexEnabled: cfg.Options.ProjectIndexEnabled(),
 		Interactive:         p.interactive,
 	}
-	// The notebook tools register only when the notebook is on —
-	// allowed_tools alone does not make them callable. The flags
-	// snapshot at Build time: the system prompt renders once per
-	// agent build, so a config reload that swaps the tool palette
-	// leaves them stale until the next build — the same lifecycle as
-	// every other config-derived PromptDat field. (The omitted-turns
-	// breadcrumb in the notebook prefix is live-gated per render
-	// instead, since it regenerates every step.)
-	if agent, ok := cfg.Agents[p.name]; ok && data.NotebookEnabled {
-		data.RecallEnabled = slices.Contains(agent.AllowedTools, notebooktool.RecallToolName)
-		data.NotebookSearchEnabled = slices.Contains(agent.AllowedTools, notebooktool.SearchToolName)
+	// AgentTools resolves unconditionally — plan.md.tpl renders it as
+	// the tool list outside any notebook section. The notebook tools
+	// register only when the notebook is on, so templates gate
+	// recall/search guidance behind NotebookEnabled as well.
+	if agent, ok := cfg.Agents[p.name]; ok {
+		data.AgentTools = agent.AllowedTools
 	}
 	if isGit {
 		var err error

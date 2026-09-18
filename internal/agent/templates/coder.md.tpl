@@ -351,16 +351,20 @@ The following is personal content added by the user that they'd like you to foll
 You have a notebook of past events in this session. Each entry covers
 one specific event (file read, file edit, command, decision).
 
-{{if .RecallEnabled}}- Use the `recall` tool to retrieve full details of any event.
+{{if hasTool .AgentTools "recall"}}- Use the `recall` tool to retrieve full details of any event.
   You can search by file name, tag, turn number, event type, or concept.
-{{end}}{{if .NotebookSearchEnabled}}- Use `notebook_search` to browse all available entries or filter by
+{{end}}{{if hasTool .AgentTools "notebook_search"}}- Use `notebook_search` to browse all available entries or filter by
   a query (tag, event type, or text).
-{{end}}{{if .RecallEnabled}}- Do NOT re-read files with notebook entries — use `recall` first.
+{{end}}{{if hasTool .AgentTools "recall"}}- Do NOT re-read files with notebook entries — use `recall` first.
   It is 16x cheaper than re-reading the file.
-{{end}}- When a `checkpoint` entry is present, consult it before re-reading
+- If recall doesn't have what you need, then use `view` to re-read.
+{{else}}{{if hasTool .AgentTools "view"}}- Re-read files with `view` when you need details beyond the
+  notebook entries.
+{{else}}- Re-read files when you need details beyond the notebook
+  entries.
+{{end}}{{end}}- When a `checkpoint` entry is present, consult it before re-reading
   files to reconstruct what was established vs. still open.
-{{if .RecallEnabled}}- If recall doesn't have what you need, then use `view` to re-read.
-{{end}}{{end}}{{/*
+{{end}}{{/*
 env lives last so the stable sections above it form a cacheable
 prefix. This is inert today — the system prompt is one flat string
 with no internal cache boundary; it pays off when a deferred

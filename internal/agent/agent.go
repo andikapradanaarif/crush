@@ -43,6 +43,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	notebooktool "github.com/charmbracelet/crush/internal/agent/tools/notebook"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/filetracker"
@@ -2007,11 +2008,16 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 		rawMsgs = msgs
 	}
 
+	// Turn collapse and superseded stubs only render recall pointers —
+	// gate them on the live tool set, not just the build-time flags, so
+	// a runtime disabled_tools: [recall] can't leave dead pointers.
+	recallLive := a.hasTool(notebooktool.RecallToolName)
+
 	// Per-message turn numbers are absolute over the full stored list —
 	// rawMsgs can begin mid-turn, so numbering the slice would mislabel
 	// turns against the registry.
 	var turns []int64
-	if collapse != nil && len(collapse.Set) > 0 {
+	if collapse != nil && len(collapse.Set) > 0 && recallLive {
 		turns = messageTurns(msgs)
 	}
 	collapsedTurn := func(i int) (int64, bool) {
@@ -2059,7 +2065,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 			var n int
 			m, n = collapseToolMessageForTurn(m, turn, a.priorTurns, exemptCalls, callNames)
 			collapsedResults += n
-		} else if a.stubSuperseded {
+		} else if a.stubSuperseded && recallLive {
 			// Substitute stubs before indexing so the emitted result
 			// parts carry the stub text, not the stored original.
 			var count int
@@ -2306,7 +2312,7 @@ func (a *sessionAgent) maybeAutoInject(ctx context.Context, msgs []message.Messa
 			text = e.EntryText
 		}
 		fmt.Fprintf(&sb, "## Turn %d.%d — %s\n", e.TurnNumber, e.EventNumber, e.Title)
-		sb.WriteString(notebook.RewriteTruncationMarker(text))
+		sb.WriteString(text)
 		for _, tag := range e.Tags {
 			if base, ok := strings.CutPrefix(tag, "file:"); ok && injectedFiles != nil {
 				injectedFiles[base] = true
