@@ -59,16 +59,23 @@ type Querier interface {
 	GetUsageByDayOfWeek(ctx context.Context) ([]GetUsageByDayOfWeekRow, error)
 	GetUsageByHour(ctx context.Context) ([]GetUsageByHourRow, error)
 	GetUsageByModel(ctx context.Context) ([]GetUsageByModelRow, error)
+	// Backs prompt history when no session is open. Needs
+	// idx_messages_role_created_at to seek rather than scan the table.
 	ListAllUserMessages(ctx context.Context) ([]Message, error)
 	ListFilesByPath(ctx context.Context, path string) ([]File, error)
 	ListFilesBySession(ctx context.Context, sessionID string) ([]File, error)
 	ListLatestSessionFiles(ctx context.Context, sessionID string) ([]File, error)
 	ListMessagesBySession(ctx context.Context, sessionID string) ([]Message, error)
+	// Messages from the summary onward, which is all a compacted session sends.
+	// created_at has one-second resolution, so a few messages preceding the
+	// summary can come back too; the caller slices from the summary by ID.
+	ListMessagesBySessionFromSummary(ctx context.Context, arg ListMessagesBySessionFromSummaryParams) ([]Message, error)
 	ListNewFiles(ctx context.Context) ([]File, error)
 	ListProcessedSegments(ctx context.Context, sessionID string) ([]ProcessedSegment, error)
 	ListSessionCounters(ctx context.Context) ([]ListSessionCountersRow, error)
 	ListSessionReadFiles(ctx context.Context, sessionID string) ([]ReadFile, error)
 	ListSessions(ctx context.Context) ([]Session, error)
+	// Backs prompt history, which steps back one entry at a time.
 	ListUserMessagesBySession(ctx context.Context, sessionID string) ([]Message, error)
 	MarkSegmentProcessed(ctx context.Context, arg MarkSegmentProcessedParams) error
 	// One row per collapsed prior turn; INSERT OR IGNORE makes the write

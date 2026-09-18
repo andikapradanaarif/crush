@@ -50,7 +50,7 @@ type SessionTelemetry struct {
 // type-asserts for it so test stubs needn't implement it. Zero value
 // when the agent is absent or the session has no accumulated counters.
 func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
-	sa, ok := c.currentAgent.(*sessionAgent)
+	sa, ok := c.currentAgent().(*sessionAgent)
 	if !ok || sa == nil {
 		return SessionTelemetry{}
 	}
