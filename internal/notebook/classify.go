@@ -548,8 +548,9 @@ func (s *service) GenerateEntries(ctx context.Context, sessionID string, turnNum
 const EntryTruncatedMarker = "[Entry truncated.]"
 
 // LegacyEntryTruncatedMarker is the marker entries stored before it
-// stopped naming recall. Renders for agents without the tool rewrite
-// it to EntryTruncatedMarker so no dead pointer ships.
+// stopped naming recall. Renders rewrite it to EntryTruncatedMarker
+// unconditionally — the pointer overpromises for every agent since
+// entry_text_full holds the same truncated body.
 const LegacyEntryTruncatedMarker = "[Entry truncated. Use recall tool for full details.]"
 
 // truncateEntry clips an entry to the max token budget, preserving

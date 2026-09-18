@@ -23,8 +23,8 @@ type SearchParams struct {
 
 // NewSearchTool creates a tool that lists and searches notebook entries.
 // With no query: returns all entries (titles + tags only). With a query:
-// returns matching entries (titles + tags only). Use recall for full
-// content.
+// returns matching entries (titles + tags only). Full content comes from
+// recall when it is available.
 func NewSearchTool(svc notebook.Service) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		SearchToolName,
