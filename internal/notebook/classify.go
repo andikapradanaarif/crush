@@ -537,6 +537,21 @@ func (s *service) GenerateEntries(ctx context.Context, sessionID string, turnNum
 	return nil
 }
 
+// EntryTruncatedMarker is the line truncateEntry appends where it cut
+// generated text. It names no tool: recovery pointers are a
+// render-time concern gated on the prompted agent's tool set, and a
+// stored pointer to a tool the agent lacks is dead text. The marker
+// stays tool-neutral for a second reason — entry_text_full holds the
+// same truncated body, so recall has no fuller text to return and a
+// "use recall for full details" pointer overpromises even when the
+// tool exists.
+const EntryTruncatedMarker = "[Entry truncated.]"
+
+// LegacyEntryTruncatedMarker is the marker entries stored before it
+// stopped naming recall. Renders for agents without the tool rewrite
+// it to EntryTruncatedMarker so no dead pointer ships.
+const LegacyEntryTruncatedMarker = "[Entry truncated. Use recall tool for full details.]"
+
 // truncateEntry clips an entry to the max token budget, preserving
 // tags at the bottom.
 func truncateEntry(text string, maxTokens int64) string {
@@ -556,7 +571,7 @@ func truncateEntry(text string, maxTokens int64) string {
 	}
 	body := strings.Join(lines[:len(lines)-len(tagLines)], "\n")
 	body = body[:maxChars-len(strings.Join(tagLines, "\n"))-50]
-	return body + "\n[Entry truncated. Use recall tool for full details.]\n" + strings.Join(tagLines, "\n")
+	return body + "\n" + EntryTruncatedMarker + "\n" + strings.Join(tagLines, "\n")
 }
 
 // extractAssistantText returns the concatenated text of all assistant

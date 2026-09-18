@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	notebooktool "github.com/charmbracelet/crush/internal/agent/tools/notebook"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/notebook"
 )
@@ -1105,6 +1106,7 @@ func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID strin
 			}
 		}
 		if rendered := notebook.RenderEntries(selected); rendered != "" {
+			rendered = a.scrubDeadRecallPointer(rendered)
 			// Turns whose every entry was budget-evicted have entries
 			// but nothing rendered. Emit a breadcrumb so the omission
 			// isn't silent — the raw window intentionally does not
@@ -1121,7 +1123,7 @@ func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID strin
 			}
 			if len(omitted) > 0 {
 				slices.Sort(omitted)
-				rendered += "\n\n[turns " + formatTurnRanges(omitted) + " have notebook entries not injected here — recallable via recall/notebook_search]"
+				rendered += "\n\n[turns " + formatTurnRanges(omitted) + " have notebook entries not injected here" + a.recallVia() + "]"
 			}
 			msg := fantasy.NewSystemMessage("<notebook>\n" + rendered + "</notebook>")
 			out = append(out, msg)
@@ -1133,6 +1135,36 @@ func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID strin
 		}
 	}
 	return out, files
+}
+
+// recallVia names the notebook lookup tools the rendering agent can
+// actually call, for pointers emitted into its prompt. The live tool
+// set is the gate — a build-time flag goes stale when a config reload
+// rebuilds the palette, and a pointer to a tool the agent lacks is a
+// dead end. Empty when neither tool is present.
+func (a *sessionAgent) recallVia() string {
+	hasRecall := a.hasTool(notebooktool.RecallToolName)
+	hasSearch := a.hasTool(notebooktool.SearchToolName)
+	switch {
+	case hasRecall && hasSearch:
+		return " — recallable via recall/notebook_search"
+	case hasRecall:
+		return " — recallable via recall"
+	case hasSearch:
+		return " — recallable via notebook_search"
+	}
+	return ""
+}
+
+// scrubDeadRecallPointer rewrites the recall pointer baked into entry
+// text stored before the truncation marker went tool-neutral. Agents
+// without recall get the plain marker instead of a dead pointer; with
+// it the stored text renders as-is.
+func (a *sessionAgent) scrubDeadRecallPointer(text string) string {
+	if a.hasTool(notebooktool.RecallToolName) {
+		return text
+	}
+	return strings.ReplaceAll(text, notebook.LegacyEntryTruncatedMarker, notebook.EntryTruncatedMarker)
 }
 
 // noteSelectionDiff folds one render's per-pass contribution counts

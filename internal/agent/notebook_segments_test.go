@@ -658,6 +658,75 @@ func TestRenderNotebookPrefix_SegmentCoverageFilter(t *testing.T) {
 	require.NotContains(t, text, "segment two content")
 }
 
+// TestRenderNotebookPrefix_OmittedTurnBreadcrumb is the issue-66
+// contract: the recall pointer in the omitted-turns breadcrumb must
+// name only the lookup tools the rendering agent actually has — a
+// pointer to a missing tool is a dead end.
+func TestRenderNotebookPrefix_OmittedTurnBreadcrumb(t *testing.T) {
+	t.Parallel()
+
+	// The oversized turn-0 entry is skipped by every selection pass,
+	// leaving turn 0 in the omitted set the breadcrumb reports.
+	entries := []notebook.Entry{
+		nbSegEntry("big", 0, 0, 1, notebook.EventGeneral, "oversized", maxNotebookInjectionTokens+1),
+		nbSegEntry("ok", 1, 0, 1, notebook.EventGeneral, "rendered content", 10),
+	}
+	rawMsgs := []message.Message{segUser("go"), segAssistant("work")}
+	render := func(a *sessionAgent) string {
+		prefix, _ := a.renderNotebookPrefix(t.Context(), "sess", entries, rawMsgs,
+			segmentKey{turn: 2, segment: 0}, segmentKey{turn: 0, segment: 0}, nil, selectionInput{}, nil)
+		require.Len(t, prefix, 1)
+		return prefix[0].Content[0].(fantasy.TextPart).Text
+	}
+	withTools := func(tools ...fantasy.AgentTool) *sessionAgent {
+		return &sessionAgent{tools: csync.NewSliceFrom(tools)}
+	}
+
+	both := render(withTools(&fakeTool{name: "recall"}, &fakeTool{name: "notebook_search"}))
+	require.Contains(t, both, "turns 0 have notebook entries not injected here")
+	require.Contains(t, both, "recallable via recall/notebook_search")
+
+	recallOnly := render(withTools(&fakeTool{name: "recall"}))
+	require.Contains(t, recallOnly, "recallable via recall]")
+	require.NotContains(t, recallOnly, "notebook_search")
+
+	searchOnly := render(withTools(&fakeTool{name: "notebook_search"}))
+	require.Contains(t, searchOnly, "recallable via notebook_search]")
+	require.NotContains(t, searchOnly, "recallable via recall")
+
+	// Neither tool: the omission still reports, but with no pointer.
+	none := render(&sessionAgent{})
+	require.Contains(t, none, "turns 0 have notebook entries not injected here]")
+	require.NotContains(t, none, "recallable")
+}
+
+// TestRenderNotebookPrefix_ScrubsLegacyTruncationMarker covers the
+// stored-text wrinkle from issue 66: entries written while the
+// truncation marker named recall keep that pointer in entry_text, so
+// the render scrubs it for agents that cannot call the tool.
+func TestRenderNotebookPrefix_ScrubsLegacyTruncationMarker(t *testing.T) {
+	t.Parallel()
+
+	legacy := "cut content\n" + notebook.LegacyEntryTruncatedMarker + "\nfile:a.go"
+	entries := []notebook.Entry{
+		nbSegEntry("e1", 0, 0, 1, notebook.EventGeneral, legacy, 10),
+	}
+	rawMsgs := []message.Message{segUser("go"), segAssistant("work")}
+	render := func(a *sessionAgent) string {
+		prefix, _ := a.renderNotebookPrefix(t.Context(), "sess", entries, rawMsgs,
+			segmentKey{turn: 1, segment: 0}, segmentKey{turn: 0, segment: 0}, nil, selectionInput{}, nil)
+		require.Len(t, prefix, 1)
+		return prefix[0].Content[0].(fantasy.TextPart).Text
+	}
+
+	withRecall := render(&sessionAgent{tools: csync.NewSliceFrom([]fantasy.AgentTool{&fakeTool{name: "recall"}})})
+	require.Contains(t, withRecall, "Use recall tool for full details")
+
+	without := render(&sessionAgent{})
+	require.Contains(t, without, notebook.EntryTruncatedMarker)
+	require.NotContains(t, without, "recall tool for full details")
+}
+
 // TestDetectSegments_AsyncCloses exercises the real goroutine path —
 // multiple segments firing generation and flagging concurrently. Run
 // with -race to cover the per-goroutine clone isolation.
