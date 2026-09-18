@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -43,7 +44,28 @@ const (
 	gatePass gateVerdict = iota
 	gateWait
 	gateConfirm
+	// gateRejectPlan bounces a todos call that cannot count as a
+	// declaration — the gate is armed and the submitted list is empty
+	// or carries an item with no evidence bound.
+	gateRejectPlan
 )
+
+// planCallResolves reports whether a todos call declares a plan the
+// gate accepts: a non-empty list where every item binds evidence —
+// checks or paths. A plan of bare strings, or an empty list, is a
+// legal write but not a declaration.
+func planCallResolves(input string) bool {
+	var params tools.TodosParams
+	if err := json.Unmarshal([]byte(input), &params); err != nil || len(params.Todos) == 0 {
+		return false
+	}
+	for _, item := range params.Todos {
+		if len(item.EvidenceChecks) == 0 && len(item.EvidencePaths) == 0 {
+			return false
+		}
+	}
+	return true
+}
 
 // scopeGate wraps the tool list to intercept the first mutating call of
 // a run when deep exploration suggests a non-routine scope. In
@@ -120,10 +142,21 @@ func (g *scopeGate) observe(ctx context.Context, call fantasy.ToolCall) (gateVer
 			return gateConfirm, st.explore
 		}
 	}
-	// A declared plan or an in-flight question already externalized the
-	// scope decision — the gate is satisfied for the rest of the run.
-	if call.Name == tools.TodosToolName || call.Name == tools.QuestionToolName {
+	// An in-flight question already externalized the scope decision —
+	// the gate is satisfied for the rest of the run.
+	if call.Name == tools.QuestionToolName {
 		st.resolved = true
+		return gatePass, st.explore
+	}
+	// A plan call resolves the gate only once a validating plan has
+	// landed (checked post-run in Run). While the gate is armed, a
+	// non-validating declaration gets bounced with the reason so the
+	// model fixes the list instead of hitting the question cold.
+	if call.Name == tools.TodosToolName {
+		if !st.resolved && !st.asking &&
+			st.explore >= scopeGateMinExploration && !planCallResolves(call.Input) {
+			return gateRejectPlan, st.explore
+		}
 		return gatePass, st.explore
 	}
 	st.explore++
@@ -211,7 +244,22 @@ func (t *scopeGateTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 	verdict, explore := t.gate.observe(ctx, call)
 	switch verdict {
 	case gatePass:
-		return t.inner.Run(ctx, call)
+		resp, err := t.inner.Run(ctx, call)
+		// A plan declaration satisfies the gate only once a
+		// validating list has actually landed — a write the tool
+		// rejected must not count as a declaration.
+		if err == nil && !resp.IsError &&
+			call.Name == tools.TodosToolName && planCallResolves(call.Input) {
+			t.gate.resolve(ctx)
+		}
+		return resp, err
+	case gateRejectPlan:
+		return fantasy.NewTextErrorResponse(
+			"This todos call does not count as declaring the plan: every item must bind " +
+				"evidence via evidence_checks or evidence_paths, and the list must not be empty. " +
+				"Resubmit with evidence bound to each item, or proceed and answer the scope-check " +
+				"question when the first write triggers it.",
+		), nil
 	case gateWait:
 		return fantasy.NewTextErrorResponse(
 			"Scope check in progress — re-issue this call after the pending question resolves.",

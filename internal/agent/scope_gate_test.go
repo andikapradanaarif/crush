@@ -223,13 +223,91 @@ func TestScopeGate(t *testing.T) {
 		})
 		ctx := gateCtx("s1", 1)
 		exploreN(t, ctx, shared[1], scopeGateMinExploration)
-		_, err := shared[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName})
+		_, err := shared[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName,
+			Input: `{"todos":[{"content":"fix the gate","status":"pending","evidence_paths":["internal/agent/scope_gate.go"]}]}`})
 		require.NoError(t, err)
 		resp, err := shared[2].Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
 		require.NoError(t, err)
 		require.False(t, resp.IsError)
 		require.True(t, write.called)
 		require.Equal(t, 0, svc.asks)
+	})
+
+	newTodosGate := func(t *testing.T) (*fakeQuestionService, *fakeTool, *fakeTool, fantasy.AgentTool, fantasy.AgentTool, fantasy.AgentTool) {
+		svc := &fakeQuestionService{selected: []string{"proceed"}}
+		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextResponse("ok")}
+		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
+		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
+		wrapped := newScopeGate(svc, true).wrap([]fantasy.AgentTool{todosTool, read, write})
+		return svc, todosTool, write, wrapped[0], wrapped[1], wrapped[2]
+	}
+	barePlan := `{"todos":[{"content":"fix the gate","status":"pending"}]}`
+	boundPlan := `{"todos":[{"content":"fix the gate","status":"pending","evidence_checks":["verify:build"]}]}`
+
+	t.Run("bare-string plan does not resolve the gate", func(t *testing.T) {
+		t.Parallel()
+		svc, _, write, todosTool, readTool, writeTool := newTodosGate(t)
+		ctx := gateCtx("s1", 1)
+		exploreN(t, ctx, readTool, scopeGateMinExploration)
+
+		// Armed gate: the non-validating declaration bounces with the
+		// reason instead of running.
+		resp, err := todosTool.Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName, Input: barePlan})
+		require.NoError(t, err)
+		require.True(t, resp.IsError)
+		require.Contains(t, resp.Content, "must bind evidence")
+
+		// The write that follows still hits the scope question.
+		_, err = writeTool.Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
+		require.NoError(t, err)
+		require.Equal(t, 1, svc.asks)
+		require.True(t, write.called)
+	})
+
+	t.Run("empty plan does not resolve the gate", func(t *testing.T) {
+		t.Parallel()
+		svc, _, _, todosTool, readTool, writeTool := newTodosGate(t)
+		ctx := gateCtx("s1", 1)
+		exploreN(t, ctx, readTool, scopeGateMinExploration)
+		resp, err := todosTool.Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName, Input: `{"todos":[]}`})
+		require.NoError(t, err)
+		require.True(t, resp.IsError)
+		_, err = writeTool.Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
+		require.NoError(t, err)
+		require.Equal(t, 1, svc.asks)
+	})
+
+	t.Run("bound plan resolves the gate after landing", func(t *testing.T) {
+		t.Parallel()
+		svc, todosFake, write, todosTool, readTool, writeTool := newTodosGate(t)
+		ctx := gateCtx("s1", 1)
+		exploreN(t, ctx, readTool, scopeGateMinExploration)
+		resp, err := todosTool.Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName, Input: boundPlan})
+		require.NoError(t, err)
+		require.False(t, resp.IsError)
+		require.True(t, todosFake.called, "the write must land before it counts as declared")
+		resp, err = writeTool.Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
+		require.NoError(t, err)
+		require.False(t, resp.IsError)
+		require.True(t, write.called)
+		require.Equal(t, 0, svc.asks)
+	})
+
+	t.Run("a rejected plan write does not resolve the gate", func(t *testing.T) {
+		t.Parallel()
+		svc := &fakeQuestionService{selected: []string{"proceed"}}
+		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextErrorResponse("validation failed")}
+		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
+		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
+		wrapped := newScopeGate(svc, true).wrap([]fantasy.AgentTool{todosTool, read, write})
+		ctx := gateCtx("s1", 1)
+		exploreN(t, ctx, wrapped[1], scopeGateMinExploration)
+		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName, Input: boundPlan})
+		require.NoError(t, err)
+		require.True(t, resp.IsError, "the underlying tool error propagates")
+		_, err = wrapped[2].Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
+		require.NoError(t, err)
+		require.Equal(t, 1, svc.asks, "a rejected write must not count as declared")
 	})
 
 	t.Run("user stop ends the turn", func(t *testing.T) {
