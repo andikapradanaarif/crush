@@ -117,23 +117,18 @@ func (s *service) GenerateTurnDigest(ctx context.Context, sessionID string, req 
 	err = s.withTx(ctx, func(q *db.Queries) error {
 		// Re-check under the write lock: a sibling generation for
 		// this turn may have committed while this one was in the
-		// model call.
-		rows, err := q.GetNotebookEntriesByTurn(ctx, db.GetNotebookEntriesByTurnParams{
-			SessionID:  sessionID,
-			TurnNumber: req.TurnNumber,
+		// model call. One tag join — granularity:turn is a rare tag
+		// (at most one entry per digested turn), so the tag index
+		// beats walking the turn's entries and their tags per row.
+		rows, err := q.SearchNotebookByTag(ctx, db.SearchNotebookByTagParams{
+			SessionID: sessionID,
+			Tag:       granularityTagPrefix + GranularityTurn,
 		})
 		if err != nil {
 			return err
 		}
 		for _, row := range rows {
-			if row.EventType != EventCheckpoint {
-				continue
-			}
-			tags, err := q.GetNotebookTagsByEntry(ctx, row.ID)
-			if err != nil {
-				return err
-			}
-			if slices.Contains(tags, granularityTagPrefix+GranularityTurn) {
+			if row.TurnNumber == req.TurnNumber && row.EventType == EventCheckpoint {
 				return errDigestExists
 			}
 		}
