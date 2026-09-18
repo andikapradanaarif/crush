@@ -797,6 +797,12 @@ func prefixFingerprint(boundary int, bKey, floor segmentKey, entries []notebook.
 			write(0)
 		}
 	}
+	// The digest-eligible turn set changes the render (post-selection
+	// demotion) without changing any entry — see the note where it is
+	// populated in notebookPrefix.
+	for _, t := range slices.Sorted(maps.Keys(sel.digestEligible)) {
+		write(t)
+	}
 	return h.Sum64()
 }
 
@@ -880,6 +886,14 @@ func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msg
 	// the rest of the run.
 	refs := notebookRelevanceRefs(detCtx, a.sessions, sessionID, msgs)
 	sel := a.buildSelectionInput(detCtx, sessionID, entries, segs, boundary, bKey)
+	if collapse != nil {
+		// The eligibility set is run-frozen, not entry-derived — a
+		// later run can face the same entry set with a wider frozen
+		// set (an earlier run froze before a digest committed). It
+		// must feed the fingerprint or the cache can serve a render
+		// built under the older, looser eligibility.
+		sel.digestEligible = collapse.digestTurns
+	}
 	floor := coveredSegmentFloor(segs, boundary)
 	fp := prefixFingerprint(boundary, bKey, floor, entries, refs, sel)
 	if a.prefixCache != nil {

@@ -138,6 +138,52 @@ func TestGenerateTurnDigests_SkipsAlreadyDigestedTurn(t *testing.T) {
 	require.True(t, got[1])
 }
 
+// TestGenerateTurnDigests_TailOwnership covers the fold scenario:
+// when a user message sits past this run's final assistant message
+// (drainQueueForStep folded a queued prompt in), the tail belongs to
+// a newer run and this pass must not digest it.
+func TestGenerateTurnDigests_TailOwnership(t *testing.T) {
+	t.Parallel()
+
+	gen := &countingGen{}
+	a, svc, nb, sessionID := newSegmentTestAgent(t, gen)
+	a.priorTurns = priorTurnsDigest
+
+	var turn1AssistantID string
+	preTurn := 0
+	for i := range 3 {
+		stored, err := svc.List(t.Context(), sessionID)
+		require.NoError(t, err)
+		preTurn = len(stored)
+		mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: fmt.Sprintf("turn %d", i)})
+		asst := mkMsg(t, svc, sessionID, message.Assistant,
+			message.ToolCall{ID: fmt.Sprintf("tc-%d", i), Name: "bash", Input: `{"command":"ls"}`, Finished: true})
+		if i == 1 {
+			turn1AssistantID = asst.ID
+		}
+		mkMsg(t, svc, sessionID, message.Tool,
+			message.ToolResult{ToolCallID: fmt.Sprintf("tc-%d", i), Name: "bash", Content: "out"})
+	}
+	msgs, err := svc.List(t.Context(), sessionID)
+	require.NoError(t, err)
+
+	// lastAssistantID points at turn 1 — turn 2's user message sits
+	// past it, so a newer run owns turn 2's tail.
+	a.generateTurnDigests(t.Context(), sessionID, msgs, preTurn, turn1AssistantID)
+
+	require.EqualValues(t, 2, gen.digests.Load(), "only turns this run owns digest")
+	got := digestTurns(t, nb, sessionID)
+	require.True(t, got[0])
+	require.True(t, got[1])
+	require.False(t, got[2], "the folded turn belongs to the newer run")
+
+	// An empty lastAssistantID owns through thisTurn — turn 2 fills.
+	a.generateTurnDigests(t.Context(), sessionID, msgs, preTurn, "")
+	require.EqualValues(t, 3, gen.digests.Load())
+	got = digestTurns(t, nb, sessionID)
+	require.True(t, got[2])
+}
+
 func TestGenerateTurnDigests_SkipsEmptyTurns(t *testing.T) {
 	t.Parallel()
 

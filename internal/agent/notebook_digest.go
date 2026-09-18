@@ -42,11 +42,14 @@ func (t *segmentTracker) releaseDigest(turn int64) {
 // the turn this run finished — so a turn whose run aborted (the
 // run-end goroutine only runs on the success path) or whose digest
 // generation failed digests on a later run. Oldest-first, bounded by
-// digestCatchUpCap. tailTurn bounds ownership the same way
-// generateRunEndSegments resolves it: a user message past this run's
-// final assistant message means a newer run owns the tail. The pass
-// is gated on the mode, not the checkpoint flag — notebook_checkpoint
-// owns boundary/session consolidation only.
+// digestCatchUpCap. There is deliberately no per-turn retry backoff
+// like segmentRetryDue's: a failed turn simply refires on the next
+// run, bounded by the cap — a once-per-run cadence makes the
+// exponential machinery unnecessary. tailTurn bounds ownership the
+// same way generateRunEndSegments resolves it: a user message past
+// this run's final assistant message means a newer run owns the
+// tail. The pass is gated on the mode, not the checkpoint flag —
+// notebook_checkpoint owns boundary/session consolidation only.
 func (a *sessionAgent) generateTurnDigests(ctx context.Context, sessionID string, msgs []message.Message, preTurnMsgCount int, lastAssistantID string) {
 	if a.priorTurns != priorTurnsDigest || a.notebook == nil || sessionID == "" ||
 		preTurnMsgCount >= len(msgs) {

@@ -354,6 +354,33 @@ func TestTurnInterrupted_FinishReasons(t *testing.T) {
 		"a tool-use finish mid-turn is not an interruption")
 }
 
+func TestGenerateTurnDigest_RestampsWrongTitleNumber(t *testing.T) {
+	for _, title := range []string{
+		"Turn 99 digest — hallucinated number",
+		"Turn digest — missing number",
+		"Work summary",
+	} {
+		gen := &digestEchoGen{entry: GeneratedEntry{Title: title, Text: "## body"}}
+		svc, _, sessionID := newTestService(t, gen)
+		msgs := viewMsgs("tc1")
+
+		committed, err := svc.GenerateTurnDigest(t.Context(), sessionID, DigestRequest{
+			TurnNumber:    4,
+			SegmentNumber: 0,
+			Msgs:          msgs,
+		})
+		require.NoError(t, err)
+		require.True(t, committed)
+
+		entries, err := svc.GetByTurn(t.Context(), sessionID, 4)
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+		require.True(t, strings.HasPrefix(entries[0].Title, "Turn 4 digest"),
+			"the turn number is structural, not model-trusted: %q → %q", title, entries[0].Title)
+		require.NotContains(t, entries[0].Title, "99")
+	}
+}
+
 func TestGenerateTurnDigest_StripsStructuralModelTags(t *testing.T) {
 	gen := &digestEchoGen{entry: GeneratedEntry{
 		Title: "Turn 1 digest",

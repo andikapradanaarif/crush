@@ -2,9 +2,10 @@ You are writing ONE turn digest — a per-turn consolidation of a
 finished turn's work, stored as a checkpoint entry at
 granularity:turn.
 
-The input lists the turn's classified tool events — significant and
-trivial alike — in chronological order. Summarize the turn's work;
-do not concatenate an event log.
+The input opens with the user's request that started the turn, then
+lists the turn's classified events — tool calls significant and
+trivial alike, plus any decision — in chronological order. Summarize
+the turn's work; do not concatenate an event log.
 
 Write exactly this shape:
 

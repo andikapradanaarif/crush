@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -16,6 +17,11 @@ import (
 // re-check finds a sibling generation's digest for the same turn —
 // an outcome, not a failure.
 var errDigestExists = errors.New("turn digest already exists")
+
+// digestTitleRe matches a model-emitted "Turn {N} digest" headline
+// prefix — number optional — so GenerateTurnDigest can restamp the
+// structural part while keeping the model's topic.
+var digestTitleRe = regexp.MustCompile(`(?i)^\s*turn\s+\d*\s*digest`)
 
 // GenerateTurnDigest implements the Service interface.
 //
@@ -64,13 +70,22 @@ func (s *service) GenerateTurnDigest(ctx context.Context, sessionID string, req 
 		})
 	}
 	interrupted := turnInterrupted(req.Msgs)
-	entry, err := s.generator.GenerateDigest(ctx, sessionID, buildDigestInput(events, interrupted))
+	entry, err := s.generator.GenerateDigest(ctx, sessionID, buildDigestInput(events, req.TurnNumber, interrupted, digestUserPrompt(req.Msgs)))
 	if err != nil {
 		return false, fmt.Errorf("failed to generate turn digest: %w", err)
 	}
 	entry.EventType = EventCheckpoint
-	if entry.Title == "" || entry.Title == "Entry" {
+	// The headline's turn number is structural — stamped like the
+	// tags rather than trusted to the model. A model-emitted "Turn N
+	// digest" prefix is restamped with the real number (the topic
+	// survives); any other title gains the prefix so a wrong or
+	// missing N can never reach the visible headline.
+	if loc := digestTitleRe.FindStringIndex(entry.Title); loc != nil {
+		entry.Title = fmt.Sprintf("Turn %d digest%s", req.TurnNumber, entry.Title[loc[1]:])
+	} else if topic := strings.TrimSpace(entry.Title); topic == "" || topic == "Entry" {
 		entry.Title = fmt.Sprintf("Turn %d digest", req.TurnNumber)
+	} else {
+		entry.Title = fmt.Sprintf("Turn %d digest — %s", req.TurnNumber, topic)
 	}
 	// An interrupted turn must not read as finished work — the
 	// headline carries the marker whether or not the model wrote it.
@@ -176,11 +191,24 @@ func HasFinishedToolCall(msgs []message.Message) bool {
 	return false
 }
 
-// turnInterrupted reports whether the turn's last assistant message
-// finished on FinishReasonCanceled — persistCanceledTurn's marker for
-// a user abort — or FinishReasonError, a provider failure mid-turn.
-// Either way the turn's events are partial, so the digest headline
-// notes "interrupted" rather than reading as finished work.
+// digestUserPrompt returns the turn's opening user line, truncated —
+// one line of intent in the digest input so a turn whose tool calls
+// don't self-describe their purpose still digests with context.
+func digestUserPrompt(msgs []message.Message) string {
+	for _, m := range msgs {
+		if m.Role == message.User {
+			return truncate(m.Content().Text, 300)
+		}
+	}
+	return ""
+}
+
+// turnInterrupted reports whether the turn's last finish-marked
+// assistant message ended on FinishReasonCanceled —
+// persistCanceledTurn's marker for a user abort — or
+// FinishReasonError, a provider failure mid-turn. Either way the
+// turn's events are partial, so the digest headline notes
+// "interrupted" rather than reading as finished work.
 func turnInterrupted(msgs []message.Message) bool {
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if msgs[i].Role != message.Assistant {
@@ -196,11 +224,12 @@ func turnInterrupted(msgs []message.Message) bool {
 
 // buildDigestInput renders the turn-digest input: the finished turn's
 // classified events — significant and trivial alike — emitted in
-// chronological order. Significant events are the digest's substance
-// and claim the byte budget first, newest first; trivial exploration
+// chronological order, preceded by the turn's opening user line for
+// intent context. Significant events are the digest's substance and
+// claim the byte budget first, newest first; trivial exploration
 // fills what remains. Interrupted turns get a preamble so the model
 // marks the headline.
-func buildDigestInput(events []EntryInput, interrupted bool) string {
+func buildDigestInput(events []EntryInput, turn int64, interrupted bool, userPrompt string) string {
 	blocks := make([]string, len(events))
 	for i, ev := range events {
 		var b strings.Builder
@@ -236,7 +265,10 @@ func buildDigestInput(events []EntryInput, interrupted bool) string {
 	if interrupted {
 		sb.WriteString("This turn was interrupted before it finished — its events are partial.\n\n")
 	}
-	sb.WriteString("Classified events from one finished turn (oldest first):\n\n")
+	if userPrompt != "" {
+		fmt.Fprintf(&sb, "Turn %d began with the user asking: %s\n\n", turn, userPrompt)
+	}
+	fmt.Fprintf(&sb, "Classified events from turn %d (oldest first):\n\n", turn)
 	if truncated {
 		sb.WriteString("(events elided for budget)\n\n")
 	}
