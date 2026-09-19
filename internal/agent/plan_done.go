@@ -127,6 +127,17 @@ func pathCovers(p, w string) bool {
 	return w == p || strings.HasPrefix(w, p+string(filepath.Separator))
 }
 
+// relPlanPath renders an absolute evidence path relative to the
+// working directory for gate feedback — "pkg/f.go" reads better than
+// the normalized absolute form.
+func relPlanPath(workingDir, abs string) string {
+	if rel, err := filepath.Rel(workingDir, abs); err == nil &&
+		rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return rel
+	}
+	return abs
+}
+
 // packageTestCovers reports whether a package-test:<dir> check covers
 // the declared path. A file binding is covered by its own directory's
 // package test; a directory binding by package tests inside it. File
@@ -184,6 +195,12 @@ func (e *planEvidence) evidenceReason(item session.PlanItem, workingDir string) 
 		// named-check loop applies.
 		latestOnPath := map[string]message.VerificationCheck{}
 		var pathCheckOrder []string
+		// Diagnostics is a per-write project delta: a green entry on
+		// one file says nothing about another's errors, so verdicts
+		// are tracked per write path — superseded only by a later
+		// write to the SAME path (with or without an entry).
+		diagByPath := map[string]message.VerificationCheck{}
+		var diagPaths []string
 		for _, w := range e.writes {
 			if !pathCovers(p, w.path) {
 				continue
@@ -195,41 +212,64 @@ func (e *planEvidence) evidenceReason(item session.PlanItem, workingDir string) 
 				if chk.Check == "" {
 					continue
 				}
+				if chk.Check == "diagnostics" {
+					if _, seen := diagByPath[w.path]; !seen {
+						diagPaths = append(diagPaths, w.path)
+					}
+					diagByPath[w.path] = chk
+					sawDiag = true
+					continue
+				}
 				if _, seen := latestOnPath[chk.Check]; !seen {
 					pathCheckOrder = append(pathCheckOrder, chk.Check)
 				}
 				latestOnPath[chk.Check] = chk
-				sawDiag = sawDiag || chk.Check == "diagnostics"
 			}
-			// Diagnostics resolves per write — a covered write carrying
-			// no entry (a bash rewrite, a download) supersedes the
-			// earlier verdict rather than latching it.
+			// A covered write carrying no diagnostics entry (a bash
+			// rewrite, a download) supersedes that path's earlier
+			// verdict rather than latching it.
 			if !sawDiag {
-				delete(latestOnPath, "diagnostics")
+				delete(diagByPath, w.path)
 			}
 		}
 		if !landed {
 			return "no write observed on " + declared
 		}
 		for _, name := range pathCheckOrder {
-			v, ok := latestOnPath[name]
-			if !ok {
-				continue
-			}
+			v := latestOnPath[name]
 			// Name-scoped checks (verify:*, package-test:*) evaluate
 			// their session-latest instance — a later write elsewhere
-			// may have re-resolved the name. diagnostics is per-write:
-			// the latest covered write's entry is its verdict here.
-			if name != "diagnostics" {
-				if lv, exists := e.latest[name]; exists {
-					v = lv
-				}
+			// may have re-resolved the name.
+			if lv, exists := e.latest[name]; exists {
+				v = lv
 			}
-			if v.State == message.VerificationFailed {
+			switch v.State {
+			case message.VerificationFailed:
 				if v.Detail != "" {
 					return "check " + name + " failed on " + declared + ": " + v.Detail
 				}
 				return "check " + name + " failed on " + declared
+			case message.VerificationPending:
+				return "check " + name + " has not resolved on " + declared
+				// unverified is a weak pass — resolved without a
+				// verdict, so it does not block. Blocking it would
+				// make path evidence unreachable wherever LSP
+				// coverage is absent.
+			}
+		}
+		for _, wp := range diagPaths {
+			v, ok := diagByPath[wp]
+			if !ok {
+				continue
+			}
+			switch v.State {
+			case message.VerificationFailed:
+				if v.Detail != "" {
+					return "check diagnostics failed on " + relPlanPath(workingDir, wp) + ": " + v.Detail
+				}
+				return "check diagnostics failed on " + relPlanPath(workingDir, wp)
+			case message.VerificationPending:
+				return "check diagnostics has not resolved on " + relPlanPath(workingDir, wp)
 			}
 		}
 		// Covering checks beyond the path's own writes: a package test

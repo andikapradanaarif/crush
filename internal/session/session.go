@@ -362,16 +362,17 @@ func unmarshalTodos(data string) ([]PlanItem, error) {
 	if err := json.Unmarshal([]byte(data), &todos); err != nil {
 		return []PlanItem{}, err
 	}
-	mintPlanItemIDs(todos)
+	MintPlanItemIDs(todos)
 	return todos, nil
 }
 
-// mintPlanItemIDs is the legacy shim: rows written before PlanItem
-// carried IDs unmarshal with the field empty, and the same
-// deterministic minting the write path uses fills them so every read
-// agrees. Duplicate legacy content collides on the same hash — the
-// ordinal suffix keeps IDs unique without breaking determinism.
-func mintPlanItemIDs(todos []PlanItem) {
+// MintPlanItemIDs is the legacy shim: rows written before PlanItem
+// carried IDs read with the field empty, and the same deterministic
+// minting the write path uses fills them so every read agrees —
+// stored rows and wire-converted rows alike. Duplicate legacy
+// content collides on the same hash — the ordinal suffix keeps IDs
+// unique without breaking determinism.
+func MintPlanItemIDs(todos []PlanItem) {
 	seen := map[string]int{}
 	baseN := map[string]int{}
 	for i := range todos {

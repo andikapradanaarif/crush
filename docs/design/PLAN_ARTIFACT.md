@@ -106,6 +106,15 @@ EvidenceChecks []string, EvidencePaths []string}`:
     lets a repair/replan edge render the current symbols of the
     files it names (`CONTEXT_PREFETCH.md`) into the prompt — the
     plan carries its own map.
+    Two accepted loosenesses: the evidence scan is
+    **session-lifetime** — a write from an earlier turn can
+    satisfy a binding declared later, so the evidence proves "a
+    write happened," not "this item's work happened"; and binding
+    is a **checkpoint-time nudge, not an invariant** — once the
+    scope gate resolves, a bare rewrite can strip `evidence_*`
+    fields and unbound completed marks count as done. Both are
+    deliberate: the gate pressures declaration-time structure,
+    it does not police post-resolution plan hygiene.
     This unifies today's two gate triggers (failed checks, open
     todos) into one definition of done instead of two scans of the
     same run — and **done-ness evaluates on final state, not

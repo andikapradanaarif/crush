@@ -7,8 +7,10 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/question"
+	"github.com/charmbracelet/crush/internal/session"
 	"github.com/stretchr/testify/require"
 )
 
@@ -113,7 +115,7 @@ func TestScopeGate(t *testing.T) {
 		svc := &fakeQuestionService{selected: selected}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("file contents")}
-		wrapped := newScopeGate(svc, true).wrap([]fantasy.AgentTool{read, write})
+		wrapped := newScopeGate(svc, true, nil).wrap([]fantasy.AgentTool{read, write})
 		return svc, write, wrapped[0], wrapped[1]
 	}
 
@@ -178,7 +180,7 @@ func TestScopeGate(t *testing.T) {
 		svc := &fakeQuestionService{selected: []string{"proceed"}}
 		bash := &fakeTool{name: "bash", resp: fantasy.NewTextResponse("done")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
-		wrapped := newScopeGate(svc, true).wrap([]fantasy.AgentTool{read, bash})
+		wrapped := newScopeGate(svc, true, nil).wrap([]fantasy.AgentTool{read, bash})
 		ctx := gateCtx("s1", 1)
 		exploreN(t, ctx, wrapped[0], scopeGateMinExploration)
 
@@ -196,7 +198,7 @@ func TestScopeGate(t *testing.T) {
 		svc := &fakeQuestionService{selected: []string{"proceed"}}
 		bash := &fakeTool{name: "bash", resp: fantasy.NewTextResponse("ok")}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
-		wrapped := newScopeGate(svc, true).wrap([]fantasy.AgentTool{bash, write})
+		wrapped := newScopeGate(svc, true, nil).wrap([]fantasy.AgentTool{bash, write})
 		ctx := gateCtx("s1", 1)
 		for range scopeGateMinExploration {
 			resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{
@@ -216,7 +218,7 @@ func TestScopeGate(t *testing.T) {
 		t.Parallel()
 		svc := &fakeQuestionService{}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
-		shared := newScopeGate(svc, true).wrap([]fantasy.AgentTool{
+		shared := newScopeGate(svc, true, nil).wrap([]fantasy.AgentTool{
 			&fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextResponse("ok")},
 			&fakeTool{name: "view", resp: fantasy.NewTextResponse("x")},
 			write,
@@ -238,7 +240,7 @@ func TestScopeGate(t *testing.T) {
 		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextResponse("ok")}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
-		wrapped := newScopeGate(svc, true).wrap([]fantasy.AgentTool{todosTool, read, write})
+		wrapped := newScopeGate(svc, true, nil).wrap([]fantasy.AgentTool{todosTool, read, write})
 		return svc, todosTool, write, wrapped[0], wrapped[1], wrapped[2]
 	}
 	barePlan := `{"todos":[{"content":"fix the gate","status":"pending"}]}`
@@ -293,13 +295,44 @@ func TestScopeGate(t *testing.T) {
 		require.Equal(t, 0, svc.asks)
 	})
 
+	t.Run("bookkeeping write on an existing bare plan passes", func(t *testing.T) {
+		t.Parallel()
+		conn, err := db.Connect(t.Context(), t.TempDir())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = conn.Close() })
+		sessions := session.NewService(db.New(conn), conn)
+		sess, err := sessions.Create(t.Context(), "test")
+		require.NoError(t, err)
+		sess.Todos = []session.PlanItem{{ID: "i1", Content: "existing", Status: session.PlanItemPending}}
+		_, err = sessions.Save(t.Context(), sess)
+		require.NoError(t, err)
+
+		svc := &fakeQuestionService{selected: []string{"proceed"}}
+		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextResponse("ok")}
+		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
+		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("e")}
+		wrapped := newScopeGate(svc, true, sessions).wrap([]fantasy.AgentTool{todosTool, read, write})
+		ctx := gateCtx(sess.ID, 1)
+		exploreN(t, ctx, wrapped[1], scopeGateMinExploration)
+		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName,
+			Input: `{"todos":[{"content":"existing","status":"in_progress"}]}`})
+		require.NoError(t, err)
+		require.False(t, resp.IsError, "a bookkeeping update on an existing plan is not a declaration")
+		require.True(t, todosTool.called)
+		// The gate is still unresolved — the update didn't validate,
+		// so a later write still reaches the question.
+		_, err = wrapped[2].Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
+		require.NoError(t, err)
+		require.Equal(t, 1, svc.asks)
+	})
+
 	t.Run("malformed plan input gets the tool's own error, not the gate's", func(t *testing.T) {
 		t.Parallel()
 		svc := &fakeQuestionService{selected: []string{"proceed"}}
 		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextErrorResponse("invalid todos payload")}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
-		wrapped := newScopeGate(svc, true).wrap([]fantasy.AgentTool{todosTool, read, write})
+		wrapped := newScopeGate(svc, true, nil).wrap([]fantasy.AgentTool{todosTool, read, write})
 		ctx := gateCtx("s1", 1)
 		exploreN(t, ctx, wrapped[1], scopeGateMinExploration)
 		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName, Input: `{not json`})
@@ -314,7 +347,7 @@ func TestScopeGate(t *testing.T) {
 		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextErrorResponse("validation failed")}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
-		wrapped := newScopeGate(svc, true).wrap([]fantasy.AgentTool{todosTool, read, write})
+		wrapped := newScopeGate(svc, true, nil).wrap([]fantasy.AgentTool{todosTool, read, write})
 		ctx := gateCtx("s1", 1)
 		exploreN(t, ctx, wrapped[1], scopeGateMinExploration)
 		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName, Input: boundPlan})
@@ -342,7 +375,7 @@ func TestScopeGate(t *testing.T) {
 		svc := &fakeQuestionService{err: context.DeadlineExceeded}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
-		wrapped := newScopeGate(svc, true).wrap([]fantasy.AgentTool{read, write})
+		wrapped := newScopeGate(svc, true, nil).wrap([]fantasy.AgentTool{read, write})
 		ctx := gateCtx("s1", 1)
 		exploreN(t, ctx, wrapped[0], scopeGateMinExploration)
 		resp, err := wrapped[1].Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
@@ -355,7 +388,7 @@ func TestScopeGate(t *testing.T) {
 		t.Parallel()
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
-		wrapped := newScopeGate(nil, false).wrap([]fantasy.AgentTool{read, write})
+		wrapped := newScopeGate(nil, false, nil).wrap([]fantasy.AgentTool{read, write})
 		ctx := gateCtx("s1", 1)
 		exploreN(t, ctx, wrapped[0], scopeGateMinExploration)
 		resp, err := wrapped[1].Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
@@ -366,7 +399,7 @@ func TestScopeGate(t *testing.T) {
 
 	t.Run("nil service builds no gate", func(t *testing.T) {
 		t.Parallel()
-		require.Nil(t, newScopeGate(nil, true))
+		require.Nil(t, newScopeGate(nil, true, nil))
 	})
 
 	t.Run("a tool rebuild keeps gate state", func(t *testing.T) {
@@ -374,7 +407,7 @@ func TestScopeGate(t *testing.T) {
 		// SetTools rebuilds re-wrap the toolset — the same gate must
 		// keep its resolved mark so a turn isn't re-asked.
 		svc := &fakeQuestionService{selected: []string{"proceed"}}
-		gate := newScopeGate(svc, true)
+		gate := newScopeGate(svc, true, nil)
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
 		wrapped := gate.wrap([]fantasy.AgentTool{read, write})

@@ -65,6 +65,13 @@ func TestValidatePlanItems(t *testing.T) {
 			wantErr: "duplicate key",
 		},
 		{
+			name: "whitespace-only key",
+			items: []TodoItem{
+				{Content: "a", Status: "pending", Key: "  "},
+			},
+			wantErr: "whitespace-only key",
+		},
+		{
 			name: "identical content",
 			items: []TodoItem{
 				{Content: "same", Status: "pending", Key: "a"},

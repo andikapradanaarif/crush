@@ -32,7 +32,7 @@ type edgeInput struct {
 
 // edgeTrigger is one edge's scan output: the evidence a retry prompt or
 // exhaustion note renders from. The verification edge fills the check
-// fields, the todos edge fills todos, the stall edge fills assistant and
+// fields, the todos edge fills plan, the stall edge fills assistant and
 // report, and fire marks whether the edge still wants a repair turn
 // after resolve ran.
 type edgeTrigger struct {

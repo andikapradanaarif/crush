@@ -1274,6 +1274,9 @@ func protoToTodos(todos []proto.Todo) []session.PlanItem {
 			EvidencePaths:  t.EvidencePaths,
 		}
 	}
+	// Rows from an older server may carry no IDs — mint them here so
+	// the every-read-agrees invariant holds across the wire.
+	session.MintPlanItemIDs(out)
 	return out
 }
 

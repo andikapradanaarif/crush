@@ -95,24 +95,50 @@ func IsMutatingCall(name, input string) bool {
 	return false
 }
 
+// redirectOpRe finds redirect operators outside quoted spans (the
+// masked string keeps `>` inside literals from matching).
+var redirectOpRe = regexp.MustCompile(`>>?`)
+
 // BashRedirectTargets extracts the file paths a bash command writes
 // via redirect — `> out`, `>> out`, `>& out` — for evidence scans that
-// need the mutated path, not just the mutation verdict. Quoted spans
-// are masked position-preservingly so a `>` inside a string literal
-// produces no target; a quoted target (`> 'out'`) is masked away with
-// its quotes and therefore missed — an accepted trade-off for never
-// reporting a phantom path. Non-redirect mutations (sed -i, tee, cp)
-// have no extractable target here; they classify as mutating via
-// IsMutatingCall but yield no path.
+// need the mutated path, not just the mutation verdict. Operators are
+// found on the quote-masked command so a `>` inside a string literal
+// produces no target; targets are then parsed from the ORIGINAL text,
+// so a quoted target (`> 'out'`) resolves to its real path — matching
+// what IsMutatingCall classifies as a write. Non-redirect mutations
+// (sed -i, tee, cp) have no extractable target here; they classify as
+// mutating via IsMutatingCall but yield no path.
 func BashRedirectTargets(command string) []string {
 	masked := quotedSpanRe.ReplaceAllStringFunc(command, func(s string) string {
 		return strings.Repeat(" ", len(s))
 	})
 	var out []string
-	for _, m := range redirectTargetRe.FindAllStringSubmatchIndex(masked, -1) {
-		target := strings.Trim(command[m[2]:m[3]], `'"`)
+	for _, loc := range redirectOpRe.FindAllStringIndex(masked, -1) {
+		i := loc[1]
+		for i < len(command) && (command[i] == ' ' || command[i] == '\t') {
+			i++
+		}
+		if i >= len(command) {
+			continue
+		}
+		var target string
+		if q := command[i]; q == '\'' || q == '"' {
+			end := strings.IndexByte(command[i+1:], q)
+			if end < 0 {
+				continue
+			}
+			target = command[i+1 : i+1+end]
+		} else {
+			j := i
+			for j < len(command) && !strings.ContainsRune(" \t\n;|<>()", rune(command[j])) {
+				j++
+			}
+			target = command[i:j]
+		}
 		if target != "" && target != "/dev/null" && !fdDupTargetRe.MatchString(target) {
-			out = append(out, target)
+			// `>&word` writes both streams to a file — the `&` is
+			// part of the operator, not the path.
+			out = append(out, strings.TrimPrefix(target, "&"))
 		}
 	}
 	return out

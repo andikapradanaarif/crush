@@ -11,6 +11,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/question"
+	"github.com/charmbracelet/crush/internal/session"
 )
 
 // scopeGateMinExploration is the explore→execute boundary: a first
@@ -98,6 +99,7 @@ func planCallResolves(input string) bool {
 // scope confirmation, not a security boundary.
 type scopeGate struct {
 	svc         question.Service
+	sessions    session.Service
 	interactive bool
 	mu          sync.Mutex
 	states      map[string]*scopeGateState
@@ -105,11 +107,23 @@ type scopeGate struct {
 
 // newScopeGate builds the gate. Returns nil when an interactive run
 // has no question service to ask through.
-func newScopeGate(svc question.Service, interactive bool) *scopeGate {
+func newScopeGate(svc question.Service, interactive bool, sessions session.Service) *scopeGate {
 	if interactive && svc == nil {
 		return nil
 	}
-	return &scopeGate{svc: svc, interactive: interactive, states: map[string]*scopeGateState{}}
+	return &scopeGate{svc: svc, sessions: sessions, interactive: interactive, states: map[string]*scopeGateState{}}
+}
+
+// planDeclared reports whether the session already holds a plan — the
+// armed gate bounces first declarations only; bookkeeping writes to an
+// existing (bare) plan are not declarations and must not be hostage
+// to evidence binding.
+func (g *scopeGate) planDeclared(ctx context.Context, sessionID string) bool {
+	if g.sessions == nil {
+		return false
+	}
+	sess, err := g.sessions.Get(ctx, sessionID)
+	return err == nil && len(sess.Todos) > 0
 }
 
 // wrap decorates every tool so the gate sees exploration calls as well
@@ -137,6 +151,11 @@ func (g *scopeGate) observe(ctx context.Context, call fantasy.ToolCall) (gateVer
 		return gatePass, 0
 	}
 	stamp := tools.GetRunStampFromContext(ctx)
+
+	// Read the stored plan outside the lock — todos calls are rare
+	// enough that an extra session read costs nothing, and holding
+	// the mutex across a DB read would serialize unrelated gates.
+	declared := call.Name == tools.TodosToolName && g.planDeclared(ctx, sessionID)
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -172,7 +191,7 @@ func (g *scopeGate) observe(ctx context.Context, call fantasy.ToolCall) (gateVer
 			// input passes through so the tool's own parse error
 			// explains the failure instead of a misleading plan
 			// rejection.
-			if params, err := parsePlanCall(call.Input); err == nil && !planParamsResolve(params) {
+			if params, err := parsePlanCall(call.Input); err == nil && !planParamsResolve(params) && !declared {
 				return gateRejectPlan, st.explore
 			}
 		}

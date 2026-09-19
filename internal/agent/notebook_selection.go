@@ -59,6 +59,10 @@ func entryTypeRank(e notebook.Entry, latestCkpt map[string]bool) int {
 		return 4
 	case notebook.EventDecision:
 		return 3
+	case notebook.EventPlan:
+		// Plan declarations are replan ground truth — decision-grade
+		// history, not generic prose.
+		return 3
 	case notebook.EventFileRead:
 		return 2
 	case notebook.EventExploration:

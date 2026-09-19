@@ -84,13 +84,13 @@ func NewTodosTool(sessions session.Service, checkNames []string, workingDir stri
 				return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for managing todos")
 			}
 
+			if err := validatePlanItems(params.Todos, bindable, workingDir); err != nil {
+				return fantasy.ToolResponse{}, err
+			}
+
 			currentSession, err := sessions.Get(ctx, sessionID)
 			if err != nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("failed to get session: %w", err)
-			}
-
-			if err := validatePlanItems(params.Todos, bindable, workingDir); err != nil {
-				return fantasy.ToolResponse{}, err
 			}
 
 			isNew := len(currentSession.Todos) == 0
@@ -198,6 +198,9 @@ func validatePlanItems(items []TodoItem, bindable map[string]bool, workingDir st
 			return fmt.Errorf("invalid status %q for todo %q", item.Status, item.Content)
 		}
 		if item.Key != "" {
+			if strings.TrimSpace(item.Key) == "" {
+				return fmt.Errorf("item %d (%q) has a whitespace-only key — keys must be visible slugs", i, item.Content)
+			}
 			if keys[item.Key] {
 				return fmt.Errorf("duplicate key %q on item %d (%q) — keys must be unique within the list", item.Key, i, item.Content)
 			}
