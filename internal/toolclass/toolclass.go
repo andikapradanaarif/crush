@@ -215,11 +215,21 @@ func BashRedirectTargets(command string) []string {
 			}
 			target = command[i+1 : i+1+end]
 		} else {
+			// Unquoted targets end at the first unescaped separator;
+			// backslash escapes stay in the path (`my\ file` →
+			// `my file`), matching how the shell word-splits.
 			j := i
+			var sb strings.Builder
 			for j < len(command) && !strings.ContainsRune(" \t\n;|<>()", rune(command[j])) {
+				if command[j] == '\\' && j+1 < len(command) {
+					sb.WriteByte(command[j+1])
+					j += 2
+					continue
+				}
+				sb.WriteByte(command[j])
 				j++
 			}
-			target = command[i:j]
+			target = sb.String()
 		}
 		if target != "" && target != "/dev/null" && !fdDupTargetRe.MatchString(target) {
 			// `>&word` writes both streams to a file — the `&` is

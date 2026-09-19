@@ -45,6 +45,8 @@ func TestBashRedirectTargets(t *testing.T) {
 		{name: "variable target not concrete", command: "cmd > $OUT", want: nil},
 		{name: "glob target not concrete", command: "cmd > *.log", want: nil},
 		{name: "substitution target not concrete", command: "cmd > $(gen)", want: nil},
+		{name: "escaped-space target", command: `cmd > my\ file.txt`, want: []string{"my file.txt"}},
+		{name: "escaped backslash in target", command: `cmd > a\\b`, want: []string{`a\b`}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

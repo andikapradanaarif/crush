@@ -97,6 +97,13 @@ EvidenceChecks []string, EvidencePaths []string}`:
     file) is not failed — it doesn't block under the weak rule;
     keep `unverified` / `unmet` / `failed` distinct in gate
     feedback — three near-synonyms that must not collapse.
+    Supersession is per-write-path: a later write to the same
+    path with a `diagnostics` entry replaces the verdict, and a
+    write carrying _no_ `diagnostics` entry (a bash redirect
+    rewrite) clears it — optimistic by design, since latching
+    until a checked write would make bash-heavy fixes
+    unresolvable; the cost is a `cat > a.go` that preserves the
+    errors reads as resolved until the next checked write.
     Known bounds, same as the verify gate's: `package-test` is
     Go-only, so non-Go trees reduce to "write landed"; mutating
     bash (`sed -i`, redirects, `go generate`) and multi-file
