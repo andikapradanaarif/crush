@@ -156,6 +156,9 @@ func TestPreparePrompt_NoCollapseWithoutRecall(t *testing.T) {
 	collapse := a.newTurnCollapse(1)
 	history, _ := a.preparePrompt(ctx, msgs, false, collapse)
 
+	// Pin eligibility: turn 0 IS covered — the verbatim render must
+	// come from the recall gate, not an empty collapse set.
+	require.NotEmpty(t, collapse.Set)
 	res := renderedResultText(t, history, "tc-bash")
 	require.NotContains(t, res, `recall("result:`)
 	require.Contains(t, res, "file content line")

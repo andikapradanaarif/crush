@@ -412,7 +412,7 @@ func (s *service) compactOldestToLevel(ctx context.Context, sessionID string, fr
 		if err != nil {
 			tags = nil
 		}
-		text := compressEntry(entry.EntryText, entry.Title, tags, entry.ErrorHeadline, toLevel)
+		text := compressEntry(RewriteTruncationMarker(entry.EntryText), entry.Title, tags, entry.ErrorHeadline, toLevel)
 		newTokens := estimateTokens(text)
 		if err := s.q.UpdateNotebookCompression(ctx, db.UpdateNotebookCompressionParams{
 			EntryText:        text,
