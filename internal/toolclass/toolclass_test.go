@@ -53,6 +53,9 @@ func TestBashRedirectTargets(t *testing.T) {
 		{name: "escaped quote is not a phantom span", command: `echo "a \"b > out"`, want: nil},
 		{name: "ansi-c quoted gt is not a redirect", command: `echo $'a > b'`, want: nil},
 		{name: "ansi-c quote before real redirect", command: `echo $'x' > out`, want: []string{"out"}},
+		{name: "herestring is not a heredoc", command: "cat <<< foo\n> out.txt", want: []string{"out.txt"}},
+		{name: "quoted herestring is not a heredoc", command: "cat <<< \"foo\"\n> out.txt", want: []string{"out.txt"}},
+		{name: "newline before delimiter is not a heredoc", command: "cat <<\nEOF\n> out.txt", want: []string{"out.txt"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

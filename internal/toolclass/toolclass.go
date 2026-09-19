@@ -76,7 +76,7 @@ var arithRe = regexp.MustCompile(`\$?\(\([^)]*\)\)`)
 // heredocRe finds heredoc openers and captures the delimiter from
 // the raw command (quoted delimiters arrive masked on the scan
 // string, so capture happens on the original text).
-var heredocRe = regexp.MustCompile(`<<(-?)\s*(?:'([A-Za-z0-9_]+)'|"([A-Za-z0-9_]+)"|([A-Za-z0-9_]+))`)
+var heredocRe = regexp.MustCompile(`<<(-?)[ \t]*(?:'([A-Za-z0-9_]+)'|"([A-Za-z0-9_]+)"|([A-Za-z0-9_]+))`)
 
 // maskCommand returns the command with every span a `>` can hide
 // inside blanked to spaces — quoted literals, [[ ]] tests, (( ))
@@ -105,9 +105,10 @@ func maskCommand(command string) string {
 func maskHeredocBodies(command, masked string) string {
 	b := []byte(masked)
 	for _, m := range heredocRe.FindAllStringSubmatchIndex(command, -1) {
-		// An opener inside a quoted span is literal text, not a
-		// heredoc — the masked string is already blanked there.
-		if masked[m[0]] == ' ' {
+		// A `<<` preceded by another `<` is a herestring (`<<<`),
+		// and an opener inside a quoted span is literal text —
+		// neither starts a heredoc.
+		if (m[0] > 0 && command[m[0]-1] == '<') || masked[m[0]] == ' ' {
 			continue
 		}
 		stripTabs := m[2] >= 0 && command[m[2]:m[3]] == "-"
