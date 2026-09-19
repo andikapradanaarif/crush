@@ -142,6 +142,13 @@ the edge's prompt branches on budget, not a second edge.
   context-window summarize check first in the `StopWhen` slice
   (`agent.go:1378` before the detector at `1399`): context
   pressure can mask a real stall and leave `loopStopped` false.
+  **Coverage, stated:** the masked case only exists when
+  `!notebookEnabled && !disableAutoSummarize` (`agent.go:1393`)
+  — notebook-on or summarize-off configs can't mask, so the
+  fallback's coverage is narrower than "every stall"; and
+  reordering `StopWhen` (detector first) would be the wrong fix
+  anyway — the masked case currently gets _both_ a replan and a
+  summarize+continue, the better recovery order.
   Corollary interaction to handle: a masked stall +
   `shouldSummarize` produces a replan retry _and_ a post-summary
   continue call queued behind it — `[replan, …, continue]` since
@@ -152,7 +159,12 @@ the edge's prompt branches on budget, not a second edge.
   re-prompts "resume the original request." Decision: accept the
   occasional redundant turn for v1 (the replan's own stop doesn't
   cancel queued calls); conditioning the continue on the replan's
-  outcome is follow-up, not this PR.
+  outcome is follow-up, not this PR. **Budget reset, named:** the
+  continue re-queues `call` itself — carrying _its_
+  `RepairAttempts` — so a masked-stall sequence can burn
+  replan+escalate (2 turns) and then the continue arrives with a
+  fresh budget. Pre-existing for all edges; the replan makes the
+  sequence likelier.
 - **Headless behavior changes — stated:** today a headless stall
   sets `fire=false` → blocker report, no retry. Under
   replan-first the replan branch fires unconditionally (no
@@ -163,7 +175,13 @@ the edge's prompt branches on budget, not a second edge.
   `retry.NonInteractive` carries through the clone, so the replan
   turn is a full-priced extra LLM call on every headless
   loop-stop — the eval flag arm must surface this as cost, not
-  just flips.
+  just flips. **Concretely, that means chain-summed usage:**
+  `emitEvalTelemetry` reports the _terminal_ run's
+  `result.TotalUsage`/`len(result.Steps)` only — a replan turn's
+  tokens land in session DB totals but not the record's
+  `tokens`/`steps` fields, so the arm comparison under-reports
+  exactly the spend the flag adds. The record needs chain-summed
+  usage (session counters), not the final `Run`'s result.
 - **Mechanics:** `prompt func(t)` doesn't receive `call` —
   `scan` stashes `call.RepairAttempts` (and the branch decision)
   onto the `edgeTrigger`. The replan prompt's leading literal
@@ -318,7 +336,9 @@ notice" failure as a declared transition.
   when the just-finished run contained a mutating call —
   otherwise a repair turn that writes then burns again stays
   suppressed forever. No `amendRetry` type extension; the edge
-  never touches the clone. (Alternative considered: derive
+  never touches the clone. The clearing scan is skippable when
+  no marker is set (flag-off never stamps → clear is a no-op),
+  so the `IsMutatingCall` sweep only runs on stamped chains. (Alternative considered: derive
   suppression from the persisted `edge_firings` records — rejected
   for v1, a per-boundary DB read for what a field does free;
   records remain the accounting layer, not the suppression
@@ -343,17 +363,33 @@ notice" failure as a declared transition.
 - **Precedence — and the merge-rule gap:** when an
   escalation-family prompt co-fires with retry-family triggers,
   the user-targeted prompt wins the slot outright and retry
-  triggers **defer** — their conditions still hold at the next
-  boundary (checks still fail, todos still open), so they re-fire
-  on the turn after the question answers. Carry-as-context is
+  triggers **defer** — they re-_scan_ at the next boundary, and
+  what they land in depends on budget: if the escalate turn
+  consumed the last slot, the re-fire renders an exhaustion
+  note, not a repair turn (consistent with the crowding
+  acceptance). **Cancel hole, decided:** if the user cancels the
+  escalation question, its result carries `StopTurn`
+  (`question.go:126-128`) → `cleanStop` fails → deferred
+  cleanStop-gated triggers never even re-scan, and the chain
+  ends with failed checks silently unmet. Rule: a
+  `StopTurn`-ended escalation boundary still renders deferred
+  triggers' **notes** on the terminal assistant message — the
+  firing is recorded and the terminal signal survives even
+  though the retry doesn't. Deferred triggers' `note` funcs also
+  still render at a budget-exhausted boundary (notes collect per
+  firing trigger regardless of who won the prompt slot).
+  Carry-as-context is
   rejected: inlining failed-check evidence into a prompt whose
   instruction is "ask the user" muddies the turn's semantics.
   This rule is **not implemented today**: merged prompts
   concatenate sections (`run_edges.go`). The real co-fire pair is
-  **burn-watch + verification/todos** — all three gate on
-  `cleanStop`, so a clean-stopping run that both failed checks
-  and burned write-less tokens hands the model "fix these
-  checks" _and_ "ask the user" and lets it pick. (verification/
+  **burn-watch + todos** — verification can't co-fire with
+  burn-watch: entries attach only to `WriteToolNames` results
+  (`verify_gate.go:111`), so a zero-mutating-call run produces
+  none and `scanVerification` returns nil. A clean-stopping run
+  that both left items open and burned write-less tokens hands
+  the model "finish these items" _and_ "ask the user" and lets
+  it pick. (verification/
   todos + stall ~never co-fire — a stalled run's terminal step is
   normally `FinishReasonToolCalls`, so `cleanStop` fails; a
   provider _can_ return `stop` on a tool-call step, rare but real,
@@ -396,11 +432,21 @@ Follow the `collapsed_turns` precedent: migration + sqlc query +
 service method + stats section + eval analyzer read — an
 `edge_firings` table. **PK: `(session_id, turn_seq,
 repair_attempts, edge)`** — `turn_seq` is the ordinal of the
-run's initiating user message, derived from message positions
+run's initiating user message among **all** user messages —
+repair retries persist their prompts as user messages (that's
+why `RepairPromptPrefixes` exist for the analyzer), so
+`messageTurns` counts them and each attempt's initiating message
+naturally differs: `repair_attempts` in the PK is redundant-but-
+harmless and dedup stays sound. (The alternative — filtering to
+the original user turn — needs a filtered counter for no added
+guarantee.) Derived from message positions
 (the same family as `collapsed_turns`' `byTurn`): durable across
 restarts and `INSERT OR IGNORE`-dedupable. **`call.RunStamp` is
-rejected as the key** — it's `runStampGen.Add(1)` seeded from a
-random per-build epoch (`runStampEpoch`, `agent.go:496-508`): stamps are unique
+rejected as the key** — it's `runStampGen.Add(1)` (`agent.go:892`)
+seeded from a random **per-agent-instance** epoch
+(`runStampEpoch`, `agent.go:496-508` — the code comment says
+per-build; it's really per-instance/per-process, which only
+strengthens the argument: a restart reseeds): stamps are unique
 across restarts but non-deterministic per logical turn, so a
 resumed session's re-fire wouldn't dedup and the stamp orders
 nothing durably. It earns a plain _column_ instead — it still
@@ -431,13 +477,16 @@ default-off, every boundary writes a `gated` row per gated edge
 write pattern from day one. `crush stats`
 reads the table; the eval doc reads the same counts via
 `SessionTelemetry` + `emitEvalTelemetry`. **Write path — not `notebook.Service`:**
-`RecordCollapsedTurn` rides `a.notebook`, which is nil when the
-notebook is disabled (`recordCollapsedTurns` early-returns) —
-edge firings are harness telemetry, not notebook concepts, and
-routing them through it would silently produce zero records for
-exactly the notebook-off configs the "never fires" signal exists
-to audit. Use a dedicated service or a `db.Queries` handle held
-by the agent. **Instrumentation point: inside `runEdges`' scan
+firings are harness telemetry, not notebook concepts, and adding
+a record method churns every `notebook.Service` mock. (The nil-
+check trap is a myth, corrected: `app.Notebook` is constructed
+unconditionally at `app.go:168` and always threaded —
+`a.notebook` is never nil in production; the `prior_turns.go:249`
+early-return is defensive dead-code, and notebook-off sessions
+produce no collapse rows because `collapsedEvents` stays empty,
+not because the service is nil. Route firings through a
+dedicated service or a `db.Queries` handle held by the agent
+anyway — the mock-churn reason stands alone.) **Instrumentation point: inside `runEdges`' scan
 loop**, written per-edge right after scan/resolve — the
 `len(prompts)==0` early return precedes the budget check
 (`run_edges.go:145` vs `149`), so a firing edge that renders no
