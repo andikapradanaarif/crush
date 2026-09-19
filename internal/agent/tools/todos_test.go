@@ -101,6 +101,20 @@ func TestValidatePlanItems(t *testing.T) {
 			},
 			wantErr: "unknown check",
 		},
+		{
+			name: "empty check entry",
+			items: []TodoItem{
+				{Content: "a", Status: "pending", EvidenceChecks: []string{" "}},
+			},
+			wantErr: "empty evidence_checks",
+		},
+		{
+			name: "empty path entry",
+			items: []TodoItem{
+				{Content: "a", Status: "pending", EvidencePaths: []string{""}},
+			},
+			wantErr: "empty evidence_paths",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

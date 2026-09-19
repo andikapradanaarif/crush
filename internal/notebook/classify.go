@@ -438,9 +438,21 @@ func (s *service) significantEntries(ctx context.Context, sessionID string, sign
 	for i, in := range significant {
 		if in.EventType == EventPlan {
 			entries = append(entries, buildPlanEntry(in))
-		} else {
-			entries = append(entries, genAt[i])
+			continue
 		}
+		entry, ok := genAt[i]
+		if !ok {
+			// The generator under-produced (merged inputs into one
+			// entry) — store a deterministic fallback rather than a
+			// zero-value entry, matching the no-model path.
+			entry = GeneratedEntry{
+				EventType: in.EventType,
+				Title:     in.Title,
+				Text:      fmt.Sprintf("## %s\n\n%s\n", in.Title, truncate(in.Description, 800)),
+				Tags:      defaultTagsForEvent(in),
+			}
+		}
+		entries = append(entries, entry)
 	}
 	return append(entries, extras...), nil
 }

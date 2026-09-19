@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/toolclass"
 	"github.com/tidwall/gjson"
 )
 
@@ -61,12 +62,28 @@ type planEvidence struct {
 // not the mark-time snapshot. Messages are chronological, so the last
 // entry seen per check name is the latest instance.
 func scanPlanEvidence(msgs []message.Message, workingDir string) *planEvidence {
-	callPath := map[string]string{}
+	callPaths := map[string][]string{}
 	for _, m := range msgs {
 		for _, part := range m.Parts {
-			if tc, ok := part.(message.ToolCall); ok && tools.WriteToolNames[tc.Name] {
+			tc, ok := part.(message.ToolCall)
+			if !ok {
+				continue
+			}
+			switch {
+			case tools.WriteToolNames[tc.Name] || tc.Name == tools.DownloadToolName:
 				if p := tools.ToolCallFilePath(tc.Input); p != "" {
-					callPath[tc.ID] = normalizePlanPath(workingDir, p)
+					callPaths[tc.ID] = append(callPaths[tc.ID], normalizePlanPath(workingDir, p))
+				}
+			case tc.Name == "bash":
+				// Bash redirect writes land on paths the file tools
+				// never saw — covering evidence for evidence_paths.
+				var params struct {
+					Command string `json:"command"`
+				}
+				if json.Unmarshal([]byte(tc.Input), &params) == nil {
+					for _, target := range toolclass.BashRedirectTargets(params.Command) {
+						callPaths[tc.ID] = append(callPaths[tc.ID], normalizePlanPath(workingDir, target))
+					}
 				}
 			}
 		}
@@ -78,7 +95,6 @@ func scanPlanEvidence(msgs []message.Message, workingDir string) *planEvidence {
 			if !ok || tr.IsError {
 				continue
 			}
-			path, isWrite := callPath[tr.ToolCallID]
 			var checks []message.VerificationCheck
 			if raw := gjson.Get(tr.Metadata, "verification"); raw.Exists() {
 				_ = json.Unmarshal([]byte(raw.Raw), &checks)
@@ -88,7 +104,7 @@ func scanPlanEvidence(msgs []message.Message, workingDir string) *planEvidence {
 					ev.latest[chk.Check] = chk
 				}
 			}
-			if isWrite {
+			for _, path := range callPaths[tr.ToolCallID] {
 				ev.writes = append(ev.writes, writeEvidence{path: path, checks: checks})
 			}
 		}
@@ -111,11 +127,13 @@ func pathCovers(p, w string) bool {
 }
 
 // packageTestCovers reports whether a package-test:<dir> check covers
-// the declared path: a file binding is covered by its own directory's
-// package test; a directory binding is covered by package tests inside
-// it. Bindings with an extension read as files.
-func packageTestCovers(declared, dir, workingDir string) bool {
-	if filepath.Ext(declared) != "" {
+// the declared path. A file binding is covered by its own directory's
+// package test; a directory binding by package tests inside it. File
+// vs directory is derived from the observed writes — a path an exact
+// write landed on is a file, a path only prefix-covered is a dir —
+// so extensionless names like "foo.d" classify correctly.
+func packageTestCovers(declared, dir string, declaredIsFile bool) bool {
+	if declaredIsFile {
 		return filepath.Dir(declared) == dir
 	}
 	return dir == declared || strings.HasPrefix(dir, declared+string(filepath.Separator))
@@ -158,21 +176,49 @@ func (e *planEvidence) evidenceReason(item session.PlanItem, workingDir string) 
 	for _, declared := range item.EvidencePaths {
 		p := normalizePlanPath(workingDir, declared)
 		landed := false
+		declaredIsFile := false
+		// Latest covering instance per check name — a stale failed
+		// entry on an earlier write is superseded by a later covered
+		// write's verdict, the same latest-instance semantics the
+		// named-check loop applies.
+		latestOnPath := map[string]message.VerificationCheck{}
+		var pathCheckOrder []string
 		for _, w := range e.writes {
 			if !pathCovers(p, w.path) {
 				continue
 			}
 			landed = true
-			// Checks recorded on a covered write carry their resolved
-			// state — a failed entry on the path itself blocks.
+			declaredIsFile = declaredIsFile || w.path == p
 			for _, chk := range w.checks {
-				if chk.State == message.VerificationFailed {
-					return "check " + chk.Check + " failed on " + declared
+				if chk.Check == "" {
+					continue
 				}
+				if _, seen := latestOnPath[chk.Check]; !seen {
+					pathCheckOrder = append(pathCheckOrder, chk.Check)
+				}
+				latestOnPath[chk.Check] = chk
 			}
 		}
 		if !landed {
 			return "no write observed on " + declared
+		}
+		for _, name := range pathCheckOrder {
+			v := latestOnPath[name]
+			// Name-scoped checks (verify:*, package-test:*) evaluate
+			// their session-latest instance — a later write elsewhere
+			// may have re-resolved the name. diagnostics is per-write:
+			// the latest covered write's entry is its verdict here.
+			if name != "diagnostics" {
+				if lv, ok := e.latest[name]; ok {
+					v = lv
+				}
+			}
+			if v.State == message.VerificationFailed {
+				if v.Detail != "" {
+					return "check " + name + " failed on " + declared + ": " + v.Detail
+				}
+				return "check " + name + " failed on " + declared
+			}
 		}
 		// Covering checks beyond the path's own writes: a package test
 		// covers every file in its directory, and configured verify
@@ -184,7 +230,7 @@ func (e *planEvidence) evidenceReason(item session.PlanItem, workingDir string) 
 			}
 			if strings.HasPrefix(name, "package-test:") {
 				dir := normalizePlanPath(workingDir, strings.TrimPrefix(name, "package-test:"))
-				if packageTestCovers(p, dir, workingDir) {
+				if packageTestCovers(p, dir, declaredIsFile) {
 					return "covering check " + name + " failed"
 				}
 			}

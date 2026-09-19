@@ -11,13 +11,18 @@ import (
 // recordingGen captures which inputs the generator sees — plan events
 // must bypass it entirely.
 type recordingGen struct {
-	seen []EntryInput
+	seen       []EntryInput
+	underCount int // return at most this many entries (0 = all)
 }
 
 func (g *recordingGen) Generate(_ context.Context, _ string, events []EntryInput) ([]GeneratedEntry, error) {
 	g.seen = append(g.seen, events...)
-	entries := make([]GeneratedEntry, len(events))
-	for i, ev := range events {
+	limit := len(events)
+	if g.underCount > 0 && limit > g.underCount {
+		limit = g.underCount
+	}
+	entries := make([]GeneratedEntry, limit)
+	for i, ev := range events[:limit] {
 		entries[i] = GeneratedEntry{
 			EventType: ev.EventType,
 			Title:     ev.Title,
@@ -145,4 +150,25 @@ func TestGenerateSegmentEntries_PlanEntryBypassesGenerator(t *testing.T) {
 	// The plan event never reaches the generator — only the edit did.
 	require.Len(t, gen.seen, 1)
 	require.Equal(t, EventFileEdit, gen.seen[0].EventType)
+}
+
+func TestGenerateSegmentEntries_GeneratorUnderProduction(t *testing.T) {
+	// The generator merged two inputs into one entry — the uncovered
+	// input must get a fallback entry, not a stored zero value.
+	gen := &recordingGen{underCount: 1}
+	svc, _, sessionID := newSegmentTestService(t, gen)
+	ctx := context.Background()
+
+	msgs := append(segmentEditMsgs(), todosCallResult("tc-t",
+		`{"todos":[{"id":"i1","content":"plan thing","status":"pending","evidence_paths":["x.go"]}]}`, false)...)
+	require.NoError(t, svc.GenerateSegmentEntries(ctx, sessionID, 0, 0, 0, 4, msgs))
+
+	entries, err := svc.GetEntries(ctx, sessionID)
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	for _, e := range entries {
+		require.NotEmpty(t, e.Title)
+		require.NotEmpty(t, e.EntryText)
+		require.NotEmpty(t, e.EventType)
+	}
 }

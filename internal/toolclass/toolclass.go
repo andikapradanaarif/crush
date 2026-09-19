@@ -8,6 +8,7 @@ package toolclass
 import (
 	"encoding/json"
 	"regexp"
+	"strings"
 )
 
 // DownloadToolName mutates files when its result lands — a write for
@@ -92,4 +93,27 @@ func IsMutatingCall(name, input string) bool {
 		}
 	}
 	return false
+}
+
+// BashRedirectTargets extracts the file paths a bash command writes
+// via redirect — `> out`, `>> out`, `>& out` — for evidence scans that
+// need the mutated path, not just the mutation verdict. Quoted spans
+// are masked position-preservingly so a `>` inside a string literal
+// produces no target; a quoted target (`> 'out'`) is masked away with
+// its quotes and therefore missed — an accepted trade-off for never
+// reporting a phantom path. Non-redirect mutations (sed -i, tee, cp)
+// have no extractable target here; they classify as mutating via
+// IsMutatingCall but yield no path.
+func BashRedirectTargets(command string) []string {
+	masked := quotedSpanRe.ReplaceAllStringFunc(command, func(s string) string {
+		return strings.Repeat(" ", len(s))
+	})
+	var out []string
+	for _, m := range redirectTargetRe.FindAllStringSubmatchIndex(masked, -1) {
+		target := strings.Trim(command[m[2]:m[3]], `'"`)
+		if target != "" && target != "/dev/null" && !fdDupTargetRe.MatchString(target) {
+			out = append(out, target)
+		}
+	}
+	return out
 }

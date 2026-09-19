@@ -293,6 +293,21 @@ func TestScopeGate(t *testing.T) {
 		require.Equal(t, 0, svc.asks)
 	})
 
+	t.Run("malformed plan input gets the tool's own error, not the gate's", func(t *testing.T) {
+		t.Parallel()
+		svc := &fakeQuestionService{selected: []string{"proceed"}}
+		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextErrorResponse("invalid todos payload")}
+		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
+		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
+		wrapped := newScopeGate(svc, true).wrap([]fantasy.AgentTool{todosTool, read, write})
+		ctx := gateCtx("s1", 1)
+		exploreN(t, ctx, wrapped[1], scopeGateMinExploration)
+		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName, Input: `{not json`})
+		require.NoError(t, err)
+		require.True(t, resp.IsError)
+		require.Contains(t, resp.Content, "invalid todos payload", "the tool's parse error must surface, not a plan rejection")
+	})
+
 	t.Run("a rejected plan write does not resolve the gate", func(t *testing.T) {
 		t.Parallel()
 		svc := &fakeQuestionService{selected: []string{"proceed"}}

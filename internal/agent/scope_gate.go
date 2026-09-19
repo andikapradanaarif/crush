@@ -50,13 +50,20 @@ const (
 	gateRejectPlan
 )
 
-// planCallResolves reports whether a todos call declares a plan the
-// gate accepts: a non-empty list where every item binds evidence —
+// parsePlanCall extracts the submitted list — the gate checks a
+// declaration's shape, not its tool-level validity.
+func parsePlanCall(input string) (tools.TodosParams, error) {
+	var params tools.TodosParams
+	err := json.Unmarshal([]byte(input), &params)
+	return params, err
+}
+
+// planParamsResolve reports whether a submitted list declares a plan
+// the gate accepts: a non-empty list where every item binds evidence —
 // checks or paths. A plan of bare strings, or an empty list, is a
 // legal write but not a declaration.
-func planCallResolves(input string) bool {
-	var params tools.TodosParams
-	if err := json.Unmarshal([]byte(input), &params); err != nil || len(params.Todos) == 0 {
+func planParamsResolve(params tools.TodosParams) bool {
+	if len(params.Todos) == 0 {
 		return false
 	}
 	for _, item := range params.Todos {
@@ -65,6 +72,13 @@ func planCallResolves(input string) bool {
 		}
 	}
 	return true
+}
+
+// planCallResolves reports whether a todos call's input is a parseable,
+// evidence-bound declaration.
+func planCallResolves(input string) bool {
+	params, err := parsePlanCall(input)
+	return err == nil && planParamsResolve(params)
 }
 
 // scopeGate wraps the tool list to intercept the first mutating call of
@@ -153,9 +167,14 @@ func (g *scopeGate) observe(ctx context.Context, call fantasy.ToolCall) (gateVer
 	// non-validating declaration gets bounced with the reason so the
 	// model fixes the list instead of hitting the question cold.
 	if call.Name == tools.TodosToolName {
-		if !st.resolved && !st.asking &&
-			st.explore >= scopeGateMinExploration && !planCallResolves(call.Input) {
-			return gateRejectPlan, st.explore
+		if !st.resolved && !st.asking && st.explore >= scopeGateMinExploration {
+			// Only a parseable, non-validating list bounces — malformed
+			// input passes through so the tool's own parse error
+			// explains the failure instead of a misleading plan
+			// rejection.
+			if params, err := parsePlanCall(call.Input); err == nil && !planParamsResolve(params) {
+				return gateRejectPlan, st.explore
+			}
 		}
 		return gatePass, st.explore
 	}

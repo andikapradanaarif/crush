@@ -211,8 +211,16 @@ func validatePlanItems(items []TodoItem, bindable map[string]bool) error {
 			}
 		}
 		for _, check := range item.EvidenceChecks {
+			if strings.TrimSpace(check) == "" {
+				return fmt.Errorf("item %q binds an empty evidence_checks entry — name a configured check", item.Content)
+			}
 			if !bindable[check] {
 				return fmt.Errorf("item %q binds unknown check %q — only configured check names are bindable (see tool description)", item.Content, check)
+			}
+		}
+		for _, path := range item.EvidencePaths {
+			if strings.TrimSpace(path) == "" {
+				return fmt.Errorf("item %q binds an empty evidence_paths entry — name a file or directory the work touches", item.Content)
 			}
 		}
 	}

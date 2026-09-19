@@ -22,6 +22,16 @@ func mkWrite(t *testing.T, svc message.Service, sessionID, callID, path, metadat
 		message.ToolResult{ToolCallID: callID, Name: "edit", Content: "ok", Metadata: metadata})
 }
 
+// mkBashWrite lands a bash call/result pair — redirect targets count
+// as observed writes even though no file tool ran.
+func mkBashWrite(t *testing.T, svc message.Service, sessionID, callID, command string) {
+	t.Helper()
+	mkMsg(t, svc, sessionID, message.Assistant,
+		message.ToolCall{ID: callID, Name: "bash", Input: fmt.Sprintf(`{"command":%q}`, command), Finished: true})
+	mkMsg(t, svc, sessionID, message.Tool,
+		message.ToolResult{ToolCallID: callID, Name: "bash", Content: "ok"})
+}
+
 func setPlan(t *testing.T, a *sessionAgent, sessionID string, items ...session.PlanItem) {
 	t.Helper()
 	sess, err := a.sessions.Get(t.Context(), sessionID)
@@ -182,6 +192,78 @@ func TestPlanVerdicts(t *testing.T) {
 				require.True(t, v.ready)
 			}
 		}
+	})
+
+	t.Run("superseded diagnostics failure on the path does not block", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		// First write fails diagnostics; the fix lands with a second
+		// write that resolves green — the stale entry must not block.
+		mkWrite(t, svc, sessionID, "w1", "a.go",
+			`{"verification":[{"check":"diagnostics","state":"failed","detail":"2 new error(s)"}]}`)
+		mkWrite(t, svc, sessionID, "w2", "a.go",
+			`{"verification":[{"check":"diagnostics","state":"passed"}]}`)
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "edit a.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"a.go"}},
+		)
+		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
+	})
+
+	t.Run("superseded named check on a covered write does not block", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		mkWrite(t, svc, sessionID, "w1", "a.go",
+			`{"verification":[{"check":"verify:build","state":"failed"}]}`)
+		mkWrite(t, svc, sessionID, "w2", "b.go",
+			`{"verification":[{"check":"verify:build","state":"passed"}]}`)
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "edit a.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"a.go"}},
+		)
+		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
+	})
+
+	t.Run("bash redirect write satisfies the declared path", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		mkBashWrite(t, svc, sessionID, "b1", "cat > out.txt <<'EOF'\ncontent\nEOF")
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "create out.txt", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"out.txt"}},
+		)
+		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
+	})
+
+	t.Run("download target satisfies the declared path", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		mkMsg(t, svc, sessionID, message.Assistant,
+			message.ToolCall{ID: "d1", Name: "download", Input: `{"url":"https://x/y","file_path":"dl.go"}`, Finished: true})
+		mkMsg(t, svc, sessionID, message.Tool,
+			message.ToolResult{ToolCallID: "d1", Name: "download", Content: "ok"})
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "fetch dl.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"dl.go"}},
+		)
+		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
+	})
+
+	t.Run("directory binding with an extension-like name still reads as a dir", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		mkWrite(t, svc, sessionID, "w1", "foo.d/x.go",
+			`{"verification":[{"check":"diagnostics","state":"passed"}]}`)
+		mkWrite(t, svc, sessionID, "w2", "foo.d/y.go",
+			`{"verification":[{"check":"package-test:foo.d","state":"failed"}]}`)
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "work in foo.d", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"foo.d"}},
+		)
+		verdicts := a.planVerdicts(t.Context(), sessionID)
+		require.Len(t, verdicts, 1)
+		require.Equal(t, planEvidenceBlocked, verdicts[0].state)
+		require.Contains(t, verdicts[0].reason, "package-test:foo.d")
 	})
 }
 
