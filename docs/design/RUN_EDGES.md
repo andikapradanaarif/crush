@@ -166,8 +166,12 @@ the edge's prompt branches on budget, not a second edge.
   continue re-queues `call` itself — carrying _its_
   `RepairAttempts` — so a masked-stall sequence can burn
   replan+escalate (2 turns) and then the continue arrives with a
-  fresh budget — bounded at ~4 runs total, and only reachable
-  with the notebook off (the masked case's precondition).
+  fresh budget — bounded at ~6 runs _per summarize cycle_, not
+  per session (original → replan → escalate → continue →
+  replan → escalate; every subsequent context-pressure trip
+  produces another summarize+continue with another fresh
+  budget), and only reachable with the notebook off (the
+  masked case's precondition).
   Pre-existing for all edges; the replan makes the
   sequence likelier.
 - **Headless behavior changes — stated:** today a headless stall
@@ -241,8 +245,11 @@ the edge's prompt branches on budget, not a second edge.
   run-end checkpoint generates in an async goroutine spawned
   _after_ `runEdges` (`agent.go:1563+`), so resolve sees the
   previous turn's (or a mid-run) checkpoint — never this run's.
-  **Needs a new accessor** ("latest committed checkpoint") —
-  unlisted work alongside the signature-returning detector.
+  The accessor exists in pieces: `notebook.LatestCheckpointIDs`
+  over `GetEntries` already does the selection
+  (`retrieve.go:349`), so resolve composes two calls — no new
+  service method strictly needed, a smaller item than the
+  signature-returning detector.
   That's fine for re-orientation: the stall evidence itself
   comes from `result.Steps`. When the notebook is off, the edge
   degrades to evidence-only — no payload.
@@ -300,7 +307,14 @@ notice" failure as a declared transition.
     billed spend** (`updateSessionUsage`, `agent.go:2841`) — a
     pre/post-run diff yields a real dollar figure with no
     `stepMessages` plumbing; use it alongside or instead of the
-    token arm where cost precision matters. `fallbackStepUsage` is
+    token arm where cost precision matters. (It inherits the
+    delegate-all-writes blind spot: `updateParentSessionCost`
+    folds child spend into the parent while the child's writes
+    never appear in the parent's `result.Steps` — a run that
+    delegated every write can fire "N dollars, zero writes."
+    Same accepted category as the `IsMutatingCall` blind spots,
+    and the cost arm makes it likelier.)
+    `fallbackStepUsage` is
     **out of scope**, harder than it first looks: `stepMessages`
     is _overwritten per step_ (`agent.go:1197`), so the boundary
     holds only the last step's messages — an estimated arm needs a
@@ -351,18 +365,22 @@ notice" failure as a declared transition.
   input), not the stall edge's trigger, so ordering is cosmetic —
   declared here because the doc requires new rows to say where
   they sit.
-- **Budget crowding — stated decision:** narrower than it first
-  reads. Escalation turns end via the question tool's `StopTurn`
-  → `!cleanStop` → deferred retry triggers land on the _next
-  clean-stop turn_, which is a fresh call with
-  `RepairAttempts=0` — fresh budget. Crowding only bites at a
-  same-boundary co-fire at an already-spent budget: an
-  escalate+retry co-fire at `attempts≥1` where the carried retry
-  trigger lands after the last slot → note, not turn. Accepted —
-  the alternative (escalation bypassing the budget) is the
-  rejected nagging-with-a-type-signature, and the once-per-
-  crossing marker bounds frequency. Records will show whether
-  crowding actually occurs before any threshold is tuned.
+- **Budget crowding — stated decision:** crowding bites
+  in-chain. `StopTurn` is set only when the user _cancels_
+  (`tools/question.go:128`) — a successful answer returns a
+  normal result, the model continues, and the escalate run ends
+  `stop` → `cleanStop` holds. So the carrier merges at the
+  escalate run's _own_ boundary, on the same clone whose
+  `RepairAttempts` is already incremented — the carried retry
+  trigger re-fires there and consumes the next shared slot,
+  not a fresh call (a fresh call has no `deferred` field at
+  all). Crowding thus occurs two ways: same-boundary co-fire
+  at an already-spent budget, and a carried re-fire consuming
+  the last slot → note, not turn. Accepted — the alternative
+  (escalation bypassing the budget) is the rejected nagging-
+  with-a-type-signature, and the once-per-crossing marker
+  bounds frequency. Records will show whether crowding
+  actually occurs before any threshold is tuned.
 - **Fires once per crossing, resets on write.** The marker is a
   `SessionAgentCall` field, and the seam owns both halves:
   `runEdges` **stamps** it on the retry clone at the existing
@@ -407,7 +425,11 @@ notice" failure as a declared transition.
   `SessionAgentCall` gains a `deferred` field carrying the
   deferred trigger(s), stamped on the escalate clone by the seam;
   at the next boundary `runEdges` merges them back — prompt
-  section if a retry slot is free, note at exhaustion. Read-back
+  section if a retry slot is free, note at exhaustion. The
+  merge runs _unconditionally on `cleanStop`_, before any
+  scan short-circuits — the `StopTurn`-ended boundary it exists
+  for is precisely the case where cleanStop-gated scans never
+  run. Read-back
   from `edge_firings` rejected: it couples prompt rendering to a
   DB read. Blast radius is small today (verification ~never
   co-fires with stall, never with burn-watch) but the
@@ -547,15 +569,16 @@ joins to persisted `run:<stamp>` checkpoint tags. Columns: edge
 name, `variant` (stall records `replan`/`escalate` — the single
 most interesting firing stat for that edge), trigger detail,
 **outcome enum**: fired / suppressed / exhausted /
-headless-degraded / **gated** (flag-off early return —
-`scanStallEdge` returning nil at the option check must not be
-indistinguishable from "edge never ran"; a boundary with no row
-means _clean_, which stays distinguishable precisely because
-gated rows exist) / **deferred** (lost the prompt slot to an
-escalate-family trigger — recorded at the boundary where it
-lost, real outcome at the next) / **cleared** (scan fired but
-`resolve` dropped `t.fire` — a pending→clean verification isn't
-"suppressed"; nothing suppressed it), `created_at`
+headless-degraded / **gated** (flag-off — the flag gates
+`t.fire`, not the scan; the row records the would-have-fired
+verdict. A boundary with no row means _clean_, which stays
+distinguishable precisely because gated rows exist) /
+**deferred** (lost the prompt slot to an escalate-family
+trigger — recorded at the boundary where it lost, real
+outcome at the next) / **cleared** (scan fired but `resolve`
+dropped `t.fire` — a pending→clean verification isn't
+"suppressed"; nothing suppressed it) / **cancelled** (`ctx.Err()`
+mid-loop — see "Cancel partial rows" below), `created_at`
 (firing-rate-over-time queries).
 Precision note: records distinguish _triggered-but-not-fired_ vs
 _fired_ — "evaluated" is guaranteed by construction since
@@ -573,11 +596,19 @@ detail carries the would-have-fired verdict: flag-off means
 default-on flip decision exists on — a `gated` row that only
 records "we didn't look" throws away exactly the firing-rate
 data #38/#54 need. (Cost, stated: the scan work runs even
-flag-off — cheap for these edges; `planVerdicts`' message read
-is the heaviest.) The contract: `scan` returns a non-nil
+flag-off — cheap: the stall signature re-scan and the
+burn-watch step/token walk are both in-memory; no gated edge
+does a service read.) The contract: `scan` returns a non-nil
 trigger carrying an outcome hint (`gated`/`suppressed`) instead
 of nil when the predicate is off or suppressed — no hoisted
-predicate needed. Volume: flag default-off means a `gated` row
+predicate needed. **Gated/suppressed triggers skip `resolve`
+(and the note/report/deferred-merge paths) — only the firing
+row is written.** This is load-bearing, not tidiness:
+`runEdges` calls `resolve` for every non-nil trigger and
+`resolveStallEdge` appends the blocker report whenever
+`!t.fire` (`run_edges.go:489-498`) — without the skip, a
+gated stall trigger would emit blocker reports with the flag
+off, and the flag would stop gating output entirely. Volume: flag default-off means a `gated` row
 per gated edge per boundary — ~2 rows/turn for most users;
 cheap, but the table's dominant write pattern from day one.
 **Cancel partial rows:** `ctx.Err()` at `run_edges.go:123` exits
