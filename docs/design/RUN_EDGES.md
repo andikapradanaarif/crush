@@ -37,7 +37,7 @@ type runEdge struct {
 }
 ```
 
-Evaluated in sequence at the `agent.go:1464` site (`runEdges` —
+Evaluated in sequence at the `agent.go:1550` site (`runEdges` —
 the seam itself shipped in #43; this doc's remaining work is the
 unimplemented catalog rows). Aggregation rule,
 already precedented: all firing edges merge evidence into **one**
@@ -45,7 +45,7 @@ retry prompt, one prepend, one budget increment — two edges each
 enqueueing a turn would double every repair. Budget becomes a shared
 repair counter on `SessionAgentCall` (rename `VerificationAttempts`
 → `RepairAttempts`; per-edge sub-budgets only if a thrash pattern
-demands it). `maxVerificationAttempts = 2` (`verify_gate.go:27`)
+demands it). `maxRepairAttempts = 2` (`run_edges.go:19`)
 stays the initial shared bound.
 
 **Field traps are inherited, not optional.** Every edge obeys the
@@ -134,16 +134,41 @@ headless, drawn from the shared repair budget. The new work is a
 the edge's prompt branches on budget, not a second edge.
 
 - **scan:** the run ended via `hasRepeatedToolCalls` (`in.stalled`,
-  plumbed at `agent.go:1553`).
-- **Mechanism — the stall edge branches on `call.RepairAttempts`:**
-  budget available → replan retry prompt (below); spent → the
-  existing escalation path (question turn interactive, blocker
-  report headless). One edge, two prompts — the spec's earlier
-  "both fire and merge" reading was wrong: under this shape they
-  can never co-fire, and a spent budget is already terminal in
-  `runEdges` (`run_edges.go:149-155` — exhaustion note, nothing
-  enqueued). Zero structural change to the seam; "budgeted like
-  repairs" is literal.
+  plumbed at `agent.go:1553`) — plus a cheap fallback re-scan of
+  `result.Steps` inside the edge, since `in.stalled` only reflects
+  the StopWhen callback.
+- **Mechanism — the stall edge's prompt branches on attempts:**
+  first stall → the replan prompt below (works headless AND
+  interactive — it's a model retry, not a question); stall on the
+  repair turn → the shipped escalation prompt
+  (`stallRetrySection`, one question-tool call — interactive-only,
+  `fire: a.interactive && hasTool(question)`; headless keeps the
+  blocker-report resolve). A third stall falls to the terminal
+  exhaustion note. Both turns live _inside_ `RepairAttempts` —
+  escalation consumes the last retry slot rather than bypassing
+  the budget (the shipped comment's "one per distinct blocker,
+  drawn from the shared repair budget" stays true). The
+  alternative — escalation bypassing the budget with per-blocker
+  suppression keyed on the repeated-signature hash — is rejected:
+  more machinery, and an unbudgeted escalation edge is nagging
+  with a type signature.
+- **Why replan-first, not escalate-directly:** the loop detector
+  trips mostly on _environmental_ stalls — permission denied,
+  identical output, unchanged state — where a meta-prompt ("state
+  which assumption failed") unsticks for one cheap turn. The
+  objection is real — the model that just thrashed is the least
+  trustworthy replanner — which is exactly why the replan is
+  bounded to one slot and escalation still fires if it stalls
+  again. It also makes the eventual question better: "tried X,
+  it didn't work" is a more answerable ask than "we're stuck."
+  Bonus coherence: subagent runs can't ask (no question tool), so
+  escalate-directly degrades them to a blocker report — under
+  replan-first, a stalled child gets a replan turn and its parent
+  sees the outcome through the agent result.
+- **Handoff payload:** pull the session's latest checkpoint into
+  resolve — #48 shipped the machinery but nothing wires it into
+  an edge yet; this is where "the forced turn starts re-oriented
+  at zero model cost" becomes literal.
 - **resolve:** collect the repeated call signature, the write set
   (**scan `result.Steps` for write-class calls** — filetracker
   tracks _reads_ only, `RecordRead`/`ListReadFiles`; the
@@ -166,16 +191,23 @@ produces a write_ — 40 steps, 2M tokens, zero edits, run ends
 notice" failure as a declared transition.
 
 - **scan:** the finished run consumed >T tokens (or >S steps) and
-  produced zero **write-class** calls — the plan gate's write
-  vocabulary (`plan_done.go:121-135`: `writeToolNames` ∪
-  `download` ∪ `toolclass.BashRedirectTargets`), not the raw map —
-  a run that wrote only via `bash > f` must not false-trip.
-  **Token metric is `input+output` only** — `TotalUsage` splits
-  cache-read/cache-creation, and a cache-inclusive threshold
-  trips dramatically earlier on long sessions. T/S are generous
-  tripwire thresholds, not a governor — the edge exists to
-  surface, not to throttle. Configurable; default on the order of
-  ~200K input+output tokens or ~30 steps.
+  produced zero **mutating calls** — `toolclass.IsMutatingCall`,
+  the shared write-boundary vocabulary the scope gate and
+  checkpoint boundary already agree on (write-tools + `download`
+  - mutating bash), not the raw `writeToolNames` map — a run
+    that wrote only via `bash > f` must not false-trip.
+    (`eval/analyze.go` uses the narrow map deliberately for gate
+    metrics — a documented blind spot burn-watch must not inherit.)
+    **Token metric:** sum `step.Response.Usage.InputTokens` across
+    steps — the true billed spend, since each step re-sends the
+    prompt — with `fallbackStepUsage` for zero-usage providers
+    (flagged `estimated`); **cache-read excluded** — cached tokens
+    are ~free and would trip the tripwire far too early. T/S are
+    generous tripwire thresholds, not a governor — the edge exists
+    to surface, not to throttle. "Configurable" is real work:
+    threshold + step count need an `optionSpec` entry, schema, and
+    `Options` field. Default on the order of ~200K input tokens or
+    ~30 steps.
 - **resolve:** collect the evidence — steps, tokens, exploration
   event count, files-read-without-write (filetracker's read set
   minus the scanned write set).
@@ -184,16 +216,27 @@ notice" failure as a declared transition.
   stop?"), not a retry prompt. Headless degrades to a logged
   assumption per the shared rule.
 - **Fires once per crossing, resets on write.** A marker on
-  `SessionAgentCall` suppresses re-firing until a write-class call
-  lands — otherwise it nags at every run end forever. Marker
-  scope is **per run-chain**: it propagates only through the
-  retry-clone chain, so a write-less streak spanning fresh user
-  turns re-fires at each turn end — intended (each turn's spend
-  is a fresh decision worth surfacing); widen to session scope
-  only if the re-fire proves nagging in practice.
-- **Precedence:** shares the escalation path — if `stall-replan`
-  or `escalate-human` also fired, the aggregation rule merges them
-  and the user-targeted prompt wins the slot.
+  `SessionAgentCall` suppresses re-firing — but the marker needs
+  a _clear_ mechanism, and the `runEdge` type has no hook to
+  mutate the enqueued retry (the clone happens in `runEdges`
+  before the next run exists). Seam-level fix: **`runEdges`
+  clears the marker when the just-finished run contained a
+  mutating call** — otherwise a repair turn that writes and then
+  burns again stays suppressed forever. No `amendRetry` type
+  extension needed. Marker scope is **per run-chain**: it
+  propagates only through the retry-clone chain, so a write-less
+  streak spanning fresh user turns re-fires at each turn end —
+  intended (each turn's spend is a fresh decision worth
+  surfacing); widen to session scope only if the re-fire proves
+  nagging in practice.
+- **Precedence — and the merge-rule gap:** if the stall edge's
+  escalation prompt also fired, the user-targeted prompt wins the
+  slot and retry-family triggers carry as context inside it (or
+  defer — their conditions re-fire next boundary anyway). This
+  rule is **not implemented today**: merged prompts concatenate
+  sections (`run_edges.go`), so a verification+stall double-fire
+  hands the model both "fix these checks" and "ask the user" and
+  lets it pick. The precedence needs to be real, not textual.
 - **Limit, stated plainly:** edges fire at run boundaries only —
   a single giant turn mid-flight is not caught. Mid-run spend
   pressure is `CONTEXT_WINDOW_SAFETY.md` territory (or a future
@@ -211,13 +254,27 @@ rows prove the type.
 ### edge-firing records
 
 Log every edge firing per turn — name, trigger, outcome — into the
-run record. **Store decision:** two consumers, one substrate —
-firings persist as **metadata on the boundary assistant message**
-(the verification-outcomes precedent: `ClientMetadata` on stored
-messages is durable, stats-queryable, and already unions into the
-session record). `crush stats` reads it from the DB; the eval doc
-gets the same counts via `SessionTelemetry` counters +
-`emitEvalTelemetry`. No new table for v1. This is what
+run record. **Store decision — records need a real table.** There
+is no runtime run-record store today (the eval `RunRecord` is
+post-hoc JSONL analysis of the session DB), and the cheaper
+alternative — message metadata like verification outcomes —
+doesn't fit: suppressed-by-marker, budget-exhausted, and
+headless-degraded firings have no natural message home, yet
+those are exactly the states that make firing rates interpretable
+("never fires" must be distinguishable from "never evaluated").
+Follow the `collapsed_turns` precedent: migration + sqlc query +
+service method + stats section + eval analyzer read — an
+`edge_firings` table (session_id, turn seq, edge name, trigger
+detail, **outcome enum**: fired / suppressed / exhausted /
+headless-degraded). `crush stats` reads the table; the eval doc
+reads the same counts via `SessionTelemetry` +
+`emitEvalTelemetry`.
+**Name stability lands first** — records become eval assertion
+targets, so edge names must be final before the table exists:
+the shipped edge is `stall` (the doc's "stall-replan" was the
+delta it gained; "escalate-human" is fused into it, not a
+distinct edge). Renaming post-baseline churns eval baselines.
+This is what
 `EVAL_HARNESS` consumes as trajectory assertions: named
 transitions give the corpus stable checkpoints, and asserting on
 emergent loop behavior does not. Also surfaced in `crush stats` —
