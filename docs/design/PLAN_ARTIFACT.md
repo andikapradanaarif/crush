@@ -184,7 +184,18 @@ evidence` — a completed mark with pending/failed/unmet
   strings no longer satisfies the gate, and an **empty list does
   not resolve it either**: `todos: []` vacuously satisfies "every
   item binds evidence," so without the non-empty requirement
-  "declare nothing" becomes the cheapest gate-resolution. **Open
+  "declare nothing" becomes the cheapest gate-resolution. Bounced
+  declarations are **bounded, not infinite**: a ~2–3-bounce budget
+  then escalates to the real scope question with stuck-loop
+  context ("repeatedly declared plans that don't resolve —
+  proceed without a declared plan?") — the edge-exhaustion shape,
+  escalation never pass-through (passing after N bounces would
+  teach the spam-bypass). The budget is also the safety valve for
+  an _unrepairable_ bounce — a requirement the model can't see
+  (evidence vocabulary unsurfaced) is a guaranteed loop. Bounce
+  count is exported telemetry: a high rate means the model can't
+  conform — vocabulary invisible, schema too strict — versus a
+  weak model; silent bouncing hides the difference. **Open
   items do not block
   `phase-confirm`** — at the first-write boundary every item is
   open by definition, so blocking there deadlocks every plan.
