@@ -56,16 +56,16 @@ here because the list must have exactly one home.
 
 ## Catalog
 
-| Edge               | Trigger                                            | Status today                          |
-| ------------------ | -------------------------------------------------- | ------------------------------------- |
-| verification       | failed/pending checks                              | implemented (the extraction source)   |
-| todos-reconcile    | open plan items at clean stop                      | implemented (same site)               |
-| stall-replan       | loop-detector / no-progress                        | new — repurposes the stop-only signal |
-| escalate-human     | loop-detector stop, or repair budget spent         | implemented (#43) — question turn     |
-| phase-confirm      | first write-class call after ≥N exploration events | implemented (#43) — plan gate         |
-| join-subagents     | outstanding dispatch ledger                        | lives in `BACKGROUND_SUBAGENTS.md`    |
-| summarize-continue | context pressure at run end                        | new — reframes auto-summarize         |
-| burn-watch         | run spent >T tokens with zero write-class calls    | new — the unnoticed-spend tripwire    |
+| Edge               | Trigger                                            | Status today                                                 |
+| ------------------ | -------------------------------------------------- | ------------------------------------------------------------ |
+| verification       | failed/pending checks                              | implemented (the extraction source)                          |
+| todos-reconcile    | open plan items at clean stop                      | implemented (same site)                                      |
+| stall-replan       | loop-detector / no-progress                        | new — inserts a model replan _before_ the shipped escalation |
+| escalate-human     | loop-detector stop, or repair budget spent         | implemented (#43) — question turn                            |
+| phase-confirm      | first write-class call after ≥N exploration events | implemented (#43) — plan gate                                |
+| join-subagents     | outstanding dispatch ledger                        | lives in `BACKGROUND_SUBAGENTS.md`                           |
+| summarize-continue | context pressure at run end                        | new — reframes auto-summarize                                |
+| burn-watch         | run spent >T tokens with zero write-class calls    | new — the unnoticed-spend tripwire                           |
 
 The stall-replan row is the tell that this abstraction earns its
 keep: `hasRepeatedToolCalls` today _stops_ a thrashing turn — the
@@ -86,6 +86,15 @@ type signature. Headless (`crush run`) degrades both rows to
 "state the blocker + chosen option, proceed": the edge still fires,
 the question becomes a logged assumption.
 
+**Ordering and scope.** `runEdgeSet` order is load-bearing —
+verification's resolve must precede todos' scan (resolved checks
+feed the done-definition); new rows declare where they sit rather
+than appending blindly. Edges evaluate on the session's own run;
+for child/task sessions, firing follows the checkpoint precedent —
+the machinery is shared, the decision is per-edge (a child's stall
+is the parent's problem via the child's report, not a second
+question turn).
+
 `escalate-human` ships in the same series as #39's clause work, with
 the `runEdge` extraction folded in as its enabling step — the seam
 lands first within the series, the edge second. The ordering is not
@@ -102,8 +111,9 @@ different seam (permissions/hook territory), unblocked today.
 
 With the project index (`CONTEXT_PREFETCH.md`, #34), `resolve`
 gains a deterministic evidence source: a repair prompt can carry a
-`map` slice over the run's touched dirs (filetracker knows the write
-set), so the forced turn starts re-oriented at zero model cost
+`map` slice over the run's touched dirs (the write set is scanned
+from `result.Steps` — filetracker tracks reads only), so the
+forced turn starts re-oriented at zero model cost
 instead of the model re-gathering in its first calls back — the
 re-read loop the index exists to kill, closed at the run boundary
 rather than left to the model remembering a tool exists.
@@ -116,24 +126,36 @@ fire between turns.
 
 ### stall-replan
 
-Repurposes the stop-only loop-detector signal into a budgeted
-replan turn.
+The stop-only signal was _already_ repurposed — #43's `stall`
+edge (`scanStallEdge`, `run_edges.go:473`) _is_ the escalate-human
+row: question-escalation when interactive, blocker report
+headless, drawn from the shared repair budget. The new work is a
+**model-directed replan turn inserted before that escalation** —
+the edge's prompt branches on budget, not a second edge.
 
-- **scan:** the run ended via `hasRepeatedToolCalls` (or carries
-  repeated-call evidence in `result.Steps`) and the repair budget
-  is not spent.
-- **resolve:** collect the repeated call signature, the filetracker
-  write set, and — with `project_index` on — a `map` slice over
-  the touched dirs.
+- **scan:** the run ended via `hasRepeatedToolCalls` (`in.stalled`,
+  plumbed at `agent.go:1553`).
+- **Mechanism — the stall edge branches on `call.RepairAttempts`:**
+  budget available → replan retry prompt (below); spent → the
+  existing escalation path (question turn interactive, blocker
+  report headless). One edge, two prompts — the spec's earlier
+  "both fire and merge" reading was wrong: under this shape they
+  can never co-fire, and a spent budget is already terminal in
+  `runEdges` (`run_edges.go:149-155` — exhaustion note, nothing
+  enqueued). Zero structural change to the seam; "budgeted like
+  repairs" is literal.
+- **resolve:** collect the repeated call signature, the write set
+  (**scan `result.Steps` for write-class calls** — filetracker
+  tracks _reads_ only, `RecordRead`/`ListReadFiles`; the
+  `scanVerification`/`scanPlanEvidence` precedent), and — with
+  `project_index` on — a `map` slice over the touched dirs.
 - **prompt:** "you stopped making progress: <evidence>. State which
   assumption failed and revise the approach." One turn within
   `RepairAttempts`.
-- **Precedence vs. `escalate-human`:** both can trigger on a loop
-  stop. Resolution order — `stall-replan` is the in-budget
-  response; `escalate-human` is what a spent budget falls through
-  to. The aggregation rule merges them if both fire: one boundary
-  slot, escalation wins the target (a question to the user
-  subsumes a retry prompt).
+- **Gating:** rides `ambiguity_clarification` with the stall edge
+  it extends — a retry turn on every loop stop changes behavior
+  for everyone, so the default-on flip is a separate
+  evidence-gated decision (#38/#54), not part of this row.
 
 ### burn-watch
 
@@ -144,19 +166,31 @@ produces a write_ — 40 steps, 2M tokens, zero edits, run ends
 notice" failure as a declared transition.
 
 - **scan:** the finished run consumed >T tokens (or >S steps) and
-  produced zero `writeToolNames` calls. T/S are generous tripwire
-  thresholds, not a governor — the edge exists to surface, not to
-  throttle. Configurable; default on the order of ~200K tokens or
-  ~30 steps.
+  produced zero **write-class** calls — the plan gate's write
+  vocabulary (`plan_done.go:121-135`: `writeToolNames` ∪
+  `download` ∪ `toolclass.BashRedirectTargets`), not the raw map —
+  a run that wrote only via `bash > f` must not false-trip.
+  **Token metric is `input+output` only** — `TotalUsage` splits
+  cache-read/cache-creation, and a cache-inclusive threshold
+  trips dramatically earlier on long sessions. T/S are generous
+  tripwire thresholds, not a governor — the edge exists to
+  surface, not to throttle. Configurable; default on the order of
+  ~200K input+output tokens or ~30 steps.
 - **resolve:** collect the evidence — steps, tokens, exploration
-  event count, files-read-without-write (filetracker).
+  event count, files-read-without-write (filetracker's read set
+  minus the scanned write set).
 - **prompt:** escalation-family — a `question` turn ("spent N
   tokens over M steps with no writes — continue / replan /
   stop?"), not a retry prompt. Headless degrades to a logged
   assumption per the shared rule.
 - **Fires once per crossing, resets on write.** A marker on
   `SessionAgentCall` suppresses re-firing until a write-class call
-  lands — otherwise it nags at every run end forever.
+  lands — otherwise it nags at every run end forever. Marker
+  scope is **per run-chain**: it propagates only through the
+  retry-clone chain, so a write-less streak spanning fresh user
+  turns re-fires at each turn end — intended (each turn's spend
+  is a fresh decision worth surfacing); widen to session scope
+  only if the re-fire proves nagging in practice.
 - **Precedence:** shares the escalation path — if `stall-replan`
   or `escalate-human` also fired, the aggregation rule merges them
   and the user-targeted prompt wins the slot.
@@ -177,11 +211,18 @@ rows prove the type.
 ### edge-firing records
 
 Log every edge firing per turn — name, trigger, outcome — into the
-run record. This is what `EVAL_HARNESS` consumes as trajectory
-assertions: named transitions give the corpus stable checkpoints,
-and asserting on emergent loop behavior does not. Also surfaced in
-`crush stats` — an edge that fires constantly is a tuning signal,
-an edge that never fires is dead code.
+run record. **Store decision:** two consumers, one substrate —
+firings persist as **metadata on the boundary assistant message**
+(the verification-outcomes precedent: `ClientMetadata` on stored
+messages is durable, stats-queryable, and already unions into the
+session record). `crush stats` reads it from the DB; the eval doc
+gets the same counts via `SessionTelemetry` counters +
+`emitEvalTelemetry`. No new table for v1. This is what
+`EVAL_HARNESS` consumes as trajectory assertions: named
+transitions give the corpus stable checkpoints, and asserting on
+emergent loop behavior does not. Also surfaced in `crush stats` —
+an edge that fires constantly is a tuning signal, an edge that
+never fires is dead code.
 
 ## PR ordering
 
