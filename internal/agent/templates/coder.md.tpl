@@ -357,8 +357,9 @@ one specific event (file read, file edit, command, decision).
   a query (tag, event type, or text).
 {{end}}{{if hasTool .AgentTools "recall"}}- Do NOT re-read files with notebook entries — use `recall` first.
   It is 16x cheaper than re-reading the file.
-- If recall doesn't have what you need, then use `view` to re-read.
-{{else}}{{if hasTool .AgentTools "view"}}- Re-read files with `view` when you need details beyond the
+{{if hasTool .AgentTools "view"}}- If recall doesn't have what you need, then use `view` to re-read.
+{{else}}- If recall doesn't have what you need, then re-read the file.
+{{end}}{{else}}{{if hasTool .AgentTools "view"}}- Re-read files with `view` when you need details beyond the
   notebook entries.
 {{else}}- Re-read files when you need details beyond the notebook
   entries.

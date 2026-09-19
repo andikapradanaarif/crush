@@ -50,7 +50,11 @@ type PromptDat struct {
 	// leave it nil. Snapshotted at Build time: the system prompt
 	// renders once per agent build, so a config reload swapping the
 	// tool palette leaves it stale until the next build — the same
-	// lifecycle as every other config-derived PromptDat field.
+	// lifecycle as every other config-derived PromptDat field. Note
+	// the contract is "allowed, not built" — conditional builds
+	// (question when headless, map without an index) can still be
+	// absent from the live set; safe for tools whose registration
+	// tracks AllowedTools exactly, like recall/notebook_search.
 	AgentTools []string
 	// ProjectIndexEnabled reports whether the map tool is registered —
 	// the prompt's map hint must not render when the tool is absent, or
