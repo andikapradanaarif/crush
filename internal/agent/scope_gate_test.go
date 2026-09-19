@@ -7,8 +7,10 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/question"
+	"github.com/charmbracelet/crush/internal/session"
 	"github.com/stretchr/testify/require"
 )
 
@@ -41,6 +43,19 @@ func (f *fakeQuestionService) Ask(_ context.Context, req question.Request) ([]qu
 
 func (f *fakeQuestionService) Answer([]question.Answer) bool { return false }
 func (f *fakeQuestionService) Cancel() bool                  { return false }
+
+// countingSessionService wraps a real session.Service and counts
+// Get calls — the gate's stored-plan check must not read the session
+// once the gate has resolved.
+type countingSessionService struct {
+	session.Service
+	gets int
+}
+
+func (c *countingSessionService) Get(ctx context.Context, id string) (session.Session, error) {
+	c.gets++
+	return c.Service.Get(ctx, id)
+}
 
 func TestIsMutatingCall(t *testing.T) {
 	t.Parallel()
@@ -79,6 +94,13 @@ func TestIsMutatingCall(t *testing.T) {
 		{"quoted redirect", bash(`echo "progress > bar"`), false},
 		{"quoted redirect target", bash(`echo x > 'out'`), true},
 		{"stderr-and-stdout to file", bash("go build >& out.log"), true},
+		{"variable redirect target still mutates", bash("cmd > $OUT"), true},
+		{"tilde redirect target still mutates", bash("cmd > ~/out"), true},
+		{"glob redirect target still mutates", bash("cmd > *.log"), true},
+		{"substitution redirect target still mutates", bash("cmd > $(gen)"), true},
+		{"test comparison is not a write", bash("[[ $a > b.go ]]"), false},
+		{"arithmetic is not a write", bash("echo $((a > b))"), false},
+		{"escaped quote keeps real redirect", bash(`echo "a \"b" > out`), true},
 		{"go test", bash("go test ./..."), false},
 		{"make test", bash("make test"), false},
 		{"empty input", fantasy.ToolCall{Name: "bash"}, false},
@@ -113,7 +135,7 @@ func TestScopeGate(t *testing.T) {
 		svc := &fakeQuestionService{selected: selected}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("file contents")}
-		wrapped := newScopeGate(svc, true).wrap([]fantasy.AgentTool{read, write})
+		wrapped := newScopeGate(svc, true, nil).wrap([]fantasy.AgentTool{read, write})
 		return svc, write, wrapped[0], wrapped[1]
 	}
 
@@ -178,7 +200,7 @@ func TestScopeGate(t *testing.T) {
 		svc := &fakeQuestionService{selected: []string{"proceed"}}
 		bash := &fakeTool{name: "bash", resp: fantasy.NewTextResponse("done")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
-		wrapped := newScopeGate(svc, true).wrap([]fantasy.AgentTool{read, bash})
+		wrapped := newScopeGate(svc, true, nil).wrap([]fantasy.AgentTool{read, bash})
 		ctx := gateCtx("s1", 1)
 		exploreN(t, ctx, wrapped[0], scopeGateMinExploration)
 
@@ -196,7 +218,7 @@ func TestScopeGate(t *testing.T) {
 		svc := &fakeQuestionService{selected: []string{"proceed"}}
 		bash := &fakeTool{name: "bash", resp: fantasy.NewTextResponse("ok")}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
-		wrapped := newScopeGate(svc, true).wrap([]fantasy.AgentTool{bash, write})
+		wrapped := newScopeGate(svc, true, nil).wrap([]fantasy.AgentTool{bash, write})
 		ctx := gateCtx("s1", 1)
 		for range scopeGateMinExploration {
 			resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{
@@ -216,20 +238,201 @@ func TestScopeGate(t *testing.T) {
 		t.Parallel()
 		svc := &fakeQuestionService{}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
-		shared := newScopeGate(svc, true).wrap([]fantasy.AgentTool{
+		shared := newScopeGate(svc, true, nil).wrap([]fantasy.AgentTool{
 			&fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextResponse("ok")},
 			&fakeTool{name: "view", resp: fantasy.NewTextResponse("x")},
 			write,
 		})
 		ctx := gateCtx("s1", 1)
 		exploreN(t, ctx, shared[1], scopeGateMinExploration)
-		_, err := shared[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName})
+		_, err := shared[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName,
+			Input: `{"todos":[{"content":"fix the gate","status":"pending","evidence_paths":["internal/agent/scope_gate.go"]}]}`})
 		require.NoError(t, err)
 		resp, err := shared[2].Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
 		require.NoError(t, err)
 		require.False(t, resp.IsError)
 		require.True(t, write.called)
 		require.Equal(t, 0, svc.asks)
+	})
+
+	newTodosGate := func(t *testing.T) (*fakeQuestionService, *fakeTool, *fakeTool, fantasy.AgentTool, fantasy.AgentTool, fantasy.AgentTool) {
+		svc := &fakeQuestionService{selected: []string{"proceed"}}
+		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextResponse("ok")}
+		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
+		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
+		wrapped := newScopeGate(svc, true, nil).wrap([]fantasy.AgentTool{todosTool, read, write})
+		return svc, todosTool, write, wrapped[0], wrapped[1], wrapped[2]
+	}
+	barePlan := `{"todos":[{"content":"fix the gate","status":"pending"}]}`
+	boundPlan := `{"todos":[{"content":"fix the gate","status":"pending","evidence_checks":["verify:build"]}]}`
+
+	t.Run("bare-string plan does not resolve the gate", func(t *testing.T) {
+		t.Parallel()
+		svc, _, write, todosTool, readTool, writeTool := newTodosGate(t)
+		ctx := gateCtx("s1", 1)
+		exploreN(t, ctx, readTool, scopeGateMinExploration)
+
+		// Armed gate: the non-validating declaration bounces with the
+		// reason instead of running.
+		resp, err := todosTool.Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName, Input: barePlan})
+		require.NoError(t, err)
+		require.True(t, resp.IsError)
+		require.Contains(t, resp.Content, "must bind evidence")
+
+		// The write that follows still hits the scope question.
+		_, err = writeTool.Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
+		require.NoError(t, err)
+		require.Equal(t, 1, svc.asks)
+		require.True(t, write.called)
+	})
+
+	t.Run("empty plan does not resolve the gate", func(t *testing.T) {
+		t.Parallel()
+		svc, _, _, todosTool, readTool, writeTool := newTodosGate(t)
+		ctx := gateCtx("s1", 1)
+		exploreN(t, ctx, readTool, scopeGateMinExploration)
+		resp, err := todosTool.Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName, Input: `{"todos":[]}`})
+		require.NoError(t, err)
+		require.True(t, resp.IsError)
+		_, err = writeTool.Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
+		require.NoError(t, err)
+		require.Equal(t, 1, svc.asks)
+	})
+
+	t.Run("bound plan resolves the gate after landing", func(t *testing.T) {
+		t.Parallel()
+		svc, todosFake, write, todosTool, readTool, writeTool := newTodosGate(t)
+		ctx := gateCtx("s1", 1)
+		exploreN(t, ctx, readTool, scopeGateMinExploration)
+		resp, err := todosTool.Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName, Input: boundPlan})
+		require.NoError(t, err)
+		require.False(t, resp.IsError)
+		require.True(t, todosFake.called, "the write must land before it counts as declared")
+		resp, err = writeTool.Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
+		require.NoError(t, err)
+		require.False(t, resp.IsError)
+		require.True(t, write.called)
+		require.Equal(t, 0, svc.asks)
+	})
+
+	t.Run("bookkeeping write on an existing bare plan passes", func(t *testing.T) {
+		t.Parallel()
+		conn, err := db.Connect(t.Context(), t.TempDir())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = conn.Close() })
+		sessions := session.NewService(db.New(conn), conn)
+		sess, err := sessions.Create(t.Context(), "test")
+		require.NoError(t, err)
+		sess.Todos = []session.PlanItem{{ID: "i1", Content: "existing", Status: session.PlanItemPending}}
+		_, err = sessions.Save(t.Context(), sess)
+		require.NoError(t, err)
+
+		svc := &fakeQuestionService{selected: []string{"proceed"}}
+		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextResponse("ok")}
+		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
+		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("e")}
+		wrapped := newScopeGate(svc, true, sessions).wrap([]fantasy.AgentTool{todosTool, read, write})
+		ctx := gateCtx(sess.ID, 1)
+		exploreN(t, ctx, wrapped[1], scopeGateMinExploration)
+		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName,
+			Input: `{"todos":[{"content":"existing","status":"in_progress"}]}`})
+		require.NoError(t, err)
+		require.False(t, resp.IsError, "a bookkeeping update on an existing plan is not a declaration")
+		require.True(t, todosTool.called)
+		// The gate is still unresolved — the update didn't validate,
+		// so a later write still reaches the question.
+		_, err = wrapped[2].Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
+		require.NoError(t, err)
+		require.Equal(t, 1, svc.asks)
+	})
+
+	t.Run("resolved gate stops reading the session", func(t *testing.T) {
+		t.Parallel()
+		conn, err := db.Connect(t.Context(), t.TempDir())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = conn.Close() })
+		sessions := &countingSessionService{Service: session.NewService(db.New(conn), conn)}
+		sess, err := sessions.Create(t.Context(), "test")
+		require.NoError(t, err)
+
+		svc := &fakeQuestionService{selected: []string{"proceed"}}
+		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextResponse("ok")}
+		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
+		wrapped := newScopeGate(svc, true, sessions).wrap([]fantasy.AgentTool{todosTool, read})
+		ctx := gateCtx(sess.ID, 1)
+		exploreN(t, ctx, wrapped[1], scopeGateMinExploration)
+
+		// Armed, no plan stored: a bare list bounces (one Get), a
+		// bound list lands and resolves (second Get).
+		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t1", Name: tools.TodosToolName,
+			Input: `{"todos":[{"content":"bare","status":"pending"}]}`})
+		require.NoError(t, err)
+		require.True(t, resp.IsError)
+		resp, err = wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t2", Name: tools.TodosToolName, Input: boundPlan})
+		require.NoError(t, err)
+		require.False(t, resp.IsError)
+		getsAfterResolve := sessions.gets
+
+		// Resolved: bookkeeping calls must not touch the session row.
+		resp, err = wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t3", Name: tools.TodosToolName,
+			Input: `{"todos":[{"content":"bare","status":"pending"}]}`})
+		require.NoError(t, err)
+		require.False(t, resp.IsError)
+		require.Equal(t, getsAfterResolve, sessions.gets, "a resolved gate must skip planDeclared")
+	})
+
+	t.Run("todos calls do not count as exploration", func(t *testing.T) {
+		t.Parallel()
+		svc := &fakeQuestionService{selected: []string{"proceed"}}
+		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextResponse("ok")}
+		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
+		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("e")}
+		wrapped := newScopeGate(svc, true, nil).wrap([]fantasy.AgentTool{todosTool, read, write})
+		ctx := gateCtx("s1", 1)
+		exploreN(t, ctx, wrapped[1], scopeGateMinExploration-1)
+		for i := 0; i < 5; i++ {
+			resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName,
+				Input: `{"todos":[{"content":"bare","status":"pending"}]}`})
+			require.NoError(t, err)
+			require.False(t, resp.IsError)
+		}
+		resp, err := wrapped[2].Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
+		require.NoError(t, err)
+		require.False(t, resp.IsError)
+		require.True(t, write.called)
+		require.Equal(t, 0, svc.asks, "plan bookkeeping is not exploration — the gate stays unarmed")
+	})
+
+	t.Run("malformed plan input gets the tool's own error, not the gate's", func(t *testing.T) {
+		t.Parallel()
+		svc := &fakeQuestionService{selected: []string{"proceed"}}
+		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextErrorResponse("invalid todos payload")}
+		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
+		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
+		wrapped := newScopeGate(svc, true, nil).wrap([]fantasy.AgentTool{todosTool, read, write})
+		ctx := gateCtx("s1", 1)
+		exploreN(t, ctx, wrapped[1], scopeGateMinExploration)
+		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName, Input: `{not json`})
+		require.NoError(t, err)
+		require.True(t, resp.IsError)
+		require.Contains(t, resp.Content, "invalid todos payload", "the tool's parse error must surface, not a plan rejection")
+	})
+
+	t.Run("a rejected plan write does not resolve the gate", func(t *testing.T) {
+		t.Parallel()
+		svc := &fakeQuestionService{selected: []string{"proceed"}}
+		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextErrorResponse("validation failed")}
+		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
+		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
+		wrapped := newScopeGate(svc, true, nil).wrap([]fantasy.AgentTool{todosTool, read, write})
+		ctx := gateCtx("s1", 1)
+		exploreN(t, ctx, wrapped[1], scopeGateMinExploration)
+		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName, Input: boundPlan})
+		require.NoError(t, err)
+		require.True(t, resp.IsError, "the underlying tool error propagates")
+		_, err = wrapped[2].Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
+		require.NoError(t, err)
+		require.Equal(t, 1, svc.asks, "a rejected write must not count as declared")
 	})
 
 	t.Run("user stop ends the turn", func(t *testing.T) {
@@ -249,7 +452,7 @@ func TestScopeGate(t *testing.T) {
 		svc := &fakeQuestionService{err: context.DeadlineExceeded}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
-		wrapped := newScopeGate(svc, true).wrap([]fantasy.AgentTool{read, write})
+		wrapped := newScopeGate(svc, true, nil).wrap([]fantasy.AgentTool{read, write})
 		ctx := gateCtx("s1", 1)
 		exploreN(t, ctx, wrapped[0], scopeGateMinExploration)
 		resp, err := wrapped[1].Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
@@ -262,7 +465,7 @@ func TestScopeGate(t *testing.T) {
 		t.Parallel()
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
-		wrapped := newScopeGate(nil, false).wrap([]fantasy.AgentTool{read, write})
+		wrapped := newScopeGate(nil, false, nil).wrap([]fantasy.AgentTool{read, write})
 		ctx := gateCtx("s1", 1)
 		exploreN(t, ctx, wrapped[0], scopeGateMinExploration)
 		resp, err := wrapped[1].Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
@@ -273,7 +476,7 @@ func TestScopeGate(t *testing.T) {
 
 	t.Run("nil service builds no gate", func(t *testing.T) {
 		t.Parallel()
-		require.Nil(t, newScopeGate(nil, true))
+		require.Nil(t, newScopeGate(nil, true, nil))
 	})
 
 	t.Run("a tool rebuild keeps gate state", func(t *testing.T) {
@@ -281,7 +484,7 @@ func TestScopeGate(t *testing.T) {
 		// SetTools rebuilds re-wrap the toolset — the same gate must
 		// keep its resolved mark so a turn isn't re-asked.
 		svc := &fakeQuestionService{selected: []string{"proceed"}}
-		gate := newScopeGate(svc, true)
+		gate := newScopeGate(svc, true, nil)
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
 		wrapped := gate.wrap([]fantasy.AgentTool{read, write})

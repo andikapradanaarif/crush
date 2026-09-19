@@ -138,7 +138,9 @@ func TestRepairPromptPrefixes_Stable(t *testing.T) {
 	}}})
 	require.True(t, strings.HasPrefix(v, verificationRetryPrefix))
 	require.True(t, strings.HasPrefix(
-		todosRetrySection(&edgeTrigger{todos: []session.Todo{{Content: "x", Status: "pending"}}}),
+		todosRetrySection(&edgeTrigger{plan: []planVerdict{{
+			item: session.PlanItem{Content: "x", Status: session.PlanItemPending},
+		}}}),
 		todosRetryPrefix))
 	require.True(t, strings.HasPrefix(stallRetrySection(nil), stallRetryPrefix))
 }

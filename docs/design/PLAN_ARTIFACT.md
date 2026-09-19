@@ -21,6 +21,14 @@ are structural questions about an artifact — not self-reported
 model judgment. The model keeps writing plans; the harness gains
 the ability to verify them.
 
+`PlanItem` is unrelated to upstream's plan _mode_ (`AgentPlan`,
+`plan.md.tpl`): the plan agent produces human-facing prose for
+user approval and cannot write `PlanItem`s (`resolvePlanTools`
+excludes `todos`). Two systems named "plan" coexist — one the
+user confirms, one the harness checks. Seeding typed items from
+an approved plan-mode plan is a deliberate follow-up, not part of
+this work.
+
 ## Problem
 
 `session.Todo` is `{Content, Status, ActiveForm}`
@@ -41,8 +49,8 @@ verify.
 
 ## Design
 
-`session.Todo` → `PlanItem{ID, Content, DependsOn []ID, Status,
-Evidence []string}`:
+`session.Todo` → `PlanItem{ID, Key, Content, DependsOn []ID, Status,
+EvidenceChecks []string, EvidencePaths []string}`:
 
 - `DependsOn` is the dispatch unit for fan-out: independent
   subtrees are what a background subagent may be handed, and the
@@ -89,6 +97,13 @@ Evidence []string}`:
     file) is not failed — it doesn't block under the weak rule;
     keep `unverified` / `unmet` / `failed` distinct in gate
     feedback — three near-synonyms that must not collapse.
+    Supersession is per-write-path: a later write to the same
+    path with a `diagnostics` entry replaces the verdict, and a
+    write carrying _no_ `diagnostics` entry (a bash redirect
+    rewrite) clears it — optimistic by design, since latching
+    until a checked write would make bash-heavy fixes
+    unresolvable; the cost is a `cat > a.go` that preserves the
+    errors reads as resolved until the next checked write.
     Known bounds, same as the verify gate's: `package-test` is
     Go-only, so non-Go trees reduce to "write landed"; mutating
     bash (`sed -i`, redirects, `go generate`) and multi-file
@@ -98,6 +113,33 @@ Evidence []string}`:
     lets a repair/replan edge render the current symbols of the
     files it names (`CONTEXT_PREFETCH.md`) into the prompt — the
     plan carries its own map.
+    Bash evidence bounds: the redirect scan masks quoted spans,
+    `[[ ]]` tests, arithmetic, and heredoc bodies before reading
+    `>` operators, and only records concrete targets — `~/out`,
+    `$OUT`, globs, and substitutions mutate but yield no path
+    (they still count as mutation for the scope gate; the two
+    vocabularies deliberately differ on expansion targets).
+    Residual blind spots: nested-paren arithmetic, `]` inside a
+    `[[ ]]` body, and heredoc delimiters outside `[A-Za-z0-9_]`.
+    Bindings outside the working directory (`../x`, absolute) are
+    legal — evidence binding is not a permission — and a bash
+    redirect there satisfies them.
+    Two accepted loosenesses: the evidence scan is
+    **session-lifetime** — a write from an earlier turn can
+    satisfy a binding declared later, so the evidence proves "a
+    write happened," not "this item's work happened"; and binding
+    is a **checkpoint-time nudge, not an invariant** — once the
+    scope gate resolves, a bare rewrite can strip `evidence_*`
+    fields and unbound completed marks count as done. Both are
+    deliberate: the gate pressures declaration-time structure,
+    it does not police post-resolution plan hygiene.
+    Two more bounds, same deliberate kind: only **successful**
+    tool results record writes — a failed bash call's redirect
+    may still have created its target, but failed work is not
+    evidence; and the UI's incomplete-todo pill is **mark-only** —
+    an evidence-blocked completed item counts as done there even
+    while the run-end gate queues a repair turn, a cosmetic
+    divergence the retry prompt explains.
     This unifies today's two gate triggers (failed checks, open
     todos) into one definition of done instead of two scans of the
     same run — and **done-ness evaluates on final state, not

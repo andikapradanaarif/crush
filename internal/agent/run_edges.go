@@ -9,7 +9,6 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/message"
-	"github.com/charmbracelet/crush/internal/session"
 )
 
 // maxRepairAttempts bounds the shared repair-turn budget: the number of
@@ -33,14 +32,14 @@ type edgeInput struct {
 
 // edgeTrigger is one edge's scan output: the evidence a retry prompt or
 // exhaustion note renders from. The verification edge fills the check
-// fields, the todos edge fills todos, the stall edge fills assistant and
+// fields, the todos edge fills plan, the stall edge fills assistant and
 // report, and fire marks whether the edge still wants a repair turn
 // after resolve ran.
 type edgeTrigger struct {
 	failed    []gateCheckOutcome
 	pending   []gateCheckOutcome
 	observed  []observedBash
-	todos     []session.Todo
+	plan      []planVerdict
 	assistant *message.Message
 	report    string
 	fire      bool
@@ -66,6 +65,14 @@ type runEdge struct {
 // original gate halves; stall converts a loop-detector stop into a
 // replan turn. All firing edges merge into ONE retry prompt — two edges
 // each enqueueing a turn would double every repair.
+//
+// The order is load-bearing: verification resolves before todos
+// scans. scanTodosEdge reads check verdicts from STORED tool-result
+// metadata — final state, not the mark-time snapshot — which is only
+// true because resolveVerificationEdge runs pending checks and
+// FlushAlls their outcomes first. Reordering or parallelizing the
+// set would make every pending check read as "has not resolved" and
+// false-block evidence-bound items.
 func (a *sessionAgent) runEdgeSet() []runEdge {
 	return []runEdge{
 		{
@@ -331,46 +338,87 @@ func verificationExhaustNote(t *edgeTrigger, attempts int) string {
 
 // --- todos edge ---
 
-// scanTodosEdge fires when a clean stop leaves session todos open — the
-// model's own declared scope says the turn is not done.
+// scanTodosEdge fires when a clean stop leaves plan items unresolved —
+// open marks, or completed marks the evidence contradicts. Done-ness
+// evaluates on final state: a check green at mark-time that regressed
+// on a later write reopens the item here.
 func (a *sessionAgent) scanTodosEdge(ctx context.Context, call SessionAgentCall, in edgeInput) *edgeTrigger {
 	if !cleanStop(in) {
 		return nil
 	}
-	open := a.incompleteTodos(ctx, call.SessionID)
+	open := a.planVerdicts(ctx, call.SessionID)
 	if len(open) == 0 {
 		return nil
 	}
-	return &edgeTrigger{todos: open, fire: true}
+	return &edgeTrigger{plan: open, fire: true}
 }
 
-// todosRetrySection renders the open todo items left behind by a turn
-// that reported done.
+// todosRetrySection renders the unresolved plan items left behind by a
+// turn that reported done: ready work first (DependsOn satisfied), then
+// evidence-blocked items with their reasons, then dep-blocked items —
+// the ready-before-blocked ordering DependsOn's first consumer reads.
 func todosRetrySection(t *edgeTrigger) string {
-	if len(t.todos) == 0 {
+	if len(t.plan) == 0 {
 		return ""
 	}
-	var b strings.Builder
-	b.WriteString(todosRetryPrefix + " incomplete item(s) — a turn is not done while its declared tasks are open:\n")
-	const maxListedTodos = 20
-	for i, todo := range t.todos {
-		if i >= maxListedTodos {
-			fmt.Fprintf(&b, "- … and %d more\n", len(t.todos)-maxListedTodos)
-			break
+	keyByID := map[string]string{}
+	for _, v := range t.plan {
+		if v.item.Key != "" {
+			keyByID[v.item.ID] = v.item.Key
 		}
-		fmt.Fprintf(&b, "- [%s] %s\n", todo.Status, todo.Content)
 	}
-	b.WriteString("Finish the remaining work, or reconcile the list with the todos tool (mark genuinely done items completed; drop abandoned ones). Do not report the task finished while the list says otherwise.\n")
+	var b strings.Builder
+	b.WriteString(todosRetryPrefix + " unresolved item(s) — a turn is not done while its declared tasks are open:\n")
+	const maxListedTodos = 20
+	listed := 0
+	render := func(v planVerdict, suffix string) bool {
+		if listed >= maxListedTodos {
+			return false
+		}
+		listed++
+		fmt.Fprintf(&b, "- [%s] %s%s\n", v.item.Status, v.item.Content, suffix)
+		return true
+	}
+	for _, v := range t.plan {
+		if v.state == planOpen && v.ready {
+			render(v, "")
+		}
+	}
+	for _, v := range t.plan {
+		if v.state == planEvidenceBlocked {
+			render(v, " — marked completed but "+v.reason)
+		}
+	}
+	for _, v := range t.plan {
+		if v.state == planOpen && !v.ready {
+			var names []string
+			for _, dep := range v.item.DependsOn {
+				if k := keyByID[dep]; k != "" {
+					names = append(names, k)
+				}
+			}
+			suffix := ""
+			if len(names) > 0 {
+				suffix = " (blocked by: " + strings.Join(names, ", ") + ")"
+			}
+			render(v, suffix)
+		}
+	}
+	if len(t.plan) > listed {
+		fmt.Fprintf(&b, "- … and %d more\n", len(t.plan)-listed)
+	}
+	b.WriteString("Finish the remaining work, or reconcile the list with the todos tool (mark genuinely done items completed; drop abandoned ones). An evidence-blocked item needs its evidence resolved — run the check or rebind it — not a repeated completed mark. Do not report the task finished while the list says otherwise.\n")
 	return b.String()
 }
 
-// todosExhaustNote renders the budget-exhausted line for open items.
+// todosExhaustNote renders the budget-exhausted line for unresolved
+// plan items.
 func todosExhaustNote(t *edgeTrigger, attempts int) string {
-	if len(t.todos) == 0 {
+	if len(t.plan) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%d todo item(s) still incomplete after %d attempt(s).",
-		len(t.todos), attempts)
+	return fmt.Sprintf("%d todo item(s) still unresolved after %d attempt(s).",
+		len(t.plan), attempts)
 }
 
 // --- stall edge ---

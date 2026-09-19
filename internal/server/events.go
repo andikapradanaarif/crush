@@ -238,16 +238,21 @@ func attachedClients(ws *backend.Workspace, sessionID string) int {
 	return ws.AttachedClientsForSession(sessionID)
 }
 
-func todosToProto(todos []session.Todo) []proto.Todo {
+func todosToProto(todos []session.PlanItem) []proto.Todo {
 	if len(todos) == 0 {
 		return nil
 	}
 	out := make([]proto.Todo, len(todos))
 	for i, t := range todos {
 		out[i] = proto.Todo{
-			Content:    t.Content,
-			Status:     string(t.Status),
-			ActiveForm: t.ActiveForm,
+			ID:             t.ID,
+			Key:            t.Key,
+			Content:        t.Content,
+			Status:         string(t.Status),
+			ActiveForm:     t.ActiveForm,
+			DependsOn:      t.DependsOn,
+			EvidenceChecks: t.EvidenceChecks,
+			EvidencePaths:  t.EvidencePaths,
 		}
 	}
 	return out

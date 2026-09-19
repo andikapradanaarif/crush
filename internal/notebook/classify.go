@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/session"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )
@@ -70,6 +72,12 @@ func classifyAll(msgs []message.Message) []EntryInput {
 			}
 			input.Verified = verificationState(tc.Name, result)
 			input.EventType = eventTypeForTool(tc.Name)
+			// A plan write that never landed — errored or interrupted —
+			// is not plan state; route it to general generation so the
+			// failure stays visible without corrupting plan history.
+			if input.EventType == EventPlan && (result == nil || result.IsError) {
+				input.EventType = EventGeneral
+			}
 			input.Title = titleForTool(tc)
 			input.Description = describeToolCall(tc, result)
 			input.trivial = !isSignificant(tc, result)
@@ -121,6 +129,8 @@ func eventTypeForTool(name string) string {
 		return EventCommand
 	case "grep", "glob", "ls":
 		return EventExploration
+	case "todos":
+		return EventPlan
 	default:
 		return EventGeneral
 	}
@@ -288,6 +298,133 @@ func buildTrivialExplorationEntry(trivial []EntryInput) GeneratedEntry {
 		Text:      sb.String(),
 		Tags:      []string{"phase:exploration"},
 	}
+}
+
+// planItemsFromResult recovers the landed plan list from a todos
+// result's metadata — the post-validation list with minted ids.
+func planItemsFromResult(result *message.ToolResult) []session.PlanItem {
+	if result == nil || result.Metadata == "" {
+		return nil
+	}
+	var items []session.PlanItem
+	if raw := gjson.Get(result.Metadata, "todos"); raw.Exists() {
+		_ = json.Unmarshal([]byte(raw.Raw), &items)
+	}
+	return items
+}
+
+// planItemsFromCall recovers the submitted list from the call input —
+// the fallback for results that predate response metadata. The
+// depends_on values here are item keys, not minted ids.
+func planItemsFromCall(tc *message.ToolCall) []session.PlanItem {
+	if tc == nil {
+		return nil
+	}
+	var items []session.PlanItem
+	if raw := gjson.Get(tc.Input, "todos"); raw.Exists() {
+		_ = json.Unmarshal([]byte(raw.Raw), &items)
+	}
+	return items
+}
+
+// buildPlanEntry renders a plan write deterministically — the landed
+// item list is already structured, so a generator paraphrase would only
+// lose information. Dependency edges render as item keys when the id
+// resolves inside the list.
+func buildPlanEntry(input EntryInput) GeneratedEntry {
+	items := planItemsFromResult(input.ToolResult)
+	if len(items) == 0 {
+		items = planItemsFromCall(input.ToolCall)
+	}
+	keyByID := session.PlanKeyByID(items)
+	var pending, inProgress, completed int
+	for _, it := range items {
+		switch it.Status {
+		case session.PlanItemPending:
+			pending++
+		case session.PlanItemInProgress:
+			inProgress++
+		case session.PlanItemCompleted:
+			completed++
+		}
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "## Plan update: %d item(s) — %d pending, %d in progress, %d completed\n",
+		len(items), pending, inProgress, completed)
+	tags := []string{"plan"}
+	for _, it := range items {
+		sb.WriteString(session.FormatPlanItemLine(it, keyByID) + "\n")
+		for _, p := range it.EvidencePaths {
+			tag := "file:" + filepath.Base(strings.TrimRight(p, "/\\"))
+			if !slices.Contains(tags, tag) {
+				tags = append(tags, tag)
+			}
+		}
+	}
+	for _, tag := range tags {
+		sb.WriteString("#" + tag + " ")
+	}
+	return GeneratedEntry{
+		EventType: EventPlan,
+		Title:     "Plan update",
+		Text:      strings.TrimSpace(sb.String()),
+		Tags:      tags,
+	}
+}
+
+// significantEntries produces one entry per significant input: plan
+// events render deterministically (the structured list IS the entry),
+// everything else goes through the generator. Returns entries aligned
+// with significant plus any generator extras appended — the same
+// contract generator.Generate used to satisfy directly.
+func (s *service) significantEntries(ctx context.Context, sessionID string, significant []EntryInput) ([]GeneratedEntry, error) {
+	llmIdx := make([]int, 0, len(significant))
+	var llmInputs []EntryInput
+	for i, in := range significant {
+		if in.EventType == EventPlan {
+			continue
+		}
+		llmIdx = append(llmIdx, i)
+		llmInputs = append(llmInputs, in)
+	}
+	var generated []GeneratedEntry
+	if len(llmInputs) > 0 {
+		var err error
+		generated, err = s.generator.Generate(ctx, sessionID, llmInputs)
+		if err != nil {
+			return nil, err
+		}
+	}
+	genAt := make(map[int]GeneratedEntry, len(generated))
+	var extras []GeneratedEntry
+	for j, e := range generated {
+		if j < len(llmIdx) {
+			genAt[llmIdx[j]] = e
+		} else {
+			extras = append(extras, e)
+		}
+	}
+	entries := make([]GeneratedEntry, 0, len(significant)+len(extras))
+	for i, in := range significant {
+		if in.EventType == EventPlan {
+			entries = append(entries, buildPlanEntry(in))
+			continue
+		}
+		entry, ok := genAt[i]
+		if !ok {
+			// The generator under-produced (merged inputs into one
+			// entry) — store a deterministic fallback rather than a
+			// zero-value entry, matching the no-model path.
+			entry = GeneratedEntry{
+				EventType: in.EventType,
+				Title:     in.Title,
+				Text:      fmt.Sprintf("## %s\n\n%s\n", in.Title, truncate(in.Description, 800)),
+				Tags:      defaultTagsForEvent(in),
+			}
+		}
+		entries = append(entries, entry)
+	}
+	return append(entries, extras...), nil
 }
 
 // errorHeadline extracts a one-line digest from a failed tool result:
@@ -496,12 +633,13 @@ func (s *service) GenerateEntries(ctx context.Context, sessionID string, turnNum
 		}
 	}
 
-	// Generate significant entries via the small model (batched).
+	// Generate significant entries — plan events render
+	// deterministically, everything else via the small model.
 	if len(significant) == 0 {
 		return nil
 	}
 
-	entries, err := s.generator.Generate(ctx, sessionID, significant)
+	entries, err := s.significantEntries(ctx, sessionID, significant)
 	if err != nil {
 		return fmt.Errorf("failed to generate notebook entries: %w", err)
 	}

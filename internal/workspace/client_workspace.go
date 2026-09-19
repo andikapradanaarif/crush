@@ -1257,18 +1257,26 @@ func protoToSession(s proto.Session) session.Session {
 	}
 }
 
-func protoToTodos(todos []proto.Todo) []session.Todo {
+func protoToTodos(todos []proto.Todo) []session.PlanItem {
 	if len(todos) == 0 {
 		return nil
 	}
-	out := make([]session.Todo, len(todos))
+	out := make([]session.PlanItem, len(todos))
 	for i, t := range todos {
-		out[i] = session.Todo{
-			Content:    t.Content,
-			Status:     session.TodoStatus(t.Status),
-			ActiveForm: t.ActiveForm,
+		out[i] = session.PlanItem{
+			ID:             t.ID,
+			Key:            t.Key,
+			Content:        t.Content,
+			Status:         session.PlanItemStatus(t.Status),
+			ActiveForm:     t.ActiveForm,
+			DependsOn:      t.DependsOn,
+			EvidenceChecks: t.EvidenceChecks,
+			EvidencePaths:  t.EvidencePaths,
 		}
 	}
+	// Rows from an older server may carry no IDs — mint them here so
+	// the every-read-agrees invariant holds across the wire.
+	session.MintPlanItemIDs(out)
 	return out
 }
 
@@ -1405,16 +1413,21 @@ func protoToSkillStates(in []proto.SkillState) []*skills.SkillState {
 	return out
 }
 
-func todosToProto(todos []session.Todo) []proto.Todo {
+func todosToProto(todos []session.PlanItem) []proto.Todo {
 	if len(todos) == 0 {
 		return nil
 	}
 	out := make([]proto.Todo, len(todos))
 	for i, t := range todos {
 		out[i] = proto.Todo{
-			Content:    t.Content,
-			Status:     string(t.Status),
-			ActiveForm: t.ActiveForm,
+			ID:             t.ID,
+			Key:            t.Key,
+			Content:        t.Content,
+			Status:         string(t.Status),
+			ActiveForm:     t.ActiveForm,
+			DependsOn:      t.DependsOn,
+			EvidenceChecks: t.EvidenceChecks,
+			EvidencePaths:  t.EvidencePaths,
 		}
 	}
 	return out

@@ -30,14 +30,14 @@ const (
 )
 
 // hasIncompleteTodos returns true if there are any non-completed todos.
-func hasIncompleteTodos(todos []session.Todo) bool {
+func hasIncompleteTodos(todos []session.PlanItem) bool {
 	return session.HasIncompleteTodos(todos)
 }
 
 // hasInProgressTodo returns true if there is at least one in-progress todo.
-func hasInProgressTodo(todos []session.Todo) bool {
+func hasInProgressTodo(todos []session.PlanItem) bool {
 	for _, todo := range todos {
-		if todo.Status == session.TodoStatusInProgress {
+		if todo.Status == session.PlanItemInProgress {
 			return true
 		}
 	}
@@ -62,18 +62,18 @@ func queuePill(queue int, t *styles.Styles) string {
 }
 
 // todoPill renders the todo progress pill with optional spinner and task name.
-func todoPill(todos []session.Todo, spinnerView string, panelFocused bool, t *styles.Styles) string {
+func todoPill(todos []session.PlanItem, spinnerView string, panelFocused bool, t *styles.Styles) string {
 	if !hasIncompleteTodos(todos) {
 		return ""
 	}
 
 	completed := 0
-	var currentTodo *session.Todo
+	var currentTodo *session.PlanItem
 	for i := range todos {
 		switch todos[i].Status {
-		case session.TodoStatusCompleted:
+		case session.PlanItemCompleted:
 			completed++
-		case session.TodoStatusInProgress:
+		case session.PlanItemInProgress:
 			if currentTodo == nil {
 				currentTodo = &todos[i]
 			}
@@ -106,7 +106,7 @@ func todoPill(todos []session.Todo, spinnerView string, panelFocused bool, t *st
 }
 
 // todoList renders the expanded todo list.
-func todoList(sessionTodos []session.Todo, spinnerView string, t *styles.Styles, width int) string {
+func todoList(sessionTodos []session.PlanItem, spinnerView string, t *styles.Styles, width int) string {
 	return chat.FormatTodosList(t, sessionTodos, spinnerView, width)
 }
 

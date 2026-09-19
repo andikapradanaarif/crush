@@ -29,9 +29,16 @@ type Session struct {
 	AttachedClients  int     `json:"attached_clients"`
 }
 
-// Todo represents a single todo entry on a session in the proto layer.
+// Todo represents a single plan item on a session in the proto layer.
+// New PlanItem fields are additive-only (omitempty) so older clients
+// keep decoding the flat shape.
 type Todo struct {
-	Content    string `json:"content"`
-	Status     string `json:"status"`
-	ActiveForm string `json:"active_form"`
+	ID             string   `json:"id,omitempty"`
+	Key            string   `json:"key,omitempty"`
+	Content        string   `json:"content"`
+	Status         string   `json:"status"`
+	ActiveForm     string   `json:"active_form"`
+	DependsOn      []string `json:"depends_on,omitempty"`
+	EvidenceChecks []string `json:"evidence_checks,omitempty"`
+	EvidencePaths  []string `json:"evidence_paths,omitempty"`
 }

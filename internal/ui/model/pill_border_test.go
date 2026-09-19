@@ -36,13 +36,13 @@ func queuePillHasBorder(view string) bool {
 // render with its rounded border regardless of panel expansion or which pill
 // section is nominally focused.
 func TestQueuePillAlwaysHasBorder(t *testing.T) {
-	incompleteTodos := []session.Todo{{Content: "a", Status: session.TodoStatusPending}}
+	incompleteTodos := []session.PlanItem{{Content: "a", Status: session.PlanItemPending}}
 
 	cases := []struct {
 		name           string
 		expanded       bool
 		focusedSection pillSection
-		todos          []session.Todo
+		todos          []session.PlanItem
 		queue          int
 	}{
 		{"collapsed only queue", false, pillSectionTodos, nil, 2},
@@ -78,13 +78,13 @@ func TestEffectiveFocusedSectionFallsThrough(t *testing.T) {
 	cases := []struct {
 		name     string
 		stored   pillSection
-		todos    []session.Todo
+		todos    []session.PlanItem
 		queue    int
 		expected pillSection
 	}{
 		{"todos focus but only queue", pillSectionTodos, nil, 2, pillSectionQueue},
-		{"queue focus but only todos", pillSectionQueue, []session.Todo{{Content: "a", Status: session.TodoStatusPending}}, 0, pillSectionTodos},
-		{"todos focus with todos", pillSectionTodos, []session.Todo{{Content: "a", Status: session.TodoStatusPending}}, 2, pillSectionTodos},
+		{"queue focus but only todos", pillSectionQueue, []session.PlanItem{{Content: "a", Status: session.PlanItemPending}}, 0, pillSectionTodos},
+		{"todos focus with todos", pillSectionTodos, []session.PlanItem{{Content: "a", Status: session.PlanItemPending}}, 2, pillSectionTodos},
 		{"queue focus with queue", pillSectionQueue, nil, 2, pillSectionQueue},
 	}
 	for _, tc := range cases {

@@ -625,15 +625,29 @@ func TestCoderAgent(t *testing.T) {
 	}
 }
 
-func makeTestTodos(n int) []session.Todo {
-	todos := make([]session.Todo, n)
+func makeTestTodos(n int) []session.PlanItem {
+	todos := make([]session.PlanItem, n)
 	for i := range n {
-		todos[i] = session.Todo{
-			Status:  session.TodoStatusPending,
+		todos[i] = session.PlanItem{
+			Status:  session.PlanItemPending,
 			Content: fmt.Sprintf("Task %d: Implement feature with some description that makes it realistic", i),
 		}
 	}
 	return todos
+}
+
+func TestBuildSummaryPromptCarriesPlanStructure(t *testing.T) {
+	t.Parallel()
+	prompt := buildSummaryPrompt([]session.PlanItem{
+		{ID: "i1", Key: "setup", Content: "set things up", Status: session.PlanItemPending,
+			EvidencePaths: []string{"cfg/"}},
+		{ID: "i2", Key: "impl", Content: "implement it", Status: session.PlanItemCompleted,
+			DependsOn: []string{"i1"}, EvidenceChecks: []string{"verify:build"}},
+	})
+	require.Contains(t, prompt, "key: setup")
+	require.Contains(t, prompt, "depends_on: setup")
+	require.Contains(t, prompt, "checks: verify:build")
+	require.Contains(t, prompt, "paths: cfg/")
 }
 
 func BenchmarkBuildSummaryPrompt(b *testing.B) {

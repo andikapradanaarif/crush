@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/question"
+	"github.com/charmbracelet/crush/internal/session"
 )
 
 // scopeGateMinExploration is the explore→execute boundary: a first
@@ -43,7 +45,42 @@ const (
 	gatePass gateVerdict = iota
 	gateWait
 	gateConfirm
+	// gateRejectPlan bounces a todos call that cannot count as a
+	// declaration — the gate is armed and the submitted list is empty
+	// or carries an item with no evidence bound.
+	gateRejectPlan
 )
+
+// parsePlanCall extracts the submitted list — the gate checks a
+// declaration's shape, not its tool-level validity.
+func parsePlanCall(input string) (tools.TodosParams, error) {
+	var params tools.TodosParams
+	err := json.Unmarshal([]byte(input), &params)
+	return params, err
+}
+
+// planParamsResolve reports whether a submitted list declares a plan
+// the gate accepts: a non-empty list where every item binds evidence —
+// checks or paths. A plan of bare strings, or an empty list, is a
+// legal write but not a declaration.
+func planParamsResolve(params tools.TodosParams) bool {
+	if len(params.Todos) == 0 {
+		return false
+	}
+	for _, item := range params.Todos {
+		if len(item.EvidenceChecks) == 0 && len(item.EvidencePaths) == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// planCallResolves reports whether a todos call's input is a parseable,
+// evidence-bound declaration.
+func planCallResolves(input string) bool {
+	params, err := parsePlanCall(input)
+	return err == nil && planParamsResolve(params)
+}
 
 // scopeGate wraps the tool list to intercept the first mutating call of
 // a run when deep exploration suggests a non-routine scope. In
@@ -62,6 +99,7 @@ const (
 // scope confirmation, not a security boundary.
 type scopeGate struct {
 	svc         question.Service
+	sessions    session.Service
 	interactive bool
 	mu          sync.Mutex
 	states      map[string]*scopeGateState
@@ -69,11 +107,23 @@ type scopeGate struct {
 
 // newScopeGate builds the gate. Returns nil when an interactive run
 // has no question service to ask through.
-func newScopeGate(svc question.Service, interactive bool) *scopeGate {
+func newScopeGate(svc question.Service, interactive bool, sessions session.Service) *scopeGate {
 	if interactive && svc == nil {
 		return nil
 	}
-	return &scopeGate{svc: svc, interactive: interactive, states: map[string]*scopeGateState{}}
+	return &scopeGate{svc: svc, sessions: sessions, interactive: interactive, states: map[string]*scopeGateState{}}
+}
+
+// planDeclared reports whether the session already holds a plan — the
+// armed gate bounces first declarations only; bookkeeping writes to an
+// existing (bare) plan are not declarations and must not be hostage
+// to evidence binding.
+func (g *scopeGate) planDeclared(ctx context.Context, sessionID string) bool {
+	if g.sessions == nil {
+		return false
+	}
+	sess, err := g.sessions.Get(ctx, sessionID)
+	return err == nil && len(sess.Todos) > 0
 }
 
 // wrap decorates every tool so the gate sees exploration calls as well
@@ -102,9 +152,29 @@ func (g *scopeGate) observe(ctx context.Context, call fantasy.ToolCall) (gateVer
 	}
 	stamp := tools.GetRunStampFromContext(ctx)
 
+	// Phase one: under the lock, decide only whether the armed-bounce
+	// path could need the stored plan. The session read itself stays
+	// outside the mutex so a slow Get can't serialize unrelated
+	// sessions' gates — and a resolved gate skips the read entirely,
+	// since bookkeeping writes are never bounced anyway.
+	g.mu.Lock()
+	st, ok := g.states[sessionID]
+	if !ok || st.stamp != stamp {
+		st = &scopeGateState{stamp: stamp}
+		g.states[sessionID] = st
+	}
+	needsPlanCheck := call.Name == tools.TodosToolName &&
+		!st.resolved && !st.asking && st.explore >= scopeGateMinExploration
+	g.mu.Unlock()
+
+	declared := needsPlanCheck && g.planDeclared(ctx, sessionID)
+
+	// Phase two: the verdict re-reads state under the lock — a
+	// concurrent resolve between phases is authoritative there, and
+	// `declared` only ever feeds the armed-bounce branch.
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	st, ok := g.states[sessionID]
+	st, ok = g.states[sessionID]
 	if !ok || st.stamp != stamp {
 		st = &scopeGateState{stamp: stamp}
 		g.states[sessionID] = st
@@ -120,10 +190,26 @@ func (g *scopeGate) observe(ctx context.Context, call fantasy.ToolCall) (gateVer
 			return gateConfirm, st.explore
 		}
 	}
-	// A declared plan or an in-flight question already externalized the
-	// scope decision — the gate is satisfied for the rest of the run.
-	if call.Name == tools.TodosToolName || call.Name == tools.QuestionToolName {
+	// An in-flight question already externalized the scope decision —
+	// the gate is satisfied for the rest of the run.
+	if call.Name == tools.QuestionToolName {
 		st.resolved = true
+		return gatePass, st.explore
+	}
+	// A plan call resolves the gate only once a validating plan has
+	// landed (checked post-run in Run). While the gate is armed, a
+	// non-validating declaration gets bounced with the reason so the
+	// model fixes the list instead of hitting the question cold.
+	if call.Name == tools.TodosToolName {
+		if !st.resolved && !st.asking && st.explore >= scopeGateMinExploration {
+			// Only a parseable, non-validating list bounces — malformed
+			// input passes through so the tool's own parse error
+			// explains the failure instead of a misleading plan
+			// rejection.
+			if params, err := parsePlanCall(call.Input); err == nil && !planParamsResolve(params) && !declared {
+				return gateRejectPlan, st.explore
+			}
+		}
 		return gatePass, st.explore
 	}
 	st.explore++
@@ -211,7 +297,25 @@ func (t *scopeGateTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 	verdict, explore := t.gate.observe(ctx, call)
 	switch verdict {
 	case gatePass:
-		return t.inner.Run(ctx, call)
+		resp, err := t.inner.Run(ctx, call)
+		// A plan declaration satisfies the gate only once a
+		// validating list has actually landed — a write the tool
+		// rejected must not count as a declaration.
+		if err == nil && !resp.IsError &&
+			call.Name == tools.TodosToolName && planCallResolves(call.Input) {
+			t.gate.resolve(ctx)
+		}
+		return resp, err
+	case gateRejectPlan:
+		msg := "This todos call does not count as declaring the plan: every item must bind " +
+			"evidence via evidence_checks or evidence_paths, and the list must not be empty. " +
+			"Resubmit with evidence bound to each item"
+		if t.gate.interactive {
+			msg += ", or proceed and answer the scope-check question when the first write triggers it."
+		} else {
+			msg += " — the scope check resolves on the first write."
+		}
+		return fantasy.NewTextErrorResponse(msg), nil
 	case gateWait:
 		return fantasy.NewTextErrorResponse(
 			"Scope check in progress — re-issue this call after the pending question resolves.",

@@ -16,12 +16,12 @@ import (
 	"github.com/zeebo/xxh3"
 )
 
-type TodoStatus string
+type PlanItemStatus string
 
 const (
-	TodoStatusPending    TodoStatus = "pending"
-	TodoStatusInProgress TodoStatus = "in_progress"
-	TodoStatusCompleted  TodoStatus = "completed"
+	PlanItemPending    PlanItemStatus = "pending"
+	PlanItemInProgress PlanItemStatus = "in_progress"
+	PlanItemCompleted  PlanItemStatus = "completed"
 )
 
 // HashID returns the XXH3 hash of a session ID (UUID) as a hex string.
@@ -31,16 +31,44 @@ func HashID(id string) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-type Todo struct {
-	Content    string     `json:"content"`
-	Status     TodoStatus `json:"status"`
-	ActiveForm string     `json:"active_form"`
+// MintPlanItemID derives a plan item's deterministic ID: keyed items
+// hash their key (a kept key survives content rewording, so inbound
+// DependsOn refs stay valid), keyless items hash their content — the
+// same derivation the legacy shim applies on read, so in-flight
+// sessions mint stable IDs.
+func MintPlanItemID(key, content string) string {
+	h := xxh3.New()
+	if key != "" {
+		h.WriteString("key:" + key)
+	} else {
+		h.WriteString("content:" + content)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+// PlanItem is a typed plan entry: the model-authored content plus the
+// structure the harness can check — dependencies, evidence bindings,
+// and a stable identity the model never writes directly.
+type PlanItem struct {
+	// ID is harness-minted on write (deterministic per MintPlanItemID);
+	// model-authored IDs are ignored.
+	ID string `json:"id,omitempty"`
+	// Key is the model-authored slug DependsOn references — the
+	// authoring handle minted IDs alone can't provide (a first write
+	// has no IDs yet). Optional; required on dep targets in practice.
+	Key            string         `json:"key,omitempty"`
+	Content        string         `json:"content"`
+	Status         PlanItemStatus `json:"status"`
+	ActiveForm     string         `json:"active_form"`
+	DependsOn      []string       `json:"depends_on,omitempty"`      // Minted item IDs.
+	EvidenceChecks []string       `json:"evidence_checks,omitempty"` // Gate-bearing check names.
+	EvidencePaths  []string       `json:"evidence_paths,omitempty"`  // Files/dirs the work must touch.
 }
 
 // HasIncompleteTodos returns true if there are any non-completed todos.
-func HasIncompleteTodos(todos []Todo) bool {
+func HasIncompleteTodos(todos []PlanItem) bool {
 	for _, todo := range todos {
-		if todo.Status != TodoStatusCompleted {
+		if todo.Status != PlanItemCompleted {
 			return true
 		}
 	}
@@ -57,7 +85,7 @@ type Session struct {
 	EstimatedUsage   bool
 	SummaryMessageID string
 	Cost             float64
-	Todos            []Todo
+	Todos            []PlanItem
 	CreatedAt        int64
 	UpdatedAt        int64
 }
@@ -315,7 +343,7 @@ func (s *service) fromDBItem(item db.Session) Session {
 	}
 }
 
-func marshalTodos(todos []Todo) (string, error) {
+func marshalTodos(todos []PlanItem) (string, error) {
 	if len(todos) == 0 {
 		return "", nil
 	}
@@ -326,15 +354,99 @@ func marshalTodos(todos []Todo) (string, error) {
 	return string(data), nil
 }
 
-func unmarshalTodos(data string) ([]Todo, error) {
+func unmarshalTodos(data string) ([]PlanItem, error) {
 	if data == "" {
-		return []Todo{}, nil
+		return []PlanItem{}, nil
 	}
-	var todos []Todo
+	var todos []PlanItem
 	if err := json.Unmarshal([]byte(data), &todos); err != nil {
-		return []Todo{}, err
+		return []PlanItem{}, err
 	}
+	MintPlanItemIDs(todos)
 	return todos, nil
+}
+
+// MintPlanItemIDs is the legacy shim: rows written before PlanItem
+// carried IDs read with the field empty, and the same deterministic
+// minting the write path uses fills them so every read agrees —
+// stored rows and wire-converted rows alike. Duplicate legacy
+// content collides on the same hash — the ordinal suffix keeps IDs
+// unique without breaking determinism.
+func MintPlanItemIDs(todos []PlanItem) {
+	// Two passes: stored IDs all land in `seen` before any minting,
+	// so a minted base can never collide with a stored ID that only
+	// appears later in the list.
+	seen := map[string]int{}
+	for i := range todos {
+		if todos[i].ID != "" {
+			seen[todos[i].ID]++
+		}
+	}
+	baseN := map[string]int{}
+	for i := range todos {
+		if todos[i].ID != "" {
+			continue
+		}
+		base := MintPlanItemID(todos[i].Key, todos[i].Content)
+		id := base
+		// Identical legacy rows mint the same base — suffix from a
+		// per-base counter, and skip suffixes a stored row already
+		// holds, so every minted ID is unique within the list.
+		for seen[id] > 0 {
+			baseN[base]++
+			id = fmt.Sprintf("%s#%d", base, baseN[base])
+		}
+		seen[id]++
+		todos[i].ID = id
+	}
+}
+
+// PlanKeyByID maps minted item IDs back to their model-authored keys
+// so dependency edges render as keys, not internal IDs.
+func PlanKeyByID(items []PlanItem) map[string]string {
+	m := make(map[string]string, len(items))
+	for _, it := range items {
+		if it.ID != "" && it.Key != "" {
+			m[it.ID] = it.Key
+		}
+	}
+	return m
+}
+
+// FormatPlanItemLine renders one plan item for model-facing
+// surfaces — <open_todos>, the compaction summary prompt, and plan
+// notebook entries — with its authoring handle intact: key,
+// dependency edges as keys where they resolve, and bound evidence.
+// Keeping the typed fields visible in context prevents a compaction
+// from degrading the plan into a bare, self-reported list.
+func FormatPlanItemLine(t PlanItem, keyByID map[string]string) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "- [%s] %s", t.Status, t.Content)
+	var attrs []string
+	if t.Key != "" {
+		attrs = append(attrs, "key: "+t.Key)
+	}
+	if len(t.DependsOn) > 0 {
+		names := make([]string, 0, len(t.DependsOn))
+		for _, dep := range t.DependsOn {
+			if k := keyByID[dep]; k != "" {
+				names = append(names, k)
+			} else {
+				names = append(names, dep)
+			}
+		}
+		attrs = append(attrs, "depends_on: "+strings.Join(names, ", "))
+	}
+	if len(t.EvidenceChecks) > 0 {
+		attrs = append(attrs, "checks: "+strings.Join(t.EvidenceChecks, ", "))
+	}
+	if len(t.EvidencePaths) > 0 {
+		attrs = append(attrs, "paths: "+strings.Join(t.EvidencePaths, ", "))
+	}
+	if len(attrs) > 0 {
+		sb.WriteString(" (" + strings.Join(attrs, "; ") + ")")
+	}
+	return sb.String()
 }
 
 func NewService(q *db.Queries, conn *sql.DB) Service {
