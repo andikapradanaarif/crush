@@ -363,11 +363,28 @@ notice" failure as a declared transition.
 - **Precedence — and the merge-rule gap:** when an
   escalation-family prompt co-fires with retry-family triggers,
   the user-targeted prompt wins the slot outright and retry
-  triggers **defer** — they re-_scan_ at the next boundary, and
-  what they land in depends on budget: if the escalate turn
-  consumed the last slot, the re-fire renders an exhaustion
-  note, not a repair turn (consistent with the crowding
-  acceptance). **Cancel hole, decided:** if the user cancels the
+  triggers **defer** — but deferral only works for
+  session-state evidence: `scanTodosEdge` reads `planVerdicts`
+  (stored, survives the escalate turn) while `scanVerificationEdge`
+  scans `in.result.Steps` — and the escalate run's steps contain
+  only the question call, so a deferred verification trigger is
+  _dropped_, not deferred (a deferred stall-replan's signature
+  evidence is likewise step-bound). **Carrier — unlisted work:**
+  `SessionAgentCall` gains a `deferred` field carrying the
+  deferred trigger(s), stamped on the escalate clone by the seam;
+  at the next boundary `runEdges` merges them back — prompt
+  section if a retry slot is free, note at exhaustion. Read-back
+  from `edge_firings` rejected: it couples prompt rendering to a
+  DB read. Blast radius is small today (verification ~never
+  co-fires with stall, never with burn-watch) but the
+  cancel-hole rule below has no carrier without it. What they
+  land in depends on budget: if the escalate turn consumed the
+  last slot, the re-fire renders an exhaustion note, not a
+  repair turn (consistent with the crowding acceptance).
+  **Intra-family rule:** two escalate-family edges can co-fire
+  (stall-escalate + burn-watch) — first-in-`runEdgeSet` wins,
+  losers defer via the same carrier; today's concatenate would
+  merge two "ask ONE question" instructions. **Cancel hole, decided:** if the user cancels the
   escalation question, its result carries `StopTurn`
   (`question.go:126-128`) → `cleanStop` fails → deferred
   cleanStop-gated triggers never even re-scan, and the chain
@@ -403,6 +420,24 @@ notice" failure as a declared transition.
   and one edge-level field can't express both. When both
   families fire, `runEdges` renders only the escalate-family
   prompt and marks retry triggers deferred.
+- **Per-run scope means chains evade it — stated:** steps/tokens
+  evaluate per finished run, so a 3-run repair chain burning 45
+  steps / 600K tokens in 15-step/200K slices never trips either
+  arm. Bounded by `maxRepairAttempts`; records show whether
+  chain-level spend matters before any chain-aggregated
+  threshold is considered.
+- **`IsMutatingCall` blind spots = burn-watch false positives,
+  stated:** `mutatingBashRe` is deliberately conservative —
+  `make`, `go generate`, `python -c` writes, heredoc scripts
+  pass un-gated, so a run that wrote via an unclassified command
+  reports "N tokens, no writes" incorrectly. The once-per-
+  crossing marker bounds it to one nag per chain; widening the
+  regex is a separate decision from this edge.
+- **Headless degrade pins to the final assistant message** —
+  same carrier as stall's blocker report so it reaches
+  `RunComplete.Text` for `crush run`; a slog-only degrade would
+  hide a spend tripwire in exactly the unattended context where
+  unnoticed spend happens.
 - **Limit, stated plainly:** edges fire at run boundaries only —
   a single giant turn mid-flight is not caught. Mid-run spend
   pressure is `CONTEXT_WINDOW_SAFETY.md` territory (or a future
@@ -458,7 +493,12 @@ headless-degraded / **gated** (flag-off early return —
 `scanStallEdge` returning nil at the option check must not be
 indistinguishable from "edge never ran"; a boundary with no row
 means _clean_, which stays distinguishable precisely because
-gated rows exist), `created_at` (firing-rate-over-time queries).
+gated rows exist) / **deferred** (lost the prompt slot to an
+escalate-family trigger — recorded at the boundary where it
+lost, real outcome at the next) / **cleared** (scan fired but
+`resolve` dropped `t.fire` — a pending→clean verification isn't
+"suppressed"; nothing suppressed it), `created_at`
+(firing-rate-over-time queries).
 Precision note: records distinguish _triggered-but-not-fired_ vs
 _fired_ — "evaluated" is guaranteed by construction since
 `runEdgeSet` statically scans every edge at every boundary; the
