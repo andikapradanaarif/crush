@@ -61,7 +61,7 @@ here because the list must have exactly one home.
 | verification       | failed/pending checks                              | implemented (the extraction source)                          |
 | todos-reconcile    | open plan items at clean stop                      | implemented (same site)                                      |
 | stall-replan       | loop-detector / no-progress                        | new — inserts a model replan _before_ the shipped escalation |
-| escalate-human     | loop-detector stop, or repair budget spent         | implemented (#43) — question turn                            |
+| escalate-human     | loop-detector stop                                 | implemented (#43) — question turn                            |
 | phase-confirm      | first write-class call after ≥N exploration events | implemented (#43) — plan gate                                |
 | join-subagents     | outstanding dispatch ledger                        | lives in `BACKGROUND_SUBAGENTS.md`                           |
 | summarize-continue | context pressure at run end                        | new — reframes auto-summarize                                |
@@ -79,7 +79,8 @@ stay deterministic, but the boundary slot is spent asking the human
 rather than prepending for the model. This is the human-in-the-loop
 half of the calibrated-autonomy work (#39): the harness decides
 _when_ to ask (loop-stop with no progress, first-write boundary on
-a large-scope plan, repair budget spent), the prompt decides how.
+a large-scope plan), the prompt decides how. A spent budget produces
+a terminal note, not a question — see the exhaustion path.
 Escalation frequency is budgeted like repairs — one per distinct
 blocker — because an unbudgeted escalation edge is nagging with a
 type signature. Headless (`crush run`) degrades both rows to
@@ -163,7 +164,9 @@ the edge's prompt branches on budget, not a second edge.
   continue re-queues `call` itself — carrying _its_
   `RepairAttempts` — so a masked-stall sequence can burn
   replan+escalate (2 turns) and then the continue arrives with a
-  fresh budget. Pre-existing for all edges; the replan makes the
+  fresh budget — bounded at ~4 runs total, and only reachable
+  with the notebook off (the masked case's precondition).
+  Pre-existing for all edges; the replan makes the
   sequence likelier.
 - **Headless behavior changes — stated:** today a headless stall
   sets `fire=false` → blocker report, no retry. Under
@@ -185,8 +188,10 @@ the edge's prompt branches on budget, not a second edge.
 - **Mechanics:** `prompt func(t)` doesn't receive `call` —
   `scan` stashes `call.RepairAttempts` (and the branch decision)
   onto the `edgeTrigger`. The replan prompt's leading literal
-  joins `RepairPromptPrefixes` (`run_edges.go:298`) or the eval
-  analyzer won't fingerprint replan turns. The `fire` condition
+  joins `RepairPromptPrefixes` (`run_edges.go:298`) — **distinct
+  from `stallRetryPrefix`** or the eval analyzer can't split
+  `replan`/`escalate` variants, the edge's most interesting
+  firing stat. The `fire` condition
   splits by branch: replan fires without `hasTool(question)` —
   that check belongs only to the escalation branch.
 - **Mechanism — the stall edge's prompt branches on attempts:**
@@ -230,6 +235,8 @@ the edge's prompt branches on budget, not a second edge.
   run-end checkpoint generates in an async goroutine spawned
   _after_ `runEdges` (`agent.go:1563+`), so resolve sees the
   previous turn's (or a mid-run) checkpoint — never this run's.
+  **Needs a new accessor** ("latest committed checkpoint") —
+  unlisted work alongside the signature-returning detector.
   That's fine for re-orientation: the stall evidence itself
   comes from `result.Steps`. When the notebook is off, the edge
   degrades to evidence-only — no payload.
@@ -276,12 +283,19 @@ notice" failure as a declared transition.
     **Token metric:** `result.TotalUsage.InputTokens` — already the
     per-step sum, the true billed spend since each step re-sends the
     prompt; **cache-read excluded** — cached tokens are ~free and
-    would trip the tripwire far too early. `fallbackStepUsage` is
-    **out of scope**: it needs the step's _request_ messages
-    (`stepMessages` captured inside `OnStepFinish`), which
-    `edgeInput` doesn't carry — and zero-usage providers are
-    mostly local/free models where billed spend is ~zero anyway;
-    the step arm covers their burn shape. T/S are
+    would trip the tripwire far too early. A second already-
+    persisted arm exists: **`session.Cost` accumulates per-run
+    billed spend** (`updateSessionUsage`, `agent.go:2841`) — a
+    pre/post-run diff yields a real dollar figure with no
+    `stepMessages` plumbing; use it alongside or instead of the
+    token arm where cost precision matters. `fallbackStepUsage` is
+    **out of scope**, harder than it first looks: `stepMessages`
+    is _overwritten per step_ (`agent.go:1197`), so the boundary
+    holds only the last step's messages — an estimated arm needs a
+    per-step accumulator plumbed through `edgeInput`, and zero-
+    usage providers are mostly local/free models where billed
+    spend is ~zero anyway; the step arm covers their burn shape.
+    T/S are
     generous tripwire thresholds, not a governor — the edge exists
     to surface, not to throttle. "Configurable" is real work:
     threshold + step count need an `optionSpec` entry, schema, and
@@ -297,8 +311,9 @@ notice" failure as a declared transition.
     size.
 - **resolve:** collect the evidence — steps, tokens, exploration
   event count, files-read-without-write **this run**: scan
-  `result.Steps` for `ReadToolNames` (the `stubs.go:189`
-  precedent) and subtract the scanned write set —
+  `result.Steps` for `ReadToolNames` (the `scanVerification`
+  steps-scan precedent — `stubs.go:189` iterates stored
+  _messages_, not steps) and subtract the scanned write set —
   `filetracker.ListRecentReadFiles` is session-scoped, not
   run-scoped.
 - **prompt:** escalation-family — a `question` turn ("spent N
@@ -320,15 +335,18 @@ notice" failure as a declared transition.
   input), not the stall edge's trigger, so ordering is cosmetic —
   declared here because the doc requires new rows to say where
   they sit.
-- **Budget crowding — stated decision:** burn-watch's question
-  consumes a shared `RepairAttempts` slot like any firing edge,
-  so a burn-watch turn followed by a check failure can land the
-  verification edge in exhaustion-note territory instead of a
-  repair turn. Accepted — the alternative (escalation bypassing
-  the budget) is the rejected nagging-with-a-type-signature, and
-  the once-per-crossing marker bounds how often the slot is
-  taken. Records will show whether crowding actually occurs in
-  the corpus before any threshold is tuned.
+- **Budget crowding — stated decision:** narrower than it first
+  reads. Escalation turns end via the question tool's `StopTurn`
+  → `!cleanStop` → deferred retry triggers land on the _next
+  clean-stop turn_, which is a fresh call with
+  `RepairAttempts=0` — fresh budget. Crowding only bites at a
+  same-boundary co-fire at an already-spent budget: an
+  escalate+retry co-fire at `attempts≥1` where the carried retry
+  trigger lands after the last slot → note, not turn. Accepted —
+  the alternative (escalation bypassing the budget) is the
+  rejected nagging-with-a-type-signature, and the once-per-
+  crossing marker bounds frequency. Records will show whether
+  crowding actually occurs before any threshold is tuned.
 - **Fires once per crossing, resets on write.** The marker is a
   `SessionAgentCall` field, and the seam owns both halves:
   `runEdges` **stamps** it on the retry clone at the existing
@@ -465,16 +483,17 @@ those are exactly the states that make firing rates interpretable
 ("never fires" must be distinguishable from "never evaluated").
 Follow the `collapsed_turns` precedent: migration + sqlc query +
 service method + stats section + eval analyzer read — an
-`edge_firings` table. **PK: `(session_id, turn_seq,
-repair_attempts, edge)`** — `turn_seq` is the ordinal of the
-run's initiating user message among **all** user messages —
-repair retries persist their prompts as user messages (that's
-why `RepairPromptPrefixes` exist for the analyzer), so
-`messageTurns` counts them and each attempt's initiating message
-naturally differs: `repair_attempts` in the PK is redundant-but-
-harmless and dedup stays sound. (The alternative — filtering to
-the original user turn — needs a filtered counter for no added
-guarantee.) Derived from message positions
+`edge_firings` table. **PK: `(session_id, turn_seq, edge)`** —
+`turn_seq` is the ordinal of the run's initiating user message
+among **all** user messages — repair retries persist their
+prompts as user messages (`createUserMessage` runs
+unconditionally per `Run`), so `messageTurns` counts them and
+each attempt's initiating message naturally differs:
+`repair_attempts` is **demoted to a column** (still queryable —
+it disambiguates replan-vs-escalate stats) rather than a key
+part. `turn_seq` isn't in `edgeInput` today — it needs plumbing
+(`messageTurns` + `preTurnMsgCount` are already computable in
+`Run`). Derived from message positions
 (the same family as `collapsed_turns`' `byTurn`): durable across
 restarts and `INSERT OR IGNORE`-dedupable. **`call.RunStamp` is
 rejected as the key** — it's `runStampGen.Add(1)` (`agent.go:892`)
@@ -508,13 +527,25 @@ len(in.result.Steps) == 0` — three conditions, `run_edges.go:106`),
 named here so nobody reads zero rows as dead code.
 **Scan-contract extension — unlisted work:** today a nil scan
 return is the only "no" signal, so `gated` and `suppressed`
-can't be recorded. Either `runEdge` gains an `enabled func(call)
-bool` / `suppressed func(call, t) bool` predicate hoisted ahead
-of `scan`, or `scan` returns a non-nil trigger carrying an
-outcome hint instead of nil. Volume, stated: with the flag
-default-off, every boundary writes a `gated` row per gated edge
-— ~2 rows/turn for most users; cheap, but the table's dominant
-write pattern from day one. `crush stats`
+can't be recorded. **The flag gates `t.fire`, not the scan** —
+a gated edge still evaluates its predicate and the row's trigger
+detail carries the would-have-fired verdict: flag-off means
+"don't act," _not_ "don't measure." That's the numerator the
+default-on flip decision exists on — a `gated` row that only
+records "we didn't look" throws away exactly the firing-rate
+data #38/#54 need. (Cost, stated: the scan work runs even
+flag-off — cheap for these edges; `planVerdicts`' message read
+is the heaviest.) The contract: `scan` returns a non-nil
+trigger carrying an outcome hint (`gated`/`suppressed`) instead
+of nil when the predicate is off or suppressed — no hoisted
+predicate needed. Volume: flag default-off means a `gated` row
+per gated edge per boundary — ~2 rows/turn for most users;
+cheap, but the table's dominant write pattern from day one.
+**Cancel partial rows:** `ctx.Err()` at `run_edges.go:123` exits
+mid-loop — a cancelled boundary leaves rows only for already-
+scanned edges, and un-scanned ones would read as _clean_.
+Record a `cancelled` outcome row for each un-scanned edge on
+that path so the no-row=clean invariant stays true. `crush stats`
 reads the table; the eval doc reads the same counts via
 `SessionTelemetry` + `emitEvalTelemetry`. **Write path — not `notebook.Service`:**
 firings are harness telemetry, not notebook concepts, and adding
