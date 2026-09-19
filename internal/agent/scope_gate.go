@@ -221,6 +221,12 @@ func (g *scopeGate) observe(ctx context.Context, call fantasy.ToolCall) (gateVer
 	// non-validating declaration gets bounced with the reason so the
 	// model fixes the list instead of hitting the question cold.
 	if call.Name == tools.TodosToolName {
+		// Deliberate hole, pre-existing: while a question is in
+		// flight (st.asking), a concurrent todos call falls through
+		// to gatePass unchecked — a parallel non-validating
+		// declaration lands a bare plan. Parallel tool calls make
+		// the window rare, and the alternative (queuing plan calls
+		// behind a pending question) serializes the common case.
 		if !st.resolved && !st.asking && st.explore >= scopeGateMinExploration {
 			// Only a parseable, non-validating list bounces — malformed
 			// input passes through so the tool's own parse error
@@ -408,7 +414,7 @@ func (t *scopeGateTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 	default:
 		return fantasy.NewTextErrorResponse(
 			"Scope check: the user asked to narrow the plan. Restate a smaller scope " +
-				"with the todos tool, then re-issue the write.",
+				"with the todos tool, then re-issue the call.",
 		), nil
 	}
 }

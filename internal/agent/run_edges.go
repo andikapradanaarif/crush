@@ -339,19 +339,18 @@ func (a *sessionAgent) verificationRetrySection(t *edgeTrigger) string {
 	for _, group := range failedCheckGroups(t.failed) {
 		f := group[0]
 		fmt.Fprintf(&b, "\n<check name=%q>\n", f.check.Check)
-		if len(group) > 1 {
-			// Per-file entries from one write: name each affected
-			// path, then render the shared tool output once.
-			for _, g := range group {
-				if g.check.Path == "" {
-					continue
-				}
-				b.WriteString(relPlanPath(workingDir, g.check.Path))
-				if g.check.Detail != "" {
-					b.WriteString(": " + g.check.Detail)
-				}
-				b.WriteString("\n")
+		// Per-file entries name each affected path, then the shared
+		// tool output renders once — for a single-entry group this is
+		// the only place the attributed path appears.
+		for _, g := range group {
+			if g.check.Path == "" {
+				continue
 			}
+			b.WriteString(relPlanPath(workingDir, g.check.Path))
+			if g.check.Detail != "" {
+				b.WriteString(": " + g.check.Detail)
+			}
+			b.WriteString("\n")
 		}
 		out := f.output
 		if out == "" {

@@ -119,7 +119,9 @@ EvidenceChecks []string, EvidencePaths []string}`:
     resolution entry, so the run-end scan reconciles `failed`
     verdicts against a live diagnostics snapshot — a path clean
     now clears, never mints (the verdict is a delta; pre-existing
-    errors must not retroactively fail a clean write). Last
+    errors must not retroactively fail a clean write), and only
+    while a client still handles the path, so a dead-server empty
+    snapshot fails closed rather than clearing everything. Last
     verdict wins even for `unverified`: a settle-timeout write
     can overwrite a known failure — accepted, and the live
     snapshot bounds how long a wrong latch survives.

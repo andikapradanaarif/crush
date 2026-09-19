@@ -572,7 +572,8 @@ func TestTodosRetrySectionOrdersReadyBeforeBlocked(t *testing.T) {
 // verdict whose path reads clean in the current snapshot was repaired
 // outside any covered write's delta window and must not stay latched.
 // A path still erroring keeps its verdict — the snapshot overlay
-// clears, it never mints.
+// clears, it never mints — and a path no client handles keeps it too:
+// an empty snapshot from a dead client must not fail open.
 func TestResolveStaleDiag(t *testing.T) {
 	t.Parallel()
 
@@ -581,17 +582,21 @@ func TestResolveStaleDiag(t *testing.T) {
 	}
 	ev := &planEvidence{
 		diag: map[string]message.VerificationCheck{
-			"/w/fixed.go":  failed("/w/fixed.go"),
-			"/w/broken.go": failed("/w/broken.go"),
-			"/w/green.go":  {Check: "diagnostics", State: message.VerificationPassed, Path: "/w/green.go"},
+			"/w/fixed.go":     failed("/w/fixed.go"),
+			"/w/broken.go":    failed("/w/broken.go"),
+			"/w/unwatched.go": failed("/w/unwatched.go"),
+			"/w/green.go":     {Check: "diagnostics", State: message.VerificationPassed, Path: "/w/green.go"},
 		},
-		diagOrder: []string{"/w/fixed.go", "/w/broken.go", "/w/green.go"},
+		diagOrder: []string{"/w/fixed.go", "/w/broken.go", "/w/unwatched.go", "/w/green.go"},
 	}
-	ev.resolveStaleDiag(map[string]int{"/w/broken.go": 2})
+	covered := func(p string) bool { return p != "/w/unwatched.go" }
+	ev.resolveStaleDiag(map[string]int{"/w/broken.go": 2}, covered)
 	_, latched := ev.diag["/w/fixed.go"]
 	require.False(t, latched, "a path clean in the live snapshot was repaired out-of-window")
 	require.Equal(t, message.VerificationFailed, ev.diag["/w/broken.go"].State,
 		"a path still erroring keeps its failure")
+	require.Equal(t, message.VerificationFailed, ev.diag["/w/unwatched.go"].State,
+		"a path no client handles keeps its failure — dead-client snapshots fail closed")
 	require.Equal(t, message.VerificationPassed, ev.diag["/w/green.go"].State,
 		"non-failed verdicts are untouched")
 }

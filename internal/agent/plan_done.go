@@ -70,8 +70,8 @@ type planEvidence struct {
 // keeping first-seen order for stable blocker reporting. Last verdict
 // wins — including unverified superseding a failed verdict when a
 // flaky settle timeout couldn't determine the delta; the live-snapshot
-// re-check is the safety net that keeps a wrongly-latched either way
-// from surviving to evaluation.
+// re-check only ever clears a latched failed (never mints one), so a
+// stale pass on a still-erroring path survives by design.
 func (e *planEvidence) setDiag(p string, chk message.VerificationCheck) {
 	if _, seen := e.diag[p]; !seen {
 		e.diagOrder = append(e.diagOrder, p)
@@ -85,10 +85,13 @@ func (e *planEvidence) setDiag(p string, chk message.VerificationCheck) {
 // per-write delta window can't span — mints no resolution entry and
 // would otherwise stay latched past its fix. Only failed entries
 // clear, never mint: the verdict is a delta, so pre-existing errors on
-// a path must not retroactively fail a clean write.
-func (e *planEvidence) resolveStaleDiag(live map[string]int) {
+// a path must not retroactively fail a clean write. The covered check
+// keeps it fail-closed when observability is lost — an empty snapshot
+// from a dead or restarted client reads "clean" for every path, so a
+// path no running client handles keeps its verdict.
+func (e *planEvidence) resolveStaleDiag(live map[string]int, covered func(string) bool) {
 	for p, chk := range e.diag {
-		if chk.State == message.VerificationFailed && live[p] == 0 {
+		if chk.State == message.VerificationFailed && live[p] == 0 && covered(p) {
 			delete(e.diag, p)
 		}
 	}
@@ -188,7 +191,10 @@ func scanPlanEvidence(msgs []message.Message, workingDir string, manager *lsp.Ma
 		}
 	}
 	if manager != nil {
-		ev.resolveStaleDiag(tools.SnapshotDiagnostics(manager).CountByPath())
+		ev.resolveStaleDiag(
+			tools.SnapshotDiagnostics(manager).CountByPath(),
+			func(p string) bool { return tools.AnyClientHandles(manager, p) },
+		)
 	}
 	return ev
 }

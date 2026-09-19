@@ -84,6 +84,13 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 		return v.inner.Run(ctx, call)
 	}
 	absPath := filepathext.SmartJoin(v.workingDir, filePath)
+	// LSP servers report canonicalized paths in diagnostic locations
+	// (gopls resolves symlinks, so /var reports as /private/var) while
+	// absPath stays workingDir-form — coverage (HandlesFile prefixes
+	// the client's cwd) and package-test selection both need that
+	// form. Snapshot-derived path comparisons and every minted Path
+	// field need the canonical one so check identities agree.
+	canonPath := filepathext.Canonical(absPath)
 	// Start configured-but-not-running servers before the coverage check —
 	// AnyClientHandles only sees running clients, and the pre-decorator
 	// flow started them on every edit via notifyLSPs. Skipping this lost
@@ -100,7 +107,7 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 		}
 		// Keep the project-diagnostics append the tools used to produce
 		// even when no client handles this file.
-		resp.Content += tools.FormatDiagnostics(filepathext.Canonical(absPath), v.lspManager)
+		resp.Content += tools.FormatDiagnostics(canonPath, v.lspManager)
 		// Select after the mutation so a newly created file (e.g. the
 		// first _test.go in a package) is seen by the selector.
 		checks := v.selectPending(absPath)
@@ -108,7 +115,7 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 			checks = []message.VerificationCheck{{
 				Check:  "diagnostics",
 				State:  message.VerificationUnverified,
-				Path:   absPath,
+				Path:   canonPath,
 				Detail: "no LSP client handles the file",
 			}}
 			// Surface the unverified state in the result so the model can
@@ -144,12 +151,6 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 	after := tools.SnapshotDiagnostics(v.lspManager)
 	newErrs := after.NewErrorsSince(baseline)
 
-	// LSP servers report canonicalized paths in diagnostic locations
-	// (gopls resolves symlinks, so /var reports as /private/var) while
-	// absPath stays workingDir-form — coverage (HandlesFile prefixes
-	// the client's cwd) and package-test selection both need that
-	// form. Snapshot-derived path comparisons need the canonical one.
-	canonPath := filepathext.Canonical(absPath)
 	resp.Content += tools.FormatDiagnostics(canonPath, v.lspManager)
 
 	var errsByPath map[string]int

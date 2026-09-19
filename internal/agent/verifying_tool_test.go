@@ -6,6 +6,7 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/stretchr/testify/require"
 )
@@ -56,7 +57,7 @@ func TestVerifyingTool_UnverifiedWhenNoClientHandlesFile(t *testing.T) {
 	require.Len(t, meta.Verification, 1)
 	require.Equal(t, "diagnostics", meta.Verification[0].Check)
 	require.Equal(t, message.VerificationUnverified, meta.Verification[0].State)
-	require.Equal(t, "/tmp/x.go", meta.Verification[0].Path)
+	require.Equal(t, filepathext.Canonical("/tmp/x.go"), meta.Verification[0].Path)
 }
 
 func TestVerifyingTool_ErrorResponseSkipsVerification(t *testing.T) {
