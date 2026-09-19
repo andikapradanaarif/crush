@@ -197,11 +197,18 @@ the edge's prompt branches on budget, not a second edge.
   at chain start and diff at chain end.
 - **Mechanics:** `prompt func(t)` doesn't receive `call` —
   `scan` stashes `call.RepairAttempts` (and the branch decision)
-  onto the `edgeTrigger`. The replan prompt's leading literal
+  onto the `edgeTrigger`. `resolve` doesn't receive `in` either —
+  step-bound evidence (steps for the signature re-scan, write
+  set, checkpoint inputs) is stashed on the trigger by `scan`
+  the same way, or the signature extends. The replan prompt's leading literal
   joins `RepairPromptPrefixes` (`run_edges.go:298`) — **distinct
   from `stallRetryPrefix`** or the eval analyzer can't split
   `replan`/`escalate` variants, the edge's most interesting
-  firing stat. The `fire` condition
+  firing stat. Caveat: merged prompts fingerprint only by their
+  _leading_ prefix — a verification+replan merge reads as
+  `verification` to the analyzer; `edge_firings` rows carry the
+  real per-edge stats, so don't expect prefix fingerprinting to
+  see the second section. The `fire` condition
   splits by branch: replan fires without `hasTool(question)` —
   that check belongs only to the escalation branch.
 - **Mechanism — the stall edge's prompt branches on attempts:**
@@ -210,7 +217,11 @@ the edge's prompt branches on budget, not a second edge.
   repair turn → the shipped escalation prompt
   (`stallRetrySection`, one question-tool call — interactive-only,
   `fire: a.interactive && hasTool(question)`; headless keeps the
-  blocker-report resolve). A third stall falls to the terminal
+  blocker-report resolve. More precisely the condition wants
+  `!call.NonInteractive` — interactivity is per-call (the task
+  path sets `NonInteractive: true`, `coordinator.go:2010`);
+  `hasTool(question)` is the real subagent safeguard either way).
+  A third stall falls to the terminal
   exhaustion note. Both turns live _inside_ `RepairAttempts` —
   escalation consumes the last retry slot rather than bypassing
   the budget (the shipped comment's "one per distinct blocker,
@@ -418,8 +429,11 @@ notice" failure as a declared transition.
   triggers **defer** — but deferral only works for
   session-state evidence: `scanTodosEdge` reads `planVerdicts`
   (stored, survives the escalate turn) while `scanVerificationEdge`
-  scans `in.result.Steps` — and the escalate run's steps contain
-  only the question call, so a deferred verification trigger is
+  scans `in.result.Steps` — and the escalate run's steps don't
+  carry the prior run's evidence (only the question call on the
+  cancel path; an answered question lets the model keep working
+  — writes included, but they're _new_ steps), so a deferred
+  verification trigger is
   _dropped_, not deferred (a deferred stall-replan's signature
   evidence is likewise step-bound). **Carrier — unlisted work:**
   `SessionAgentCall` gains a `deferred` field carrying the
@@ -437,8 +451,13 @@ notice" failure as a declared transition.
   land in depends on budget: if the escalate turn consumed the
   last slot, the re-fire renders an exhaustion note, not a
   repair turn (consistent with the crowding acceptance).
-  **Intra-family rule:** first-in-`runEdgeSet` wins, losers
-  defer via the same carrier — needed for future edges, but
+  **Intra-family rule — escalate-family only:** first-in-
+  `runEdgeSet` wins, losers defer via the same carrier.
+  Scoped to escalate on purpose: retry-family triggers keep
+  _concatenating_ — verification+todos is a routine co-fire
+  today merged into one prompt, and applying first-wins there
+  would regress the merge the seam shipped for (todos deferring
+  to a second turn). Needed for future edges, but
   **dead code for the shipped set**: stall-escalate +
   burn-watch can never co-fire (burn-watch requires
   `cleanStop && !in.stalled`; stall requires `in.stalled` — the
@@ -539,7 +558,7 @@ prompts as user messages (`createUserMessage` runs
 unconditionally per `Run`), so each attempt's initiating
 message naturally differs and `repair_attempts` is **demoted to
 a column** (still queryable — disambiguates replan-vs-escalate
-stats). **Source: `ListUserMessages`, not the working view.**
+stats). **Source: a `COUNT(*)` query, not the working view.**
 `getSessionMessages` returns the full transcript only when
 `notebookEnabled`; notebook-off it returns the `ListFromSummary`
 tail (`agent.go:2518-2531`, and the code comment says why —
@@ -547,14 +566,26 @@ turn numbers must stay absolute), so `messageTurns` ordinals
 are tail-relative there: post-summary firings get _smaller_
 ordinals, and a relative `turn_seq=3` can `INSERT OR IGNORE`-
 collide with a real pre-summary row at absolute turn 3 —
-the dedup mechanism silently eating a firing. Derive `turn_seq`
-from `ListUserMessages` (`message.go:553`) — a direct DB count
-over all user messages, absolute across summarizes and
-restarts — or persist an absolute user-turn counter on the
-session; it needs plumbing into `edgeInput` either way.
-(`collapsed_turns` never hit this because its rows are written
-and deduped within one numbering view; `edge_firings` spans
-summarize boundaries.) **`call.RunStamp` is
+the dedup mechanism silently eating a firing. But the obvious
+fix is wrong too: `ListUserMessages` (`messages.sql:59-65`) is
+`ORDER BY created_at DESC LIMIT 200` — a _prompt-history_
+query, not an absolute count (underivable past 200, DESC can't
+yield the ASC ordinal, `created_at` is 1-second resolution so
+same-second ordinals are ambiguous). **Unlisted work:** a
+`CountUserMessagesBySession` sqlc query — `COUNT(*)` over
+`role='user'`, unbounded — or an absolute user-turn counter on
+the session (more robust, needs backfill). **Correlation
+plumbing, also unlisted:** "ordinal of the run's initiating
+user message" presumes identifying _which_ user message
+initiated the run — nothing on `SessionAgentCall` carries its
+created message's ID; stash it from `createUserMessage`
+(`agent.go:976`) or snapshot the count at `Run` start. Note
+folded queued prompts create _non-initiating_ user messages
+mid-run (`agent.go:1115`), so the ordinal isn't "number of
+turns" — fine for PK purposes, but name it. It needs plumbing
+into `edgeInput` either way. (`collapsed_turns` never hit this
+because its rows are written and deduped within one numbering
+view; `edge_firings` spans summarize boundaries.) **`call.RunStamp` is
 rejected as the key** — it's `runStampGen.Add(1)` (`agent.go:892`)
 seeded from a random **per-agent-instance** epoch
 (`runStampEpoch`, `agent.go:496-508` — the code comment says
@@ -586,7 +617,13 @@ _fired_ — "evaluated" is guaranteed by construction since
 one coverage hole is the entry guard
 (`a.configStore == nil || in.result == nil ||
 len(in.result.Steps) == 0` — three conditions, `run_edges.go:106`),
-named here so nobody reads zero rows as dead code.
+named here so nobody reads zero rows as dead code. One more
+caveat on the invariant: hard-cancelled/errored runs return err
+_before_ `runEdges` (`agent.go:1538`) — boundary never evaluated,
+zero rows, distinguishable from "clean" only by the run's own
+record. `cancelled` covers the mid-loop `ctx.Err()` case only;
+acceptable for firing-rate stats, but named since no-row=clean
+is load-bearing.
 **Scan-contract extension — unlisted work:** today a nil scan
 return is the only "no" signal, so `gated` and `suppressed`
 can't be recorded. **The flag gates `t.fire`, not the scan** —
@@ -611,7 +648,7 @@ gated stall trigger would emit blocker reports with the flag
 off, and the flag would stop gating output entirely. Volume: flag default-off means a `gated` row
 per gated edge per boundary — ~2 rows/turn for most users;
 cheap, but the table's dominant write pattern from day one.
-**Cancel partial rows:** `ctx.Err()` at `run_edges.go:123` exits
+**Cancel partial rows:** `ctx.Err()` at `run_edges.go:118-124` exits
 mid-loop — a cancelled boundary leaves rows only for already-
 scanned edges, and un-scanned ones would read as _clean_.
 Record a `cancelled` outcome row for each un-scanned edge on
