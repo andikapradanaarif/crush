@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -331,6 +332,55 @@ func (s DiagnosticsSnapshot) NewErrorsSince(baseline DiagnosticsSnapshot) []stri
 		}
 	}
 	return newErrs
+}
+
+// NewErrorCountByPath groups the multiset difference by file — the
+// per-file view a verification entry attributes its verdict to. The
+// path is the key segment before the first "|"; a message containing
+// "|" cannot corrupt it.
+func (s DiagnosticsSnapshot) NewErrorCountByPath(baseline DiagnosticsSnapshot) map[string]int {
+	counts := map[string]int{}
+	for key, count := range s {
+		newOnPath := count - baseline[key]
+		if newOnPath <= 0 {
+			continue
+		}
+		counts[pathFor(key)] += newOnPath
+	}
+	return counts
+}
+
+// CountByPath totals the snapshot's error diagnostics per file.
+func (s DiagnosticsSnapshot) CountByPath() map[string]int {
+	counts := map[string]int{}
+	for key, count := range s {
+		counts[pathFor(key)] += count
+	}
+	return counts
+}
+
+// ResolvedPathsSince returns, sorted, the paths holding errors in s
+// that hold none in after — per-file resolution evidence for a write
+// that repairs errors on files it did not touch, the mirror of the
+// cross-file breakage attribution.
+func (s DiagnosticsSnapshot) ResolvedPathsSince(after DiagnosticsSnapshot) []string {
+	afterByPath := after.CountByPath()
+	var resolved []string
+	for p, n := range s.CountByPath() {
+		if n > 0 && afterByPath[p] == 0 {
+			resolved = append(resolved, p)
+		}
+	}
+	slices.Sort(resolved)
+	return resolved
+}
+
+// pathFor extracts the path segment of a "path|message" snapshot key.
+func pathFor(key string) string {
+	if i := strings.IndexByte(key, '|'); i >= 0 {
+		return key[:i]
+	}
+	return key
 }
 
 // AnyClientHandles reports whether any running LSP client claims the

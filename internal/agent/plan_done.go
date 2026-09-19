@@ -49,12 +49,20 @@ type writeEvidence struct {
 }
 
 // planEvidence is the session-scoped evidence the done-scan reads off
-// stored tool results: the latest instance of each check name, the
+// stored tool results: the latest instance of each check identity, the
 // paths writes landed on, and per-write check entries for covering
 // evaluation.
 type planEvidence struct {
 	latest map[string]message.VerificationCheck
 	writes []writeEvidence
+	// diag is the session's per-path diagnostics verdicts, keyed by
+	// attributed path — a check carrying Path attributes to that file
+	// regardless of which write recorded it, so a write that breaks a
+	// file it did not touch still blocks that file's bindings; a bare
+	// entry attributes to its write's path. diagOrder keeps first-seen
+	// order so the reported blocker is stable.
+	diag      map[string]message.VerificationCheck
+	diagOrder []string
 }
 
 // scanPlanEvidence walks stored messages collecting verification
@@ -93,7 +101,10 @@ func scanPlanEvidence(msgs []message.Message, workingDir string) *planEvidence {
 			}
 		}
 	}
-	ev := &planEvidence{latest: map[string]message.VerificationCheck{}}
+	ev := &planEvidence{
+		latest: map[string]message.VerificationCheck{},
+		diag:   map[string]message.VerificationCheck{},
+	}
 	for _, m := range msgs {
 		for _, part := range m.Parts {
 			tr, ok := part.(message.ToolResult)
@@ -106,12 +117,37 @@ func scanPlanEvidence(msgs []message.Message, workingDir string) *planEvidence {
 			}
 			for _, chk := range checks {
 				if chk.Check != "" {
-					ev.latest[chk.Check] = chk
+					ev.latest[chk.Identity()] = chk
 				}
 			}
 			for _, path := range callPaths[tr.ToolCallID] {
 				ev.writes = append(ev.writes, writeEvidence{path: path, checks: checks})
 			}
+		}
+	}
+	// Diagnostics supersession is per write path and chronological:
+	// the last verdict attributed to a path wins, and a write carrying
+	// no diagnostics entry at all clears its own path's verdict —
+	// optimistic by design, since latching until a checked write would
+	// make bash-heavy fixes unresolvable.
+	for _, w := range ev.writes {
+		sawDiag := false
+		for _, chk := range w.checks {
+			if chk.Check != "diagnostics" {
+				continue
+			}
+			p := w.path
+			if chk.Path != "" {
+				p = normalizePlanPath(workingDir, chk.Path)
+			}
+			if _, seen := ev.diag[p]; !seen {
+				ev.diagOrder = append(ev.diagOrder, p)
+			}
+			ev.diag[p] = chk
+			sawDiag = true
+		}
+		if !sawDiag {
+			delete(ev.diag, w.path)
 		}
 	}
 	return ev
@@ -199,71 +235,54 @@ func (e *planEvidence) evidenceReason(item session.PlanItem, workingDir string) 
 		// named-check loop applies.
 		latestOnPath := map[string]message.VerificationCheck{}
 		var pathCheckOrder []string
-		// Diagnostics is a per-write project delta: a green entry on
-		// one file says nothing about another's errors, so verdicts
-		// are tracked per write path — superseded only by a later
-		// write to the SAME path (with or without an entry).
-		diagByPath := map[string]message.VerificationCheck{}
-		var diagPaths []string
 		for _, w := range e.writes {
 			if !pathCovers(p, w.path) {
 				continue
 			}
 			landed = true
 			declaredIsFile = declaredIsFile || w.path == p
-			sawDiag := false
 			for _, chk := range w.checks {
-				if chk.Check == "" {
+				if chk.Check == "" || chk.Check == "diagnostics" {
 					continue
 				}
-				if chk.Check == "diagnostics" {
-					if _, seen := diagByPath[w.path]; !seen {
-						diagPaths = append(diagPaths, w.path)
-					}
-					diagByPath[w.path] = chk
-					sawDiag = true
-					continue
+				if _, seen := latestOnPath[chk.Identity()]; !seen {
+					pathCheckOrder = append(pathCheckOrder, chk.Identity())
 				}
-				if _, seen := latestOnPath[chk.Check]; !seen {
-					pathCheckOrder = append(pathCheckOrder, chk.Check)
-				}
-				latestOnPath[chk.Check] = chk
-			}
-			// A covered write carrying no diagnostics entry (a bash
-			// rewrite, a download) supersedes that path's earlier
-			// verdict rather than latching it.
-			if !sawDiag {
-				delete(diagByPath, w.path)
+				latestOnPath[chk.Identity()] = chk
 			}
 		}
 		if !landed {
 			return "no write observed on " + declared
 		}
-		for _, name := range pathCheckOrder {
-			v := latestOnPath[name]
+		for _, id := range pathCheckOrder {
+			v := latestOnPath[id]
 			// Name-scoped checks (verify:*, package-test:*) evaluate
 			// their session-latest instance — a later write elsewhere
 			// may have re-resolved the name.
-			if lv, exists := e.latest[name]; exists {
+			if lv, exists := e.latest[id]; exists {
 				v = lv
 			}
 			switch v.State {
 			case message.VerificationFailed:
 				if v.Detail != "" {
-					return "check " + name + " failed on " + declared + ": " + v.Detail
+					return "check " + v.Check + " failed on " + declared + ": " + v.Detail
 				}
-				return "check " + name + " failed on " + declared
+				return "check " + v.Check + " failed on " + declared
 			case message.VerificationPending:
-				return "check " + name + " has not resolved on " + declared
+				return "check " + v.Check + " has not resolved on " + declared
 				// unverified is a weak pass — resolved without a
 				// verdict, so it does not block. Blocking it would
 				// make path evidence unreachable wherever LSP
 				// coverage is absent.
 			}
 		}
-		for _, wp := range diagPaths {
-			v, ok := diagByPath[wp]
-			if !ok {
+		// Diagnostics verdicts attribute per file: an entry covering
+		// the declared path blocks it — including failures a write to
+		// another file caused (cross-file breakage), which is exactly
+		// what the per-file Path field exists to catch.
+		for _, wp := range e.diagOrder {
+			v, ok := e.diag[wp]
+			if !ok || !pathCovers(p, wp) {
 				continue
 			}
 			switch v.State {

@@ -241,6 +241,77 @@ func TestPlanVerdicts(t *testing.T) {
 		require.Contains(t, verdicts[0].reason, "pkg/f.go")
 	})
 
+	t.Run("write to a.go breaking b.go blocks the b.go binding", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		// b.go was written and verified earlier; a later write to
+		// a.go introduced errors in b.go — the per-file entry must
+		// block the b.go item even though the write never touched it.
+		mkWrite(t, svc, sessionID, "w1", "b.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"b.go"}]}`)
+		mkWrite(t, svc, sessionID, "w2", "a.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"a.go"},{"check":"diagnostics","state":"failed","path":"b.go","detail":"1 new error(s)"}]}`)
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"b.go"}},
+		)
+		verdicts := a.planVerdicts(t.Context(), sessionID)
+		require.Len(t, verdicts, 1)
+		require.Equal(t, planEvidenceBlocked, verdicts[0].state)
+		require.Contains(t, verdicts[0].reason, "b.go")
+	})
+
+	t.Run("cross-file failure does not block the clean write path", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		// The write to a.go broke b.go, not a.go — the a.go item's
+		// own diagnostics verdict is green. The failure still blocks
+		// the run-level edge and the b.go binding, not this item.
+		mkWrite(t, svc, sessionID, "w1", "a.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"a.go"},{"check":"diagnostics","state":"failed","path":"b.go","detail":"1 new error(s)"}]}`)
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "edit a.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"a.go"}},
+		)
+		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
+	})
+
+	t.Run("another file's fix write supersedes the cross-file failure", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		// The typical repair for cross-file breakage edits the
+		// referencing file, not the broken one — the resolution entry
+		// it mints must supersede the failure or the item stays
+		// blocked past its fix.
+		mkWrite(t, svc, sessionID, "w0", "b.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"b.go"}]}`)
+		mkWrite(t, svc, sessionID, "w1", "a.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"a.go"},{"check":"diagnostics","state":"failed","path":"b.go","detail":"1 new error(s)"}]}`)
+		mkWrite(t, svc, sessionID, "w2", "a.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"a.go"},{"check":"diagnostics","state":"passed","path":"b.go","detail":"errors resolved"}]}`)
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"b.go"}},
+		)
+		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
+	})
+
+	t.Run("fixing the broken file supersedes the cross-file failure", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		mkWrite(t, svc, sessionID, "w1", "b.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"b.go"}]}`)
+		mkWrite(t, svc, sessionID, "w2", "a.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"a.go"},{"check":"diagnostics","state":"failed","path":"b.go","detail":"1 new error(s)"}]}`)
+		mkWrite(t, svc, sessionID, "w3", "b.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"b.go"}]}`)
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"b.go"}},
+		)
+		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
+	})
+
 	t.Run("pending covering check blocks path evidence", func(t *testing.T) {
 		t.Parallel()
 		a, svc, sessionID := newGateTestAgent(t, &config.Config{})

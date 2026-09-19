@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 func TestPendingChecksForEdit(t *testing.T) {
@@ -313,6 +315,22 @@ func TestUnionToolMetadata(t *testing.T) {
 		`{"verification":[{"check":"verify:x","state":"passed"}]}`,
 	)
 	require.Contains(t, merged, `"state":"passed"`)
+}
+
+func TestUnionToolMetadata_PreservesPerFileDiagnostics(t *testing.T) {
+	t.Parallel()
+	// Per-file diagnostics entries share a check name but differ by
+	// path — merging must not collapse them into each other.
+	stored := `{"verification":[` +
+		`{"check":"diagnostics","state":"passed","path":"a.go"},` +
+		`{"check":"diagnostics","state":"failed","path":"b.go"}]}`
+	merged := unionToolMetadata(stored, stored)
+
+	var checks []message.VerificationCheck
+	require.NoError(t, json.Unmarshal([]byte(gjson.Get(merged, "verification").Raw), &checks))
+	require.Len(t, checks, 2)
+	require.Equal(t, "a.go", checks[0].Path)
+	require.Equal(t, "b.go", checks[1].Path)
 }
 
 // newGateTestAgent builds a sessionAgent with the pieces the gate

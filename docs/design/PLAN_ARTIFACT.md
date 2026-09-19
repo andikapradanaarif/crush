@@ -93,7 +93,12 @@ EvidenceChecks []string, EvidencePaths []string}`:
     kind, minted per write when LSP covers the file
     (`verifying_tool.go:164`); a new-error delta on the path is
     exactly per-path evidence) is the harness's job, not the
-    model's vocabulary. `unverified` (LSP doesn't cover the
+    model's vocabulary. Diagnostics verdicts attribute **per
+    file** via the check's `path` field: a write to `a.go` whose
+    delta breaks `b.go` mints a failed entry attributed to
+    `b.go`, so an item bound to `b.go` blocks even though no
+    write ever landed there — cross-file breakage is per-item
+    evidence, not just a run-level failure. `unverified` (LSP doesn't cover the
     file) is not failed — it doesn't block under the weak rule;
     keep `unverified` / `unmet` / `failed` distinct in gate
     feedback — three near-synonyms that must not collapse.
@@ -184,8 +189,16 @@ evidence` — a completed mark with pending/failed/unmet
   strings no longer satisfies the gate, and an **empty list does
   not resolve it either**: `todos: []` vacuously satisfies "every
   item binds evidence," so without the non-empty requirement
-  "declare nothing" becomes the cheapest gate-resolution. **Open
-  items do not block
+  "declare nothing" becomes the cheapest gate-resolution. A
+  declaration that keeps bouncing is **budgeted**: after 3
+  rejections the gate escalates to the real scope question with
+  stuck-loop context — escalation, never pass-through, since a
+  free pass after N bounces would teach the spam-bypass and an
+  unrepairable bounce (unsurfaced vocabulary) is otherwise a
+  guaranteed loop. Each bounce is exported to telemetry as the
+  conformance-health signal: a high bounce rate means
+  can't-conform (vocabulary/schema) vs won't (model quality).
+  **Open items do not block
   `phase-confirm`** — at the first-write boundary every item is
   open by definition, so blocking there deadlocks every plan.
   Open-items-block lives at the **run-end todos edge** (PR 2's

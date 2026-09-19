@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -106,6 +108,7 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 			checks = []message.VerificationCheck{{
 				Check:  "diagnostics",
 				State:  message.VerificationUnverified,
+				Path:   absPath,
 				Detail: "no LSP client handles the file",
 			}}
 			// Surface the unverified state in the result so the model can
@@ -143,6 +146,8 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 
 	resp.Content += tools.FormatDiagnostics(absPath, v.lspManager)
 
+	var errsByPath map[string]int
+	var resolved []string
 	state := message.VerificationPassed
 	detail := ""
 	switch {
@@ -160,14 +165,63 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 	case len(newErrs) > 0:
 		state = message.VerificationFailed
 		detail = fmt.Sprintf("%d new error(s)", len(newErrs))
+		errsByPath = after.NewErrorCountByPath(baseline)
+		resolved = baseline.ResolvedPathsSince(after)
+	default:
+		// A clean delta can still carry per-file news: errors that
+		// disappeared since the baseline are resolutions to record,
+		// or a stale failure on that path would latch past its fix.
+		resolved = baseline.ResolvedPathsSince(after)
 	}
-	checks := append([]message.VerificationCheck{{
-		Check:  "diagnostics",
-		State:  state,
-		Detail: detail,
-	}}, v.selectPending(absPath)...)
+	checks := append(diagnosticsChecks(absPath, state, detail, errsByPath, resolved), v.selectPending(absPath)...)
 	resp.Metadata = mergeVerificationMetadata(resp.Metadata, checks)
 	return resp, nil
+}
+
+// diagnosticsChecks mints the per-file diagnostics entries for a
+// mutation. The write's own path always carries a verdict so a later
+// write to it supersedes correctly; every other file the delta broke
+// carries a failed entry attributed to itself, and every file whose
+// errors the delta cleared carries a passed one — a write that breaks
+// or repairs a file it did not touch must update evidence bound to
+// that file, not just evidence bound to the write's path.
+func diagnosticsChecks(absPath, state, detail string, errsByPath map[string]int, resolved []string) []message.VerificationCheck {
+	checks := make([]message.VerificationCheck, 0, len(errsByPath)+len(resolved)+1)
+	if _, broke := errsByPath[absPath]; !broke {
+		writeState, writeDetail := state, detail
+		if writeState == message.VerificationFailed {
+			// The delta failed elsewhere — the write path itself
+			// stayed clean.
+			writeState, writeDetail = message.VerificationPassed, ""
+		}
+		checks = append(checks, message.VerificationCheck{
+			Check:  "diagnostics",
+			State:  writeState,
+			Path:   absPath,
+			Detail: writeDetail,
+		})
+	}
+	for _, p := range slices.Sorted(maps.Keys(errsByPath)) {
+		checks = append(checks, message.VerificationCheck{
+			Check:  "diagnostics",
+			State:  message.VerificationFailed,
+			Path:   p,
+			Detail: fmt.Sprintf("%d new error(s)", errsByPath[p]),
+		})
+	}
+	for _, p := range resolved {
+		if p == absPath {
+			// The write-path entry already carries this verdict.
+			continue
+		}
+		checks = append(checks, message.VerificationCheck{
+			Check:  "diagnostics",
+			State:  message.VerificationPassed,
+			Path:   p,
+			Detail: "errors resolved",
+		})
+	}
+	return checks
 }
 
 // selectPending runs the configured check selector when one is wired.

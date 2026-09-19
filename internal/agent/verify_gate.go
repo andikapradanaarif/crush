@@ -151,7 +151,7 @@ func (a *sessionAgent) runGateChecks(ctx context.Context, workingDir string, pen
 	var uniques []uniqueCheck
 	seen := map[string]int{}
 	for _, p := range pending {
-		if i, ok := seen[p.check.Check]; ok {
+		if i, ok := seen[p.check.Identity()]; ok {
 			// An observed run must postdate the LAST write the check
 			// covers — keep the latest step the pending was recorded on.
 			if p.stepIndex > uniques[i].latestStep {
@@ -159,7 +159,7 @@ func (a *sessionAgent) runGateChecks(ctx context.Context, workingDir string, pen
 			}
 			continue
 		}
-		seen[p.check.Check] = len(uniques)
+		seen[p.check.Identity()] = len(uniques)
 		uniques = append(uniques, uniqueCheck{check: p.check, latestStep: p.stepIndex})
 	}
 
@@ -167,7 +167,7 @@ func (a *sessionAgent) runGateChecks(ctx context.Context, workingDir string, pen
 	for _, uc := range uniques {
 		cmd := uc.check.Command
 		if cmd == "" {
-			out[uc.check.Check] = resolvedCheck{state: message.VerificationUnverified, detail: "no command to run"}
+			out[uc.check.Identity()] = resolvedCheck{state: message.VerificationUnverified, detail: "no command to run"}
 			continue
 		}
 		satisfied := false
@@ -180,7 +180,7 @@ func (a *sessionAgent) runGateChecks(ctx context.Context, workingDir string, pen
 				if b.isError {
 					st = message.VerificationFailed
 				}
-				out[uc.check.Check] = resolvedCheck{state: st, detail: "observed via bash run", output: b.output}
+				out[uc.check.Identity()] = resolvedCheck{state: st, detail: "observed via bash run", output: b.output}
 				satisfied = true
 				break
 			}
@@ -208,25 +208,25 @@ func (a *sessionAgent) runGateChecks(ctx context.Context, workingDir string, pen
 		case checkCtx.Err() == context.DeadlineExceeded:
 			// The deadline fired — a kill may surface as a bare exit
 			// code with no error, so check the context first.
-			out[uc.check.Check] = resolvedCheck{
+			out[uc.check.Identity()] = resolvedCheck{
 				state:  message.VerificationFailed,
 				detail: fmt.Sprintf("timed out after %s", timeout),
 				output: res.Output,
 			}
 		case err != nil:
-			out[uc.check.Check] = resolvedCheck{
+			out[uc.check.Identity()] = resolvedCheck{
 				state:  message.VerificationFailed,
 				detail: err.Error(),
 				output: res.Output,
 			}
 		case res.ExitCode != 0:
-			out[uc.check.Check] = resolvedCheck{
+			out[uc.check.Identity()] = resolvedCheck{
 				state:  message.VerificationFailed,
 				detail: fmt.Sprintf("exit code %d", res.ExitCode),
 				output: res.Output,
 			}
 		default:
-			out[uc.check.Check] = resolvedCheck{state: message.VerificationPassed, output: res.Output}
+			out[uc.check.Identity()] = resolvedCheck{state: message.VerificationPassed, output: res.Output}
 		}
 	}
 	return out
@@ -286,7 +286,7 @@ func mergeVerificationResolved(existing string, updates []message.VerificationCh
 	for _, u := range updates {
 		replaced := false
 		for i := range checks {
-			if checks[i].Check == u.Check {
+			if checks[i].Identity() == u.Identity() {
 				checks[i] = u
 				replaced = true
 			}
@@ -357,10 +357,11 @@ func unionVerificationChecks(stored, incoming gjson.Result) string {
 			if json.Unmarshal([]byte(raw.Raw), &chk) != nil || chk.Check == "" {
 				continue
 			}
-			prev, ok := merged[chk.Check]
+			id := chk.Identity()
+			prev, ok := merged[id]
 			if !ok {
-				order = append(order, chk.Check)
-				merged[chk.Check] = chk
+				order = append(order, id)
+				merged[id] = chk
 				continue
 			}
 			// Terminal states stick; otherwise the later (incoming) copy
@@ -368,7 +369,7 @@ func unionVerificationChecks(stored, incoming gjson.Result) string {
 			if prev.State != message.VerificationPending {
 				continue
 			}
-			merged[chk.Check] = chk
+			merged[id] = chk
 		}
 	}
 	checks := make([]message.VerificationCheck, 0, len(order))

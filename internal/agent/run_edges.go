@@ -248,7 +248,7 @@ func (a *sessionAgent) resolveVerificationEdge(ctx context.Context, call Session
 	}
 	unique := map[string]bool{}
 	for _, p := range t.pending {
-		unique[p.check.Check] = true
+		unique[p.check.Identity()] = true
 	}
 	a.notifyVerifying(call, len(unique))
 	resolved := a.runGateChecks(ctx, a.configStore.WorkingDir(), t.pending, t.observed)
@@ -259,7 +259,7 @@ func (a *sessionAgent) resolveVerificationEdge(ctx context.Context, call Session
 		return
 	}
 	for i := range t.pending {
-		out, ok := resolved[t.pending[i].check.Check]
+		out, ok := resolved[t.pending[i].check.Identity()]
 		if !ok {
 			continue
 		}
@@ -301,6 +301,27 @@ var RepairPromptPrefixes = []string{
 	stallRetryPrefix,
 }
 
+// failedCheckGroups merges failed entries minted by one write into a
+// single renderable failure — a write whose diagnostics delta broke
+// three files recorded three per-file entries but is one broken write
+// sharing one tool output, not three checks.
+func failedCheckGroups(failed []gateCheckOutcome) [][]gateCheckOutcome {
+	var order []string
+	groups := map[string][]gateCheckOutcome{}
+	for _, f := range failed {
+		key := f.toolCallID + "\x00" + f.check.Check
+		if _, ok := groups[key]; !ok {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], f)
+	}
+	out := make([][]gateCheckOutcome, 0, len(order))
+	for _, k := range order {
+		out = append(out, groups[k])
+	}
+	return out
+}
+
 // verificationRetrySection renders the failed checks' raw output
 // (truncated to the tool-result cap) — evidence the turn claimed done
 // prematurely.
@@ -310,8 +331,23 @@ func verificationRetrySection(t *edgeTrigger) string {
 	}
 	var b strings.Builder
 	b.WriteString(verificationRetryPrefix + " The following check(s) did not pass — fix the underlying issue; do not restate success.\n")
-	for _, f := range t.failed {
+	for _, group := range failedCheckGroups(t.failed) {
+		f := group[0]
 		fmt.Fprintf(&b, "\n<check name=%q>\n", f.check.Check)
+		if len(group) > 1 {
+			// Per-file entries from one write: name each affected
+			// path, then render the shared tool output once.
+			for _, g := range group {
+				if g.check.Path == "" {
+					continue
+				}
+				b.WriteString(g.check.Path)
+				if g.check.Detail != "" {
+					b.WriteString(": " + g.check.Detail)
+				}
+				b.WriteString("\n")
+			}
+		}
 		out := f.output
 		if out == "" {
 			out = f.check.Detail
@@ -333,7 +369,7 @@ func verificationExhaustNote(t *edgeTrigger, attempts int) string {
 		headline = firstLine(t.failed[0].output)
 	}
 	return fmt.Sprintf("%d check(s) still failing after %d attempt(s). Last failure: %s",
-		len(t.failed), attempts, headline)
+		len(failedCheckGroups(t.failed)), attempts, headline)
 }
 
 // --- todos edge ---

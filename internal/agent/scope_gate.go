@@ -10,6 +10,7 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/event"
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
 )
@@ -19,6 +20,14 @@ import (
 // marks a task whose scope is worth confirming. Routine-size tasks —
 // a handful of reads before the edit — pass un-gated.
 const scopeGateMinExploration = 8
+
+// scopeGatePlanBounceBudget bounds how many times a non-validating
+// plan declaration may bounce before the gate escalates to the real
+// scope question. An unbounded bounce is a zero-cost stall — the
+// rejection only exists inside the tool result — and an unrepairable
+// one (the evidence vocabulary never surfaced to the model) is a
+// guaranteed loop, so the budget doubles as its safety valve.
+const scopeGatePlanBounceBudget = 3
 
 // scopeGateState is the per-session gate bookkeeping for one turn — one
 // entry per session ID, negligible growth. A new run stamp resets it;
@@ -30,6 +39,9 @@ type scopeGateState struct {
 	explore  int
 	asking   bool
 	resolved bool
+	// bounces counts this run's rejected plan declarations — the
+	// conformance signal exported to telemetry on each bounce.
+	bounces int
 }
 
 // gateVerdict is observe's tri-state: pass the call through, hold it
@@ -49,6 +61,12 @@ const (
 	// declaration — the gate is armed and the submitted list is empty
 	// or carries an item with no evidence bound.
 	gateRejectPlan
+	// gateEscalatePlan is the bounce-budget-exhausted verdict: the
+	// declaration loop gets the real scope question with stuck-loop
+	// context instead of another bounce. Escalation, never
+	// pass-through — a free pass after N rejections would teach the
+	// spam-bypass.
+	gateEscalatePlan
 )
 
 // parsePlanCall extracts the submitted list — the gate checks a
@@ -139,16 +157,16 @@ func (g *scopeGate) wrap(all []fantasy.AgentTool) []fantasy.AgentTool {
 }
 
 // observe records one tool call against the session's run state and
-// reports the gate's verdict plus the exploration count the verdict was
-// reached at. A new run stamp resets the state — the boundary is per
-// turn, not per session. gateConfirm claims the one in-flight question
-// slot (the service supports a single pending question); a parallel
-// gated write in the same step gets gateWait and is told to re-issue
-// after the question resolves.
-func (g *scopeGate) observe(ctx context.Context, call fantasy.ToolCall) (gateVerdict, int) {
+// reports the gate's verdict plus the exploration and bounce counts
+// the verdict was reached at. A new run stamp resets the state — the
+// boundary is per turn, not per session. gateConfirm claims the one
+// in-flight question slot (the service supports a single pending
+// question); a parallel gated write in the same step gets gateWait and
+// is told to re-issue after the question resolves.
+func (g *scopeGate) observe(ctx context.Context, call fantasy.ToolCall) (gateVerdict, int, int) {
 	sessionID := tools.GetSessionFromContext(ctx)
 	if sessionID == "" {
-		return gatePass, 0
+		return gatePass, 0, 0
 	}
 	stamp := tools.GetRunStampFromContext(ctx)
 
@@ -182,19 +200,19 @@ func (g *scopeGate) observe(ctx context.Context, call fantasy.ToolCall) (gateVer
 	if tools.IsMutatingCall(call.Name, call.Input) {
 		switch {
 		case st.resolved || st.explore < scopeGateMinExploration:
-			return gatePass, st.explore
+			return gatePass, st.explore, st.bounces
 		case st.asking:
-			return gateWait, st.explore
+			return gateWait, st.explore, st.bounces
 		default:
 			st.asking = true
-			return gateConfirm, st.explore
+			return gateConfirm, st.explore, st.bounces
 		}
 	}
 	// An in-flight question already externalized the scope decision —
 	// the gate is satisfied for the rest of the run.
 	if call.Name == tools.QuestionToolName {
 		st.resolved = true
-		return gatePass, st.explore
+		return gatePass, st.explore, st.bounces
 	}
 	// A plan call resolves the gate only once a validating plan has
 	// landed (checked post-run in Run). While the gate is armed, a
@@ -207,13 +225,21 @@ func (g *scopeGate) observe(ctx context.Context, call fantasy.ToolCall) (gateVer
 			// explains the failure instead of a misleading plan
 			// rejection.
 			if params, err := parsePlanCall(call.Input); err == nil && !planParamsResolve(params) && !declared {
-				return gateRejectPlan, st.explore
+				st.bounces++
+				if st.bounces > scopeGatePlanBounceBudget {
+					// Budget exhausted: escalate to the real scope
+					// question with stuck-loop context rather than
+					// bounce forever.
+					st.asking = true
+					return gateEscalatePlan, st.explore, st.bounces
+				}
+				return gateRejectPlan, st.explore, st.bounces
 			}
 		}
-		return gatePass, st.explore
+		return gatePass, st.explore, st.bounces
 	}
 	st.explore++
-	return gatePass, st.explore
+	return gatePass, st.explore, st.bounces
 }
 
 // resolve marks the session's current run gated — the checkpoint fired
@@ -236,14 +262,20 @@ func (g *scopeGate) resolve(ctx context.Context) {
 // question globally — a concurrent Ask from another session would
 // clobber it; that hazard pre-dates the gate (the question tool
 // exposes it too) and same-session serialization keeps it from
-// firing here.
-func (g *scopeGate) confirm(ctx context.Context, explore int) (proceed bool, err error) {
+// firing here. Prior plan bounces join the prompt as stuck-loop
+// context — an escalation asks the same question, but the user
+// deserves to know the model could not conform.
+func (g *scopeGate) confirm(ctx context.Context, explore, bounces int) (proceed bool, err error) {
+	text := fmt.Sprintf("This task has explored %d steps without a declared plan. Confirm scope before the first write?", explore)
+	if bounces > 0 {
+		text = fmt.Sprintf("The plan declaration was rejected %d time(s) for missing evidence binding — the model may be stuck in a bounce loop. Confirm scope before the first write?", bounces)
+	}
 	answers, err := g.svc.Ask(ctx, question.Request{
 		SessionID: tools.GetSessionFromContext(ctx),
 		Questions: []question.Question{{
 			Type:  question.TypeSingleChoice,
 			Label: "Scope check",
-			Text:  fmt.Sprintf("This task has explored %d steps without a declared plan. Confirm scope before the first write?", explore),
+			Text:  text,
 			Description: "The exploration so far suggests a non-routine change. " +
 				"Confirming means the plan is worth a checkpoint; you can also narrow the scope or stop to restate the task.",
 			Choices: []question.Choice{
@@ -294,7 +326,7 @@ func (t *scopeGateTool) SetProviderOptions(opts fantasy.ProviderOptions) {
 }
 
 func (t *scopeGateTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-	verdict, explore := t.gate.observe(ctx, call)
+	verdict, explore, bounces := t.gate.observe(ctx, call)
 	switch verdict {
 	case gatePass:
 		resp, err := t.inner.Run(ctx, call)
@@ -307,6 +339,15 @@ func (t *scopeGateTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 		}
 		return resp, err
 	case gateRejectPlan:
+		// The rejection lives only inside this tool result — export
+		// it so telemetry and logs see the loop a bare-plan model
+		// would otherwise burn turns inside.
+		sessionID := tools.GetSessionFromContext(ctx)
+		event.PlanDeclarationBounced("session id", sessionID, "bounces", bounces)
+		slog.Info("Scope gate: plan declaration bounced",
+			"session_id", sessionID,
+			"bounces", bounces,
+		)
 		msg := "This todos call does not count as declaring the plan: every item must bind " +
 			"evidence via evidence_checks or evidence_paths, and the list must not be empty. " +
 			"Resubmit with evidence bound to each item"
@@ -322,6 +363,15 @@ func (t *scopeGateTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 		), nil
 	}
 
+	if verdict == gateEscalatePlan {
+		sessionID := tools.GetSessionFromContext(ctx)
+		event.PlanDeclarationEscalated("session id", sessionID, "bounces", bounces)
+		slog.Warn("Scope gate: plan bounce budget exhausted, escalating to the scope question",
+			"session_id", sessionID,
+			"bounces", bounces,
+		)
+	}
+
 	if !t.gate.interactive {
 		// Headless degrade: proceed with a logged assumption — the
 		// boundary is observed and recorded, never asked.
@@ -333,7 +383,7 @@ func (t *scopeGateTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 		return t.inner.Run(ctx, call)
 	}
 
-	proceed, err := t.gate.confirm(ctx, explore)
+	proceed, err := t.gate.confirm(ctx, explore, bounces)
 	t.gate.resolve(ctx)
 	switch {
 	case err == nil && proceed:

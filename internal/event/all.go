@@ -62,6 +62,19 @@ func StatsViewed() {
 	send("stats viewed")
 }
 
+// PlanDeclarationBounced records a scope-gate plan rejection — the
+// conformance-health signal: a high bounce rate means can't-conform
+// (unsurfaced vocabulary or schema) rather than won't (model quality).
+func PlanDeclarationBounced(props ...any) {
+	send("plan declaration bounced", props...)
+}
+
+// PlanDeclarationEscalated records the bounce-budget exhaustion that
+// turns a stuck declaration loop into the real scope question.
+func PlanDeclarationEscalated(props ...any) {
+	send("plan declaration escalated", props...)
+}
+
 func SessionListed(json bool) {
 	send("session listed", "json", json)
 }
