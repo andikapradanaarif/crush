@@ -58,17 +58,21 @@ type TodosResponseMetadata struct {
 // it has never seen run.
 func NewTodosTool(sessions session.Service, checkNames []string, workingDir string) fantasy.AgentTool {
 	description := todosDescription
-	if len(checkNames) > 0 {
+	bindable := map[string]bool{}
+	var names []string
+	for _, name := range checkNames {
+		if !bindable[name] {
+			bindable[name] = true
+			names = append(names, name)
+		}
+	}
+	if len(names) > 0 {
 		var b strings.Builder
 		b.WriteString("\n\nBindable `evidence_checks` names (anything else is rejected):\n")
-		for _, name := range checkNames {
+		for _, name := range names {
 			b.WriteString("- " + name + "\n")
 		}
 		description += b.String()
-	}
-	bindable := map[string]bool{}
-	for _, name := range checkNames {
-		bindable[name] = true
 	}
 
 	return fantasy.NewAgentTool(

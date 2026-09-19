@@ -373,14 +373,20 @@ func unmarshalTodos(data string) ([]PlanItem, error) {
 // ordinal suffix keeps IDs unique without breaking determinism.
 func mintPlanItemIDs(todos []PlanItem) {
 	seen := map[string]int{}
+	baseN := map[string]int{}
 	for i := range todos {
 		if todos[i].ID != "" {
 			seen[todos[i].ID]++
 			continue
 		}
-		id := MintPlanItemID(todos[i].Key, todos[i].Content)
-		if n := seen[id]; n > 0 {
-			id = fmt.Sprintf("%s#%d", id, n)
+		base := MintPlanItemID(todos[i].Key, todos[i].Content)
+		id := base
+		// Identical legacy rows mint the same base — suffix from a
+		// per-base counter, and skip suffixes a stored row already
+		// holds, so every minted ID is unique within the list.
+		for seen[id] > 0 {
+			baseN[base]++
+			id = fmt.Sprintf("%s#%d", base, baseN[base])
 		}
 		seen[id]++
 		todos[i].ID = id

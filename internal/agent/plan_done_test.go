@@ -224,6 +224,21 @@ func TestPlanVerdicts(t *testing.T) {
 		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
 	})
 
+	t.Run("checkless rewrite supersedes a diagnostics failure", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		mkWrite(t, svc, sessionID, "w1", "a.go",
+			`{"verification":[{"check":"diagnostics","state":"failed","detail":"1 new error(s)"}]}`)
+		// A bash rewrite carries no diagnostics entry — the stale
+		// verdict is superseded, not latched.
+		mkBashWrite(t, svc, sessionID, "b1", "cat > a.go <<'EOF'\nfixed\nEOF")
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "fix a.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"a.go"}},
+		)
+		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
+	})
+
 	t.Run("bash redirect write satisfies the declared path", func(t *testing.T) {
 		t.Parallel()
 		a, svc, sessionID := newGateTestAgent(t, &config.Config{})

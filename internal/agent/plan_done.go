@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
@@ -189,6 +190,7 @@ func (e *planEvidence) evidenceReason(item session.PlanItem, workingDir string) 
 			}
 			landed = true
 			declaredIsFile = declaredIsFile || w.path == p
+			sawDiag := false
 			for _, chk := range w.checks {
 				if chk.Check == "" {
 					continue
@@ -197,19 +199,29 @@ func (e *planEvidence) evidenceReason(item session.PlanItem, workingDir string) 
 					pathCheckOrder = append(pathCheckOrder, chk.Check)
 				}
 				latestOnPath[chk.Check] = chk
+				sawDiag = sawDiag || chk.Check == "diagnostics"
+			}
+			// Diagnostics resolves per write — a covered write carrying
+			// no entry (a bash rewrite, a download) supersedes the
+			// earlier verdict rather than latching it.
+			if !sawDiag {
+				delete(latestOnPath, "diagnostics")
 			}
 		}
 		if !landed {
 			return "no write observed on " + declared
 		}
 		for _, name := range pathCheckOrder {
-			v := latestOnPath[name]
+			v, ok := latestOnPath[name]
+			if !ok {
+				continue
+			}
 			// Name-scoped checks (verify:*, package-test:*) evaluate
 			// their session-latest instance — a later write elsewhere
 			// may have re-resolved the name. diagnostics is per-write:
 			// the latest covered write's entry is its verdict here.
 			if name != "diagnostics" {
-				if lv, ok := e.latest[name]; ok {
+				if lv, exists := e.latest[name]; exists {
 					v = lv
 				}
 			}
@@ -223,11 +235,15 @@ func (e *planEvidence) evidenceReason(item session.PlanItem, workingDir string) 
 		// Covering checks beyond the path's own writes: a package test
 		// covers every file in its directory, and configured verify
 		// commands gate any mutation — their latest failure covers all
-		// declared paths.
+		// declared paths. Sorted so the reported blocker is stable.
+		var failedNames []string
 		for name, v := range e.latest {
-			if v.State != message.VerificationFailed {
-				continue
+			if v.State == message.VerificationFailed {
+				failedNames = append(failedNames, name)
 			}
+		}
+		slices.Sort(failedNames)
+		for _, name := range failedNames {
 			if strings.HasPrefix(name, "package-test:") {
 				dir := normalizePlanPath(workingDir, strings.TrimPrefix(name, "package-test:"))
 				if packageTestCovers(p, dir, declaredIsFile) {

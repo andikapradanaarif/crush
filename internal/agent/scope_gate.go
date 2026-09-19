@@ -273,12 +273,15 @@ func (t *scopeGateTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 		}
 		return resp, err
 	case gateRejectPlan:
-		return fantasy.NewTextErrorResponse(
-			"This todos call does not count as declaring the plan: every item must bind " +
-				"evidence via evidence_checks or evidence_paths, and the list must not be empty. " +
-				"Resubmit with evidence bound to each item, or proceed and answer the scope-check " +
-				"question when the first write triggers it.",
-		), nil
+		msg := "This todos call does not count as declaring the plan: every item must bind " +
+			"evidence via evidence_checks or evidence_paths, and the list must not be empty. " +
+			"Resubmit with evidence bound to each item"
+		if t.gate.interactive {
+			msg += ", or proceed and answer the scope-check question when the first write triggers it."
+		} else {
+			msg += " — the scope check resolves on the first write."
+		}
+		return fantasy.NewTextErrorResponse(msg), nil
 	case gateWait:
 		return fantasy.NewTextErrorResponse(
 			"Scope check in progress — re-issue this call after the pending question resolves.",

@@ -66,10 +66,22 @@ func TestUnmarshalTodosMintsDeterministicIDs(t *testing.T) {
 	require.Equal(t, todos[0].ID, again[0].ID)
 
 	// Duplicate legacy content would collide on the content hash —
-	// the ordinal suffix keeps ids unique.
-	dups, err := unmarshalTodos(`[{"content":"x","status":"pending"},{"content":"x","status":"pending"}]`)
+	// the ordinal suffix keeps ids unique, including 3+ repeats.
+	dups, err := unmarshalTodos(`[{"content":"x","status":"pending"},{"content":"x","status":"pending"},{"content":"x","status":"pending"}]`)
 	require.NoError(t, err)
 	require.NotEqual(t, dups[0].ID, dups[1].ID)
+	require.NotEqual(t, dups[1].ID, dups[2].ID)
+	require.NotEqual(t, dups[0].ID, dups[2].ID)
+
+	// A stored row already holding the ordinal form doesn't collide
+	// with a freshly minted suffix.
+	mixed, err := unmarshalTodos(`[{"id":"` + MintPlanItemID("", "x") + `#1","content":"x","status":"pending"},{"content":"x","status":"pending"},{"content":"x","status":"pending"}]`)
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, it := range mixed {
+		require.False(t, ids[it.ID], "duplicate minted id %q", it.ID)
+		ids[it.ID] = true
+	}
 
 	// Newer rows carry ids and keys — both survive untouched.
 	kept, err := unmarshalTodos(`[{"id":"abc","key":"k","content":"y","status":"pending"}]`)
