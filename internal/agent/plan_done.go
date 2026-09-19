@@ -10,6 +10,7 @@ import (
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/filepathext"
+	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/toolclass"
@@ -65,12 +66,43 @@ type planEvidence struct {
 	diagOrder []string
 }
 
+// setDiag records the latest diagnostics verdict attributed to path p,
+// keeping first-seen order for stable blocker reporting. Last verdict
+// wins — including unverified superseding a failed verdict when a
+// flaky settle timeout couldn't determine the delta; the live-snapshot
+// re-check is the safety net that keeps a wrongly-latched either way
+// from surviving to evaluation.
+func (e *planEvidence) setDiag(p string, chk message.VerificationCheck) {
+	if _, seen := e.diag[p]; !seen {
+		e.diagOrder = append(e.diagOrder, p)
+	}
+	e.diag[p] = chk
+}
+
+// resolveStaleDiag clears failed diagnostics verdicts the live
+// snapshot no longer supports: a fix landing between writes — in-place
+// bash edits (sed -i, gofmt -w, git restore), MCP tools, anything the
+// per-write delta window can't span — mints no resolution entry and
+// would otherwise stay latched past its fix. Only failed entries
+// clear, never mint: the verdict is a delta, so pre-existing errors on
+// a path must not retroactively fail a clean write.
+func (e *planEvidence) resolveStaleDiag(live map[string]int) {
+	for p, chk := range e.diag {
+		if chk.State == message.VerificationFailed && live[p] == 0 {
+			delete(e.diag, p)
+		}
+	}
+}
+
 // scanPlanEvidence walks stored messages collecting verification
 // entries — resolved verdicts land on the originating result via
 // writeVerificationOutcomes, so the stored metadata is the final state,
 // not the mark-time snapshot. Messages are chronological, so the last
-// entry seen per check name is the latest instance.
-func scanPlanEvidence(msgs []message.Message, workingDir string) *planEvidence {
+// entry seen per check name is the latest instance. When manager is
+// non-nil the diagnostics map is reconciled against the live snapshot:
+// fixes that landed outside a covered write's delta window minted no
+// resolution entry.
+func scanPlanEvidence(msgs []message.Message, workingDir string, manager *lsp.Manager) *planEvidence {
 	callPaths := map[string][]string{}
 	for _, m := range msgs {
 		for _, part := range m.Parts {
@@ -120,35 +152,43 @@ func scanPlanEvidence(msgs []message.Message, workingDir string) *planEvidence {
 					ev.latest[chk.Identity()] = chk
 				}
 			}
-			for _, path := range callPaths[tr.ToolCallID] {
+			paths := callPaths[tr.ToolCallID]
+			for _, path := range paths {
 				ev.writes = append(ev.writes, writeEvidence{path: path, checks: checks})
+			}
+			// Diagnostics supersession is chronological, last verdict
+			// per attributed path wins. Entries carrying Path
+			// attribute to that file regardless of which call
+			// recorded them — an lsp_rename/lsp_replace_symbol
+			// workspace edit has no write path yet still breaks or
+			// repairs files — while pathless legacy entries anchor to
+			// the call's write paths. A real write carrying no
+			// diagnostics entry clears its own path's verdict —
+			// optimistic by design, since latching until a checked
+			// write would make bash-heavy fixes unresolvable.
+			sawDiag := false
+			for _, chk := range checks {
+				if chk.Check != "diagnostics" {
+					continue
+				}
+				sawDiag = true
+				if chk.Path != "" {
+					ev.setDiag(normalizePlanPath(workingDir, chk.Path), chk)
+					continue
+				}
+				for _, wp := range paths {
+					ev.setDiag(wp, chk)
+				}
+			}
+			if !sawDiag {
+				for _, wp := range paths {
+					delete(ev.diag, wp)
+				}
 			}
 		}
 	}
-	// Diagnostics supersession is per write path and chronological:
-	// the last verdict attributed to a path wins, and a write carrying
-	// no diagnostics entry at all clears its own path's verdict —
-	// optimistic by design, since latching until a checked write would
-	// make bash-heavy fixes unresolvable.
-	for _, w := range ev.writes {
-		sawDiag := false
-		for _, chk := range w.checks {
-			if chk.Check != "diagnostics" {
-				continue
-			}
-			p := w.path
-			if chk.Path != "" {
-				p = normalizePlanPath(workingDir, chk.Path)
-			}
-			if _, seen := ev.diag[p]; !seen {
-				ev.diagOrder = append(ev.diagOrder, p)
-			}
-			ev.diag[p] = chk
-			sawDiag = true
-		}
-		if !sawDiag {
-			delete(ev.diag, w.path)
-		}
+	if manager != nil {
+		ev.resolveStaleDiag(tools.SnapshotDiagnostics(manager).CountByPath())
 	}
 	return ev
 }
@@ -377,7 +417,7 @@ func (a *sessionAgent) planVerdicts(ctx context.Context, sessionID string) []pla
 	}
 	if a.messages != nil {
 		if msgs, err := a.messages.List(ctx, sessionID); err == nil {
-			ev = scanPlanEvidence(msgs, workingDir)
+			ev = scanPlanEvidence(msgs, workingDir, a.lspManager)
 		} else {
 			slog.Error("Failed to list messages for plan evidence", "error", err, "session_id", sessionID)
 		}

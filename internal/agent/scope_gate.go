@@ -44,9 +44,11 @@ type scopeGateState struct {
 	bounces int
 }
 
-// gateVerdict is observe's tri-state: pass the call through, hold it
-// while a scope question is already in flight, or confirm scope with
-// the user before the write executes. gateWait is defensive — parallel
+// gateVerdict is observe's verdict: pass the call through, hold it
+// while a scope question is already in flight, confirm scope with the
+// user before the write executes, bounce a non-declaring plan call,
+// or escalate an exhausted bounce loop to the scope question.
+// gateWait is defensive — parallel
 // tools (download, fetch, web_*, MCP reads) run concurrently under
 // parallelSem, and a parallel-classified mutating tool like download
 // could observe st.asking mid-question if the fantasy executor ever
@@ -225,14 +227,15 @@ func (g *scopeGate) observe(ctx context.Context, call fantasy.ToolCall) (gateVer
 			// explains the failure instead of a misleading plan
 			// rejection.
 			if params, err := parsePlanCall(call.Input); err == nil && !planParamsResolve(params) && !declared {
-				st.bounces++
-				if st.bounces > scopeGatePlanBounceBudget {
+				if st.bounces >= scopeGatePlanBounceBudget {
 					// Budget exhausted: escalate to the real scope
 					// question with stuck-loop context rather than
-					// bounce forever.
+					// bounce forever. The escalating call is not
+					// itself a bounce — bounces counts rejections.
 					st.asking = true
 					return gateEscalatePlan, st.explore, st.bounces
 				}
+				st.bounces++
 				return gateRejectPlan, st.explore, st.bounces
 			}
 		}
@@ -267,10 +270,13 @@ func (g *scopeGate) resolve(ctx context.Context) {
 // deserves to know the model could not conform.
 func (g *scopeGate) confirm(ctx context.Context, explore, bounces int) (proceed bool, err error) {
 	text := fmt.Sprintf("This task has explored %d steps without a declared plan", explore)
-	if bounces > 0 {
-		// bounces counts every rejected declaration — including the
-		// one that exhausted the budget and triggered this question.
-		text += fmt.Sprintf(", and %d plan declaration(s) were rejected for missing evidence binding — the model may be stuck in a bounce loop", bounces)
+	switch {
+	case bounces > 1:
+		text += fmt.Sprintf(", and %d plan declarations were rejected for missing evidence binding — the model may be stuck in a bounce loop", bounces)
+	case bounces == 1:
+		// A write-triggered confirm after one bounce is not a loop —
+		// name the rejection without the stuck-loop framing.
+		text += ", and a plan declaration was rejected for missing evidence binding"
 	}
 	text += ". Confirm scope before the first write?"
 	answers, err := g.svc.Ask(ctx, question.Request{

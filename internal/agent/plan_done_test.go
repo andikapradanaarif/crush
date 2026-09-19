@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/session"
@@ -30,6 +31,19 @@ func mkBashWrite(t *testing.T, svc message.Service, sessionID, callID, command s
 		message.ToolCall{ID: callID, Name: "bash", Input: fmt.Sprintf(`{"command":%q}`, command), Finished: true})
 	mkMsg(t, svc, sessionID, message.Tool,
 		message.ToolResult{ToolCallID: callID, Name: "bash", Content: "ok"})
+}
+
+// mkWorkspaceEdit lands an lsp_replace_symbol call/result pair — the
+// call has no evidence-binding path (its file_path is the symbol's
+// anchor, not a written file), so its per-file diagnostics entries
+// must feed the diag map on their own Path alone.
+func mkWorkspaceEdit(t *testing.T, svc message.Service, sessionID, callID, metadata string) {
+	t.Helper()
+	mkMsg(t, svc, sessionID, message.Assistant,
+		message.ToolCall{ID: callID, Name: tools.ReplaceSymbolToolName,
+			Input: `{"file_path":"a.go","symbol":"s"}`, Finished: true})
+	mkMsg(t, svc, sessionID, message.Tool,
+		message.ToolResult{ToolCallID: callID, Name: tools.ReplaceSymbolToolName, Content: "ok", Metadata: metadata})
 }
 
 func setPlan(t *testing.T, a *sessionAgent, sessionID string, items ...session.PlanItem) {
@@ -279,6 +293,42 @@ func TestPlanVerdicts(t *testing.T) {
 		require.NotContains(t, verdicts[0].reason, "no write observed")
 	})
 
+	t.Run("workspace-edit diagnostics attribute without a write path", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		// An lsp_replace_symbol result carries per-file entries but
+		// records no write path — its failed entry on b.go must still
+		// block the b.go binding.
+		mkWorkspaceEdit(t, svc, sessionID, "r1",
+			`{"verification":[{"check":"diagnostics","state":"failed","path":"b.go","detail":"1 new error(s)"}]}`)
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"b.go"}},
+		)
+		verdicts := a.planVerdicts(t.Context(), sessionID)
+		require.Len(t, verdicts, 1)
+		require.Equal(t, planEvidenceBlocked, verdicts[0].state)
+		require.Contains(t, verdicts[0].reason, "diagnostics failed")
+	})
+
+	t.Run("workspace-edit resolution clears a cross-file failure", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		mkWrite(t, svc, sessionID, "w0", "b.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"b.go"}]}`)
+		mkWrite(t, svc, sessionID, "w1", "a.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"a.go"},{"check":"diagnostics","state":"failed","path":"b.go","detail":"1 new error(s)"}]}`)
+		// A rename repairs b.go — its resolution entry must supersede
+		// the failure even though the call has no write path.
+		mkWorkspaceEdit(t, svc, sessionID, "r1",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"b.go","detail":"errors resolved"}]}`)
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"b.go"}},
+		)
+		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
+	})
+
 	t.Run("cross-file failure does not block the clean write path", func(t *testing.T) {
 		t.Parallel()
 		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
@@ -516,4 +566,32 @@ func TestTodosRetrySectionOrdersReadyBeforeBlocked(t *testing.T) {
 		"expected ready → evidence-blocked → dep-blocked order, got:\n%s", out)
 	require.Contains(t, out, "(blocked by: setup)")
 	require.Contains(t, out, "marked completed but verify:build failed")
+}
+
+// TestResolveStaleDiag pins the live-snapshot reconciliation: a failed
+// verdict whose path reads clean in the current snapshot was repaired
+// outside any covered write's delta window and must not stay latched.
+// A path still erroring keeps its verdict — the snapshot overlay
+// clears, it never mints.
+func TestResolveStaleDiag(t *testing.T) {
+	t.Parallel()
+
+	failed := func(p string) message.VerificationCheck {
+		return message.VerificationCheck{Check: "diagnostics", State: message.VerificationFailed, Path: p}
+	}
+	ev := &planEvidence{
+		diag: map[string]message.VerificationCheck{
+			"/w/fixed.go":  failed("/w/fixed.go"),
+			"/w/broken.go": failed("/w/broken.go"),
+			"/w/green.go":  {Check: "diagnostics", State: message.VerificationPassed, Path: "/w/green.go"},
+		},
+		diagOrder: []string{"/w/fixed.go", "/w/broken.go", "/w/green.go"},
+	}
+	ev.resolveStaleDiag(map[string]int{"/w/broken.go": 2})
+	_, latched := ev.diag["/w/fixed.go"]
+	require.False(t, latched, "a path clean in the live snapshot was repaired out-of-window")
+	require.Equal(t, message.VerificationFailed, ev.diag["/w/broken.go"].State,
+		"a path still erroring keeps its failure")
+	require.Equal(t, message.VerificationPassed, ev.diag["/w/green.go"].State,
+		"non-failed verdicts are untouched")
 }

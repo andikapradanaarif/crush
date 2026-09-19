@@ -109,11 +109,24 @@ EvidenceChecks []string, EvidencePaths []string}`:
     until a checked write would make bash-heavy fixes
     unresolvable; the cost is a `cat > a.go` that preserves the
     errors reads as resolved until the next checked write.
+    Workspace-edit tools (`lsp_rename`, `lsp_replace_symbol`)
+    record no write path — `path` is a search root — so they
+    never satisfy a binding's observed-write leg, but their
+    per-file diagnostics entries still attribute: a rename that
+    breaks `b.go` blocks its item, and a rename that repairs it
+    clears the latch. Fixes landing outside any covered write's
+    delta window (`sed -i`, `gofmt -w`, `git restore`) mint no
+    resolution entry, so the run-end scan reconciles `failed`
+    verdicts against a live diagnostics snapshot — a path clean
+    now clears, never mints (the verdict is a delta; pre-existing
+    errors must not retroactively fail a clean write). Last
+    verdict wins even for `unverified`: a settle-timeout write
+    can overwrite a known failure — accepted, and the live
+    snapshot bounds how long a wrong latch survives.
     Known bounds, same as the verify gate's: `package-test` is
     Go-only, so non-Go trees reduce to "write landed"; mutating
-    bash (`sed -i`, redirects, `go generate`) and multi-file
-    workspace edits (`lsp_rename`, `lsp_replace_symbol`) leave no
-    path metadata an `EvidencePaths` binding can observe. Same
+    bash (`sed -i`, redirects, `go generate`) leaves no path
+    metadata an `EvidencePaths` binding can observe. Same
     paths double as annotation: an item bound to `internal/agent/`
     lets a repair/replan edge render the current symbols of the
     files it names (`CONTEXT_PREFETCH.md`) into the prompt — the
