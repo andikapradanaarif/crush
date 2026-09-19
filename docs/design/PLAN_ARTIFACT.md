@@ -145,6 +145,15 @@ EvidenceChecks []string, EvidencePaths []string}`:
     an evidence-blocked completed item counts as done there even
     while the run-end gate queues a repair turn, a cosmetic
     divergence the retry prompt explains.
+    **Diagnostics attribute per affected file** —
+    `VerificationCheck` carries a `path` field and the delta
+    computation mints per-file entries: a write to `a.go` that
+    introduces errors in `b.go` records a `failed` diagnostics
+    entry attributed to `b.go` (and a `passed` resolution entry
+    when a later delta clears a file's errors), so an
+    `evidence_paths: ["b.go"]` item blocks even when no write
+    landed on `b.go`. Pathless legacy entries fall back to the
+    write's path.
     This unifies today's two gate triggers (failed checks, open
     todos) into one definition of done instead of two scans of the
     same run — and **done-ness evaluates on final state, not
@@ -189,16 +198,19 @@ evidence` — a completed mark with pending/failed/unmet
   strings no longer satisfies the gate, and an **empty list does
   not resolve it either**: `todos: []` vacuously satisfies "every
   item binds evidence," so without the non-empty requirement
-  "declare nothing" becomes the cheapest gate-resolution. A
-  declaration that keeps bouncing is **budgeted**: after 3
-  rejections the gate escalates to the real scope question with
-  stuck-loop context — escalation, never pass-through, since a
-  free pass after N bounces would teach the spam-bypass and an
-  unrepairable bounce (unsurfaced vocabulary) is otherwise a
-  guaranteed loop. Each bounce is exported to telemetry as the
-  conformance-health signal: a high bounce rate means
-  can't-conform (vocabulary/schema) vs won't (model quality).
-  **Open items do not block
+  "declare nothing" becomes the cheapest gate-resolution. Bounced
+  declarations are **bounded, not infinite**: a ~2–3-bounce budget
+  then escalates to the real scope question with stuck-loop
+  context ("repeatedly declared plans that don't resolve —
+  proceed without a declared plan?") — the edge-exhaustion shape,
+  escalation never pass-through (passing after N bounces would
+  teach the spam-bypass). The budget is also the safety valve for
+  an _unrepairable_ bounce — a requirement the model can't see
+  (evidence vocabulary unsurfaced) is a guaranteed loop. Bounce
+  count is exported telemetry: a high rate means the model can't
+  conform — vocabulary invisible, schema too strict — versus a
+  weak model; silent bouncing hides the difference. **Open
+  items do not block
   `phase-confirm`** — at the first-write boundary every item is
   open by definition, so blocking there deadlocks every plan.
   Open-items-block lives at the **run-end todos edge** (PR 2's
@@ -242,7 +254,16 @@ evidence` — a completed mark with pending/failed/unmet
 
 - `todos` graduates vs. `plan` replaces — decide at implementation;
   either way a shim reads legacy `session.Todos` so in-flight
-  sessions don't orphan.
+  sessions don't orphan. **`plan` is a loaded name**: upstream's
+  `plan` agent/mode (`plan.md.tpl`, v0.95.0) already claims it —
+  a `plan` tool inside a `plan` agent is confusing in prompts and
+  logs. The same upstream arrival is the integration point: plan
+  mode produces an _approved_ plan as text while `resolvePlanTools`
+  excludes `todos`, so its plan never becomes checkable —
+  seeding `PlanItem`s from the approved plan on handoff makes the
+  human-confirmed plan the artifact the gate then checks
+  (tracked separately — text→typed conversion is lossy enough to
+  need its own design pass, not a follow-up fix).
 - The plan format is model-visible — expect `bands.json`
   re-characterization after merge (same confound class as the #39
   clause: corpus authored under the old surface).
