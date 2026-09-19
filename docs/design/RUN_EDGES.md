@@ -144,7 +144,15 @@ the edge's prompt branches on budget, not a second edge.
   pressure can mask a real stall and leave `loopStopped` false.
   Corollary interaction to handle: a masked stall +
   `shouldSummarize` produces a replan retry _and_ a post-summary
-  continue call queued behind it — bounded, but named.
+  continue call queued behind it — `[replan, …, continue]` since
+  `runEdges` prepends and the summarize path appends. The
+  continue fires **unconditionally** whenever
+  `shouldSummarize && tool calls > 0` — even if the replan turn
+  resolved the stall and finished the task, the continue still
+  re-prompts "resume the original request." Decision: accept the
+  occasional redundant turn for v1 (the replan's own stop doesn't
+  cancel queued calls); conditioning the continue on the replan's
+  outcome is follow-up, not this PR.
 - **Headless behavior changes — stated:** today a headless stall
   sets `fire=false` → blocker report, no retry. Under
   replan-first the replan branch fires unconditionally (no
@@ -207,8 +215,14 @@ the edge's prompt branches on budget, not a second edge.
   That's fine for re-orientation: the stall evidence itself
   comes from `result.Steps`. When the notebook is off, the edge
   degrades to evidence-only — no payload.
-- **resolve:** collect the repeated call signature, the write set
-  (**scan `result.Steps` for write-class calls** — filetracker
+- **resolve:** collect the repeated call signature — **unlisted
+  work:** `hasRepeatedToolCalls` returns `bool`, the winning
+  signature is computed and discarded (`loop_detection.go:33`),
+  and `repeatedToolName` only approximates the dominant tool
+  _name_; resolve needs a signature-returning detector variant
+  or a re-run of the signature computation over the window.
+  Also collect the write set (**scan `result.Steps` for
+  write-class calls** — filetracker
   can't serve it: writes also `RecordRead` for staleness tracking,
   so the tracker can't distinguish reads from writes, and bash
   mutations bypass it entirely; the `scanVerification`
@@ -273,6 +287,10 @@ notice" failure as a declared transition.
   tokens over M steps with no writes — continue / replan /
   stop?"), not a retry prompt. Headless degrades to a logged
   assumption per the shared rule.
+- **note (exhaustion path):** "N tokens over M steps, no writes"
+  — at `attempts=2` the flow hits `writeRepairExhaustion`, which
+  renders `note` funcs; without one, a run that burns write-less
+  again at exhaustion produces no terminal signal.
 - **Gating:** rides `ambiguity_clarification` — it's the same
   calibrated-autonomy family as stall escalation (a user-targeted
   "is this intended?" prompt); the default-on flip is a separate
@@ -312,11 +330,16 @@ notice" failure as a declared transition.
   **Degraded path has no carrier — stated decision:** the headless
   degrade appends a logged assumption, not a retry clone, so no
   marker stamps; a headless repair chain that burns write-less
-  again can re-fire and append repeated degraded notes (bounded
-  by `maxRepairAttempts` — nag-at-most-twice per chain; across
-  fresh turns it's a cheap log line, and `edge_firings` makes
-  the repetition visible). Accepted for v1; revisit records-
+  again can re-fire and append repeated degraded notes —
+  at most once per boundary, i.e. ≤3 per chain (boundaries at
+  attempts 0/1/2, and `resolve` runs _before_ the budget check);
+  across fresh turns it's a cheap log line, and `edge_firings`
+  makes the repetition visible. Accepted for v1; revisit records-
   derived suppression only for this path if records show spam.
+  **Marker-stamp rule, pinned:** the seam stamps only when the
+  recorded outcome is `fired` — a headless-degraded trigger
+  alongside another edge's retry does NOT stamp that clone
+  (degrade → no carrier → re-fire allowed, per above).
 - **Precedence — and the merge-rule gap:** when an
   escalation-family prompt co-fires with retry-family triggers,
   the user-targeted prompt wins the slot outright and retry
@@ -331,11 +354,19 @@ notice" failure as a declared transition.
   `cleanStop`, so a clean-stopping run that both failed checks
   and burned write-less tokens hands the model "fix these
   checks" _and_ "ask the user" and lets it pick. (verification/
-  todos + stall can't co-fire — a stalled run's terminal step
-  isn't `FinishReasonStop`, so `cleanStop` fails.) Mechanism:
-  `runEdge` gains a `family` field (retry vs escalate); when both
-  fire, `runEdges` renders only the escalate-family prompt and
-  marks retry triggers deferred.
+  todos + stall ~never co-fire — a stalled run's terminal step is
+  normally `FinishReasonToolCalls`, so `cleanStop` fails; a
+  provider _can_ return `stop` on a tool-call step, rare but real,
+  and exactly the case `family` handles — mildly supportive of
+  shipping `family` in the stall-replan PR, which the ordering
+  already does.) Mechanism:
+  `edgeTrigger` gains a `family` field (retry vs escalate), set
+  by `scan` — it must live on the trigger, not the edge: the
+  stall edge's replan branch is retry-family (model-directed,
+  fires headless) while its escalate branch is escalate-family,
+  and one edge-level field can't express both. When both
+  families fire, `runEdges` renders only the escalate-family
+  prompt and marks retry triggers deferred.
 - **Limit, stated plainly:** edges fire at run boundaries only —
   a single giant turn mid-flight is not caught. Mid-run spend
   pressure is `CONTEXT_WINDOW_SAFETY.md` territory (or a future
@@ -369,7 +400,7 @@ run's initiating user message, derived from message positions
 (the same family as `collapsed_turns`' `byTurn`): durable across
 restarts and `INSERT OR IGNORE`-dedupable. **`call.RunStamp` is
 rejected as the key** — it's `runStampGen.Add(1)` seeded from a
-random per-build epoch (`agent.go:481-495`): stamps are unique
+random per-build epoch (`runStampEpoch`, `agent.go:496-508`): stamps are unique
 across restarts but non-deterministic per logical turn, so a
 resumed session's re-fire wouldn't dedup and the stamp orders
 nothing durably. It earns a plain _column_ instead — it still
@@ -385,8 +416,19 @@ gated rows exist), `created_at` (firing-rate-over-time queries).
 Precision note: records distinguish _triggered-but-not-fired_ vs
 _fired_ — "evaluated" is guaranteed by construction since
 `runEdgeSet` statically scans every edge at every boundary; the
-one coverage hole is the `len(in.result.Steps)==0` early return,
-named here so nobody reads zero rows as dead code. `crush stats`
+one coverage hole is the entry guard
+(`a.configStore == nil || in.result == nil ||
+len(in.result.Steps) == 0` — three conditions, `run_edges.go:106`),
+named here so nobody reads zero rows as dead code.
+**Scan-contract extension — unlisted work:** today a nil scan
+return is the only "no" signal, so `gated` and `suppressed`
+can't be recorded. Either `runEdge` gains an `enabled func(call)
+bool` / `suppressed func(call, t) bool` predicate hoisted ahead
+of `scan`, or `scan` returns a non-nil trigger carrying an
+outcome hint instead of nil. Volume, stated: with the flag
+default-off, every boundary writes a `gated` row per gated edge
+— ~2 rows/turn for most users; cheap, but the table's dominant
+write pattern from day one. `crush stats`
 reads the table; the eval doc reads the same counts via
 `SessionTelemetry` + `emitEvalTelemetry`. **Write path — not `notebook.Service`:**
 `RecordCollapsedTurn` rides `a.notebook`, which is nil when the
