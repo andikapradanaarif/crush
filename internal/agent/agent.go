@@ -3151,8 +3151,9 @@ func buildSummaryPrompt(todos []session.PlanItem) string {
 	sb.WriteString("Provide a detailed summary of our conversation above.")
 	if len(todos) > 0 {
 		sb.WriteString("\n\n## Current Todo List\n\n")
+		keyByID := session.PlanKeyByID(todos)
 		for _, t := range todos {
-			fmt.Fprintf(&sb, "- [%s] %s\n", t.Status, t.Content)
+			sb.WriteString(session.FormatPlanItemLine(t, keyByID) + "\n")
 		}
 		sb.WriteString("\nInclude these tasks and their statuses in your summary. ")
 		sb.WriteString("Instruct the resuming assistant to use the `todos` tool to continue tracking progress on these tasks.")

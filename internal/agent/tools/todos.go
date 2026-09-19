@@ -197,6 +197,9 @@ func validatePlanItems(items []TodoItem, bindable map[string]bool, workingDir st
 		default:
 			return fmt.Errorf("invalid status %q for todo %q", item.Status, item.Content)
 		}
+		if strings.TrimSpace(item.Content) == "" {
+			return fmt.Errorf("item %d has empty content — describe the work or remove the item", i)
+		}
 		if item.Key != "" {
 			if strings.TrimSpace(item.Key) == "" {
 				return fmt.Errorf("item %d (%q) has a whitespace-only key — keys must be visible slugs", i, item.Content)
@@ -212,6 +215,7 @@ func validatePlanItems(items []TodoItem, bindable map[string]bool, workingDir st
 		contents[item.Content] = i
 	}
 	for i, item := range items {
+		depSeen := map[string]bool{}
 		for _, dep := range item.DependsOn {
 			if dep == item.Key && item.Key != "" {
 				return fmt.Errorf("item %q depends on itself", item.Key)
@@ -219,7 +223,12 @@ func validatePlanItems(items []TodoItem, bindable map[string]bool, workingDir st
 			if !keys[dep] {
 				return fmt.Errorf("item %d (%q) depends on unknown key %q — depends_on references keys of items in this list", i, item.Content, dep)
 			}
+			if depSeen[dep] {
+				return fmt.Errorf("item %d (%q) lists %q twice in depends_on", i, item.Content, dep)
+			}
+			depSeen[dep] = true
 		}
+		checkSeen := map[string]bool{}
 		for _, check := range item.EvidenceChecks {
 			if strings.TrimSpace(check) == "" {
 				return fmt.Errorf("item %q binds an empty evidence_checks entry — name a configured check", item.Content)
@@ -227,6 +236,10 @@ func validatePlanItems(items []TodoItem, bindable map[string]bool, workingDir st
 			if !bindable[check] {
 				return fmt.Errorf("item %q binds unknown check %q — only configured check names are bindable (see tool description)", item.Content, check)
 			}
+			if checkSeen[check] {
+				return fmt.Errorf("item %q binds %q twice in evidence_checks", item.Content, check)
+			}
+			checkSeen[check] = true
 		}
 		for _, path := range item.EvidencePaths {
 			if strings.TrimSpace(path) == "" {

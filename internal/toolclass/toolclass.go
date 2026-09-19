@@ -65,6 +65,96 @@ var fdDupTargetRe = regexp.MustCompile(`^&[-\d]`)
 // keeps the target position occupied.
 var quotedSpanRe = regexp.MustCompile(`'[^']*'|"[^"]*"`)
 
+// testExprRe masks [[ ]] conditional expressions — a `>` inside is a
+// string comparison, not a redirect.
+var testExprRe = regexp.MustCompile(`\[\[[^\]]*\]\]`)
+
+// arithRe masks (( )) and $(( )) arithmetic — a `>` inside is a
+// numeric comparison.
+var arithRe = regexp.MustCompile(`\$?\(\([^)]*\)\)`)
+
+// heredocRe finds heredoc openers and captures the delimiter from
+// the raw command (quoted delimiters arrive masked on the scan
+// string, so capture happens on the original text).
+var heredocRe = regexp.MustCompile(`<<(-?)\s*(?:'([A-Za-z0-9_]+)'|"([A-Za-z0-9_]+)"|([A-Za-z0-9_]+))`)
+
+// maskCommand returns the command with every span a `>` can hide
+// inside blanked to spaces — quoted literals, [[ ]] tests, (( ))
+// arithmetic, and heredoc bodies. The result is position-preserving:
+// byte offsets in the masked string index the original command, so
+// operators found there extract their targets from the raw text.
+// Both the mutation classifier and the redirect-target extractor
+// scan this form so they never disagree on what a `>` means.
+func maskCommand(command string) string {
+	masked := quotedSpanRe.ReplaceAllStringFunc(command, func(s string) string {
+		return strings.Repeat(" ", len(s))
+	})
+	masked = testExprRe.ReplaceAllStringFunc(masked, func(s string) string {
+		return strings.Repeat(" ", len(s))
+	})
+	masked = arithRe.ReplaceAllStringFunc(masked, func(s string) string {
+		return strings.Repeat(" ", len(s))
+	})
+	return maskHeredocBodies(command, masked)
+}
+
+// maskHeredocBodies blanks each heredoc body — from the line after
+// the << token to its delimiter line — so a `>` inside body text is
+// not a redirect. An unterminated heredoc masks to end of command,
+// matching bash's own treatment of the remaining text as body.
+func maskHeredocBodies(command, masked string) string {
+	b := []byte(masked)
+	for _, m := range heredocRe.FindAllStringSubmatchIndex(command, -1) {
+		// An opener inside a quoted span is literal text, not a
+		// heredoc — the masked string is already blanked there.
+		if masked[m[0]] == ' ' {
+			continue
+		}
+		stripTabs := m[2] >= 0 && command[m[2]:m[3]] == "-"
+		var delim string
+		for i := 4; i <= 8; i += 2 {
+			if m[i] >= 0 {
+				delim = command[m[i]:m[i+1]]
+				break
+			}
+		}
+		if delim == "" {
+			continue
+		}
+		nl := strings.IndexByte(command[m[1]:], '\n')
+		if nl < 0 {
+			continue
+		}
+		bodyStart := m[1] + nl + 1
+		pos := bodyStart
+		for pos <= len(command) {
+			lineEnd := strings.IndexByte(command[pos:], '\n')
+			line := command[pos:]
+			if lineEnd >= 0 {
+				line = command[pos : pos+lineEnd]
+			}
+			candidate := line
+			if stripTabs {
+				candidate = strings.TrimLeft(candidate, "\t")
+			}
+			if candidate == delim {
+				break
+			}
+			if lineEnd < 0 {
+				pos = len(command) + 1
+				break
+			}
+			pos += lineEnd + 1
+		}
+		for i := bodyStart; i < pos && i < len(b); i++ {
+			if b[i] != '\n' {
+				b[i] = ' '
+			}
+		}
+	}
+	return string(b)
+}
+
 // IsMutatingCall classifies a call as a write for boundary purposes:
 // a write-tool name, a file-writing download, or a bash command whose
 // text matches a mutating pattern or a file-writing redirect. It is
@@ -87,12 +177,10 @@ func IsMutatingCall(name, input string) bool {
 	if mutatingBashRe.MatchString(params.Command) {
 		return true
 	}
-	for _, m := range redirectTargetRe.FindAllStringSubmatch(quotedSpanRe.ReplaceAllString(params.Command, "f"), -1) {
-		if m[1] != "/dev/null" && !fdDupTargetRe.MatchString(m[1]) {
-			return true
-		}
-	}
-	return false
+	// The redirect check reuses the target extractor so mutation and
+	// path evidence classify identically — a `> 'out'` write gates
+	// AND lands.
+	return len(BashRedirectTargets(params.Command)) > 0
 }
 
 // redirectOpRe finds redirect operators outside quoted spans (the
@@ -109,9 +197,7 @@ var redirectOpRe = regexp.MustCompile(`>>?`)
 // (sed -i, tee, cp) have no extractable target here; they classify as
 // mutating via IsMutatingCall but yield no path.
 func BashRedirectTargets(command string) []string {
-	masked := quotedSpanRe.ReplaceAllStringFunc(command, func(s string) string {
-		return strings.Repeat(" ", len(s))
-	})
+	masked := maskCommand(command)
 	var out []string
 	for _, loc := range redirectOpRe.FindAllStringIndex(masked, -1) {
 		i := loc[1]
@@ -138,8 +224,21 @@ func BashRedirectTargets(command string) []string {
 		if target != "" && target != "/dev/null" && !fdDupTargetRe.MatchString(target) {
 			// `>&word` writes both streams to a file — the `&` is
 			// part of the operator, not the path.
-			out = append(out, strings.TrimPrefix(target, "&"))
+			target = strings.TrimPrefix(target, "&")
+			if concreteRedirectTarget(target) {
+				out = append(out, target)
+			}
 		}
 	}
 	return out
+}
+
+// concreteRedirectTarget reports whether a redirect target resolves
+// to a definite path without expansion. Targets needing shell
+// expansion — `~/out`, `$OUT`, `*.log`, `$(gen)` — yield an
+// uncertain path at evidence time, so they're dropped rather than
+// recorded as writes that never verifiably happened.
+func concreteRedirectTarget(target string) bool {
+	return !strings.HasPrefix(target, "~") &&
+		!strings.ContainsAny(target, "$`*?[{")
 }

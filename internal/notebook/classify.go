@@ -336,12 +336,7 @@ func buildPlanEntry(input EntryInput) GeneratedEntry {
 	if len(items) == 0 {
 		items = planItemsFromCall(input.ToolCall)
 	}
-	keyByID := map[string]string{}
-	for _, it := range items {
-		if it.ID != "" && it.Key != "" {
-			keyByID[it.ID] = it.Key
-		}
-	}
+	keyByID := session.PlanKeyByID(items)
 	var pending, inProgress, completed int
 	for _, it := range items {
 		switch it.Status {
@@ -358,32 +353,7 @@ func buildPlanEntry(input EntryInput) GeneratedEntry {
 		len(items), pending, inProgress, completed)
 	tags := []string{"plan"}
 	for _, it := range items {
-		fmt.Fprintf(&sb, "- [%s] %s", it.Status, it.Content)
-		var attrs []string
-		if it.Key != "" {
-			attrs = append(attrs, "key: "+it.Key)
-		}
-		if len(it.DependsOn) > 0 {
-			names := make([]string, 0, len(it.DependsOn))
-			for _, dep := range it.DependsOn {
-				if k := keyByID[dep]; k != "" {
-					names = append(names, k)
-				} else {
-					names = append(names, dep)
-				}
-			}
-			attrs = append(attrs, "depends_on: "+strings.Join(names, ", "))
-		}
-		if len(it.EvidenceChecks) > 0 {
-			attrs = append(attrs, "checks: "+strings.Join(it.EvidenceChecks, ", "))
-		}
-		if len(it.EvidencePaths) > 0 {
-			attrs = append(attrs, "paths: "+strings.Join(it.EvidencePaths, ", "))
-		}
-		if len(attrs) > 0 {
-			sb.WriteString(" (" + strings.Join(attrs, "; ") + ")")
-		}
-		sb.WriteString("\n")
+		sb.WriteString(session.FormatPlanItemLine(it, keyByID) + "\n")
 		for _, p := range it.EvidencePaths {
 			tag := "file:" + filepath.Base(strings.TrimRight(p, "/\\"))
 			if !slices.Contains(tags, tag) {

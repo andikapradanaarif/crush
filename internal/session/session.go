@@ -373,11 +373,18 @@ func unmarshalTodos(data string) ([]PlanItem, error) {
 // content collides on the same hash — the ordinal suffix keeps IDs
 // unique without breaking determinism.
 func MintPlanItemIDs(todos []PlanItem) {
+	// Two passes: stored IDs all land in `seen` before any minting,
+	// so a minted base can never collide with a stored ID that only
+	// appears later in the list.
 	seen := map[string]int{}
-	baseN := map[string]int{}
 	for i := range todos {
 		if todos[i].ID != "" {
 			seen[todos[i].ID]++
+		}
+	}
+	baseN := map[string]int{}
+	for i := range todos {
+		if todos[i].ID != "" {
 			continue
 		}
 		base := MintPlanItemID(todos[i].Key, todos[i].Content)
@@ -392,6 +399,54 @@ func MintPlanItemIDs(todos []PlanItem) {
 		seen[id]++
 		todos[i].ID = id
 	}
+}
+
+// PlanKeyByID maps minted item IDs back to their model-authored keys
+// so dependency edges render as keys, not internal IDs.
+func PlanKeyByID(items []PlanItem) map[string]string {
+	m := make(map[string]string, len(items))
+	for _, it := range items {
+		if it.ID != "" && it.Key != "" {
+			m[it.ID] = it.Key
+		}
+	}
+	return m
+}
+
+// FormatPlanItemLine renders one plan item for model-facing
+// surfaces — <open_todos>, the compaction summary prompt, and plan
+// notebook entries — with its authoring handle intact: key,
+// dependency edges as keys where they resolve, and bound evidence.
+// Keeping the typed fields visible in context prevents a compaction
+// from degrading the plan into a bare, self-reported list.
+func FormatPlanItemLine(t PlanItem, keyByID map[string]string) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "- [%s] %s", t.Status, t.Content)
+	var attrs []string
+	if t.Key != "" {
+		attrs = append(attrs, "key: "+t.Key)
+	}
+	if len(t.DependsOn) > 0 {
+		names := make([]string, 0, len(t.DependsOn))
+		for _, dep := range t.DependsOn {
+			if k := keyByID[dep]; k != "" {
+				names = append(names, k)
+			} else {
+				names = append(names, dep)
+			}
+		}
+		attrs = append(attrs, "depends_on: "+strings.Join(names, ", "))
+	}
+	if len(t.EvidenceChecks) > 0 {
+		attrs = append(attrs, "checks: "+strings.Join(t.EvidenceChecks, ", "))
+	}
+	if len(t.EvidencePaths) > 0 {
+		attrs = append(attrs, "paths: "+strings.Join(t.EvidencePaths, ", "))
+	}
+	if len(attrs) > 0 {
+		sb.WriteString(" (" + strings.Join(attrs, "; ") + ")")
+	}
+	return sb.String()
 }
 
 func NewService(q *db.Queries, conn *sql.DB) Service {

@@ -152,14 +152,29 @@ func (g *scopeGate) observe(ctx context.Context, call fantasy.ToolCall) (gateVer
 	}
 	stamp := tools.GetRunStampFromContext(ctx)
 
-	// Read the stored plan outside the lock — todos calls are rare
-	// enough that an extra session read costs nothing, and holding
-	// the mutex across a DB read would serialize unrelated gates.
-	declared := call.Name == tools.TodosToolName && g.planDeclared(ctx, sessionID)
+	// Phase one: under the lock, decide only whether the armed-bounce
+	// path could need the stored plan. The session read itself stays
+	// outside the mutex so a slow Get can't serialize unrelated
+	// sessions' gates — and a resolved gate skips the read entirely,
+	// since bookkeeping writes are never bounced anyway.
+	g.mu.Lock()
+	st, ok := g.states[sessionID]
+	if !ok || st.stamp != stamp {
+		st = &scopeGateState{stamp: stamp}
+		g.states[sessionID] = st
+	}
+	needsPlanCheck := call.Name == tools.TodosToolName &&
+		!st.resolved && !st.asking && st.explore >= scopeGateMinExploration
+	g.mu.Unlock()
 
+	declared := needsPlanCheck && g.planDeclared(ctx, sessionID)
+
+	// Phase two: the verdict re-reads state under the lock — a
+	// concurrent resolve between phases is authoritative there, and
+	// `declared` only ever feeds the armed-bounce branch.
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	st, ok := g.states[sessionID]
+	st, ok = g.states[sessionID]
 	if !ok || st.stamp != stamp {
 		st = &scopeGateState{stamp: stamp}
 		g.states[sessionID] = st

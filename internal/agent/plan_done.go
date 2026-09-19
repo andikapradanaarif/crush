@@ -71,6 +71,10 @@ func scanPlanEvidence(msgs []message.Message, workingDir string) *planEvidence {
 				continue
 			}
 			switch {
+			case tc.Name == tools.RenameToolName || tc.Name == tools.ReplaceSymbolToolName:
+				// LSP workspace edits touch arbitrary files — `path`
+				// is the search root, not a written file, so there is
+				// no reliable path to bind evidence to.
 			case tools.WriteToolNames[tc.Name] || tc.Name == tools.DownloadToolName:
 				if p := tools.ToolCallFilePath(tc.Input); p != "" {
 					callPaths[tc.ID] = append(callPaths[tc.ID], normalizePlanPath(workingDir, p))

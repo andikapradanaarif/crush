@@ -136,6 +136,35 @@ func TestValidatePlanItems(t *testing.T) {
 			},
 			wantErr: "covers the whole working directory",
 		},
+		{
+			name: "empty content",
+			items: []TodoItem{
+				{Content: "", Status: "pending"},
+			},
+			wantErr: "empty content",
+		},
+		{
+			name: "whitespace-only content",
+			items: []TodoItem{
+				{Content: "   ", Status: "pending"},
+			},
+			wantErr: "empty content",
+		},
+		{
+			name: "duplicate depends_on entry",
+			items: []TodoItem{
+				{Content: "a", Status: "pending", Key: "x"},
+				{Content: "b", Status: "pending", DependsOn: []string{"x", "x"}},
+			},
+			wantErr: "twice in depends_on",
+		},
+		{
+			name: "duplicate evidence_checks entry",
+			items: []TodoItem{
+				{Content: "a", Status: "pending", EvidenceChecks: []string{"verify:build", "verify:build"}},
+			},
+			wantErr: "twice in evidence_checks",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

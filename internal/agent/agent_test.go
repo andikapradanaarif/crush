@@ -636,6 +636,20 @@ func makeTestTodos(n int) []session.PlanItem {
 	return todos
 }
 
+func TestBuildSummaryPromptCarriesPlanStructure(t *testing.T) {
+	t.Parallel()
+	prompt := buildSummaryPrompt([]session.PlanItem{
+		{ID: "i1", Key: "setup", Content: "set things up", Status: session.PlanItemPending,
+			EvidencePaths: []string{"cfg/"}},
+		{ID: "i2", Key: "impl", Content: "implement it", Status: session.PlanItemCompleted,
+			DependsOn: []string{"i1"}, EvidenceChecks: []string{"verify:build"}},
+	})
+	require.Contains(t, prompt, "key: setup")
+	require.Contains(t, prompt, "depends_on: setup")
+	require.Contains(t, prompt, "checks: verify:build")
+	require.Contains(t, prompt, "paths: cfg/")
+}
+
 func BenchmarkBuildSummaryPrompt(b *testing.B) {
 	cases := []struct {
 		name     string

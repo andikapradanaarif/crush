@@ -113,13 +113,14 @@ func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCal
 			}
 			if len(open) > 0 {
 				b.WriteString("<open_todos>\nDeclared work items still open:\n")
+				keyByID := session.PlanKeyByID(sess.Todos)
 				const maxListedTodos = 10
 				for i, t := range open {
 					if i >= maxListedTodos {
 						fmt.Fprintf(&b, "- … and %d more\n", len(open)-maxListedTodos)
 						break
 					}
-					fmt.Fprintf(&b, "- [%s] %s\n", t.Status, t.Content)
+					b.WriteString(session.FormatPlanItemLine(t, keyByID) + "\n")
 				}
 				b.WriteString("</open_todos>\n")
 			}

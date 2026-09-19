@@ -32,6 +32,19 @@ func TestBashRedirectTargets(t *testing.T) {
 		{name: "sequence terminator", command: "cmd > out; ls", want: []string{"out"}},
 		{name: "multiple redirects", command: "cmd > a.txt 2> b.txt", want: []string{"a.txt", "b.txt"}},
 		{name: "no redirect", command: "sed -i 's/a/b/' f.go", want: nil},
+		{name: "test comparison is not a redirect", command: "[[ $a > b.go ]]", want: nil},
+		{name: "test comparison with real redirect", command: "[[ $a > b ]] && cmd > out.txt", want: []string{"out.txt"}},
+		{name: "arithmetic comparison is not a redirect", command: "echo $((a > b))", want: nil},
+		{name: "arithmetic with real redirect", command: "echo $((a > b)) > out.txt", want: []string{"out.txt"}},
+		{name: "heredoc body gt is not a redirect", command: "cat <<'EOF'\n> line\nEOF", want: nil},
+		{name: "unquoted heredoc body", command: "cat <<EOF\n> line\nEOF", want: nil},
+		{name: "heredoc body with real redirect", command: "cat <<'EOF' > out.txt\n> line\nEOF", want: []string{"out.txt"}},
+		{name: "dash-strip heredoc body", command: "cat <<-'EOF'\n\t> line\n\tEOF", want: nil},
+		{name: "unterminated heredoc masks rest", command: "cat <<'EOF'\n> never\n> stops", want: nil},
+		{name: "tilde target not concrete", command: "cmd > ~/out", want: nil},
+		{name: "variable target not concrete", command: "cmd > $OUT", want: nil},
+		{name: "glob target not concrete", command: "cmd > *.log", want: nil},
+		{name: "substitution target not concrete", command: "cmd > $(gen)", want: nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -194,6 +194,28 @@ func TestTurnContextBlob(t *testing.T) {
 		require.NotContains(t, blob, "done item")
 	})
 
+	t.Run("open todos carry keys, deps, and evidence", func(t *testing.T) {
+		t.Parallel()
+		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.turnContext = "session"
+		sess, err := a.sessions.Get(t.Context(), sessionID)
+		require.NoError(t, err)
+		sess.Todos = []session.PlanItem{
+			{ID: "i1", Key: "setup", Content: "set things up", Status: session.PlanItemPending,
+				EvidencePaths: []string{"cfg/"}},
+			{ID: "i2", Key: "impl", Content: "implement it", Status: session.PlanItemInProgress,
+				DependsOn: []string{"i1"}, EvidenceChecks: []string{"verify:build"}},
+		}
+		_, err = a.sessions.Save(t.Context(), sess)
+		require.NoError(t, err)
+		blob := a.turnContextBlob(t.Context(), SessionAgentCall{SessionID: sessionID})
+		require.Contains(t, blob, "key: setup")
+		require.Contains(t, blob, "key: impl")
+		require.Contains(t, blob, "depends_on: setup")
+		require.Contains(t, blob, "checks: verify:build")
+		require.Contains(t, blob, "paths: cfg/")
+	})
+
 	t.Run("empty session produces no blob", func(t *testing.T) {
 		t.Parallel()
 		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})

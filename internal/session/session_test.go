@@ -83,6 +83,15 @@ func TestUnmarshalTodosMintsDeterministicIDs(t *testing.T) {
 		ids[it.ID] = true
 	}
 
+	// A stored ID later in the list must not collide with a minted ID
+	// earlier in the list — stored IDs are all collected before
+	// minting runs.
+	storedBase := MintPlanItemID("", "x")
+	ordered, err := unmarshalTodos(`[{"content":"x","status":"pending"},{"id":"` + storedBase + `","content":"y","status":"pending"}]`)
+	require.NoError(t, err)
+	require.Equal(t, storedBase+"#1", ordered[0].ID)
+	require.Equal(t, storedBase, ordered[1].ID)
+
 	// Newer rows carry ids and keys — both survive untouched.
 	kept, err := unmarshalTodos(`[{"id":"abc","key":"k","content":"y","status":"pending"}]`)
 	require.NoError(t, err)

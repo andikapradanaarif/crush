@@ -44,6 +44,19 @@ func (f *fakeQuestionService) Ask(_ context.Context, req question.Request) ([]qu
 func (f *fakeQuestionService) Answer([]question.Answer) bool { return false }
 func (f *fakeQuestionService) Cancel() bool                  { return false }
 
+// countingSessionService wraps a real session.Service and counts
+// Get calls — the gate's stored-plan check must not read the session
+// once the gate has resolved.
+type countingSessionService struct {
+	session.Service
+	gets int
+}
+
+func (c *countingSessionService) Get(ctx context.Context, id string) (session.Session, error) {
+	c.gets++
+	return c.Service.Get(ctx, id)
+}
+
 func TestIsMutatingCall(t *testing.T) {
 	t.Parallel()
 	bash := func(cmd string) fantasy.ToolCall {
@@ -324,6 +337,63 @@ func TestScopeGate(t *testing.T) {
 		_, err = wrapped[2].Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
 		require.NoError(t, err)
 		require.Equal(t, 1, svc.asks)
+	})
+
+	t.Run("resolved gate stops reading the session", func(t *testing.T) {
+		t.Parallel()
+		conn, err := db.Connect(t.Context(), t.TempDir())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = conn.Close() })
+		sessions := &countingSessionService{Service: session.NewService(db.New(conn), conn)}
+		sess, err := sessions.Create(t.Context(), "test")
+		require.NoError(t, err)
+
+		svc := &fakeQuestionService{selected: []string{"proceed"}}
+		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextResponse("ok")}
+		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
+		wrapped := newScopeGate(svc, true, sessions).wrap([]fantasy.AgentTool{todosTool, read})
+		ctx := gateCtx(sess.ID, 1)
+		exploreN(t, ctx, wrapped[1], scopeGateMinExploration)
+
+		// Armed, no plan stored: a bare list bounces (one Get), a
+		// bound list lands and resolves (second Get).
+		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t1", Name: tools.TodosToolName,
+			Input: `{"todos":[{"content":"bare","status":"pending"}]}`})
+		require.NoError(t, err)
+		require.True(t, resp.IsError)
+		resp, err = wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t2", Name: tools.TodosToolName, Input: boundPlan})
+		require.NoError(t, err)
+		require.False(t, resp.IsError)
+		getsAfterResolve := sessions.gets
+
+		// Resolved: bookkeeping calls must not touch the session row.
+		resp, err = wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t3", Name: tools.TodosToolName,
+			Input: `{"todos":[{"content":"bare","status":"pending"}]}`})
+		require.NoError(t, err)
+		require.False(t, resp.IsError)
+		require.Equal(t, getsAfterResolve, sessions.gets, "a resolved gate must skip planDeclared")
+	})
+
+	t.Run("todos calls do not count as exploration", func(t *testing.T) {
+		t.Parallel()
+		svc := &fakeQuestionService{selected: []string{"proceed"}}
+		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextResponse("ok")}
+		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
+		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("e")}
+		wrapped := newScopeGate(svc, true, nil).wrap([]fantasy.AgentTool{todosTool, read, write})
+		ctx := gateCtx("s1", 1)
+		exploreN(t, ctx, wrapped[1], scopeGateMinExploration-1)
+		for i := 0; i < 5; i++ {
+			resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName,
+				Input: `{"todos":[{"content":"bare","status":"pending"}]}`})
+			require.NoError(t, err)
+			require.False(t, resp.IsError)
+		}
+		resp, err := wrapped[2].Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
+		require.NoError(t, err)
+		require.False(t, resp.IsError)
+		require.True(t, write.called)
+		require.Equal(t, 0, svc.asks, "plan bookkeeping is not exploration — the gate stays unarmed")
 	})
 
 	t.Run("malformed plan input gets the tool's own error, not the gate's", func(t *testing.T) {

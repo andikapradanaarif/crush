@@ -282,6 +282,79 @@ func TestPlanVerdicts(t *testing.T) {
 		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
 	})
 
+	t.Run("phantom redirect targets fabricate no write", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		// Comparisons, expansions, and heredoc bodies look like `>`
+		// writes to a naive scan — none is a real write, so the
+		// binding must stay unmet.
+		mkBashWrite(t, svc, sessionID, "b1", "[[ $x > out.txt ]]")
+		mkBashWrite(t, svc, sessionID, "b2", "echo $((a > b)) > /dev/null")
+		mkBashWrite(t, svc, sessionID, "b3", "cmd > $OUT; cmd2 > ~/o")
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "create out.txt", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"out.txt"}},
+		)
+		verdicts := a.planVerdicts(t.Context(), sessionID)
+		require.Len(t, verdicts, 1)
+		require.Equal(t, planEvidenceBlocked, verdicts[0].state)
+		require.Contains(t, verdicts[0].reason, "no write observed")
+	})
+
+	t.Run("phantom redirect cannot clear a diagnostics failure", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		mkWrite(t, svc, sessionID, "w1", "a.go",
+			`{"verification":[{"check":"diagnostics","state":"failed","detail":"1 new error(s)"}]}`)
+		// A comparison that scans as `> a.go` must not supersede the
+		// real diagnostics failure on a.go.
+		mkBashWrite(t, svc, sessionID, "b1", "[[ $x > a.go ]]")
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "fix a.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"a.go"}},
+		)
+		verdicts := a.planVerdicts(t.Context(), sessionID)
+		require.Len(t, verdicts, 1)
+		require.Equal(t, planEvidenceBlocked, verdicts[0].state)
+		require.Contains(t, verdicts[0].reason, "diagnostics failed")
+	})
+
+	t.Run("errored bash result records no write", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		mkMsg(t, svc, sessionID, message.Assistant,
+			message.ToolCall{ID: "b1", Name: "bash", Input: `{"command":"cmd > out.txt"}`, Finished: true})
+		mkMsg(t, svc, sessionID, message.Tool,
+			message.ToolResult{ToolCallID: "b1", Name: "bash", Content: "exit 1", IsError: true})
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "create out.txt", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"out.txt"}},
+		)
+		verdicts := a.planVerdicts(t.Context(), sessionID)
+		require.Len(t, verdicts, 1)
+		require.Equal(t, planEvidenceBlocked, verdicts[0].state)
+		require.Contains(t, verdicts[0].reason, "no write observed")
+	})
+
+	t.Run("lsp rename records no path evidence", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		// `path` on an lsp_rename call is the search root, not a
+		// written file — it must not satisfy a binding to itself.
+		mkMsg(t, svc, sessionID, message.Assistant,
+			message.ToolCall{ID: "r1", Name: "lsp_rename", Input: `{"path":"pkg","old_name":"foo","new_name":"bar"}`, Finished: true})
+		mkMsg(t, svc, sessionID, message.Tool,
+			message.ToolResult{ToolCallID: "r1", Name: "lsp_rename", Content: "ok"})
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "rename in pkg", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"pkg"}},
+		)
+		verdicts := a.planVerdicts(t.Context(), sessionID)
+		require.Len(t, verdicts, 1)
+		require.Equal(t, planEvidenceBlocked, verdicts[0].state)
+		require.Contains(t, verdicts[0].reason, "no write observed")
+	})
+
 	t.Run("download target satisfies the declared path", func(t *testing.T) {
 		t.Parallel()
 		a, svc, sessionID := newGateTestAgent(t, &config.Config{})

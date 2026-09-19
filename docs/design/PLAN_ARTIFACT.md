@@ -115,6 +115,13 @@ EvidenceChecks []string, EvidencePaths []string}`:
     fields and unbound completed marks count as done. Both are
     deliberate: the gate pressures declaration-time structure,
     it does not police post-resolution plan hygiene.
+    Two more bounds, same deliberate kind: only **successful**
+    tool results record writes — a failed bash call's redirect
+    may still have created its target, but failed work is not
+    evidence; and the UI's incomplete-todo pill is **mark-only** —
+    an evidence-blocked completed item counts as done there even
+    while the run-end gate queues a repair turn, a cosmetic
+    divergence the retry prompt explains.
     This unifies today's two gate triggers (failed checks, open
     todos) into one definition of done instead of two scans of the
     same run — and **done-ness evaluates on final state, not
