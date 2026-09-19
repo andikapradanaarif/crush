@@ -47,6 +47,7 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/filetracker"
+	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/notebook"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -273,6 +274,11 @@ type sessionAgent struct {
 	// interactive records whether the run can ask the user — the
 	// mode the clarification gates degrade on.
 	interactive bool
+	// lspManager backs the plan-evidence scan's live diagnostics
+	// re-check — a fix landing outside a covered write's window
+	// (in-place bash edits, external tools) mints no resolution
+	// entry, so a stale failed verdict would latch without it.
+	lspManager *lsp.Manager
 	// runStampGen is the monotonic source of per-Run stamps the scope
 	// gate uses to reset its explore→execute boundary bookkeeping.
 	// Atomic: Run invocations on different sessions can race on it.
@@ -414,6 +420,11 @@ type SessionAgentOptions struct {
 	// coordinator's interactive flag threaded through for the gate
 	// degrade branches.
 	Interactive bool
+	// LSPManager lets the plan-evidence scan re-check attributed
+	// diagnostics against the live snapshot — a fix landing outside a
+	// covered write's window mints no resolution entry otherwise. May
+	// be nil.
+	LSPManager *lsp.Manager
 	// NotebookCheckpoint enables the consolidated-position checkpoint
 	// entry type (options.notebook_checkpoint, default on under
 	// notebook). Detection lives in the per-step rebuild so it works
@@ -465,6 +476,7 @@ func NewSessionAgent(
 		turnContext:            opts.TurnContext,
 		ambiguityClarification: opts.AmbiguityClarification,
 		interactive:            opts.Interactive,
+		lspManager:             opts.LSPManager,
 	}
 	a.runStampGen.Store(runStampEpoch())
 	return a

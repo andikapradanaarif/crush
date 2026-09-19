@@ -18,9 +18,24 @@ type VerificationCheck struct {
 	Check  string `json:"check"`
 	State  string `json:"state"`
 	Detail string `json:"detail,omitempty"`
+	// Path attributes the verdict to a file. Per-file diagnostics
+	// entries set it so a write that breaks a file it did not touch
+	// still blocks evidence bound to that file; empty attributes the
+	// verdict to the mutating call's own path.
+	Path string `json:"path,omitempty"`
 	// Command is the shell command a gate-run check executes; empty for
 	// decorator-run checks.
 	Command string `json:"command,omitempty"`
 	// Timeout bounds a gate-run check, in seconds.
 	Timeout int `json:"timeout,omitempty"`
+}
+
+// Identity keys the check for dedup and merge — name plus attributed
+// path, so the per-file diagnostics entries one write mints do not
+// collapse into each other.
+func (c VerificationCheck) Identity() string {
+	if c.Path == "" {
+		return c.Check
+	}
+	return c.Check + "\x00" + c.Path
 }

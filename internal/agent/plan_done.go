@@ -10,6 +10,7 @@ import (
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/filepathext"
+	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/toolclass"
@@ -49,20 +50,62 @@ type writeEvidence struct {
 }
 
 // planEvidence is the session-scoped evidence the done-scan reads off
-// stored tool results: the latest instance of each check name, the
+// stored tool results: the latest instance of each check identity, the
 // paths writes landed on, and per-write check entries for covering
 // evaluation.
 type planEvidence struct {
 	latest map[string]message.VerificationCheck
 	writes []writeEvidence
+	// diag is the session's per-path diagnostics verdicts, keyed by
+	// attributed path — a check carrying Path attributes to that file
+	// regardless of which write recorded it, so a write that breaks a
+	// file it did not touch still blocks that file's bindings; a bare
+	// entry attributes to its write's path. diagOrder keeps first-seen
+	// order so the reported blocker is stable.
+	diag      map[string]message.VerificationCheck
+	diagOrder []string
+}
+
+// setDiag records the latest diagnostics verdict attributed to path p,
+// keeping first-seen order for stable blocker reporting. Last verdict
+// wins — including unverified superseding a failed verdict when a
+// flaky settle timeout couldn't determine the delta; the live-snapshot
+// re-check only ever clears a latched failed (never mints one), so a
+// stale pass on a still-erroring path survives by design.
+func (e *planEvidence) setDiag(p string, chk message.VerificationCheck) {
+	if _, seen := e.diag[p]; !seen {
+		e.diagOrder = append(e.diagOrder, p)
+	}
+	e.diag[p] = chk
+}
+
+// resolveStaleDiag clears failed diagnostics verdicts the live
+// snapshot no longer supports: a fix landing between writes — in-place
+// bash edits (sed -i, gofmt -w, git restore), MCP tools, anything the
+// per-write delta window can't span — mints no resolution entry and
+// would otherwise stay latched past its fix. Only failed entries
+// clear, never mint: the verdict is a delta, so pre-existing errors on
+// a path must not retroactively fail a clean write. The covered check
+// keeps it fail-closed when observability is lost — an empty snapshot
+// from a dead or restarted client reads "clean" for every path, so a
+// path no running client handles keeps its verdict.
+func (e *planEvidence) resolveStaleDiag(live map[string]int, covered func(string) bool) {
+	for p, chk := range e.diag {
+		if chk.State == message.VerificationFailed && live[p] == 0 && covered(p) {
+			delete(e.diag, p)
+		}
+	}
 }
 
 // scanPlanEvidence walks stored messages collecting verification
 // entries — resolved verdicts land on the originating result via
 // writeVerificationOutcomes, so the stored metadata is the final state,
 // not the mark-time snapshot. Messages are chronological, so the last
-// entry seen per check name is the latest instance.
-func scanPlanEvidence(msgs []message.Message, workingDir string) *planEvidence {
+// entry seen per check name is the latest instance. When manager is
+// non-nil the diagnostics map is reconciled against the live snapshot:
+// fixes that landed outside a covered write's delta window minted no
+// resolution entry.
+func scanPlanEvidence(msgs []message.Message, workingDir string, manager *lsp.Manager) *planEvidence {
 	callPaths := map[string][]string{}
 	for _, m := range msgs {
 		for _, part := range m.Parts {
@@ -93,7 +136,10 @@ func scanPlanEvidence(msgs []message.Message, workingDir string) *planEvidence {
 			}
 		}
 	}
-	ev := &planEvidence{latest: map[string]message.VerificationCheck{}}
+	ev := &planEvidence{
+		latest: map[string]message.VerificationCheck{},
+		diag:   map[string]message.VerificationCheck{},
+	}
 	for _, m := range msgs {
 		for _, part := range m.Parts {
 			tr, ok := part.(message.ToolResult)
@@ -106,22 +152,66 @@ func scanPlanEvidence(msgs []message.Message, workingDir string) *planEvidence {
 			}
 			for _, chk := range checks {
 				if chk.Check != "" {
-					ev.latest[chk.Check] = chk
+					ev.latest[chk.Identity()] = chk
 				}
 			}
-			for _, path := range callPaths[tr.ToolCallID] {
+			paths := callPaths[tr.ToolCallID]
+			for _, path := range paths {
 				ev.writes = append(ev.writes, writeEvidence{path: path, checks: checks})
 			}
+			// Diagnostics supersession is chronological, last verdict
+			// per attributed path wins. Entries carrying Path
+			// attribute to that file regardless of which call
+			// recorded them — an lsp_rename/lsp_replace_symbol
+			// workspace edit has no write path yet still breaks or
+			// repairs files — while pathless legacy entries anchor to
+			// the call's write paths. A real write carrying no
+			// diagnostics entry clears its own path's verdict —
+			// optimistic by design, since latching until a checked
+			// write would make bash-heavy fixes unresolvable.
+			sawDiag := false
+			for _, chk := range checks {
+				if chk.Check != "diagnostics" {
+					continue
+				}
+				sawDiag = true
+				if chk.Path != "" {
+					ev.setDiag(normalizePlanPath(workingDir, chk.Path), chk)
+					continue
+				}
+				for _, wp := range paths {
+					ev.setDiag(wp, chk)
+				}
+			}
+			if !sawDiag {
+				for _, wp := range paths {
+					delete(ev.diag, wp)
+				}
+			}
 		}
+	}
+	if manager != nil {
+		// Canonicalize the live keys too — servers that echo the
+		// didOpen URI report workingDir-form paths while gopls
+		// reports resolved ones; the diag map is canonical.
+		live := map[string]int{}
+		for p, n := range tools.SnapshotDiagnostics(manager).CountByPath() {
+			live[filepathext.Canonical(p)] += n
+		}
+		ev.resolveStaleDiag(live,
+			func(p string) bool { return tools.AnyClientHandles(manager, p) })
 	}
 	return ev
 }
 
 // normalizePlanPath renders a declared or written path absolute and
-// clean so the two vocabularies compare.
+// canonical so the vocabularies compare — LSP servers report resolved
+// paths in diagnostic locations (gopls maps /var to /private/var), so
+// declared paths, write paths, and check Path fields must all reduce
+// to the same form before pathCovers can match them.
 func normalizePlanPath(workingDir, p string) string {
 	p = strings.TrimRight(p, "/\\")
-	return filepath.Clean(filepathext.SmartJoin(workingDir, p))
+	return filepathext.Canonical(filepathext.SmartJoin(workingDir, p))
 }
 
 // pathCovers reports whether a write to w satisfies or is covered by
@@ -135,8 +225,13 @@ func pathCovers(p, w string) bool {
 // working directory for gate feedback — "pkg/f.go" reads better than
 // the normalized absolute form.
 func relPlanPath(workingDir, abs string) string {
-	if rel, err := filepath.Rel(workingDir, abs); err == nil &&
-		rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	rel, err := filepath.Rel(workingDir, abs)
+	if (err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))) && workingDir != "" {
+		// abs may be canonical while workingDir is not — retry the
+		// relativization against the canonical form.
+		rel, err = filepath.Rel(filepathext.Canonical(workingDir), abs)
+	}
+	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return rel
 	}
 	return abs
@@ -179,6 +274,29 @@ func checkVerdictReason(name string, latest map[string]message.VerificationCheck
 	}
 }
 
+// diagReason renders the latest covering diagnostics verdict for a
+// normalized declared path — including entries a write to another file
+// attributed here (cross-file breakage). Returns "" when no covering
+// entry blocks.
+func (e *planEvidence) diagReason(p, workingDir string) string {
+	for _, wp := range e.diagOrder {
+		v, ok := e.diag[wp]
+		if !ok || !pathCovers(p, wp) {
+			continue
+		}
+		switch v.State {
+		case message.VerificationFailed:
+			if v.Detail != "" {
+				return "check diagnostics failed on " + relPlanPath(workingDir, wp) + ": " + v.Detail
+			}
+			return "check diagnostics failed on " + relPlanPath(workingDir, wp)
+		case message.VerificationPending:
+			return "check diagnostics has not resolved on " + relPlanPath(workingDir, wp)
+		}
+	}
+	return ""
+}
+
 // evidenceReason evaluates a completed item's bound evidence: every
 // named check's latest instance green, and for each declared path an
 // observed write with no covering check failed. Returns "" when the
@@ -199,82 +317,59 @@ func (e *planEvidence) evidenceReason(item session.PlanItem, workingDir string) 
 		// named-check loop applies.
 		latestOnPath := map[string]message.VerificationCheck{}
 		var pathCheckOrder []string
-		// Diagnostics is a per-write project delta: a green entry on
-		// one file says nothing about another's errors, so verdicts
-		// are tracked per write path — superseded only by a later
-		// write to the SAME path (with or without an entry).
-		diagByPath := map[string]message.VerificationCheck{}
-		var diagPaths []string
 		for _, w := range e.writes {
 			if !pathCovers(p, w.path) {
 				continue
 			}
 			landed = true
 			declaredIsFile = declaredIsFile || w.path == p
-			sawDiag := false
 			for _, chk := range w.checks {
-				if chk.Check == "" {
+				if chk.Check == "" || chk.Check == "diagnostics" {
 					continue
 				}
-				if chk.Check == "diagnostics" {
-					if _, seen := diagByPath[w.path]; !seen {
-						diagPaths = append(diagPaths, w.path)
-					}
-					diagByPath[w.path] = chk
-					sawDiag = true
-					continue
+				if _, seen := latestOnPath[chk.Identity()]; !seen {
+					pathCheckOrder = append(pathCheckOrder, chk.Identity())
 				}
-				if _, seen := latestOnPath[chk.Check]; !seen {
-					pathCheckOrder = append(pathCheckOrder, chk.Check)
-				}
-				latestOnPath[chk.Check] = chk
-			}
-			// A covered write carrying no diagnostics entry (a bash
-			// rewrite, a download) supersedes that path's earlier
-			// verdict rather than latching it.
-			if !sawDiag {
-				delete(diagByPath, w.path)
+				latestOnPath[chk.Identity()] = chk
 			}
 		}
 		if !landed {
+			// A covering diagnostics failure is the more useful
+			// reason — another file's write can break this path
+			// without a write ever landing on it.
+			if r := e.diagReason(p, workingDir); r != "" {
+				return r
+			}
 			return "no write observed on " + declared
 		}
-		for _, name := range pathCheckOrder {
-			v := latestOnPath[name]
+		for _, id := range pathCheckOrder {
+			v := latestOnPath[id]
 			// Name-scoped checks (verify:*, package-test:*) evaluate
 			// their session-latest instance — a later write elsewhere
 			// may have re-resolved the name.
-			if lv, exists := e.latest[name]; exists {
+			if lv, exists := e.latest[id]; exists {
 				v = lv
 			}
 			switch v.State {
 			case message.VerificationFailed:
 				if v.Detail != "" {
-					return "check " + name + " failed on " + declared + ": " + v.Detail
+					return "check " + v.Check + " failed on " + declared + ": " + v.Detail
 				}
-				return "check " + name + " failed on " + declared
+				return "check " + v.Check + " failed on " + declared
 			case message.VerificationPending:
-				return "check " + name + " has not resolved on " + declared
+				return "check " + v.Check + " has not resolved on " + declared
 				// unverified is a weak pass — resolved without a
 				// verdict, so it does not block. Blocking it would
 				// make path evidence unreachable wherever LSP
 				// coverage is absent.
 			}
 		}
-		for _, wp := range diagPaths {
-			v, ok := diagByPath[wp]
-			if !ok {
-				continue
-			}
-			switch v.State {
-			case message.VerificationFailed:
-				if v.Detail != "" {
-					return "check diagnostics failed on " + relPlanPath(workingDir, wp) + ": " + v.Detail
-				}
-				return "check diagnostics failed on " + relPlanPath(workingDir, wp)
-			case message.VerificationPending:
-				return "check diagnostics has not resolved on " + relPlanPath(workingDir, wp)
-			}
+		// Diagnostics verdicts attribute per file: an entry covering
+		// the declared path blocks it — including failures a write to
+		// another file caused (cross-file breakage), which is exactly
+		// what the per-file Path field exists to catch.
+		if r := e.diagReason(p, workingDir); r != "" {
+			return r
 		}
 		// Covering checks beyond the path's own writes: a package test
 		// covers every file in its directory, and configured verify
@@ -333,7 +428,7 @@ func (a *sessionAgent) planVerdicts(ctx context.Context, sessionID string) []pla
 	}
 	if a.messages != nil {
 		if msgs, err := a.messages.List(ctx, sessionID); err == nil {
-			ev = scanPlanEvidence(msgs, workingDir)
+			ev = scanPlanEvidence(msgs, workingDir, a.lspManager)
 		} else {
 			slog.Error("Failed to list messages for plan evidence", "error", err, "session_id", sessionID)
 		}

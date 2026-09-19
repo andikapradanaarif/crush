@@ -93,7 +93,12 @@ EvidenceChecks []string, EvidencePaths []string}`:
     kind, minted per write when LSP covers the file
     (`verifying_tool.go:164`); a new-error delta on the path is
     exactly per-path evidence) is the harness's job, not the
-    model's vocabulary. `unverified` (LSP doesn't cover the
+    model's vocabulary. Diagnostics verdicts attribute **per
+    file** via the check's `path` field: a write to `a.go` whose
+    delta breaks `b.go` mints a failed entry attributed to
+    `b.go`, so an item bound to `b.go` blocks even though no
+    write ever landed there — cross-file breakage is per-item
+    evidence, not just a run-level failure. `unverified` (LSP doesn't cover the
     file) is not failed — it doesn't block under the weak rule;
     keep `unverified` / `unmet` / `failed` distinct in gate
     feedback — three near-synonyms that must not collapse.
@@ -104,11 +109,26 @@ EvidenceChecks []string, EvidencePaths []string}`:
     until a checked write would make bash-heavy fixes
     unresolvable; the cost is a `cat > a.go` that preserves the
     errors reads as resolved until the next checked write.
+    Workspace-edit tools (`lsp_rename`, `lsp_replace_symbol`)
+    record no write path — `path` is a search root — so they
+    never satisfy a binding's observed-write leg, but their
+    per-file diagnostics entries still attribute: a rename that
+    breaks `b.go` blocks its item, and a rename that repairs it
+    clears the latch. Fixes landing outside any covered write's
+    delta window (`sed -i`, `gofmt -w`, `git restore`) mint no
+    resolution entry, so the run-end scan reconciles `failed`
+    verdicts against a live diagnostics snapshot — a path clean
+    now clears, never mints (the verdict is a delta; pre-existing
+    errors must not retroactively fail a clean write), and only
+    while a client still handles the path, so a dead-server empty
+    snapshot fails closed rather than clearing everything. Last
+    verdict wins even for `unverified`: a settle-timeout write
+    can overwrite a known failure — accepted, and the live
+    snapshot bounds how long a wrong latch survives.
     Known bounds, same as the verify gate's: `package-test` is
     Go-only, so non-Go trees reduce to "write landed"; mutating
-    bash (`sed -i`, redirects, `go generate`) and multi-file
-    workspace edits (`lsp_rename`, `lsp_replace_symbol`) leave no
-    path metadata an `EvidencePaths` binding can observe. Same
+    bash (`sed -i`, redirects, `go generate`) leaves no path
+    metadata an `EvidencePaths` binding can observe. Same
     paths double as annotation: an item bound to `internal/agent/`
     lets a repair/replan edge render the current symbols of the
     files it names (`CONTEXT_PREFETCH.md`) into the prompt — the
@@ -140,14 +160,15 @@ EvidenceChecks []string, EvidencePaths []string}`:
     an evidence-blocked completed item counts as done there even
     while the run-end gate queues a repair turn, a cosmetic
     divergence the retry prompt explains.
-    **Diagnostics attribute to the write's path only** —
-    `VerificationCheck` carries no path field, so a write to
-    `a.go` that introduces errors in `b.go` never blocks an
-    `evidence_paths: ["b.go"]` item. The run-level verification
-    edge still catches the failure, so this is per-item
-    granularity, not a silent miss — fixing it needs a path field
-    plus a `detail` parse contract (or per-affected-file
-    diagnostics entries) in the LSP delta computation.
+    **Diagnostics attribute per affected file** —
+    `VerificationCheck` carries a `path` field and the delta
+    computation mints per-file entries: a write to `a.go` that
+    introduces errors in `b.go` records a `failed` diagnostics
+    entry attributed to `b.go` (and a `passed` resolution entry
+    when a later delta clears a file's errors), so an
+    `evidence_paths: ["b.go"]` item blocks even when no write
+    landed on `b.go`. Pathless legacy entries fall back to the
+    write's path.
     This unifies today's two gate triggers (failed checks, open
     todos) into one definition of done instead of two scans of the
     same run — and **done-ness evaluates on final state, not
@@ -203,7 +224,13 @@ evidence` — a completed mark with pending/failed/unmet
   (evidence vocabulary unsurfaced) is a guaranteed loop. Bounce
   count is exported telemetry: a high rate means the model can't
   conform — vocabulary invisible, schema too strict — versus a
-  weak model; silent bouncing hides the difference. **Open
+  weak model; silent bouncing hides the difference. Headless has
+  no one to ask, so escalation degrades the same way the scope
+  check does: proceed-with-logged-assumption — the rejected
+  declaration _lands_ after the budget. A persistent
+  non-conformer defeats the gate headless by design: refusing
+  forever would stall, and the bounce events still record that
+  conformance failed. **Open
   items do not block
   `phase-confirm`** — at the first-write boundary every item is
   open by definition, so blocking there deadlocks every plan.

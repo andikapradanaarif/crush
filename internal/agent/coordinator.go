@@ -944,6 +944,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		TurnContext:            c.cfg.Config().Options.TurnContextMode(),
 		AmbiguityClarification: c.cfg.Config().Options.AmbiguityClarificationEnabled(),
 		Interactive:            c.interactive,
+		LSPManager:             c.lspManager,
 	})
 
 	// Warn only for main agents — sub-agent builds happen per run via

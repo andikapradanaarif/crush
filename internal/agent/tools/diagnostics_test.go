@@ -50,6 +50,46 @@ func TestDiagnosticsSnapshot_NewErrorsSince_RemovalOnly(t *testing.T) {
 		"fewer diagnostics than baseline must not report new errors")
 }
 
+func TestDiagnosticsSnapshot_NewErrorCountByPath(t *testing.T) {
+	t.Parallel()
+
+	baseline := DiagnosticsSnapshot{
+		"a.go|undefined: x": 1,
+		"b.go|old error":    2,
+	}
+	after := DiagnosticsSnapshot{
+		"a.go|undefined: x":    1, // unchanged
+		"b.go|old error":       2, // unchanged
+		"c.go|new error":       1, // brand new
+		"a.go|same msg, moved": 2, // count beyond baseline
+		"b.go|err|with pipe":   1, // message pipes must not corrupt the path
+	}
+
+	require.Equal(t, map[string]int{
+		"c.go": 1,
+		"a.go": 2,
+		"b.go": 1,
+	}, after.NewErrorCountByPath(baseline))
+}
+
+func TestDiagnosticsSnapshot_ResolvedPathsSince(t *testing.T) {
+	t.Parallel()
+
+	baseline := DiagnosticsSnapshot{
+		"a.go|err one": 1,
+		"b.go|err two": 2,
+		"c.go|err old": 1,
+	}
+	after := DiagnosticsSnapshot{
+		"b.go|err two": 1, // reduced but not cleared — still broken
+		"c.go|err old": 1, // unchanged
+		"d.go|err new": 1, // new errors are not resolutions
+	}
+
+	require.Equal(t, []string{"a.go"}, baseline.ResolvedPathsSince(after),
+		"only a fully cleared path counts as resolved")
+}
+
 func TestSnapshotDiagnostics_NilManager(t *testing.T) {
 	t.Parallel()
 

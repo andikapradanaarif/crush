@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/session"
@@ -30,6 +31,19 @@ func mkBashWrite(t *testing.T, svc message.Service, sessionID, callID, command s
 		message.ToolCall{ID: callID, Name: "bash", Input: fmt.Sprintf(`{"command":%q}`, command), Finished: true})
 	mkMsg(t, svc, sessionID, message.Tool,
 		message.ToolResult{ToolCallID: callID, Name: "bash", Content: "ok"})
+}
+
+// mkWorkspaceEdit lands an lsp_replace_symbol call/result pair — the
+// call has no evidence-binding path (its file_path is the symbol's
+// anchor, not a written file), so its per-file diagnostics entries
+// must feed the diag map on their own Path alone.
+func mkWorkspaceEdit(t *testing.T, svc message.Service, sessionID, callID, metadata string) {
+	t.Helper()
+	mkMsg(t, svc, sessionID, message.Assistant,
+		message.ToolCall{ID: callID, Name: tools.ReplaceSymbolToolName,
+			Input: `{"file_path":"a.go","symbol":"s"}`, Finished: true})
+	mkMsg(t, svc, sessionID, message.Tool,
+		message.ToolResult{ToolCallID: callID, Name: tools.ReplaceSymbolToolName, Content: "ok", Metadata: metadata})
 }
 
 func setPlan(t *testing.T, a *sessionAgent, sessionID string, items ...session.PlanItem) {
@@ -241,6 +255,131 @@ func TestPlanVerdicts(t *testing.T) {
 		require.Contains(t, verdicts[0].reason, "pkg/f.go")
 	})
 
+	t.Run("write to a.go breaking b.go blocks the b.go binding", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		// b.go was written and verified earlier; a later write to
+		// a.go introduced errors in b.go — the per-file entry must
+		// block the b.go item even though the write never touched it.
+		mkWrite(t, svc, sessionID, "w1", "b.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"b.go"}]}`)
+		mkWrite(t, svc, sessionID, "w2", "a.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"a.go"},{"check":"diagnostics","state":"failed","path":"b.go","detail":"1 new error(s)"}]}`)
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"b.go"}},
+		)
+		verdicts := a.planVerdicts(t.Context(), sessionID)
+		require.Len(t, verdicts, 1)
+		require.Equal(t, planEvidenceBlocked, verdicts[0].state)
+		require.Contains(t, verdicts[0].reason, "b.go")
+	})
+
+	t.Run("cross-file failure without a write reports the diagnostics reason", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		// No write ever landed on b.go — the failure reason must name
+		// the diagnostics verdict, not the less useful "no write".
+		mkWrite(t, svc, sessionID, "w1", "a.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"a.go"},{"check":"diagnostics","state":"failed","path":"b.go","detail":"1 new error(s)"}]}`)
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"b.go"}},
+		)
+		verdicts := a.planVerdicts(t.Context(), sessionID)
+		require.Len(t, verdicts, 1)
+		require.Equal(t, planEvidenceBlocked, verdicts[0].state)
+		require.Contains(t, verdicts[0].reason, "diagnostics failed")
+		require.NotContains(t, verdicts[0].reason, "no write observed")
+	})
+
+	t.Run("workspace-edit diagnostics attribute without a write path", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		// An lsp_replace_symbol result carries per-file entries but
+		// records no write path — its failed entry on b.go must still
+		// block the b.go binding.
+		mkWorkspaceEdit(t, svc, sessionID, "r1",
+			`{"verification":[{"check":"diagnostics","state":"failed","path":"b.go","detail":"1 new error(s)"}]}`)
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"b.go"}},
+		)
+		verdicts := a.planVerdicts(t.Context(), sessionID)
+		require.Len(t, verdicts, 1)
+		require.Equal(t, planEvidenceBlocked, verdicts[0].state)
+		require.Contains(t, verdicts[0].reason, "diagnostics failed")
+	})
+
+	t.Run("workspace-edit resolution clears a cross-file failure", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		mkWrite(t, svc, sessionID, "w0", "b.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"b.go"}]}`)
+		mkWrite(t, svc, sessionID, "w1", "a.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"a.go"},{"check":"diagnostics","state":"failed","path":"b.go","detail":"1 new error(s)"}]}`)
+		// A rename repairs b.go — its resolution entry must supersede
+		// the failure even though the call has no write path.
+		mkWorkspaceEdit(t, svc, sessionID, "r1",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"b.go","detail":"errors resolved"}]}`)
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"b.go"}},
+		)
+		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
+	})
+
+	t.Run("cross-file failure does not block the clean write path", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		// The write to a.go broke b.go, not a.go — the a.go item's
+		// own diagnostics verdict is green. The failure still blocks
+		// the run-level edge and the b.go binding, not this item.
+		mkWrite(t, svc, sessionID, "w1", "a.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"a.go"},{"check":"diagnostics","state":"failed","path":"b.go","detail":"1 new error(s)"}]}`)
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "edit a.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"a.go"}},
+		)
+		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
+	})
+
+	t.Run("another file's fix write supersedes the cross-file failure", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		// The typical repair for cross-file breakage edits the
+		// referencing file, not the broken one — the resolution entry
+		// it mints must supersede the failure or the item stays
+		// blocked past its fix.
+		mkWrite(t, svc, sessionID, "w0", "b.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"b.go"}]}`)
+		mkWrite(t, svc, sessionID, "w1", "a.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"a.go"},{"check":"diagnostics","state":"failed","path":"b.go","detail":"1 new error(s)"}]}`)
+		mkWrite(t, svc, sessionID, "w2", "a.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"a.go"},{"check":"diagnostics","state":"passed","path":"b.go","detail":"errors resolved"}]}`)
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"b.go"}},
+		)
+		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
+	})
+
+	t.Run("fixing the broken file supersedes the cross-file failure", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		mkWrite(t, svc, sessionID, "w1", "b.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"b.go"}]}`)
+		mkWrite(t, svc, sessionID, "w2", "a.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"a.go"},{"check":"diagnostics","state":"failed","path":"b.go","detail":"1 new error(s)"}]}`)
+		mkWrite(t, svc, sessionID, "w3", "b.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"b.go"}]}`)
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"b.go"}},
+		)
+		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
+	})
+
 	t.Run("pending covering check blocks path evidence", func(t *testing.T) {
 		t.Parallel()
 		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
@@ -427,4 +566,37 @@ func TestTodosRetrySectionOrdersReadyBeforeBlocked(t *testing.T) {
 		"expected ready → evidence-blocked → dep-blocked order, got:\n%s", out)
 	require.Contains(t, out, "(blocked by: setup)")
 	require.Contains(t, out, "marked completed but verify:build failed")
+}
+
+// TestResolveStaleDiag pins the live-snapshot reconciliation: a failed
+// verdict whose path reads clean in the current snapshot was repaired
+// outside any covered write's delta window and must not stay latched.
+// A path still erroring keeps its verdict — the snapshot overlay
+// clears, it never mints — and a path no client handles keeps it too:
+// an empty snapshot from a dead client must not fail open.
+func TestResolveStaleDiag(t *testing.T) {
+	t.Parallel()
+
+	failed := func(p string) message.VerificationCheck {
+		return message.VerificationCheck{Check: "diagnostics", State: message.VerificationFailed, Path: p}
+	}
+	ev := &planEvidence{
+		diag: map[string]message.VerificationCheck{
+			"/w/fixed.go":     failed("/w/fixed.go"),
+			"/w/broken.go":    failed("/w/broken.go"),
+			"/w/unwatched.go": failed("/w/unwatched.go"),
+			"/w/green.go":     {Check: "diagnostics", State: message.VerificationPassed, Path: "/w/green.go"},
+		},
+		diagOrder: []string{"/w/fixed.go", "/w/broken.go", "/w/unwatched.go", "/w/green.go"},
+	}
+	covered := func(p string) bool { return p != "/w/unwatched.go" }
+	ev.resolveStaleDiag(map[string]int{"/w/broken.go": 2}, covered)
+	_, latched := ev.diag["/w/fixed.go"]
+	require.False(t, latched, "a path clean in the live snapshot was repaired out-of-window")
+	require.Equal(t, message.VerificationFailed, ev.diag["/w/broken.go"].State,
+		"a path still erroring keeps its failure")
+	require.Equal(t, message.VerificationFailed, ev.diag["/w/unwatched.go"].State,
+		"a path no client handles keeps its failure — dead-client snapshots fail closed")
+	require.Equal(t, message.VerificationPassed, ev.diag["/w/green.go"].State,
+		"non-failed verdicts are untouched")
 }

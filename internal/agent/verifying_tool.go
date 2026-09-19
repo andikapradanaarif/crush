@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -78,10 +80,20 @@ func (v *verifyingTool) SetProviderOptions(opts fantasy.ProviderOptions) {
 
 func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 	filePath := tools.ToolCallFilePath(call.Input)
-	if filePath == "" {
+	// A projectWide tool may carry no usable path at all — a rename's
+	// `path` is an optional search root — and its delta still applies:
+	// the snapshots are project-wide, not anchored to the file.
+	if filePath == "" && !v.projectWide {
 		return v.inner.Run(ctx, call)
 	}
 	absPath := filepathext.SmartJoin(v.workingDir, filePath)
+	// LSP servers report canonicalized paths in diagnostic locations
+	// (gopls resolves symlinks, so /var reports as /private/var) while
+	// absPath stays workingDir-form — coverage (HandlesFile prefixes
+	// the client's cwd) and package-test selection both need that
+	// form. Snapshot-derived path comparisons and every minted Path
+	// field need the canonical one so check identities agree.
+	canonPath := filepathext.Canonical(absPath)
 	// Start configured-but-not-running servers before the coverage check —
 	// AnyClientHandles only sees running clients, and the pre-decorator
 	// flow started them on every edit via notifyLSPs. Skipping this lost
@@ -90,6 +102,13 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 		v.lspManager.Start(ctx, absPath)
 	}
 	lspCovered := tools.AnyClientHandles(v.lspManager, absPath)
+	if v.projectWide {
+		// The delta is project-wide, so anchor coverage is
+		// irrelevant — a rename's `path` is a search-root directory
+		// no filetype-restricted client handles. A nil manager still
+		// means uncovered: nothing can snapshot.
+		lspCovered = v.lspManager != nil
+	}
 
 	if !lspCovered {
 		resp, err := v.inner.Run(ctx, call)
@@ -98,7 +117,7 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 		}
 		// Keep the project-diagnostics append the tools used to produce
 		// even when no client handles this file.
-		resp.Content += tools.FormatDiagnostics(absPath, v.lspManager)
+		resp.Content += tools.FormatDiagnostics(canonPath, v.lspManager)
 		// Select after the mutation so a newly created file (e.g. the
 		// first _test.go in a package) is seen by the selector.
 		checks := v.selectPending(absPath)
@@ -106,6 +125,7 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 			checks = []message.VerificationCheck{{
 				Check:  "diagnostics",
 				State:  message.VerificationUnverified,
+				Path:   canonPath,
 				Detail: "no LSP client handles the file",
 			}}
 			// Surface the unverified state in the result so the model can
@@ -141,8 +161,10 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 	after := tools.SnapshotDiagnostics(v.lspManager)
 	newErrs := after.NewErrorsSince(baseline)
 
-	resp.Content += tools.FormatDiagnostics(absPath, v.lspManager)
+	resp.Content += tools.FormatDiagnostics(canonPath, v.lspManager)
 
+	var errsByPath map[string]int
+	var resolved []string
 	state := message.VerificationPassed
 	detail := ""
 	switch {
@@ -160,14 +182,66 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 	case len(newErrs) > 0:
 		state = message.VerificationFailed
 		detail = fmt.Sprintf("%d new error(s)", len(newErrs))
+		errsByPath = after.NewErrorCountByPath(baseline)
+		resolved = baseline.ResolvedPathsSince(after)
+	default:
+		// A clean delta can still carry per-file news: errors that
+		// disappeared since the baseline are resolutions to record,
+		// or a stale failure on that path would latch past its fix.
+		resolved = baseline.ResolvedPathsSince(after)
 	}
-	checks := append([]message.VerificationCheck{{
-		Check:  "diagnostics",
-		State:  state,
-		Detail: detail,
-	}}, v.selectPending(absPath)...)
+	checks := append(diagnosticsChecks(canonPath, state, detail, errsByPath, resolved), v.selectPending(absPath)...)
 	resp.Metadata = mergeVerificationMetadata(resp.Metadata, checks)
 	return resp, nil
+}
+
+// diagnosticsChecks mints the per-file diagnostics entries for a
+// mutation. The write's own path always carries a verdict so a later
+// write to it supersedes correctly; every other file the delta broke
+// carries a failed entry attributed to itself, and every file whose
+// errors the delta cleared carries a passed one — a write that breaks
+// or repairs a file it did not touch must update evidence bound to
+// that file, not just evidence bound to the write's path. writePath
+// must be the canonical form: errsByPath and resolved keys come from
+// LSP-reported (resolved) diagnostic locations, so a workingDir-form
+// path would miss a same-file match under a symlinked tree.
+func diagnosticsChecks(writePath, state, detail string, errsByPath map[string]int, resolved []string) []message.VerificationCheck {
+	checks := make([]message.VerificationCheck, 0, len(errsByPath)+len(resolved)+1)
+	if _, broke := errsByPath[writePath]; !broke {
+		writeState, writeDetail := state, detail
+		if writeState == message.VerificationFailed {
+			// The delta failed elsewhere — the write path itself
+			// stayed clean.
+			writeState, writeDetail = message.VerificationPassed, ""
+		}
+		checks = append(checks, message.VerificationCheck{
+			Check:  "diagnostics",
+			State:  writeState,
+			Path:   writePath,
+			Detail: writeDetail,
+		})
+	}
+	for _, p := range slices.Sorted(maps.Keys(errsByPath)) {
+		checks = append(checks, message.VerificationCheck{
+			Check:  "diagnostics",
+			State:  message.VerificationFailed,
+			Path:   p,
+			Detail: fmt.Sprintf("%d new error(s)", errsByPath[p]),
+		})
+	}
+	for _, p := range resolved {
+		if p == writePath {
+			// The write-path entry already carries this verdict.
+			continue
+		}
+		checks = append(checks, message.VerificationCheck{
+			Check:  "diagnostics",
+			State:  message.VerificationPassed,
+			Path:   p,
+			Detail: "errors resolved",
+		})
+	}
+	return checks
 }
 
 // selectPending runs the configured check selector when one is wired.

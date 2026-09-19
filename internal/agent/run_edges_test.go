@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -133,7 +134,7 @@ func TestStallEdge(t *testing.T) {
 // those literals to keep repair turns inside the firing process-turn.
 func TestRepairPromptPrefixes_Stable(t *testing.T) {
 	t.Parallel()
-	v := verificationRetrySection(&edgeTrigger{failed: []gateCheckOutcome{{
+	v := (&sessionAgent{}).verificationRetrySection(&edgeTrigger{failed: []gateCheckOutcome{{
 		check: message.VerificationCheck{Check: "c"}, output: "out",
 	}}})
 	require.True(t, strings.HasPrefix(v, verificationRetryPrefix))
@@ -143,4 +144,47 @@ func TestRepairPromptPrefixes_Stable(t *testing.T) {
 		}}}),
 		todosRetryPrefix))
 	require.True(t, strings.HasPrefix(stallRetrySection(nil), stallRetryPrefix))
+}
+
+// TestFailedCheckGroups pins the per-file grouping: diagnostics
+// entries minted by one write render as one failure with its shared
+// output once — not one <check> block per affected file.
+func TestFailedCheckGroups(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	a := &sessionAgent{configStore: config.NewTestStoreWithDir(&config.Config{}, dir)}
+	mk := func(callID, check, path, detail, output string) gateCheckOutcome {
+		return gateCheckOutcome{
+			toolCallID: callID,
+			check: message.VerificationCheck{
+				Check: check, State: message.VerificationFailed,
+				Path: filepath.Join(dir, path), Detail: detail,
+			},
+			output: output,
+		}
+	}
+	failed := []gateCheckOutcome{
+		mk("tc1", "diagnostics", "a.go", "1 new error(s)", "out-1"),
+		mk("tc1", "diagnostics", "b.go", "2 new error(s)", "out-1"),
+		mk("tc1", "diagnostics", "c.go", "1 new error(s)", "out-1"),
+		mk("tc2", "diagnostics", "d.go", "1 new error(s)", "out-2"),
+		mk("tc3", "verify:build", "", "", "out-3"),
+	}
+
+	groups := failedCheckGroups(failed)
+	require.Len(t, groups, 3)
+	require.Len(t, groups[0], 3)
+
+	section := a.verificationRetrySection(&edgeTrigger{failed: failed})
+	require.Equal(t, 2, strings.Count(section, `<check name="diagnostics">`))
+	require.Equal(t, 1, strings.Count(section, "out-1"),
+		"shared tool output must render once per group")
+	// Per-file paths render relative to the working dir, matching the
+	// plan reasons in the same prompt.
+	require.Contains(t, section, "a.go: 1 new error(s)")
+	require.NotContains(t, section, dir)
+
+	note := verificationExhaustNote(&edgeTrigger{failed: failed}, 2)
+	require.Contains(t, note, "3 check(s) still failing")
 }

@@ -403,6 +403,80 @@ func TestScopeGate(t *testing.T) {
 		require.Equal(t, 0, svc.asks, "plan bookkeeping is not exploration — the gate stays unarmed")
 	})
 
+	t.Run("bounced plans escalate to the scope question after the budget", func(t *testing.T) {
+		t.Parallel()
+		svc, todosFake, write, todosTool, readTool, writeTool := newTodosGate(t)
+		ctx := gateCtx("s1", 1)
+		exploreN(t, ctx, readTool, scopeGateMinExploration)
+
+		for i := 0; i < scopeGatePlanBounceBudget; i++ {
+			resp, err := todosTool.Run(ctx, fantasy.ToolCall{ID: fmt.Sprintf("t%d", i), Name: tools.TodosToolName, Input: barePlan})
+			require.NoError(t, err)
+			require.True(t, resp.IsError, "bounce %d must reject the declaration", i)
+		}
+		require.False(t, todosFake.called, "a bounced declaration never lands")
+		require.Equal(t, 0, svc.asks, "bounces must not ask the question")
+
+		// The next non-validating declaration escalates to the real
+		// scope question with stuck-loop context — not a fourth
+		// bounce, and never a silent pass-through.
+		resp, err := todosTool.Run(ctx, fantasy.ToolCall{ID: "t9", Name: tools.TodosToolName, Input: barePlan})
+		require.NoError(t, err)
+		require.Equal(t, 1, svc.asks)
+		require.Contains(t, svc.texts[0], "bounce loop")
+		require.False(t, resp.IsError, "a proceed answer lands the declared write")
+		require.True(t, todosFake.called)
+
+		resp, err = writeTool.Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
+		require.NoError(t, err)
+		require.False(t, resp.IsError)
+		require.True(t, write.called)
+		require.Equal(t, 1, svc.asks, "the escalation resolved the gate for the run")
+	})
+
+	t.Run("bounce budget resets with the run stamp", func(t *testing.T) {
+		t.Parallel()
+		svc, _, _, todosTool, readTool, _ := newTodosGate(t)
+		ctx := gateCtx("s1", 1)
+		exploreN(t, ctx, readTool, scopeGateMinExploration)
+		for i := 0; i < scopeGatePlanBounceBudget; i++ {
+			resp, err := todosTool.Run(ctx, fantasy.ToolCall{ID: fmt.Sprintf("t%d", i), Name: tools.TodosToolName, Input: barePlan})
+			require.NoError(t, err)
+			require.True(t, resp.IsError)
+		}
+
+		// A new turn re-arms the gate: the budget starts over, so the
+		// first bare declaration of run 2 bounces rather than
+		// escalating on stale counts.
+		ctx2 := gateCtx("s1", 2)
+		exploreN(t, ctx2, readTool, scopeGateMinExploration)
+		resp, err := todosTool.Run(ctx2, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName, Input: barePlan})
+		require.NoError(t, err)
+		require.True(t, resp.IsError)
+		require.Equal(t, 0, svc.asks)
+	})
+
+	t.Run("headless escalation proceeds with a logged assumption", func(t *testing.T) {
+		t.Parallel()
+		todosFake := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextResponse("ok")}
+		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
+		wrapped := newScopeGate(nil, false, nil).wrap([]fantasy.AgentTool{todosFake, read})
+		ctx := gateCtx("s1", 1)
+		exploreN(t, ctx, wrapped[1], scopeGateMinExploration)
+		for i := 0; i < scopeGatePlanBounceBudget; i++ {
+			resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: fmt.Sprintf("t%d", i), Name: tools.TodosToolName, Input: barePlan})
+			require.NoError(t, err)
+			require.True(t, resp.IsError)
+		}
+		// The question nobody can answer degrades the same way as the
+		// scope check itself: proceed with a logged assumption rather
+		// than bounce forever.
+		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t9", Name: tools.TodosToolName, Input: barePlan})
+		require.NoError(t, err)
+		require.False(t, resp.IsError)
+		require.True(t, todosFake.called)
+	})
+
 	t.Run("malformed plan input gets the tool's own error, not the gate's", func(t *testing.T) {
 		t.Parallel()
 		svc := &fakeQuestionService{selected: []string{"proceed"}}

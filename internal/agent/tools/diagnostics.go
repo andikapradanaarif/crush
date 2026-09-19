@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/x/powernap/pkg/lsp/protocol"
 )
@@ -150,10 +152,19 @@ func NotifyLSPs(
 }
 
 // FormatDiagnostics renders the file and project diagnostics as a
-// formatted, sorted, truncated string for tool-result output.
+// formatted, sorted, truncated string for tool-result output. Both
+// sides of the current-file comparison are canonicalized — servers
+// may report resolved paths while callers pass workingDir-form (or
+// vice versa for servers that echo the didOpen URI), so raw equality
+// would misgroup on symlinked trees either way.
 func FormatDiagnostics(filePath string, manager *lsp.Manager) string {
 	if manager == nil {
 		return ""
+	}
+
+	want := ""
+	if filePath != "" {
+		want = filepathext.Canonical(filePath)
 	}
 
 	var fileDiags []string
@@ -166,7 +177,7 @@ func FormatDiagnostics(filePath string, manager *lsp.Manager) string {
 				slog.Error("Failed to convert diagnostic location URI to path", "uri", location, "error", err)
 				continue
 			}
-			isCurrentFile := path == filePath
+			isCurrentFile := want != "" && filepathext.Canonical(path) == want
 			for _, diag := range diags {
 				formattedDiag := formatDiagnostic(path, diag, lspName)
 				if isCurrentFile {
@@ -331,6 +342,58 @@ func (s DiagnosticsSnapshot) NewErrorsSince(baseline DiagnosticsSnapshot) []stri
 		}
 	}
 	return newErrs
+}
+
+// NewErrorCountByPath groups the multiset difference by file — the
+// per-file view a verification entry attributes its verdict to. The
+// path is the key segment before the first "|"; a message containing
+// "|" cannot corrupt it.
+func (s DiagnosticsSnapshot) NewErrorCountByPath(baseline DiagnosticsSnapshot) map[string]int {
+	counts := map[string]int{}
+	for key, count := range s {
+		newOnPath := count - baseline[key]
+		if newOnPath <= 0 {
+			continue
+		}
+		counts[pathFor(key)] += newOnPath
+	}
+	return counts
+}
+
+// CountByPath totals the snapshot's error diagnostics per file.
+func (s DiagnosticsSnapshot) CountByPath() map[string]int {
+	counts := map[string]int{}
+	for key, count := range s {
+		counts[pathFor(key)] += count
+	}
+	return counts
+}
+
+// ResolvedPathsSince returns, sorted, the paths holding errors in s
+// that hold none in after — per-file resolution evidence for a write
+// that repairs errors on files it did not touch, the mirror of the
+// cross-file breakage attribution.
+func (s DiagnosticsSnapshot) ResolvedPathsSince(after DiagnosticsSnapshot) []string {
+	afterByPath := after.CountByPath()
+	var resolved []string
+	for p, n := range s.CountByPath() {
+		if n > 0 && afterByPath[p] == 0 {
+			resolved = append(resolved, p)
+		}
+	}
+	slices.Sort(resolved)
+	return resolved
+}
+
+// pathFor extracts the path segment of a "path|message" snapshot key.
+// A path literally containing "|" truncates its attribution — the key
+// format predates per-file attribution, and "|" in filenames is rare
+// enough to accept.
+func pathFor(key string) string {
+	if i := strings.IndexByte(key, '|'); i >= 0 {
+		return key[:i]
+	}
+	return key
 }
 
 // AnyClientHandles reports whether any running LSP client claims the
