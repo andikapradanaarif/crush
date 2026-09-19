@@ -112,7 +112,8 @@ different seam (permissions/hook territory), unblocked today.
 With the project index (`CONTEXT_PREFETCH.md`, #34), `resolve`
 gains a deterministic evidence source: a repair prompt can carry a
 `map` slice over the run's touched dirs (the write set is scanned
-from `result.Steps` — filetracker tracks reads only), so the
+from `result.Steps` — filetracker records writes as reads too, so
+it can't distinguish), so the
 forced turn starts re-oriented at zero model cost
 instead of the model re-gathering in its first calls back — the
 re-read loop the index exists to kill, closed at the run boundary
@@ -127,7 +128,7 @@ fire between turns.
 ### stall-replan
 
 The stop-only signal was _already_ repurposed — #43's `stall`
-edge (`scanStallEdge`, `run_edges.go:473`) _is_ the escalate-human
+edge (`scanStallEdge`, `run_edges.go:474`) _is_ the escalate-human
 row: question-escalation when interactive, blocker report
 headless, drawn from the shared repair budget. The new work is a
 **model-directed replan turn inserted before that escalation** —
@@ -136,7 +137,14 @@ the edge's prompt branches on budget, not a second edge.
 - **scan:** the run ended via `hasRepeatedToolCalls` (`in.stalled`,
   plumbed at `agent.go:1553`) — plus a cheap fallback re-scan of
   `result.Steps` inside the edge, since `in.stalled` only reflects
-  the StopWhen callback.
+  the StopWhen callback — and fantasy's `isStopConditionMet`
+  **short-circuits at the first true condition**, with the
+  context-window summarize check first in the `StopWhen` slice
+  (`agent.go:1378` before the detector at `1399`): context
+  pressure can mask a real stall and leave `loopStopped` false.
+  Corollary interaction to handle: a masked stall +
+  `shouldSummarize` produces a replan retry _and_ a post-summary
+  continue call queued behind it — bounded, but named.
 - **Headless behavior changes — stated:** today a headless stall
   sets `fire=false` → blocker report, no retry. Under
   replan-first the replan branch fires unconditionally (no
@@ -197,9 +205,9 @@ the edge's prompt branches on budget, not a second edge.
   (**scan `result.Steps` for write-class calls** — filetracker
   can't serve it: writes also `RecordRead` for staleness tracking,
   so the tracker can't distinguish reads from writes, and bash
-  mutations bypass it entirely; the `scanVerification`/
-  `scanPlanEvidence` precedent), and — with `project_index` on —
-  a `map` slice over the touched dirs.
+  mutations bypass it entirely; the `scanVerification`
+  (`verify_gate.go:51`) steps-scan precedent), and — with
+  `project_index` on — a `map` slice over the touched dirs.
 - **prompt:** "you stopped making progress: <evidence>. State which
   assumption failed and revise the approach." One turn within
   `RepairAttempts`.
@@ -227,11 +235,15 @@ notice" failure as a declared transition.
     that wrote only via `bash > f` must not false-trip.
     (`eval/analyze.go` uses the narrow map deliberately for gate
     metrics — a documented blind spot burn-watch must not inherit.)
-    **Token metric:** sum `step.Response.Usage.InputTokens` across
-    steps — the true billed spend, since each step re-sends the
-    prompt — with `fallbackStepUsage` for zero-usage providers
-    (flagged `estimated`); **cache-read excluded** — cached tokens
-    are ~free and would trip the tripwire far too early. T/S are
+    **Token metric:** `result.TotalUsage.InputTokens` — already the
+    per-step sum, the true billed spend since each step re-sends the
+    prompt; **cache-read excluded** — cached tokens are ~free and
+    would trip the tripwire far too early. `fallbackStepUsage` is
+    **out of scope**: it needs the step's _request_ messages
+    (`stepMessages` captured inside `OnStepFinish`), which
+    `edgeInput` doesn't carry — and zero-usage providers are
+    mostly local/free models where billed spend is ~zero anyway;
+    the step arm covers their burn shape. T/S are
     generous tripwire thresholds, not a governor — the edge exists
     to surface, not to throttle. "Configurable" is real work:
     threshold + step count need an `optionSpec` entry, schema, and
@@ -246,8 +258,11 @@ notice" failure as a declared transition.
     rate on cache-less providers otherwise just measures context
     size.
 - **resolve:** collect the evidence — steps, tokens, exploration
-  event count, files-read-without-write (filetracker's read set
-  minus the scanned write set).
+  event count, files-read-without-write **this run**: scan
+  `result.Steps` for `ReadToolNames` (the `stubs.go:189`
+  precedent) and subtract the scanned write set —
+  `filetracker.ListRecentReadFiles` is session-scoped, not
+  run-scoped.
 - **prompt:** escalation-family — a `question` turn ("spent N
   tokens over M steps with no writes — continue / replan /
   stop?"), not a retry prompt. Headless degrades to a logged
@@ -260,6 +275,15 @@ notice" failure as a declared transition.
   input), not the stall edge's trigger, so ordering is cosmetic —
   declared here because the doc requires new rows to say where
   they sit.
+- **Budget crowding — stated decision:** burn-watch's question
+  consumes a shared `RepairAttempts` slot like any firing edge,
+  so a burn-watch turn followed by a check failure can land the
+  verification edge in exhaustion-note territory instead of a
+  repair turn. Accepted — the alternative (escalation bypassing
+  the budget) is the rejected nagging-with-a-type-signature, and
+  the once-per-crossing marker bounds how often the slot is
+  taken. Records will show whether crowding actually occurs in
+  the corpus before any threshold is tuned.
 - **Fires once per crossing, resets on write.** The marker is a
   `SessionAgentCall` field, and the seam owns both halves:
   `runEdges` **stamps** it on the retry clone at the existing
@@ -319,9 +343,18 @@ those are exactly the states that make firing rates interpretable
 ("never fires" must be distinguishable from "never evaluated").
 Follow the `collapsed_turns` precedent: migration + sqlc query +
 service method + stats section + eval analyzer read — an
-`edge_firings` table (session_id, turn seq, edge name, trigger
-detail, **outcome enum**: fired / suppressed / exhausted /
-headless-degraded). `crush stats` reads the table; the eval doc
+`edge_firings` table. **PK: `(session_id, run_stamp,
+repair_attempts, edge)`** — `call.RunStamp` _is_ the run-boundary
+derivation (stamped once per user turn at `agent.go:891`,
+preserved across retry clones, already joins to `run:<stamp>`
+checkpoint tags); `INSERT OR IGNORE` on it dedupes a resumed
+session's double-fire the way `collapsed_turns` does. Columns:
+edge name, trigger detail, **outcome enum**: fired / suppressed /
+exhausted / headless-degraded / **gated** (flag-off early return
+— `scanStallEdge` returning nil at the option check must not be
+indistinguishable from "edge never ran"; a boundary with no row
+means _clean_, which stays distinguishable precisely because
+gated rows exist). `crush stats` reads the table; the eval doc
 reads the same counts via `SessionTelemetry` +
 `emitEvalTelemetry`. **Write path — not `notebook.Service`:**
 `RecordCollapsedTurn` rides `a.notebook`, which is nil when the
@@ -330,9 +363,13 @@ edge firings are harness telemetry, not notebook concepts, and
 routing them through it would silently produce zero records for
 exactly the notebook-off configs the "never fires" signal exists
 to audit. Use a dedicated service or a `db.Queries` handle held
-by the agent; the turn seq needs its own derivation at the run
-boundary (`collapsed_turns`' `byTurn` comes from message
-positions — no equivalent exists for edges). (Lighter alternative considered: a
+by the agent. **Instrumentation point: inside `runEdges`' scan
+loop**, written per-edge right after scan/resolve — the
+`len(prompts)==0` early return precedes the budget check
+(`run_edges.go:145` vs `149`), so a firing edge that renders no
+prompt section skips `writeRepairExhaustion` entirely today;
+records written after those gates would miss suppressed and
+exhausted outcomes. (Lighter alternative considered: a
 `ContentPart` type on the boundary assistant message — `Parts` is
 a JSON blob, no migration — but firing-rate queries and eval
 assertions want structured columns, not JSON-part scans; the
