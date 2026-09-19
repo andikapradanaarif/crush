@@ -115,11 +115,25 @@ func TestValidatePlanItems(t *testing.T) {
 			},
 			wantErr: "empty evidence_paths",
 		},
+		{
+			name: "path covering the working directory",
+			items: []TodoItem{
+				{Content: "a", Status: "pending", EvidencePaths: []string{"."}},
+			},
+			wantErr: "covers the whole working directory",
+		},
+		{
+			name: "ancestor path covering the working directory",
+			items: []TodoItem{
+				{Content: "a", Status: "pending", EvidencePaths: []string{".."}},
+			},
+			wantErr: "covers the whole working directory",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := validatePlanItems(tc.items, bindable)
+			err := validatePlanItems(tc.items, bindable, t.TempDir())
 			if tc.wantErr == "" {
 				require.NoError(t, err)
 				return
@@ -133,7 +147,7 @@ func TestValidatePlanItems(t *testing.T) {
 func TestTodosToolMintsDeterministicIDs(t *testing.T) {
 	t.Parallel()
 	sessions, sessionID := newTodosTestSession(t)
-	tool := NewTodosTool(sessions, nil)
+	tool := NewTodosTool(sessions, nil, t.TempDir())
 
 	// First write: keyed dep target, keyless item, depends_on by key.
 	resp, err := runTodosTool(t, tool, sessionID, []TodoItem{
@@ -173,11 +187,11 @@ func TestTodosToolMintsDeterministicIDs(t *testing.T) {
 func TestTodosToolDescriptionSurfacesCheckNames(t *testing.T) {
 	t.Parallel()
 	sessions, _ := newTodosTestSession(t)
-	tool := NewTodosTool(sessions, []string{"verify:build", "verify:lint"})
+	tool := NewTodosTool(sessions, []string{"verify:build", "verify:lint"}, t.TempDir())
 	require.Contains(t, tool.Info().Description, "verify:build")
 	require.Contains(t, tool.Info().Description, "verify:lint")
 
 	sessions2, _ := newTodosTestSession(t)
-	bare := NewTodosTool(sessions2, nil)
+	bare := NewTodosTool(sessions2, nil, t.TempDir())
 	require.NotContains(t, bare.Info().Description, "verify:")
 }

@@ -21,6 +21,14 @@ are structural questions about an artifact — not self-reported
 model judgment. The model keeps writing plans; the harness gains
 the ability to verify them.
 
+`PlanItem` is unrelated to upstream's plan _mode_ (`AgentPlan`,
+`plan.md.tpl`): the plan agent produces human-facing prose for
+user approval and cannot write `PlanItem`s (`resolvePlanTools`
+excludes `todos`). Two systems named "plan" coexist — one the
+user confirms, one the harness checks. Seeding typed items from
+an approved plan-mode plan is a deliberate follow-up, not part of
+this work.
+
 ## Problem
 
 `session.Todo` is `{Content, Status, ActiveForm}`

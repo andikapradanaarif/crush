@@ -4,9 +4,11 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/session"
 )
 
@@ -54,7 +56,7 @@ type TodosResponseMetadata struct {
 // evidence-check vocabulary — the configured verify commands' check
 // identities — surfaced in the description so the model can bind names
 // it has never seen run.
-func NewTodosTool(sessions session.Service, checkNames []string) fantasy.AgentTool {
+func NewTodosTool(sessions session.Service, checkNames []string, workingDir string) fantasy.AgentTool {
 	description := todosDescription
 	if len(checkNames) > 0 {
 		var b strings.Builder
@@ -83,7 +85,7 @@ func NewTodosTool(sessions session.Service, checkNames []string) fantasy.AgentTo
 				return fantasy.ToolResponse{}, fmt.Errorf("failed to get session: %w", err)
 			}
 
-			if err := validatePlanItems(params.Todos, bindable); err != nil {
+			if err := validatePlanItems(params.Todos, bindable, workingDir); err != nil {
 				return fantasy.ToolResponse{}, err
 			}
 
@@ -181,9 +183,10 @@ func NewTodosTool(sessions session.Service, checkNames []string) fantasy.AgentTo
 // the same list, no cycles or self-deps, and only configured check
 // names bound. Every rejection names the offending key or item so the
 // model can repair in the same call.
-func validatePlanItems(items []TodoItem, bindable map[string]bool) error {
+func validatePlanItems(items []TodoItem, bindable map[string]bool, workingDir string) error {
 	keys := map[string]bool{}
-	contents := map[string]string{}
+	contents := map[string]int{}
+	cleanWD := filepath.Clean(workingDir)
 	for i, item := range items {
 		switch item.Status {
 		case "pending", "in_progress", "completed":
@@ -197,9 +200,9 @@ func validatePlanItems(items []TodoItem, bindable map[string]bool) error {
 			keys[item.Key] = true
 		}
 		if first, dup := contents[item.Content]; dup {
-			return fmt.Errorf("items %q and %q have identical content — make them distinct (ambiguous dependency target)", first, item.Content)
+			return fmt.Errorf("items %d and %d have identical content %q — make them distinct (ambiguous dependency target)", first, i, item.Content)
 		}
-		contents[item.Content] = item.Content
+		contents[item.Content] = i
 	}
 	for i, item := range items {
 		for _, dep := range item.DependsOn {
@@ -221,6 +224,13 @@ func validatePlanItems(items []TodoItem, bindable map[string]bool) error {
 		for _, path := range item.EvidencePaths {
 			if strings.TrimSpace(path) == "" {
 				return fmt.Errorf("item %q binds an empty evidence_paths entry — name a file or directory the work touches", item.Content)
+			}
+			// A binding that normalizes to the working directory (or an
+			// ancestor of it) covers every write — vacuous evidence.
+			np := filepath.Clean(filepathext.SmartJoin(cleanWD, strings.TrimRight(path, "/\\")))
+			rel, err := filepath.Rel(np, cleanWD)
+			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return fmt.Errorf("item %q binds %q which covers the whole working directory — name a specific file or directory", item.Content, path)
 			}
 		}
 	}
@@ -261,9 +271,9 @@ func detectPlanCycle(items []TodoItem) error {
 		color[key] = black
 		return nil
 	}
-	for key := range deps {
-		if color[key] == white {
-			if err := visit(key); err != nil {
+	for _, item := range items {
+		if item.Key != "" && color[item.Key] == white {
+			if err := visit(item.Key); err != nil {
 				return err
 			}
 		}
