@@ -200,7 +200,13 @@ the edge's prompt branches on budget, not a second edge.
 - **Handoff payload:** pull the session's latest checkpoint into
   resolve — #48 shipped the machinery but nothing wires it into
   an edge yet; this is where "the forced turn starts re-oriented
-  at zero model cost" becomes literal.
+  at zero model cost" becomes literal. **Timing, stated:** the
+  run-end checkpoint generates in an async goroutine spawned
+  _after_ `runEdges` (`agent.go:1563+`), so resolve sees the
+  previous turn's (or a mid-run) checkpoint — never this run's.
+  That's fine for re-orientation: the stall evidence itself
+  comes from `result.Steps`. When the notebook is off, the edge
+  degrades to evidence-only — no payload.
 - **resolve:** collect the repeated call signature, the write set
   (**scan `result.Steps` for write-class calls** — filetracker
   can't serve it: writes also `RecordRead` for staleness tracking,
@@ -270,7 +276,10 @@ notice" failure as a declared transition.
 - **Gating:** rides `ambiguity_clarification` — it's the same
   calibrated-autonomy family as stall escalation (a user-targeted
   "is this intended?" prompt); the default-on flip is a separate
-  evidence-gated decision informed by its own firing-rate records.
+  evidence-gated decision informed by its own firing-rate
+  records. Update the flag's `optionSpec` description when this
+  lands — it currently describes clarification only, not the
+  spend tripwire.
 - **`runEdgeSet` position: last.** It reads `in.stalled` (run
   input), not the stall edge's trigger, so ordering is cosmetic —
   declared here because the doc requires new rows to say where
@@ -300,22 +309,33 @@ notice" failure as a declared transition.
   fresh user turns re-fires at each turn end — intended (each
   turn's spend is a fresh decision worth surfacing); widen to
   session scope only if the re-fire proves nagging in practice.
+  **Degraded path has no carrier — stated decision:** the headless
+  degrade appends a logged assumption, not a retry clone, so no
+  marker stamps; a headless repair chain that burns write-less
+  again can re-fire and append repeated degraded notes (bounded
+  by `maxRepairAttempts` — nag-at-most-twice per chain; across
+  fresh turns it's a cheap log line, and `edge_firings` makes
+  the repetition visible). Accepted for v1; revisit records-
+  derived suppression only for this path if records show spam.
 - **Precedence — and the merge-rule gap:** when an
   escalation-family prompt co-fires with retry-family triggers,
-  the user-targeted prompt wins the slot and retry evidence
-  carries as context inside it (or defers — conditions re-fire
-  next boundary anyway). This rule is **not implemented today**:
-  merged prompts concatenate sections (`run_edges.go`). The real
-  co-fire pair is **burn-watch + verification/todos** — all three
-  gate on `cleanStop`, so a clean-stopping run that both failed
-  checks and burned write-less tokens hands the model "fix these
+  the user-targeted prompt wins the slot outright and retry
+  triggers **defer** — their conditions still hold at the next
+  boundary (checks still fail, todos still open), so they re-fire
+  on the turn after the question answers. Carry-as-context is
+  rejected: inlining failed-check evidence into a prompt whose
+  instruction is "ask the user" muddies the turn's semantics.
+  This rule is **not implemented today**: merged prompts
+  concatenate sections (`run_edges.go`). The real co-fire pair is
+  **burn-watch + verification/todos** — all three gate on
+  `cleanStop`, so a clean-stopping run that both failed checks
+  and burned write-less tokens hands the model "fix these
   checks" _and_ "ask the user" and lets it pick. (verification/
   todos + stall can't co-fire — a stalled run's terminal step
   isn't `FinishReasonStop`, so `cleanStop` fails.) Mechanism:
   `runEdge` gains a `family` field (retry vs escalate); when both
-  fire, `runEdges` renders the escalate-family prompt and appends
-  retry-family evidence as context — never two competing
-  instruction sections.
+  fire, `runEdges` renders only the escalate-family prompt and
+  marks retry triggers deferred.
 - **Limit, stated plainly:** edges fire at run boundaries only —
   a single giant turn mid-flight is not caught. Mid-run spend
   pressure is `CONTEXT_WINDOW_SAFETY.md` territory (or a future
@@ -343,20 +363,32 @@ those are exactly the states that make firing rates interpretable
 ("never fires" must be distinguishable from "never evaluated").
 Follow the `collapsed_turns` precedent: migration + sqlc query +
 service method + stats section + eval analyzer read — an
-`edge_firings` table. **PK: `(session_id, run_stamp,
-repair_attempts, edge)`** — `call.RunStamp` _is_ the run-boundary
-derivation (stamped once per user turn at `agent.go:891`,
-preserved across retry clones, already joins to `run:<stamp>`
-checkpoint tags); `INSERT OR IGNORE` on it dedupes a resumed
-session's double-fire the way `collapsed_turns` does. Columns:
-edge name, trigger detail, **outcome enum**: fired / suppressed /
-exhausted / headless-degraded / **gated** (flag-off early return
-— `scanStallEdge` returning nil at the option check must not be
+`edge_firings` table. **PK: `(session_id, turn_seq,
+repair_attempts, edge)`** — `turn_seq` is the ordinal of the
+run's initiating user message, derived from message positions
+(the same family as `collapsed_turns`' `byTurn`): durable across
+restarts and `INSERT OR IGNORE`-dedupable. **`call.RunStamp` is
+rejected as the key** — it's `runStampGen.Add(1)` seeded from a
+random per-build epoch (`agent.go:481-495`): stamps are unique
+across restarts but non-deterministic per logical turn, so a
+resumed session's re-fire wouldn't dedup and the stamp orders
+nothing durably. It earns a plain _column_ instead — it still
+joins to persisted `run:<stamp>` checkpoint tags. Columns: edge
+name, `variant` (stall records `replan`/`escalate` — the single
+most interesting firing stat for that edge), trigger detail,
+**outcome enum**: fired / suppressed / exhausted /
+headless-degraded / **gated** (flag-off early return —
+`scanStallEdge` returning nil at the option check must not be
 indistinguishable from "edge never ran"; a boundary with no row
 means _clean_, which stays distinguishable precisely because
-gated rows exist). `crush stats` reads the table; the eval doc
-reads the same counts via `SessionTelemetry` +
-`emitEvalTelemetry`. **Write path — not `notebook.Service`:**
+gated rows exist), `created_at` (firing-rate-over-time queries).
+Precision note: records distinguish _triggered-but-not-fired_ vs
+_fired_ — "evaluated" is guaranteed by construction since
+`runEdgeSet` statically scans every edge at every boundary; the
+one coverage hole is the `len(in.result.Steps)==0` early return,
+named here so nobody reads zero rows as dead code. `crush stats`
+reads the table; the eval doc reads the same counts via
+`SessionTelemetry` + `emitEvalTelemetry`. **Write path — not `notebook.Service`:**
 `RecordCollapsedTurn` rides `a.notebook`, which is nil when the
 notebook is disabled (`recordCollapsedTurns` early-returns) —
 edge firings are harness telemetry, not notebook concepts, and
