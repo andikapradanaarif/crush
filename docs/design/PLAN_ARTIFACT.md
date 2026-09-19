@@ -224,7 +224,13 @@ evidence` — a completed mark with pending/failed/unmet
   (evidence vocabulary unsurfaced) is a guaranteed loop. Bounce
   count is exported telemetry: a high rate means the model can't
   conform — vocabulary invisible, schema too strict — versus a
-  weak model; silent bouncing hides the difference. **Open
+  weak model; silent bouncing hides the difference. Headless has
+  no one to ask, so escalation degrades the same way the scope
+  check does: proceed-with-logged-assumption — the rejected
+  declaration _lands_ after the budget. A persistent
+  non-conformer defeats the gate headless by design: refusing
+  forever would stall, and the bounce events still record that
+  conformance failed. **Open
   items do not block
   `phase-confirm`** — at the first-write boundary every item is
   open by definition, so blocking there deadlocks every plan.

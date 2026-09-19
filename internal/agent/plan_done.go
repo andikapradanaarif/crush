@@ -191,10 +191,15 @@ func scanPlanEvidence(msgs []message.Message, workingDir string, manager *lsp.Ma
 		}
 	}
 	if manager != nil {
-		ev.resolveStaleDiag(
-			tools.SnapshotDiagnostics(manager).CountByPath(),
-			func(p string) bool { return tools.AnyClientHandles(manager, p) },
-		)
+		// Canonicalize the live keys too — servers that echo the
+		// didOpen URI report workingDir-form paths while gopls
+		// reports resolved ones; the diag map is canonical.
+		live := map[string]int{}
+		for p, n := range tools.SnapshotDiagnostics(manager).CountByPath() {
+			live[filepathext.Canonical(p)] += n
+		}
+		ev.resolveStaleDiag(live,
+			func(p string) bool { return tools.AnyClientHandles(manager, p) })
 	}
 	return ev
 }

@@ -80,7 +80,10 @@ func (v *verifyingTool) SetProviderOptions(opts fantasy.ProviderOptions) {
 
 func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 	filePath := tools.ToolCallFilePath(call.Input)
-	if filePath == "" {
+	// A projectWide tool may carry no usable path at all — a rename's
+	// `path` is an optional search root — and its delta still applies:
+	// the snapshots are project-wide, not anchored to the file.
+	if filePath == "" && !v.projectWide {
 		return v.inner.Run(ctx, call)
 	}
 	absPath := filepathext.SmartJoin(v.workingDir, filePath)
@@ -99,6 +102,13 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 		v.lspManager.Start(ctx, absPath)
 	}
 	lspCovered := tools.AnyClientHandles(v.lspManager, absPath)
+	if v.projectWide {
+		// The delta is project-wide, so anchor coverage is
+		// irrelevant — a rename's `path` is a search-root directory
+		// no filetype-restricted client handles. A nil manager still
+		// means uncovered: nothing can snapshot.
+		lspCovered = v.lspManager != nil
+	}
 
 	if !lspCovered {
 		resp, err := v.inner.Run(ctx, call)

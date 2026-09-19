@@ -3,12 +3,15 @@ package lsp
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/env"
+	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/x/powernap/pkg/lsp/protocol"
 	"github.com/stretchr/testify/require"
 )
@@ -199,4 +202,21 @@ func TestWaitForDiagnostics_NilClient(t *testing.T) {
 	var c *Client
 	// Should not panic.
 	c.WaitForDiagnostics(context.Background(), time.Second)
+}
+
+// TestHandlesFile_SymlinkedWorkingDir pins the canonical fallback: a
+// client scoped to a symlinked working dir must still handle paths in
+// the resolved form servers report in diagnostic locations.
+func TestHandlesFile_SymlinkedWorkingDir(t *testing.T) {
+	t.Parallel()
+
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	require.NoError(t, os.Symlink(real, link))
+
+	c := &Client{cwd: link, canonCwd: filepathext.Canonical(link), fileTypes: []string{"go"}}
+	require.True(t, c.HandlesFile(filepath.Join(link, "f.go")), "workingDir-form path")
+	require.True(t, c.HandlesFile(filepath.Join(real, "f.go")), "canonical path")
+	require.False(t, c.HandlesFile(filepath.Join(real, "f.py")), "filetype gate still applies")
+	require.False(t, c.HandlesFile(filepath.Join(t.TempDir(), "f.go")), "outside the workspace")
 }

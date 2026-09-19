@@ -14,6 +14,7 @@ import (
 
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
+	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/home"
 	powernap "github.com/charmbracelet/x/powernap/pkg/lsp"
@@ -36,6 +37,11 @@ type Client struct {
 
 	// Working directory this LSP is scoped to.
 	cwd string
+	// canonCwd is cwd with symlinks resolved — servers report
+	// canonicalized paths in diagnostic locations (gopls maps /var
+	// to /private/var), so HandlesFile falls back to it when the
+	// workingDir-form prefix check misses.
+	canonCwd string
 
 	// File types this LSP server handles (e.g., .go, .rs, .py)
 	fileTypes []string
@@ -91,6 +97,7 @@ func New(
 		debug:       debug,
 		resolver:    resolver,
 		cwd:         cwd,
+		canonCwd:    filepathext.Canonical(cwd),
 	}
 	client.serverState.Store(StateStopped)
 
@@ -391,7 +398,8 @@ func (c *Client) HandlesFile(path string) bool {
 	if c == nil {
 		return false
 	}
-	if !fsext.HasPrefix(path, c.cwd) {
+	if !fsext.HasPrefix(path, c.cwd) &&
+		(c.canonCwd == "" || !fsext.HasPrefix(filepathext.Canonical(path), c.canonCwd)) {
 		slog.Debug("File outside workspace", "name", c.name, "file", path, "workDir", c.cwd)
 		return false
 	}

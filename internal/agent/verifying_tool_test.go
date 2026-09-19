@@ -92,6 +92,35 @@ func TestVerifyingTool_MissingPathPassesThrough(t *testing.T) {
 	require.Empty(t, resp.Metadata)
 }
 
+// TestVerifyingTool_ProjectWideNoPath pins that a workspace-edit tool
+// with no usable anchor path still runs the verification flow instead
+// of passing through — a rename's `path` is an optional search root,
+// not a written file.
+func TestVerifyingTool_ProjectWideNoPath(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	inner := &fakeTool{name: "lsp_rename", resp: fantasy.NewTextResponse("ok")}
+	tool := &verifyingTool{inner: inner, lspManager: nil, workingDir: dir, projectWide: true}
+
+	resp, err := tool.Run(t.Context(), fantasy.ToolCall{
+		ID:    "call-1",
+		Name:  "lsp_rename",
+		Input: `{"symbol":"Old","new_name":"New"}`,
+	})
+	require.NoError(t, err)
+	require.True(t, inner.called)
+
+	var meta struct {
+		Verification []message.VerificationCheck `json:"verification"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(resp.Metadata), &meta))
+	require.Len(t, meta.Verification, 1)
+	require.Equal(t, "diagnostics", meta.Verification[0].Check)
+	require.Equal(t, message.VerificationUnverified, meta.Verification[0].State)
+	require.Equal(t, filepathext.Canonical(dir), meta.Verification[0].Path)
+}
+
 func TestDiagnosticsChecks(t *testing.T) {
 	t.Parallel()
 

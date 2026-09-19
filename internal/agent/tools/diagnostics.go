@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/x/powernap/pkg/lsp/protocol"
 )
@@ -151,13 +152,19 @@ func NotifyLSPs(
 }
 
 // FormatDiagnostics renders the file and project diagnostics as a
-// formatted, sorted, truncated string for tool-result output.
-// filePath should be canonical (filepathext.Canonical) — diagnostic
-// locations come from the server in resolved form, so current-file
-// grouping only matches like forms.
+// formatted, sorted, truncated string for tool-result output. Both
+// sides of the current-file comparison are canonicalized — servers
+// may report resolved paths while callers pass workingDir-form (or
+// vice versa for servers that echo the didOpen URI), so raw equality
+// would misgroup on symlinked trees either way.
 func FormatDiagnostics(filePath string, manager *lsp.Manager) string {
 	if manager == nil {
 		return ""
+	}
+
+	want := ""
+	if filePath != "" {
+		want = filepathext.Canonical(filePath)
 	}
 
 	var fileDiags []string
@@ -170,7 +177,7 @@ func FormatDiagnostics(filePath string, manager *lsp.Manager) string {
 				slog.Error("Failed to convert diagnostic location URI to path", "uri", location, "error", err)
 				continue
 			}
-			isCurrentFile := path == filePath
+			isCurrentFile := want != "" && filepathext.Canonical(path) == want
 			for _, diag := range diags {
 				formattedDiag := formatDiagnostic(path, diag, lspName)
 				if isCurrentFile {
