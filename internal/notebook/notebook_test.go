@@ -2,9 +2,11 @@ package notebook
 
 import (
 	"context"
+	"database/sql"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/db"
@@ -407,6 +409,35 @@ func TestRenderEntries(t *testing.T) {
 func TestRenderEntries_NilEntries(t *testing.T) {
 	rendered := RenderEntries(nil)
 	require.Equal(t, "", rendered)
+}
+
+// Stored entries written before the neutral marker may still carry the
+// recall pointer — hydration must normalize it once so every consumer
+// (prompt render, auto-inject, recall output, checkpoint input) sees
+// clean text without per-site scrubs.
+func TestGetEntries_NormalizesLegacyTruncatedMarker(t *testing.T) {
+	svc, q, sessionID := newTestService(t, nil)
+
+	const legacy = "## Edit auth.go\npartial\n" + LegacyEntryTruncatedMarker + "\n#file:auth.go"
+	_, err := q.CreateNotebookEntry(context.Background(), db.CreateNotebookEntryParams{
+		ID:               uuid.New().String(),
+		SessionID:        sessionID,
+		TurnNumber:       1,
+		EventType:        "file_edit",
+		Title:            "Edit auth.go",
+		EntryText:        legacy,
+		EntryTextFull:    sql.NullString{String: legacy, Valid: true},
+		CompressionLevel: CompressionFull,
+		CreatedAt:        time.Now().Unix(),
+	})
+	require.NoError(t, err)
+
+	entries, err := svc.GetEntries(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Contains(t, entries[0].EntryText, EntryTruncatedMarker)
+	require.NotContains(t, entries[0].EntryText, "recall")
+	require.NotContains(t, entries[0].EntryTextFull, "recall")
 }
 
 func TestCompact_NoOpUnderLimit(t *testing.T) {
@@ -932,6 +963,26 @@ func TestTruncateTextToTokens(t *testing.T) {
 	// Exact boundary: 100 tokens * 4 chars = 400 chars.
 	exact := strings.Repeat("b", 400)
 	require.Equal(t, exact, truncateTextToTokens(exact, 100))
+}
+
+// TestTruncateEntry_ToolNeutralMarker is the issue-66 contract at the
+// write site: the truncation marker baked into stored entry text names
+// no tool — pointers are rendered per-agent, and entry_text_full holds
+// the same cut text so recall has nothing fuller to return anyway.
+func TestTruncateEntry_ToolNeutralMarker(t *testing.T) {
+	t.Parallel()
+
+	text := strings.Repeat("x", 200) + "\n#t"
+	got := truncateEntry(text, 25) // 100-char budget.
+	require.Contains(t, got, EntryTruncatedMarker)
+	require.NotContains(t, got, "recall")
+	require.True(t, strings.HasSuffix(got, "#t"), "tag lines survive truncation")
+
+	// A tag block bigger than the budget clamps the body cut instead
+	// of slicing out of range.
+	hugeTags := "body\n#" + strings.Repeat("t", 500)
+	got = truncateEntry(hugeTags, 25)
+	require.Contains(t, got, EntryTruncatedMarker)
 }
 
 func TestMem0Sync_NilGuards(t *testing.T) {

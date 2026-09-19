@@ -922,3 +922,29 @@ func TestCoveredReViews_CountsViewOnInjectedFile(t *testing.T) {
 	got, _ := a.nbStats.Get(sessionID)
 	require.Equal(t, 1, got.CoveredReViews)
 }
+
+// With recall absent from the live tool set, Applied superseded marks
+// must not substitute — a recall("result:...") pointer would name a
+// tool the agent can't call. With recall present the same marks stub.
+func TestPreparePrompt_StubGateOnLiveRecall(t *testing.T) {
+	t.Parallel()
+	a, svc, sessionID := newStubTestAgent(t)
+	ctx := t.Context()
+	a.stubSuperseded = true
+	a.tools = csync.NewSliceFrom([]fantasy.AgentTool{&fakeTool{name: "view"}})
+
+	msgs := viewThenEdit(t, svc, sessionID, bigContent(), true)
+	a.flagPrunableToolResults(ctx, msgs)
+	ok := a.promoteSupersededStubs(ctx, msgs, 0, segmentBoundaries(msgs, segmentTokenThreshold, segmentMaxStepCount))
+	require.True(t, ok)
+	require.True(t, resultOf(t, msgs[2], "tc-view").Superseded.Applied)
+
+	history, _ := a.preparePrompt(ctx, msgs, false, nil)
+	res := renderedResultText(t, history, "tc-view")
+	require.NotContains(t, res, `recall("result:`)
+	require.Contains(t, res, "file content line")
+
+	a.tools = csync.NewSliceFrom([]fantasy.AgentTool{&fakeTool{name: "recall"}})
+	history, _ = a.preparePrompt(ctx, msgs, false, nil)
+	require.Contains(t, renderedResultText(t, history, "tc-view"), `recall("result:tc-view")`)
+}

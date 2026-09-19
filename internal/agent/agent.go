@@ -43,6 +43,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	notebooktool "github.com/charmbracelet/crush/internal/agent/tools/notebook"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/filetracker"
@@ -1954,6 +1955,17 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 	// build and the per-step rebuild in PrepareStep — one boundary
 	// implementation, two call sites.
 	notebookEnabled := a.notebookEnabled && a.notebook != nil
+
+	// Turn collapse and superseded stubs only render recall pointers —
+	// gate them on the live tool set, not just the build-time flags, so
+	// a runtime disabled_tools: [recall] can't leave dead pointers.
+	// Caveat: the model sees the run-start tool snapshot (agentTools in
+	// Run), while this reads the mutable set — a mid-run palette swap
+	// diverges for the rest of the run. Removal fails safe (verbatim);
+	// addition can emit pointers to a not-yet-offered tool until the
+	// next run, matching the breadcrumb's live gate.
+	recallLive := a.hasTool(notebooktool.RecallToolName)
+
 	var rawMsgs []message.Message
 	boundary := 0
 	if notebookEnabled {
@@ -1979,11 +1991,14 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 			if last, ok := a.stubBoundary.Get(sessionID); !ok || last != boundary {
 				moved := ok
 				persisted := true
-				if a.stubSuperseded {
+				if a.stubSuperseded && recallLive {
 					// Boundary moves already invalidate the
 					// prompt-cache prefix, so pending superseded
 					// flags promote to stubs only here — never
-					// mid-window.
+					// mid-window. Without recall the stubs can't
+					// render anyway, so promotion waits rather
+					// than persisting marks and stats the model
+					// never sees.
 					promoteCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 					persisted = a.promoteSupersededStubs(promoteCtx, msgs, boundary, segs)
 					cancel()
@@ -2011,7 +2026,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 	// rawMsgs can begin mid-turn, so numbering the slice would mislabel
 	// turns against the registry.
 	var turns []int64
-	if collapse != nil && len(collapse.Set) > 0 {
+	if collapse != nil && len(collapse.Set) > 0 && recallLive {
 		turns = messageTurns(msgs)
 	}
 	collapsedTurn := func(i int) (int64, bool) {
@@ -2059,7 +2074,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 			var n int
 			m, n = collapseToolMessageForTurn(m, turn, a.priorTurns, exemptCalls, callNames)
 			collapsedResults += n
-		} else if a.stubSuperseded {
+		} else if a.stubSuperseded && recallLive {
 			// Substitute stubs before indexing so the emitted result
 			// parts carry the stub text, not the stored original.
 			var count int

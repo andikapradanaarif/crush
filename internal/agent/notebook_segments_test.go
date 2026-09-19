@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	notebooktool "github.com/charmbracelet/crush/internal/agent/tools/notebook"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/message"
@@ -336,6 +337,12 @@ func newSegmentTestAgent(t *testing.T, gen notebook.Generator) (*sessionAgent, m
 		stubStats:        csync.NewMap[string, stubStats](),
 		collapseRecorded: csync.NewMap[string, *csync.Map[int64, bool]](),
 		systemPrompt:     csync.NewValue("system"),
+		// Collapse and stub rendering gate on the live tool set — the
+		// fixture carries recall/notebook_search like a default coder.
+		tools: csync.NewSliceFrom([]fantasy.AgentTool{
+			&fakeTool{name: notebooktool.RecallToolName},
+			&fakeTool{name: notebooktool.SearchToolName},
+		}),
 	}
 	// Seed the stamp generator like NewSessionAgent — stamps are
 	// random-epoch, so tests must assert explicit stamps rather than
@@ -648,7 +655,7 @@ func TestRenderNotebookPrefix_SegmentCoverageFilter(t *testing.T) {
 	}
 	rawMsgs := []message.Message{segUser("go"), segAssistant("work")}
 	prefix, files := a.renderNotebookPrefix(t.Context(), "sess", entries, rawMsgs,
-		segmentKey{turn: 0, segment: 2}, segmentKey{turn: 0, segment: 0}, nil, selectionInput{}, nil)
+		segmentKey{turn: 0, segment: 2}, segmentKey{turn: 0, segment: 0}, nil, selectionInput{}, nil, a.recallVia())
 	require.Len(t, prefix, 1)
 	require.Equal(t, fantasy.MessageRoleSystem, prefix[0].Role)
 	require.Empty(t, files)
@@ -656,6 +663,48 @@ func TestRenderNotebookPrefix_SegmentCoverageFilter(t *testing.T) {
 	require.Contains(t, text, "segment zero content")
 	require.Contains(t, text, "segment one content")
 	require.NotContains(t, text, "segment two content")
+}
+
+// TestRenderNotebookPrefix_OmittedTurnBreadcrumb is the issue-66
+// contract: the recall pointer in the omitted-turns breadcrumb must
+// name only the lookup tools the rendering agent actually has — a
+// pointer to a missing tool is a dead end.
+func TestRenderNotebookPrefix_OmittedTurnBreadcrumb(t *testing.T) {
+	t.Parallel()
+
+	// The oversized turn-0 entry is skipped by every selection pass,
+	// leaving turn 0 in the omitted set the breadcrumb reports.
+	entries := []notebook.Entry{
+		nbSegEntry("big", 0, 0, 1, notebook.EventGeneral, "oversized", maxNotebookInjectionTokens+1),
+		nbSegEntry("ok", 1, 0, 1, notebook.EventGeneral, "rendered content", 10),
+	}
+	rawMsgs := []message.Message{segUser("go"), segAssistant("work")}
+	render := func(a *sessionAgent) string {
+		prefix, _ := a.renderNotebookPrefix(t.Context(), "sess", entries, rawMsgs,
+			segmentKey{turn: 2, segment: 0}, segmentKey{turn: 0, segment: 0}, nil, selectionInput{}, nil, a.recallVia())
+		require.Len(t, prefix, 1)
+		return prefix[0].Content[0].(fantasy.TextPart).Text
+	}
+	withTools := func(tools ...fantasy.AgentTool) *sessionAgent {
+		return &sessionAgent{tools: csync.NewSliceFrom(tools)}
+	}
+
+	both := render(withTools(&fakeTool{name: "recall"}, &fakeTool{name: "notebook_search"}))
+	require.Contains(t, both, "turns 0 have notebook entries not injected here")
+	require.Contains(t, both, "recallable via recall/notebook_search")
+
+	recallOnly := render(withTools(&fakeTool{name: "recall"}))
+	require.Contains(t, recallOnly, "recallable via recall]")
+	require.NotContains(t, recallOnly, "notebook_search")
+
+	searchOnly := render(withTools(&fakeTool{name: "notebook_search"}))
+	require.Contains(t, searchOnly, "browsable via notebook_search]")
+	require.NotContains(t, searchOnly, "recallable via recall")
+
+	// Neither tool: the omission still reports, but with no pointer.
+	none := render(&sessionAgent{})
+	require.Contains(t, none, "turns 0 have notebook entries not injected here]")
+	require.NotContains(t, none, "recallable")
 }
 
 // TestDetectSegments_AsyncCloses exercises the real goroutine path —
@@ -785,31 +834,35 @@ func TestPrefixFingerprint_SelectionInputs(t *testing.T) {
 	}
 	refs := []string{"file:a.go"}
 	base := selectionInput{}
-	fp := prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, base)
+	fp := prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, base, "")
 
 	// Identical inputs hash identically.
-	require.Equal(t, fp, prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, selectionInput{}))
+	require.Equal(t, fp, prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, selectionInput{}, ""))
 
 	// Working-set membership changes the hash.
 	withWS := selectionInput{workingSet: map[string][]string{"a.go": {"/w/a.go"}}}
-	require.NotEqual(t, fp, prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, withWS))
+	require.NotEqual(t, fp, prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, withWS, ""))
 
 	// A file dying changes the hash even when the working set is
 	// unchanged.
 	withWS.livePaths = map[string]bool{"/w/a.go": true}
-	live := prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, withWS)
+	live := prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, withWS, "")
 	withWS.livePaths = map[string]bool{"/w/a.go": false}
-	dead := prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, withWS)
+	dead := prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, withWS, "")
 	require.NotEqual(t, live, dead)
 
 	// The fill band position changes the hash.
 	withWS.livePaths = nil
-	noBand := prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, withWS)
+	noBand := prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, withWS, "")
 	withWS.bandFloor = segmentKey{turn: 0, segment: 5}
-	require.NotEqual(t, noBand, prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, withWS))
+	require.NotEqual(t, noBand, prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, withWS, ""))
 
 	// The pass-1 recency floor changes the hash — a zero-entry
 	// segment committing inside coverage shifts it while boundary
 	// and entries stay put.
-	require.NotEqual(t, fp, prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 3}, entries, refs, base))
+	require.NotEqual(t, fp, prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 3}, entries, refs, base, ""))
+
+	// The tool palette changes the hash — a reload dropping recall
+	// must not serve a cached prefix that still points at it.
+	require.NotEqual(t, fp, prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, base, " — recallable via recall"))
 }

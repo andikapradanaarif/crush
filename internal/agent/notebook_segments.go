@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	notebooktool "github.com/charmbracelet/crush/internal/agent/tools/notebook"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/notebook"
 )
@@ -741,10 +742,13 @@ func (a *sessionAgent) generateRunEndSegments(ctx context.Context, sessionID str
 // prefixFingerprint hashes every input the notebook prefix render
 // reads: the boundary position, its coverage key, the entries
 // (identity plus the fields compaction rewrites), the relevance refs,
-// and the selection inputs — working set, file liveness, fill band.
-// Identical inputs must render byte-identical output, so the cache
-// key is the input set itself.
-func prefixFingerprint(boundary int, bKey, floor segmentKey, entries []notebook.Entry, refs []string, sel selectionInput) uint64 {
+// the selection inputs — working set, file liveness, fill band — and
+// toolPtr, the recall-pointer suffix the live tool set produces. The
+// palette changes nothing else in the hash but SetTools can swap it
+// mid-run, and a cached prefix must not serve a pointer to a tool the
+// render would no longer emit. Identical inputs must render
+// byte-identical output, so the cache key is the input set itself.
+func prefixFingerprint(boundary int, bKey, floor segmentKey, entries []notebook.Entry, refs []string, sel selectionInput, toolPtr string) uint64 {
 	h := fnv.New64a()
 	var scratch [8]byte
 	write := func(v int64) {
@@ -803,6 +807,7 @@ func prefixFingerprint(boundary int, bKey, floor segmentKey, entries []notebook.
 	for _, t := range slices.Sorted(maps.Keys(sel.digestEligible)) {
 		write(t)
 	}
+	h.Write([]byte(toolPtr))
 	return h.Sum64()
 }
 
@@ -895,13 +900,17 @@ func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msg
 		sel.digestEligible = collapse.digestTurns
 	}
 	floor := coveredSegmentFloor(segs, boundary)
-	fp := prefixFingerprint(boundary, bKey, floor, entries, refs, sel)
+	// Compute the recall-pointer suffix once per render: it feeds both
+	// the fingerprint and the breadcrumb, so a SetTools landing
+	// mid-render cannot split the cache key from the content it keys.
+	toolPtr := a.recallVia()
+	fp := prefixFingerprint(boundary, bKey, floor, entries, refs, sel, toolPtr)
 	if a.prefixCache != nil {
 		if c, ok := a.prefixCache.Get(sessionID); ok && c.boundary == boundary && c.fingerprint == fp {
 			return c.msgs
 		}
 	}
-	prefix, files := a.renderNotebookPrefix(detCtx, sessionID, entries, msgs, bKey, floor, refs, sel, collapse)
+	prefix, files := a.renderNotebookPrefix(detCtx, sessionID, entries, msgs, bKey, floor, refs, sel, collapse, toolPtr)
 	if a.prefixCache != nil {
 		a.prefixCache.Set(sessionID, cachedPrefix{boundary: boundary, fingerprint: fp, msgs: prefix, files: files})
 	}
@@ -1065,8 +1074,11 @@ func fantasyToolResultOutputEqual(a, b fantasy.ToolResultOutputContent) bool {
 // returned file set holds the file: basenames this render injected —
 // the coverage signal the re-view counter joins against. collapse's
 // digestTurns freeze happens in notebookPrefix before the cache
-// check; the call here covers direct render callers.
-func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID string, entries []notebook.Entry, msgs []message.Message, bKey segmentKey, floor segmentKey, refs []string, sel selectionInput, collapse *turnCollapse) ([]fantasy.Message, map[string]bool) {
+// check; the call here covers direct render callers. toolPtr is the
+// recall-pointer suffix the caller computed once for this render —
+// the same value the fingerprint hashed, so content and cache key
+// can never split across a palette swap.
+func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID string, entries []notebook.Entry, msgs []message.Message, bKey segmentKey, floor segmentKey, refs []string, sel selectionInput, collapse *turnCollapse, toolPtr string) ([]fantasy.Message, map[string]bool) {
 	var filtered []notebook.Entry
 	for _, e := range entries {
 		if e.TurnNumber < bKey.turn || (e.TurnNumber == bKey.turn && e.SegmentNumber < bKey.segment) {
@@ -1121,7 +1133,7 @@ func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID strin
 			}
 			if len(omitted) > 0 {
 				slices.Sort(omitted)
-				rendered += "\n\n[turns " + formatTurnRanges(omitted) + " have notebook entries not injected here — recallable via recall/notebook_search]"
+				rendered += "\n\n[turns " + formatTurnRanges(omitted) + " have notebook entries not injected here" + toolPtr + "]"
 			}
 			msg := fantasy.NewSystemMessage("<notebook>\n" + rendered + "</notebook>")
 			out = append(out, msg)
@@ -1133,6 +1145,27 @@ func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID strin
 		}
 	}
 	return out, files
+}
+
+// recallVia names the notebook lookup tools the rendering agent can
+// actually call, for pointers emitted into its prompt. The live tool
+// set is the gate — a build-time flag goes stale when a config reload
+// rebuilds the palette, and a pointer to a tool the agent lacks is a
+// dead end. Empty when neither tool is present.
+func (a *sessionAgent) recallVia() string {
+	hasRecall := a.hasTool(notebooktool.RecallToolName)
+	hasSearch := a.hasTool(notebooktool.SearchToolName)
+	switch {
+	case hasRecall && hasSearch:
+		return " — recallable via recall/notebook_search"
+	case hasRecall:
+		return " — recallable via recall"
+	case hasSearch:
+		// Search returns titles and tags only — the omitted entries'
+		// content is not recoverable through it, only browsable.
+		return " — browsable via notebook_search"
+	}
+	return ""
 }
 
 // noteSelectionDiff folds one render's per-pass contribution counts

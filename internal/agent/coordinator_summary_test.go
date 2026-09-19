@@ -16,6 +16,19 @@ import (
 // slot configured, for testing summary model resolution.
 func newSummaryTestCoordinator(t *testing.T, crushJSON string) *coordinator {
 	t.Helper()
+	return newSummaryTestCoordinatorAt(t, crushJSON, true)
+}
+
+// newSummaryTestCoordinatorNoSummary is the same but drops the summary
+// slot the developer's global config may have merged in — for the
+// fallback tests "absent" must mean actually absent.
+func newSummaryTestCoordinatorNoSummary(t *testing.T, crushJSON string) *coordinator {
+	t.Helper()
+	return newSummaryTestCoordinatorAt(t, crushJSON, false)
+}
+
+func newSummaryTestCoordinatorAt(t *testing.T, crushJSON string, keepSummary bool) *coordinator {
+	t.Helper()
 
 	env := testEnv(t)
 
@@ -23,6 +36,9 @@ func newSummaryTestCoordinator(t *testing.T, crushJSON string) *coordinator {
 
 	cfg, err := config.Init(env.workingDir, "", false)
 	require.NoError(t, err)
+	if !keepSummary {
+		delete(cfg.Config().Models, config.SelectedModelTypeSummary)
+	}
 	cfg.SetupAgents()
 
 	coord := &coordinator{
@@ -76,7 +92,7 @@ func TestBuildAgentFallsBackToSmallWhenSummaryAbsent(t *testing.T) {
   "models": {"large": {"provider": "mock", "model": "mock-model"},
              "small": {"provider": "mock", "model": "mock-model"}}
 }`
-	coord := newSummaryTestCoordinator(t, crushJSON)
+	coord := newSummaryTestCoordinatorNoSummary(t, crushJSON)
 
 	// summaryModel should fall back to small when summary slot absent.
 	sm := coord.summaryModel.Get()
@@ -112,7 +128,7 @@ func TestUpdateSummaryModelFallsBackToSmallWhenAbsent(t *testing.T) {
   "models": {"large": {"provider": "mock", "model": "mock-model"},
              "small": {"provider": "mock", "model": "mock-model"}}
 }`
-	coord := newSummaryTestCoordinator(t, crushJSON)
+	coord := newSummaryTestCoordinatorNoSummary(t, crushJSON)
 
 	err := coord.UpdateSummaryModel(context.Background())
 	require.NoError(t, err)
