@@ -479,13 +479,20 @@ never writes back.
 
 ## Measurement
 
-`EVAL_HARNESS.md` arm, two axes:
+`EVAL_HARNESS.md` arm, three axes:
 
 - **Cold-start:** same task in a fresh session, hydration on vs off.
   Metric: redundant re-reads — tool calls on files already covered
   by hydrated checkpoints (countable via the `file:` tag overlap;
   `nbStats.CoveredReViews` already counts re-views of injected files
-  and is a partial reuse).
+  and is a partial reuse). The slice must be **two-sided by task
+  size**: the seed cost is per-session-fixed (~2-4K tokens), so
+  "saved" on a long task can coexist with "spent" on a short one —
+  run the same small task on a short-task corpus slice or the flip
+  decision is made on the workload the feature was designed to
+  win. If the short slice loses, options are keep flag-off or
+  lazy-fetch (defer the fetch to a recall-worthy turn rather than
+  always on turn 1) — the arm exists to pick.
 - **Checkpoint utility:** within a long session, recall calls and
   re-reads before vs after the checkpoint trigger fires. A
   checkpoint that doesn't reduce re-reading is a token cost with no
@@ -493,6 +500,12 @@ never writes back.
   "checkpoint-present-at-render" rate from day one (parallel to
   TURN_DIGEST's digest-present metric) — it makes the async-race
   and mid-run-render claims measurable.
+- **Production overhead:** corpus slices can't capture a user's
+  real mix of micro-sessions — the residual question is usage
+  statistics, not trajectories. Post-flip `crush stats` sanity:
+  hydration tokens as % of session total across the session-length
+  distribution. A flag that wins both corpus slices can still be a
+  net tax on a mostly-short-task workload.
 
 ## Non-goals
 
