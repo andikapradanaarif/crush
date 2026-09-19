@@ -114,7 +114,7 @@ func scanPlanEvidence(msgs []message.Message, workingDir string, manager *lsp.Ma
 				continue
 			}
 			switch {
-			case tc.Name == tools.RenameToolName || tc.Name == tools.ReplaceSymbolToolName:
+			case tc.Name == tools.RenameToolName:
 				// LSP workspace edits touch arbitrary files — `path`
 				// is the search root, not a written file, so there is
 				// no reliable path to bind evidence to.
@@ -122,7 +122,7 @@ func scanPlanEvidence(msgs []message.Message, workingDir string, manager *lsp.Ma
 				if p := tools.ToolCallFilePath(tc.Input); p != "" {
 					callPaths[tc.ID] = append(callPaths[tc.ID], normalizePlanPath(workingDir, p))
 				}
-			case tc.Name == "bash":
+			case tc.Name == tools.BashToolName:
 				// Bash redirect writes land on paths the file tools
 				// never saw — covering evidence for evidence_paths.
 				var params struct {

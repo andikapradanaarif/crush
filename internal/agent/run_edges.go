@@ -368,9 +368,10 @@ func verificationExhaustNote(t *edgeTrigger, attempts int) string {
 	if len(t.failed) == 0 {
 		return ""
 	}
-	headline := t.failed[0].check.Detail
+	last := t.failed[len(t.failed)-1]
+	headline := last.check.Detail
 	if headline == "" {
-		headline = firstLine(t.failed[0].output)
+		headline = firstLine(last.output)
 	}
 	return fmt.Sprintf("%d check(s) still failing after %d attempt(s). Last failure: %s",
 		len(failedCheckGroups(t.failed)), attempts, headline)

@@ -187,4 +187,6 @@ func TestFailedCheckGroups(t *testing.T) {
 
 	note := verificationExhaustNote(&edgeTrigger{failed: failed}, 2)
 	require.Contains(t, note, "3 check(s) still failing")
+	require.Contains(t, note, "Last failure: out-3",
+		"failures append chronologically — the note names the last, not the first")
 }

@@ -34,14 +34,14 @@ func mkBashWrite(t *testing.T, svc message.Service, sessionID, callID, command s
 }
 
 // mkWorkspaceEdit lands an lsp_replace_symbol call/result pair — the
-// call has no evidence-binding path (its file_path is the symbol's
-// anchor, not a written file), so its per-file diagnostics entries
-// must feed the diag map on their own Path alone.
-func mkWorkspaceEdit(t *testing.T, svc message.Service, sessionID, callID, metadata string) {
+// call writes file_path directly, so it records an observed write on
+// a.go; per-file diagnostics entries on other paths still feed the
+// diag map on their own Path alone.
+func mkWorkspaceEdit(t *testing.T, svc message.Service, sessionID, callID, path, metadata string) {
 	t.Helper()
 	mkMsg(t, svc, sessionID, message.Assistant,
 		message.ToolCall{ID: callID, Name: tools.ReplaceSymbolToolName,
-			Input: `{"file_path":"a.go","symbol":"s"}`, Finished: true})
+			Input: fmt.Sprintf(`{"file_path":%q,"symbol":"s"}`, path), Finished: true})
 	mkMsg(t, svc, sessionID, message.Tool,
 		message.ToolResult{ToolCallID: callID, Name: tools.ReplaceSymbolToolName, Content: "ok", Metadata: metadata})
 }
@@ -293,13 +293,13 @@ func TestPlanVerdicts(t *testing.T) {
 		require.NotContains(t, verdicts[0].reason, "no write observed")
 	})
 
-	t.Run("workspace-edit diagnostics attribute without a write path", func(t *testing.T) {
+	t.Run("workspace-edit diagnostics attribute cross-file", func(t *testing.T) {
 		t.Parallel()
 		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
-		// An lsp_replace_symbol result carries per-file entries but
-		// records no write path — its failed entry on b.go must still
-		// block the b.go binding.
-		mkWorkspaceEdit(t, svc, sessionID, "r1",
+		// An lsp_replace_symbol writes a.go but its result carries a
+		// per-file failed entry on b.go — the b.go binding must still
+		// block even though no write landed there.
+		mkWorkspaceEdit(t, svc, sessionID, "r1", "a.go",
 			`{"verification":[{"check":"diagnostics","state":"failed","path":"b.go","detail":"1 new error(s)"}]}`)
 		setPlan(t, a, sessionID,
 			session.PlanItem{ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
@@ -318,10 +318,26 @@ func TestPlanVerdicts(t *testing.T) {
 			`{"verification":[{"check":"diagnostics","state":"passed","path":"b.go"}]}`)
 		mkWrite(t, svc, sessionID, "w1", "a.go",
 			`{"verification":[{"check":"diagnostics","state":"passed","path":"a.go"},{"check":"diagnostics","state":"failed","path":"b.go","detail":"1 new error(s)"}]}`)
-		// A rename repairs b.go — its resolution entry must supersede
-		// the failure even though the call has no write path.
-		mkWorkspaceEdit(t, svc, sessionID, "r1",
+		// A replace_symbol repairs b.go — its resolution entry must
+		// supersede the failure even though the write it records is
+		// on a.go, not the bound path.
+		mkWorkspaceEdit(t, svc, sessionID, "r1", "a.go",
 			`{"verification":[{"check":"diagnostics","state":"passed","path":"b.go","detail":"errors resolved"}]}`)
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"b.go"}},
+		)
+		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
+	})
+
+	t.Run("workspace-edit write on the declared path is done", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		// lsp_replace_symbol writes file_path via os.WriteFile — the
+		// observed write must satisfy the binding, not report
+		// "no write observed".
+		mkWorkspaceEdit(t, svc, sessionID, "r1", "b.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"b.go"}]}`)
 		setPlan(t, a, sessionID,
 			session.PlanItem{ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
 				EvidencePaths: []string{"b.go"}},
