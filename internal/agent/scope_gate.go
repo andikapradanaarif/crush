@@ -266,10 +266,13 @@ func (g *scopeGate) resolve(ctx context.Context) {
 // context — an escalation asks the same question, but the user
 // deserves to know the model could not conform.
 func (g *scopeGate) confirm(ctx context.Context, explore, bounces int) (proceed bool, err error) {
-	text := fmt.Sprintf("This task has explored %d steps without a declared plan. Confirm scope before the first write?", explore)
+	text := fmt.Sprintf("This task has explored %d steps without a declared plan", explore)
 	if bounces > 0 {
-		text = fmt.Sprintf("The plan declaration was rejected %d time(s) for missing evidence binding — the model may be stuck in a bounce loop. Confirm scope before the first write?", bounces)
+		// bounces counts every rejected declaration — including the
+		// one that exhausted the budget and triggered this question.
+		text += fmt.Sprintf(", and %d plan declaration(s) were rejected for missing evidence binding — the model may be stuck in a bounce loop", bounces)
 	}
+	text += ". Confirm scope before the first write?"
 	answers, err := g.svc.Ask(ctx, question.Request{
 		SessionID: tools.GetSessionFromContext(ctx),
 		Questions: []question.Question{{

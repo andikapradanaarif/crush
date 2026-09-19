@@ -152,6 +152,9 @@ func NotifyLSPs(
 
 // FormatDiagnostics renders the file and project diagnostics as a
 // formatted, sorted, truncated string for tool-result output.
+// filePath should be canonical (filepathext.Canonical) — diagnostic
+// locations come from the server in resolved form, so current-file
+// grouping only matches like forms.
 func FormatDiagnostics(filePath string, manager *lsp.Manager) string {
 	if manager == nil {
 		return ""
@@ -376,6 +379,9 @@ func (s DiagnosticsSnapshot) ResolvedPathsSince(after DiagnosticsSnapshot) []str
 }
 
 // pathFor extracts the path segment of a "path|message" snapshot key.
+// A path literally containing "|" truncates its attribution — the key
+// format predates per-file attribution, and "|" in filenames is rare
+// enough to accept.
 func pathFor(key string) string {
 	if i := strings.IndexByte(key, '|'); i >= 0 {
 		return key[:i]

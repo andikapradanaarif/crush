@@ -1,10 +1,27 @@
 package filepathext
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestCanonical(t *testing.T) {
+	t.Parallel()
+
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	require.NoError(t, os.Symlink(real, link))
+
+	// An existing path resolves through the symlink.
+	require.Equal(t, Canonical(filepath.Join(real, "f.go")), Canonical(filepath.Join(link, "f.go")))
+
+	// A missing tail still resolves through its existing ancestor.
+	got := Canonical(filepath.Join(link, "sub", "f.go"))
+	require.Equal(t, filepath.Join(Canonical(real), "sub", "f.go"), got)
+}
 
 func TestSplitGlobPrefix(t *testing.T) {
 	t.Parallel()

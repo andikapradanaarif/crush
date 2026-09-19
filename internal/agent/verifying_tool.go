@@ -100,7 +100,7 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 		}
 		// Keep the project-diagnostics append the tools used to produce
 		// even when no client handles this file.
-		resp.Content += tools.FormatDiagnostics(absPath, v.lspManager)
+		resp.Content += tools.FormatDiagnostics(filepathext.Canonical(absPath), v.lspManager)
 		// Select after the mutation so a newly created file (e.g. the
 		// first _test.go in a package) is seen by the selector.
 		checks := v.selectPending(absPath)
@@ -144,7 +144,13 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 	after := tools.SnapshotDiagnostics(v.lspManager)
 	newErrs := after.NewErrorsSince(baseline)
 
-	resp.Content += tools.FormatDiagnostics(absPath, v.lspManager)
+	// LSP servers report canonicalized paths in diagnostic locations
+	// (gopls resolves symlinks, so /var reports as /private/var) while
+	// absPath stays workingDir-form — coverage (HandlesFile prefixes
+	// the client's cwd) and package-test selection both need that
+	// form. Snapshot-derived path comparisons need the canonical one.
+	canonPath := filepathext.Canonical(absPath)
+	resp.Content += tools.FormatDiagnostics(canonPath, v.lspManager)
 
 	var errsByPath map[string]int
 	var resolved []string
@@ -173,7 +179,7 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 		// or a stale failure on that path would latch past its fix.
 		resolved = baseline.ResolvedPathsSince(after)
 	}
-	checks := append(diagnosticsChecks(absPath, state, detail, errsByPath, resolved), v.selectPending(absPath)...)
+	checks := append(diagnosticsChecks(canonPath, state, detail, errsByPath, resolved), v.selectPending(absPath)...)
 	resp.Metadata = mergeVerificationMetadata(resp.Metadata, checks)
 	return resp, nil
 }
@@ -184,10 +190,13 @@ func (v *verifyingTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 // carries a failed entry attributed to itself, and every file whose
 // errors the delta cleared carries a passed one — a write that breaks
 // or repairs a file it did not touch must update evidence bound to
-// that file, not just evidence bound to the write's path.
-func diagnosticsChecks(absPath, state, detail string, errsByPath map[string]int, resolved []string) []message.VerificationCheck {
+// that file, not just evidence bound to the write's path. writePath
+// must be the canonical form: errsByPath and resolved keys come from
+// LSP-reported (resolved) diagnostic locations, so a workingDir-form
+// path would miss a same-file match under a symlinked tree.
+func diagnosticsChecks(writePath, state, detail string, errsByPath map[string]int, resolved []string) []message.VerificationCheck {
 	checks := make([]message.VerificationCheck, 0, len(errsByPath)+len(resolved)+1)
-	if _, broke := errsByPath[absPath]; !broke {
+	if _, broke := errsByPath[writePath]; !broke {
 		writeState, writeDetail := state, detail
 		if writeState == message.VerificationFailed {
 			// The delta failed elsewhere — the write path itself
@@ -197,7 +206,7 @@ func diagnosticsChecks(absPath, state, detail string, errsByPath map[string]int,
 		checks = append(checks, message.VerificationCheck{
 			Check:  "diagnostics",
 			State:  writeState,
-			Path:   absPath,
+			Path:   writePath,
 			Detail: writeDetail,
 		})
 	}
@@ -210,7 +219,7 @@ func diagnosticsChecks(absPath, state, detail string, errsByPath map[string]int,
 		})
 	}
 	for _, p := range resolved {
-		if p == absPath {
+		if p == writePath {
 			// The write-path entry already carries this verdict.
 			continue
 		}

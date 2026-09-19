@@ -79,7 +79,7 @@ func (a *sessionAgent) runEdgeSet() []runEdge {
 			name:    "verification",
 			scan:    a.scanVerificationEdge,
 			resolve: a.resolveVerificationEdge,
-			prompt:  verificationRetrySection,
+			prompt:  a.verificationRetrySection,
 			note:    verificationExhaustNote,
 		},
 		{
@@ -324,10 +324,15 @@ func failedCheckGroups(failed []gateCheckOutcome) [][]gateCheckOutcome {
 
 // verificationRetrySection renders the failed checks' raw output
 // (truncated to the tool-result cap) — evidence the turn claimed done
-// prematurely.
-func verificationRetrySection(t *edgeTrigger) string {
+// prematurely. Per-file paths render workingDir-relative, matching the
+// plan reasons in the same prompt.
+func (a *sessionAgent) verificationRetrySection(t *edgeTrigger) string {
 	if len(t.failed) == 0 {
 		return ""
+	}
+	workingDir := ""
+	if a.configStore != nil {
+		workingDir = a.configStore.WorkingDir()
 	}
 	var b strings.Builder
 	b.WriteString(verificationRetryPrefix + " The following check(s) did not pass — fix the underlying issue; do not restate success.\n")
@@ -341,7 +346,7 @@ func verificationRetrySection(t *edgeTrigger) string {
 				if g.check.Path == "" {
 					continue
 				}
-				b.WriteString(g.check.Path)
+				b.WriteString(relPlanPath(workingDir, g.check.Path))
 				if g.check.Detail != "" {
 					b.WriteString(": " + g.check.Detail)
 				}

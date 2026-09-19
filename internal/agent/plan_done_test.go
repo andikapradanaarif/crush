@@ -261,6 +261,24 @@ func TestPlanVerdicts(t *testing.T) {
 		require.Contains(t, verdicts[0].reason, "b.go")
 	})
 
+	t.Run("cross-file failure without a write reports the diagnostics reason", func(t *testing.T) {
+		t.Parallel()
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		// No write ever landed on b.go — the failure reason must name
+		// the diagnostics verdict, not the less useful "no write".
+		mkWrite(t, svc, sessionID, "w1", "a.go",
+			`{"verification":[{"check":"diagnostics","state":"passed","path":"a.go"},{"check":"diagnostics","state":"failed","path":"b.go","detail":"1 new error(s)"}]}`)
+		setPlan(t, a, sessionID,
+			session.PlanItem{ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"b.go"}},
+		)
+		verdicts := a.planVerdicts(t.Context(), sessionID)
+		require.Len(t, verdicts, 1)
+		require.Equal(t, planEvidenceBlocked, verdicts[0].state)
+		require.Contains(t, verdicts[0].reason, "diagnostics failed")
+		require.NotContains(t, verdicts[0].reason, "no write observed")
+	})
+
 	t.Run("cross-file failure does not block the clean write path", func(t *testing.T) {
 		t.Parallel()
 		a, svc, sessionID := newGateTestAgent(t, &config.Config{})

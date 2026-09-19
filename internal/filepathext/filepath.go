@@ -26,6 +26,32 @@ func SmartIsAbs(path string) bool {
 	}
 }
 
+// Canonical resolves symlinks in p — the form LSP servers report in
+// diagnostic locations (gopls resolves symlinks, so a working dir under
+// /var reports as /private/var on macOS). Components that do not exist
+// resolve best-effort: the deepest existing ancestor resolves and the
+// remaining tail rejoins, so a not-yet-created file still gets a
+// canonical prefix.
+func Canonical(p string) string {
+	p = filepath.Clean(p)
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	var tail []string
+	dir := p
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return p
+		}
+		tail = append([]string{filepath.Base(dir)}, tail...)
+		dir = parent
+		if r, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(append([]string{r}, tail...)...)
+		}
+	}
+}
+
 // SplitGlobPrefix splits a glob pattern into the longest leading run of
 // literal path segments and the remaining pattern. The prefix contains no
 // glob metacharacters, so callers can safely use it as a directory to start

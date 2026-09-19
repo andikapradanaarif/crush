@@ -154,10 +154,13 @@ func scanPlanEvidence(msgs []message.Message, workingDir string) *planEvidence {
 }
 
 // normalizePlanPath renders a declared or written path absolute and
-// clean so the two vocabularies compare.
+// canonical so the vocabularies compare — LSP servers report resolved
+// paths in diagnostic locations (gopls maps /var to /private/var), so
+// declared paths, write paths, and check Path fields must all reduce
+// to the same form before pathCovers can match them.
 func normalizePlanPath(workingDir, p string) string {
 	p = strings.TrimRight(p, "/\\")
-	return filepath.Clean(filepathext.SmartJoin(workingDir, p))
+	return filepathext.Canonical(filepathext.SmartJoin(workingDir, p))
 }
 
 // pathCovers reports whether a write to w satisfies or is covered by
@@ -171,8 +174,13 @@ func pathCovers(p, w string) bool {
 // working directory for gate feedback — "pkg/f.go" reads better than
 // the normalized absolute form.
 func relPlanPath(workingDir, abs string) string {
-	if rel, err := filepath.Rel(workingDir, abs); err == nil &&
-		rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	rel, err := filepath.Rel(workingDir, abs)
+	if (err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))) && workingDir != "" {
+		// abs may be canonical while workingDir is not — retry the
+		// relativization against the canonical form.
+		rel, err = filepath.Rel(filepathext.Canonical(workingDir), abs)
+	}
+	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return rel
 	}
 	return abs
@@ -215,6 +223,29 @@ func checkVerdictReason(name string, latest map[string]message.VerificationCheck
 	}
 }
 
+// diagReason renders the latest covering diagnostics verdict for a
+// normalized declared path — including entries a write to another file
+// attributed here (cross-file breakage). Returns "" when no covering
+// entry blocks.
+func (e *planEvidence) diagReason(p, workingDir string) string {
+	for _, wp := range e.diagOrder {
+		v, ok := e.diag[wp]
+		if !ok || !pathCovers(p, wp) {
+			continue
+		}
+		switch v.State {
+		case message.VerificationFailed:
+			if v.Detail != "" {
+				return "check diagnostics failed on " + relPlanPath(workingDir, wp) + ": " + v.Detail
+			}
+			return "check diagnostics failed on " + relPlanPath(workingDir, wp)
+		case message.VerificationPending:
+			return "check diagnostics has not resolved on " + relPlanPath(workingDir, wp)
+		}
+	}
+	return ""
+}
+
 // evidenceReason evaluates a completed item's bound evidence: every
 // named check's latest instance green, and for each declared path an
 // observed write with no covering check failed. Returns "" when the
@@ -252,6 +283,12 @@ func (e *planEvidence) evidenceReason(item session.PlanItem, workingDir string) 
 			}
 		}
 		if !landed {
+			// A covering diagnostics failure is the more useful
+			// reason — another file's write can break this path
+			// without a write ever landing on it.
+			if r := e.diagReason(p, workingDir); r != "" {
+				return r
+			}
 			return "no write observed on " + declared
 		}
 		for _, id := range pathCheckOrder {
@@ -280,20 +317,8 @@ func (e *planEvidence) evidenceReason(item session.PlanItem, workingDir string) 
 		// the declared path blocks it — including failures a write to
 		// another file caused (cross-file breakage), which is exactly
 		// what the per-file Path field exists to catch.
-		for _, wp := range e.diagOrder {
-			v, ok := e.diag[wp]
-			if !ok || !pathCovers(p, wp) {
-				continue
-			}
-			switch v.State {
-			case message.VerificationFailed:
-				if v.Detail != "" {
-					return "check diagnostics failed on " + relPlanPath(workingDir, wp) + ": " + v.Detail
-				}
-				return "check diagnostics failed on " + relPlanPath(workingDir, wp)
-			case message.VerificationPending:
-				return "check diagnostics has not resolved on " + relPlanPath(workingDir, wp)
-			}
+		if r := e.diagReason(p, workingDir); r != "" {
+			return r
 		}
 		// Covering checks beyond the path's own writes: a package test
 		// covers every file in its directory, and configured verify
