@@ -137,6 +137,20 @@ the edge's prompt branches on budget, not a second edge.
   plumbed at `agent.go:1553`) — plus a cheap fallback re-scan of
   `result.Steps` inside the edge, since `in.stalled` only reflects
   the StopWhen callback.
+- **Headless behavior changes — stated:** today a headless stall
+  sets `fire=false` → blocker report, no retry. Under
+  replan-first the replan branch fires unconditionally (no
+  question tool needed), so `crush run` gains one bounded repair
+  turn on loop-stop where it previously stopped — intended, but
+  it is a headless cost/latency change, and the blocker report
+  still lands via the existing `reports` slice on exhaustion.
+- **Mechanics:** `prompt func(t)` doesn't receive `call` —
+  `scan` stashes `call.RepairAttempts` (and the branch decision)
+  onto the `edgeTrigger`. The replan prompt's leading literal
+  joins `RepairPromptPrefixes` (`run_edges.go:298`) or the eval
+  analyzer won't fingerprint replan turns. The `fire` condition
+  splits by branch: replan fires without `hasTool(question)` —
+  that check belongs only to the escalation branch.
 - **Mechanism — the stall edge's prompt branches on attempts:**
   first stall → the replan prompt below (works headless AND
   interactive — it's a model retry, not a question); stall on the
@@ -190,7 +204,10 @@ produces a write_ — 40 steps, 2M tokens, zero edits, run ends
 "cleanly" and nobody noticed. This is the "60M tokens and I didn't
 notice" failure as a declared transition.
 
-- **scan:** the finished run consumed >T tokens (or >S steps) and
+- **scan:** the finished run consumed >T tokens (or >S steps),
+  **ended in a clean stop** (a cancelled or errored 40-step read
+  run must not nag), **didn't stall** (`in.stalled` — the stall
+  edge owns that boundary's signal), and
   produced zero **mutating calls** — `toolclass.IsMutatingCall`,
   the shared write-boundary vocabulary the scope gate and
   checkpoint boundary already agree on (write-tools + `download`
@@ -215,20 +232,22 @@ notice" failure as a declared transition.
   tokens over M steps with no writes — continue / replan /
   stop?"), not a retry prompt. Headless degrades to a logged
   assumption per the shared rule.
-- **Fires once per crossing, resets on write.** A marker on
-  `SessionAgentCall` suppresses re-firing — but the marker needs
-  a _clear_ mechanism, and the `runEdge` type has no hook to
-  mutate the enqueued retry (the clone happens in `runEdges`
-  before the next run exists). Seam-level fix: **`runEdges`
-  clears the marker when the just-finished run contained a
-  mutating call** — otherwise a repair turn that writes and then
-  burns again stays suppressed forever. No `amendRetry` type
-  extension needed. Marker scope is **per run-chain**: it
-  propagates only through the retry-clone chain, so a write-less
-  streak spanning fresh user turns re-fires at each turn end —
-  intended (each turn's spend is a fresh decision worth
-  surfacing); widen to session scope only if the re-fire proves
-  nagging in practice.
+- **Fires once per crossing, resets on write.** The marker is a
+  `SessionAgentCall` field, and the seam owns both halves:
+  `runEdges` **stamps** it on the retry clone at the existing
+  `retry := call` site when the trigger fires, and **clears** it
+  when the just-finished run contained a mutating call —
+  otherwise a repair turn that writes then burns again stays
+  suppressed forever. No `amendRetry` type extension; the edge
+  never touches the clone. (Alternative considered: derive
+  suppression from the persisted `edge_firings` records — rejected
+  for v1, a per-boundary DB read for what a field does free;
+  records remain the accounting layer, not the suppression
+  signal.) Marker scope is **per run-chain**: it propagates only
+  through the retry-clone chain, so a write-less streak spanning
+  fresh user turns re-fires at each turn end — intended (each
+  turn's spend is a fresh decision worth surfacing); widen to
+  session scope only if the re-fire proves nagging in practice.
 - **Precedence — and the merge-rule gap:** if the stall edge's
   escalation prompt also fired, the user-targeted prompt wins the
   slot and retry-family triggers carry as context inside it (or
@@ -236,7 +255,10 @@ notice" failure as a declared transition.
   rule is **not implemented today**: merged prompts concatenate
   sections (`run_edges.go`), so a verification+stall double-fire
   hands the model both "fix these checks" and "ask the user" and
-  lets it pick. The precedence needs to be real, not textual.
+  lets it pick. Mechanism: `runEdge` gains a `family` field
+  (retry vs escalate); when both fire, `runEdges` renders the
+  escalate-family prompt and appends retry-family evidence as
+  context — never two competing instruction sections.
 - **Limit, stated plainly:** edges fire at run boundaries only —
   a single giant turn mid-flight is not caught. Mid-run spend
   pressure is `CONTEXT_WINDOW_SAFETY.md` territory (or a future
@@ -268,7 +290,12 @@ service method + stats section + eval analyzer read — an
 detail, **outcome enum**: fired / suppressed / exhausted /
 headless-degraded). `crush stats` reads the table; the eval doc
 reads the same counts via `SessionTelemetry` +
-`emitEvalTelemetry`.
+`emitEvalTelemetry`. (Lighter alternative considered: a
+`ContentPart` type on the boundary assistant message — `Parts` is
+a JSON blob, no migration — but firing-rate queries and eval
+assertions want structured columns, not JSON-part scans; the
+table follows the `collapsed_turns` precedent for exactly that
+consumer pair.)
 **Name stability lands first** — records become eval assertion
 targets, so edge names must be final before the table exists:
 the shipped edge is `stall` (the doc's "stall-replan" was the
