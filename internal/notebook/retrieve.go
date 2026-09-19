@@ -109,8 +109,8 @@ func (s *service) enrichEntries(ctx context.Context, rows []db.NotebookEntry) ([
 			EventNumber:      row.EventNumber,
 			EventType:        row.EventType,
 			Title:            row.Title,
-			EntryText:        row.EntryText,
-			EntryTextFull:    row.EntryTextFull.String,
+			EntryText:        RewriteTruncationMarker(row.EntryText),
+			EntryTextFull:    RewriteTruncationMarker(row.EntryTextFull.String),
 			TokenCount:       row.TokenCount,
 			CompressionLevel: row.CompressionLevel,
 			CreatedAt:        row.CreatedAt,
@@ -412,7 +412,7 @@ func (s *service) compactOldestToLevel(ctx context.Context, sessionID string, fr
 		if err != nil {
 			tags = nil
 		}
-		text := compressEntry(entry.EntryText, entry.Title, tags, entry.ErrorHeadline, toLevel)
+		text := compressEntry(RewriteTruncationMarker(entry.EntryText), entry.Title, tags, entry.ErrorHeadline, toLevel)
 		newTokens := estimateTokens(text)
 		if err := s.q.UpdateNotebookCompression(ctx, db.UpdateNotebookCompressionParams{
 			EntryText:        text,

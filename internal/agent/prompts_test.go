@@ -109,4 +109,14 @@ func TestCoderPrompt_NotebookToolGating(t *testing.T) {
 	require.Contains(t, neither, "# Context Notebook")
 	require.NotContains(t, neither, "`recall`")
 	require.NotContains(t, neither, "`notebook_search`")
+
+	// The fallback branches must degrade tool-agnostically too —
+	// naming `view` when it's disabled would be the same dead pointer.
+	noRecallNoView := render("recall", "view")
+	require.Contains(t, noRecallNoView, "Re-read files when you need details")
+	require.NotContains(t, noRecallNoView, "Re-read files with `view`")
+
+	recallNoView := render("view")
+	require.Contains(t, recallNoView, "then re-read the file.")
+	require.NotContains(t, recallNoView, "then use `view`")
 }

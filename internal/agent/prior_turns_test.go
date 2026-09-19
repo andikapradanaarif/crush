@@ -138,6 +138,34 @@ func priorTurnFixture(t *testing.T, svc message.Service, sessionID string) []mes
 	return msgs
 }
 
+// A runtime disabled_tools: [recall] strips the recovery path the
+// collapse stubs point at — the render must degrade to verbatim rather
+// than emit recall("result:<id>") pointers to a tool the agent lacks.
+func TestPreparePrompt_NoCollapseWithoutRecall(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsStub
+	// The fixture seeds recall+search; strip both like a live reload
+	// disabling them.
+	a.tools = csync.NewSliceFrom([]fantasy.AgentTool{&fakeTool{name: "view"}})
+	msgs := priorTurnFixture(t, svc, sessionID)
+	ctx := t.Context()
+	a.detectSegments(ctx, sessionID, msgs)
+
+	collapse := a.newTurnCollapse(1)
+	history, _ := a.preparePrompt(ctx, msgs, false, collapse)
+
+	// Pin eligibility: turn 0 IS covered — the verbatim render must
+	// come from the recall gate, not an empty collapse set.
+	require.NotEmpty(t, collapse.Set)
+	res := renderedResultText(t, history, "tc-bash")
+	require.NotContains(t, res, `recall("result:`)
+	require.Contains(t, res, "file content line")
+	call := renderedCall(t, history, "tc-bash")
+	require.NotContains(t, call.Input, "_collapsed")
+}
+
 func TestPreparePrompt_CollapsesCoveredPriorTurn(t *testing.T) {
 	t.Parallel()
 

@@ -548,16 +548,19 @@ func (s *service) GenerateEntries(ctx context.Context, sessionID string, turnNum
 const EntryTruncatedMarker = "[Entry truncated.]"
 
 // LegacyEntryTruncatedMarker is the marker entries stored before it
-// stopped naming recall. Renders rewrite it to EntryTruncatedMarker
+// stopped naming recall. Hydration rewrites it to EntryTruncatedMarker
 // unconditionally — the pointer overpromises for every agent since
 // entry_text_full holds the same truncated body.
 const LegacyEntryTruncatedMarker = "[Entry truncated. Use recall tool for full details.]"
 
-// RewriteTruncationMarker normalizes stored entry text for render:
+// RewriteTruncationMarker normalizes stored entry text at hydration:
 // entries written while the marker named recall carry
-// LegacyEntryTruncatedMarker, and no render path should ship it —
+// LegacyEntryTruncatedMarker, and no consumer should ship it —
 // entry_text_full holds the same truncated body, so the pointer
-// overpromises regardless of which tools the agent has.
+// overpromises regardless of which tools the agent has. Applied in
+// enrichEntries so prompt renders, auto-inject, recall output,
+// checkpoint input, and compaction all see clean text from one choke
+// point.
 func RewriteTruncationMarker(text string) string {
 	return strings.ReplaceAll(text, LegacyEntryTruncatedMarker, EntryTruncatedMarker)
 }
