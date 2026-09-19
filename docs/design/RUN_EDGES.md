@@ -28,10 +28,10 @@ Promote the gate's generic half into a declarative edge:
 type runEdge struct {
 	name string
 	// scan inspects the finished run; nil trigger means no fire.
-	scan func(steps []fantasy.StepResult, sess *session.Session) *edgeTrigger
+	scan func(ctx context.Context, call SessionAgentCall, in edgeInput) *edgeTrigger
 	// resolve runs the deterministic part (shell checks, ledger
 	// queries). May be nil for prompt-only edges.
-	resolve func(ctx context.Context, t *edgeTrigger) error
+	resolve func(ctx context.Context, call SessionAgentCall, t *edgeTrigger)
 	// prompt builds the retry message from resolved evidence.
 	prompt func(t *edgeTrigger) string
 }
@@ -157,7 +157,9 @@ the edge's prompt branches on budget, not a second edge.
   continue fires **unconditionally** whenever
   `shouldSummarize && tool calls > 0` — even if the replan turn
   resolved the stall and finished the task, the continue still
-  re-prompts "resume the original request." Decision: accept the
+  re-prompts "resume the original request." (Masking also
+  requires `cw > 0`, `agent.go:1382` — an unknown context
+  window can't mask either.) Decision: accept the
   occasional redundant turn for v1 (the replan's own stop doesn't
   cancel queued calls); conditioning the continue on the replan's
   outcome is follow-up, not this PR. **Budget reset, named:** the
@@ -184,7 +186,11 @@ the edge's prompt branches on budget, not a second edge.
   tokens land in session DB totals but not the record's
   `tokens`/`steps` fields, so the arm comparison under-reports
   exactly the spend the flag adds. The record needs chain-summed
-  usage (session counters), not the final `Run`'s result.
+  usage (session counters), not the final `Run`'s result —
+  boundary-delta, not session-lifetime: session counters are
+  cumulative, accurate for single-turn eval trajectories but
+  over-counting multi-turn eval sessions; snapshot the counter
+  at chain start and diff at chain end.
 - **Mechanics:** `prompt func(t)` doesn't receive `call` —
   `scan` stashes `call.RepairAttempts` (and the branch decision)
   onto the `edgeTrigger`. The replan prompt's leading literal
@@ -240,6 +246,12 @@ the edge's prompt branches on budget, not a second edge.
   That's fine for re-orientation: the stall evidence itself
   comes from `result.Steps`. When the notebook is off, the edge
   degrades to evidence-only — no payload.
+- **`stallBlockerReport` reuse:** it's computed in `scan`
+  unconditionally today but discarded whenever a retry is
+  enqueued (reports only reach the message at exhaustion).
+  Under replan-first its content — repeated tool, evidence —
+  should feed the replan prompt rather than being
+  computed-then-dropped.
 - **resolve:** collect the repeated call signature — **unlisted
   work:** `hasRepeatedToolCalls` returns `bool`, the winning
   signature is computed and discarded (`loop_detection.go:33`),
@@ -321,9 +333,13 @@ notice" failure as a declared transition.
   stop?"), not a retry prompt. Headless degrades to a logged
   assumption per the shared rule.
 - **note (exhaustion path):** "N tokens over M steps, no writes"
-  — at `attempts=2` the flow hits `writeRepairExhaustion`, which
-  renders `note` funcs; without one, a run that burns write-less
-  again at exhaustion produces no terminal signal.
+  — needed for the _interactive_ exhaustion path only:
+  `writeRepairExhaustion` is only reached when `len(prompts)>0`,
+  so a pure headless-degraded boundary (`fire=false` alone)
+  never renders notes — the resolve-appended assumption is the
+  only terminal signal there. At `attempts=2` with a firing
+  interactive edge alongside, the note is what carries the
+  write-less signal to the terminal message.
 - **Gating:** rides `ambiguity_clarification` — it's the same
   calibrated-autonomy family as stall escalation (a user-targeted
   "is this intended?" prompt); the default-on flip is a separate
@@ -399,10 +415,21 @@ notice" failure as a declared transition.
   land in depends on budget: if the escalate turn consumed the
   last slot, the re-fire renders an exhaustion note, not a
   repair turn (consistent with the crowding acceptance).
-  **Intra-family rule:** two escalate-family edges can co-fire
-  (stall-escalate + burn-watch) — first-in-`runEdgeSet` wins,
-  losers defer via the same carrier; today's concatenate would
-  merge two "ask ONE question" instructions. **Cancel hole, decided:** if the user cancels the
+  **Intra-family rule:** first-in-`runEdgeSet` wins, losers
+  defer via the same carrier — needed for future edges, but
+  **dead code for the shipped set**: stall-escalate +
+  burn-watch can never co-fire (burn-watch requires
+  `cleanStop && !in.stalled`; stall requires `in.stalled` — the
+  only overlap, a provider `stop` on the terminal tool-call
+  step, is exactly what `!in.stalled` excludes). **The carrier's
+  real load-bearing case:** burn-watch + todos co-fire, then the
+  user cancels the question → `StopTurn` → `cleanStop` fails →
+  todos never re-scans and open items are silently unmet.
+  Todos' evidence is session-state (re-scannable on the next
+  clean-stop boundary), but its _terminal note_ at the cancelled
+  boundary needs the carried trigger to render — that's the
+  carrier's justification, not the impossible co-fires.
+  **Cancel hole, decided:** if the user cancels the
   escalation question, its result carries `StopTurn`
   (`question.go:126-128`) → `cleanStop` fails → deferred
   cleanStop-gated triggers never even re-scan, and the chain
@@ -487,23 +514,35 @@ service method + stats section + eval analyzer read — an
 `turn_seq` is the ordinal of the run's initiating user message
 among **all** user messages — repair retries persist their
 prompts as user messages (`createUserMessage` runs
-unconditionally per `Run`), so `messageTurns` counts them and
-each attempt's initiating message naturally differs:
-`repair_attempts` is **demoted to a column** (still queryable —
-it disambiguates replan-vs-escalate stats) rather than a key
-part. `turn_seq` isn't in `edgeInput` today — it needs plumbing
-(`messageTurns` + `preTurnMsgCount` are already computable in
-`Run`). Derived from message positions
-(the same family as `collapsed_turns`' `byTurn`): durable across
-restarts and `INSERT OR IGNORE`-dedupable. **`call.RunStamp` is
+unconditionally per `Run`), so each attempt's initiating
+message naturally differs and `repair_attempts` is **demoted to
+a column** (still queryable — disambiguates replan-vs-escalate
+stats). **Source: `ListUserMessages`, not the working view.**
+`getSessionMessages` returns the full transcript only when
+`notebookEnabled`; notebook-off it returns the `ListFromSummary`
+tail (`agent.go:2518-2531`, and the code comment says why —
+turn numbers must stay absolute), so `messageTurns` ordinals
+are tail-relative there: post-summary firings get _smaller_
+ordinals, and a relative `turn_seq=3` can `INSERT OR IGNORE`-
+collide with a real pre-summary row at absolute turn 3 —
+the dedup mechanism silently eating a firing. Derive `turn_seq`
+from `ListUserMessages` (`message.go:553`) — a direct DB count
+over all user messages, absolute across summarizes and
+restarts — or persist an absolute user-turn counter on the
+session; it needs plumbing into `edgeInput` either way.
+(`collapsed_turns` never hit this because its rows are written
+and deduped within one numbering view; `edge_firings` spans
+summarize boundaries.) **`call.RunStamp` is
 rejected as the key** — it's `runStampGen.Add(1)` (`agent.go:892`)
 seeded from a random **per-agent-instance** epoch
 (`runStampEpoch`, `agent.go:496-508` — the code comment says
 per-build; it's really per-instance/per-process, which only
-strengthens the argument: a restart reseeds): stamps are unique
-across restarts but non-deterministic per logical turn, so a
-resumed session's re-fire wouldn't dedup and the stamp orders
-nothing durably. It earns a plain _column_ instead — it still
+strengthens the argument: a restart reseeds): non-deterministic
+per logical turn, orders nothing durably. (Dedup rationale,
+corrected: the repair queue is in-memory — a resumed session
+can't re-fire the same logical boundary at all. `INSERT OR
+IGNORE` exists for idempotent writes _within_ a boundary —
+e.g. a mid-write crash — not cross-restart re-fires.) It earns a plain _column_ instead — it still
 joins to persisted `run:<stamp>` checkpoint tags. Columns: edge
 name, `variant` (stall records `replan`/`escalate` — the single
 most interesting firing stat for that edge), trigger detail,
