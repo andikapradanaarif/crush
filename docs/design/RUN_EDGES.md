@@ -144,6 +144,10 @@ the edge's prompt branches on budget, not a second edge.
   turn on loop-stop where it previously stopped — intended, but
   it is a headless cost/latency change, and the blocker report
   still lands via the existing `reports` slice on exhaustion.
+  `retry.NonInteractive` carries through the clone, so the replan
+  turn is a full-priced extra LLM call on every headless
+  loop-stop — the eval flag arm must surface this as cost, not
+  just flips.
 - **Mechanics:** `prompt func(t)` doesn't receive `call` —
   `scan` stashes `call.RepairAttempts` (and the branch decision)
   onto the `edgeTrigger`. The replan prompt's leading literal
@@ -166,6 +170,12 @@ the edge's prompt branches on budget, not a second edge.
   suppression keyed on the repeated-signature hash — is rejected:
   more machinery, and an unbudgeted escalation edge is nagging
   with a type signature.
+- **"First stall" means "first repair slot," stated plainly:** the
+  branch is `call.RepairAttempts`-driven and the budget is shared
+  across edges — a run that burned a verification repair and
+  _then_ stalls skips the replan and goes straight to escalation.
+  Intended: the model already spent its cheap retry. Do not
+  implement a per-stall counter.
 - **Why replan-first, not escalate-directly:** the loop detector
   trips mostly on _environmental_ stalls — permission denied,
   identical output, unchanged state — where a meta-prompt ("state
@@ -185,9 +195,11 @@ the edge's prompt branches on budget, not a second edge.
   at zero model cost" becomes literal.
 - **resolve:** collect the repeated call signature, the write set
   (**scan `result.Steps` for write-class calls** — filetracker
-  tracks _reads_ only, `RecordRead`/`ListReadFiles`; the
-  `scanVerification`/`scanPlanEvidence` precedent), and — with
-  `project_index` on — a `map` slice over the touched dirs.
+  can't serve it: writes also `RecordRead` for staleness tracking,
+  so the tracker can't distinguish reads from writes, and bash
+  mutations bypass it entirely; the `scanVerification`/
+  `scanPlanEvidence` precedent), and — with `project_index` on —
+  a `map` slice over the touched dirs.
 - **prompt:** "you stopped making progress: <evidence>. State which
   assumption failed and revise the approach." One turn within
   `RepairAttempts`.
@@ -223,8 +235,16 @@ notice" failure as a declared transition.
     generous tripwire thresholds, not a governor — the edge exists
     to surface, not to throttle. "Configurable" is real work:
     threshold + step count need an `optionSpec` entry, schema, and
-    `Options` field. Default on the order of ~200K input tokens or
-    ~30 steps.
+    `Options` field. **The token arm is conjunctive, not
+    disjunctive:** Σ `InputTokens` counts the re-sent prompt per
+    step, so on a non-caching provider any few-step read-only turn
+    in a mature session crosses a flat ~200K — the arm would fire
+    on session size, not unnoticed spend. Fire on `steps > S`
+    (~30), or `steps ≥ Smin` (~10) **and** `tokens > T` — the step
+    floor keeps the token arm honest. T defaults get tuned from
+    `edge_firings` data before any default-on flip, since firing
+    rate on cache-less providers otherwise just measures context
+    size.
 - **resolve:** collect the evidence — steps, tokens, exploration
   event count, files-read-without-write (filetracker's read set
   minus the scanned write set).
@@ -232,6 +252,14 @@ notice" failure as a declared transition.
   tokens over M steps with no writes — continue / replan /
   stop?"), not a retry prompt. Headless degrades to a logged
   assumption per the shared rule.
+- **Gating:** rides `ambiguity_clarification` — it's the same
+  calibrated-autonomy family as stall escalation (a user-targeted
+  "is this intended?" prompt); the default-on flip is a separate
+  evidence-gated decision informed by its own firing-rate records.
+- **`runEdgeSet` position: last.** It reads `in.stalled` (run
+  input), not the stall edge's trigger, so ordering is cosmetic —
+  declared here because the doc requires new rows to say where
+  they sit.
 - **Fires once per crossing, resets on write.** The marker is a
   `SessionAgentCall` field, and the seam owns both halves:
   `runEdges` **stamps** it on the retry clone at the existing
@@ -248,17 +276,22 @@ notice" failure as a declared transition.
   fresh user turns re-fires at each turn end — intended (each
   turn's spend is a fresh decision worth surfacing); widen to
   session scope only if the re-fire proves nagging in practice.
-- **Precedence — and the merge-rule gap:** if the stall edge's
-  escalation prompt also fired, the user-targeted prompt wins the
-  slot and retry-family triggers carry as context inside it (or
-  defer — their conditions re-fire next boundary anyway). This
-  rule is **not implemented today**: merged prompts concatenate
-  sections (`run_edges.go`), so a verification+stall double-fire
-  hands the model both "fix these checks" and "ask the user" and
-  lets it pick. Mechanism: `runEdge` gains a `family` field
-  (retry vs escalate); when both fire, `runEdges` renders the
-  escalate-family prompt and appends retry-family evidence as
-  context — never two competing instruction sections.
+- **Precedence — and the merge-rule gap:** when an
+  escalation-family prompt co-fires with retry-family triggers,
+  the user-targeted prompt wins the slot and retry evidence
+  carries as context inside it (or defers — conditions re-fire
+  next boundary anyway). This rule is **not implemented today**:
+  merged prompts concatenate sections (`run_edges.go`). The real
+  co-fire pair is **burn-watch + verification/todos** — all three
+  gate on `cleanStop`, so a clean-stopping run that both failed
+  checks and burned write-less tokens hands the model "fix these
+  checks" _and_ "ask the user" and lets it pick. (verification/
+  todos + stall can't co-fire — a stalled run's terminal step
+  isn't `FinishReasonStop`, so `cleanStop` fails.) Mechanism:
+  `runEdge` gains a `family` field (retry vs escalate); when both
+  fire, `runEdges` renders the escalate-family prompt and appends
+  retry-family evidence as context — never two competing
+  instruction sections.
 - **Limit, stated plainly:** edges fire at run boundaries only —
   a single giant turn mid-flight is not caught. Mid-run spend
   pressure is `CONTEXT_WINDOW_SAFETY.md` territory (or a future
@@ -290,7 +323,16 @@ service method + stats section + eval analyzer read — an
 detail, **outcome enum**: fired / suppressed / exhausted /
 headless-degraded). `crush stats` reads the table; the eval doc
 reads the same counts via `SessionTelemetry` +
-`emitEvalTelemetry`. (Lighter alternative considered: a
+`emitEvalTelemetry`. **Write path — not `notebook.Service`:**
+`RecordCollapsedTurn` rides `a.notebook`, which is nil when the
+notebook is disabled (`recordCollapsedTurns` early-returns) —
+edge firings are harness telemetry, not notebook concepts, and
+routing them through it would silently produce zero records for
+exactly the notebook-off configs the "never fires" signal exists
+to audit. Use a dedicated service or a `db.Queries` handle held
+by the agent; the turn seq needs its own derivation at the run
+boundary (`collapsed_turns`' `byTurn` comes from message
+positions — no equivalent exists for edges). (Lighter alternative considered: a
 `ContentPart` type on the boundary assistant message — `Parts` is
 a JSON blob, no migration — but firing-rate queries and eval
 assertions want structured columns, not JSON-part scans; the
@@ -313,11 +355,16 @@ never fires is dead code.
 1. Extract `runEdge` from `runVerificationGate` — pure refactor;
    verification + todos become the first two instances. Ships
    inside #39's series — `escalate-human` needs this seam.
-2. `stall-replan` edge — same trigger family as `escalate-human`;
-   implement the precedence rule above.
-3. Edge-firing records per turn for `EVAL_HARNESS` + `crush stats`.
-4. `burn-watch` — threshold + once-per-crossing marker; lands after
-   records exist so its firing rate is measurable from day one.
+2. Edge-firing records — `edge_firings` table + stats + eval
+   field. Lands first among the remaining rows: the three shipped
+   edges get recorded immediately, and stall-replan's new branches
+   are captured from day one. Requires name stability up front
+   (the `stall` name stays).
+3. `stall-replan` — the stall edge's branch on `RepairAttempts`;
+   implement the `family` precedence mechanism.
+4. `burn-watch` — conjunctive thresholds + once-per-crossing
+   marker; records exist so its firing rate is measurable from
+   day one.
 5. `summarize-continue` — only after the `StopWhen` interaction is
    designed.
 
