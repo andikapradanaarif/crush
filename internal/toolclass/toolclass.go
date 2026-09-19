@@ -63,7 +63,7 @@ var fdDupTargetRe = regexp.MustCompile(`^&[-\d]`)
 // redirect scan: a `>` inside a string literal must not gate, while a
 // quoted *target* (`> 'out'`) still counts — masking to a placeholder
 // keeps the target position occupied.
-var quotedSpanRe = regexp.MustCompile(`'[^']*'|"[^"]*"`)
+var quotedSpanRe = regexp.MustCompile(`'[^']*'|\$'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"`)
 
 // testExprRe masks [[ ]] conditional expressions — a `>` inside is a
 // string comparison, not a redirect.
@@ -177,10 +177,11 @@ func IsMutatingCall(name, input string) bool {
 	if mutatingBashRe.MatchString(params.Command) {
 		return true
 	}
-	// The redirect check reuses the target extractor so mutation and
-	// path evidence classify identically — a `> 'out'` write gates
-	// AND lands.
-	return len(BashRedirectTargets(params.Command)) > 0
+	// The redirect check reuses the extractor in its lenient form —
+	// any redirect target counts as a write (`> $OUT`, `> ~/out`,
+	// `> *.log` all mutate even though the path can't be bound),
+	// while the evidence extractor stays strict about concreteness.
+	return len(bashRedirectTargets(params.Command, false)) > 0
 }
 
 // redirectOpRe finds redirect operators outside quoted spans (the
@@ -197,10 +198,26 @@ var redirectOpRe = regexp.MustCompile(`>>?`)
 // (sed -i, tee, cp) have no extractable target here; they classify as
 // mutating via IsMutatingCall but yield no path.
 func BashRedirectTargets(command string) []string {
+	return bashRedirectTargets(command, true)
+}
+
+// bashRedirectTargets is the shared scan behind BashRedirectTargets
+// and IsMutatingCall's redirect check. With concreteOnly, targets
+// needing shell expansion are dropped — evidence must name the path
+// that was actually written. Without it every real target counts —
+// `> $OUT` is still a mutation even when its path can't be bound.
+func bashRedirectTargets(command string, concreteOnly bool) []string {
 	masked := maskCommand(command)
 	var out []string
 	for _, loc := range redirectOpRe.FindAllStringIndex(masked, -1) {
 		i := loc[1]
+		// `>&word` writes both streams to a file — a `&` glued to the
+		// `>` is part of the combined-stream operator, not the path.
+		// After whitespace (`> &file`) it's a literal filename char.
+		glued := i < len(command) && command[i] == '&'
+		if glued {
+			i++
+		}
 		for i < len(command) && (command[i] == ' ' || command[i] == '\t') {
 			i++
 		}
@@ -231,13 +248,15 @@ func BashRedirectTargets(command string) []string {
 			}
 			target = sb.String()
 		}
-		if target != "" && target != "/dev/null" && !fdDupTargetRe.MatchString(target) {
-			// `>&word` writes both streams to a file — the `&` is
-			// part of the operator, not the path.
-			target = strings.TrimPrefix(target, "&")
-			if concreteRedirectTarget(target) {
-				out = append(out, target)
-			}
+		if target == "" || target == "/dev/null" {
+			continue
+		}
+		// fd duplication (`>&1`, `>&-`) is not a file write.
+		if glued && fdDupTargetRe.MatchString("&"+target) {
+			continue
+		}
+		if !concreteOnly || concreteRedirectTarget(target) {
+			out = append(out, target)
 		}
 	}
 	return out

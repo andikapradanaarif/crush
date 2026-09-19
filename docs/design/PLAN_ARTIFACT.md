@@ -113,6 +113,17 @@ EvidenceChecks []string, EvidencePaths []string}`:
     lets a repair/replan edge render the current symbols of the
     files it names (`CONTEXT_PREFETCH.md`) into the prompt — the
     plan carries its own map.
+    Bash evidence bounds: the redirect scan masks quoted spans,
+    `[[ ]]` tests, arithmetic, and heredoc bodies before reading
+    `>` operators, and only records concrete targets — `~/out`,
+    `$OUT`, globs, and substitutions mutate but yield no path
+    (they still count as mutation for the scope gate; the two
+    vocabularies deliberately differ on expansion targets).
+    Residual blind spots: nested-paren arithmetic, `]` inside a
+    `[[ ]]` body, and heredoc delimiters outside `[A-Za-z0-9_]`.
+    Bindings outside the working directory (`../x`, absolute) are
+    legal — evidence binding is not a permission — and a bash
+    redirect there satisfies them.
     Two accepted loosenesses: the evidence scan is
     **session-lifetime** — a write from an earlier turn can
     satisfy a binding declared later, so the evidence proves "a

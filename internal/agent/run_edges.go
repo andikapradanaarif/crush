@@ -65,6 +65,14 @@ type runEdge struct {
 // original gate halves; stall converts a loop-detector stop into a
 // replan turn. All firing edges merge into ONE retry prompt — two edges
 // each enqueueing a turn would double every repair.
+//
+// The order is load-bearing: verification resolves before todos
+// scans. scanTodosEdge reads check verdicts from STORED tool-result
+// metadata — final state, not the mark-time snapshot — which is only
+// true because resolveVerificationEdge runs pending checks and
+// FlushAlls their outcomes first. Reordering or parallelizing the
+// set would make every pending check read as "has not resolved" and
+// false-block evidence-bound items.
 func (a *sessionAgent) runEdgeSet() []runEdge {
 	return []runEdge{
 		{

@@ -47,6 +47,12 @@ func TestBashRedirectTargets(t *testing.T) {
 		{name: "substitution target not concrete", command: "cmd > $(gen)", want: nil},
 		{name: "escaped-space target", command: `cmd > my\ file.txt`, want: []string{"my file.txt"}},
 		{name: "escaped backslash in target", command: `cmd > a\\b`, want: []string{`a\b`}},
+		{name: "bare >& yields nothing", command: `cmd >&`, want: nil},
+		{name: "bare >& before separator", command: `cmd >& ; ls`, want: nil},
+		{name: "escaped quote inside double quotes", command: `echo "a \"b" > out`, want: []string{"out"}},
+		{name: "escaped quote is not a phantom span", command: `echo "a \"b > out"`, want: nil},
+		{name: "ansi-c quoted gt is not a redirect", command: `echo $'a > b'`, want: nil},
+		{name: "ansi-c quote before real redirect", command: `echo $'x' > out`, want: []string{"out"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
