@@ -415,14 +415,24 @@ injecting a prompt block:
    (`PinnedFileTagsSince`, `retrieve.go:160`) from `file:` tags +
    boundary floors — nothing syncs a `pinned` flag into mem0
    metadata. The pinned sort tier uses `file:`-tag recency as the
-   proxy, or `SyncEntries` must start recording pin-ness.
+   proxy, or `SyncEntries` must start recording pin-ness. **The
+   query itself is a knob:** hydration has no natural query, and a
+   fixed neutral string still biases which memories fill the
+   window (the residual filter applied to the ordering input) —
+   empty queries are rejected by the guard anyway, so the query
+   string is a named decision, not a placeholder.
 2. Write each selected memory as a notebook entry on the _new_
    session: `Tags += ["hydrated", "origin:<source_session_id>"]`,
    **all recallable prefixes stripped** (`result:`, `turn:`,
    `segment:` — see field traps), origin date **in the entry text**,
-   `CreatedAt` preserved. The rewrite choke point is
-   `RewriteTruncationMarker` (`classify.go:702`) — it exists
-   precisely for hydration-time text normalization.
+   `CreatedAt` preserved. The strip is a **write-time** transform on
+   seed text — not `RewriteTruncationMarker` (`classify.go:702`),
+   which runs at _read_ time inside `enrichEntries`
+   (`retrieve.go:20-68`): stripping there would corrupt live
+   entries' legitimate `turn:`/`segment:`/`result:` pointers (a
+   `turn:5` in a same-session entry resolves correctly). Seeds also
+   set `entry_text_full` — `storeEntry` stores it, and recall
+   drill-down degrades without it.
 3. **Sentinel keys:** seeds get `(turn, segment)` below any real
    value (e.g. `TurnNumber = -1`) — see the field trap for why both
    origin and real keys are harmful. Selection, compaction, recall,
@@ -441,13 +451,21 @@ injecting a prompt block:
    pass it naturally once the boundary moves. Without the
    carve-out, seeds sit in the DB invisible on turn 1 — the model
    pays the re-exploration cost hydration exists to avoid.
-5. **Idempotency marker:** "first turn of a new session" needs a
-   persistent signal — a crash between seed-write and turn
-   completion must neither double-seed nor never-seed. The seeds
-   themselves are the marker: seed iff no `hydrated`-tagged entry
-   exists (`GetEntries` is already on this path). `preTurnMsgCount
-   == 0` alone is wrong — it's true pre-seed on every crashed
-   retry.
+5. **Idempotency marker + atomicity:** "first turn of a new
+   session" needs a persistent signal — the seeds themselves are
+   the marker: seed iff no `hydrated`-tagged entry exists
+   (`GetEntries` is already on this path). `preTurnMsgCount == 0`
+   alone is wrong — it's true pre-seed on every crashed retry.
+   And the marker needs atomicity: a crash _mid_-seed leaves a
+   partial set that reads as fully seeded — the seed write must be
+   a single transaction (`withTx`), or a distinct marker row
+   written last. Proceed-empty leaves no marker → the next turn
+   re-attempts naturally (MCP likely connected by then): "first
+   turn only" is really "**until seeded**" — stated, and arguably
+   better than silent-skip. Side effect, stated: pre-hydration-era
+   sessions have no marker, so they seed on their next resume —
+   intended (existing sessions benefit), but "resumptions keep
+   theirs" only holds for post-hydration sessions.
 6. **Checkpoint eligibility — stated decision:** seeds keep their
    granularity tags (`boundary`/`session`), so a hydrated
    checkpoint is eligible for `LatestCheckpointIDs` — on turn 1
@@ -469,11 +487,31 @@ injecting a prompt block:
    skips seeding. **Eval opt-out — stated:** `crush run` evals spawn
    fresh sessions, so unconditional hydration fires per run —
    cross-session memory contaminates eval arms and costs on every
-   run; hydration respects a non-interactive/eval opt-out (the
-   cold-start arm opts in explicitly via its arm config).
+   run; hydration respects an **eval opt-out — discriminated by
+   the eval signal (env var / arm config), NOT `NonInteractive`**:
+   `call.NonInteractive` is true for every `crush run`, eval and
+   user-driven alike — keying on it would contradict "fires on
+   headless too." (The cold-start arm opts in explicitly via its
+   arm config.) **Sub-agent sessions skip** — `ParentSessionID != ""`
+   distinguishes them; hydrating a task session costs the fetch +
+   ~2-4K tokens for context the parent's prompt already provides.
    Transitive seeding is already blocked: `SyncEntries` skips
    `hydrated` entries → seeds never reach mem0 → session N+1 can't
    re-seed session N's seeds (only its new, organic entries).
+8. **Write API — unlisted work:** `notebook.Service` has no raw
+   write method — every write path is a generation pipeline
+   (`GenerateSegmentEntries`, `GenerateCheckpoint`,
+   `GenerateTurnDigest`). Hydration needs a `SeedEntries`-style
+   method; `storeEntry` + `withTx` make it small, but the API
+   doesn't exist and no caller-side shortcut does either.
+9. **Open-items payload source — stated:** prior sessions' plan
+   state lives in the local `sessions` table (`sess.Todos`/
+   `PlanItem`s) — same DB, no MCP round-trip, works even when the
+   session's mem0 sync raced. The mem0 `plan`-entry path is uniform
+   but depends on sync having run; the direct read of the latest
+   same-project session's open items is higher-fidelity for the
+   highest-value payload — local read wins, mem0 entries are the
+   fallback for cross-machine history.
 
 Rejected alternative — system-prompt section (`CacheClassSession`):
 keeps the digest out of message history, but bypasses every existing
