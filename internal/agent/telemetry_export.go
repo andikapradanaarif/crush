@@ -46,7 +46,9 @@ type SessionTelemetry struct {
 	EventsCollapsed int `json:"events_collapsed"`
 	// EdgeFirings splits run-boundary edge firing counts by edge and
 	// outcome — the in-memory mirror of the edge_firings rows this
-	// process wrote.
+	// process wrote. Cumulative for the process; the eval harness
+	// emits EdgeFiringDelta instead so multi-emission processes
+	// can't double-count.
 	EdgeFirings map[string]map[string]int `json:"edge_firings,omitempty"`
 }
 
@@ -106,11 +108,13 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 // not double-count. Deliberately not on the Coordinator interface —
 // the eval harness type-asserts for it alongside SessionTelemetry.
 func (c *coordinator) EdgeFiringDelta(sessionID string) map[string]map[string]int {
-	sa, ok := c.currentAgent().(*sessionAgent)
-	if !ok || sa == nil || sa.edgeStats == nil {
+	if c.edgeStats == nil {
 		return nil
 	}
-	cur, _ := sa.edgeStats.Get(sessionID)
+	// Read the coordinator-owned map directly — not through
+	// currentAgent — so an emission landing during an agent rebuild
+	// gap still reports the rows.
+	cur, _ := c.edgeStats.Get(sessionID)
 	prev, _ := c.edgeFiringEmitted.Get(sessionID)
 	var delta map[string]map[string]int
 	for key, n := range cur {

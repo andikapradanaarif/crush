@@ -519,6 +519,13 @@ notice" failure as a declared transition.
   reports "N tokens, no writes" incorrectly. The once-per-
   crossing marker bounds it to one nag per chain; widening the
   regex is a separate decision from this edge.
+- **Delegation blind spot applies to the shipped arm too:**
+  `scanStepCallClasses` reads `result.Steps` only — a run that
+  delegated every write through the task tool shows `mutating==0`
+  (the child's writes live in the child's steps), so a
+  delegation-heavy run can trip `steps > 30` alone. The marker
+  bounds it to one nag per chain; same accepted category as the
+  regex gaps above.
 - **Headless degrade pins to the final assistant message** —
   same carrier as stall's blocker report so it reaches
   `RunComplete.Text` for `crush run`; a slog-only degrade would

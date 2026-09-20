@@ -40,7 +40,18 @@ func stallResult() *fantasy.AgentResult {
 			},
 		))
 	}
-	steps = append(steps, stepWith(fantasy.FinishReasonUnknown, fantasy.TextContent{Text: "..."}))
+	// The masked shape ends mid-tool-chain — the summarize StopWhen
+	// fired between the model's calls, before the loop detector ran.
+	steps = append(steps, stepWith(fantasy.FinishReasonToolCalls,
+		fantasy.ToolCallContent{
+			ToolCallID: "tc-x", ToolName: "view",
+			Input: `{"file_path":"other.go"}`,
+		},
+		fantasy.ToolResultContent{
+			ToolCallID: "tc-x", ToolName: "view",
+			Result: fantasy.ToolResultOutputContentText{Text: "different"},
+		},
+	))
 	return &fantasy.AgentResult{Steps: steps}
 }
 
@@ -976,8 +987,11 @@ func TestStallEscalateBeatsBurnWatch(t *testing.T) {
 
 	a, conn, sessionID := interactiveEdgeAgent(t)
 	// A clean-stopping, write-less, over-threshold run whose last
-	// window saturates one signature — the masked-stall fallback and
-	// burn-watch both produce escalation-family triggers.
+	// window saturates one signature. The fallback must NOT fire
+	// here — a clean stop means the detector evaluated every step,
+	// so saturation can only exist undetected when a non-clean
+	// ending (summarize, halt) preempted it. Burn-watch takes the
+	// boundary alone.
 	result := burnResult(burnWatchStepsThreshold+1, 0)
 	for i := len(result.Steps) - loopDetectionWindowSize; i < len(result.Steps)-1; i++ {
 		id := fmt.Sprintf("tc-s%d", i)
@@ -997,17 +1011,29 @@ func TestStallEscalateBeatsBurnWatch(t *testing.T) {
 	require.True(t, queued)
 	q, _ := a.messageQueue.Get(sessionID)
 	require.Len(t, q, 1)
-	require.True(t, strings.HasPrefix(q[0].Prompt, stallRetryPrefix),
-		"first-in-runEdgeSet escalation wins the slot")
-	require.NotContains(t, q[0].Prompt, burnWatchPrefix)
-	require.Empty(t, q[0].deferred,
-		"burn-watch's evidence is step-bound — deferred, not carried")
+	require.True(t, strings.HasPrefix(q[0].Prompt, burnWatchPrefix))
 	outcomes := map[string]string{}
 	for _, r := range firingRows(t, conn, sessionID) {
 		outcomes[r.edge+"|"+r.variant] = r.outcome
 	}
-	require.Equal(t, "fired", outcomes["stall|escalate"])
-	require.Equal(t, "deferred", outcomes["burn-watch|"])
+	require.Empty(t, outcomes["stall|escalate"],
+		"clean-stop saturation is not stall evidence")
+	require.Equal(t, "fired", outcomes["burn-watch|"])
+}
+
+func TestStallFallbackMaskedShape(t *testing.T) {
+	t.Parallel()
+
+	a, conn, sessionID := interactiveEdgeAgent(t)
+	// The mask shape: saturated window AND the run ended mid-tool-
+	// chain — the summarize StopWhen preempted the detector.
+	queued := runEdgesForTest(a, t.Context(),
+		SessionAgentCall{SessionID: sessionID},
+		edgeInput{result: stallResult(), stalled: false, turnSeq: 1})
+	require.True(t, queued, "masked stall replans")
+	q, _ := a.messageQueue.Get(sessionID)
+	require.True(t, strings.HasPrefix(q[0].Prompt, stallReplanPrefix))
+	require.Equal(t, "fired", firingOutcome(t, conn, sessionID, "stall"))
 }
 
 func TestVerificationTodosMerge(t *testing.T) {
@@ -1142,18 +1168,18 @@ func TestStallEdge_SkipsStopTurnBoundary(t *testing.T) {
 func TestEdgeFiringDelta(t *testing.T) {
 	t.Parallel()
 
-	sa, _, sessionID := newEdgeTestAgent(t, &config.Config{})
+	_, _, sessionID := newEdgeTestAgent(t, &config.Config{})
 	coord := &coordinator{
-		mainAgent:         sa,
+		edgeStats:         csync.NewMap[string, map[string]int](),
 		edgeFiringEmitted: csync.NewMap[string, map[string]int](),
 	}
-	sa.edgeStats.Set(sessionID, map[string]int{"stall:fired": 2, "todos:cleared": 1})
+	coord.edgeStats.Set(sessionID, map[string]int{"stall:fired": 2, "todos:cleared": 1})
 	require.Equal(t, map[string]map[string]int{
 		"stall": {"fired": 2}, "todos": {"cleared": 1},
 	}, coord.EdgeFiringDelta(sessionID))
 	// A second emission reports only the increment — the driver's
 	// per-turn summation can't double-count cumulative counters.
-	sa.edgeStats.Set(sessionID, map[string]int{"stall:fired": 3, "todos:cleared": 1})
+	coord.edgeStats.Set(sessionID, map[string]int{"stall:fired": 3, "todos:cleared": 1})
 	require.Equal(t, map[string]map[string]int{
 		"stall": {"fired": 1},
 	}, coord.EdgeFiringDelta(sessionID))

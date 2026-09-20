@@ -249,10 +249,12 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 	if a.configStore == nil || in.result == nil || len(in.result.Steps) == 0 {
 		// The entry guard skips scanning entirely — a carried trigger
 		// landing here still deserves its cancelled row rather than
-		// dying silently (its deferred row already exists).
+		// dying silently, and the carrier is consumed: a requeued
+		// call must not re-merge a trigger already recorded dead.
 		for _, d := range call.deferred {
 			a.recordEdgeFiring(ctx, call, in, d.edge.name, d.trigger, edgeOutcomeCancelled)
 		}
+		call.deferred = nil
 		return false, call
 	}
 	// A mutating call in the just-finished run resets the write-less
@@ -268,7 +270,12 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 	// Carried triggers merge back before any scan short-circuits,
 	// keyed by edge so a fresh trigger can supersede them. They are
 	// consumed — cleared from the returned call so a requeue doesn't
-	// re-merge them at the next boundary.
+	// re-merge them at the next boundary. Note the merge contract:
+	// only sessionState triggers ever ride the carrier, and their
+	// "prompt if a slot is free" case resolves through the FRESH scan
+	// — a carrier-eligible edge's scan re-derives its evidence from
+	// session state, so a nil scan genuinely means resolved and the
+	// carried trigger records cleared rather than taking a slot.
 	carried := make(map[string]deferredTrigger, len(call.deferred))
 	for _, d := range call.deferred {
 		carried[d.edge.name] = d
@@ -633,8 +640,15 @@ func (a *sessionAgent) recordEdgeFiring(ctx context.Context, call SessionAgentCa
 		// eat them. The stamp is chain-shared, so the attempt index
 		// disambiguates boundaries inside the chain; the negative
 		// keeps the fallback out of the real ordinal range. The mask
-		// bounds the product inside int64.
+		// bounds the product inside int64. The ×4 stride assumes
+		// RepairAttempts stays under maxRepairAttempts — widen it if
+		// the repair budget ever grows.
 		turnSeq = -((int64(call.RunStamp)%(1<<40))*4 + int64(call.RepairAttempts))
+	} else if turnSeq == 0 {
+		// Both the count and the stamp failed — the row dedupes into
+		// every other boundary's. Warn so the silent loss is at
+		// least visible in logs.
+		slog.Warn("Edge firing row keyed at turn_seq 0", "session_id", call.SessionID, "edge", edgeName)
 	}
 	params := db.InsertEdgeFiringParams{
 		SessionID:      call.SessionID,
@@ -1040,18 +1054,30 @@ func (a *sessionAgent) scanStallEdge(_ context.Context, call SessionAgentCall, i
 	// crossed the context threshold ends with loopStopped false.
 	sig, tool, repeats := repeatedToolSignature(in.result.Steps, loopDetectionWindowSize, loopDetectionMaxRepeats)
 	if !in.stalled {
-		// The fallback must not fire where the run paused for user
-		// input — a question-tool StopTurn is an escalation in
-		// progress, not a loop stop, and a saturated window
-		// coinciding with it is coincidence, not evidence.
-		if sig == "" || endedOnStopTurn(in.result) {
+		// The fallback only exists for the mask shape: a run that
+		// ended mid-tool-chain (FinishReasonToolCalls — the summarize
+		// StopWhen fired between the model's calls). A run that ended
+		// stop/error had the detector evaluated on its last step
+		// already, and a question-tool StopTurn is an escalation in
+		// progress — neither is stall evidence.
+		if sig == "" || endedOnStopTurn(in.result) ||
+			in.result.Steps[len(in.result.Steps)-1].FinishReason != fantasy.FinishReasonToolCalls {
 			return nil
 		}
 	}
+	report := stallBlockerReport(tool)
+	detail := fmt.Sprintf("tool=%q repeats=%d signature=%s", tool, repeats, sig)
+	if sig == "" {
+		// The detector tripped but the winning signature aged out of
+		// the trailing window — keep the report honest instead of
+		// claiming a repeated call.
+		report = "The loop detector stopped this run: the step pattern repeated without progress."
+		detail = "stalled (signature aged out of window)"
+	}
 	t := &edgeTrigger{
 		assistant: in.currentAssistant,
-		report:    stallBlockerReport(tool),
-		detail:    fmt.Sprintf("tool=%q repeats=%d signature=%s", tool, repeats, sig),
+		report:    report,
+		detail:    detail,
 		steps:     in.result.Steps,
 		writeSet:  stepWriteSet(in.result.Steps),
 	}
@@ -1143,11 +1169,17 @@ func (a *sessionAgent) pullStallHandoff(ctx context.Context, call SessionAgentCa
 			}
 		}
 	}
+	// Match the verification prompt's path rendering — write-set
+	// paths under the working dir render relative.
+	workingDir := a.configStore.WorkingDir()
+	for i, p := range t.writeSet {
+		t.writeSet[i] = relPlanPath(workingDir, p)
+	}
+
 	opts := a.configStore.Config().Options
 	if opts == nil || !opts.ProjectIndexEnabled() {
 		return
 	}
-	workingDir := a.configStore.WorkingDir()
 	dirs := relTouchedDirs(workingDir, t.steps)
 	if len(dirs) == 0 {
 		return
