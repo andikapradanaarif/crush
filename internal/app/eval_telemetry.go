@@ -91,6 +91,11 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 			"written":  tel.DigestsWritten,
 			"rendered": tel.DigestRenders,
 		}
+		edgeFirings := tel.EdgeFirings
+		if edgeFirings == nil {
+			edgeFirings = map[string]map[string]int{}
+		}
+		doc["edge_firings"] = edgeFirings
 	}
 	if m, ok := app.config.Config().Models[config.SelectedModelTypeLarge]; ok {
 		doc["model"] = m.Provider + "/" + m.Model

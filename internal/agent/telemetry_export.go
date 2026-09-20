@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"strconv"
+	"strings"
 
 	"charm.land/fantasy"
 )
@@ -43,6 +44,10 @@ type SessionTelemetry struct {
 	// collapsed_turns rows.
 	TurnsCollapsed  int `json:"turns_collapsed"`
 	EventsCollapsed int `json:"events_collapsed"`
+	// EdgeFirings splits run-boundary edge firing counts by edge and
+	// outcome — the in-memory mirror of the edge_firings rows this
+	// process wrote.
+	EdgeFirings map[string]map[string]int `json:"edge_firings,omitempty"`
 }
 
 // SessionTelemetry returns the coordinator's per-session counters.
@@ -79,6 +84,18 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 		t.DigestsWritten = n.DigestsWritten
 		t.DigestRenders = n.DigestRenders
 		t.PriorTurnResultRecalls = n.PriorTurnResultRecalls
+	}
+	if sa.edgeStats != nil {
+		if m, ok := sa.edgeStats.Get(sessionID); ok && len(m) > 0 {
+			t.EdgeFirings = make(map[string]map[string]int, len(m))
+			for key, n := range m {
+				edge, outcome, _ := strings.Cut(key, ":")
+				if t.EdgeFirings[edge] == nil {
+					t.EdgeFirings[edge] = map[string]int{}
+				}
+				t.EdgeFirings[edge][outcome] += n
+			}
+		}
 	}
 	return t
 }

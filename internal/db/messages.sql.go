@@ -10,6 +10,23 @@ import (
 	"database/sql"
 )
 
+const countUserMessagesBySession = `-- name: CountUserMessagesBySession :one
+SELECT COUNT(id)
+FROM messages
+WHERE session_id = ? AND role = 'user'
+`
+
+// Absolute user-turn ordinal source for edge_firings.turn_seq - the
+// bounded prompt-history query above can't serve it (DESC LIMIT 200
+// yields no ASC ordinal past 200 and same-second created_at ties are
+// ambiguous).
+func (q *Queries) CountUserMessagesBySession(ctx context.Context, sessionID string) (int64, error) {
+	row := q.queryRow(ctx, q.countUserMessagesBySessionStmt, countUserMessagesBySession, sessionID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createMessage = `-- name: CreateMessage :one
 INSERT INTO messages (
     id,

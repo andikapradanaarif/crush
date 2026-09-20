@@ -212,6 +212,11 @@ type coordinator struct {
 	nbStats        *csync.Map[string, notebook.Stats]
 	nbScanIdx      *csync.Map[string, int]
 	nbPendingReads *csync.Map[string, map[string]string]
+	// edgeStore persists run-boundary edge firing rows and edgeStats
+	// accumulates the per-session counts SessionTelemetry reports —
+	// shared across agent rebuilds, nil store skips the records.
+	edgeStore EdgeFiringStore
+	edgeStats *csync.Map[string, map[string]int]
 
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
@@ -252,6 +257,9 @@ type CoordinatorOptions struct {
 	// the small model. The coordinator sets this so the notebook
 	// generator can obtain the model lazily.
 	NotebookModelResolver *func() fantasy.LanguageModel
+	// EdgeStore persists run-boundary edge firing rows — *db.Queries
+	// satisfies it. May be nil; the records then skip.
+	EdgeStore EdgeFiringStore
 }
 
 func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, error) {
@@ -288,6 +296,8 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		notebook:              opts.Notebook,
 		notebookModelResolver: opts.NotebookModelResolver,
 		summaryModel:          csync.NewValue(Model{}),
+		edgeStore:             opts.EdgeStore,
+		edgeStats:             csync.NewMap[string, map[string]int](),
 	}
 
 	// Share per-session bookkeeping maps across all built agents and
@@ -945,6 +955,8 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		AmbiguityClarification: c.cfg.Config().Options.AmbiguityClarificationEnabled(),
 		Interactive:            c.interactive,
 		LSPManager:             c.lspManager,
+		EdgeStore:              c.edgeStore,
+		EdgeStats:              c.edgeStats,
 	})
 
 	// Warn only for main agents — sub-agent builds happen per run via

@@ -15,6 +15,18 @@ type CollapsedTurn struct {
 	CreatedAt  int64  `json:"created_at"`
 }
 
+type EdgeFiring struct {
+	SessionID      string `json:"session_id"`
+	TurnSeq        int64  `json:"turn_seq"`
+	Edge           string `json:"edge"`
+	Variant        string `json:"variant"`
+	RepairAttempts int64  `json:"repair_attempts"`
+	TriggerDetail  string `json:"trigger_detail"`
+	Outcome        string `json:"outcome"`
+	RunStamp       int64  `json:"run_stamp"`
+	CreatedAt      int64  `json:"created_at"`
+}
+
 type File struct {
 	ID        string `json:"id"`
 	SessionID string `json:"session_id"`

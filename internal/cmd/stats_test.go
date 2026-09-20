@@ -115,3 +115,76 @@ func TestGatherPruningStats_Empty(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, stats)
 }
+
+func TestGatherEdgeFiringStats(t *testing.T) {
+	t.Parallel()
+
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+
+	queries := db.New(conn)
+	sessions := session.NewService(queries, conn)
+	s1, err := sessions.Create(t.Context(), "one")
+	require.NoError(t, err)
+	s2, err := sessions.Create(t.Context(), "two")
+	require.NoError(t, err)
+
+	insert := func(sessionID string, turnSeq int64, edge, outcome string) {
+		t.Helper()
+		_, err := queries.InsertEdgeFiring(t.Context(), db.InsertEdgeFiringParams{
+			SessionID: sessionID,
+			TurnSeq:   turnSeq,
+			Edge:      edge,
+			Outcome:   outcome,
+		})
+		require.NoError(t, err)
+	}
+	insert(s1.ID, 1, "todos", "fired")
+	insert(s1.ID, 2, "todos", "fired")
+	insert(s1.ID, 3, "todos", "exhausted")
+	insert(s1.ID, 1, "stall", "gated")
+	insert(s2.ID, 1, "todos", "fired")
+
+	stats, err := gatherEdgeFiringStats(t.Context(), queries)
+	require.NoError(t, err)
+	require.Len(t, stats, 3)
+
+	byKey := map[string]EdgeFiringStat{}
+	for _, s := range stats {
+		byKey[s.Edge+"|"+s.Outcome] = s
+	}
+	require.EqualValues(t, 3, byKey["todos|fired"].Firings)
+	require.EqualValues(t, 2, byKey["todos|fired"].Sessions)
+	require.EqualValues(t, 1, byKey["todos|exhausted"].Firings)
+	require.EqualValues(t, 1, byKey["stall|gated"].Firings)
+
+	// The merged view across projects dedupes by edge|outcome.
+	merged := mergeStats([]ProjectStats{
+		{Stats: &Stats{EdgeFirings: stats}},
+		{Stats: &Stats{EdgeFirings: []EdgeFiringStat{
+			{Edge: "todos", Outcome: "fired", Firings: 5, Sessions: 1},
+		}}},
+	})
+	require.Len(t, merged.EdgeFirings, 3)
+	var fired EdgeFiringStat
+	for _, e := range merged.EdgeFirings {
+		if e.Edge == "todos" && e.Outcome == "fired" {
+			fired = e
+		}
+	}
+	require.EqualValues(t, 8, fired.Firings)
+	require.EqualValues(t, 3, fired.Sessions)
+}
+
+func TestGatherEdgeFiringStats_Empty(t *testing.T) {
+	t.Parallel()
+
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+
+	stats, err := gatherEdgeFiringStats(t.Context(), db.New(conn))
+	require.NoError(t, err)
+	require.Nil(t, stats)
+}

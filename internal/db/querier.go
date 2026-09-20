@@ -10,6 +10,11 @@ import (
 
 type Querier interface {
 	BumpSessionCounter(ctx context.Context, arg BumpSessionCounterParams) error
+	// Absolute user-turn ordinal source for edge_firings.turn_seq - the
+	// bounded prompt-history query above can't serve it (DESC LIMIT 200
+	// yields no ASC ordinal past 200 and same-second created_at ties are
+	// ambiguous).
+	CountUserMessagesBySession(ctx context.Context, sessionID string) (int64, error)
 	CreateFile(ctx context.Context, arg CreateFileParams) (File, error)
 	CreateMessage(ctx context.Context, arg CreateMessageParams) (Message, error)
 	CreateNotebookEntry(ctx context.Context, arg CreateNotebookEntryParams) (NotebookEntry, error)
@@ -24,6 +29,7 @@ type Querier interface {
 	DeleteSessionMessages(ctx context.Context, sessionID string) error
 	GetAverageResponseTime(ctx context.Context) (int64, error)
 	GetCollapsedTurnStats(ctx context.Context) (GetCollapsedTurnStatsRow, error)
+	GetEdgeFiringStats(ctx context.Context) ([]GetEdgeFiringStatsRow, error)
 	GetFile(ctx context.Context, id string) (File, error)
 	GetFileByPathAndSession(ctx context.Context, arg GetFileByPathAndSessionParams) (File, error)
 	GetFileRead(ctx context.Context, arg GetFileReadParams) (ReadFile, error)
@@ -59,6 +65,10 @@ type Querier interface {
 	GetUsageByDayOfWeek(ctx context.Context) ([]GetUsageByDayOfWeekRow, error)
 	GetUsageByHour(ctx context.Context) ([]GetUsageByHourRow, error)
 	GetUsageByModel(ctx context.Context) ([]GetUsageByModelRow, error)
+	// One row per edge per run boundary; INSERT OR IGNORE makes the write
+	// idempotent within a boundary, so callers count a firing only when
+	// this reports a new row.
+	InsertEdgeFiring(ctx context.Context, arg InsertEdgeFiringParams) (int64, error)
 	// Backs prompt history when no session is open. Needs
 	// idx_messages_role_created_at to seek rather than scan the table.
 	ListAllUserMessages(ctx context.Context) ([]Message, error)

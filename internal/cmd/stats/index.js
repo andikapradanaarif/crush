@@ -521,3 +521,35 @@ if (stats.project_index && stats.project_index.map_calls > 0) {
     container.appendChild(section);
   }
 }
+
+// Run Edges (only shown when a boundary edge has been recorded)
+if (stats.edge_firings && stats.edge_firings.length > 0) {
+  const section = document.createElement("div");
+  section.className = "chart-card full-width";
+  const rows = stats.edge_firings
+    .map(
+      (e) =>
+        `<tr><td>${e.edge}</td><td>${e.outcome}</td><td>${formatNumber(e.firings)}</td><td>${formatNumber(e.sessions)}</td></tr>`,
+    )
+    .join("");
+  section.innerHTML = `
+    <h2>Run Edges</h2>
+    <p style="color: var(--text-muted); margin: 0">
+      Deterministic transitions evaluated at every run boundary. An edge
+      that fires constantly is a tuning signal; an edge that never fires
+      is dead code.
+    </p>
+    <div style="overflow-x: auto">
+      <table>
+        <thead>
+          <tr><th>Edge</th><th>Outcome</th><th>Firings</th><th>Sessions</th></tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+  const container = document.querySelector(".charts-grid");
+  if (container) {
+    container.appendChild(section);
+  }
+}
