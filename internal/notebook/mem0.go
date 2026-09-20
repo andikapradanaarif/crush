@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
@@ -286,6 +287,29 @@ var mem0ListToolNames = []string{"get_all_memories", "list_memories", "get_memor
 // fill the window, so this is a named knob the eval arm can revisit.
 const hydrationQuery = "session position decisions files"
 
+// mem0HydrationFailures is a process-level negative cache recording
+// the last failed hydration fetch per server. The per-session attempt
+// cap bounds each session, but without this every NEW session still
+// pays the full timeout while the server stays dead.
+var mem0HydrationFailures = csync.NewMap[string, time.Time]()
+
+// hydrationFailureTTL is how long a failed fetch suppresses further
+// hydration attempts for that server.
+const hydrationFailureTTL = time.Minute
+
+// HydrationFetchFailedRecently reports whether the server's last
+// hydration fetch failed within hydrationFailureTTL — callers skip
+// the attempt (and its counter bump) rather than paying a known-dead
+// server's timeout on every new session's first turn.
+func HydrationFetchFailedRecently(serverName string) bool {
+	t, ok := mem0HydrationFailures.Get(serverName)
+	return ok && time.Since(t) < hydrationFailureTTL
+}
+
+func noteHydrationFailure(serverName string) {
+	mem0HydrationFailures.Set(serverName, time.Now())
+}
+
 // mem0ListTool returns the server's declared listing tool name, or ""
 // when it exposes none. The registry is empty until the server connects
 // — an unconnected server yields no tool and the search path runs. A
@@ -310,8 +334,10 @@ var mem0ListTool = func(serverName string) string {
 // metadata ordering can rank it. A declared listing tool is preferred
 // (no semantic bias in which memories fill the window); otherwise a
 // wide search_memories fetch carries the residual semantic bound.
-// Fail-closed throughout: an unparseable or unverifiable response
-// yields nil — proceed-empty, never a seeded blob.
+// Fail-closed throughout: transport errors AND unparseable responses
+// return an error so the caller can distinguish "failed — retry next
+// turn" from "verifiably empty"; a parseable response with zero
+// same-project items returns (nil, nil).
 func FetchHydrationMemories(ctx context.Context, cfg *config.ConfigStore, serverName string) ([]map[string]any, error) {
 	if cfg == nil || serverName == "" {
 		return nil, nil
@@ -338,16 +364,19 @@ func FetchHydrationMemories(ctx context.Context, cfg *config.ConfigStore, server
 	}
 	content, _, err := fetchMem0(ctx, cfg, serverName, hydrationQuery, mem0SearchFetchK, mem0SearchFetchK)
 	if err != nil {
+		noteHydrationFailure(serverName)
 		return nil, err
 	}
 	items, ok := partitionMem0Items(content, workDir, serverName)
 	if !ok {
 		// Unlike recall prose, an unparseable hydration response has
-		// no usable fallback — nothing to seed.
-		slog.Warn("Mem0 hydration fetch dropped: response is not parseable",
-			"server", serverName)
-		return nil, nil
+		// no usable fallback — and it must surface as an error, not an
+		// empty result, or the caller would seed the local plan
+		// payload alone and commit the marker, losing the mem0 retry.
+		noteHydrationFailure(serverName)
+		return nil, fmt.Errorf("mem0 hydration fetch returned an unverifiable payload")
 	}
+	mem0HydrationFailures.Del(serverName)
 	return items, nil
 }
 

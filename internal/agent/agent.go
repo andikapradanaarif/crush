@@ -328,6 +328,10 @@ type sessionAgent struct {
 	// syncSegmentGen runs segment entry generation inline instead of
 	// in a goroutine — a deterministic seam for tests.
 	syncSegmentGen bool
+	// hydrateFetch fetches hydration candidates; nil uses
+	// notebook.FetchHydrationMemories. A test seam — production never
+	// overrides it.
+	hydrateFetch func(ctx context.Context, cfg *config.ConfigStore, serverName string) ([]map[string]any, error)
 
 	messageQueue   *csync.Map[string, []SessionAgentCall]
 	activeRequests *csync.Map[string, *activeCancel]
@@ -515,6 +519,7 @@ func NewSessionAgent(
 		lspManager:             opts.LSPManager,
 		edgeStore:              opts.EdgeStore,
 		edgeStats:              cmp.Or(opts.EdgeStats, csync.NewMap[string, map[string]int]()),
+		hydrateFetch:           notebook.FetchHydrationMemories,
 	}
 	a.runStampGen.Store(runStampEpoch())
 	return a

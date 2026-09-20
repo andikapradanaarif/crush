@@ -528,7 +528,12 @@ injecting a prompt block:
    run; hydration is an **option flag** (`hydration`/`notebook-
    hydration`), default on when the feature ships — eval arms set
    it explicitly via arm config, which is also what the cold-start
-   arm needs for its on/off knob. Env sniffing rejected:
+   arm needs for its on/off knob. Deliberate deviation: the default
+   is ON (the spec text asked for opt-out); the paired cold-start arm
+   must therefore set `notebook_hydration` on BOTH sides — the off
+   arm explicitly false — since an unset arm now silently hydrates.
+   In practice eval children run with a sanitized HOME and typically
+   no mem0 server, which no-ops hydration anyway. Env sniffing rejected:
    `CRUSH_EVAL_FLAGS` is only pinned when `len(FlagKeys) > 0`
    (`eval/driver.go:340-342`) — a no-flag-keys eval would leave it
    unset and contaminate the off arm; `CRUSH_EVAL_TELEMETRY` is

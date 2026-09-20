@@ -69,26 +69,38 @@ func (a *sessionAgent) maybeHydrateNotebook(ctx context.Context, sess session.Se
 	if attempts >= maxHydrationAttempts {
 		return
 	}
-	detCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hydrationFetchTimeout)
+	// The fetch rides the run's context: a TUI Escape cancels the run
+	// and must abort the wait/fetch with it, not make the user sit
+	// out the timeout on a dead run. A cancelled fetch writes nothing,
+	// burns no marker, and retries next turn under the cap.
+	fetchCtx, cancel := context.WithTimeout(ctx, hydrationFetchTimeout)
 	defer cancel()
 
 	// MCP servers connect asynchronously and getOrRenewClient fails
 	// instantly while none is registered — without this wait a fast
 	// first TUI prompt (the exact turn hydration exists for) would
 	// burn an attempt against a server that was simply still starting.
-	// The detCtx deadline bounds the wait; timing out while init is
+	// The fetchCtx deadline bounds the wait; timing out while init is
 	// still in flight costs no attempt — the next turn retries.
-	if err := mcp.WaitForInit(detCtx); err != nil {
+	if err := mcp.WaitForInit(fetchCtx); err != nil {
+		return
+	}
+	// Process-level negative cache: a dead server shouldn't tax every
+	// new session's first turn with a fresh timeout.
+	if notebook.HydrationFetchFailedRecently(a.notebookMemoryServer) {
 		return
 	}
 	if err := a.notebook.BumpSessionCounter(ctx, sess.ID, notebook.CounterHydrationAttempts, 1); err != nil {
 		slog.Warn("Failed to record hydration attempt", "session_id", sess.ID, "error", err)
 	}
 
-	items, err := notebook.FetchHydrationMemories(detCtx, a.configStore, a.notebookMemoryServer)
+	items, err := a.hydrateFetch(fetchCtx, a.configStore, a.notebookMemoryServer)
 	if err != nil {
-		// Proceed-empty: no marker, next turn retries under the cap.
+		// Fetch failure must not commit the marker — even the local
+		// plan payload rides the retry, or one bad fetch would pin the
+		// session as seeded with the mem0 knowledge lost forever.
 		slog.Warn("Hydration fetch failed; proceeding unseeded", "session_id", sess.ID, "error", err)
+		return
 	}
 	seeds := notebook.BuildHydrationSeeds(items, notebook.HydrationSeedMaxTokens)
 	// The open-items payload is the highest-value seed and sources
@@ -96,10 +108,15 @@ func (a *sessionAgent) maybeHydrateNotebook(ctx context.Context, sess session.Se
 	// and it survives a sync that raced. Landing last gives it the
 	// highest event number: it wins the selection budget and renders
 	// last — closest to the prompt.
-	if plan := a.planSeedEntry(detCtx, sess); plan != nil {
+	if plan := a.planSeedEntry(fetchCtx, sess); plan != nil {
 		seeds = append(seeds, *plan)
 	}
-	seeded, err := a.notebook.SeedEntries(detCtx, sess.ID, seeds)
+	// The write detaches: a mid-write cancel rolls back cleanly, but
+	// a completed write racing a cancelled run still commits — the
+	// seeds are valid for the session either way.
+	writeCtx, writeCancel := context.WithTimeout(context.WithoutCancel(ctx), hydrationFetchTimeout)
+	defer writeCancel()
+	seeded, err := a.notebook.SeedEntries(writeCtx, sess.ID, seeds)
 	if err != nil {
 		slog.Error("Failed to seed notebook", "session_id", sess.ID, "error", err)
 		return
@@ -123,7 +140,11 @@ func (a *sessionAgent) planSeedEntry(ctx context.Context, sess session.Session) 
 		return nil
 	}
 	for _, s := range sessions {
-		if s.ID == sess.ID || !session.HasIncompleteTodos(s.Todos) {
+		// ListSessions already filters parent_session_id IS NULL;
+		// the check is kept anyway — a child session's open todos
+		// must never seed a top-level session's agenda even if the
+		// query ever changes.
+		if s.ID == sess.ID || s.ParentSessionID != "" || !session.HasIncompleteTodos(s.Todos) {
 			continue
 		}
 		keyByID := session.PlanKeyByID(s.Todos)

@@ -93,7 +93,9 @@ func tagValue(tags []string, prefix string) string {
 // turn:5/segment:5.2 are live recall queries that would silently
 // resolve against the new session's unrelated turn; result:<id> dies
 // cleanly but misleads. All three are rewritten to origin-* handles —
-// provenance text the recall dispatch never parses.
+// provenance text the recall dispatch never parses. The rewrite also
+// catches non-pointer prose ("the result:"), which reads slightly odd
+// but stays unambiguous — accepted.
 var recallHandleRe = regexp.MustCompile(`\b(turn|segment|result):`)
 
 // parseMemoryItem extracts the hydration-relevant fields from one
@@ -292,7 +294,7 @@ func (s *service) SeedEntries(ctx context.Context, sessionID string, seeds []See
 			return err
 		}
 		for i, seed := range seeds {
-			if err := storeSeedEntry(ctx, q, sessionID, maxEvent+1+int64(i), seed); err != nil {
+			if err := s.storeSeedEntry(ctx, q, sessionID, maxEvent+1+int64(i), seed); err != nil {
 				return err
 			}
 		}
@@ -308,10 +310,14 @@ func (s *service) SeedEntries(ctx context.Context, sessionID string, seeds []See
 // storeSeedEntry persists one hydration seed under the sentinel turn.
 // Unlike storeEntry it preserves the origin timestamp and always
 // stores entry_text_full — recall drill-down degrades without it.
-func storeSeedEntry(ctx context.Context, q *db.Queries, sessionID string, eventNumber int64, seed SeedEntry) error {
+func (s *service) storeSeedEntry(ctx context.Context, q *db.Queries, sessionID string, eventNumber int64, seed SeedEntry) error {
 	createdAt := seed.CreatedAt
 	if createdAt <= 0 {
 		createdAt = time.Now().Unix()
+	}
+	text := seed.Text
+	if estimateTokens(text) > s.opts.MaxEntryTokens {
+		text = truncateEntry(text, s.opts.MaxEntryTokens)
 	}
 	id := uuid.New().String()
 	_, err := q.CreateNotebookEntry(ctx, db.CreateNotebookEntryParams{
@@ -322,9 +328,9 @@ func storeSeedEntry(ctx context.Context, q *db.Queries, sessionID string, eventN
 		EventNumber:      eventNumber,
 		EventType:        seed.EventType,
 		Title:            seed.Title,
-		EntryText:        seed.Text,
-		EntryTextFull:    sql.NullString{String: seed.Text, Valid: true},
-		TokenCount:       estimateTokens(seed.Text),
+		EntryText:        text,
+		EntryTextFull:    sql.NullString{String: text, Valid: true},
+		TokenCount:       estimateTokens(text),
 		CompressionLevel: CompressionFull,
 		Succeeded:        1,
 		CreatedAt:        createdAt,

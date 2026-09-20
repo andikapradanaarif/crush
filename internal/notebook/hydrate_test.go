@@ -209,19 +209,21 @@ func TestFetchHydrationMemories_PrefersListTool(t *testing.T) {
 	require.Len(t, items, 1)
 }
 
-func TestFetchHydrationMemories_UnparseableIsEmpty(t *testing.T) {
+func TestFetchHydrationMemories_UnparseableIsError(t *testing.T) {
 	dirA := t.TempDir()
 	cfg := mem0TestStore(t, dirA)
 	stubSearchCaps(t, mem0SearchCaps{filters: true})
 	stubRunMCPTool(t, func(_ context.Context, _ *config.ConfigStore, _, _, _ string) (mcp.ToolResult, error) {
-		// Even server-filtered, an unparseable response yields
-		// nothing to seed — hydration never inherits the recall
-		// path's fail-open prose.
+		// Even server-filtered, an unparseable response must surface
+		// as an error — indistinguishable from "empty" would let the
+		// caller commit the marker with only local seeds, losing the
+		// mem0 retry.
 		return mcp.ToolResult{Type: "text", Content: "3 memories found, trust me"}, nil
 	})
 	items, err := FetchHydrationMemories(context.Background(), cfg, "mem0")
-	require.NoError(t, err)
+	require.Error(t, err)
 	require.Empty(t, items)
+	require.True(t, HydrationFetchFailedRecently("mem0"))
 }
 
 func TestFetchHydrationMemories_NoServerNoWorkDir(t *testing.T) {
