@@ -147,6 +147,11 @@ func (a *sessionAgent) maybeHydrateNotebook(ctx context.Context, sess session.Se
 	}
 	if seeded {
 		slog.Debug("Session notebook hydrated", "session_id", sess.ID, "seeds", len(seeds))
+		if a.nbStats != nil {
+			stats, _ := a.nbStats.Get(sess.ID)
+			stats.HydrationSeeds += len(seeds)
+			a.nbStats.Set(sess.ID, stats)
+		}
 	}
 }
 

@@ -92,6 +92,8 @@ func logStepComposition(sessionID string, messages []fantasy.Message, agentTools
 		"nb_checkpoint_renders", nb.CheckpointRenders,
 		"nb_digests_written", nb.DigestsWritten,
 		"nb_digest_renders", nb.DigestRenders,
+		"nb_hydration_seeds", nb.HydrationSeeds,
+		"nb_hydration_renders", nb.HydrationRenders,
 		"nb_sel_recency", nb.SelPassRecency,
 		"nb_sel_pinned", nb.SelPassPinned,
 		"nb_sel_refs", nb.SelPassRefs,

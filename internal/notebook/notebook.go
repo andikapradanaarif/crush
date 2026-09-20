@@ -208,6 +208,14 @@ type Stats struct {
 	DigestRenders int
 	// DigestsWritten counts committed turn-digest entries.
 	DigestsWritten int
+	// HydrationSeeds counts entries committed by SeedEntries for this
+	// session — the firing side of the cold-start arm's coverage gate
+	// ("did hydration actually seed" vs a silent no-op).
+	HydrationSeeds int
+	// HydrationRenders counts prefix renders that included a
+	// hydrated-tagged entry — the "seed present at render" signal,
+	// matching the checkpoints/digests written/rendered split.
+	HydrationRenders int
 	// PriorTurnResultRecalls counts result: recalls that resolved to
 	// a tool call in a prior turn — the feasible approximation of
 	// recall-into-collapsed-turn (collapse leaves no stored mark).

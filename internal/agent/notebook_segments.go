@@ -1223,5 +1223,8 @@ func (a *sessionAgent) noteSelectionDiff(sessionID string, diff selectionDiff) {
 	if diff.digests > 0 {
 		stats.DigestRenders++
 	}
+	if diff.hydrated > 0 {
+		stats.HydrationRenders++
+	}
 	a.nbStats.Set(sessionID, stats)
 }

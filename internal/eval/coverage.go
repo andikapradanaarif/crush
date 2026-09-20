@@ -46,6 +46,8 @@ var coverageFields = map[string]func(*RunRecord) float64{
 	"checkpoints.rendered":         func(r *RunRecord) float64 { return float64(r.Checkpoints.Rendered) },
 	"digests.written":              func(r *RunRecord) float64 { return float64(r.Digests.Written) },
 	"digests.rendered":             func(r *RunRecord) float64 { return float64(r.Digests.Rendered) },
+	"hydration.seeds":              func(r *RunRecord) float64 { return float64(r.Hydration.Seeds) },
+	"hydration.rendered":           func(r *RunRecord) float64 { return float64(r.Hydration.Rendered) },
 	// Flag-invariant call_metrics subset — see the comment above.
 	"call_metrics.requests":          func(r *RunRecord) float64 { return float64(callMetrics(r).Requests) },
 	"call_metrics.calls":             func(r *RunRecord) float64 { return float64(callMetrics(r).Calls) },
@@ -103,11 +105,12 @@ var armFields map[string]func(*RunRecord) float64
 
 // flagGatedPrefixes name coverage fields whose counters only exist
 // when a feature flag is on — stub_stats.* need notebook_stub_superseded,
-// prior_turns.* need notebook_prior_turns=stub|digest, recalls.* need
-// a registered recall tool. An unscoped min_ predicate over one of
-// these starves the arm where the flag is off, so trajectory coverage
-// rejects them; scope them per-arm instead.
-var flagGatedPrefixes = []string{"stub_stats.", "prior_turns.", "recalls.", "checkpoints.", "digests."}
+// prior_turns.* need notebook_prior_turns=stub|digest, hydration.* need
+// notebook_hydration, recalls.* need a registered recall tool. An
+// unscoped min_ predicate over one of these starves the arm where the
+// flag is off, so trajectory coverage rejects them; scope them
+// per-arm instead.
+var flagGatedPrefixes = []string{"stub_stats.", "prior_turns.", "recalls.", "checkpoints.", "digests.", "hydration."}
 
 // callMetrics dereferences the optional analysis sub-object. CoverageMet
 // short-circuits nil CallMetrics before reaching field funcs, so this

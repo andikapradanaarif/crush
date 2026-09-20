@@ -91,6 +91,10 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 			"written":  tel.DigestsWritten,
 			"rendered": tel.DigestRenders,
 		}
+		doc["hydration"] = map[string]any{
+			"seeds":    tel.HydrationSeeds,
+			"rendered": tel.HydrationRenders,
+		}
 	}
 	// Edge firings emit as a DELTA, not the cumulative snapshot — the
 	// driver sums per-turn telemetry files, so a process emitting

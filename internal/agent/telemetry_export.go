@@ -39,6 +39,11 @@ type SessionTelemetry struct {
 	// generation race.
 	DigestsWritten int `json:"digests_written"`
 	DigestRenders  int `json:"digest_renders"`
+	// Hydration telemetry: seeds counts committed hydration seed
+	// entries; renders counts prefix renders that included one — the
+	// cold-start arm's "did the mechanism fire" coverage signal.
+	HydrationSeeds   int `json:"hydration_seeds"`
+	HydrationRenders int `json:"hydration_renders"`
 	// Prior-turn collapse telemetry: distinct turns collapsed and the
 	// call/result pairs inside them — deduped against the persisted
 	// collapsed_turns rows.
@@ -85,6 +90,8 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 		t.CheckpointRenders = n.CheckpointRenders
 		t.DigestsWritten = n.DigestsWritten
 		t.DigestRenders = n.DigestRenders
+		t.HydrationSeeds = n.HydrationSeeds
+		t.HydrationRenders = n.HydrationRenders
 		t.PriorTurnResultRecalls = n.PriorTurnResultRecalls
 	}
 	if sa.edgeStats != nil {

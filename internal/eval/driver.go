@@ -35,6 +35,7 @@ type RunResult struct {
 	Recalls     Recalls
 	Checkpoints Checkpoints
 	Digests     Checkpoints
+	Hydration   Hydration
 	// EdgeFirings is the trajectory-wide edge/outcome firing split —
 	// the summed per-turn deltas (each `crush run` process's counters
 	// are in-memory and reset on spawn).
@@ -126,6 +127,15 @@ type runTelemetry struct {
 		Written  int `json:"written"`
 		Rendered int `json:"rendered"`
 	} `json:"digests"`
+	// Hydration carries the cold-start seed telemetry: seeds counts
+	// entries SeedEntries committed this turn's process (the marker
+	// suppresses re-seeding, so only the seeding turn reports a
+	// nonzero count); rendered counts prefix renders that included a
+	// hydrated-tagged entry.
+	Hydration struct {
+		Seeds    int `json:"seeds"`
+		Rendered int `json:"rendered"`
+	} `json:"hydration"`
 	// EdgeFirings splits run-boundary edge firing counts by edge and
 	// outcome — the per-turn delta of the session's edge_firings rows
 	// this process recorded (repair retries share the process).
@@ -288,6 +298,8 @@ func (res *RunResult) addTurnTelemetry(tel runTelemetry) {
 	res.Checkpoints.Rendered += tel.Checkpoints.Rendered
 	res.Digests.Written += tel.Digests.Written
 	res.Digests.Rendered += tel.Digests.Rendered
+	res.Hydration.Seeds += tel.Hydration.Seeds
+	res.Hydration.Rendered += tel.Hydration.Rendered
 	for edge, outcomes := range tel.EdgeFirings {
 		if res.EdgeFirings == nil {
 			res.EdgeFirings = map[string]map[string]int{}

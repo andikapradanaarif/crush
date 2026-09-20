@@ -225,6 +225,9 @@ type selectionDiff struct {
 	// consolidated position.
 	checkpoints int
 	digests     int
+	// hydrated counts rendered entries carrying the hydrated tag —
+	// the cold-start arm's "seed present at render" signal.
+	hydrated int
 }
 
 // total returns the number of entries selection produced.
@@ -298,6 +301,9 @@ func selectNotebookEntries(entries []notebook.Entry, refs []string, floor segmen
 			} else {
 				diff.checkpoints++
 			}
+		}
+		if slices.Contains(e.Tags, notebook.TagHydrated) {
+			diff.hydrated++
 		}
 	}
 

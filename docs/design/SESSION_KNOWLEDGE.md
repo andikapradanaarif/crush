@@ -642,6 +642,17 @@ never writes back.
   win. If the short slice loses, options are keep flag-off or
   lazy-fetch (defer the fetch to a recall-worthy turn rather than
   always on turn 1) — the arm exists to pick.
+  `eval/experiments/cold-start-hydration.json` pins both arms
+  explicitly (`notebook_hydration` defaults on, so the control
+  sets it false) and gates the treatment on
+  `min_hydration.seeds` — a run where nothing seeded lands
+  inconclusive rather than passing as evidence of nothing. The arm
+  still needs its signal path: hydration requires a configured
+  mem0 MCP server and memories keyed to the materialized workdir,
+  and eval children get a sanitized HOME, a random `eval-run-*`
+  workdir, and a fresh data dir — so a corpus-side mem0 stub (or
+  setup-time memory seeding keyed to `$PWD`) must land before runs
+  produce evidence.
 - **Checkpoint utility:** within a long session, recall calls and
   re-reads before vs after the checkpoint trigger fires. A
   checkpoint that doesn't reduce re-reading is a token cost with no
