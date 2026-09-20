@@ -403,6 +403,10 @@ injecting a prompt block:
    of client-side sort. If the server exposes a `get_all`/`list`
    tool, that's the right fetch for hydration; otherwise the bound
    is accepted and recorded (eval arm measures the miss rate).
+   The `get_all`/`list` path is itself capability-detected —
+   `mem0SearchCapsFor`-style schema introspection, like `filters`
+   — and still needs client-side `working_dir` verification: a
+   list tool may not honor the filter grammar at all.
    **Refactor, unlisted:** `SearchMem0` returns a rendered,
    token-truncated string — metadata sorting needs the parsed
    items, so extract an internal fetch returning `[]map[string]any`
@@ -443,15 +447,17 @@ injecting a prompt block:
    value (e.g. `TurnNumber = -1`) — see the field trap for why both
    origin and real keys are harmful. Selection, compaction, recall,
    and auto-inject treat them as ordinary entries from there.
-4. **Render carve-out — prefix-level, not entry-level.** The
-   `boundary <= 0` early-return (`notebook_segments.go:873`) sits
-   _before_ any entry logic, so "hydrated entries bypass the gate"
-   really means the whole prefix path runs at boundary 0 when
-   seeds exist — `buildSelectionInput`,
-   `coveredSegmentFloor`/`fillBandFloor`, `freezeDigestEligibility`,
-   and the fingerprint must all tolerate empty `segs` / zero
-   `bKey`. More surface than a render branch — name it so the PR
-   doesn't discover it mid-build. The coverage-position filter
+4. **Render carve-out — prefix-level, and narrower than it
+   looks.** The `boundary <= 0` early-return
+   (`internal/agent/notebook_segments.go:873`) sits _before_ any
+   entry logic, so the whole prefix path runs at boundary 0 when
+   seeds exist — but `coveredSegmentFloor` and `fillBandFloor`
+   already tolerate empty `segs` (both return the zero key,
+   `notebook_selection.go:476,506`). What actually needs
+   boundary-0 tolerance: the early return itself,
+   `freezeDigestEligibility` (`:1180`), `prefixFingerprint`
+   (`:751`), and the cache key — a boundary-0 render must not
+   collide with the boundary-N render once the boundary moves. The coverage-position filter
    (`notebook_segments.go:1084`) needs no special case — sentinel
    keys (`turn = -1`) are below any real boundary key, so seeds
    pass it naturally once the boundary moves. Without the
@@ -472,10 +478,17 @@ injecting a prompt block:
    leaves no marker → the next turn
    re-attempts naturally (MCP likely connected by then): "first
    turn only" is really "**until seeded**" — stated, and arguably
-   better than silent-skip. Side effect, stated: pre-hydration-era
+   better than silent-skip. **But bound the retry:** a configured-
+   but-dead mem0 server would pay the fetch timeout on _every_
+   turn, not just turn 1 — a per-session attempt cap or a
+   negative marker with TTL keeps "until seeded" from becoming
+   "tax every first request." Side effect, stated: pre-hydration-era
    sessions have no marker, so they seed on their next resume —
    intended (existing sessions benefit), but "resumptions keep
-   theirs" only holds for post-hydration sessions.
+   theirs" only holds for post-hydration sessions. **The newness
+   signal, pinned:** the gate is "no `hydrated` entry AND the run's
+   first `preparePrompt`" — `MessageCount == 0`-style checks are
+   unnecessary since the marker already supplies persistence.
 6. **Checkpoint eligibility — stated decision:** seeds keep their
    granularity tags (`boundary`/`session`), so a hydrated
    checkpoint is eligible for `LatestCheckpointIDs` — on turn 1
@@ -490,7 +503,12 @@ injecting a prompt block:
    same-granularity checkpoint lands, and sessions that never
    write one keep the seed pinned forever. Stated: accept it
    (seeds are small) unless telemetry shows crowding — exempting
-   `hydrated` from the pin is the fallback. Also
+   `hydrated` from the pin is the fallback. **Same exemption via
+   the file-tag path:** a hydrated `file_read`/`decision` seed
+   whose `file:` tag lands in the pinned set (a live entry sharing
+   the tag) is also exempt via `pinnedEntryIDs`
+   (`retrieve.go:329-341`) — same answer, stated since it extends
+   the exemption beyond checkpoints. Also
    free: seeds' `file:` tags join the liveness pass in
    `buildSelectionInput` — dead-file demotion works on seeds too.
 7. **Hook point:** before the first `preparePrompt` of the session —
@@ -504,12 +522,16 @@ injecting a prompt block:
    skips seeding. **Eval opt-out — stated:** `crush run` evals spawn
    fresh sessions, so unconditional hydration fires per run —
    cross-session memory contaminates eval arms and costs on every
-   run; hydration respects an **eval opt-out — discriminated by
-   `CRUSH_EVAL_FLAGS` (`eval/driver.go:27`) or the arm config, NOT
-   `NonInteractive`**: `call.NonInteractive` is true for every
-   `crush run`, eval and user-driven alike — keying on it would
-   contradict "fires on headless too." (The cold-start arm opts in
-   explicitly via its arm config.) **The zero-caps race resolves
+   run; hydration is an **option flag** (`hydration`/`notebook-
+   hydration`), default on when the feature ships — eval arms set
+   it explicitly via arm config, which is also what the cold-start
+   arm needs for its on/off knob. Env sniffing rejected:
+   `CRUSH_EVAL_FLAGS` is only pinned when `len(FlagKeys) > 0`
+   (`eval/driver.go:340-342`) — a no-flag-keys eval would leave it
+   unset and contaminate the off arm; `CRUSH_EVAL_TELEMETRY` is
+   always pinned but reading it couples the feature to eval
+   internals. NOT `NonInteractive` either: it's true for every
+   `crush run`, eval and user-driven alike. **The zero-caps race resolves
    fail-closed:** an unconnected mem0 server yields zero caps → no
    `filters` arg → unparseable/unverifiable responses drop →
    proceed-empty. Safe, and consistent with "until seeded"
