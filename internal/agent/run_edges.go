@@ -52,8 +52,10 @@ const (
 	// off — the flag gates acting, not measuring.
 	edgeOutcomeGated edgeOutcome = "gated"
 	// edgeOutcomeDeferred means the trigger lost the boundary's single
-	// prompt slot to an escalation-family winner and rides the retry
-	// clone's deferred carrier to the next boundary.
+	// prompt slot to an escalation-family winner. Session-state
+	// triggers ride the retry clone's deferred carrier to the next
+	// boundary; step-bound losers record deferred and are dropped —
+	// the escalate run's steps can't carry their evidence.
 	edgeOutcomeDeferred edgeOutcome = "deferred"
 	// edgeOutcomeCleared means the scan produced a trigger but resolve
 	// dropped t.fire — a pending→clean verification — or a deferred
@@ -260,6 +262,20 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		carried[d.edge.name] = d
 	}
 
+	if ctx.Err() != nil {
+		// The boundary is already dead before any edge evaluated —
+		// every edge records cancelled, carried triggers keep their
+		// detail, and nothing enqueues.
+		for _, edge := range edges {
+			var t *edgeTrigger
+			if d, ok := carried[edge.name]; ok {
+				t = d.trigger
+			}
+			a.recordEdgeFiring(ctx, call, in, edge.name, t, edgeOutcomeCancelled)
+		}
+		return false
+	}
+
 	var contenders []contender
 	// stillDeferred holds carried triggers that land on a non-clean
 	// boundary — they can't take a retry slot here, but they ride the
@@ -331,11 +347,11 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		a.recordEdgeFiring(ctx, call, in, d.edge.name, d.trigger, edgeOutcomeCleared)
 	}
 
-	// die renders the terminal state of carried triggers whose
-	// boundary produced no retry to ride — the cancelled row plus the
-	// trigger's exhaustion note on the final assistant message.
-	die := func() {
-		var noteEdges, notes, reports []string
+	// collectDeadDeferred records the cancelled row for each carried
+	// trigger whose boundary produced no retry to ride and returns
+	// its terminal note edges/lines/reports for a single merged
+	// exhaustion write.
+	collectDeadDeferred := func() (noteEdges, notes, reports []string) {
 		for _, d := range stillDeferred {
 			a.recordEdgeFiring(ctx, call, in, d.edge.name, d.trigger, edgeOutcomeCancelled)
 			if d.trigger.report != "" {
@@ -349,12 +365,11 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 				noteEdges = append(noteEdges, d.edge.name)
 			}
 		}
-		if len(noteEdges) > 0 {
-			a.writeRepairExhaustion(ctx, call, in.currentAssistant, noteEdges, notes, reports)
-		}
+		return noteEdges, notes, reports
 	}
 	if len(contenders) == 0 {
-		die()
+		edges2, notes2, reports2 := collectDeadDeferred()
+		a.writeRepairExhaustion(ctx, call, in.currentAssistant, edges2, notes2, reports2)
 		return false
 	}
 
@@ -380,11 +395,16 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		for _, c := range contenders {
 			a.recordEdgeFiring(ctx, call, in, c.edge.name, c.t, edgeOutcomeExhausted)
 		}
+		// Carried triggers die with the budget too — merge their
+		// notes into the same terminal write.
+		deadEdges, deadNotes, deadReports := collectDeadDeferred()
+		noteEdges = append(noteEdges, deadEdges...)
+		notes = append(notes, deadNotes...)
+		reports = append(reports, deadReports...)
 		// Budget exhausted: surface the terminal state on the final
 		// assistant message — it is the last assistant message of the
 		// run, so the text reaches RunComplete.Text for `crush run`.
 		a.writeRepairExhaustion(ctx, call, in.currentAssistant, noteEdges, notes, reports)
-		die()
 		return false
 	}
 
@@ -426,7 +446,8 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		for _, c := range losers {
 			a.recordEdgeFiring(ctx, call, in, c.edge.name, c.t, edgeOutcomeDeferred)
 		}
-		die()
+		deadEdges, deadNotes, deadReports := collectDeadDeferred()
+		a.writeRepairExhaustion(ctx, call, in.currentAssistant, deadEdges, deadNotes, deadReports)
 		return false
 	}
 
@@ -471,6 +492,11 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		a.recordEdgeFiring(ctx, call, in, c.edge.name, c.t, edgeOutcomeDeferred)
 	}
 
+	if ctx.Err() != nil {
+		// Cancelled after the verdicts were recorded — do not enqueue
+		// a retry behind clearQueueAndNotify's back.
+		return false
+	}
 	mu := a.sessionMu(call.SessionID)
 	mu.Lock()
 	existing, _ := a.messageQueue.Get(call.SessionID)
@@ -975,19 +1001,28 @@ func (a *sessionAgent) pullStallHandoff(ctx context.Context, call SessionAgentCa
 			for _, id := range notebook.LatestCheckpointIDs(entries) {
 				latest[id] = true
 			}
-			for _, e := range entries {
+			// Boundary and session granularities can both be "latest"
+			// — take the newest by (turn, event) so the pick doesn't
+			// depend on GetEntries ordering.
+			var best *notebook.Entry
+			for i := range entries {
+				e := &entries[i]
 				if !latest[e.ID] {
 					continue
 				}
+				if best == nil ||
+					e.TurnNumber > best.TurnNumber ||
+					(e.TurnNumber == best.TurnNumber && e.EventNumber > best.EventNumber) {
+					best = e
+				}
+			}
+			if best != nil {
 				// Prefer the uncompressed text — the replan prompt
 				// gets one shot at re-orientation, matching
 				// buildCheckpointInput's precedence.
-				text := e.EntryTextFull
-				if text == "" {
-					text = e.EntryText
-				}
-				if text != "" {
-					t.checkpoint = text
+				t.checkpoint = best.EntryTextFull
+				if t.checkpoint == "" {
+					t.checkpoint = best.EntryText
 				}
 			}
 		}
@@ -996,22 +1031,50 @@ func (a *sessionAgent) pullStallHandoff(ctx context.Context, call SessionAgentCa
 	if opts == nil || !opts.ProjectIndexEnabled() {
 		return
 	}
-	dirs := touchedDirs(t.steps)
+	workingDir := a.configStore.WorkingDir()
+	dirs := relTouchedDirs(workingDir, t.steps)
 	if len(dirs) == 0 {
 		return
 	}
-	svc := index.Shared(opts.DataDirectory, a.configStore.WorkingDir())
+	svc := index.Shared(opts.DataDirectory, workingDir)
 	if err := svc.Ready(); err != nil {
 		return
 	}
 	var b strings.Builder
 	for _, dir := range dirs {
-		if slice, err := svc.Subtree(ctx, dir, 150); err == nil && slice != "" {
-			b.WriteString(slice)
-			b.WriteString("\n")
+		slice, err := svc.Subtree(ctx, dir, 150)
+		if err != nil || slice == "" {
+			continue
 		}
+		// Subtree reports guidance ("Path ... is absolute", "No
+		// indexed files under ...") as a nil-error string — never a
+		// map. Keep those out of the prompt.
+		if strings.HasPrefix(slice, "Path ") || strings.HasPrefix(slice, "No indexed files") {
+			continue
+		}
+		b.WriteString(slice)
+		b.WriteString("\n")
 	}
 	t.mapSlice = strings.TrimSpace(b.String())
+}
+
+// relTouchedDirs is touchedDirs' output translated into the
+// project-relative form Subtree requires: absolute dirs under the
+// working dir are relativized, dirs outside the root (or that fail to
+// relativize) are skipped.
+func relTouchedDirs(workingDir string, steps []fantasy.StepResult) []string {
+	var out []string
+	for _, dir := range touchedDirs(steps) {
+		if filepath.IsAbs(dir) {
+			rel, err := filepath.Rel(workingDir, dir)
+			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				continue
+			}
+			dir = rel
+		}
+		out = append(out, dir)
+	}
+	return out
 }
 
 // stepWriteSet scans a run's steps for write-class call targets —

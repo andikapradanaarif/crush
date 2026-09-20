@@ -1579,7 +1579,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// merge into one bounded retry prepended ahead of queued prompts.
 	// Must run before the notebook goroutine spawn AND before the
 	// queue dequeue.
-	repairQueued := a.runEdges(ctx, call, edgeInput{
+	// genCtx, not ctx: Cancel() kills the run context via
+	// activeRequests, so boundary evaluation must observe it — a TUI
+	// Escape during the seam must still write cancelled rows and must
+	// not enqueue a retry behind clearQueueAndNotify's back.
+	repairQueued := a.runEdges(genCtx, call, edgeInput{
 		result:           result,
 		currentAssistant: currentAssistant,
 		stalled:          loopStopped,

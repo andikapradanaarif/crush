@@ -226,6 +226,23 @@ func TestRepairPromptPrefixes_Stable(t *testing.T) {
 		}}}),
 		todosRetryPrefix))
 	require.True(t, strings.HasPrefix(stallRetrySection(nil), stallRetryPrefix))
+	// The replan branch fingerprints separately — the eval analyzer
+	// splits stall variants on the leading literal.
+	replan := stallReplanSection(&edgeTrigger{report: "Stopped: x"})
+	require.True(t, strings.HasPrefix(replan, stallReplanPrefix))
+	require.NotEqual(t, stallReplanPrefix, stallRetryPrefix)
+	require.True(t, strings.HasPrefix(
+		burnWatchRetrySection(&edgeTrigger{inputTokens: 250000, steps: make([]fantasy.StepResult, 40)}),
+		burnWatchPrefix))
+	// No prefix is a prefix of another — a merged prompt reads as its
+	// leading edge only.
+	for i, p := range RepairPromptPrefixes {
+		for j, q := range RepairPromptPrefixes {
+			if i != j {
+				require.False(t, strings.HasPrefix(q, p), "%q starts with %q", q, p)
+			}
+		}
+	}
 }
 
 // TestFailedCheckGroups pins the per-file grouping: diagnostics
@@ -924,4 +941,101 @@ func TestStallReplanHandoffCheckpoint(t *testing.T) {
 	require.Contains(t, mq[0].Prompt, "Latest session checkpoint:")
 	require.Contains(t, mq[0].Prompt, "full: edited auth.go then verified",
 		"the replan payload prefers the uncompressed checkpoint text")
+}
+
+func TestRelTouchedDirs(t *testing.T) {
+	t.Parallel()
+
+	wd := "/repo"
+	mk := func(tool, input string) fantasy.StepResult {
+		id := fmt.Sprintf("tc-%s", tool)
+		return stepWith(fantasy.FinishReasonToolCalls,
+			fantasy.ToolCallContent{ToolCallID: id, ToolName: tool, Input: input},
+			fantasy.ToolResultContent{
+				ToolCallID: id, ToolName: tool,
+				Result: fantasy.ToolResultOutputContentText{Text: "ok"},
+			},
+		)
+	}
+	dirs := relTouchedDirs(wd, []fantasy.StepResult{
+		mk("edit", `{"file_path":"/repo/internal/x.go"}`),
+		mk("view", `{"file_path":"pkg/y.go"}`),
+		mk("view", `{"file_path":"/etc/passwd"}`),
+		mk("bash", `{"command":"ls"}`),
+	})
+	require.Equal(t, []string{"internal", "pkg"}, dirs,
+		"absolute dirs under the root relativize; escapes and non-file calls drop")
+}
+
+func TestStallEscalateBeatsBurnWatch(t *testing.T) {
+	t.Parallel()
+
+	a, conn, sessionID := interactiveEdgeAgent(t)
+	// A clean-stopping, write-less, over-threshold run whose last
+	// window saturates one signature — the masked-stall fallback and
+	// burn-watch both produce escalation-family triggers.
+	result := burnResult(burnWatchStepsThreshold+1, 0)
+	for i := len(result.Steps) - loopDetectionWindowSize; i < len(result.Steps)-1; i++ {
+		id := fmt.Sprintf("tc-s%d", i)
+		result.Steps[i] = stepWith(fantasy.FinishReasonToolCalls,
+			fantasy.ToolCallContent{
+				ToolCallID: id, ToolName: "view", Input: `{"file_path":"same.go"}`,
+			},
+			fantasy.ToolResultContent{
+				ToolCallID: id, ToolName: "view",
+				Result: fantasy.ToolResultOutputContentText{Text: "same"},
+			},
+		)
+	}
+	queued := a.runEdges(t.Context(),
+		SessionAgentCall{SessionID: sessionID, RepairAttempts: 1},
+		edgeInput{result: result, turnSeq: 1})
+	require.True(t, queued)
+	q, _ := a.messageQueue.Get(sessionID)
+	require.Len(t, q, 1)
+	require.True(t, strings.HasPrefix(q[0].Prompt, stallRetryPrefix),
+		"first-in-runEdgeSet escalation wins the slot")
+	require.NotContains(t, q[0].Prompt, burnWatchPrefix)
+	require.Empty(t, q[0].deferred,
+		"burn-watch's evidence is step-bound — deferred, not carried")
+	outcomes := map[string]string{}
+	for _, r := range firingRows(t, conn, sessionID) {
+		outcomes[r.edge+"|"+r.variant] = r.outcome
+	}
+	require.Equal(t, "fired", outcomes["stall|escalate"])
+	require.Equal(t, "deferred", outcomes["burn-watch|"])
+}
+
+func TestVerificationTodosMerge(t *testing.T) {
+	t.Parallel()
+
+	a, conn, sessionID := newEdgeTestAgent(t, &config.Config{})
+	sess, err := a.sessions.Get(t.Context(), sessionID)
+	require.NoError(t, err)
+	sess.Todos = []session.PlanItem{{Content: "open", Status: session.PlanItemPending}}
+	_, err = a.sessions.Save(t.Context(), sess)
+	require.NoError(t, err)
+
+	result := &fantasy.AgentResult{Steps: []fantasy.StepResult{
+		stepWith(fantasy.FinishReasonToolCalls, fantasy.ToolResultContent{
+			ToolCallID: "tc-edit", ToolName: "edit",
+			Result:         fantasy.ToolResultOutputContentText{Text: "edited"},
+			ClientMetadata: `{"verification":[{"check":"verify:build","state":"failed","detail":"exit 1"}]}`,
+		}),
+		stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),
+	}}
+	queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID},
+		edgeInput{result: result, turnSeq: 1})
+	require.True(t, queued)
+	q, _ := a.messageQueue.Get(sessionID)
+	require.Len(t, q, 1, "retry-family triggers merge into ONE retry")
+	require.True(t, strings.HasPrefix(q[0].Prompt, verificationRetryPrefix))
+	require.Contains(t, q[0].Prompt, todosRetryPrefix,
+		"intra-retry-family rule is concatenate, not first-wins")
+	outcomes := map[string]string{}
+	for _, r := range firingRows(t, conn, sessionID) {
+		outcomes[r.edge] = r.outcome
+	}
+	require.Equal(t, "fired", outcomes["verification"])
+	require.Equal(t, "fired", outcomes["todos"])
 }
