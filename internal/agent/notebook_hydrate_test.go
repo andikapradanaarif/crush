@@ -161,3 +161,22 @@ func TestMaybeHydrate_DisabledOption(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, entries)
 }
+
+func TestMaybeHydrate_EmptyFetchStillCountsAnAttempt(t *testing.T) {
+	a, _, nb, sess := newHydrationTestAgent(t, func(context.Context, *config.ConfigStore, string) ([]map[string]any, error) {
+		return nil, nil // healthy server, verifiably empty store
+	})
+	ctx := context.Background()
+
+	a.maybeHydrateNotebook(ctx, sess)
+
+	// No marker commits on an empty result, but the fetch counts —
+	// otherwise a healthy-but-empty store re-fetches every turn for
+	// the life of the session, unbounded.
+	attempts, err := nb.SessionCounter(ctx, sess.ID, notebook.CounterHydrationAttempts)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), attempts)
+	entries, err := nb.GetEntries(ctx, sess.ID)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}

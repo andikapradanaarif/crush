@@ -126,6 +126,15 @@ func (a *sessionAgent) maybeHydrateNotebook(ctx context.Context, sess session.Se
 	if plan := a.planSeedEntry(fetchCtx, sess); plan != nil {
 		seeds = append(seeds, *plan)
 	}
+	if len(seeds) == 0 {
+		// A verifiably empty result commits no marker, so without the
+		// bump every turn would re-fetch forever on a healthy-but-empty
+		// store — the cap bounds fetches per session, not just
+		// failures. Kept uncommitted on purpose: memories arriving
+		// mid-session can still seed on a later turn.
+		burnAttempt()
+		return
+	}
 	// The write detaches: a mid-write cancel rolls back cleanly, but
 	// a completed write racing a cancelled run still commits — the
 	// seeds are valid for the session either way.
