@@ -403,6 +403,19 @@ injecting a prompt block:
    of client-side sort. If the server exposes a `get_all`/`list`
    tool, that's the right fetch for hydration; otherwise the bound
    is accepted and recorded (eval arm measures the miss rate).
+   **Refactor, unlisted:** `SearchMem0` returns a rendered,
+   token-truncated string — metadata sorting needs the parsed
+   items, so extract an internal fetch returning `[]map[string]any`
+   through the same partitioned path. Do NOT inherit the
+   fail-open branch (`mem0.go:206-217`): when `serverFiltered` and
+   the response isn't parseable JSON, `SearchMem0` returns the
+   truncated blob anyway — fine for recall prose, unusable for
+   hydration (unparseable = nothing to seed). **"Pinned" needs a
+   proxy:** pin-ness is computed at selection time
+   (`PinnedFileTagsSince`, `retrieve.go:160`) from `file:` tags +
+   boundary floors — nothing syncs a `pinned` flag into mem0
+   metadata. The pinned sort tier uses `file:`-tag recency as the
+   proxy, or `SyncEntries` must start recording pin-ness.
 2. Write each selected memory as a notebook entry on the _new_
    session: `Tags += ["hydrated", "origin:<source_session_id>"]`,
    **all recallable prefixes stripped** (`result:`, `turn:`,
@@ -446,10 +459,21 @@ injecting a prompt block:
    free: seeds' `file:` tags join the liveness pass in
    `buildSelectionInput` — dead-file demotion works on seeds too.
 7. **Hook point:** before the first `preparePrompt` of the session —
-   fires on headless `crush run` too. Note MCP-connection readiness
-   and turn-1 latency: the mem0 fetch is on the critical path of the
-   user's first request — needs a timeout + proceed-empty fallback,
-   and the bound applies in the TUI too, not just headless.
+   fires on headless `crush run` too. The mem0 fetch is on the
+   critical path of the user's first request — needs a timeout +
+   proceed-empty fallback, bounded in the TUI too, not just
+   headless. **The timeout must bound connection-wait + fetch, not
+   just fetch:** MCP servers connect asynchronously at startup, so
+   the mem0 server may not be up on exactly the fast first turns
+   where hydration matters most — proceed-empty there silently
+   skips seeding. **Eval opt-out — stated:** `crush run` evals spawn
+   fresh sessions, so unconditional hydration fires per run —
+   cross-session memory contaminates eval arms and costs on every
+   run; hydration respects a non-interactive/eval opt-out (the
+   cold-start arm opts in explicitly via its arm config).
+   Transitive seeding is already blocked: `SyncEntries` skips
+   `hydrated` entries → seeds never reach mem0 → session N+1 can't
+   re-seed session N's seeds (only its new, organic entries).
 
 Rejected alternative — system-prompt section (`CacheClassSession`):
 keeps the digest out of message history, but bypasses every existing
