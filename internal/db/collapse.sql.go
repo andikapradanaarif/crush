@@ -53,6 +53,25 @@ func (q *Queries) GetCollapsedTurnStats(ctx context.Context) (GetCollapsedTurnSt
 	return i, err
 }
 
+const getSessionCounter = `-- name: GetSessionCounter :one
+SELECT CAST(COALESCE(
+    (SELECT value FROM session_counters WHERE session_id = ? AND name = ?),
+    0
+) AS INTEGER) AS value
+`
+
+type GetSessionCounterParams struct {
+	SessionID string `json:"session_id"`
+	Name      string `json:"name"`
+}
+
+func (q *Queries) GetSessionCounter(ctx context.Context, arg GetSessionCounterParams) (int64, error) {
+	row := q.queryRow(ctx, q.getSessionCounterStmt, getSessionCounter, arg.SessionID, arg.Name)
+	var value int64
+	err := row.Scan(&value)
+	return value, err
+}
+
 const listSessionCounters = `-- name: ListSessionCounters :many
 SELECT
     name,

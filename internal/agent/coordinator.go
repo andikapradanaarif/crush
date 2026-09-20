@@ -939,6 +939,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		RawTokenBudget:       c.cfg.Config().Options.NotebookRawTokenBudget,
 		ConfigStore:          c.cfg,
 		NotebookSyncMem0:     c.cfg.Config().Options.NotebookSyncMem0Enabled(),
+		NotebookHydration:    c.cfg.Config().Options.NotebookHydrationEnabled(),
 		NotebookMemoryServer: c.cfg.Config().Options.NotebookMemoryServerName(),
 		NotebookAutoInject:   c.cfg.Config().Options.NotebookAutoInjectEnabled(),
 		NotebookCheckpoint: c.cfg.Config().Options.NotebookCheckpointEnabled() &&

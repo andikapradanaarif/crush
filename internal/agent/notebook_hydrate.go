@@ -1,0 +1,132 @@
+package agent
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/crush/internal/notebook"
+	"github.com/charmbracelet/crush/internal/session"
+)
+
+const (
+	// hydrationFetchTimeout bounds connection-wait + fetch + seed
+	// write on the first request's critical path — MCP servers connect
+	// asynchronously at startup, so the window where hydration matters
+	// most is exactly where the server may not be up yet. On timeout
+	// the run proceeds unseeded and retries next turn under the cap.
+	hydrationFetchTimeout = 10 * time.Second
+	// maxHydrationAttempts bounds "until seeded": a configured-but-dead
+	// memory server pays the fetch timeout this many times per session
+	// (persisted in session_counters so headless one-process-per-turn
+	// runs share the count) instead of taxing every first request.
+	maxHydrationAttempts = 3
+)
+
+// maybeHydrateNotebook seeds a session's notebook from cross-session
+// memory before the run's first prompt build. The persistent gate is
+// the seeds themselves — SeedEntries writes only when no
+// hydrated-tagged entry exists — so pre-hydration sessions seed on
+// their next resume and "first turn" really means "until seeded,"
+// bounded by maxHydrationAttempts. Fetch failure or an empty result
+// leaves no marker and proceeds unseeded.
+func (a *sessionAgent) maybeHydrateNotebook(ctx context.Context, sess session.Session) {
+	if a.notebook == nil || !a.notebookEnabled || !a.notebookHydration ||
+		a.configStore == nil || a.notebookMemoryServer == "" {
+		return
+	}
+	// Sub-agent sessions inherit position from the parent's prompt —
+	// the fetch plus ~4K seed tokens buys nothing there.
+	if sess.ParentSessionID != "" {
+		return
+	}
+	// Without the server in MCP config nothing could ever have been
+	// written; skip the counter read too.
+	if _, ok := a.configStore.Config().MCP[a.notebookMemoryServer]; !ok {
+		return
+	}
+	// Cheap pre-check: a seeded session never pays the fetch again.
+	// SeedEntries re-checks inside its transaction — this read exists
+	// to skip the MCP round-trip, not for correctness.
+	if existing, err := a.notebook.SearchByTag(ctx, sess.ID, notebook.TagHydrated); err == nil && len(existing) > 0 {
+		return
+	}
+	attempts, err := a.notebook.SessionCounter(ctx, sess.ID, notebook.CounterHydrationAttempts)
+	if err != nil {
+		slog.Warn("Failed to read hydration attempt counter", "session_id", sess.ID, "error", err)
+		return
+	}
+	if attempts >= maxHydrationAttempts {
+		return
+	}
+	if err := a.notebook.BumpSessionCounter(ctx, sess.ID, notebook.CounterHydrationAttempts, 1); err != nil {
+		slog.Warn("Failed to record hydration attempt", "session_id", sess.ID, "error", err)
+	}
+	detCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hydrationFetchTimeout)
+	defer cancel()
+
+	items, err := notebook.FetchHydrationMemories(detCtx, a.configStore, a.notebookMemoryServer)
+	if err != nil {
+		// Proceed-empty: no marker, next turn retries under the cap.
+		slog.Warn("Hydration fetch failed; proceeding unseeded", "session_id", sess.ID, "error", err)
+	}
+	seeds := notebook.BuildHydrationSeeds(items, notebook.HydrationSeedMaxTokens)
+	// The open-items payload is the highest-value seed and sources
+	// locally — the sessions table is the same DB, no MCP round-trip,
+	// and it survives a sync that raced. It lands last so it carries
+	// the highest event number and ranks first among the seeds.
+	if plan := a.planSeedEntry(detCtx, sess); plan != nil {
+		seeds = append(seeds, *plan)
+	}
+	seeded, err := a.notebook.SeedEntries(detCtx, sess.ID, seeds)
+	if err != nil {
+		slog.Error("Failed to seed notebook", "session_id", sess.ID, "error", err)
+		return
+	}
+	if seeded {
+		slog.Debug("Session notebook hydrated", "session_id", sess.ID, "seeds", len(seeds))
+	}
+}
+
+// planSeedEntry renders the most recent session's open plan items as
+// a seed — the agenda half of the handoff (checkpoints answer "what
+// was learned"; open items answer "what was left"). List returns
+// top-level sessions newest-first; the current session is skipped.
+func (a *sessionAgent) planSeedEntry(ctx context.Context, sess session.Session) *notebook.SeedEntry {
+	if a.sessions == nil {
+		return nil
+	}
+	sessions, err := a.sessions.List(ctx)
+	if err != nil {
+		slog.Warn("Failed to list sessions for plan seed", "error", err)
+		return nil
+	}
+	for _, s := range sessions {
+		if s.ID == sess.ID || !session.HasIncompleteTodos(s.Todos) {
+			continue
+		}
+		keyByID := session.PlanKeyByID(s.Todos)
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "_Seeded from an earlier session (%s, session %s)._\n\nOpen plan items:\n",
+			time.Unix(s.UpdatedAt, 0).UTC().Format("2006-01-02"), s.ID)
+		for _, item := range s.Todos {
+			if item.Status == session.PlanItemCompleted {
+				continue
+			}
+			sb.WriteString(session.FormatPlanItemLine(item, keyByID))
+			sb.WriteString("\n")
+		}
+		return &notebook.SeedEntry{
+			GeneratedEntry: notebook.GeneratedEntry{
+				EventType: notebook.EventPlan,
+				Title:     "Open plan items",
+				Text:      sb.String(),
+				Tags:      []string{notebook.TagHydrated, "origin:" + s.ID},
+			},
+			CreatedAt: s.UpdatedAt,
+		}
+	}
+	return nil
+}

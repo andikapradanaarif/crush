@@ -2559,6 +2559,7 @@ func TestNotebookOptions_Defaults(t *testing.T) {
 	require.True(t, c.Options.NotebookIsEnabled(), "notebook should default to enabled")
 	require.False(t, c.Options.NotebookSyncMem0Enabled(), "mem0 sync should default to false")
 	require.False(t, c.Options.NotebookAutoInjectEnabled(), "auto-inject should default to false")
+	require.True(t, c.Options.NotebookHydrationEnabled(), "hydration should default to enabled")
 	require.Equal(t, "mem0", c.Options.NotebookMemoryServerName(), "memory server should default to mem0")
 }
 
@@ -2568,10 +2569,12 @@ func TestNotebookOptions_ExplicitDisable(t *testing.T) {
 	c.Options.NotebookEnabled = ptr(false)
 	c.Options.NotebookSyncMem0 = ptr(true)
 	c.Options.NotebookAutoInject = ptr(true)
+	c.Options.NotebookHydration = ptr(false)
 	c.Options.NotebookMemoryServer = "custom-mem0"
 	c.NormalizeOptions()
 	require.False(t, c.Options.NotebookIsEnabled(), "notebook should be disabled")
 	require.True(t, c.Options.NotebookSyncMem0Enabled(), "mem0 sync should be enabled")
 	require.True(t, c.Options.NotebookAutoInjectEnabled(), "auto-inject should be enabled")
+	require.False(t, c.Options.NotebookHydrationEnabled(), "explicit hydration disable should be respected")
 	require.Equal(t, "custom-mem0", c.Options.NotebookMemoryServerName(), "memory server should be custom")
 }

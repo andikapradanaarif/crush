@@ -233,6 +233,9 @@ type sessionAgent struct {
 	configStore *config.ConfigStore
 	// notebookSyncMem0 controls whether entries are synced to mem0.
 	notebookSyncMem0 bool
+	// notebookHydration controls whether a session's first turn seeds
+	// its notebook from cross-session memory.
+	notebookHydration bool
 	// notebookMemoryServer is the MCP server name for mem0.
 	notebookMemoryServer string
 	// notebookAutoInject controls whether file references in the
@@ -395,6 +398,10 @@ type SessionAgentOptions struct {
 	// NotebookSyncMem0 controls whether entries are synced to mem0
 	// for cross-session search.
 	NotebookSyncMem0 bool
+	// NotebookHydration controls whether a session's first turn seeds
+	// its notebook from cross-session memory (options.
+	// notebook_hydration). Only takes effect in notebook mode.
+	NotebookHydration bool
 	// NotebookMemoryServer is the MCP server name for mem0.
 	NotebookMemoryServer string
 	// NotebookAutoInject controls whether file references in the user
@@ -487,6 +494,7 @@ func NewSessionAgent(
 		rawTokenBudget:         opts.RawTokenBudget,
 		configStore:            opts.ConfigStore,
 		notebookSyncMem0:       opts.NotebookSyncMem0,
+		notebookHydration:      opts.NotebookHydration,
 		notebookMemoryServer:   opts.NotebookMemoryServer,
 		notebookAutoInject:     opts.NotebookAutoInject,
 		notebookCheckpoint:     opts.NotebookCheckpoint,
@@ -1077,6 +1085,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		// non-interactive clients waiting on RunComplete.
 		a.publishRunComplete(ctx, call, complete)
 	}()
+
+	// Hydration seeds the notebook from cross-session memory before
+	// the run's first prompt build so the seeds render on turn 1 —
+	// gated on the option, a configured memory server, a top-level
+	// session, and no existing hydrated marker.
+	a.maybeHydrateNotebook(ctx, currentSession)
 
 	// Prior-turn collapse compares against the turn that STARTED the
 	// run, not the recomputed current turn: drainQueueForStep can fold

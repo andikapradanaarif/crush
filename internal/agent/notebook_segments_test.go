@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -865,4 +866,50 @@ func TestPrefixFingerprint_SelectionInputs(t *testing.T) {
 	// The tool palette changes the hash — a reload dropping recall
 	// must not serve a cached prefix that still points at it.
 	require.NotEqual(t, fp, prefixFingerprint(100, segmentKey{turn: 1, segment: 2}, segmentKey{turn: 1, segment: 1}, entries, refs, base, " — recallable via recall"))
+}
+
+func TestNotebookPrefix_SeedsRenderAtBoundaryZero(t *testing.T) {
+	t.Parallel()
+
+	gen := &countingGen{}
+	a, svc, nb, sessionID := newSegmentTestAgent(t, gen)
+	ctx := t.Context()
+
+	// Seed the notebook as hydration would: sentinel turn, provenance
+	// tags.
+	seeded, err := nb.SeedEntries(ctx, sessionID, []notebook.SeedEntry{{
+		GeneratedEntry: notebook.GeneratedEntry{
+			EventType: notebook.EventCheckpoint,
+			Title:     "Checkpoint",
+			Text:      "## Checkpoint\nestablished-position-marker",
+			Tags:      []string{"granularity:session", notebook.TagHydrated, "origin:s0"},
+		},
+	}})
+	require.NoError(t, err)
+	require.True(t, seeded)
+
+	msgs := segBuildTurn(t, svc, sessionID, "first turn", 2, "step")
+	segs, _ := a.detectSegments(ctx, sessionID, msgs)
+
+	// Boundary 0 — nothing covered yet — still renders the seeds:
+	// turn 1 is exactly when they exist for.
+	prefix := a.notebookPrefix(ctx, sessionID, msgs, 0, boundarySegmentKey(segs, 0), segs, nil)
+	require.NotEmpty(t, prefix, "hydrated seeds must render at boundary 0")
+	var rendered string
+	for _, m := range prefix {
+		rendered += fmt.Sprintf("%v", m.Content)
+	}
+	require.Contains(t, rendered, "established-position-marker")
+}
+
+func TestNotebookPrefix_BoundaryZeroWithoutSeedsStillNil(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, &countingGen{})
+	ctx := t.Context()
+	msgs := segBuildTurn(t, svc, sessionID, "first turn", 2, "step")
+	segs, _ := a.detectSegments(ctx, sessionID, msgs)
+
+	prefix := a.notebookPrefix(ctx, sessionID, msgs, 0, boundarySegmentKey(segs, 0), segs, nil)
+	require.Empty(t, prefix, "no coverage and no seeds — nothing to render")
 }

@@ -59,6 +59,7 @@ type Querier interface {
 	GetPruningStats(ctx context.Context) ([]GetPruningStatsRow, error)
 	GetRecentActivity(ctx context.Context) ([]GetRecentActivityRow, error)
 	GetSessionByID(ctx context.Context, id string) (Session, error)
+	GetSessionCounter(ctx context.Context, arg GetSessionCounterParams) (int64, error)
 	GetToolUsage(ctx context.Context) ([]GetToolUsageRow, error)
 	GetTotalStats(ctx context.Context) (GetTotalStatsRow, error)
 	GetUsageByDay(ctx context.Context) ([]GetUsageByDayRow, error)

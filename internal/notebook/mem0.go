@@ -157,12 +157,64 @@ func SearchMem0(ctx context.Context, cfg *config.ConfigStore, serverName, query 
 	if cfg == nil || serverName == "" || strings.TrimSpace(query) == "" {
 		return "", nil
 	}
-	raw := cfg.WorkingDir()
-	if raw == "" {
-		slog.Warn("Mem0 search skipped: working directory is unknown", "server", serverName)
+	workDir, ok := mem0WorkDir(cfg, serverName)
+	if !ok {
 		return "", nil
 	}
-	workDir := canonicalizeWorkingDir(raw)
+	content, serverFiltered, err := fetchMem0(ctx, cfg, serverName, query, mem0SearchTopK, mem0SearchFetchK)
+	if err != nil {
+		return "", err
+	}
+	kept, ok := partitionMem0Items(content, workDir, serverName)
+	if !ok {
+		if serverFiltered {
+			// The response isn't per-memory JSON we can re-check, so
+			// the partition rests entirely on the declared filters
+			// contract — a server that accepts the arg but silently
+			// ignores it would still leak cross-project memories.
+			// Dropping instead would break servers that legitimately
+			// filter-and-return-prose.
+			return truncateTextToTokens(content, mem0SearchMaxTokens), nil
+		}
+		slog.Warn("Mem0 search dropped: response is not parseable and no server-side filter was applied",
+			"server", serverName)
+		return "", nil
+	}
+	kept = rankMem0Items(kept)
+	if len(kept) == 0 {
+		return "", nil
+	}
+	return truncateTextToTokens(renderMem0Results(kept), mem0SearchMaxTokens), nil
+}
+
+// rankMem0Items re-ranks partition survivors by relevance score and
+// caps at the model-facing top_k — the server ranked by semantic
+// relevance across every project, so the partition must precede the
+// cap or same-project memories lose their slots to foreign ones.
+func rankMem0Items(kept []map[string]any) []map[string]any {
+	slices.SortStableFunc(kept, func(a, b map[string]any) int {
+		return cmp.Compare(mem0Score(b), mem0Score(a))
+	})
+	if len(kept) > mem0SearchTopK {
+		kept = kept[:mem0SearchTopK]
+	}
+	return kept
+}
+
+// fetchMem0 runs one capability-detected search_memories round-trip:
+// a server-side partition filter when the schema declares a filters
+// argument (retrying unfiltered on rejection, since a server may
+// declare the argument yet reject the grammar) and the caller's
+// limit under whichever argument the schema names. filteredLimit
+// applies while the filters argument is in effect, unfilteredLimit
+// otherwise — hydration wants the wide window even when the server
+// partitions. Returns the raw content and whether a server-side
+// filter governed the response actually returned.
+func fetchMem0(ctx context.Context, cfg *config.ConfigStore, serverName, query string, filteredLimit, unfilteredLimit int) (string, bool, error) {
+	workDir, ok := mem0WorkDir(cfg, serverName)
+	if !ok {
+		return "", false, nil
+	}
 	caps := mem0SearchCapsFor(serverName)
 	serverFiltered := caps.filters
 	args := map[string]any{
@@ -170,9 +222,9 @@ func SearchMem0(ctx context.Context, cfg *config.ConfigStore, serverName, query 
 		"agent_id": mem0AgentID,
 	}
 	if caps.limitArg != "" {
-		limit := mem0SearchFetchK
+		limit := unfilteredLimit
 		if serverFiltered {
-			limit = mem0SearchTopK
+			limit = filteredLimit
 		}
 		args[caps.limitArg] = limit
 	} else if !serverFiltered {
@@ -198,30 +250,105 @@ func SearchMem0(ctx context.Context, cfg *config.ConfigStore, serverName, query 
 		serverFiltered = false
 		delete(args, "filters")
 		if caps.limitArg != "" {
-			args[caps.limitArg] = mem0SearchFetchK
+			args[caps.limitArg] = unfilteredLimit
 		}
 		input, _ = json.Marshal(args)
 		result, err = runMCPTool(ctx, cfg, serverName, "search_memories", string(input))
 	}
 	if err != nil {
-		return "", fmt.Errorf("mem0 search failed: %w", err)
+		return "", false, fmt.Errorf("mem0 search failed: %w", err)
 	}
-	filtered, ok := filterMem0Results(result.Content, workDir, serverName)
-	if !ok {
-		if serverFiltered {
-			// The response isn't per-memory JSON we can re-check, so
-			// the partition rests entirely on the declared filters
-			// contract — a server that accepts the arg but silently
-			// ignores it would still leak cross-project memories.
-			// Dropping instead would break servers that legitimately
-			// filter-and-return-prose.
-			return truncateTextToTokens(result.Content, mem0SearchMaxTokens), nil
+	return result.Content, serverFiltered, nil
+}
+
+// mem0WorkDir resolves the canonicalized partition key for the
+// configured working directory, reporting false when the directory is
+// unknown — without it a memory would be unreachable by every future
+// filtered search.
+func mem0WorkDir(cfg *config.ConfigStore, serverName string) (string, bool) {
+	raw := cfg.WorkingDir()
+	if raw == "" {
+		slog.Warn("Mem0 skipped: working directory is unknown", "server", serverName)
+		return "", false
+	}
+	return canonicalizeWorkingDir(raw), true
+}
+
+// mem0ListToolNames are the tool names recognized as metadata-complete
+// memory listings — the right fetch for hydration, since a semantic
+// search picks which memories fill the window by query match rather
+// than recency. Capability-detected by name like the search schema's
+// filters/limit arguments.
+var mem0ListToolNames = []string{"get_all_memories", "list_memories", "get_memories"}
+
+// hydrationQuery is the fixed neutral query for the search fallback —
+// hydration has no natural query and any string biases which memories
+// fill the window, so this is a named knob the eval arm can revisit.
+const hydrationQuery = "session position decisions files"
+
+// mem0ListTool returns the server's declared listing tool name, or ""
+// when it exposes none. The registry is empty until the server connects
+// — an unconnected server yields no tool and the search path runs. A
+// package-level var so tests can force either path.
+var mem0ListTool = func(serverName string) string {
+	for name, tools := range mcp.Tools() {
+		if name != serverName {
+			continue
 		}
-		slog.Warn("Mem0 search dropped: response is not parseable and no server-side filter was applied",
-			"server", serverName)
-		return "", nil
+		for _, tool := range tools {
+			if tool != nil && slices.Contains(mem0ListToolNames, tool.Name) {
+				return tool.Name
+			}
+		}
 	}
-	return truncateTextToTokens(filtered, mem0SearchMaxTokens), nil
+	return ""
+}
+
+// FetchHydrationMemories returns this working directory's memory items
+// for session hydration: parsed, partition-verified, and NOT capped at
+// the model-facing top_k — hydration needs the wide window so its own
+// metadata ordering can rank it. A declared listing tool is preferred
+// (no semantic bias in which memories fill the window); otherwise a
+// wide search_memories fetch carries the residual semantic bound.
+// Fail-closed throughout: an unparseable or unverifiable response
+// yields nil — proceed-empty, never a seeded blob.
+func FetchHydrationMemories(ctx context.Context, cfg *config.ConfigStore, serverName string) ([]map[string]any, error) {
+	if cfg == nil || serverName == "" {
+		return nil, nil
+	}
+	workDir, ok := mem0WorkDir(cfg, serverName)
+	if !ok {
+		return nil, nil
+	}
+	if listTool := mem0ListTool(serverName); listTool != "" {
+		input, _ := json.Marshal(map[string]any{"agent_id": mem0AgentID})
+		result, err := runMCPTool(ctx, cfg, serverName, listTool, string(input))
+		if err == nil {
+			if items, ok := partitionMem0Items(result.Content, workDir, serverName); ok {
+				return items, nil
+			}
+			// Unparseable listing — fall through to the search path
+			// rather than trusting a payload the partition can't verify.
+			slog.Debug("Mem0 list tool returned unparseable payload; falling back to search",
+				"server", serverName, "tool", listTool)
+		} else {
+			slog.Debug("Mem0 list tool failed; falling back to search",
+				"server", serverName, "tool", listTool, "error", err)
+		}
+	}
+	content, _, err := fetchMem0(ctx, cfg, serverName, hydrationQuery, mem0SearchFetchK, mem0SearchFetchK)
+	if err != nil {
+		return nil, err
+	}
+	items, ok := partitionMem0Items(content, workDir, serverName)
+	if !ok {
+		// Unlike recall prose, an unparseable hydration response has
+		// no usable fallback — nothing to seed.
+		slog.Warn("Mem0 hydration fetch dropped: response is not parseable",
+			"server", serverName)
+		return nil, nil
+	}
+	return items, nil
 }
 
 // canonicalizeWorkingDir canonicalizes a working directory for use as
@@ -330,21 +457,23 @@ func schemaHasProperty(schema any, prop string) bool {
 	return ok
 }
 
-// filterMem0Results parses a search_memories response and keeps only
-// memories whose metadata.working_dir equals workDir; anything else —
-// foreign partitions, missing keys, malformed metadata — is excluded
-// and logged. Survivors are ranked by relevance score and capped at
-// mem0SearchTopK. The boolean reports whether the payload parsed into
-// per-memory items at all: false means the caller cannot prove the
-// results are same-project.
-func filterMem0Results(content, workDir, serverName string) (string, bool) {
+// partitionMem0Items parses a mem0 response and keeps only memories
+// whose metadata.working_dir equals workDir; anything else — foreign
+// partitions, missing keys, malformed metadata — is excluded and
+// logged. Survivors are returned unranked and uncapped: callers choose
+// the ordering (SearchMem0 re-ranks by score and caps at
+// mem0SearchTopK; hydration sorts on metadata over the wide window).
+// The boolean reports whether the payload parsed into per-memory
+// items at all: false means the caller cannot prove the results are
+// same-project.
+func partitionMem0Items(content, workDir, serverName string) ([]map[string]any, bool) {
 	var payload any
 	if err := json.Unmarshal([]byte(content), &payload); err != nil {
-		return "", false
+		return nil, false
 	}
 	items, ok := mem0ResultItems(payload)
 	if !ok {
-		return "", false
+		return nil, false
 	}
 	var kept []map[string]any
 	foreign, malformed := 0, 0
@@ -380,19 +509,7 @@ func filterMem0Results(content, workDir, serverName string) (string, bool) {
 			"kept", len(kept),
 		)
 	}
-	// The server ranked by semantic relevance across every project;
-	// after partitioning, re-rank the survivors and cap at the
-	// model-facing top_k.
-	slices.SortStableFunc(kept, func(a, b map[string]any) int {
-		return cmp.Compare(mem0Score(b), mem0Score(a))
-	})
-	if len(kept) > mem0SearchTopK {
-		kept = kept[:mem0SearchTopK]
-	}
-	if len(kept) == 0 {
-		return "", true
-	}
-	return renderMem0Results(kept), true
+	return kept, true
 }
 
 // renderMem0Results marshals kept memories to JSON that fits the

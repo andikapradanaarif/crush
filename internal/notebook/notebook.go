@@ -303,6 +303,15 @@ type Service interface {
 	// collapsed_turns (e.g. CounterPriorTurnResultRecall).
 	BumpSessionCounter(ctx context.Context, sessionID, name string, delta int64) error
 
+	// SessionCounter reads a named per-session counter.
+	SessionCounter(ctx context.Context, sessionID, name string) (int64, error)
+
+	// SeedEntries writes hydration seeds in a single transaction when
+	// no hydrated-tagged entry exists — the seeds are the idempotency
+	// marker, so a crash mid-seed or a concurrent first turn can never
+	// leave a partial or doubled set. Reports whether seeds committed.
+	SeedEntries(ctx context.Context, sessionID string, seeds []SeedEntry) (bool, error)
+
 	// GetTokenCount returns the total token count of all entries for a
 	// session.
 	GetTokenCount(ctx context.Context, sessionID string) (int64, error)
