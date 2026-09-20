@@ -288,8 +288,8 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 					// trigger detail), every pending contender, every
 					// carried trigger, and every un-scanned edge so
 					// no-row=clean stays true.
-					a.recordEdgeFiring(context.WithoutCancel(ctx), call, in, edge.name, t, edgeOutcomeCancelled)
-					a.recordCancelledBoundary(ctx, call, in, edges[i+1:], contenders, stillDeferred)
+					a.recordEdgeFiring(ctx, call, in, edge.name, t, edgeOutcomeCancelled)
+					a.recordCancelledBoundary(ctx, call, in, edges[i+1:], contenders, stillDeferred, carried)
 					return false
 				}
 			}
@@ -485,29 +485,45 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 // carried triggers, and every un-scanned edge. Writes run on a
 // detached context: the insert must succeed even though the run
 // context is dead.
-func (a *sessionAgent) recordCancelledBoundary(ctx context.Context, call SessionAgentCall, in edgeInput, remaining []runEdge, pending []contender, carried []deferredTrigger) {
-	ctx = context.WithoutCancel(ctx)
+func (a *sessionAgent) recordCancelledBoundary(ctx context.Context, call SessionAgentCall, in edgeInput, remaining []runEdge, pending []contender, deferred []deferredTrigger, carried map[string]deferredTrigger) {
 	for _, c := range pending {
 		a.recordEdgeFiring(ctx, call, in, c.edge.name, c.t, edgeOutcomeCancelled)
 	}
-	for _, d := range carried {
+	for _, d := range deferred {
 		a.recordEdgeFiring(ctx, call, in, d.edge.name, d.trigger, edgeOutcomeCancelled)
 	}
 	for _, edge := range remaining {
-		a.recordEdgeFiring(ctx, call, in, edge.name, nil, edgeOutcomeCancelled)
+		// A trigger parked on the carrier for an un-scanned edge
+		// still carries its detail.
+		var t *edgeTrigger
+		if d, ok := carried[edge.name]; ok {
+			t = d.trigger
+		}
+		a.recordEdgeFiring(ctx, call, in, edge.name, t, edgeOutcomeCancelled)
 	}
 }
 
 // recordEdgeFiring writes one edge_firings row for an evaluated edge —
 // INSERT OR IGNORE makes the write idempotent within a boundary, and
-// the in-memory counter only advances on a real insert.
+// the in-memory counter only advances on a real insert. Writes run on
+// a detached context: a cancel landing between the mid-loop ctx.Err()
+// check and the outcome writes must not lose the row — an unrecorded
+// fired edge reads as clean and breaks the invariant.
 func (a *sessionAgent) recordEdgeFiring(ctx context.Context, call SessionAgentCall, in edgeInput, edgeName string, t *edgeTrigger, outcome edgeOutcome) {
 	if a.edgeStore == nil {
 		return
 	}
+	turnSeq := in.turnSeq
+	if turnSeq == 0 && call.RunStamp != 0 {
+		// The user-message count failed — key the row off the run
+		// stamp instead of collapsing every edge's rows onto
+		// turn_seq=0 and letting INSERT OR IGNORE eat them. The
+		// negative keeps it out of the real ordinal range.
+		turnSeq = -int64(call.RunStamp)
+	}
 	params := db.InsertEdgeFiringParams{
 		SessionID:      call.SessionID,
-		TurnSeq:        in.turnSeq,
+		TurnSeq:        turnSeq,
 		Edge:           edgeName,
 		RepairAttempts: int64(call.RepairAttempts),
 		Outcome:        string(outcome),
@@ -517,7 +533,7 @@ func (a *sessionAgent) recordEdgeFiring(ctx context.Context, call SessionAgentCa
 		params.Variant = t.variant
 		params.TriggerDetail = t.detail
 	}
-	n, err := a.edgeStore.InsertEdgeFiring(ctx, params)
+	n, err := a.edgeStore.InsertEdgeFiring(context.WithoutCancel(ctx), params)
 	if err != nil {
 		slog.Warn("Failed to record edge firing", "error", err, "session_id", call.SessionID, "edge", edgeName)
 		return
@@ -588,6 +604,9 @@ func (a *sessionAgent) writeRepairExhaustion(ctx context.Context, call SessionAg
 	for _, report := range reports {
 		currentAssistant.AppendContent("\n\n" + report)
 	}
+	// Detached like the firing rows: the terminal line must land even
+	// when the run context is already dead.
+	ctx = context.WithoutCancel(ctx)
 	if err := a.messages.Update(ctx, *currentAssistant); err != nil {
 		slog.Error("Failed to record repair exhaustion", "error", err, "session_id", call.SessionID)
 	} else if err := a.messages.FlushAll(ctx); err != nil {
@@ -957,8 +976,18 @@ func (a *sessionAgent) pullStallHandoff(ctx context.Context, call SessionAgentCa
 				latest[id] = true
 			}
 			for _, e := range entries {
-				if latest[e.ID] && e.EntryText != "" {
-					t.checkpoint = e.EntryText
+				if !latest[e.ID] {
+					continue
+				}
+				// Prefer the uncompressed text — the replan prompt
+				// gets one shot at re-orientation, matching
+				// buildCheckpointInput's precedence.
+				text := e.EntryTextFull
+				if text == "" {
+					text = e.EntryText
+				}
+				if text != "" {
+					t.checkpoint = text
 				}
 			}
 		}

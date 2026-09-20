@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
@@ -15,7 +16,9 @@ import (
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/notebook"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -839,4 +842,86 @@ func TestStallReplanHandoff(t *testing.T) {
 		q, _ := a.messageQueue.Get(sessionID)
 		require.NotContains(t, q[0].Prompt, "Files written")
 	})
+}
+
+// failingCountStore fails the user-message count but delegates the
+// insert — the turnSeq=0 collapse path.
+type failingCountStore struct {
+	q *db.Queries
+}
+
+func (f failingCountStore) CountUserMessagesBySession(context.Context, string) (int64, error) {
+	return 0, fmt.Errorf("count failed")
+}
+
+func (f failingCountStore) InsertEdgeFiring(ctx context.Context, p db.InsertEdgeFiringParams) (int64, error) {
+	return f.q.InsertEdgeFiring(ctx, p)
+}
+
+func TestEdgeFiringTurnSeqFallback(t *testing.T) {
+	t.Parallel()
+
+	a, conn, sessionID := newEdgeTestAgent(t, &config.Config{})
+	a.edgeStore = failingCountStore{q: db.New(conn)}
+	a.ambiguityClarification = true
+	sess, err := a.sessions.Get(t.Context(), sessionID)
+	require.NoError(t, err)
+	sess.Todos = []session.PlanItem{{Content: "open", Status: session.PlanItemPending}}
+	_, err = a.sessions.Save(t.Context(), sess)
+	require.NoError(t, err)
+
+	// Two boundaries with distinct run stamps must not collapse into
+	// one row even though the count failed both times.
+	for stamp := uint64(10); stamp <= 11; stamp++ {
+		require.True(t, a.runEdges(t.Context(),
+			SessionAgentCall{SessionID: sessionID, RunStamp: stamp},
+			edgeInput{result: cleanResult(), turnSeq: 0}))
+	}
+	var turnSeqs []int64
+	rows, err := conn.QueryContext(t.Context(),
+		`SELECT turn_seq FROM edge_firings WHERE session_id = ? AND edge = 'todos' ORDER BY turn_seq`, sessionID)
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var ts int64
+		require.NoError(t, rows.Scan(&ts))
+		turnSeqs = append(turnSeqs, ts)
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, []int64{-11, -10}, turnSeqs,
+		"each boundary keys off its run stamp when the count fails")
+}
+
+func TestStallReplanHandoffCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	a, conn, sessionID := newEdgeTestAgent(t, &config.Config{})
+	a.ambiguityClarification = true
+	a.notebook = notebook.NewService(db.New(conn), nil, notebook.Options{})
+	q := db.New(conn)
+	entryID := uuid.New().String()
+	_, err := q.CreateNotebookEntry(t.Context(), db.CreateNotebookEntryParams{
+		ID:         entryID,
+		SessionID:  sessionID,
+		TurnNumber: 1,
+		EventType:  "checkpoint",
+		Title:      "Session checkpoint",
+		// The compressed text loses detail the full text keeps.
+		EntryText:     "compressed: edited auth.go",
+		EntryTextFull: sql.NullString{String: "full: edited auth.go then verified", Valid: true},
+		CreatedAt:     time.Now().Unix(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, q.CreateNotebookTag(t.Context(), db.CreateNotebookTagParams{
+		EntryID: entryID,
+		Tag:     "granularity:boundary",
+	}))
+
+	queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID},
+		edgeInput{result: stallResult(), stalled: true})
+	require.True(t, queued)
+	mq, _ := a.messageQueue.Get(sessionID)
+	require.Contains(t, mq[0].Prompt, "Latest session checkpoint:")
+	require.Contains(t, mq[0].Prompt, "full: edited auth.go then verified",
+		"the replan payload prefers the uncompressed checkpoint text")
 }
