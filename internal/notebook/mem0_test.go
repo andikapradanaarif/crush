@@ -317,7 +317,7 @@ func TestCanonicalizeWorkingDir(t *testing.T) {
 	}
 }
 
-func TestFilterMem0Results(t *testing.T) {
+func TestPartitionMem0Items(t *testing.T) {
 	const dirA = "/repo/a"
 
 	tests := []struct {
@@ -394,24 +394,25 @@ func TestFilterMem0Results(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			out, ok := filterMem0Results(tc.content, dirA, "mem0")
+			items, ok := partitionMem0Items(tc.content, dirA, "mem0")
 			require.Equal(t, tc.ok, ok)
+			out, _ := json.Marshal(items)
 			for _, w := range tc.want {
-				require.Contains(t, out, w)
+				require.Contains(t, string(out), w)
 			}
 			for _, nw := range tc.notWant {
-				require.NotContains(t, out, nw)
+				require.NotContains(t, string(out), nw)
 			}
 		})
 	}
 
 	// Foreign-only results keep nothing.
-	out, ok := filterMem0Results(`[{"memory":"b1","metadata":{"working_dir":"/repo/b"}}]`, dirA, "mem0")
+	items, ok := partitionMem0Items(`[{"memory":"b1","metadata":{"working_dir":"/repo/b"}}]`, dirA, "mem0")
 	require.True(t, ok)
-	require.Equal(t, "", out)
+	require.Empty(t, items)
 }
 
-func TestFilterMem0Results_SortsByScoreAndCaps(t *testing.T) {
+func TestRankMem0Items_SortsByScoreAndCaps(t *testing.T) {
 	var sb strings.Builder
 	sb.WriteString("[")
 	for i := range mem0SearchTopK + 5 {
@@ -422,11 +423,11 @@ func TestFilterMem0Results_SortsByScoreAndCaps(t *testing.T) {
 	}
 	sb.WriteString(`,{"memory":"foreign","score":9999,"metadata":{"working_dir":"/repo/b"}}]`)
 
-	out, ok := filterMem0Results(sb.String(), "/repo/a", "mem0")
+	items, ok := partitionMem0Items(sb.String(), "/repo/a", "mem0")
 	require.True(t, ok)
+	require.Len(t, items, mem0SearchTopK+5, "partition alone does not cap")
 
-	var kept []map[string]any
-	require.NoError(t, json.Unmarshal([]byte(out), &kept))
+	kept := rankMem0Items(items)
 	require.Len(t, kept, mem0SearchTopK, "results are capped at the model-facing top_k")
 	// The high-scoring foreign memory was excluded before ranking.
 	for _, m := range kept {
@@ -439,22 +440,22 @@ func TestFilterMem0Results_SortsByScoreAndCaps(t *testing.T) {
 	require.Equal(t, "m14", kept[0]["memory"], "highest-scoring same-dir memory ranks first")
 }
 
-func TestFilterMem0Results_EnvelopeEdgeCases(t *testing.T) {
+func TestPartitionMem0Items_EnvelopeEdgeCases(t *testing.T) {
 	// A wrapper key holding neither a list nor a memory is a
 	// malformed envelope, not a single memory carrying metadata.
-	out, ok := filterMem0Results(`{"results":"oops","metadata":{"working_dir":"/repo/a"}}`, "/repo/a", "mem0")
+	_, ok := partitionMem0Items(`{"results":"oops","metadata":{"working_dir":"/repo/a"}}`, "/repo/a", "mem0")
 	require.False(t, ok)
-	require.Equal(t, "", out)
 
 	// A wrapper key holding one memory object unwraps it.
-	out, ok = filterMem0Results(`{"results":{"memory":"a1","metadata":{"working_dir":"/repo/a"}}}`, "/repo/a", "mem0")
+	items, ok := partitionMem0Items(`{"results":{"memory":"a1","metadata":{"working_dir":"/repo/a"}}}`, "/repo/a", "mem0")
 	require.True(t, ok)
-	require.Contains(t, out, "a1")
+	require.Len(t, items, 1)
+	require.Equal(t, "a1", items[0]["memory"])
 }
 
 func TestRenderMem0Results_FitsBudget(t *testing.T) {
 	// Many same-project memories, best first (the order
-	// filterMem0Results produces): the output must stay within the
+	// partitionMem0Items + rankMem0Items produce): the output must stay within the
 	// budget and remain valid JSON — items are dropped, never cut.
 	var kept []map[string]any
 	for i := range 500 {

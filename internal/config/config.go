@@ -404,6 +404,12 @@ type Options struct {
 	NotebookAutoInject     *bool  `json:"notebook_auto_inject,omitempty" jsonschema:"description=Auto-inject full notebook entries for files mentioned in the user message,default=false"`
 	NotebookCheckpoint     *bool  `json:"notebook_checkpoint,omitempty" jsonschema:"description=Write a consolidated checkpoint entry (established facts vs open questions) at the write boundary and run end,default=true"`
 	NotebookStubSuperseded *bool  `json:"notebook_stub_superseded,omitempty" jsonschema:"description=Replace stale or superseded tool results in raw history with labeled stubs (experimental),default=false"`
+	// NotebookHydration seeds a new session's notebook from the
+	// memory server's prior entries for this working directory —
+	// position and agenda instead of a cold start. Requires the
+	// memory server to be configured as an MCP server; eval arms set
+	// it explicitly.
+	NotebookHydration *bool `json:"notebook_hydration,omitempty" jsonschema:"description=Seed a new session's notebook from cross-session memory on the first turn,default=true"`
 	// NotebookPriorTurns selects how completed, fully covered turns
 	// render inside the raw window: verbatim keeps the full
 	// transcript, stub collapses tool call/result pairs to labeled
@@ -1371,6 +1377,17 @@ func (o *Options) NotebookCheckpointEnabled() bool {
 		return o.NotebookIsEnabled()
 	}
 	return *o.NotebookCheckpoint
+}
+
+// NotebookHydrationEnabled returns the resolved hydration setting,
+// defaulting to true — the feature's on/off knob lives here (not an
+// eval env var) so eval arms flip it through arm config like every
+// other option.
+func (o *Options) NotebookHydrationEnabled() bool {
+	if o.NotebookHydration == nil {
+		return true
+	}
+	return *o.NotebookHydration
 }
 
 // NotebookStubSupersededEnabled returns the resolved superseded-result

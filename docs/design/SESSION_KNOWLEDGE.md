@@ -3,8 +3,8 @@
 > **Status:** Partially shipped. PR 1 shipped (#56 — `working_dir`
 > partition, capability-detected server-side filters, fail-closed
 > client verification); §1's within-session `checkpoint` entry type
-> shipped (#57, closing #48). §2 (cold-start hydration) remains spec
-> — tracked in #53. Covers two halves of one gap — the notebook is an
+> shipped (#57, closing #48). §2 (cold-start hydration) shipped on
+> the branch closing #53. Covers two halves of one gap — the notebook is an
 > event log with no consolidated position (within-session), and its
 > mem0 sync is write-only in practice because retrieval is pull-only
 > (cross-session). Proposes a `checkpoint` entry type plus session
@@ -372,8 +372,11 @@ event_type != 'checkpoint'`) — an sqlc query change, not just Go.
 - **Metric distortion.** Checkpoint `file:` tags join the injected
   `files` set — a first-ever view of a cited file counts as
   `CoveredReViews`, inflating exactly the metric the eval arm
-  reads. Filter checkpoint tags out of that set, or accept the
-  bias consciously.
+  reads. Hydrated non-checkpoint seeds with `file:` tags do the
+  same, and in the cold-start arm they land before any real
+  coverage — the paired eval should either exclude
+  `hydrated`-tagged entries from `CoveredReViews` or accept the
+  bias consciously (arguably correct: the seed IS the prior read).
 - **`SearchByEventType("checkpoint")` spans granularities** —
   returns turn digests too. Probably fine (recall by granularity
   isn't a stated need), but decide consciously.
@@ -525,7 +528,12 @@ injecting a prompt block:
    run; hydration is an **option flag** (`hydration`/`notebook-
    hydration`), default on when the feature ships — eval arms set
    it explicitly via arm config, which is also what the cold-start
-   arm needs for its on/off knob. Env sniffing rejected:
+   arm needs for its on/off knob. Deliberate deviation: the default
+   is ON (the spec text asked for opt-out); the paired cold-start arm
+   must therefore set `notebook_hydration` on BOTH sides — the off
+   arm explicitly false — since an unset arm now silently hydrates.
+   In practice eval children run with a sanitized HOME and typically
+   no mem0 server, which no-ops hydration anyway. Env sniffing rejected:
    `CRUSH_EVAL_FLAGS` is only pinned when `len(FlagKeys) > 0`
    (`eval/driver.go:340-342`) — a no-flag-keys eval would leave it
    unset and contaminate the off arm; `CRUSH_EVAL_TELEMETRY` is

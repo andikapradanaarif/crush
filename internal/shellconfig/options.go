@@ -205,6 +205,7 @@ var optionSpecs = map[string]optionSpec{
 	"notebook-auto-inject":     {jsonKey: "notebook_auto_inject", kind: optBool},
 	"notebook-checkpoint":      {jsonKey: "notebook_checkpoint", kind: optBool},
 	"notebook-stub-superseded": {jsonKey: "notebook_stub_superseded", kind: optBool},
+	"notebook-hydration":       {jsonKey: "notebook_hydration", kind: optBool},
 
 	// Boolean fields exposed positively but stored as their negation.
 	"metrics":              {jsonKey: "disable_metrics", kind: optBool, inverted: true},

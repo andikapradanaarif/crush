@@ -570,6 +570,13 @@ func (a *sessionAgent) detectSegments(ctx context.Context, sessionID string, msg
 	return segs, processed
 }
 
+// isHydratedSeed reports whether the entry was written by session
+// hydration — the tag SyncEntries also uses to keep seeds out of
+// mem0.
+func isHydratedSeed(e notebook.Entry) bool {
+	return slices.Contains(e.Tags, notebook.TagHydrated)
+}
+
 // cloneMessagesForGen deep-copies messages for a generation goroutine.
 // Message.Clone copies the parts slice but shares pointer fields —
 // ToolResult.Superseded is a *SupersededMark that stub flagging and
@@ -870,7 +877,7 @@ func (a *sessionAgent) buildSelectionInput(ctx context.Context, sessionID string
 // digestTurns freeze is populated on the run's first call, before
 // the cache check.
 func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msgs []message.Message, boundary int, bKey segmentKey, segs []segment, collapse *turnCollapse) []fantasy.Message {
-	if a.notebook == nil || boundary <= 0 || sessionID == "" {
+	if a.notebook == nil || sessionID == "" {
 		return nil
 	}
 	detCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -878,6 +885,14 @@ func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msg
 	entries, err := a.notebook.GetEntries(detCtx, sessionID)
 	if err != nil {
 		slog.Error("Failed to get notebook entries", "error", err)
+		return nil
+	}
+	if boundary <= 0 && !slices.ContainsFunc(entries, isHydratedSeed) {
+		// No covered segments yet and nothing seeded — nothing to
+		// render. Hydration seeds are the carve-out: they exist
+		// precisely for the first turn, and their sentinel keys sit
+		// below every real boundary key so the downstream filters
+		// pass them unmodified.
 		return nil
 	}
 	// Freeze digest eligibility here, before the cache check — a

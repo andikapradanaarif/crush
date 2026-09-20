@@ -22,6 +22,12 @@ INSERT INTO session_counters (
 ON CONFLICT (session_id, name)
 DO UPDATE SET value = value + excluded.value;
 
+-- name: GetSessionCounter :one
+SELECT CAST(COALESCE(
+    (SELECT value FROM session_counters WHERE session_id = ? AND name = ?),
+    0
+) AS INTEGER) AS value;
+
 -- name: GetCollapsedTurnStats :one
 SELECT
     COUNT(*) AS turns,

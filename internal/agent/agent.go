@@ -233,6 +233,9 @@ type sessionAgent struct {
 	configStore *config.ConfigStore
 	// notebookSyncMem0 controls whether entries are synced to mem0.
 	notebookSyncMem0 bool
+	// notebookHydration controls whether a session's first turn seeds
+	// its notebook from cross-session memory.
+	notebookHydration bool
 	// notebookMemoryServer is the MCP server name for mem0.
 	notebookMemoryServer string
 	// notebookAutoInject controls whether file references in the
@@ -325,6 +328,10 @@ type sessionAgent struct {
 	// syncSegmentGen runs segment entry generation inline instead of
 	// in a goroutine — a deterministic seam for tests.
 	syncSegmentGen bool
+	// hydrateFetch fetches hydration candidates; nil uses
+	// notebook.FetchHydrationMemories. A test seam — production never
+	// overrides it.
+	hydrateFetch func(ctx context.Context, cfg *config.ConfigStore, serverName string) ([]map[string]any, error)
 
 	messageQueue   *csync.Map[string, []SessionAgentCall]
 	activeRequests *csync.Map[string, *activeCancel]
@@ -395,6 +402,10 @@ type SessionAgentOptions struct {
 	// NotebookSyncMem0 controls whether entries are synced to mem0
 	// for cross-session search.
 	NotebookSyncMem0 bool
+	// NotebookHydration controls whether a session's first turn seeds
+	// its notebook from cross-session memory (the notebook_hydration
+	// option). Only takes effect in notebook mode.
+	NotebookHydration bool
 	// NotebookMemoryServer is the MCP server name for mem0.
 	NotebookMemoryServer string
 	// NotebookAutoInject controls whether file references in the user
@@ -487,6 +498,7 @@ func NewSessionAgent(
 		rawTokenBudget:         opts.RawTokenBudget,
 		configStore:            opts.ConfigStore,
 		notebookSyncMem0:       opts.NotebookSyncMem0,
+		notebookHydration:      opts.NotebookHydration,
 		notebookMemoryServer:   opts.NotebookMemoryServer,
 		notebookAutoInject:     opts.NotebookAutoInject,
 		notebookCheckpoint:     opts.NotebookCheckpoint,
@@ -507,6 +519,7 @@ func NewSessionAgent(
 		lspManager:             opts.LSPManager,
 		edgeStore:              opts.EdgeStore,
 		edgeStats:              cmp.Or(opts.EdgeStats, csync.NewMap[string, map[string]int]()),
+		hydrateFetch:           notebook.FetchHydrationMemories,
 	}
 	a.runStampGen.Store(runStampEpoch())
 	return a
@@ -1077,6 +1090,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		// non-interactive clients waiting on RunComplete.
 		a.publishRunComplete(ctx, call, complete)
 	}()
+
+	// Hydration seeds the notebook from cross-session memory before
+	// the run's first prompt build so the seeds render on turn 1 —
+	// gated on the option, a configured memory server, a top-level
+	// session, and no existing hydrated marker.
+	a.maybeHydrateNotebook(ctx, currentSession)
 
 	// Prior-turn collapse compares against the turn that STARTED the
 	// run, not the recomputed current turn: drainQueueForStep can fold
