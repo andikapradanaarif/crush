@@ -1,10 +1,10 @@
 # Session Knowledge — Consolidated Checkpoints & Cold-Start Hydration
 
-> **Status:** Partially shipped. PR 1 shipped (#56 — `working_dir`
+> **Status:** Shipped. PR 1 shipped (#56 — `working_dir`
 > partition, capability-detected server-side filters, fail-closed
 > client verification); §1's within-session `checkpoint` entry type
-> shipped (#57, closing #48). §2 (cold-start hydration) shipped on
-> the branch closing #53. Covers two halves of one gap — the notebook is an
+> shipped (#57, closing #48); §2 (cold-start hydration) shipped
+> (#79, closing #53). Covers two halves of one gap — the notebook is an
 > event log with no consolidated position (within-session), and its
 > mem0 sync is write-only in practice because retrieval is pull-only
 > (cross-session). Proposes a `checkpoint` entry type plus session
