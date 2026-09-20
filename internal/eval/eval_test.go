@@ -458,6 +458,48 @@ func TestRunTelemetry_StubKinds(t *testing.T) {
 	require.Equal(t, map[string]int{"superseded": 1, "stale": 1, "deleted": 2}, res.StubStats.Kinds)
 }
 
+// TestRunTelemetry_EdgeFirings pins the edge_firings contract: the
+// child's per-edge outcome map parses and per-turn deltas sum into
+// trajectory totals — the counters reset with each `crush run`
+// process, so a repair turn's replan shows up in the same turn's
+// file and the next turn's rows add on top.
+func TestRunTelemetry_EdgeFirings(t *testing.T) {
+	t.Parallel()
+	writeTel := func(firings map[string]map[string]int) runTelemetry {
+		doc := map[string]any{
+			"session_id":   "s1",
+			"steps":        3,
+			"edge_firings": firings,
+		}
+		path := filepath.Join(t.TempDir(), "tel.json")
+		data, err := json.Marshal(doc)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(path, data, 0o644))
+		tel, err := readTelemetry(path)
+		require.NoError(t, err)
+		return tel
+	}
+
+	var res RunResult
+	res.addTurnTelemetry(writeTel(map[string]map[string]int{
+		"stall":        {"fired": 1},
+		"todos":        {"fired": 1},
+		"verification": {"cleared": 1},
+	}))
+	res.addTurnTelemetry(writeTel(nil))
+	res.addTurnTelemetry(writeTel(map[string]map[string]int{
+		"stall":      {"fired": 1, "exhausted": 1},
+		"burn-watch": {"gated": 1},
+	}))
+
+	require.Equal(t, map[string]map[string]int{
+		"stall":        {"fired": 2, "exhausted": 1},
+		"todos":        {"fired": 1},
+		"verification": {"cleared": 1},
+		"burn-watch":   {"gated": 1},
+	}, res.EdgeFirings)
+}
+
 // --- stats ---
 
 func TestFisherExactCollapse_KnownValues(t *testing.T) {

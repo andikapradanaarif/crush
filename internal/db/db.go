@@ -27,6 +27,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.bumpSessionCounterStmt, err = db.PrepareContext(ctx, bumpSessionCounter); err != nil {
 		return nil, fmt.Errorf("error preparing query BumpSessionCounter: %w", err)
 	}
+	if q.countUserMessagesBySessionStmt, err = db.PrepareContext(ctx, countUserMessagesBySession); err != nil {
+		return nil, fmt.Errorf("error preparing query CountUserMessagesBySession: %w", err)
+	}
 	if q.createFileStmt, err = db.PrepareContext(ctx, createFile); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateFile: %w", err)
 	}
@@ -68,6 +71,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.getCollapsedTurnStatsStmt, err = db.PrepareContext(ctx, getCollapsedTurnStats); err != nil {
 		return nil, fmt.Errorf("error preparing query GetCollapsedTurnStats: %w", err)
+	}
+	if q.getEdgeFiringStatsStmt, err = db.PrepareContext(ctx, getEdgeFiringStats); err != nil {
+		return nil, fmt.Errorf("error preparing query GetEdgeFiringStats: %w", err)
 	}
 	if q.getFileStmt, err = db.PrepareContext(ctx, getFile); err != nil {
 		return nil, fmt.Errorf("error preparing query GetFile: %w", err)
@@ -153,6 +159,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getUsageByModelStmt, err = db.PrepareContext(ctx, getUsageByModel); err != nil {
 		return nil, fmt.Errorf("error preparing query GetUsageByModel: %w", err)
 	}
+	if q.insertEdgeFiringStmt, err = db.PrepareContext(ctx, insertEdgeFiring); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertEdgeFiring: %w", err)
+	}
 	if q.listAllUserMessagesStmt, err = db.PrepareContext(ctx, listAllUserMessages); err != nil {
 		return nil, fmt.Errorf("error preparing query ListAllUserMessages: %w", err)
 	}
@@ -235,6 +244,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing bumpSessionCounterStmt: %w", cerr)
 		}
 	}
+	if q.countUserMessagesBySessionStmt != nil {
+		if cerr := q.countUserMessagesBySessionStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing countUserMessagesBySessionStmt: %w", cerr)
+		}
+	}
 	if q.createFileStmt != nil {
 		if cerr := q.createFileStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing createFileStmt: %w", cerr)
@@ -303,6 +317,11 @@ func (q *Queries) Close() error {
 	if q.getCollapsedTurnStatsStmt != nil {
 		if cerr := q.getCollapsedTurnStatsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getCollapsedTurnStatsStmt: %w", cerr)
+		}
+	}
+	if q.getEdgeFiringStatsStmt != nil {
+		if cerr := q.getEdgeFiringStatsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getEdgeFiringStatsStmt: %w", cerr)
 		}
 	}
 	if q.getFileStmt != nil {
@@ -443,6 +462,11 @@ func (q *Queries) Close() error {
 	if q.getUsageByModelStmt != nil {
 		if cerr := q.getUsageByModelStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getUsageByModelStmt: %w", cerr)
+		}
+	}
+	if q.insertEdgeFiringStmt != nil {
+		if cerr := q.insertEdgeFiringStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertEdgeFiringStmt: %w", cerr)
 		}
 	}
 	if q.listAllUserMessagesStmt != nil {
@@ -605,6 +629,7 @@ type Queries struct {
 	db                                   DBTX
 	tx                                   *sql.Tx
 	bumpSessionCounterStmt               *sql.Stmt
+	countUserMessagesBySessionStmt       *sql.Stmt
 	createFileStmt                       *sql.Stmt
 	createMessageStmt                    *sql.Stmt
 	createNotebookEntryStmt              *sql.Stmt
@@ -619,6 +644,7 @@ type Queries struct {
 	deleteSessionMessagesStmt            *sql.Stmt
 	getAverageResponseTimeStmt           *sql.Stmt
 	getCollapsedTurnStatsStmt            *sql.Stmt
+	getEdgeFiringStatsStmt               *sql.Stmt
 	getFileStmt                          *sql.Stmt
 	getFileByPathAndSessionStmt          *sql.Stmt
 	getFileReadStmt                      *sql.Stmt
@@ -647,6 +673,7 @@ type Queries struct {
 	getUsageByDayOfWeekStmt              *sql.Stmt
 	getUsageByHourStmt                   *sql.Stmt
 	getUsageByModelStmt                  *sql.Stmt
+	insertEdgeFiringStmt                 *sql.Stmt
 	listAllUserMessagesStmt              *sql.Stmt
 	listFilesByPathStmt                  *sql.Stmt
 	listFilesBySessionStmt               *sql.Stmt
@@ -678,6 +705,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		db:                                   tx,
 		tx:                                   tx,
 		bumpSessionCounterStmt:               q.bumpSessionCounterStmt,
+		countUserMessagesBySessionStmt:       q.countUserMessagesBySessionStmt,
 		createFileStmt:                       q.createFileStmt,
 		createMessageStmt:                    q.createMessageStmt,
 		createNotebookEntryStmt:              q.createNotebookEntryStmt,
@@ -692,6 +720,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		deleteSessionMessagesStmt:            q.deleteSessionMessagesStmt,
 		getAverageResponseTimeStmt:           q.getAverageResponseTimeStmt,
 		getCollapsedTurnStatsStmt:            q.getCollapsedTurnStatsStmt,
+		getEdgeFiringStatsStmt:               q.getEdgeFiringStatsStmt,
 		getFileStmt:                          q.getFileStmt,
 		getFileByPathAndSessionStmt:          q.getFileByPathAndSessionStmt,
 		getFileReadStmt:                      q.getFileReadStmt,
@@ -720,6 +749,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getUsageByDayOfWeekStmt:              q.getUsageByDayOfWeekStmt,
 		getUsageByHourStmt:                   q.getUsageByHourStmt,
 		getUsageByModelStmt:                  q.getUsageByModelStmt,
+		insertEdgeFiringStmt:                 q.insertEdgeFiringStmt,
 		listAllUserMessagesStmt:              q.listAllUserMessagesStmt,
 		listFilesByPathStmt:                  q.listFilesByPathStmt,
 		listFilesBySessionStmt:               q.listFilesBySessionStmt,

@@ -382,7 +382,7 @@ func TestRunVerificationGate(t *testing.T) {
 			stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),
 		}}
 
-		queued := a.runEdges(t.Context(), SessionAgentCall{
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{
 			SessionID: sessionID, RunID: "run-1", Prompt: "do it",
 		}, edgeInput{result: result, currentAssistant: assistantMsg()})
 		require.True(t, queued)
@@ -404,7 +404,7 @@ func TestRunVerificationGate(t *testing.T) {
 				Result: fantasy.ToolResultOutputContentText{Text: "denied"},
 			}),
 		}}
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID}, edgeInput{result: result, currentAssistant: assistantMsg()})
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID}, edgeInput{result: result, currentAssistant: assistantMsg()})
 		require.False(t, queued)
 	})
 
@@ -415,7 +415,7 @@ func TestRunVerificationGate(t *testing.T) {
 			stepWith(fantasy.FinishReasonToolCalls, editWith(`{"verification":[{"check":"diagnostics","state":"failed"}]}`)),
 			stepWith(fantasy.FinishReasonLength, fantasy.TextContent{Text: "cut off"}),
 		}}
-		require.False(t, a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID}, edgeInput{result: result, currentAssistant: assistantMsg()}))
+		require.False(t, runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID}, edgeInput{result: result, currentAssistant: assistantMsg()}))
 	})
 
 	t.Run("observed failing bash resolves pending and retries", func(t *testing.T) {
@@ -441,7 +441,7 @@ func TestRunVerificationGate(t *testing.T) {
 			stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),
 		}}
 
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID, RunID: "r"}, edgeInput{result: result, currentAssistant: assistantMsg()})
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID, RunID: "r"}, edgeInput{result: result, currentAssistant: assistantMsg()})
 		require.True(t, queued)
 
 		// The stored row's pending entry resolved to failed.
@@ -462,7 +462,7 @@ func TestRunVerificationGate(t *testing.T) {
 			stepWith(fantasy.FinishReasonToolCalls, editWith(`{"verification":[{"check":"diagnostics","state":"failed"}]}`)),
 			stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),
 		}}
-		queued := a.runEdges(t.Context(), SessionAgentCall{
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{
 			SessionID: sessionID, RunID: "run-1",
 		}, edgeInput{result: result, currentAssistant: assistantMsg()})
 		require.True(t, queued)
@@ -480,7 +480,7 @@ func TestRunVerificationGate(t *testing.T) {
 			stepWith(fantasy.FinishReasonToolCalls, editWith(`{"verification":[{"check":"diagnostics","state":"failed","detail":"1 new error(s)"}]}`)),
 			stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),
 		}}
-		queued := a.runEdges(t.Context(), SessionAgentCall{
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{
 			SessionID: sessionID, RepairAttempts: maxRepairAttempts,
 		}, edgeInput{result: result, currentAssistant: asst})
 		require.False(t, queued)
@@ -508,7 +508,7 @@ func TestRunVerificationGate(t *testing.T) {
 			stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),
 		}}
 
-		queued := a.runEdges(t.Context(), SessionAgentCall{
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{
 			SessionID: sessionID, RunID: "run-1",
 		}, edgeInput{result: result, currentAssistant: assistantMsg()})
 		require.True(t, queued)
@@ -532,7 +532,7 @@ func TestRunVerificationGate(t *testing.T) {
 		result := &fantasy.AgentResult{Steps: []fantasy.StepResult{
 			stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),
 		}}
-		require.False(t, a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID}, edgeInput{result: result, currentAssistant: assistantMsg()}))
+		require.False(t, runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID}, edgeInput{result: result, currentAssistant: assistantMsg()}))
 	})
 
 	t.Run("failed check and open todos share one retry prompt", func(t *testing.T) {
@@ -545,7 +545,7 @@ func TestRunVerificationGate(t *testing.T) {
 			stepWith(fantasy.FinishReasonToolCalls, editWith(`{"verification":[{"check":"diagnostics","state":"failed","detail":"1 new error(s)"}]}`)),
 			stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),
 		}}
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID}, edgeInput{result: result, currentAssistant: assistantMsg()})
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID}, edgeInput{result: result, currentAssistant: assistantMsg()})
 		require.True(t, queued)
 		q, _ := a.messageQueue.Get(sessionID)
 		require.Len(t, q, 1)
@@ -563,7 +563,7 @@ func TestRunVerificationGate(t *testing.T) {
 		result := &fantasy.AgentResult{Steps: []fantasy.StepResult{
 			stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),
 		}}
-		queued := a.runEdges(t.Context(), SessionAgentCall{
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{
 			SessionID: sessionID, RepairAttempts: maxRepairAttempts,
 		}, edgeInput{result: result, currentAssistant: asst})
 		require.False(t, queued)
@@ -581,7 +581,7 @@ func TestRunVerificationGate(t *testing.T) {
 			stepWith(fantasy.FinishReasonToolCalls, editWith(`{"verification":[{"check":"diagnostics","state":"failed","detail":"1 new error(s)"}]}`)),
 			stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),
 		}}
-		queued := a.runEdges(t.Context(), SessionAgentCall{
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{
 			SessionID: sessionID, RepairAttempts: maxRepairAttempts,
 		}, edgeInput{result: result, currentAssistant: asst})
 		require.False(t, queued)
@@ -601,7 +601,7 @@ func TestRunVerificationGate(t *testing.T) {
 		result := &fantasy.AgentResult{Steps: []fantasy.StepResult{
 			stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),
 		}}
-		require.False(t, a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID}, edgeInput{result: result, currentAssistant: assistantMsg()}))
+		require.False(t, runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID}, edgeInput{result: result, currentAssistant: assistantMsg()}))
 	})
 }
 

@@ -424,9 +424,10 @@ type Options struct {
 	TurnContext string `json:"turn_context,omitempty" jsonschema:"description=Per-turn context augmentation tier. session injects deterministic session signals (working set\\, open todos) at the request tail.,enum=off,enum=session,default=off"`
 	// AmbiguityClarification enables the calibrated-autonomy gates:
 	// the turn-zero vagueness pre-filter, the first-write scope gate,
-	// and the loop-stop escalation edge. Experimental; default off
-	// until the vague-prompt corpus arm justifies flipping it.
-	AmbiguityClarification *bool `json:"ambiguity_clarification,omitempty" jsonschema:"description=Enable deterministic clarification gates: turn-zero vagueness pre-filter\\, first-write scope gate\\, and loop-stop escalation. Experimental.,default=false"`
+	// the loop-stop replan/escalation edge, and the burn-watch spend
+	// tripwire. Experimental; default off until the vague-prompt
+	// corpus arm justifies flipping it.
+	AmbiguityClarification *bool `json:"ambiguity_clarification,omitempty" jsonschema:"description=Enable deterministic clarification gates: turn-zero vagueness pre-filter\\, first-write scope gate\\, loop-stop replan and escalation\\, and the burn-watch spend tripwire. Experimental.,default=false"`
 }
 
 // OptionKeys returns the Options struct's JSON field names — the set

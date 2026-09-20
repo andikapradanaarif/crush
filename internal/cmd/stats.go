@@ -75,6 +75,7 @@ type Stats struct {
 	Pruning           *PruningStats      `json:"pruning,omitempty"`
 	ProjectIndex      *ProjectIndexStats `json:"project_index,omitempty"`
 	Collapse          *CollapseStats     `json:"collapse,omitempty"`
+	EdgeFirings       []EdgeFiringStat   `json:"edge_firings,omitempty"`
 }
 
 type TotalStats struct {
@@ -173,6 +174,17 @@ type CollapseStats struct {
 	Events                 int64 `json:"events"`
 	Sessions               int64 `json:"sessions"`
 	PriorTurnResultRecalls int64 `json:"prior_turn_result_recalls"`
+}
+
+// EdgeFiringStat is one edge/outcome row of the run-boundary firing
+// records — an edge that fires constantly is a tuning signal, an edge
+// that never fires is dead code.
+type EdgeFiringStat struct {
+	Edge     string `json:"edge"`
+	Variant  string `json:"variant"`
+	Outcome  string `json:"outcome"`
+	Firings  int64  `json:"firings"`
+	Sessions int64  `json:"sessions"`
 }
 
 // ProjectStats associates stats with a project path.
@@ -445,6 +457,7 @@ func mergeStats(projectStats []ProjectStats) *Stats {
 	toolUsageMap := make(map[string]ToolUsage)
 	heatmapMap := make(map[string]HourDayHeatmapPt) // key: "day-hour"
 	pruningKindMap := make(map[string]*PruningKindStats)
+	edgeFiringMap := make(map[string]EdgeFiringStat)
 
 	var totalResponseTimeMs float64
 	var responseTimeCount int64
@@ -569,6 +582,18 @@ func mergeStats(projectStats []ProjectStats) *Stats {
 			merged.Collapse.PriorTurnResultRecalls += s.Collapse.PriorTurnResultRecalls
 		}
 
+		// Aggregate run-edge firings by edge|variant|outcome.
+		for _, e := range s.EdgeFirings {
+			key := e.Edge + "|" + e.Variant + "|" + e.Outcome
+			existing := edgeFiringMap[key]
+			existing.Edge = e.Edge
+			existing.Variant = e.Variant
+			existing.Outcome = e.Outcome
+			existing.Firings += e.Firings
+			existing.Sessions += e.Sessions
+			edgeFiringMap[key] = existing
+		}
+
 		// Accumulate response time for averaging.
 		if s.AvgResponseTimeMs > 0 {
 			totalResponseTimeMs += s.AvgResponseTimeMs * float64(s.Total.TotalMessages)
@@ -608,6 +633,18 @@ func mergeStats(projectStats []ProjectStats) *Stats {
 	for _, h := range heatmapMap {
 		merged.HourDayHeatmap = append(merged.HourDayHeatmap, h)
 	}
+	for _, e := range edgeFiringMap {
+		merged.EdgeFirings = append(merged.EdgeFirings, e)
+	}
+	sort.Slice(merged.EdgeFirings, func(i, j int) bool {
+		if merged.EdgeFirings[i].Edge != merged.EdgeFirings[j].Edge {
+			return merged.EdgeFirings[i].Edge < merged.EdgeFirings[j].Edge
+		}
+		if merged.EdgeFirings[i].Variant != merged.EdgeFirings[j].Variant {
+			return merged.EdgeFirings[i].Variant < merged.EdgeFirings[j].Variant
+		}
+		return merged.EdgeFirings[i].Outcome < merged.EdgeFirings[j].Outcome
+	})
 	if merged.Pruning != nil {
 		for _, ks := range pruningKindMap {
 			merged.Pruning.ByKind = append(merged.Pruning.ByKind, *ks)
@@ -782,6 +819,43 @@ func gatherStats(ctx context.Context, conn *sql.DB) (*Stats, error) {
 	}
 	stats.Collapse = collapse
 
+	// Run-edge firings — one row per edge per evaluated boundary.
+	edgeFirings, err := gatherEdgeFiringStats(ctx, queries)
+	if err != nil {
+		return nil, err
+	}
+	stats.EdgeFirings = edgeFirings
+
+	return stats, nil
+}
+
+// gatherEdgeFiringStats aggregates the persisted edge_firings rows —
+// per-edge outcome splits plus the distinct sessions each row class
+// touched.
+func gatherEdgeFiringStats(ctx context.Context, queries *db.Queries) ([]EdgeFiringStat, error) {
+	rows, err := queries.GetEdgeFiringStats(ctx)
+	if err != nil {
+		// Read-only connects don't migrate — a project DB untouched
+		// since before the table existed must not lose the whole
+		// stats gather, just this section.
+		if strings.Contains(err.Error(), "no such table") {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get edge firing stats: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	stats := make([]EdgeFiringStat, 0, len(rows))
+	for _, r := range rows {
+		stats = append(stats, EdgeFiringStat{
+			Edge:     r.Edge,
+			Variant:  r.Variant,
+			Outcome:  r.Outcome,
+			Firings:  r.Firings,
+			Sessions: r.Sessions,
+		})
+	}
 	return stats, nil
 }
 

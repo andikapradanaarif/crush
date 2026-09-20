@@ -40,8 +40,10 @@ func mkBashWrite(t *testing.T, svc message.Service, sessionID, callID, command s
 func mkWorkspaceEdit(t *testing.T, svc message.Service, sessionID, callID, path, metadata string) {
 	t.Helper()
 	mkMsg(t, svc, sessionID, message.Assistant,
-		message.ToolCall{ID: callID, Name: tools.ReplaceSymbolToolName,
-			Input: fmt.Sprintf(`{"file_path":%q,"symbol":"s"}`, path), Finished: true})
+		message.ToolCall{
+			ID: callID, Name: tools.ReplaceSymbolToolName,
+			Input: fmt.Sprintf(`{"file_path":%q,"symbol":"s"}`, path), Finished: true,
+		})
 	mkMsg(t, svc, sessionID, message.Tool,
 		message.ToolResult{ToolCallID: callID, Name: tools.ReplaceSymbolToolName, Content: "ok", Metadata: metadata})
 }
@@ -83,8 +85,10 @@ func TestPlanVerdicts(t *testing.T) {
 		t.Parallel()
 		a, _, sessionID := newGateTestAgent(t, &config.Config{})
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "verified work", Status: session.PlanItemCompleted,
-				EvidenceChecks: []string{"verify:build"}},
+			session.PlanItem{
+				ID: "i1", Content: "verified work", Status: session.PlanItemCompleted,
+				EvidenceChecks: []string{"verify:build"},
+			},
 		)
 		verdicts := a.planVerdicts(t.Context(), sessionID)
 		require.Len(t, verdicts, 1)
@@ -98,8 +102,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkWrite(t, svc, sessionID, "w1", "a.go",
 			`{"verification":[{"check":"verify:build","state":"failed","detail":"exit code 1"}]}`)
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "verified work", Status: session.PlanItemCompleted,
-				EvidenceChecks: []string{"verify:build"}},
+			session.PlanItem{
+				ID: "i1", Content: "verified work", Status: session.PlanItemCompleted,
+				EvidenceChecks: []string{"verify:build"},
+			},
 		)
 		verdicts := a.planVerdicts(t.Context(), sessionID)
 		require.Len(t, verdicts, 1)
@@ -113,8 +119,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkWrite(t, svc, sessionID, "w1", "a.go",
 			`{"verification":[{"check":"verify:build","state":"passed"}]}`)
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "verified work", Status: session.PlanItemCompleted,
-				EvidenceChecks: []string{"verify:build"}},
+			session.PlanItem{
+				ID: "i1", Content: "verified work", Status: session.PlanItemCompleted,
+				EvidenceChecks: []string{"verify:build"},
+			},
 		)
 		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
 	})
@@ -127,8 +135,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkWrite(t, svc, sessionID, "w2", "b.go",
 			`{"verification":[{"check":"verify:build","state":"failed","detail":"exit code 1"}]}`)
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "verified work", Status: session.PlanItemCompleted,
-				EvidenceChecks: []string{"verify:build"}},
+			session.PlanItem{
+				ID: "i1", Content: "verified work", Status: session.PlanItemCompleted,
+				EvidenceChecks: []string{"verify:build"},
+			},
 		)
 		verdicts := a.planVerdicts(t.Context(), sessionID)
 		require.Len(t, verdicts, 1)
@@ -141,8 +151,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkWrite(t, svc, sessionID, "w1", "a.go",
 			`{"verification":[{"check":"diagnostics","state":"passed"}]}`)
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "edit a.go", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"a.go"}},
+			session.PlanItem{
+				ID: "i1", Content: "edit a.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"a.go"},
+			},
 		)
 		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
 	})
@@ -151,8 +163,10 @@ func TestPlanVerdicts(t *testing.T) {
 		t.Parallel()
 		a, _, sessionID := newGateTestAgent(t, &config.Config{})
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "edit a.go", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"a.go"}},
+			session.PlanItem{
+				ID: "i1", Content: "edit a.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"a.go"},
+			},
 		)
 		verdicts := a.planVerdicts(t.Context(), sessionID)
 		require.Len(t, verdicts, 1)
@@ -166,8 +180,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkWrite(t, svc, sessionID, "w1", "pkg/f.go",
 			`{"verification":[{"check":"diagnostics","state":"passed"}]}`)
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "work in pkg", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"pkg"}},
+			session.PlanItem{
+				ID: "i1", Content: "work in pkg", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"pkg"},
+			},
 		)
 		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
 	})
@@ -180,8 +196,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkWrite(t, svc, sessionID, "w2", "pkg/g.go",
 			`{"verification":[{"check":"package-test:pkg","state":"failed","detail":"exit code 1"}]}`)
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "edit f.go", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"pkg/f.go"}},
+			session.PlanItem{
+				ID: "i1", Content: "edit f.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"pkg/f.go"},
+			},
 		)
 		verdicts := a.planVerdicts(t.Context(), sessionID)
 		require.Len(t, verdicts, 1)
@@ -218,8 +236,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkWrite(t, svc, sessionID, "w2", "a.go",
 			`{"verification":[{"check":"diagnostics","state":"passed"}]}`)
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "edit a.go", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"a.go"}},
+			session.PlanItem{
+				ID: "i1", Content: "edit a.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"a.go"},
+			},
 		)
 		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
 	})
@@ -232,8 +252,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkWrite(t, svc, sessionID, "w2", "b.go",
 			`{"verification":[{"check":"verify:build","state":"passed"}]}`)
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "edit a.go", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"a.go"}},
+			session.PlanItem{
+				ID: "i1", Content: "edit a.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"a.go"},
+			},
 		)
 		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
 	})
@@ -246,8 +268,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkWrite(t, svc, sessionID, "w2", "pkg/g.go",
 			`{"verification":[{"check":"diagnostics","state":"passed"}]}`)
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "work in pkg", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"pkg"}},
+			session.PlanItem{
+				ID: "i1", Content: "work in pkg", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"pkg"},
+			},
 		)
 		verdicts := a.planVerdicts(t.Context(), sessionID)
 		require.Len(t, verdicts, 1)
@@ -266,8 +290,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkWrite(t, svc, sessionID, "w2", "a.go",
 			`{"verification":[{"check":"diagnostics","state":"passed","path":"a.go"},{"check":"diagnostics","state":"failed","path":"b.go","detail":"1 new error(s)"}]}`)
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"b.go"}},
+			session.PlanItem{
+				ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"b.go"},
+			},
 		)
 		verdicts := a.planVerdicts(t.Context(), sessionID)
 		require.Len(t, verdicts, 1)
@@ -283,8 +309,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkWrite(t, svc, sessionID, "w1", "a.go",
 			`{"verification":[{"check":"diagnostics","state":"passed","path":"a.go"},{"check":"diagnostics","state":"failed","path":"b.go","detail":"1 new error(s)"}]}`)
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"b.go"}},
+			session.PlanItem{
+				ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"b.go"},
+			},
 		)
 		verdicts := a.planVerdicts(t.Context(), sessionID)
 		require.Len(t, verdicts, 1)
@@ -302,8 +330,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkWorkspaceEdit(t, svc, sessionID, "r1", "a.go",
 			`{"verification":[{"check":"diagnostics","state":"failed","path":"b.go","detail":"1 new error(s)"}]}`)
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"b.go"}},
+			session.PlanItem{
+				ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"b.go"},
+			},
 		)
 		verdicts := a.planVerdicts(t.Context(), sessionID)
 		require.Len(t, verdicts, 1)
@@ -324,8 +354,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkWorkspaceEdit(t, svc, sessionID, "r1", "a.go",
 			`{"verification":[{"check":"diagnostics","state":"passed","path":"b.go","detail":"errors resolved"}]}`)
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"b.go"}},
+			session.PlanItem{
+				ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"b.go"},
+			},
 		)
 		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
 	})
@@ -339,8 +371,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkWorkspaceEdit(t, svc, sessionID, "r1", "b.go",
 			`{"verification":[{"check":"diagnostics","state":"passed","path":"b.go"}]}`)
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"b.go"}},
+			session.PlanItem{
+				ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"b.go"},
+			},
 		)
 		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
 	})
@@ -354,8 +388,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkWrite(t, svc, sessionID, "w1", "a.go",
 			`{"verification":[{"check":"diagnostics","state":"passed","path":"a.go"},{"check":"diagnostics","state":"failed","path":"b.go","detail":"1 new error(s)"}]}`)
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "edit a.go", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"a.go"}},
+			session.PlanItem{
+				ID: "i1", Content: "edit a.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"a.go"},
+			},
 		)
 		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
 	})
@@ -374,8 +410,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkWrite(t, svc, sessionID, "w2", "a.go",
 			`{"verification":[{"check":"diagnostics","state":"passed","path":"a.go"},{"check":"diagnostics","state":"passed","path":"b.go","detail":"errors resolved"}]}`)
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"b.go"}},
+			session.PlanItem{
+				ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"b.go"},
+			},
 		)
 		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
 	})
@@ -390,8 +428,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkWrite(t, svc, sessionID, "w3", "b.go",
 			`{"verification":[{"check":"diagnostics","state":"passed","path":"b.go"}]}`)
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"b.go"}},
+			session.PlanItem{
+				ID: "i1", Content: "edit b.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"b.go"},
+			},
 		)
 		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
 	})
@@ -402,8 +442,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkWrite(t, svc, sessionID, "w1", "a.go",
 			`{"verification":[{"check":"verify:build","state":"pending"}]}`)
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "edit a.go", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"a.go"}},
+			session.PlanItem{
+				ID: "i1", Content: "edit a.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"a.go"},
+			},
 		)
 		verdicts := a.planVerdicts(t.Context(), sessionID)
 		require.Len(t, verdicts, 1)
@@ -420,8 +462,10 @@ func TestPlanVerdicts(t *testing.T) {
 		// verdict is superseded, not latched.
 		mkBashWrite(t, svc, sessionID, "b1", "cat > a.go <<'EOF'\nfixed\nEOF")
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "fix a.go", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"a.go"}},
+			session.PlanItem{
+				ID: "i1", Content: "fix a.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"a.go"},
+			},
 		)
 		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
 	})
@@ -431,8 +475,10 @@ func TestPlanVerdicts(t *testing.T) {
 		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
 		mkBashWrite(t, svc, sessionID, "b1", "cat > out.txt <<'EOF'\ncontent\nEOF")
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "create out.txt", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"out.txt"}},
+			session.PlanItem{
+				ID: "i1", Content: "create out.txt", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"out.txt"},
+			},
 		)
 		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
 	})
@@ -447,8 +493,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkBashWrite(t, svc, sessionID, "b2", "echo $((a > b)) > /dev/null")
 		mkBashWrite(t, svc, sessionID, "b3", "cmd > $OUT; cmd2 > ~/o")
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "create out.txt", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"out.txt"}},
+			session.PlanItem{
+				ID: "i1", Content: "create out.txt", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"out.txt"},
+			},
 		)
 		verdicts := a.planVerdicts(t.Context(), sessionID)
 		require.Len(t, verdicts, 1)
@@ -465,8 +513,10 @@ func TestPlanVerdicts(t *testing.T) {
 		// real diagnostics failure on a.go.
 		mkBashWrite(t, svc, sessionID, "b1", "[[ $x > a.go ]]")
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "fix a.go", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"a.go"}},
+			session.PlanItem{
+				ID: "i1", Content: "fix a.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"a.go"},
+			},
 		)
 		verdicts := a.planVerdicts(t.Context(), sessionID)
 		require.Len(t, verdicts, 1)
@@ -482,8 +532,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkMsg(t, svc, sessionID, message.Tool,
 			message.ToolResult{ToolCallID: "b1", Name: "bash", Content: "exit 1", IsError: true})
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "create out.txt", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"out.txt"}},
+			session.PlanItem{
+				ID: "i1", Content: "create out.txt", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"out.txt"},
+			},
 		)
 		verdicts := a.planVerdicts(t.Context(), sessionID)
 		require.Len(t, verdicts, 1)
@@ -501,8 +553,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkMsg(t, svc, sessionID, message.Tool,
 			message.ToolResult{ToolCallID: "r1", Name: "lsp_rename", Content: "ok"})
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "rename in pkg", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"pkg"}},
+			session.PlanItem{
+				ID: "i1", Content: "rename in pkg", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"pkg"},
+			},
 		)
 		verdicts := a.planVerdicts(t.Context(), sessionID)
 		require.Len(t, verdicts, 1)
@@ -518,8 +572,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkMsg(t, svc, sessionID, message.Tool,
 			message.ToolResult{ToolCallID: "d1", Name: "download", Content: "ok"})
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "fetch dl.go", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"dl.go"}},
+			session.PlanItem{
+				ID: "i1", Content: "fetch dl.go", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"dl.go"},
+			},
 		)
 		require.Empty(t, a.planVerdicts(t.Context(), sessionID))
 	})
@@ -532,8 +588,10 @@ func TestPlanVerdicts(t *testing.T) {
 		mkWrite(t, svc, sessionID, "w2", "foo.d/y.go",
 			`{"verification":[{"check":"package-test:foo.d","state":"failed"}]}`)
 		setPlan(t, a, sessionID,
-			session.PlanItem{ID: "i1", Content: "work in foo.d", Status: session.PlanItemCompleted,
-				EvidencePaths: []string{"foo.d"}},
+			session.PlanItem{
+				ID: "i1", Content: "work in foo.d", Status: session.PlanItemCompleted,
+				EvidencePaths: []string{"foo.d"},
+			},
 		)
 		verdicts := a.planVerdicts(t.Context(), sessionID)
 		require.Len(t, verdicts, 1)
@@ -546,13 +604,15 @@ func TestScanTodosEdgeEvidenceBlocked(t *testing.T) {
 	t.Parallel()
 	a, _, sessionID := newGateTestAgent(t, &config.Config{})
 	setPlan(t, a, sessionID,
-		session.PlanItem{ID: "i1", Content: "claimed done", Status: session.PlanItemCompleted,
-			EvidenceChecks: []string{"verify:build"}},
+		session.PlanItem{
+			ID: "i1", Content: "claimed done", Status: session.PlanItemCompleted,
+			EvidenceChecks: []string{"verify:build"},
+		},
 	)
 	result := &fantasy.AgentResult{Steps: []fantasy.StepResult{
 		stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),
 	}}
-	queued := a.runEdges(t.Context(), SessionAgentCall{
+	queued := runEdgesForTest(a, t.Context(), SessionAgentCall{
 		SessionID: sessionID, RunID: "run-1",
 	}, edgeInput{result: result, currentAssistant: &message.Message{Role: message.Assistant}})
 	require.True(t, queued, "evidence-blocked item must fire the run-end edge")
@@ -565,12 +625,18 @@ func TestScanTodosEdgeEvidenceBlocked(t *testing.T) {
 func TestTodosRetrySectionOrdersReadyBeforeBlocked(t *testing.T) {
 	t.Parallel()
 	trigger := &edgeTrigger{plan: []planVerdict{
-		{item: session.PlanItem{ID: "i2", Content: "downstream", Status: session.PlanItemPending,
-			DependsOn: []string{"depid"}}, state: planOpen, ready: false},
-		{item: session.PlanItem{ID: "depid", Key: "setup", Content: "setup work",
-			Status: session.PlanItemPending}, state: planOpen, ready: true},
-		{item: session.PlanItem{ID: "i3", Content: "claimed done", Status: session.PlanItemCompleted},
-			state: planEvidenceBlocked, reason: "verify:build failed"},
+		{item: session.PlanItem{
+			ID: "i2", Content: "downstream", Status: session.PlanItemPending,
+			DependsOn: []string{"depid"},
+		}, state: planOpen, ready: false},
+		{item: session.PlanItem{
+			ID: "depid", Key: "setup", Content: "setup work",
+			Status: session.PlanItemPending,
+		}, state: planOpen, ready: true},
+		{
+			item:  session.PlanItem{ID: "i3", Content: "claimed done", Status: session.PlanItemCompleted},
+			state: planEvidenceBlocked, reason: "verify:build failed",
+		},
 	}}
 	out := todosRetrySection(trigger)
 	require.True(t, strings.HasPrefix(out, todosRetryPrefix))

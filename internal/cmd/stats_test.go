@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"database/sql"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -112,6 +114,101 @@ func TestGatherPruningStats_Empty(t *testing.T) {
 	t.Cleanup(func() { conn.Close() })
 
 	stats, err := gatherPruningStats(t.Context(), db.New(conn))
+	require.NoError(t, err)
+	require.Nil(t, stats)
+}
+
+func TestGatherEdgeFiringStats(t *testing.T) {
+	t.Parallel()
+
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+
+	queries := db.New(conn)
+	sessions := session.NewService(queries, conn)
+	s1, err := sessions.Create(t.Context(), "one")
+	require.NoError(t, err)
+	s2, err := sessions.Create(t.Context(), "two")
+	require.NoError(t, err)
+
+	insert := func(sessionID string, turnSeq int64, edge, variant, outcome string) {
+		t.Helper()
+		_, err := queries.InsertEdgeFiring(t.Context(), db.InsertEdgeFiringParams{
+			SessionID: sessionID,
+			TurnSeq:   turnSeq,
+			Edge:      edge,
+			Variant:   variant,
+			Outcome:   outcome,
+		})
+		require.NoError(t, err)
+	}
+	insert(s1.ID, 1, "todos", "", "fired")
+	insert(s1.ID, 2, "todos", "", "fired")
+	insert(s1.ID, 3, "todos", "", "exhausted")
+	insert(s1.ID, 1, "stall", "replan", "fired")
+	insert(s1.ID, 2, "stall", "escalate", "fired")
+	insert(s1.ID, 3, "stall", "escalate", "gated")
+	insert(s2.ID, 1, "todos", "", "fired")
+
+	stats, err := gatherEdgeFiringStats(t.Context(), queries)
+	require.NoError(t, err)
+	require.Len(t, stats, 5)
+
+	byKey := map[string]EdgeFiringStat{}
+	for _, s := range stats {
+		byKey[s.Edge+"|"+s.Variant+"|"+s.Outcome] = s
+	}
+	require.EqualValues(t, 3, byKey["todos||fired"].Firings)
+	require.EqualValues(t, 2, byKey["todos||fired"].Sessions)
+	require.EqualValues(t, 1, byKey["todos||exhausted"].Firings)
+	// The replan-vs-escalate split is the stat the flag-flip decision
+	// reads — variants must not collapse into one outcome bucket.
+	require.EqualValues(t, 1, byKey["stall|replan|fired"].Firings)
+	require.EqualValues(t, 1, byKey["stall|escalate|fired"].Firings)
+	require.EqualValues(t, 1, byKey["stall|escalate|gated"].Firings)
+
+	// The merged view across projects dedupes by edge|variant|outcome.
+	merged := mergeStats([]ProjectStats{
+		{Stats: &Stats{EdgeFirings: stats}},
+		{Stats: &Stats{EdgeFirings: []EdgeFiringStat{
+			{Edge: "todos", Outcome: "fired", Firings: 5, Sessions: 1},
+		}}},
+	})
+	require.Len(t, merged.EdgeFirings, 5)
+	var fired EdgeFiringStat
+	for _, e := range merged.EdgeFirings {
+		if e.Edge == "todos" && e.Outcome == "fired" {
+			fired = e
+		}
+	}
+	require.EqualValues(t, 8, fired.Firings)
+	require.EqualValues(t, 3, fired.Sessions)
+}
+
+func TestGatherEdgeFiringStats_Empty(t *testing.T) {
+	t.Parallel()
+
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+
+	stats, err := gatherEdgeFiringStats(t.Context(), db.New(conn))
+	require.NoError(t, err)
+	require.Nil(t, stats)
+}
+
+func TestGatherEdgeFiringStats_UnmigratedDB(t *testing.T) {
+	t.Parallel()
+
+	// A project DB from before the edge_firings migration — the
+	// missing table must degrade to an empty section, not an error
+	// that skips the project's whole stats gather.
+	conn, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "old.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+
+	stats, err := gatherEdgeFiringStats(t.Context(), db.New(conn))
 	require.NoError(t, err)
 	require.Nil(t, stats)
 }

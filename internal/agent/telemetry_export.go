@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"strconv"
+	"strings"
 
 	"charm.land/fantasy"
 )
@@ -43,6 +44,12 @@ type SessionTelemetry struct {
 	// collapsed_turns rows.
 	TurnsCollapsed  int `json:"turns_collapsed"`
 	EventsCollapsed int `json:"events_collapsed"`
+	// EdgeFirings splits run-boundary edge firing counts by edge and
+	// outcome — the in-memory mirror of the edge_firings rows this
+	// process wrote. Cumulative for the process; the eval harness
+	// emits EdgeFiringDelta instead so multi-emission processes
+	// can't double-count.
+	EdgeFirings map[string]map[string]int `json:"edge_firings,omitempty"`
 }
 
 // SessionTelemetry returns the coordinator's per-session counters.
@@ -80,7 +87,54 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 		t.DigestRenders = n.DigestRenders
 		t.PriorTurnResultRecalls = n.PriorTurnResultRecalls
 	}
+	if sa.edgeStats != nil {
+		if m, ok := sa.edgeStats.Get(sessionID); ok && len(m) > 0 {
+			t.EdgeFirings = make(map[string]map[string]int, len(m))
+			for key, n := range m {
+				edge, outcome, _ := strings.Cut(key, ":")
+				if t.EdgeFirings[edge] == nil {
+					t.EdgeFirings[edge] = map[string]int{}
+				}
+				t.EdgeFirings[edge][outcome] += n
+			}
+		}
+	}
 	return t
+}
+
+// EdgeFiringDelta returns the session's edge firing counts minus what
+// the previous call reported, then snapshots — the eval harness sums
+// per-turn telemetry files, so a process emitting more than once must
+// not double-count. Deliberately not on the Coordinator interface —
+// the eval harness type-asserts for it alongside SessionTelemetry.
+func (c *coordinator) EdgeFiringDelta(sessionID string) map[string]map[string]int {
+	if c.edgeStats == nil {
+		return nil
+	}
+	// Read the coordinator-owned map directly — not through
+	// currentAgent — so an emission landing during an agent rebuild
+	// gap still reports the rows.
+	cur, _ := c.edgeStats.Get(sessionID)
+	prev, _ := c.edgeFiringEmitted.Get(sessionID)
+	var delta map[string]map[string]int
+	for key, n := range cur {
+		if d := n - prev[key]; d > 0 {
+			edge, outcome, _ := strings.Cut(key, ":")
+			if delta == nil {
+				delta = map[string]map[string]int{}
+			}
+			if delta[edge] == nil {
+				delta[edge] = map[string]int{}
+			}
+			delta[edge][outcome] = d
+		}
+	}
+	snapshot := make(map[string]int, len(cur))
+	for k, n := range cur {
+		snapshot[k] = n
+	}
+	c.edgeFiringEmitted.Set(sessionID, snapshot)
+	return delta
 }
 
 // EvalMaxStepsEnvVar caps a single run's steps when the eval harness

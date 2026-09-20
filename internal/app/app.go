@@ -70,6 +70,10 @@ type App struct {
 	// available, so the notebook generator can obtain the small model.
 	notebookModelResolver *func() fantasy.LanguageModel
 
+	// queries is the sqlc handle retained for the coordinator's
+	// edge-firing store — the services wrap it but don't expose it.
+	queries *db.Queries
+
 	AgentCoordinator agent.Coordinator
 
 	LSPManager *lsp.Manager
@@ -125,6 +129,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		FileTracker: filetracker.NewService(q),
 		LSPManager:  lsp.NewManager(store),
 		Skills:      skillsMgr,
+		queries:     q,
 
 		globalCtx: ctx,
 
@@ -850,6 +855,7 @@ func (app *App) initCoderAgent(ctx context.Context, interactive bool) error {
 		Interactive:           interactive,
 		Notebook:              app.Notebook,
 		NotebookModelResolver: app.notebookModelResolver,
+		EdgeStore:             app.queries,
 	})
 	if err != nil {
 		slog.Error("Failed to create coder agent", "err", err)

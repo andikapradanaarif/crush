@@ -190,8 +190,11 @@ type RunRecord struct {
 	// Digests carries the turn-digest telemetry — same written/
 	// rendered split as Checkpoints, counting granularity:turn
 	// entries.
-	Digests   Checkpoints `json:"digests"`
-	SessionDB string      `json:"session_db,omitempty"`
+	Digests Checkpoints `json:"digests"`
+	// EdgeFirings is the run's per-edge outcome split — the
+	// edge_firings telemetry the flag-flip decisions consume.
+	EdgeFirings map[string]map[string]int `json:"edge_firings,omitempty"`
+	SessionDB   string                    `json:"session_db,omitempty"`
 	// Workdir is the materialized run directory — recorded so a
 	// post-hoc `crush eval analyze` on the artifact can anchor relative
 	// call paths correctly (the directory itself is deleted).

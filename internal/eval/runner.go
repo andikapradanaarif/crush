@@ -280,6 +280,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	rec.Recalls = res.Recalls
 	rec.Checkpoints = res.Checkpoints
 	rec.Digests = res.Digests
+	rec.EdgeFirings = res.EdgeFirings
 	rec.Env.ModelPin = exp.Model
 	rec.Env.ModelResolved = res.ModelResolved
 	// The baseline key hashes resolved config when the child reported

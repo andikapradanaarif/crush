@@ -152,6 +152,20 @@ type SessionAgentCall struct {
 	// turn gets one boundary check regardless of transport (TUI,
 	// `crush run`, backend) rather than one per retry Run.
 	RunStamp uint64
+	// deferred carries the firing edge triggers that lost this
+	// boundary's single prompt slot to an escalation-family winner —
+	// the seam stamps it on the retry clone and merges the triggers
+	// back at the next boundary (prompt slot if free, exhaustion note
+	// if not, terminal note on a StopTurn-ended boundary).
+	deferred []deferredTrigger
+	// burnWatched marks a run-chain that already escalated write-less
+	// spend once — stamped on the retry clone when the burn-watch
+	// edge fires, cleared when a run in the chain makes a mutating
+	// call. Per-chain scope: a fresh user turn starts unstamped —
+	// including the user's answer to the escalation question, which
+	// arrives as a new SessionAgentCall, so the bound is "one nag per
+	// question round-trip", not per session.
+	burnWatched bool
 }
 
 type SessionAgent interface {
@@ -279,6 +293,14 @@ type sessionAgent struct {
 	// (in-place bash edits, external tools) mints no resolution
 	// entry, so a stale failed verdict would latch without it.
 	lspManager *lsp.Manager
+	// edgeStore persists run-boundary edge firing rows — harness
+	// telemetry, not notebook concepts, so it is threaded directly
+	// rather than riding a service. Nil skips the records.
+	edgeStore EdgeFiringStore
+	// edgeStats accumulates per-session edge firing counts for
+	// SessionTelemetry, shared across agent rebuilds so a rebuilt
+	// coordinator does not lose counts. Nil allocates its own.
+	edgeStats *csync.Map[string, map[string]int]
 	// runStampGen is the monotonic source of per-Run stamps the scope
 	// gate uses to reset its explore→execute boundary bookkeeping.
 	// Atomic: Run invocations on different sessions can race on it.
@@ -430,6 +452,12 @@ type SessionAgentOptions struct {
 	// notebook). Detection lives in the per-step rebuild so it works
 	// without the ambiguity-clarification gates.
 	NotebookCheckpoint bool
+	// EdgeStore persists run-boundary edge firing rows; may be nil —
+	// the records and turn-sequence counts skip without it.
+	EdgeStore EdgeFiringStore
+	// EdgeStats shares per-session edge firing counts across agent
+	// rebuilds. When nil the agent allocates its own.
+	EdgeStats *csync.Map[string, map[string]int]
 }
 
 func NewSessionAgent(
@@ -477,6 +505,8 @@ func NewSessionAgent(
 		ambiguityClarification: opts.AmbiguityClarification,
 		interactive:            opts.Interactive,
 		lspManager:             opts.LSPManager,
+		edgeStore:              opts.EdgeStore,
+		edgeStats:              cmp.Or(opts.EdgeStats, csync.NewMap[string, map[string]int]()),
 	}
 	a.runStampGen.Store(runStampEpoch())
 	return a
@@ -978,6 +1008,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		return nil, err
 	}
 	userMsgCreated = true
+
+	// Snapshot the initiating user message's absolute ordinal for the
+	// edge-firing records — counted now, before folded queued prompts
+	// create non-initiating user messages mid-run.
+	turnSeq := a.edgeTurnSeq(ctx, call.SessionID)
 
 	// Add the session to the context. The run context (genCtx) and its
 	// cancel func were already created and registered under the dispatch
@@ -1547,10 +1582,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// merge into one bounded retry prepended ahead of queued prompts.
 	// Must run before the notebook goroutine spawn AND before the
 	// queue dequeue.
-	repairQueued := a.runEdges(ctx, call, edgeInput{
+	// genCtx, not ctx: Cancel() kills the run context via
+	// activeRequests, so boundary evaluation must observe it — a TUI
+	// Escape during the seam must still write cancelled rows and must
+	// not enqueue a retry behind clearQueueAndNotify's back.
+	repairQueued, call := a.runEdges(genCtx, call, edgeInput{
 		result:           result,
 		currentAssistant: currentAssistant,
 		stalled:          loopStopped,
+		turnSeq:          turnSeq,
 	})
 
 	// Generate notebook entries asynchronously when notebook is

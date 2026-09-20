@@ -64,6 +64,15 @@ WHERE session_id = ? AND role = 'user'
 ORDER BY created_at DESC
 LIMIT 200;
 
+-- name: CountUserMessagesBySession :one
+-- Absolute user-turn ordinal source for edge_firings.turn_seq - the
+-- bounded prompt-history query above can't serve it (DESC LIMIT 200
+-- yields no ASC ordinal past 200 and same-second created_at ties are
+-- ambiguous).
+SELECT COUNT(id)
+FROM messages
+WHERE session_id = ? AND role = 'user';
+
 -- name: ListAllUserMessages :many
 -- Backs prompt history when no session is open. Needs
 -- idx_messages_role_created_at to seek rather than scan the table.
