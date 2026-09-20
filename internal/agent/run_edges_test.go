@@ -782,9 +782,9 @@ func TestDeferredCarrierRecarry(t *testing.T) {
 		require.Len(t, q[0].deferred, 1)
 		require.Equal(t, "todos", q[0].deferred[0].edge.name,
 			"the deferred trigger survives the stalled boundary on the clone")
-		// No todos row at this boundary — the trigger was never
-		// evaluated, just re-carried.
-		require.Empty(t, firingOutcome(t, conn, sessionID, "todos"))
+		// The re-carried trigger records deferred at this boundary —
+		// its lifecycle row is "still waiting", not clean.
+		require.Equal(t, "deferred", firingOutcome(t, conn, sessionID, "todos"))
 	})
 }
 
@@ -1137,4 +1137,25 @@ func TestStallEdge_SkipsStopTurnBoundary(t *testing.T) {
 	require.False(t, queued)
 	q, _ := a.messageQueue.Get(sessionID)
 	require.Empty(t, q)
+}
+
+func TestEdgeFiringDelta(t *testing.T) {
+	t.Parallel()
+
+	sa, _, sessionID := newEdgeTestAgent(t, &config.Config{})
+	coord := &coordinator{
+		mainAgent:         sa,
+		edgeFiringEmitted: csync.NewMap[string, map[string]int](),
+	}
+	sa.edgeStats.Set(sessionID, map[string]int{"stall:fired": 2, "todos:cleared": 1})
+	require.Equal(t, map[string]map[string]int{
+		"stall": {"fired": 2}, "todos": {"cleared": 1},
+	}, coord.EdgeFiringDelta(sessionID))
+	// A second emission reports only the increment — the driver's
+	// per-turn summation can't double-count cumulative counters.
+	sa.edgeStats.Set(sessionID, map[string]int{"stall:fired": 3, "todos:cleared": 1})
+	require.Equal(t, map[string]map[string]int{
+		"stall": {"fired": 1},
+	}, coord.EdgeFiringDelta(sessionID))
+	require.Nil(t, coord.EdgeFiringDelta(sessionID), "no new rows, no delta")
 }

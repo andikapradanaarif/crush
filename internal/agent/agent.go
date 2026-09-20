@@ -161,7 +161,10 @@ type SessionAgentCall struct {
 	// burnWatched marks a run-chain that already escalated write-less
 	// spend once — stamped on the retry clone when the burn-watch
 	// edge fires, cleared when a run in the chain makes a mutating
-	// call. Per-chain scope: a fresh user turn starts unstamped.
+	// call. Per-chain scope: a fresh user turn starts unstamped —
+	// including the user's answer to the escalation question, which
+	// arrives as a new SessionAgentCall, so the bound is "one nag per
+	// question round-trip", not per session.
 	burnWatched bool
 }
 

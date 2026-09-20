@@ -23,10 +23,10 @@ func hasRepeatedToolCalls(steps []fantasy.StepResult, windowSize, maxRepeats int
 
 // repeatedToolSignature returns the first tool-interaction signature in
 // the detection window whose count exceeds maxRepeats — the hex hash,
-// the window step's first tool-call name, and the repeat count. The
-// stop signal only needs the bool, but the stall edge's trigger detail
-// needs the exact repeated interaction, not the window's dominant tool
-// name.
+// the window step's first tool-call name, and the signature's total
+// count in the window. The stop signal only needs the bool, but the
+// stall edge's trigger detail needs the exact repeated interaction,
+// not the window's dominant tool name.
 func repeatedToolSignature(steps []fantasy.StepResult, windowSize, maxRepeats int) (sig, toolName string, repeats int) {
 	if len(steps) < windowSize {
 		return "", "", 0
@@ -35,6 +35,7 @@ func repeatedToolSignature(steps []fantasy.StepResult, windowSize, maxRepeats in
 	window := steps[len(steps)-windowSize:]
 	counts := make(map[string]int)
 	tools := make(map[string]string)
+	winner := ""
 
 	for _, step := range window {
 		s := getToolInteractionSignature(step.Content)
@@ -45,12 +46,14 @@ func repeatedToolSignature(steps []fantasy.StepResult, windowSize, maxRepeats in
 			tools[s] = firstToolCallName(step.Content)
 		}
 		counts[s]++
-		if counts[s] > maxRepeats {
-			return s, tools[s], counts[s]
+		if winner == "" && counts[s] > maxRepeats {
+			winner = s
 		}
 	}
-
-	return "", "", 0
+	if winner == "" {
+		return "", "", 0
+	}
+	return winner, tools[winner], counts[winner]
 }
 
 // firstToolCallName returns the name of the first tool call in a step's

@@ -132,9 +132,13 @@ func init() {
 	}
 	// Per-edge outcome counts: edge_firings.<edge>.<outcome> for the
 	// stable edge names and the full outcome enum. Verification and
-	// todos are flag-invariant — they record at every boundary; stall
-	// and burn-watch ride ambiguity_clarification (their fired rows
-	// only exist when the flag is on), so their fields are arm-scoped.
+	// todos are flag-invariant — their predicates don't gate on the
+	// flag (rows still only exist when a trigger evaluated, not every
+	// boundary); stall and burn-watch ride ambiguity_clarification
+	// (their fired rows only exist when the flag is on), so their
+	// fields are arm-scoped. Gated rows only ever appear in the
+	// flag-off arm — arm coverage is also where "would have fired"
+	// volume is measured.
 	for _, edge := range []string{"verification", "todos"} {
 		for _, outcome := range edgeFiringOutcomes {
 			coverageFields["edge_firings."+edge+"."+outcome] = func(r *RunRecord) float64 {

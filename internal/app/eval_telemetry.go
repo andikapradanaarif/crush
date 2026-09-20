@@ -91,7 +91,14 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 			"written":  tel.DigestsWritten,
 			"rendered": tel.DigestRenders,
 		}
-		edgeFirings := tel.EdgeFirings
+	}
+	// Edge firings emit as a DELTA, not the cumulative snapshot — the
+	// driver sums per-turn telemetry files, so a process emitting
+	// twice for one session must not double-count.
+	if c, ok := app.AgentCoordinator.(interface {
+		EdgeFiringDelta(string) map[string]map[string]int
+	}); ok {
+		edgeFirings := c.EdgeFiringDelta(sessionID)
 		if edgeFirings == nil {
 			edgeFirings = map[string]map[string]int{}
 		}

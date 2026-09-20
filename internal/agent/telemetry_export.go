@@ -100,6 +100,39 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 	return t
 }
 
+// EdgeFiringDelta returns the session's edge firing counts minus what
+// the previous call reported, then snapshots — the eval harness sums
+// per-turn telemetry files, so a process emitting more than once must
+// not double-count. Deliberately not on the Coordinator interface —
+// the eval harness type-asserts for it alongside SessionTelemetry.
+func (c *coordinator) EdgeFiringDelta(sessionID string) map[string]map[string]int {
+	sa, ok := c.currentAgent().(*sessionAgent)
+	if !ok || sa == nil || sa.edgeStats == nil {
+		return nil
+	}
+	cur, _ := sa.edgeStats.Get(sessionID)
+	prev, _ := c.edgeFiringEmitted.Get(sessionID)
+	var delta map[string]map[string]int
+	for key, n := range cur {
+		if d := n - prev[key]; d > 0 {
+			edge, outcome, _ := strings.Cut(key, ":")
+			if delta == nil {
+				delta = map[string]map[string]int{}
+			}
+			if delta[edge] == nil {
+				delta[edge] = map[string]int{}
+			}
+			delta[edge][outcome] = d
+		}
+	}
+	snapshot := make(map[string]int, len(cur))
+	for k, n := range cur {
+		snapshot[k] = n
+	}
+	c.edgeFiringEmitted.Set(sessionID, snapshot)
+	return delta
+}
+
 // EvalMaxStepsEnvVar caps a single run's steps when the eval harness
 // is driving — the run-side enforcement of the trajectory-wide
 // max_steps budget. The driver passes the remaining budget (plus one)

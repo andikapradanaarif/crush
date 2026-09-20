@@ -540,28 +540,54 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		return false, call
 	}
 
+	// The marker stamps on the clone before it enqueues — a fired
+	// burn-watch suppresses the next crossing on this chain.
+	for _, c := range winners {
+		if c.prompted && c.edge.name == "burn-watch" {
+			retry.burnWatched = true
+		}
+	}
+
+	// The retry is enqueued before its outcomes are recorded — under
+	// the session mutex with a final cancel check — so a `fired` row
+	// can only exist for a retry that actually landed on the queue.
+	// A cancel landing inside this section records cancelled for
+	// every contender instead.
+	mu := a.sessionMu(call.SessionID)
+	mu.Lock()
+	if ctx.Err() != nil {
+		mu.Unlock()
+		for _, c := range contenders {
+			a.recordEdgeFiring(ctx, call, in, c.edge.name, c.t, edgeOutcomeCancelled)
+		}
+		cancelEdges, cancelNotes, cancelReports := collectDeadDeferred(edgeOutcomeCancelled)
+		cancelEdges = append(cancelEdges, deadEdges...)
+		cancelNotes = append(cancelNotes, deadNotes...)
+		cancelReports = append(cancelReports, deadReports...)
+		a.writeRepairExhaustion(ctx, call, in.currentAssistant, cancelEdges, cancelNotes, cancelReports)
+		return false, call
+	}
+	existing, _ := a.messageQueue.Get(call.SessionID)
+	a.messageQueue.Set(call.SessionID, append([]SessionAgentCall{retry}, existing...))
+	mu.Unlock()
+
 	for _, c := range winners {
 		outcome := edgeOutcomeFired
 		if !c.prompted {
 			outcome = edgeOutcomeCleared
 		}
 		a.recordEdgeFiring(ctx, call, in, c.edge.name, c.t, outcome)
-		// The marker stamps only on a fired burn-watch outcome — a
-		// headless-degraded or deferred trigger leaves no carrier.
-		if outcome == edgeOutcomeFired && c.edge.name == "burn-watch" {
-			retry.burnWatched = true
-		}
 	}
 	for _, c := range losers {
 		a.recordEdgeFiring(ctx, call, in, c.edge.name, c.t, edgeOutcomeDeferred)
 	}
+	for _, d := range stillDeferred {
+		// A carried trigger that rode this boundary's retry forward
+		// records deferred here too — the edge's lifecycle row for
+		// this boundary is "still waiting", not clean.
+		a.recordEdgeFiring(ctx, call, in, d.edge.name, d.trigger, edgeOutcomeDeferred)
+	}
 	a.writeRepairExhaustion(ctx, call, in.currentAssistant, deadEdges, deadNotes, deadReports)
-
-	mu := a.sessionMu(call.SessionID)
-	mu.Lock()
-	existing, _ := a.messageQueue.Get(call.SessionID)
-	a.messageQueue.Set(call.SessionID, append([]SessionAgentCall{retry}, existing...))
-	mu.Unlock()
 	return true, call
 }
 
@@ -1162,14 +1188,19 @@ func relTouchedDirs(workingDir string, steps []fantasy.StepResult) []string {
 			}
 			dir = rel
 		}
+		if dir == "." {
+			// The working dir itself normalizes to the root form
+			// Subtree expects — keeps the two spellings deduped.
+			dir = ""
+		}
 		out = append(out, dir)
 	}
 	return out
 }
 
 // stepWriteSet scans a run's steps for write-class call targets —
-// the file_path inputs of mutating tool calls. Bash mutations carry
-// no structured target, so they contribute nothing here.
+// the file_path inputs of mutating tool calls plus bash redirect
+// operands via the shared toolclass vocabulary.
 func stepWriteSet(steps []fantasy.StepResult) []string {
 	seen := map[string]bool{}
 	var out []string

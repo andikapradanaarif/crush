@@ -215,8 +215,11 @@ type coordinator struct {
 	// edgeStore persists run-boundary edge firing rows and edgeStats
 	// accumulates the per-session counts SessionTelemetry reports —
 	// shared across agent rebuilds, nil store skips the records.
-	edgeStore EdgeFiringStore
-	edgeStats *csync.Map[string, map[string]int]
+	// edgeFiringEmitted snapshots the counts the last EdgeFiringDelta
+	// call reported, per session.
+	edgeStore         EdgeFiringStore
+	edgeStats         *csync.Map[string, map[string]int]
+	edgeFiringEmitted *csync.Map[string, map[string]int]
 
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
@@ -298,6 +301,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		summaryModel:          csync.NewValue(Model{}),
 		edgeStore:             opts.EdgeStore,
 		edgeStats:             csync.NewMap[string, map[string]int](),
+		edgeFiringEmitted:     csync.NewMap[string, map[string]int](),
 	}
 
 	// Share per-session bookkeeping maps across all built agents and
