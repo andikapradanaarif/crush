@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log/slog"
 	"regexp"
 	"slices"
 	"strconv"
@@ -61,7 +60,11 @@ type memoryItem struct {
 // session's consolidated position first, then the pinned proxy
 // (file:-tagged entries — pin-ness itself is computed at selection
 // time and never synced), then recent decisions/edits/plans, then
-// everything else by recency.
+// everything else by recency. A hydrated checkpoint anchors
+// LatestCheckpointIDs until a real session-grain checkpoint
+// supersedes it — in a session that never writes one the pin is
+// permanent; accepted, since seeds are small and the alternative
+// (pinning anyway but compactable) breaks the anchor's guarantee.
 func hydrationTier(it memoryItem) int {
 	if it.EventType == EventCheckpoint && seedableGranularities[tagValue(it.Tags, granularityTagPrefix)] {
 		return 0
@@ -152,7 +155,13 @@ func mem0ItemTime(m map[string]any) int64 {
 	for _, key := range []string{"created_at", "updated_at"} {
 		switch v := m[key].(type) {
 		case float64:
-			return int64(v)
+			n := int64(v)
+			// A ms-precision server would mint far-future dates in
+			// the provenance line — normalize to seconds.
+			if n > 1e12 {
+				n /= 1000
+			}
+			return n
 		case string:
 			if t, err := time.Parse(time.RFC3339, v); err == nil {
 				return t.Unix()
@@ -163,13 +172,6 @@ func mem0ItemTime(m map[string]any) int64 {
 		}
 	}
 	return 0
-}
-
-func cmp_Or(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }
 
 // BuildHydrationSeeds converts partition-verified mem0 items into
@@ -331,11 +333,16 @@ func storeSeedEntry(ctx context.Context, q *db.Queries, sessionID string, eventN
 		return fmt.Errorf("failed to create seed entry: %w", err)
 	}
 	for _, tag := range seed.Tags {
+		// A tag failure must abort the transaction: an entry committed
+		// without its hydrated tag would be invisible to the marker
+		// check (re-seeding next turn) and to SyncEntries' skip
+		// (syncing the seed back to mem0, compounding the memory it
+		// came from). Atomicity covers the tags, not just the row.
 		if err := q.CreateNotebookTag(ctx, db.CreateNotebookTagParams{
 			EntryID: id,
 			Tag:     tag,
 		}); err != nil {
-			slog.Error("Failed to create seed tag", "error", err, "tag", tag)
+			return fmt.Errorf("failed to create seed tag: %w", err)
 		}
 	}
 	return nil

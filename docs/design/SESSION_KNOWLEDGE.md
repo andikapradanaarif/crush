@@ -372,8 +372,11 @@ event_type != 'checkpoint'`) — an sqlc query change, not just Go.
 - **Metric distortion.** Checkpoint `file:` tags join the injected
   `files` set — a first-ever view of a cited file counts as
   `CoveredReViews`, inflating exactly the metric the eval arm
-  reads. Filter checkpoint tags out of that set, or accept the
-  bias consciously.
+  reads. Hydrated non-checkpoint seeds with `file:` tags do the
+  same, and in the cold-start arm they land before any real
+  coverage — the paired eval should either exclude
+  `hydrated`-tagged entries from `CoveredReViews` or accept the
+  bias consciously (arguably correct: the seed IS the prior read).
 - **`SearchByEventType("checkpoint")` spans granularities** —
   returns turn digests too. Probably fine (recall by granularity
   isn't a stated need), but decide consciously.

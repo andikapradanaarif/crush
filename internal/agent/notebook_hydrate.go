@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/notebook"
 	"github.com/charmbracelet/crush/internal/session"
 )
@@ -49,8 +50,15 @@ func (a *sessionAgent) maybeHydrateNotebook(ctx context.Context, sess session.Se
 	}
 	// Cheap pre-check: a seeded session never pays the fetch again.
 	// SeedEntries re-checks inside its transaction — this read exists
-	// to skip the MCP round-trip, not for correctness.
-	if existing, err := a.notebook.SearchByTag(ctx, sess.ID, notebook.TagHydrated); err == nil && len(existing) > 0 {
+	// to skip the MCP round-trip, not for correctness. On a transient
+	// DB error skip this turn entirely rather than burning an attempt
+	// on a fetch whose result can't be verified.
+	existing, err := a.notebook.SearchByTag(ctx, sess.ID, notebook.TagHydrated)
+	if err != nil {
+		slog.Warn("Failed to check hydration marker", "session_id", sess.ID, "error", err)
+		return
+	}
+	if len(existing) > 0 {
 		return
 	}
 	attempts, err := a.notebook.SessionCounter(ctx, sess.ID, notebook.CounterHydrationAttempts)
@@ -61,11 +69,21 @@ func (a *sessionAgent) maybeHydrateNotebook(ctx context.Context, sess session.Se
 	if attempts >= maxHydrationAttempts {
 		return
 	}
+	detCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hydrationFetchTimeout)
+	defer cancel()
+
+	// MCP servers connect asynchronously and getOrRenewClient fails
+	// instantly while none is registered — without this wait a fast
+	// first TUI prompt (the exact turn hydration exists for) would
+	// burn an attempt against a server that was simply still starting.
+	// The detCtx deadline bounds the wait; timing out while init is
+	// still in flight costs no attempt — the next turn retries.
+	if err := mcp.WaitForInit(detCtx); err != nil {
+		return
+	}
 	if err := a.notebook.BumpSessionCounter(ctx, sess.ID, notebook.CounterHydrationAttempts, 1); err != nil {
 		slog.Warn("Failed to record hydration attempt", "session_id", sess.ID, "error", err)
 	}
-	detCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hydrationFetchTimeout)
-	defer cancel()
 
 	items, err := notebook.FetchHydrationMemories(detCtx, a.configStore, a.notebookMemoryServer)
 	if err != nil {
@@ -75,8 +93,9 @@ func (a *sessionAgent) maybeHydrateNotebook(ctx context.Context, sess session.Se
 	seeds := notebook.BuildHydrationSeeds(items, notebook.HydrationSeedMaxTokens)
 	// The open-items payload is the highest-value seed and sources
 	// locally — the sessions table is the same DB, no MCP round-trip,
-	// and it survives a sync that raced. It lands last so it carries
-	// the highest event number and ranks first among the seeds.
+	// and it survives a sync that raced. Landing last gives it the
+	// highest event number: it wins the selection budget and renders
+	// last — closest to the prompt.
 	if plan := a.planSeedEntry(detCtx, sess); plan != nil {
 		seeds = append(seeds, *plan)
 	}
