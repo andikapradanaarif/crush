@@ -3,8 +3,10 @@
 -- Run-boundary edge firing records. One row per edge per evaluated
 -- boundary: the primary key is the dedupe for idempotent writes within
 -- a boundary (e.g. a mid-write crash), and turn_seq is the absolute
--- ordinal of the run's initiating user message — repair retries persist
--- their prompts as user messages, so each attempt's boundary differs.
+-- ordinal of the run's initiating user message — a boundary ordinal,
+-- not a user-turn ordinal: repair retries and summarize-continue
+-- requeues persist another user message, so one logical user turn can
+-- span several turn_seq values.
 -- run_stamp is a join column for run:<stamp> checkpoint tags, not key
 -- material: the stamp is a per-process random epoch + sequence, neither
 -- deterministic nor durable per logical turn.

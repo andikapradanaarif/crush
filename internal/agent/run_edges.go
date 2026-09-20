@@ -557,9 +557,12 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 
 	// The retry is enqueued before its outcomes are recorded — under
 	// the session mutex with a final cancel check — so a `fired` row
-	// can only exist for a retry that actually landed on the queue.
-	// A cancel landing inside this section records cancelled for
-	// every contender instead.
+	// only exists for a retry that actually landed on the queue.
+	// Residual race: a cancel between the unlock and the dequeue can
+	// still drop the queued retry via its cancel mark — the row
+	// records that the edge fired and queued a retry, not that the
+	// retry ran. A cancel landing inside this section records
+	// cancelled for every contender instead.
 	mu := a.sessionMu(call.SessionID)
 	mu.Lock()
 	if ctx.Err() != nil {
@@ -622,6 +625,13 @@ func (a *sessionAgent) recordCancelledBoundary(ctx context.Context, call Session
 	}
 }
 
+// detachedWriteCtx detaches boundary evidence writes from a dying run
+// context — a cancel mid-boundary must not lose terminal evidence —
+// bounded so a hung write can't stall the boundary itself.
+func detachedWriteCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+}
+
 // recordEdgeFiring writes one edge_firings row for an evaluated edge —
 // INSERT OR IGNORE makes the write idempotent within a boundary, and
 // the in-memory counter only advances on a real insert. Writes run on
@@ -664,7 +674,7 @@ func (a *sessionAgent) recordEdgeFiring(ctx context.Context, call SessionAgentCa
 	}
 	// Detached so a mid-boundary cancel can't lose the row, but
 	// bounded — a hung write must not stall the boundary.
-	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	wctx, cancel := detachedWriteCtx(ctx)
 	defer cancel()
 	n, err := a.edgeStore.InsertEdgeFiring(wctx, params)
 	if err != nil {
@@ -755,7 +765,7 @@ func (a *sessionAgent) writeRepairExhaustion(ctx context.Context, call SessionAg
 	// when the run context is already dead — bounded so a hung write
 	// can't stall the boundary.
 	var cancel context.CancelFunc
-	ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	ctx, cancel = detachedWriteCtx(ctx)
 	defer cancel()
 	if err := a.messages.Update(ctx, *currentAssistant); err != nil {
 		slog.Error("Failed to record repair exhaustion", "error", err, "session_id", call.SessionID)
@@ -1124,9 +1134,13 @@ func (a *sessionAgent) resolveStallEdge(ctx context.Context, call SessionAgentCa
 		return
 	}
 	t.assistant.AppendContent("\n\n" + t.report)
-	if err := a.messages.Update(ctx, *t.assistant); err != nil {
+	// Detached like the firing rows — the blocker report is terminal
+	// evidence and must land even on a dead run context.
+	wctx, cancel := detachedWriteCtx(ctx)
+	defer cancel()
+	if err := a.messages.Update(wctx, *t.assistant); err != nil {
 		slog.Error("Failed to record stall blocker report", "error", err, "session_id", call.SessionID)
-	} else if err := a.messages.FlushAll(ctx); err != nil {
+	} else if err := a.messages.FlushAll(wctx); err != nil {
 		slog.Error("Failed to flush stall blocker report", "error", err, "session_id", call.SessionID)
 	}
 }
@@ -1391,8 +1405,12 @@ const (
 	// burnWatchMinSteps is the step floor for the token arm.
 	burnWatchMinSteps = 10
 	// burnWatchInputTokens is the conjunctive token arm's spend
-	// threshold — cache-read tokens are excluded (cached tokens are
-	// ~free and would trip the tripwire far too early).
+	// threshold. Cache-read tokens are excluded where the provider
+	// separates them (Anthropic reports input excluding cache reads;
+	// OpenAI subtracts cached tokens) — but Google folds
+	// PromptTokenCount cached tokens into InputTokens, so a
+	// heavy-cache Gemini run trips the arm earlier than intended.
+	// The step floor bounds the damage.
 	burnWatchInputTokens = 200_000
 )
 
@@ -1450,9 +1468,13 @@ func (a *sessionAgent) resolveBurnWatchEdge(ctx context.Context, call SessionAge
 		return
 	}
 	t.assistant.AppendContent("\n\n" + burnWatchAssumption(t))
-	if err := a.messages.Update(ctx, *t.assistant); err != nil {
+	// Detached like the firing rows — the assumption is terminal
+	// evidence and must land even on a dead run context.
+	wctx, cancel := detachedWriteCtx(ctx)
+	defer cancel()
+	if err := a.messages.Update(wctx, *t.assistant); err != nil {
 		slog.Error("Failed to record burn-watch assumption", "error", err, "session_id", call.SessionID)
-	} else if err := a.messages.FlushAll(ctx); err != nil {
+	} else if err := a.messages.FlushAll(wctx); err != nil {
 		slog.Error("Failed to flush burn-watch assumption", "error", err, "session_id", call.SessionID)
 	}
 }

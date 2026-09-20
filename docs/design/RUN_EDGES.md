@@ -565,7 +565,11 @@ prompts as user messages (`createUserMessage` runs
 unconditionally per `Run`), so each attempt's initiating
 message naturally differs and `repair_attempts` is **demoted to
 a column** (still queryable — disambiguates replan-vs-escalate
-stats). **Source: a `COUNT(*)` query, not the working view.**
+stats). **Read it as a boundary ordinal, not a user-turn
+ordinal** — retries and summarize-continue requeues each persist
+another user message, so one logical user turn can span several
+`turn_seq` values; consumers counting "user turns" must not sum
+`turn_seq` deltas. **Source: a `COUNT(*)` query, not the working view.**
 `getSessionMessages` returns the full transcript only when
 `notebookEnabled`; notebook-off it returns the `ListFromSummary`
 tail (`agent.go:2518-2531`, and the code comment says why —
