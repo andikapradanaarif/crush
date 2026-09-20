@@ -26,8 +26,19 @@ the ability to verify them.
 user approval and cannot write `PlanItem`s (`resolvePlanTools`
 excludes `todos`). Two systems named "plan" coexist — one the
 user confirms, one the harness checks. Seeding typed items from
-an approved plan-mode plan is a deliberate follow-up, not part of
-this work.
+an approved plan-mode plan is a deliberate follow-up (#74), not
+part of this work — with two constraints that shape it: bare
+seeding is a **gate regression** (`planDeclared` treats
+`len(sess.Todos) > 0` as declared, so bare seeds permanently
+disarm the evidence bounce — seeds must carry evidence bindings
+or the gate must not count them), and approval is a **TUI-side
+construct** (`planReadySessionID` is UI state; the backend never
+observes it, and headless has no handoff), so the trigger lives
+at `AgentSetMain` or an explicit workspace op, not in the dialog.
+The viable paths are structured emission (plan mode emits typed
+items in the marker block) and required re-declare (the armed
+bounce validates the coder's first `todos` call against the
+approved text) — bare text→typed conversion is rejected.
 
 ## Problem
 
