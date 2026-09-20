@@ -562,7 +562,13 @@ injecting a prompt block:
    but depends on sync having run; the direct read of the latest
    same-project session's open items is higher-fidelity for the
    highest-value payload — local read wins, mem0 entries are the
-   fallback for cross-machine history.
+   fallback for cross-machine history. **Coupling, stated:** the
+   plan seed rides the fetch-success path — a configured-but-dead
+   mem0 server loses the local agenda too. Deliberate: a
+   plan-only seed would commit the `hydrated` marker and lose the
+   mem0 seeds forever; decoupling needs split markers
+   (`hydrated:plan` vs `hydrated:mem0`) — revisit if telemetry
+   shows dead-server sessions losing the agenda matters.
 
 Rejected alternative — system-prompt section (`CacheClassSession`):
 keeps the digest out of message history, but bypasses every existing
