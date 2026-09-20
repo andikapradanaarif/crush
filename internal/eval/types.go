@@ -277,11 +277,13 @@ type Checkpoints struct {
 }
 
 // Hydration mirrors the agent's session-hydration telemetry:
-// seeds counts committed seed entries, rendered counts prefix
-// renders that included a hydrated-tagged entry.
+// seeds counts committed mem0-sourced seed entries, plan_seeds the
+// locally sourced plan seed, rendered counts prefix renders that
+// included a hydrated-tagged entry.
 type Hydration struct {
-	Seeds    int `json:"seeds"`
-	Rendered int `json:"rendered"`
+	Seeds     int `json:"seeds"`
+	PlanSeeds int `json:"plan_seeds"`
+	Rendered  int `json:"rendered"`
 }
 
 // Env is the forensic record: when a trajectory rots, the diff between

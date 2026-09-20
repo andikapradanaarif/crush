@@ -645,8 +645,11 @@ never writes back.
   `eval/experiments/cold-start-hydration.json` pins both arms
   explicitly (`notebook_hydration` defaults on, so the control
   sets it false) and gates the treatment on
-  `min_hydration.seeds` — a run where nothing seeded lands
-  inconclusive rather than passing as evidence of nothing. The arm
+  `min_hydration.seeds` — which counts mem0-sourced seeds only
+  (`hydration.plan_seeds` splits the locally sourced plan seed so
+  a plan-only commit can't pass the gate); a run where no
+  cross-session knowledge seeded lands inconclusive rather than
+  passing as evidence of nothing. The arm
   still needs its signal path: hydration requires a configured
   mem0 MCP server and memories keyed to the materialized workdir,
   and eval children get a sanitized HOME, a random `eval-run-*`

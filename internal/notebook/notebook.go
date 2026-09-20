@@ -208,10 +208,16 @@ type Stats struct {
 	DigestRenders int
 	// DigestsWritten counts committed turn-digest entries.
 	DigestsWritten int
-	// HydrationSeeds counts entries committed by SeedEntries for this
-	// session — the firing side of the cold-start arm's coverage gate
-	// ("did hydration actually seed" vs a silent no-op).
+	// HydrationSeeds counts mem0-sourced entries committed by
+	// SeedEntries for this session — the firing side of the cold-start
+	// arm's coverage gate. The locally sourced plan seed counts under
+	// HydrationPlanSeeds so the gate measures cross-session memory,
+	// not just "some seed committed".
 	HydrationSeeds int
+	// HydrationPlanSeeds counts committed open-plan-items seeds — the
+	// locally sourced half of hydration, split from HydrationSeeds so
+	// a plan-only commit doesn't masquerade as mem0 knowledge.
+	HydrationPlanSeeds int
 	// HydrationRenders counts prefix renders that included a
 	// hydrated-tagged entry — the "seed present at render" signal,
 	// matching the checkpoints/digests written/rendered split.

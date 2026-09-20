@@ -47,6 +47,7 @@ var coverageFields = map[string]func(*RunRecord) float64{
 	"digests.written":              func(r *RunRecord) float64 { return float64(r.Digests.Written) },
 	"digests.rendered":             func(r *RunRecord) float64 { return float64(r.Digests.Rendered) },
 	"hydration.seeds":              func(r *RunRecord) float64 { return float64(r.Hydration.Seeds) },
+	"hydration.plan_seeds":         func(r *RunRecord) float64 { return float64(r.Hydration.PlanSeeds) },
 	"hydration.rendered":           func(r *RunRecord) float64 { return float64(r.Hydration.Rendered) },
 	// Flag-invariant call_metrics subset — see the comment above.
 	"call_metrics.requests":          func(r *RunRecord) float64 { return float64(callMetrics(r).Requests) },

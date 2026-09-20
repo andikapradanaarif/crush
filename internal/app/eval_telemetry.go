@@ -92,8 +92,9 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 			"rendered": tel.DigestRenders,
 		}
 		doc["hydration"] = map[string]any{
-			"seeds":    tel.HydrationSeeds,
-			"rendered": tel.HydrationRenders,
+			"seeds":      tel.HydrationSeeds,
+			"plan_seeds": tel.HydrationPlanSeeds,
+			"rendered":   tel.HydrationRenders,
 		}
 	}
 	// Edge firings emit as a DELTA, not the cumulative snapshot — the

@@ -128,13 +128,15 @@ type runTelemetry struct {
 		Rendered int `json:"rendered"`
 	} `json:"digests"`
 	// Hydration carries the cold-start seed telemetry: seeds counts
-	// entries SeedEntries committed this turn's process (the marker
-	// suppresses re-seeding, so only the seeding turn reports a
-	// nonzero count); rendered counts prefix renders that included a
+	// mem0-sourced entries SeedEntries committed this turn's process
+	// (the marker suppresses re-seeding, so only the seeding turn
+	// reports a nonzero count), plan_seeds the locally sourced plan
+	// seed; rendered counts prefix renders that included a
 	// hydrated-tagged entry.
 	Hydration struct {
-		Seeds    int `json:"seeds"`
-		Rendered int `json:"rendered"`
+		Seeds     int `json:"seeds"`
+		PlanSeeds int `json:"plan_seeds"`
+		Rendered  int `json:"rendered"`
 	} `json:"hydration"`
 	// EdgeFirings splits run-boundary edge firing counts by edge and
 	// outcome — the per-turn delta of the session's edge_firings rows
@@ -299,6 +301,7 @@ func (res *RunResult) addTurnTelemetry(tel runTelemetry) {
 	res.Digests.Written += tel.Digests.Written
 	res.Digests.Rendered += tel.Digests.Rendered
 	res.Hydration.Seeds += tel.Hydration.Seeds
+	res.Hydration.PlanSeeds += tel.Hydration.PlanSeeds
 	res.Hydration.Rendered += tel.Hydration.Rendered
 	for edge, outcomes := range tel.EdgeFirings {
 		if res.EdgeFirings == nil {
