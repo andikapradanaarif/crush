@@ -142,6 +142,14 @@ type Experiment struct {
 	Corpus            []string       `json:"corpus"` // globs or "band:<name>"
 	RunsPerTrajectory map[Band]int   `json:"runs_per_trajectory"`
 	Arms              map[string]Arm `json:"arms"`
+	// Providers declares custom providers the experiment's model
+	// resolves against — written into the generated .crush.json so
+	// non-builtin providers (e.g. an OpenAI-compatible endpoint) work
+	// under the child's sanitized HOME. Raw JSON matching the config
+	// providers schema; api_key should be an env ref ($VAR) — the
+	// eval environment's credentials pass through, secrets never
+	// enter the repo.
+	Providers map[string]any `json:"providers,omitempty"`
 }
 
 // Arm is a generated config fragment plus an optional arm-scoped

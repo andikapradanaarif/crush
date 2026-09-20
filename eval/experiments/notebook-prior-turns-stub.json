@@ -1,6 +1,6 @@
 {
 	"name": "notebook-prior-turns-stub",
-	"model": "hyper/deepseek-v4-pro-0813",
+	"model": "alibaba-tp/deepseek-v4.1-flash",
 	"temperature": 0,
 	"corpus": [
 		"rename-timeout-key",
@@ -10,12 +10,46 @@
 		"lint-until-clean",
 		"retry-config-cross-turn"
 	],
-	"runs_per_trajectory": {"stable": 3, "mid": 10, "uncharacterized": 5},
+	"runs_per_trajectory": {
+		"stable": 3,
+		"mid": 10,
+		"uncharacterized": 5
+	},
 	"arms": {
-		"control": {"config": {"options": {"notebook_enabled": true, "notebook_prior_turns": "verbatim"}}},
+		"control": {
+			"config": {
+				"options": {
+					"notebook_enabled": true,
+					"notebook_prior_turns": "verbatim"
+				}
+			}
+		},
 		"treatment": {
-			"config": {"options": {"notebook_enabled": true, "notebook_prior_turns": "stub"}},
-			"coverage": {"min_prior_turns.turns_collapsed": 1}
+			"config": {
+				"options": {
+					"notebook_enabled": true,
+					"notebook_prior_turns": "stub"
+				}
+			},
+			"coverage": {
+				"min_prior_turns.turns_collapsed": 1
+			}
+		}
+	},
+	"providers": {
+		"alibaba-tp": {
+			"name": "Alibaba Token Plan",
+			"type": "openai-compat",
+			"api_key": "$ALIBABA_TP_API_KEY",
+			"base_url": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+			"models": [
+				{
+					"id": "deepseek-v4.1-flash",
+					"name": "DeepSeek V4.1 Flash",
+					"context_window": 1000000,
+					"default_max_tokens": 384000
+				}
+			]
 		}
 	}
 }

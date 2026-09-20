@@ -176,6 +176,15 @@ func WriteArmConfig(workdir string, exp *Experiment, arm Arm, manifest *FlagsMan
 		}
 		doc = existing
 	}
+	// Experiment-declared providers: the child's pinned HOME hides
+	// the operator's config, so a custom provider (e.g. an
+	// OpenAI-compatible endpoint for a non-builtin model) must ride
+	// the generated config. api_key is an env ref — credentials come
+	// from the eval environment. Applied after the fixture merge so
+	// a start-state .crush.json can't shadow it.
+	if len(exp.Providers) > 0 {
+		doc["providers"] = exp.Providers
+	}
 	// crush.json merges at lower precedence — still an error when it
 	// pins a manifest flag (same foreign-condition trap).
 	lowPath := filepath.Join(workdir, "crush.json")
