@@ -410,7 +410,13 @@ injecting a prompt block:
    fail-open branch (`mem0.go:206-217`): when `serverFiltered` and
    the response isn't parseable JSON, `SearchMem0` returns the
    truncated blob anyway — fine for recall prose, unusable for
-   hydration (unparseable = nothing to seed). **"Pinned" needs a
+   hydration (unparseable = nothing to seed). **Split before the
+   cap:** `filterMem0Results` re-ranks and caps `kept` to
+   `mem0SearchTopK` (10) before rendering (`mem0.go:386-391`) —
+   an extracted fetch returning post-cap items gives hydration a
+   semantic top-10, not the wide window; the split happens before
+   the cap/re-rank, or the cap becomes a parameter.
+   **"Pinned" needs a
    proxy:** pin-ness is computed at selection time
    (`PinnedFileTagsSince`, `retrieve.go:160`) from `file:` tags +
    boundary floors — nothing syncs a `pinned` flag into mem0
@@ -459,7 +465,11 @@ injecting a prompt block:
    And the marker needs atomicity: a crash _mid_-seed leaves a
    partial set that reads as fully seeded — the seed write must be
    a single transaction (`withTx`), or a distinct marker row
-   written last. Proceed-empty leaves no marker → the next turn
+   written last. **The marker check goes _inside_ the transaction** —
+   `GetEntries`-read then `withTx`-write lets two concurrent first
+   turns double-seed; and the marker is written only on a
+   successful seed commit, never on fetch failure. Proceed-empty
+   leaves no marker → the next turn
    re-attempts naturally (MCP likely connected by then): "first
    turn only" is really "**until seeded**" — stated, and arguably
    better than silent-skip. Side effect, stated: pre-hydration-era
@@ -473,7 +483,14 @@ injecting a prompt block:
    "latest checkpoint" and feeding pinning/consolidation as
    inherited position. Intended: the prior session's checkpoint is
    exactly the durable position to resume from. It loses to any
-   real checkpoint (`-1` sorts lowest, `retrieve.go:349`). Also
+   real checkpoint (`-1` sorts lowest, `retrieve.go:349`). **But
+   the pin is sticky:** `pinnedEntryIDs` (`retrieve.go:316-330`)
+   fully exempts `LatestCheckpointIDs` winners from `Compact` — a
+   hydrated session-grain checkpoint stays exempt until a real
+   same-granularity checkpoint lands, and sessions that never
+   write one keep the seed pinned forever. Stated: accept it
+   (seeds are small) unless telemetry shows crowding — exempting
+   `hydrated` from the pin is the fallback. Also
    free: seeds' `file:` tags join the liveness pass in
    `buildSelectionInput` — dead-file demotion works on seeds too.
 7. **Hook point:** before the first `preparePrompt` of the session —
@@ -488,11 +505,15 @@ injecting a prompt block:
    fresh sessions, so unconditional hydration fires per run —
    cross-session memory contaminates eval arms and costs on every
    run; hydration respects an **eval opt-out — discriminated by
-   the eval signal (env var / arm config), NOT `NonInteractive`**:
-   `call.NonInteractive` is true for every `crush run`, eval and
-   user-driven alike — keying on it would contradict "fires on
-   headless too." (The cold-start arm opts in explicitly via its
-   arm config.) **Sub-agent sessions skip** — `ParentSessionID != ""`
+   `CRUSH_EVAL_FLAGS` (`eval/driver.go:27`) or the arm config, NOT
+   `NonInteractive`**: `call.NonInteractive` is true for every
+   `crush run`, eval and user-driven alike — keying on it would
+   contradict "fires on headless too." (The cold-start arm opts in
+   explicitly via its arm config.) **The zero-caps race resolves
+   fail-closed:** an unconnected mem0 server yields zero caps → no
+   `filters` arg → unparseable/unverifiable responses drop →
+   proceed-empty. Safe, and consistent with "until seeded"
+   _because_ the marker is written only on a successful commit. **Sub-agent sessions skip** — `ParentSessionID != ""`
    distinguishes them; hydrating a task session costs the fetch +
    ~2-4K tokens for context the parent's prompt already provides.
    Transitive seeding is already blocked: `SyncEntries` skips
