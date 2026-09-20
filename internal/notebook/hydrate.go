@@ -126,14 +126,21 @@ func parseMemoryItem(m map[string]any) memoryItem {
 		it.EventType, _ = meta["event_type"].(string)
 		it.TurnNumber = mem0MetaInt(meta, "turn_number")
 		it.EventNumber = mem0MetaInt(meta, "event_number")
-		if tags, ok := meta["tags"].([]any); ok {
+		switch tags := meta["tags"].(type) {
+		case []any:
 			for _, t := range tags {
 				if s, ok := t.(string); ok {
 					it.Tags = append(it.Tags, s)
 				}
 			}
+		case []string:
+			// Non-JSON-decoded payloads (in-process writers) carry
+			// []string — dropping them would demote a checkpoint seed
+			// out of tier 0 and lose its granularity: anchor.
+			it.Tags = tags
 		}
 	}
+	it.EventType = cmp.Or(it.EventType, EventGeneral)
 	if it.Title == "" {
 		it.Title = cmp.Or(it.EventType, "Note")
 	}
@@ -256,8 +263,10 @@ func buildSeedEntry(it memoryItem) SeedEntry {
 }
 
 // SeedEntry is a hydration seed: the entry content plus the origin
-// memory's timestamp (CreatedAt is preserved for provenance even
-// though no consumer renders it — compaction ordering reads it).
+// memory's timestamp. CreatedAt is provenance only — selection and
+// compaction order by (turn, event), where the sentinel key is what
+// ranks seeds oldest; nothing renders the timestamp, so the origin
+// date is also embedded in the entry text.
 type SeedEntry struct {
 	GeneratedEntry
 	CreatedAt int64

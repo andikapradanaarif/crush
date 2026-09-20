@@ -403,8 +403,8 @@ type SessionAgentOptions struct {
 	// for cross-session search.
 	NotebookSyncMem0 bool
 	// NotebookHydration controls whether a session's first turn seeds
-	// its notebook from cross-session memory (options.
-	// notebook_hydration). Only takes effect in notebook mode.
+	// its notebook from cross-session memory (options.notebook_
+	// hydration). Only takes effect in notebook mode.
 	NotebookHydration bool
 	// NotebookMemoryServer is the MCP server name for mem0.
 	NotebookMemoryServer string

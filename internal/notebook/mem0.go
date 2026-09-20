@@ -351,6 +351,7 @@ func FetchHydrationMemories(ctx context.Context, cfg *config.ConfigStore, server
 		result, err := runMCPTool(ctx, cfg, serverName, listTool, string(input))
 		if err == nil {
 			if items, ok := partitionMem0Items(result.Content, workDir, serverName); ok {
+				mem0HydrationFailures.Del(serverName)
 				return items, nil
 			}
 			// Unparseable listing — fall through to the search path

@@ -24,6 +24,11 @@ const (
 	// (persisted in session_counters so headless one-process-per-turn
 	// runs share the count) instead of taxing every first request.
 	maxHydrationAttempts = 3
+	// maxPlanSeedItems bounds the plan seed — it lands outside
+	// BuildHydrationSeeds' token accounting, so the item list itself
+	// needs a bound or a large open agenda would blow the seed
+	// budget. storeSeedEntry's per-entry truncation is the backstop.
+	maxPlanSeedItems = 20
 )
 
 // maybeHydrateNotebook seeds a session's notebook from cross-session
@@ -35,7 +40,7 @@ const (
 // leaves no marker and proceeds unseeded.
 func (a *sessionAgent) maybeHydrateNotebook(ctx context.Context, sess session.Session) {
 	if a.notebook == nil || !a.notebookEnabled || !a.notebookHydration ||
-		a.configStore == nil || a.notebookMemoryServer == "" {
+		a.configStore == nil || a.notebookMemoryServer == "" || a.hydrateFetch == nil {
 		return
 	}
 	// Sub-agent sessions inherit position from the parent's prompt —
@@ -80,18 +85,27 @@ func (a *sessionAgent) maybeHydrateNotebook(ctx context.Context, sess session.Se
 	// instantly while none is registered — without this wait a fast
 	// first TUI prompt (the exact turn hydration exists for) would
 	// burn an attempt against a server that was simply still starting.
-	// The fetchCtx deadline bounds the wait; timing out while init is
-	// still in flight costs no attempt — the next turn retries.
+	// The fetchCtx deadline bounds the wait. burnAttempt records a
+	// definitive failure — dead server, unparseable payload, wedged
+	// init (the cap is what bounds a wedged init's per-session tax) —
+	// but a cancelled run burns nothing: the retry belongs to a live
+	// turn.
+	burnAttempt := func() {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := a.notebook.BumpSessionCounter(ctx, sess.ID, notebook.CounterHydrationAttempts, 1); err != nil {
+			slog.Warn("Failed to record hydration attempt", "session_id", sess.ID, "error", err)
+		}
+	}
 	if err := mcp.WaitForInit(fetchCtx); err != nil {
+		burnAttempt()
 		return
 	}
 	// Process-level negative cache: a dead server shouldn't tax every
 	// new session's first turn with a fresh timeout.
 	if notebook.HydrationFetchFailedRecently(a.notebookMemoryServer) {
 		return
-	}
-	if err := a.notebook.BumpSessionCounter(ctx, sess.ID, notebook.CounterHydrationAttempts, 1); err != nil {
-		slog.Warn("Failed to record hydration attempt", "session_id", sess.ID, "error", err)
 	}
 
 	items, err := a.hydrateFetch(fetchCtx, a.configStore, a.notebookMemoryServer)
@@ -100,6 +114,7 @@ func (a *sessionAgent) maybeHydrateNotebook(ctx context.Context, sess session.Se
 		// plan payload rides the retry, or one bad fetch would pin the
 		// session as seeded with the mem0 knowledge lost forever.
 		slog.Warn("Hydration fetch failed; proceeding unseeded", "session_id", sess.ID, "error", err)
+		burnAttempt()
 		return
 	}
 	seeds := notebook.BuildHydrationSeeds(items, notebook.HydrationSeedMaxTokens)
@@ -148,12 +163,19 @@ func (a *sessionAgent) planSeedEntry(ctx context.Context, sess session.Session) 
 			continue
 		}
 		keyByID := session.PlanKeyByID(s.Todos)
+		var open []session.PlanItem
+		for _, item := range s.Todos {
+			if item.Status != session.PlanItemCompleted {
+				open = append(open, item)
+			}
+		}
 		var sb strings.Builder
 		fmt.Fprintf(&sb, "_Seeded from an earlier session (%s, session %s)._\n\nOpen plan items:\n",
 			time.Unix(s.UpdatedAt, 0).UTC().Format("2006-01-02"), s.ID)
-		for _, item := range s.Todos {
-			if item.Status == session.PlanItemCompleted {
-				continue
+		for i, item := range open {
+			if i >= maxPlanSeedItems {
+				fmt.Fprintf(&sb, "- …and %d more open items\n", len(open)-i)
+				break
 			}
 			sb.WriteString(session.FormatPlanItemLine(item, keyByID))
 			sb.WriteString("\n")
