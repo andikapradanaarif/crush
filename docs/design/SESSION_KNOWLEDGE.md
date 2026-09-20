@@ -397,29 +397,59 @@ injecting a prompt block:
    payload) — semantic top-10 alone would yield false _negatives_
    (project memories exist but didn't rank). Bound to a fixed token
    budget (~2-4K, the `mem0SearchMaxTokens` precedent).
+   **Residual semantic filter, stated:** `SearchMem0` still picks
+   _which_ memories the window contains semantically — a project
+   with >fetch-limit memories loses non-matching ones regardless
+   of client-side sort. If the server exposes a `get_all`/`list`
+   tool, that's the right fetch for hydration; otherwise the bound
+   is accepted and recorded (eval arm measures the miss rate).
 2. Write each selected memory as a notebook entry on the _new_
    session: `Tags += ["hydrated", "origin:<source_session_id>"]`,
    **all recallable prefixes stripped** (`result:`, `turn:`,
    `segment:` — see field traps), origin date **in the entry text**,
-   `CreatedAt` preserved.
+   `CreatedAt` preserved. The rewrite choke point is
+   `RewriteTruncationMarker` (`classify.go:702`) — it exists
+   precisely for hydration-time text normalization.
 3. **Sentinel keys:** seeds get `(turn, segment)` below any real
    value (e.g. `TurnNumber = -1`) — see the field trap for why both
    origin and real keys are harmful. Selection, compaction, recall,
    and auto-inject treat them as ordinary entries from there.
-4. **Render carve-out — the one new code path this requires.**
-   `hydrated`-tagged entries bypass the `boundary <= 0`
-   early-return (`notebook_segments.go:827`) so seeds render on
-   turn 1. The coverage-position filter
-   (`notebook_segments.go:1017`) needs no special case — sentinel
+4. **Render carve-out — prefix-level, not entry-level.** The
+   `boundary <= 0` early-return (`notebook_segments.go:873`) sits
+   _before_ any entry logic, so "hydrated entries bypass the gate"
+   really means the whole prefix path runs at boundary 0 when
+   seeds exist — `buildSelectionInput`,
+   `coveredSegmentFloor`/`fillBandFloor`, `freezeDigestEligibility`,
+   and the fingerprint must all tolerate empty `segs` / zero
+   `bKey`. More surface than a render branch — name it so the PR
+   doesn't discover it mid-build. The coverage-position filter
+   (`notebook_segments.go:1084`) needs no special case — sentinel
    keys (`turn = -1`) are below any real boundary key, so seeds
    pass it naturally once the boundary moves. Without the
    carve-out, seeds sit in the DB invisible on turn 1 — the model
    pays the re-exploration cost hydration exists to avoid.
-5. **Hook point:** before the first `preparePrompt` of the session —
+5. **Idempotency marker:** "first turn of a new session" needs a
+   persistent signal — a crash between seed-write and turn
+   completion must neither double-seed nor never-seed. The seeds
+   themselves are the marker: seed iff no `hydrated`-tagged entry
+   exists (`GetEntries` is already on this path). `preTurnMsgCount
+   == 0` alone is wrong — it's true pre-seed on every crashed
+   retry.
+6. **Checkpoint eligibility — stated decision:** seeds keep their
+   granularity tags (`boundary`/`session`), so a hydrated
+   checkpoint is eligible for `LatestCheckpointIDs` — on turn 1
+   (no real checkpoints yet) it _wins_, becoming the session's
+   "latest checkpoint" and feeding pinning/consolidation as
+   inherited position. Intended: the prior session's checkpoint is
+   exactly the durable position to resume from. It loses to any
+   real checkpoint (`-1` sorts lowest, `retrieve.go:349`). Also
+   free: seeds' `file:` tags join the liveness pass in
+   `buildSelectionInput` — dead-file demotion works on seeds too.
+7. **Hook point:** before the first `preparePrompt` of the session —
    fires on headless `crush run` too. Note MCP-connection readiness
    and turn-1 latency: the mem0 fetch is on the critical path of the
-   user's first request, so it needs a timeout and a proceed-empty
-   fallback.
+   user's first request — needs a timeout + proceed-empty fallback,
+   and the bound applies in the TUI too, not just headless.
 
 Rejected alternative — system-prompt section (`CacheClassSession`):
 keeps the digest out of message history, but bypasses every existing
