@@ -532,6 +532,15 @@ if (stats.edge_firings && stats.edge_firings.length > 0) {
         `<tr><td>${e.edge}</td><td>${e.variant || "—"}</td><td>${e.outcome}</td><td>${formatNumber(e.firings)}</td><td>${formatNumber(e.sessions)}</td></tr>`,
     )
     .join("");
+  const signals =
+    stats.edge_signals && stats.edge_signals.length > 0
+      ? `<ul style="color: var(--text-muted); margin: 0.5rem 0; padding-left: 1.25rem">${stats.edge_signals
+          .map(
+            (s) =>
+              `<li><strong style="color: var(--text)">${s.name}:</strong> ${s.value} <span style="opacity: 0.75">— ${s.note}</span></li>`,
+          )
+          .join("")}</ul>`
+      : "";
   section.innerHTML = `
     <h2>Run Edges</h2>
     <p style="color: var(--text-muted); margin: 0">
@@ -539,6 +548,7 @@ if (stats.edge_firings && stats.edge_firings.length > 0) {
       that fires constantly is a tuning signal; an edge that never fires
       is dead code.
     </p>
+    ${signals}
     <div style="overflow-x: auto">
       <table>
         <thead>

@@ -212,3 +212,39 @@ func TestGatherEdgeFiringStats_UnmigratedDB(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, stats)
 }
+
+func TestDeriveEdgeSignals(t *testing.T) {
+	t.Parallel()
+
+	rows := []EdgeFiringStat{
+		{Edge: "stall", Variant: "replan", Outcome: "fired", Firings: 6, Sessions: 4},
+		{Edge: "stall", Variant: "escalate", Outcome: "fired", Firings: 2, Sessions: 2},
+		{Edge: "burn-watch", Outcome: "fired", Firings: 1, Sessions: 1},
+		{Edge: "burn-watch", Outcome: "suppressed", Firings: 24, Sessions: 10},
+		{Edge: "burn-watch", Outcome: "gated", Firings: 5, Sessions: 3},
+		{Edge: "todos", Outcome: "suppressed", Firings: 12, Sessions: 8},
+	}
+
+	signals := deriveEdgeSignals(rows, 10)
+	byName := map[string]EdgeSignal{}
+	for _, s := range signals {
+		byName[s.Name] = s
+	}
+
+	// Replan→escalate: 2/(6+2) = 25%.
+	require.Equal(t, "25%", byName["replan → escalate"].Value)
+	// Burn-watch: 1/30 = 3.3%.
+	require.Equal(t, "3.3%", byName["burn-watch rate"].Value)
+	// Escalations/session: (2+1)/10 = 0.30.
+	require.Equal(t, "0.30", byName["escalations / session"].Value)
+	// Gated share: 5/50 = 10%.
+	require.Equal(t, "10%", byName["gated share"].Value)
+	// Todos never fired — the dead-edge signal names it.
+	require.Equal(t, "todos", byName["edges never fired"].Value)
+}
+
+func TestDeriveEdgeSignals_Empty(t *testing.T) {
+	t.Parallel()
+
+	require.Empty(t, deriveEdgeSignals(nil, 0))
+}

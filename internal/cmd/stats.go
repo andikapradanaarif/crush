@@ -76,6 +76,7 @@ type Stats struct {
 	ProjectIndex      *ProjectIndexStats `json:"project_index,omitempty"`
 	Collapse          *CollapseStats     `json:"collapse,omitempty"`
 	EdgeFirings       []EdgeFiringStat   `json:"edge_firings,omitempty"`
+	EdgeSignals       []EdgeSignal       `json:"edge_signals,omitempty"`
 }
 
 type TotalStats struct {
@@ -185,6 +186,15 @@ type EdgeFiringStat struct {
 	Outcome  string `json:"outcome"`
 	Firings  int64  `json:"firings"`
 	Sessions int64  `json:"sessions"`
+}
+
+// EdgeSignal is a derived metric from edge-firing aggregates — the
+// pre-committed thresholds that turn firing counts into a verdict on
+// whether an edge earns its keep.
+type EdgeSignal struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+	Note  string `json:"note"`
 }
 
 // ProjectStats associates stats with a project path.
@@ -645,6 +655,7 @@ func mergeStats(projectStats []ProjectStats) *Stats {
 		}
 		return merged.EdgeFirings[i].Outcome < merged.EdgeFirings[j].Outcome
 	})
+	merged.EdgeSignals = deriveEdgeSignals(merged.EdgeFirings, merged.Total.TotalSessions)
 	if merged.Pruning != nil {
 		for _, ks := range pruningKindMap {
 			merged.Pruning.ByKind = append(merged.Pruning.ByKind, *ks)
@@ -827,6 +838,79 @@ func gatherStats(ctx context.Context, conn *sql.DB) (*Stats, error) {
 	stats.EdgeFirings = edgeFirings
 
 	return stats, nil
+}
+
+// deriveEdgeSignals turns raw firing counts into the pre-committed
+// health metrics: replan conversion, burn-watch rate, escalation
+// load, gated baseline, and dead edges.
+func deriveEdgeSignals(rows []EdgeFiringStat, sessions int64) []EdgeSignal {
+	fired := map[string]int64{}
+	total := map[string]int64{}
+	var replanFired, escalateFired, burnWatchFired, gated, allRows int64
+	for _, r := range rows {
+		total[r.Edge] += r.Firings
+		allRows += r.Firings
+		if r.Outcome == "gated" {
+			gated += r.Firings
+		}
+		if r.Outcome != "fired" {
+			continue
+		}
+		fired[r.Edge] += r.Firings
+		switch {
+		case r.Edge == "stall" && r.Variant == "replan":
+			replanFired += r.Firings
+		case r.Edge == "stall" && r.Variant == "escalate":
+			escalateFired += r.Firings
+		case r.Edge == "burn-watch":
+			burnWatchFired += r.Firings
+		}
+	}
+
+	var signals []EdgeSignal
+	if n := replanFired + escalateFired; n > 0 {
+		signals = append(signals, EdgeSignal{
+			Name:  "replan → escalate",
+			Value: fmt.Sprintf("%.0f%%", 100*float64(escalateFired)/float64(n)),
+			Note:  "share of stall firings that still needed a human — under ~40% means replans unstick; higher means the replan slot is wasted",
+		})
+	}
+	if n := total["burn-watch"]; n > 0 {
+		signals = append(signals, EdgeSignal{
+			Name:  "burn-watch rate",
+			Value: fmt.Sprintf("%.1f%%", 100*float64(burnWatchFired)/float64(n)),
+			Note:  "tripwire firing share of evaluated boundaries — expect <5%; higher means thresholds are miscalibrated",
+		})
+	}
+	if sessions > 0 {
+		signals = append(signals, EdgeSignal{
+			Name:  "escalations / session",
+			Value: fmt.Sprintf("%.2f", float64(escalateFired+burnWatchFired)/float64(sessions)),
+			Note:  "human asks per session — the nag detector; healthy is well under 1.0",
+		})
+	}
+	if allRows > 0 {
+		signals = append(signals, EdgeSignal{
+			Name:  "gated share",
+			Value: fmt.Sprintf("%.0f%%", 100*float64(gated)/float64(allRows)),
+			Note:  "flag-off measurement rows — the numerator the default-on flip decisions run on",
+		})
+	}
+	var dead []string
+	for edge, n := range total {
+		if fired[edge] == 0 && n > 0 {
+			dead = append(dead, edge)
+		}
+	}
+	if len(dead) > 0 {
+		sort.Strings(dead)
+		signals = append(signals, EdgeSignal{
+			Name:  "edges never fired",
+			Value: strings.Join(dead, ", "),
+			Note:  "evaluated but never triggered — dead code or untriggered predicates; check the scans",
+		})
+	}
+	return signals
 }
 
 // gatherEdgeFiringStats aggregates the persisted edge_firings rows —
