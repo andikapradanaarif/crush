@@ -529,7 +529,7 @@ if (stats.edge_firings && stats.edge_firings.length > 0) {
   const rows = stats.edge_firings
     .map(
       (e) =>
-        `<tr><td>${e.edge}</td><td>${e.outcome}</td><td>${formatNumber(e.firings)}</td><td>${formatNumber(e.sessions)}</td></tr>`,
+        `<tr><td>${e.edge}</td><td>${e.variant || "—"}</td><td>${e.outcome}</td><td>${formatNumber(e.firings)}</td><td>${formatNumber(e.sessions)}</td></tr>`,
     )
     .join("");
   section.innerHTML = `
@@ -542,7 +542,7 @@ if (stats.edge_firings && stats.edge_firings.length > 0) {
     <div style="overflow-x: auto">
       <table>
         <thead>
-          <tr><th>Edge</th><th>Outcome</th><th>Firings</th><th>Sessions</th></tr>
+          <tr><th>Edge</th><th>Variant</th><th>Outcome</th><th>Firings</th><th>Sessions</th></tr>
         </thead>
         <tbody>${rows}</tbody>
       </table>

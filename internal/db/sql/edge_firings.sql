@@ -19,9 +19,10 @@ INSERT OR IGNORE INTO edge_firings (
 -- name: GetEdgeFiringStats :many
 SELECT
     edge,
+    variant,
     outcome,
     COUNT(*) AS firings,
     COUNT(DISTINCT session_id) AS sessions
 FROM edge_firings
-GROUP BY edge, outcome
-ORDER BY edge, outcome;
+GROUP BY edge, variant, outcome
+ORDER BY edge, variant, outcome;

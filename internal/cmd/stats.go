@@ -181,6 +181,7 @@ type CollapseStats struct {
 // that never fires is dead code.
 type EdgeFiringStat struct {
 	Edge     string `json:"edge"`
+	Variant  string `json:"variant"`
 	Outcome  string `json:"outcome"`
 	Firings  int64  `json:"firings"`
 	Sessions int64  `json:"sessions"`
@@ -581,11 +582,12 @@ func mergeStats(projectStats []ProjectStats) *Stats {
 			merged.Collapse.PriorTurnResultRecalls += s.Collapse.PriorTurnResultRecalls
 		}
 
-		// Aggregate run-edge firings by edge|outcome.
+		// Aggregate run-edge firings by edge|variant|outcome.
 		for _, e := range s.EdgeFirings {
-			key := e.Edge + "|" + e.Outcome
+			key := e.Edge + "|" + e.Variant + "|" + e.Outcome
 			existing := edgeFiringMap[key]
 			existing.Edge = e.Edge
+			existing.Variant = e.Variant
 			existing.Outcome = e.Outcome
 			existing.Firings += e.Firings
 			existing.Sessions += e.Sessions
@@ -637,6 +639,9 @@ func mergeStats(projectStats []ProjectStats) *Stats {
 	sort.Slice(merged.EdgeFirings, func(i, j int) bool {
 		if merged.EdgeFirings[i].Edge != merged.EdgeFirings[j].Edge {
 			return merged.EdgeFirings[i].Edge < merged.EdgeFirings[j].Edge
+		}
+		if merged.EdgeFirings[i].Variant != merged.EdgeFirings[j].Variant {
+			return merged.EdgeFirings[i].Variant < merged.EdgeFirings[j].Variant
 		}
 		return merged.EdgeFirings[i].Outcome < merged.EdgeFirings[j].Outcome
 	})
@@ -830,6 +835,12 @@ func gatherStats(ctx context.Context, conn *sql.DB) (*Stats, error) {
 func gatherEdgeFiringStats(ctx context.Context, queries *db.Queries) ([]EdgeFiringStat, error) {
 	rows, err := queries.GetEdgeFiringStats(ctx)
 	if err != nil {
+		// Read-only connects don't migrate — a project DB untouched
+		// since before the table existed must not lose the whole
+		// stats gather, just this section.
+		if strings.Contains(err.Error(), "no such table") {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("get edge firing stats: %w", err)
 	}
 	if len(rows) == 0 {
@@ -839,6 +850,7 @@ func gatherEdgeFiringStats(ctx context.Context, queries *db.Queries) ([]EdgeFiri
 	for _, r := range rows {
 		stats = append(stats, EdgeFiringStat{
 			Edge:     r.Edge,
+			Variant:  r.Variant,
 			Outcome:  r.Outcome,
 			Firings:  r.Firings,
 			Sessions: r.Sessions,

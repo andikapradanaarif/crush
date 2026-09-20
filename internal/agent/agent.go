@@ -1583,7 +1583,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// activeRequests, so boundary evaluation must observe it — a TUI
 	// Escape during the seam must still write cancelled rows and must
 	// not enqueue a retry behind clearQueueAndNotify's back.
-	repairQueued := a.runEdges(genCtx, call, edgeInput{
+	repairQueued, call := a.runEdges(genCtx, call, edgeInput{
 		result:           result,
 		currentAssistant: currentAssistant,
 		stalled:          loopStopped,

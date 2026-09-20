@@ -240,10 +240,13 @@ func (a *sessionAgent) runEdgeSet() []runEdge {
 // their evidence into one budgeted retry call, prepended ahead of queued
 // prompts; every evaluated edge records an edge_firings row so "no row"
 // keeps meaning "clean". Returns true when a retry was queued so the
-// caller can suppress the finished notification.
-func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in edgeInput) bool {
+// caller can suppress the finished notification, plus the call with its
+// boundary mutations applied — burnWatched cleared on a writing run and
+// the deferred carrier consumed — so a summarize-continue requeue of the
+// same call doesn't carry stale edge state.
+func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in edgeInput) (bool, SessionAgentCall) {
 	if a.configStore == nil || in.result == nil || len(in.result.Steps) == 0 {
-		return false
+		return false, call
 	}
 	// A mutating call in the just-finished run resets the write-less
 	// streak the burn-watch marker suppresses — the marker lives on
@@ -256,11 +259,14 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 	clean := cleanStop(in)
 
 	// Carried triggers merge back before any scan short-circuits,
-	// keyed by edge so a fresh trigger can supersede them.
+	// keyed by edge so a fresh trigger can supersede them. They are
+	// consumed — cleared from the returned call so a requeue doesn't
+	// re-merge them at the next boundary.
 	carried := make(map[string]deferredTrigger, len(call.deferred))
 	for _, d := range call.deferred {
 		carried[d.edge.name] = d
 	}
+	call.deferred = nil
 
 	if ctx.Err() != nil {
 		// The boundary is already dead before any edge evaluated —
@@ -273,7 +279,7 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 			}
 			a.recordEdgeFiring(ctx, call, in, edge.name, t, edgeOutcomeCancelled)
 		}
-		return false
+		return false, call
 	}
 
 	var contenders []contender
@@ -306,7 +312,7 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 					// no-row=clean stays true.
 					a.recordEdgeFiring(ctx, call, in, edge.name, t, edgeOutcomeCancelled)
 					a.recordCancelledBoundary(ctx, call, in, edges[i+1:], contenders, stillDeferred, carried)
-					return false
+					return false, call
 				}
 			}
 			if !t.fire {
@@ -347,13 +353,14 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		a.recordEdgeFiring(ctx, call, in, d.edge.name, d.trigger, edgeOutcomeCleared)
 	}
 
-	// collectDeadDeferred records the cancelled row for each carried
-	// trigger whose boundary produced no retry to ride and returns
-	// its terminal note edges/lines/reports for a single merged
-	// exhaustion write.
-	collectDeadDeferred := func() (noteEdges, notes, reports []string) {
+	// collectDeadDeferred records the terminal row for each carried
+	// trigger whose boundary produced no retry to ride — cancelled
+	// when the boundary died (StopTurn), exhausted when the budget
+	// did — and returns its note edges/lines/reports for a single
+	// merged exhaustion write.
+	collectDeadDeferred := func(outcome edgeOutcome) (noteEdges, notes, reports []string) {
 		for _, d := range stillDeferred {
-			a.recordEdgeFiring(ctx, call, in, d.edge.name, d.trigger, edgeOutcomeCancelled)
+			a.recordEdgeFiring(ctx, call, in, d.edge.name, d.trigger, outcome)
 			if d.trigger.report != "" {
 				reports = append(reports, d.trigger.report)
 			}
@@ -368,9 +375,9 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		return noteEdges, notes, reports
 	}
 	if len(contenders) == 0 {
-		edges2, notes2, reports2 := collectDeadDeferred()
+		edges2, notes2, reports2 := collectDeadDeferred(edgeOutcomeCancelled)
 		a.writeRepairExhaustion(ctx, call, in.currentAssistant, edges2, notes2, reports2)
-		return false
+		return false, call
 	}
 
 	// Terminal evidence collects per firing trigger regardless of who
@@ -397,7 +404,7 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		}
 		// Carried triggers die with the budget too — merge their
 		// notes into the same terminal write.
-		deadEdges, deadNotes, deadReports := collectDeadDeferred()
+		deadEdges, deadNotes, deadReports := collectDeadDeferred(edgeOutcomeExhausted)
 		noteEdges = append(noteEdges, deadEdges...)
 		notes = append(notes, deadNotes...)
 		reports = append(reports, deadReports...)
@@ -405,7 +412,7 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		// assistant message — it is the last assistant message of the
 		// run, so the text reaches RunComplete.Text for `crush run`.
 		a.writeRepairExhaustion(ctx, call, in.currentAssistant, noteEdges, notes, reports)
-		return false
+		return false, call
 	}
 
 	// Escalation-family prompts win the single retry slot outright —
@@ -446,9 +453,9 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		for _, c := range losers {
 			a.recordEdgeFiring(ctx, call, in, c.edge.name, c.t, edgeOutcomeDeferred)
 		}
-		deadEdges, deadNotes, deadReports := collectDeadDeferred()
+		deadEdges, deadNotes, deadReports := collectDeadDeferred(edgeOutcomeCancelled)
 		a.writeRepairExhaustion(ctx, call, in.currentAssistant, deadEdges, deadNotes, deadReports)
-		return false
+		return false, call
 	}
 
 	// Clone the caller's call — ProviderOptions, sampling params,
@@ -462,6 +469,7 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 	retry.Accepted = nil
 	retry.acceptSeq = 0
 	retry.deferred = nil
+	var deadEdges, deadNotes, deadReports []string
 	for _, c := range losers {
 		// Only session-state evidence survives an escalation turn:
 		// the escalate run's steps are new, so a step-bound trigger
@@ -475,11 +483,41 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		// transcript shows, so the drop is the right call.
 		if c.t.sessionState {
 			retry.deferred = append(retry.deferred, deferredTrigger{edge: c.edge, trigger: c.t})
+			continue
+		}
+		// A step-bound loser (masked-stall replan losing to
+		// burn-watch) is dropped, but its terminal evidence isn't —
+		// the note/report still lands on the final assistant message
+		// so the signal survives the lost slot.
+		if c.t.report != "" {
+			deadReports = append(deadReports, c.t.report)
+		}
+		if c.edge.note != nil {
+			if n := c.edge.note(c.t, call.RepairAttempts); n != "" {
+				deadNotes = append(deadNotes, n)
+				deadEdges = append(deadEdges, c.edge.name)
+			}
 		}
 	}
 	// Carried triggers that found no slot at this non-clean boundary
 	// ride forward — they survive to the next clean boundary.
 	retry.deferred = append(retry.deferred, stillDeferred...)
+
+	if ctx.Err() != nil {
+		// Cancelled between verdict and enqueue: nothing runs, so
+		// every contender records cancelled — a `fired` row for a
+		// retry that never ran would be a telemetry lie. Carried
+		// triggers die here too.
+		for _, c := range contenders {
+			a.recordEdgeFiring(ctx, call, in, c.edge.name, c.t, edgeOutcomeCancelled)
+		}
+		cancelEdges, cancelNotes, cancelReports := collectDeadDeferred(edgeOutcomeCancelled)
+		cancelEdges = append(cancelEdges, deadEdges...)
+		cancelNotes = append(cancelNotes, deadNotes...)
+		cancelReports = append(cancelReports, deadReports...)
+		a.writeRepairExhaustion(ctx, call, in.currentAssistant, cancelEdges, cancelNotes, cancelReports)
+		return false, call
+	}
 
 	for _, c := range winners {
 		outcome := edgeOutcomeFired
@@ -496,18 +534,14 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 	for _, c := range losers {
 		a.recordEdgeFiring(ctx, call, in, c.edge.name, c.t, edgeOutcomeDeferred)
 	}
+	a.writeRepairExhaustion(ctx, call, in.currentAssistant, deadEdges, deadNotes, deadReports)
 
-	if ctx.Err() != nil {
-		// Cancelled after the verdicts were recorded — do not enqueue
-		// a retry behind clearQueueAndNotify's back.
-		return false
-	}
 	mu := a.sessionMu(call.SessionID)
 	mu.Lock()
 	existing, _ := a.messageQueue.Get(call.SessionID)
 	a.messageQueue.Set(call.SessionID, append([]SessionAgentCall{retry}, existing...))
 	mu.Unlock()
-	return true
+	return true, call
 }
 
 // recordCancelledBoundary writes cancelled rows for the edges a
@@ -547,10 +581,13 @@ func (a *sessionAgent) recordEdgeFiring(ctx context.Context, call SessionAgentCa
 	turnSeq := in.turnSeq
 	if turnSeq == 0 && call.RunStamp != 0 {
 		// The user-message count failed — key the row off the run
-		// stamp instead of collapsing every edge's rows onto
-		// turn_seq=0 and letting INSERT OR IGNORE eat them. The
-		// negative keeps it out of the real ordinal range.
-		turnSeq = -int64(call.RunStamp)
+		// stamp and repair attempt instead of collapsing every
+		// edge's rows onto turn_seq=0 and letting INSERT OR IGNORE
+		// eat them. The stamp is chain-shared, so the attempt index
+		// disambiguates boundaries inside the chain; the negative
+		// keeps the fallback out of the real ordinal range. The mask
+		// bounds the product inside int64.
+		turnSeq = -((int64(call.RunStamp)%(1<<40))*4 + int64(call.RepairAttempts))
 	}
 	params := db.InsertEdgeFiringParams{
 		SessionID:      call.SessionID,
@@ -1091,6 +1128,24 @@ func stepWriteSet(steps []fantasy.StepResult) []string {
 	for _, step := range steps {
 		for _, tc := range step.Content.ToolCalls() {
 			if !toolclass.IsMutatingCall(tc.ToolName, tc.Input) {
+				continue
+			}
+			if tc.ToolName == tools.BashToolName {
+				// A bash mutation's target is the redirect operand,
+				// not a path field — the toolclass vocabulary
+				// already extracts it.
+				var params struct {
+					Command string `json:"command"`
+				}
+				if json.Unmarshal([]byte(tc.Input), &params) != nil {
+					continue
+				}
+				for _, p := range toolclass.BashRedirectTargets(params.Command) {
+					if p != "" && !seen[p] {
+						seen[p] = true
+						out = append(out, p)
+					}
+				}
 				continue
 			}
 			var params struct {

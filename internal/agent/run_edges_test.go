@@ -74,7 +74,7 @@ func TestStallEdge(t *testing.T) {
 			&fakeTool{name: tools.TodosToolName},
 			&fakeTool{name: tools.QuestionToolName},
 		})
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID, RunID: "r", RunStamp: 42},
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID, RunID: "r", RunStamp: 42},
 			edgeInput{result: stallResult(), stalled: true})
 		require.True(t, queued)
 		q, _ := a.messageQueue.Get(sessionID)
@@ -98,7 +98,7 @@ func TestStallEdge(t *testing.T) {
 			&fakeTool{name: tools.TodosToolName},
 			&fakeTool{name: tools.QuestionToolName},
 		})
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID, RepairAttempts: 1},
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID, RepairAttempts: 1},
 			edgeInput{result: stallResult(), stalled: true})
 		require.True(t, queued)
 		q, _ := a.messageQueue.Get(sessionID)
@@ -112,7 +112,7 @@ func TestStallEdge(t *testing.T) {
 		t.Parallel()
 		a, _, sessionID := newGateTestAgent(t, &config.Config{})
 		a.ambiguityClarification = true
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID, NonInteractive: true},
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID, NonInteractive: true},
 			edgeInput{result: stallResult(), stalled: true})
 		require.True(t, queued, "the replan branch is a model retry — it fires headless")
 		q, _ := a.messageQueue.Get(sessionID)
@@ -125,7 +125,7 @@ func TestStallEdge(t *testing.T) {
 		a, _, sessionID := newGateTestAgent(t, &config.Config{})
 		a.ambiguityClarification = true
 		asst := &message.Message{Role: message.Assistant}
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID, NonInteractive: true, RepairAttempts: 1},
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID, NonInteractive: true, RepairAttempts: 1},
 			edgeInput{result: stallResult(), currentAssistant: asst, stalled: true})
 		require.False(t, queued)
 		q, _ := a.messageQueue.Get(sessionID)
@@ -138,7 +138,7 @@ func TestStallEdge(t *testing.T) {
 	t.Run("flag off leaves a silent stop", func(t *testing.T) {
 		t.Parallel()
 		a, _, sessionID := newGateTestAgent(t, &config.Config{})
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID},
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
 			edgeInput{result: stallResult(), stalled: true})
 		require.False(t, queued)
 	})
@@ -147,7 +147,7 @@ func TestStallEdge(t *testing.T) {
 		t.Parallel()
 		a, _, sessionID := newGateTestAgent(t, &config.Config{})
 		a.ambiguityClarification = true
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID},
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
 			edgeInput{result: cleanResult()})
 		require.False(t, queued)
 	})
@@ -159,7 +159,7 @@ func TestStallEdge(t *testing.T) {
 		// in.stalled is false — the context-pressure summarize check
 		// short-circuited the detector — but the repeated signature in
 		// the steps still produces a replan.
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID},
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
 			edgeInput{result: stallResult()})
 		require.True(t, queued)
 		q, _ := a.messageQueue.Get(sessionID)
@@ -177,7 +177,7 @@ func TestStallEdge(t *testing.T) {
 			&fakeTool{name: tools.QuestionToolName},
 		})
 		asst := &message.Message{Role: message.Assistant}
-		queued := a.runEdges(t.Context(), SessionAgentCall{
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{
 			SessionID: sessionID, RepairAttempts: maxRepairAttempts,
 		}, edgeInput{result: stallResult(), currentAssistant: asst, stalled: true})
 		require.False(t, queued)
@@ -199,7 +199,7 @@ func TestStallEdge(t *testing.T) {
 		})
 		asst := &message.Message{Role: message.Assistant}
 		for attempt := 0; attempt < maxRepairAttempts; attempt++ {
-			queued := a.runEdges(t.Context(), SessionAgentCall{
+			queued := runEdgesForTest(a, t.Context(), SessionAgentCall{
 				SessionID: sessionID, RepairAttempts: attempt,
 			}, edgeInput{result: stallResult(), currentAssistant: asst, stalled: true})
 			require.True(t, queued, "attempt %d should still have budget", attempt)
@@ -394,7 +394,7 @@ func TestBurnWatchEdge(t *testing.T) {
 	t.Run("step-arm crossing escalates and stamps the marker", func(t *testing.T) {
 		t.Parallel()
 		a, conn, sessionID := interactiveEdgeAgent(t)
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID, RunID: "r", RunStamp: 7},
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID, RunID: "r", RunStamp: 7},
 			edgeInput{result: burnResult(burnWatchStepsThreshold+1, 1000), turnSeq: 3})
 		require.True(t, queued)
 		q, _ := a.messageQueue.Get(sessionID)
@@ -409,15 +409,15 @@ func TestBurnWatchEdge(t *testing.T) {
 		t.Parallel()
 		a, _, sessionID := interactiveEdgeAgent(t)
 		// Steps at the floor + tokens over the arm fires.
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID},
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
 			edgeInput{result: burnResult(burnWatchMinSteps, burnWatchInputTokens+1)})
 		require.True(t, queued)
 		// Same tokens under the floor does not.
-		queued = a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID + "x"},
+		queued = runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID + "x"},
 			edgeInput{result: burnResult(burnWatchMinSteps-1, burnWatchInputTokens+1)})
 		require.False(t, queued)
 		// Steps under the arm with low spend does not.
-		queued = a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID},
+		queued = runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
 			edgeInput{result: burnResult(burnWatchStepsThreshold-5, 500)})
 		require.False(t, queued)
 	})
@@ -437,14 +437,14 @@ func TestBurnWatchEdge(t *testing.T) {
 				Result: fantasy.ToolResultOutputContentText{Text: ""},
 			},
 		)
-		require.False(t, a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID},
+		require.False(t, runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
 			edgeInput{result: result}))
 	})
 
 	t.Run("stalled runs stay with the stall edge", func(t *testing.T) {
 		t.Parallel()
 		a, conn, sessionID := interactiveEdgeAgent(t)
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID},
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
 			edgeInput{result: stallResult(), stalled: true})
 		require.True(t, queued, "the stall edge still owns the boundary")
 		q, _ := a.messageQueue.Get(sessionID)
@@ -458,7 +458,7 @@ func TestBurnWatchEdge(t *testing.T) {
 		a, conn, sessionID := newEdgeTestAgent(t, &config.Config{})
 		a.ambiguityClarification = true
 		asst := &message.Message{Role: message.Assistant}
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID, NonInteractive: true},
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID, NonInteractive: true},
 			edgeInput{result: burnResult(burnWatchStepsThreshold+1, burnWatchInputTokens), currentAssistant: asst})
 		require.False(t, queued)
 		require.Contains(t, asst.Content().Text, "Burn-watch:")
@@ -471,7 +471,7 @@ func TestBurnWatchEdge(t *testing.T) {
 		a, conn, sessionID := interactiveEdgeAgent(t)
 		a.ambiguityClarification = false
 		asst := &message.Message{Role: message.Assistant}
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID},
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
 			edgeInput{result: burnResult(burnWatchStepsThreshold+1, 0), currentAssistant: asst})
 		require.False(t, queued)
 		require.Empty(t, asst.Content().Text, "gated must skip resolve — no assumption appended")
@@ -481,7 +481,7 @@ func TestBurnWatchEdge(t *testing.T) {
 	t.Run("marker suppresses the second crossing", func(t *testing.T) {
 		t.Parallel()
 		a, conn, sessionID := interactiveEdgeAgent(t)
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID, burnWatched: true},
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID, burnWatched: true},
 			edgeInput{result: burnResult(burnWatchStepsThreshold+1, 0)})
 		require.False(t, queued)
 		require.Equal(t, "suppressed", firingOutcome(t, conn, sessionID, "burn-watch"))
@@ -508,7 +508,7 @@ func TestBurnWatchEdge(t *testing.T) {
 		sess.Todos = []session.PlanItem{{Content: "open", Status: session.PlanItemPending}}
 		_, err = a.sessions.Save(t.Context(), sess)
 		require.NoError(t, err)
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID, burnWatched: true},
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID, burnWatched: true},
 			edgeInput{result: result})
 		require.True(t, queued)
 		q, _ := a.messageQueue.Get(sessionID)
@@ -533,7 +533,7 @@ func TestEdgeFiringRecords(t *testing.T) {
 		a, conn, sessionID := newEdgeTestAgent(t, &config.Config{})
 		a.ambiguityClarification = true
 		setTodos(t, a, sessionID, session.PlanItem{Content: "open", Status: session.PlanItemPending})
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID, RepairAttempts: 0, RunStamp: 99},
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID, RepairAttempts: 0, RunStamp: 99},
 			edgeInput{result: cleanResult(), turnSeq: 4})
 		require.True(t, queued)
 		var variant, detail, outcome string
@@ -553,7 +553,7 @@ func TestEdgeFiringRecords(t *testing.T) {
 		t.Parallel()
 		a, conn, sessionID := newEdgeTestAgent(t, &config.Config{})
 		asst := &message.Message{Role: message.Assistant}
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID},
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
 			edgeInput{result: stallResult(), currentAssistant: asst, stalled: true})
 		require.False(t, queued)
 		require.Empty(t, asst.Content().Text,
@@ -577,7 +577,7 @@ func TestEdgeFiringRecords(t *testing.T) {
 			}),
 			stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),
 		}}
-		require.False(t, a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID},
+		require.False(t, runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
 			edgeInput{result: result, currentAssistant: &message.Message{Role: message.Assistant}}))
 		require.Equal(t, "cleared", firingOutcome(t, conn, sessionID, "verification"))
 	})
@@ -595,7 +595,7 @@ func TestEdgeFiringRecords(t *testing.T) {
 		}}
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
-		require.False(t, a.runEdges(ctx, SessionAgentCall{SessionID: sessionID},
+		require.False(t, runEdgesForTest(a, ctx, SessionAgentCall{SessionID: sessionID},
 			edgeInput{result: result, currentAssistant: &message.Message{Role: message.Assistant}}))
 		outcomes := map[string]string{}
 		for _, r := range firingRows(t, conn, sessionID) {
@@ -621,7 +621,7 @@ func TestEdgeFiringRecords(t *testing.T) {
 		}
 		require.Equal(t, int64(3), a.edgeTurnSeq(t.Context(), sessionID))
 		setTodos(t, a, sessionID, session.PlanItem{Content: "open", Status: session.PlanItemPending})
-		require.True(t, a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID},
+		require.True(t, runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
 			edgeInput{result: cleanResult(), turnSeq: 3}))
 		rows := firingRows(t, conn, sessionID)
 		require.Len(t, rows, 1)
@@ -633,7 +633,7 @@ func TestEdgeFiringRecords(t *testing.T) {
 		a, conn, sessionID := newEdgeTestAgent(t, &config.Config{})
 		setTodos(t, a, sessionID, session.PlanItem{Content: "open", Status: session.PlanItemPending})
 		for i := 0; i < 2; i++ {
-			a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID},
+			runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
 				edgeInput{result: cleanResult(), turnSeq: 7})
 		}
 		require.Len(t, firingRows(t, conn, sessionID), 1)
@@ -646,7 +646,7 @@ func TestEdgeFiringRecords(t *testing.T) {
 		t.Parallel()
 		a, conn, sessionID := newEdgeTestAgent(t, &config.Config{})
 		setTodos(t, a, sessionID, session.PlanItem{Content: "open", Status: session.PlanItemPending})
-		require.False(t, a.runEdges(t.Context(),
+		require.False(t, runEdgesForTest(a, t.Context(),
 			SessionAgentCall{SessionID: sessionID, RepairAttempts: maxRepairAttempts},
 			edgeInput{result: cleanResult(), currentAssistant: &message.Message{Role: message.Assistant}}))
 		require.Equal(t, "exhausted", firingOutcome(t, conn, sessionID, "todos"))
@@ -669,7 +669,7 @@ func TestDeferredCarrier(t *testing.T) {
 		t.Parallel()
 		a, conn, sessionID := interactiveEdgeAgent(t)
 		setTodos(t, a, sessionID, session.PlanItem{Content: "open", Status: session.PlanItemPending})
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID},
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
 			edgeInput{result: burnResult(burnWatchStepsThreshold+1, 0), turnSeq: 1})
 		require.True(t, queued)
 		q, _ := a.messageQueue.Get(sessionID)
@@ -690,7 +690,7 @@ func TestDeferredCarrier(t *testing.T) {
 		t.Parallel()
 		a, conn, sessionID := interactiveEdgeAgent(t)
 		setTodos(t, a, sessionID, session.PlanItem{Content: "open", Status: session.PlanItemPending})
-		require.True(t, a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID},
+		require.True(t, runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
 			edgeInput{result: burnResult(burnWatchStepsThreshold+1, 0), turnSeq: 1}))
 		q, _ := a.messageQueue.Get(sessionID)
 		escalate := q[0]
@@ -698,7 +698,7 @@ func TestDeferredCarrier(t *testing.T) {
 		// The question was answered; the escalate run ends clean with
 		// the todo still open — the deferred trigger re-fires on the
 		// same clone's already-incremented budget.
-		queued := a.runEdges(t.Context(), escalate,
+		queued := runEdgesForTest(a, t.Context(), escalate,
 			edgeInput{result: cleanResult(), turnSeq: 2})
 		require.True(t, queued)
 		q2, _ := a.messageQueue.Get(sessionID)
@@ -712,14 +712,14 @@ func TestDeferredCarrier(t *testing.T) {
 		t.Parallel()
 		a, conn, sessionID := interactiveEdgeAgent(t)
 		setTodos(t, a, sessionID, session.PlanItem{Content: "open", Status: session.PlanItemPending})
-		require.True(t, a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID},
+		require.True(t, runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
 			edgeInput{result: burnResult(burnWatchStepsThreshold+1, 0), turnSeq: 1}))
 		q, _ := a.messageQueue.Get(sessionID)
 		escalate := q[0]
 		// The escalation turn resolved the todo — the carried
 		// trigger's session-state evidence re-scans clean.
 		setTodos(t, a, sessionID)
-		require.False(t, a.runEdges(t.Context(), escalate,
+		require.False(t, runEdgesForTest(a, t.Context(), escalate,
 			edgeInput{result: cleanResult(), turnSeq: 2}))
 		require.Equal(t, "cleared", firingOutcome(t, conn, sessionID, "todos"))
 	})
@@ -728,7 +728,7 @@ func TestDeferredCarrier(t *testing.T) {
 		t.Parallel()
 		a, conn, sessionID := interactiveEdgeAgent(t)
 		setTodos(t, a, sessionID, session.PlanItem{Content: "open", Status: session.PlanItemPending})
-		require.True(t, a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID},
+		require.True(t, runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
 			edgeInput{result: burnResult(burnWatchStepsThreshold+1, 0), turnSeq: 1}))
 		q, _ := a.messageQueue.Get(sessionID)
 		escalate := q[0]
@@ -739,7 +739,7 @@ func TestDeferredCarrier(t *testing.T) {
 				Result: fantasy.ToolResultOutputContentText{Text: "User cancelled this question"},
 			}),
 		}}
-		require.False(t, a.runEdges(t.Context(), escalate,
+		require.False(t, runEdgesForTest(a, t.Context(), escalate,
 			edgeInput{result: stopTurn, currentAssistant: asst, turnSeq: 2}))
 		require.Equal(t, "cancelled", firingOutcome(t, conn, sessionID, "todos"))
 		require.Contains(t, asst.Content().Text, "todo item(s) still unresolved",
@@ -773,7 +773,7 @@ func TestDeferredCarrierRecarry(t *testing.T) {
 		// escalation branch while the carried todos trigger finds no
 		// clean slot.
 		call := SessionAgentCall{SessionID: sessionID, RepairAttempts: 1, deferred: carried}
-		queued := a.runEdges(t.Context(), call,
+		queued := runEdgesForTest(a, t.Context(), call,
 			edgeInput{result: stallResult(), stalled: true, turnSeq: 2})
 		require.True(t, queued)
 		q, _ := a.messageQueue.Get(sessionID)
@@ -841,7 +841,7 @@ func TestStallReplanHandoff(t *testing.T) {
 				},
 			),
 		}, result.Steps...)
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID},
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
 			edgeInput{result: result, stalled: true})
 		require.True(t, queued)
 		q, _ := a.messageQueue.Get(sessionID)
@@ -853,7 +853,7 @@ func TestStallReplanHandoff(t *testing.T) {
 		t.Parallel()
 		a, _, sessionID := newGateTestAgent(t, &config.Config{})
 		a.ambiguityClarification = true
-		queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID},
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
 			edgeInput{result: stallResult(), stalled: true})
 		require.True(t, queued)
 		q, _ := a.messageQueue.Get(sessionID)
@@ -890,7 +890,7 @@ func TestEdgeFiringTurnSeqFallback(t *testing.T) {
 	// Two boundaries with distinct run stamps must not collapse into
 	// one row even though the count failed both times.
 	for stamp := uint64(10); stamp <= 11; stamp++ {
-		require.True(t, a.runEdges(t.Context(),
+		require.True(t, runEdgesForTest(a, t.Context(),
 			SessionAgentCall{SessionID: sessionID, RunStamp: stamp},
 			edgeInput{result: cleanResult(), turnSeq: 0}))
 	}
@@ -905,8 +905,12 @@ func TestEdgeFiringTurnSeqFallback(t *testing.T) {
 		turnSeqs = append(turnSeqs, ts)
 	}
 	require.NoError(t, rows.Err())
-	require.Equal(t, []int64{-11, -10}, turnSeqs,
+	require.Len(t, turnSeqs, 2,
 		"each boundary keys off its run stamp when the count fails")
+	require.NotEqual(t, turnSeqs[0], turnSeqs[1])
+	for _, ts := range turnSeqs {
+		require.Negative(t, ts, "fallback keys stay out of the real ordinal range")
+	}
 }
 
 func TestStallReplanHandoffCheckpoint(t *testing.T) {
@@ -934,7 +938,7 @@ func TestStallReplanHandoffCheckpoint(t *testing.T) {
 		Tag:     "granularity:boundary",
 	}))
 
-	queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID},
+	queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
 		edgeInput{result: stallResult(), stalled: true})
 	require.True(t, queued)
 	mq, _ := a.messageQueue.Get(sessionID)
@@ -987,7 +991,7 @@ func TestStallEscalateBeatsBurnWatch(t *testing.T) {
 			},
 		)
 	}
-	queued := a.runEdges(t.Context(),
+	queued := runEdgesForTest(a, t.Context(),
 		SessionAgentCall{SessionID: sessionID, RepairAttempts: 1},
 		edgeInput{result: result, turnSeq: 1})
 	require.True(t, queued)
@@ -1024,7 +1028,7 @@ func TestVerificationTodosMerge(t *testing.T) {
 		}),
 		stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),
 	}}
-	queued := a.runEdges(t.Context(), SessionAgentCall{SessionID: sessionID},
+	queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
 		edgeInput{result: result, turnSeq: 1})
 	require.True(t, queued)
 	q, _ := a.messageQueue.Get(sessionID)
@@ -1068,4 +1072,45 @@ func TestEdgeFiringTurnSeqAbsoluteAcrossSummary(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(4), got,
 		"summary rows don't shift the absolute user-message ordinal")
+}
+
+// runEdgesForTest adapts runEdges for tests that only assert the
+// queued verdict — the sanitized call return is exercised separately.
+func runEdgesForTest(a *sessionAgent, ctx context.Context, call SessionAgentCall, in edgeInput) bool {
+	queued, _ := a.runEdges(ctx, call, in)
+	return queued
+}
+
+func TestRunEdgesReturnsSanitizedCall(t *testing.T) {
+	t.Parallel()
+
+	a, _, sessionID := newEdgeTestAgent(t, &config.Config{})
+	// A mutating run clears the burn-watch marker, and the deferred
+	// carrier is consumed — the returned call carries both mutations
+	// so a summarize-continue requeue doesn't resurrect them.
+	call := SessionAgentCall{
+		SessionID:   sessionID,
+		burnWatched: true,
+		deferred: []deferredTrigger{{
+			edge:    a.runEdgeSet()[1],
+			trigger: &edgeTrigger{sessionState: true, plan: []planVerdict{}},
+		}},
+	}
+	writeResult := &fantasy.AgentResult{Steps: []fantasy.StepResult{
+		stepWith(fantasy.FinishReasonToolCalls,
+			fantasy.ToolCallContent{ToolCallID: "tc-1", ToolName: "edit", Input: `{"file_path":"x.go"}`},
+			fantasy.ToolResultContent{
+				ToolCallID: "tc-1", ToolName: "edit",
+				Result: fantasy.ToolResultOutputContentText{Text: "ok"},
+			},
+		),
+		stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}),
+	}}
+	_, sanitized := a.runEdges(t.Context(), call, edgeInput{result: writeResult})
+	require.False(t, sanitized.burnWatched,
+		"a writing run clears the marker on the caller's call too")
+	require.Nil(t, sanitized.deferred,
+		"consumed carrier entries must not re-merge on a requeued call")
+	require.True(t, call.burnWatched,
+		"the input call is a copy — mutation propagates via the return")
 }

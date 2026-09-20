@@ -12,16 +12,18 @@ import (
 const getEdgeFiringStats = `-- name: GetEdgeFiringStats :many
 SELECT
     edge,
+    variant,
     outcome,
     COUNT(*) AS firings,
     COUNT(DISTINCT session_id) AS sessions
 FROM edge_firings
-GROUP BY edge, outcome
-ORDER BY edge, outcome
+GROUP BY edge, variant, outcome
+ORDER BY edge, variant, outcome
 `
 
 type GetEdgeFiringStatsRow struct {
 	Edge     string `json:"edge"`
+	Variant  string `json:"variant"`
 	Outcome  string `json:"outcome"`
 	Firings  int64  `json:"firings"`
 	Sessions int64  `json:"sessions"`
@@ -38,6 +40,7 @@ func (q *Queries) GetEdgeFiringStats(ctx context.Context) ([]GetEdgeFiringStatsR
 		var i GetEdgeFiringStatsRow
 		if err := rows.Scan(
 			&i.Edge,
+			&i.Variant,
 			&i.Outcome,
 			&i.Firings,
 			&i.Sessions,
