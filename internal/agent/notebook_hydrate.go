@@ -118,13 +118,16 @@ func (a *sessionAgent) maybeHydrateNotebook(ctx context.Context, sess session.Se
 		return
 	}
 	seeds := notebook.BuildHydrationSeeds(items, notebook.HydrationSeedMaxTokens)
+	mem0Seeds := len(seeds)
 	// The open-items payload is the highest-value seed and sources
 	// locally — the sessions table is the same DB, no MCP round-trip,
 	// and it survives a sync that raced. Landing last gives it the
 	// highest event number: it wins the selection budget and renders
 	// last — closest to the prompt.
+	planSeeds := 0
 	if plan := a.planSeedEntry(fetchCtx, sess); plan != nil {
 		seeds = append(seeds, *plan)
+		planSeeds = 1
 	}
 	if len(seeds) == 0 {
 		// A verifiably empty result commits no marker, so without the
@@ -147,6 +150,12 @@ func (a *sessionAgent) maybeHydrateNotebook(ctx context.Context, sess session.Se
 	}
 	if seeded {
 		slog.Debug("Session notebook hydrated", "session_id", sess.ID, "seeds", len(seeds))
+		if a.nbStats != nil {
+			stats, _ := a.nbStats.Get(sess.ID)
+			stats.HydrationSeeds += mem0Seeds
+			stats.HydrationPlanSeeds += planSeeds
+			a.nbStats.Set(sess.ID, stats)
+		}
 	}
 }
 

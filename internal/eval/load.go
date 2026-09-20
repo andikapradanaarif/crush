@@ -301,9 +301,18 @@ func armStarvationRequires(field string) []string {
 	if strings.HasPrefix(field, "stub_stats.") {
 		return []string{"notebook_stub_superseded", "notebook_enabled"}
 	}
+	if strings.HasPrefix(field, "checkpoints.") {
+		return []string{"notebook_checkpoint", "notebook_enabled"}
+	}
+	if strings.HasPrefix(field, "hydration.") {
+		return []string{"notebook_hydration", "notebook_enabled"}
+	}
 	if strings.HasPrefix(field, "recalls.") {
 		return []string{"notebook_enabled"}
 	}
+	// prior_turns.* and digests.* gate on notebook_prior_turns's
+	// string value (stub|digest), which the bool resolver can't
+	// express — left unmapped rather than half-checked.
 	return nil
 }
 
@@ -349,6 +358,8 @@ func checkArmStarvation(armName, key, op, field string, resolve func(string) (bo
 var flagCodeDefaults = map[string]bool{
 	"notebook_enabled":         true,
 	"notebook_stub_superseded": false,
+	"notebook_checkpoint":      true,
+	"notebook_hydration":       true,
 	"project_index":            false,
 }
 

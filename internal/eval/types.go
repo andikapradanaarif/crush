@@ -191,6 +191,11 @@ type RunRecord struct {
 	// rendered split as Checkpoints, counting granularity:turn
 	// entries.
 	Digests Checkpoints `json:"digests"`
+	// Hydration carries the session-hydration telemetry — seeds is
+	// the firing side (entries committed by SeedEntries), rendered
+	// the present-at-render side. The cold-start arm's coverage gate
+	// reads min_hydration.seeds.
+	Hydration Hydration `json:"hydration"`
 	// EdgeFirings is the run's per-edge outcome split — the
 	// edge_firings telemetry the flag-flip decisions consume.
 	EdgeFirings map[string]map[string]int `json:"edge_firings,omitempty"`
@@ -269,6 +274,16 @@ type Recalls struct {
 type Checkpoints struct {
 	Written  int `json:"written"`
 	Rendered int `json:"rendered"`
+}
+
+// Hydration mirrors the agent's session-hydration telemetry:
+// seeds counts committed mem0-sourced seed entries, plan_seeds the
+// locally sourced plan seed, rendered counts prefix renders that
+// included a hydrated-tagged entry.
+type Hydration struct {
+	Seeds     int `json:"seeds"`
+	PlanSeeds int `json:"plan_seeds"`
+	Rendered  int `json:"rendered"`
 }
 
 // Env is the forensic record: when a trajectory rots, the diff between

@@ -462,7 +462,12 @@ option notebook-prior-turns digest     # collapse + generated turn digest
 ## Measurement
 
 `EVAL_HARNESS` paired experiment, three arms on the multi-turn
-corpus slice: `verbatim` / `stub` / `digest`.
+corpus slice: `verbatim` / `stub` / `digest`. The runner is
+control/treatment only, so the three arms land as two paired
+experiments — `notebook-prior-turns-stub` (verbatim vs stub,
+gated on `min_prior_turns.turns_collapsed`) and
+`notebook-prior-turns-digest` (stub vs digest, gated on
+`min_digests.written`).
 
 | Metric                                              | Question                                                       |
 | --------------------------------------------------- | -------------------------------------------------------------- |
