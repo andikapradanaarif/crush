@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -316,7 +317,11 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		if t != nil && (t.hint == edgeOutcomeGated || t.hint == edgeOutcomeSuppressed) {
 			// Flag-off or marker-suppressed: the predicate was still
 			// evaluated — record the verdict and skip resolve, notes,
-			// and the deferred merge entirely.
+			// and the deferred merge entirely. A carried trigger for
+			// the edge dies here unrecorded — the gated/suppressed row
+			// holds the edge's (session, turn_seq, edge) key, so a
+			// second row can't coexist; its earlier deferred row is
+			// the audit trail.
 			a.recordEdgeFiring(ctx, call, in, edge.name, t, t.hint)
 			delete(carried, edge.name)
 			continue
@@ -622,6 +627,15 @@ func (a *sessionAgent) recordCancelledBoundary(ctx context.Context, call Session
 			t = d.trigger
 		}
 		a.recordEdgeFiring(ctx, call, in, edge.name, t, edgeOutcomeCancelled)
+	}
+	for _, d := range carried {
+		// Leftover entries name edges no longer in the set —
+		// unreachable today (every carried trigger is a set member)
+		// but the post-loop path records them; the cancel path
+		// shouldn't leak the row.
+		if !slices.ContainsFunc(remaining, func(e runEdge) bool { return e.name == d.edge.name }) {
+			a.recordEdgeFiring(ctx, call, in, d.edge.name, d.trigger, edgeOutcomeCancelled)
+		}
 	}
 }
 
