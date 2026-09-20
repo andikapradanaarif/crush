@@ -467,7 +467,12 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		// the escalate run's steps are new, so a step-bound trigger
 		// riding the carrier would re-fire on stale evidence. Those
 		// losers are dropped — still recorded deferred at the
-		// boundary where they lost.
+		// boundary where they lost. Verification is the one loser
+		// whose evidence is durable (failed verdicts persist on the
+		// stored tool results), but re-firing on stored metadata
+		// would re-litigate checks the escalation turn may already
+		// have resolved — the verdict stays on the tool result the
+		// transcript shows, so the drop is the right call.
 		if c.t.sessionState {
 			retry.deferred = append(retry.deferred, deferredTrigger{edge: c.edge, trigger: c.t})
 		}

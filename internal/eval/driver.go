@@ -28,13 +28,17 @@ const EvalFlagsEnvVar = "CRUSH_EVAL_FLAGS"
 
 // RunResult is what one trajectory run (all turns) produced.
 type RunResult struct {
-	Steps         int
-	Tokens        TokenUsage
-	StubStats     StubStats
-	PriorTurns    PriorTurns
-	Recalls       Recalls
-	Checkpoints   Checkpoints
-	Digests       Checkpoints
+	Steps       int
+	Tokens      TokenUsage
+	StubStats   StubStats
+	PriorTurns  PriorTurns
+	Recalls     Recalls
+	Checkpoints Checkpoints
+	Digests     Checkpoints
+	// EdgeFirings is the trajectory-wide edge/outcome firing split —
+	// the summed per-turn deltas (each `crush run` process's counters
+	// are in-memory and reset on spawn).
+	EdgeFirings   map[string]map[string]int
 	SessionID     string
 	ModelResolved string
 	ModelSmall    string
@@ -122,9 +126,13 @@ type runTelemetry struct {
 		Written  int `json:"written"`
 		Rendered int `json:"rendered"`
 	} `json:"digests"`
-	Model        string `json:"model"`
-	ModelSmall   string `json:"model_small"`
-	ModelSummary string `json:"model_summary"`
+	// EdgeFirings splits run-boundary edge firing counts by edge and
+	// outcome — the per-turn delta of the session's edge_firings rows
+	// this process recorded (repair retries share the process).
+	EdgeFirings  map[string]map[string]int `json:"edge_firings"`
+	Model        string                    `json:"model"`
+	ModelSmall   string                    `json:"model_small"`
+	ModelSummary string                    `json:"model_summary"`
 	// ResolvedOptions is the child's effective config projected onto
 	// the manifest flags — what actually ran, not what the arm asked.
 	ResolvedOptions map[string]any `json:"resolved_options"`
@@ -280,6 +288,17 @@ func (res *RunResult) addTurnTelemetry(tel runTelemetry) {
 	res.Checkpoints.Rendered += tel.Checkpoints.Rendered
 	res.Digests.Written += tel.Digests.Written
 	res.Digests.Rendered += tel.Digests.Rendered
+	for edge, outcomes := range tel.EdgeFirings {
+		if res.EdgeFirings == nil {
+			res.EdgeFirings = map[string]map[string]int{}
+		}
+		if res.EdgeFirings[edge] == nil {
+			res.EdgeFirings[edge] = map[string]int{}
+		}
+		for outcome, n := range outcomes {
+			res.EdgeFirings[edge][outcome] += n
+		}
+	}
 }
 
 // remainingSteps converts the trajectory-wide max_steps budget into

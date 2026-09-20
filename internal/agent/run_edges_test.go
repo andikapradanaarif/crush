@@ -1039,3 +1039,33 @@ func TestVerificationTodosMerge(t *testing.T) {
 	require.Equal(t, "fired", outcomes["verification"])
 	require.Equal(t, "fired", outcomes["todos"])
 }
+
+func TestEdgeFiringTurnSeqAbsoluteAcrossSummary(t *testing.T) {
+	t.Parallel()
+
+	a, conn, sessionID := newEdgeTestAgent(t, &config.Config{})
+	msgs := message.NewService(db.New(conn))
+	for range 3 {
+		_, err := msgs.Create(t.Context(), sessionID, message.CreateMessageParams{
+			Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "hi"}},
+		})
+		require.NoError(t, err)
+	}
+	// Summarize writes an assistant row flagged is_summary_message —
+	// the user-message ordinal must not move.
+	_, err := msgs.Create(t.Context(), sessionID, message.CreateMessageParams{
+		Role:             message.Assistant,
+		IsSummaryMessage: true,
+		Parts:            []message.ContentPart{message.TextContent{Text: "summary"}},
+	})
+	require.NoError(t, err)
+	_, err = msgs.Create(t.Context(), sessionID, message.CreateMessageParams{
+		Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "hi"}},
+	})
+	require.NoError(t, err)
+
+	got, err := a.edgeStore.CountUserMessagesBySession(t.Context(), sessionID)
+	require.NoError(t, err)
+	require.Equal(t, int64(4), got,
+		"summary rows don't shift the absolute user-message ordinal")
+}
