@@ -1114,3 +1114,27 @@ func TestRunEdgesReturnsSanitizedCall(t *testing.T) {
 	require.True(t, call.burnWatched,
 		"the input call is a copy — mutation propagates via the return")
 }
+
+func TestStallEdge_SkipsStopTurnBoundary(t *testing.T) {
+	t.Parallel()
+
+	a, _, sessionID := newEdgeTestAgent(t, &config.Config{})
+	a.ambiguityClarification = true
+	// A saturated signature window ending on a question StopTurn is
+	// an escalation pause, not a loop stop — the fallback must not
+	// produce a replan.
+	result := stallResult()
+	result.Steps[len(result.Steps)-1] = stepWith(fantasy.FinishReasonToolCalls,
+		fantasy.ToolCallContent{ToolCallID: "tc-q", ToolName: "question", Input: `{}`},
+		fantasy.ToolResultContent{
+			ToolCallID: "tc-q", ToolName: "question",
+			StopTurn: true,
+			Result:   fantasy.ToolResultOutputContentText{Text: "asked"},
+		},
+	)
+	queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+		edgeInput{result: result})
+	require.False(t, queued)
+	q, _ := a.messageQueue.Get(sessionID)
+	require.Empty(t, q)
+}

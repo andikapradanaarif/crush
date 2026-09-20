@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
@@ -246,6 +247,12 @@ func (a *sessionAgent) runEdgeSet() []runEdge {
 // same call doesn't carry stale edge state.
 func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in edgeInput) (bool, SessionAgentCall) {
 	if a.configStore == nil || in.result == nil || len(in.result.Steps) == 0 {
+		// The entry guard skips scanning entirely — a carried trigger
+		// landing here still deserves its cancelled row rather than
+		// dying silently (its deferred row already exists).
+		for _, d := range call.deferred {
+			a.recordEdgeFiring(ctx, call, in, d.edge.name, d.trigger, edgeOutcomeCancelled)
+		}
 		return false, call
 	}
 	// A mutating call in the just-finished run resets the write-less
@@ -291,6 +298,14 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 
 	for i, edge := range edges {
 		t := edge.scan(ctx, call, in)
+		if ctx.Err() != nil {
+			// Cancel landed inside scan — this edge's verdict (if
+			// any) is cancelled, not real, and every edge after it
+			// never evaluated.
+			a.recordEdgeFiring(ctx, call, in, edge.name, t, edgeOutcomeCancelled)
+			a.recordCancelledBoundary(ctx, call, in, edges[i+1:], contenders, stillDeferred, carried)
+			return false, call
+		}
 		if t != nil && (t.hint == edgeOutcomeGated || t.hint == edgeOutcomeSuppressed) {
 			// Flag-off or marker-suppressed: the predicate was still
 			// evaluated — record the verdict and skip resolve, notes,
@@ -454,6 +469,12 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 			a.recordEdgeFiring(ctx, call, in, c.edge.name, c.t, edgeOutcomeDeferred)
 		}
 		deadEdges, deadNotes, deadReports := collectDeadDeferred(edgeOutcomeCancelled)
+		// Contender notes/reports collected for the exhaustion path
+		// are still the boundary's terminal evidence — don't drop
+		// them with the prompts.
+		deadEdges = append(deadEdges, noteEdges...)
+		deadNotes = append(deadNotes, notes...)
+		deadReports = append(deadReports, reports...)
 		a.writeRepairExhaustion(ctx, call, in.currentAssistant, deadEdges, deadNotes, deadReports)
 		return false, call
 	}
@@ -601,7 +622,11 @@ func (a *sessionAgent) recordEdgeFiring(ctx context.Context, call SessionAgentCa
 		params.Variant = t.variant
 		params.TriggerDetail = t.detail
 	}
-	n, err := a.edgeStore.InsertEdgeFiring(context.WithoutCancel(ctx), params)
+	// Detached so a mid-boundary cancel can't lose the row, but
+	// bounded — a hung write must not stall the boundary.
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	n, err := a.edgeStore.InsertEdgeFiring(wctx, params)
 	if err != nil {
 		slog.Warn("Failed to record edge firing", "error", err, "session_id", call.SessionID, "edge", edgeName)
 		return
@@ -657,6 +682,20 @@ func cleanStop(in edgeInput) bool {
 	return true
 }
 
+// endedOnStopTurn reports whether the run's terminal step carries a
+// tool result flagged StopTurn — the question tool's pause-for-input.
+func endedOnStopTurn(r *fantasy.AgentResult) bool {
+	if r == nil || len(r.Steps) == 0 {
+		return false
+	}
+	for _, tr := range r.Steps[len(r.Steps)-1].Content.ToolResults() {
+		if tr.StopTurn {
+			return true
+		}
+	}
+	return false
+}
+
 // writeRepairExhaustion appends the merged exhaustion notes to the
 // final assistant message so the terminal state is visible in the TUI
 // and reaches RunComplete.Text for `crush run`. The label names the
@@ -673,8 +712,11 @@ func (a *sessionAgent) writeRepairExhaustion(ctx context.Context, call SessionAg
 		currentAssistant.AppendContent("\n\n" + report)
 	}
 	// Detached like the firing rows: the terminal line must land even
-	// when the run context is already dead.
-	ctx = context.WithoutCancel(ctx)
+	// when the run context is already dead — bounded so a hung write
+	// can't stall the boundary.
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	if err := a.messages.Update(ctx, *currentAssistant); err != nil {
 		slog.Error("Failed to record repair exhaustion", "error", err, "session_id", call.SessionID)
 	} else if err := a.messages.FlushAll(ctx); err != nil {
@@ -971,8 +1013,14 @@ func (a *sessionAgent) scanStallEdge(_ context.Context, call SessionAgentCall, i
 	// the detector and short-circuits it, so a stalled run that also
 	// crossed the context threshold ends with loopStopped false.
 	sig, tool, repeats := repeatedToolSignature(in.result.Steps, loopDetectionWindowSize, loopDetectionMaxRepeats)
-	if !in.stalled && sig == "" {
-		return nil
+	if !in.stalled {
+		// The fallback must not fire where the run paused for user
+		// input — a question-tool StopTurn is an escalation in
+		// progress, not a loop stop, and a saturated window
+		// coinciding with it is coincidence, not evidence.
+		if sig == "" || endedOnStopTurn(in.result) {
+			return nil
+		}
 	}
 	t := &edgeTrigger{
 		assistant: in.currentAssistant,
