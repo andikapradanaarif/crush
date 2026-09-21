@@ -45,13 +45,18 @@ an early post-handoff `todos` call submits bare items unvalidated
 — prompt pressure, not enforcement; closing it means decoupling
 the declaration-shape check from the explore threshold, or
 structured emission is the only path that mechanically produces
-bound items. Two seam details: `AgentSetMain` also fires on
-non-approval transitions (`resetPlanModeState`, Shift+Tab
-cycling) — an explicit `PlanApproved` workspace op is the
-cleaner trigger and makes approval backend-visible; and
+bound items — and the only one where the approved artifact and
+the checked artifact are byte-identical (re-declare validates a
+paraphrase). Three seam details: an explicit `PlanApproved`
+workspace op is *required*, not preferred — the ready marker
+can't distinguish approval from Shift+Tab-away-after-ready, and
+`AgentSetMain` also fires on `resetPlanModeState` and cycling;
 `MintPlanItemID` hashes the `key` for keyed items but content
 for keyless, so merge-on-reapproval only works with keyed seeds
-— keyless seeds need wholesale `sess.Todos` replace.
+— keyless seeds need wholesale `sess.Todos` replace; and the
+gate reads two sources — `planDeclared` checks stored
+`sess.Todos` while resolution checks `planCallResolves` on the
+call itself.
 
 ## Problem
 
