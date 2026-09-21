@@ -39,6 +39,8 @@ type runCoordinator struct {
 
 	setMainAgentErr  error
 	lastMainAgentSet atomic.Value
+	approvePlanErr   error
+	approvedSession  atomic.Value
 	busy             bool
 }
 
@@ -75,7 +77,7 @@ func (s *runCoordinator) Cancel(string) {}
 func (s *runCoordinator) CancelAll()    {}
 func (s *runCoordinator) IsBusy() bool  { return s.busy }
 func (s *runCoordinator) IsSessionBusy(string) bool {
-	return false
+	return s.busy
 }
 func (s *runCoordinator) QueuedPrompts(string) int          { return 0 }
 func (s *runCoordinator) QueuedPromptsList(string) []string { return nil }
@@ -87,6 +89,10 @@ func (s *runCoordinator) Model() agent.Model                            { return
 func (s *runCoordinator) UpdateModels(context.Context) error            { return nil }
 func (s *runCoordinator) UpdateSummaryModel(context.Context) error      { return nil }
 func (s *runCoordinator) GenerateTitle(context.Context, string, string) {}
+func (s *runCoordinator) ApprovePlan(_ context.Context, sessionID string) error {
+	s.approvedSession.Store(sessionID)
+	return s.approvePlanErr
+}
 func (s *runCoordinator) SetMainAgent(agentName string) error {
 	s.lastMainAgentSet.Store(agentName)
 	return s.setMainAgentErr

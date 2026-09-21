@@ -39,6 +39,17 @@ These rules override everything else. Follow them strictly:
  - emit both markers as plain text — never inside a code fence or inline code backticks
  - do NOT ask for confirmation via the question tool or plain text — the UI will prompt the user
  - keep all intermediate/exploratory responses marker-free
+9. immediately before the end marker, emit the plan's work items as a fenced block tagged `crush-plan-items` containing a JSON array. This block is the machine-readable plan — it is stripped from what the user sees and becomes the checklist the coder executes against once the plan is approved. Each object uses the same schema as the `todos` tool:
+ - `key` (required): a short stable slug other items reference in `depends_on` — keep it stable across revisions, it is the item's identity
+ - `content` (required): what needs to be done, imperative form
+ - `active_form`: present-continuous form shown while the item runs (e.g. "Running tests")
+ - `depends_on`: keys of items in this list that must complete first
+ - `evidence_paths` / `evidence_checks`: every item MUST bind at least one — the files or directories its work must touch, or configured check names that must resolve green. An item with no evidence is not checkable and will be dropped on approval.{{if .Config.Verify}} Bindable `evidence_checks` names (anything else is dropped):{{range .Config.Verify}} `verify:{{.DisplayName}}`;{{end}}{{else}} No check names are configured — bind `evidence_paths` only.{{end}}
+ - do NOT include `status` — seeded items always start pending
+Example:
+```crush-plan-items
+[{"key":"add-parser","content":"Add the items-block parser","active_form":"Adding the items-block parser","evidence_paths":["internal/session/planseed.go"]},{"key":"wire-handoff","content":"Call approval from the handoff confirm","depends_on":["add-parser"],"evidence_paths":["internal/ui/model/ui.go"]}]
+```
 </workflow>
 
 <style>

@@ -1073,7 +1073,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		complete := notify.RunComplete{SessionID: call.SessionID, RunID: call.RunID}
 		if currentAssistant != nil {
 			complete.MessageID = currentAssistant.ID
-			complete.Text = currentAssistant.Content().String()
+			complete.Text = currentAssistant.JoinedText()
 		}
 		if retErr != nil {
 			complete.Error = retErr.Error()
@@ -1804,7 +1804,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		complete := notify.RunComplete{SessionID: call.SessionID, RunID: call.RunID}
 		if currentAssistant != nil {
 			complete.MessageID = currentAssistant.ID
-			complete.Text = currentAssistant.Content().String()
+			complete.Text = currentAssistant.JoinedText()
 		}
 		if ctx.Err() != nil {
 			complete.Cancelled = true

@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/crush/internal/clipboard"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/crush/internal/ui/util"
 	"github.com/charmbracelet/crush/internal/workspace"
@@ -23,17 +24,19 @@ const MaxAttachmentSize = int64(5 * 1024 * 1024)
 // PlanStartMarker is the sentinel the plan agent emits on its own line at the
 // very start of its final response, so the UI can tell the plan document
 // apart from the agent's intermediate exploratory replies while it streams.
-const PlanStartMarker = "<!-- CRUSH_PLAN_START -->"
+// The canonical definition lives in the session package — the backend
+// reads the same marker when seeding approved plans.
+const PlanStartMarker = session.PlanStartMarker
 
 // PlanReadyMarker is the sentinel the plan agent emits on its own line at the
 // end of its final response to signal that the plan is ready for execution.
-const PlanReadyMarker = "<!-- CRUSH_PLAN_READY -->"
+const PlanReadyMarker = session.PlanReadyMarker
 
 // PlanStartMarkerPresent reports whether text contains the plan-start
 // sentinel on a line by itself. See [PlanReadyMarkerPresent] for why the
 // check is line-scoped.
 func PlanStartMarkerPresent(text string) bool {
-	return planMarkerPresent(text, PlanStartMarker)
+	return session.PlanMarkerPresent(text, PlanStartMarker)
 }
 
 // PlanReadyMarkerPresent reports whether text contains the plan-ready sentinel
@@ -43,23 +46,7 @@ func PlanStartMarkerPresent(text string) bool {
 // code backticks around the marker count as a marker line too: some models wrap
 // the marker despite the prompt asking for plain text.
 func PlanReadyMarkerPresent(text string) bool {
-	return planMarkerPresent(text, PlanReadyMarker)
-}
-
-func planMarkerPresent(text, marker string) bool {
-	for line := range strings.SplitSeq(text, "\n") {
-		if planMarkerLine(line, marker) {
-			return true
-		}
-	}
-	return false
-}
-
-// planMarkerLine reports whether the line consists solely of the given plan
-// sentinel, optionally wrapped in inline-code backticks and whitespace.
-func planMarkerLine(line, marker string) bool {
-	trimmed := strings.TrimSpace(strings.Trim(strings.TrimSpace(line), "`"))
-	return trimmed == marker
+	return session.PlanMarkerPresent(text, PlanReadyMarker)
 }
 
 // StripPlanReadyMarker removes lines that consist solely of the plan-ready
@@ -72,12 +59,15 @@ func StripPlanReadyMarker(text string) string {
 	return stripPlanMarker(text, PlanReadyMarker)
 }
 
-// StripPlanMarkers removes both the plan-start and plan-ready sentinel lines.
-// Use it wherever rendered text could contain either marker, such as the plan
-// card (which strips the trailing ready marker and the leading start marker)
-// or an interrupted plan whose start marker never got its ready companion.
+// StripPlanMarkers removes both the plan-start and plan-ready sentinel
+// lines along with any typed plan-items block — the machine-readable seed
+// the plan agent emits inside the marker payload must never render in the
+// card. Use it wherever rendered text could contain either marker, such as
+// the plan card (which strips the trailing ready marker and the leading
+// start marker) or an interrupted plan whose start marker never got its
+// ready companion.
 func StripPlanMarkers(text string) string {
-	return stripPlanMarker(stripPlanMarker(text, PlanStartMarker), PlanReadyMarker)
+	return session.StripPlanItems(stripPlanMarker(stripPlanMarker(text, PlanStartMarker), PlanReadyMarker))
 }
 
 func stripPlanMarker(text, marker string) string {
@@ -85,7 +75,7 @@ func stripPlanMarker(text, marker string) string {
 	kept := lines[:0]
 	inFence := false
 	for i := 0; i < len(lines); i++ {
-		if planMarkerLine(lines[i], marker) {
+		if session.PlanMarkerLine(lines[i], marker) {
 			// When the marker sits in a block fenced on the lines directly
 			// before and after, drop the whole block so an empty code
 			// block is not left behind. inFence guards against eating the

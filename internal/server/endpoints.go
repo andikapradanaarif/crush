@@ -341,6 +341,15 @@ func (c *controllerV1) endpoints() []apigen.Endpoint {
 			Fails(400, 404, 409, 500).
 			Handle(c.handlePostWorkspaceAgentMain),
 
+		apigen.Post("/v1/workspaces/{id}/agent/sessions/{sid}/plan/approve").
+			Summary("Approve plan").
+			Description("Records approval of the session's ready plan-mode plan: seeds typed plan items and resolves the scope gate for the executing run.").
+			Tags("agent").
+			PathParam("id", "Workspace ID").
+			PathParam("sid", "Session ID").
+			Fails(400, 404, 409, 500).
+			Handle(c.handlePostWorkspaceAgentSessionPlanApprove),
+
 		apigen.Get("/v1/workspaces/{id}/agent/sessions/{sid}").
 			Summary("Get agent session").
 			Tags("agent").

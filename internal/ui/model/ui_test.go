@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"image"
 	"testing"
 
@@ -131,6 +132,8 @@ type testWorkspace struct {
 	runPrompts        []string
 	yolo              bool
 	runHidden         []bool
+	planApproved      string
+	planApproveErr    error
 }
 
 func (w *testWorkspace) Config() *config.Config {
@@ -144,6 +147,11 @@ func (w *testWorkspace) WorkingDir() string {
 func (w *testWorkspace) AgentSetMain(agentID string) error {
 	w.setMainCalledWith = agentID
 	return nil
+}
+
+func (w *testWorkspace) PlanApprove(_ context.Context, sessionID string) error {
+	w.planApproved = sessionID
+	return w.planApproveErr
 }
 
 func (w *testWorkspace) UpdateAgentModel(context.Context) error {
@@ -594,6 +602,8 @@ func TestPlanHandoffConfirm_ClearsPendingAndSwitchesMode(t *testing.T) {
 	cmds := applyModeSwitchMsg(u, cmd)
 	require.Equal(t, uiInputModeCode, u.mode)
 	require.Equal(t, config.AgentCoder, ws.setMainCalledWith)
+	require.Equal(t, "sess-1", ws.planApproved,
+		"approval must seed the plan before the continuation prompt dispatches")
 	require.Empty(t, u.planReadySessionID)
 
 	// The confirmed plan continues with a hidden implement prompt.
@@ -611,6 +621,42 @@ func TestPlanHandoffConfirm_ClearsPendingAndSwitchesMode(t *testing.T) {
 	}
 	require.Equal(t, []string{"Implement the plan."}, ws.runPrompts)
 	require.Equal(t, []bool{true}, ws.runHidden)
+}
+
+func TestPlanHandoffConfirm_ApproveFailureWarnsButContinues(t *testing.T) {
+	t.Parallel()
+	u, ws := newPlanUI(t, "sess-1")
+	ws.agentReady = true
+	ws.planApproveErr = errors.New("no ready plan")
+	u.handlePlanHandoff(notify.RunComplete{
+		SessionID: "sess-1",
+		Text:      "plan\n<!-- CRUSH_PLAN_READY -->",
+	})
+	inline, ok := u.activeInline.(*dialog.PlanHandoffInline)
+	require.True(t, ok)
+
+	cmd := inline.OnConfirm(false)
+	require.NotNil(t, cmd)
+	// A failed approval surfaces a warning alongside the mode switch —
+	// it never blocks the handoff.
+	batch, ok := cmd().(tea.BatchMsg)
+	require.True(t, ok, "expected a warn + switch batch")
+	var sawWarn, sawSwitch bool
+	for _, c := range batch {
+		if c == nil {
+			continue
+		}
+		switch msg := c().(type) {
+		case util.InfoMsg:
+			sawWarn = msg.Type == util.InfoTypeWarn
+		case modeSwitchedMsg:
+			sawSwitch = true
+			require.NoError(t, msg.err)
+			require.Equal(t, "sess-1", msg.continueSessionID)
+		}
+	}
+	require.True(t, sawWarn)
+	require.True(t, sawSwitch)
 }
 
 func TestSendMessage_ClearsPendingPlan(t *testing.T) {

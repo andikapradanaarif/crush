@@ -169,7 +169,7 @@ func TestValidatePlanItems(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := validatePlanItems(tc.items, bindable, t.TempDir())
+			err := ValidatePlanItems(tc.items, bindable, t.TempDir())
 			if tc.wantErr == "" {
 				require.NoError(t, err)
 				return

@@ -226,6 +226,13 @@ func (w *AppWorkspace) AgentSetMain(agentID string) error {
 	return w.app.AgentCoordinator.SetMainAgent(agentID)
 }
 
+func (w *AppWorkspace) PlanApprove(ctx context.Context, sessionID string) error {
+	if w.app.AgentCoordinator == nil {
+		return errors.New("agent coordinator not initialized")
+	}
+	return w.app.AgentCoordinator.ApprovePlan(ctx, sessionID)
+}
+
 func (w *AppWorkspace) AgentSummarize(ctx context.Context, sessionID string) error {
 	if w.app.AgentCoordinator == nil {
 		return errors.New("agent coordinator not initialized")

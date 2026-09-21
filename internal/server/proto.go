@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/backend"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/session"
@@ -580,6 +581,19 @@ func (c *controllerV1) handlePostWorkspaceAgentMain(w http.ResponseWriter, r *ht
 	w.WriteHeader(http.StatusOK)
 }
 
+// handlePostWorkspaceAgentSessionPlanApprove records approval of the
+// session's ready plan-mode plan: it seeds typed plan items and resolves
+// the scope gate for the executing run.
+func (c *controllerV1) handlePostWorkspaceAgentSessionPlanApprove(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sid := r.PathValue("sid")
+	if err := c.backend.ApprovePlan(r.Context(), id, sid); err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
 // handleGetWorkspaceAgentSession returns a specific agent session.
 func (c *controllerV1) handleGetWorkspaceAgentSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -780,10 +794,17 @@ func (c *controllerV1) handleError(w http.ResponseWriter, r *http.Request, err e
 		status = http.StatusNotFound
 	case errors.Is(err, backend.ErrAgentNotInitialized):
 		status = http.StatusBadRequest
-	case errors.Is(err, backend.ErrAgentBusy):
+	case errors.Is(err, backend.ErrAgentBusy), errors.Is(err, agent.ErrSessionBusy):
 		// Switching the main agent mid-run could strand the run's
 		// queued prompts on the previous agent; mirror the TUI's
-		// own busy guard for API callers.
+		// own busy guard for API callers. ErrSessionBusy is the
+		// coordinator's own guard — it covers the TOCTOU window between
+		// the backend's IsBusy check and the operation landing.
+		status = http.StatusConflict
+	case errors.Is(err, agent.ErrNoReadyPlan):
+		// Approving when no ready plan exists is a state conflict,
+		// not a malformed request — the session exists, it just has
+		// no marker-bracketed plan to approve.
 		status = http.StatusConflict
 	case errors.Is(err, backend.ErrPathRequired):
 		status = http.StatusBadRequest

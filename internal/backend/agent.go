@@ -199,6 +199,33 @@ func (b *Backend) SetMainAgent(workspaceID, agentID string) error {
 	return ws.AgentCoordinator.SetMainAgent(agentID)
 }
 
+// ApprovePlan records the user's approval of a session's ready plan-mode
+// plan. Unlike the agent switch that follows it, approval is a
+// backend-visible operation: it seeds the session's typed plan items
+// from the structured block the plan agent emitted and resolves the
+// scope gate, so the executing run treats the approved plan as the
+// scope confirmation rather than double-confirming on its first write.
+func (b *Backend) ApprovePlan(ctx context.Context, workspaceID, sessionID string) error {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return err
+	}
+
+	if ws.AgentCoordinator == nil {
+		return ErrAgentNotInitialized
+	}
+
+	// Approval is a read-modify-write on the session's plan items —
+	// a mid-run approval on the same session would race a concurrent
+	// todos write and lose an update either direction. Session-scoped,
+	// not agent-scoped: an unrelated busy session must not 409 this one.
+	if ws.AgentCoordinator.IsSessionBusy(sessionID) {
+		return ErrAgentBusy
+	}
+
+	return ws.AgentCoordinator.ApprovePlan(ctx, sessionID)
+}
+
 // CancelSession cancels an ongoing agent operation for the given
 // session.
 func (b *Backend) CancelSession(workspaceID, sessionID string) error {

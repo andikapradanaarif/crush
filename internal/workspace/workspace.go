@@ -154,6 +154,10 @@ type Workspace interface {
 	AgentQueuedPromptsList(sessionID string) []string
 	AgentClearQueue(sessionID string)
 	AgentSetMain(agentID string) error
+	// PlanApprove records approval of the session's ready plan-mode
+	// plan: the typed items the plan agent emitted seed the session's
+	// plan list and the scope gate resolves for the executing run.
+	PlanApprove(ctx context.Context, sessionID string) error
 	AgentSummarize(ctx context.Context, sessionID string) error
 	UpdateAgentModel(ctx context.Context) error
 	UpdateSummaryModel(ctx context.Context) error

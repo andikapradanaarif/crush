@@ -25,16 +25,18 @@ the ability to verify them.
 `plan.md.tpl`): the plan agent produces human-facing prose for
 user approval and cannot write `PlanItem`s (`resolvePlanTools`
 excludes `todos`). Two systems named "plan" coexist — one the
-user confirms, one the harness checks. Seeding typed items from
-an approved plan-mode plan is a deliberate follow-up (#74), not
-part of this work — with two constraints that shape it: bare
-seeding is a **gate regression** (`planDeclared` treats
-`len(sess.Todos) > 0` as declared, so bare seeds permanently
-disarm the evidence bounce — seeds must carry evidence bindings
-or the gate must not count them), and approval is a **TUI-side
-construct** (`planReadySessionID` is UI state; the backend never
-observes it, and headless has no handoff), so the trigger lives
-at `AgentSetMain` or an explicit workspace op, not in the dialog.
+user confirms, one the harness checks. **Landed (#74)**: plan
+mode emits a typed `crush-plan-items` block inside the marker
+payload; `Coordinator.ApprovePlan` (backend-visible op) seeds it
+into `sess.Todos` on handoff and resolves the scope gate for the
+executing run. The constraints below remain the design rationale:
+bare seeding is a **gate regression** (`planDeclared` counted
+`len(sess.Todos) > 0` as declared before #74 — now it requires
+`PlanItemsBound`, so seeds must carry evidence bindings or the
+gate does not count them), and approval is a **TUI-side
+construct** (`planReadySessionID` is UI state; headless has no
+handoff), which is why the trigger is the explicit `PlanApprove`
+workspace op rather than `AgentSetMain` or the dialog.
 The viable paths are structured emission (plan mode emits typed
 items in the marker block) and required re-declare (the armed
 bounce validates the coder's first `todos` call against the

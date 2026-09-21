@@ -123,6 +123,15 @@ type scopeGate struct {
 	interactive bool
 	mu          sync.Mutex
 	states      map[string]*scopeGateState
+	// approved holds sessions whose plan-mode plan the user approved
+	// between runs. The approval resolves the scope check for the next
+	// run — the flag is consumed when that run's stamp first creates
+	// state, because resolve() on the finishing run's stamp would die
+	// with the turn that produced the plan. The flag is unbounded-stale
+	// by design: a session resumed much later still carries its approved
+	// plan in history, so the approval stays valid — it just must not
+	// count twice, which the consume-once semantics guarantee.
+	approved map[string]bool
 }
 
 // newScopeGate builds the gate. Returns nil when an interactive run
@@ -131,19 +140,47 @@ func newScopeGate(svc question.Service, interactive bool, sessions session.Servi
 	if interactive && svc == nil {
 		return nil
 	}
-	return &scopeGate{svc: svc, sessions: sessions, interactive: interactive, states: map[string]*scopeGateState{}}
+	return &scopeGate{svc: svc, sessions: sessions, interactive: interactive, states: map[string]*scopeGateState{}, approved: map[string]bool{}}
 }
 
-// planDeclared reports whether the session already holds a plan — the
-// armed gate bounces first declarations only; bookkeeping writes to an
-// existing (bare) plan are not declarations and must not be hostage
-// to evidence binding.
+// planDeclared reports whether the session already holds a plan the gate
+// can lean on — the armed gate bounces first declarations only, and a
+// stored list only counts when every item binds evidence. Bare items —
+// handwritten or seeded without evidence — are bookkeeping, not a
+// declaration: counting them would let a plan that never named its scope
+// disarm the bounce for the rest of the session.
 func (g *scopeGate) planDeclared(ctx context.Context, sessionID string) bool {
 	if g.sessions == nil {
 		return false
 	}
 	sess, err := g.sessions.Get(ctx, sessionID)
-	return err == nil && len(sess.Todos) > 0
+	return err == nil && session.PlanItemsBound(sess.Todos)
+}
+
+// ApprovePlan records that the session's plan-mode plan was approved.
+// The approval is consumed by the next run's stamp in observe: the
+// approved plan IS the scope confirmation, so the run that executes it
+// must not double-confirm on its first mutating call.
+func (g *scopeGate) ApprovePlan(sessionID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.approved[sessionID] = true
+}
+
+// stateFor returns the session's state for the given run stamp, creating
+// it when missing or stale. A pending plan approval is consumed here —
+// exactly once, on the first stamp to observe it. Caller must hold g.mu.
+func (g *scopeGate) stateFor(sessionID string, stamp uint64) *scopeGateState {
+	st, ok := g.states[sessionID]
+	if !ok || st.stamp != stamp {
+		st = &scopeGateState{stamp: stamp}
+		g.states[sessionID] = st
+		if g.approved[sessionID] {
+			st.resolved = true
+			delete(g.approved, sessionID)
+		}
+	}
+	return st
 }
 
 // wrap decorates every tool so the gate sees exploration calls as well
@@ -178,11 +215,7 @@ func (g *scopeGate) observe(ctx context.Context, call fantasy.ToolCall) (gateVer
 	// sessions' gates — and a resolved gate skips the read entirely,
 	// since bookkeeping writes are never bounced anyway.
 	g.mu.Lock()
-	st, ok := g.states[sessionID]
-	if !ok || st.stamp != stamp {
-		st = &scopeGateState{stamp: stamp}
-		g.states[sessionID] = st
-	}
+	st := g.stateFor(sessionID, stamp)
 	needsPlanCheck := call.Name == tools.TodosToolName &&
 		!st.resolved && !st.asking && st.explore >= scopeGateMinExploration
 	g.mu.Unlock()
@@ -194,11 +227,7 @@ func (g *scopeGate) observe(ctx context.Context, call fantasy.ToolCall) (gateVer
 	// `declared` only ever feeds the armed-bounce branch.
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	st, ok = g.states[sessionID]
-	if !ok || st.stamp != stamp {
-		st = &scopeGateState{stamp: stamp}
-		g.states[sessionID] = st
-	}
+	st = g.stateFor(sessionID, stamp)
 	if tools.IsMutatingCall(call.Name, call.Input) {
 		switch {
 		case st.resolved || st.explore < scopeGateMinExploration:
