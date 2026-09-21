@@ -921,8 +921,12 @@ func (a *sessionAgent) verificationRetrySection(t *edgeTrigger) string {
 		return ""
 	}
 	workingDir := ""
+	spillDir := ""
 	if a.configStore != nil {
 		workingDir = a.configStore.WorkingDir()
+		if cfg := a.configStore.Config(); cfg != nil && cfg.Options != nil {
+			spillDir = cfg.Options.DataDirectory
+		}
 	}
 	var b strings.Builder
 	b.WriteString(verificationRetryPrefix + " The following check(s) did not pass — fix the underlying issue; do not restate success.\n")
@@ -946,7 +950,7 @@ func (a *sessionAgent) verificationRetrySection(t *edgeTrigger) string {
 		if out == "" {
 			out = f.check.Detail
 		}
-		b.WriteString(tools.TruncateOutput(out))
+		b.WriteString(tools.TruncateOutput(out, spillDir))
 		b.WriteString("\n</check>\n")
 	}
 	return b.String()

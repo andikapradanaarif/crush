@@ -1253,10 +1253,10 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 
 	allTools = append(
 		allTools,
-		tools.NewBashTool(c.lspManager, c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.Attribution, modelID),
+		tools.NewBashTool(c.lspManager, c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.DataDirectory, c.cfg.Config().Options.Attribution, modelID),
 		tools.NewCrushInfoTool(c.cfg, c.lspManager, c.allSkills, c.activeSkills, c.skillTracker),
 		tools.NewCrushLogsTool(logFile),
-		tools.NewJobOutputTool(),
+		tools.NewJobOutputTool(c.cfg.Config().Options.DataDirectory),
 		tools.NewJobKillTool(),
 		tools.NewDownloadTool(c.permissions, c.cfg.WorkingDir(), nil),
 		tools.NewEditTool(c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
@@ -1454,6 +1454,12 @@ func (c *coordinator) buildSelectedModel(
 	requestTimeout := cfg.Options.GetRequestTimeout()
 	model = newRequestTimeoutModel(model, requestTimeout)
 
+	// Hyper completions no longer report the hypercredit balance, so
+	// wrap Hyper models to fetch it from /v1/credits on every request.
+	if sel.Provider == hyper.Name {
+		model = newHyperCreditsModel(model, c.hyperAPIKey)
+	}
+
 	return Model{
 		Model:      model,
 		CatwalkCfg: *catwalkModel,
@@ -1501,6 +1507,13 @@ func (c *coordinator) buildAgentModels(ctx context.Context, agent config.Agent, 
 	}
 
 	return large, small, nil
+}
+
+// hyperAPIKey resolves the Hyper API key from the live config, so an
+// OAuth token refreshed after the models were built is picked up by the
+// next credits fetch.
+func (c *coordinator) hyperAPIKey() string {
+	return config.ResolveHyperAPIKey(c.cfg.Config())
 }
 
 func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string) (fantasy.Provider, error) {

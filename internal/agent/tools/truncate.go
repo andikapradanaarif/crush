@@ -2,9 +2,12 @@ package tools
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 
+	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/stringext"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // TruncationProvenance records where content was cut: at capture,
@@ -42,9 +45,29 @@ func TruncateHeadTail(content string, maxBytes int, prov TruncationProvenance) s
 }
 
 // TruncateOutput caps tool output at MaxOutputLength at capture time.
-// It is the standard per-tool output bound.
-func TruncateOutput(content string) string {
-	return TruncateHeadTail(content, MaxOutputLength, TruncatedAtCapture)
+// It is the standard per-tool output bound. The dropped middle is
+// written in full to a file under spillDir so the agent can read it
+// back rather than losing it for good; an empty spillDir falls back
+// to the system temp directory, and a failed spill degrades the
+// marker to the re-run hint instead of a path.
+func TruncateOutput(content, spillDir string) string {
+	if len(content) <= MaxOutputLength {
+		return content
+	}
+	half := MaxOutputLength / 2
+	headEnd := stringext.CutANSISafeLeft(content, half)
+	tailStart := stringext.CutANSISafeRight(content, len(content)-half)
+	head := content[:headEnd]
+	tail := content[tailStart:]
+	omitted := content[headEnd:tailStart]
+	recover := "re-run or re-view the source for the rest"
+	if path, err := shell.SpillOutput(ansi.Strip(content), spillDir); err == nil {
+		recover = "full output: " + path
+	} else {
+		slog.Debug("Could not spill tool output", "dir", spillDir, "error", err)
+	}
+	return fmt.Sprintf("%s\n\n... [%d lines (%s) truncated at %s; %s] ...\n\n%s",
+		head, strings.Count(omitted, "\n"), humanBytes(int64(len(omitted))), TruncatedAtCapture, recover, tail)
 }
 
 func humanBytes(n int64) string {

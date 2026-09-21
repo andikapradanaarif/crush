@@ -203,7 +203,7 @@ func blockFuncs() []shell.BlockFunc {
 	}
 }
 
-func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workingDir string, attribution *config.Attribution, modelID string) fantasy.AgentTool {
+func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workingDir, spillDir string, attribution *config.Attribution, modelID string) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		BashToolName,
 		string(bashDescription(attribution, modelID)),
@@ -279,7 +279,7 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 						return fantasy.ToolResponse{}, fmt.Errorf("[Job %s] error executing command: %w", bgShell.ID, execErr)
 					}
 
-					stdout = formatOutput(stdout, stderr, execErr)
+					stdout = formatOutput(stdout, stderr, execErr, spillDir)
 					stdout += lspDiagnosticsForFailure(params.Command, exitCode, interrupted, lspManager)
 
 					metadata := BashResponseMetadata{
@@ -366,7 +366,7 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 					return fantasy.ToolResponse{}, fmt.Errorf("[Job %s] error executing command: %w", bgShell.ID, execErr)
 				}
 
-				stdout = formatOutput(stdout, stderr, execErr)
+				stdout = formatOutput(stdout, stderr, execErr, spillDir)
 				stdout += lspDiagnosticsForFailure(params.Command, exitCode, interrupted, lspManager)
 
 				metadata := BashResponseMetadata{
@@ -402,12 +402,12 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 }
 
 // formatOutput formats the output of a completed command with error handling
-func formatOutput(stdout, stderr string, execErr error) string {
+func formatOutput(stdout, stderr string, execErr error, spillDir string) string {
 	interrupted := shell.IsInterrupt(execErr)
 	exitCode := shell.ExitCode(execErr)
 
-	stdout = TruncateOutput(stdout)
-	stderr = TruncateOutput(stderr)
+	stdout = TruncateOutput(stdout, spillDir)
+	stderr = TruncateOutput(stderr, spillDir)
 
 	errorMessage := stderr
 	if errorMessage == "" && execErr != nil {
