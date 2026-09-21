@@ -38,7 +38,14 @@ at `AgentSetMain` or an explicit workspace op, not in the dialog.
 The viable paths are structured emission (plan mode emits typed
 items in the marker block) and required re-declare (the armed
 bounce validates the coder's first `todos` call against the
-approved text) — bare text→typed conversion is rejected.
+approved text) — bare text→typed conversion is rejected. Note the
+re-declare hole: the evidence bounce is armed-gate-only
+(`explore >= scopeGateMinExploration`, `scope_gate.go:227`), so
+an early post-handoff `todos` call submits bare items unvalidated
+— prompt pressure, not enforcement; closing it means decoupling
+the declaration-shape check from the explore threshold, or
+structured emission is the only path that mechanically produces
+bound items.
 
 ## Problem
 
