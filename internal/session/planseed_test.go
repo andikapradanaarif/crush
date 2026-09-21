@@ -55,15 +55,14 @@ func TestParsePlanSeed(t *testing.T) {
 		require.Error(t, err)
 	})
 
-	t.Run("items without content or with duplicate keys are skipped", func(t *testing.T) {
+	t.Run("items without content, key, or with duplicate keys are skipped", func(t *testing.T) {
 		t.Parallel()
 		items, err := ParsePlanSeed("```crush-plan-items\n" +
 			`[{"key":"a","content":""},{"key":"a","content":"first"},{"key":"a","content":"dup"},{"content":"keyless"}]` +
 			"\n```")
 		require.NoError(t, err)
-		require.Len(t, items, 2)
+		require.Len(t, items, 1)
 		require.Equal(t, "first", items[0].Content)
-		require.Equal(t, "keyless", items[1].Content)
 	})
 
 	t.Run("deps on unknown or dropped keys are filtered", func(t *testing.T) {

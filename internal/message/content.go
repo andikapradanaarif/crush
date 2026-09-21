@@ -345,6 +345,21 @@ func (m *Message) Content() TextContent {
 	return TextContent{}
 }
 
+// JoinedText concatenates every text part on the message. Content()
+// returns only the first, which hides text — including sentinel markers
+// like the plan-ready marker — in later parts when a provider fragments
+// its response. Marker detection and plan extraction should use this.
+func (m *Message) JoinedText() string {
+	var sb strings.Builder
+	for _, part := range m.Parts {
+		if c, ok := part.(TextContent); ok {
+			sb.WriteString(c.Text)
+			sb.WriteByte('\n')
+		}
+	}
+	return sb.String()
+}
+
 func (m *Message) ReasoningContent() ReasoningContent {
 	for _, part := range m.Parts {
 		if c, ok := part.(ReasoningContent); ok {

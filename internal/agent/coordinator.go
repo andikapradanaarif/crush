@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -461,65 +462,134 @@ var ErrNoReadyPlan = errors.New("no ready plan in the session's last assistant m
 //     whose minted ID survived the revision. A plan without the block —
 //     emitted before the schema existed, or by a model that ignored the
 //     instruction — degrades to gate-resolution only; the approval still
-//     happened.
+//     happened. An empty-but-valid block clears previously seeded items.
 //   - It flags the scope gate so the executing run treats the approved
-//     plan as the scope confirmation instead of double-confirming.
+//     plan as the scope confirmation instead of double-confirming. The
+//     flag is set unconditionally once the marker verifies: approval is
+//     the user's act, and seeding failures must not silently re-arm the
+//     question.
 func (c *coordinator) ApprovePlan(ctx context.Context, sessionID string) error {
+	// Approval is a read-modify-write on the session's plan items; a
+	// mid-run approval would race a concurrent todos write. The backend
+	// guards its own path for the 409 mapping — this guards the
+	// in-process path the TUI uses.
+	if c.currentAgent() != nil && c.IsBusy() {
+		return fmt.Errorf("approving plan while the agent is busy: %w", ErrSessionBusy)
+	}
+
 	msg, err := c.messages.GetLastAssistantMessage(ctx, sessionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		// A session with no assistant message has no plan to approve.
+		return ErrNoReadyPlan
+	}
 	if err != nil {
 		return fmt.Errorf("getting last assistant message: %w", err)
 	}
-	// Content() reads only the first text part — a provider that
-	// fragments the response would hide the markers behind it. Join
-	// every text part so marker and items block are found wherever
-	// they landed.
-	var text strings.Builder
-	for _, part := range msg.Parts {
-		if c, ok := part.(message.TextContent); ok {
-			text.WriteString(c.Text)
-			text.WriteByte('\n')
-		}
-	}
-	plan := text.String()
+	plan := msg.JoinedText()
 	if !session.PlanMarkerPresent(plan, session.PlanReadyMarker) {
 		return ErrNoReadyPlan
 	}
+	if c.scopeGate != nil {
+		c.scopeGate.ApprovePlan(sessionID)
+	}
+
+	seeds := c.planSeeds(ctx, sessionID, plan)
+	if seeds == nil {
+		return nil
+	}
+	sess, err := c.sessions.Get(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("getting session for plan seeding: %w", err)
+	}
+	sess.Todos = session.MergePlanSeed(sess.Todos, seeds)
+	if _, err := c.sessions.Save(ctx, sess); err != nil {
+		return fmt.Errorf("saving seeded plan items: %w", err)
+	}
+	return nil
+}
+
+// planSeeds extracts and sanitizes the typed items block from a ready
+// plan. Returns nil — never an error — when no usable seed exists: a
+// missing or malformed block, or items that all fail sanitization, leave
+// the approval valid but unseeded. Items must satisfy the same contract
+// a todos write would: a key, at least one evidence binding restricted
+// to configured check names, and a structurally valid dependency graph.
+func (c *coordinator) planSeeds(ctx context.Context, sessionID, plan string) []session.PlanItem {
 	seeds, err := session.ParsePlanSeed(plan)
 	if err != nil {
 		slog.Warn("Plan approval: items block malformed, resolving gate without seeds",
 			"session_id", sessionID, "error", err)
+		return nil
 	}
-	// The emitted schema requires evidence on every item; an item that
-	// violates it is dropped rather than seeded — a bare item nags the
-	// done-scan while giving the gate nothing.
-	bound := seeds[:0]
+	if seeds == nil {
+		return nil
+	}
+
+	bindable := map[string]bool{}
+	workingDir := ""
+	if c.cfg != nil {
+		for _, name := range configuredCheckNames(c.cfg.Config()) {
+			bindable[name] = true
+		}
+		workingDir = c.cfg.WorkingDir()
+	}
+
+	keyByID := session.PlanKeyByID(seeds)
+	clean := seeds[:0]
 	dropped := 0
 	for _, item := range seeds {
+		// Unknown check names are unbindable by definition — drop the
+		// binding rather than the item, since evidence_paths may still
+		// carry it.
+		checks := item.EvidenceChecks[:0]
+		for _, name := range item.EvidenceChecks {
+			if bindable[name] {
+				checks = append(checks, name)
+			}
+		}
+		item.EvidenceChecks = checks
 		if len(item.EvidenceChecks) == 0 && len(item.EvidencePaths) == 0 {
+			// The emitted schema requires evidence on every item; a
+			// bare item nags the done-scan while giving the gate
+			// nothing, so it is dropped rather than seeded.
 			dropped++
 			continue
 		}
-		bound = append(bound, item)
+		clean = append(clean, item)
 	}
 	if dropped > 0 {
 		slog.Warn("Plan approval: dropped plan items without evidence bindings",
 			"session_id", sessionID, "dropped", dropped)
 	}
-	seeds = bound
-	if len(seeds) > 0 {
-		sess, err := c.sessions.Get(ctx, sessionID)
-		if err != nil {
-			return fmt.Errorf("getting session for plan seeding: %w", err)
+
+	// Structural validation gets the same rules the todos tool applies
+	// on write: valid deps, no cycles, no vacuous path bindings. Convert
+	// back to the write-side shape — DependsOn on PlanItem is minted
+	// IDs, the validator expects keys.
+	items := make([]tools.TodoItem, 0, len(clean))
+	for _, item := range clean {
+		deps := make([]string, 0, len(item.DependsOn))
+		for _, depID := range item.DependsOn {
+			if k := keyByID[depID]; k != "" {
+				deps = append(deps, k)
+			}
 		}
-		sess.Todos = session.MergePlanSeed(sess.Todos, seeds)
-		if _, err := c.sessions.Save(ctx, sess); err != nil {
-			return fmt.Errorf("saving seeded plan items: %w", err)
-		}
+		items = append(items, tools.TodoItem{
+			Key:            item.Key,
+			Content:        item.Content,
+			Status:         string(session.PlanItemPending),
+			ActiveForm:     item.ActiveForm,
+			DependsOn:      deps,
+			EvidenceChecks: item.EvidenceChecks,
+			EvidencePaths:  item.EvidencePaths,
+		})
 	}
-	if c.scopeGate != nil {
-		c.scopeGate.ApprovePlan(sessionID)
+	if err := tools.ValidatePlanItems(items, bindable, workingDir); err != nil {
+		slog.Warn("Plan approval: items block failed validation, resolving gate without seeds",
+			"session_id", sessionID, "error", err)
+		return nil
 	}
-	return nil
+	return clean
 }
 
 // Run implements Coordinator.

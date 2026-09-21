@@ -88,15 +88,16 @@ func ParsePlanSeed(text string) ([]PlanItem, error) {
 	seenKeys := map[string]bool{}
 	items := make([]PlanItem, 0, len(raw))
 	for _, item := range raw {
-		if strings.TrimSpace(item.Content) == "" {
+		// The emitted schema requires a key — it is the item's identity
+		// across re-approval merges, so keyless entries are dropped
+		// rather than degrading the merge to content hashing.
+		if strings.TrimSpace(item.Content) == "" || strings.TrimSpace(item.Key) == "" {
 			continue
 		}
-		if item.Key != "" {
-			if seenKeys[item.Key] {
-				continue
-			}
-			seenKeys[item.Key] = true
+		if seenKeys[item.Key] {
+			continue
 		}
+		seenKeys[item.Key] = true
 		id := MintPlanItemID(item.Key, item.Content)
 		if seenIDs[id] {
 			continue

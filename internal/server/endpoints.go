@@ -347,7 +347,7 @@ func (c *controllerV1) endpoints() []apigen.Endpoint {
 			Tags("agent").
 			PathParam("id", "Workspace ID").
 			PathParam("sid", "Session ID").
-			Fails(400, 404, 500).
+			Fails(400, 404, 409, 500).
 			Handle(c.handlePostWorkspaceAgentSessionPlanApprove),
 
 		apigen.Get("/v1/workspaces/{id}/agent/sessions/{sid}").

@@ -84,7 +84,7 @@ func NewTodosTool(sessions session.Service, checkNames []string, workingDir stri
 				return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for managing todos")
 			}
 
-			if err := validatePlanItems(params.Todos, bindable, workingDir); err != nil {
+			if err := ValidatePlanItems(params.Todos, bindable, workingDir); err != nil {
 				return fantasy.ToolResponse{}, err
 			}
 
@@ -181,13 +181,13 @@ func NewTodosTool(sessions session.Service, checkNames []string, workingDir stri
 	)
 }
 
-// validatePlanItems enforces the plan's structural rules on write:
+// ValidatePlanItems enforces the plan's structural rules on write:
 // valid statuses, unique keys, distinct contents (identical contents
 // are ambiguous dep targets), depends_on resolving to keys present in
 // the same list, no cycles or self-deps, and only configured check
 // names bound. Every rejection names the offending key or item so the
 // model can repair in the same call.
-func validatePlanItems(items []TodoItem, bindable map[string]bool, workingDir string) error {
+func ValidatePlanItems(items []TodoItem, bindable map[string]bool, workingDir string) error {
 	keys := map[string]bool{}
 	contents := map[string]int{}
 	cleanWD := filepath.Clean(workingDir)

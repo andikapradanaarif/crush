@@ -44,7 +44,7 @@ These rules override everything else. Follow them strictly:
  - `content` (required): what needs to be done, imperative form
  - `active_form`: present-continuous form shown while the item runs (e.g. "Running tests")
  - `depends_on`: keys of items in this list that must complete first
- - `evidence_paths` / `evidence_checks`: every item MUST bind at least one — the files or directories its work must touch, or configured check names that must resolve green. An item with no evidence is not checkable and will not count toward the declared plan.
+ - `evidence_paths` / `evidence_checks`: every item MUST bind at least one — the files or directories its work must touch, or configured check names that must resolve green. An item with no evidence is not checkable and will be dropped on approval.{{if .Config.Verify}} Bindable `evidence_checks` names (anything else is dropped):{{range .Config.Verify}} `verify:{{.DisplayName}}`;{{end}}{{else}} No check names are configured — bind `evidence_paths` only.{{end}}
  - do NOT include `status` — seeded items always start pending
 Example:
 ```crush-plan-items
