@@ -82,6 +82,14 @@ func TestParsePlanSeed(t *testing.T) {
 		require.NoError(t, err)
 		require.Nil(t, items)
 	})
+
+	t.Run("items fence nested in another code block is not parsed", func(t *testing.T) {
+		t.Parallel()
+		nested := "plan\n```markdown\nexample:\n```crush-plan-items\n[{\"key\":\"x\",\"content\":\"fake\"}]\n```\n```\ndone"
+		items, err := ParsePlanSeed(nested)
+		require.NoError(t, err)
+		require.Nil(t, items)
+	})
 }
 
 func TestMergePlanSeed(t *testing.T) {
@@ -137,6 +145,11 @@ func TestStripPlanItems(t *testing.T) {
 	require.Contains(t, stripped, PlanReadyMarker, "markers are stripped elsewhere")
 
 	require.Equal(t, "no block", StripPlanItems("no block"))
+
+	// An items fence nested inside another code block is prose, not a
+	// seed — it must survive the strip.
+	nested := "```markdown\nexample:\n```crush-plan-items\n[]\n```\n```"
+	require.Equal(t, nested, StripPlanItems(nested))
 }
 
 func TestPlanItemsBound(t *testing.T) {

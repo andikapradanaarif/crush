@@ -114,6 +114,20 @@ func TestApprovePlan(t *testing.T) {
 		require.ErrorIs(t, coord.ApprovePlan(t.Context(), sess.ID), ErrNoReadyPlan)
 	})
 
+	t.Run("items without evidence bindings are dropped, not seeded", func(t *testing.T) {
+		t.Parallel()
+		coord, env, sess := approveEnv(t)
+		writePlanMessage(t, env, sess.ID,
+			session.PlanStartMarker+"\n```crush-plan-items\n"+
+				`[{"key":"bare","content":"No evidence"},{"key":"bound","content":"Has evidence","evidence_paths":["x.go"]}]`+
+				"\n```\n"+session.PlanReadyMarker)
+		require.NoError(t, coord.ApprovePlan(t.Context(), sess.ID))
+		stored, err := env.sessions.Get(t.Context(), sess.ID)
+		require.NoError(t, err)
+		require.Len(t, stored.Todos, 1)
+		require.Equal(t, "bound", stored.Todos[0].Key)
+	})
+
 	t.Run("malformed items block degrades to gate-only resolution", func(t *testing.T) {
 		t.Parallel()
 		coord, env, sess := approveEnv(t)

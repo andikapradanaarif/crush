@@ -469,15 +469,43 @@ func (c *coordinator) ApprovePlan(ctx context.Context, sessionID string) error {
 	if err != nil {
 		return fmt.Errorf("getting last assistant message: %w", err)
 	}
-	text := msg.Content().Text
-	if !session.PlanMarkerPresent(text, session.PlanReadyMarker) {
+	// Content() reads only the first text part — a provider that
+	// fragments the response would hide the markers behind it. Join
+	// every text part so marker and items block are found wherever
+	// they landed.
+	var text strings.Builder
+	for _, part := range msg.Parts {
+		if c, ok := part.(message.TextContent); ok {
+			text.WriteString(c.Text)
+			text.WriteByte('\n')
+		}
+	}
+	plan := text.String()
+	if !session.PlanMarkerPresent(plan, session.PlanReadyMarker) {
 		return ErrNoReadyPlan
 	}
-	seeds, err := session.ParsePlanSeed(text)
+	seeds, err := session.ParsePlanSeed(plan)
 	if err != nil {
 		slog.Warn("Plan approval: items block malformed, resolving gate without seeds",
 			"session_id", sessionID, "error", err)
 	}
+	// The emitted schema requires evidence on every item; an item that
+	// violates it is dropped rather than seeded — a bare item nags the
+	// done-scan while giving the gate nothing.
+	bound := seeds[:0]
+	dropped := 0
+	for _, item := range seeds {
+		if len(item.EvidenceChecks) == 0 && len(item.EvidencePaths) == 0 {
+			dropped++
+			continue
+		}
+		bound = append(bound, item)
+	}
+	if dropped > 0 {
+		slog.Warn("Plan approval: dropped plan items without evidence bindings",
+			"session_id", sessionID, "dropped", dropped)
+	}
+	seeds = bound
 	if len(seeds) > 0 {
 		sess, err := c.sessions.Get(ctx, sessionID)
 		if err != nil {

@@ -124,49 +124,69 @@ func ParsePlanSeed(text string) ([]PlanItem, error) {
 
 // planItemsBlock returns the contents of the first fenced code block
 // tagged with the plan-items language, tolerating indented fences and
-// extra whitespace on the info string.
+// extra whitespace on the info string. Other fenced blocks are tracked
+// so a plan that embeds an example of its own items fence inside a
+// different code block is not falsely parsed.
 func planItemsBlock(text string) (string, bool) {
 	var block strings.Builder
 	inBlock := false
+	inFence := false
 	for line := range strings.Lines(text) {
 		trimmed := strings.TrimSpace(line)
-		if !inBlock {
-			if rest, ok := strings.CutPrefix(trimmed, "```"); ok &&
-				strings.TrimSpace(strings.TrimLeft(rest, "`")) == PlanItemsFence {
-				inBlock = true
+		if inBlock {
+			if strings.HasPrefix(trimmed, "```") {
+				return block.String(), true
 			}
+			block.WriteString(line)
+			block.WriteByte('\n')
 			continue
 		}
-		if strings.HasPrefix(trimmed, "```") {
-			return block.String(), true
+		if isFenceLine(trimmed) {
+			inFence = !inFence
+			continue
 		}
-		block.WriteString(line)
-		block.WriteByte('\n')
+		if !inFence && isPlanItemsFenceLine(trimmed) {
+			inBlock = true
+		}
 	}
 	return "", false
 }
 
+func isFenceLine(trimmed string) bool {
+	rest, ok := strings.CutPrefix(trimmed, "```")
+	return ok && strings.TrimSpace(strings.TrimLeft(rest, "`")) != PlanItemsFence
+}
+
+func isPlanItemsFenceLine(trimmed string) bool {
+	rest, ok := strings.CutPrefix(trimmed, "```")
+	return ok && strings.TrimSpace(strings.TrimLeft(rest, "`")) == PlanItemsFence
+}
+
 // StripPlanItems removes plan-items fenced blocks so the machine-readable
 // seed never renders in the plan card or chat output. The block is
-// self-delimiting, so stripping does not disturb surrounding prose.
+// self-delimiting, so stripping does not disturb surrounding prose; an
+// unclosed block drops the remainder of the text, which is correct during
+// streaming — the block is emitted last by design.
 func StripPlanItems(text string) string {
 	lines := strings.Split(text, "\n")
 	kept := lines[:0]
 	inBlock := false
+	inFence := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if !inBlock {
-			if rest, ok := strings.CutPrefix(trimmed, "```"); ok &&
-				strings.TrimSpace(strings.TrimLeft(rest, "`")) == PlanItemsFence {
-				inBlock = true
-				continue
+		if inBlock {
+			if strings.HasPrefix(trimmed, "```") {
+				inBlock = false
 			}
-			kept = append(kept, line)
 			continue
 		}
-		if strings.HasPrefix(trimmed, "```") {
-			inBlock = false
+		if isFenceLine(trimmed) {
+			inFence = !inFence
+		} else if !inFence && isPlanItemsFenceLine(trimmed) {
+			inBlock = true
+			continue
 		}
+		kept = append(kept, line)
 	}
 	return strings.Join(kept, "\n")
 }
@@ -179,6 +199,12 @@ func StripPlanItems(text string) string {
 // content still merges; keyless seeds hash content, so a reworded keyless
 // item mints a new ID and the stale one is dropped — the merge degrades
 // to replace only where identity could not survive.
+//
+// Known limit: the merge cannot distinguish seed-origin items from ones
+// the coder appended mid-execution, so re-approving a plan while work is
+// in flight discards the coder's tracking additions. Approval normally
+// precedes execution, so the loss window is narrow; an explicit
+// origin marker on PlanItem would close it if it ever matters.
 func MergePlanSeed(existing, seeds []PlanItem) []PlanItem {
 	statusByID := make(map[string]PlanItemStatus, len(existing))
 	for _, item := range existing {

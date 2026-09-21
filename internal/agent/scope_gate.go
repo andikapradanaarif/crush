@@ -127,7 +127,10 @@ type scopeGate struct {
 	// between runs. The approval resolves the scope check for the next
 	// run — the flag is consumed when that run's stamp first creates
 	// state, because resolve() on the finishing run's stamp would die
-	// with the turn that produced the plan.
+	// with the turn that produced the plan. The flag is unbounded-stale
+	// by design: a session resumed much later still carries its approved
+	// plan in history, so the approval stays valid — it just must not
+	// count twice, which the consume-once semantics guarantee.
 	approved map[string]bool
 }
 
