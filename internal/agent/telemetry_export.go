@@ -51,6 +51,19 @@ type SessionTelemetry struct {
 	// collapsed_turns rows.
 	TurnsCollapsed  int `json:"turns_collapsed"`
 	EventsCollapsed int `json:"events_collapsed"`
+	// Request telemetry: the prompt growth curve (last/peak
+	// normalized prompt tokens across the run's steps) and the last
+	// rendered request's content-byte composition. This is the
+	// flat-vs-growing signal the benefit measurement reads —
+	// informational only, never gating.
+	PromptRequests     int64 `json:"prompt_requests"`
+	PromptTokensLast   int64 `json:"prompt_tokens_last"`
+	PromptTokensPeak   int64 `json:"prompt_tokens_peak"`
+	ReqSystemBytes     int64 `json:"req_system_bytes"`
+	ReqNotebookBytes   int64 `json:"req_notebook_bytes"`
+	ReqHistoryBytes    int64 `json:"req_history_bytes"`
+	ReqToolCallBytes   int64 `json:"req_tool_call_bytes"`
+	ReqToolResultBytes int64 `json:"req_tool_result_bytes"`
 	// EdgeFirings splits run-boundary edge firing counts by edge and
 	// outcome — the in-memory mirror of the edge_firings rows this
 	// process wrote. Cumulative for the process; the eval harness
@@ -96,6 +109,18 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 		t.HydrationPlanSeeds = n.HydrationPlanSeeds
 		t.HydrationRenders = n.HydrationRenders
 		t.PriorTurnResultRecalls = n.PriorTurnResultRecalls
+	}
+	if sa.reqStats != nil {
+		if r, ok := sa.reqStats.Get(sessionID); ok {
+			t.PromptRequests = r.Requests
+			t.PromptTokensLast = r.LastPromptTokens
+			t.PromptTokensPeak = r.PeakPromptTokens
+			t.ReqSystemBytes = r.SystemBytes
+			t.ReqNotebookBytes = r.NotebookBytes
+			t.ReqHistoryBytes = r.HistoryBytes
+			t.ReqToolCallBytes = r.ToolCallBytes
+			t.ReqToolResultBytes = r.ToolResultBytes
+		}
 	}
 	if sa.edgeStats != nil {
 		if m, ok := sa.edgeStats.Get(sessionID); ok && len(m) > 0 {

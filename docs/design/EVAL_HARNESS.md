@@ -425,10 +425,28 @@ approximately exchangeable, which the permutation test assumes.
 		"kinds": {"superseded": 3, "stale": 1}
 	},
 	"recalls": {"result": 0, "entry": 0, "empty": 0, "cross": 0},
+	"prompt_tokens_per_turn": [41200, 43800, 44100],
+	"request": {
+		"prompt_requests": 6,
+		"prompt_tokens_peak": 44100,
+		"system_bytes": 9000, "notebook_bytes": 1200,
+		"history_bytes": 3100, "tool_call_bytes": 800, "tool_result_bytes": 14000
+	},
 	"session_db": "results/<experiment>/artifacts/<trajectory_id>-<arm>-<run_index>.db",
 	"env": {"crush_sha": "...", "model_resolved": "...", "go": "1.25", "os": "darwin", "content_hash": "..."}
 }
 ```
+
+`prompt_tokens_per_turn` is the growth curve — each turn's last
+request's normalized prompt tokens (input + cache write + cache
+read); `request` carries the trajectory-final rendered request's
+byte composition (tool calls/results split from the rest of
+history). Both are **informational**: they exist so the benefit
+question — does context machinery hold the prompt flat as the
+session grows — is measured rather than asserted, and they feed the
+per-arm token delta the gate summary prints. Neither is a
+predicate: coverage grammar cannot reach them, and the gate never
+reads them for the verdict.
 
 Sources, all existing: `fantasy.AgentResult` (turns/steps/usage)
 from `agent.Run`; `stubStats` per session (`stubs.go:60`); recall

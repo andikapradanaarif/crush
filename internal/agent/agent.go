@@ -304,6 +304,11 @@ type sessionAgent struct {
 	// SessionTelemetry, shared across agent rebuilds so a rebuilt
 	// coordinator does not lose counts. Nil allocates its own.
 	edgeStats *csync.Map[string, map[string]int]
+	// reqStats accumulates per-session request-size telemetry — the
+	// prompt-token growth curve and last rendered request's
+	// composition — shared across agent rebuilds. Nil allocates its
+	// own.
+	reqStats *csync.Map[string, requestStats]
 	// runStampGen is the monotonic source of per-Run stamps the scope
 	// gate uses to reset its explore→execute boundary bookkeeping.
 	// Atomic: Run invocations on different sessions can race on it.
@@ -469,6 +474,10 @@ type SessionAgentOptions struct {
 	// EdgeStats shares per-session edge firing counts across agent
 	// rebuilds. When nil the agent allocates its own.
 	EdgeStats *csync.Map[string, map[string]int]
+	// RequestStats shares per-session request-size telemetry (prompt
+	// growth curve, rendered composition) across agent rebuilds.
+	// When nil the agent allocates its own.
+	RequestStats *csync.Map[string, requestStats]
 }
 
 func NewSessionAgent(
@@ -519,6 +528,7 @@ func NewSessionAgent(
 		lspManager:             opts.LSPManager,
 		edgeStore:              opts.EdgeStore,
 		edgeStats:              cmp.Or(opts.EdgeStats, csync.NewMap[string, map[string]int]()),
+		reqStats:               cmp.Or(opts.RequestStats, csync.NewMap[string, requestStats]()),
 		hydrateFetch:           notebook.FetchHydrationMemories,
 	}
 	a.runStampGen.Store(runStampEpoch())
@@ -1245,7 +1255,16 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 
 			stats, _ := a.stubStats.Get(call.SessionID)
 			nbStats, _ := a.nbStats.Get(call.SessionID)
-			logStepComposition(call.SessionID, prepared.Messages, prepared.Tools, stats, nbStats)
+			comp := logStepComposition(call.SessionID, prepared.Messages, prepared.Tools, stats, nbStats)
+			if a.reqStats != nil {
+				rs, _ := a.reqStats.Get(call.SessionID)
+				rs.SystemBytes = comp.SystemBytes
+				rs.NotebookBytes = comp.NotebookBytes
+				rs.HistoryBytes = comp.HistoryBytes
+				rs.ToolCallBytes = comp.ToolCallBytes
+				rs.ToolResultBytes = comp.ToolResultBytes
+				a.reqStats.Set(call.SessionID, rs)
+			}
 
 			sessionLock.Lock()
 			stepMessages = cloneFantasyMessages(prepared.Messages)
@@ -1419,6 +1438,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			}
 			usage, estimated := fallbackStepUsage(stepMessages, stepResult)
 			logStepUsage(call.SessionID, usage, estimated)
+			if a.reqStats != nil {
+				rs, _ := a.reqStats.Get(call.SessionID)
+				rs.Requests++
+				rs.LastPromptTokens = normalizedPromptTokens(usage)
+				if rs.LastPromptTokens > rs.PeakPromptTokens {
+					rs.PeakPromptTokens = rs.LastPromptTokens
+				}
+				a.reqStats.Set(call.SessionID, rs)
+			}
 			a.updateSessionUsage(largeModel, &updatedSession, usage, a.openrouterCost(stepResult.ProviderMetadata), estimated)
 			extractHyperCredits(stepResult.ProviderMetadata)
 			_, sessionErr := a.sessions.Save(ctx, updatedSession)

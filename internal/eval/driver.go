@@ -36,6 +36,15 @@ type RunResult struct {
 	Checkpoints Checkpoints
 	Digests     Checkpoints
 	Hydration   Hydration
+	// PromptTokensPerTurn is the growth curve: each turn's last
+	// request's normalized prompt tokens (input + cache write +
+	// cache read). Flat across turns means the context machinery
+	// holds the rendered request down — the benefit claim.
+	PromptTokensPerTurn []int64
+	// Request carries the trajectory-final request's composition
+	// (system/notebook/history/tool bytes) and the run's peak
+	// prompt size. Informational, never gating.
+	Request RequestStats
 	// EdgeFirings is the trajectory-wide edge/outcome firing split —
 	// the summed per-turn deltas (each `crush run` process's counters
 	// are in-memory and reset on spawn).
@@ -138,6 +147,19 @@ type runTelemetry struct {
 		PlanSeeds int `json:"plan_seeds"`
 		Rendered  int `json:"rendered"`
 	} `json:"hydration"`
+	// Request carries the prompt growth-curve sample and the last
+	// rendered request's composition — the flat-vs-growing signal
+	// the benefit measurement reads. Informational, never gating.
+	Request struct {
+		PromptRequests   int64 `json:"prompt_requests"`
+		PromptTokensLast int64 `json:"prompt_tokens_last"`
+		PromptTokensPeak int64 `json:"prompt_tokens_peak"`
+		SystemBytes      int64 `json:"system_bytes"`
+		NotebookBytes    int64 `json:"notebook_bytes"`
+		HistoryBytes     int64 `json:"history_bytes"`
+		ToolCallBytes    int64 `json:"tool_call_bytes"`
+		ToolResultBytes  int64 `json:"tool_result_bytes"`
+	} `json:"request"`
 	// EdgeFirings splits run-boundary edge firing counts by edge and
 	// outcome — the per-turn delta of the session's edge_firings rows
 	// this process recorded (repair retries share the process).
@@ -297,6 +319,21 @@ func (res *RunResult) addTurnTelemetry(tel runTelemetry) {
 	res.Recalls.Cross += tel.Recalls.Cross
 	res.Recalls.PriorTurnResult += tel.Recalls.PriorTurnResult
 	res.Checkpoints.Written += tel.Checkpoints.Written
+	// Prompt-curve and composition are per-turn snapshots, not
+	// sums: append each turn's last-request prompt size (the curve)
+	// and keep the latest turn's composition plus the max peak.
+	if tel.Request.PromptTokensLast > 0 {
+		res.PromptTokensPerTurn = append(res.PromptTokensPerTurn, tel.Request.PromptTokensLast)
+	}
+	res.Request.PromptRequests += tel.Request.PromptRequests
+	if tel.Request.PromptTokensPeak > res.Request.PromptTokensPeak {
+		res.Request.PromptTokensPeak = tel.Request.PromptTokensPeak
+	}
+	res.Request.SystemBytes = tel.Request.SystemBytes
+	res.Request.NotebookBytes = tel.Request.NotebookBytes
+	res.Request.HistoryBytes = tel.Request.HistoryBytes
+	res.Request.ToolCallBytes = tel.Request.ToolCallBytes
+	res.Request.ToolResultBytes = tel.Request.ToolResultBytes
 	res.Checkpoints.Rendered += tel.Checkpoints.Rendered
 	res.Digests.Written += tel.Digests.Written
 	res.Digests.Rendered += tel.Digests.Rendered

@@ -53,6 +53,38 @@ type Report struct {
 	// flag projections — the flag under test did nothing and the
 	// pairing is a guaranteed null. Fails closed.
 	NoopFlags []string
+	// ArmTokens carries per-arm prompt-side token aggregates over
+	// conclusive runs — the benefit measurement (does the flag under
+	// test shrink the prompt?), purely informational: it never
+	// affects Fired or the verdict.
+	ArmTokens map[string]ArmTokenStats
+}
+
+// ArmTokenStats is one arm's prompt-side token totals over its
+// conclusive runs. PromptTotal counts input + cache read + cache
+// write — the full prompt-side billed mass, not just uncached input.
+type ArmTokenStats struct {
+	Runs          int
+	PromptTotal   int64
+	LastTurnTotal int64 // Σ of each run's last-turn prompt tokens
+	LastTurnN     int
+}
+
+// PromptMean returns mean prompt-side tokens per conclusive run.
+func (s ArmTokenStats) PromptMean() float64 {
+	if s.Runs == 0 {
+		return 0
+	}
+	return float64(s.PromptTotal) / float64(s.Runs)
+}
+
+// LastTurnMean returns the mean last-turn prompt size — the
+// trajectory-final request, where the growth curve terminates.
+func (s ArmTokenStats) LastTurnMean() float64 {
+	if s.LastTurnN == 0 {
+		return 0
+	}
+	return float64(s.LastTurnTotal) / float64(s.LastTurnN)
 }
 
 // Fired reports whether any alarm tripped — including the diffuse
@@ -92,12 +124,68 @@ func (r Report) Summary(alpha float64) string {
 	}
 	fmt.Fprintf(&b, "  catastrophic coverage: %d/%d stable trajectories eligible\n", eligible, len(r.CatastrophicEligible))
 	fmt.Fprintf(&b, "  diffuse p = %.4g (alpha %.3g)\n", r.DiffuseP, alpha)
+	if len(r.ArmTokens) > 0 {
+		b.WriteString("  tokens (prompt-side, conclusive runs — informational):\n")
+		for _, arm := range []string{ArmControl, ArmTreatment} {
+			t, ok := r.ArmTokens[arm]
+			if !ok || t.Runs == 0 {
+				continue
+			}
+			fmt.Fprintf(&b, "    %-9s n=%d  mean %s/run", arm, t.Runs, humanTokens(int64(t.PromptMean())))
+			if t.LastTurnN > 0 {
+				fmt.Fprintf(&b, "  last-turn mean %s", humanTokens(int64(t.LastTurnMean())))
+			}
+			b.WriteString("\n")
+		}
+		ctrl, cok := r.ArmTokens[ArmControl]
+		treat, tok := r.ArmTokens[ArmTreatment]
+		if cok && tok && ctrl.Runs > 0 && treat.Runs > 0 && ctrl.PromptMean() > 0 {
+			fmt.Fprintf(&b, "    Δ treatment vs control: %+.1f%%\n",
+				100*(treat.PromptMean()-ctrl.PromptMean())/ctrl.PromptMean())
+		}
+	}
 	if !r.Fired(alpha) {
 		b.WriteString("  verdict: PASS\n")
 	} else {
 		b.WriteString("  verdict: FAIL\n")
 	}
 	return b.String()
+}
+
+// armTokenStats aggregates the informational benefit metric —
+// prompt-side tokens per arm over conclusive runs only (excluded
+// runs burned tokens but aren't comparable samples). Never gates.
+func armTokenStats(records []RunRecord) map[string]ArmTokenStats {
+	var out map[string]ArmTokenStats
+	for _, r := range records {
+		if !r.Outcome.Conclusive() || (r.Arm != ArmControl && r.Arm != ArmTreatment) {
+			continue
+		}
+		if out == nil {
+			out = map[string]ArmTokenStats{}
+		}
+		s := out[r.Arm]
+		s.Runs++
+		s.PromptTotal += r.Tokens.Input + r.Tokens.CacheRead + r.Tokens.CacheWrite
+		if n := len(r.PromptTokensPerTurn); n > 0 {
+			s.LastTurnTotal += r.PromptTokensPerTurn[n-1]
+			s.LastTurnN++
+		}
+		out[r.Arm] = s
+	}
+	return out
+}
+
+// humanTokens renders a token count compactly for the report.
+func humanTokens(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.2fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fK", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
 }
 
 // Evaluate runs the gate over one experiment's records. bands is the
@@ -111,6 +199,7 @@ func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRe
 	for _, r := range records {
 		byTraj[r.TrajectoryID] = append(byTraj[r.TrajectoryID], r)
 	}
+	rep.ArmTokens = armTokenStats(records)
 
 	stable := stableBandSize(bands, corpusIDs)
 	if stable == 0 {

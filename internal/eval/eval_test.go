@@ -500,6 +500,69 @@ func TestRunTelemetry_EdgeFirings(t *testing.T) {
 	}, res.EdgeFirings)
 }
 
+// TestRunTelemetry_RequestCurve pins the request-telemetry contract:
+// the child's per-turn prompt_tokens_last appends to the growth
+// curve (never sums — a snapshot, not a counter), peak takes the
+// max, and the composition keeps the latest turn's bytes.
+func TestRunTelemetry_RequestCurve(t *testing.T) {
+	t.Parallel()
+	writeTel := func(last, peak, toolResultBytes int64) runTelemetry {
+		doc := map[string]any{
+			"session_id": "s1",
+			"steps":      2,
+			"request": map[string]any{
+				"prompt_requests":    2,
+				"prompt_tokens_last": last,
+				"prompt_tokens_peak": peak,
+				"system_bytes":       1000,
+				"notebook_bytes":     2000,
+				"history_bytes":      3000,
+				"tool_call_bytes":    400,
+				"tool_result_bytes":  toolResultBytes,
+			},
+		}
+		path := filepath.Join(t.TempDir(), "tel.json")
+		data, err := json.Marshal(doc)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(path, data, 0o644))
+		tel, err := readTelemetry(path)
+		require.NoError(t, err)
+		return tel
+	}
+
+	var res RunResult
+	res.addTurnTelemetry(writeTel(12000, 12000, 8000))
+	res.addTurnTelemetry(writeTel(0, 0, 0)) // turn with no requests — no curve point
+	res.addTurnTelemetry(writeTel(25000, 30000, 9000))
+
+	require.Equal(t, []int64{12000, 25000}, res.PromptTokensPerTurn)
+	require.Equal(t, int64(6), res.Request.PromptRequests)
+	require.Equal(t, int64(30000), res.Request.PromptTokensPeak)
+	// Composition keeps the last turn's rendered request.
+	require.Equal(t, int64(9000), res.Request.ToolResultBytes)
+	require.Equal(t, int64(3000), res.Request.HistoryBytes)
+}
+
+// TestArmTokenStats pins the informational benefit metric: conclusive
+// runs only, prompt-side = input + cache read + cache write, and the
+// last-turn mean reads each run's curve tail.
+func TestArmTokenStats(t *testing.T) {
+	t.Parallel()
+	recs := []RunRecord{
+		{Arm: ArmControl, Outcome: OutcomePass, Tokens: TokenUsage{Input: 1000, CacheRead: 9000}, PromptTokensPerTurn: []int64{10, 40}},
+		{Arm: ArmControl, Outcome: OutcomeInconclusive, Tokens: TokenUsage{Input: 99999}}, // excluded
+		{Arm: ArmControl, Outcome: OutcomeFail, Tokens: TokenUsage{Input: 2000}, PromptTokensPerTurn: []int64{30}},
+		{Arm: ArmTreatment, Outcome: OutcomePass, Tokens: TokenUsage{Input: 500, CacheRead: 5500, CacheWrite: 1000}, PromptTokensPerTurn: []int64{10, 20}},
+	}
+	stats := armTokenStats(recs)
+	require.Equal(t, 2, stats[ArmControl].Runs)
+	require.Equal(t, int64(12000), stats[ArmControl].PromptTotal)
+	require.InDelta(t, 35, stats[ArmControl].LastTurnMean(), 1e-9) // (40+30)/2
+	require.Equal(t, int64(7000), stats[ArmTreatment].PromptTotal)
+	require.InDelta(t, 20, stats[ArmTreatment].LastTurnMean(), 1e-9)
+	require.Nil(t, armTokenStats(nil))
+}
+
 // --- stats ---
 
 func TestFisherExactCollapse_KnownValues(t *testing.T) {

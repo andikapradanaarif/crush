@@ -96,6 +96,19 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 			"plan_seeds": tel.HydrationPlanSeeds,
 			"rendered":   tel.HydrationRenders,
 		}
+		// Request telemetry: the prompt growth curve + last rendered
+		// request's composition — the flat-vs-growing signal the
+		// benefit measurement reads. Informational, never gating.
+		doc["request"] = map[string]any{
+			"prompt_requests":    tel.PromptRequests,
+			"prompt_tokens_last": tel.PromptTokensLast,
+			"prompt_tokens_peak": tel.PromptTokensPeak,
+			"system_bytes":       tel.ReqSystemBytes,
+			"notebook_bytes":     tel.ReqNotebookBytes,
+			"history_bytes":      tel.ReqHistoryBytes,
+			"tool_call_bytes":    tel.ReqToolCallBytes,
+			"tool_result_bytes":  tel.ReqToolResultBytes,
+		}
 	}
 	// Edge firings emit as a DELTA, not the cumulative snapshot — the
 	// driver sums per-turn telemetry files, so a process emitting

@@ -282,6 +282,10 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	rec.Digests = res.Digests
 	rec.Hydration = res.Hydration
 	rec.EdgeFirings = res.EdgeFirings
+	rec.PromptTokensPerTurn = res.PromptTokensPerTurn
+	if res.Request.PromptRequests > 0 {
+		rec.Request = &res.Request
+	}
 	rec.Env.ModelPin = exp.Model
 	rec.Env.ModelResolved = res.ModelResolved
 	// The baseline key hashes resolved config when the child reported

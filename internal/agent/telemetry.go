@@ -37,18 +37,45 @@ func logPromptComposition(sessionID string, systemPromptBytes int, mcpInstructio
 	slog.Debug("Prompt composition", attrs...)
 }
 
+// requestStats accumulates per-session request-size telemetry: the
+// prompt-token growth curve and the last rendered request's byte
+// composition — the "does context stay flat" signal the eval
+// benefit measurement reads. Shared across agent rebuilds via the
+// coordinator's map so a rebuilt agent doesn't lose the curve.
+type requestStats struct {
+	// Requests counts steps that reported provider usage.
+	Requests int64
+	// LastPromptTokens is the normalized prompt-token count (input +
+	// cache write + cache read) of the most recent request — the
+	// growth-curve sample; PeakPromptTokens is the max observed.
+	LastPromptTokens int64
+	PeakPromptTokens int64
+	// Last rendered request's content bytes by component. Tool
+	// calls/results split from the rest of history so "how much of
+	// the prompt is stale tool output" is a number, not an estimate.
+	SystemBytes     int64
+	NotebookBytes   int64
+	HistoryBytes    int64
+	ToolCallBytes   int64
+	ToolResultBytes int64
+}
+
 // logStepComposition logs the byte size of each per-step request
 // component. It runs inside PrepareStep, where the message list and
 // tool list for the step are finalized. System-role messages are
 // bucketed separately from conversation history: the main system
 // prompt (and any system prompt prefix) counts toward system_bytes,
-// while notebook recall blobs count toward notebook_bytes. stubs
-// carries cumulative per-session stubbing telemetry: stubbed results,
-// saved bytes, and promotion events (each a prompt-cache invalidation).
-// nb carries the notebook sufficiency counters: entry vs result:
-// recalls, re-views, and per-pass selection contributions.
-func logStepComposition(sessionID string, messages []fantasy.Message, agentTools []fantasy.AgentTool, stubs stubStats, nb notebook.Stats) {
-	var historyBytes, notebookBytes, systemBytes int
+// while notebook recall blobs count toward notebook_bytes. History
+// parts split tool calls/results from other content so the "old
+// tool output dominates the prompt" claim is measurable per arm.
+// stubs carries cumulative per-session stubbing telemetry: stubbed
+// results, saved bytes, and promotion events (each a prompt-cache
+// invalidation). nb carries the notebook sufficiency counters:
+// entry vs result: recalls, re-views, and per-pass selection
+// contributions. The returned requestStats carries the composition
+// half for SessionTelemetry export.
+func logStepComposition(sessionID string, messages []fantasy.Message, agentTools []fantasy.AgentTool, stubs stubStats, nb notebook.Stats) requestStats {
+	var comp requestStats
 	for _, msg := range messages {
 		n := messageContentBytes(msg)
 		if msg.Role == fantasy.MessageRoleSystem {
@@ -63,21 +90,32 @@ func logStepComposition(sessionID string, messages []fantasy.Message, agentTools
 				// Matches both the assembled <notebook> block and
 				// maybeAutoInject's <notebook_auto_inject> recall blob.
 				if strings.HasPrefix(text, "<notebook") {
-					notebookBytes += n
+					comp.NotebookBytes += int64(n)
 					continue
 				}
 			}
-			systemBytes += n
+			comp.SystemBytes += int64(n)
 			continue
 		}
-		historyBytes += n
+		comp.HistoryBytes += int64(n)
+		for _, part := range msg.Content {
+			pn := int64(messagePartBytes(part))
+			switch part.(type) {
+			case fantasy.ToolCallPart, *fantasy.ToolCallPart:
+				comp.ToolCallBytes += pn
+			case fantasy.ToolResultPart, *fantasy.ToolResultPart:
+				comp.ToolResultBytes += pn
+			}
+		}
 	}
 	builtinSchemaBytes, mcpSchemaBytes := toolSchemaBytes(agentTools)
 	slog.Debug("Step request composition",
 		"session_id", sessionID,
-		"system_bytes", systemBytes,
-		"raw_history_bytes", historyBytes,
-		"notebook_bytes", notebookBytes,
+		"system_bytes", comp.SystemBytes,
+		"raw_history_bytes", comp.HistoryBytes,
+		"tool_call_bytes", comp.ToolCallBytes,
+		"tool_result_bytes", comp.ToolResultBytes,
+		"notebook_bytes", comp.NotebookBytes,
 		"stubbed_tool_results_total", stubs.Results,
 		"stubbed_saved_bytes_total", stubs.SavedBytes,
 		"stub_invalidations", stubs.Invalidations,
@@ -105,6 +143,7 @@ func logStepComposition(sessionID string, messages []fantasy.Message, agentTools
 		"tool_count", len(agentTools),
 		"message_count", len(messages),
 	)
+	return comp
 }
 
 // isMCPTool reports whether t is an MCP tool, looking through the hook,

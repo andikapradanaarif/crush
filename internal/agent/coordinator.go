@@ -225,6 +225,10 @@ type coordinator struct {
 	edgeStore         EdgeFiringStore
 	edgeStats         *csync.Map[string, map[string]int]
 	edgeFiringEmitted *csync.Map[string, map[string]int]
+	// reqStats accumulates per-session request-size telemetry
+	// (prompt growth curve, rendered composition) — always-on, two
+	// map writes per step.
+	reqStats *csync.Map[string, requestStats]
 
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
@@ -307,6 +311,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		edgeStore:             opts.EdgeStore,
 		edgeStats:             csync.NewMap[string, map[string]int](),
 		edgeFiringEmitted:     csync.NewMap[string, map[string]int](),
+		reqStats:              csync.NewMap[string, requestStats](),
 	}
 
 	// Share per-session bookkeeping maps across all built agents and
@@ -1126,6 +1131,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		LSPManager:             c.lspManager,
 		EdgeStore:              c.edgeStore,
 		EdgeStats:              c.edgeStats,
+		RequestStats:           c.reqStats,
 	})
 
 	// Warn only for main agents — sub-agent builds happen per run via

@@ -232,7 +232,30 @@ type RunRecord struct {
 	// actually resolved to — arm intent can silently no-op on a
 	// renamed/shadowed option; resolved state is the truth.
 	ResolvedOptions map[string]any `json:"resolved_options,omitempty"`
-	Env             Env            `json:"env"`
+	// PromptTokensPerTurn is the prompt growth curve: each turn's
+	// last request's normalized prompt tokens (input + cache write +
+	// cache read). Flat across turns means the context machinery
+	// holds the rendered request down — the benefit claim, measured
+	// instead of asserted. Informational only; never a predicate.
+	PromptTokensPerTurn []int64 `json:"prompt_tokens_per_turn,omitempty"`
+	// Request carries the trajectory-final rendered request's byte
+	// composition and the run's peak prompt size — the "what fills
+	// the prompt" breakdown the 70%-tool-results claim reads.
+	Request *RequestStats `json:"request,omitempty"`
+	Env     Env           `json:"env"`
+}
+
+// RequestStats is the run's request-size snapshot: the last rendered
+// request's content bytes by component plus the peak normalized
+// prompt tokens observed across the trajectory's steps.
+type RequestStats struct {
+	PromptRequests   int64 `json:"prompt_requests"`
+	PromptTokensPeak int64 `json:"prompt_tokens_peak"`
+	SystemBytes      int64 `json:"system_bytes"`
+	NotebookBytes    int64 `json:"notebook_bytes"`
+	HistoryBytes     int64 `json:"history_bytes"`
+	ToolCallBytes    int64 `json:"tool_call_bytes"`
+	ToolResultBytes  int64 `json:"tool_result_bytes"`
 }
 
 // TokenUsage mirrors fantasy.Usage for the record.

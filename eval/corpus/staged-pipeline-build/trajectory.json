@@ -1,0 +1,37 @@
+{
+	"id": "staged-pipeline-build",
+	"schema_version": 1,
+	"origin": {
+		"kind": "synthetic",
+		"source": "benefit-measurement trajectory (#90): 16 incremental turns produce the long-session context growth the flat-vs-growing claim needs to be visible"
+	},
+	"start_state": {"kind": "fixture", "fixture_dir": "fixture"},
+	"task": {
+		"turns": [
+			"Run `go test ./...` — a test in the pipe package fails. Fix the implementation so all tests pass; do not modify any _test.go file.",
+			"Add a dedupe stage to the pipe package that removes consecutive duplicate tokens, wire it into the pipeline after tokenize, and add a test for it. Keep `go build ./...` and `go test ./...` green.",
+			"Make the pipeline honor the Config's MinLen field — drop tokens shorter than MinLen during Run (0 disables). Add a test. Keep build and tests green.",
+			"Add a stem-lite stage to the pipe package: lowercase each token and strip surrounding ASCII punctuation. Wire it before dedupe and cover it with a test. Keep everything green.",
+			"Add a Report type in the pipe package that records per-stage input and output token counts during Run, with a Summary() string listing them. Wire it into Pipeline and add a test.",
+			"Update the pipex command in main.go: after printing tokens, print the Report summary to stderr. Keep `go build ./...` green.",
+			"Make the pipeline's Config.Reverse flag take effect end-to-end — add a test asserting reversed output order when it's set.",
+			"Add an exported `Stages() []string` on Pipeline returning the stage names in order. Use it in main to log the stage list to stderr at startup. Add a test for Stages.",
+			"Add an exported `Sample() []string` helper in the pipe package returning a small demo input, and use it in main when invoked with no args instead of exiting with usage.",
+			"Add doc comments on every exported identifier in the pipe package that lacks one. Keep `go build ./...` green.",
+			"Extend the Report with an Errors field collecting a per-stage error string when a stage returns nil output, and include it in Summary(). Add a test.",
+			"Make Run skip a stage whose output is empty and record a skip note in the Report. Add a test covering a stage that yields no output.",
+			"Add a -config flag to the pipex command reading a JSON file into pipe.Config and applying it to the pipeline. Keep build green.",
+			"Add an end-to-end test in the pipe package running the full default pipeline on Sample() and asserting a non-empty result.",
+			"Run `go vet ./...` and fix anything it reports. Keep build and tests green.",
+			"Review the pipe package for dead code or unused identifiers and remove them. Keep `go build ./...`, `go vet ./...`, and `go test ./...` all green."
+		]
+	},
+	"check": {
+		"script": "check.sh",
+		"expect_start_state": "fail",
+		"timeout_seconds": 300
+	},
+	"coverage": {"min_steps": 40},
+	"requires": {"tools": ["go"]},
+	"budget": {"run_timeout_seconds": 1800, "max_steps": 160}
+}
