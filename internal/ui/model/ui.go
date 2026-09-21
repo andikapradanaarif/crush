@@ -5269,10 +5269,22 @@ func (m *UI) openPlanHandoff() {
 		sessionID := m.session.ID
 		cmd := m.setInputMode(uiInputModeCode)
 		return func() tea.Msg {
+			// Approval seeds the session's typed plan items and resolves
+			// the scope gate; it must land before the mode switch's
+			// continue prompt dispatches the executing run. A failure
+			// warns but never blocks the handoff — the plan text is
+			// already in the coder's context regardless.
+			var warn tea.Cmd
+			if err := m.com.Workspace.PlanApprove(context.Background(), sessionID); err != nil {
+				warn = util.ReportWarn("Plan approval failed: " + err.Error())
+			}
 			result := cmd()
 			if switched, ok := result.(modeSwitchedMsg); ok {
 				switched.continueSessionID = sessionID
-				return switched
+				result = switched
+			}
+			if warn != nil {
+				return tea.BatchMsg{warn, func() tea.Msg { return result }}
 			}
 			return result
 		}

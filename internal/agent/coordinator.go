@@ -122,6 +122,10 @@ func isOpenCodeResponsesModel(modelID string) bool {
 
 type Coordinator interface {
 	SetMainAgent(agentName string) error
+	// ApprovePlan records user approval of the session's ready plan-mode
+	// plan: it seeds the typed plan items the plan agent emitted and
+	// resolves the scope gate for the next run.
+	ApprovePlan(ctx context.Context, sessionID string) error
 	Run(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error)
 	// RunAccepted runs a call that was already accepted via
 	// BeginAccepted on the fire-and-forget dispatch path. The handle is
@@ -438,6 +442,55 @@ func (c *coordinator) SetMainAgent(agentName string) error {
 	}
 	c.mainAgent = agent
 	c.mainAgentName = agentName
+	return nil
+}
+
+// ErrNoReadyPlan is returned by ApprovePlan when the session's last
+// assistant message is not a marker-bracketed ready plan — approval is a
+// plan-mode construct, and approving anything else is a caller bug.
+var ErrNoReadyPlan = errors.New("no ready plan in the session's last assistant message")
+
+// ApprovePlan implements Coordinator. The approval does three things:
+//
+//   - It verifies the session's last assistant message is a ready plan
+//     (the ready marker on its own line). Callers reach this only from
+//     the plan-handoff UI, but the op is backend-visible precisely so the
+//     check happens where the artifact lives, not in the frontend.
+//   - It parses the typed items block the plan agent emitted and merges
+//     it into the session's plan items, preserving the status of items
+//     whose minted ID survived the revision. A plan without the block —
+//     emitted before the schema existed, or by a model that ignored the
+//     instruction — degrades to gate-resolution only; the approval still
+//     happened.
+//   - It flags the scope gate so the executing run treats the approved
+//     plan as the scope confirmation instead of double-confirming.
+func (c *coordinator) ApprovePlan(ctx context.Context, sessionID string) error {
+	msg, err := c.messages.GetLastAssistantMessage(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("getting last assistant message: %w", err)
+	}
+	text := msg.Content().Text
+	if !session.PlanMarkerPresent(text, session.PlanReadyMarker) {
+		return ErrNoReadyPlan
+	}
+	seeds, err := session.ParsePlanSeed(text)
+	if err != nil {
+		slog.Warn("Plan approval: items block malformed, resolving gate without seeds",
+			"session_id", sessionID, "error", err)
+	}
+	if len(seeds) > 0 {
+		sess, err := c.sessions.Get(ctx, sessionID)
+		if err != nil {
+			return fmt.Errorf("getting session for plan seeding: %w", err)
+		}
+		sess.Todos = session.MergePlanSeed(sess.Todos, seeds)
+		if _, err := c.sessions.Save(ctx, sess); err != nil {
+			return fmt.Errorf("saving seeded plan items: %w", err)
+		}
+	}
+	if c.scopeGate != nil {
+		c.scopeGate.ApprovePlan(sessionID)
+	}
 	return nil
 }
 

@@ -315,7 +315,7 @@ func TestScopeGate(t *testing.T) {
 		require.Equal(t, 0, svc.asks)
 	})
 
-	t.Run("bookkeeping write on an existing bare plan passes", func(t *testing.T) {
+	t.Run("an existing bare plan is not a declaration", func(t *testing.T) {
 		t.Parallel()
 		conn, err := db.Connect(t.Context(), t.TempDir())
 		require.NoError(t, err)
@@ -334,15 +334,80 @@ func TestScopeGate(t *testing.T) {
 		wrapped := newScopeGate(svc, true, sessions).wrap([]fantasy.AgentTool{todosTool, read, write})
 		ctx := gateCtx(sess.ID, 1)
 		exploreN(t, ctx, wrapped[1], scopeGateMinExploration)
+		// A bare stored plan must not satisfy planDeclared: letting it
+		// count would make any seed a permanent gate bypass. The
+		// bookkeeping write is itself a non-validating declaration and
+		// bounces like one.
 		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName,
 			Input: `{"todos":[{"content":"existing","status":"in_progress"}]}`})
 		require.NoError(t, err)
-		require.False(t, resp.IsError, "a bookkeeping update on an existing plan is not a declaration")
+		require.True(t, resp.IsError)
+		require.False(t, todosTool.called)
+	})
+
+	t.Run("an existing bound plan lets bookkeeping writes through", func(t *testing.T) {
+		t.Parallel()
+		conn, err := db.Connect(t.Context(), t.TempDir())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = conn.Close() })
+		sessions := session.NewService(db.New(conn), conn)
+		sess, err := sessions.Create(t.Context(), "test")
+		require.NoError(t, err)
+		sess.Todos = []session.PlanItem{{
+			ID:            "i1",
+			Content:       "existing",
+			Status:        session.PlanItemPending,
+			EvidencePaths: []string{"internal/agent"},
+		}}
+		_, err = sessions.Save(t.Context(), sess)
+		require.NoError(t, err)
+
+		svc := &fakeQuestionService{selected: []string{"proceed"}}
+		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextResponse("ok")}
+		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
+		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("e")}
+		wrapped := newScopeGate(svc, true, sessions).wrap([]fantasy.AgentTool{todosTool, read, write})
+		ctx := gateCtx(sess.ID, 1)
+		exploreN(t, ctx, wrapped[1], scopeGateMinExploration)
+		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName,
+			Input: `{"todos":[{"content":"existing","status":"in_progress","evidence_paths":["internal/agent"]}]}`})
+		require.NoError(t, err)
+		require.False(t, resp.IsError, "a bookkeeping update on an evidence-bound plan is not a declaration")
 		require.True(t, todosTool.called)
-		// The gate is still unresolved — the update didn't validate,
-		// so a later write still reaches the question.
+		// The update itself bound evidence, so it resolved the gate on
+		// landing — a later write passes without asking.
 		_, err = wrapped[2].Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
 		require.NoError(t, err)
+		require.Equal(t, 0, svc.asks)
+	})
+
+	t.Run("plan approval resolves the gate for the next run", func(t *testing.T) {
+		t.Parallel()
+		svc := &fakeQuestionService{selected: []string{"proceed"}}
+		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
+		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("e")}
+		gate := newScopeGate(svc, true, nil)
+		wrapped := gate.wrap([]fantasy.AgentTool{read, write})
+
+		// Approval lands between runs — the plan run's stamp is done.
+		// The next run's first mutating call must pass without asking,
+		// even past the exploration threshold.
+		gate.ApprovePlan("s1")
+		ctx := gateCtx("s1", 2)
+		exploreN(t, ctx, wrapped[0], scopeGateMinExploration)
+		resp, err := wrapped[1].Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
+		require.NoError(t, err)
+		require.False(t, resp.IsError)
+		require.True(t, write.called)
+		require.Equal(t, 0, svc.asks, "the approved plan IS the scope confirmation")
+
+		// The flag is consumed once: the following run re-arms and the
+		// next mutating call reaches the question again.
+		ctx = gateCtx("s1", 3)
+		exploreN(t, ctx, wrapped[0], scopeGateMinExploration)
+		resp, err = wrapped[1].Run(ctx, fantasy.ToolCall{ID: "w2", Name: "edit"})
+		require.NoError(t, err)
+		require.False(t, resp.IsError)
 		require.Equal(t, 1, svc.asks)
 	})
 

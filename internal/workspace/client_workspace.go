@@ -316,6 +316,10 @@ func (w *ClientWorkspace) AgentSetMain(agentID string) error {
 	return w.client.SetMainAgent(context.Background(), w.workspaceID(), agentID)
 }
 
+func (w *ClientWorkspace) PlanApprove(ctx context.Context, sessionID string) error {
+	return w.client.ApprovePlan(ctx, w.workspaceID(), sessionID)
+}
+
 func (w *ClientWorkspace) AgentSummarize(ctx context.Context, sessionID string) error {
 	return w.client.AgentSummarizeSession(ctx, w.workspaceID(), sessionID)
 }

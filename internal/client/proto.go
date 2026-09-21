@@ -510,6 +510,21 @@ func (c *Client) SetMainAgent(ctx context.Context, id, agentID string) error {
 	return nil
 }
 
+// ApprovePlan records approval of a session's ready plan-mode plan on
+// the server: the typed items the plan agent emitted are seeded into the
+// session and the scope gate resolves for the executing run.
+func (c *Client) ApprovePlan(ctx context.Context, id, sessionID string) error {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/agent/sessions/%s/plan/approve", id, sessionID), nil, nil, nil)
+	if err != nil {
+		return fmt.Errorf("failed to approve plan: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to approve plan: status code %d", rsp.StatusCode)
+	}
+	return nil
+}
+
 // SendMessage sends a message to the agent for a workspace.
 //
 // When runID is non-empty it is echoed back on the resulting

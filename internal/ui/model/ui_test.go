@@ -146,6 +146,10 @@ func (w *testWorkspace) AgentSetMain(agentID string) error {
 	return nil
 }
 
+func (w *testWorkspace) PlanApprove(context.Context, string) error {
+	return nil
+}
+
 func (w *testWorkspace) UpdateAgentModel(context.Context) error {
 	w.updateCalls++
 	return nil
