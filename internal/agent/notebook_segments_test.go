@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -748,6 +749,77 @@ func TestDetectSegments_AsyncCloses(t *testing.T) {
 		}
 		return len(rows) > 0
 	}, 10*time.Second, 10*time.Millisecond, "closed segments should reach processed")
+}
+
+// TestGenerateSegment_AttemptStamping pins the record-on-completion
+// contract: a generation killed mid-flight (context already dead)
+// leaves no attempt stamp so it retries without backoff, while a
+// generation that ran to completion stamps — earning backoff on
+// real failures and marking the ledger on success.
+func TestGenerateSegment_AttemptStamping(t *testing.T) {
+	t.Parallel()
+
+	gen := &countingGen{}
+	a, svc, nb, sessionID := newSegmentTestAgent(t, gen)
+	msgs := segBuildTurn(t, svc, sessionID, "work", 2, "step content")
+	tracker := a.segmentTracker(sessionID)
+	s := segment{turn: 1, number: 1, start: 0, end: len(msgs)}
+	require.NoError(t, nb.RecordSegmentClose(t.Context(), sessionID, 1, 1, 0, int64(len(msgs))))
+
+	rowFor := func() notebook.ProcessedSegment {
+		rows, err := nb.ProcessedSegments(t.Context(), sessionID)
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		return rows[0]
+	}
+
+	// Killed in flight — the stamp must NOT land, so the segment is
+	// immediately due on the next process instead of inheriting a
+	// backoff it never earned.
+	deadCtx, cancel := context.WithCancel(t.Context())
+	cancel()
+	a.generateSegment(deadCtx, sessionID, s, msgs, tracker)
+	require.Zero(t, rowFor().LastAttemptAt)
+
+	// Completed generation — the stamp lands.
+	a.generateSegment(t.Context(), sessionID, s, msgs, tracker)
+	require.NotZero(t, rowFor().LastAttemptAt)
+}
+
+// TestSpawnDetached_JoinsDrain pins the drain contract: work spawned
+// through spawnDetached is counted on the shared wait group, so
+// WaitForDetachedWork can block until it finishes — and a nil group
+// (directly-constructed agents) falls back to an untracked spawn.
+func TestSpawnDetached_JoinsDrain(t *testing.T) {
+	t.Parallel()
+
+	wg := &sync.WaitGroup{}
+	a := &sessionAgent{detachedWork: wg}
+	gate := make(chan struct{})
+	a.spawnDetached(func() { <-gate })
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("drain returned while work was still in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(gate)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("drain never returned after work finished")
+	}
+
+	// Nil group — untracked spawn, still runs.
+	ran := make(chan struct{})
+	(&sessionAgent{}).spawnDetached(func() { close(ran) })
+	select {
+	case <-ran:
+	case <-time.After(2 * time.Second):
+		t.Fatal("untracked spawn never ran")
+	}
 }
 
 func TestRebuildStepMessages_PreservesSystemAndTail(t *testing.T) {

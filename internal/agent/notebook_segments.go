@@ -521,11 +521,6 @@ func (a *sessionAgent) detectSegments(ctx context.Context, sessionID string, msg
 			!segmentRetryDue(row, time.Now()) || !tracker.markInflight(key) {
 			continue
 		}
-		if err := a.notebook.RecordSegmentAttempt(detCtx, sessionID, s.turn, s.number); err != nil {
-			slog.Warn("Failed to record segment attempt", "session_id", sessionID, "error", err)
-			tracker.clearInflight(key)
-			continue
-		}
 		fired++
 		// Each goroutine gets a private deep clone: flagging and
 		// promotion mutate tool-result parts and mark pointers, so a
@@ -539,10 +534,10 @@ func (a *sessionAgent) detectSegments(ctx context.Context, sessionID string, msg
 			a.generateSegment(genCtx, sessionID, s, genMsgs[s.start:s.end], tracker)
 			cancel()
 		} else {
-			go func() {
+			a.spawnDetached(func() {
 				defer cancel()
 				a.generateSegment(genCtx, sessionID, s, genMsgs[s.start:s.end], tracker)
-			}()
+			})
 		}
 	}
 	// Write-boundary checkpoint trigger — runs on the same per-step
@@ -561,10 +556,10 @@ func (a *sessionAgent) detectSegments(ctx context.Context, sessionID string, msg
 			a.flagPrunableToolResults(flagCtx, flagMsgs)
 			cancel()
 		} else {
-			go func() {
+			a.spawnDetached(func() {
 				defer cancel()
 				a.flagPrunableToolResults(flagCtx, flagMsgs)
-			}()
+			})
 		}
 	}
 	return segs, processed
@@ -651,10 +646,19 @@ func (a *sessionAgent) backfillSegmentRegistry(ctx context.Context, sessionID st
 // Completion — entries and the processed marker — lands in one
 // transaction inside GenerateSegmentEntries; on failure the in-flight
 // mark clears and the segment stays unprocessed, retryable under
-// backoff.
+// backoff. The attempt stamp is recorded only when the generation
+// ran to completion (success or real failure): a generation killed
+// in flight — process exit, timeout — leaves no stamp, so it retries
+// immediately instead of inheriting backoff it never earned.
 func (a *sessionAgent) generateSegment(ctx context.Context, sessionID string, s segment, segMsgs []message.Message, tracker *segmentTracker) {
 	defer tracker.clearInflight(s.key())
-	if err := a.notebook.GenerateSegmentEntries(ctx, sessionID, s.turn, s.number, int64(s.start), int64(s.end), segMsgs); err != nil {
+	err := a.notebook.GenerateSegmentEntries(ctx, sessionID, s.turn, s.number, int64(s.start), int64(s.end), segMsgs)
+	if ctx.Err() == nil {
+		if recErr := a.notebook.RecordSegmentAttempt(ctx, sessionID, s.turn, s.number); recErr != nil {
+			slog.Warn("Failed to record segment attempt", "session_id", sessionID, "turn", s.turn, "segment", s.number, "error", recErr)
+		}
+	}
+	if err != nil {
 		slog.Error("Failed to generate segment entries", "session_id", sessionID, "turn", s.turn, "segment", s.number, "error", err)
 		return
 	}
@@ -738,10 +742,10 @@ func (a *sessionAgent) generateRunEndSegments(ctx context.Context, sessionID str
 			a.generateSegment(genCtx, sessionID, s, genMsgs[s.start:s.end], tracker)
 			cancel()
 		} else {
-			go func() {
+			a.spawnDetached(func() {
 				defer cancel()
 				a.generateSegment(genCtx, sessionID, s, genMsgs[s.start:s.end], tracker)
-			}()
+			})
 		}
 	}
 }

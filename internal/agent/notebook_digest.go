@@ -147,10 +147,10 @@ func (a *sessionAgent) spawnDigest(ctx context.Context, sessionID string, tracke
 		cancel()
 		return
 	}
-	go func() {
+	a.spawnDetached(func() {
 		defer cancel()
 		a.runDigest(genCtx, sessionID, req, tracker, turn)
-	}()
+	})
 }
 
 // runDigest invokes the service, resolves the in-flight claim, and

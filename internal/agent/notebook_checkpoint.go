@@ -336,10 +336,10 @@ func (a *sessionAgent) spawnCheckpoint(ctx context.Context, sessionID string, tr
 		cancel()
 		return
 	}
-	go func() {
+	a.spawnDetached(func() {
 		defer cancel()
 		a.runCheckpoint(genCtx, sessionID, req, tracker, stamp)
-	}()
+	})
 }
 
 // runCheckpoint invokes the service and resolves the claim: keep the

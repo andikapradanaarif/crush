@@ -465,6 +465,11 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 		select {
 		case result := <-done:
 			stopSpinner()
+			// Join detached notebook work before exit — a short-lived
+			// `crush run` process must commit coverage (and let the
+			// telemetry/report reflect it) rather than killing the
+			// generators mid-flight.
+			app.drainDetachedWork(detachedDrainTimeout)
 			app.emitEvalTelemetry(sess.ID, result.result, result.err, 0)
 			if result.err != nil {
 				if errors.Is(result.err, context.Canceled) || errors.Is(result.err, agent.ErrRequestCancelled) {
@@ -512,6 +517,13 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 			}
 			select {
 			case result := <-done:
+				// The run goroutine returned — no new top-level
+				// spawns can land, so joining detached work here
+				// cannot race an Add on an empty wait group.
+				// Generations run on detached contexts and may still
+				// be in flight; give near-done ones a beat to commit
+				// coverage before the process dies.
+				app.drainDetachedWork(detachedCancelDrainTimeout)
 				// An errored run may carry a nil result — still record
 				// the approximate step burn.
 				app.emitEvalTelemetry(sess.ID, result.result, result.err, len(messageReadBytes))
@@ -527,6 +539,36 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 			}
 			return ctx.Err()
 		}
+	}
+}
+
+// detachedDrainTimeout bounds the pre-exit join on detached agent
+// work — long enough for a healthy generation (seconds), short
+// enough that a hung provider call cannot hold the process hostage
+// (generations carry their own 10m timeout, which the join does not
+// extend).
+const detachedDrainTimeout = 30 * time.Second
+
+// detachedCancelDrainTimeout bounds the same join on the cancel
+// path — the eval driver's WaitDelay leaves ~10s of grace between
+// SIGINT and hard kill.
+const detachedCancelDrainTimeout = 2 * time.Second
+
+// drainDetachedWork joins detached agent bookkeeping — notebook
+// segment/checkpoint/digest generation, supersession flagging,
+// title — before the process exits. Without it a short-lived
+// `crush run` kills coverage commits mid-flight and the next
+// turn's coverage gate starves. No-op on coordinators that don't
+// expose the join.
+func (app *App) drainDetachedWork(timeout time.Duration) {
+	c, ok := app.AgentCoordinator.(interface {
+		WaitForDetachedWork(time.Duration) bool
+	})
+	if !ok {
+		return
+	}
+	if !c.WaitForDetachedWork(timeout) {
+		slog.Warn("Timed out draining detached agent work", "timeout", timeout)
 	}
 }
 

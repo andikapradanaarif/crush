@@ -4,6 +4,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"charm.land/fantasy"
 )
@@ -135,6 +136,32 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 		}
 	}
 	return t
+}
+
+// WaitForDetachedWork joins the coordinator's detached-work wait
+// group — segment, checkpoint, and digest generation, supersession
+// flagging, and title generation — so a short-lived `crush run`
+// process can commit coverage before exiting instead of killing the
+// goroutines mid-flight. Returns false when the timeout fired with
+// work still in flight. Deliberately not on the Coordinator
+// interface — the caller type-asserts for it alongside
+// SessionTelemetry. timeout <= 0 waits unboundedly.
+func (c *coordinator) WaitForDetachedWork(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		c.detachedWork.Wait()
+		close(done)
+	}()
+	if timeout <= 0 {
+		<-done
+		return true
+	}
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // EdgeFiringDelta returns the session's edge firing counts minus what

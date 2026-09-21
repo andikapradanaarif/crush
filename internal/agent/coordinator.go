@@ -229,6 +229,12 @@ type coordinator struct {
 	// (prompt growth curve, rendered composition) — always-on, two
 	// map writes per step.
 	reqStats *csync.Map[string, requestStats]
+	// detachedWork is shared with every built agent: each detached
+	// notebook/title goroutine Adds before spawning so
+	// WaitForDetachedWork can join them before a short-lived
+	// process exits. Coordinator-owned so a mid-drain agent rebuild
+	// cannot strand the count.
+	detachedWork *sync.WaitGroup
 
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
@@ -312,6 +318,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		edgeStats:             csync.NewMap[string, map[string]int](),
 		edgeFiringEmitted:     csync.NewMap[string, map[string]int](),
 		reqStats:              csync.NewMap[string, requestStats](),
+		detachedWork:          &sync.WaitGroup{},
 	}
 
 	// Share per-session bookkeeping maps across all built agents and
@@ -1132,6 +1139,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		EdgeStore:              c.edgeStore,
 		EdgeStats:              c.edgeStats,
 		RequestStats:           c.reqStats,
+		DetachedWork:           c.detachedWork,
 	})
 
 	// Warn only for main agents — sub-agent builds happen per run via

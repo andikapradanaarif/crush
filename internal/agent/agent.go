@@ -309,6 +309,12 @@ type sessionAgent struct {
 	// composition — shared across agent rebuilds. Nil allocates its
 	// own.
 	reqStats *csync.Map[string, requestStats]
+	// detachedWork tracks spawned detached goroutines (segment,
+	// checkpoint, and digest generation, flagging, title) so a
+	// short-lived process can join them before exiting instead of
+	// killing them mid-flight. Shared across agent rebuilds. Nil
+	// allocates its own.
+	detachedWork *sync.WaitGroup
 	// runStampGen is the monotonic source of per-Run stamps the scope
 	// gate uses to reset its explore→execute boundary bookkeeping.
 	// Atomic: Run invocations on different sessions can race on it.
@@ -478,6 +484,10 @@ type SessionAgentOptions struct {
 	// growth curve, rendered composition) across agent rebuilds.
 	// When nil the agent allocates its own.
 	RequestStats *csync.Map[string, requestStats]
+	// DetachedWork is the shared wait group for spawned detached
+	// goroutines — the coordinator drains it on process exit. When
+	// nil the agent allocates its own.
+	DetachedWork *sync.WaitGroup
 }
 
 func NewSessionAgent(
@@ -529,10 +539,30 @@ func NewSessionAgent(
 		edgeStore:              opts.EdgeStore,
 		edgeStats:              cmp.Or(opts.EdgeStats, csync.NewMap[string, map[string]int]()),
 		reqStats:               cmp.Or(opts.RequestStats, csync.NewMap[string, requestStats]()),
+		detachedWork:           cmp.Or(opts.DetachedWork, &sync.WaitGroup{}),
 		hydrateFetch:           notebook.FetchHydrationMemories,
 	}
 	a.runStampGen.Store(runStampEpoch())
 	return a
+}
+
+// spawnDetached runs f as tracked detached work — the coordinator's
+// WaitForDetachedWork joins these goroutines before a short-lived
+// process exits. The Add happens before the goroutine starts so a
+// drain issued the moment Run returns cannot slip past a pending
+// spawn. A directly-constructed agent (tests bypassing
+// NewSessionAgent) has no shared group — fall back to an untracked
+// spawn, the pre-drain behavior.
+func (a *sessionAgent) spawnDetached(f func()) {
+	if a.detachedWork == nil {
+		go f()
+		return
+	}
+	a.detachedWork.Add(1)
+	go func() {
+		defer a.detachedWork.Done()
+		f()
+	}()
 }
 
 // runStampEpoch returns the high-bit seed for runStampGen: a random
@@ -1022,7 +1052,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// goroutine survives Run's cancel.
 	if !hasSubstantiveUserMessage(msgs) {
 		titleCtx := context.WithoutCancel(ctx)
-		go a.GenerateTitle(titleCtx, call.SessionID, call.Prompt)
+		a.spawnDetached(func() { a.GenerateTitle(titleCtx, call.SessionID, call.Prompt) })
 	}
 
 	// Add the user message to the session.
@@ -1658,7 +1688,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		if currentAssistant != nil {
 			lastAssistantID = currentAssistant.ID
 		}
-		go func() {
+		a.spawnDetached(func() {
 			// Re-fetch messages to get the current turn's messages
 			// (user message + assistant response + tool calls/results).
 			allMsgs, err := a.messages.List(notebookCtx, notebookSessionID)
@@ -1700,7 +1730,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 					a.generateRunEndCheckpoint(notebookCtx, notebookSessionID, allMsgs, notebookPreTurnCount, call.RunStamp, registry, lastAssistantID)
 				}
 			}
-		}()
+		})
 	}
 
 	if shouldSummarize {
