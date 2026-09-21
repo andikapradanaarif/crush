@@ -5276,7 +5276,9 @@ func (m *UI) openPlanHandoff() {
 			// already in the coder's context regardless.
 			var warn tea.Cmd
 			if err := m.com.Workspace.PlanApprove(context.Background(), sessionID); err != nil {
-				warn = util.ReportWarn("Plan approval failed: " + err.Error())
+				// The approval itself may have taken effect (the gate
+				// resolves before seeding) — name the failed half.
+				warn = util.ReportWarn("Plan seeding failed: " + err.Error())
 			}
 			result := cmd()
 			if switched, ok := result.(modeSwitchedMsg); ok {

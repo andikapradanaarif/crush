@@ -77,7 +77,7 @@ func (s *runCoordinator) Cancel(string) {}
 func (s *runCoordinator) CancelAll()    {}
 func (s *runCoordinator) IsBusy() bool  { return s.busy }
 func (s *runCoordinator) IsSessionBusy(string) bool {
-	return false
+	return s.busy
 }
 func (s *runCoordinator) QueuedPrompts(string) int          { return 0 }
 func (s *runCoordinator) QueuedPromptsList(string) []string { return nil }

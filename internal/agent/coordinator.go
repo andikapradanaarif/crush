@@ -470,11 +470,15 @@ var ErrNoReadyPlan = errors.New("no ready plan in the session's last assistant m
 //     question.
 func (c *coordinator) ApprovePlan(ctx context.Context, sessionID string) error {
 	// Approval is a read-modify-write on the session's plan items; a
-	// mid-run approval would race a concurrent todos write. The backend
-	// guards its own path for the 409 mapping — this guards the
-	// in-process path the TUI uses.
-	if c.currentAgent() != nil && c.IsBusy() {
-		return fmt.Errorf("approving plan while the agent is busy: %w", ErrSessionBusy)
+	// mid-run approval on the same session would race a concurrent
+	// todos write. The backend guards its own path for the 409 mapping
+	// — this guards the in-process path the TUI uses. The check only
+	// inspects the current agent: a session busy on a non-current agent
+	// slips through, which is harmless today — only the coder's todos
+	// tool writes Todos, and it cannot run under a session whose main
+	// agent is still the plan agent.
+	if c.currentAgent() != nil && c.IsSessionBusy(sessionID) {
+		return fmt.Errorf("approving plan while the session is busy: %w", ErrSessionBusy)
 	}
 
 	msg, err := c.messages.GetLastAssistantMessage(ctx, sessionID)
@@ -493,7 +497,7 @@ func (c *coordinator) ApprovePlan(ctx context.Context, sessionID string) error {
 		c.scopeGate.ApprovePlan(sessionID)
 	}
 
-	seeds := c.planSeeds(ctx, sessionID, plan)
+	seeds := c.planSeeds(sessionID, plan)
 	if seeds == nil {
 		return nil
 	}
@@ -509,12 +513,15 @@ func (c *coordinator) ApprovePlan(ctx context.Context, sessionID string) error {
 }
 
 // planSeeds extracts and sanitizes the typed items block from a ready
-// plan. Returns nil — never an error — when no usable seed exists: a
-// missing or malformed block, or items that all fail sanitization, leave
-// the approval valid but unseeded. Items must satisfy the same contract
-// a todos write would: a key, at least one evidence binding restricted
-// to configured check names, and a structurally valid dependency graph.
-func (c *coordinator) planSeeds(ctx context.Context, sessionID, plan string) []session.PlanItem {
+// plan. Returns nil — never an error — when the plan carries no usable
+// block: missing, malformed, or failing structural validation all leave
+// the approval valid but unseeded. A block that parses but sanitizes to
+// empty (every item evidence-dropped, or an explicit []) returns an
+// empty non-nil slice so the merge clears previously seeded items.
+// Items must satisfy the same contract a todos write would: a key, at
+// least one evidence binding restricted to configured check names, and
+// a structurally valid dependency graph.
+func (c *coordinator) planSeeds(sessionID, plan string) []session.PlanItem {
 	seeds, err := session.ParsePlanSeed(plan)
 	if err != nil {
 		slog.Warn("Plan approval: items block malformed, resolving gate without seeds",
@@ -534,7 +541,6 @@ func (c *coordinator) planSeeds(ctx context.Context, sessionID, plan string) []s
 		workingDir = c.cfg.WorkingDir()
 	}
 
-	keyByID := session.PlanKeyByID(seeds)
 	clean := seeds[:0]
 	dropped := 0
 	for _, item := range seeds {
@@ -565,15 +571,22 @@ func (c *coordinator) planSeeds(ctx context.Context, sessionID, plan string) []s
 	// Structural validation gets the same rules the todos tool applies
 	// on write: valid deps, no cycles, no vacuous path bindings. Convert
 	// back to the write-side shape — DependsOn on PlanItem is minted
-	// IDs, the validator expects keys.
+	// IDs, the validator expects keys. The key map covers only items
+	// that survived sanitization, so an edge onto a dropped item prunes
+	// here exactly as it would in ParsePlanSeed — consistent pruning
+	// semantics at both stages.
+	keyByID := session.PlanKeyByID(clean)
 	items := make([]tools.TodoItem, 0, len(clean))
-	for _, item := range clean {
+	for i, item := range clean {
 		deps := make([]string, 0, len(item.DependsOn))
+		kept := item.DependsOn[:0]
 		for _, depID := range item.DependsOn {
 			if k := keyByID[depID]; k != "" {
 				deps = append(deps, k)
+				kept = append(kept, depID)
 			}
 		}
+		clean[i].DependsOn = kept
 		items = append(items, tools.TodoItem{
 			Key:            item.Key,
 			Content:        item.Content,

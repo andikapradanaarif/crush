@@ -138,8 +138,9 @@ func planItemsBlock(text string) (string, bool) {
 			if strings.HasPrefix(trimmed, "```") {
 				return block.String(), true
 			}
+			// strings.Lines yields lines with their terminators, so
+			// no extra newline is needed.
 			block.WriteString(line)
-			block.WriteByte('\n')
 			continue
 		}
 		if isFenceLine(trimmed) {

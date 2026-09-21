@@ -216,9 +216,10 @@ func (b *Backend) ApprovePlan(ctx context.Context, workspaceID, sessionID string
 	}
 
 	// Approval is a read-modify-write on the session's plan items —
-	// a mid-run approval would race a concurrent todos write and lose
-	// an update either direction. Mirror SetMainAgent's rejection.
-	if ws.AgentCoordinator.IsBusy() {
+	// a mid-run approval on the same session would race a concurrent
+	// todos write and lose an update either direction. Session-scoped,
+	// not agent-scoped: an unrelated busy session must not 409 this one.
+	if ws.AgentCoordinator.IsSessionBusy(sessionID) {
 		return ErrAgentBusy
 	}
 

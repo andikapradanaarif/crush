@@ -57,3 +57,40 @@ func TestPlanPromptListsConfiguredTools(t *testing.T) {
 		"Your available tools are: agent, lsp_symbols, lsp_definition, lsp_call_hierarchy, glob, grep, ls, map, sourcegraph, view, recall, notebook_search.")
 	require.NotContains(t, systemPrompt.Text, "ls, question,")
 }
+
+// TestPlanPromptListsBindableCheckNames verifies the plan prompt
+// surfaces the configured verify-check vocabulary for evidence_checks
+// binding — the plan agent has no todos tool, so the prompt is its only
+// source of valid names — and falls back to a paths-only instruction
+// when none are configured.
+func TestPlanPromptListsBindableCheckNames(t *testing.T) {
+	env := testEnv(t)
+	crushJSON := `{
+  "options": {"disable_default_providers": true, "disable_provider_auto_update": true},
+  "providers": {"mock": {"id": "mock", "name": "Mock", "type": "openai",
+    "base_url": "http://127.0.0.1:9/v1", "api_key": "test-key",
+    "models": [{"id": "mock-model", "name": "Mock", "context_window": 8192, "default_max_tokens": 128}]}},
+  "models": {"large": {"provider": "mock", "model": "mock-model"},
+             "small": {"provider": "mock", "model": "mock-model"}},
+  "verify": [{"name": "unit-tests", "command": "go test ./..."}]
+}`
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "crush.json"), []byte(crushJSON), 0o644))
+
+	cfg, err := config.Init(env.workingDir, "", false)
+	require.NoError(t, err)
+
+	p, err := planPrompt(prompt.WithWorkingDir(env.workingDir))
+	require.NoError(t, err)
+
+	systemPrompt, err := p.Build(context.Background(), "mock", "mock-model", cfg)
+	require.NoError(t, err)
+	require.Contains(t, systemPrompt.Text, "`verify:unit-tests`")
+	require.NotContains(t, systemPrompt.Text, "No check names are configured")
+
+	// Without configured checks the prompt must say so explicitly —
+	// a model guessing names produces seeds that sanitize away.
+	cfg.Config().Verify = nil
+	systemPrompt, err = p.Build(context.Background(), "mock", "mock-model", cfg)
+	require.NoError(t, err)
+	require.Contains(t, systemPrompt.Text, "No check names are configured")
+}

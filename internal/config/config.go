@@ -843,8 +843,8 @@ func (v *VerifyConfig) TimeoutDuration() time.Duration {
 }
 
 // DisplayName returns the check name for display purposes, falling back
-// to Command.
-func (v *VerifyConfig) DisplayName() string {
+// to Command. A value receiver so templates can call it on ranged items.
+func (v VerifyConfig) DisplayName() string {
 	if v.Name != "" {
 		return v.Name
 	}

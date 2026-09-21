@@ -794,10 +794,12 @@ func (c *controllerV1) handleError(w http.ResponseWriter, r *http.Request, err e
 		status = http.StatusNotFound
 	case errors.Is(err, backend.ErrAgentNotInitialized):
 		status = http.StatusBadRequest
-	case errors.Is(err, backend.ErrAgentBusy):
+	case errors.Is(err, backend.ErrAgentBusy), errors.Is(err, agent.ErrSessionBusy):
 		// Switching the main agent mid-run could strand the run's
 		// queued prompts on the previous agent; mirror the TUI's
-		// own busy guard for API callers.
+		// own busy guard for API callers. ErrSessionBusy is the
+		// coordinator's own guard — it covers the TOCTOU window between
+		// the backend's IsBusy check and the operation landing.
 		status = http.StatusConflict
 	case errors.Is(err, agent.ErrNoReadyPlan):
 		// Approving when no ready plan exists is a state conflict,

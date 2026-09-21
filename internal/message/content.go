@@ -350,14 +350,13 @@ func (m *Message) Content() TextContent {
 // like the plan-ready marker — in later parts when a provider fragments
 // its response. Marker detection and plan extraction should use this.
 func (m *Message) JoinedText() string {
-	var sb strings.Builder
+	var texts []string
 	for _, part := range m.Parts {
 		if c, ok := part.(TextContent); ok {
-			sb.WriteString(c.Text)
-			sb.WriteByte('\n')
+			texts = append(texts, c.Text)
 		}
 	}
-	return sb.String()
+	return strings.Join(texts, "\n")
 }
 
 func (m *Message) ReasoningContent() ReasoningContent {
