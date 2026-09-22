@@ -2110,7 +2110,29 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 		if collapse != nil && collapse.Set == nil {
 			collapse.Set = coveredPriorTurns(segs, processed, collapse.Before)
 			if a.priorTurns == priorTurnsSummarize {
-				collapse.summaries = a.turnSummaries(ctx, sessionID, collapse.Set)
+				// minTurn is the turn AT the boundary — turns fully
+				// below the raw-window floor never emit a summary, so
+				// their entries are not worth joining. messageTurns
+				// numbering, not a raw user-message count: a straddled
+				// turn keeps its entries.
+				var minTurn int64
+				if mts := messageTurns(msgs); len(mts) > 0 {
+					if boundary < len(mts) {
+						minTurn = mts[boundary]
+					} else {
+						minTurn = mts[len(mts)-1] + 1
+					}
+				}
+				var ok bool
+				collapse.summaries, ok = a.turnSummaries(ctx, sessionID, collapse.Set, minTurn)
+				if !ok && a.stubStats != nil {
+					// A failed fetch renders verbatim — mark it so a
+					// control-shaped prompt can't pass as a summarize
+					// sample in telemetry.
+					stats, _ := a.stubStats.Get(sessionID)
+					stats.SummaryFetchFailed = true
+					a.stubStats.Set(sessionID, stats)
+				}
 			}
 		}
 		bKey := boundarySegmentKey(segs, boundary)
@@ -2192,13 +2214,27 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 	// and a turn boundary cannot split a call from its result.
 	callNames := make(map[string]string)
 	exemptCalls := make(map[string]bool)
-	for _, m := range rawMsgs {
+	// callDropped marks the calls this render drops. Summarize mode
+	// may drop a result only when its call drops with it — a result
+	// can land in a collapsed turn while its call sits in a verbatim
+	// one (a user message can interleave between call and result on
+	// resume), and dropping it there would strand a tool_use that
+	// providers hard-reject on every remaining render.
+	var callDropped map[string]bool
+	if a.priorTurns == priorTurnsSummarize {
+		callDropped = make(map[string]bool)
+	}
+	for i, m := range rawMsgs {
 		if m.Role != message.Assistant {
 			continue
 		}
 		for _, tc := range m.ToolCalls() {
 			callNames[tc.ID] = tc.Name
 			exemptCalls[tc.ID] = callIsExempt(tc)
+			if callDropped != nil {
+				_, collapsing := collapsedTurn(i)
+				callDropped[tc.ID] = collapsing && tc.Name != tools.QuestionToolName
+			}
 		}
 	}
 	var stubs stubReport
@@ -2216,7 +2252,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 			// the prompt too, so nothing dangles.
 			var n int
 			if a.priorTurns == priorTurnsSummarize {
-				m, n = summarizeToolMessageForTurn(m, callNames)
+				m, n = summarizeToolMessageForTurn(m, callNames, callDropped)
 			} else {
 				m, n = collapseToolMessageForTurn(m, turn, a.priorTurns, exemptCalls, callNames)
 			}

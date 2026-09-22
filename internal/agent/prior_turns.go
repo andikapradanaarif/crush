@@ -64,6 +64,17 @@ type turnCollapse struct {
 	summaries   map[int64]string
 }
 
+// resolvePriorTurns applies the mode gates at agent construction:
+// stub/digest print recall pointers and need the recall tool live;
+// summarize renders the entries inline and needs only the notebook.
+// Anything else — including a disabled notebook — resolves verbatim.
+func resolvePriorTurns(mode string, notebookOn, recallOn bool) string {
+	if notebookOn && (recallOn || mode == priorTurnsSummarize) {
+		return mode
+	}
+	return priorTurnsVerbatim
+}
+
 // newTurnCollapse returns the collapse state for one render pipeline,
 // or nil when collapse is off — verbatim mode, or no notebook to back
 // the stubs' recall pointer. The coordinator already coerces the
@@ -259,22 +270,27 @@ func collapseToolMessageForTurn(m message.Message, turn int64, mode string, exem
 // excluded, as are hydration seeds. The uncompressed EntryTextFull is
 // preferred — the mode's premise is information sufficiency. A
 // covered turn with no entries is absent from the result: it renders
-// verbatim. The fetch runs once per run at collapse-set freeze, so a
-// mid-run entry commit cannot flip a rendered turn.
-func (a *sessionAgent) turnSummaries(ctx context.Context, sessionID string, covered map[int64]bool) map[int64]string {
+// verbatim. Entries below minTurn are skipped — turns fully evicted
+// under the raw-window floor never emit a summary. The fetch runs
+// once per run at collapse-set freeze, so a mid-run entry commit
+// cannot flip a rendered turn. The bool is false when the fetch
+// itself failed — callers mark that degrade so a verbatim-rendered
+// run can't silently pass as a summarize sample.
+func (a *sessionAgent) turnSummaries(ctx context.Context, sessionID string, covered map[int64]bool, minTurn int64) (map[int64]string, bool) {
 	if sessionID == "" || len(covered) == 0 {
-		return nil
+		return nil, true
 	}
 	detCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	entries, err := a.notebook.GetEntries(detCtx, sessionID)
 	cancel()
 	if err != nil {
 		slog.Warn("Failed to load entries for turn summaries", "session_id", sessionID, "error", err)
-		return nil
+		return nil, false
 	}
 	byTurn := make(map[int64][]notebook.Entry)
 	for _, e := range entries {
-		if !covered[e.TurnNumber] || e.EventType == notebook.EventCheckpoint || isHydratedSeed(e) {
+		if !covered[e.TurnNumber] || e.TurnNumber < minTurn ||
+			e.EventType == notebook.EventCheckpoint || isHydratedSeed(e) {
 			continue
 		}
 		byTurn[e.TurnNumber] = append(byTurn[e.TurnNumber], e)
@@ -287,15 +303,20 @@ func (a *sessionAgent) turnSummaries(ctx context.Context, sessionID string, cove
 			}
 			return cmp.Compare(x.EventNumber, y.EventNumber)
 		})
-		var sb strings.Builder
-		fmt.Fprintf(&sb, "[Summary of turn %d]\n", turn)
+		texts := make([]string, 0, len(list))
 		for _, e := range list {
-			sb.WriteString(cmp.Or(e.EntryTextFull, e.EntryText))
-			sb.WriteString("\n")
+			if t := strings.TrimSpace(cmp.Or(e.EntryTextFull, e.EntryText)); t != "" {
+				texts = append(texts, t)
+			}
 		}
-		summaries[turn] = strings.TrimRight(sb.String(), "\n")
+		// A covered turn whose entries are all empty collapses to a
+		// bare header — skip it so it renders verbatim instead.
+		if len(texts) == 0 {
+			continue
+		}
+		summaries[turn] = fmt.Sprintf("[Summary of turn %d]\n%s", turn, strings.Join(texts, "\n"))
 	}
-	return summaries
+	return summaries, true
 }
 
 // summarizeAssistantForTurn returns m with the turn's executable
@@ -351,16 +372,24 @@ func summarizeAssistantForTurn(m message.Message) (message.Message, int) {
 	return out, dropped
 }
 
-// summarizeToolMessageForTurn keeps only the results answering the
-// turn's surviving question calls — every other result drops with its
-// call, which leaves the prompt entirely rather than rendering a
-// stub. Returns the message and the dropped-result count.
-func summarizeToolMessageForTurn(m message.Message, callNames map[string]string) (message.Message, int) {
+// summarizeToolMessageForTurn keeps only the results whose call
+// survives this render — the turn's question pairs, and results
+// answering calls in turns that are NOT collapsing (a result can land
+// in a collapsed turn while its call sits in a verbatim one when a
+// user message interleaved on resume; dropping it there would strand
+// a tool_use). Every dropped result's call leaves the prompt too, so
+// nothing dangles. Returns the message and the dropped-result count.
+func summarizeToolMessageForTurn(m message.Message, callNames map[string]string, callDropped map[string]bool) (message.Message, int) {
 	var parts []message.ContentPart
 	dropped := 0
 	for i, part := range m.Parts {
 		tr, ok := part.(message.ToolResult)
-		if !ok || callNames[tr.ToolCallID] == tools.QuestionToolName {
+		keep := !ok
+		if ok {
+			_, known := callNames[tr.ToolCallID]
+			keep = known && !callDropped[tr.ToolCallID]
+		}
+		if keep {
 			if parts != nil {
 				parts = append(parts, part)
 			}

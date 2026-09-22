@@ -1095,10 +1095,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 	// notebook.
 	notebookOn := c.cfg.Config().Options.NotebookIsEnabled()
 	recallOn := slices.Contains(agent.AllowedTools, notebooktool.RecallToolName)
-	priorTurns := "verbatim"
-	if mode := c.cfg.Config().Options.NotebookPriorTurnsMode(); notebookOn && (recallOn || mode == priorTurnsSummarize) {
-		priorTurns = mode
-	}
+	priorTurns := resolvePriorTurns(c.cfg.Config().Options.NotebookPriorTurnsMode(), notebookOn, recallOn)
 	result := NewSessionAgent(SessionAgentOptions{
 		LargeModel:           large,
 		SmallModel:           small,

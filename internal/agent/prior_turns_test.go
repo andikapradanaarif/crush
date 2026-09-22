@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/message"
@@ -847,4 +848,164 @@ func TestPreparePrompt_SummarizeStraddledTurn(t *testing.T) {
 		require.False(t, callPresent(history, id), id)
 	}
 	require.Less(t, strings.Index(text, "[Summary of turn 0]"), strings.Index(text, "next prompt"))
+}
+
+// resolvePriorTurns is the coordinator's construction-time gate —
+// stub/digest need the recall tool for their pointers; summarize
+// renders entries and needs only the notebook.
+func TestResolvePriorTurns_Gates(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		mode       string
+		notebookOn bool
+		recallOn   bool
+		want       string
+	}{
+		{"summarize without recall survives", priorTurnsSummarize, true, false, priorTurnsSummarize},
+		{"stub without recall degrades", priorTurnsStub, true, false, priorTurnsVerbatim},
+		{"digest without recall degrades", priorTurnsDigest, true, false, priorTurnsVerbatim},
+		{"summarize with recall", priorTurnsSummarize, true, true, priorTurnsSummarize},
+		{"stub with recall", priorTurnsStub, true, true, priorTurnsStub},
+		{"summarize without notebook degrades", priorTurnsSummarize, false, true, priorTurnsVerbatim},
+		{"verbatim stays verbatim", priorTurnsVerbatim, true, true, priorTurnsVerbatim},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, resolvePriorTurns(tc.mode, tc.notebookOn, tc.recallOn))
+		})
+	}
+}
+
+// A result landing in a collapsed turn whose call sits in a verbatim
+// turn must survive — dropping it would strand the rendered tool_use.
+// (A user message can interleave between call and result on resume,
+// splitting the pair across the collapse boundary.)
+func TestSummarizeToolMessage_CrossTurnResultKept(t *testing.T) {
+	t.Parallel()
+
+	m := message.Message{Role: message.Tool, Parts: []message.ContentPart{
+		message.ToolResult{ToolCallID: "tc-verbatim", Name: "bash", Content: "early"},
+		message.ToolResult{ToolCallID: "tc-collapsed", Name: "bash", Content: "late"},
+		message.ToolResult{ToolCallID: "tc-question", Name: "question", Content: "yes"},
+		message.ToolResult{ToolCallID: "tc-unknown", Name: "bash", Content: "orphan"},
+	}}
+	callNames := map[string]string{
+		"tc-verbatim":  "bash",
+		"tc-collapsed": "bash",
+		"tc-question":  tools.QuestionToolName,
+	}
+	callDropped := map[string]bool{"tc-collapsed": true, "tc-question": false, "tc-verbatim": false}
+
+	out, n := summarizeToolMessageForTurn(m, callNames, callDropped)
+	require.Equal(t, 2, n)
+	kept := map[string]bool{}
+	for _, p := range out.Parts {
+		tr := p.(message.ToolResult)
+		kept[tr.ToolCallID] = true
+	}
+	require.True(t, kept["tc-verbatim"], "verbatim-turn call's result must survive")
+	require.True(t, kept["tc-question"], "question pair survives")
+	require.False(t, kept["tc-collapsed"], "dropped call's result drops with it")
+	require.False(t, kept["tc-unknown"], "unknown call's result drops (orphan)")
+}
+
+// blankEntryGen produces entries with empty text — the all-empty edge
+// that must not collapse to a bare [Summary] header.
+type blankEntryGen struct{}
+
+func (blankEntryGen) Generate(_ context.Context, _ string, events []notebook.EntryInput) ([]notebook.GeneratedEntry, error) {
+	entries := make([]notebook.GeneratedEntry, len(events))
+	for i, ev := range events {
+		entries[i] = notebook.GeneratedEntry{EventType: ev.EventType, Title: ev.Title}
+	}
+	return entries, nil
+}
+
+func (blankEntryGen) GenerateCheckpoint(context.Context, string, string) (notebook.GeneratedEntry, error) {
+	return notebook.GeneratedEntry{EventType: notebook.EventCheckpoint}, nil
+}
+
+func (blankEntryGen) GenerateDigest(context.Context, string, string) (notebook.GeneratedEntry, error) {
+	return notebook.GeneratedEntry{EventType: notebook.EventCheckpoint}, nil
+}
+
+// A covered turn whose entries are all empty stays verbatim — a bare
+// header is not a summary. The turn must hold only significant events:
+// a trivial one would earn a deterministic exploration entry and make
+// the turn non-blank.
+func TestPreparePrompt_SummarizeBlankEntriesStayVerbatim(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, blankEntryGen{})
+	a.priorTurns = priorTurnsSummarize
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "first prompt"})
+	mkMsg(t, svc, sessionID, message.Assistant,
+		message.ToolCall{ID: "tc-bash", Name: "bash", Input: `{"command":"cat big.go"}`, Finished: true})
+	mkMsg(t, svc, sessionID, message.Tool,
+		message.ToolResult{ToolCallID: "tc-bash", Name: "bash", Content: "output body"})
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "second prompt"})
+	msgs, err := svc.List(t.Context(), sessionID)
+	require.NoError(t, err)
+	ctx := t.Context()
+	a.detectSegments(ctx, sessionID, msgs)
+
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	require.JSONEq(t, `{"command":"cat big.go"}`, renderedCall(t, history, "tc-bash").Input)
+	require.NotContains(t, renderedText(history), "[Summary of turn 0]")
+}
+
+// The resume edge: a call in a covered-but-entryless turn (verbatim)
+// whose result landed in the next turn (collapsed) after an
+// interleaved user message. The pair must survive — dropping the
+// result would strand a rendered tool_use that providers reject.
+func TestPreparePrompt_SummarizeCrossTurnResultSurvives(t *testing.T) {
+	t.Parallel()
+
+	a, svc, nb, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsSummarize
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "p1"})
+	mkMsg(t, svc, sessionID, message.Assistant,
+		message.ToolCall{ID: "tc-early", Name: "bash", Input: `{"command":"ls"}`, Finished: true})
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "p2"})
+	mkMsg(t, svc, sessionID, message.Tool,
+		message.ToolResult{ToolCallID: "tc-early", Name: "bash", Content: "early result"})
+	mkMsg(t, svc, sessionID, message.Assistant,
+		message.ToolCall{ID: "tc-late", Name: "bash", Input: `{"command":"pwd"}`, Finished: true})
+	mkMsg(t, svc, sessionID, message.Tool,
+		message.ToolResult{ToolCallID: "tc-late", Name: "bash", Content: "late result"})
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "p3"})
+	msgs, err := svc.List(t.Context(), sessionID)
+	require.NoError(t, err)
+	ctx := t.Context()
+
+	// Turn 0 covered but entryless (renders verbatim); turn 1 covered
+	// with entries (collapses).
+	var coveredNoEntries []notebook.ProcessedSegment
+	for _, s := range segmentBoundaries(msgs, a.segTokenBudget(), a.segMaxSteps()) {
+		switch {
+		case s.open:
+		case s.turn == 0:
+			coveredNoEntries = append(coveredNoEntries, notebook.ProcessedSegment{
+				TurnNumber: s.turn, SegmentNumber: s.number,
+				StartIndex: int64(s.start), EndIndex: int64(s.end),
+			})
+		case s.turn == 1:
+			require.NoError(t, nb.GenerateSegmentEntries(ctx, sessionID,
+				s.turn, s.number, int64(s.start), int64(s.end), msgs[s.start:s.end]))
+		}
+	}
+	require.NoError(t, nb.MarkSegmentsProcessed(ctx, sessionID, coveredNoEntries))
+
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(2))
+
+	// The tc-early pair is intact: call verbatim in turn 0, result
+	// kept inside collapsed turn 1.
+	require.Equal(t, `{"command":"ls"}`, renderedCall(t, history, "tc-early").Input)
+	require.Equal(t, "early result", renderedResultText(t, history, "tc-early"))
+	// tc-late drops with its collapsed turn — call and result both.
+	require.False(t, callPresent(history, "tc-late"))
+	require.False(t, resultPresent(history, "tc-late"))
+	require.Contains(t, renderedText(history), "[Summary of turn 1]")
 }
