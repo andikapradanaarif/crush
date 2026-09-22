@@ -305,11 +305,14 @@ func (c *Config) configureProviders(ctx context.Context, store *ConfigStore, env
 		switch {
 		case p.ID == catwalk.InferenceProviderAnthropic && config.OAuthToken != nil:
 			// Claude Code subscription is not supported anymore. Remove to show onboarding.
-			// RemoveConfigField persists the deletion to disk. The in-memory
-			// state is kept consistent by the Providers.Del call below; any
-			// concurrent reload that races with this write will also see the
-			// removal because it re-reads from disk.
-			store.RemoveConfigField(ScopeGlobal, "providers.anthropic")
+			// RemoveConfigField persists the deletion to disk — skipped on
+			// dry runs (nil store), where only the in-memory drop matters.
+			// The in-memory state is kept consistent by the Providers.Del
+			// call below; any concurrent reload that races with this write
+			// will also see the removal because it re-reads from disk.
+			if store != nil {
+				store.RemoveConfigField(ScopeGlobal, "providers.anthropic")
+			}
 			c.Providers.Del(string(p.ID))
 			continue
 		case p.ID == catwalk.InferenceProviderCopilot && config.OAuthToken != nil:
@@ -512,6 +515,44 @@ func (c *Config) configureProviders(ctx context.Context, store *ConfigStore, env
 	}
 
 	return nil
+}
+
+// PreflightProviders runs the provider-resolution half of Load as a dry
+// run: env refs resolve against e, providers drop under exactly the same
+// rules the real path applies, but nothing persists — the store is nil
+// (the OAuth cleanup branch skips its disk write) and config-declared
+// env vars merge into e rather than os.Setenv the caller's process.
+// knownProviders is the catwalk catalog (from Providers). Callers
+// inspect the mutated Config — Providers, IsConfigured, GetModel — for
+// which providers survived.
+func (c *Config) PreflightProviders(ctx context.Context, e env.Env, knownProviders []catwalk.Provider) error {
+	if c.Options == nil {
+		c.Options = &Options{}
+	}
+	resolver := NewShellVariableResolver(e)
+	// applyEnv would os.Setenv config-declared vars into the caller's
+	// process; merge them into the resolver's env instead so $VAR and
+	// $(cmd) refs resolve with the same visibility the child gets.
+	if len(c.Env) > 0 {
+		merged := make(map[string]string, len(e.Env()))
+		for _, kv := range e.Env() {
+			k, v, _ := strings.Cut(kv, "=")
+			merged[k] = v
+		}
+		keys := make([]string, 0, len(c.Env))
+		for k := range c.Env {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		for _, k := range keys {
+			if resolved, err := resolver.ResolveValue(c.Env[k]); err == nil {
+				merged[k] = resolved
+			}
+		}
+		e = env.NewFromMap(merged)
+		resolver = NewShellVariableResolver(e)
+	}
+	return c.configureProviders(ctx, nil, e, resolver, knownProviders)
 }
 
 // applyEnv sets top-level env vars from the config. Keys are sorted for

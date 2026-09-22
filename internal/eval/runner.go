@@ -513,6 +513,12 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 	if err := ValidateExperiment(exp); err != nil {
 		return Report{}, err
 	}
+	// Dry provider resolution before sampling: config-class failures
+	// (unresolved env refs, dropped providers, missing model) abort
+	// here instead of burning error runs.
+	if err := r.preflightExperiment(ctx, exp); err != nil {
+		return Report{}, err
+	}
 	unlock, err := r.acquireLock()
 	if err != nil {
 		return Report{}, err
@@ -571,6 +577,9 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 		runnable++
 		trajDir := filepath.Join(r.EvalDir, "corpus", traj.ID)
 		trep := r.runTrajectory(ctx, exp, traj, trajDir, manifest, n, inv)
+		if trep.Abort != nil {
+			return rep, fmt.Errorf("%s: %w", traj.ID, trep.Abort)
+		}
 		rep.Starved = append(rep.Starved, trep.Starved...)
 		rep.Saturated = append(rep.Saturated, trep.Saturated...)
 		if trep.Skipped != "" {
@@ -645,6 +654,10 @@ type trajReport struct {
 	Starved   []string
 	Saturated []string
 	Skipped   string
+	// Abort carries a config-class circuit-breaker trip — the parent
+	// aborts the experiment rather than burn attempts on a systemic
+	// failure. Fixture-scoped failures report via Skipped instead.
+	Abort error
 }
 
 // runTrajectory samples one trajectory to N conclusive runs per arm,
@@ -667,6 +680,8 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 		ArmControl: {}, ArmTreatment: {},
 	}
 
+	configErrs, fixtureErrs := 0, 0
+	var firstConfigErr string
 	round := 0
 	for conclusive[ArmControl] < n || conclusive[ArmTreatment] < n {
 		if ctx.Err() != nil {
@@ -704,6 +719,29 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 				conclusive[armName]++
 			} else {
 				excluded[armName][rec.Outcome]++
+			}
+			// Circuit breakers: a provably config-class failure means
+			// every later attempt fails the same way — stop after two
+			// rather than saturate the record file. Experiment-scoped
+			// (provider/config errors ride the generated config shared
+			// by all trajectories); fixture-scoped errors skip just this
+			// trajectory.
+			switch {
+			case isConfigClassError(rec):
+				configErrs++
+				if firstConfigErr == "" {
+					firstConfigErr = rec.CheckDetail["run_error"].(string)
+				}
+				if configErrs >= 2 {
+					rep.Abort = fmt.Errorf("config-class failure after %d runs: %s", configErrs, firstConfigErr)
+					return rep
+				}
+			case isFixtureConfigError(rec):
+				fixtureErrs++
+				if fixtureErrs >= 2 {
+					rep.Skipped = "fixture config: " + rec.CheckDetail["harness"].(string)
+					return rep
+				}
 			}
 			slog.Info("Eval run", "trajectory", traj.ID, "arm", armName, "outcome", rec.Outcome,
 				"conclusive", conclusive[armName], "attempts", attempts[armName])
