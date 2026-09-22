@@ -1,5 +1,5 @@
 {
-	"name": "prior-turns-long",
+	"name": "prior-turns-long-summarize",
 	"model": "alibaba-tp/deepseek-v4.1-flash",
 	"temperature": 0,
 	"corpus": [
@@ -23,7 +23,7 @@
 			"config": {
 				"options": {
 					"notebook_enabled": true,
-					"notebook_prior_turns": "stub"
+					"notebook_prior_turns": "summarize"
 				}
 			},
 			"coverage": {
