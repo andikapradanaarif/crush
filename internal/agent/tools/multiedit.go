@@ -273,7 +273,7 @@ func processMultiEditExistingFile(edit editContext, params MultiEditParams, call
 	}
 
 	// Generate diff and check permissions
-	unified, additions, removals := diff.GenerateDiff(oldContent, currentContent, strings.TrimPrefix(params.FilePath, edit.workingDir))
+	_, additions, removals := diff.GenerateDiff(oldContent, currentContent, strings.TrimPrefix(params.FilePath, edit.workingDir))
 
 	editsApplied := len(params.Edits) - len(failedEdits)
 	var description string
@@ -327,7 +327,6 @@ func processMultiEditExistingFile(edit editContext, params MultiEditParams, call
 		message = fmt.Sprintf("Applied %d edits to file: %s", len(params.Edits), params.FilePath)
 	}
 	message = withWhitespaceNote(message, whitespaceCorrected)
-	message = withPostEditRegion(message, unified, writeContent)
 
 	return fantasy.WithResponseMetadata(
 		fantasy.NewTextResponse(message),

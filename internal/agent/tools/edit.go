@@ -327,7 +327,7 @@ func deleteContent(edit editContext, filePath, oldString string, replaceAll bool
 		return fantasy.NewTextErrorResponse(err.Error()), nil
 	}
 
-	unified, additions, removals := diff.GenerateDiff(
+	_, additions, removals := diff.GenerateDiff(
 		oldContent,
 		newContent,
 		strings.TrimPrefix(filePath, edit.workingDir),
@@ -373,10 +373,7 @@ func deleteContent(edit editContext, filePath, oldString string, replaceAll bool
 	}
 
 	return fantasy.WithResponseMetadata(
-		fantasy.NewTextResponse(withPostEditRegion(
-			withWhitespaceNote("Content deleted from file: "+filePath, whitespaceCorrected),
-			unified, writeContent,
-		)),
+		fantasy.NewTextResponse(withWhitespaceNote("Content deleted from file: "+filePath, whitespaceCorrected)),
 		EditResponseMetadata{
 			OldContent: oldContent,
 			NewContent: writeContent,
@@ -403,7 +400,7 @@ func replaceContent(edit editContext, filePath, oldString, newString string, rep
 		return fantasy.NewTextErrorResponse("new content is the same as old content. No changes made."), nil
 	}
 
-	unified, additions, removals := diff.GenerateDiff(
+	_, additions, removals := diff.GenerateDiff(
 		oldContent,
 		result,
 		strings.TrimPrefix(filePath, edit.workingDir),
@@ -449,10 +446,7 @@ func replaceContent(edit editContext, filePath, oldString, newString string, rep
 	}
 
 	return fantasy.WithResponseMetadata(
-		fantasy.NewTextResponse(withPostEditRegion(
-			withWhitespaceNote("Content replaced in file: "+filePath, whitespaceCorrected),
-			unified, writeContent,
-		)),
+		fantasy.NewTextResponse(withWhitespaceNote("Content replaced in file: "+filePath, whitespaceCorrected)),
 		EditResponseMetadata{
 			OldContent: oldContent,
 			NewContent: writeContent,

@@ -55,8 +55,7 @@ func TestReplaceContentPreservesCRLFAndMetadata(t *testing.T) {
 	resp, err := replaceContent(edit, filePath, "beta", "BETA", false, fantasy.ToolCall{ID: "call"})
 	require.NoError(t, err)
 	require.False(t, resp.IsError)
-	require.Contains(t, resp.Content, "Content replaced in file: "+filePath)
-	require.Contains(t, resp.Content, "|BETA")
+	require.Equal(t, "Content replaced in file: "+filePath, resp.Content)
 
 	content, err := os.ReadFile(filePath)
 	require.NoError(t, err)
