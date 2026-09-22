@@ -158,6 +158,9 @@ func WriteArmConfig(workdir string, exp *Experiment, arm Arm, manifest *FlagsMan
 			// A corrupt fixture config must not be silently clobbered.
 			return fmt.Errorf("existing .crush.json does not parse: %w", err)
 		}
+		if err := rejectFixtureProviderKeys(existing, ".crush.json"); err != nil {
+			return err
+		}
 		if opts, ok := existing["options"].(map[string]any); ok {
 			// A fixture pinning a manifest flag keys this trajectory's
 			// runs under a foreign condition — every characterization
@@ -197,6 +200,9 @@ func WriteArmConfig(workdir string, exp *Experiment, arm Arm, manifest *FlagsMan
 		if err := json.Unmarshal(raw, &existing); err != nil {
 			return fmt.Errorf("existing crush.json does not parse: %w", err)
 		}
+		if err := rejectFixtureProviderKeys(existing, "crush.json"); err != nil {
+			return err
+		}
 		if opts, ok := existing["options"].(map[string]any); ok {
 			for k := range opts {
 				if _, declared := manifest.Defaults[k]; declared {
@@ -211,6 +217,26 @@ func WriteArmConfig(workdir string, exp *Experiment, arm Arm, manifest *FlagsMan
 	}
 	if err := os.WriteFile(jsonPath, data, 0o644); err != nil {
 		return fmt.Errorf("write .crush.json: %w", err)
+	}
+	return nil
+}
+
+// rejectFixtureProviderKeys enforces the ownership invariant the eval
+// preflight depends on: providers and credentials live on the
+// experiment, never the fixture. Preflight can't see fixture config, so
+// a fixture-declared provider would resolve in the child but be
+// invisible to the parent check — and fixture options like
+// disable_default_providers diverge the same way.
+func rejectFixtureProviderKeys(existing map[string]any, name string) error {
+	for _, k := range []string{"providers", "env"} {
+		if _, ok := existing[k]; ok {
+			return fmt.Errorf("existing %s sets %q — providers and env belong on the experiment, not the fixture", name, k)
+		}
+	}
+	if opts, ok := existing["options"].(map[string]any); ok {
+		if _, ok := opts["disable_default_providers"]; ok {
+			return fmt.Errorf("existing %s sets \"disable_default_providers\" — provider visibility belongs to the experiment", name)
+		}
 	}
 	return nil
 }

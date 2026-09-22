@@ -162,7 +162,7 @@ func TestRunTrajectory_ConfigClassBreaker(t *testing.T) {
 	// fails, so the record carries session_db + a capitalized message —
 	// the exact axes the earlier fixture diverged on.
 	r.Driver = dbErrRunner{err: "crush run failed: exit status 1: \n   ERROR  \n\n  No providers configured - please run 'crush' to set up a provider interactively."}
-	rep := r.runTrajectory(t.Context(), exp, tr, trajDir, &FlagsManifest{Defaults: map[string]any{}}, 3, "inv")
+	rep := r.runTrajectory(t.Context(), exp, tr, trajDir, &FlagsManifest{Defaults: map[string]any{}}, 3, "inv", &configErrorTracker{})
 	require.Error(t, rep.Abort)
 	require.Contains(t, rep.Abort.Error(), "config-class")
 }
@@ -215,7 +215,7 @@ func TestRunTrajectory_AuthClassBreaker(t *testing.T) {
 	// A custom provider that survived load with a dead credential fails
 	// every request — telemetry present, session written, steps > 0.
 	r.Driver = errRunner{err: "agent run failed: unauthorized: No API-key provided."}
-	rep := r.runTrajectory(t.Context(), exp, tr, trajDir, &FlagsManifest{Defaults: map[string]any{}}, 3, "inv")
+	rep := r.runTrajectory(t.Context(), exp, tr, trajDir, &FlagsManifest{Defaults: map[string]any{}}, 3, "inv", &configErrorTracker{})
 	require.Error(t, rep.Abort)
 	require.Contains(t, rep.Abort.Error(), "config-class")
 }
@@ -228,17 +228,16 @@ func TestRunTrajectory_FixtureBreakerSkips(t *testing.T) {
 	// instead of burning to the cap.
 	require.NoError(t, os.WriteFile(filepath.Join(trajDir, "fixture", ".crush.json"), []byte("{invalid"), 0o644))
 	r.Driver = errRunner{err: "agent run failed: unreachable"}
-	rep := r.runTrajectory(t.Context(), exp, tr, trajDir, &FlagsManifest{Defaults: map[string]any{}}, 3, "inv")
+	rep := r.runTrajectory(t.Context(), exp, tr, trajDir, &FlagsManifest{Defaults: map[string]any{}}, 3, "inv", &configErrorTracker{})
 	require.NoError(t, rep.Abort)
 	require.Contains(t, rep.Skipped, "fixture config")
 }
 
 func TestIsFixtureConfigError_Shapes(t *testing.T) {
 	t.Parallel()
-	// The bare record — Materialize/harness internals and the ExecuteRun
-	// error path produce OutcomeError with no CheckDetail. This shape
-	// panicked the unconditional harness assert.
-	require.True(t, isFixtureConfigError(RunRecord{Outcome: OutcomeError}))
+	// Bare records are NOT fixture-class — ExecuteRun-internal errors
+	// (spawn/disk/timeout) are transient, not deterministic.
+	require.False(t, isFixtureConfigError(RunRecord{Outcome: OutcomeError}))
 	require.True(t, isFixtureConfigError(RunRecord{
 		Outcome:     OutcomeError,
 		CheckDetail: map[string]any{"harness": "materialize: .crush.json does not parse"},
@@ -262,7 +261,7 @@ func TestRunTrajectory_NonConfigErrorsKeepSampling(t *testing.T) {
 	// Identical string every time — a rate limit looks the same. The
 	// breaker must not fire; attempts run to the cap instead.
 	r.Driver = errRunner{err: "crush run failed: exit status 1: Error: rate limit exceeded"}
-	rep := r.runTrajectory(t.Context(), exp, tr, trajDir, &FlagsManifest{Defaults: map[string]any{}}, 3, "inv")
+	rep := r.runTrajectory(t.Context(), exp, tr, trajDir, &FlagsManifest{Defaults: map[string]any{}}, 3, "inv", &configErrorTracker{})
 	require.NoError(t, rep.Abort)
 	require.NotEmpty(t, rep.Saturated)
 }

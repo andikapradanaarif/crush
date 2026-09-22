@@ -538,6 +538,8 @@ func (c *Config) PreflightProviders(ctx context.Context, e env.Env, knownProvide
 	// process; merge them into the resolver's env instead. Resolved
 	// progressively in sorted order so a var referencing an earlier
 	// config var sees it — same semantics applyEnv's os.Setenv gives.
+	// Eval callers never populate Env (fixture env keys are rejected in
+	// WriteArmConfig) — this keeps the dry run faithful for any Config.
 	if len(c.Env) > 0 {
 		merged := make(map[string]string, len(e.Env()))
 		for _, kv := range e.Env() {

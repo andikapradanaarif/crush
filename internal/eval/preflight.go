@@ -266,13 +266,16 @@ func isConfigClassError(rec RunRecord) bool {
 	return false
 }
 
-// isFixtureConfigError reports a trajectory-scoped config failure —
-// WriteArmConfig rejected the fixture's config (unparseable
-// .crush.json, manifest-flag pinning) or Materialize failed outright.
-// The trajectory is unrunnable; other trajectories are unaffected.
-// Materialize failures land as OutcomeError with no CheckDetail at
-// all — no run_error, no harness key — and would otherwise burn to
-// the attempts cap.
+// isFixtureConfigError reports a trajectory-scoped deterministic
+// failure — WriteArmConfig rejected the fixture's config (unparseable
+// .crush.json, manifest-flag pinning, forbidden keys) or Materialize
+// failed outright (tagged "harness"), or the check script can't run
+// (tagged "check_error"). The trajectory is unrunnable; other
+// trajectories are unaffected. Bare records (no CheckDetail) are
+// deliberately NOT fixture-class: the only producers of those are
+// ExecuteRun-internal errors — spawn failures, disk, timeouts — which
+// are transient, not provably deterministic; they burn an attempt and
+// keep sampling.
 func isFixtureConfigError(rec RunRecord) bool {
 	if rec.Outcome != OutcomeError {
 		return false
@@ -280,12 +283,6 @@ func isFixtureConfigError(rec RunRecord) bool {
 	if _, ok := rec.CheckDetail["harness"]; ok {
 		return true
 	}
-	// A check script that can't run is the same deterministic fixture
-	// failure — it will never produce an outcome for this trajectory.
-	if _, ok := rec.CheckDetail["check_error"]; ok {
-		return true
-	}
-	// Bare error: no run_error (subprocess never ran), no detail —
-	// produced by materialize/harness internals.
-	return len(rec.CheckDetail) == 0
+	_, ok := rec.CheckDetail["check_error"]
+	return ok
 }

@@ -564,6 +564,11 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 
 	runnable := 0
 	requiresSkipped := 0
+	// The config-class breaker counts experiment-wide — a provider
+	// failure hits every trajectory, and an arm-scoped signature could
+	// log one error per trajectory forever without tripping a
+	// per-trajectory counter.
+	configErrs := &configErrorTracker{}
 	for _, traj := range trajs {
 		band := frozen.Band(traj.ID)
 		n := exp.RunsPerTrajectory[band]
@@ -577,7 +582,7 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 		}
 		runnable++
 		trajDir := filepath.Join(r.EvalDir, "corpus", traj.ID)
-		trep := r.runTrajectory(ctx, exp, traj, trajDir, manifest, n, inv)
+		trep := r.runTrajectory(ctx, exp, traj, trajDir, manifest, n, inv, configErrs)
 		if trep.Abort != nil {
 			return rep, fmt.Errorf("%s: %w", traj.ID, trep.Abort)
 		}
@@ -661,11 +666,19 @@ type trajReport struct {
 	Abort error
 }
 
+// configErrorTracker counts config-class failures across the whole
+// experiment — the counter is shared between trajectories because a
+// systemic error doesn't respect trajectory boundaries.
+type configErrorTracker struct {
+	n     int
+	first string
+}
+
 // runTrajectory samples one trajectory to N conclusive runs per arm,
 // alternating arms each round — per-run interleaving, the finest
 // granularity, is what makes within-trajectory runs approximately
 // exchangeable for the permutation test.
-func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Trajectory, trajDir string, manifest *FlagsManifest, n int, inv string) trajReport {
+func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Trajectory, trajDir string, manifest *FlagsManifest, n int, inv string, configErrs *configErrorTracker) trajReport {
 	rep := trajReport{}
 	if missing := CheckRequires(traj); len(missing) > 0 {
 		// Environment pre-flight: a missing tool is a skip-report,
@@ -681,8 +694,7 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 		ArmControl: {}, ArmTreatment: {},
 	}
 
-	configErrs, fixtureErrs := 0, 0
-	var firstConfigErr string
+	fixtureErrs := 0
 	round := 0
 	for conclusive[ArmControl] < n || conclusive[ArmTreatment] < n {
 		if ctx.Err() != nil {
@@ -729,12 +741,12 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 			// trajectory.
 			switch {
 			case isConfigClassError(rec):
-				configErrs++
-				if firstConfigErr == "" {
-					firstConfigErr = rec.CheckDetail["run_error"].(string)
+				configErrs.n++
+				if configErrs.first == "" {
+					configErrs.first = rec.CheckDetail["run_error"].(string)
 				}
-				if configErrs >= 2 {
-					rep.Abort = fmt.Errorf("config-class failure after %d runs: %s", configErrs, firstConfigErr)
+				if configErrs.n >= 2 {
+					rep.Abort = fmt.Errorf("config-class failure after %d runs: %s", configErrs.n, configErrs.first)
 					return rep
 				}
 			case isFixtureConfigError(rec):
