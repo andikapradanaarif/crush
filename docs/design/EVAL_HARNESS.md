@@ -539,6 +539,12 @@ contract corpus authors write predicates against. Per mechanism:
   render it. Ceiling: `turns_collapsed ≤ len(turns) − 1`. Under
   `summarize` the practical ceiling is lower still — a covered turn
   with no committed entries renders verbatim and isn't counted.
+  `stub`/`digest` have the mirror-image hole: a turn only counts when
+  ≥1 tool call collapsed, so tool-free (question-only,
+  provider-executed, text-only) turns never count — a covered
+  `summarize` turn records 0 events and still counts. A trajectory
+  with a tool-free turn can starve `min_prior_turns.turns_collapsed`
+  at its `T−1` ceiling under stub/digest.
 - **Turn digests** (`digest` mode): the run-end pass digests every
   finished turn lacking one — including the turn that just finished —
   bounded by a catch-up cap per run. A turn with no finished tool

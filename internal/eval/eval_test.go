@@ -383,6 +383,11 @@ func TestValidateArmCoverageResolved(t *testing.T) {
 	manifest.Defaults["project_index"] = true
 	exp.Arms[ArmTreatment] = Arm{Coverage: Coverage{"min_call_metrics.map_result_bytes": 1}}
 	require.NoError(t, ValidateArmCoverageResolved(exp, manifest))
+
+	// Ambiguity-gated edges default off — a fired assertion on an arm
+	// that omits the flag starves silently.
+	exp.Arms[ArmTreatment] = Arm{Coverage: Coverage{"min_edge_firings.stall.fired": 1}}
+	require.Error(t, ValidateArmCoverageResolved(exp, manifest))
 }
 
 func TestValidateExperiment_PriorTurnsModeStarvation(t *testing.T) {
@@ -431,6 +436,138 @@ func TestValidateExperiment_PriorTurnsModeStarvation(t *testing.T) {
 		"notebook_prior_turns": "summarize",
 		"disabled_tools":       []any{"recall"},
 	})))
+}
+
+func TestValidateExperiment_BoundaryAdvancesStarvation(t *testing.T) {
+	t.Parallel()
+	temp := 0.7
+	mk := func(opts map[string]any, cov Coverage) *Experiment {
+		return &Experiment{
+			Name:              "x",
+			Model:             "p/m",
+			Temperature:       &temp,
+			Corpus:            []string{"*"},
+			RunsPerTrajectory: map[Band]int{BandUncharacterized: 1},
+			Arms: map[string]Arm{
+				ArmControl: {},
+				ArmTreatment: {
+					Config:   ArmConfig{Options: opts},
+					Coverage: cov,
+				},
+			},
+		}
+	}
+	advances := Coverage{"min_stub_stats.boundary_advances": 1}
+
+	// Two paths feed the counter: supersession or prior-turn collapse.
+	require.NoError(t, ValidateExperiment(mk(map[string]any{"notebook_stub_superseded": true}, advances)))
+	require.NoError(t, ValidateExperiment(mk(map[string]any{"notebook_prior_turns": "summarize"}, advances)))
+
+	// Summarize renders inline — boundary_advances stays reachable
+	// with recall disabled.
+	require.NoError(t, ValidateExperiment(mk(map[string]any{
+		"notebook_prior_turns":     "summarize",
+		"notebook_stub_superseded": false,
+		"disabled_tools":           []any{"recall"},
+	}, advances)))
+
+	// stub + recall disabled coerces to verbatim, and supersession
+	// dies without recall either — both paths starve.
+	require.Error(t, ValidateExperiment(mk(map[string]any{
+		"notebook_prior_turns": "stub",
+		"disabled_tools":       []any{"recall"},
+	}, advances)))
+
+	// verbatim + superseded off: nothing creates stubStats entries.
+	require.Error(t, ValidateExperiment(mk(map[string]any{
+		"notebook_prior_turns":     "verbatim",
+		"notebook_stub_superseded": false,
+	}, advances)))
+
+	// Other stub_stats.* fields stay supersede-only — collapse modes
+	// don't feed them.
+	require.Error(t, ValidateExperiment(mk(
+		map[string]any{"notebook_prior_turns": "summarize", "notebook_stub_superseded": false},
+		Coverage{"min_stub_stats.results": 1})))
+}
+
+func TestValidateExperiment_EdgeFiringsStarvation(t *testing.T) {
+	t.Parallel()
+	temp := 0.7
+	mk := func(opts map[string]any, cov Coverage) *Experiment {
+		return &Experiment{
+			Name:              "x",
+			Model:             "p/m",
+			Temperature:       &temp,
+			Corpus:            []string{"*"},
+			RunsPerTrajectory: map[Band]int{BandUncharacterized: 1},
+			Arms: map[string]Arm{
+				ArmControl: {},
+				ArmTreatment: {
+					Config:   ArmConfig{Options: opts},
+					Coverage: cov,
+				},
+			},
+		}
+	}
+
+	// Acting outcomes need ambiguity_clarification on — flag-off
+	// triggers take the gated short-circuit before resolve.
+	require.Error(t, ValidateExperiment(mk(
+		map[string]any{"ambiguity_clarification": false},
+		Coverage{"min_edge_firings.stall.fired": 1})))
+	require.NoError(t, ValidateExperiment(mk(
+		map[string]any{"ambiguity_clarification": true},
+		Coverage{"min_edge_firings.stall.fired": 1})))
+	require.NoError(t, ValidateExperiment(mk(
+		map[string]any{"ambiguity_clarification": true},
+		Coverage{"min_edge_firings.burn-watch.exhausted": 1})))
+
+	// "gated" rows only exist in the flag-off arm — asserting them on
+	// a flag-on arm starves.
+	require.Error(t, ValidateExperiment(mk(
+		map[string]any{"ambiguity_clarification": true},
+		Coverage{"min_edge_firings.stall.gated": 1})))
+	require.NoError(t, ValidateExperiment(mk(
+		map[string]any{"ambiguity_clarification": false},
+		Coverage{"min_edge_firings.stall.gated": 1})))
+
+	// cancelled is flag-independent (mid-scan ctx kills); verification
+	// and todos edges are flag-invariant entirely.
+	require.NoError(t, ValidateExperiment(mk(
+		map[string]any{"ambiguity_clarification": false},
+		Coverage{"min_edge_firings.stall.cancelled": 1})))
+	require.NoError(t, ValidateExperiment(mk(
+		map[string]any{"ambiguity_clarification": false},
+		Coverage{"min_edge_firings.verification.fired": 1})))
+}
+
+func TestValidateExperiment_RecallDisabledStarvation(t *testing.T) {
+	t.Parallel()
+	temp := 0.7
+	mk := func(disabled any) *Experiment {
+		return &Experiment{
+			Name:              "x",
+			Model:             "p/m",
+			Temperature:       &temp,
+			Corpus:            []string{"*"},
+			RunsPerTrajectory: map[Band]int{BandUncharacterized: 1},
+			Arms: map[string]Arm{
+				ArmControl: {},
+				ArmTreatment: {
+					Config:   ArmConfig{Options: map[string]any{"disabled_tools": disabled}},
+					Coverage: Coverage{"min_recalls.prior_turn_result": 1},
+				},
+			},
+		}
+	}
+
+	// recalls.* counters need the recall tool — disabling it starves
+	// them. disabled_tools may arrive as []any (JSON) or []string
+	// (fixtures) — disablesTool handles both.
+	require.Error(t, ValidateExperiment(mk([]any{"recall"})))
+	require.Error(t, ValidateExperiment(mk([]string{"recall"})))
+	require.NoError(t, ValidateExperiment(mk([]any{"bash"})))
 }
 
 func TestValidateArmCoverageResolved_PriorTurnsModeStarvation(t *testing.T) {

@@ -300,6 +300,16 @@ func boolOn(opt string) starvationRule {
 	}}
 }
 
+// boolOff requires a boolean option to resolve false — the "would
+// have fired" measurement rows only exist in the flag-off arm.
+func boolOff(opt string) starvationRule {
+	return starvationRule{opt + "=false", func(resolve func(string) (any, bool)) bool {
+		v, known := resolve(opt)
+		b, _ := v.(bool)
+		return !known || !b
+	}}
+}
+
 // modeIs requires a string option to resolve to one of the accepted
 // values.
 func modeIs(opt string, modes ...string) starvationRule {
@@ -363,6 +373,40 @@ var priorTurnsRecallLive = starvationRule{
 	},
 }
 
+// stubBoundaryAdvancesLive is the reachability rule for
+// stub_stats.boundary_advances. The counter increments on each
+// boundary move once a per-session stubStats entry exists, and two
+// paths create entries: supersession (needs the flag and the recall
+// tool — stubs render pointers) and prior-turn collapse (stub/digest
+// need recall; summarize doesn't). Starving requires both paths
+// provably dead; an unresolved option leaves its path open.
+var stubBoundaryAdvancesLive = starvationRule{
+	"notebook_stub_superseded or notebook_prior_turns=stub|digest|summarize (recall required except under summarize)",
+	func(resolve func(string) (any, bool)) bool {
+		recallKnown, recallOn := false, true
+		if dt, known := resolve("disabled_tools"); known {
+			recallKnown, recallOn = true, !disablesTool(dt, notebookRecallTool)
+		}
+		supKnown, supOn := false, false
+		if v, known := resolve("notebook_stub_superseded"); known {
+			supKnown = true
+			supOn, _ = v.(bool)
+		}
+		modeKnown, mode := false, ""
+		if v, known := resolve("notebook_prior_turns"); known {
+			modeKnown = true
+			mode, _ = v.(string)
+		}
+		// Supersession dies when the flag resolves off or recall is
+		// disabled. Collapse dies when the mode resolves non-collapse,
+		// or when recall is disabled and the mode can't be summarize.
+		supDead := (supKnown && !supOn) || (recallKnown && !recallOn)
+		modeDead := (modeKnown && mode != "stub" && mode != "digest" && mode != "summarize") ||
+			(recallKnown && !recallOn && modeKnown && mode != "summarize")
+		return !(supDead && modeDead)
+	},
+}
+
 // armStarvationRules maps a coverage field to the option requirements
 // that must hold for its counter to be reachable. map_calls is
 // absent deliberately: tool-not-found attempts still count, so a
@@ -380,7 +424,29 @@ func armStarvationRules(field string) []starvationRule {
 		return []starvationRule{boolOn("project_index")}
 	}
 	if strings.HasPrefix(field, "stub_stats.") {
+		if field == "stub_stats.boundary_advances" {
+			return []starvationRule{boolOn("notebook_enabled"), stubBoundaryAdvancesLive}
+		}
 		return []starvationRule{boolOn("notebook_stub_superseded"), boolOn("notebook_enabled"), recallToolLive}
+	}
+	if edge, ok := strings.CutPrefix(field, "edge_firings."); ok {
+		// Stall and burn-watch ride ambiguity_clarification; the
+		// outcome suffix picks the direction.
+		if strings.HasPrefix(edge, "stall.") || strings.HasPrefix(edge, "burn-watch.") {
+			switch edge[strings.LastIndexByte(edge, '.')+1:] {
+			case "gated":
+				return []starvationRule{boolOff("ambiguity_clarification")}
+			case "cancelled":
+				// Mid-scan ctx kills are flag-independent.
+				return nil
+			default:
+				// Flag-off triggers take the gated short-circuit
+				// before resolve/contention — every other outcome
+				// needs the flag on.
+				return []starvationRule{boolOn("ambiguity_clarification")}
+			}
+		}
+		return nil
 	}
 	if strings.HasPrefix(field, "checkpoints.") {
 		return []starvationRule{boolOn("notebook_checkpoint"), boolOn("notebook_enabled")}
@@ -441,6 +507,7 @@ var flagCodeDefaults = map[string]bool{
 	"notebook_checkpoint":      true,
 	"notebook_hydration":       true,
 	"project_index":            false,
+	"ambiguity_clarification":  false,
 }
 
 // ValidateArmCoverageResolved re-runs the starvation check against
