@@ -403,6 +403,26 @@ with the flag under test doesn't cancel — and interleaving is
 itself load-bearing: it's what makes within-trajectory runs
 approximately exchangeable, which the permutation test assumes.
 
+### Provider preflight + config-class breaker
+
+Before sampling, `RunExperiment` dry-resolves providers exactly as a
+turn subprocess will: a minimal `Config` built from `exp.providers`
+and the arm's option fragment, the real provider-prep path
+(`Config.PreflightProviders`), and the driver's effective environment
+(`subprocessEnv` — inherited env plus `ExtraEnv`, minus `CRUSH_*`/
+`EVAL_*`). Unresolved credential templates, dropped providers, and
+model pins that can't resolve abort before a subprocess spawns. A
+*declared* `api_key` that resolves empty is flagged even though the
+child only warns — custom providers survive keyless load (legitimate
+for loopback endpoints) but 401 on every request.
+
+Mid-run, a circuit breaker stops the bleed: two `error` records
+matching a config-class signature (`crush run failed:` + pre-model
+signature, or `agent run failed:` + auth signature) abort the
+experiment; fixture-config failures (`harness` check detail) skip
+only their trajectory. Identical non-config errors — rate limits —
+keep sampling.
+
 ## Run record (results/\*.jsonl)
 
 ```json
