@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/message"
@@ -627,4 +628,384 @@ func TestSummarize_RendersVerbatim(t *testing.T) {
 	}
 	require.Contains(t, body.String(), "file content line")
 	require.NotContains(t, body.String(), "_collapsed")
+}
+
+// callPresent reports whether any rendered tool-call part carries id.
+func callPresent(history []fantasy.Message, id string) bool {
+	for _, m := range history {
+		for _, p := range m.Content {
+			if tc, ok := p.(fantasy.ToolCallPart); ok && tc.ToolCallID == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// resultPresent reports whether any rendered tool-result part answers id.
+func resultPresent(history []fantasy.Message, id string) bool {
+	for _, m := range history {
+		for _, p := range m.Content {
+			if tr, ok := p.(fantasy.ToolResultPart); ok && tr.ToolCallID == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// emptyEntryGen marks coverage but produces no entries — the
+// summarize mode's zero-entry fallback path.
+type emptyEntryGen struct{}
+
+func (emptyEntryGen) Generate(context.Context, string, []notebook.EntryInput) ([]notebook.GeneratedEntry, error) {
+	return nil, nil
+}
+
+func (emptyEntryGen) GenerateCheckpoint(context.Context, string, string) (notebook.GeneratedEntry, error) {
+	return notebook.GeneratedEntry{}, nil
+}
+
+func (emptyEntryGen) GenerateDigest(context.Context, string, string) (notebook.GeneratedEntry, error) {
+	return notebook.GeneratedEntry{}, nil
+}
+
+// Summarize mode replaces the covered turn's executable span with its
+// generated entries rendered inline — content, not recall pointers.
+// Calls and results drop together so nothing dangles; the question
+// pair stays verbatim because its result carries a user decision a
+// summary cannot safely compress.
+func TestPreparePrompt_SummarizeCollapsesToEntries(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsSummarize
+	msgs := priorTurnFixture(t, svc, sessionID)
+	ctx := t.Context()
+	a.detectSegments(ctx, sessionID, msgs)
+
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	text := renderedText(history)
+
+	// The summary stands in for the span and carries real entry
+	// content — echoEntryGen embeds the tool result body.
+	require.Contains(t, text, "[Summary of turn 0]")
+	require.Contains(t, text, "file content line")
+	require.NotContains(t, text, `recall("result:`)
+
+	// Every executable part is gone — calls and results drop
+	// together, provider-executed included.
+	for _, id := range []string{"tc-bash", "tc-web", "tc-shot"} {
+		require.False(t, callPresent(history, id), id)
+		require.False(t, resultPresent(history, id), id)
+	}
+
+	// The question pair survives verbatim, bound reasoning included —
+	// replaying a signed call without its thought signature is a
+	// provider rejection mode.
+	require.JSONEq(t, `{"questions":[{"type":"yes_no","question":"proceed?"}]}`,
+		renderedCall(t, history, "tc-q").Input)
+	require.Equal(t, "yes — proceed", renderedResultText(t, history, "tc-q"))
+	require.Contains(t, renderedReasoning(history), "signed for question")
+	require.NotContains(t, renderedReasoning(history), "deep thoughts")
+
+	// No dangling pairs: every rendered result answers a rendered call.
+	for _, m := range history {
+		for _, p := range m.Content {
+			if tr, ok := p.(fantasy.ToolResultPart); ok {
+				require.True(t, callPresent(history, tr.ToolCallID), tr.ToolCallID)
+			}
+		}
+	}
+
+	// Conversation plane verbatim; ordering is prompt → summary →
+	// answer.
+	require.Contains(t, text, "first prompt")
+	require.Contains(t, text, "second prompt")
+	require.Contains(t, text, "turn zero answer")
+	require.Less(t, strings.Index(text, "first prompt"), strings.Index(text, "[Summary of turn 0]"))
+	require.Less(t, strings.Index(text, "[Summary of turn 0]"), strings.Index(text, "turn zero answer"))
+}
+
+// Summarize renders entries, not recall pointers — stripping the
+// recall tool must not degrade it to verbatim (stub mode's gate).
+func TestPreparePrompt_SummarizeWithoutRecallStillCollapses(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsSummarize
+	// Same strip as TestPreparePrompt_NoCollapseWithoutRecall — a live
+	// reload disabled recall.
+	a.tools = csync.NewSliceFrom([]fantasy.AgentTool{&fakeTool{name: "view"}})
+	msgs := priorTurnFixture(t, svc, sessionID)
+	ctx := t.Context()
+	a.detectSegments(ctx, sessionID, msgs)
+
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	require.Contains(t, renderedText(history), "[Summary of turn 0]")
+	require.False(t, callPresent(history, "tc-bash"))
+}
+
+// A covered turn with no entries stays verbatim — processed coverage
+// alone is not a summary. Coverage is committed straight to the
+// registry because an empty generator still yields deterministic
+// fallback entries (significantEntries under-production path).
+func TestPreparePrompt_SummarizeNoEntriesStaysVerbatim(t *testing.T) {
+	t.Parallel()
+
+	a, svc, nb, sessionID := newSegmentTestAgent(t, emptyEntryGen{})
+	a.priorTurns = priorTurnsSummarize
+	msgs := priorTurnFixture(t, svc, sessionID)
+	ctx := t.Context()
+
+	var covered []notebook.ProcessedSegment
+	for _, s := range segmentBoundaries(msgs, a.segTokenBudget(), a.segMaxSteps()) {
+		if s.open || s.turn != 0 {
+			continue
+		}
+		covered = append(covered, notebook.ProcessedSegment{
+			TurnNumber:    s.turn,
+			SegmentNumber: s.number,
+			StartIndex:    int64(s.start),
+			EndIndex:      int64(s.end),
+		})
+	}
+	require.NotEmpty(t, covered)
+	require.NoError(t, nb.MarkSegmentsProcessed(ctx, sessionID, covered))
+
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	require.JSONEq(t, `{"command":"cat big.go"}`, renderedCall(t, history, "tc-bash").Input)
+	require.Contains(t, renderedResultText(t, history, "tc-bash"), "file content line")
+	require.NotContains(t, renderedText(history), "[Summary of turn 0]")
+}
+
+// Digest and checkpoint rows share notebook_entries under
+// EventCheckpoint keyed to the same turn — the summary join must
+// exclude them or consolidated text lands inside the span.
+func TestPreparePrompt_SummarizeExcludesCheckpointRows(t *testing.T) {
+	t.Parallel()
+
+	a, svc, nb, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsSummarize
+	msgs := priorTurnFixture(t, svc, sessionID)
+	ctx := t.Context()
+	segs, _ := a.detectSegments(ctx, sessionID, msgs)
+
+	// Turn 0's last segment — the digest's coverage key.
+	var lastSeg int64
+	for _, s := range segs {
+		if s.turn == 0 {
+			lastSeg = max(lastSeg, s.number)
+		}
+	}
+	ok, err := nb.GenerateTurnDigest(ctx, sessionID, notebook.DigestRequest{
+		TurnNumber:    0,
+		SegmentNumber: lastSeg,
+		Msgs:          msgs[:5],
+	})
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	text := renderedText(history)
+	require.Contains(t, text, "[Summary of turn 0]")
+	require.Contains(t, text, "file content line")
+	require.NotContains(t, text, "## Turn digest")
+}
+
+// A turn can straddle the raw-window boundary: its earlier segments
+// evict to the notebook prefix while the rest still renders raw. The
+// summary lands at the turn's first rendered index — not its evicted
+// start — and emits exactly once.
+func TestPreparePrompt_SummarizeStraddledTurn(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsSummarize
+	a.segmentMaxSteps = 2
+	// Four steps of ~1000-token messages: segments t0s0/t0s1 of two
+	// steps each (~4K tokens apiece), then the next turn's prompt.
+	big := strings.Repeat("step ", 800)
+	msgs := segBuildTurn(t, svc, sessionID, "work", 4, big)
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "next prompt"})
+	msgs, err := svc.List(t.Context(), sessionID)
+	require.NoError(t, err)
+	ctx := t.Context()
+	a.detectSegments(ctx, sessionID, msgs)
+
+	// Budget fits t0s1 and the tail but not t0s0 — the boundary lands
+	// mid-turn-0, evicting the prompt and first segment.
+	a.rawTokenBudget = 4500
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	text := renderedText(history)
+
+	require.Equal(t, 1, strings.Count(text, "[Summary of turn 0]"))
+	require.NotContains(t, text, "work")
+	require.Contains(t, text, "next prompt")
+	// The rendered remainder of the span still drops — no dangling
+	// calls from either segment.
+	for _, id := range []string{"tc-work-a", "tc-work-xb", "tc-work-xxc", "tc-work-d"} {
+		require.False(t, callPresent(history, id), id)
+	}
+	require.Less(t, strings.Index(text, "[Summary of turn 0]"), strings.Index(text, "next prompt"))
+}
+
+// resolvePriorTurns is the coordinator's construction-time gate —
+// stub/digest need the recall tool for their pointers; summarize
+// renders entries and needs only the notebook.
+func TestResolvePriorTurns_Gates(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		mode       string
+		notebookOn bool
+		recallOn   bool
+		want       string
+	}{
+		{"summarize without recall survives", priorTurnsSummarize, true, false, priorTurnsSummarize},
+		{"stub without recall degrades", priorTurnsStub, true, false, priorTurnsVerbatim},
+		{"digest without recall degrades", priorTurnsDigest, true, false, priorTurnsVerbatim},
+		{"summarize with recall", priorTurnsSummarize, true, true, priorTurnsSummarize},
+		{"stub with recall", priorTurnsStub, true, true, priorTurnsStub},
+		{"summarize without notebook degrades", priorTurnsSummarize, false, true, priorTurnsVerbatim},
+		{"verbatim stays verbatim", priorTurnsVerbatim, true, true, priorTurnsVerbatim},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, resolvePriorTurns(tc.mode, tc.notebookOn, tc.recallOn))
+		})
+	}
+}
+
+// A result landing in a collapsed turn whose call sits in a verbatim
+// turn must survive — dropping it would strand the rendered tool_use.
+// (A user message can interleave between call and result on resume,
+// splitting the pair across the collapse boundary.)
+func TestSummarizeToolMessage_CrossTurnResultKept(t *testing.T) {
+	t.Parallel()
+
+	m := message.Message{Role: message.Tool, Parts: []message.ContentPart{
+		message.ToolResult{ToolCallID: "tc-verbatim", Name: "bash", Content: "early"},
+		message.ToolResult{ToolCallID: "tc-collapsed", Name: "bash", Content: "late"},
+		message.ToolResult{ToolCallID: "tc-question", Name: "question", Content: "yes"},
+		message.ToolResult{ToolCallID: "tc-unknown", Name: "bash", Content: "orphan"},
+	}}
+	callNames := map[string]string{
+		"tc-verbatim":  "bash",
+		"tc-collapsed": "bash",
+		"tc-question":  tools.QuestionToolName,
+	}
+	callDropped := map[string]bool{"tc-collapsed": true, "tc-question": false, "tc-verbatim": false}
+
+	out, n := summarizeToolMessageForTurn(m, callNames, callDropped)
+	require.Equal(t, 2, n)
+	kept := map[string]bool{}
+	for _, p := range out.Parts {
+		tr := p.(message.ToolResult)
+		kept[tr.ToolCallID] = true
+	}
+	require.True(t, kept["tc-verbatim"], "verbatim-turn call's result must survive")
+	require.True(t, kept["tc-question"], "question pair survives")
+	require.False(t, kept["tc-collapsed"], "dropped call's result drops with it")
+	require.False(t, kept["tc-unknown"], "unknown call's result drops (orphan)")
+}
+
+// blankEntryGen produces entries with empty text — the all-empty edge
+// that must not collapse to a bare [Summary] header.
+type blankEntryGen struct{}
+
+func (blankEntryGen) Generate(_ context.Context, _ string, events []notebook.EntryInput) ([]notebook.GeneratedEntry, error) {
+	entries := make([]notebook.GeneratedEntry, len(events))
+	for i, ev := range events {
+		entries[i] = notebook.GeneratedEntry{EventType: ev.EventType, Title: ev.Title}
+	}
+	return entries, nil
+}
+
+func (blankEntryGen) GenerateCheckpoint(context.Context, string, string) (notebook.GeneratedEntry, error) {
+	return notebook.GeneratedEntry{EventType: notebook.EventCheckpoint}, nil
+}
+
+func (blankEntryGen) GenerateDigest(context.Context, string, string) (notebook.GeneratedEntry, error) {
+	return notebook.GeneratedEntry{EventType: notebook.EventCheckpoint}, nil
+}
+
+// A covered turn whose entries are all empty stays verbatim — a bare
+// header is not a summary. The turn must hold only significant events:
+// a trivial one would earn a deterministic exploration entry and make
+// the turn non-blank.
+func TestPreparePrompt_SummarizeBlankEntriesStayVerbatim(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, blankEntryGen{})
+	a.priorTurns = priorTurnsSummarize
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "first prompt"})
+	mkMsg(t, svc, sessionID, message.Assistant,
+		message.ToolCall{ID: "tc-bash", Name: "bash", Input: `{"command":"cat big.go"}`, Finished: true})
+	mkMsg(t, svc, sessionID, message.Tool,
+		message.ToolResult{ToolCallID: "tc-bash", Name: "bash", Content: "output body"})
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "second prompt"})
+	msgs, err := svc.List(t.Context(), sessionID)
+	require.NoError(t, err)
+	ctx := t.Context()
+	a.detectSegments(ctx, sessionID, msgs)
+
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	require.JSONEq(t, `{"command":"cat big.go"}`, renderedCall(t, history, "tc-bash").Input)
+	require.NotContains(t, renderedText(history), "[Summary of turn 0]")
+}
+
+// The resume edge: a call in a covered-but-entryless turn (verbatim)
+// whose result landed in the next turn (collapsed) after an
+// interleaved user message. The pair must survive — dropping the
+// result would strand a rendered tool_use that providers reject.
+func TestPreparePrompt_SummarizeCrossTurnResultSurvives(t *testing.T) {
+	t.Parallel()
+
+	a, svc, nb, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsSummarize
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "p1"})
+	mkMsg(t, svc, sessionID, message.Assistant,
+		message.ToolCall{ID: "tc-early", Name: "bash", Input: `{"command":"ls"}`, Finished: true})
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "p2"})
+	mkMsg(t, svc, sessionID, message.Tool,
+		message.ToolResult{ToolCallID: "tc-early", Name: "bash", Content: "early result"})
+	mkMsg(t, svc, sessionID, message.Assistant,
+		message.ToolCall{ID: "tc-late", Name: "bash", Input: `{"command":"pwd"}`, Finished: true})
+	mkMsg(t, svc, sessionID, message.Tool,
+		message.ToolResult{ToolCallID: "tc-late", Name: "bash", Content: "late result"})
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "p3"})
+	msgs, err := svc.List(t.Context(), sessionID)
+	require.NoError(t, err)
+	ctx := t.Context()
+
+	// Turn 0 covered but entryless (renders verbatim); turn 1 covered
+	// with entries (collapses).
+	var coveredNoEntries []notebook.ProcessedSegment
+	for _, s := range segmentBoundaries(msgs, a.segTokenBudget(), a.segMaxSteps()) {
+		switch {
+		case s.open:
+		case s.turn == 0:
+			coveredNoEntries = append(coveredNoEntries, notebook.ProcessedSegment{
+				TurnNumber: s.turn, SegmentNumber: s.number,
+				StartIndex: int64(s.start), EndIndex: int64(s.end),
+			})
+		case s.turn == 1:
+			require.NoError(t, nb.GenerateSegmentEntries(ctx, sessionID,
+				s.turn, s.number, int64(s.start), int64(s.end), msgs[s.start:s.end]))
+		}
+	}
+	require.NoError(t, nb.MarkSegmentsProcessed(ctx, sessionID, coveredNoEntries))
+
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(2))
+
+	// The tc-early pair is intact: call verbatim in turn 0, result
+	// kept inside collapsed turn 1.
+	require.Equal(t, `{"command":"ls"}`, renderedCall(t, history, "tc-early").Input)
+	require.Equal(t, "early result", renderedResultText(t, history, "tc-early"))
+	// tc-late drops with its collapsed turn — call and result both.
+	require.False(t, callPresent(history, "tc-late"))
+	require.False(t, resultPresent(history, "tc-late"))
+	require.Contains(t, renderedText(history), "[Summary of turn 1]")
 }

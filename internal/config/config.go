@@ -443,9 +443,10 @@ type Options struct {
 	// NotebookPriorTurns selects how completed, fully covered turns
 	// render inside the raw window: verbatim keeps the full
 	// transcript, stub collapses tool call/result pairs to labeled
-	// stubs, digest adds a generated turn digest on top. Requires the
+	// stubs, digest adds a generated turn digest on top, summarize
+	// replaces the span with its generated entries. Requires the
 	// notebook — recall is the stub's recovery path.
-	NotebookPriorTurns string   `json:"notebook_prior_turns,omitempty" jsonschema:"description=Render mode for completed covered turns: verbatim keeps the full transcript\\, stub collapses prior-turn tool pairs to labeled stubs\\, digest adds a generated turn digest (experimental).,enum=verbatim,enum=stub,enum=digest,default=verbatim"`
+	NotebookPriorTurns string   `json:"notebook_prior_turns,omitempty" jsonschema:"description=Render mode for completed covered turns: verbatim keeps the full transcript\\, stub collapses prior-turn tool pairs to labeled stubs\\, digest adds a generated turn digest\\, summarize replaces the turn span with its generated entries (experimental).,enum=verbatim,enum=stub,enum=digest,enum=summarize,default=verbatim"`
 	ProjectIndex       *bool    `json:"project_index,omitempty" jsonschema:"description=Enable the persistent per-project symbol index and map tool for codebase navigation,default=false"`
 	InitializeAs       string   `json:"initialize_as,omitempty" jsonschema:"description=Name of the context file to create/update during project initialization,default=AGENTS.md,example=AGENTS.md,example=CRUSH.md,example=CLAUDE.md,example=docs/LLMs.md"`
 	AutoLSP            *bool    `json:"auto_lsp,omitempty" jsonschema:"description=Automatically setup LSPs based on root markers,default=true"`
@@ -1443,12 +1444,12 @@ func (o *Options) TurnContextMode() string {
 }
 
 // NotebookPriorTurnsMode returns the resolved prior-turn render mode —
-// "verbatim", "stub", or "digest". Unrecognized values resolve to
-// "verbatim" so a typo keeps the full transcript rather than silently
-// collapsing it.
+// "verbatim", "stub", "digest", or "summarize". Unrecognized values
+// resolve to "verbatim" so a typo keeps the full transcript rather
+// than silently collapsing it.
 func (o *Options) NotebookPriorTurnsMode() string {
 	switch o.NotebookPriorTurns {
-	case "stub", "digest":
+	case "stub", "digest", "summarize":
 		return o.NotebookPriorTurns
 	default:
 		return "verbatim"

@@ -66,6 +66,11 @@ type stubStats struct {
 	// EventsCollapsed counts collapsed call/result pairs across those
 	// turns.
 	EventsCollapsed int
+	// SummaryFetchFailed marks a summarize-mode run whose entry fetch
+	// failed at freeze — the run renders verbatim, so without the
+	// marker it would poison the treatment arm as a control-shaped
+	// sample.
+	SummaryFetchFailed bool
 	// Kinds splits Results by stub kind — the counter backing the
 	// eval harness's min_stub_stats.kinds.* coverage predicates.
 	// Like Results it counts promoted stubs only; a flag still

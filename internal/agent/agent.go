@@ -2104,9 +2104,36 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 		boundary = findSegmentBoundaryByTokenBudget(msgs, budget, segs, processed)
 		// Resolve the collapsible-turn set on this pipeline's first
 		// render, then freeze it: a mid-run coverage commit must not
-		// flip a turn from raw to stub mid-window.
+		// flip a turn from raw to stub mid-window. Summarize mode's
+		// render payload freezes with it — same rule for mid-run entry
+		// commits, and one entry query per run rather than per render.
 		if collapse != nil && collapse.Set == nil {
 			collapse.Set = coveredPriorTurns(segs, processed, collapse.Before)
+			if a.priorTurns == priorTurnsSummarize {
+				// minTurn is the turn AT the boundary — turns fully
+				// below the raw-window floor never emit a summary, so
+				// their entries are not worth joining. messageTurns
+				// numbering, not a raw user-message count: a straddled
+				// turn keeps its entries.
+				var minTurn int64
+				if mts := messageTurns(msgs); len(mts) > 0 {
+					if boundary < len(mts) {
+						minTurn = mts[boundary]
+					} else {
+						minTurn = mts[len(mts)-1] + 1
+					}
+				}
+				var ok bool
+				collapse.summaries, ok = a.turnSummaries(ctx, sessionID, collapse.Set, minTurn)
+				if !ok && a.stubStats != nil {
+					// A failed fetch renders verbatim — mark it so a
+					// control-shaped prompt can't pass as a summarize
+					// sample in telemetry.
+					stats, _ := a.stubStats.Get(sessionID)
+					stats.SummaryFetchFailed = true
+					a.stubStats.Set(sessionID, stats)
+				}
+			}
 		}
 		bKey := boundarySegmentKey(segs, boundary)
 		// Count before this render refreshes the injected-file set —
@@ -2152,7 +2179,10 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 	// rawMsgs can begin mid-turn, so numbering the slice would mislabel
 	// turns against the registry.
 	var turns []int64
-	if collapse != nil && len(collapse.Set) > 0 && recallLive {
+	// Stub/digest renders print recall pointers, so they collapse only
+	// when recall is live; summarize renders the entries themselves
+	// and needs no recall tool.
+	if collapse != nil && len(collapse.Set) > 0 && (recallLive || a.priorTurns == priorTurnsSummarize) {
 		turns = messageTurns(msgs)
 	}
 	collapsedTurn := func(i int) (int64, bool) {
@@ -2160,6 +2190,13 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 			return 0, false
 		}
 		t := turns[boundary+i]
+		if a.priorTurns == priorTurnsSummarize {
+			// The entry-joined set is the render gate — a covered turn
+			// with no entries stays verbatim rather than collapsing to
+			// an empty summary.
+			_, ok := collapse.summaries[t]
+			return t, ok
+		}
 		return t, collapse.Set[t]
 	}
 
@@ -2177,13 +2214,27 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 	// and a turn boundary cannot split a call from its result.
 	callNames := make(map[string]string)
 	exemptCalls := make(map[string]bool)
-	for _, m := range rawMsgs {
+	// callDropped marks the calls this render drops. Summarize mode
+	// may drop a result only when its call drops with it — a result
+	// can land in a collapsed turn while its call sits in a verbatim
+	// one (a user message can interleave between call and result on
+	// resume), and dropping it there would strand a tool_use that
+	// providers hard-reject on every remaining render.
+	var callDropped map[string]bool
+	if a.priorTurns == priorTurnsSummarize {
+		callDropped = make(map[string]bool)
+	}
+	for i, m := range rawMsgs {
 		if m.Role != message.Assistant {
 			continue
 		}
 		for _, tc := range m.ToolCalls() {
 			callNames[tc.ID] = tc.Name
 			exemptCalls[tc.ID] = callIsExempt(tc)
+			if callDropped != nil {
+				_, collapsing := collapsedTurn(i)
+				callDropped[tc.ID] = collapsing && tc.Name != tools.QuestionToolName
+			}
 		}
 	}
 	var stubs stubReport
@@ -2196,9 +2247,15 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 		}
 		if turn, yes := collapsedTurn(i); yes {
 			// Turn collapse is evaluated before other stub kinds —
-			// inside a collapsed turn they are irrelevant.
+			// inside a collapsed turn they are irrelevant. Summarize
+			// drops non-question results outright — their calls leave
+			// the prompt too, so nothing dangles.
 			var n int
-			m, n = collapseToolMessageForTurn(m, turn, a.priorTurns, exemptCalls, callNames)
+			if a.priorTurns == priorTurnsSummarize {
+				m, n = summarizeToolMessageForTurn(m, callNames, callDropped)
+			} else {
+				m, n = collapseToolMessageForTurn(m, turn, a.priorTurns, exemptCalls, callNames)
+			}
 			collapsedResults += n
 		} else if a.stubSuperseded && recallLive {
 			// Substitute stubs before indexing so the emitted result
@@ -2233,16 +2290,39 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 		}
 	}
 
+	summarized := make(map[int64]bool)
 	for i, m := range rawMsgs {
-		if turn, yes := collapsedTurn(i); yes && m.Role == message.Assistant {
-			// Reasoning drops with the turn and call inputs collapse;
-			// the emptiness checks below must see the stripped copy.
-			var n int
-			m, n = collapseAssistantForTurn(m, turn, a.priorTurns)
-			// A covered turn whose calls are all exempt renders
-			// verbatim — it must not count as collapsed.
-			if n > 0 {
-				collapsedEvents[turn] += n
+		if turn, yes := collapsedTurn(i); yes {
+			if a.priorTurns == priorTurnsSummarize && m.Role != message.User && !summarized[turn] {
+				// The summary stands where the turn's executable span
+				// began — the first rendered message of a collapsed
+				// turn, which can be mid-turn when the boundary
+				// straddles it. User prompts render verbatim ahead of
+				// it. Emitting counts the turn as collapsed even when
+				// nothing dropped.
+				summarized[turn] = true
+				history = append(history, fantasy.Message{
+					Role:    fantasy.MessageRoleAssistant,
+					Content: []fantasy.MessagePart{fantasy.TextPart{Text: collapse.summaries[turn]}},
+				})
+				collapsedEvents[turn] += 0
+			}
+			if m.Role == message.Assistant {
+				// Reasoning drops with the turn and calls leave under
+				// summarize (stub mutates their inputs); the emptiness
+				// checks below must see the stripped copy.
+				var n int
+				if a.priorTurns == priorTurnsSummarize {
+					m, n = summarizeAssistantForTurn(m)
+					collapsedEvents[turn] += n
+				} else {
+					m, n = collapseAssistantForTurn(m, turn, a.priorTurns)
+					// A covered turn whose calls are all exempt renders
+					// verbatim — it must not count as collapsed.
+					if n > 0 {
+						collapsedEvents[turn] += n
+					}
+				}
 			}
 		}
 		if len(m.Parts) == 0 {
