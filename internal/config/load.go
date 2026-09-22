@@ -517,22 +517,27 @@ func (c *Config) configureProviders(ctx context.Context, store *ConfigStore, env
 	return nil
 }
 
-// PreflightProviders runs the provider-resolution half of Load as a dry
-// run: env refs resolve against e, providers drop under exactly the same
-// rules the real path applies, but nothing persists — the store is nil
-// (the OAuth cleanup branch skips its disk write) and config-declared
-// env vars merge into e rather than os.Setenv the caller's process.
-// knownProviders is the catwalk catalog (from Providers). Callers
-// inspect the mutated Config — Providers, IsConfigured, GetModel — for
-// which providers survived.
+// PreflightProviders runs the provider-resolution half of Load as a
+// side-effect-light check: env refs resolve against e, providers drop
+// under exactly the same rules the real path applies, nothing persists
+// (nil store — the OAuth cleanup branch skips its disk write), and
+// config-declared env vars merge into e rather than os.Setenv the
+// caller's process. knownProviders is the catwalk catalog (from
+// Providers). Callers inspect the mutated Config — Providers,
+// IsConfigured, GetModel — for which providers survived.
+//
+// Not fully "dry": providers relying on model discovery get a real
+// DiscoverModels HTTP call to their base_url (3s-bounded) — a dead
+// endpoint fails preflight exactly as it fails the child.
 func (c *Config) PreflightProviders(ctx context.Context, e env.Env, knownProviders []catwalk.Provider) error {
 	if c.Options == nil {
 		c.Options = &Options{}
 	}
 	resolver := NewShellVariableResolver(e)
 	// applyEnv would os.Setenv config-declared vars into the caller's
-	// process; merge them into the resolver's env instead so $VAR and
-	// $(cmd) refs resolve with the same visibility the child gets.
+	// process; merge them into the resolver's env instead. Resolved
+	// progressively in sorted order so a var referencing an earlier
+	// config var sees it — same semantics applyEnv's os.Setenv gives.
 	if len(c.Env) > 0 {
 		merged := make(map[string]string, len(e.Env()))
 		for _, kv := range e.Env() {
@@ -547,6 +552,7 @@ func (c *Config) PreflightProviders(ctx context.Context, e env.Env, knownProvide
 		for _, k := range keys {
 			if resolved, err := resolver.ResolveValue(c.Env[k]); err == nil {
 				merged[k] = resolved
+				resolver = NewShellVariableResolver(env.NewFromMap(merged))
 			}
 		}
 		e = env.NewFromMap(merged)

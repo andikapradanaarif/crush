@@ -592,7 +592,7 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 	// counts only requires-misses — band-uncovered entries share
 	// rep.Skipped but aren't runnable.
 	if runnable > 0 && requiresSkipped == runnable {
-		return rep, fmt.Errorf("all %d runnable trajectories skipped requires pre-flight: %s",
+		return rep, fmt.Errorf("all %d runnable trajectories skipped before sampling: %s",
 			runnable, strings.Join(rep.Skipped, "; "))
 	}
 	// A selection whose bands are all absent from runs_per_trajectory

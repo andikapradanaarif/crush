@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -28,13 +29,24 @@ var configErrorSignatures = []string{
 // (openai-compat) provider with an unresolved api_key is *kept* at load
 // (warn-only — keyless local providers are legitimate), then fails every
 // request with a 401. That arrives as "agent run failed:" with telemetry
-// present, so the pre-model triad never sees it.
+// present, so the pre-model triad never sees it. Scoped tight — bare
+// "api key"/"401" substrings would match rate-limit text.
 var authErrorSignatures = []string{
 	"unauthorized",
 	"no api-key",
-	"api key",
-	"authentication",
-	"401",
+	"no api key",
+	"invalid api key",
+	"authentication failed",
+	"missing credentials",
+}
+
+// nonConfigErrorMarkers negate an otherwise-matching signature — a
+// rate-limit message containing "api key" is transient, not config.
+var nonConfigErrorMarkers = []string{
+	"rate limit",
+	"429",
+	"quota",
+	"too many requests",
 }
 
 // preflightExperiment dry-resolves the experiment's providers the same
@@ -60,15 +72,29 @@ func (r *Runner) preflightExperiment(ctx context.Context, exp *Experiment) error
 
 	providerID, modelID, pinnedProvider := strings.Cut(exp.Model, "/")
 
+	// The catwalk catalog is process-global (providerOnce) — fetch once
+	// outside the arm loop so map order can't seed it with one arm's
+	// options. Auto-update is pinned off to match the child's generated
+	// .crush.json (materialize.go always sets it; arms can't override).
+	// Per-arm DisableDefaultProviders still applies inside prep.
+	catalogCfg := &config.Config{Options: &config.Options{DisableProviderAutoUpdate: true}}
+	known, catErr := config.Providers(catalogCfg)
+
 	var problems []string
 	for armName, arm := range exp.Arms {
 		cfg := &config.Config{
-			Options:   &config.Options{},
+			Options:   &config.Options{DisableProviderAutoUpdate: true},
 			Providers: csync.NewMap[string, config.ProviderConfig](),
 		}
 		if raw := arm.Config.Options; len(raw) > 0 {
-			if data, err := json.Marshal(raw); err == nil {
-				_ = json.Unmarshal(data, cfg.Options)
+			data, err := json.Marshal(raw)
+			if err != nil {
+				problems = append(problems, fmt.Sprintf("arm %s: options marshal: %v", armName, err))
+				continue
+			}
+			if err := json.Unmarshal(data, cfg.Options); err != nil {
+				problems = append(problems, fmt.Sprintf("arm %s: options decode: %v", armName, err))
+				continue
 			}
 		}
 		if len(exp.Providers) > 0 {
@@ -85,11 +111,8 @@ func (r *Runner) preflightExperiment(ctx context.Context, exp *Experiment) error
 			}
 		}
 
-		// The catwalk catalog the child merges against — same call, so a
-		// catalog fetch failure fails here exactly as it would there.
-		known, err := config.Providers(cfg)
-		if err != nil && len(known) == 0 {
-			problems = append(problems, fmt.Sprintf("arm %s: provider catalog: %v", armName, err))
+		if catErr != nil && len(known) == 0 {
+			problems = append(problems, fmt.Sprintf("arm %s: provider catalog: %v", armName, catErr))
 			continue
 		}
 		if err := cfg.PreflightProviders(ctx, e, known); err != nil {
@@ -153,14 +176,12 @@ func loopbackBaseURL(baseURL string, resolver config.VariableResolver) bool {
 	if err != nil || u == "" {
 		return false
 	}
-	host := u
-	if i := strings.Index(u, "://"); i >= 0 {
-		host = u[i+3:]
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return false
 	}
-	if i := strings.IndexAny(host, "/:"); i >= 0 {
-		host = host[:i]
-	}
-	return host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]"
+	host := parsed.Hostname()
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 // dropHint re-resolves the provider's credential template for the abort
@@ -197,29 +218,41 @@ func dropHint(exp *Experiment, providerID string, known []catwalk.Provider, reso
 // isConfigClassError reports whether a run record is a provably
 // config-class failure. Two classes:
 //
-//   - Pre-model exit: "crush run failed:" with no session and no steps,
-//     matching a config signature — the subprocess died before the model.
+//   - Pre-model exit: "crush run failed:" with no request stats and no
+//     steps, matching a config signature — the subprocess died before
+//     the model. (SessionDB is NOT such a signal: the child creates
+//     crush.db in setupLocalWorkspace before IsConfigured fails, and
+//     preserveSessionDB snapshots it unconditionally — every real
+//     "No providers configured" record carries session_db.)
 //   - Deferred credential failure: "agent run failed:" matching an auth
 //     signature — the provider survived load but every request 401s.
 //
 // Both are experiment-global (credentials/config don't vary per run);
 // anything else — rate limits, mid-run model errors — keeps sampling.
+// Signatures match case-insensitively: real run_error strings carry
+// TUI-rendered capitalization ("  No providers configured  ").
 func isConfigClassError(rec RunRecord) bool {
 	if rec.Outcome != OutcomeError {
 		return false
 	}
 	s, _ := rec.CheckDetail["run_error"].(string)
 	lower := strings.ToLower(s)
+	if slices.ContainsFunc(nonConfigErrorMarkers, func(m string) bool {
+		return strings.Contains(lower, m)
+	}) {
+		return false
+	}
 	switch {
 	case strings.HasPrefix(s, "crush run failed:"):
-		if rec.SessionDB != "" || rec.Steps > 0 {
+		if rec.Request != nil || rec.Steps > 0 {
 			return false
 		}
-		if strings.Contains(s, "not found") && (strings.Contains(s, "model") || strings.Contains(s, "provider")) {
+		if strings.Contains(lower, "not found") &&
+			(strings.Contains(lower, "model") || strings.Contains(lower, "provider")) {
 			return true
 		}
 		return slices.ContainsFunc(configErrorSignatures, func(sig string) bool {
-			return strings.Contains(s, sig)
+			return strings.Contains(lower, sig)
 		})
 	case strings.HasPrefix(s, "agent run failed:"):
 		return slices.ContainsFunc(authErrorSignatures, func(sig string) bool {
@@ -231,12 +264,21 @@ func isConfigClassError(rec RunRecord) bool {
 
 // isFixtureConfigError reports a trajectory-scoped config failure —
 // WriteArmConfig rejected the fixture's config (unparseable
-// .crush.json, manifest-flag pinning). The trajectory is unrunnable;
-// other trajectories are unaffected.
+// .crush.json, manifest-flag pinning) or Materialize failed outright.
+// The trajectory is unrunnable; other trajectories are unaffected.
+// Materialize failures land as OutcomeError with no CheckDetail at
+// all — no run_error, no harness key — and would otherwise burn to
+// the attempts cap.
 func isFixtureConfigError(rec RunRecord) bool {
 	if rec.Outcome != OutcomeError {
 		return false
 	}
-	_, ok := rec.CheckDetail["harness"]
-	return ok
+	if _, ok := rec.CheckDetail["harness"]; ok {
+		return true
+	}
+	// Bare error: no run_error (subprocess never ran), no check_error,
+	// no coverage detail — produced by materialize/harness internals.
+	_, hasRunErr := rec.CheckDetail["run_error"]
+	_, hasCheckErr := rec.CheckDetail["check_error"]
+	return !hasRunErr && !hasCheckErr && len(rec.CheckDetail) == 0
 }

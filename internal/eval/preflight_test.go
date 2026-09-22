@@ -114,6 +114,18 @@ func (e errRunner) Run(_ context.Context, _ string, _ []string, _ Budget) RunRes
 	return RunResult{Err: errors.New(e.err)}
 }
 
+// dbErrRunner writes a crush.db into the run's data dir before failing —
+// mirroring the real config-failure shape (the child creates the DB in
+// setupLocalWorkspace before IsConfigured errors, and preserveSessionDB
+// snapshots it). This is the record shape the SessionDB guard got wrong.
+type dbErrRunner struct{ err string }
+
+func (e dbErrRunner) Run(_ context.Context, workdir string, _ []string, _ Budget) RunResult {
+	_ = os.MkdirAll(DataDirFor(workdir), 0o755)
+	_ = os.WriteFile(filepath.Join(DataDirFor(workdir), "crush.db"), []byte("x"), 0o644)
+	return RunResult{Err: errors.New(e.err)}
+}
+
 func breakerFixture(t *testing.T) (*Runner, *Experiment, *Trajectory, string) {
 	root := newEvalDir(t)
 	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "brk-t", nil)
@@ -133,10 +145,55 @@ func breakerFixture(t *testing.T) (*Runner, *Experiment, *Trajectory, string) {
 func TestRunTrajectory_ConfigClassBreaker(t *testing.T) {
 	t.Parallel()
 	r, exp, tr, trajDir := breakerFixture(t)
-	r.Driver = errRunner{err: "crush run failed: exit status 1: Error: no providers configured"}
+	// Production shape: the child creates crush.db before IsConfigured
+	// fails, so the record carries session_db + a capitalized message —
+	// the exact axes the earlier fixture diverged on.
+	r.Driver = dbErrRunner{err: "crush run failed: exit status 1: \n   ERROR  \n\n  No providers configured - please run 'crush' to set up a provider interactively."}
 	rep := r.runTrajectory(t.Context(), exp, tr, trajDir, &FlagsManifest{Defaults: map[string]any{}}, 3, "inv")
 	require.Error(t, rep.Abort)
 	require.Contains(t, rep.Abort.Error(), "config-class")
+}
+
+func TestIsConfigClassError_RealShapes(t *testing.T) {
+	t.Parallel()
+	// The actual record bytes from invocation 071231Z.
+	realRecord := RunRecord{
+		Outcome:   OutcomeError,
+		Steps:     0,
+		DurationS: 0.2,
+		SessionDB: "results/x/artifacts/t-control-1.db",
+		CheckDetail: map[string]any{
+			"run_error": "crush run failed: exit status 1:           \n   ERROR  \n          \n  No providers configured - please run 'crush' to set up a provider interactively.",
+		},
+	}
+	require.True(t, isConfigClassError(realRecord))
+
+	// Reached-the-model records never classify — request stats exist.
+	withReq := realRecord
+	withReq.Request = &RequestStats{PromptRequests: 3}
+	require.False(t, isConfigClassError(withReq))
+
+	// Rate limits keep sampling even when byte-identical.
+	rateLimit := RunRecord{
+		Outcome:     OutcomeError,
+		CheckDetail: map[string]any{"run_error": "crush run failed: exit status 1: Error: rate limit exceeded"},
+	}
+	require.False(t, isConfigClassError(rateLimit))
+
+	// Auth-class: telemetry-written mid-run credential failure.
+	auth := RunRecord{
+		Outcome:     OutcomeError,
+		Steps:       5,
+		SessionDB:   "x.db",
+		Request:     &RequestStats{PromptRequests: 5},
+		CheckDetail: map[string]any{"run_error": "agent run failed: unauthorized: No API-key provided."},
+	}
+	require.True(t, isConfigClassError(auth))
+
+	// Auth-adjacent rate limit doesn't classify.
+	authRL := auth
+	authRL.CheckDetail = map[string]any{"run_error": "agent run failed: api key rate limit exceeded"}
+	require.False(t, isConfigClassError(authRL))
 }
 
 func TestRunTrajectory_AuthClassBreaker(t *testing.T) {
