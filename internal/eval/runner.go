@@ -253,6 +253,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	workdir, err := Materialize(ctx, traj, trajDir, r.workParent(), r.checkEnv())
 	if err != nil {
 		rec.Outcome = OutcomeError
+		rec.CheckDetail = map[string]any{"harness": "materialize: " + err.Error()}
 		return rec, nil
 	}
 	// The data dir is a sibling, not inside the workdir — clean both.
@@ -739,7 +740,14 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 			case isFixtureConfigError(rec):
 				fixtureErrs++
 				if fixtureErrs >= 2 {
-					rep.Skipped = "fixture config: " + rec.CheckDetail["harness"].(string)
+					detail := "fixture config"
+					for _, key := range []string{"harness", "check_error"} {
+						if v, ok := rec.CheckDetail[key].(string); ok && v != "" {
+							detail += ": " + v
+							break
+						}
+					}
+					rep.Skipped = detail
 					return rep
 				}
 			}

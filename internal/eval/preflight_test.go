@@ -89,7 +89,20 @@ func TestPreflightExperiment_ModelMissingDiscoveryOff(t *testing.T) {
 	r := &Runner{Driver: CrushRunner{Home: t.TempDir()}}
 	err := r.preflightExperiment(t.Context(), pfExperiment(p))
 	require.Error(t, err)
-	require.Contains(t, err.Error(), `model "m" not in provider "testp"`)
+	require.Contains(t, err.Error(), `model "m" not found in provider "testp"`)
+}
+
+func TestPreflightExperiment_ModelMissingDiscoveryUnset(t *testing.T) {
+	// discover_models unset + a non-empty declared list → the child
+	// never discovers (autoTrigger needs models empty) → a pin outside
+	// the list fails at runtime. Preflight flags it post-prep.
+	p := testProvider("$EVALTEST_SET_KEY")
+	p["testp"].(map[string]any)["models"] = []any{map[string]any{"id": "other", "name": "other"}}
+	t.Setenv("EVALTEST_SET_KEY", "abc123")
+	r := &Runner{Driver: CrushRunner{Home: t.TempDir()}}
+	err := r.preflightExperiment(t.Context(), pfExperiment(p))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `model "m" not found in provider "testp"`)
 }
 
 func TestPreflightExperiment_BuiltinProviderMissingKey(t *testing.T) {
@@ -205,6 +218,42 @@ func TestRunTrajectory_AuthClassBreaker(t *testing.T) {
 	rep := r.runTrajectory(t.Context(), exp, tr, trajDir, &FlagsManifest{Defaults: map[string]any{}}, 3, "inv")
 	require.Error(t, rep.Abort)
 	require.Contains(t, rep.Abort.Error(), "config-class")
+}
+
+func TestRunTrajectory_FixtureBreakerSkips(t *testing.T) {
+	t.Parallel()
+	r, exp, tr, trajDir := breakerFixture(t)
+	// A corrupt fixture .crush.json — WriteArmConfig rejects it, the
+	// record carries harness detail, two failures skip the trajectory
+	// instead of burning to the cap.
+	require.NoError(t, os.WriteFile(filepath.Join(trajDir, "fixture", ".crush.json"), []byte("{invalid"), 0o644))
+	r.Driver = errRunner{err: "agent run failed: unreachable"}
+	rep := r.runTrajectory(t.Context(), exp, tr, trajDir, &FlagsManifest{Defaults: map[string]any{}}, 3, "inv")
+	require.NoError(t, rep.Abort)
+	require.Contains(t, rep.Skipped, "fixture config")
+}
+
+func TestIsFixtureConfigError_Shapes(t *testing.T) {
+	t.Parallel()
+	// The bare record — Materialize/harness internals and the ExecuteRun
+	// error path produce OutcomeError with no CheckDetail. This shape
+	// panicked the unconditional harness assert.
+	require.True(t, isFixtureConfigError(RunRecord{Outcome: OutcomeError}))
+	require.True(t, isFixtureConfigError(RunRecord{
+		Outcome:     OutcomeError,
+		CheckDetail: map[string]any{"harness": "materialize: .crush.json does not parse"},
+	}))
+	require.True(t, isFixtureConfigError(RunRecord{
+		Outcome:     OutcomeError,
+		CheckDetail: map[string]any{"check_error": "exec check.sh: no such file"},
+	}))
+	// Subprocess errors are not fixture-class — they run through the
+	// config-class classifier instead.
+	require.False(t, isFixtureConfigError(RunRecord{
+		Outcome:     OutcomeError,
+		CheckDetail: map[string]any{"run_error": "crush run failed: exit status 1"},
+	}))
+	require.False(t, isFixtureConfigError(RunRecord{Outcome: OutcomePass}))
 }
 
 func TestRunTrajectory_NonConfigErrorsKeepSampling(t *testing.T) {

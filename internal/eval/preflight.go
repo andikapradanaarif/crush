@@ -80,6 +80,18 @@ func (r *Runner) preflightExperiment(ctx context.Context, exp *Experiment) error
 	catalogCfg := &config.Config{Options: &config.Options{DisableProviderAutoUpdate: true}}
 	known, catErr := config.Providers(catalogCfg)
 
+	// Decode the experiment's provider block once — it's arm-independent.
+	var declaredProviders map[string]config.ProviderConfig
+	if len(exp.Providers) > 0 {
+		data, err := json.Marshal(exp.Providers)
+		if err != nil {
+			return fmt.Errorf("preflight: marshal providers: %w", err)
+		}
+		if err := json.Unmarshal(data, &declaredProviders); err != nil {
+			return fmt.Errorf("preflight: providers block does not decode: %w", err)
+		}
+	}
+
 	var problems []string
 	for armName, arm := range exp.Arms {
 		cfg := &config.Config{
@@ -97,18 +109,8 @@ func (r *Runner) preflightExperiment(ctx context.Context, exp *Experiment) error
 				continue
 			}
 		}
-		if len(exp.Providers) > 0 {
-			data, err := json.Marshal(exp.Providers)
-			if err != nil {
-				return fmt.Errorf("preflight: marshal providers: %w", err)
-			}
-			var declared map[string]config.ProviderConfig
-			if err := json.Unmarshal(data, &declared); err != nil {
-				return fmt.Errorf("preflight: providers block does not decode: %w", err)
-			}
-			for id, pc := range declared {
-				cfg.Providers.Set(id, pc)
-			}
+		for id, pc := range declaredProviders {
+			cfg.Providers.Set(id, pc)
 		}
 
 		if catErr != nil && len(known) == 0 {
@@ -124,17 +126,19 @@ func (r *Runner) preflightExperiment(ctx context.Context, exp *Experiment) error
 		// builtin-provider experiment whose key is unset wants "anthropic
 		// dropped", not the generic unconfigured line.
 		if pinnedProvider {
-			pc, exists := cfg.Providers.Get(providerID)
+			_, exists := cfg.Providers.Get(providerID)
 			if !exists {
 				problems = append(problems, fmt.Sprintf("arm %s: provider %q dropped during resolution%s",
 					armName, providerID, dropHint(exp, providerID, known, resolver)))
 				continue
 			}
-			if cfg.GetModel(providerID, modelID) == nil &&
-				pc.AutoDiscoverModels != nil && !*pc.AutoDiscoverModels {
-				// Discovery fetches the model list at runtime — "not
-				// declared" is only a failure when it's off.
-				problems = append(problems, fmt.Sprintf("arm %s: model %q not in provider %q's declared models (discover_models off)",
+			// Post-prep GetModel reflects discovery results — "not
+			// found" is definitive regardless of discover_models.
+			// Stricter than the child by design: resolveSelectedModels
+			// silently falls back to the default model on a bad pin,
+			// landing records under a condition nobody measured.
+			if cfg.GetModel(providerID, modelID) == nil {
+				problems = append(problems, fmt.Sprintf("arm %s: model %q not found in provider %q",
 					armName, modelID, providerID))
 			}
 		}
@@ -276,9 +280,12 @@ func isFixtureConfigError(rec RunRecord) bool {
 	if _, ok := rec.CheckDetail["harness"]; ok {
 		return true
 	}
-	// Bare error: no run_error (subprocess never ran), no check_error,
-	// no coverage detail — produced by materialize/harness internals.
-	_, hasRunErr := rec.CheckDetail["run_error"]
-	_, hasCheckErr := rec.CheckDetail["check_error"]
-	return !hasRunErr && !hasCheckErr && len(rec.CheckDetail) == 0
+	// A check script that can't run is the same deterministic fixture
+	// failure — it will never produce an outcome for this trajectory.
+	if _, ok := rec.CheckDetail["check_error"]; ok {
+		return true
+	}
+	// Bare error: no run_error (subprocess never ran), no detail —
+	// produced by materialize/harness internals.
+	return len(rec.CheckDetail) == 0
 }
