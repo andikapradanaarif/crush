@@ -1091,11 +1091,13 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 	// recall("result:<id>") recovery pointers, so they need the
 	// notebook AND the recall tool — disabling either via config or
 	// disabled_tools would leave dead pointers in the prompt.
+	// Summarize mode renders the entries inline, so it needs only the
+	// notebook.
 	notebookOn := c.cfg.Config().Options.NotebookIsEnabled()
 	recallOn := slices.Contains(agent.AllowedTools, notebooktool.RecallToolName)
 	priorTurns := "verbatim"
-	if notebookOn && recallOn {
-		priorTurns = c.cfg.Config().Options.NotebookPriorTurnsMode()
+	if mode := c.cfg.Config().Options.NotebookPriorTurnsMode(); notebookOn && (recallOn || mode == priorTurnsSummarize) {
+		priorTurns = mode
 	}
 	result := NewSessionAgent(SessionAgentOptions{
 		LargeModel:           large,

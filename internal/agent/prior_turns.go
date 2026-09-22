@@ -1,24 +1,32 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/notebook"
 )
 
-// Prior-turn collapse (options.notebook_prior_turns = "stub" or
-// "digest") renders tool call/result pairs in completed, fully
-// covered turns as minimal stub pairs: structure — IDs, roles,
-// pairing — is preserved and only the content is replaced. Collapse
-// is a pure render-time transform; stored events are never rewritten,
-// so recall("result:<id>") still resolves the original. Under
-// "digest" each finished turn additionally consolidates into a
-// granularity:turn notebook entry at run end — see
-// notebook_digest.go and docs/design/TURN_DIGEST.md.
+// Prior-turn collapse (options.notebook_prior_turns = "stub",
+// "digest", or "summarize") renders tool call/result pairs in
+// completed, fully covered turns as minimal stub pairs: structure —
+// IDs, roles, pairing — is preserved and only the content is
+// replaced. Collapse is a pure render-time transform; stored events
+// are never rewritten, so recall("result:<id>") still resolves the
+// original. Under "digest" each finished turn additionally
+// consolidates into a granularity:turn notebook entry at run end —
+// see notebook_digest.go and docs/design/TURN_DIGEST.md. Under
+// "summarize" the turn's executable span is instead replaced by one
+// synthetic message carrying the turn's generated segment entries —
+// content, not pointers — so no recall tool is required.
 
 const (
 	// priorTurnsVerbatim renders the full transcript — the default.
@@ -29,6 +37,9 @@ const (
 	// consolidates each finished turn into a granularity:turn
 	// notebook entry — the turn digest.
 	priorTurnsDigest = "digest"
+	// priorTurnsSummarize replaces a covered turn's executable span
+	// with its segment entries rendered inline.
+	priorTurnsSummarize = "summarize"
 )
 
 // turnCollapse carries prior-turn collapse state across one run's
@@ -43,10 +54,14 @@ const (
 // set of turns holding a granularity:turn digest, frozen lazily on
 // the run's first prefix render — eligibility, not application: a
 // digest landing mid-run must not demote already-rendered entries.
+// summaries is the summarize mode's render payload — turn → joined
+// entry text — frozen with Set on the run's first render so a mid-run
+// entry commit cannot flip a turn from summary to raw mid-window.
 type turnCollapse struct {
 	Before      int64
 	Set         map[int64]bool
 	digestTurns map[int64]bool
+	summaries   map[int64]string
 }
 
 // newTurnCollapse returns the collapse state for one render pipeline,
@@ -55,7 +70,7 @@ type turnCollapse struct {
 // option to verbatim when the notebook is disabled; this is the belt.
 func (a *sessionAgent) newTurnCollapse(before int64) *turnCollapse {
 	switch a.priorTurns {
-	case priorTurnsStub, priorTurnsDigest:
+	case priorTurnsStub, priorTurnsDigest, priorTurnsSummarize:
 	default:
 		return nil
 	}
@@ -235,6 +250,134 @@ func collapseToolMessageForTurn(m message.Message, turn int64, mode string, exem
 	out := m
 	out.Parts = parts
 	return out, count
+}
+
+// turnSummaries renders each covered turn's segment entries into the
+// text summarize mode substitutes for the turn's executable span.
+// Entries join per turn ordered by (segment, event); checkpoint and
+// digest rows share notebook_entries under EventCheckpoint and are
+// excluded, as are hydration seeds. The uncompressed EntryTextFull is
+// preferred — the mode's premise is information sufficiency. A
+// covered turn with no entries is absent from the result: it renders
+// verbatim. The fetch runs once per run at collapse-set freeze, so a
+// mid-run entry commit cannot flip a rendered turn.
+func (a *sessionAgent) turnSummaries(ctx context.Context, sessionID string, covered map[int64]bool) map[int64]string {
+	if sessionID == "" || len(covered) == 0 {
+		return nil
+	}
+	detCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	entries, err := a.notebook.GetEntries(detCtx, sessionID)
+	cancel()
+	if err != nil {
+		slog.Warn("Failed to load entries for turn summaries", "session_id", sessionID, "error", err)
+		return nil
+	}
+	byTurn := make(map[int64][]notebook.Entry)
+	for _, e := range entries {
+		if !covered[e.TurnNumber] || e.EventType == notebook.EventCheckpoint || isHydratedSeed(e) {
+			continue
+		}
+		byTurn[e.TurnNumber] = append(byTurn[e.TurnNumber], e)
+	}
+	summaries := make(map[int64]string, len(byTurn))
+	for turn, list := range byTurn {
+		slices.SortFunc(list, func(x, y notebook.Entry) int {
+			if x.SegmentNumber != y.SegmentNumber {
+				return cmp.Compare(x.SegmentNumber, y.SegmentNumber)
+			}
+			return cmp.Compare(x.EventNumber, y.EventNumber)
+		})
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "[Summary of turn %d]\n", turn)
+		for _, e := range list {
+			sb.WriteString(cmp.Or(e.EntryTextFull, e.EntryText))
+			sb.WriteString("\n")
+		}
+		summaries[turn] = strings.TrimRight(sb.String(), "\n")
+	}
+	return summaries
+}
+
+// summarizeAssistantForTurn returns m with the turn's executable
+// detail dropped whole — reasoning and every non-question tool call —
+// the synthetic turn summary stands in their place. Question pairs
+// survive verbatim: their results carry user decisions, the one
+// payload a summary cannot safely compress, and a signed question
+// call keeps its bound reasoning — replaying a signed call without
+// its thought signature is a provider rejection mode. Unlike stub
+// collapse nothing is mutated, so no provider replays a falsified
+// call. Returns the message and the number of dropped calls.
+func summarizeAssistantForTurn(m message.Message) (message.Message, int) {
+	keep := make(map[string]bool)
+	for _, part := range m.Parts {
+		if tc, ok := part.(message.ToolCall); ok && tc.Name == tools.QuestionToolName {
+			keep[tc.ID] = true
+		}
+	}
+	needs := false
+	for _, part := range m.Parts {
+		switch p := part.(type) {
+		case message.ReasoningContent:
+			needs = needs || !keep[p.ToolID]
+		case message.ToolCall:
+			needs = needs || !keep[p.ID]
+		}
+		if needs {
+			break
+		}
+	}
+	if !needs {
+		return m, 0
+	}
+	parts := make([]message.ContentPart, 0, len(m.Parts))
+	dropped := 0
+	for _, part := range m.Parts {
+		switch p := part.(type) {
+		case message.ReasoningContent:
+			if keep[p.ToolID] {
+				parts = append(parts, part)
+			}
+			continue
+		case message.ToolCall:
+			if !keep[p.ID] {
+				dropped++
+				continue
+			}
+		}
+		parts = append(parts, part)
+	}
+	out := m
+	out.Parts = parts
+	return out, dropped
+}
+
+// summarizeToolMessageForTurn keeps only the results answering the
+// turn's surviving question calls — every other result drops with its
+// call, which leaves the prompt entirely rather than rendering a
+// stub. Returns the message and the dropped-result count.
+func summarizeToolMessageForTurn(m message.Message, callNames map[string]string) (message.Message, int) {
+	var parts []message.ContentPart
+	dropped := 0
+	for i, part := range m.Parts {
+		tr, ok := part.(message.ToolResult)
+		if !ok || callNames[tr.ToolCallID] == tools.QuestionToolName {
+			if parts != nil {
+				parts = append(parts, part)
+			}
+			continue
+		}
+		dropped++
+		if parts == nil {
+			parts = make([]message.ContentPart, 0, len(m.Parts))
+			parts = append(parts, m.Parts[:i]...)
+		}
+	}
+	if parts == nil {
+		return m, 0
+	}
+	out := m
+	out.Parts = parts
+	return out, dropped
 }
 
 // recordCollapsedTurns persists newly collapsed turns and accumulates

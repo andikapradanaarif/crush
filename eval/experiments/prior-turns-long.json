@@ -29,6 +29,17 @@
 			"coverage": {
 				"min_prior_turns.turns_collapsed": 1
 			}
+		},
+		"summarize": {
+			"config": {
+				"options": {
+					"notebook_enabled": true,
+					"notebook_prior_turns": "summarize"
+				}
+			},
+			"coverage": {
+				"min_prior_turns.turns_collapsed": 1
+			}
 		}
 	},
 	"providers": {

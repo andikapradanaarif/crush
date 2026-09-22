@@ -628,3 +628,223 @@ func TestSummarize_RendersVerbatim(t *testing.T) {
 	require.Contains(t, body.String(), "file content line")
 	require.NotContains(t, body.String(), "_collapsed")
 }
+
+// callPresent reports whether any rendered tool-call part carries id.
+func callPresent(history []fantasy.Message, id string) bool {
+	for _, m := range history {
+		for _, p := range m.Content {
+			if tc, ok := p.(fantasy.ToolCallPart); ok && tc.ToolCallID == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// resultPresent reports whether any rendered tool-result part answers id.
+func resultPresent(history []fantasy.Message, id string) bool {
+	for _, m := range history {
+		for _, p := range m.Content {
+			if tr, ok := p.(fantasy.ToolResultPart); ok && tr.ToolCallID == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// emptyEntryGen marks coverage but produces no entries — the
+// summarize mode's zero-entry fallback path.
+type emptyEntryGen struct{}
+
+func (emptyEntryGen) Generate(context.Context, string, []notebook.EntryInput) ([]notebook.GeneratedEntry, error) {
+	return nil, nil
+}
+
+func (emptyEntryGen) GenerateCheckpoint(context.Context, string, string) (notebook.GeneratedEntry, error) {
+	return notebook.GeneratedEntry{}, nil
+}
+
+func (emptyEntryGen) GenerateDigest(context.Context, string, string) (notebook.GeneratedEntry, error) {
+	return notebook.GeneratedEntry{}, nil
+}
+
+// Summarize mode replaces the covered turn's executable span with its
+// generated entries rendered inline — content, not recall pointers.
+// Calls and results drop together so nothing dangles; the question
+// pair stays verbatim because its result carries a user decision a
+// summary cannot safely compress.
+func TestPreparePrompt_SummarizeCollapsesToEntries(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsSummarize
+	msgs := priorTurnFixture(t, svc, sessionID)
+	ctx := t.Context()
+	a.detectSegments(ctx, sessionID, msgs)
+
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	text := renderedText(history)
+
+	// The summary stands in for the span and carries real entry
+	// content — echoEntryGen embeds the tool result body.
+	require.Contains(t, text, "[Summary of turn 0]")
+	require.Contains(t, text, "file content line")
+	require.NotContains(t, text, `recall("result:`)
+
+	// Every executable part is gone — calls and results drop
+	// together, provider-executed included.
+	for _, id := range []string{"tc-bash", "tc-web", "tc-shot"} {
+		require.False(t, callPresent(history, id), id)
+		require.False(t, resultPresent(history, id), id)
+	}
+
+	// The question pair survives verbatim, bound reasoning included —
+	// replaying a signed call without its thought signature is a
+	// provider rejection mode.
+	require.JSONEq(t, `{"questions":[{"type":"yes_no","question":"proceed?"}]}`,
+		renderedCall(t, history, "tc-q").Input)
+	require.Equal(t, "yes — proceed", renderedResultText(t, history, "tc-q"))
+	require.Contains(t, renderedReasoning(history), "signed for question")
+	require.NotContains(t, renderedReasoning(history), "deep thoughts")
+
+	// No dangling pairs: every rendered result answers a rendered call.
+	for _, m := range history {
+		for _, p := range m.Content {
+			if tr, ok := p.(fantasy.ToolResultPart); ok {
+				require.True(t, callPresent(history, tr.ToolCallID), tr.ToolCallID)
+			}
+		}
+	}
+
+	// Conversation plane verbatim; ordering is prompt → summary →
+	// answer.
+	require.Contains(t, text, "first prompt")
+	require.Contains(t, text, "second prompt")
+	require.Contains(t, text, "turn zero answer")
+	require.Less(t, strings.Index(text, "first prompt"), strings.Index(text, "[Summary of turn 0]"))
+	require.Less(t, strings.Index(text, "[Summary of turn 0]"), strings.Index(text, "turn zero answer"))
+}
+
+// Summarize renders entries, not recall pointers — stripping the
+// recall tool must not degrade it to verbatim (stub mode's gate).
+func TestPreparePrompt_SummarizeWithoutRecallStillCollapses(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsSummarize
+	// Same strip as TestPreparePrompt_NoCollapseWithoutRecall — a live
+	// reload disabled recall.
+	a.tools = csync.NewSliceFrom([]fantasy.AgentTool{&fakeTool{name: "view"}})
+	msgs := priorTurnFixture(t, svc, sessionID)
+	ctx := t.Context()
+	a.detectSegments(ctx, sessionID, msgs)
+
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	require.Contains(t, renderedText(history), "[Summary of turn 0]")
+	require.False(t, callPresent(history, "tc-bash"))
+}
+
+// A covered turn with no entries stays verbatim — processed coverage
+// alone is not a summary. Coverage is committed straight to the
+// registry because an empty generator still yields deterministic
+// fallback entries (significantEntries under-production path).
+func TestPreparePrompt_SummarizeNoEntriesStaysVerbatim(t *testing.T) {
+	t.Parallel()
+
+	a, svc, nb, sessionID := newSegmentTestAgent(t, emptyEntryGen{})
+	a.priorTurns = priorTurnsSummarize
+	msgs := priorTurnFixture(t, svc, sessionID)
+	ctx := t.Context()
+
+	var covered []notebook.ProcessedSegment
+	for _, s := range segmentBoundaries(msgs, a.segTokenBudget(), a.segMaxSteps()) {
+		if s.open || s.turn != 0 {
+			continue
+		}
+		covered = append(covered, notebook.ProcessedSegment{
+			TurnNumber:    s.turn,
+			SegmentNumber: s.number,
+			StartIndex:    int64(s.start),
+			EndIndex:      int64(s.end),
+		})
+	}
+	require.NotEmpty(t, covered)
+	require.NoError(t, nb.MarkSegmentsProcessed(ctx, sessionID, covered))
+
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	require.JSONEq(t, `{"command":"cat big.go"}`, renderedCall(t, history, "tc-bash").Input)
+	require.Contains(t, renderedResultText(t, history, "tc-bash"), "file content line")
+	require.NotContains(t, renderedText(history), "[Summary of turn 0]")
+}
+
+// Digest and checkpoint rows share notebook_entries under
+// EventCheckpoint keyed to the same turn — the summary join must
+// exclude them or consolidated text lands inside the span.
+func TestPreparePrompt_SummarizeExcludesCheckpointRows(t *testing.T) {
+	t.Parallel()
+
+	a, svc, nb, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsSummarize
+	msgs := priorTurnFixture(t, svc, sessionID)
+	ctx := t.Context()
+	segs, _ := a.detectSegments(ctx, sessionID, msgs)
+
+	// Turn 0's last segment — the digest's coverage key.
+	var lastSeg int64
+	for _, s := range segs {
+		if s.turn == 0 {
+			lastSeg = max(lastSeg, s.number)
+		}
+	}
+	ok, err := nb.GenerateTurnDigest(ctx, sessionID, notebook.DigestRequest{
+		TurnNumber:    0,
+		SegmentNumber: lastSeg,
+		Msgs:          msgs[:5],
+	})
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	text := renderedText(history)
+	require.Contains(t, text, "[Summary of turn 0]")
+	require.Contains(t, text, "file content line")
+	require.NotContains(t, text, "## Turn digest")
+}
+
+// A turn can straddle the raw-window boundary: its earlier segments
+// evict to the notebook prefix while the rest still renders raw. The
+// summary lands at the turn's first rendered index — not its evicted
+// start — and emits exactly once.
+func TestPreparePrompt_SummarizeStraddledTurn(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsSummarize
+	a.segmentMaxSteps = 2
+	// Four steps of ~1000-token messages: segments t0s0/t0s1 of two
+	// steps each (~4K tokens apiece), then the next turn's prompt.
+	big := strings.Repeat("step ", 800)
+	msgs := segBuildTurn(t, svc, sessionID, "work", 4, big)
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "next prompt"})
+	msgs, err := svc.List(t.Context(), sessionID)
+	require.NoError(t, err)
+	ctx := t.Context()
+	a.detectSegments(ctx, sessionID, msgs)
+
+	// Budget fits t0s1 and the tail but not t0s0 — the boundary lands
+	// mid-turn-0, evicting the prompt and first segment.
+	a.rawTokenBudget = 4500
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	text := renderedText(history)
+
+	require.Equal(t, 1, strings.Count(text, "[Summary of turn 0]"))
+	require.NotContains(t, text, "work")
+	require.Contains(t, text, "next prompt")
+	// The rendered remainder of the span still drops — no dangling
+	// calls from either segment.
+	for _, id := range []string{"tc-work-a", "tc-work-xb", "tc-work-xxc", "tc-work-d"} {
+		require.False(t, callPresent(history, id), id)
+	}
+	require.Less(t, strings.Index(text, "[Summary of turn 0]"), strings.Index(text, "next prompt"))
+}
