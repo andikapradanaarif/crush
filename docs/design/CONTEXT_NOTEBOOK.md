@@ -1,5 +1,40 @@
 # Context Notebook — Per-Event Summarization - Implemented
 
+## As built (what actually shipped)
+
+This doc is the original implementation plan — kept for history. The
+shipped architecture diverged in ways that matter to readers:
+
+- **Segments, not per-event entries.** Entries are generated per
+  *segment* — token-budget-bounded groups of events within a turn
+  (`notebook_segments.go`, `detectSegments`) — not one per significant
+  tool call.
+- **Three consolidation granularities.** Segment entries (per segment),
+  *turn digests* (`granularity:turn` entries; the digest mode's run-end
+  pass consolidates each finished turn — `notebook_digest.go`), and
+  *checkpoints* (`notebook_checkpoint`; cumulative consolidation when a
+  run crosses the write boundary, plus a run-end fallback —
+  `notebook_checkpoint.go`).
+- **Coverage-gated collapse.** A prior turn renders collapsed only when
+  every one of its segments has committed coverage; the collapsible set
+  freezes at a run's first render (`prior_turns.go`). Render modes on
+  `notebook_prior_turns`: `verbatim` (default), `stub`, `digest`,
+  `summarize` (experimental — replaces the turn span with its entries
+  inline; PR #96).
+- **Adaptive raw window.** The verbatim tail is bounded by
+  `notebook_raw_token_budget` (default 25K), the rendered prefix by
+  `notebook_max_tokens` (default 100K) — see "adaptive by token budget"
+  below; there is no fixed turn count.
+- **Detached generation, drained at exit.** Segment/digest/checkpoint
+  generation runs detached and joins before process exit, so a turn's
+  coverage commits by end of its own run (see `EVAL_HARNESS.md`'s
+  lifecycle contract for what that means for eval predicates).
+
+`recall`/`notebook_search` tools and auto-injection shipped as
+planned. The plan below (Steps 0–12) is the original design — accurate
+on motivation and the recall model, stale on granularity and where the
+boundaries sit.
+
 ## Problem
 
 Crush sends the **full conversation history** on every API call. In a 20-turn

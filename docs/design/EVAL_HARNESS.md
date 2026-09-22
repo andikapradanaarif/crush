@@ -1,9 +1,10 @@
 # Eval Harness — Golden Trajectories & Paired Outcome Gating
 
-> **Status:** Spec. Covers the corpus format (trajectory spec, check
-> contract, experiment definition, run record, banding state) and the
-> quarantine procedure. The runner itself is a later doc; the schema
-> here is what it must honor.
+> **Status:** Shipped. Covers the corpus format (trajectory spec, check
+> contract, experiment definition, run record, banding state), the
+> quarantine procedure, and the lifecycle contract corpus authors write
+> predicates against. Runner, telemetry, preflight, and gates all land
+> in `internal/eval/`.
 
 ## Goal
 
@@ -518,6 +519,42 @@ multiple-comparison family with its own correction; corpus-pooling
 it would be insensitive to one trajectory going all-inconclusive.
 (The arm-side differential is the counterpart of the
 trajectory-side coverage-starved alarm.)
+
+## Lifecycle contract — when coverage commits
+
+Each `task.turns[i]` runs as its own `crush run` subprocess
+continuing the same session (`driver.go`). Consolidation work a turn
+spawns joins before its process exits (the detached-work drain), so
+**a turn's coverage commits by the end of its own run** — the
+contract corpus authors write predicates against. Per mechanism:
+
+- **Segments** (`notebook_enabled`): detected at render, generated
+  detached but drained at run end — turn i's segments have entries
+  committed when run i exits.
+- **Prior-turn collapse** (`notebook_prior_turns` ∈
+  `stub`/`digest`/`summarize`): the collapsible set freezes at a
+  run's first render and only turns strictly below the run's
+  starting turn are eligible — turn i can first collapse inside run
+  i+1. **The last turn can never collapse**: no later run exists to
+  render it. Ceiling: `turns_collapsed ≤ len(turns) − 1`. Under
+  `summarize` the practical ceiling is lower still — a covered turn
+  with no committed entries renders verbatim and isn't counted.
+- **Turn digests** (`digest` mode): the run-end pass digests every
+  finished turn lacking one — including the turn that just finished —
+  bounded by a catch-up cap per run. A turn with no finished tool
+  call never digests. Ceiling: `digests.written ≤ len(turns)`.
+  `digests.rendered` counts renders selecting a digest — it needs a
+  prior turn to exist (structurally zero below 2 turns) but isn't
+  turn-bounded above that.
+- **Checkpoints** (`notebook_checkpoint`): fire on the mid-run
+  write-boundary trigger or the run-end fallback — session-bounded,
+  not turn-bounded; no turn-count ceiling applies.
+- **`recalls.prior_turn_result`**: needs a prior turn to exist —
+  structurally zero below 2 turns regardless of mode.
+
+`ValidateArmCoverageVsCorpus` enforces the turn-count half of this
+contract post-selection: a `min_` predicate past the ceiling is a
+load error, not an inconclusive run.
 
 ## bands.json — characterization state
 

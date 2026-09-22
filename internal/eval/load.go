@@ -282,12 +282,93 @@ func ValidateExperiment(e *Experiment) error {
 	return nil
 }
 
-// armStarvationRequires maps a coverage field to the option keys that
-// must resolve true for its counter to be reachable. map_calls is
+// starvationRule is one requirement an arm's resolved options must
+// satisfy for a coverage field's counter to be reachable. ok receives
+// the option resolver; unknown options must pass — the check only
+// rejects what it can prove starves.
+type starvationRule struct {
+	desc string
+	ok   func(resolve func(string) (any, bool)) bool
+}
+
+// boolOn requires a boolean option to resolve true.
+func boolOn(opt string) starvationRule {
+	return starvationRule{opt, func(resolve func(string) (any, bool)) bool {
+		v, known := resolve(opt)
+		b, _ := v.(bool)
+		return !known || b
+	}}
+}
+
+// modeIs requires a string option to resolve to one of the accepted
+// values.
+func modeIs(opt string, modes ...string) starvationRule {
+	return starvationRule{opt + "=" + strings.Join(modes, "|"), func(resolve func(string) (any, bool)) bool {
+		v, known := resolve(opt)
+		if !known {
+			return true
+		}
+		s, _ := v.(string)
+		return slices.Contains(modes, s)
+	}}
+}
+
+// notebookRecallTool is internal/agent/tools/notebook's
+// RecallToolName — the package boundary can't import it.
+const notebookRecallTool = "recall"
+
+// disablesTool reports whether a resolved disabled_tools value lists
+// name. JSON unmarshals the option as []any; test fixtures may build
+// it as []string.
+func disablesTool(v any, name string) bool {
+	switch l := v.(type) {
+	case []string:
+		return slices.Contains(l, name)
+	case []any:
+		return slices.Contains(l, any(name))
+	}
+	return false
+}
+
+// recallToolLive requires the recall tool to stay registered —
+// disabled_tools:[recall] removes every pointer-resolving counter's
+// only writer.
+var recallToolLive = starvationRule{
+	"recall tool enabled (disabled_tools must not list it)",
+	func(resolve func(string) (any, bool)) bool {
+		v, known := resolve("disabled_tools")
+		return !known || !disablesTool(v, notebookRecallTool)
+	},
+}
+
+// priorTurnsRecallLive is the conditional form for prior_turns.* and
+// digests.*: stub/digest print recall pointers and die without the
+// tool, while summarize renders entries inline and doesn't need it.
+// The mode constants are internal/agent's priorTurns* strings — kept
+// in sync with internal/agent/prior_turns.go; the package boundary
+// can't import them.
+var priorTurnsRecallLive = starvationRule{
+	"notebook_prior_turns=stub|digest need the recall tool enabled",
+	func(resolve func(string) (any, bool)) bool {
+		v, known := resolve("notebook_prior_turns")
+		if !known {
+			return true
+		}
+		s, _ := v.(string)
+		if s != "stub" && s != "digest" {
+			return true
+		}
+		dt, known := resolve("disabled_tools")
+		return !known || !disablesTool(dt, notebookRecallTool)
+	},
+}
+
+// armStarvationRules maps a coverage field to the option requirements
+// that must hold for its counter to be reachable. map_calls is
 // absent deliberately: tool-not-found attempts still count, so a
 // flag-off arm can measure unprompted map reach — only the *_ok /
 // *_index_unavailable / result_bytes fields are truly unreachable.
-func armStarvationRequires(field string) []string {
+func armStarvationRules(field string) []starvationRule {
 	switch field {
 	case "call_metrics.map_calls_ok",
 		"call_metrics.map_calls_index_unavailable",
@@ -296,37 +377,36 @@ func armStarvationRequires(field string) []string {
 		// (analyze.go skips is_error records) — structurally zero
 		// wherever map isn't registered.
 		"call_metrics.wrong_pointer_events":
-		return []string{"project_index"}
+		return []starvationRule{boolOn("project_index")}
 	}
 	if strings.HasPrefix(field, "stub_stats.") {
-		return []string{"notebook_stub_superseded", "notebook_enabled"}
+		return []starvationRule{boolOn("notebook_stub_superseded"), boolOn("notebook_enabled"), recallToolLive}
 	}
 	if strings.HasPrefix(field, "checkpoints.") {
-		return []string{"notebook_checkpoint", "notebook_enabled"}
+		return []starvationRule{boolOn("notebook_checkpoint"), boolOn("notebook_enabled")}
 	}
 	if strings.HasPrefix(field, "hydration.") {
-		return []string{"notebook_hydration", "notebook_enabled"}
+		return []starvationRule{boolOn("notebook_hydration"), boolOn("notebook_enabled")}
+	}
+	if strings.HasPrefix(field, "prior_turns.") {
+		return []starvationRule{boolOn("notebook_enabled"), modeIs("notebook_prior_turns", "stub", "digest", "summarize"), priorTurnsRecallLive}
+	}
+	if strings.HasPrefix(field, "digests.") {
+		return []starvationRule{boolOn("notebook_enabled"), modeIs("notebook_prior_turns", "digest"), priorTurnsRecallLive}
 	}
 	if strings.HasPrefix(field, "recalls.") {
-		return []string{"notebook_enabled"}
+		return []starvationRule{boolOn("notebook_enabled"), recallToolLive}
 	}
-	// prior_turns.* and digests.* gate on notebook_prior_turns's
-	// string value (stub|digest), which the bool resolver can't
-	// express — left unmapped rather than half-checked.
 	return nil
 }
 
 // armOptionResolver resolves only the arm's literal options — an
 // absent key reports unknown so load-time validation can't flag what
 // flags.json might enable.
-func armOptionResolver(arm Arm) func(string) (bool, bool) {
-	return func(opt string) (bool, bool) {
+func armOptionResolver(arm Arm) func(string) (any, bool) {
+	return func(opt string) (any, bool) {
 		v, ok := arm.Config.Options[opt]
-		if !ok {
-			return false, false
-		}
-		b, ok := v.(bool)
-		return b, ok
+		return v, ok
 	}
 }
 
@@ -335,18 +415,18 @@ func armOptionResolver(arm Arm) func(string) (bool, bool) {
 // and question_* counters: the question tool is interactive-only, so
 // headless eval calls only ever register as is_error tool-not-found
 // attempts — a min_ asserts hallucination, not firing. resolve
-// reports (value, known); unknown options are skipped so the check
+// reports (value, known); rules pass unknown options so the check
 // only rejects what it can prove starves.
-func checkArmStarvation(armName, key, op, field string, resolve func(string) (bool, bool)) error {
+func checkArmStarvation(armName, key, op, field string, resolve func(string) (any, bool)) error {
 	if op != "min" {
 		return nil
 	}
 	if strings.HasPrefix(field, "call_metrics.question_") {
 		return fmt.Errorf("arm %q coverage %q: the question tool is interactive-only — headless calls only register as is_error, so a min_ asserts a hallucination", armName, key)
 	}
-	for _, opt := range armStarvationRequires(field) {
-		if v, known := resolve(opt); known && !v {
-			return fmt.Errorf("arm %q coverage %q: %s needs %s, which resolves off for this arm — every run starves", armName, key, field, opt)
+	for _, req := range armStarvationRules(field) {
+		if !req.ok(resolve) {
+			return fmt.Errorf("arm %q coverage %q: %s needs %s — every run starves", armName, key, field, req.desc)
 		}
 	}
 	return nil
@@ -375,28 +455,85 @@ func ValidateArmCoverageResolved(e *Experiment, manifest *FlagsManifest) error {
 			if err != nil {
 				return fmt.Errorf("arm %q coverage %q: %w", name, key, err)
 			}
-			resolve := func(opt string) (bool, bool) {
+			resolve := func(opt string) (any, bool) {
 				if v, ok := arm.Config.Options[opt]; ok {
-					b, isBool := v.(bool)
-					return b, isBool
+					return v, true
 				}
 				if manifest != nil {
 					if v, ok := manifest.Defaults[opt]; ok {
-						b, isBool := v.(bool)
-						return b, isBool
+						return v, true
 					}
 				}
 				if d, ok := flagCodeDefaults[opt]; ok {
 					return d, true
 				}
-				// An unnamed flag defaults off — the counter is
-				// unreachable either way.
-				return false, true
+				// An unnamed flag resolves to its code default — off
+				// for bools, verbatim for notebook_prior_turns — and
+				// either way the gated counter is unreachable.
+				return nil, true
 			}
 			if err := checkArmStarvation(name, key, op, field, resolve); err != nil {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+// coverageTurnCeiling gives the structural maximum a coverage field
+// can reach on a trajectory of n turns — (ceil, true, why) when a
+// bound is expressible in turn count, false when it isn't.
+func coverageTurnCeiling(field string, turns int) (ceil int, bounded bool, why string) {
+	switch field {
+	case "prior_turns.turns_collapsed":
+		// A turn collapses only at a LATER run's frozen render — the
+		// last turn has no later run. Summarize mode lowers the
+		// practical ceiling further (a covered turn with no entries
+		// renders verbatim), but the count can't see entry-emptiness.
+		return max(turns-1, 0), true, "the last turn can never collapse — no later run renders it"
+	case "digests.written":
+		// The run-end pass digests the just-finished turn too, so
+		// every turn is digestible. The HasFinishedToolCall floor —
+		// a tool-free turn never digests — is invisible to the count.
+		return turns, true, "one digest per turn"
+	case "prior_turns.events_collapsed", "digests.rendered", "recalls.prior_turn_result":
+		// Not turn-bounded above zero, but with fewer than two turns
+		// no prior turn exists — any positive min_ starves.
+		if turns < 2 {
+			return 0, true, "no prior turn exists below 2 turns"
+		}
+	}
+	return 0, false, ""
+}
+
+// ValidateArmCoverageVsCorpus rejects min_ predicates that exceed what
+// a selected trajectory can ever produce — the starvation class
+// checkArmStarvation can't see because trajectory turn counts only
+// exist after corpus selection. A ceiling violation starves every run
+// of that trajectory into inconclusive, forever.
+func ValidateArmCoverageVsCorpus(e *Experiment, trajs []*Trajectory) error {
+	var problems []string
+	for _, t := range trajs {
+		n := len(t.Task.Turns)
+		for name, arm := range e.Arms {
+			for key, v := range arm.Coverage {
+				op, field, err := ParseArmCoverageKey(key)
+				if err != nil {
+					continue // Load-time validation reports the bad key.
+				}
+				if op != "min" {
+					continue
+				}
+				ceil, bounded, why := coverageTurnCeiling(field, n)
+				if !bounded || v <= float64(ceil) {
+					continue
+				}
+				problems = append(problems, fmt.Sprintf("arm %q coverage %s=%v exceeds trajectory %q ceiling %d (%d turns; %s)", name, key, v, t.ID, ceil, n, why))
+			}
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("coverage unachievable: %s", strings.Join(problems, "; "))
 	}
 	return nil
 }

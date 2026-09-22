@@ -385,6 +385,121 @@ func TestValidateArmCoverageResolved(t *testing.T) {
 	require.NoError(t, ValidateArmCoverageResolved(exp, manifest))
 }
 
+func TestValidateExperiment_PriorTurnsModeStarvation(t *testing.T) {
+	t.Parallel()
+	temp := 0.7
+	mk := func(opts map[string]any) *Experiment {
+		return &Experiment{
+			Name:              "x",
+			Model:             "p/m",
+			Temperature:       &temp,
+			Corpus:            []string{"*"},
+			RunsPerTrajectory: map[Band]int{BandUncharacterized: 1},
+			Arms: map[string]Arm{
+				ArmControl: {},
+				ArmTreatment: {
+					Config:   ArmConfig{Options: opts},
+					Coverage: Coverage{"min_prior_turns.turns_collapsed": 1},
+				},
+			},
+		}
+	}
+
+	// A collapse mode + notebook on is the intended assertion — legal.
+	require.NoError(t, ValidateExperiment(mk(map[string]any{"notebook_enabled": true, "notebook_prior_turns": "stub"})))
+	require.NoError(t, ValidateExperiment(mk(map[string]any{"notebook_enabled": true, "notebook_prior_turns": "digest"})))
+	require.NoError(t, ValidateExperiment(mk(map[string]any{"notebook_enabled": true, "notebook_prior_turns": "summarize"})))
+
+	// verbatim arms produce no collapse counters — the predicate
+	// starves on every run.
+	require.Error(t, ValidateExperiment(mk(map[string]any{"notebook_enabled": true, "notebook_prior_turns": "verbatim"})))
+
+	// Notebook off coerces any mode to verbatim — starves.
+	require.Error(t, ValidateExperiment(mk(map[string]any{"notebook_enabled": false, "notebook_prior_turns": "stub"})))
+
+	// stub/digest print recall pointers — disabling the tool coerces
+	// the mode to verbatim at agent build.
+	require.Error(t, ValidateExperiment(mk(map[string]any{
+		"notebook_enabled":     true,
+		"notebook_prior_turns": "stub",
+		"disabled_tools":       []any{"recall"},
+	})))
+
+	// summarize renders entries inline — no recall tool needed.
+	require.NoError(t, ValidateExperiment(mk(map[string]any{
+		"notebook_enabled":     true,
+		"notebook_prior_turns": "summarize",
+		"disabled_tools":       []any{"recall"},
+	})))
+}
+
+func TestValidateArmCoverageResolved_PriorTurnsModeStarvation(t *testing.T) {
+	t.Parallel()
+	manifest := &FlagsManifest{Defaults: map[string]any{
+		"notebook_enabled":     true,
+		"notebook_prior_turns": "verbatim",
+	}}
+	exp := &Experiment{Arms: map[string]Arm{ArmControl: {}, ArmTreatment: {}}}
+
+	// The arm omits the mode: the manifest's verbatim default means
+	// no collapse counters exist — silent starvation, now an error.
+	exp.Arms[ArmTreatment] = Arm{Coverage: Coverage{"min_prior_turns.turns_collapsed": 1}}
+	require.Error(t, ValidateArmCoverageResolved(exp, manifest))
+
+	// digests.* needs digest mode specifically, not any collapse mode.
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"notebook_prior_turns": "stub"}},
+		Coverage: Coverage{"min_digests.written": 1},
+	}
+	require.Error(t, ValidateArmCoverageResolved(exp, manifest))
+	exp.Arms[ArmTreatment].Config.Options["notebook_prior_turns"] = "digest"
+	require.NoError(t, ValidateArmCoverageResolved(exp, manifest))
+}
+
+func TestValidateArmCoverageVsCorpus(t *testing.T) {
+	t.Parallel()
+	mkTraj := func(id string, turns int) *Trajectory {
+		ts := make([]string, turns)
+		for i := range ts {
+			ts[i] = "turn"
+		}
+		return &Trajectory{ID: id, Task: Task{Turns: ts}}
+	}
+	mk := func(cov Coverage) *Experiment {
+		return &Experiment{Arms: map[string]Arm{
+			ArmControl:   {},
+			ArmTreatment: {Coverage: cov},
+		}}
+	}
+	trajs3 := []*Trajectory{mkTraj("a", 3), mkTraj("b", 3)}
+
+	// turns_collapsed ceiling is T−1: the last turn never collapses.
+	require.NoError(t, ValidateArmCoverageVsCorpus(mk(Coverage{"min_prior_turns.turns_collapsed": 2}), trajs3))
+	require.Error(t, ValidateArmCoverageVsCorpus(mk(Coverage{"min_prior_turns.turns_collapsed": 3}), trajs3))
+	require.Error(t, ValidateArmCoverageVsCorpus(mk(Coverage{"min_prior_turns.turns_collapsed": 1}), []*Trajectory{mkTraj("one", 1)}))
+
+	// digests.written ceiling is T — the run-end pass digests the
+	// just-finished turn too.
+	require.NoError(t, ValidateArmCoverageVsCorpus(mk(Coverage{"min_digests.written": 3}), trajs3))
+	require.Error(t, ValidateArmCoverageVsCorpus(mk(Coverage{"min_digests.written": 4}), trajs3))
+
+	// Prior-turn counters are structurally zero below two turns even
+	// without a tighter bound.
+	require.Error(t, ValidateArmCoverageVsCorpus(mk(Coverage{"min_digests.rendered": 1}), []*Trajectory{mkTraj("one", 1)}))
+	require.NoError(t, ValidateArmCoverageVsCorpus(mk(Coverage{"min_digests.rendered": 1}), trajs3))
+	require.Error(t, ValidateArmCoverageVsCorpus(mk(Coverage{"min_recalls.prior_turn_result": 1}), []*Trajectory{mkTraj("one", 1)}))
+	require.Error(t, ValidateArmCoverageVsCorpus(mk(Coverage{"min_prior_turns.events_collapsed": 1}), []*Trajectory{mkTraj("one", 1)}))
+
+	// max_ bounds and non-turn-bounded fields pass anywhere.
+	require.NoError(t, ValidateArmCoverageVsCorpus(mk(Coverage{"max_prior_turns.turns_collapsed": 5}), []*Trajectory{mkTraj("one", 1)}))
+	require.NoError(t, ValidateArmCoverageVsCorpus(mk(Coverage{"min_checkpoints.written": 9}), trajs3))
+
+	// A violation on ANY selected trajectory errors and names it.
+	err := ValidateArmCoverageVsCorpus(mk(Coverage{"min_prior_turns.turns_collapsed": 1}), []*Trajectory{mkTraj("ok", 3), mkTraj("short", 1)})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `"short"`)
+}
+
 func TestValidateTrajectory_FlagGatedMinRejected(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
