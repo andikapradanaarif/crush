@@ -683,7 +683,10 @@ func (a *sessionAgent) generateSegment(ctx context.Context, sessionID string, s 
 // generation for every segment of the turns this run produced that
 // still lacks committed coverage — the uncovered tail plus any
 // segments whose mid-run generation failed — and nothing before this
-// run's first turn (those retry under mid-run catch-up backoff).
+// run's first turn. Prior-turn closes retry under mid-run catch-up:
+// PrepareStep(0) fires before the first request of every run
+// (including no-tool-call runs), so the next run's rebuild always
+// sees this run's persisted user message and detects the close.
 // The tail becomes a closed segment the moment the next user message
 // lands; writing its marker in the same transaction as its entries is
 // what keeps the next run's catch-up from re-firing it into duplicate
