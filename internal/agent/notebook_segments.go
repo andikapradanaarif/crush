@@ -1218,20 +1218,20 @@ func (a *sessionAgent) noteSelectionDiff(sessionID string, diff selectionDiff) {
 	if a.nbStats == nil || sessionID == "" || diff.total() == 0 {
 		return
 	}
-	stats, _ := a.nbStats.Get(sessionID)
-	stats.SelPassRecency += diff.recency
-	stats.SelPassPinned += diff.pinned
-	stats.SelPassRefs += diff.refs
-	stats.SelPassWorking += diff.working
-	stats.SelPassFill += diff.fill
-	if diff.checkpoints > 0 {
-		stats.CheckpointRenders++
-	}
-	if diff.digests > 0 {
-		stats.DigestRenders++
-	}
-	if diff.hydrated > 0 {
-		stats.HydrationRenders++
-	}
-	a.nbStats.Set(sessionID, stats)
+	a.nbStats.Update(sessionID, func(s *notebook.Stats) {
+		s.SelPassRecency += diff.recency
+		s.SelPassPinned += diff.pinned
+		s.SelPassRefs += diff.refs
+		s.SelPassWorking += diff.working
+		s.SelPassFill += diff.fill
+		if diff.checkpoints > 0 {
+			s.CheckpointRenders++
+		}
+		if diff.digests > 0 {
+			s.DigestRenders++
+		}
+		if diff.hydrated > 0 {
+			s.HydrationRenders++
+		}
+	})
 }

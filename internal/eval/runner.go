@@ -284,6 +284,11 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	rec.Hydration = res.Hydration
 	rec.EdgeFirings = res.EdgeFirings
 	rec.PromptTokensPerTurn = res.PromptTokensPerTurn
+	rec.StepRecords = res.StepRecords
+	rec.ErrorClass = res.ErrorClass
+	if res.GeneratorTokens.Calls > 0 {
+		rec.GeneratorTokens = &res.GeneratorTokens
+	}
 	if res.Request.PromptRequests > 0 {
 		rec.Request = &res.Request
 	}

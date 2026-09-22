@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+
+	"github.com/charmbracelet/crush/internal/notebook"
 )
 
 // SessionTelemetry is the per-session counter snapshot the eval
@@ -47,6 +49,14 @@ type SessionTelemetry struct {
 	HydrationSeeds     int `json:"hydration_seeds"`
 	HydrationPlanSeeds int `json:"hydration_plan_seeds"`
 	HydrationRenders   int `json:"hydration_renders"`
+	// GeneratorCalls and Generator*Tokens account the sidecar LLM
+	// calls that produced notebook entries — spend invisible in the
+	// run's token totals.
+	GeneratorCalls            int   `json:"generator_calls"`
+	GeneratorInputTokens      int64 `json:"generator_input_tokens"`
+	GeneratorOutputTokens     int64 `json:"generator_output_tokens"`
+	GeneratorCacheReadTokens  int64 `json:"generator_cache_read_tokens"`
+	GeneratorCacheWriteTokens int64 `json:"generator_cache_write_tokens"`
 	// Prior-turn collapse telemetry: distinct turns collapsed and the
 	// call/result pairs inside them — deduped against the persisted
 	// collapsed_turns rows.
@@ -61,14 +71,17 @@ type SessionTelemetry struct {
 	// rendered request's content-byte composition. This is the
 	// flat-vs-growing signal the benefit measurement reads —
 	// informational only, never gating.
-	PromptRequests     int64 `json:"prompt_requests"`
-	PromptTokensLast   int64 `json:"prompt_tokens_last"`
-	PromptTokensPeak   int64 `json:"prompt_tokens_peak"`
-	ReqSystemBytes     int64 `json:"req_system_bytes"`
-	ReqNotebookBytes   int64 `json:"req_notebook_bytes"`
-	ReqHistoryBytes    int64 `json:"req_history_bytes"`
-	ReqToolCallBytes   int64 `json:"req_tool_call_bytes"`
-	ReqToolResultBytes int64 `json:"req_tool_result_bytes"`
+	PromptRequests   int64 `json:"prompt_requests"`
+	PromptTokensLast int64 `json:"prompt_tokens_last"`
+	PromptTokensPeak int64 `json:"prompt_tokens_peak"`
+	// Steps is the per-request usage + prefix-attribution table —
+	// the cache-miss forensics the run aggregate can't carry.
+	Steps              []StepRecord `json:"steps,omitempty"`
+	ReqSystemBytes     int64        `json:"req_system_bytes"`
+	ReqNotebookBytes   int64        `json:"req_notebook_bytes"`
+	ReqHistoryBytes    int64        `json:"req_history_bytes"`
+	ReqToolCallBytes   int64        `json:"req_tool_call_bytes"`
+	ReqToolResultBytes int64        `json:"req_tool_result_bytes"`
 	// EdgeFirings splits run-boundary edge firing counts by edge and
 	// outcome — the in-memory mirror of the edge_firings rows this
 	// process wrote. Cumulative for the process; the eval harness
@@ -115,6 +128,11 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 		t.HydrationPlanSeeds = n.HydrationPlanSeeds
 		t.HydrationRenders = n.HydrationRenders
 		t.PriorTurnResultRecalls = n.PriorTurnResultRecalls
+		t.GeneratorCalls = n.GeneratorCalls
+		t.GeneratorInputTokens = n.GeneratorInputTokens
+		t.GeneratorOutputTokens = n.GeneratorOutputTokens
+		t.GeneratorCacheReadTokens = n.GeneratorCacheReadTokens
+		t.GeneratorCacheWriteTokens = n.GeneratorCacheWriteTokens
 	}
 	if sa.reqStats != nil {
 		if r, ok := sa.reqStats.Get(sessionID); ok {
@@ -126,6 +144,7 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 			t.ReqHistoryBytes = r.HistoryBytes
 			t.ReqToolCallBytes = r.ToolCallBytes
 			t.ReqToolResultBytes = r.ToolResultBytes
+			t.Steps = r.Steps
 		}
 	}
 	if sa.edgeStats != nil {
@@ -141,6 +160,25 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 		}
 	}
 	return t
+}
+
+// RecordGeneratorUsage folds one notebook generation call's usage into
+// the session's counters — the sidecar spend (segment entries,
+// checkpoints, turn digests) the run's own token totals can't see.
+// Deliberately not on the Coordinator interface — the notebook
+// generator's usage sink type-asserts for it alongside
+// SessionTelemetry.
+func (c *coordinator) RecordGeneratorUsage(sessionID string, usage fantasy.Usage) {
+	if c.nbStats == nil || sessionID == "" {
+		return
+	}
+	c.nbStats.Update(sessionID, func(n *notebook.Stats) {
+		n.GeneratorCalls++
+		n.GeneratorInputTokens += usage.InputTokens
+		n.GeneratorOutputTokens += usage.OutputTokens
+		n.GeneratorCacheReadTokens += usage.CacheReadTokens
+		n.GeneratorCacheWriteTokens += usage.CacheCreationTokens
+	})
 }
 
 // WaitForDetachedWork joins the coordinator's detached-work wait

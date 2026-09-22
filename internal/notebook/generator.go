@@ -24,16 +24,28 @@ var turnDigestPrompt []byte
 type llmGenerator struct {
 	resolveModel   func() fantasy.LanguageModel
 	maxEntryTokens int64
+	// onUsage reports each generation call's token usage — the
+	// sidecar spend the run's token totals can't see. Nil-safe.
+	onUsage func(sessionID string, usage fantasy.Usage)
 }
 
 // NewLLMGenerator creates a Generator that uses the given model
 // resolver to obtain the small model at generation time. The resolver
 // is called lazily so the model can be configured after the notebook
-// service is created.
-func NewLLMGenerator(modelResolver func() fantasy.LanguageModel) Generator {
+// service is created. onUsage, when non-nil, receives every successful
+// generation call's usage for run telemetry.
+func NewLLMGenerator(modelResolver func() fantasy.LanguageModel, onUsage func(string, fantasy.Usage)) Generator {
 	return &llmGenerator{
 		resolveModel:   modelResolver,
 		maxEntryTokens: 1000, // Default; overridden by service.
+		onUsage:        onUsage,
+	}
+}
+
+// reportUsage forwards a generation call's usage to the sink.
+func (g *llmGenerator) reportUsage(sessionID string, usage fantasy.Usage) {
+	if g.onUsage != nil {
+		g.onUsage(sessionID, usage)
 	}
 }
 
@@ -91,6 +103,7 @@ func (g *llmGenerator) Generate(ctx context.Context, sessionID string, events []
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate notebook entries: %w", err)
 	}
+	g.reportUsage(sessionID, resp.TotalUsage)
 
 	text := resp.Response.Content.Text()
 	entries := parseGeneratedEntries(text, events)
@@ -134,6 +147,7 @@ func (g *llmGenerator) GenerateCheckpoint(ctx context.Context, sessionID string,
 	if err != nil {
 		return GeneratedEntry{}, fmt.Errorf("failed to generate checkpoint: %w", err)
 	}
+	g.reportUsage(sessionID, resp.TotalUsage)
 	text := strings.TrimSpace(resp.Response.Content.Text())
 	if text == "" {
 		slog.Warn("LLM returned an empty checkpoint, using fallback")
@@ -176,6 +190,7 @@ func (g *llmGenerator) GenerateDigest(ctx context.Context, sessionID string, inp
 	if err != nil {
 		return GeneratedEntry{}, fmt.Errorf("failed to generate turn digest: %w", err)
 	}
+	g.reportUsage(sessionID, resp.TotalUsage)
 	text := strings.TrimSpace(resp.Response.Content.Text())
 	if text == "" {
 		slog.Warn("LLM returned an empty turn digest, using fallback")

@@ -165,8 +165,6 @@ func (a *sessionAgent) runDigest(ctx context.Context, sessionID string, req note
 		return
 	}
 	if committed && a.nbStats != nil {
-		stats, _ := a.nbStats.Get(sessionID)
-		stats.DigestsWritten++
-		a.nbStats.Set(sessionID, stats)
+		a.nbStats.Update(sessionID, func(s *notebook.Stats) { s.DigestsWritten++ })
 	}
 }

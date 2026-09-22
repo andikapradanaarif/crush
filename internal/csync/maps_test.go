@@ -117,6 +117,35 @@ func TestMap_GetOrSet(t *testing.T) {
 	require.Equal(t, 1, m.Len())
 }
 
+func TestMap_Update(t *testing.T) {
+	t.Parallel()
+
+	m := NewMap[string, int]()
+
+	// Absent key: fn sees the zero value and the result is stored.
+	m.Update("key1", func(v *int) { *v++ })
+	value, ok := m.Get("key1")
+	require.True(t, ok)
+	require.Equal(t, 1, value)
+
+	m.Update("key1", func(v *int) { *v += 41 })
+	value, _ = m.Get("key1")
+	require.Equal(t, 42, value)
+
+	// Concurrent increments on one key must not lose updates.
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			m.Update("hot", func(v *int) { *v++ })
+		}()
+	}
+	wg.Wait()
+	value, _ = m.Get("hot")
+	require.Equal(t, 64, value)
+}
+
 func TestMap_Get(t *testing.T) {
 	t.Parallel()
 

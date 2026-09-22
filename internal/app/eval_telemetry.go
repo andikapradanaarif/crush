@@ -1,9 +1,14 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"net"
+	"net/http"
 	"os"
 	"strings"
+	"syscall"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent"
@@ -96,6 +101,15 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 			"plan_seeds": tel.HydrationPlanSeeds,
 			"rendered":   tel.HydrationRenders,
 		}
+		// Sidecar generation spend — the notebook-vs-off comparison
+		// can't price the notebook without it.
+		doc["generator_tokens"] = map[string]any{
+			"calls":       tel.GeneratorCalls,
+			"input":       tel.GeneratorInputTokens,
+			"output":      tel.GeneratorOutputTokens,
+			"cache_read":  tel.GeneratorCacheReadTokens,
+			"cache_write": tel.GeneratorCacheWriteTokens,
+		}
 		// Request telemetry: the prompt growth curve + last rendered
 		// request's composition — the flat-vs-growing signal the
 		// benefit measurement reads. Informational, never gating.
@@ -108,6 +122,9 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 			"history_bytes":      tel.ReqHistoryBytes,
 			"tool_call_bytes":    tel.ReqToolCallBytes,
 			"tool_result_bytes":  tel.ReqToolResultBytes,
+			// Per-request rows: usage plus prefix attribution — the
+			// named cause behind every cache miss.
+			"steps": tel.Steps,
 		}
 	}
 	// Edge firings emit as a DELTA, not the cumulative snapshot — the
@@ -138,8 +155,63 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 	}
 	if runErr != nil {
 		doc["error"] = runErr.Error()
+		if class := classifyRunError(runErr); class != "" {
+			doc["error_class"] = class
+		}
 	}
 	if data, err := json.Marshal(doc); err == nil {
 		_ = os.WriteFile(path, data, 0o644)
+	}
+}
+
+// classifyRunError maps the run's terminal error to a stable class for
+// the eval harness's circuit breaker. Provider errors arrive typed —
+// fantasy.ProviderError survives the RetryError wrap via Unwrap — so
+// classify on StatusCode and the typed flags rather than message text:
+// the harness then distinguishes deterministic failures (every retry
+// fails identically) from transients worth resampling. An empty class
+// means "unclassified" — the harness falls back to string signatures.
+func classifyRunError(err error) string {
+	var pe *fantasy.ProviderError
+	switch {
+	case errors.Is(err, context.Canceled) || errors.Is(err, agent.ErrRequestCancelled):
+		return "cancelled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.As(err, &pe):
+		switch {
+		case pe.AuthError || pe.StatusCode == http.StatusUnauthorized || pe.StatusCode == http.StatusForbidden:
+			return "auth"
+		case pe.IsContextTooLarge():
+			// Workload overflow is trajectory-scoped, not config —
+			// other trajectories still run.
+			return "context_too_large"
+		case pe.StatusCode == http.StatusTooManyRequests:
+			// Rate limits are transient by definition — resampling
+			// is the mechanism, not a breaker trip.
+			return "rate_limit"
+		case pe.StatusCode >= 400 && pe.StatusCode < 500:
+			// Model resolution, malformed requests, schema
+			// rejections — deterministic per config.
+			return "provider_deterministic"
+		case pe.StatusCode >= 500:
+			// Fantasy already retried before surfacing; the harness's
+			// strike count is the persistence test.
+			return "provider_server"
+		default:
+			// No HTTP status — the failure happened at transport
+			// level. A dead endpoint is config-class; a reset isn't.
+			var dnsErr *net.DNSError
+			switch {
+			case errors.Is(pe.Cause, syscall.ECONNREFUSED) || errors.As(pe.Cause, &dnsErr):
+				return "provider_unreachable"
+			case pe.IsRetryable():
+				return "provider_transient"
+			default:
+				return "provider_other"
+			}
+		}
+	default:
+		return ""
 	}
 }

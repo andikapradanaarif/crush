@@ -208,6 +208,14 @@ type Stats struct {
 	DigestRenders int
 	// DigestsWritten counts committed turn-digest entries.
 	DigestsWritten int
+	// GeneratorCalls and Generator*Tokens account the sidecar LLM
+	// calls that produced notebook entries (segments, checkpoints,
+	// digests) — generation spend the run's token totals can't see.
+	GeneratorCalls            int
+	GeneratorInputTokens      int64
+	GeneratorOutputTokens     int64
+	GeneratorCacheReadTokens  int64
+	GeneratorCacheWriteTokens int64
 	// HydrationSeeds counts mem0-sourced entries committed by
 	// SeedEntries for this session — the firing side of the cold-start
 	// arm's coverage gate. The locally sourced plan seed counts under

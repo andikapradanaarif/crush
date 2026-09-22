@@ -336,13 +336,12 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		c.nbScanIdx = csync.NewMap[string, int]()
 		c.nbPendingReads = csync.NewMap[string, map[string]string]()
 		c.collapseRecorded = csync.NewMap[string, *csync.Map[int64, bool]]()
-		if opts.Config.Config().Options.NotebookStubSupersededEnabled() {
-			c.stubBoundary = csync.NewMap[string, int]()
-		}
-		if opts.Config.Config().Options.NotebookStubSupersededEnabled() ||
-			opts.Config.Config().Options.NotebookPriorTurnsMode() != "verbatim" {
-			c.stubStats = csync.NewMap[string, stubStats]()
-		}
+		// stubBoundary/stubStats must exist for every notebook-on
+		// arm — they also carry boundary_advances, which counts
+		// prefix churn in verbatim arms too, not just under
+		// stubbing/collapse.
+		c.stubBoundary = csync.NewMap[string, int]()
+		c.stubStats = csync.NewMap[string, stubStats]()
 		go c.watchSessionDeletions()
 	}
 

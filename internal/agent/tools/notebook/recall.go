@@ -45,9 +45,7 @@ func (rc *recallContext) bump(sessionID string, f func(*notebook.Stats)) {
 	if rc.stats == nil || sessionID == "" {
 		return
 	}
-	s, _ := rc.stats.Get(sessionID)
-	f(&s)
-	rc.stats.Set(sessionID, s)
+	rc.stats.Update(sessionID, f)
 }
 
 // NewRecallTool creates a tool that retrieves full notebook entries by

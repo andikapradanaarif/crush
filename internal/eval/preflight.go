@@ -220,7 +220,20 @@ func dropHint(exp *Experiment, providerID string, known []catwalk.Provider, reso
 }
 
 // isConfigClassError reports whether a run record is a provably
-// config-class failure. Two classes:
+// config-class failure. When the child reports error_class — typed
+// classification of the fantasy.ProviderError, immune to message-text
+// drift — it wins outright:
+//
+//   - auth / provider_deterministic / provider_unreachable: every
+//     retry fails identically — trip.
+//   - provider_server: a 5xx that survived fantasy's internal retries;
+//     the 2-strike count is the persistence test — trip.
+//   - rate_limit / provider_transient / context_too_large /
+//     provider_other / cancelled / timeout: keep sampling — resampling
+//     or the attempts cap is the right mechanism. (context_too_large
+//     is additionally fixture-class: deterministic per trajectory.)
+//
+// Without error_class (older children), two string-matched classes:
 //
 //   - Pre-model exit: "crush run failed:" with no request stats and no
 //     steps, matching a config signature — the subprocess died before
@@ -237,6 +250,12 @@ func dropHint(exp *Experiment, providerID string, known []catwalk.Provider, reso
 // TUI-rendered capitalization ("  No providers configured  ").
 func isConfigClassError(rec RunRecord) bool {
 	if rec.Outcome != OutcomeError {
+		return false
+	}
+	switch rec.ErrorClass {
+	case "auth", "provider_deterministic", "provider_unreachable", "provider_server":
+		return true
+	case "rate_limit", "provider_transient", "provider_other", "context_too_large", "cancelled", "timeout":
 		return false
 	}
 	s, _ := rec.CheckDetail["run_error"].(string)
@@ -270,15 +289,20 @@ func isConfigClassError(rec RunRecord) bool {
 // failure — WriteArmConfig rejected the fixture's config (unparseable
 // .crush.json, manifest-flag pinning, forbidden keys) or Materialize
 // failed outright (tagged "harness"), or the check script can't run
-// (tagged "check_error"). The trajectory is unrunnable; other
-// trajectories are unaffected. Bare records (no CheckDetail) are
-// deliberately NOT fixture-class: the only producers of those are
-// ExecuteRun-internal errors — spawn failures, disk, timeouts — which
-// are transient, not provably deterministic; they burn an attempt and
-// keep sampling.
+// (tagged "check_error"). A context_too_large error class joins them:
+// the trajectory overflows the model's window every attempt —
+// unrunnable, but experiment-global config is fine. The trajectory is
+// unrunnable; other trajectories are unaffected. Bare records (no
+// CheckDetail) are deliberately NOT fixture-class: the only producers
+// of those are ExecuteRun-internal errors — spawn failures, disk,
+// timeouts — which are transient, not provably deterministic; they
+// burn an attempt and keep sampling.
 func isFixtureConfigError(rec RunRecord) bool {
 	if rec.Outcome != OutcomeError {
 		return false
+	}
+	if rec.ErrorClass == "context_too_large" {
+		return true
 	}
 	if _, ok := rec.CheckDetail["harness"]; ok {
 		return true

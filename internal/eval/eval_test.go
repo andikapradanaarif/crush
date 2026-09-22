@@ -459,30 +459,12 @@ func TestValidateExperiment_BoundaryAdvancesStarvation(t *testing.T) {
 	}
 	advances := Coverage{"min_stub_stats.boundary_advances": 1}
 
-	// Two paths feed the counter: supersession or prior-turn collapse.
-	require.NoError(t, ValidateExperiment(mk(map[string]any{"notebook_stub_superseded": true}, advances)))
+	// Boundary moves count whenever the notebook prefix renders —
+	// verbatim arms churn too, so only notebook_enabled gates it.
+	require.NoError(t, ValidateExperiment(mk(map[string]any{"notebook_prior_turns": "verbatim"}, advances)))
 	require.NoError(t, ValidateExperiment(mk(map[string]any{"notebook_prior_turns": "summarize"}, advances)))
-
-	// Summarize renders inline — boundary_advances stays reachable
-	// with recall disabled.
-	require.NoError(t, ValidateExperiment(mk(map[string]any{
-		"notebook_prior_turns":     "summarize",
-		"notebook_stub_superseded": false,
-		"disabled_tools":           []any{"recall"},
-	}, advances)))
-
-	// stub + recall disabled coerces to verbatim, and supersession
-	// dies without recall either — both paths starve.
-	require.Error(t, ValidateExperiment(mk(map[string]any{
-		"notebook_prior_turns": "stub",
-		"disabled_tools":       []any{"recall"},
-	}, advances)))
-
-	// verbatim + superseded off: nothing creates stubStats entries.
-	require.Error(t, ValidateExperiment(mk(map[string]any{
-		"notebook_prior_turns":     "verbatim",
-		"notebook_stub_superseded": false,
-	}, advances)))
+	require.NoError(t, ValidateExperiment(mk(nil, advances)))
+	require.Error(t, ValidateExperiment(mk(map[string]any{"notebook_enabled": false}, advances)))
 
 	// Other stub_stats.* fields stay supersede-only — collapse modes
 	// don't feed them.
@@ -700,10 +682,10 @@ func TestRunTelemetry_StubKinds(t *testing.T) {
 	}
 
 	var res RunResult
-	res.addTurnTelemetry(writeTel(map[string]int{"superseded": 1, "stale": 1}))
+	res.addTurnTelemetry(writeTel(map[string]int{"superseded": 1, "stale": 1}), 0)
 	// A mid-run turn may emit no kinds at all — sparse map or absent.
-	res.addTurnTelemetry(writeTel(nil))
-	res.addTurnTelemetry(writeTel(map[string]int{"deleted": 2}))
+	res.addTurnTelemetry(writeTel(nil), 1)
+	res.addTurnTelemetry(writeTel(map[string]int{"deleted": 2}), 2)
 
 	require.Equal(t, 9, res.Steps)
 	require.Equal(t, 6, res.StubStats.Results)
@@ -737,12 +719,12 @@ func TestRunTelemetry_EdgeFirings(t *testing.T) {
 		"stall":        {"fired": 1},
 		"todos":        {"fired": 1},
 		"verification": {"cleared": 1},
-	}))
-	res.addTurnTelemetry(writeTel(nil))
+	}), 0)
+	res.addTurnTelemetry(writeTel(nil), 1)
 	res.addTurnTelemetry(writeTel(map[string]map[string]int{
 		"stall":      {"fired": 1, "exhausted": 1},
 		"burn-watch": {"gated": 1},
-	}))
+	}), 2)
 
 	require.Equal(t, map[string]map[string]int{
 		"stall":        {"fired": 2, "exhausted": 1},
@@ -783,9 +765,9 @@ func TestRunTelemetry_RequestCurve(t *testing.T) {
 	}
 
 	var res RunResult
-	res.addTurnTelemetry(writeTel(12000, 12000, 8000))
-	res.addTurnTelemetry(writeTel(0, 0, 0)) // turn with no requests — no curve point
-	res.addTurnTelemetry(writeTel(25000, 30000, 9000))
+	res.addTurnTelemetry(writeTel(12000, 12000, 8000), 0)
+	res.addTurnTelemetry(writeTel(0, 0, 0), 1) // turn with no requests — no curve point
+	res.addTurnTelemetry(writeTel(25000, 30000, 9000), 2)
 
 	require.Equal(t, []int64{12000, 25000}, res.PromptTokensPerTurn)
 	require.Equal(t, int64(6), res.Request.PromptRequests)
@@ -793,6 +775,58 @@ func TestRunTelemetry_RequestCurve(t *testing.T) {
 	// Composition keeps the last turn's rendered request.
 	require.Equal(t, int64(9000), res.Request.ToolResultBytes)
 	require.Equal(t, int64(3000), res.Request.HistoryBytes)
+}
+
+// TestRunTelemetry_StepRecords pins the per-request table contract:
+// request.steps rows fold across turns with the trajectory turn
+// stamped on each, generator_tokens sums the sidecar spend, and a
+// notebook-off child leaving the block empty contributes nothing.
+func TestRunTelemetry_StepRecords(t *testing.T) {
+	t.Parallel()
+	writeTel := func(steps []map[string]any, gen map[string]any) runTelemetry {
+		doc := map[string]any{
+			"session_id": "s1",
+			"steps":      len(steps),
+			"request": map[string]any{
+				"prompt_requests": len(steps),
+				"steps":           steps,
+			},
+		}
+		if gen != nil {
+			doc["generator_tokens"] = gen
+		}
+		path := filepath.Join(t.TempDir(), "tel.json")
+		data, err := json.Marshal(doc)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(path, data, 0o644))
+		tel, err := readTelemetry(path)
+		require.NoError(t, err)
+		return tel
+	}
+
+	var res RunResult
+	res.addTurnTelemetry(writeTel([]map[string]any{
+		{"step": 0, "input_tokens": 100, "output_tokens": 10, "cache_read_tokens": 5, "cache_write_tokens": 3, "prefix_hash": "aa", "first_changed_index": 0, "first_changed_cause": "cold"},
+		{"step": 1, "input_tokens": 120, "output_tokens": 8, "prefix_hash": "aa", "first_changed_index": 2, "first_changed_cause": "append"},
+	}, map[string]any{"calls": 2, "input": 300, "output": 30, "cache_write": 12}), 0)
+	res.addTurnTelemetry(writeTel([]map[string]any{
+		{"step": 0, "input_tokens": 200, "output_tokens": 20, "cache_read_tokens": 150, "prefix_hash": "bb", "first_changed_index": 1, "first_changed_cause": "notebook-prefix"},
+	}, nil), 1)
+
+	require.Len(t, res.StepRecords, 3)
+	require.Equal(t, 0, res.StepRecords[0].Turn)
+	require.Equal(t, 0, res.StepRecords[0].Step)
+	require.Equal(t, int64(100), res.StepRecords[0].InputTokens)
+	require.Equal(t, int64(5), res.StepRecords[0].CacheReadTokens)
+	require.Equal(t, "cold", res.StepRecords[0].FirstChangedCause)
+	require.Equal(t, 1, res.StepRecords[2].Turn)
+	require.Equal(t, "notebook-prefix", res.StepRecords[2].FirstChangedCause)
+	require.Equal(t, "bb", res.StepRecords[2].PrefixHash)
+
+	require.Equal(t, 2, res.GeneratorTokens.Calls)
+	require.Equal(t, int64(300), res.GeneratorTokens.Input)
+	require.Equal(t, int64(30), res.GeneratorTokens.Output)
+	require.Equal(t, int64(12), res.GeneratorTokens.CacheWrite)
 }
 
 // TestArmTokenStats pins the informational benefit metric: conclusive

@@ -453,6 +453,17 @@ keep sampling.
 		"system_bytes": 9000, "notebook_bytes": 1200,
 		"history_bytes": 3100, "tool_call_bytes": 800, "tool_result_bytes": 14000
 	},
+	"step_records": [
+		{
+			"turn": 0, "step": 3,
+			"input_tokens": 41200, "output_tokens": 320,
+			"cache_read_tokens": 38000, "cache_write_tokens": 3100,
+			"prefix_hash": "0123abcd...", "first_changed_index": 1,
+			"first_changed_cause": "notebook-prefix"
+		}
+	],
+	"generator_tokens": {"calls": 12, "input": 41000, "output": 900, "cache_read": 0, "cache_write": 0},
+	"error_class": "auth | rate_limit | context_too_large | provider_* | cancelled | timeout",
 	"session_db": "results/<experiment>/artifacts/<trajectory_id>-<arm>-<run_index>.db",
 	"env": {"crush_sha": "...", "model_resolved": "...", "go": "1.25", "os": "darwin", "content_hash": "..."}
 }
@@ -468,6 +479,23 @@ session grows — is measured rather than asserted, and they feed the
 per-arm token delta the gate summary prints. Neither is a
 predicate: coverage grammar cannot reach them, and the gate never
 reads them for the verdict.
+
+`step_records` is the per-request table — one row per provider
+request with usage plus prefix attribution: `prefix_hash`
+fingerprints the leading system-message run (system prompt +
+notebook block) and `first_changed_index`/`first_changed_cause`
+name where the render diverged from the previous step's
+(`cold`/`append`/`shrink`/`system-prompt`/`notebook-prefix`/
+`history`). Every cache miss gets a named cause — the mechanism
+question "did the prefix churn or the tail grow" stops being a
+correlation guess. `generator_tokens` is the notebook sidecar's
+generation spend (segment, checkpoint, digest calls) — kept out of
+`tokens` so the agent's own usage isn't polluted, but priced so
+notebook-on arms can't hide ~100 uncounted calls per run.
+`error_class` is the child's typed `fantasy.ProviderError`
+classification; the circuit breaker reads it before falling back to
+string signatures, so deterministic provider failures trip at two
+strikes instead of resampling to `2N`.
 
 Sources, all existing: `fantasy.AgentResult` (turns/steps/usage)
 from `agent.Run`; `stubStats` per session (`stubs.go:60`); recall

@@ -175,6 +175,15 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 			return notebookModelResolver()
 		}
 		return nil
+	}, func(sessionID string, usage fantasy.Usage) {
+		// Sidecar generation spend lands on the session's counters —
+		// the coordinator may not exist yet at construction, so the
+		// sink resolves it at call time.
+		if c, ok := app.AgentCoordinator.(interface {
+			RecordGeneratorUsage(string, fantasy.Usage)
+		}); ok {
+			c.RecordGeneratorUsage(sessionID, usage)
+		}
 	}), notebookOpts)
 	app.notebookModelResolver = &notebookModelResolver
 

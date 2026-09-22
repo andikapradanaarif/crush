@@ -357,9 +357,7 @@ func (a *sessionAgent) runCheckpoint(ctx context.Context, sessionID string, req 
 		return
 	}
 	if a.nbStats != nil {
-		stats, _ := a.nbStats.Get(sessionID)
-		stats.CheckpointsWritten++
-		a.nbStats.Set(sessionID, stats)
+		a.nbStats.Update(sessionID, func(s *notebook.Stats) { s.CheckpointsWritten++ })
 	}
 	if a.notebookSyncMem0 && a.configStore != nil {
 		entries, err := a.notebook.GetByTurnSegment(ctx, sessionID, req.TurnNumber, req.SegmentNumber)

@@ -2,6 +2,9 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
+	"hash"
+	"hash/fnv"
 	"io"
 	"log/slog"
 	"net/http"
@@ -58,6 +61,196 @@ type requestStats struct {
 	HistoryBytes    int64
 	ToolCallBytes   int64
 	ToolResultBytes int64
+	// Steps is the per-request table the eval harness reads — usage
+	// plus the prefix-attribution forensics that name every cache
+	// miss's cause. Pending holds the PrepareStep-side attribution
+	// for the in-flight step; OnStepFinish folds it into Steps with
+	// the request's usage. PrevHashes is the previous step's
+	// per-message content hashes — the diff input.
+	Steps      []StepRecord
+	Pending    stepAttribution
+	PrevHashes []uint64
+}
+
+// StepRecord is one provider request's usage plus prefix attribution.
+// FirstChanged is the index of the first message whose content differs
+// from the previous step's render: len(prev) means pure tail append
+// (the cache-friendly case), inside the leading system-message run
+// means a prefix rewrite, mid-history means an edit (stub promotion,
+// collapse, region replacement). PrefixHash fingerprints the leading
+// system-message run — the volatile prefix a provider's prompt cache
+// keys on.
+type StepRecord struct {
+	Step              int    `json:"step"`
+	InputTokens       int64  `json:"input_tokens"`
+	OutputTokens      int64  `json:"output_tokens"`
+	CacheReadTokens   int64  `json:"cache_read_tokens"`
+	CacheWriteTokens  int64  `json:"cache_write_tokens"`
+	Estimated         bool   `json:"estimated,omitempty"`
+	PrefixHash        string `json:"prefix_hash,omitempty"`
+	FirstChanged      int    `json:"first_changed_index"`
+	FirstChangedCause string `json:"first_changed_cause,omitempty"`
+}
+
+// stepAttribution is the PrepareStep-side half of a StepRecord — the
+// prompt-side state captured before the request flies.
+type stepAttribution struct {
+	PrefixHash        string
+	FirstChanged      int
+	FirstChangedCause string
+}
+
+// attributeStep hashes the rendered message list and diffs it against
+// the previous step's per-message hashes. prefixHash covers the
+// leading system-message run (system prompt + prompt prefix +
+// notebook block); firstChanged/cause name where the divergence
+// starts. Returns the attribution and the new hash vector.
+func attributeStep(messages []fantasy.Message, prev []uint64) (stepAttribution, []uint64) {
+	hashes := make([]uint64, len(messages))
+	prefixLen := 0
+	for i, msg := range messages {
+		hashes[i] = hashMessage(msg)
+		if i == prefixLen && msg.Role == fantasy.MessageRoleSystem {
+			prefixLen++
+		}
+	}
+	ph := fnv.New64a()
+	for _, h := range hashes[:prefixLen] {
+		var b [8]byte
+		for i := range b {
+			b[i] = byte(h >> (8 * i))
+		}
+		_, _ = ph.Write(b[:])
+	}
+	fc := -1
+	for i := 0; i < min(len(hashes), len(prev)); i++ {
+		if hashes[i] != prev[i] {
+			fc = i
+			break
+		}
+	}
+	if fc == -1 && len(hashes) != len(prev) {
+		fc = min(len(hashes), len(prev))
+	}
+	return stepAttribution{
+		PrefixHash:        fmt.Sprintf("%016x", ph.Sum64()),
+		FirstChanged:      fc,
+		FirstChangedCause: firstChangedCause(messages, fc, prefixLen, len(prev)),
+	}, hashes
+}
+
+// firstChangedCause names the component at the first-changed index:
+// cold for the run's first request, append for pure tail growth,
+// shrink for truncation, system-prompt/notebook-prefix inside the
+// leading system run, history for mid-conversation edits. Empty
+// when nothing changed.
+func firstChangedCause(messages []fantasy.Message, fc, prefixLen, prevLen int) string {
+	switch {
+	case prevLen == 0:
+		return "cold"
+	case fc < 0:
+		return ""
+	case fc >= len(messages):
+		return "shrink"
+	case fc >= prevLen:
+		return "append"
+	case fc < prefixLen:
+		if isNotebookMessage(messages[fc]) {
+			return "notebook-prefix"
+		}
+		return "system-prompt"
+	default:
+		return "history"
+	}
+}
+
+// isNotebookMessage reports whether msg is a system message carrying a
+// notebook-rendered block — the assembled prefix block or an
+// auto-inject recall blob.
+func isNotebookMessage(msg fantasy.Message) bool {
+	if msg.Role != fantasy.MessageRoleSystem || len(msg.Content) == 0 {
+		return false
+	}
+	switch tp := msg.Content[0].(type) {
+	case fantasy.TextPart:
+		return strings.HasPrefix(tp.Text, "<notebook")
+	case *fantasy.TextPart:
+		return strings.HasPrefix(tp.Text, "<notebook")
+	}
+	return false
+}
+
+// hashMessage fingerprints a rendered message's content — role plus
+// each part's bytes. fnv-64a keeps the hash stable across processes so
+// prefix_hash survives cross-run comparison.
+func hashMessage(msg fantasy.Message) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(msg.Role))
+	for _, part := range msg.Content {
+		// A part-type separator keeps concatenated fields from
+		// colliding across part boundaries.
+		_, _ = h.Write([]byte{0})
+		hashPart(h, part)
+	}
+	return h.Sum64()
+}
+
+func hashPart(h hash.Hash64, part fantasy.MessagePart) {
+	write := h.Write
+	switch p := part.(type) {
+	case fantasy.TextPart:
+		_, _ = write([]byte(p.Text))
+	case *fantasy.TextPart:
+		_, _ = write([]byte(p.Text))
+	case fantasy.ReasoningPart:
+		_, _ = write([]byte(p.Text))
+	case *fantasy.ReasoningPart:
+		_, _ = write([]byte(p.Text))
+	case fantasy.FilePart:
+		_, _ = write(p.Data)
+		_, _ = write([]byte(p.Filename))
+		_, _ = write([]byte(p.MediaType))
+	case *fantasy.FilePart:
+		_, _ = write(p.Data)
+		_, _ = write([]byte(p.Filename))
+		_, _ = write([]byte(p.MediaType))
+	case fantasy.ToolCallPart:
+		_, _ = write([]byte(p.ToolName))
+		_, _ = write([]byte(p.Input))
+	case *fantasy.ToolCallPart:
+		_, _ = write([]byte(p.ToolName))
+		_, _ = write([]byte(p.Input))
+	case fantasy.ToolResultPart:
+		hashToolResultOutput(h, p.Output)
+	case *fantasy.ToolResultPart:
+		hashToolResultOutput(h, p.Output)
+	}
+}
+
+func hashToolResultOutput(h hash.Hash64, output fantasy.ToolResultOutputContent) {
+	write := h.Write
+	switch o := output.(type) {
+	case fantasy.ToolResultOutputContentText:
+		_, _ = write([]byte(o.Text))
+	case *fantasy.ToolResultOutputContentText:
+		_, _ = write([]byte(o.Text))
+	case fantasy.ToolResultOutputContentError:
+		if o.Error != nil {
+			_, _ = write([]byte(o.Error.Error()))
+		}
+	case *fantasy.ToolResultOutputContentError:
+		if o.Error != nil {
+			_, _ = write([]byte(o.Error.Error()))
+		}
+	case fantasy.ToolResultOutputContentMedia:
+		_, _ = write([]byte(o.Data))
+		_, _ = write([]byte(o.MediaType))
+		_, _ = write([]byte(o.Text))
+	case *fantasy.ToolResultOutputContentMedia:
+		_, _ = write([]byte(o.Data))
+		_, _ = write([]byte(o.MediaType))
+		_, _ = write([]byte(o.Text))
+	}
 }
 
 // logStepComposition logs the byte size of each per-step request

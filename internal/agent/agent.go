@@ -1292,6 +1292,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				rs.HistoryBytes = comp.HistoryBytes
 				rs.ToolCallBytes = comp.ToolCallBytes
 				rs.ToolResultBytes = comp.ToolResultBytes
+				rs.Pending, rs.PrevHashes = attributeStep(prepared.Messages, rs.PrevHashes)
 				a.reqStats.Set(call.SessionID, rs)
 			}
 
@@ -1474,6 +1475,17 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				if rs.LastPromptTokens > rs.PeakPromptTokens {
 					rs.PeakPromptTokens = rs.LastPromptTokens
 				}
+				rs.Steps = append(rs.Steps, StepRecord{
+					Step:              len(rs.Steps),
+					InputTokens:       usage.InputTokens,
+					OutputTokens:      usage.OutputTokens,
+					CacheReadTokens:   usage.CacheReadTokens,
+					CacheWriteTokens:  usage.CacheCreationTokens,
+					Estimated:         estimated,
+					PrefixHash:        rs.Pending.PrefixHash,
+					FirstChanged:      rs.Pending.FirstChanged,
+					FirstChangedCause: rs.Pending.FirstChangedCause,
+				})
 				a.reqStats.Set(call.SessionID, rs)
 			}
 			a.updateSessionUsage(largeModel, &updatedSession, usage, a.openrouterCost(stepResult.ProviderMetadata), estimated)
@@ -2129,9 +2141,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 					// A failed fetch renders verbatim — mark it so a
 					// control-shaped prompt can't pass as a summarize
 					// sample in telemetry.
-					stats, _ := a.stubStats.Get(sessionID)
-					stats.SummaryFetchFailed = true
-					a.stubStats.Set(sessionID, stats)
+					a.stubStats.Update(sessionID, func(s *stubStats) { s.SummaryFetchFailed = true })
 				}
 			}
 		}
@@ -2162,10 +2172,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 				if persisted {
 					a.stubBoundary.Set(sessionID, boundary)
 					if moved {
-						if stats, ok := a.stubStats.Get(sessionID); ok {
-							stats.BoundaryAdvances++
-							a.stubStats.Set(sessionID, stats)
-						}
+						a.noteBoundaryAdvance(sessionID)
 					}
 				}
 			}
@@ -2644,19 +2651,22 @@ func (a *sessionAgent) countNotebookReViews(sessionID string, msgs []message.Mes
 			}
 		}
 	}
-	stats, _ := a.nbStats.Get(sessionID)
+	var covered, stubbedN int
 	for _, p := range newCalls {
 		if p == "" {
 			continue
 		}
 		if injected[filepath.Base(p)] {
-			stats.CoveredReViews++
+			covered++
 		}
 		if stubbed[normalizedPath(a.resolveReadPath(p))] {
-			stats.StubReViews++
+			stubbedN++
 		}
 	}
-	a.nbStats.Set(sessionID, stats)
+	a.nbStats.Update(sessionID, func(s *notebook.Stats) {
+		s.CoveredReViews += covered
+		s.StubReViews += stubbedN
+	})
 }
 
 // filterFileParts removes fantasy.FilePart entries from a slice of message
