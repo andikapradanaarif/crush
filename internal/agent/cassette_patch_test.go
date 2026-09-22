@@ -245,7 +245,11 @@ func TestPatchCoderCassetteEditResults(t *testing.T) {
 				if !ok {
 					continue
 				}
-				if newText, ok := newResults[mm["tool_call_id"].(string)]; ok && content != newText {
+				callID, ok := mm["tool_call_id"].(string)
+				if !ok {
+					continue
+				}
+				if newText, ok := newResults[callID]; ok && content != newText {
 					mm["content"] = newText
 				}
 			}

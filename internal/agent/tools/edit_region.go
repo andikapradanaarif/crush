@@ -106,18 +106,29 @@ func postEditRegion(unified, newContent string) string {
 	emitted := 0
 	truncated := false
 	for wi, w := range windows {
+		remaining := postEditMaxLines - emitted
+		if remaining <= 0 {
+			truncated = true
+			break
+		}
+		// Header must name the range actually emitted, not the
+		// window's full extent — the cap can cut a window short.
+		showHi := min(w.hi, w.lo+remaining-1)
 		if wi > 0 {
 			sb.WriteString("     ⋯\n")
 		}
-		for ln := w.lo; ln <= w.hi; ln++ {
-			if emitted >= postEditMaxLines {
-				truncated = true
-				break
+		fmt.Fprintf(&sb, "Current file content (lines %d-%d):\n", w.lo, showHi)
+		for ln := w.lo; ln <= showHi; ln++ {
+			line := lines[ln-1]
+			if len(line) > MaxLineLength {
+				// Truncate at a rune boundary, as view does.
+				line = strings.ToValidUTF8(line[:MaxLineLength], "") + "..."
 			}
-			fmt.Fprintf(&sb, "%6d|%s\n", ln, lines[ln-1])
+			fmt.Fprintf(&sb, "%6d|%s\n", ln, line)
 			emitted++
 		}
-		if truncated {
+		if showHi < w.hi {
+			truncated = true
 			break
 		}
 	}

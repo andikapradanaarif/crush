@@ -124,6 +124,41 @@ func TestPostEditRegion_NoHunks(t *testing.T) {
 	require.Empty(t, postEditRegion("garbage", "content"))
 }
 
+func TestPostEditRegion_LongLineTruncated(t *testing.T) {
+	t.Parallel()
+
+	long := strings.Repeat("x", MaxLineLength+500)
+	old := "a\nb\nc"
+	new := "a\n" + long + "\nc"
+	unified, _, _ := diff.GenerateDiff(old, new, "f.txt")
+
+	region := postEditRegion(unified, new)
+	require.Contains(t, region, "...")
+	for line := range strings.Lines(region) {
+		if idx := strings.Index(line, "|"); idx >= 0 {
+			require.LessOrEqual(t, len(strings.TrimSuffix(line, "\n"))-idx-1, MaxLineLength+3)
+		}
+	}
+}
+
+func TestPostEditRegion_HeaderNamesEmittedRange(t *testing.T) {
+	t.Parallel()
+
+	var oldLines, newLines []string
+	for i := 0; i < 200; i++ {
+		oldLines = append(oldLines, fmt.Sprintf("old-%03d", i))
+		newLines = append(newLines, fmt.Sprintf("new-%03d", i))
+	}
+	old, new := strings.Join(oldLines, "\n"), strings.Join(newLines, "\n")
+	unified, _, _ := diff.GenerateDiff(old, new, "f.txt")
+
+	region := postEditRegion(unified, new)
+	// The cap cut the window at 50 lines — the header names what
+	// was actually shown, not the full window extent.
+	require.Contains(t, region, "(lines 1-50)")
+	require.NotContains(t, region, "(lines 1-200)")
+}
+
 // End to end through replaceContent: the response carries the
 // numbered post-edit region after the confirmation.
 func TestReplaceContent_AppendsPostEditRegion(t *testing.T) {
