@@ -65,6 +65,7 @@ type gateGen struct {
 	release chan struct{}
 	entered chan struct{}
 	once    sync.Once
+	relOnce sync.Once
 }
 
 func newGateGen() *gateGen {
@@ -73,6 +74,13 @@ func newGateGen() *gateGen {
 		release: make(chan struct{}),
 		entered: make(chan struct{}),
 	}
+}
+
+// Release unblocks a parked Generate. Idempotent so a test that fails
+// between entered and Release can free the goroutine from t.Cleanup —
+// the detached context strips cancellation, so nothing else can.
+func (g *gateGen) Release() {
+	g.relOnce.Do(func() { close(g.release) })
 }
 
 func (g *gateGen) Generate(ctx context.Context, sessionID string, events []notebook.EntryInput) ([]notebook.GeneratedEntry, error) {
@@ -155,14 +163,39 @@ func (e *processEnv) agent(model fantasy.LanguageModel, priorTurns string) *sess
 // stays 0 — the starvation the eval gate reported.
 func TestRun_DrainCommitsCoverageForNextProcess(t *testing.T) {
 	t.Parallel()
-	env, sessionID := newProcessEnv(t, &countingGen{})
+	gen := newGateGen()
+	env, sessionID := newProcessEnv(t, gen)
+	t.Cleanup(gen.Release)
 
 	// Process 1: a turn with one finished tool call, then drain —
 	// RunNonInteractive's drainDetachedWork equivalent.
 	a1 := env.agent(&toolThenTextModel{}, priorTurnsStub)
 	_, err := a1.Run(t.Context(), SessionAgentCall{SessionID: sessionID, Prompt: "turn one"})
 	require.NoError(t, err)
-	a1.detachedWork.Wait()
+
+	// The drain join must be blocked on the in-flight generation — an
+	// untracked spawn would let Wait return with coverage uncommitted.
+	select {
+	case <-gen.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("run-end generation never started")
+	}
+	drained := make(chan struct{})
+	go func() {
+		a1.detachedWork.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+		t.Fatal("detachedWork.Wait returned while generation was in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+	gen.Release()
+	select {
+	case <-drained:
+	case <-time.After(10 * time.Second):
+		t.Fatal("detachedWork.Wait did not return after generation finished")
+	}
 
 	// The turn's segment must be processed before the process exits —
 	// pre-drain this row died with the goroutine.
@@ -194,6 +227,7 @@ func TestRun_UndrainedExitLosesRunEndCoverage(t *testing.T) {
 	t.Parallel()
 	gen := newGateGen()
 	env, sessionID := newProcessEnv(t, gen)
+	t.Cleanup(gen.Release)
 
 	a1 := env.agent(&toolThenTextModel{}, priorTurnsStub)
 	_, err := a1.Run(t.Context(), SessionAgentCall{SessionID: sessionID, Prompt: "turn one"})
@@ -208,13 +242,14 @@ func TestRun_UndrainedExitLosesRunEndCoverage(t *testing.T) {
 	}
 	rows, err := env.notebook.ProcessedSegments(t.Context(), sessionID)
 	require.NoError(t, err)
+	require.NotEmpty(t, rows, "the closed segment must already be recorded")
 	for _, r := range rows {
 		require.NotEqual(t, notebook.SegmentProcessed, r.State,
 			"segment must stay unprocessed while generation is in flight")
 	}
 
 	// Releasing the generator plus the drain join commits the coverage.
-	close(gen.release)
+	gen.Release()
 	a1.detachedWork.Wait()
 	rows, err = env.notebook.ProcessedSegments(t.Context(), sessionID)
 	require.NoError(t, err)
@@ -242,4 +277,23 @@ func TestRun_DrainWritesTurnDigest(t *testing.T) {
 	require.True(t, ok, "digest stats must exist for the session")
 	require.GreaterOrEqual(t, stats.DigestsWritten, 1,
 		"the finished turn's digest must commit before process exit")
+}
+
+// TestRun_DrainWritesCheckpoint covers the third arm of the run-end
+// pass: the checkpoint fallback shares the detached goroutine, so a
+// short-lived process loses the consolidation without the drain.
+func TestRun_DrainWritesCheckpoint(t *testing.T) {
+	t.Parallel()
+	env, sessionID := newProcessEnv(t, &countingGen{})
+
+	a1 := env.agent(&toolThenTextModel{}, priorTurnsStub)
+	a1.notebookCheckpoint = true
+	_, err := a1.Run(t.Context(), SessionAgentCall{SessionID: sessionID, Prompt: "turn one"})
+	require.NoError(t, err)
+	a1.detachedWork.Wait()
+
+	stats, ok := a1.nbStats.Get(sessionID)
+	require.True(t, ok, "checkpoint stats must exist for the session")
+	require.GreaterOrEqual(t, stats.CheckpointsWritten, 1,
+		"the run-end checkpoint fallback must commit before process exit")
 }
