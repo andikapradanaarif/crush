@@ -216,6 +216,47 @@ func TestProbeCache_TransportFailure(t *testing.T) {
 	}
 }
 
+// TestProbeCache_HTTPError covers the deterministic provider-error
+// path: RoundTrip ran (attempts=1), so the capture IS this send's —
+// the record must carry its request hash and the error body lands in
+// the raw file, while the error is still recorded.
+func TestProbeCache_HTTPError(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":{"message":"probe-400-marker","type":"invalid_request_error"}}`)
+	}))
+	defer srv.Close()
+
+	out := filepath.Join(t.TempDir(), "probe.jsonl")
+	err := RunProbeCache(t.Context(), ProbeCacheConfig{
+		BaseURL:      srv.URL + "/v1",
+		APIKey:       "k",
+		Model:        "m",
+		TargetTokens: 2000,
+		Repeats:      5,
+		MaxRequests:  100,
+		OutPath:      out,
+		DelayScale:   0,
+		Seed:         1,
+	})
+	// Every send 400s → three consecutive errors abort the run.
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "consecutive send errors")
+	recs := readProbeRecords(t, out)
+	require.Len(t, recs, 3)
+	for _, r := range recs {
+		require.NotEmpty(t, r.Error)
+		require.Equal(t, 1, r.Attempts)
+		require.NotEmpty(t, r.RequestHash)
+		require.NotEmpty(t, r.RawFile)
+		body, rerr := os.ReadFile(r.RawFile)
+		require.NoError(t, rerr)
+		require.Contains(t, string(body), "probe-400-marker")
+	}
+}
+
 // TestProbeCache_DryRun verifies the schedule path sends nothing and
 // writes no artifact.
 func TestProbeCache_DryRun(t *testing.T) {
@@ -240,12 +281,16 @@ func TestProbeSummarize(t *testing.T) {
 			Usage: fantasy.Usage{InputTokens: input, CacheReadTokens: cached},
 		}
 	}
+	retried := mk("measured", "notebook", 25000, 25000)
+	retried.Attempts = 2 // Counted but flagged — may inherit a warm cache.
 	recs := []ProbeRecord{
 		mk("warm", "identical", 50000, 0), // Excluded — establishes cache.
 		mk("measured", "identical", 1000, 49000),
 		mk("control", "identical", 2000, 48000),
 		mk("delayed", "identical", 5000, 45000),
 		mk("measured", "notebook", 25000, 25000),
+		retried,
+		{Kind: "measured", Condition: "notebook", Error: "conn reset"}, // n_err — must not dilute hit%.
 	}
 	var buf bytes.Buffer
 	ProbeSummarize(&buf, recs)
@@ -256,7 +301,9 @@ func TestProbeSummarize(t *testing.T) {
 	require.Contains(t, s, "97.0%") // (49000/50000 + 48000/50000)/2
 	require.Contains(t, s, "identical (delayed)")
 	require.Contains(t, s, "90.0%") // 45000/50000
-	require.Contains(t, s, "notebook")
+	// The errored row counts in n_err but stays out of n and hit% —
+	// with it included notebook would read 33.3% instead of 50.0%.
+	require.Regexp(t, `notebook\s+2\s+1\s+1`, s)
 	require.Contains(t, s, "50.0%")
 }
 

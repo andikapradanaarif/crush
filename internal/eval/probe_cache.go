@@ -89,7 +89,10 @@ type ProbeRecord struct {
 	Kind      string    `json:"kind"` // warm | measured | control | delayed
 	Condition string    `json:"condition"`
 	Repeat    int       `json:"repeat"`
-	DelayMS   int64     `json:"delay_ms"` // Since the previous send.
+	// DelayMS is send-start to send-start — it includes the previous
+	// send's latency; subtract the previous row's latency_ms for the
+	// idle gap the cache actually experienced.
+	DelayMS int64 `json:"delay_ms"`
 	// FreshProcess is true only when the send actually ran on a
 	// rebuilt transport; FreshFallback records why it didn't (the
 	// fresh client/model construction failed and the send fell back
@@ -102,10 +105,14 @@ type ProbeRecord struct {
 	// Usage is fantasy-normalized: InputTokens is the UNCACHED
 	// remainder (prompt_tokens minus cached), not the full prompt
 	// size — input+cache_read reconstructs it.
-	Usage     fantasy.Usage  `json:"usage_normalized"`
-	RawUsage  map[string]any `json:"usage_raw,omitempty"`
-	LatencyMS int64          `json:"latency_ms"`
-	Error     string         `json:"error,omitempty"`
+	Usage    fantasy.Usage  `json:"usage_normalized"`
+	RawUsage map[string]any `json:"usage_raw,omitempty"`
+	// RawFile is the captured response body's path — empty when no
+	// capture existed (transport failure) or the write failed, so the
+	// artifact never claims a body it doesn't have.
+	RawFile   string `json:"raw_file,omitempty"`
+	LatencyMS int64  `json:"latency_ms"`
+	Error     string `json:"error,omitempty"`
 }
 
 // probeCapture stores one exchange: wire-body hash + buffered SSE body.
@@ -359,7 +366,7 @@ func RunProbeCache(ctx context.Context, cfg ProbeCacheConfig) error {
 		return fmt.Errorf("target tokens %d below minimum %d", cfg.TargetTokens, minProbeTargetTokens)
 	}
 	if cfg.DelayScale < 0 {
-		cfg.DelayScale = 1
+		return fmt.Errorf("delay-scale must be >= 0, got %v", cfg.DelayScale)
 	}
 	// DelayScale 0 is legitimate — tests use it for instant sleeps.
 	if cfg.RawDir == "" {
@@ -391,7 +398,7 @@ func RunProbeCache(ctx context.Context, cfg ProbeCacheConfig) error {
 		}
 	}
 	estSends := len(blocks)*2 + nDelayed + len(blocks)/5
-	fmt.Printf("probe: %d blocks, ~%d sends, cap %d, seed %d, out %s\n",
+	fmt.Printf("probe: %d blocks, %d sends, cap %d, seed %d, out %s\n",
 		len(blocks), estSends, cfg.MaxRequests, cfg.Seed, cfg.OutPath)
 	if cfg.DryRun {
 		for i, b := range blocks {
@@ -529,7 +536,11 @@ func RunProbeCache(ctx context.Context, cfg ProbeCacheConfig) error {
 				rec.RequestHash = capt.reqHash
 				rec.RawUsage = lastSSEUsage(capt.buf.Bytes())
 				fname := filepath.Join(cfg.RawDir, fmt.Sprintf("seq-%04d-%s-%s.resp", seq, kind, cond))
-				_ = os.WriteFile(fname, capt.buf.Bytes(), 0o644)
+				if werr := os.WriteFile(fname, capt.buf.Bytes(), 0o644); werr != nil {
+					fmt.Fprintf(os.Stderr, "probe: raw body write: %v\n", werr)
+				} else {
+					rec.RawFile = fname
+				}
 			}
 		}
 		if serr != nil {
@@ -565,7 +576,6 @@ func RunProbeCache(ctx context.Context, cfg ProbeCacheConfig) error {
 		}
 	}
 
-	doneBlocks := 0
 	for i, b := range blocks {
 		if seq >= cfg.MaxRequests || consecErr >= 3 || ctx.Err() != nil {
 			break
@@ -583,7 +593,6 @@ func RunProbeCache(ctx context.Context, cfg ProbeCacheConfig) error {
 		if i%5 == 4 {
 			send("control", "identical", 0, bundle.variants["identical"], -1, false)
 		}
-		doneBlocks++
 	}
 	fmt.Printf("probe done: %d sends → %s\n", seq, cfg.OutPath)
 	ProbeSummarize(os.Stdout, recs)
@@ -592,9 +601,10 @@ func RunProbeCache(ctx context.Context, cfg ProbeCacheConfig) error {
 		return ctx.Err()
 	case consecErr >= 3:
 		return fmt.Errorf("probe aborted: %d consecutive send errors", consecErr)
-	case doneBlocks < len(blocks):
-		return fmt.Errorf("probe incomplete: spend cap reached after %d sends (%d/%d blocks ran)",
-			seq, doneBlocks, len(blocks))
+	case seq < estSends:
+		// estSends is exact, so fewer sends means the cap truncated
+		// the schedule — possibly mid-block.
+		return fmt.Errorf("probe incomplete: spend cap reached — %d/%d sends ran", seq, estSends)
 	}
 	return nil
 }
@@ -607,7 +617,10 @@ func ptrOf[T any](v T) *T { return &v }
 // warm rows are excluded (they establish the cache, they don't test
 // it).
 func ProbeSummarize(w io.Writer, recs []ProbeRecord) {
-	type acc struct{ prompt, hits, rawHit []int64 }
+	type acc struct {
+		prompt, hits, rawHit []int64
+		errs, retried        int
+	}
 	by := map[string]*acc{}
 	var order []string
 	for _, r := range recs {
@@ -624,6 +637,17 @@ func ProbeSummarize(w io.Writer, recs []ProbeRecord) {
 			by[key] = a
 			order = append(order, key)
 		}
+		if r.Error != "" {
+			// A failed send produced no cache evidence — counting it
+			// as a 0% row would dilute the gate with endpoint health.
+			a.errs++
+			continue
+		}
+		if r.Attempts > 1 {
+			// The surviving attempt's usage can reflect a cache the
+			// failed attempt just populated — count it, flag it.
+			a.retried++
+		}
 		// Fantasy normalizes InputTokens to the uncached remainder
 		// (prompt_tokens − cached_tokens), so input+cached
 		// reconstructs the true prompt size — the correct hit%
@@ -639,16 +663,20 @@ func ProbeSummarize(w io.Writer, recs []ProbeRecord) {
 		}
 	}
 	sort.Strings(order)
-	fmt.Fprintf(w, "\n%-22s %4s %10s %10s %10s %8s\n", "condition", "n", "prompt", "cache_read", "raw_hit", "hit%")
+	fmt.Fprintf(w, "\n%-22s %4s %5s %5s %10s %10s %10s %8s\n",
+		"condition", "n", "n_err", "n_ret", "prompt", "cache_read", "raw_hit", "hit%")
 	for _, c := range order {
 		a := by[c]
-		var hitFrac float64
-		for i := range a.hits {
-			if a.prompt[i] > 0 {
-				hitFrac += float64(a.hits[i]) / float64(a.prompt[i])
+		hit := "-"
+		if len(a.hits) > 0 {
+			var hitFrac float64
+			for i := range a.hits {
+				if a.prompt[i] > 0 {
+					hitFrac += float64(a.hits[i]) / float64(a.prompt[i])
+				}
 			}
+			hit = fmt.Sprintf("%.1f%%", hitFrac/float64(len(a.hits))*100)
 		}
-		hitFrac /= float64(len(a.hits))
 		raw := "-"
 		var rawVals []int64
 		for _, v := range a.rawHit {
@@ -659,10 +687,10 @@ func ProbeSummarize(w io.Writer, recs []ProbeRecord) {
 		if len(rawVals) > 0 {
 			raw = fmt.Sprintf("%d", median(rawVals))
 		}
-		fmt.Fprintf(w, "%-22s %4d %10d %10d %10s %7.1f%%\n",
-			c, len(a.hits), median(a.prompt), median(a.hits), raw, hitFrac*100)
+		fmt.Fprintf(w, "%-22s %4d %5d %5d %10d %10d %10s %8s\n",
+			c, len(a.hits), a.errs, a.retried, median(a.prompt), median(a.hits), raw, hit)
 	}
-	fmt.Fprintln(w, "hit% = mean(cache_read / (uncached + cache_read)) per row; 'identical' includes control resends; warm rows excluded.")
+	fmt.Fprintln(w, "hit% = mean(cache_read / (uncached + cache_read)) per row; error rows excluded (n_err), retried sends flagged (n_ret); 'identical' includes control resends; warm rows excluded.")
 }
 
 func median(v []int64) int64 {

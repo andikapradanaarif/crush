@@ -201,14 +201,14 @@ bodies; prints the per-condition cache-hit table at the end.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		keyEnv, _ := cmd.Flags().GetString("api-key-env")
 		cfg := eval.ProbeCacheConfig{
-			BaseURL:      flag(cmd, "base-url"),
+			BaseURL:      flagStr(cmd, "base-url"),
 			APIKey:       os.Getenv(keyEnv),
-			Model:        flag(cmd, "model"),
+			Model:        flagStr(cmd, "model"),
 			TargetTokens: flagInt(cmd, "target-tokens"),
 			Repeats:      flagInt(cmd, "repeats"),
 			MaxRequests:  flagInt(cmd, "max-requests"),
-			OutPath:      flag(cmd, "out"),
-			RawDir:       flag(cmd, "raw-dir"),
+			OutPath:      flagStr(cmd, "out"),
+			RawDir:       flagStr(cmd, "raw-dir"),
 			Seed:         flagInt64(cmd, "seed"),
 			DelayScale:   flagFloat(cmd, "delay-scale"),
 			DryRun:       flagBool(cmd, "dry-run"),
@@ -222,8 +222,8 @@ bodies; prints the per-condition cache-hit table at the end.`,
 	},
 }
 
-func flag(cmd *cobra.Command, n string) string { v, _ := cmd.Flags().GetString(n); return v }
-func flagInt(cmd *cobra.Command, n string) int { v, _ := cmd.Flags().GetInt(n); return v }
+func flagStr(cmd *cobra.Command, n string) string { v, _ := cmd.Flags().GetString(n); return v }
+func flagInt(cmd *cobra.Command, n string) int    { v, _ := cmd.Flags().GetInt(n); return v }
 func flagInt64(cmd *cobra.Command, n string) int64 {
 	v, _ := cmd.Flags().GetInt64(n)
 	return v
