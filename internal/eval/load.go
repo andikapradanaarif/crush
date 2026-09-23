@@ -373,6 +373,30 @@ var priorTurnsRecallLive = starvationRule{
 	},
 }
 
+// edgeOutcomeTable enumerates the (edge, outcome) pairs the
+// scan/resolve/carrier machinery in run_edges.go can produce — a
+// pair not listed can never appear in edge_firings and starves
+// regardless of options. coverage.go's field registration iterates
+// this table, so unreachable pairs fail parse with "unknown field";
+// the check below is the same verdict expressed as a starvation rule
+// for any field registered by a path that skips the table.
+// Reachability:
+//   - cancelled: mid-scan ctx kill — every edge, flag-independent.
+//   - deferred/exhausted: contention loser or spent repair budget —
+//     needs a firing trigger, so flag-on for stall/burn-watch.
+//   - gated/suppressed/headless-degraded: stall/burn-watch hints —
+//     verification/todos never set hints.
+//   - cleared: a !fire trigger with no hint (verification resolving
+//     clean), or a sessionState carrier ride (todos) — stall and
+//     burn-watch are step-bound and always fire-or-hint, so they
+//     never clear.
+var edgeOutcomeTable = map[string]map[string]bool{
+	"verification": {"fired": true, "cleared": true, "cancelled": true, "deferred": true, "exhausted": true},
+	"todos":        {"fired": true, "cleared": true, "cancelled": true, "deferred": true, "exhausted": true},
+	"stall":        {"fired": true, "gated": true, "headless-degraded": true, "cancelled": true, "deferred": true, "exhausted": true},
+	"burn-watch":   {"fired": true, "gated": true, "suppressed": true, "headless-degraded": true, "cancelled": true, "deferred": true, "exhausted": true},
+}
+
 // armStarvationRules maps a coverage field to the option requirements
 // that must hold for its counter to be reachable. map_calls is
 // absent deliberately: tool-not-found attempts still count, so a
@@ -399,23 +423,35 @@ func armStarvationRules(field string) []starvationRule {
 		return []starvationRule{boolOn("notebook_stub_superseded"), boolOn("notebook_enabled"), recallToolLive}
 	}
 	if edge, ok := strings.CutPrefix(field, "edge_firings."); ok {
-		// Stall and burn-watch ride ambiguity_clarification; the
-		// outcome suffix picks the direction.
-		if strings.HasPrefix(edge, "stall.") || strings.HasPrefix(edge, "burn-watch.") {
-			switch edge[strings.LastIndexByte(edge, '.')+1:] {
-			case "gated":
-				return []starvationRule{boolOff("ambiguity_clarification")}
-			case "cancelled":
-				// Mid-scan ctx kills are flag-independent.
-				return nil
-			default:
-				// Flag-off triggers take the gated short-circuit
-				// before resolve/contention — every other outcome
-				// needs the flag on.
-				return []starvationRule{boolOn("ambiguity_clarification")}
-			}
+		name, outcome, found := strings.Cut(edge, ".")
+		if !found {
+			return nil
 		}
-		return nil
+		if outcomes, known := edgeOutcomeTable[name]; !known || !outcomes[outcome] {
+			// The (edge, outcome) pair never appears — the scan/
+			// resolve/carrier machinery can't produce it in any
+			// configuration, so no option resolves the starvation.
+			return []starvationRule{{
+				"a reachable edge_firings pair",
+				func(func(string) (any, bool)) bool { return false },
+			}}
+		}
+		if name != "stall" && name != "burn-watch" {
+			// verification/todos never consult the flag.
+			return nil
+		}
+		switch outcome {
+		case "gated":
+			return []starvationRule{boolOff("ambiguity_clarification")}
+		case "cancelled":
+			// Mid-scan ctx kills are flag-independent.
+			return nil
+		default:
+			// Flag-off triggers take the gated short-circuit
+			// before resolve/contention — every other outcome
+			// needs the flag on.
+			return []starvationRule{boolOn("ambiguity_clarification")}
+		}
 	}
 	if strings.HasPrefix(field, "checkpoints.") {
 		return []starvationRule{boolOn("notebook_checkpoint"), boolOn("notebook_enabled")}
@@ -516,27 +552,37 @@ func ValidateArmCoverageResolved(e *Experiment, manifest *FlagsManifest) error {
 	return nil
 }
 
-// coverageTurnCeiling gives the structural maximum a coverage field
-// can reach on a trajectory of n turns — (ceil, true, why) when a
-// bound is expressible in turn count, false when it isn't.
+// coverageTurnCeiling gives the deterministic maximum a coverage field
+// can reach on a trajectory of n TASK turns — (ceil, true, why) when a
+// bound is expressible in turn count, false when it isn't. The bound
+// is deterministic, not structural: edge repair retries persist as
+// user messages, each gets its own Run, and a repair after the last
+// task turn has Before=n — so the session can produce up to ~3n
+// collapsible turns. Repair firing is model-dependent, so a min_
+// predicate can never rely on it: the ceiling rejects what the task
+// turns alone can't guarantee.
 func coverageTurnCeiling(field string, turns int) (ceil int, bounded bool, why string) {
 	switch field {
 	case "prior_turns.turns_collapsed":
 		// A turn collapses only at a LATER run's frozen render — the
-		// last turn has no later run. Summarize mode lowers the
-		// practical ceiling further (a covered turn with no entries
-		// renders verbatim), but the count can't see entry-emptiness.
-		return max(turns-1, 0), true, "the last turn can never collapse — no later run renders it"
+		// last task turn has no guaranteed later run. Summarize mode
+		// lowers the practical ceiling further (a covered turn with
+		// no entries renders verbatim), but the count can't see
+		// entry-emptiness.
+		return max(turns-1, 0), true, "the last task turn has no guaranteed later run (repair turns can render it but min_ can't rely on them)"
 	case "digests.written":
 		// The run-end pass digests the just-finished turn too, so
-		// every turn is digestible. The HasFinishedToolCall floor —
-		// a tool-free turn never digests — is invisible to the count.
-		return turns, true, "one digest per turn"
+		// every task turn is digestible. The HasFinishedToolCall
+		// floor — a tool-free turn never digests — is invisible to
+		// the count.
+		return turns, true, "one digest per turn (repair turns can add more but aren't guaranteed)"
 	case "prior_turns.events_collapsed", "digests.rendered", "recalls.prior_turn_result":
-		// Not turn-bounded above zero, but with fewer than two turns
-		// no prior turn exists — any positive min_ starves.
+		// Not turn-bounded above zero, but with fewer than two task
+		// turns no GUARANTEED prior turn exists — a repair retry on
+		// a 1-turn trajectory creates one, but a min_ predicate
+		// can't rely on it. Any positive min_ starves.
 		if turns < 2 {
-			return 0, true, "no prior turn exists below 2 turns"
+			return 0, true, "no guaranteed prior turn below 2 task turns (repair retries can create one but min_ can't rely on them)"
 		}
 	}
 	return 0, false, ""

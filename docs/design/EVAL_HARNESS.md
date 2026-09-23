@@ -563,10 +563,14 @@ contract corpus authors write predicates against. Per mechanism:
   `stub`/`digest`/`summarize`): the collapsible set freezes at a
   run's first render and only turns strictly below the run's
   starting turn are eligible — turn i can first collapse inside run
-  i+1. **The last turn can never collapse**: no later run exists to
-  render it. Ceiling: `turns_collapsed ≤ len(turns) − 1`. Under
-  `summarize` the practical ceiling is lower still — a covered turn
-  with no committed entries renders verbatim and isn't counted.
+  i+1. The last task turn has no *guaranteed* later run, so the lint
+  ceiling is `turns_collapsed ≤ len(turns) − 1` — a deterministic
+  bound, not a structural one: edge repair retries persist as user
+  messages and a repair run after the last task turn CAN collapse
+  it (up to ~3T session turns), but repair firing is model-dependent
+  and no `min_` predicate may rely on it. Under `summarize` the
+  practical ceiling is lower still — a covered turn with no
+  committed entries renders verbatim and isn't counted.
   `stub`/`digest` have the mirror-image hole: a turn only counts when
   ≥1 tool call collapsed, so tool-free (question-only,
   provider-executed, text-only) turns never count — a covered
@@ -576,19 +580,42 @@ contract corpus authors write predicates against. Per mechanism:
 - **Turn digests** (`digest` mode): the run-end pass digests every
   finished turn lacking one — including the turn that just finished —
   bounded by a catch-up cap per run. A turn with no finished tool
-  call never digests. Ceiling: `digests.written ≤ len(turns)`.
-  `digests.rendered` counts renders selecting a digest — it needs a
-  prior turn to exist (structurally zero below 2 turns) but isn't
-  turn-bounded above that.
+  call never digests. Ceiling: `digests.written ≤ len(turns)` —
+  again deterministic: repair turns digest too, but can't be relied
+  on. `digests.rendered` counts renders selecting a digest — it needs
+  a prior turn to exist (deterministically zero below 2 task turns —
+  a repair retry can create one, but `min_` can't rely on it) and
+  isn't turn-bounded above that.
 - **Checkpoints** (`notebook_checkpoint`): fire on the mid-run
   write-boundary trigger or the run-end fallback — session-bounded,
   not turn-bounded; no turn-count ceiling applies.
 - **`recalls.prior_turn_result`**: needs a prior turn to exist —
-  structurally zero below 2 turns regardless of mode.
+  deterministically zero below 2 task turns (a repair retry can
+  create one, but `min_` can't rely on it).
 
 `ValidateArmCoverageVsCorpus` enforces the turn-count half of this
 contract post-selection: a `min_` predicate past the ceiling is a
 load error, not an inconclusive run.
+
+The lint's blind spots, disclosed so nobody mistakes silence for
+safety:
+
+- **Fixture config escapes resolution.** A trajectory's
+  `fixture/.crush.json` merges *under* the arm config
+  (`materialize.go`) — `options.disabled_tools: ["recall"]` there
+  silently starves every recall-dependent predicate, and no phase
+  sees it. Corpus rule: fixtures must not disable tools that arm
+  coverage depends on.
+- **Hydration needs an MCP memory server.** `maybeHydrateNotebook`
+  also requires a configured mem0-style MCP server
+  (`notebook_hydrate.go`), which arm options can't express — a
+  `min_hydration.*` predicate on an env without one starves even
+  when every flag resolves correctly.
+- **Edge outcome reachability is enumerated, not open.** Only
+  `(edge, outcome)` pairs in `edgeOutcomeTable` can ever appear —
+  `verification.gated`, `stall.cleared`, `todos.suppressed` and
+  friends fail parse as unknown fields rather than starving at run
+  time.
 
 ## bands.json — characterization state
 

@@ -135,23 +135,26 @@ func init() {
 		}
 	}
 	// Per-edge outcome counts: edge_firings.<edge>.<outcome> for the
-	// stable edge names and the full outcome enum. Verification and
-	// todos are flag-invariant — their predicates don't gate on the
-	// flag (rows still only exist when a trigger evaluated, not every
-	// boundary); stall and burn-watch ride ambiguity_clarification
-	// (their fired rows only exist when the flag is on), so their
-	// fields are arm-scoped. Gated rows only ever appear in the
-	// flag-off arm — arm coverage is also where "would have fired"
-	// volume is measured.
+	// reachable (edge, outcome) pairs in edgeOutcomeTable — pairs the
+	// scan/resolve machinery can't produce (verification.gated,
+	// stall.cleared, ...) never register, so a predicate naming one
+	// fails parse in either scope rather than starving silently.
+	// Verification and todos are flag-invariant — their predicates
+	// don't gate on the flag (rows still only exist when a trigger
+	// evaluated, not every boundary); stall and burn-watch ride
+	// ambiguity_clarification (their fired rows only exist when the
+	// flag is on), so their fields are arm-scoped. Gated rows only
+	// ever appear in the flag-off arm — arm coverage is also where
+	// "would have fired" volume is measured.
 	for _, edge := range []string{"verification", "todos"} {
-		for _, outcome := range edgeFiringOutcomes {
+		for outcome := range edgeOutcomeTable[edge] {
 			coverageFields["edge_firings."+edge+"."+outcome] = func(r *RunRecord) float64 {
 				return float64(r.EdgeFirings[edge][outcome])
 			}
 		}
 	}
 	for _, edge := range []string{"stall", "burn-watch"} {
-		for _, outcome := range edgeFiringOutcomes {
+		for outcome := range edgeOutcomeTable[edge] {
 			armOnlyCoverageFields["edge_firings."+edge+"."+outcome] = func(r *RunRecord) float64 {
 				return float64(r.EdgeFirings[edge][outcome])
 			}
@@ -159,15 +162,6 @@ func init() {
 	}
 	armFields = maps.Clone(coverageFields)
 	maps.Copy(armFields, armOnlyCoverageFields)
-}
-
-// edgeFiringOutcomes is the edge_firings.outcome enum — the coverage
-// field suffix set. Kept in sync with internal/agent/run_edges.go's
-// edgeOutcome constants (the package boundary can't import them; the
-// string literals are the stable names eval assertions pin).
-var edgeFiringOutcomes = []string{
-	"fired", "suppressed", "exhausted", "headless-degraded",
-	"gated", "deferred", "cleared", "cancelled",
 }
 
 // ParseCoverageKey validates a coverage predicate key at load time:
