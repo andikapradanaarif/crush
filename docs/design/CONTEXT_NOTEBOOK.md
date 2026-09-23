@@ -338,8 +338,9 @@ func recall(query string) string {
 }
 ```
 
-**Cost:** one tool call (~500 tokens result). 16× cheaper than re-reading
-a file (~8K tokens).
+**Cost:** one tool call (~500 tokens result) vs ~8K tokens for
+re-reading a file — but recall returns event descriptions, not current
+file bytes, so edits still need `view`.
 
 ### Mechanism 2 (supporting): Notebook search (browse + query, one tool)
 
@@ -530,7 +531,7 @@ func (a *sessionAgent) maybeAutoInject(
 │                                                              │
 │ - Sees compacted notebook for old turns                     │
 │ - Sees recent raw turns within 25K token budget              │
-│ - Sees system prompt: "Use recall before re-reading files"   │
+│ - Sees system prompt: "recall for details, view for bytes"    │
 │ - May see auto-injected entries (if enabled + matched)      │
 │                                                              │
 │ Model decides:                                               │
@@ -550,8 +551,8 @@ func (a *sessionAgent) maybeAutoInject(
 ┌──────────────────────────────────────────────────────────────┐
 │ Model works on the task                                      │
 │ - Uses recalled context                                       │
-│ - Does NOT re-read files that have notebook entries          │
-│ - Saves tokens by using recall instead of view tool          │
+│ - Uses `view` for bytes, `recall` for event details          │
+│ - Saves tokens vs carrying full raw history                  │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -567,14 +568,14 @@ one specific event (file read, file edit, command, decision).
   You can search by file name, tag, turn number, event type, or concept.
 - Use `notebook_search` to browse all available entries or filter by
   a query (tag, event type, or text).
-- Do NOT re-read files with notebook entries — use `recall` first.
-  It is 16× cheaper than re-reading the file.
-- If recall doesn't have what you need, then use `view` to re-read.
+- Entries describe past events; they don't contain a file's
+  current contents — `recall` for event details, `view` for the bytes
+  you'll modify.
 ```
 
 Note: the system prompt no longer mentions auto-injection as a
 guaranteed mechanism. The model is instructed to use `recall` as the
-primary retrieval path.
+primary retrieval path for event details.
 
 ### Token cost comparison: retrieval methods
 
@@ -1231,8 +1232,9 @@ Usage:
 Returns: full notebook entries with all preserved details.
 Each entry is about ONE event — no noise from unrelated events.
 
-Do NOT re-read files with notebook entries — use recall first.
-It is 16× cheaper than re-reading the file.
+Entries describe past events, and `result:` returns recorded tool
+output — neither has the file's current bytes. Re-read the file for the
+bytes you'll modify.
 ```
 
 ### Step 7: Notebook search tool — browse + query (one tool)
@@ -1305,9 +1307,9 @@ one specific event (file read, file edit, command, decision).
   You can search by file name, tag, turn number, event type, or concept.
 - Use `notebook_search` to browse all available entries or filter by
   a query (tag, event type, or text).
-- Do NOT re-read files with notebook entries — use `recall` first.
-  It is 16× cheaper than re-reading the file.
-- If recall doesn't have what you need, then use `view` to re-read.
+- Entries describe past events; they don't contain a file's
+  current contents — `recall` for event details, `view` for the bytes
+  you'll modify.
 ```
 
 ### Step 9: Compaction — when notebook exceeds 100K tokens
@@ -1451,7 +1453,7 @@ Must be validated by Step 0 instrumentation on real sessions.
 | Notebook gen not ready before next turn   | Include stale turn as raw (R+1 temporarily)                                                                 |
 | Summary loses critical detail             | Recall tool retrieves full content; 1000 token cap per entry                                                |
 | Model doesn't know it can recall          | System prompt instructs model; auto-injection handles common case                                           |
-| Model re-reads files instead of recalling | System prompt says "use recall first, 16× cheaper"; recall tool description reinforces                      |
+| Model re-reads files instead of recalling | System prompt and recall tool description direct event-detail lookups to recall; file bytes still need `view` |
 | Notebook grows too large                  | Compaction at 100K tokens; compression levels 0→1→2                                                         |
 | Tool-call sequence split                  | `findTurnBoundaryByTokenBudget` + `findNextSafeBoundary` guarantee safe cut points                          |
 | Token estimate inaccuracy                 | Adaptive budget is approximate; over-estimate is safe (fewer raw turns), under-estimate sends slightly more |
