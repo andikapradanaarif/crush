@@ -20,18 +20,24 @@
 			"config": {
 				"options": {
 					"notebook_enabled": true,
-					"notebook_checkpoint": false
+					"notebook_checkpoint": false,
+					"notebook_raw_token_budget": 2000
 				}
+			},
+			"coverage": {
+				"min_request.notebook_bytes": 1
 			}
 		},
 		"treatment": {
 			"config": {
 				"options": {
 					"notebook_enabled": true,
-					"notebook_checkpoint": true
+					"notebook_checkpoint": true,
+					"notebook_raw_token_budget": 2000
 				}
 			},
 			"coverage": {
+				"min_request.notebook_bytes": 1,
 				"min_checkpoints.written": 1,
 				"min_checkpoints.rendered": 1
 			}
