@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/stretchr/testify/require"
 )
@@ -868,6 +869,43 @@ func TestRunTelemetry_StepRecords(t *testing.T) {
 	require.Equal(t, int64(300), res.GeneratorTokens.Input)
 	require.Equal(t, int64(30), res.GeneratorTokens.Output)
 	require.Equal(t, int64(12), res.GeneratorTokens.CacheWrite)
+}
+
+// TestStepRecord_WireContract pins the agent→eval wire shape: the
+// child marshals agent.StepRecord into the telemetry doc and
+// addTurnTelemetry decodes into eval.StepRecord. A renamed JSON tag
+// on either side compiles fine and silently drops the field —
+// round-tripping a fully populated row makes drift visible.
+func TestStepRecord_WireContract(t *testing.T) {
+	t.Parallel()
+	src := agent.StepRecord{
+		Step:              3,
+		InputTokens:       11,
+		OutputTokens:      22,
+		CacheReadTokens:   33,
+		CacheWriteTokens:  44,
+		Estimated:         true,
+		Failed:            true,
+		PrefixHash:        "deadbeef",
+		FirstChanged:      7,
+		FirstChangedCause: "notebook-prefix",
+	}
+	b, err := json.Marshal(src)
+	require.NoError(t, err)
+	var dst StepRecord
+	require.NoError(t, json.Unmarshal(b, &dst))
+	require.Equal(t, src.Step, dst.Step)
+	require.Equal(t, src.InputTokens, dst.InputTokens)
+	require.Equal(t, src.OutputTokens, dst.OutputTokens)
+	require.Equal(t, src.CacheReadTokens, dst.CacheReadTokens)
+	require.Equal(t, src.CacheWriteTokens, dst.CacheWriteTokens)
+	require.Equal(t, src.Estimated, dst.Estimated)
+	require.Equal(t, src.Failed, dst.Failed)
+	require.Equal(t, src.PrefixHash, dst.PrefixHash)
+	require.Equal(t, src.FirstChanged, dst.FirstChanged)
+	require.Equal(t, src.FirstChangedCause, dst.FirstChangedCause)
+	// Turn is driver-assigned (addTurnTelemetry stamps it), not wire.
+	require.Zero(t, dst.Turn)
 }
 
 // TestArmTokenStats pins the informational benefit metric: conclusive

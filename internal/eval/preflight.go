@@ -224,13 +224,13 @@ func dropHint(exp *Experiment, providerID string, known []catwalk.Provider, reso
 // classification of the fantasy.ProviderError, immune to message-text
 // drift — it wins outright:
 //
-//   - auth / provider_unreachable / provider_server: credentials and
-//     the endpoint are experiment-global — every trajectory fails
-//     identically — trip.
-//   - provider_deterministic: scope-split. A 4xx before any request
-//     completes (Steps==0 && Request==nil) is config-shaped — trip;
-//     mid-run it's trajectory-shaped and falls through to
-//     fixture-class instead.
+//   - auth / provider_unreachable: credentials and the endpoint are
+//     experiment-global — every trajectory fails identically — trip.
+//   - provider_deterministic / provider_server: scope-split. Before
+//     any request completes (Steps==0 && Request==nil) the failure is
+//     config-shaped — trip; mid-run it can be payload-specific —
+//     fixture-class. (A dead endpoint can never produce a completed
+//     request, so it still reads step-0.)
 //   - rate_limit / provider_transient / context_too_large /
 //     provider_other / cancelled / timeout: keep sampling — resampling
 //     or the attempts cap is the right mechanism. (context_too_large
@@ -256,17 +256,20 @@ func isConfigClassError(rec RunRecord) bool {
 		return false
 	}
 	switch rec.ErrorClass {
-	case "auth", "provider_unreachable", "provider_server":
+	case "auth", "provider_unreachable":
 		// Credentials and the endpoint itself are experiment-global —
 		// a failure at any step still fails every other trajectory.
 		return true
-	case "provider_deterministic":
-		// A 4xx that fires before the first request is config-shaped
-		// (unresolved model, rejected schema) — every trajectory fails
-		// identically. A mid-run 4xx can be trajectory-shaped instead:
-		// a pathological tool result the provider rejects, a 413 that
-		// dodged the CTL flag. That's fixture-class — skip this
-		// trajectory, don't abort the experiment.
+	case "provider_deterministic", "provider_server":
+		// A provider failure before the first request completes is
+		// config-shaped — unresolved model, rejected schema, dead
+		// endpoint; every trajectory fails identically at step 0.
+		// Mid-run either class can be trajectory-shaped: a
+		// pathological tool result the provider rejects (4xx), or a
+		// payload that trips a provider bug (5xx — endpoints do
+		// return 500/529 on specific inputs). A genuinely dead
+		// endpoint still aborts — it can never produce a completed
+		// request, so it never reads mid-run.
 		return rec.Steps == 0 && rec.Request == nil
 	case "rate_limit", "provider_transient", "provider_other", "context_too_large", "cancelled", "timeout":
 		return false
@@ -317,11 +320,12 @@ func isFixtureConfigError(rec RunRecord) bool {
 	if rec.ErrorClass == "context_too_large" {
 		return true
 	}
-	// A deterministic provider rejection observed mid-trajectory is
-	// trajectory-scoped — the offending content belongs to this
-	// trajectory's render, not the shared config. Step-0 failures
+	// A provider rejection or server failure observed mid-trajectory
+	// is trajectory-scoped — the offending content belongs to this
+	// trajectory's render (a rejected tool result, a payload that
+	// trips a provider bug), not the shared config. Step-0 failures
 	// stay config-class (see isConfigClassError).
-	if rec.ErrorClass == "provider_deterministic" {
+	if rec.ErrorClass == "provider_deterministic" || rec.ErrorClass == "provider_server" {
 		return rec.Steps > 0 || rec.Request != nil
 	}
 	if _, ok := rec.CheckDetail["harness"]; ok {

@@ -342,6 +342,12 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		// stubbing/collapse.
 		c.stubBoundary = csync.NewMap[string, int]()
 		c.stubStats = csync.NewMap[string, stubStats]()
+	}
+	// reqStats exists regardless of the notebook gate, so the
+	// deletion watcher runs whenever the session service does —
+	// every map access inside is nil-guarded, making the
+	// notebook-off path a reqStats-only cleanup.
+	if opts.Sessions != nil {
 		go c.watchSessionDeletions()
 	}
 

@@ -420,16 +420,20 @@ for loopback endpoints) but 401 on every request.
 Mid-run, a circuit breaker stops the bleed: two `error` records
 matching a config-class signature abort the experiment;
 fixture-config failures (`harness`/`check_error` check detail,
-`context_too_large`, or a trajectory-shaped `provider_deterministic`)
-skip only their trajectory. When the child reports a typed
-`error_class` it wins over the string signatures:
-`auth`/`provider_unreachable`/`provider_server` are experiment-global
-at any step, while `provider_deterministic` is scope-split — a 4xx
-with `steps == 0 && request == nil` (a rejected first request:
-unresolved model, bad schema — every trajectory fails identically) is
-config-class, and anything observed after a completed request is
-fixture-class. Identical non-config errors — rate limits,
-transients — keep sampling.
+`context_too_large`, or a trajectory-shaped provider error) skip only
+their trajectory. When the child reports a typed `error_class` it
+wins over the string signatures: `auth`/`provider_unreachable` are
+experiment-global at any step, while `provider_deterministic` and
+`provider_server` are scope-split — a provider failure with
+`steps == 0 && request == nil` (a rejected first request: unresolved
+model, bad schema, dead endpoint — every trajectory fails
+identically) is config-class, and anything observed after a completed
+request is fixture-class, since a mid-run 4xx or 5xx can be
+payload-specific (pathological tool result, provider bug on a
+specific input). The split can't be fooled by a dead endpoint: an
+endpoint that never completes a request always reads step-0, so a
+mid-experiment outage still aborts. Identical non-config errors —
+rate limits, transients — keep sampling.
 
 One coarse edge, by design: a trajectory whose *first* request is
 rejected for trajectory-specific content (an oversized first render

@@ -205,10 +205,19 @@ func classifyRunError(err error) string {
 			return "provider_server"
 		default:
 			// No HTTP status — the failure happened at transport
-			// level. A dead endpoint is config-class; a reset isn't.
+			// level. Refused, DNS, and routing-layer unreachable all
+			// mean "the endpoint can't be reached at all" —
+			// config-class. ETIMEDOUT and x509 errors deliberately
+			// stay out: a mid-run timeout can be a blip rather than
+			// a dead endpoint, so they resample instead of risking
+			// a false abort — the cost is burning the attempts cap
+			// on a silently-dropped endpoint.
 			var dnsErr *net.DNSError
 			switch {
-			case errors.Is(pe.Cause, syscall.ECONNREFUSED) || errors.As(pe.Cause, &dnsErr):
+			case errors.Is(pe.Cause, syscall.ECONNREFUSED) ||
+				errors.Is(pe.Cause, syscall.EHOSTUNREACH) ||
+				errors.Is(pe.Cause, syscall.ENETUNREACH) ||
+				errors.As(pe.Cause, &dnsErr):
 				return "provider_unreachable"
 			case pe.IsRetryable():
 				return "provider_transient"

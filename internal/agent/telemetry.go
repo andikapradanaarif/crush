@@ -267,6 +267,12 @@ func hashPart(h hash.Hash64, part fantasy.MessagePart) {
 		_, _ = write([]byte(p.ToolCallID))
 		_, _ = write([]byte{0})
 		hashToolResultOutput(h, p.Output)
+	default:
+		// A MessagePart kind this switch doesn't know (a future
+		// fantasy addition) — hash its discriminator so two
+		// different unknown kinds can't silently hash identical.
+		_, _ = write([]byte{127})
+		_, _ = write([]byte(p.GetType()))
 	}
 }
 
@@ -303,6 +309,11 @@ func hashToolResultOutput(h hash.Hash64, output fantasy.ToolResultOutputContent)
 		_, _ = write([]byte(o.MediaType))
 		_, _ = write([]byte{0})
 		_, _ = write([]byte(o.Text))
+	default:
+		// Same future-proofing as hashPart — a new output kind
+		// still contributes its discriminator.
+		_, _ = write([]byte{127})
+		_, _ = write([]byte(o.GetType()))
 	}
 }
 

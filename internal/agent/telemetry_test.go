@@ -149,6 +149,20 @@ func TestHashMessage_PartTypeAndIDs(t *testing.T) {
 		require.NotEqual(t, hashMessage(mk("call_1")), hashMessage(mk("call_2")))
 	})
 
+	t.Run("unknown part types hash by discriminator", func(t *testing.T) {
+		t.Parallel()
+		mk := func(kind fantasy.ContentType) fantasy.Message {
+			return fantasy.Message{
+				Role:    fantasy.MessageRoleUser,
+				Content: []fantasy.MessagePart{unknownPart{kind: kind}},
+			}
+		}
+		// A part kind hashPart doesn't know still separates on its
+		// discriminator — two different unknown kinds can't collapse
+		// into an identical hash.
+		require.NotEqual(t, hashMessage(mk("future-a")), hashMessage(mk("future-b")))
+	})
+
 	t.Run("field concatenation can't bleed", func(t *testing.T) {
 		t.Parallel()
 		mk := func(id, name string) fantasy.Message {
@@ -231,3 +245,10 @@ func TestRecordGeneratorUsage(t *testing.T) {
 	_, ok = c.nbStats.Get("")
 	require.False(t, ok)
 }
+
+// unknownPart stands in for a MessagePart kind hashPart doesn't know
+// — the hash must still separate on the discriminator.
+type unknownPart struct{ kind fantasy.ContentType }
+
+func (u unknownPart) GetType() fantasy.ContentType     { return u.kind }
+func (u unknownPart) Options() fantasy.ProviderOptions { return nil }

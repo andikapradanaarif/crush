@@ -222,28 +222,32 @@ func TestIsConfigClassError_ErrorClass(t *testing.T) {
 			CheckDetail: map[string]any{"run_error": "agent run failed: opaque provider text"},
 		}
 	}
-	for _, class := range []string{"auth", "provider_unreachable", "provider_server"} {
+	for _, class := range []string{"auth", "provider_unreachable"} {
 		require.True(t, isConfigClassError(mk(class)), class)
 	}
 	for _, class := range []string{"rate_limit", "provider_transient", "provider_other", "context_too_large", "cancelled", "timeout"} {
 		require.False(t, isConfigClassError(mk(class)), class)
 	}
-	// provider_deterministic is scope-split: pre-model (no steps, no
-	// request) it's config-shaped and trips the experiment breaker;
-	// mid-run it's trajectory-shaped — fixture-class, so two strikes
-	// skip the trajectory instead of aborting the experiment.
-	midRun := mk("provider_deterministic")
-	require.False(t, isConfigClassError(midRun))
-	require.True(t, isFixtureConfigError(midRun))
-	step0 := midRun
-	step0.Steps = 0
-	step0.Request = nil
-	require.True(t, isConfigClassError(step0))
-	require.False(t, isFixtureConfigError(step0))
+	// provider_deterministic and provider_server share the scope
+	// split: pre-model (no steps, no request) they're config-shaped
+	// and trip the experiment breaker; mid-run they're
+	// trajectory-shaped — fixture-class, so two strikes skip the
+	// trajectory instead of aborting the experiment. A dead
+	// endpoint can't produce a completed request, so a real outage
+	// still reads step-0.
+	for _, class := range []string{"provider_deterministic", "provider_server"} {
+		midRun := mk(class)
+		require.False(t, isConfigClassError(midRun), class)
+		require.True(t, isFixtureConfigError(midRun), class)
+		step0 := midRun
+		step0.Steps = 0
+		step0.Request = nil
+		require.True(t, isConfigClassError(step0), class)
+		require.False(t, isFixtureConfigError(step0), class)
+	}
 	// context_too_large is trajectory-scoped — fixture-class, so two
 	// strikes skip the trajectory rather than abort the experiment.
 	require.True(t, isFixtureConfigError(mk("context_too_large")))
-	require.False(t, isFixtureConfigError(mk("provider_server")))
 }
 
 // classRunner fails every run with a fixed typed error class — the
