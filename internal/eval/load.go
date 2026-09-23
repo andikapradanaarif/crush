@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -103,8 +104,11 @@ func ValidateTrajectory(t *Trajectory, trajDir string) []string {
 			problems = append(problems, fmt.Sprintf("coverage %q: %v", key, err))
 			continue
 		}
-		if op == "min" && field == "steps" && t.Budget.MaxSteps > 0 && int(v) > t.Budget.MaxSteps {
-			problems = append(problems, fmt.Sprintf("coverage min_steps=%v exceeds budget.max_steps=%d — permanently inconclusive", v, t.Budget.MaxSteps))
+		// steps and request.prompt_requests count the same event
+		// stream — one model call per step, summed trajectory-wide —
+		// so both share the max_steps ceiling.
+		if op == "min" && (field == "steps" || field == "request.prompt_requests") && t.Budget.MaxSteps > 0 && int(v) > t.Budget.MaxSteps {
+			problems = append(problems, fmt.Sprintf("coverage %s=%v exceeds budget.max_steps=%d — permanently inconclusive", key, v, t.Budget.MaxSteps))
 		}
 		if op == "min" {
 			for _, p := range flagGatedPrefixes {
@@ -278,8 +282,49 @@ func ValidateExperiment(e *Experiment) error {
 				return err
 			}
 		}
+		for _, w := range writeOnlyCoverageWarnings(name, arm.Coverage) {
+			slog.Warn(w)
+		}
 	}
 	return nil
+}
+
+// writeRenderPairs maps a write-side coverage field to the render-side
+// sibling that proves the mechanism reached the prompt — the quantity
+// a prompt-level claim actually needs. Write counters increment on
+// commit regardless of whether any render ever selects the entry, so a
+// write-only min_ can be satisfied while the prefix never changes.
+var writeRenderPairs = map[string]string{
+	"checkpoints.written":  "checkpoints.rendered",
+	"digests.written":      "digests.rendered",
+	"hydration.seeds":      "hydration.rendered",
+	"hydration.plan_seeds": "hydration.rendered",
+}
+
+// writeOnlyCoverageWarnings flags arm coverage that asserts a write-
+// side counter without its render-side sibling — advisory, since a
+// write-only predicate is legitimate when the question is about the
+// generation path itself rather than prompt inclusion.
+func writeOnlyCoverageWarnings(armName string, cov Coverage) []string {
+	var warnings []string
+	for key := range cov {
+		op, field, err := ParseArmCoverageKey(key)
+		if err != nil || op != "min" {
+			continue
+		}
+		rendered, ok := writeRenderPairs[field]
+		if !ok {
+			continue
+		}
+		if _, has := cov["min_"+rendered]; has {
+			continue
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"Arm %q coverage %q asserts writes, not prompt inclusion — "+
+				"a run can commit entries that never render; add min_%s if the claim is prompt-level",
+			armName, key, rendered))
+	}
+	return warnings
 }
 
 // starvationRule is one requirement an arm's resolved options must
@@ -456,6 +501,11 @@ func armStarvationRules(field string) []starvationRule {
 	if strings.HasPrefix(field, "checkpoints.") {
 		return []starvationRule{boolOn("notebook_checkpoint"), boolOn("notebook_enabled")}
 	}
+	if field == "request.notebook_bytes" {
+		// The rendered notebook block only exists when the feature
+		// is on — flag-off arms carry a structural 0.
+		return []starvationRule{boolOn("notebook_enabled")}
+	}
 	if strings.HasPrefix(field, "hydration.") {
 		return []starvationRule{boolOn("notebook_hydration"), boolOn("notebook_enabled")}
 	}
@@ -576,7 +626,7 @@ func coverageTurnCeiling(field string, turns int) (ceil int, bounded bool, why s
 		// floor — a tool-free turn never digests — is invisible to
 		// the count.
 		return turns, true, "one digest per turn (repair turns can add more but aren't guaranteed)"
-	case "prior_turns.events_collapsed", "digests.rendered", "recalls.prior_turn_result":
+	case "prior_turns.events_collapsed", "digests.rendered", "checkpoints.rendered", "recalls.prior_turn_result":
 		// Not turn-bounded above zero, but with fewer than two task
 		// turns no GUARANTEED prior turn exists — a repair retry on
 		// a 1-turn trajectory creates one, but a min_ predicate

@@ -377,6 +377,28 @@ starve the arm where the flag is off — move it to arm coverage.
 of an arm with no coverage block — `baseline` characterize runs
 always — see trajectory predicates only.
 
+Write counters are not render counters. `checkpoints.written`,
+`digests.written`, and `hydration.seeds`/`plan_seeds` increment on
+commit — a run can satisfy them while no entry ever reaches a
+rendered prompt (selection may rank the entry out, or the boundary
+filter may exclude it). A prompt-level claim needs the render-side
+sibling — `*.rendered` — or the direct request-composition fields
+(`request.notebook_bytes`, `request.system_bytes`, …, measured on the
+trajectory-final rendered request). Asserting a write-side `min_`
+without its render sibling still validates — generation-path
+questions are legitimate — but validation warns, because a
+`written`-only predicate on a prompt-level claim is how an experiment
+passes while testing nothing. `request.*` answers a coarser question
+than a render sibling — `request.notebook_bytes > 0` proves *some*
+notebook block rendered, not that the entry class under test did — so
+the warning doesn't treat it as a sibling; pair them when the claim
+needs both ("content rendered" + "checkpoints in it"). `request.*`
+reads fail closed in both directions when the run carried no request
+snapshot: absent telemetry is not "0 bytes rendered".
+`request.notebook_bytes` is flag-gated (structurally 0 with
+`notebook_enabled` off) — arm-scope it like the other flag-dependent
+fields.
+
 `corpus` selects trajectory ids by glob (`["*"]` = everything) or
 `"band:<name>"` for a band slice — `"band:stable"` is how the smoke
 tier expresses its corpus. `quarantined` is excluded even under
@@ -842,6 +864,16 @@ p̂_treat − p̂_ctrl`, paired permutation test over `{d_t}`.
   (0/N on a stable trajectory — strict; the 23% false-alarm math
   above is why it's not ≥1 failure), not the eligibility-gated
   baseline Fisher — smoke must work where baselines are thin.
+- **A quiet run is only a pass when some tier could have spoken.**
+  The report is *powered* iff at least one catastrophic-eligible
+  trajectory exists or at least one diffuse arm-pair fed the
+  permutation test. A quiet report with no powered tier reads
+  `verdict: INCONCLUSIVE`, not PASS — "no alarm fired" is "no
+  evidence" when neither tier was populated (a mechanism that never
+  rendered, a corpus with no eligible trajectories), and `eval run`
+  exits non-zero so an unpowered experiment cannot green a gate.
+  Alarms still produce FAIL on an unpowered report — INCONCLUSIVE
+  describes only the quiet no-evidence case.
 
 ## Benefit, quantified
 

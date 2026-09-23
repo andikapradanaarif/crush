@@ -23,6 +23,10 @@ type Report struct {
 	// DiffuseP is the corpus-level permutation p-value over mid +
 	// uncharacterized bands.
 	DiffuseP float64
+	// DiffusePairs counts the trajectory arm-pairs that fed the
+	// diffuse permutation test — zero means the tier never ran and
+	// carried no power regardless of the printed p.
+	DiffusePairs int
 	// ExcludedDifferential lists trajectories whose treatment arm
 	// produced significantly more inconclusive/error outcomes than
 	// control — mechanism flags aren't orthogonal to exclusion by
@@ -98,6 +102,24 @@ func (r Report) Fired(alpha float64) bool {
 		len(r.NoopFlags) > 0
 }
 
+// Powered reports whether at least one evidence tier could have
+// produced a verdict: a catastrophic-eligible trajectory or a diffuse
+// arm-pair. When neither exists the evidence tiers are empty and a
+// quiet run means "no evidence", not "no regression" — the verdict
+// reads INCONCLUSIVE rather than PASS so a mechanism-never-fired or
+// baseline-starved experiment cannot masquerade as a clean bill. The
+// collapse-pattern alarms (smoke, noop, excluded-differential, ...)
+// still fire on an unpowered report; INCONCLUSIVE only describes the
+// quiet case.
+func (r Report) Powered() bool {
+	for _, ok := range r.CatastrophicEligible {
+		if ok {
+			return true
+		}
+	}
+	return r.DiffusePairs > 0
+}
+
 // Summary renders the report for the CLI.
 func (r Report) Summary(alpha float64) string {
 	var b strings.Builder
@@ -144,10 +166,14 @@ func (r Report) Summary(alpha float64) string {
 				100*(treat.PromptMean()-ctrl.PromptMean())/ctrl.PromptMean())
 		}
 	}
-	if !r.Fired(alpha) {
-		b.WriteString("  verdict: PASS\n")
-	} else {
+	switch {
+	case r.Fired(alpha):
 		b.WriteString("  verdict: FAIL\n")
+	case !r.Powered():
+		fmt.Fprintf(&b, "  verdict: INCONCLUSIVE (no powered tier: 0/%d catastrophic-eligible, %d diffuse pairs)\n",
+			len(r.CatastrophicEligible), r.DiffusePairs)
+	default:
+		b.WriteString("  verdict: PASS\n")
 	}
 	return b.String()
 }
@@ -315,6 +341,7 @@ func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRe
 		}
 	}
 
+	rep.DiffusePairs = len(diffusePairs)
 	if len(diffusePairs) > 0 {
 		rep.DiffuseP = PermutationP(diffusePairs, replicates, rng)
 	}

@@ -649,6 +649,8 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 	rep.Catastrophic = gate.Catastrophic
 	rep.CatastrophicEligible = gate.CatastrophicEligible
 	rep.DiffuseP = gate.DiffuseP
+	rep.DiffusePairs = gate.DiffusePairs
+	rep.ArmTokens = gate.ArmTokens
 	rep.ExcludedDifferential = gate.ExcludedDifferential
 	rep.Smoke = gate.Smoke
 
