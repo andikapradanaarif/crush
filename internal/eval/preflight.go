@@ -224,10 +224,13 @@ func dropHint(exp *Experiment, providerID string, known []catwalk.Provider, reso
 // classification of the fantasy.ProviderError, immune to message-text
 // drift — it wins outright:
 //
-//   - auth / provider_deterministic / provider_unreachable: every
-//     retry fails identically — trip.
-//   - provider_server: a 5xx that survived fantasy's internal retries;
-//     the 2-strike count is the persistence test — trip.
+//   - auth / provider_unreachable / provider_server: credentials and
+//     the endpoint are experiment-global — every trajectory fails
+//     identically — trip.
+//   - provider_deterministic: scope-split. A 4xx before any request
+//     completes (Steps==0 && Request==nil) is config-shaped — trip;
+//     mid-run it's trajectory-shaped and falls through to
+//     fixture-class instead.
 //   - rate_limit / provider_transient / context_too_large /
 //     provider_other / cancelled / timeout: keep sampling — resampling
 //     or the attempts cap is the right mechanism. (context_too_large

@@ -418,11 +418,26 @@ child only warns — custom providers survive keyless load (legitimate
 for loopback endpoints) but 401 on every request.
 
 Mid-run, a circuit breaker stops the bleed: two `error` records
-matching a config-class signature (`crush run failed:` + pre-model
-signature, or `agent run failed:` + auth signature) abort the
-experiment; fixture-config failures (`harness` check detail) skip
-only their trajectory. Identical non-config errors — rate limits —
-keep sampling.
+matching a config-class signature abort the experiment;
+fixture-config failures (`harness`/`check_error` check detail,
+`context_too_large`, or a trajectory-shaped `provider_deterministic`)
+skip only their trajectory. When the child reports a typed
+`error_class` it wins over the string signatures:
+`auth`/`provider_unreachable`/`provider_server` are experiment-global
+at any step, while `provider_deterministic` is scope-split — a 4xx
+with `steps == 0 && request == nil` (a rejected first request:
+unresolved model, bad schema — every trajectory fails identically) is
+config-class, and anything observed after a completed request is
+fixture-class. Identical non-config errors — rate limits,
+transients — keep sampling.
+
+One coarse edge, by design: a trajectory whose *first* request is
+rejected for trajectory-specific content (an oversized first render
+that dodges the context-too-large flag, a pathological prompt shape)
+reads config-shaped — two such trajectories abort the experiment
+rather than skip. Defensible: pre-model failures are usually
+shared-config, and the alternative (a broken config resampling every
+trajectory twice) is strictly worse.
 
 ## Run record (results/\*.jsonl)
 
