@@ -388,11 +388,16 @@ trajectory-final rendered request). Asserting a write-side `min_`
 without its render sibling still validates — generation-path
 questions are legitimate — but validation warns, because a
 `written`-only predicate on a prompt-level claim is how an experiment
-passes while testing nothing. `request.*` reads fail closed in both
-directions when the run carried no request snapshot: absent telemetry
-is not "0 bytes rendered". `request.notebook_bytes` is flag-gated
-(structurally 0 with `notebook_enabled` off) — arm-scope it like the
-other flag-dependent fields.
+passes while testing nothing. `request.*` answers a coarser question
+than a render sibling — `request.notebook_bytes > 0` proves *some*
+notebook block rendered, not that the entry class under test did — so
+the warning doesn't treat it as a sibling; pair them when the claim
+needs both ("content rendered" + "checkpoints in it"). `request.*`
+reads fail closed in both directions when the run carried no request
+snapshot: absent telemetry is not "0 bytes rendered".
+`request.notebook_bytes` is flag-gated (structurally 0 with
+`notebook_enabled` off) — arm-scope it like the other flag-dependent
+fields.
 
 `corpus` selects trajectory ids by glob (`["*"]` = everything) or
 `"band:<name>"` for a band slice — `"band:stable"` is how the smoke

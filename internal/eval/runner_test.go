@@ -378,6 +378,95 @@ func TestRunExperiment_DiffuseAlarmOnUniformShift(t *testing.T) {
 	require.Empty(t, rep.Catastrophic)
 }
 
+// A quiet diffuse-only experiment must read powered — the report
+// RunExperiment returns has to carry Evaluate's DiffusePairs, else
+// every all-uncharacterized corpus reports INCONCLUSIVE while its
+// p-value was computed from real pairs.
+func TestRunExperiment_QuietDiffusePowered(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	flag := "debug"
+	r := &Runner{
+		EvalDir:        root,
+		Driver:         fakeRunner{flag: flag},
+		WorkParent:     t.TempDir(),
+		PermReplicates: 500,
+		RNG:            rand.New(rand.NewPCG(5, 6)),
+	}
+	for i := range 4 {
+		id := fmt.Sprintf("mid-%d", i)
+		writeTrajectory(t, filepath.Join(root, "corpus"), id, nil)
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(root, "flags.json"),
+		[]byte(fmt.Sprintf(`{"flag_defaults":{%q:false}}`, flag)), 0o644))
+	bands := &Bands{SchemaVersion: 1, Entries: map[string]BandEntry{}}
+	for i := range 4 {
+		id := fmt.Sprintf("mid-%d", i)
+		bands.Entries[id] = BandEntry{Band: BandMid, ContentHash: mustHash(t, filepath.Join(root, "corpus", id))}
+	}
+	require.NoError(t, bands.Save(root))
+
+	// Identical arm intents — the marker writes on flag-off so both
+	// arms pass, d_t≈0, nothing fires. (fakeRunner reports no
+	// ResolvedOptions, so the noop-flag alarm stays silent.)
+	exp := &Experiment{
+		Name: "expq", Model: "mock/m", Temperature: ptr(0.0),
+		Corpus:            []string{"band:mid"},
+		RunsPerTrajectory: map[Band]int{BandMid: 3},
+		Arms: map[string]Arm{
+			"control":   {Config: ArmConfig{Options: map[string]any{flag: false}}},
+			"treatment": {Config: ArmConfig{Options: map[string]any{flag: false}}},
+		},
+	}
+	rep, err := r.RunExperiment(context.Background(), exp)
+	require.NoError(t, err)
+	require.False(t, rep.Fired(0.05))
+	require.Equal(t, 4, rep.DiffusePairs)
+	require.True(t, rep.Powered())
+	require.Contains(t, rep.Summary(0.05), "verdict: PASS")
+}
+
+// No eligible catastrophic trajectory AND no diffuse pairs → the
+// quiet report is INCONCLUSIVE through the real plumbing too.
+func TestRunExperiment_UnpoweredIsInconclusive(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	flag := "debug"
+	r := &Runner{
+		EvalDir:        root,
+		Driver:         fakeRunner{flag: flag},
+		WorkParent:     t.TempDir(),
+		PermReplicates: 500,
+		RNG:            rand.New(rand.NewPCG(9, 10)),
+	}
+	// Stable-band trajectory with no baseline → never eligible, and
+	// stable feeds no diffuse pairs.
+	writeTrajectory(t, filepath.Join(root, "corpus"), "stable-t", nil)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "flags.json"),
+		[]byte(fmt.Sprintf(`{"flag_defaults":{%q:false}}`, flag)), 0o644))
+	bands := &Bands{SchemaVersion: 1, Entries: map[string]BandEntry{
+		"stable-t": {Band: BandStable, ContentHash: mustHash(t, filepath.Join(root, "corpus", "stable-t"))},
+	}}
+	require.NoError(t, bands.Save(root))
+
+	// Flag off on both arms → all pass: a collapse would trip the
+	// smoke alarm into FAIL, not the quiet-INCONCLUSIVE under test.
+	exp := &Experiment{
+		Name: "expu", Model: "mock/m", Temperature: ptr(0.0),
+		Corpus:            []string{"*"},
+		RunsPerTrajectory: map[Band]int{BandStable: 3},
+		Arms: map[string]Arm{
+			"control":   {Config: ArmConfig{Options: map[string]any{flag: false}}},
+			"treatment": {Config: ArmConfig{Options: map[string]any{flag: false}}},
+		},
+	}
+	rep, err := r.RunExperiment(context.Background(), exp)
+	require.NoError(t, err)
+	require.False(t, rep.Fired(0.05))
+	require.False(t, rep.Powered())
+	require.Contains(t, rep.Summary(0.05), "verdict: INCONCLUSIVE")
+}
+
 func TestWriteArmConfig_CollisionAndContent(t *testing.T) {
 	t.Parallel()
 	wd := t.TempDir()

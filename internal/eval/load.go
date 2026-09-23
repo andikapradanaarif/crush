@@ -104,8 +104,11 @@ func ValidateTrajectory(t *Trajectory, trajDir string) []string {
 			problems = append(problems, fmt.Sprintf("coverage %q: %v", key, err))
 			continue
 		}
-		if op == "min" && field == "steps" && t.Budget.MaxSteps > 0 && int(v) > t.Budget.MaxSteps {
-			problems = append(problems, fmt.Sprintf("coverage min_steps=%v exceeds budget.max_steps=%d — permanently inconclusive", v, t.Budget.MaxSteps))
+		// steps and request.prompt_requests count the same event
+		// stream — one model call per step, summed trajectory-wide —
+		// so both share the max_steps ceiling.
+		if op == "min" && (field == "steps" || field == "request.prompt_requests") && t.Budget.MaxSteps > 0 && int(v) > t.Budget.MaxSteps {
+			problems = append(problems, fmt.Sprintf("coverage %s=%v exceeds budget.max_steps=%d — permanently inconclusive", key, v, t.Budget.MaxSteps))
 		}
 		if op == "min" {
 			for _, p := range flagGatedPrefixes {

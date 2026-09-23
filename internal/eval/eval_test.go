@@ -747,6 +747,11 @@ func TestValidateArmCoverageVsCorpus(t *testing.T) {
 	// without a tighter bound.
 	require.Error(t, ValidateArmCoverageVsCorpus(mk(Coverage{"min_digests.rendered": 1}), []*Trajectory{mkTraj("one", 1)}))
 	require.NoError(t, ValidateArmCoverageVsCorpus(mk(Coverage{"min_digests.rendered": 1}), trajs3))
+	// checkpoints.rendered shares the floor: a checkpoint committed
+	// at turn k renders at k+1 earliest — no guaranteed render on a
+	// 1-turn trajectory.
+	require.Error(t, ValidateArmCoverageVsCorpus(mk(Coverage{"min_checkpoints.rendered": 1}), []*Trajectory{mkTraj("one", 1)}))
+	require.NoError(t, ValidateArmCoverageVsCorpus(mk(Coverage{"min_checkpoints.rendered": 1}), trajs3))
 	require.Error(t, ValidateArmCoverageVsCorpus(mk(Coverage{"min_recalls.prior_turn_result": 1}), []*Trajectory{mkTraj("one", 1)}))
 	require.Error(t, ValidateArmCoverageVsCorpus(mk(Coverage{"min_prior_turns.events_collapsed": 1}), []*Trajectory{mkTraj("one", 1)}))
 
@@ -798,6 +803,38 @@ func TestValidateTrajectory_FlagGatedMinRejected(t *testing.T) {
 	// Flag-invariant fields unaffected.
 	problems = ValidateTrajectory(mk(Coverage{"min_steps": 1}), dir)
 	require.Empty(t, problems)
+}
+
+func TestValidateTrajectory_StepsBudgetCeiling(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "fixture"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "check.sh"), []byte("#!/bin/sh\nexit 1\n"), 0o755))
+	mk := func(cov Coverage) *Trajectory {
+		return &Trajectory{
+			ID: "x", SchemaVersion: 1,
+			Origin:     Origin{Kind: "synthetic"},
+			StartState: StartState{Kind: "fixture", FixtureDir: "fixture"},
+			Task:       Task{Turns: []string{"do it"}},
+			Budget:     Budget{MaxSteps: 10},
+			Check:      Check{Script: "check.sh", ExpectStartState: "fail"},
+			Coverage:   cov,
+		}
+	}
+
+	// steps and request.prompt_requests count the same event stream
+	// — a min_ above the trajectory-wide cap starves forever.
+	problems := ValidateTrajectory(mk(Coverage{"min_steps": 11}), dir)
+	require.NotEmpty(t, problems)
+	require.Contains(t, problems[0], "max_steps")
+
+	problems = ValidateTrajectory(mk(Coverage{"min_request.prompt_requests": 11}), dir)
+	require.NotEmpty(t, problems)
+	require.Contains(t, problems[0], "max_steps")
+
+	// At the cap is reachable; max_ bounds stay legal above it.
+	require.Empty(t, ValidateTrajectory(mk(Coverage{"min_request.prompt_requests": 10}), dir))
+	require.Empty(t, ValidateTrajectory(mk(Coverage{"max_request.prompt_requests": 11}), dir))
 }
 
 // --- run telemetry ---
