@@ -531,7 +531,7 @@ func (a *sessionAgent) maybeAutoInject(
 │                                                              │
 │ - Sees compacted notebook for old turns                     │
 │ - Sees recent raw turns within 25K token budget              │
-│ - Sees system prompt: "recall for event details, view for bytes"   │
+│ - Sees system prompt: "recall for details, view for bytes"    │
 │ - May see auto-injected entries (if enabled + matched)      │
 │                                                              │
 │ Model decides:                                               │
@@ -551,8 +551,8 @@ func (a *sessionAgent) maybeAutoInject(
 ┌──────────────────────────────────────────────────────────────┐
 │ Model works on the task                                      │
 │ - Uses recalled context                                       │
-│ - Uses `view` for file bytes, `recall` for event details       │
-│ - Saves tokens by recalling details instead of full history    │
+│ - Uses `view` for bytes, `recall` for event details          │
+│ - Saves tokens vs carrying full raw history                  │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -568,8 +568,9 @@ one specific event (file read, file edit, command, decision).
   You can search by file name, tag, turn number, event type, or concept.
 - Use `notebook_search` to browse all available entries or filter by
   a query (tag, event type, or text).
-- Entries describe events; they don't contain file contents — use
-  `recall` for event details, `view` for the bytes you'll modify.
+- Entries describe past events; they don't contain a file's
+  current contents — `recall` for event details, `view` for the bytes
+  you'll modify.
 ```
 
 Note: the system prompt no longer mentions auto-injection as a
@@ -1231,8 +1232,9 @@ Usage:
 Returns: full notebook entries with all preserved details.
 Each entry is about ONE event — no noise from unrelated events.
 
-Entries describe events; they don't contain file contents. Use recall
-for event details — view or re-read the file for the bytes you'll modify.
+Entries describe past events, and `result:` returns recorded tool
+output — neither has the file's current bytes. Re-read the file for the
+bytes you'll modify.
 ```
 
 ### Step 7: Notebook search tool — browse + query (one tool)
@@ -1305,8 +1307,9 @@ one specific event (file read, file edit, command, decision).
   You can search by file name, tag, turn number, event type, or concept.
 - Use `notebook_search` to browse all available entries or filter by
   a query (tag, event type, or text).
-- Entries describe events; they don't contain file contents — use
-  `recall` for event details, `view` for the bytes you'll modify.
+- Entries describe past events; they don't contain a file's
+  current contents — `recall` for event details, `view` for the bytes
+  you'll modify.
 ```
 
 ### Step 9: Compaction — when notebook exceeds 100K tokens

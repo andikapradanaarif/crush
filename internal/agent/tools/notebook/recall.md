@@ -19,5 +19,6 @@ Returns: full notebook entries with all preserved details, or the
 original tool result for result: queries.
 Each entry is about ONE event — no noise from unrelated events.
 
-Entries describe events; they don't contain file contents. Use recall
-for event details — view or re-read the file for the bytes you'll modify.
+Entries describe past events, and `result:` returns recorded tool
+output — neither has the file's current bytes. Re-read the file for the
+bytes you'll modify.

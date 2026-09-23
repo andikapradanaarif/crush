@@ -2,6 +2,7 @@ package agent
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/agent/prompt"
@@ -95,17 +96,22 @@ func TestCoderPrompt_NotebookToolGating(t *testing.T) {
 		return built.Text
 	}
 
+	// Content pins normalize whitespace — the bullets wrap mid-sentence
+	// and only the rendered contract matters, not the wrap point.
+	norm := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+
 	full := render()
 	require.Contains(t, full, "# Context Notebook")
 	require.Contains(t, full, "Use the `recall` tool")
 	require.Contains(t, full, "Use `notebook_search`")
-	require.Contains(t, full, "`recall` for event details, `view` for the bytes you'll modify.")
+	require.Contains(t, norm(full), "`recall` for event details, `view` for the bytes you'll modify.")
 	require.NotContains(t, full, "16x")
 
 	noRecall := render("recall")
 	require.Contains(t, noRecall, "# Context Notebook")
 	require.Contains(t, noRecall, "Use `notebook_search`")
 	require.NotContains(t, noRecall, "`recall`")
+	require.Contains(t, norm(noRecall), "`view` for the bytes you'll modify.")
 
 	neither := render("recall", "notebook_search")
 	require.Contains(t, neither, "# Context Notebook")
@@ -115,10 +121,10 @@ func TestCoderPrompt_NotebookToolGating(t *testing.T) {
 	// The fallback branches must degrade tool-agnostically too —
 	// naming `view` when it's disabled would be the same dead pointer.
 	noRecallNoView := render("recall", "view")
-	require.Contains(t, noRecallNoView, "re-read the file for the bytes you'll modify.")
+	require.Contains(t, norm(noRecallNoView), "re-read the file for the bytes you'll modify.")
 	require.NotContains(t, noRecallNoView, "use `view`")
 
 	recallNoView := render("view")
-	require.Contains(t, recallNoView, "re-read the file for the bytes you'll modify.")
+	require.Contains(t, norm(recallNoView), "`recall` for event details, re-read the file for the bytes you'll modify.")
 	require.NotContains(t, recallNoView, "`view` for the bytes")
 }
