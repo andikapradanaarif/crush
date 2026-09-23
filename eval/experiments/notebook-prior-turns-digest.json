@@ -25,7 +25,7 @@
 				}
 			},
 			"coverage": {
-				"min_request.notebook_bytes": 1
+				"min_stub_stats.boundary_advances": 1
 			}
 		},
 		"treatment": {
@@ -37,7 +37,7 @@
 				}
 			},
 			"coverage": {
-				"min_request.notebook_bytes": 1,
+				"min_stub_stats.boundary_advances": 1,
 				"min_digests.written": 1,
 				"min_digests.rendered": 1
 			}
