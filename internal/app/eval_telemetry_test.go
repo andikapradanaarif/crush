@@ -29,6 +29,8 @@ func TestClassifyRunError(t *testing.T) {
 		{"context too large", &fantasy.ProviderError{StatusCode: 400, ContextTooLargeErr: true}, "context_too_large"},
 		{"context too large via tokens", &fantasy.ProviderError{ContextMaxTokens: 128000, ContextUsedTokens: 200000}, "context_too_large"},
 		{"rate limit", &fantasy.ProviderError{StatusCode: 429}, "rate_limit"},
+		{"request timeout retryable", &fantasy.ProviderError{StatusCode: 408}, "provider_transient"},
+		{"conflict retryable", &fantasy.ProviderError{StatusCode: 409}, "provider_transient"},
 		{"deterministic 4xx", &fantasy.ProviderError{StatusCode: 422, Message: "schema rejected"}, "provider_deterministic"},
 		{"server error", &fantasy.ProviderError{StatusCode: 503}, "provider_server"},
 		{"connection refused", &fantasy.ProviderError{Cause: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}, "provider_unreachable"},

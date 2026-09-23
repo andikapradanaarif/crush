@@ -238,7 +238,7 @@ type RunRecord struct {
 	// holds the rendered request down — the benefit claim, measured
 	// instead of asserted. Informational only; never a predicate.
 	PromptTokensPerTurn []int64 `json:"prompt_tokens_per_turn,omitempty"`
-	// StepRecords is the per-request table — usage plus prefix
+	// StepRecords is the per-step table — usage plus prefix
 	// attribution for every step across every turn. The cache-miss
 	// forensics: which component first differed and what the volatile
 	// prefix hashed to. Informational only; never a predicate.
@@ -280,13 +280,18 @@ type TokenUsage struct {
 	CacheWrite int64 `json:"cache_write"`
 }
 
-// StepRecord is one provider request's usage plus prefix attribution —
-// the per-step row the aggregate TokenUsage can't carry. Turn/Step
-// locate it in the trajectory; FirstChangedCause names the component
-// that diverged from the previous request (cold | append | shrink |
-// system-prompt | notebook-prefix | history), and PrefixHash
-// fingerprints the leading system-message run the provider's prompt
-// cache keys on.
+// StepRecord is one agent step's usage plus prefix attribution — the
+// per-step row the aggregate TokenUsage can't carry. One row per step,
+// not per wire request: fantasy's internal retries resend the same
+// prompt and fold into a single OnStepFinish. A terminal mid-step
+// failure still produces a row (Failed, zero usage) so the request
+// that broke the run keeps its attribution. Turn/Step locate it in
+// the trajectory; FirstChangedCause names the component that diverged
+// from the previous request (cold | append | shrink | system-prompt |
+// notebook-prefix | history, or empty when the render is byte-
+// identical), and PrefixHash fingerprints the leading system-message
+// run the provider's prompt cache keys on. FirstChanged is -1 when
+// nothing changed.
 type StepRecord struct {
 	Turn              int    `json:"turn"`
 	Step              int    `json:"step"`
@@ -295,6 +300,7 @@ type StepRecord struct {
 	CacheReadTokens   int64  `json:"cache_read_tokens"`
 	CacheWriteTokens  int64  `json:"cache_write_tokens"`
 	Estimated         bool   `json:"estimated,omitempty"`
+	Failed            bool   `json:"failed,omitempty"`
 	PrefixHash        string `json:"prefix_hash,omitempty"`
 	FirstChanged      int    `json:"first_changed_index"`
 	FirstChangedCause string `json:"first_changed_cause,omitempty"`

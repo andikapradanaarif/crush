@@ -56,7 +56,7 @@ type RunResult struct {
 	// ResolvedOptions is the child's report of what each manifest
 	// flag resolved to — the truth the baseline key hashes.
 	ResolvedOptions map[string]any
-	// StepRecords is the trajectory-wide per-request table — every
+	// StepRecords is the trajectory-wide per-step table — every
 	// turn's steps with usage and prefix attribution, Turn stamped
 	// at fold time.
 	StepRecords []StepRecord

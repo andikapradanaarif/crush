@@ -122,7 +122,7 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 			"history_bytes":      tel.ReqHistoryBytes,
 			"tool_call_bytes":    tel.ReqToolCallBytes,
 			"tool_result_bytes":  tel.ReqToolResultBytes,
-			// Per-request rows: usage plus prefix attribution — the
+			// Per-step rows: usage plus prefix attribution — the
 			// named cause behind every cache miss.
 			"steps": tel.Steps,
 		}
@@ -192,7 +192,12 @@ func classifyRunError(err error) string {
 			return "rate_limit"
 		case pe.StatusCode >= 400 && pe.StatusCode < 500:
 			// Model resolution, malformed requests, schema
-			// rejections — deterministic per config.
+			// rejections — deterministic per config. Fantasy marks
+			// 408/409 retryable; a persistent one is exhaustion, not
+			// a broken config, so keep it out of the breaker path.
+			if pe.IsRetryable() {
+				return "provider_transient"
+			}
 			return "provider_deterministic"
 		case pe.StatusCode >= 500:
 			// Fantasy already retried before surfacing; the harness's

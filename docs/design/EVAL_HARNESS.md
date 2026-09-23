@@ -480,22 +480,44 @@ per-arm token delta the gate summary prints. Neither is a
 predicate: coverage grammar cannot reach them, and the gate never
 reads them for the verdict.
 
-`step_records` is the per-request table — one row per provider
-request with usage plus prefix attribution: `prefix_hash`
-fingerprints the leading system-message run (system prompt +
-notebook block) and `first_changed_index`/`first_changed_cause`
-name where the render diverged from the previous step's
-(`cold`/`append`/`shrink`/`system-prompt`/`notebook-prefix`/
-`history`). Every cache miss gets a named cause — the mechanism
-question "did the prefix churn or the tail grow" stops being a
-correlation guess. `generator_tokens` is the notebook sidecar's
-generation spend (segment, checkpoint, digest calls) — kept out of
-`tokens` so the agent's own usage isn't polluted, but priced so
-notebook-on arms can't hide ~100 uncounted calls per run.
-`error_class` is the child's typed `fantasy.ProviderError`
-classification; the circuit breaker reads it before falling back to
-string signatures, so deterministic provider failures trip at two
-strikes instead of resampling to `2N`.
+`step_records` is the per-step table — one row per agent step with
+usage plus prefix attribution (fantasy's internal retries resend the
+identical prompt and fold into a single `OnStepFinish`, so a row can
+cover several wire requests; a terminal mid-step failure still emits a
+row — `failed: true`, zero usage — so the request that broke the run
+keeps its attribution). `prefix_hash` fingerprints the leading
+system-message run (system prompt + notebook block) and
+`first_changed_index`/`first_changed_cause` name where the render
+diverged from the previous step's (`cold`/`append`/`shrink`/
+`system-prompt`/`notebook-prefix`/`history`, or empty with
+`first_changed_index: -1` when the render is byte-identical). Every
+cache miss gets a named cause — the mechanism question "did the
+prefix churn or the tail grow" stops being a correlation guess.
+
+Attribution caveats worth knowing before reading the column:
+`first_changed_cause` diffs against an **in-process** hash vector —
+under the eval driver's restart-per-turn regime each turn's first step
+reports `cold` (per-process cold, not provider-cache cold), so
+turn-boundary churn is invisible until cross-process hashes land.
+`PrevHashes` advances at `PrepareStep`, before the request flies, so
+after a failed step the next diff compares against a render the
+provider may never have accepted. The hash is content-scoped — cache
+breakpoints (`ProviderOptions`), `ProviderExecuted`, and
+`ClientMetadata` are deliberately unhashed, and tool *schemas* aren't
+in the message hashes at all. `turnTailMessages` pins a message at
+the tail: with a non-empty tail, new step content inserts before it
+and the positional diff reports `history`, not `append` — default
+eval arms have empty tails, so the primary signal is clean.
+`generator_tokens` is the notebook sidecar's generation spend
+(segment, checkpoint, digest calls) — kept out of `tokens` so the
+agent's own usage isn't polluted, but priced so notebook-on arms
+can't hide ~100 uncounted calls per run. It does **not** cover the
+other sidecars: `GenerateTitle` (one call per session) and
+auto-summarize ride their own stream calls and stay invisible in both
+`step_records` and `generator_tokens`. `error_class` is the child's
+typed `fantasy.ProviderError` classification; the circuit breaker
+reads it before falling back to string signatures, so deterministic
+provider failures trip at two strikes instead of resampling to `2N`.
 
 Sources, all existing: `fantasy.AgentResult` (turns/steps/usage)
 from `agent.Run`; `stubStats` per session (`stubs.go:60`); recall

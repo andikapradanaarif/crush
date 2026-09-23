@@ -421,6 +421,9 @@ func (c *coordinator) watchSessionDeletions() {
 		if c.nbPendingReads != nil {
 			c.nbPendingReads.Del(ev.Payload.ID)
 		}
+		if c.reqStats != nil {
+			c.reqStats.Del(ev.Payload.ID)
+		}
 		// The DB cascade removes the rows; ForgetSession drops the
 		// service's in-memory compaction-stall counter.
 		if c.notebook != nil {

@@ -65,8 +65,12 @@ type requestStats struct {
 	// plus the prefix-attribution forensics that name every cache
 	// miss's cause. Pending holds the PrepareStep-side attribution
 	// for the in-flight step; OnStepFinish folds it into Steps with
-	// the request's usage. PrevHashes is the previous step's
-	// per-message content hashes — the diff input.
+	// the request's usage, and the run-error path folds it as a
+	// Failed row when the request dies mid-step. PrevHashes is the
+	// previous step's per-message content hashes — the diff input.
+	// Note it advances at PrepareStep, so after a failed request the
+	// next diff compares against a render the provider may never
+	// have accepted (see EVAL_HARNESS.md for the caveat).
 	Steps      []StepRecord
 	Pending    stepAttribution
 	PrevHashes []uint64
@@ -81,12 +85,16 @@ type requestStats struct {
 // system-message run — the volatile prefix a provider's prompt cache
 // keys on.
 type StepRecord struct {
-	Step              int    `json:"step"`
-	InputTokens       int64  `json:"input_tokens"`
-	OutputTokens      int64  `json:"output_tokens"`
-	CacheReadTokens   int64  `json:"cache_read_tokens"`
-	CacheWriteTokens  int64  `json:"cache_write_tokens"`
-	Estimated         bool   `json:"estimated,omitempty"`
+	Step             int   `json:"step"`
+	InputTokens      int64 `json:"input_tokens"`
+	OutputTokens     int64 `json:"output_tokens"`
+	CacheReadTokens  int64 `json:"cache_read_tokens"`
+	CacheWriteTokens int64 `json:"cache_write_tokens"`
+	Estimated        bool  `json:"estimated,omitempty"`
+	// Failed marks the row folded from a request that died before
+	// OnStepFinish — its attribution is real but the usage fields
+	// are zero (no usage report survives a failed stream).
+	Failed            bool   `json:"failed,omitempty"`
 	PrefixHash        string `json:"prefix_hash,omitempty"`
 	FirstChanged      int    `json:"first_changed_index"`
 	FirstChangedCause string `json:"first_changed_cause,omitempty"`
@@ -195,34 +203,69 @@ func hashMessage(msg fantasy.Message) uint64 {
 	return h.Sum64()
 }
 
+// hashPart folds a content part into the message hash. Each part leads
+// with a stable one-byte type tag so same-content parts of different
+// kinds can't collide — a TextPart and a ReasoningPart holding
+// identical text are different wire content. The scope is deliberately
+// content-only: ProviderOptions (cache breakpoints mark lookup
+// positions, not content), ProviderExecuted, and ClientMetadata are
+// transport/persistence metadata that don't change what the model
+// sees, so they stay unhashed.
 func hashPart(h hash.Hash64, part fantasy.MessagePart) {
 	write := h.Write
 	switch p := part.(type) {
 	case fantasy.TextPart:
+		_, _ = write([]byte{1})
 		_, _ = write([]byte(p.Text))
 	case *fantasy.TextPart:
+		_, _ = write([]byte{1})
 		_, _ = write([]byte(p.Text))
 	case fantasy.ReasoningPart:
+		_, _ = write([]byte{2})
 		_, _ = write([]byte(p.Text))
 	case *fantasy.ReasoningPart:
+		_, _ = write([]byte{2})
 		_, _ = write([]byte(p.Text))
 	case fantasy.FilePart:
+		_, _ = write([]byte{3})
 		_, _ = write(p.Data)
+		_, _ = write([]byte{0})
 		_, _ = write([]byte(p.Filename))
+		_, _ = write([]byte{0})
 		_, _ = write([]byte(p.MediaType))
 	case *fantasy.FilePart:
+		_, _ = write([]byte{3})
 		_, _ = write(p.Data)
+		_, _ = write([]byte{0})
 		_, _ = write([]byte(p.Filename))
+		_, _ = write([]byte{0})
 		_, _ = write([]byte(p.MediaType))
 	case fantasy.ToolCallPart:
+		// ToolCallID is wire content — the provider sees it, and two
+		// calls with identical tool+input but different IDs are
+		// different requests.
+		_, _ = write([]byte{4})
+		_, _ = write([]byte(p.ToolCallID))
+		_, _ = write([]byte{0})
 		_, _ = write([]byte(p.ToolName))
+		_, _ = write([]byte{0})
 		_, _ = write([]byte(p.Input))
 	case *fantasy.ToolCallPart:
+		_, _ = write([]byte{4})
+		_, _ = write([]byte(p.ToolCallID))
+		_, _ = write([]byte{0})
 		_, _ = write([]byte(p.ToolName))
+		_, _ = write([]byte{0})
 		_, _ = write([]byte(p.Input))
 	case fantasy.ToolResultPart:
+		_, _ = write([]byte{5})
+		_, _ = write([]byte(p.ToolCallID))
+		_, _ = write([]byte{0})
 		hashToolResultOutput(h, p.Output)
 	case *fantasy.ToolResultPart:
+		_, _ = write([]byte{5})
+		_, _ = write([]byte(p.ToolCallID))
+		_, _ = write([]byte{0})
 		hashToolResultOutput(h, p.Output)
 	}
 }
@@ -231,24 +274,34 @@ func hashToolResultOutput(h hash.Hash64, output fantasy.ToolResultOutputContent)
 	write := h.Write
 	switch o := output.(type) {
 	case fantasy.ToolResultOutputContentText:
+		_, _ = write([]byte{1})
 		_, _ = write([]byte(o.Text))
 	case *fantasy.ToolResultOutputContentText:
+		_, _ = write([]byte{1})
 		_, _ = write([]byte(o.Text))
 	case fantasy.ToolResultOutputContentError:
+		_, _ = write([]byte{2})
 		if o.Error != nil {
 			_, _ = write([]byte(o.Error.Error()))
 		}
 	case *fantasy.ToolResultOutputContentError:
+		_, _ = write([]byte{2})
 		if o.Error != nil {
 			_, _ = write([]byte(o.Error.Error()))
 		}
 	case fantasy.ToolResultOutputContentMedia:
+		_, _ = write([]byte{3})
 		_, _ = write([]byte(o.Data))
+		_, _ = write([]byte{0})
 		_, _ = write([]byte(o.MediaType))
+		_, _ = write([]byte{0})
 		_, _ = write([]byte(o.Text))
 	case *fantasy.ToolResultOutputContentMedia:
+		_, _ = write([]byte{3})
 		_, _ = write([]byte(o.Data))
+		_, _ = write([]byte{0})
 		_, _ = write([]byte(o.MediaType))
+		_, _ = write([]byte{0})
 		_, _ = write([]byte(o.Text))
 	}
 }

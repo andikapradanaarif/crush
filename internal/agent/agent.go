@@ -1486,6 +1486,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 					FirstChanged:      rs.Pending.FirstChanged,
 					FirstChangedCause: rs.Pending.FirstChangedCause,
 				})
+				// Clear the folded attribution so a terminal error
+				// later in the turn can't re-fold a stale Pending —
+				// a non-empty Pending in the error path provably
+				// belongs to the failed step.
+				rs.Pending = stepAttribution{}
 				a.reqStats.Set(call.SessionID, rs)
 			}
 			a.updateSessionUsage(largeModel, &updatedSession, usage, a.openrouterCost(stepResult.ProviderMetadata), estimated)
@@ -1531,6 +1536,24 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	a.eventPromptResponded(call.SessionID, time.Since(startTime).Truncate(time.Second))
 
 	if err != nil {
+		// A terminal error after PrepareStep but before OnStepFinish
+		// leaves the failed request's attribution in Pending — fold it
+		// as a zero-usage Failed row so the request that broke the run
+		// isn't invisible in step_records.
+		if a.reqStats != nil {
+			rs, _ := a.reqStats.Get(call.SessionID)
+			if rs.Pending.PrefixHash != "" {
+				rs.Steps = append(rs.Steps, StepRecord{
+					Step:              len(rs.Steps),
+					Failed:            true,
+					PrefixHash:        rs.Pending.PrefixHash,
+					FirstChanged:      rs.Pending.FirstChanged,
+					FirstChangedCause: rs.Pending.FirstChangedCause,
+				})
+				rs.Pending = stepAttribution{}
+				a.reqStats.Set(call.SessionID, rs)
+			}
+		}
 		isHyper := largeModel.ModelCfg.Provider == hyper.Name
 		isCancelErr := errors.Is(err, context.Canceled)
 		slog.Info("Agent stream returned error",

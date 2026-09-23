@@ -74,7 +74,7 @@ type SessionTelemetry struct {
 	PromptRequests   int64 `json:"prompt_requests"`
 	PromptTokensLast int64 `json:"prompt_tokens_last"`
 	PromptTokensPeak int64 `json:"prompt_tokens_peak"`
-	// Steps is the per-request usage + prefix-attribution table —
+	// Steps is the per-step usage + prefix-attribution table —
 	// the cache-miss forensics the run aggregate can't carry.
 	Steps              []StepRecord `json:"steps,omitempty"`
 	ReqSystemBytes     int64        `json:"req_system_bytes"`

@@ -103,6 +103,87 @@ func TestAttributeStep(t *testing.T) {
 	})
 }
 
+func TestHashMessage_PartTypeAndIDs(t *testing.T) {
+	t.Parallel()
+	user := func(text string) fantasy.Message { return telemetryMsg(fantasy.MessageRoleUser, text) }
+
+	t.Run("part type tag separates same-text parts", func(t *testing.T) {
+		t.Parallel()
+		text := fantasy.Message{
+			Role:    fantasy.MessageRoleUser,
+			Content: []fantasy.MessagePart{fantasy.TextPart{Text: "same"}},
+		}
+		reasoning := fantasy.Message{
+			Role:    fantasy.MessageRoleUser,
+			Content: []fantasy.MessagePart{fantasy.ReasoningPart{Text: "same"}},
+		}
+		require.NotEqual(t, hashMessage(text), hashMessage(reasoning))
+	})
+
+	t.Run("tool call id participates", func(t *testing.T) {
+		t.Parallel()
+		mk := func(id string) fantasy.Message {
+			return fantasy.Message{
+				Role: fantasy.MessageRoleAssistant,
+				Content: []fantasy.MessagePart{fantasy.ToolCallPart{
+					ToolCallID: id, ToolName: "bash", Input: `{"cmd":"ls"}`,
+				}},
+			}
+		}
+		require.NotEqual(t, hashMessage(mk("call_1")), hashMessage(mk("call_2")))
+		// Same everything including the ID — identical render.
+		require.Equal(t, hashMessage(mk("call_1")), hashMessage(mk("call_1")))
+	})
+
+	t.Run("tool result id participates", func(t *testing.T) {
+		t.Parallel()
+		mk := func(id string) fantasy.Message {
+			return fantasy.Message{
+				Role: fantasy.MessageRoleTool,
+				Content: []fantasy.MessagePart{fantasy.ToolResultPart{
+					ToolCallID: id,
+					Output:     fantasy.ToolResultOutputContentText{Text: "out"},
+				}},
+			}
+		}
+		require.NotEqual(t, hashMessage(mk("call_1")), hashMessage(mk("call_2")))
+	})
+
+	t.Run("field concatenation can't bleed", func(t *testing.T) {
+		t.Parallel()
+		mk := func(id, name string) fantasy.Message {
+			return fantasy.Message{
+				Role: fantasy.MessageRoleAssistant,
+				Content: []fantasy.MessagePart{fantasy.ToolCallPart{
+					ToolCallID: id, ToolName: name, Input: "x",
+				}},
+			}
+		}
+		// "ab"+"c" vs "a"+"bc" — separators keep the boundary real.
+		require.NotEqual(t, hashMessage(mk("ab", "c")), hashMessage(mk("a", "bc")))
+	})
+
+	t.Run("diff lands on the changed index", func(t *testing.T) {
+		t.Parallel()
+		prev := []fantasy.Message{
+			user("u1"),
+			{Role: fantasy.MessageRoleAssistant, Content: []fantasy.MessagePart{
+				fantasy.ToolCallPart{ToolCallID: "call_1", ToolName: "bash", Input: "x"},
+			}},
+		}
+		cur := []fantasy.Message{
+			user("u1"),
+			{Role: fantasy.MessageRoleAssistant, Content: []fantasy.MessagePart{
+				fantasy.ToolCallPart{ToolCallID: "call_9", ToolName: "bash", Input: "x"},
+			}},
+		}
+		_, prevHashes := attributeStep(prev, nil)
+		attr, _ := attributeStep(cur, prevHashes)
+		require.Equal(t, 1, attr.FirstChanged)
+		require.Equal(t, "history", attr.FirstChangedCause)
+	})
+}
+
 func TestNoteBoundaryAdvance_VerbatimArm(t *testing.T) {
 	t.Parallel()
 	// A verbatim control carries no collapse/supersession machinery —
