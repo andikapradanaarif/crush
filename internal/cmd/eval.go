@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/eval"
 	"github.com/spf13/cobra"
@@ -188,6 +189,52 @@ repair-prompt fingerprinted.`,
 	},
 }
 
+var evalProbeCacheCmd = &cobra.Command{
+	Use:   "probe-cache",
+	Short: "Measure the serving endpoint's prompt-cache behavior (issue #116)",
+	Long: `Sends synthetic ~50K-token requests through the same openai-compat
+provider construction and session-affinity headers Crush uses, under six
+conditions (identical / append / early-system / notebook-position /
+late-history / fresh-process), 5 repeats each, independently warmed and
+order-randomized. Writes one JSONL record per request plus raw response
+bodies; prints the per-condition cache-hit table at the end.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		keyEnv, _ := cmd.Flags().GetString("api-key-env")
+		cfg := eval.ProbeCacheConfig{
+			BaseURL:      flagStr(cmd, "base-url"),
+			APIKey:       os.Getenv(keyEnv),
+			Model:        flagStr(cmd, "model"),
+			TargetTokens: flagInt(cmd, "target-tokens"),
+			Repeats:      flagInt(cmd, "repeats"),
+			MaxRequests:  flagInt(cmd, "max-requests"),
+			OutPath:      flagStr(cmd, "out"),
+			RawDir:       flagStr(cmd, "raw-dir"),
+			Seed:         flagInt64(cmd, "seed"),
+			DelayScale:   flagFloat(cmd, "delay-scale"),
+			DryRun:       flagBool(cmd, "dry-run"),
+		}
+		if cfg.OutPath == "" {
+			cfg.OutPath = fmt.Sprintf("probe-cache-%d.jsonl", time.Now().Unix())
+		}
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		return eval.RunProbeCache(ctx, cfg)
+	},
+}
+
+func flagStr(cmd *cobra.Command, n string) string { v, _ := cmd.Flags().GetString(n); return v }
+func flagInt(cmd *cobra.Command, n string) int    { v, _ := cmd.Flags().GetInt(n); return v }
+func flagInt64(cmd *cobra.Command, n string) int64 {
+	v, _ := cmd.Flags().GetInt64(n)
+	return v
+}
+
+func flagFloat(cmd *cobra.Command, n string) float64 {
+	v, _ := cmd.Flags().GetFloat64(n)
+	return v
+}
+func flagBool(cmd *cobra.Command, n string) bool { v, _ := cmd.Flags().GetBool(n); return v }
+
 var evalSmokeCmd = &cobra.Command{
 	Use:   "smoke",
 	Short: "Smoke tier: strict 0/N collapse check over the stable band",
@@ -230,9 +277,20 @@ func init() {
 	evalSmokeCmd.Flags().Float64("temperature", 0, "sampling temperature")
 	_ = evalCharacterizeCmd.MarkFlagRequired("model")
 	_ = evalSmokeCmd.MarkFlagRequired("model")
+	evalProbeCacheCmd.Flags().String("base-url", "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", "serving endpoint")
+	evalProbeCacheCmd.Flags().String("api-key-env", "ALIBABA_TP_API_KEY", "env var holding the API key")
+	evalProbeCacheCmd.Flags().String("model", "deepseek-v4.1-flash", "model ID")
+	evalProbeCacheCmd.Flags().Int("target-tokens", 50000, "approximate prompt size in tokens")
+	evalProbeCacheCmd.Flags().Int("repeats", 5, "measured repeats per condition")
+	evalProbeCacheCmd.Flags().Int("max-requests", 120, "hard spend cap on sends (one HTTP request each)")
+	evalProbeCacheCmd.Flags().String("out", "", "JSONL output path (default probe-cache-<ts>.jsonl)")
+	evalProbeCacheCmd.Flags().String("raw-dir", "", "raw response bodies dir (default <out>-raw)")
+	evalProbeCacheCmd.Flags().Int64("seed", time.Now().UnixNano(), "filler/schedule RNG seed")
+	evalProbeCacheCmd.Flags().Float64("delay-scale", 1.0, "multiplier on inter-request sleeps (spec timing = 1.0)")
+	evalProbeCacheCmd.Flags().Bool("dry-run", false, "print schedule and send estimate without sending")
 	evalAnalyzeCmd.Flags().String("workdir", "", "run working dir for normalizing relative call paths (default: CWD)")
 	evalAnalyzeCmd.Flags().String("session", "", "session ID to analyze (default: latest parent session)")
 	evalAnalyzeCmd.Flags().String("trajectory", "", "corpus trajectory ID — supplies turns for process-turn segmentation")
 	evalAnalyzeCmd.Flags().String("goos", "", "OS whose path conventions produced the artifact (default: this machine)")
-	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd)
+	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd, evalProbeCacheCmd)
 }
