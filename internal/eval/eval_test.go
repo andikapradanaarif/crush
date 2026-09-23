@@ -540,6 +540,47 @@ func TestValidateExperiment_EdgeFiringsStarvation(t *testing.T) {
 	require.NoError(t, ValidateExperiment(mk(
 		map[string]any{"ambiguity_clarification": false},
 		Coverage{"min_edge_firings.verification.fired": 1})))
+
+	// Unreachable (edge, outcome) pairs starve in EVERY config —
+	// suppressed is burn-watch-only, stall/burn-watch are step-bound
+	// and never clear, and verification/todos never set hints.
+	for _, field := range []string{
+		"min_edge_firings.stall.suppressed",
+		"min_edge_firings.stall.cleared",
+		"min_edge_firings.burn-watch.cleared",
+		"min_edge_firings.verification.gated",
+		"min_edge_firings.verification.suppressed",
+		"min_edge_firings.todos.headless-degraded",
+		"min_edge_firings.todos.gated",
+		"min_edge_firings.no-such-edge.fired",
+	} {
+		require.Error(t, ValidateExperiment(mk(
+			map[string]any{"ambiguity_clarification": true},
+			Coverage{field: 1})), field)
+		require.Error(t, ValidateExperiment(mk(
+			map[string]any{"ambiguity_clarification": false},
+			Coverage{field: 1})), field)
+	}
+
+	// Reachable flag-invariant pairs pass on either flag state.
+	for _, field := range []string{
+		"min_edge_firings.verification.fired",
+		"min_edge_firings.verification.cleared",
+		"min_edge_firings.todos.cleared",
+	} {
+		require.NoError(t, ValidateExperiment(mk(
+			map[string]any{"ambiguity_clarification": false},
+			Coverage{field: 1})), field)
+	}
+
+	// suppressed is reachable but flag-ON only — the gated
+	// short-circuit precedes the burnWatched marker check.
+	require.Error(t, ValidateExperiment(mk(
+		map[string]any{"ambiguity_clarification": false},
+		Coverage{"min_edge_firings.burn-watch.suppressed": 1})))
+	require.NoError(t, ValidateExperiment(mk(
+		map[string]any{"ambiguity_clarification": true},
+		Coverage{"min_edge_firings.burn-watch.suppressed": 1})))
 }
 
 func TestValidateExperiment_RecallDisabledStarvation(t *testing.T) {
