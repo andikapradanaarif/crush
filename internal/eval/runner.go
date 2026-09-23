@@ -554,6 +554,11 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 		// a verdict over zero trajectories is a PASS on nothing.
 		return Report{}, fmt.Errorf("corpus selection %v matched no runnable trajectories", exp.Corpus)
 	}
+	// Turn-count ceilings only exist once trajectories resolve — a
+	// predicate past the ceiling starves every run of that trajectory.
+	if err := ValidateArmCoverageVsCorpus(exp, trajs); err != nil {
+		return Report{}, err
+	}
 
 	baselineKey := manifest.keyWith(exp.Arms[ArmControl].Config.Options,
 		map[string]any{"$temperature": temperatureKey(exp.Temperature)})

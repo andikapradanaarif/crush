@@ -282,12 +282,164 @@ func ValidateExperiment(e *Experiment) error {
 	return nil
 }
 
-// armStarvationRequires maps a coverage field to the option keys that
-// must resolve true for its counter to be reachable. map_calls is
+// starvationRule is one requirement an arm's resolved options must
+// satisfy for a coverage field's counter to be reachable. ok receives
+// the option resolver; unknown options must pass — the check only
+// rejects what it can prove starves.
+type starvationRule struct {
+	desc string
+	ok   func(resolve func(string) (any, bool)) bool
+}
+
+// boolOn requires a boolean option to resolve true.
+func boolOn(opt string) starvationRule {
+	return starvationRule{opt, func(resolve func(string) (any, bool)) bool {
+		v, known := resolve(opt)
+		b, _ := v.(bool)
+		return !known || b
+	}}
+}
+
+// boolOff requires a boolean option to resolve false — the "would
+// have fired" measurement rows only exist in the flag-off arm.
+func boolOff(opt string) starvationRule {
+	return starvationRule{opt + "=false", func(resolve func(string) (any, bool)) bool {
+		v, known := resolve(opt)
+		b, _ := v.(bool)
+		return !known || !b
+	}}
+}
+
+// modeIs requires a string option to resolve to one of the accepted
+// values.
+func modeIs(opt string, modes ...string) starvationRule {
+	return starvationRule{opt + "=" + strings.Join(modes, "|"), func(resolve func(string) (any, bool)) bool {
+		v, known := resolve(opt)
+		if !known {
+			return true
+		}
+		s, _ := v.(string)
+		return slices.Contains(modes, s)
+	}}
+}
+
+// notebookRecallTool is internal/agent/tools/notebook's
+// RecallToolName — the package boundary can't import it.
+const notebookRecallTool = "recall"
+
+// disablesTool reports whether a resolved disabled_tools value lists
+// name. JSON unmarshals the option as []any; test fixtures may build
+// it as []string.
+func disablesTool(v any, name string) bool {
+	switch l := v.(type) {
+	case []string:
+		return slices.Contains(l, name)
+	case []any:
+		return slices.Contains(l, any(name))
+	}
+	return false
+}
+
+// recallToolLive requires the recall tool to stay registered —
+// disabled_tools:[recall] removes every pointer-resolving counter's
+// only writer.
+var recallToolLive = starvationRule{
+	"recall tool enabled (disabled_tools must not list it)",
+	func(resolve func(string) (any, bool)) bool {
+		v, known := resolve("disabled_tools")
+		return !known || !disablesTool(v, notebookRecallTool)
+	},
+}
+
+// priorTurnsRecallLive is the conditional form for prior_turns.* and
+// digests.*: stub/digest print recall pointers and die without the
+// tool, while summarize renders entries inline and doesn't need it.
+// The mode constants are internal/agent's priorTurns* strings — kept
+// in sync with internal/agent/prior_turns.go; the package boundary
+// can't import them.
+var priorTurnsRecallLive = starvationRule{
+	"notebook_prior_turns=stub|digest need the recall tool enabled",
+	func(resolve func(string) (any, bool)) bool {
+		v, known := resolve("notebook_prior_turns")
+		if !known {
+			return true
+		}
+		s, _ := v.(string)
+		if s != "stub" && s != "digest" {
+			return true
+		}
+		dt, known := resolve("disabled_tools")
+		return !known || !disablesTool(dt, notebookRecallTool)
+	},
+}
+
+// edgeOutcomeTable enumerates the (edge, outcome) pairs the
+// scan/resolve/carrier machinery in run_edges.go can produce — a
+// pair not listed can never appear in edge_firings and starves
+// regardless of options. coverage.go's field registration iterates
+// this table, so unreachable pairs fail parse with "unknown field";
+// the check below is the same verdict expressed as a starvation rule
+// for any field registered by a path that skips the table.
+// Reachability:
+//   - cancelled: mid-scan ctx kill — every edge, flag-independent.
+//   - deferred/exhausted: contention loser or spent repair budget —
+//     needs a firing trigger, so flag-on for stall/burn-watch.
+//   - gated/suppressed/headless-degraded: stall/burn-watch hints —
+//     verification/todos never set hints.
+//   - cleared: a !fire trigger with no hint (verification resolving
+//     clean), or a sessionState carrier ride (todos) — stall and
+//     burn-watch are step-bound and always fire-or-hint, so they
+//     never clear.
+var edgeOutcomeTable = map[string]map[string]bool{
+	"verification": {"fired": true, "cleared": true, "cancelled": true, "deferred": true, "exhausted": true},
+	"todos":        {"fired": true, "cleared": true, "cancelled": true, "deferred": true, "exhausted": true},
+	"stall":        {"fired": true, "gated": true, "headless-degraded": true, "cancelled": true, "deferred": true, "exhausted": true},
+	"burn-watch":   {"fired": true, "gated": true, "suppressed": true, "headless-degraded": true, "cancelled": true, "deferred": true, "exhausted": true},
+}
+
+// stubBoundaryAdvancesLive is the reachability rule for
+// stub_stats.boundary_advances. The counter increments on each
+// boundary move once a per-session stubStats entry exists. Entry-
+// creating paths: supersession (needs the flag and the recall tool —
+// stubs render pointers), prior-turn collapse (stub/digest need
+// recall; summarize doesn't), and summarize's SummaryFetchFailed
+// marker write — all three live inside collapse-or-summarize modes,
+// so the reachability split below is unchanged. Starving requires
+// every path provably dead; an unresolved option leaves its path
+// open.
+var stubBoundaryAdvancesLive = starvationRule{
+	"notebook_stub_superseded or notebook_prior_turns=stub|digest|summarize (recall required except under summarize)",
+	func(resolve func(string) (any, bool)) bool {
+		recallKnown, recallOn := false, true
+		if dt, known := resolve("disabled_tools"); known {
+			recallKnown, recallOn = true, !disablesTool(dt, notebookRecallTool)
+		}
+		supKnown, supOn := false, false
+		if v, known := resolve("notebook_stub_superseded"); known {
+			supKnown = true
+			supOn, _ = v.(bool)
+		}
+		modeKnown, mode := false, ""
+		if v, known := resolve("notebook_prior_turns"); known {
+			modeKnown = true
+			mode, _ = v.(string)
+		}
+		// Supersession dies when the flag resolves off or recall is
+		// disabled. Collapse dies when the mode resolves non-collapse,
+		// or when recall is disabled and the mode can't be summarize.
+		supDead := (supKnown && !supOn) || (recallKnown && !recallOn)
+		modeDead := (modeKnown && mode != "stub" && mode != "digest" && mode != "summarize") ||
+			(recallKnown && !recallOn && modeKnown && mode != "summarize")
+		return !(supDead && modeDead)
+	},
+}
+
+// armStarvationRules maps a coverage field to the option requirements
+// that must hold for its counter to be reachable. map_calls is
 // absent deliberately: tool-not-found attempts still count, so a
 // flag-off arm can measure unprompted map reach — only the *_ok /
 // *_index_unavailable / result_bytes fields are truly unreachable.
-func armStarvationRequires(field string) []string {
+func armStarvationRules(field string) []starvationRule {
 	switch field {
 	case "call_metrics.map_calls_ok",
 		"call_metrics.map_calls_index_unavailable",
@@ -296,37 +448,70 @@ func armStarvationRequires(field string) []string {
 		// (analyze.go skips is_error records) — structurally zero
 		// wherever map isn't registered.
 		"call_metrics.wrong_pointer_events":
-		return []string{"project_index"}
+		return []starvationRule{boolOn("project_index")}
 	}
 	if strings.HasPrefix(field, "stub_stats.") {
-		return []string{"notebook_stub_superseded", "notebook_enabled"}
+		if field == "stub_stats.boundary_advances" {
+			return []starvationRule{boolOn("notebook_enabled"), stubBoundaryAdvancesLive}
+		}
+		return []starvationRule{boolOn("notebook_stub_superseded"), boolOn("notebook_enabled"), recallToolLive}
+	}
+	if edge, ok := strings.CutPrefix(field, "edge_firings."); ok {
+		name, outcome, found := strings.Cut(edge, ".")
+		if !found {
+			return nil
+		}
+		if outcomes, known := edgeOutcomeTable[name]; !known || !outcomes[outcome] {
+			// The (edge, outcome) pair never appears — the scan/
+			// resolve/carrier machinery can't produce it in any
+			// configuration, so no option resolves the starvation.
+			return []starvationRule{{
+				"a reachable edge_firings pair",
+				func(func(string) (any, bool)) bool { return false },
+			}}
+		}
+		if name != "stall" && name != "burn-watch" {
+			// verification/todos never consult the flag.
+			return nil
+		}
+		switch outcome {
+		case "gated":
+			return []starvationRule{boolOff("ambiguity_clarification")}
+		case "cancelled":
+			// Mid-scan ctx kills are flag-independent.
+			return nil
+		default:
+			// Flag-off triggers take the gated short-circuit
+			// before resolve/contention — every other outcome
+			// needs the flag on.
+			return []starvationRule{boolOn("ambiguity_clarification")}
+		}
 	}
 	if strings.HasPrefix(field, "checkpoints.") {
-		return []string{"notebook_checkpoint", "notebook_enabled"}
+		return []starvationRule{boolOn("notebook_checkpoint"), boolOn("notebook_enabled")}
 	}
 	if strings.HasPrefix(field, "hydration.") {
-		return []string{"notebook_hydration", "notebook_enabled"}
+		return []starvationRule{boolOn("notebook_hydration"), boolOn("notebook_enabled")}
+	}
+	if strings.HasPrefix(field, "prior_turns.") {
+		return []starvationRule{boolOn("notebook_enabled"), modeIs("notebook_prior_turns", "stub", "digest", "summarize"), priorTurnsRecallLive}
+	}
+	if strings.HasPrefix(field, "digests.") {
+		return []starvationRule{boolOn("notebook_enabled"), modeIs("notebook_prior_turns", "digest"), priorTurnsRecallLive}
 	}
 	if strings.HasPrefix(field, "recalls.") {
-		return []string{"notebook_enabled"}
+		return []starvationRule{boolOn("notebook_enabled"), recallToolLive}
 	}
-	// prior_turns.* and digests.* gate on notebook_prior_turns's
-	// string value (stub|digest), which the bool resolver can't
-	// express — left unmapped rather than half-checked.
 	return nil
 }
 
 // armOptionResolver resolves only the arm's literal options — an
 // absent key reports unknown so load-time validation can't flag what
 // flags.json might enable.
-func armOptionResolver(arm Arm) func(string) (bool, bool) {
-	return func(opt string) (bool, bool) {
+func armOptionResolver(arm Arm) func(string) (any, bool) {
+	return func(opt string) (any, bool) {
 		v, ok := arm.Config.Options[opt]
-		if !ok {
-			return false, false
-		}
-		b, ok := v.(bool)
-		return b, ok
+		return v, ok
 	}
 }
 
@@ -335,18 +520,18 @@ func armOptionResolver(arm Arm) func(string) (bool, bool) {
 // and question_* counters: the question tool is interactive-only, so
 // headless eval calls only ever register as is_error tool-not-found
 // attempts — a min_ asserts hallucination, not firing. resolve
-// reports (value, known); unknown options are skipped so the check
+// reports (value, known); rules pass unknown options so the check
 // only rejects what it can prove starves.
-func checkArmStarvation(armName, key, op, field string, resolve func(string) (bool, bool)) error {
+func checkArmStarvation(armName, key, op, field string, resolve func(string) (any, bool)) error {
 	if op != "min" {
 		return nil
 	}
 	if strings.HasPrefix(field, "call_metrics.question_") {
 		return fmt.Errorf("arm %q coverage %q: the question tool is interactive-only — headless calls only register as is_error, so a min_ asserts a hallucination", armName, key)
 	}
-	for _, opt := range armStarvationRequires(field) {
-		if v, known := resolve(opt); known && !v {
-			return fmt.Errorf("arm %q coverage %q: %s needs %s, which resolves off for this arm — every run starves", armName, key, field, opt)
+	for _, req := range armStarvationRules(field) {
+		if !req.ok(resolve) {
+			return fmt.Errorf("arm %q coverage %q: %s needs %s — every run starves", armName, key, field, req.desc)
 		}
 	}
 	return nil
@@ -361,6 +546,7 @@ var flagCodeDefaults = map[string]bool{
 	"notebook_checkpoint":      true,
 	"notebook_hydration":       true,
 	"project_index":            false,
+	"ambiguity_clarification":  false,
 }
 
 // ValidateArmCoverageResolved re-runs the starvation check against
@@ -375,28 +561,95 @@ func ValidateArmCoverageResolved(e *Experiment, manifest *FlagsManifest) error {
 			if err != nil {
 				return fmt.Errorf("arm %q coverage %q: %w", name, key, err)
 			}
-			resolve := func(opt string) (bool, bool) {
+			resolve := func(opt string) (any, bool) {
 				if v, ok := arm.Config.Options[opt]; ok {
-					b, isBool := v.(bool)
-					return b, isBool
+					return v, true
 				}
 				if manifest != nil {
 					if v, ok := manifest.Defaults[opt]; ok {
-						b, isBool := v.(bool)
-						return b, isBool
+						return v, true
 					}
 				}
 				if d, ok := flagCodeDefaults[opt]; ok {
 					return d, true
 				}
-				// An unnamed flag defaults off — the counter is
-				// unreachable either way.
-				return false, true
+				// An unnamed flag resolves to its code default — off
+				// for bools, verbatim for notebook_prior_turns — and
+				// either way the gated counter is unreachable.
+				return nil, true
 			}
 			if err := checkArmStarvation(name, key, op, field, resolve); err != nil {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+// coverageTurnCeiling gives the deterministic maximum a coverage field
+// can reach on a trajectory of n TASK turns — (ceil, true, why) when a
+// bound is expressible in turn count, false when it isn't. The bound
+// is deterministic, not structural: edge repair retries persist as
+// user messages, each gets its own Run, and a repair after the last
+// task turn has Before=n — so the session can produce up to ~3n
+// collapsible turns. Repair firing is model-dependent, so a min_
+// predicate can never rely on it: the ceiling rejects what the task
+// turns alone can't guarantee.
+func coverageTurnCeiling(field string, turns int) (ceil int, bounded bool, why string) {
+	switch field {
+	case "prior_turns.turns_collapsed":
+		// A turn collapses only at a LATER run's frozen render — the
+		// last task turn has no guaranteed later run. Summarize mode
+		// lowers the practical ceiling further (a covered turn with
+		// no entries renders verbatim), but the count can't see
+		// entry-emptiness.
+		return max(turns-1, 0), true, "the last task turn has no guaranteed later run (repair turns can render it but min_ can't rely on them)"
+	case "digests.written":
+		// The run-end pass digests the just-finished turn too, so
+		// every task turn is digestible. The HasFinishedToolCall
+		// floor — a tool-free turn never digests — is invisible to
+		// the count.
+		return turns, true, "one digest per turn (repair turns can add more but aren't guaranteed)"
+	case "prior_turns.events_collapsed", "digests.rendered", "recalls.prior_turn_result":
+		// Not turn-bounded above zero, but with fewer than two task
+		// turns no GUARANTEED prior turn exists — a repair retry on
+		// a 1-turn trajectory creates one, but a min_ predicate
+		// can't rely on it. Any positive min_ starves.
+		if turns < 2 {
+			return 0, true, "no guaranteed prior turn below 2 task turns (repair retries can create one but min_ can't rely on them)"
+		}
+	}
+	return 0, false, ""
+}
+
+// ValidateArmCoverageVsCorpus rejects min_ predicates that exceed what
+// a selected trajectory can ever produce — the starvation class
+// checkArmStarvation can't see because trajectory turn counts only
+// exist after corpus selection. A ceiling violation starves every run
+// of that trajectory into inconclusive, forever.
+func ValidateArmCoverageVsCorpus(e *Experiment, trajs []*Trajectory) error {
+	var problems []string
+	for _, t := range trajs {
+		n := len(t.Task.Turns)
+		for name, arm := range e.Arms {
+			for key, v := range arm.Coverage {
+				op, field, err := ParseArmCoverageKey(key)
+				if err != nil {
+					continue // Load-time validation reports the bad key.
+				}
+				if op != "min" {
+					continue
+				}
+				ceil, bounded, why := coverageTurnCeiling(field, n)
+				if !bounded || v <= float64(ceil) {
+					continue
+				}
+				problems = append(problems, fmt.Sprintf("arm %q coverage %s=%v exceeds trajectory %q ceiling %d (%d turns; %s)", name, key, v, t.ID, ceil, n, why))
+			}
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("coverage unachievable: %s", strings.Join(problems, "; "))
 	}
 	return nil
 }

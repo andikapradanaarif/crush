@@ -1,13 +1,14 @@
 # Run Edges — Deterministic Transitions at the Run Boundary
 
-> **Status:** Partially shipped. The `runEdge` seam, verification,
+> **Status:** Mostly shipped. The `runEdge` seam, verification,
 > todos-reconcile, `escalate-human`, and `phase-confirm` landed via
-> #43 — this doc's remaining work is the unimplemented catalog rows
-> (stall-replan, burn-watch, summarize-continue, join-subagents) and
-> edge-firing records. Split from `HARNESS_TOPOLOGY.md` — that doc
+> #43; stall-replan, burn-watch, and edge-firing records landed via
+> #52/#77 (`run_edges.go`, the `edge_firings` store, and the
+> `edge_firings.*` eval coverage fields). Remaining: summarize-continue
+> and join-subagents. Split from `HARNESS_TOPOLOGY.md` — that doc
 > is the analysis of why this shape; this doc is the work.
 > **Ship when:** per edge — the catalog names each trigger.
-> **Measured by:** edge-firing records per turn (PR 3 below);
+> **Measured by:** edge-firing records per turn;
 > `EVAL_HARNESS` trajectory assertions on named transitions.
 
 ## Goal
@@ -60,12 +61,12 @@ here because the list must have exactly one home.
 | ------------------ | -------------------------------------------------- | ------------------------------------------------------------ |
 | verification       | failed/pending checks                              | implemented (the extraction source)                          |
 | todos-reconcile    | open plan items at clean stop                      | implemented (same site)                                      |
-| stall-replan       | loop-detector / no-progress                        | new — inserts a model replan _before_ the shipped escalation |
+| stall-replan       | loop-detector / no-progress                        | implemented — replan before escalation, budget-branched         |
 | escalate-human     | loop-detector stop                                 | implemented (#43) — question turn                            |
 | phase-confirm      | first write-class call after ≥N exploration events | implemented (#43) — plan gate                                |
 | join-subagents     | outstanding dispatch ledger                        | lives in `BACKGROUND_SUBAGENTS.md`                           |
 | summarize-continue | context pressure at run end                        | new — reframes auto-summarize                                |
-| burn-watch         | run spent >T tokens with zero write-class calls    | new — the unnoticed-spend tripwire                           |
+| burn-watch         | run spent >T tokens with zero write-class calls    | implemented — the unnoticed-spend tripwire                     |
 
 The stall-replan row is the tell that this abstraction earns its
 keep: `hasRepeatedToolCalls` today _stops_ a thrashing turn — the
@@ -124,7 +125,11 @@ Mid-step control is explicitly out of scope for edges — hooks and
 permissions own that boundary (`hooked_tool.go`); edges only ever
 fire between turns.
 
-## Edge specs — the unimplemented rows
+## Edge specs
+
+stall-replan, burn-watch, and edge-firing records are shipped — their
+specs below describe as-built behavior. summarize-continue remains
+unimplemented; join-subagents lives in `BACKGROUND_SUBAGENTS.md`.
 
 ### stall-replan
 
@@ -701,19 +706,8 @@ never fires is dead code.
 
 ## PR ordering
 
-1. Extract `runEdge` from `runVerificationGate` — pure refactor;
-   verification + todos become the first two instances. Ships
-   inside #39's series — `escalate-human` needs this seam.
-2. Edge-firing records — `edge_firings` table + stats + eval
-   field. Lands first among the remaining rows: the three shipped
-   edges get recorded immediately, and stall-replan's new branches
-   are captured from day one. Requires name stability up front
-   (the `stall` name stays).
-3. `stall-replan` — the stall edge's branch on `RepairAttempts`;
-   implement the `family` precedence mechanism.
-4. `burn-watch` — conjunctive thresholds + once-per-crossing
-   marker; records exist so its firing rate is measurable from
-   day one.
+Steps 1–4 shipped (#43, #52/#77). What remains:
+
 5. `summarize-continue` — only after the `StopWhen` interaction is
    designed.
 
