@@ -208,6 +208,7 @@ bodies; prints the per-condition cache-hit table at the end.`,
 			Repeats:      flagInt(cmd, "repeats"),
 			MaxRequests:  flagInt(cmd, "max-requests"),
 			OutPath:      flag(cmd, "out"),
+			RawDir:       flag(cmd, "raw-dir"),
 			Seed:         flagInt64(cmd, "seed"),
 			DelayScale:   flagFloat(cmd, "delay-scale"),
 			DryRun:       flagBool(cmd, "dry-run"),
@@ -227,6 +228,7 @@ func flagInt64(cmd *cobra.Command, n string) int64 {
 	v, _ := cmd.Flags().GetInt64(n)
 	return v
 }
+
 func flagFloat(cmd *cobra.Command, n string) float64 {
 	v, _ := cmd.Flags().GetFloat64(n)
 	return v
@@ -280,8 +282,9 @@ func init() {
 	evalProbeCacheCmd.Flags().String("model", "deepseek-v4.1-flash", "model ID")
 	evalProbeCacheCmd.Flags().Int("target-tokens", 50000, "approximate prompt size in tokens")
 	evalProbeCacheCmd.Flags().Int("repeats", 5, "measured repeats per condition")
-	evalProbeCacheCmd.Flags().Int("max-requests", 120, "hard spend cap on HTTP requests")
+	evalProbeCacheCmd.Flags().Int("max-requests", 120, "hard spend cap on sends (one HTTP request each)")
 	evalProbeCacheCmd.Flags().String("out", "", "JSONL output path (default probe-cache-<ts>.jsonl)")
+	evalProbeCacheCmd.Flags().String("raw-dir", "", "raw response bodies dir (default <out>-raw)")
 	evalProbeCacheCmd.Flags().Int64("seed", time.Now().UnixNano(), "filler/schedule RNG seed")
 	evalProbeCacheCmd.Flags().Float64("delay-scale", 1.0, "multiplier on inter-request sleeps (spec timing = 1.0)")
 	evalProbeCacheCmd.Flags().Bool("dry-run", false, "print schedule and send estimate without sending")

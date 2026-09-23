@@ -1,13 +1,18 @@
 package eval
 
 // Cache probe: measures the serving endpoint's prompt-cache behavior
-// through the same provider construction and request path Crush uses
-// (openaicompat provider + session-affinity headers + streaming with
-// include_usage). Everything below is synthetic — no real session data
-// ever leaves the machine. See eval issue #116 for the experiment spec:
-// 6 conditions × 5 repeats over ~50K-token requests, randomized order,
-// independently warmed blocks, raw provider usage captured alongside
-// fantasy-normalized usage.
+// through the same provider-level request path Crush uses —
+// openaicompat provider construction, session-affinity headers, and
+// streaming with include_usage. It is deliberately not the full agent
+// loop: no tools array, no fantasy retry layer, a small max_tokens,
+// and synthetic filler text instead of real session content. Those
+// deltas can shift absolute hit fractions if the endpoint folds tools
+// into cache-key material, but prefix-vs-position reuse semantics —
+// what the probe exists to measure — transfer. No real session data
+// ever leaves the machine. See eval issue #116 for the experiment
+// spec: 6 conditions × 5 repeats over ~50K-token requests,
+// randomized order, independently warmed blocks, raw provider usage
+// captured alongside fantasy-normalized usage.
 
 import (
 	"bufio"
@@ -29,6 +34,7 @@ import (
 	"charm.land/fantasy"
 	"charm.land/fantasy/providers/openaicompat"
 
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/session"
 )
 
@@ -57,29 +63,55 @@ var probeConditions = []string{
 	"fresh-process", // Identical content, brand-new transport/client.
 }
 
-// ProbeRecord is one JSONL row per HTTP request.
+// ProbeMeta is the first JSONL row (kind="meta") — the run's
+// provenance. Without it a completed artifact can't be reproduced or
+// audited: the seed drives both the filler content and the schedule
+// shuffle, and the session string is hashed into the affinity header.
+type ProbeMeta struct {
+	Kind         string    `json:"kind"` // Always "meta".
+	TS           time.Time `json:"ts"`
+	Seed         int64     `json:"seed"`
+	Session      string    `json:"session"` // Pre-hash affinity string.
+	AffinityHash string    `json:"affinity_hash"`
+	Model        string    `json:"model"`
+	BaseURL      string    `json:"base_url"`
+	TargetTokens int       `json:"target_tokens"`
+	Repeats      int       `json:"repeats"`
+	DelayScale   float64   `json:"delay_scale"`
+	MaxRequests  int       `json:"max_requests"`
+	Conditions   []string  `json:"conditions"`
+}
+
+// ProbeRecord is one JSONL row per logical send.
 type ProbeRecord struct {
-	Seq          int            `json:"seq"`
-	TS           time.Time      `json:"ts"`
-	Kind         string         `json:"kind"` // warm | measured | control | delayed
-	Condition    string         `json:"condition"`
-	Repeat       int            `json:"repeat"`
-	DelayMS      int64          `json:"delay_ms"` // Since the previous send.
-	FreshProcess bool           `json:"fresh_process,omitempty"`
-	Attempts     int            `json:"attempts"`
-	RequestHash  string         `json:"request_hash"` // FNV-64a of the wire body.
-	MutatedIndex int            `json:"mutated_index"`
-	Usage        fantasy.Usage  `json:"usage_normalized"`
-	RawUsage     map[string]any `json:"usage_raw,omitempty"`
-	LatencyMS    int64          `json:"latency_ms"`
-	Error        string         `json:"error,omitempty"`
+	Seq       int       `json:"seq"`
+	TS        time.Time `json:"ts"`
+	Kind      string    `json:"kind"` // warm | measured | control | delayed
+	Condition string    `json:"condition"`
+	Repeat    int       `json:"repeat"`
+	DelayMS   int64     `json:"delay_ms"` // Since the previous send.
+	// FreshProcess is true only when the send actually ran on a
+	// rebuilt transport; FreshFallback records why it didn't (the
+	// fresh client/model construction failed and the send fell back
+	// to the shared one).
+	FreshProcess  bool   `json:"fresh_process,omitempty"`
+	FreshFallback string `json:"fresh_fallback,omitempty"`
+	Attempts      int    `json:"attempts"`     // HTTP round trips observed.
+	RequestHash   string `json:"request_hash"` // FNV-64a of the wire body.
+	MutatedIndex  int    `json:"mutated_index"`
+	// Usage is fantasy-normalized: InputTokens is the UNCACHED
+	// remainder (prompt_tokens minus cached), not the full prompt
+	// size — input+cache_read reconstructs it.
+	Usage     fantasy.Usage  `json:"usage_normalized"`
+	RawUsage  map[string]any `json:"usage_raw,omitempty"`
+	LatencyMS int64          `json:"latency_ms"`
+	Error     string         `json:"error,omitempty"`
 }
 
 // probeCapture stores one exchange: wire-body hash + buffered SSE body.
 type probeCapture struct {
 	reqHash string
 	buf     bytes.Buffer
-	file    string
 }
 
 // probeStore accumulates captures in send order (the probe is strictly
@@ -87,8 +119,6 @@ type probeCapture struct {
 type probeStore struct {
 	mu   sync.Mutex
 	caps []*probeCapture
-	dir  string
-	seq  int
 }
 
 func (s *probeStore) add(c *probeCapture) {
@@ -162,7 +192,9 @@ func (t *teeReadCloser) Close() error { return t.rc.Close() }
 
 // lastSSEUsage scans the buffered stream body for the terminal usage
 // chunk (openai-compatible servers emit `usage` once, on the final
-// chunk, when include_usage is set — fantasy sets it).
+// chunk, when include_usage is set — fantasy sets it). Lines beyond
+// the 1MiB scanner bound silently drop the usage — oversized SSE
+// chunks show up as a missing usage_raw field, not a parse error.
 func lastSSEUsage(body []byte) map[string]any {
 	var usage map[string]any
 	sc := bufio.NewScanner(bytes.NewReader(body))
@@ -300,8 +332,19 @@ func buildProbeBundle(rng *rand.Rand, targetTokens int) probeBundle {
 	return probeBundle{base: base, variants: variants, mutatedIdx: mutatedIdx}
 }
 
-// RunProbeCache executes the probe. Writes one JSONL record per HTTP
-// request to cfg.OutPath and raw SSE bodies under cfg.RawDir.
+// minProbeTargetTokens is the smallest prompt size whose bundle keeps
+// every condition's mutation meaningful — below it the system-prompt
+// and notebook builders hit negative slice bounds or degenerate to
+// byte-identical variants.
+const minProbeTargetTokens = 1000
+
+// RunProbeCache executes the probe. Writes a kind="meta" provenance
+// record then one JSONL record per send to cfg.OutPath, raw SSE bodies
+// under cfg.RawDir, and prints the per-condition cache-hit table — the
+// decision-gate readout — at the end. Returns nil only when the full
+// schedule ran; an early cap hit, three consecutive send errors, or a
+// cancelled context come back as errors so automation can tell a
+// complete run from an aborted one.
 func RunProbeCache(ctx context.Context, cfg ProbeCacheConfig) error {
 	if cfg.Repeats <= 0 {
 		cfg.Repeats = 5
@@ -311,6 +354,9 @@ func RunProbeCache(ctx context.Context, cfg ProbeCacheConfig) error {
 	}
 	if cfg.TargetTokens <= 0 {
 		cfg.TargetTokens = 50000
+	}
+	if cfg.TargetTokens < minProbeTargetTokens {
+		return fmt.Errorf("target tokens %d below minimum %d", cfg.TargetTokens, minProbeTargetTokens)
 	}
 	if cfg.DelayScale < 0 {
 		cfg.DelayScale = 1
@@ -338,13 +384,25 @@ func RunProbeCache(ctx context.Context, cfg ProbeCacheConfig) error {
 	}
 	rng.Shuffle(len(blocks), func(i, j int) { blocks[i], blocks[j] = blocks[j], blocks[i] })
 
-	estSends := len(blocks)*2 + 12 + len(blocks)/5
-	fmt.Printf("probe: %d blocks, ~%d sends, cap %d, out %s\n", len(blocks), estSends, cfg.MaxRequests, cfg.OutPath)
+	nDelayed := 0
+	for _, r := range []int{2, 4} {
+		if r <= cfg.Repeats {
+			nDelayed += len(probeConditions)
+		}
+	}
+	estSends := len(blocks)*2 + nDelayed + len(blocks)/5
+	fmt.Printf("probe: %d blocks, ~%d sends, cap %d, seed %d, out %s\n",
+		len(blocks), estSends, cfg.MaxRequests, cfg.Seed, cfg.OutPath)
 	if cfg.DryRun {
 		for i, b := range blocks {
 			fmt.Printf("  %2d: %-13s rep=%d\n", i, b.cond, b.rep)
 		}
 		return nil
+	}
+	if cfg.BaseURL == "" {
+		// openaicompat's default is api.openai.com — falling through
+		// to it would send the configured key to the wrong provider.
+		return fmt.Errorf("base URL required")
 	}
 	if cfg.APIKey == "" {
 		return fmt.Errorf("API key required")
@@ -359,11 +417,12 @@ func RunProbeCache(ctx context.Context, cfg ProbeCacheConfig) error {
 	probeSession := fmt.Sprintf("probe-%d-%d", time.Now().Unix(), cfg.Seed)
 	affinity := session.HashID(probeSession)
 	headers := map[string]string{"x-session-id": affinity, "x-session-affinity": affinity}
+	fmt.Printf("probe: session %s affinity %s\n", probeSession, affinity)
 
-	newClient := func() (*http.Client, *probeStore) {
-		store := &probeStore{dir: cfg.RawDir}
+	newClient := func() (*http.Client, *probeStore, *http.Transport) {
+		store := &probeStore{}
 		tr := http.DefaultTransport.(*http.Transport).Clone()
-		return &http.Client{Transport: &probeTransport{next: tr, store: store}}, store
+		return &http.Client{Transport: &probeTransport{next: tr, store: store}}, store, tr
 	}
 	newModel := func(client *http.Client) (fantasy.LanguageModel, error) {
 		prov, err := openaicompat.New(
@@ -377,7 +436,7 @@ func RunProbeCache(ctx context.Context, cfg ProbeCacheConfig) error {
 		return prov.LanguageModel(ctx, cfg.Model)
 	}
 
-	client, store := newClient()
+	client, store, _ := newClient()
 	model, err := newModel(client)
 	if err != nil {
 		return err
@@ -389,33 +448,57 @@ func RunProbeCache(ctx context.Context, cfg ProbeCacheConfig) error {
 	}
 	defer out.Close()
 	enc := json.NewEncoder(out)
+	// Provenance first — the artifact must be self-describing.
+	if err := enc.Encode(ProbeMeta{
+		Kind: "meta", TS: time.Now(), Seed: cfg.Seed,
+		Session: probeSession, AffinityHash: affinity,
+		Model: cfg.Model, BaseURL: cfg.BaseURL,
+		TargetTokens: cfg.TargetTokens, Repeats: cfg.Repeats,
+		DelayScale: cfg.DelayScale, MaxRequests: cfg.MaxRequests,
+		Conditions: probeConditions,
+	}); err != nil {
+		return err
+	}
 
 	seq := 0
 	lastSend := time.Now()
 	consecErr := 0
-	send := func(kind, cond string, rep int, msgs fantasy.Prompt, fresh bool) {
-		if seq >= cfg.MaxRequests {
+	var recs []ProbeRecord
+	send := func(kind, cond string, rep int, msgs fantasy.Prompt, mutIdx int, fresh bool) {
+		if seq >= cfg.MaxRequests || consecErr >= 3 || ctx.Err() != nil {
 			return
 		}
 		seq++
+		rec := ProbeRecord{
+			Seq: seq, TS: time.Now(), Kind: kind, Condition: cond, Repeat: rep,
+			MutatedIndex: mutIdx,
+		}
 		m, st := model, store
+		var freshTr *http.Transport
 		if fresh {
-			fc, fs := newClient()
+			fc, fs, ftr := newClient()
 			fm, ferr := newModel(fc)
 			if ferr == nil {
 				m, st = fm, fs
+				rec.FreshProcess = true
+				freshTr = ftr
+			} else {
+				// The send still runs on the shared transport —
+				// record the fallback so the row doesn't claim a
+				// fresh connection it didn't get.
+				rec.FreshFallback = ferr.Error()
+				ftr.CloseIdleConnections()
 			}
 		}
 		delay := time.Since(lastSend)
 		lastSend = time.Now()
-		rec := ProbeRecord{
-			Seq: seq, TS: time.Now(), Kind: kind, Condition: cond, Repeat: rep,
-			DelayMS: delay.Milliseconds(), FreshProcess: fresh,
-			MutatedIndex: bundle.mutatedIdx[cond],
-		}
+		rec.DelayMS = delay.Milliseconds()
 		prevCaps := st.len()
 		start := time.Now()
-		stream, serr := m.Stream(ctx, fantasy.Call{
+		// Per-request timeout mirrors production's request-timeout
+		// model — a stalled stream must not hang the run.
+		sendCtx, cancelSend := context.WithTimeout(ctx, config.DefaultRequestTimeout)
+		stream, serr := m.Stream(sendCtx, fantasy.Call{
 			Prompt:          msgs,
 			Headers:         headers,
 			MaxOutputTokens: ptrOf(int64(32)),
@@ -431,14 +514,22 @@ func RunProbeCache(ctx context.Context, cfg ProbeCacheConfig) error {
 				}
 			}
 		}
+		cancelSend()
+		if freshTr != nil {
+			freshTr.CloseIdleConnections()
+		}
 		rec.LatencyMS = time.Since(start).Milliseconds()
 		rec.Attempts = st.len() - prevCaps
-		if capt := st.last(); capt != nil {
-			rec.RequestHash = capt.reqHash
-			rec.RawUsage = lastSSEUsage(capt.buf.Bytes())
-			fname := filepath.Join(cfg.RawDir, fmt.Sprintf("seq-%04d-%s-%s.resp", seq, kind, cond))
-			if werr := os.WriteFile(fname, capt.buf.Bytes(), 0o644); werr == nil {
-				capt.file = fname
+		// Only a capture from THIS send is attributable — a transport-
+		// level failure appends nothing, and reading last() anyway
+		// would stamp the previous request's hash, usage, and body
+		// onto the failure record.
+		if rec.Attempts > 0 {
+			if capt := st.last(); capt != nil {
+				rec.RequestHash = capt.reqHash
+				rec.RawUsage = lastSSEUsage(capt.buf.Bytes())
+				fname := filepath.Join(cfg.RawDir, fmt.Sprintf("seq-%04d-%s-%s.resp", seq, kind, cond))
+				_ = os.WriteFile(fname, capt.buf.Bytes(), 0o644)
 			}
 		}
 		if serr != nil {
@@ -450,62 +541,105 @@ func RunProbeCache(ctx context.Context, cfg ProbeCacheConfig) error {
 		if err := enc.Encode(rec); err != nil {
 			fmt.Fprintf(os.Stderr, "probe: encode: %v\n", err)
 		}
+		recs = append(recs, rec)
 		status := ""
 		if serr != nil {
 			status = " ERR " + serr.Error()
 		}
-		fmt.Printf("  %3d %-8s %-13s prompt=%6d cache_read=%6d%s\n",
+		// InputTokens is the uncached remainder (fantasy normalizes
+		// prompt_tokens minus cached_tokens) — label it as such.
+		fmt.Printf("  %3d %-8s %-13s uncached=%6d cache_read=%6d%s\n",
 			seq, kind, cond, rec.Usage.InputTokens, rec.Usage.CacheReadTokens, status)
 	}
 
 	sleep := func(lo, hi time.Duration) {
+		if ctx.Err() != nil || seq >= cfg.MaxRequests || consecErr >= 3 {
+			return
+		}
 		d := lo + time.Duration(rng.Int63n(int64(hi-lo)))
-		time.Sleep(time.Duration(float64(d) * cfg.DelayScale))
+		t := time.NewTimer(time.Duration(float64(d) * cfg.DelayScale))
+		defer t.Stop()
+		select {
+		case <-ctx.Done():
+		case <-t.C:
+		}
 	}
 
+	doneBlocks := 0
 	for i, b := range blocks {
-		if seq >= cfg.MaxRequests || consecErr >= 3 {
+		if seq >= cfg.MaxRequests || consecErr >= 3 || ctx.Err() != nil {
 			break
 		}
-		send("warm", "base", 0, bundle.base, false)
+		// The warm carries the block's condition so it's attributable
+		// without seq-adjacency inference; kind=warm distinguishes it.
+		send("warm", b.cond, 0, bundle.base, -1, false)
 		sleep(8*time.Second, 22*time.Second)
 		fresh := b.cond == "fresh-process"
-		send("measured", b.cond, b.rep, bundle.variants[b.cond], fresh)
+		send("measured", b.cond, b.rep, bundle.variants[b.cond], bundle.mutatedIdx[b.cond], fresh)
 		if b.rep == 2 || b.rep == 4 {
 			sleep(45*time.Second, 75*time.Second)
-			send("delayed", b.cond, b.rep, bundle.variants[b.cond], fresh)
+			send("delayed", b.cond, b.rep, bundle.variants[b.cond], bundle.mutatedIdx[b.cond], fresh)
 		}
 		if i%5 == 4 {
-			send("control", "identical", 0, bundle.variants["identical"], false)
+			send("control", "identical", 0, bundle.variants["identical"], -1, false)
 		}
+		doneBlocks++
 	}
 	fmt.Printf("probe done: %d sends → %s\n", seq, cfg.OutPath)
+	ProbeSummarize(os.Stdout, recs)
+	switch {
+	case ctx.Err() != nil:
+		return ctx.Err()
+	case consecErr >= 3:
+		return fmt.Errorf("probe aborted: %d consecutive send errors", consecErr)
+	case doneBlocks < len(blocks):
+		return fmt.Errorf("probe incomplete: spend cap reached after %d sends (%d/%d blocks ran)",
+			seq, doneBlocks, len(blocks))
+	}
 	return nil
 }
 
 func ptrOf[T any](v T) *T { return &v }
 
 // ProbeSummarize prints the per-condition cache-hit table — the
-// decision-gate readout.
-func ProbeSummarize(recs []ProbeRecord) {
-	type acc struct{ hits, prompt []int64 }
+// decision-gate readout. Delayed resends get their own rows so
+// seconds-scale persistence is visible next to the immediate repeats;
+// warm rows are excluded (they establish the cache, they don't test
+// it).
+func ProbeSummarize(w io.Writer, recs []ProbeRecord) {
+	type acc struct{ prompt, hits, rawHit []int64 }
 	by := map[string]*acc{}
 	var order []string
 	for _, r := range recs {
 		if r.Kind != "measured" && r.Kind != "delayed" && r.Kind != "control" {
 			continue
 		}
-		a := by[r.Condition]
+		key := r.Condition
+		if r.Kind == "delayed" {
+			key += " (delayed)"
+		}
+		a := by[key]
 		if a == nil {
 			a = &acc{}
-			by[r.Condition] = a
-			order = append(order, r.Condition)
+			by[key] = a
+			order = append(order, key)
 		}
+		// Fantasy normalizes InputTokens to the uncached remainder
+		// (prompt_tokens − cached_tokens), so input+cached
+		// reconstructs the true prompt size — the correct hit%
+		// denominator.
+		a.prompt = append(a.prompt, r.Usage.InputTokens+r.Usage.CacheReadTokens)
 		a.hits = append(a.hits, r.Usage.CacheReadTokens)
-		a.prompt = append(a.prompt, r.Usage.InputTokens)
+		// Provider-native cache fields (DeepSeek-style) survive in
+		// the raw usage — prefer them for the hit column when present.
+		if v, ok := r.RawUsage["prompt_cache_hit_tokens"].(float64); ok {
+			a.rawHit = append(a.rawHit, int64(v))
+		} else {
+			a.rawHit = append(a.rawHit, -1)
+		}
 	}
 	sort.Strings(order)
-	fmt.Printf("\n%-14s %4s %10s %10s %8s\n", "condition", "n", "prompt", "cache_read", "hit%")
+	fmt.Fprintf(w, "\n%-22s %4s %10s %10s %10s %8s\n", "condition", "n", "prompt", "cache_read", "raw_hit", "hit%")
 	for _, c := range order {
 		a := by[c]
 		var hitFrac float64
@@ -515,8 +649,20 @@ func ProbeSummarize(recs []ProbeRecord) {
 			}
 		}
 		hitFrac /= float64(len(a.hits))
-		fmt.Printf("%-14s %4d %10d %10d %7.1f%%\n", c, len(a.hits), median(a.prompt), median(a.hits), hitFrac*100)
+		raw := "-"
+		var rawVals []int64
+		for _, v := range a.rawHit {
+			if v >= 0 {
+				rawVals = append(rawVals, v)
+			}
+		}
+		if len(rawVals) > 0 {
+			raw = fmt.Sprintf("%d", median(rawVals))
+		}
+		fmt.Fprintf(w, "%-22s %4d %10d %10d %10s %7.1f%%\n",
+			c, len(a.hits), median(a.prompt), median(a.hits), raw, hitFrac*100)
 	}
+	fmt.Fprintln(w, "hit% = mean(cache_read / (uncached + cache_read)) per row; 'identical' includes control resends; warm rows excluded.")
 }
 
 func median(v []int64) int64 {

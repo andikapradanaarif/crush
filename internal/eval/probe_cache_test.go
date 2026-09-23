@@ -1,13 +1,16 @@
 package eval
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -19,12 +22,23 @@ import (
 // text chunk, then a usage chunk carrying both OpenAI-style
 // prompt_tokens_details.cached_tokens (what fantasy normalizes) and
 // DeepSeek-style prompt_cache_hit_tokens (what only the raw capture
-// sees).
-func fakeCacheEndpoint(t *testing.T, hits *atomic.Int64) *httptest.Server {
+// sees). Header assertions are collected and checked by the caller —
+// require.* in a handler goroutine is unsafe (FailNow only works on
+// the test goroutine).
+func fakeCacheEndpoint(t *testing.T, hits *atomic.Int64, hdrErrs *[]string, mu *sync.Mutex) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, http.MethodPost, r.Method)
-		require.NotEmpty(t, r.Header.Get("x-session-affinity"))
+		mu.Lock()
+		if r.Method != http.MethodPost {
+			*hdrErrs = append(*hdrErrs, fmt.Sprintf("method %s", r.Method))
+		}
+		sid, sa := r.Header.Get("x-session-id"), r.Header.Get("x-session-affinity")
+		if sid == "" || sa == "" {
+			*hdrErrs = append(*hdrErrs, "missing affinity headers")
+		} else if sid != sa {
+			*hdrErrs = append(*hdrErrs, fmt.Sprintf("affinity mismatch %q != %q", sid, sa))
+		}
+		mu.Unlock()
 		w.Header().Set("Content-Type", "text/event-stream")
 		h := hits.Load()
 		fmt.Fprintf(w, `data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}`+"\n\n")
@@ -33,6 +47,8 @@ func fakeCacheEndpoint(t *testing.T, hits *atomic.Int64) *httptest.Server {
 	}))
 }
 
+// readProbeRecords returns the JSONL's send rows, skipping the meta
+// header.
 func readProbeRecords(t *testing.T, path string) []ProbeRecord {
 	t.Helper()
 	f, err := os.Open(path)
@@ -43,16 +59,32 @@ func readProbeRecords(t *testing.T, path string) []ProbeRecord {
 	for dec.More() {
 		var r ProbeRecord
 		require.NoError(t, dec.Decode(&r))
+		if r.Kind == "meta" {
+			continue
+		}
 		recs = append(recs, r)
 	}
 	return recs
+}
+
+// readProbeMeta decodes the first JSONL row as the meta record.
+func readProbeMeta(t *testing.T, path string) ProbeMeta {
+	t.Helper()
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	defer f.Close()
+	var meta ProbeMeta
+	require.NoError(t, json.NewDecoder(f).Decode(&meta))
+	return meta
 }
 
 func TestProbeCache_EndToEnd(t *testing.T) {
 	t.Parallel()
 	var hits atomic.Int64
 	hits.Store(49000)
-	srv := fakeCacheEndpoint(t, &hits)
+	var mu sync.Mutex
+	var hdrErrs []string
+	srv := fakeCacheEndpoint(t, &hits, &hdrErrs, &mu)
 	defer srv.Close()
 
 	out := filepath.Join(t.TempDir(), "probe.jsonl")
@@ -68,22 +100,32 @@ func TestProbeCache_EndToEnd(t *testing.T) {
 		Seed:         42,
 	})
 	require.NoError(t, err)
+	require.Empty(t, hdrErrs)
+
+	meta := readProbeMeta(t, out)
+	require.Equal(t, "meta", meta.Kind)
+	require.EqualValues(t, 42, meta.Seed)
+	require.Equal(t, "test-model", meta.Model)
+	require.NotEmpty(t, meta.AffinityHash)
+	require.Equal(t, probeConditions, meta.Conditions)
 
 	recs := readProbeRecords(t, out)
 	// 6 conditions × 1 repeat → 6 warms + 6 measured + 1 control.
 	var warms, measured, controls int
-	byHash := map[string][]ProbeRecord{}
 	for _, r := range recs {
-		byHash[r.RequestHash] = append(byHash[r.RequestHash], r)
 		switch r.Kind {
 		case "warm":
 			warms++
+			// Warm rows carry the block's condition and no mutation.
+			require.NotEqual(t, "base", r.Condition)
+			require.Equal(t, -1, r.MutatedIndex)
 		case "measured":
 			measured++
 		case "control":
 			controls++
 		}
 		require.Empty(t, r.Error)
+		require.Equal(t, 1, r.Attempts)
 		require.NotEmpty(t, r.RequestHash)
 		require.EqualValues(t, 49000, r.Usage.CacheReadTokens)
 		// Raw capture carries the DeepSeek-style field fantasy drops.
@@ -95,7 +137,7 @@ func TestProbeCache_EndToEnd(t *testing.T) {
 
 	// Identical/fresh-process share the base request hash; mutated
 	// conditions each produce a distinct one.
-	var condHashes = map[string]string{}
+	condHashes := map[string]string{}
 	for _, r := range recs {
 		if r.Kind == "measured" {
 			condHashes[r.Condition] = r.RequestHash
@@ -116,7 +158,9 @@ func TestProbeCache_EndToEnd(t *testing.T) {
 func TestProbeCache_SpendCap(t *testing.T) {
 	t.Parallel()
 	var hits atomic.Int64
-	srv := fakeCacheEndpoint(t, &hits)
+	var mu sync.Mutex
+	var hdrErrs []string
+	srv := fakeCacheEndpoint(t, &hits, &hdrErrs, &mu)
 	defer srv.Close()
 
 	out := filepath.Join(t.TempDir(), "probe.jsonl")
@@ -130,8 +174,90 @@ func TestProbeCache_SpendCap(t *testing.T) {
 		DelayScale:  0,
 		Seed:        1,
 	})
-	require.NoError(t, err)
+	// Cap hit mid-schedule is an incomplete run, not a clean exit.
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "spend cap")
 	require.Len(t, readProbeRecords(t, out), 7)
+}
+
+// TestProbeCache_TransportFailure exercises the path where a send dies
+// before RoundTrip produces a response — the record must not inherit
+// the previous send's capture (hash, usage, body).
+func TestProbeCache_TransportFailure(t *testing.T) {
+	t.Parallel()
+	// A listener that accepts then immediately closes gives a fast
+	// transport-level failure (no HTTP response ever arrives).
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	require.NoError(t, ln.Close())
+
+	out := filepath.Join(t.TempDir(), "probe.jsonl")
+	err = RunProbeCache(t.Context(), ProbeCacheConfig{
+		BaseURL:     "http://" + ln.Addr().String() + "/v1",
+		APIKey:      "k",
+		Model:       "m",
+		Repeats:     5,
+		MaxRequests: 100,
+		OutPath:     out,
+		DelayScale:  0,
+		Seed:        1,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "consecutive send errors")
+	recs := readProbeRecords(t, out)
+	require.NotEmpty(t, recs)
+	for _, r := range recs {
+		require.NotEmpty(t, r.Error)
+		require.Zero(t, r.Attempts)
+		// The stale-capture bug stamped these with the prior send's
+		// data — they must stay empty on transport failure.
+		require.Empty(t, r.RequestHash)
+		require.Empty(t, r.RawUsage)
+	}
+}
+
+// TestProbeCache_DryRun verifies the schedule path sends nothing and
+// writes no artifact.
+func TestProbeCache_DryRun(t *testing.T) {
+	t.Parallel()
+	out := filepath.Join(t.TempDir(), "probe.jsonl")
+	err := RunProbeCache(t.Context(), ProbeCacheConfig{
+		DryRun:       true,
+		TargetTokens: 2000,
+		OutPath:      out,
+		Seed:         1,
+	})
+	require.NoError(t, err)
+	_, statErr := os.Stat(out)
+	require.True(t, os.IsNotExist(statErr))
+}
+
+func TestProbeSummarize(t *testing.T) {
+	t.Parallel()
+	mk := func(kind, cond string, input, cached int64) ProbeRecord {
+		return ProbeRecord{
+			Kind: kind, Condition: cond,
+			Usage: fantasy.Usage{InputTokens: input, CacheReadTokens: cached},
+		}
+	}
+	recs := []ProbeRecord{
+		mk("warm", "identical", 50000, 0), // Excluded — establishes cache.
+		mk("measured", "identical", 1000, 49000),
+		mk("control", "identical", 2000, 48000),
+		mk("delayed", "identical", 5000, 45000),
+		mk("measured", "notebook", 25000, 25000),
+	}
+	var buf bytes.Buffer
+	ProbeSummarize(&buf, recs)
+	s := buf.String()
+	// hit% divides by the true prompt (uncached+cached), not the
+	// uncached remainder — 49K/50K must print ~98%, not 4900%.
+	require.Contains(t, s, "identical")
+	require.Contains(t, s, "97.0%") // (49000/50000 + 48000/50000)/2
+	require.Contains(t, s, "identical (delayed)")
+	require.Contains(t, s, "90.0%") // 45000/50000
+	require.Contains(t, s, "notebook")
+	require.Contains(t, s, "50.0%")
 }
 
 func TestBuildProbeBundle_MutationLocality(t *testing.T) {
