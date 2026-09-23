@@ -19,5 +19,5 @@ Returns: full notebook entries with all preserved details, or the
 original tool result for result: queries.
 Each entry is about ONE event — no noise from unrelated events.
 
-Do NOT re-read files with notebook entries — use recall first.
-It is 16x cheaper than re-reading the file.
+Entries describe events; they don't contain file contents. Use recall
+for event details — view or re-read the file for the bytes you'll modify.

@@ -99,6 +99,8 @@ func TestCoderPrompt_NotebookToolGating(t *testing.T) {
 	require.Contains(t, full, "# Context Notebook")
 	require.Contains(t, full, "Use the `recall` tool")
 	require.Contains(t, full, "Use `notebook_search`")
+	require.Contains(t, full, "`recall` for event details, `view` for the bytes you'll modify.")
+	require.NotContains(t, full, "16x")
 
 	noRecall := render("recall")
 	require.Contains(t, noRecall, "# Context Notebook")
@@ -113,10 +115,10 @@ func TestCoderPrompt_NotebookToolGating(t *testing.T) {
 	// The fallback branches must degrade tool-agnostically too —
 	// naming `view` when it's disabled would be the same dead pointer.
 	noRecallNoView := render("recall", "view")
-	require.Contains(t, noRecallNoView, "Re-read files when you need details")
-	require.NotContains(t, noRecallNoView, "Re-read files with `view`")
+	require.Contains(t, noRecallNoView, "re-read the file for the bytes you'll modify.")
+	require.NotContains(t, noRecallNoView, "use `view`")
 
 	recallNoView := render("view")
-	require.Contains(t, recallNoView, "then re-read the file.")
-	require.NotContains(t, recallNoView, "then use `view`")
+	require.Contains(t, recallNoView, "re-read the file for the bytes you'll modify.")
+	require.NotContains(t, recallNoView, "`view` for the bytes")
 }
