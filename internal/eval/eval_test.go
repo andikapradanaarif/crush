@@ -274,6 +274,92 @@ func TestCoverage_ArmScoped(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestCoverage_RequestFields(t *testing.T) {
+	t.Parallel()
+
+	// request.* decomposes the final rendered request — the direct
+	// "did content reach the prompt" predicate.
+	for _, f := range []string{
+		"prompt_requests", "prompt_tokens_peak", "system_bytes",
+		"notebook_bytes", "history_bytes", "tool_call_bytes",
+		"tool_result_bytes",
+	} {
+		_, _, err := ParseCoverageKey("min_request." + f)
+		require.NoError(t, err, "request.%s must be a coverage field", f)
+	}
+
+	rec := &RunRecord{Request: &RequestStats{NotebookBytes: 4096, SystemBytes: 21037}}
+	met, err := CoverageMet(Coverage{"min_request.notebook_bytes": 1}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+	met, err = CoverageMet(Coverage{"min_request.notebook_bytes": 4097}, rec)
+	require.NoError(t, err)
+	require.False(t, met)
+
+	// Absent request stats fail closed in BOTH directions — a
+	// missing snapshot is not "0 bytes rendered".
+	bare := &RunRecord{}
+	met, err = CoverageMet(Coverage{"min_request.system_bytes": 1}, bare)
+	require.NoError(t, err)
+	require.False(t, met)
+	met, err = CoverageMet(Coverage{"max_request.system_bytes": 1}, bare)
+	require.NoError(t, err)
+	require.False(t, met)
+	met, err = ArmCoverageMet(Coverage{"min_request.notebook_bytes": 1}, bare)
+	require.NoError(t, err)
+	require.False(t, met)
+}
+
+func TestWriteOnlyCoverageWarnings(t *testing.T) {
+	t.Parallel()
+
+	// A write-side predicate without its render sibling warns —
+	// commits can land while the prompt never changes.
+	w := writeOnlyCoverageWarnings("treatment", Coverage{"min_checkpoints.written": 1})
+	require.Len(t, w, 1)
+	require.Contains(t, w[0], "checkpoints.rendered")
+
+	w = writeOnlyCoverageWarnings("treatment", Coverage{"min_hydration.seeds": 1})
+	require.Len(t, w, 1)
+	require.Contains(t, w[0], "hydration.rendered")
+
+	// The render sibling present → quiet.
+	require.Empty(t, writeOnlyCoverageWarnings("treatment", Coverage{
+		"min_checkpoints.written": 1, "min_checkpoints.rendered": 1,
+	}))
+
+	// Fields outside the write/render pairs stay quiet — and max_ on
+	// a write field is a bound, not a firing claim.
+	require.Empty(t, writeOnlyCoverageWarnings("treatment", Coverage{"min_steps": 3}))
+	require.Empty(t, writeOnlyCoverageWarnings("treatment", Coverage{"max_digests.written": 5}))
+}
+
+func TestReport_VerdictPower(t *testing.T) {
+	t.Parallel()
+
+	// Quiet + no powered tier → INCONCLUSIVE: a run where neither
+	// evidence tier could have spoken is not a pass.
+	rep := Report{CatastrophicEligible: map[string]bool{"a": false}, DiffuseP: 1}
+	require.Contains(t, rep.Summary(0.05), "verdict: INCONCLUSIVE")
+
+	// An eligible catastrophic trajectory powers the tier → quiet
+	// reads PASS again.
+	rep = Report{CatastrophicEligible: map[string]bool{"a": true}, DiffuseP: 1}
+	require.Contains(t, rep.Summary(0.05), "verdict: PASS")
+
+	// Diffuse pairs power the other tier.
+	rep = Report{CatastrophicEligible: map[string]bool{}, DiffusePairs: 2, DiffuseP: 0.9}
+	require.Contains(t, rep.Summary(0.05), "verdict: PASS")
+
+	// Alarms override regardless of power.
+	rep = Report{
+		CatastrophicEligible: map[string]bool{"a": false},
+		DiffuseP:             1,
+		Smoke:                []string{"a"},
+	}
+	require.Contains(t, rep.Summary(0.05), "verdict: FAIL")
+}
+
 func TestValidateExperiment_ArmCoverage(t *testing.T) {
 	t.Parallel()
 	temp := 0.0
@@ -354,6 +440,19 @@ func TestValidateExperiment_ArmCoverageStarvation(t *testing.T) {
 		Coverage: Coverage{"min_call_metrics.wrong_pointer_events": 1},
 	}
 	require.Error(t, ValidateExperiment(exp))
+
+	// request.notebook_bytes is zero by construction when the
+	// notebook is off — min_ starves on a notebook-disabled arm.
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"notebook_enabled": false}},
+		Coverage: Coverage{"min_request.notebook_bytes": 1},
+	}
+	require.Error(t, ValidateExperiment(exp))
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"notebook_enabled": true}},
+		Coverage: Coverage{"min_request.notebook_bytes": 1},
+	}
+	require.NoError(t, ValidateExperiment(exp))
 }
 
 func TestValidateArmCoverageResolved(t *testing.T) {
@@ -685,6 +784,12 @@ func TestValidateTrajectory_FlagGatedMinRejected(t *testing.T) {
 
 	problems = ValidateTrajectory(mk(Coverage{"min_recalls.entry": 1}), dir)
 	require.NotEmpty(t, problems)
+
+	// request.notebook_bytes is zero by construction on a
+	// notebook-off arm — a shared min_ starves it.
+	problems = ValidateTrajectory(mk(Coverage{"min_request.notebook_bytes": 1}), dir)
+	require.NotEmpty(t, problems)
+	require.Contains(t, problems[0], "flag-gated")
 
 	// max_ bounds both arms legitimately — still legal unscoped.
 	problems = ValidateTrajectory(mk(Coverage{"max_stub_stats.results": 10}), dir)

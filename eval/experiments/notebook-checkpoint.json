@@ -32,7 +32,8 @@
 				}
 			},
 			"coverage": {
-				"min_checkpoints.written": 1
+				"min_checkpoints.written": 1,
+				"min_checkpoints.rendered": 1
 			}
 		}
 	},

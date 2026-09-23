@@ -32,7 +32,8 @@
 				}
 			},
 			"coverage": {
-				"min_digests.written": 1
+				"min_digests.written": 1,
+				"min_digests.rendered": 1
 			}
 		}
 	},

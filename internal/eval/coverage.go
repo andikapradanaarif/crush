@@ -49,6 +49,22 @@ var coverageFields = map[string]func(*RunRecord) float64{
 	"hydration.seeds":              func(r *RunRecord) float64 { return float64(r.Hydration.Seeds) },
 	"hydration.plan_seeds":         func(r *RunRecord) float64 { return float64(r.Hydration.PlanSeeds) },
 	"hydration.rendered":           func(r *RunRecord) float64 { return float64(r.Hydration.Rendered) },
+	// request.* decomposes the trajectory-final rendered request —
+	// the direct "did content reach the prompt" measure. Absent
+	// request stats starve these predicates in BOTH directions
+	// (see coverageMet's nil guard), like call_metrics.
+	// request.notebook_bytes is flag-gated (structurally 0 when
+	// notebook_enabled is off) — trajectory min_ rejects it via
+	// flagGatedPrefixes; assert it in arm coverage.
+	"request.prompt_requests": func(r *RunRecord) float64 { return float64(requestStats(r).PromptRequests) },
+	"request.prompt_tokens_peak": func(r *RunRecord) float64 {
+		return float64(requestStats(r).PromptTokensPeak)
+	},
+	"request.system_bytes":      func(r *RunRecord) float64 { return float64(requestStats(r).SystemBytes) },
+	"request.notebook_bytes":    func(r *RunRecord) float64 { return float64(requestStats(r).NotebookBytes) },
+	"request.history_bytes":     func(r *RunRecord) float64 { return float64(requestStats(r).HistoryBytes) },
+	"request.tool_call_bytes":   func(r *RunRecord) float64 { return float64(requestStats(r).ToolCallBytes) },
+	"request.tool_result_bytes": func(r *RunRecord) float64 { return float64(requestStats(r).ToolResultBytes) },
 	// Flag-invariant call_metrics subset — see the comment above.
 	"call_metrics.requests":          func(r *RunRecord) float64 { return float64(callMetrics(r).Requests) },
 	"call_metrics.calls":             func(r *RunRecord) float64 { return float64(callMetrics(r).Calls) },
@@ -107,11 +123,11 @@ var armFields map[string]func(*RunRecord) float64
 // flagGatedPrefixes name coverage fields whose counters only exist
 // when a feature flag is on — stub_stats.* need notebook_stub_superseded,
 // prior_turns.* need notebook_prior_turns=stub|digest, hydration.* need
-// notebook_hydration, recalls.* need a registered recall tool. An
-// unscoped min_ predicate over one of these starves the arm where the
-// flag is off, so trajectory coverage rejects them; scope them
-// per-arm instead.
-var flagGatedPrefixes = []string{"stub_stats.", "prior_turns.", "recalls.", "checkpoints.", "digests.", "hydration."}
+// notebook_hydration, recalls.* need a registered recall tool,
+// request.notebook_* needs notebook_enabled. An unscoped min_
+// predicate over one of these starves the arm where the flag is off,
+// so trajectory coverage rejects them; scope them per-arm instead.
+var flagGatedPrefixes = []string{"stub_stats.", "prior_turns.", "recalls.", "checkpoints.", "digests.", "hydration.", "request.notebook"}
 
 // callMetrics dereferences the optional analysis sub-object. CoverageMet
 // short-circuits nil CallMetrics before reaching field funcs, so this
@@ -121,6 +137,16 @@ func callMetrics(r *RunRecord) CallMetrics {
 		return CallMetrics{}
 	}
 	return *r.CallMetrics
+}
+
+// requestStats dereferences the optional request-composition snapshot.
+// coverageMet short-circuits nil Request before reaching field funcs,
+// so this only runs when the snapshot is present.
+func requestStats(r *RunRecord) RequestStats {
+	if r.Request == nil {
+		return RequestStats{}
+	}
+	return *r.Request
 }
 
 func init() {
@@ -226,6 +252,12 @@ func coverageMet(cov Coverage, rec *RunRecord, fields map[string]func(*RunRecord
 		// Absent analysis starves call_metrics predicates in BOTH
 		// directions — max_* must not pass on a missing analysis.
 		if strings.HasPrefix(field, "call_metrics.") && rec.CallMetrics == nil {
+			return false, key, nil
+		}
+		// Same for request.*: a missing request snapshot means the
+		// render never landed — the "did it reach the prompt"
+		// question must fail closed, not read as 0 bytes present.
+		if strings.HasPrefix(field, "request.") && rec.Request == nil {
 			return false, key, nil
 		}
 		got := fn(rec)

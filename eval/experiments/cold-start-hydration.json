@@ -32,7 +32,8 @@
 				}
 			},
 			"coverage": {
-				"min_hydration.seeds": 1
+				"min_hydration.seeds": 1,
+				"min_hydration.rendered": 1
 			}
 		}
 	},

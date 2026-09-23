@@ -128,6 +128,9 @@ var evalRunCmd = &cobra.Command{
 		if rep.Fired(alpha) {
 			return fmt.Errorf("gate fired")
 		}
+		if !rep.Powered() {
+			return fmt.Errorf("gate inconclusive: no powered tier")
+		}
 		return nil
 	},
 }
