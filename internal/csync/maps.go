@@ -79,6 +79,19 @@ func (m *Map[K, V]) CompareAndDelete(key K, expected any) bool {
 	return true
 }
 
+// Update applies fn to the value stored under key as one atomic
+// read-modify-write under the map lock, storing the result. Absent
+// keys start from the zero value, so counter increments GetOrCreate.
+// fn runs while the map's write lock is held — keep it cheap and never
+// call back into this map (Get, Set, Update, ...) or it will deadlock.
+func (m *Map[K, V]) Update(key K, fn func(*V)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v := m.inner[key]
+	fn(&v)
+	m.inner[key] = v
+}
+
 // Get gets the value for the specified key from the map.
 func (m *Map[K, V]) Get(key K) (V, bool) {
 	m.mu.RLock()

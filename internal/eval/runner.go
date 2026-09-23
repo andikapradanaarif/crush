@@ -284,6 +284,11 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	rec.Hydration = res.Hydration
 	rec.EdgeFirings = res.EdgeFirings
 	rec.PromptTokensPerTurn = res.PromptTokensPerTurn
+	rec.StepRecords = res.StepRecords
+	rec.ErrorClass = res.ErrorClass
+	if res.GeneratorTokens.Calls > 0 {
+		rec.GeneratorTokens = &res.GeneratorTokens
+	}
 	if res.Request.PromptRequests > 0 {
 		rec.Request = &res.Request
 	}
@@ -748,7 +753,14 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 			case isConfigClassError(rec):
 				configErrs.n++
 				if configErrs.first == "" {
-					configErrs.first = rec.CheckDetail["run_error"].(string)
+					// run_error accompanies every classified failure
+					// today; the class name is the fallback if a
+					// future record producer drops it.
+					if s, ok := rec.CheckDetail["run_error"].(string); ok && s != "" {
+						configErrs.first = s
+					} else {
+						configErrs.first = rec.ErrorClass
+					}
 				}
 				if configErrs.n >= 2 {
 					rep.Abort = fmt.Errorf("config-class failure after %d runs: %s", configErrs.n, configErrs.first)
@@ -758,7 +770,7 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 				fixtureErrs++
 				if fixtureErrs >= 2 {
 					detail := "fixture config"
-					for _, key := range []string{"harness", "check_error"} {
+					for _, key := range []string{"harness", "check_error", "run_error"} {
 						if v, ok := rec.CheckDetail[key].(string); ok && v != "" {
 							detail += ": " + v
 							break

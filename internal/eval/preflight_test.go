@@ -209,6 +209,77 @@ func TestIsConfigClassError_RealShapes(t *testing.T) {
 	require.False(t, isConfigClassError(authRL))
 }
 
+func TestIsConfigClassError_ErrorClass(t *testing.T) {
+	t.Parallel()
+	// Typed classification wins over the string fallback — the child's
+	// ProviderError status decides, not message text.
+	mk := func(class string) RunRecord {
+		return RunRecord{
+			Outcome:     OutcomeError,
+			ErrorClass:  class,
+			Steps:       5,
+			Request:     &RequestStats{PromptRequests: 5},
+			CheckDetail: map[string]any{"run_error": "agent run failed: opaque provider text"},
+		}
+	}
+	for _, class := range []string{"auth", "provider_unreachable"} {
+		require.True(t, isConfigClassError(mk(class)), class)
+	}
+	for _, class := range []string{"rate_limit", "provider_transient", "provider_other", "context_too_large", "cancelled", "timeout"} {
+		require.False(t, isConfigClassError(mk(class)), class)
+	}
+	// provider_deterministic and provider_server share the scope
+	// split: pre-model (no steps, no request) they're config-shaped
+	// and trip the experiment breaker; mid-run they're
+	// trajectory-shaped — fixture-class, so two strikes skip the
+	// trajectory instead of aborting the experiment. A dead
+	// endpoint can't produce a completed request, so a real outage
+	// still reads step-0.
+	for _, class := range []string{"provider_deterministic", "provider_server"} {
+		midRun := mk(class)
+		require.False(t, isConfigClassError(midRun), class)
+		require.True(t, isFixtureConfigError(midRun), class)
+		step0 := midRun
+		step0.Steps = 0
+		step0.Request = nil
+		require.True(t, isConfigClassError(step0), class)
+		require.False(t, isFixtureConfigError(step0), class)
+	}
+	// context_too_large is trajectory-scoped — fixture-class, so two
+	// strikes skip the trajectory rather than abort the experiment.
+	require.True(t, isFixtureConfigError(mk("context_too_large")))
+}
+
+// classRunner fails every run with a fixed typed error class — the
+// breaker's fixture for error_class records.
+type classRunner struct{ class string }
+
+func (e classRunner) Run(_ context.Context, _ string, _ []string, _ Budget) RunResult {
+	return RunResult{Err: errors.New("agent run failed: provider exploded"), ErrorClass: e.class}
+}
+
+func TestRunTrajectory_ProviderServerBreaker(t *testing.T) {
+	t.Parallel()
+	r, exp, tr, trajDir := breakerFixture(t)
+	// A provider 5xx that survived the child's internal retries trips
+	// the config breaker at two strikes — the strike count is the
+	// persistence test.
+	r.Driver = classRunner{class: "provider_server"}
+	rep := r.runTrajectory(t.Context(), exp, tr, trajDir, &FlagsManifest{Defaults: map[string]any{}}, 3, "inv", &configErrorTracker{})
+	require.Error(t, rep.Abort)
+	require.Contains(t, rep.Abort.Error(), "config-class")
+}
+
+func TestRunTrajectory_TransientClassKeepsSampling(t *testing.T) {
+	t.Parallel()
+	r, exp, tr, trajDir := breakerFixture(t)
+	// Transient-class errors burn attempts but never trip the config
+	// breaker — the attempts cap is the mechanism.
+	r.Driver = classRunner{class: "provider_transient"}
+	rep := r.runTrajectory(t.Context(), exp, tr, trajDir, &FlagsManifest{Defaults: map[string]any{}}, 1, "inv", &configErrorTracker{})
+	require.NoError(t, rep.Abort)
+}
+
 func TestRunTrajectory_AuthClassBreaker(t *testing.T) {
 	t.Parallel()
 	r, exp, tr, trajDir := breakerFixture(t)

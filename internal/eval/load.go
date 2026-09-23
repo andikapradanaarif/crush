@@ -397,43 +397,6 @@ var edgeOutcomeTable = map[string]map[string]bool{
 	"burn-watch":   {"fired": true, "gated": true, "suppressed": true, "headless-degraded": true, "cancelled": true, "deferred": true, "exhausted": true},
 }
 
-// stubBoundaryAdvancesLive is the reachability rule for
-// stub_stats.boundary_advances. The counter increments on each
-// boundary move once a per-session stubStats entry exists. Entry-
-// creating paths: supersession (needs the flag and the recall tool —
-// stubs render pointers), prior-turn collapse (stub/digest need
-// recall; summarize doesn't), and summarize's SummaryFetchFailed
-// marker write — all three live inside collapse-or-summarize modes,
-// so the reachability split below is unchanged. Starving requires
-// every path provably dead; an unresolved option leaves its path
-// open.
-var stubBoundaryAdvancesLive = starvationRule{
-	"notebook_stub_superseded or notebook_prior_turns=stub|digest|summarize (recall required except under summarize)",
-	func(resolve func(string) (any, bool)) bool {
-		recallKnown, recallOn := false, true
-		if dt, known := resolve("disabled_tools"); known {
-			recallKnown, recallOn = true, !disablesTool(dt, notebookRecallTool)
-		}
-		supKnown, supOn := false, false
-		if v, known := resolve("notebook_stub_superseded"); known {
-			supKnown = true
-			supOn, _ = v.(bool)
-		}
-		modeKnown, mode := false, ""
-		if v, known := resolve("notebook_prior_turns"); known {
-			modeKnown = true
-			mode, _ = v.(string)
-		}
-		// Supersession dies when the flag resolves off or recall is
-		// disabled. Collapse dies when the mode resolves non-collapse,
-		// or when recall is disabled and the mode can't be summarize.
-		supDead := (supKnown && !supOn) || (recallKnown && !recallOn)
-		modeDead := (modeKnown && mode != "stub" && mode != "digest" && mode != "summarize") ||
-			(recallKnown && !recallOn && modeKnown && mode != "summarize")
-		return !(supDead && modeDead)
-	},
-}
-
 // armStarvationRules maps a coverage field to the option requirements
 // that must hold for its counter to be reachable. map_calls is
 // absent deliberately: tool-not-found attempts still count, so a
@@ -452,7 +415,10 @@ func armStarvationRules(field string) []starvationRule {
 	}
 	if strings.HasPrefix(field, "stub_stats.") {
 		if field == "stub_stats.boundary_advances" {
-			return []starvationRule{boolOn("notebook_enabled"), stubBoundaryAdvancesLive}
+			// Boundary moves count whenever the notebook prefix
+			// renders — supersession and collapse are just two of
+			// its writers; verbatim arms churn too.
+			return []starvationRule{boolOn("notebook_enabled")}
 		}
 		return []starvationRule{boolOn("notebook_stub_superseded"), boolOn("notebook_enabled"), recallToolLive}
 	}

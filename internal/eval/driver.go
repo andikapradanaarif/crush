@@ -56,6 +56,16 @@ type RunResult struct {
 	// ResolvedOptions is the child's report of what each manifest
 	// flag resolved to — the truth the baseline key hashes.
 	ResolvedOptions map[string]any
+	// StepRecords is the trajectory-wide per-step table — every
+	// turn's steps with usage and prefix attribution, Turn stamped
+	// at fold time.
+	StepRecords []StepRecord
+	// GeneratorTokens is the summed sidecar generation spend across
+	// the trajectory's turns.
+	GeneratorTokens GeneratorTokens
+	// ErrorClass is the erroring turn's typed classification —
+	// what the breaker reads.
+	ErrorClass string
 	// TimedOut is set when the run hit the trajectory's
 	// run_timeout_seconds or max_steps budget.
 	TimedOut bool
@@ -150,16 +160,28 @@ type runTelemetry struct {
 	// Request carries the prompt growth-curve sample and the last
 	// rendered request's composition — the flat-vs-growing signal
 	// the benefit measurement reads. Informational, never gating.
+	// Steps is the per-request table: usage plus the prefix
+	// attribution naming each cache miss's cause.
 	Request struct {
-		PromptRequests   int64 `json:"prompt_requests"`
-		PromptTokensLast int64 `json:"prompt_tokens_last"`
-		PromptTokensPeak int64 `json:"prompt_tokens_peak"`
-		SystemBytes      int64 `json:"system_bytes"`
-		NotebookBytes    int64 `json:"notebook_bytes"`
-		HistoryBytes     int64 `json:"history_bytes"`
-		ToolCallBytes    int64 `json:"tool_call_bytes"`
-		ToolResultBytes  int64 `json:"tool_result_bytes"`
+		PromptRequests   int64        `json:"prompt_requests"`
+		PromptTokensLast int64        `json:"prompt_tokens_last"`
+		PromptTokensPeak int64        `json:"prompt_tokens_peak"`
+		SystemBytes      int64        `json:"system_bytes"`
+		NotebookBytes    int64        `json:"notebook_bytes"`
+		HistoryBytes     int64        `json:"history_bytes"`
+		ToolCallBytes    int64        `json:"tool_call_bytes"`
+		ToolResultBytes  int64        `json:"tool_result_bytes"`
+		Steps            []StepRecord `json:"steps"`
 	} `json:"request"`
+	// GeneratorTokens is the notebook sidecar's generation spend —
+	// segment/checkpoint/digest LLM calls the run totals can't see.
+	GeneratorTokens struct {
+		Calls      int   `json:"calls"`
+		Input      int64 `json:"input"`
+		Output     int64 `json:"output"`
+		CacheRead  int64 `json:"cache_read"`
+		CacheWrite int64 `json:"cache_write"`
+	} `json:"generator_tokens"`
 	// EdgeFirings splits run-boundary edge firing counts by edge and
 	// outcome — the per-turn delta of the session's edge_firings rows
 	// this process recorded (repair retries share the process).
@@ -171,6 +193,12 @@ type runTelemetry struct {
 	// the manifest flags — what actually ran, not what the arm asked.
 	ResolvedOptions map[string]any `json:"resolved_options"`
 	Error           string         `json:"error,omitempty"`
+	// ErrorClass is the child's typed classification of the terminal
+	// error — auth/provider_deterministic/provider_server/
+	// rate_limit/context_too_large/provider_unreachable/
+	// provider_transient/cancelled/timeout. The circuit breaker reads
+	// it instead of string-matching when present.
+	ErrorClass string `json:"error_class,omitempty"`
 }
 
 // Run executes the trajectory's turns sequentially — each turn a
@@ -235,7 +263,7 @@ func (c CrushRunner) Run(ctx context.Context, workdir string, turns []string, bu
 
 		tel, telErr := readTelemetry(tfile)
 		_ = os.Remove(tfile)
-		res.addTurnTelemetry(tel)
+		res.addTurnTelemetry(tel, i)
 		if tel.SessionID != "" {
 			sessionID = tel.SessionID
 			res.SessionID = sessionID
@@ -259,6 +287,7 @@ func (c CrushRunner) Run(ctx context.Context, workdir string, turns []string, bu
 		// which. A clean cancellation (our own signal) is a timeout.
 		if tel.Error != "" && !isCancellation(tel.Error) {
 			res.Err = fmt.Errorf("agent run failed: %s", tel.Error)
+			res.ErrorClass = tel.ErrorClass
 			return res
 		}
 		if ctx.Err() == context.DeadlineExceeded || (budget.MaxSteps > 0 && res.Steps > budget.MaxSteps) {
@@ -282,6 +311,7 @@ func (c CrushRunner) Run(ctx context.Context, workdir string, turns []string, bu
 		}
 		if tel.Error != "" {
 			res.Err = fmt.Errorf("agent run failed: %s", tel.Error)
+			res.ErrorClass = tel.ErrorClass
 			return res
 		}
 	}
@@ -293,7 +323,9 @@ func (c CrushRunner) Run(ctx context.Context, workdir string, turns []string, bu
 // (the stats maps are in-memory per session, not rehydrated on
 // --session resume), so the trajectory totals are the SUM of per-turn
 // deltas, not the last turn's value — per-kind counts included.
-func (res *RunResult) addTurnTelemetry(tel runTelemetry) {
+// turn is the trajectory turn index — stamped onto the per-step rows
+// so the table is ordered across process boundaries.
+func (res *RunResult) addTurnTelemetry(tel runTelemetry, turn int) {
 	res.Steps += tel.Steps
 	res.Tokens.Input += tel.Tokens.Input
 	res.Tokens.Output += tel.Tokens.Output
@@ -334,6 +366,15 @@ func (res *RunResult) addTurnTelemetry(tel runTelemetry) {
 	res.Request.HistoryBytes = tel.Request.HistoryBytes
 	res.Request.ToolCallBytes = tel.Request.ToolCallBytes
 	res.Request.ToolResultBytes = tel.Request.ToolResultBytes
+	for _, s := range tel.Request.Steps {
+		s.Turn = turn
+		res.StepRecords = append(res.StepRecords, s)
+	}
+	res.GeneratorTokens.Calls += tel.GeneratorTokens.Calls
+	res.GeneratorTokens.Input += tel.GeneratorTokens.Input
+	res.GeneratorTokens.Output += tel.GeneratorTokens.Output
+	res.GeneratorTokens.CacheRead += tel.GeneratorTokens.CacheRead
+	res.GeneratorTokens.CacheWrite += tel.GeneratorTokens.CacheWrite
 	res.Checkpoints.Rendered += tel.Checkpoints.Rendered
 	res.Digests.Written += tel.Digests.Written
 	res.Digests.Rendered += tel.Digests.Rendered

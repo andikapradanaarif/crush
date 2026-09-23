@@ -336,13 +336,18 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		c.nbScanIdx = csync.NewMap[string, int]()
 		c.nbPendingReads = csync.NewMap[string, map[string]string]()
 		c.collapseRecorded = csync.NewMap[string, *csync.Map[int64, bool]]()
-		if opts.Config.Config().Options.NotebookStubSupersededEnabled() {
-			c.stubBoundary = csync.NewMap[string, int]()
-		}
-		if opts.Config.Config().Options.NotebookStubSupersededEnabled() ||
-			opts.Config.Config().Options.NotebookPriorTurnsMode() != "verbatim" {
-			c.stubStats = csync.NewMap[string, stubStats]()
-		}
+		// stubBoundary/stubStats must exist for every notebook-on
+		// arm — they also carry boundary_advances, which counts
+		// prefix churn in verbatim arms too, not just under
+		// stubbing/collapse.
+		c.stubBoundary = csync.NewMap[string, int]()
+		c.stubStats = csync.NewMap[string, stubStats]()
+	}
+	// reqStats exists regardless of the notebook gate, so the
+	// deletion watcher runs whenever the session service does —
+	// every map access inside is nil-guarded, making the
+	// notebook-off path a reqStats-only cleanup.
+	if opts.Sessions != nil {
 		go c.watchSessionDeletions()
 	}
 
@@ -421,6 +426,9 @@ func (c *coordinator) watchSessionDeletions() {
 		}
 		if c.nbPendingReads != nil {
 			c.nbPendingReads.Del(ev.Payload.ID)
+		}
+		if c.reqStats != nil {
+			c.reqStats.Del(ev.Payload.ID)
 		}
 		// The DB cascade removes the rows; ForgetSession drops the
 		// service's in-memory compaction-stall counter.

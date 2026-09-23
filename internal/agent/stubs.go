@@ -439,6 +439,19 @@ func (a *sessionAgent) stampReadMtime(tr *message.ToolResult, calls []message.To
 	}
 }
 
+// noteBoundaryAdvance counts one raw-window boundary move. It
+// runs unconditionally — collapse modes and supersession are just
+// two of the boundary's writers; the churn itself exists whenever
+// the notebook prefix renders, and a verbatim arm's
+// boundary_advances is the control-side signal the prefix-cost
+// comparison reads.
+func (a *sessionAgent) noteBoundaryAdvance(sessionID string) {
+	if a.stubStats == nil {
+		return
+	}
+	a.stubStats.Update(sessionID, func(s *stubStats) { s.BoundaryAdvances++ })
+}
+
 // promoteSupersededStubs applies pending superseded flags on tool
 // results inside the raw window. Callers invoke it only when the
 // raw/notebook boundary moved since the last render — the move already
@@ -504,22 +517,22 @@ func (a *sessionAgent) promoteSupersededStubs(ctx context.Context, msgs []messag
 		// Guard the empty session ID: a sessionless list would leak a
 		// "" key the deletion watcher can never clean.
 		if sessionID := sessionIDFromMessages(msgs); sessionID != "" {
-			stats, _ := a.stubStats.Get(sessionID)
-			stats.Invalidations++
-			stats.Results += promoted
-			stats.SavedBytes += saved
-			// Merge into a fresh map rather than mutating the stored
-			// one in place — a reader holding the pre-Set snapshot
-			// keeps a consistent view.
-			kinds := make(map[message.StubKind]int, len(stats.Kinds)+len(promotedKinds))
-			for kind, n := range stats.Kinds {
-				kinds[kind] = n
-			}
-			for kind, n := range promotedKinds {
-				kinds[kind] += n
-			}
-			stats.Kinds = kinds
-			a.stubStats.Set(sessionID, stats)
+			a.stubStats.Update(sessionID, func(stats *stubStats) {
+				stats.Invalidations++
+				stats.Results += promoted
+				stats.SavedBytes += saved
+				// Merge into a fresh map rather than mutating the
+				// stored one in place — a reader holding the
+				// pre-Update snapshot keeps a consistent view.
+				kinds := make(map[message.StubKind]int, len(stats.Kinds)+len(promotedKinds))
+				for kind, n := range stats.Kinds {
+					kinds[kind] = n
+				}
+				for kind, n := range promotedKinds {
+					kinds[kind] += n
+				}
+				stats.Kinds = kinds
+			})
 		}
 	}
 	return !persistFailed

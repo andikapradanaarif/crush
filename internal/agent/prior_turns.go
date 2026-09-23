@@ -444,10 +444,10 @@ func (a *sessionAgent) recordCollapsedTurns(ctx context.Context, sessionID strin
 			recorded.Set(turn, true)
 		}
 		if inserted && a.stubStats != nil {
-			stats, _ := a.stubStats.Get(sessionID)
-			stats.TurnsCollapsed++
-			stats.EventsCollapsed += events
-			a.stubStats.Set(sessionID, stats)
+			a.stubStats.Update(sessionID, func(s *stubStats) {
+				s.TurnsCollapsed++
+				s.EventsCollapsed += events
+			})
 		}
 	}
 }

@@ -220,7 +220,23 @@ func dropHint(exp *Experiment, providerID string, known []catwalk.Provider, reso
 }
 
 // isConfigClassError reports whether a run record is a provably
-// config-class failure. Two classes:
+// config-class failure. When the child reports error_class — typed
+// classification of the fantasy.ProviderError, immune to message-text
+// drift — it wins outright:
+//
+//   - auth / provider_unreachable: credentials and the endpoint are
+//     experiment-global — every trajectory fails identically — trip.
+//   - provider_deterministic / provider_server: scope-split. Before
+//     any request completes (Steps==0 && Request==nil) the failure is
+//     config-shaped — trip; mid-run it can be payload-specific —
+//     fixture-class. (A dead endpoint can never produce a completed
+//     request, so it still reads step-0.)
+//   - rate_limit / provider_transient / context_too_large /
+//     provider_other / cancelled / timeout: keep sampling — resampling
+//     or the attempts cap is the right mechanism. (context_too_large
+//     is additionally fixture-class: deterministic per trajectory.)
+//
+// Without error_class (older children), two string-matched classes:
 //
 //   - Pre-model exit: "crush run failed:" with no request stats and no
 //     steps, matching a config signature — the subprocess died before
@@ -237,6 +253,25 @@ func dropHint(exp *Experiment, providerID string, known []catwalk.Provider, reso
 // TUI-rendered capitalization ("  No providers configured  ").
 func isConfigClassError(rec RunRecord) bool {
 	if rec.Outcome != OutcomeError {
+		return false
+	}
+	switch rec.ErrorClass {
+	case "auth", "provider_unreachable":
+		// Credentials and the endpoint itself are experiment-global —
+		// a failure at any step still fails every other trajectory.
+		return true
+	case "provider_deterministic", "provider_server":
+		// A provider failure before the first request completes is
+		// config-shaped — unresolved model, rejected schema, dead
+		// endpoint; every trajectory fails identically at step 0.
+		// Mid-run either class can be trajectory-shaped: a
+		// pathological tool result the provider rejects (4xx), or a
+		// payload that trips a provider bug (5xx — endpoints do
+		// return 500/529 on specific inputs). A genuinely dead
+		// endpoint still aborts — it can never produce a completed
+		// request, so it never reads mid-run.
+		return rec.Steps == 0 && rec.Request == nil
+	case "rate_limit", "provider_transient", "provider_other", "context_too_large", "cancelled", "timeout":
 		return false
 	}
 	s, _ := rec.CheckDetail["run_error"].(string)
@@ -270,15 +305,28 @@ func isConfigClassError(rec RunRecord) bool {
 // failure — WriteArmConfig rejected the fixture's config (unparseable
 // .crush.json, manifest-flag pinning, forbidden keys) or Materialize
 // failed outright (tagged "harness"), or the check script can't run
-// (tagged "check_error"). The trajectory is unrunnable; other
-// trajectories are unaffected. Bare records (no CheckDetail) are
-// deliberately NOT fixture-class: the only producers of those are
-// ExecuteRun-internal errors — spawn failures, disk, timeouts — which
-// are transient, not provably deterministic; they burn an attempt and
-// keep sampling.
+// (tagged "check_error"). A context_too_large error class joins them:
+// the trajectory overflows the model's window every attempt —
+// unrunnable, but experiment-global config is fine. The trajectory is
+// unrunnable; other trajectories are unaffected. Bare records (no
+// CheckDetail) are deliberately NOT fixture-class: the only producers
+// of those are ExecuteRun-internal errors — spawn failures, disk,
+// timeouts — which are transient, not provably deterministic; they
+// burn an attempt and keep sampling.
 func isFixtureConfigError(rec RunRecord) bool {
 	if rec.Outcome != OutcomeError {
 		return false
+	}
+	if rec.ErrorClass == "context_too_large" {
+		return true
+	}
+	// A provider rejection or server failure observed mid-trajectory
+	// is trajectory-scoped — the offending content belongs to this
+	// trajectory's render (a rejected tool result, a payload that
+	// trips a provider bug), not the shared config. Step-0 failures
+	// stay config-class (see isConfigClassError).
+	if rec.ErrorClass == "provider_deterministic" || rec.ErrorClass == "provider_server" {
+		return rec.Steps > 0 || rec.Request != nil
 	}
 	if _, ok := rec.CheckDetail["harness"]; ok {
 		return true

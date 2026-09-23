@@ -418,11 +418,30 @@ child only warns — custom providers survive keyless load (legitimate
 for loopback endpoints) but 401 on every request.
 
 Mid-run, a circuit breaker stops the bleed: two `error` records
-matching a config-class signature (`crush run failed:` + pre-model
-signature, or `agent run failed:` + auth signature) abort the
-experiment; fixture-config failures (`harness` check detail) skip
-only their trajectory. Identical non-config errors — rate limits —
-keep sampling.
+matching a config-class signature abort the experiment;
+fixture-config failures (`harness`/`check_error` check detail,
+`context_too_large`, or a trajectory-shaped provider error) skip only
+their trajectory. When the child reports a typed `error_class` it
+wins over the string signatures: `auth`/`provider_unreachable` are
+experiment-global at any step, while `provider_deterministic` and
+`provider_server` are scope-split — a provider failure with
+`steps == 0 && request == nil` (a rejected first request: unresolved
+model, bad schema, dead endpoint — every trajectory fails
+identically) is config-class, and anything observed after a completed
+request is fixture-class, since a mid-run 4xx or 5xx can be
+payload-specific (pathological tool result, provider bug on a
+specific input). The split can't be fooled by a dead endpoint: an
+endpoint that never completes a request always reads step-0, so a
+mid-experiment outage still aborts. Identical non-config errors —
+rate limits, transients — keep sampling.
+
+One coarse edge, by design: a trajectory whose *first* request is
+rejected for trajectory-specific content (an oversized first render
+that dodges the context-too-large flag, a pathological prompt shape)
+reads config-shaped — two such trajectories abort the experiment
+rather than skip. Defensible: pre-model failures are usually
+shared-config, and the alternative (a broken config resampling every
+trajectory twice) is strictly worse.
 
 ## Run record (results/\*.jsonl)
 
@@ -453,6 +472,17 @@ keep sampling.
 		"system_bytes": 9000, "notebook_bytes": 1200,
 		"history_bytes": 3100, "tool_call_bytes": 800, "tool_result_bytes": 14000
 	},
+	"step_records": [
+		{
+			"turn": 0, "step": 3,
+			"input_tokens": 41200, "output_tokens": 320,
+			"cache_read_tokens": 38000, "cache_write_tokens": 3100,
+			"prefix_hash": "0123abcd...", "first_changed_index": 1,
+			"first_changed_cause": "notebook-prefix"
+		}
+	],
+	"generator_tokens": {"calls": 12, "input": 41000, "output": 900, "cache_read": 0, "cache_write": 0},
+	"error_class": "auth | rate_limit | context_too_large | provider_* | cancelled | timeout",
 	"session_db": "results/<experiment>/artifacts/<trajectory_id>-<arm>-<run_index>.db",
 	"env": {"crush_sha": "...", "model_resolved": "...", "go": "1.25", "os": "darwin", "content_hash": "..."}
 }
@@ -468,6 +498,45 @@ session grows — is measured rather than asserted, and they feed the
 per-arm token delta the gate summary prints. Neither is a
 predicate: coverage grammar cannot reach them, and the gate never
 reads them for the verdict.
+
+`step_records` is the per-step table — one row per agent step with
+usage plus prefix attribution (fantasy's internal retries resend the
+identical prompt and fold into a single `OnStepFinish`, so a row can
+cover several wire requests; a terminal mid-step failure still emits a
+row — `failed: true`, zero usage — so the request that broke the run
+keeps its attribution). `prefix_hash` fingerprints the leading
+system-message run (system prompt + notebook block) and
+`first_changed_index`/`first_changed_cause` name where the render
+diverged from the previous step's (`cold`/`append`/`shrink`/
+`system-prompt`/`notebook-prefix`/`history`, or empty with
+`first_changed_index: -1` when the render is byte-identical). Every
+cache miss gets a named cause — the mechanism question "did the
+prefix churn or the tail grow" stops being a correlation guess.
+
+Attribution caveats worth knowing before reading the column:
+`first_changed_cause` diffs against an **in-process** hash vector —
+under the eval driver's restart-per-turn regime each turn's first step
+reports `cold` (per-process cold, not provider-cache cold), so
+turn-boundary churn is invisible until cross-process hashes land.
+`PrevHashes` advances at `PrepareStep`, before the request flies, so
+after a failed step the next diff compares against a render the
+provider may never have accepted. The hash is content-scoped — cache
+breakpoints (`ProviderOptions`), `ProviderExecuted`, and
+`ClientMetadata` are deliberately unhashed, and tool *schemas* aren't
+in the message hashes at all. `turnTailMessages` pins a message at
+the tail: with a non-empty tail, new step content inserts before it
+and the positional diff reports `history`, not `append` — default
+eval arms have empty tails, so the primary signal is clean.
+`generator_tokens` is the notebook sidecar's generation spend
+(segment, checkpoint, digest calls) — kept out of `tokens` so the
+agent's own usage isn't polluted, but priced so notebook-on arms
+can't hide ~100 uncounted calls per run. It does **not** cover the
+other sidecars: `GenerateTitle` (one call per session) and
+auto-summarize ride their own stream calls and stay invisible in both
+`step_records` and `generator_tokens`. `error_class` is the child's
+typed `fantasy.ProviderError` classification; the circuit breaker
+reads it before falling back to string signatures, so deterministic
+provider failures trip at two strikes instead of resampling to `2N`.
 
 Sources, all existing: `fantasy.AgentResult` (turns/steps/usage)
 from `agent.Run`; `stubStats` per session (`stubs.go:60`); recall

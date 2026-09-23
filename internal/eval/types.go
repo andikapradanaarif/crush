@@ -238,6 +238,20 @@ type RunRecord struct {
 	// holds the rendered request down — the benefit claim, measured
 	// instead of asserted. Informational only; never a predicate.
 	PromptTokensPerTurn []int64 `json:"prompt_tokens_per_turn,omitempty"`
+	// StepRecords is the per-step table — usage plus prefix
+	// attribution for every step across every turn. The cache-miss
+	// forensics: which component first differed and what the volatile
+	// prefix hashed to. Informational only; never a predicate.
+	StepRecords []StepRecord `json:"step_records,omitempty"`
+	// GeneratorTokens accounts the sidecar LLM calls that produced
+	// notebook entries — generation spend invisible in Tokens. Absent
+	// on arms where the notebook never generated.
+	GeneratorTokens *GeneratorTokens `json:"generator_tokens,omitempty"`
+	// ErrorClass is the child's typed error classification (auth,
+	// provider_deterministic, provider_server, rate_limit, ...) —
+	// the circuit breaker reads it instead of string-matching when
+	// present; absent means an older child, fall back to signatures.
+	ErrorClass string `json:"error_class,omitempty"`
 	// Request carries the trajectory-final rendered request's byte
 	// composition and the run's peak prompt size — the "what fills
 	// the prompt" breakdown the 70%-tool-results claim reads.
@@ -260,6 +274,44 @@ type RequestStats struct {
 
 // TokenUsage mirrors fantasy.Usage for the record.
 type TokenUsage struct {
+	Input      int64 `json:"input"`
+	Output     int64 `json:"output"`
+	CacheRead  int64 `json:"cache_read"`
+	CacheWrite int64 `json:"cache_write"`
+}
+
+// StepRecord is one agent step's usage plus prefix attribution — the
+// per-step row the aggregate TokenUsage can't carry. One row per step,
+// not per wire request: fantasy's internal retries resend the same
+// prompt and fold into a single OnStepFinish. A terminal mid-step
+// failure still produces a row (Failed, zero usage) so the request
+// that broke the run keeps its attribution. Turn/Step locate it in
+// the trajectory; FirstChangedCause names the component that diverged
+// from the previous request (cold | append | shrink | system-prompt |
+// notebook-prefix | history, or empty when the render is byte-
+// identical), and PrefixHash fingerprints the leading system-message
+// run the provider's prompt cache keys on. FirstChanged is -1 when
+// nothing changed.
+type StepRecord struct {
+	Turn              int    `json:"turn"`
+	Step              int    `json:"step"`
+	InputTokens       int64  `json:"input_tokens"`
+	OutputTokens      int64  `json:"output_tokens"`
+	CacheReadTokens   int64  `json:"cache_read_tokens"`
+	CacheWriteTokens  int64  `json:"cache_write_tokens"`
+	Estimated         bool   `json:"estimated,omitempty"`
+	Failed            bool   `json:"failed,omitempty"`
+	PrefixHash        string `json:"prefix_hash,omitempty"`
+	FirstChanged      int    `json:"first_changed_index"`
+	FirstChangedCause string `json:"first_changed_cause,omitempty"`
+}
+
+// GeneratorTokens accounts the notebook sidecar's generation spend —
+// segment-entry, checkpoint, and turn-digest LLM calls that never
+// touch the run's token totals. The notebook-vs-off baseline can't
+// price the notebook without it.
+type GeneratorTokens struct {
+	Calls      int   `json:"calls"`
 	Input      int64 `json:"input"`
 	Output     int64 `json:"output"`
 	CacheRead  int64 `json:"cache_read"`
