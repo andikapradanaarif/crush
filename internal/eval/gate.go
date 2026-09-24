@@ -60,8 +60,192 @@ type Report struct {
 	// ArmTokens carries per-arm prompt-side token aggregates over
 	// conclusive runs — the benefit measurement (does the flag under
 	// test shrink the prompt?), purely informational: it never
-	// affects Fired or the verdict.
+	// affects Fired or the verdict. The aa arm appears here too when
+	// --aa ran — its delta vs control is the harness's own false
+	// effect, visible next to the treatment delta.
 	ArmTokens map[string]ArmTokenStats
+	// ArmTokensExcluded carries the same aggregates over excluded
+	// runs (inconclusive/error/timeout-not-counted). Resampling to N
+	// conclusive silently drops them from the conclusive table —
+	// reporting their token mass keeps the selection visible.
+	ArmTokensExcluded map[string]ArmTokenStats
+	// Primary is the experiment's declared decision-metric read-out:
+	// per-arm means over conclusive runs, the mechanism-fired
+	// treatment stratum, the aa calibration sample, and the sample
+	// size the power gate required. Informational like ArmTokens —
+	// verdict logic stays binary until compare lands.
+	Primary *PrimaryResult
+	// Behavior carries the behavioral metric set per arm over
+	// conclusive runs — the mechanism's second-order effects.
+	// Informational: it reports, it never gates.
+	Behavior map[string]ArmBehavior
+	// Guardrails carries the guardrail set per arm — steps, pass
+	// count, edit failures. Reported so a treatment that wins the
+	// primary by burning steps or edits can't hide it — guardrails
+	// are never wins.
+	Guardrails map[string]ArmGuardrail
+	// NoiseUpdated lists the noise.json CVs an --aa run refreshed.
+	NoiseUpdated []string
+}
+
+// ArmBehavior is one arm's behavioral-metric sums over conclusive
+// runs; the report divides by Runs for mean/run.
+type ArmBehavior struct {
+	Runs                int
+	RereadsCrossTurn    float64
+	RereadsSameTurn     float64
+	DiscoveryCalls      float64
+	RequestsToFirstEdit float64
+}
+
+// ArmGuardrail is one arm's guardrail tallies over conclusive runs.
+type ArmGuardrail struct {
+	Runs         int
+	Passes       int
+	StepsSum     int
+	EditFailures int
+}
+
+// armBehavior aggregates the behavioral metric set — only runs with
+// a call-metrics snapshot feed it (absent analysis is unmeasurable,
+// not zero).
+func armBehavior(records []RunRecord) map[string]ArmBehavior {
+	var out map[string]ArmBehavior
+	for i := range records {
+		r := &records[i]
+		if !r.Outcome.Conclusive() || r.CallMetrics == nil {
+			continue
+		}
+		switch r.Arm {
+		case ArmControl, ArmTreatment, ArmAA:
+		default:
+			continue
+		}
+		if out == nil {
+			out = map[string]ArmBehavior{}
+		}
+		s := out[r.Arm]
+		s.Runs++
+		s.RereadsCrossTurn += float64(r.CallMetrics.RereadsCrossTurn)
+		s.RereadsSameTurn += float64(r.CallMetrics.RereadsSameTurn)
+		s.DiscoveryCalls += float64(r.CallMetrics.DiscoveryCallsBeforeWrite)
+		s.RequestsToFirstEdit += float64(r.CallMetrics.RequestsToFirstEdit)
+		out[r.Arm] = s
+	}
+	return out
+}
+
+// armGuardrails aggregates the guardrail set — steps, pass count,
+// and edit failures over conclusive runs.
+func armGuardrails(records []RunRecord) map[string]ArmGuardrail {
+	var out map[string]ArmGuardrail
+	for i := range records {
+		r := &records[i]
+		if !r.Outcome.Conclusive() {
+			continue
+		}
+		switch r.Arm {
+		case ArmControl, ArmTreatment, ArmAA:
+		default:
+			continue
+		}
+		if out == nil {
+			out = map[string]ArmGuardrail{}
+		}
+		s := out[r.Arm]
+		s.Runs++
+		if r.Outcome == OutcomePass {
+			s.Passes++
+		}
+		s.StepsSum += r.Steps
+		if r.CallMetrics != nil {
+			s.EditFailures += r.CallMetrics.EditFailures
+		}
+		out[r.Arm] = s
+	}
+	return out
+}
+
+// PrimaryResult is the decision metric's measured read-out.
+type PrimaryResult struct {
+	Metric         string
+	Direction      string
+	MDE            float64
+	RequiredPerArm int // power-gate minimum
+	// Conclusive strata — the powered comparison set.
+	Control   metricSample
+	Treatment metricSample
+	// Mechanism-fired strata split treatment runs by whether the
+	// treatment arm's own coverage block (the firing assertion) was
+	// met — inconclusive runs count too, so a mechanism that fires
+	// then fails still lands in Fired, not silently excluded.
+	TreatmentFired   metricSample
+	TreatmentUnfired metricSample
+	// AA is the calibration arm's sample (control config, third arm).
+	AA metricSample
+}
+
+// buildPrimaryResult computes the declared metric's strata over the
+// invocation's records. requiredN is the power gate's per-arm floor
+// (0 when no primary ran the gate — impossible here by construction).
+func buildPrimaryResult(e *Experiment, records []RunRecord, requiredN int) *PrimaryResult {
+	if e.Primary == nil {
+		return nil
+	}
+	f, err := primaryMetricFunc(e, e.Primary.Metric)
+	if err != nil {
+		return nil
+	}
+	res := &PrimaryResult{
+		Metric:         e.Primary.Metric,
+		Direction:      e.Primary.Direction,
+		MDE:            e.Primary.MDE,
+		RequiredPerArm: requiredN,
+	}
+	treatCov := e.Arms[ArmTreatment].Coverage
+	for i := range records {
+		r := &records[i]
+		if !primaryMeasurable(e.Primary.Metric, r) {
+			continue
+		}
+		v := f(r)
+		switch r.Arm {
+		case ArmControl:
+			if r.Outcome.Conclusive() {
+				res.Control.add(v)
+			}
+		case ArmTreatment:
+			if r.Outcome.Conclusive() {
+				res.Treatment.add(v)
+			}
+			if fired, err := ArmCoverageMet(treatCov, r); err == nil && fired {
+				res.TreatmentFired.add(v)
+			} else {
+				res.TreatmentUnfired.add(v)
+			}
+		case ArmAA:
+			if r.Outcome.Conclusive() {
+				res.AA.add(v)
+			}
+		}
+	}
+	return res
+}
+
+// primaryMeasurable fails closed on the same absent-telemetry
+// classes the coverage grammar guards: a metric whose source never
+// produced data is unmeasurable, not a zero — counting it would
+// de-bias the strata the other way.
+func primaryMeasurable(metric string, r *RunRecord) bool {
+	switch {
+	case strings.HasPrefix(metric, "call_metrics."):
+		return r.CallMetrics != nil
+	case strings.HasPrefix(metric, "request."):
+		return r.Request != nil
+	case strings.HasPrefix(metric, "generator_tokens."):
+		return r.GeneratorTokens != nil
+	}
+	return true
 }
 
 // ArmTokenStats is one arm's prompt-side token totals over its
@@ -148,7 +332,7 @@ func (r Report) Summary(alpha float64) string {
 	fmt.Fprintf(&b, "  diffuse p = %.4g (alpha %.3g)\n", r.DiffuseP, alpha)
 	if len(r.ArmTokens) > 0 {
 		b.WriteString("  tokens (prompt-side, conclusive runs — informational):\n")
-		for _, arm := range []string{ArmControl, ArmTreatment} {
+		for _, arm := range []string{ArmControl, ArmTreatment, ArmAA} {
 			t, ok := r.ArmTokens[arm]
 			if !ok || t.Runs == 0 {
 				continue
@@ -165,6 +349,75 @@ func (r Report) Summary(alpha float64) string {
 			fmt.Fprintf(&b, "    Δ treatment vs control: %+.1f%%\n",
 				100*(treat.PromptMean()-ctrl.PromptMean())/ctrl.PromptMean())
 		}
+		// The calibration arm's delta is the false-effect magnitude —
+		// a control-vs-control comparison should read ~0; when it
+		// doesn't, drift or non-exchangeability is priced before the
+		// treatment delta is read.
+		if aa, ok := r.ArmTokens[ArmAA]; cok && ok && ctrl.Runs > 0 && aa.Runs > 0 && ctrl.PromptMean() > 0 {
+			fmt.Fprintf(&b, "    a/a calibration: Δ aa vs control %+.1f%% (n=%d)\n",
+				100*(aa.PromptMean()-ctrl.PromptMean())/ctrl.PromptMean(), aa.Runs)
+		}
+	}
+	if len(r.ArmTokensExcluded) > 0 {
+		var parts []string
+		for _, arm := range []string{ArmControl, ArmTreatment, ArmAA} {
+			if t, ok := r.ArmTokensExcluded[arm]; ok && t.Runs > 0 {
+				parts = append(parts, fmt.Sprintf("%s n=%d mean %s/run", arm, t.Runs, humanTokens(int64(t.PromptMean()))))
+			}
+		}
+		if len(parts) > 0 {
+			fmt.Fprintf(&b, "  tokens, excluded runs (inconclusive/error — de-biased cost view): %s\n",
+				strings.Join(parts, "; "))
+		}
+	}
+	if p := r.Primary; p != nil {
+		fmt.Fprintf(&b, "  primary %s (%s, mde %.0f%%):", p.Metric, p.Direction, 100*p.MDE)
+		if p.Control.N > 0 && p.Treatment.N > 0 && p.Control.Mean() > 0 {
+			fmt.Fprintf(&b, " control %.3g (n=%d), treatment %.3g (n=%d), Δ %+.1f%%",
+				p.Control.Mean(), p.Control.N, p.Treatment.Mean(), p.Treatment.N,
+				100*(p.Treatment.Mean()-p.Control.Mean())/p.Control.Mean())
+		} else {
+			fmt.Fprintf(&b, " control n=%d, treatment n=%d (no conclusive comparison)",
+				p.Control.N, p.Treatment.N)
+		}
+		if p.RequiredPerArm > 0 {
+			fmt.Fprintf(&b, "  [power: %d/arm required]", p.RequiredPerArm)
+		}
+		b.WriteString("\n")
+		if p.TreatmentFired.N > 0 || p.TreatmentUnfired.N > 0 {
+			fmt.Fprintf(&b, "    mechanism-fired stratum: fired n=%d mean %.3g, not-fired n=%d mean %.3g\n",
+				p.TreatmentFired.N, p.TreatmentFired.Mean(), p.TreatmentUnfired.N, p.TreatmentUnfired.Mean())
+		}
+		if p.AA.N > 0 && p.Control.Mean() > 0 {
+			fmt.Fprintf(&b, "    a/a: mean %.3g (n=%d), Δ vs control %+.1f%%\n",
+				p.AA.Mean(), p.AA.N, 100*(p.AA.Mean()-p.Control.Mean())/p.Control.Mean())
+		}
+	}
+	if len(r.Behavior) > 0 {
+		b.WriteString("  behavior (conclusive, mean/run — informational):\n")
+		for _, arm := range []string{ArmControl, ArmTreatment, ArmAA} {
+			s, ok := r.Behavior[arm]
+			if !ok || s.Runs == 0 {
+				continue
+			}
+			n := float64(s.Runs)
+			fmt.Fprintf(&b, "    %-9s rereads_xt %.2f  rereads_st %.2f  discovery %.2f  first_edit_req %.2f\n",
+				arm, s.RereadsCrossTurn/n, s.RereadsSameTurn/n, s.DiscoveryCalls/n, s.RequestsToFirstEdit/n)
+		}
+	}
+	if len(r.Guardrails) > 0 {
+		b.WriteString("  guardrails (conclusive — never wins):\n")
+		for _, arm := range []string{ArmControl, ArmTreatment, ArmAA} {
+			g, ok := r.Guardrails[arm]
+			if !ok || g.Runs == 0 {
+				continue
+			}
+			fmt.Fprintf(&b, "    %-9s pass %d/%d  steps μ%.1f  edit_failures %d\n",
+				arm, g.Passes, g.Runs, float64(g.StepsSum)/float64(g.Runs), g.EditFailures)
+		}
+	}
+	if len(r.NoiseUpdated) > 0 {
+		fmt.Fprintf(&b, "  noise.json updated: %s\n", strings.Join(r.NoiseUpdated, ", "))
 	}
 	switch {
 	case r.Fired(alpha):
@@ -179,12 +432,18 @@ func (r Report) Summary(alpha float64) string {
 }
 
 // armTokenStats aggregates the informational benefit metric —
-// prompt-side tokens per arm over conclusive runs only (excluded
-// runs burned tokens but aren't comparable samples). Never gates.
-func armTokenStats(records []RunRecord) map[string]ArmTokenStats {
+// prompt-side tokens per arm. conclusive selects the sample:
+// conclusive runs for the powered comparison, excluded runs for the
+// de-biased cost view. Never gates.
+func armTokenStats(records []RunRecord, conclusive bool) map[string]ArmTokenStats {
 	var out map[string]ArmTokenStats
 	for _, r := range records {
-		if !r.Outcome.Conclusive() || (r.Arm != ArmControl && r.Arm != ArmTreatment) {
+		if r.Outcome.Conclusive() != conclusive {
+			continue
+		}
+		switch r.Arm {
+		case ArmControl, ArmTreatment, ArmAA:
+		default:
 			continue
 		}
 		if out == nil {
@@ -225,7 +484,10 @@ func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRe
 	for _, r := range records {
 		byTraj[r.TrajectoryID] = append(byTraj[r.TrajectoryID], r)
 	}
-	rep.ArmTokens = armTokenStats(records)
+	rep.ArmTokens = armTokenStats(records, true)
+	rep.ArmTokensExcluded = armTokenStats(records, false)
+	rep.Behavior = armBehavior(records)
+	rep.Guardrails = armGuardrails(records)
 
 	stable := stableBandSize(bands, corpusIDs)
 	if stable == 0 {

@@ -247,6 +247,26 @@ func ValidateExperiment(e *Experiment) error {
 	if e.Temperature == nil {
 		return fmt.Errorf("temperature must be pinned — unpinned arms never join characterized baselines")
 	}
+	if e.Primary != nil {
+		switch e.Primary.Direction {
+		case PrimaryIncrease, PrimaryDecrease:
+		default:
+			return fmt.Errorf("primary.direction must be %q or %q, got %q",
+				PrimaryIncrease, PrimaryDecrease, e.Primary.Direction)
+		}
+		if e.Primary.MDE <= 0 || e.Primary.MDE >= 1 {
+			return fmt.Errorf("primary.mde must be a relative effect in (0,1), got %g", e.Primary.MDE)
+		}
+		if _, err := primaryMetricFunc(e, e.Primary.Metric); err != nil {
+			return err
+		}
+	}
+	if e.CostWeights != nil {
+		if e.CostWeights.CacheRead < 0 || e.CostWeights.Output < 0 {
+			return fmt.Errorf("cost_weights must be non-negative (h=%g, o=%g)",
+				e.CostWeights.CacheRead, e.CostWeights.Output)
+		}
+	}
 	if len(e.Corpus) == 0 {
 		return fmt.Errorf("corpus selector is required")
 	}

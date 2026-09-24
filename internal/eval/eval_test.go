@@ -1061,13 +1061,17 @@ func TestArmTokenStats(t *testing.T) {
 		{Arm: ArmControl, Outcome: OutcomeFail, Tokens: TokenUsage{Input: 2000}, PromptTokensPerTurn: []int64{30}},
 		{Arm: ArmTreatment, Outcome: OutcomePass, Tokens: TokenUsage{Input: 500, CacheRead: 5500, CacheWrite: 1000}, PromptTokensPerTurn: []int64{10, 20}},
 	}
-	stats := armTokenStats(recs)
+	stats := armTokenStats(recs, true)
 	require.Equal(t, 2, stats[ArmControl].Runs)
 	require.Equal(t, int64(12000), stats[ArmControl].PromptTotal)
 	require.InDelta(t, 35, stats[ArmControl].LastTurnMean(), 1e-9) // (40+30)/2
 	require.Equal(t, int64(7000), stats[ArmTreatment].PromptTotal)
 	require.InDelta(t, 20, stats[ArmTreatment].LastTurnMean(), 1e-9)
-	require.Nil(t, armTokenStats(nil))
+	require.Nil(t, armTokenStats(nil, true))
+	// The excluded stratum reports the runs resampling drops.
+	excl := armTokenStats(recs, false)
+	require.Equal(t, 1, excl[ArmControl].Runs)
+	require.Equal(t, int64(99999), excl[ArmControl].PromptTotal)
 }
 
 // --- stats ---

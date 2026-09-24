@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -806,4 +807,312 @@ func TestValidateExperiment_RequiresTemperature(t *testing.T) {
 		},
 	}
 	require.ErrorContains(t, ValidateExperiment(exp), "temperature")
+}
+
+// --- primary endpoint, power gate, a/a arm, de-biased metrics (#105) ---
+
+func TestValidateExperiment_Primary(t *testing.T) {
+	t.Parallel()
+	base := func() *Experiment {
+		return &Experiment{
+			Name: "x", Model: "mock/m", Temperature: ptr(0.0), Corpus: []string{"*"},
+			RunsPerTrajectory: map[Band]int{BandMid: 1},
+			Arms:              map[string]Arm{ArmControl: {}, ArmTreatment: {}},
+		}
+	}
+
+	exp := base()
+	exp.Primary = &Primary{Metric: "request.prompt_tokens_peak", Direction: PrimaryDecrease, MDE: 0.15}
+	require.NoError(t, ValidateExperiment(exp))
+
+	exp = base()
+	exp.Primary = &Primary{Metric: "steps", Direction: "sideways", MDE: 0.1}
+	require.ErrorContains(t, ValidateExperiment(exp), "direction")
+
+	exp = base()
+	exp.Primary = &Primary{Metric: "steps", Direction: PrimaryDecrease, MDE: 0}
+	require.ErrorContains(t, ValidateExperiment(exp), "mde")
+
+	exp = base()
+	exp.Primary = &Primary{Metric: "steps", Direction: PrimaryDecrease, MDE: 1.5}
+	require.ErrorContains(t, ValidateExperiment(exp), "mde")
+
+	exp = base()
+	exp.Primary = &Primary{Metric: "prompt_per_request", Direction: PrimaryDecrease, MDE: 0.1}
+	require.ErrorContains(t, ValidateExperiment(exp), "unknown primary metric")
+
+	// weighted_cost needs its pinned prices.
+	exp = base()
+	exp.Primary = &Primary{Metric: "weighted_cost", Direction: PrimaryDecrease, MDE: 0.1}
+	require.ErrorContains(t, ValidateExperiment(exp), "cost_weights")
+	exp.CostWeights = &CostWeights{CacheRead: 0.1, Output: 4}
+	require.NoError(t, ValidateExperiment(exp))
+
+	exp = base()
+	exp.CostWeights = &CostWeights{CacheRead: -0.1}
+	require.ErrorContains(t, ValidateExperiment(exp), "cost_weights")
+}
+
+func TestPrimaryMetricFunc_WeightedCost(t *testing.T) {
+	t.Parallel()
+	exp := &Experiment{CostWeights: &CostWeights{CacheRead: 0.1, Output: 4}}
+	f, err := primaryMetricFunc(exp, "weighted_cost")
+	require.NoError(t, err)
+	rec := &RunRecord{Tokens: TokenUsage{Input: 1000, CacheRead: 10000, Output: 500}}
+	// 1000 + 0.1*10000 + 4*500 = 4000.
+	require.InDelta(t, 4000, f(rec), 1e-9)
+
+	// The closed registry rejects ratios by construction — there is
+	// no grammar for "X/steps".
+	_, err = primaryMetricFunc(exp, "tokens.input_per_step")
+	require.ErrorContains(t, err, "unknown primary metric")
+
+	f, err = primaryMetricFunc(exp, "request.prompt_tokens_peak")
+	require.NoError(t, err)
+	rec.Request = &RequestStats{PromptTokensPeak: 12345}
+	require.InDelta(t, 12345, f(rec), 1e-9)
+}
+
+func TestRequiredSamples(t *testing.T) {
+	t.Parallel()
+	// n = ceil(12.372 * (cv/mde)^2): the seed steps CV (0.11) at a
+	// 5% MDE needs ~60/arm — far past the old n=3 default.
+	require.Equal(t, 60, RequiredSamples(0.11, 0.05))
+	// prompt_tokens_peak's tight CV (0.047) resolves 15% at n=2.
+	require.Equal(t, 2, RequiredSamples(0.047, 0.15))
+	require.Zero(t, RequiredSamples(0, 0.1))
+	require.Zero(t, RequiredSamples(0.1, 0))
+}
+
+func TestLoadNoise(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	n, err := LoadNoise(root) // Missing file → empty, not an error.
+	require.NoError(t, err)
+	require.Empty(t, n.CV)
+
+	require.NoError(t, os.WriteFile(filepath.Join(root, "noise.json"),
+		[]byte(`{"cv":{"steps":0.11,"request.prompt_tokens_peak":0.047}}`), 0o644))
+	n, err = LoadNoise(root)
+	require.NoError(t, err)
+	require.InDelta(t, 0.11, n.CV["steps"], 1e-9)
+
+	require.NoError(t, os.WriteFile(filepath.Join(root, "noise.json"),
+		[]byte(`{"cv":{"steps":0}}`), 0o644))
+	_, err = LoadNoise(root)
+	require.ErrorContains(t, err, "cv")
+}
+
+func TestCheckPower(t *testing.T) {
+	t.Parallel()
+	noise := &NoiseFile{CV: map[string]float64{"steps": 0.11, "request.prompt_tokens_peak": 0.047}}
+	trajs := []*Trajectory{{ID: "a"}, {ID: "b"}, {ID: "c"}, {ID: "d"}}
+	bands := &Bands{Entries: map[string]BandEntry{}}
+	for _, tr := range trajs {
+		bands.Entries[tr.ID] = BandEntry{Band: BandMid}
+	}
+	exp := &Experiment{
+		RunsPerTrajectory: map[Band]int{BandMid: 3},
+		Primary:           &Primary{Metric: "steps", Direction: PrimaryDecrease, MDE: 0.05},
+	}
+	// 4 trajs × 3 = 12/arm < 60 required → refuse with the count.
+	_, _, err := checkPower(exp, trajs, bands, noise)
+	require.ErrorContains(t, err, "power gate")
+	require.ErrorContains(t, err, "60")
+
+	// The tight-CV metric resolves at n=2 → the same plan passes.
+	exp.Primary = &Primary{Metric: "request.prompt_tokens_peak", Direction: PrimaryDecrease, MDE: 0.15}
+	req, avail, err := checkPower(exp, trajs, bands, noise)
+	require.NoError(t, err)
+	require.Equal(t, 2, req)
+	require.Equal(t, 12, avail)
+
+	// An unrecorded metric fails closed — the gate can't run blind.
+	exp.Primary = &Primary{Metric: "tokens.cache_read", Direction: PrimaryDecrease, MDE: 0.1}
+	_, _, err = checkPower(exp, trajs, bands, noise)
+	require.ErrorContains(t, err, "no recorded CV")
+
+	// No primary → no gate.
+	exp.Primary = nil
+	_, _, err = checkPower(exp, trajs, bands, noise)
+	require.NoError(t, err)
+}
+
+func TestRunExperiment_PowerGateRefuses(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	flag := "debug"
+	r := &Runner{EvalDir: root, Driver: fakeRunner{flag: flag}, WorkParent: t.TempDir()}
+	for i := range 4 {
+		id := fmt.Sprintf("mid-%d", i)
+		writeTrajectory(t, filepath.Join(root, "corpus"), id, nil)
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(root, "flags.json"),
+		[]byte(fmt.Sprintf(`{"flag_defaults":{%q:false}}`, flag)), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "noise.json"),
+		[]byte(`{"cv":{"steps":0.11}}`), 0o644))
+	bands := &Bands{SchemaVersion: 1, Entries: map[string]BandEntry{}}
+	for i := range 4 {
+		id := fmt.Sprintf("mid-%d", i)
+		bands.Entries[id] = BandEntry{Band: BandMid, ContentHash: mustHash(t, filepath.Join(root, "corpus", id))}
+	}
+	require.NoError(t, bands.Save(root))
+
+	exp := &Experiment{
+		Name: "underpowered", Model: "mock/m", Temperature: ptr(0.0),
+		Corpus:            []string{"band:mid"},
+		RunsPerTrajectory: map[Band]int{BandMid: 3},
+		Primary:           &Primary{Metric: "steps", Direction: PrimaryDecrease, MDE: 0.05},
+		Arms: map[string]Arm{
+			ArmControl:   {Config: ArmConfig{Options: map[string]any{flag: false}}},
+			ArmTreatment: {Config: ArmConfig{Options: map[string]any{flag: true}}},
+		},
+	}
+	_, err := r.RunExperiment(context.Background(), exp)
+	require.ErrorContains(t, err, "power gate")
+	require.ErrorContains(t, err, "60")
+
+	// Refusal precedes scheduling — no records were burned.
+	recs, lerr := r.LoadExperimentRecords("underpowered")
+	require.NoError(t, lerr)
+	require.Empty(t, recs)
+}
+
+// varyRunner is fakeRunner plus per-call step variance — the A/A
+// noise refresh needs a real CV, which identical samples can't
+// produce.
+type varyRunner struct {
+	flag string
+	n    atomic.Int64
+}
+
+func (f *varyRunner) Run(ctx context.Context, workdir string, turns []string, b Budget) RunResult {
+	res := fakeRunner{flag: f.flag}.Run(ctx, workdir, turns, b)
+	res.Steps = 3 + int(f.n.Add(1)%5)
+	return res
+}
+
+func TestRunExperiment_AAArm(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	flag := "debug"
+	r := &Runner{
+		EvalDir:        root,
+		Driver:         &varyRunner{flag: flag},
+		WorkParent:     t.TempDir(),
+		PermReplicates: 500,
+		RNG:            rand.New(rand.NewPCG(7, 8)),
+		AA:             true,
+	}
+	experimentFixture(t, r, root, flag)
+
+	exp := &Experiment{
+		Name: "exp-aa", Model: "mock/m", Temperature: ptr(0.0),
+		Corpus:            []string{"*"},
+		RunsPerTrajectory: map[Band]int{BandStable: 3, BandMid: 3, BandUncharacterized: 3},
+		Arms: map[string]Arm{
+			ArmControl:   {Config: ArmConfig{Options: map[string]any{flag: false}}},
+			ArmTreatment: {Config: ArmConfig{Options: map[string]any{flag: true}}},
+		},
+	}
+	rep, err := r.RunExperiment(context.Background(), exp)
+	require.NoError(t, err)
+
+	// The aa arm sampled like the others but stayed out of every
+	// gate tier — the catastrophic alarm is control-vs-treatment.
+	recs, err := r.LoadExperimentRecords("exp-aa")
+	require.NoError(t, err)
+	aaN := 0
+	for _, rec := range recs {
+		if rec.Arm == ArmAA {
+			aaN++
+		}
+	}
+	require.Equal(t, 6, aaN) // 2 trajs × 3.
+	require.NotEmpty(t, rep.Catastrophic)
+	require.Equal(t, 6, rep.ArmTokens[ArmAA].Runs)
+
+	// The calibration line and the refreshed CVs are in the report.
+	s := rep.Summary(0.05)
+	require.Contains(t, s, "a/a calibration")
+	require.NotEmpty(t, rep.NoiseUpdated)
+	noise, err := LoadNoise(root)
+	require.NoError(t, err)
+	require.Contains(t, noise.CV, "steps")
+
+	// AA starvation never alarms — it shares control's coverage.
+	require.NotContains(t, s, "/aa")
+}
+
+func TestBuildPrimaryResult_Strata(t *testing.T) {
+	t.Parallel()
+	exp := &Experiment{
+		Primary: &Primary{Metric: "request.prompt_tokens_peak", Direction: PrimaryDecrease, MDE: 0.15},
+		Arms: map[string]Arm{
+			ArmControl: {},
+			ArmTreatment: {Coverage: Coverage{
+				"min_checkpoints.rendered": 1,
+			}},
+		},
+	}
+	recs := []RunRecord{
+		{Arm: ArmControl, Outcome: OutcomePass, Request: &RequestStats{PromptTokensPeak: 100}},
+		{Arm: ArmControl, Outcome: OutcomePass, Request: &RequestStats{PromptTokensPeak: 120}},
+		{Arm: ArmControl, Outcome: OutcomeInconclusive, Request: &RequestStats{PromptTokensPeak: 999}}, // Excluded.
+		{Arm: ArmTreatment, Outcome: OutcomePass, Request: &RequestStats{PromptTokensPeak: 80}, Checkpoints: Checkpoints{Rendered: 3}},
+		{Arm: ArmTreatment, Outcome: OutcomeInconclusive, Request: &RequestStats{PromptTokensPeak: 90}, Checkpoints: Checkpoints{Rendered: 2}},
+		{Arm: ArmTreatment, Outcome: OutcomePass, Request: &RequestStats{PromptTokensPeak: 95}}, // Mechanism never fired.
+		{Arm: ArmTreatment, Outcome: OutcomeError},                                              // No request snapshot → unmeasurable, skipped.
+		{Arm: ArmAA, Outcome: OutcomePass, Request: &RequestStats{PromptTokensPeak: 110}},
+	}
+	res := buildPrimaryResult(exp, recs, 20)
+	require.Equal(t, 20, res.RequiredPerArm)
+	require.Equal(t, 2, res.Control.N)
+	require.InDelta(t, 110, res.Control.Mean(), 1e-9)
+	// Conclusive treatment: the pass at 80 and the unfired pass at 95.
+	require.Equal(t, 2, res.Treatment.N)
+	require.InDelta(t, 87.5, res.Treatment.Mean(), 1e-9)
+	// Fired stratum counts the inconclusive-but-fired run too.
+	require.Equal(t, 2, res.TreatmentFired.N)
+	require.InDelta(t, 85, res.TreatmentFired.Mean(), 1e-9)
+	require.Equal(t, 1, res.TreatmentUnfired.N)
+	require.InDelta(t, 95, res.TreatmentUnfired.Mean(), 1e-9)
+	require.Equal(t, 1, res.AA.N)
+	require.InDelta(t, 110, res.AA.Mean(), 1e-9)
+}
+
+func TestUpdateNoiseFromAA(t *testing.T) {
+	t.Parallel()
+	exp := &Experiment{Primary: &Primary{Metric: "steps", Direction: PrimaryDecrease, MDE: 0.1}}
+	metrics := noiseUpdateMetrics(exp)
+	require.Contains(t, metrics, "steps")
+	require.Contains(t, metrics, "request.prompt_tokens_peak")
+	require.NotContains(t, metrics, "weighted_cost") // No cost_weights.
+
+	// Identical values → CV 0 → nothing updates.
+	n := &NoiseFile{CV: map[string]float64{}}
+	var recs []RunRecord
+	for i := range 6 {
+		arm := ArmControl
+		if i%2 == 0 {
+			arm = ArmAA
+		}
+		recs = append(recs, RunRecord{Arm: arm, Outcome: OutcomePass, Steps: 10})
+	}
+	require.Empty(t, n.updateNoiseFromAA(recs, metrics))
+
+	// Variance in the control+aa pool produces a CV; an existing
+	// entry blends 80/20 with the new measurement.
+	recs[1].Steps, recs[3].Steps, recs[5].Steps = 12, 8, 11
+	recs[0].Steps, recs[2].Steps, recs[4].Steps = 9, 11, 10
+	n.CV["steps"] = 0.10
+	updated := n.updateNoiseFromAA(recs, metrics)
+	require.NotEmpty(t, updated)
+	require.Contains(t, updated[0], "steps=")
+	require.Greater(t, n.CV["steps"], 0.0)
+	// Excluded runs don't enter the noise pool.
+	recs = append(recs, RunRecord{Arm: ArmAA, Outcome: OutcomeError, Steps: 9999})
+	cv0 := n.CV["steps"]
+	n.updateNoiseFromAA(recs, metrics)
+	require.InDelta(t, cv0, n.CV["steps"], cv0*0.25) // 80/20 blend bounds drift.
 }

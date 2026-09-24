@@ -15,6 +15,11 @@
 		"mid": 10,
 		"uncharacterized": 5
 	},
+	"primary": {
+		"metric": "request.prompt_tokens_peak",
+		"direction": "decrease",
+		"mde": 0.15
+	},
 	"arms": {
 		"control": {
 			"config": {

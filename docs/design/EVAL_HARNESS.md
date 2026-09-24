@@ -875,6 +875,104 @@ p̂_treat − p̂_ctrl`, paired permutation test over `{d_t}`.
   Alarms still produce FAIL on an unpowered report — INCONCLUSIVE
   describes only the quiet no-evidence case.
 
+## Primary endpoint, power gate, and the A/A arm
+
+The binary gate answers "did the outcome distribution collapse?".
+It cannot answer the question most experiments actually ask — "did
+the mechanism move the metric it exists to move, by enough?" — and
+answering it ad hoc invites garden-of-forking-paths: report five
+metrics, quote whichever moved. The schema's answer is one declared
+decision metric per experiment:
+
+```json
+"primary": {"metric": "request.prompt_tokens_peak", "direction": "decrease", "mde": 0.15}
+```
+
+- **One primary, closed registry.** `metric` resolves against a
+  fixed set of per-run accessors — every coverage field plus
+  `weighted_cost` and `generator_tokens.{input,output}`. Ratios are
+  deliberately unexpressible: `X/steps` moves whenever a regression
+  inflates step count, and "per-request prompt" is
+  `prompt_total/steps` — a phantom that hides behind step inflation
+  instead of measuring the prompt. A metric that wants that shape
+  doesn't belong in the registry.
+- **`direction` declares the one-sided claim** (`decrease` = the
+  treatment lowers the metric); the sign matters for the power
+  calculation and for reading the reported Δ.
+- **`mde` is the minimum detectable effect** as a relative change
+  (0.15 = 15%). Effects smaller than the MDE are defined as
+  uninteresting — which is what lets the power gate be a gate
+  rather than an aspiration.
+- **`cost_weights` prices the cost metric.** `weighted_cost =
+  input + h·cache_read + o·output` with `h`/`o` pinned per model in
+  the experiment JSON — relative prices in uncached-input units, so
+  the metric is comparable across runs without embedding a dollar
+  table in the repo.
+
+### noise.json + the scheduling refusal
+
+`eval/noise.json` records per-metric coefficients of variation —
+seeded from A/A measurements, refreshed by every `--aa` run (each
+control-pool CV blends 80/20 with the new measurement). Before any
+run is scheduled, the power gate checks the declared primary:
+
+```
+required/arm = ⌈2·(z_α + z_β)²·(cv/mde)²⌉ ≈ ⌈12.38·(cv/mde)²⌉
+             (one-sided α = 0.05 — direction is declared — power 0.80)
+available    = Σ runs_per_trajectory[band] over selected trajectories
+```
+
+`available < required` refuses the run outright and prints the
+required n — at the seed CVs a 5% `steps` MDE needs ~60/arm, and
+n=3/trajectory scheduling can only ever produce a vacuous readout.
+An absent CV entry fails closed with instructions (seed noise.json
+or run `--aa`), so an unmeasured metric can't slip the gate.
+
+### `crush eval run --aa` — the calibration arm
+
+`--aa` clones the control arm in-memory as a third arm named `aa`
+(authored experiments stay two-arm; the gate's schema constraint is
+untouched). It samples to N conclusive like every arm, writes
+`arm: "aa"` records under the same invocation, and is excluded from
+every verdict tier by construction — gate comparisons key on the
+`control`/`treatment` names. Its purposes:
+
+- **False-effect magnitude.** The report prints `a/a calibration:
+  Δ aa vs control` next to the treatment delta — a control-vs-
+  control comparison that should read ~0, so drift, non-
+  exchangeability, or pairing breakage is priced in the same units
+  as the claimed effect.
+- **Noise floor.** Its records pool with control's (same condition)
+  to refresh `noise.json` — the file the power gate schedules
+  against, which is also how `required/arm` stays honest as the
+  provider or harness drifts.
+
+AA records still feed characterization (`RecomputeAll` pools all
+control-condition runs) — legitimate baseline samples, not waste.
+
+### De-biased reporting
+
+Resampling to N conclusive is a selection: the runs it drops are a
+biased subset (they're *why* resampling happened). The report
+therefore keeps them visible rather than letting the conclusive
+table stand alone:
+
+- **`tokens, excluded runs`** — the same prompt-side aggregates over
+  inconclusive/error runs. What the exclusions cost, in the same
+  units as the benefit table.
+- **Mechanism-fired stratum** — treatment runs split by whether the
+  treatment arm's own coverage block (its firing assertion) was
+  met, counting inconclusive runs too. A mechanism that fired and
+  then failed is a *fired* sample with a bad outcome, not a
+  non-sample — and "the mechanism's effect on those it engaged" is
+  a different estimand than the arm-level delta; reporting both
+  keeps the difference explicit instead of silently resampling the
+  arm into fired-only.
+
+Guardrails — steps, pass rate, `edit_failures_*` — stay what they
+are: alarm inputs and informational lines that can block a verdict
+but are never read as wins.
+
 ## Benefit, quantified
 
 Three separable wins, each with its own math. Numbers below are
