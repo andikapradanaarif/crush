@@ -465,6 +465,82 @@ func TestRun_PressureGateWireProof(t *testing.T) {
 		"the covered prior turn's verbatim call must not reach the wire under pressure")
 }
 
+// Within one process the gate can flip mid-run: a render below the
+// margin is verbatim, history grows, and the next render of the SAME
+// collapse pipeline engages and collapses. rebuildStepMessages reuses
+// the run's collapse object across renders, so the test shares it too.
+func TestPreparePrompt_PressureGateIntraProcessTransition(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsStub
+	a.pressureGate = true
+	// 64K window, 4K reserve → margin 54K → engage threshold ≈ 10K
+	// estimated tokens ≈ 40K chars of render.
+	a.largeModel = csync.NewValue(Model{CatwalkCfg: catwalk.Model{
+		ContextWindow:    64_000,
+		DefaultMaxTokens: 4_000,
+	}})
+	// A huge raw budget keeps the boundary at 0 so engagement shows as
+	// in-place collapse, not eviction — the mechanism this test pins.
+	a.rawTokenBudget = 1_000_000
+	a.reqStats = csync.NewMap[string, requestStats]()
+	msgs := priorTurnFixture(t, svc, sessionID)
+	ctx := t.Context()
+
+	collapse := a.newTurnCollapse(1)
+	history, _ := a.preparePrompt(ctx, msgs, false, collapse)
+	require.Nil(t, collapse.Set, "below pressure the set stays unfrozen")
+	require.Contains(t, renderedResultText(t, history, "tc-bash"), "file content line")
+	rs, _ := a.reqStats.Get(sessionID)
+	require.False(t, rs.pressureEngaged)
+
+	// A 200KB stored message lands between renders — appended history
+	// crosses the margin before the next render evaluates.
+	mkMsg(t, svc, sessionID, message.User,
+		message.TextContent{Text: strings.Repeat("filler ", 30_000)})
+	var err error
+	msgs, err = svc.List(ctx, sessionID)
+	require.NoError(t, err)
+
+	history, _ = a.preparePrompt(ctx, msgs, false, collapse)
+	require.True(t, collapse.Set[0], "the engaged render collapses the covered prior turn")
+	res := renderedResultText(t, history, "tc-bash")
+	require.Contains(t, res, `recall("result:tc-bash")`)
+	rs, _ = a.reqStats.Get(sessionID)
+	require.True(t, rs.pressureEngaged)
+	require.Equal(t, 1, rs.pressureActivations)
+}
+
+// A nil-collapse render is Summarize's one-shot path: machinery stays
+// on but the gate is skipped entirely — no estimate, no watermark
+// move, no latch — so /compact can't corrupt the session's pressure
+// state. On a window smaller than the margin, any evaluation would
+// latch, so staying unlatched proves the gate never ran.
+func TestPreparePrompt_SummarizeRenderSkipsGateState(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsStub
+	a.pressureGate = true
+	a.largeModel = csync.NewValue(Model{CatwalkCfg: catwalk.Model{
+		ContextWindow:    40_000,
+		DefaultMaxTokens: 8_000,
+	}})
+	a.reqStats = csync.NewMap[string, requestStats]()
+	msgs := priorTurnFixture(t, svc, sessionID)
+	a.reqStats.Set(sessionID, requestStats{LastPromptTokens: 5_000, renderedMsgs: 2, pressureEstimate: 5_500})
+
+	history, _ := a.preparePrompt(t.Context(), msgs, false, nil)
+	require.NotEmpty(t, history)
+
+	rs, _ := a.reqStats.Get(sessionID)
+	require.Equal(t, int64(5_500), rs.pressureEstimate, "one-shot renders must not move the estimate")
+	require.Equal(t, 2, rs.renderedMsgs, "one-shot renders must not move the watermark")
+	require.False(t, rs.pressureEngaged, "a /compact must not trip the latch")
+	require.Zero(t, rs.pressureActivations)
+}
+
 // The digest-eligibility freeze has the same empty-freeze edge as
 // collapse.Set: a disengaged render passes a zero boundary key, under
 // which no entry qualifies — freezing {} there would lock digests out

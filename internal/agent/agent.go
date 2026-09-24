@@ -2165,8 +2165,13 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 		// flag off the machinery runs unconditionally — the pre-gate
 		// behavior — and with no measured headroom to prove (unknown
 		// window, no usage yet) it stays on: deactivating a safety
-		// mechanism needs positive evidence of comfort.
-		engaged := !a.pressureGate || a.pressureEngaged(sessionID, msgs)
+		// mechanism needs positive evidence of comfort. A nil
+		// collapse marks a one-shot render outside a run's lifecycle
+		// (Summarize): it keeps the machinery on — an over-margin
+		// summarize call still has to fit — but never consults or
+		// writes the session's gate state, so a /compact can't move
+		// the watermark or trip the latch for renders after it.
+		engaged := collapse == nil || !a.pressureGate || a.pressureEngaged(sessionID, msgs)
 		// Count before this render refreshes the injected-file set —
 		// the join target is the files the LAST render injected. Runs
 		// in both regimes: the disengaged branch's seeds can inject

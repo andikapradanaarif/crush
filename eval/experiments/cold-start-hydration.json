@@ -22,6 +22,9 @@
 					"notebook_enabled": true,
 					"notebook_hydration": false
 				}
+			},
+			"coverage": {
+				"max_pressure.activations": 0
 			}
 		},
 		"treatment": {
@@ -33,7 +36,8 @@
 			},
 			"coverage": {
 				"min_hydration.seeds": 1,
-				"min_hydration.rendered": 1
+				"min_hydration.rendered": 1,
+				"max_pressure.activations": 0
 			}
 		}
 	},

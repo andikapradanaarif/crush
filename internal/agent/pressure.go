@@ -11,7 +11,12 @@ import (
 // estimate is one render stale: a step that writes several 50KB
 // results plus a max-output completion can leap a smaller margin
 // before the next evaluation, so the reserve must exceed the
-// largest plausible jump.
+// largest plausible jump. "Plausible" is a heuristic, not a bound:
+// nothing caps tool calls per step, so a fan-out beyond this count
+// (or a binary attachment — the estimate counts only text, call,
+// result, and reasoning parts) can still leap any margin. The gate
+// is overflow insurance priced for the common jump, not a
+// guarantee.
 const pressureParallelResults = 4
 
 // defaultOutputReserve is the output-token floor when neither the
@@ -23,10 +28,12 @@ const defaultOutputReserve = 4_096
 // remaining-window reserve: the gate engages when
 // cw - estimate <= margin. The legacy auto-summarize shape (a flat
 // 20K for windows over 200K, else 20% of the window) is the floor;
-// the step-jump reserve raises it so a single step's growth cannot
-// leap the margin between renders. Small windows therefore engage
-// almost immediately — honest, since a 64K window genuinely cannot
-// absorb one capped-results batch plus a completion.
+// the step-jump reserve raises it so a single step's growth rarely
+// leaps the margin between renders — rarely, not never, since the
+// jump bound is heuristic (see pressureParallelResults). Small
+// windows therefore engage almost immediately — honest, since a
+// 64K window genuinely cannot absorb one capped-results batch plus
+// a completion.
 func pressureMargin(cw, outputReserve int64) int64 {
 	legacy := int64(float64(cw) * smallContextWindowRatio)
 	if cw > largeContextWindowThreshold {
@@ -81,6 +88,11 @@ func (a *sessionAgent) pressureEngaged(sessionID string, msgs []message.Message)
 		est = int64(estimateRawMessageTokens(msgs))
 	}
 	rs.pressureEstimate = est
+	// The watermark advances at render-eval time, so a request that
+	// fails before reporting usage leaves LastPromptTokens stale
+	// while renderedMsgs moved — the next estimate misses one
+	// render's growth. Self-correcting on the next success and
+	// priced into the step-jump margin.
 	rs.renderedMsgs = len(msgs)
 	if !rs.pressureEngaged && est >= cw-pressureMargin(cw, a.outputReserve()) {
 		rs.pressureEngaged = true

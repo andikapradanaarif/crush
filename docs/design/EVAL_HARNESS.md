@@ -558,13 +558,16 @@ machinery fire" predicate — and `engaged` is the per-session latch at
 the last turn's exit. `estimate` is the last computed next-request
 size (provider-reported last prompt + chars/4 delta over persisted
 messages); `step_records.pressure_estimate`/`pressure_engaged` carry
-the same pair per step for the estimate-vs-reported audit. The
-comfortable-regime experiment asserts `pressure.activations == 0` on
-both arms — distinguishing "gate correctly silent" from "mechanism
-absent", which an absent `prior_turns` row alone cannot do. The
-fields are flag-gated on `notebook_pressure_gate`: arms that pin it
-off (the mechanism-forcing experiments) or run notebook-disabled are
-structurally 0, so `pressure.*` predicates must be arm-scoped.
+the same pair per step for the estimate-vs-reported audit.
+`cold-start-hydration` asserts `max_pressure.activations: 0` on both
+arms — the comfortable-regime check distinguishing "gate correctly
+silent" from "mechanism absent". The distinction is structural: the
+block is pointer-gated, so arms that pin `notebook_pressure_gate`
+off (the mechanism-forcing experiments), run notebook-disabled, or
+evaluate against an unknown window carry no `pressure` key at all
+and any `pressure.*` predicate fails closed on them — the assert is
+arm-scoped because trajectory coverage can't express "present on
+some arms, absent on others".
 
 `generator_tokens` is the notebook sidecar's generation spend
 (segment, checkpoint, digest calls) — kept out of `tokens` so the

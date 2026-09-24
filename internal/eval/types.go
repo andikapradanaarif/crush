@@ -300,9 +300,12 @@ type RunRecord struct {
 	// activations counts engage transitions (the "did the gate fire"
 	// predicate for comfortable-regime experiments), engaged the
 	// latch at the last turn's exit, estimate the last next-request
-	// estimate for the estimate-vs-reported audit.
-	Pressure Pressure `json:"pressure"`
-	Env      Env      `json:"env"`
+	// estimate for the estimate-vs-reported audit. Pointer-gated like
+	// Request: nil when the gate never evaluated (notebook or gate
+	// flag off, unknown window), so pressure.* predicates fail closed
+	// rather than reading unmeasured silence as zero.
+	Pressure *Pressure `json:"pressure,omitempty"`
+	Env      Env       `json:"env"`
 }
 
 // RequestStats is the run's request-size snapshot: the last rendered

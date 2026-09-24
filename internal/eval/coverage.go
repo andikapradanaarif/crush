@@ -52,11 +52,13 @@ var coverageFields = map[string]func(*RunRecord) float64{
 	// pressure.* is the gate's own coverage — activations counts
 	// engage transitions (the "did it fire" predicate), engaged the
 	// latch as 0/1. Flag-gated on notebook_pressure_gate (and
-	// notebook_enabled): a gate-off or notebook-off arm is
-	// structurally 0, so these are arm-scoped predicates.
-	"pressure.activations": func(r *RunRecord) float64 { return float64(r.Pressure.Activations) },
+	// notebook_enabled): a gate-off or notebook-off arm carries no
+	// Pressure block at all, so coverageMet's nil guard fails these
+	// closed — max_pressure.activations: 0 reads "the gate ran and
+	// stayed silent", never "the gate wasn't there".
+	"pressure.activations": func(r *RunRecord) float64 { return float64(pressure(r).Activations) },
 	"pressure.engaged": func(r *RunRecord) float64 {
-		if r.Pressure.Engaged {
+		if pressure(r).Engaged {
 			return 1
 		}
 		return 0
@@ -159,6 +161,16 @@ func requestStats(r *RunRecord) RequestStats {
 		return RequestStats{}
 	}
 	return *r.Request
+}
+
+// pressure dereferences the optional gate-state block. coverageMet
+// short-circuits nil Pressure before reaching field funcs, so this
+// only runs when the gate evaluated.
+func pressure(r *RunRecord) Pressure {
+	if r.Pressure == nil {
+		return Pressure{}
+	}
+	return *r.Pressure
 }
 
 func init() {
@@ -270,6 +282,13 @@ func coverageMet(cov Coverage, rec *RunRecord, fields map[string]func(*RunRecord
 		// render never landed — the "did it reach the prompt"
 		// question must fail closed, not read as 0 bytes present.
 		if strings.HasPrefix(field, "request.") && rec.Request == nil {
+			return false, key, nil
+		}
+		// And pressure.*: a missing block means the gate never
+		// evaluated (notebook off, gate flag off, or no window to
+		// measure against) — silence must not satisfy either a min_
+		// "did it fire" or a max_ "did it stay quiet" predicate.
+		if strings.HasPrefix(field, "pressure.") && rec.Pressure == nil {
 			return false, key, nil
 		}
 		got := fn(rec)

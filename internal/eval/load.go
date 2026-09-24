@@ -538,6 +538,12 @@ func armStarvationRules(field string) []starvationRule {
 	if strings.HasPrefix(field, "recalls.") {
 		return []starvationRule{boolOn("notebook_enabled"), recallToolLive}
 	}
+	if strings.HasPrefix(field, "pressure.") {
+		// The gate only evaluates when the notebook render path runs
+		// with the flag on — either off means the counter can never
+		// move, so a min_ asserts an impossibility.
+		return []starvationRule{boolOn("notebook_enabled"), boolOn("notebook_pressure_gate")}
+	}
 	return nil
 }
 
@@ -581,6 +587,7 @@ var flagCodeDefaults = map[string]bool{
 	"notebook_stub_superseded": false,
 	"notebook_checkpoint":      true,
 	"notebook_hydration":       true,
+	"notebook_pressure_gate":   true,
 	"project_index":            false,
 	"ambiguity_clarification":  false,
 }

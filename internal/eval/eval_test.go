@@ -310,6 +310,64 @@ func TestCoverage_RequestFields(t *testing.T) {
 	require.False(t, met)
 }
 
+func TestCoverage_PressureAbsentFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	// No Pressure block means the gate never evaluated — notebook or
+	// gate flag off, or no window to measure against. Predicates fail
+	// closed in BOTH directions: absent silence is not a zero.
+	bare := &RunRecord{}
+	met, err := ArmCoverageMet(Coverage{"max_pressure.activations": 0}, bare)
+	require.NoError(t, err)
+	require.False(t, met, "absent gate telemetry must not satisfy max_")
+	met, err = ArmCoverageMet(Coverage{"min_pressure.activations": 0}, bare)
+	require.NoError(t, err)
+	require.False(t, met)
+
+	// Present and silent: the gate ran and never fired — the
+	// comfortable-regime assertion.
+	rec := &RunRecord{Pressure: &Pressure{Estimate: 42_000}}
+	met, err = ArmCoverageMet(Coverage{"max_pressure.activations": 0}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+
+	// Present and fired: the latch reads through.
+	rec.Pressure.Activations = 1
+	rec.Pressure.Engaged = true
+	met, err = ArmCoverageMet(Coverage{"min_pressure.engaged": 1}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+}
+
+// The telemetry doc's pressure block decodes into runTelemetry and
+// folds across the trajectory's per-turn processes: activations sum
+// (each process latches independently), engaged ORs, and estimate
+// keeps the latest non-zero — the wire contract and its semantics.
+func TestRunTelemetry_PressureDecodeAndFold(t *testing.T) {
+	t.Parallel()
+
+	var tel runTelemetry
+	require.NoError(t, json.Unmarshal([]byte(
+		`{"pressure":{"activations":1,"engaged":true,"estimate":51200}}`), &tel))
+	require.Equal(t, 1, tel.Pressure.Activations)
+	require.True(t, tel.Pressure.Engaged)
+	require.Equal(t, int64(51_200), tel.Pressure.Estimate)
+
+	var res RunResult
+	res.addTurnTelemetry(tel, 0)
+	res.addTurnTelemetry(tel, 1)
+	require.Equal(t, 2, res.Pressure.Activations, "per-process latches sum")
+	require.True(t, res.Pressure.Engaged)
+	require.Equal(t, int64(51_200), res.Pressure.Estimate)
+
+	// A later turn's larger estimate wins; a turn with none doesn't
+	// clobber the audit trail.
+	tel.Pressure.Estimate = 61_000
+	res.addTurnTelemetry(tel, 2)
+	res.addTurnTelemetry(runTelemetry{}, 3)
+	require.Equal(t, int64(61_000), res.Pressure.Estimate)
+}
+
 func TestWriteOnlyCoverageWarnings(t *testing.T) {
 	t.Parallel()
 
@@ -488,6 +546,26 @@ func TestValidateArmCoverageResolved(t *testing.T) {
 	// that omits the flag starves silently.
 	exp.Arms[ArmTreatment] = Arm{Coverage: Coverage{"min_edge_firings.stall.fired": 1}}
 	require.Error(t, ValidateArmCoverageResolved(exp, manifest))
+
+	// pressure.* needs the notebook AND the gate: pinning the gate
+	// off starves the predicate even though the flag defaults on.
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"notebook_pressure_gate": false}},
+		Coverage: Coverage{"min_pressure.activations": 1},
+	}
+	require.Error(t, ValidateArmCoverageResolved(exp, manifest))
+
+	// Notebook off starves it too, gate pin notwithstanding.
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"notebook_enabled": false}},
+		Coverage: Coverage{"min_pressure.activations": 1},
+	}
+	require.Error(t, ValidateArmCoverageResolved(exp, manifest))
+
+	// Unpinned resolves on via the code default (the gate defaults
+	// true) — the firing assertion is legal.
+	exp.Arms[ArmTreatment] = Arm{Coverage: Coverage{"min_pressure.activations": 1}}
+	require.NoError(t, ValidateArmCoverageResolved(exp, manifest))
 }
 
 func TestValidateExperiment_PriorTurnsModeStarvation(t *testing.T) {

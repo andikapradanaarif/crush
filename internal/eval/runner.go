@@ -291,7 +291,13 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	rec.EdgeFirings = res.EdgeFirings
 	rec.PromptTokensPerTurn = res.PromptTokensPerTurn
 	rec.StepRecords = res.StepRecords
-	rec.Pressure = res.Pressure
+	// Pressure is pointer-gated presence: a positive estimate means
+	// the gate evaluated (engaged/activations imply it — the latch
+	// only trips after the estimate lands). Absent means unmeasured,
+	// and coverage reads unmeasured as failure, not silence.
+	if res.Pressure.Estimate > 0 || res.Pressure.Engaged || res.Pressure.Activations > 0 {
+		rec.Pressure = &res.Pressure
+	}
 	rec.ErrorClass = res.ErrorClass
 	if res.GeneratorTokens.Calls > 0 {
 		rec.GeneratorTokens = &res.GeneratorTokens
