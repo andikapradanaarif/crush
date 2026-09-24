@@ -202,14 +202,15 @@ provenance)` is the single helper behind `TruncateOutput`
 ## The merge point with window-safety
 
 Structural triggers (superseded, boundary moved, guard elapsed) are
-what's built. The stronger trigger is **pressure**: inside
-`PrepareStep`, as the estimated total approaches the input budget,
-escalate — stub large results regardless of class → tighten the
-recency guard → drop optional sections only after that. A stub
-preserves skeleton + pointer; a drop doesn't. This is where the two
-plans meet: pruning becomes the graduated response, dropping the last
-resort. Spec belongs in `CONTEXT_WINDOW_SAFETY.md` — this doc names
-the dependency.
+what's built. The stronger trigger is **pressure** — now shipped as
+the `notebook_pressure_gate` (#100): when the estimated next request
+crosses the margin, the render path escalates to boundary eviction +
+prior-turn collapse. The graduated sequence this doc proposed —
+stub regardless of class → tighten recency → drop optional sections —
+remains the unbuilt follow-up inside `PrepareStep`; the gate is the
+trigger it would hang off. A stub preserves skeleton + pointer; a
+drop doesn't. Spec belongs in `CONTEXT_WINDOW_SAFETY.md` — this doc
+names the dependency.
 
 ## Acceptance criteria
 

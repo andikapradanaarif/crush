@@ -74,6 +74,16 @@ type requestStats struct {
 	Steps      []StepRecord
 	Pending    stepAttribution
 	PrevHashes []uint64
+	// Pressure-gate state: renderedMsgs is the count of stored
+	// messages the last render covered — the watermark the delta
+	// estimate reads; pressureEstimate is the last computed
+	// next-request size; pressureEngaged is the latch and
+	// pressureActivations counts engage transitions (once per
+	// session, by the latch's monotonicity).
+	renderedMsgs        int
+	pressureEstimate    int64
+	pressureEngaged     bool
+	pressureActivations int
 }
 
 // StepRecord is one provider request's usage plus prefix attribution.
@@ -98,6 +108,11 @@ type StepRecord struct {
 	PrefixHash        string `json:"prefix_hash,omitempty"`
 	FirstChanged      int    `json:"first_changed_index"`
 	FirstChangedCause string `json:"first_changed_cause,omitempty"`
+	// PressureEstimate/PressureEngaged carry the gate's per-step
+	// state — the estimate-vs-reported audit and the activation
+	// signal the comfortable-regime experiment reads.
+	PressureEstimate int64 `json:"pressure_estimate,omitempty"`
+	PressureEngaged  bool  `json:"pressure_engaged,omitempty"`
 }
 
 // stepAttribution is the PrepareStep-side half of a StepRecord — the

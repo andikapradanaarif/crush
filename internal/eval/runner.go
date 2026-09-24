@@ -291,6 +291,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	rec.EdgeFirings = res.EdgeFirings
 	rec.PromptTokensPerTurn = res.PromptTokensPerTurn
 	rec.StepRecords = res.StepRecords
+	rec.Pressure = res.Pressure
 	rec.ErrorClass = res.ErrorClass
 	if res.GeneratorTokens.Calls > 0 {
 		rec.GeneratorTokens = &res.GeneratorTokens

@@ -274,15 +274,20 @@ func TestPreparePrompt_CollapseSetFrozenForRun(t *testing.T) {
 	ctx := t.Context()
 
 	collapse := a.newTurnCollapse(1)
-	// The first render fires coverage but reads the registry pre-commit,
-	// so turn 0 resolves uncovered — and the set freezes that way.
+	// The first render fires coverage but reads the registry
+	// pre-commit, so turn 0 resolves uncovered. An empty set must not
+	// freeze — the pressure gate engages before generation catches
+	// up, and freezing {} would lock collapse out for the whole run.
 	h1, _ := a.preparePrompt(ctx, msgs, false, collapse)
 	require.Equal(t, `{"command":"cat big.go"}`, renderedCall(t, h1, "tc-bash").Input)
+	require.Nil(t, collapse.Set)
 
-	// Coverage has committed by now, but the frozen set keeps the run's
-	// renders byte-stable — no mid-window flip from raw to stub.
+	// The next render sees the committed coverage and freezes {0} —
+	// at most one raw→stub flip per run, then byte-stable for the
+	// rest of it.
 	h2, _ := a.preparePrompt(ctx, msgs, false, collapse)
-	require.Equal(t, `{"command":"cat big.go"}`, renderedCall(t, h2, "tc-bash").Input)
+	require.JSONEq(t, `{"_collapsed":"prior turn 0"}`, renderedCall(t, h2, "tc-bash").Input)
+	require.Equal(t, map[int64]bool{0: true}, collapse.Set)
 
 	// A fresh pipeline — the next run — sees the committed coverage.
 	h3, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))

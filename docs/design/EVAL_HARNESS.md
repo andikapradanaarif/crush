@@ -496,6 +496,7 @@ trajectory twice) is strictly worse.
 		"system_bytes": 9000, "notebook_bytes": 1200,
 		"history_bytes": 3100, "tool_call_bytes": 800, "tool_result_bytes": 14000
 	},
+	"pressure": {"activations": 0, "engaged": false, "estimate": 43800},
 	"step_records": [
 		{
 			"turn": 0, "step": 3,
@@ -551,6 +552,20 @@ in the message hashes at all. `turnTailMessages` pins a message at
 the tail: with a non-empty tail, new step content inserts before it
 and the positional diff reports `history`, not `append` — default
 eval arms have empty tails, so the primary signal is clean.
+`pressure` is the notebook pressure gate's own coverage (#100):
+`activations` counts engage transitions — the "did the overflow
+machinery fire" predicate — and `engaged` is the per-session latch at
+the last turn's exit. `estimate` is the last computed next-request
+size (provider-reported last prompt + chars/4 delta over persisted
+messages); `step_records.pressure_estimate`/`pressure_engaged` carry
+the same pair per step for the estimate-vs-reported audit. The
+comfortable-regime experiment asserts `pressure.activations == 0` on
+both arms — distinguishing "gate correctly silent" from "mechanism
+absent", which an absent `prior_turns` row alone cannot do. The
+fields are flag-gated on `notebook_pressure_gate`: arms that pin it
+off (the mechanism-forcing experiments) or run notebook-disabled are
+structurally 0, so `pressure.*` predicates must be arm-scoped.
+
 `generator_tokens` is the notebook sidecar's generation spend
 (segment, checkpoint, digest calls) — kept out of `tokens` so the
 agent's own usage isn't polluted, but priced so notebook-on arms

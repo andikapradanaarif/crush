@@ -76,12 +76,19 @@ type SessionTelemetry struct {
 	PromptTokensPeak int64 `json:"prompt_tokens_peak"`
 	// Steps is the per-step usage + prefix-attribution table —
 	// the cache-miss forensics the run aggregate can't carry.
-	Steps              []StepRecord `json:"steps,omitempty"`
-	ReqSystemBytes     int64        `json:"req_system_bytes"`
-	ReqNotebookBytes   int64        `json:"req_notebook_bytes"`
-	ReqHistoryBytes    int64        `json:"req_history_bytes"`
-	ReqToolCallBytes   int64        `json:"req_tool_call_bytes"`
-	ReqToolResultBytes int64        `json:"req_tool_result_bytes"`
+	Steps []StepRecord `json:"steps,omitempty"`
+	// Pressure telemetry: activations counts gate engage transitions
+	// (the "did it fire" signal — latched, so at most one per
+	// process), engaged is the latch at snapshot time, estimate the
+	// last next-request estimate for the estimate-vs-reported audit.
+	PressureActivations int   `json:"pressure_activations"`
+	PressureEngaged     bool  `json:"pressure_engaged"`
+	PressureEstimate    int64 `json:"pressure_estimate"`
+	ReqSystemBytes      int64 `json:"req_system_bytes"`
+	ReqNotebookBytes    int64 `json:"req_notebook_bytes"`
+	ReqHistoryBytes     int64 `json:"req_history_bytes"`
+	ReqToolCallBytes    int64 `json:"req_tool_call_bytes"`
+	ReqToolResultBytes  int64 `json:"req_tool_result_bytes"`
 	// EdgeFirings splits run-boundary edge firing counts by edge and
 	// outcome — the in-memory mirror of the edge_firings rows this
 	// process wrote. Cumulative for the process; the eval harness
@@ -139,6 +146,9 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 			t.PromptRequests = r.Requests
 			t.PromptTokensLast = r.LastPromptTokens
 			t.PromptTokensPeak = r.PeakPromptTokens
+			t.PressureActivations = r.pressureActivations
+			t.PressureEngaged = r.pressureEngaged
+			t.PressureEstimate = r.pressureEstimate
 			t.ReqSystemBytes = r.SystemBytes
 			t.ReqNotebookBytes = r.NotebookBytes
 			t.ReqHistoryBytes = r.HistoryBytes

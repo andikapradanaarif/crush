@@ -1,11 +1,14 @@
 # Context Window Safety — Implementation Plan
 
-> **Status:** Spec — needed, deferred behind the #90 benefit
-> measurement. Not parked-by-neglect: the gap it covers is live
-> (notebook mode disables the auto-summarize fallback entirely), and
-> issue #100 is the pressure-gate proposal that would activate this
-> layer. Until the measurement says the machinery pays for itself,
-> nothing below is a commitment to build.
+> **Status:** Partially shipped — issue #100 landed the pressure gate
+> (`notebook_pressure_gate`, default on): the notebook render path —
+> boundary eviction, prefix render, prior-turn collapse — activates on
+> estimated request pressure vs. the context window instead of a fixed
+> token budget, latching per session. This restores overflow protection
+> for notebook mode, which disables the auto-summarize fallback
+> entirely. What remains below — graduated per-component budgets inside
+> `PrepareStep`, MCP caps, and the mandatory-overflow path — is still
+> spec, deferred behind the #90 benefit measurement.
 
 ## Goal
 

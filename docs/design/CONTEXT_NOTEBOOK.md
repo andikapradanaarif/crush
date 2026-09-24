@@ -33,6 +33,29 @@ shipped architecture diverged in ways that matter to readers:
   `notebook_raw_token_budget` (default 25K), the rendered prefix by
   `notebook_max_tokens` (default 100K) — see "adaptive by token budget"
   below; there is no fixed turn count.
+- **Pressure-gated render machinery.** With `notebook_pressure_gate`
+  (default on), boundary eviction, the rendered prefix, and prior-turn
+  collapse run only once the estimated next request approaches the
+  model's context window — below the margin the history renders
+  verbatim and the machinery's prefix-cache churn is skipped.
+  *Coverage accrual is not gated*: segment detection, entry
+  generation, and supersession flagging run in every regime, because
+  eviction itself requires committed coverage — a gate that starved
+  detection would find nothing to activate when pressure arrived.
+  Engagement latches per session (stored history is append-only, so
+  verbatim size is monotonic — once over, always over) and counts a
+  `pressure.activations` telemetry transition. The estimate anchors
+  on the provider-reported size of the last request plus a chars/4
+  delta over messages persisted since; cold starts estimate the whole
+  verbatim render. The margin is `max(legacy 20K/20%, output reserve
+  + 4×50KB tool results)` — it must exceed the largest plausible
+  single-step jump so a stale estimate can't let the next request
+  overflow. An unknown context window (0) keeps the machinery on
+  without latching — deactivating a safety mechanism needs positive
+  evidence of headroom. `false` restores the pre-gate unconditional
+  render; mechanism-forcing experiments pin it so coverage predicates
+  stay meaningful in comfortable regimes. Prefix stability per
+  boundary move is deliberately deferred to #107.
 - **Detached generation, drained at exit.** Segment/digest/checkpoint
   generation runs detached and joins before process exit, so a turn's
   coverage commits by end of its own run (see `EVAL_HARNESS.md`'s

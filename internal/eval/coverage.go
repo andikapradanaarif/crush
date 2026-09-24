@@ -49,6 +49,18 @@ var coverageFields = map[string]func(*RunRecord) float64{
 	"hydration.seeds":              func(r *RunRecord) float64 { return float64(r.Hydration.Seeds) },
 	"hydration.plan_seeds":         func(r *RunRecord) float64 { return float64(r.Hydration.PlanSeeds) },
 	"hydration.rendered":           func(r *RunRecord) float64 { return float64(r.Hydration.Rendered) },
+	// pressure.* is the gate's own coverage — activations counts
+	// engage transitions (the "did it fire" predicate), engaged the
+	// latch as 0/1. Flag-gated on notebook_pressure_gate (and
+	// notebook_enabled): a gate-off or notebook-off arm is
+	// structurally 0, so these are arm-scoped predicates.
+	"pressure.activations": func(r *RunRecord) float64 { return float64(r.Pressure.Activations) },
+	"pressure.engaged": func(r *RunRecord) float64 {
+		if r.Pressure.Engaged {
+			return 1
+		}
+		return 0
+	},
 	// request.* decomposes the trajectory-final rendered request —
 	// the direct "did content reach the prompt" measure. Absent
 	// request stats starve these predicates in BOTH directions
@@ -127,7 +139,7 @@ var armFields map[string]func(*RunRecord) float64
 // request.notebook_* needs notebook_enabled. An unscoped min_
 // predicate over one of these starves the arm where the flag is off,
 // so trajectory coverage rejects them; scope them per-arm instead.
-var flagGatedPrefixes = []string{"stub_stats.", "prior_turns.", "recalls.", "checkpoints.", "digests.", "hydration.", "request.notebook"}
+var flagGatedPrefixes = []string{"stub_stats.", "prior_turns.", "recalls.", "checkpoints.", "digests.", "hydration.", "request.notebook", "pressure."}
 
 // callMetrics dereferences the optional analysis sub-object. CoverageMet
 // short-circuits nil CallMetrics before reaching field funcs, so this

@@ -446,14 +446,20 @@ type Options struct {
 	// stubs, digest adds a generated turn digest on top, summarize
 	// replaces the span with its generated entries. Requires the
 	// notebook — recall is the stub's recovery path.
-	NotebookPriorTurns string   `json:"notebook_prior_turns,omitempty" jsonschema:"description=Render mode for completed covered turns: verbatim keeps the full transcript\\, stub collapses prior-turn tool pairs to labeled stubs\\, digest adds a generated turn digest\\, summarize replaces the turn span with its generated entries (experimental).,enum=verbatim,enum=stub,enum=digest,enum=summarize,default=verbatim"`
-	ProjectIndex       *bool    `json:"project_index,omitempty" jsonschema:"description=Enable the persistent per-project symbol index and map tool for codebase navigation,default=false"`
-	InitializeAs       string   `json:"initialize_as,omitempty" jsonschema:"description=Name of the context file to create/update during project initialization,default=AGENTS.md,example=AGENTS.md,example=CRUSH.md,example=CLAUDE.md,example=docs/LLMs.md"`
-	AutoLSP            *bool    `json:"auto_lsp,omitempty" jsonschema:"description=Automatically setup LSPs based on root markers,default=true"`
-	Progress           *bool    `json:"progress,omitempty" jsonschema:"description=Show indeterminate progress updates during long operations,default=true"`
-	Notifications      string   `json:"notifications,omitempty" jsonschema:"description=Notification style to use. Options: auto (default)\\, native\\, osc\\, bell\\, disabled. Auto selects based on environment: native for local sessions\\, osc for SSH (with automatic OSC 99/777 detection).,enum=auto,enum=native,enum=osc,enum=bell,enum=disabled,default=auto"`
-	DisabledSkills     []string `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=crush-config"`
-	RequestTimeout     *int     `json:"request_timeout,omitempty" jsonschema:"description=Timeout in seconds for each LLM API request. Streaming responses are aborted only after this much inactivity\\, so slow but active streams are never killed. 0 disables it\\, negative values are invalid.,default=120,example=120,example=300,example=0"`
+	NotebookPriorTurns string `json:"notebook_prior_turns,omitempty" jsonschema:"description=Render mode for completed covered turns: verbatim keeps the full transcript\\, stub collapses prior-turn tool pairs to labeled stubs\\, digest adds a generated turn digest\\, summarize replaces the turn span with its generated entries (experimental).,enum=verbatim,enum=stub,enum=digest,enum=summarize,default=verbatim"`
+	// NotebookPressureGate gates the notebook render path — boundary
+	// eviction, prefix render, prior-turn collapse — on estimated
+	// request pressure vs. the context window. Below the margin the
+	// render is verbatim; coverage accrual still runs (eviction
+	// itself requires it). This is the notebook-mode overflow guard.
+	NotebookPressureGate *bool    `json:"notebook_pressure_gate,omitempty" jsonschema:"description=Gate the notebook render path on estimated request pressure; below the margin the render is verbatim (the notebook-mode overflow guard),default=true"`
+	ProjectIndex         *bool    `json:"project_index,omitempty" jsonschema:"description=Enable the persistent per-project symbol index and map tool for codebase navigation,default=false"`
+	InitializeAs         string   `json:"initialize_as,omitempty" jsonschema:"description=Name of the context file to create/update during project initialization,default=AGENTS.md,example=AGENTS.md,example=CRUSH.md,example=CLAUDE.md,example=docs/LLMs.md"`
+	AutoLSP              *bool    `json:"auto_lsp,omitempty" jsonschema:"description=Automatically setup LSPs based on root markers,default=true"`
+	Progress             *bool    `json:"progress,omitempty" jsonschema:"description=Show indeterminate progress updates during long operations,default=true"`
+	Notifications        string   `json:"notifications,omitempty" jsonschema:"description=Notification style to use. Options: auto (default)\\, native\\, osc\\, bell\\, disabled. Auto selects based on environment: native for local sessions\\, osc for SSH (with automatic OSC 99/777 detection).,enum=auto,enum=native,enum=osc,enum=bell,enum=disabled,default=auto"`
+	DisabledSkills       []string `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=crush-config"`
+	RequestTimeout       *int     `json:"request_timeout,omitempty" jsonschema:"description=Timeout in seconds for each LLM API request. Streaming responses are aborted only after this much inactivity\\, so slow but active streams are never killed. 0 disables it\\, negative values are invalid.,default=120,example=120,example=300,example=0"`
 	// TurnContext selects the per-turn context augmentation tier:
 	// off (default) or session (deterministic session signals —
 	// working set, open todos — appended at the request tail). The
@@ -1454,6 +1460,18 @@ func (o *Options) NotebookPriorTurnsMode() string {
 	default:
 		return "verbatim"
 	}
+}
+
+// NotebookPressureGateEnabled returns the resolved pressure-gate
+// setting, defaulting to true — the gate is the notebook-mode
+// overflow guard. Setting it false restores the pre-gate behavior
+// (the render machinery runs unconditionally) for arms that measure
+// the mechanism itself rather than its activation.
+func (o *Options) NotebookPressureGateEnabled() bool {
+	if o.NotebookPressureGate == nil {
+		return true
+	}
+	return *o.NotebookPressureGate
 }
 
 // AmbiguityClarificationEnabled returns the resolved
