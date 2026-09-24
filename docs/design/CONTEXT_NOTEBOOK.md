@@ -1,5 +1,13 @@
 # Context Notebook — Per-Event Summarization - Implemented
 
+> **Status:** Resolved (shipped — base #1, relevance selection #15/#26,
+> checkpoint #57, stub collapse #58, turn digests #63, hydration #79,
+> `summarize` mode #96, coverage predicates #119–#120, lifecycle fixes
+> #115/#124). Architecture record: the "As built" section is
+> authoritative; Steps 0–12 below are the original plan — accurate on
+> motivation and the recall model, stale on granularity and where the
+> boundaries sit.
+
 ## As built (what actually shipped)
 
 This doc is the original implementation plan — kept for history. The
@@ -29,6 +37,22 @@ shipped architecture diverged in ways that matter to readers:
   generation runs detached and joins before process exit, so a turn's
   coverage commits by end of its own run (see `EVAL_HARNESS.md`'s
   lifecycle contract for what that means for eval predicates).
+- **Relevance-gated selection.** Entries reach the prompt through a
+  multi-pass selection (`notebook_selection.go`): recency floor,
+  pinned files (`PinnedFileTagsSince` — segment-grained working set),
+  prompt/todo ref-matching, then newest-first fill. Beyond the recency
+  band, fill orders by type rank; entries tagged only to dead files
+  demote (never drop). `dropSupersededReads` is success-aware — a
+  failed edit never evicts a still-accurate read. Selection inputs
+  join `prefixFingerprint` so the rendered-prefix cache stays honest.
+- **Compaction is stall-bounded.** `Compact` runs per segment commit;
+  consecutive no-progress rounds (PreCompact denials or every
+  remaining entry pinned) surface a persistent UI warning rather than
+  growing the DB silently. `ErrorHeadline` gives every failed call a
+  distilled first line that survives all compression levels. `recall`
+  queries `tag`, `turn:N`, `segment:T.S`, `result:<tool_call_id>`,
+  and `cross:` (mem0). As-built detail folded in from
+  `NOTEBOOK_QUALITY.md` — that doc survives as the decision record.
 
 `recall`/`notebook_search` tools and auto-injection shipped as
 planned. The plan below (Steps 0–12) is the original design — accurate

@@ -1,10 +1,12 @@
 # Context Prefetch — Persistent Project Index & `map` Tool
 
-> **Status:** Implemented — PR #34 on `feat/context-prefetch`
-> (plan doc committed in-branch for reviewers). Part of a plan
+> **Status:** Resolved (shipped #34, merged). Part of a plan
 > series — continuation: `SEMANTIC_INDEX.md`;
 > consumers: `HARNESS_TOPOLOGY.md` (edge evidence), `SESSION_KNOWLEDGE.md`
-> (session-hot ranking); gate: `EVAL_HARNESS.md`.
+> (session-hot ranking); gate: `EVAL_HARNESS.md`. Note:
+> `SEMANTIC_INDEX.md` and `HARNESS_TOPOLOGY.md`, referenced
+> throughout, are local-only docs (untracked — kept out of the
+> repo by `711fbb96`).
 >
 > **Shipped:**
 >

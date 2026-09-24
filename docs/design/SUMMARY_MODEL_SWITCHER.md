@@ -1,5 +1,10 @@
 # Summary Model Switcher — Implementation Plan - Implemented
 
+> **Status:** Resolved (shipped #5) — the "Switch Model Summary"
+> command and model picker exist (`internal/ui/dialog/models.go`,
+> `commands.go`; coverage in `commands_summary_test.go`). Frozen as a
+> record of the design; details below are as-built.
+
 ## Goal
 
 Add a new slash command **"Switch Model Summary"** to the `/` command

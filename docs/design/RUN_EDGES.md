@@ -1,12 +1,13 @@
 # Run Edges — Deterministic Transitions at the Run Boundary
 
-> **Status:** Mostly shipped. The `runEdge` seam, verification,
-> todos-reconcile, `escalate-human`, and `phase-confirm` landed via
-> #43; stall-replan, burn-watch, and edge-firing records landed via
-> #52/#77 (`run_edges.go`, the `edge_firings` store, and the
-> `edge_firings.*` eval coverage fields). Remaining: summarize-continue
-> and join-subagents. Split from `HARNESS_TOPOLOGY.md` — that doc
-> is the analysis of why this shape; this doc is the work.
+> **Status:** Spec — partially shipped. The `runEdge` seam,
+> verification, todos-reconcile, `escalate-human`, and `phase-confirm`
+> landed via #43; stall-replan, burn-watch, and edge-firing records
+> landed via #52/#77 (`run_edges.go`, the `edge_firings` store, and
+> the `edge_firings.*` eval coverage fields). Remaining:
+> summarize-continue and join-subagents. Split from
+> `HARNESS_TOPOLOGY.md` (local-only — untracked) — that doc is the
+> analysis of why this shape; this doc is the work.
 > **Ship when:** per edge — the catalog names each trigger.
 > **Measured by:** edge-firing records per turn;
 > `EVAL_HARNESS` trajectory assertions on named transitions.
@@ -64,7 +65,7 @@ here because the list must have exactly one home.
 | stall-replan       | loop-detector / no-progress                        | implemented — replan before escalation, budget-branched         |
 | escalate-human     | loop-detector stop                                 | implemented (#43) — question turn                            |
 | phase-confirm      | first write-class call after ≥N exploration events | implemented (#43) — plan gate                                |
-| join-subagents     | outstanding dispatch ledger                        | lives in `BACKGROUND_SUBAGENTS.md`                           |
+| join-subagents     | outstanding dispatch ledger                        | lives in `BACKGROUND_SUBAGENTS.md` (local-only — untracked; issue #3) |
 | summarize-continue | context pressure at run end                        | new — reframes auto-summarize                                |
 | burn-watch         | run spent >T tokens with zero write-class calls    | implemented — the unnoticed-spend tripwire                     |
 
@@ -129,7 +130,8 @@ fire between turns.
 
 stall-replan, burn-watch, and edge-firing records are shipped — their
 specs below describe as-built behavior. summarize-continue remains
-unimplemented; join-subagents lives in `BACKGROUND_SUBAGENTS.md`.
+unimplemented; join-subagents lives in `BACKGROUND_SUBAGENTS.md`
+(local-only — untracked; issue #3).
 
 ### stall-replan
 
@@ -712,4 +714,5 @@ Steps 1–4 shipped (#43, #52/#77). What remains:
    designed.
 
 (The join edge is not an item here — it lives in
-`BACKGROUND_SUBAGENTS.md` with its dependencies.)
+`BACKGROUND_SUBAGENTS.md` — local-only, untracked — with its
+dependencies; issue #3.)

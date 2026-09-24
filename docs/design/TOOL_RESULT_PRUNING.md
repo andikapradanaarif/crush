@@ -1,7 +1,9 @@
 # Tool Result Pruning — Deterministic Context Reduction
 
-> **Status:** Implemented behind `notebook_stub_superseded` (default
-> off). Shipped: success-aware supersession, boundary-gated stubs,
+> **Status:** Resolved (shipped) — implemented behind
+> `notebook_stub_superseded` (default off). Absorbs
+> `TOOL_RESULT_LIFECYCLE.md`: its retention model is the rationale
+> section below. Shipped: success-aware supersession, boundary-gated stubs,
 > `result:` recall (bounded via `tools.TruncateHeadTail`), error
 > digests, file pins, PreCompact, per-session stub telemetry, path
 > normalization + case-folding, flip-flop revert-on-failure,
@@ -35,6 +37,71 @@ results ("re-view `foo.go`"), `recall("result:<tool_call_id>")` for
 ephemeral ones. SQLite is the offload store; `tool_call_id` is the
 pointer.
 
+## Retention model (absorbed from TOOL_RESULT_LIFECYCLE.md)
+
+When the agent fixes code, does it need the execution output again?
+The analysis' answer: **the conclusions yes, the evidence mostly no**
+— and the split is not staleness but _reproducibility_.
+
+Two axes decide whether a tool result earns another replay:
+
+| Axis            | Question                      | Consequence                                                         |
+| --------------- | ----------------------------- | ------------------------------------------------------------------- |
+| Reproducibility | Can the model re-derive this? | If yes, safe to stub — re-view/re-run recovers it                   |
+| Supersession    | Does newer info replace it?   | If yes, the old copy is worse than dead weight — it is _misleading_ |
+
+| Artifact                  | Reproducible?                          | Superseded by?               | Keep?                                                       |
+| ------------------------- | -------------------------------------- | ---------------------------- | ----------------------------------------------------------- |
+| `view` result             | Yes (re-view)                          | Successful edit to same file | **Stub** after supersession                                 |
+| `edit`/`write` result     | n/a (one-line confirmation)            | —                            | Keep (already tiny)                                         |
+| `bash` success output     | Mostly (re-run)                        | —                            | Stub after immediate turn                                   |
+| `bash` **failure** output | **No** — pre-fix state is gone forever | —                            | Digest survives in entry; full text recallable              |
+| `grep`/`glob`/`ls`        | Yes                                    | —                            | Stub earliest (already classified trivial)                  |
+| Any `IsError` result      | No                                     | —                            | Keep digest — needed for "same failure or new?" comparisons |
+
+The critical case: **a `view` result followed by a successful edit to
+the same file is actively harmful.** It shows pre-edit state; the model
+may diff against phantom content and produce wrong follow-up edits.
+Dropping it is a correctness fix, not just token savings. The equally
+important counter-case: **a failed edit does NOT supersede the read** —
+the file is unchanged and the earlier read is still current state.
+Supersession must be success-aware.
+
+A companion mechanism: **self-healing tool results** push known
+recoveries into the error result itself — `edit` on an `old_string`
+miss attaches the current content of the target region, so the model
+retries immediately instead of burning a separate `view` round-trip.
+Append-only, no prefix invalidation, and it makes the superseded read
+genuinely stale.
+
+### The cache constraint
+
+Cache breakpoints sit on the last tool, last system message, and last
+two messages — everything before is the cached prefix. Appending is
+free; mutating history is not: any change to a historical message
+invalidates the cache from that point forward. Three options were
+weighed:
+
+- **(a) Render-time stubbing, monotonic flag.** Mark results stale in
+  the DB (metadata — never `ToolResult.Content`); `preparePrompt`
+  renders stubs for flagged results. Deterministic; costs one prefix
+  invalidation per supersession event.
+- **(b) Piggyback on boundary moves.** Defer pending stubs until the
+  notebook boundary advances — the prefix shifts then anyway, so the
+  invalidation is already paid.
+- **(c) Append-only.** Never rewrite history; staleness handling lives
+  in entries and new tool results only. Zero cache cost, raw-window
+  staleness remains.
+
+Chosen: **(b)**, with (a)'s monotonic flag as the mechanism — that is
+the boundary-gated stub machinery below. If measurement shows prefix
+reprocessing dominates, fall back to (c): residual exposure is bounded
+by `notebook_raw_token_budget`.
+
+The failure mode is asymmetric — a stub costs ~20 tokens; a dropped
+conclusion costs a broken reasoning chain. Bias toward keeping digests
+of ephemeral state.
+
 ## Invariants
 
 These held through implementation and load-bearing review; future work
@@ -64,7 +131,7 @@ must preserve them.
   flags eagerly (metadata, cache-free); `promoteSupersededStubs`
   applies `Applied=true` only when the raw/notebook boundary moves.
   _Divergence:_ the original spec said eager, same-step. Reversed
-  because self-healing edit errors (the lifecycle plan's region
+  because self-healing edit errors (the retention model's region
   context on `old_string` miss) are the backstop for phantom reads —
   the residual
   cost is one wasted, self-correcting edit call, which doesn't buy a

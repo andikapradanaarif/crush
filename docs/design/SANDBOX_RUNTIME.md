@@ -1,9 +1,10 @@
 # Sandbox Runtime — Containment for Agent Execution
 
-> **Status:** Spec. Proposal accepted: phase D (workspace-root
-> confinement) + phase A (OS sandbox on exec) first, phase B
-> (whole-process sandbox) as the headless improvement. Container
-> runtimes rejected — see Non-goals.
+> **Status:** Parked — accepted design, held pending the #90 benefit
+> measurement. When it resumes: phase D (workspace-root confinement)
+> + phase A (OS sandbox on exec) first, phase B (whole-process
+> sandbox) as the headless improvement. Container runtimes rejected —
+> see Non-goals.
 > **Ship when:** per phase; each phase is independently useful.
 > **Measured by:** sandbox-deny and escalation-grant counters in
 > `crush stats` + `edge_firings`-style telemetry per session.

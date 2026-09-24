@@ -1,5 +1,12 @@
 # Context Window Safety — Implementation Plan
 
+> **Status:** Spec — needed, deferred behind the #90 benefit
+> measurement. Not parked-by-neglect: the gap it covers is live
+> (notebook mode disables the auto-summarize fallback entirely), and
+> issue #100 is the pressure-gate proposal that would activate this
+> layer. Until the measurement says the machinery pays for itself,
+> nothing below is a commitment to build.
+
 ## Goal
 
 Prevent request overflow when the sum of system prompt, tools, MCP

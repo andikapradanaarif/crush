@@ -1,8 +1,15 @@
 # Notebook Quality — Selection Relevance & Compaction Robustness
 
-> **Status:** Implemented (PR #26). Scope: `selectNotebookEntries`,
-> `maybeAutoInject`, `Compact`, and the feedback signals that tell us
-> whether the notebook is keeping the right things.
+> **Status:** Resolved (shipped #26) — decision record. All five
+> proposals landed: sufficiency instrumentation, working-set
+> relevance, type weighting, dead-reference demotion, bounded stall
+> warnings, and `ErrorHeadline` in generation input (plus `segment:`
+> recall). The as-built inventory moved to `CONTEXT_NOTEBOOK.md`'s
+> "As built" section; what remains here is the reasoning — the quality
+> gaps, the design choices, and the rejected alternatives.
+> Scope was: `selectNotebookEntries`, `maybeAutoInject`, `Compact`,
+> and the feedback signals that tell us whether the notebook is
+> keeping the right things.
 
 ## Problem
 
@@ -40,29 +47,21 @@ Plus one robustness gap:
 
 ## What exists
 
-- `selectNotebookEntries`: four-pass selection + chronological
-  return; `dropSupersededReads` is success-aware (line 194).
-- `PinnedFileTagsSince` (`notebook/retrieve.go:158`): segment-
-  grained pin set — files with edit entries at/after the recency
-  floor. Already a crude working-set detector. (The turn-grained
-  `PinnedFileTags` variant backs `Compact`'s pin skip.)
-- `filetracker.ListReadFiles` (`internal/filetracker/service.go:77`):
-  full paths of files read this session — resolves `file:` basenames
-  to real paths (tags store basenames only). Edit/write/multiedit
-  also `RecordRead`, so the set covers reads _and_ tool writes —
-  but not files touched only via bash (`sed`, `rm`, `git
-checkout`). **Cumulative**: it grows monotonically for the life
-  of the session.
-- `prefixFingerprint` (`agent/notebook_segments.go:707`): the
-  rendered prefix is cached on `(boundary, bKey, entries, refs)`.
-  **Any new selection input must join this hash or the cache
-  serves stale renders** — and anything hashed is computed _per
-  step_ (before the cache check), not per render.
-- `stubStats` (`AgentOptions.StubStats`, agent.go:314): the
-  existing precedent for sharing a per-session counter map from
-  the coordinator into the agent.
-- `recall` granularity lags coverage granularity: `turn:` exists,
-  no `segment:` query (`searchNotebook`, recall.go:160-180).
+All of the machinery this doc proposed is shipped — see
+`CONTEXT_NOTEBOOK.md`'s "As built" section for the inventory
+(multi-pass selection, working-set pass, `prefixFingerprint`,
+stall-bounded `Compact`, `ErrorHeadline`, `segment:` recall). The
+constraints below remain the load-bearing ones for future selection
+work:
+
+- `filetracker.ListReadFiles` resolves `file:` basenames to real
+  paths (tags store basenames only) and covers reads _and_ tool
+  writes — but not files touched only via bash. It is cumulative
+  for the life of the session, so any pass over it needs a recency
+  bound.
+- `prefixFingerprint` decides freshness: **any new selection input
+  must join this hash or the cache serves stale renders** — and
+  anything hashed is computed _per step_, not per render.
 
 ## Proposal
 

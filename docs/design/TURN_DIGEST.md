@@ -1,6 +1,6 @@
 # Turn Digest — Fidelity Drop at the Turn Boundary
 
-> **Status:** Shipped. `stub` mode — the `prior_turn` render
+> **Status:** Resolved (shipped #58, #63). `stub` mode — the `prior_turn` render
 > predicate, frozen collapse set, and `notebook-prior-turns` option —
 > shipped (#58, closing #49); `digest` mode — turn-granularity
 > digest generation, the demotion rule, and the run-end trigger
