@@ -6,7 +6,11 @@
 > estimated request pressure vs. the context window instead of a fixed
 > token budget, latching per session. This restores overflow protection
 > for notebook mode, which disables the auto-summarize fallback
-> entirely. What remains below — graduated per-component budgets inside
+> entirely. Issue #112 adds `enforce_context_window` (default off), a
+> harness-side cap that rejects wire-bound renders estimated to
+> overflow the declared window — the stand-in for a provider's own
+> rejection when a manifest pins a window smaller than the endpoint's
+> real one. What remains below — graduated per-component budgets inside
 > `PrepareStep`, MCP caps, and the mandatory-overflow path — is still
 > spec, deferred behind the #90 benefit measurement.
 

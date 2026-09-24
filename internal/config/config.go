@@ -452,7 +452,14 @@ type Options struct {
 	// request pressure vs. the context window. Below the margin the
 	// render is verbatim; coverage accrual still runs (eviction
 	// itself requires it). This is the notebook-mode overflow guard.
-	NotebookPressureGate *bool    `json:"notebook_pressure_gate,omitempty" jsonschema:"description=Gate the notebook render path on estimated request pressure; below the margin the render is verbatim (the notebook-mode overflow guard),default=true"`
+	NotebookPressureGate *bool `json:"notebook_pressure_gate,omitempty" jsonschema:"description=Gate the notebook render path on estimated request pressure; below the margin the render is verbatim (the notebook-mode overflow guard),default=true"`
+	// EnforceContextWindow turns the model's declared context_window
+	// into a hard cap: a rendered request estimated to overflow it
+	// fails with a context-overflow error before reaching the
+	// provider. Eval-only — it simulates the rejection a small-window
+	// endpoint would give, for manifests that pin a window smaller
+	// than the real one. Applies with or without the notebook.
+	EnforceContextWindow *bool    `json:"enforce_context_window,omitempty" jsonschema:"description=Fail rendered requests estimated to overflow the model's declared context_window; simulates a small-window endpoint (eval use),default=false"`
 	ProjectIndex         *bool    `json:"project_index,omitempty" jsonschema:"description=Enable the persistent per-project symbol index and map tool for codebase navigation,default=false"`
 	InitializeAs         string   `json:"initialize_as,omitempty" jsonschema:"description=Name of the context file to create/update during project initialization,default=AGENTS.md,example=AGENTS.md,example=CRUSH.md,example=CLAUDE.md,example=docs/LLMs.md"`
 	AutoLSP              *bool    `json:"auto_lsp,omitempty" jsonschema:"description=Automatically setup LSPs based on root markers,default=true"`
@@ -1472,6 +1479,17 @@ func (o *Options) NotebookPressureGateEnabled() bool {
 		return true
 	}
 	return *o.NotebookPressureGate
+}
+
+// EnforceContextWindowEnabled returns the resolved hard-cap setting,
+// defaulting to false — it exists for eval manifests that pin a
+// context_window below the endpoint's real one; production configs
+// leave the provider's own rejection as the only cap.
+func (o *Options) EnforceContextWindowEnabled() bool {
+	if o.EnforceContextWindow == nil {
+		return false
+	}
+	return *o.EnforceContextWindow
 }
 
 // AmbiguityClarificationEnabled returns the resolved

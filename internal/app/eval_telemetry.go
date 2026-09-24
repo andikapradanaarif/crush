@@ -185,6 +185,12 @@ func classifyRunError(err error) string {
 		return "cancelled"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "timeout"
+	case errors.Is(err, agent.ErrContextWindowExceeded):
+		// Harness-enforced window cap (options.enforce_context_window)
+		// — the local stand-in for a provider's overflow rejection,
+		// classified identically so a simulated endpoint and a real
+		// small window land in the same bucket.
+		return "context_too_large"
 	case errors.As(err, &pe):
 		switch {
 		case pe.AuthError || pe.StatusCode == http.StatusUnauthorized || pe.StatusCode == http.StatusForbidden:

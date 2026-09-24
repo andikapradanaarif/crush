@@ -1,0 +1,65 @@
+{
+	"name": "notebook-pressure-regime-qwen",
+	"model": "alibaba-tp/qwen3.8-flash",
+	"temperature": 0,
+	"corpus": [
+		"realrepo-compact-status",
+		"realrepo-env-cmd"
+	],
+	"runs_per_trajectory": {
+		"stable": 3,
+		"mid": 10,
+		"uncharacterized": 5
+	},
+	"primary": {
+		"metric": "request.prompt_tokens_peak",
+		"direction": "decrease",
+		"mde": 0.3
+	},
+	"arms": {
+		"control": {
+			"config": {
+				"options": {
+					"notebook_enabled": false,
+					"disable_auto_summarize": true,
+					"enforce_context_window": true
+				}
+			}
+		},
+		"treatment": {
+			"config": {
+				"options": {
+					"notebook_enabled": true,
+					"notebook_pressure_gate": true,
+					"disable_auto_summarize": true,
+					"enforce_context_window": true
+				}
+			},
+			"coverage": {
+				"min_pressure.activations": 1
+			}
+		}
+	},
+	"providers": {
+		"alibaba-tp": {
+			"name": "Alibaba Token Plan",
+			"type": "openai-compat",
+			"api_key": "$ALIBABA_TP_API_KEY",
+			"base_url": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+			"models": [
+				{
+					"id": "deepseek-v4.1-flash",
+					"name": "DeepSeek V4.1 Flash",
+					"context_window": 64000,
+					"default_max_tokens": 8192
+				},
+				{
+					"id": "qwen3.8-flash",
+					"name": "Qwen 3.8 Flash",
+					"context_window": 64000,
+					"default_max_tokens": 8192
+				}
+			]
+		}
+	}
+}

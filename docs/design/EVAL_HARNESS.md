@@ -572,6 +572,24 @@ churn only: coverage accrual (and its `generator_tokens` spend) runs
 in every regime, so below-pressure arms still pay generation cost —
 "does the notebook pay for itself" stays with #90/#106.
 
+`enforce_context_window` (default off) turns the manifest-declared
+`context_window` into a hard cap: inside `PrepareStep`, a wire-bound
+render whose chars/4 estimate plus the request's output budget
+exceeds the window fails with `ErrContextWindowExceeded`, which
+`classifyRunError` maps to `context_too_large` — the same class a
+real provider rejection produces. This is how a pressure regime is
+manufactured without a small-window endpoint: the manifest pins
+`context_window: 64000` (with `default_max_tokens` reconciled below
+it) on a model whose real window is larger, and enforcement makes
+the pin real. Deliberately not notebook-gated — the uncompressed
+control arm is the one meant to die. Known under-counts:
+request-level `Files` attachments sit outside the message list, and
+chars/4 drifts from real tokenization — the cap simulates the
+provider's check, it isn't wire-exact. `notebook-pressure-regime`
+(and its `-qwen` sibling) exercise it: control `notebook_enabled:
+false` verbatim-until-death vs treatment gate-on, both enforcing
+64K, with `min_pressure.activations: 1` proving the gate fired.
+
 `generator_tokens` is the notebook sidecar's generation spend
 (segment, checkpoint, digest calls) — kept out of `tokens` so the
 agent's own usage isn't polluted, but priced so notebook-on arms

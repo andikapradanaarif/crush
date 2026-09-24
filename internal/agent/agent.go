@@ -263,6 +263,14 @@ type sessionAgent struct {
 	// itself requires processed segments, so generation must run in
 	// every regime for the gate to have anything to activate.
 	pressureGate bool
+	// enforceContextWindow turns the model's declared context_window
+	// into a hard cap: a wire-bound render estimated to overflow it
+	// fails with ErrContextWindowExceeded before the request leaves.
+	// Unlike pressureGate it applies with or without the notebook —
+	// it simulates the provider rejection an uncompressed control
+	// arm would otherwise never hit on an endpoint whose real
+	// window is larger than the manifest pin.
+	enforceContextWindow bool
 	// stubBoundary records the last raw-window boundary index per
 	// session, so pending superseded flags promote to stubs only on
 	// boundary moves.
@@ -445,6 +453,14 @@ type SessionAgentOptions struct {
 	// under notebook). When false the machinery runs
 	// unconditionally — the pre-gate behavior.
 	PressureGate bool
+	// EnforceContextWindow turns the model's declared
+	// context_window into a hard cap (options.enforce_context_window,
+	// default off): a render estimated to overflow the window fails
+	// with ErrContextWindowExceeded before reaching the provider.
+	// Eval-only knob for simulating a small-window endpoint — unlike
+	// PressureGate it is NOT conditioned on the notebook, since the
+	// uncompressed control arm is what must die.
+	EnforceContextWindow bool
 	// StubBoundary/StubStats let a coordinator share stub bookkeeping
 	// across agent rebuilds; CollapseRecorded is the same for
 	// prior-turn collapse. When nil the agent allocates its own.
@@ -538,6 +554,7 @@ func NewSessionAgent(
 		stubSuperseded:         opts.StubSuperseded,
 		priorTurns:             opts.NotebookPriorTurns,
 		pressureGate:           opts.PressureGate,
+		enforceContextWindow:   opts.EnforceContextWindow,
 		stubBoundary:           cmp.Or(opts.StubBoundary, csync.NewMap[string, int]()),
 		stubStats:              cmp.Or(opts.StubStats, csync.NewMap[string, stubStats]()),
 		collapseRecorded:       cmp.Or(opts.CollapseRecorded, csync.NewMap[string, *csync.Map[int64, bool]]()),
@@ -1298,6 +1315,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(promptPrefix)}, prepared.Messages...)
 			}
 
+			// The window cap is checked on the final wire-bound list —
+			// a rejection here plays exactly like a provider's own
+			// overflow response: PrepareStep aborts the stream and the
+			// error lands on the run's terminal path.
+			if err := a.enforceWindowCap(prepared.Messages, call.MaxOutputTokens); err != nil {
+				return callContext, prepared, err
+			}
+
 			stats, _ := a.stubStats.Get(call.SessionID)
 			nbStats, _ := a.nbStats.Get(call.SessionID)
 			comp := logStepComposition(call.SessionID, prepared.Messages, prepared.Tools, stats, nbStats)
@@ -1994,6 +2019,9 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 			prepared.Messages = options.Messages
 			if systemPromptPrefix != "" {
 				prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(systemPromptPrefix)}, prepared.Messages...)
+			}
+			if err := a.enforceWindowCap(prepared.Messages, 0); err != nil {
+				return callContext, prepared, err
 			}
 			return callContext, prepared, nil
 		},

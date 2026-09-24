@@ -590,6 +590,8 @@ var flagCodeDefaults = map[string]bool{
 	"notebook_pressure_gate":   true,
 	"project_index":            false,
 	"ambiguity_clarification":  false,
+	"enforce_context_window":   false,
+	"disable_auto_summarize":   false,
 }
 
 // ValidateArmCoverageResolved re-runs the starvation check against
