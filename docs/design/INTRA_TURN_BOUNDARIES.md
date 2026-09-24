@@ -1,6 +1,6 @@
 # Intra-turn boundaries — notebook coverage below the user-message grain
 
-Status: implemented (PRs #24, #25).
+> **Status:** Resolved (shipped #24, #25).
 Root cause verified against live session `23826edc` (79 requests,
 6.45M provider-reported tokens, ~6.2M cached reads). Sharpening
 context: auto-summarize is disabled when the notebook is on

@@ -1,7 +1,9 @@
 # Plan Artifact — Typed Plan Items
 
-> **Status:** Spec. Split from `HARNESS_TOPOLOGY.md` — the typed
-> plan object the harness can check.
+> **Status:** Parked — feature work held pending the #90 benefit
+> measurement; the ship-when conditions below still apply when it
+> resumes. Spec split from `HARNESS_TOPOLOGY.md` (local-only —
+> untracked) — the typed plan object the harness can check.
 >
 > **Depends on:** nothing — `session.Todos` exist today and the
 > gate reads them. `phase-confirm` already shipped (#43, calibrated
@@ -73,10 +75,10 @@ call as resolved without inspecting content
 gap is not that the gate can't render structure; it is that the
 gate cannot _validate_ what a plan declares — no evidence
 binding, no "which item is unresolved", no structural confidence.
-`BACKGROUND_SUBAGENTS.md` needs a dispatch unit; today the dispatch
-spec is a prompt string the model composes inline in the `agent`
-tool call, with no handle the harness can track, dedup against, or
-verify.
+`BACKGROUND_SUBAGENTS.md` (local-only — untracked; issue #3) needs a
+dispatch unit; today the dispatch spec is a prompt string the model
+composes inline in the `agent` tool call, with no handle the harness
+can track, dedup against, or verify.
 
 ## Design
 
@@ -85,8 +87,8 @@ EvidenceChecks []string, EvidencePaths []string}`:
 
 - `DependsOn` is the dispatch unit for fan-out: independent
   subtrees are what a background subagent may be handed, and the
-  join edge (`BACKGROUND_SUBAGENTS.md`) reads "outstanding" off
-  the same structure.
+  join edge (`BACKGROUND_SUBAGENTS.md`, local-only) reads
+  "outstanding" off the same structure.
 - `Evidence` is **two kinds, distinct fields** — not one
   `[]string` the done-definition sniffs prefixes on:
   - `EvidenceChecks []string` — gate-bearing: the item is

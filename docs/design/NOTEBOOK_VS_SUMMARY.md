@@ -1,5 +1,13 @@
 # Notebook vs Summary — Comparison
 
+> **Status:** Resolved (shipped) — the recommended hybrid shipped: the notebook
+> is the context-management mechanism and `Summarize()` is retained
+> only for `notebook_enabled=false`. One honest divergence from the
+> recommendation below: the "notebook + emergency fallback" arm did
+> **not** ship — with the notebook on, auto-summarize is disabled
+> entirely, so a long single turn has no overflow fallback today
+> (tracked in issue #100). Decision rationale preserved below.
+
 ## How each works (from actual code)
 
 ### Existing Summarize() (agent.go:1329)

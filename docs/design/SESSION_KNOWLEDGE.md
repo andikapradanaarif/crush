@@ -1,6 +1,6 @@
 # Session Knowledge — Consolidated Checkpoints & Cold-Start Hydration
 
-> **Status:** Shipped. PR 1 shipped (#56 — `working_dir`
+> **Status:** Resolved (shipped). PR 1 shipped (#56 — `working_dir`
 > partition, capability-detected server-side filters, fail-closed
 > client verification); §1's within-session `checkpoint` entry type
 > shipped (#57, closing #48); §2 (cold-start hydration) shipped

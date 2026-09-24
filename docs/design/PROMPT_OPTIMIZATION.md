@@ -1,5 +1,15 @@
 # Prompt Optimization — Implementation Plan - Implemented
 
+> **Status:** Resolved (shipped) — PRs 1–5 landed: prompt-composition
+> telemetry (#12), stable cache prefix (#16), deduplicated system
+> prompt, trimmed tool descriptions, MCP hard limits, and
+> relevance-selected notebook entries. Honest caveats, unchanged
+> from the doc's own labels: the "Architecture roadmap" phases 1–4
+> remain deferred by design, and two helpers (`readContextFile`,
+> `truncateToTokenLimit`) were never landed — they belong to
+> `CONTEXT_WINDOW_SAFETY.md`'s overflow handling, which is still
+> unbuilt.
+
 ## Goal
 
 Minimize request payload and model distraction by removing duplicated

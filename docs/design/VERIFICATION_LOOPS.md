@@ -1,6 +1,6 @@
 # Verification Loops — Ground-Truth Gates on Task Completion
 
-> **Status:** Implemented (PR #28). Scope delivered: `verifyingTool`
+> **Status:** Resolved (shipped #28). Scope delivered: `verifyingTool`
 > decorator + `verification` metadata, `verify` crushrc builtin,
 > end-of-turn gate with bounded retries, notebook `verified` ground
 > truth. Deferred: `bash`-redirection/MCP-write coverage, gate-check

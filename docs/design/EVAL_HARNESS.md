@@ -1,10 +1,12 @@
 # Eval Harness — Golden Trajectories & Paired Outcome Gating
 
-> **Status:** Shipped. Covers the corpus format (trajectory spec, check
-> contract, experiment definition, run record, banding state), the
-> quarantine procedure, and the lifecycle contract corpus authors write
-> predicates against. Runner, telemetry, preflight, and gates all land
-> in `internal/eval/`.
+> **Status:** Resolved (shipped). Covers the corpus format (trajectory
+> spec, check contract, experiment definition, run record, banding
+> state), the quarantine procedure, and the lifecycle contract corpus
+> authors write predicates against. Runner, telemetry, preflight, and
+> gates all land in `internal/eval/`. Note: `HARNESS_TOPOLOGY.md`,
+> referenced below for edge-layer context, is a local-only doc
+> (untracked — kept out of the repo by `711fbb96`).
 
 ## Goal
 
