@@ -65,7 +65,7 @@ type Report struct {
 	// effect, visible next to the treatment delta.
 	ArmTokens map[string]ArmTokenStats
 	// ArmTokensExcluded carries the same aggregates over excluded
-	// runs (inconclusive/error/timeout-not-counted). Resampling to N
+	// runs (inconclusive/error — timeouts are conclusive). Resampling to N
 	// conclusive silently drops them from the conclusive table —
 	// reporting their token mass keeps the selection visible.
 	ArmTokensExcluded map[string]ArmTokenStats

@@ -898,8 +898,10 @@ decision metric per experiment:
   doesn't belong in the registry.
 - **`direction` declares the one-sided claim** (`decrease` = the
   treatment lowers the metric). Declaring it is what licenses the
-  one-sided α in the power gate; the reported Δ is signed against
-  it either way.
+  one-sided α in the power gate and orients the reported Δ — it is
+  not an assertion checked against the observed sign; the powered
+  comparison that could contradict a declaration is compare's job,
+  not the report's.
 - **`mde` is the minimum detectable effect** as a relative change
   (0.15 = 15%). Effects smaller than the MDE are defined as
   uninteresting — which is what lets the power gate be a gate
@@ -908,14 +910,24 @@ decision metric per experiment:
   input + h·cache_read + o·output` with `h`/`o` pinned per model in
   the experiment JSON — relative prices in uncached-input units, so
   the metric is comparable across runs without embedding a dollar
-  table in the repo.
+  table in the repo. Its CV can't bootstrap itself: the power gate
+  refuses before scheduling, so a `weighted_cost` primary must be
+  hand-seeded in noise.json or measured by an `--aa` run on another
+  `cost_weights`-bearing experiment first.
 
 ### noise.json + the scheduling refusal
 
 `eval/noise.json` records per-metric coefficients of variation —
 seeded from A/A measurements, refreshed by every `--aa` run (each
-control-pool CV blends 80/20 with the new measurement). Before any
-run is scheduled, the power gate checks the declared primary:
+control-pool CV blends 80/20 with the new measurement). It is
+tracked **and** rewritten in place — unlike `bands.json` or
+`results/`, an `--aa` run dirties the worktree by design: refreshed
+CVs are configuration data, and committing them is the automation
+contract. The CVs price a *pooled* comparison — between-trajectory
+variance inflates them, so required n over-powers relative to the
+paired estimator `compare` will eventually use; conservative is the
+safe direction for a scheduling floor. Before any run is scheduled,
+the power gate checks the declared primary:
 
 ```
 required/arm = ⌈2·(z_α + z_β)²·(cv/mde)²⌉ ≈ ⌈12.38·(cv/mde)²⌉
@@ -969,6 +981,13 @@ table stand alone:
   a different estimand than the arm-level delta; reporting both
   keeps the difference explicit instead of silently resampling the
   arm into fired-only.
+
+All primary/strata means are pooled across trajectories — if one
+arm's conclusive runs land disproportionately on easier
+trajectories, the pooled mean shifts independently of the
+mechanism. The per-trajectory-paired estimator that removes that
+composition sensitivity is `eval compare`'s job; the pooled numbers
+are descriptive, not causal.
 
 Guardrails — steps, pass rate, `edit_failures_*` — stay what they
 are: alarm inputs and informational lines that can block a verdict

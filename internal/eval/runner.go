@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"os"
 	"os/exec"
@@ -594,7 +595,13 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 	// is removed before returning so a reused *Experiment doesn't
 	// carry it into the next call.
 	if r.AA {
-		exp.Arms[ArmAA] = exp.Arms[ArmControl]
+		aa := exp.Arms[ArmControl]
+		// The Arm copy shares the control's maps — clone them so a
+		// future write path through aa can't silently corrupt
+		// control's spec mid-experiment.
+		aa.Config.Options = maps.Clone(aa.Config.Options)
+		aa.Coverage = maps.Clone(aa.Coverage)
+		exp.Arms[ArmAA] = aa
 		defer delete(exp.Arms, ArmAA)
 	}
 
