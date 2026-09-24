@@ -777,9 +777,14 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 	conclusive := map[string]int{}
 	attempts := map[string]int{}
 	excluded := map[string]map[Outcome]int{}
+	// excludedClass tracks error-class counts per arm alongside the
+	// outcome split — an expected_exclusion declaration needs "the
+	// arm died the declared way", which the outcome count can't see.
+	excludedClass := map[string]map[string]int{}
 	for _, name := range armNames {
 		conclusive[name], attempts[name] = 0, 0
 		excluded[name] = map[Outcome]int{}
+		excludedClass[name] = map[string]int{}
 	}
 
 	fixtureErrs := 0
@@ -830,6 +835,9 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 				conclusive[armName]++
 			} else {
 				excluded[armName][rec.Outcome]++
+				if rec.Outcome == OutcomeError && rec.ErrorClass != "" {
+					excludedClass[armName][rec.ErrorClass]++
+				}
 			}
 			// Circuit breakers: a provably config-class failure means
 			// every later attempt fails the same way — stop after two
@@ -885,6 +893,18 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 			continue
 		}
 		if conclusive[armName] < n {
+			// A declared expected exclusion consumes its own
+			// saturation: every excluded record on the arm being the
+			// declared death at or beyond min is the designed
+			// condition, not infra bleed. An arm that also starved
+			// inconclusive or died other ways keeps the alarm —
+			// unexplained exclusions stay loud.
+			if d := exp.ExpectedExclusion; d != nil && d.Arm == armName &&
+				excluded[armName][OutcomeInconclusive] == 0 &&
+				excludedClass[armName][d.ErrorClass] == excluded[armName][OutcomeError] &&
+				excludedClass[armName][d.ErrorClass] >= d.Min {
+				continue
+			}
 			if excluded[armName][OutcomeError] >= excluded[armName][OutcomeInconclusive] {
 				rep.Saturated = append(rep.Saturated, fmt.Sprintf("%s/%s", traj.ID, armName))
 			} else {

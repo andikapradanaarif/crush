@@ -165,6 +165,27 @@ type Experiment struct {
 	// eval environment's credentials pass through, secrets never
 	// enter the repo.
 	Providers map[string]any `json:"providers,omitempty"`
+	// ExpectedExclusion declares an arm's designed exclusion
+	// pattern — the experiment's hypothesis is that the arm cannot
+	// complete the corpus (the pressure-regime control dying at the
+	// manufactured cap). A declared exclusion is data, not an alarm:
+	// error-saturation and the excluded-differential are consumed
+	// for trajectories where the declared arm meets the expectation,
+	// while a trajectory where it falls short reports the miss —
+	// the regime the experiment needs never engaged, so the run is
+	// vacuous where it should have been decisive.
+	ExpectedExclusion *ExpectedExclusion `json:"expected_exclusion,omitempty"`
+}
+
+// ExpectedExclusion pins which arm is supposed to fail and how:
+// at least Min error records carrying ErrorClass per trajectory.
+// Min should equal the trajectory's designed n when the claim is
+// total death (control cannot run this corpus); a smaller Min
+// asserts only that the regime engages.
+type ExpectedExclusion struct {
+	Arm        string `json:"arm"`         // control | treatment
+	ErrorClass string `json:"error_class"` // e.g. window_cap_enforced
+	Min        int    `json:"min"`
 }
 
 // Primary declares the decision metric, its expected direction, and

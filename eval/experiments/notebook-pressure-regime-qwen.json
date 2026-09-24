@@ -16,6 +16,11 @@
 		"direction": "decrease",
 		"mde": 0.3
 	},
+	"expected_exclusion": {
+		"arm": "control",
+		"error_class": "window_cap_enforced",
+		"min": 5
+	},
 	"arms": {
 		"control": {
 			"config": {

@@ -154,6 +154,12 @@ func (r *Runner) persistAlarms(exp *Experiment, inv string, rep Report, retErr e
 	if len(rep.ExcludedDifferential) > 0 {
 		snap.OutcomeAlarms = append(snap.OutcomeAlarms, "excluded-differential: "+strings.Join(rep.ExcludedDifferential, ", "))
 	}
+	if len(rep.ExpectedExclusionMissed) > 0 {
+		snap.OutcomeAlarms = append(snap.OutcomeAlarms, "expected-exclusion-missed: "+strings.Join(rep.ExpectedExclusionMissed, ", "))
+	}
+	if len(rep.ExpectedExclusionSatisfied) > 0 {
+		snap.OutcomeAlarms = append(snap.OutcomeAlarms, "expected-exclusion met: "+strings.Join(rep.ExpectedExclusionSatisfied, ", "))
+	}
 	if len(rep.Coincident) > 0 {
 		snap.OutcomeAlarms = append(snap.OutcomeAlarms, "coincident-collapse: "+strings.Join(rep.Coincident, ", "))
 	}
@@ -221,7 +227,7 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 
 	// Structural-alarm refusal. The persisted snapshot is exact when
 	// present; legacy invocations fall back to record inference.
-	snap, noop, err := r.invocationAlarms(exp.Name, invocation, recs)
+	snap, noop, err := r.invocationAlarms(exp.Name, invocation, recs, exp.ExpectedExclusion)
 	if err != nil {
 		return nil, err
 	}
@@ -383,7 +389,7 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 // still be missing (a torn write, a pre-snapshot defect). Returns
 // the parsed snapshot (nil for legacy invocations) and the noop
 // trajectory set for the null-experiment label.
-func (r *Runner) invocationAlarms(expName, invocation string, recs []RunRecord) (snap *alarmSnapshot, noop []string, err error) {
+func (r *Runner) invocationAlarms(expName, invocation string, recs []RunRecord, expectedExclusion *ExpectedExclusion) (snap *alarmSnapshot, noop []string, err error) {
 	// Noop always derives from records — resolved options are exact
 	// on every record, and a partial snapshot (aborted run) can't be
 	// trusted to carry it.
@@ -426,10 +432,39 @@ func (r *Runner) invocationAlarms(expName, invocation string, recs []RunRecord) 
 			}
 		}
 		if nc != nt {
-			return nil, nil, fmt.Errorf("compare: conclusive asymmetry on %s (control %d, treatment %d) — an arm under-sampled, which is the starve/saturate signature; the invocation is void", traj, nc, nt)
+			// A declared expected exclusion explains the shortfall:
+			// the under-sampled arm dying entirely the declared way
+			// at-or-beyond min is the designed condition. Shortfalls
+			// the declaration doesn't cover keep the refusal.
+			under := ArmControl
+			if nt < nc {
+				under = ArmTreatment
+			}
+			if d := expectedExclusion; d == nil || d.Arm != under ||
+				!exclusionShortfallExplained(rs, under, d) {
+				return nil, nil, fmt.Errorf("compare: conclusive asymmetry on %s (control %d, treatment %d) — an arm under-sampled, which is the starve/saturate signature; the invocation is void", traj, nc, nt)
+			}
 		}
 	}
 	return snap, noop, nil
+}
+
+// exclusionShortfallExplained reports whether an arm's conclusive
+// shortfall is fully accounted for by the declared exclusion —
+// every non-conclusive record on the arm carries the declared error
+// class and the count meets the declared minimum.
+func exclusionShortfallExplained(rs []RunRecord, arm string, d *ExpectedExclusion) bool {
+	declared := 0
+	for _, rec := range rs {
+		if rec.Arm != arm || rec.Outcome.Conclusive() {
+			continue
+		}
+		if rec.Outcome != OutcomeError || rec.ErrorClass != d.ErrorClass {
+			return false
+		}
+		declared++
+	}
+	return declared >= d.Min
 }
 
 // noopTrajectories lists trajectories whose control/treatment
