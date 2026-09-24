@@ -1130,6 +1130,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		StubSuperseded: c.cfg.Config().Options.NotebookStubSupersededEnabled() &&
 			notebookOn && recallOn,
 		NotebookPriorTurns:     priorTurns,
+		PressureGate:           c.cfg.Config().Options.NotebookPressureGateEnabled() && notebookOn,
 		StubBoundary:           c.stubBoundary,
 		StubStats:              c.stubStats,
 		CollapseRecorded:       c.collapseRecorded,

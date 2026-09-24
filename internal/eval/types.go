@@ -296,7 +296,16 @@ type RunRecord struct {
 	// composition and the run's peak prompt size — the "what fills
 	// the prompt" breakdown the 70%-tool-results claim reads.
 	Request *RequestStats `json:"request,omitempty"`
-	Env     Env           `json:"env"`
+	// Pressure carries the pressure gate's trajectory state:
+	// activations counts engage transitions (the "did the gate fire"
+	// predicate for comfortable-regime experiments), engaged the
+	// latch at the last turn's exit, estimate the last next-request
+	// estimate for the estimate-vs-reported audit. Pointer-gated like
+	// Request: nil when the gate never evaluated (notebook or gate
+	// flag off, unknown window), so pressure.* predicates fail closed
+	// rather than reading unmeasured silence as zero.
+	Pressure *Pressure `json:"pressure,omitempty"`
+	Env      Env       `json:"env"`
 }
 
 // RequestStats is the run's request-size snapshot: the last rendered
@@ -318,6 +327,14 @@ type TokenUsage struct {
 	Output     int64 `json:"output"`
 	CacheRead  int64 `json:"cache_read"`
 	CacheWrite int64 `json:"cache_write"`
+}
+
+// Pressure mirrors the agent's pressure-gate telemetry — the
+// notebook-mode overflow guard's activation state.
+type Pressure struct {
+	Activations int   `json:"activations"`
+	Engaged     bool  `json:"engaged"`
+	Estimate    int64 `json:"estimate"`
 }
 
 // StepRecord is one agent step's usage plus prefix attribution — the
@@ -344,6 +361,10 @@ type StepRecord struct {
 	PrefixHash        string `json:"prefix_hash,omitempty"`
 	FirstChanged      int    `json:"first_changed_index"`
 	FirstChangedCause string `json:"first_changed_cause,omitempty"`
+	// PressureEstimate/PressureEngaged carry the gate's per-step
+	// state — the estimate-vs-reported audit pair.
+	PressureEstimate int64 `json:"pressure_estimate,omitempty"`
+	PressureEngaged  bool  `json:"pressure_engaged,omitempty"`
 }
 
 // GeneratorTokens accounts the notebook sidecar's generation spend —

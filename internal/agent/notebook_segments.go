@@ -956,7 +956,7 @@ func (a *sessionAgent) rebuildStepMessages(ctx context.Context, sessionID string
 	if err != nil || len(msgs) == 0 {
 		return nil, false
 	}
-	history, _ := a.preparePrompt(ctx, msgs, supportsImages, collapse)
+	history, _ := a.preparePrompt(ctx, msgs, supportsImages, collapse, false)
 	out := history
 	if a.systemPrompt.Get() != "" && len(optionsMsgs) > 0 && optionsMsgs[0].Role == fantasy.MessageRoleSystem {
 		out = make([]fantasy.Message, 0, len(history)+1)
@@ -1203,14 +1203,24 @@ func freezeDigestEligibility(collapse *turnCollapse, entries []notebook.Entry, b
 	if collapse == nil || collapse.digestTurns != nil {
 		return
 	}
-	collapse.digestTurns = make(map[int64]bool)
+	var eligible map[int64]bool
 	for _, e := range entries {
 		if e.TurnNumber > bKey.turn || (e.TurnNumber == bKey.turn && e.SegmentNumber >= bKey.segment) {
 			continue // Past the render boundary — invisible this run.
 		}
 		if notebook.CheckpointGranularity(e) == notebook.GranularityTurn {
-			collapse.digestTurns[e.TurnNumber] = true
+			if eligible == nil {
+				eligible = make(map[int64]bool)
+			}
+			eligible[e.TurnNumber] = true
 		}
+	}
+	// Like collapse.Set, an empty result must not freeze: the
+	// pressure gate's disengaged renders pass a zero boundary key, so
+	// freezing {} here would lock digest eligibility out for the run
+	// even after the machinery engages.
+	if len(eligible) > 0 {
+		collapse.digestTurns = eligible
 	}
 }
 

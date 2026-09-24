@@ -20,6 +20,7 @@
 			"config": {
 				"options": {
 					"notebook_enabled": true,
+					"notebook_pressure_gate": false,
 					"notebook_stub_superseded": false
 				}
 			}
@@ -28,6 +29,7 @@
 			"config": {
 				"options": {
 					"notebook_enabled": true,
+					"notebook_pressure_gate": false,
 					"notebook_stub_superseded": true
 				}
 			},

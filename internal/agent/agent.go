@@ -253,6 +253,16 @@ type sessionAgent struct {
 	// same way and additionally consolidates each finished turn into
 	// a granularity:turn notebook entry at run end.
 	priorTurns string
+	// pressureGate gates the notebook render path — boundary
+	// eviction, the prefix render, and prior-turn collapse — on
+	// estimated request pressure vs. the context window. Below the
+	// margin the render is verbatim; the machinery's value is
+	// overflow insurance, and its steady-state cost is prefix cache
+	// churn. When false the machinery runs unconditionally (the
+	// pre-gate behavior). Coverage accrual is not gated: eviction
+	// itself requires processed segments, so generation must run in
+	// every regime for the gate to have anything to activate.
+	pressureGate bool
 	// stubBoundary records the last raw-window boundary index per
 	// session, so pending superseded flags promote to stubs only on
 	// boundary moves.
@@ -430,6 +440,11 @@ type SessionAgentOptions struct {
 	// — the coordinator coerces it to verbatim when the notebook is
 	// disabled, since recall is the stub's recovery path.
 	NotebookPriorTurns string
+	// PressureGate gates the notebook render path on estimated
+	// request pressure (options.notebook_pressure_gate, default on
+	// under notebook). When false the machinery runs
+	// unconditionally — the pre-gate behavior.
+	PressureGate bool
 	// StubBoundary/StubStats let a coordinator share stub bookkeeping
 	// across agent rebuilds; CollapseRecorded is the same for
 	// prior-turn collapse. When nil the agent allocates its own.
@@ -522,6 +537,7 @@ func NewSessionAgent(
 		notebookCheckpoint:     opts.NotebookCheckpoint,
 		stubSuperseded:         opts.StubSuperseded,
 		priorTurns:             opts.NotebookPriorTurns,
+		pressureGate:           opts.PressureGate,
 		stubBoundary:           cmp.Or(opts.StubBoundary, csync.NewMap[string, int]()),
 		stubStats:              cmp.Or(opts.StubStats, csync.NewMap[string, stubStats]()),
 		collapseRecorded:       cmp.Or(opts.CollapseRecorded, csync.NewMap[string, *csync.Map[int64, bool]]()),
@@ -1145,7 +1161,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// set freezes inside this first render — later coverage commits
 	// can't flip a turn mid-window.
 	collapse := a.newTurnCollapse(int64(countUserMessages(msgs)))
-	history, files := a.preparePrompt(ctx, msgs, largeModel.CatwalkCfg.SupportsImages, collapse, call.Attachments...)
+	history, files := a.preparePrompt(ctx, msgs, largeModel.CatwalkCfg.SupportsImages, collapse, false, call.Attachments...)
 
 	// Per-turn tail augmentation: the turn-context blob and the
 	// vagueness pre-filter's clarify directive. Computed once here —
@@ -1485,6 +1501,8 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 					PrefixHash:        rs.Pending.PrefixHash,
 					FirstChanged:      rs.Pending.FirstChanged,
 					FirstChangedCause: rs.Pending.FirstChangedCause,
+					PressureEstimate:  rs.pressureEstimate,
+					PressureEngaged:   rs.pressureEngaged,
 				})
 				// Clear the folded attribution so a terminal error
 				// later in the turn can't re-fold a stale Pending —
@@ -1549,6 +1567,8 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 					PrefixHash:        rs.Pending.PrefixHash,
 					FirstChanged:      rs.Pending.FirstChanged,
 					FirstChangedCause: rs.Pending.FirstChangedCause,
+					PressureEstimate:  rs.pressureEstimate,
+					PressureEngaged:   rs.pressureEngaged,
 				})
 				rs.Pending = stepAttribution{}
 				a.reqStats.Set(call.SessionID, rs)
@@ -1929,8 +1949,9 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 
 	// Summarize renders verbatim: the call is one-shot with no cache
 	// reuse, and the summary is the seed the next context window grows
-	// from — stubs would amplify whatever the notebook dropped.
-	aiMsgs, _ := a.preparePrompt(ctx, msgs, largeModel.CatwalkCfg.SupportsImages, nil)
+	// from — stubs would amplify whatever the notebook dropped. The
+	// skip flag keeps the render outside the session's gate state.
+	aiMsgs, _ := a.preparePrompt(ctx, msgs, largeModel.CatwalkCfg.SupportsImages, nil, true)
 
 	genCtx, cancel := context.WithCancel(ctx)
 	ac := &activeCancel{cancel: cancel}
@@ -2042,6 +2063,11 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		return err
 	}
 
+	// Compaction breaks the gate's append-only premise — the latch
+	// and its anchors describe pre-compact history, so they reset
+	// and the next render re-engages only if still over margin.
+	a.clearPressureState(sessionID)
+
 	// Release the active request before processing queued messages so that
 	// Run() does not see the session as busy.
 	a.activeRequests.Del(sessionID)
@@ -2105,7 +2131,15 @@ func (a *sessionAgent) createUserMessage(ctx context.Context, call SessionAgentC
 	return msg, nil
 }
 
-func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message, supportsImages bool, collapse *turnCollapse, attachments ...message.Attachment) ([]fantasy.Message, []fantasy.FilePart) {
+// skipPressureGate marks a one-shot render outside a run's render
+// lifecycle — Summarize is the only such caller. It keeps the render
+// machinery on (an over-margin summarize call still has to fit) but
+// never consults or writes the session's gate state, so a /compact
+// can't move the watermark or trip the latch for renders after it.
+// Run-path callers always pass false — including verbatim mode, whose
+// nil collapse must NOT skip the gate: the gate covers boundary and
+// prefix churn in every mode, not just collapse.
+func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message, supportsImages bool, collapse *turnCollapse, skipPressureGate bool, attachments ...message.Attachment) ([]fantasy.Message, []fantasy.FilePart) {
 	var history []fantasy.Message
 
 	// When notebook is enabled, split messages into notebook (closed
@@ -2135,70 +2169,105 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 			budget = notebook.DefaultRawTokenBudget
 		}
 		sessionID := sessionIDFromMessages(msgs)
+		// Coverage accrual runs in every regime — detection is the
+		// generation driver, and boundary eviction itself requires
+		// processed segments (an unprocessed one pulls the boundary
+		// back), so a gate that skipped detection would find nothing
+		// to activate when pressure arrived.
 		segs, processed := a.detectSegments(ctx, sessionID, msgs)
-		boundary = findSegmentBoundaryByTokenBudget(msgs, budget, segs, processed)
-		// Resolve the collapsible-turn set on this pipeline's first
-		// render, then freeze it: a mid-run coverage commit must not
-		// flip a turn from raw to stub mid-window. Summarize mode's
-		// render payload freezes with it — same rule for mid-run entry
-		// commits, and one entry query per run rather than per render.
-		if collapse != nil && collapse.Set == nil {
-			collapse.Set = coveredPriorTurns(segs, processed, collapse.Before)
-			if a.priorTurns == priorTurnsSummarize {
-				// minTurn is the turn AT the boundary — turns fully
-				// below the raw-window floor never emit a summary, so
-				// their entries are not worth joining. messageTurns
-				// numbering, not a raw user-message count: a straddled
-				// turn keeps its entries.
-				var minTurn int64
-				if mts := messageTurns(msgs); len(mts) > 0 {
-					if boundary < len(mts) {
-						minTurn = mts[boundary]
-					} else {
-						minTurn = mts[len(mts)-1] + 1
-					}
-				}
-				var ok bool
-				collapse.summaries, ok = a.turnSummaries(ctx, sessionID, collapse.Set, minTurn)
-				if !ok && a.stubStats != nil {
-					// A failed fetch renders verbatim — mark it so a
-					// control-shaped prompt can't pass as a summarize
-					// sample in telemetry.
-					a.stubStats.Update(sessionID, func(s *stubStats) { s.SummaryFetchFailed = true })
-				}
-			}
-		}
-		bKey := boundarySegmentKey(segs, boundary)
+		// The pressure gate covers only the render path. With the
+		// flag off the machinery runs unconditionally — the pre-gate
+		// behavior — and with no measured headroom to prove (unknown
+		// window, no usage yet) it stays on: deactivating a safety
+		// mechanism needs positive evidence of comfort. One-shot
+		// renders skip the gate outright (see the signature comment):
+		// machinery on, session state untouched.
+		engaged := skipPressureGate || !a.pressureGate || a.pressureEngaged(sessionID, msgs)
 		// Count before this render refreshes the injected-file set —
-		// the join target is the files the LAST render injected.
+		// the join target is the files the LAST render injected. Runs
+		// in both regimes: the disengaged branch's seeds can inject
+		// too.
 		a.countNotebookReViews(sessionID, msgs)
-		history = append(history, a.notebookPrefix(ctx, sessionID, msgs, boundary, bKey, segs, collapse)...)
-		if sessionID != "" {
-			if last, ok := a.stubBoundary.Get(sessionID); !ok || last != boundary {
-				moved := ok
-				persisted := true
-				if a.stubSuperseded && recallLive {
-					// Boundary moves already invalidate the
-					// prompt-cache prefix, so pending superseded
-					// flags promote to stubs only here — never
-					// mid-window. Without recall the stubs can't
-					// render anyway, so promotion waits rather
-					// than persisting marks and stats the model
-					// never sees.
-					promoteCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-					persisted = a.promoteSupersededStubs(promoteCtx, msgs, boundary, segs)
-					cancel()
-				}
-				// Only record the boundary when persistence
-				// succeeded; otherwise the next render would flip
-				// back to verbatim and promotion would never retry.
-				if persisted {
-					a.stubBoundary.Set(sessionID, boundary)
-					if moved {
-						a.noteBoundaryAdvance(sessionID)
+		if engaged {
+			boundary = findSegmentBoundaryByTokenBudget(msgs, budget, segs, processed)
+			// Resolve the collapsible-turn set on this pipeline's
+			// first engaged render holding coverage, then freeze
+			// it: a mid-run coverage commit must not flip a turn
+			// from raw to stub mid-window. The len guard keeps a
+			// pressure-before-coverage render from freezing an
+			// empty set — collapse would otherwise stay locked
+			// out for the run no matter what later commits.
+			// Summarize mode's render payload freezes with it —
+			// same rule for mid-run entry commits, and one entry
+			// query per run rather than per render.
+			if collapse != nil && collapse.Set == nil {
+				if covered := coveredPriorTurns(segs, processed, collapse.Before); len(covered) > 0 {
+					collapse.Set = covered
+					if a.priorTurns == priorTurnsSummarize {
+						// minTurn is the turn AT the boundary —
+						// turns fully below the raw-window floor
+						// never emit a summary, so their entries
+						// are not worth joining. messageTurns
+						// numbering, not a raw user-message
+						// count: a straddled turn keeps its
+						// entries.
+						var minTurn int64
+						if mts := messageTurns(msgs); len(mts) > 0 {
+							if boundary < len(mts) {
+								minTurn = mts[boundary]
+							} else {
+								minTurn = mts[len(mts)-1] + 1
+							}
+						}
+						var ok bool
+						collapse.summaries, ok = a.turnSummaries(ctx, sessionID, collapse.Set, minTurn)
+						if !ok && a.stubStats != nil {
+							// A failed fetch renders verbatim —
+							// mark it so a control-shaped prompt
+							// can't pass as a summarize sample in
+							// telemetry.
+							a.stubStats.Update(sessionID, func(s *stubStats) { s.SummaryFetchFailed = true })
+						}
 					}
 				}
 			}
+			history = append(history, a.notebookPrefix(ctx, sessionID, msgs, boundary, boundarySegmentKey(segs, boundary), segs, collapse)...)
+			if sessionID != "" {
+				if last, ok := a.stubBoundary.Get(sessionID); !ok || last != boundary {
+					moved := ok
+					persisted := true
+					if a.stubSuperseded && recallLive {
+						// Boundary moves already invalidate the
+						// prompt-cache prefix, so pending
+						// superseded flags promote to stubs only
+						// here — never mid-window. Without
+						// recall the stubs can't render anyway,
+						// so promotion waits rather than
+						// persisting marks and stats the model
+						// never sees.
+						promoteCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+						persisted = a.promoteSupersededStubs(promoteCtx, msgs, boundary, segs)
+						cancel()
+					}
+					// Only record the boundary when persistence
+					// succeeded; otherwise the next render
+					// would flip back to verbatim and promotion
+					// would never retry.
+					if persisted {
+						a.stubBoundary.Set(sessionID, boundary)
+						if moved {
+							a.noteBoundaryAdvance(sessionID)
+						}
+					}
+				}
+			}
+		} else {
+			// Below the margin the render is verbatim — but the
+			// prefix path still runs at boundary 0 for the two
+			// non-pressure cases it serves: hydration seeds
+			// (session seeding) and auto-inject (the user named
+			// a file with committed entries).
+			history = append(history, a.notebookPrefix(ctx, sessionID, msgs, 0, segmentKey{}, segs, collapse)...)
 		}
 		rawMsgs = msgs[boundary:]
 	} else {

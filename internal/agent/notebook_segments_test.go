@@ -555,8 +555,8 @@ func TestPreparePrompt_LongTurnStaysInSegmentBand(t *testing.T) {
 	ctx := t.Context()
 	// First pass records closes and generates coverage; the second
 	// render sees committed coverage and drops covered segments.
-	a.preparePrompt(ctx, msgs, false, nil)
-	history, _ := a.preparePrompt(ctx, msgs, false, nil)
+	a.preparePrompt(ctx, msgs, false, nil, false)
+	history, _ := a.preparePrompt(ctx, msgs, false, nil, false)
 	require.NotEmpty(t, history)
 
 	// Count raw messages in the rebuild: with default 25K-token budget

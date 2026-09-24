@@ -126,6 +126,13 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 			// named cause behind every cache miss.
 			"steps": tel.Steps,
 		}
+		// Pressure-gate state: the "did the gate fire" predicate the
+		// comfortable-regime experiment asserts as silent.
+		doc["pressure"] = map[string]any{
+			"activations": tel.PressureActivations,
+			"engaged":     tel.PressureEngaged,
+			"estimate":    tel.PressureEstimate,
+		}
 	}
 	// Edge firings emit as a DELTA, not the cumulative snapshot — the
 	// driver sums per-turn telemetry files, so a process emitting

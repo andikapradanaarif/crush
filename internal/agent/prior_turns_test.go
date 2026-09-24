@@ -155,7 +155,7 @@ func TestPreparePrompt_NoCollapseWithoutRecall(t *testing.T) {
 	a.detectSegments(ctx, sessionID, msgs)
 
 	collapse := a.newTurnCollapse(1)
-	history, _ := a.preparePrompt(ctx, msgs, false, collapse)
+	history, _ := a.preparePrompt(ctx, msgs, false, collapse, false)
 
 	// Pin eligibility: turn 0 IS covered — the verbatim render must
 	// come from the recall gate, not an empty collapse set.
@@ -180,7 +180,7 @@ func TestPreparePrompt_CollapsesCoveredPriorTurn(t *testing.T) {
 
 	// A run starting turn 1: only turn 0 is eligible for collapse.
 	collapse := a.newTurnCollapse(1)
-	history, _ := a.preparePrompt(ctx, msgs, false, collapse)
+	history, _ := a.preparePrompt(ctx, msgs, false, collapse, false)
 
 	// Call side: still a valid JSON object, never prose.
 	call := renderedCall(t, history, "tc-bash")
@@ -259,7 +259,7 @@ func TestPreparePrompt_UncoveredPriorTurnStaysRaw(t *testing.T) {
 	a.priorTurns = priorTurnsStub
 	msgs := priorTurnFixture(t, svc, sessionID)
 
-	history, _ := a.preparePrompt(t.Context(), msgs, false, a.newTurnCollapse(1))
+	history, _ := a.preparePrompt(t.Context(), msgs, false, a.newTurnCollapse(1), false)
 	require.Equal(t, `{"command":"cat big.go"}`, renderedCall(t, history, "tc-bash").Input)
 	require.Contains(t, renderedResultText(t, history, "tc-bash"), "file content line")
 	require.Contains(t, renderedReasoning(history), "deep thoughts")
@@ -274,18 +274,23 @@ func TestPreparePrompt_CollapseSetFrozenForRun(t *testing.T) {
 	ctx := t.Context()
 
 	collapse := a.newTurnCollapse(1)
-	// The first render fires coverage but reads the registry pre-commit,
-	// so turn 0 resolves uncovered — and the set freezes that way.
-	h1, _ := a.preparePrompt(ctx, msgs, false, collapse)
+	// The first render fires coverage but reads the registry
+	// pre-commit, so turn 0 resolves uncovered. An empty set must not
+	// freeze — the pressure gate engages before generation catches
+	// up, and freezing {} would lock collapse out for the whole run.
+	h1, _ := a.preparePrompt(ctx, msgs, false, collapse, false)
 	require.Equal(t, `{"command":"cat big.go"}`, renderedCall(t, h1, "tc-bash").Input)
+	require.Nil(t, collapse.Set)
 
-	// Coverage has committed by now, but the frozen set keeps the run's
-	// renders byte-stable — no mid-window flip from raw to stub.
-	h2, _ := a.preparePrompt(ctx, msgs, false, collapse)
-	require.Equal(t, `{"command":"cat big.go"}`, renderedCall(t, h2, "tc-bash").Input)
+	// The next render sees the committed coverage and freezes {0} —
+	// at most one raw→stub flip per run, then byte-stable for the
+	// rest of it.
+	h2, _ := a.preparePrompt(ctx, msgs, false, collapse, false)
+	require.JSONEq(t, `{"_collapsed":"prior turn 0"}`, renderedCall(t, h2, "tc-bash").Input)
+	require.Equal(t, map[int64]bool{0: true}, collapse.Set)
 
 	// A fresh pipeline — the next run — sees the committed coverage.
-	h3, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	h3, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1), false)
 	require.JSONEq(t, `{"_collapsed":"prior turn 0"}`, renderedCall(t, h3, "tc-bash").Input)
 }
 
@@ -299,7 +304,7 @@ func TestPreparePrompt_MidRunFoldCannotCollapseRunEvents(t *testing.T) {
 	a.detectSegments(ctx, sessionID, msgs)
 
 	collapse := a.newTurnCollapse(1)
-	history, _ := a.preparePrompt(ctx, msgs, false, collapse)
+	history, _ := a.preparePrompt(ctx, msgs, false, collapse, false)
 	require.JSONEq(t, `{"_collapsed":"prior turn 0"}`, renderedCall(t, history, "tc-bash").Input)
 
 	// The active run produces its own tool pair (turn 1), then a queued
@@ -320,7 +325,7 @@ func TestPreparePrompt_MidRunFoldCannotCollapseRunEvents(t *testing.T) {
 	// The rebuild uses the run's frozen collapse state — the predicate
 	// compares against the run-start turn, not the advanced count, so
 	// neither the pre-fold nor the post-fold pair can collapse.
-	history, _ = a.preparePrompt(ctx, msgs, false, collapse)
+	history, _ = a.preparePrompt(ctx, msgs, false, collapse, false)
 	require.Equal(t, `{"command":"ls"}`, renderedCall(t, history, "tc-live").Input)
 	require.Equal(t, `{"command":"pwd"}`, renderedCall(t, history, "tc-folded").Input)
 	require.Equal(t, "live output", renderedResultText(t, history, "tc-live"))
@@ -342,7 +347,7 @@ func TestPreparePrompt_CollapsedTurnOrphanCallKeepsPairing(t *testing.T) {
 
 	ctx := t.Context()
 	a.detectSegments(ctx, sessionID, msgs)
-	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1), false)
 
 	call := renderedCall(t, history, "tc-orph")
 	require.JSONEq(t, `{"_collapsed":"prior turn 0"}`, call.Input)
@@ -388,7 +393,7 @@ func TestPreparePrompt_OpenTailCoverage(t *testing.T) {
 	// No active run, so every completed turn is prior — the horizon
 	// sits one past the last user turn.
 	collapse := a.newTurnCollapse(int64(countUserMessages(msgs)))
-	history, _ := a.preparePrompt(ctx, msgs, false, collapse)
+	history, _ := a.preparePrompt(ctx, msgs, false, collapse, false)
 	require.JSONEq(t, `{"_collapsed":"prior turn 0"}`, renderedCall(t, history, "tc-0").Input)
 }
 
@@ -459,7 +464,7 @@ func TestPreparePrompt_WriteClassStubText(t *testing.T) {
 
 	ctx := t.Context()
 	a.detectSegments(ctx, sessionID, msgs)
-	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1), false)
 
 	// File-write calls: the payload was the input itself — result:
 	// recall can't recover it — so both stubs lead with re-view; the
@@ -492,7 +497,7 @@ func TestRecordCollapsedTurns_PersistsAndDedupes(t *testing.T) {
 	ctx := t.Context()
 	a.detectSegments(ctx, sessionID, msgs)
 
-	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1), false)
 	require.JSONEq(t, `{"_collapsed":"prior turn 0"}`, renderedCall(t, history, "tc-bash").Input)
 
 	// Turn 0 persisted once; tc-bash + tc-shot collapsed while the
@@ -504,7 +509,7 @@ func TestRecordCollapsedTurns_PersistsAndDedupes(t *testing.T) {
 
 	// Re-renders collapse the same turn every step — the recorded set
 	// and the persisted row keep the counters flat.
-	_, _ = a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	_, _ = a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1), false)
 	stats, _ = a.stubStats.Get(sessionID)
 	require.Equal(t, 1, stats.TurnsCollapsed)
 	require.Equal(t, 2, stats.EventsCollapsed)
@@ -548,7 +553,7 @@ func TestRecordCollapsedTurns_SkipsAllExemptTurn(t *testing.T) {
 	}
 	require.NoError(t, nb.MarkSegmentsProcessed(ctx, sessionID, covered))
 
-	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1), false)
 	// The exempt pair renders verbatim even inside a covered turn.
 	require.JSONEq(t, `{"questions":[{"type":"yes_no","question":"go?"}]}`,
 		renderedCall(t, history, "tc-q").Input)
@@ -684,7 +689,7 @@ func TestPreparePrompt_SummarizeCollapsesToEntries(t *testing.T) {
 	ctx := t.Context()
 	a.detectSegments(ctx, sessionID, msgs)
 
-	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1), false)
 	text := renderedText(history)
 
 	// The summary stands in for the span and carries real entry
@@ -741,7 +746,7 @@ func TestPreparePrompt_SummarizeWithoutRecallStillCollapses(t *testing.T) {
 	ctx := t.Context()
 	a.detectSegments(ctx, sessionID, msgs)
 
-	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1), false)
 	require.Contains(t, renderedText(history), "[Summary of turn 0]")
 	require.False(t, callPresent(history, "tc-bash"))
 }
@@ -773,7 +778,7 @@ func TestPreparePrompt_SummarizeNoEntriesStaysVerbatim(t *testing.T) {
 	require.NotEmpty(t, covered)
 	require.NoError(t, nb.MarkSegmentsProcessed(ctx, sessionID, covered))
 
-	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1), false)
 	require.JSONEq(t, `{"command":"cat big.go"}`, renderedCall(t, history, "tc-bash").Input)
 	require.Contains(t, renderedResultText(t, history, "tc-bash"), "file content line")
 	require.NotContains(t, renderedText(history), "[Summary of turn 0]")
@@ -806,7 +811,7 @@ func TestPreparePrompt_SummarizeExcludesCheckpointRows(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 
-	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1), false)
 	text := renderedText(history)
 	require.Contains(t, text, "[Summary of turn 0]")
 	require.Contains(t, text, "file content line")
@@ -836,7 +841,7 @@ func TestPreparePrompt_SummarizeStraddledTurn(t *testing.T) {
 	// Budget fits t0s1 and the tail but not t0s0 — the boundary lands
 	// mid-turn-0, evicting the prompt and first segment.
 	a.rawTokenBudget = 4500
-	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1), false)
 	text := renderedText(history)
 
 	require.Equal(t, 1, strings.Count(text, "[Summary of turn 0]"))
@@ -951,7 +956,7 @@ func TestPreparePrompt_SummarizeBlankEntriesStayVerbatim(t *testing.T) {
 	ctx := t.Context()
 	a.detectSegments(ctx, sessionID, msgs)
 
-	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1), false)
 	require.JSONEq(t, `{"command":"cat big.go"}`, renderedCall(t, history, "tc-bash").Input)
 	require.NotContains(t, renderedText(history), "[Summary of turn 0]")
 }
@@ -998,7 +1003,7 @@ func TestPreparePrompt_SummarizeCrossTurnResultSurvives(t *testing.T) {
 	}
 	require.NoError(t, nb.MarkSegmentsProcessed(ctx, sessionID, coveredNoEntries))
 
-	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(2))
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(2), false)
 
 	// The tc-early pair is intact: call verbatim in turn 0, result
 	// kept inside collapsed turn 1.

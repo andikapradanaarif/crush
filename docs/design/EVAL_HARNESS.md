@@ -496,6 +496,7 @@ trajectory twice) is strictly worse.
 		"system_bytes": 9000, "notebook_bytes": 1200,
 		"history_bytes": 3100, "tool_call_bytes": 800, "tool_result_bytes": 14000
 	},
+	"pressure": {"activations": 0, "engaged": false, "estimate": 43800},
 	"step_records": [
 		{
 			"turn": 0, "step": 3,
@@ -551,6 +552,26 @@ in the message hashes at all. `turnTailMessages` pins a message at
 the tail: with a non-empty tail, new step content inserts before it
 and the positional diff reports `history`, not `append` — default
 eval arms have empty tails, so the primary signal is clean.
+`pressure` is the notebook pressure gate's own coverage (#100):
+`activations` counts engage transitions — the "did the overflow
+machinery fire" predicate — and `engaged` is the per-session latch at
+the last turn's exit. `estimate` is the last computed next-request
+size (provider-reported last prompt + chars/4 delta over persisted
+messages); `step_records.pressure_estimate`/`pressure_engaged` carry
+the same pair per step for the estimate-vs-reported audit.
+`cold-start-hydration` asserts `max_pressure.activations: 0` on both
+arms — the comfortable-regime check distinguishing "gate correctly
+silent" from "mechanism absent". The distinction is structural: the
+block is pointer-gated, so arms that pin `notebook_pressure_gate`
+off (the mechanism-forcing experiments), run notebook-disabled, or
+evaluate against an unknown window carry no `pressure` key at all
+and any `pressure.*` predicate fails closed on them — the assert is
+arm-scoped because trajectory coverage can't express "present on
+some arms, absent on others". Note the gate removes render-side
+churn only: coverage accrual (and its `generator_tokens` spend) runs
+in every regime, so below-pressure arms still pay generation cost —
+"does the notebook pay for itself" stays with #90/#106.
+
 `generator_tokens` is the notebook sidecar's generation spend
 (segment, checkpoint, digest calls) — kept out of `tokens` so the
 agent's own usage isn't polluted, but priced so notebook-on arms

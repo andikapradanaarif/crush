@@ -60,6 +60,10 @@ type RunResult struct {
 	// turn's steps with usage and prefix attribution, Turn stamped
 	// at fold time.
 	StepRecords []StepRecord
+	// Pressure carries the pressure gate's trajectory-wide state —
+	// summed engage transitions and the last turn's latch and
+	// estimate.
+	Pressure Pressure
 	// GeneratorTokens is the summed sidecar generation spend across
 	// the trajectory's turns.
 	GeneratorTokens GeneratorTokens
@@ -182,6 +186,16 @@ type runTelemetry struct {
 		CacheRead  int64 `json:"cache_read"`
 		CacheWrite int64 `json:"cache_write"`
 	} `json:"generator_tokens"`
+	// Pressure carries the gate's state: activations counts engage
+	// transitions (the "did it fire" predicate — the latch makes it
+	// at most one per process), engaged is the latch at snapshot
+	// time, estimate the last next-request estimate for the
+	// estimate-vs-reported audit.
+	Pressure struct {
+		Activations int   `json:"activations"`
+		Engaged     bool  `json:"engaged"`
+		Estimate    int64 `json:"estimate"`
+	} `json:"pressure"`
 	// EdgeFirings splits run-boundary edge firing counts by edge and
 	// outcome — the per-turn delta of the session's edge_firings rows
 	// this process recorded (repair retries share the process).
@@ -375,6 +389,15 @@ func (res *RunResult) addTurnTelemetry(tel runTelemetry, turn int) {
 	res.GeneratorTokens.Output += tel.GeneratorTokens.Output
 	res.GeneratorTokens.CacheRead += tel.GeneratorTokens.CacheRead
 	res.GeneratorTokens.CacheWrite += tel.GeneratorTokens.CacheWrite
+	// Pressure state is latch-like across the trajectory's
+	// subprocesses: activations sum, engaged ORs (an engaged turn
+	// re-engages on the next process's cold-start estimate), and
+	// estimate keeps the latest non-zero for the audit.
+	res.Pressure.Activations += tel.Pressure.Activations
+	res.Pressure.Engaged = res.Pressure.Engaged || tel.Pressure.Engaged
+	if tel.Pressure.Estimate > 0 {
+		res.Pressure.Estimate = tel.Pressure.Estimate
+	}
 	res.Checkpoints.Rendered += tel.Checkpoints.Rendered
 	res.Digests.Written += tel.Digests.Written
 	res.Digests.Rendered += tel.Digests.Rendered

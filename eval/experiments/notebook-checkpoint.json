@@ -25,6 +25,7 @@
 			"config": {
 				"options": {
 					"notebook_enabled": true,
+					"notebook_pressure_gate": false,
 					"notebook_checkpoint": false,
 					"notebook_raw_token_budget": 2000
 				}
@@ -37,6 +38,7 @@
 			"config": {
 				"options": {
 					"notebook_enabled": true,
+					"notebook_pressure_gate": false,
 					"notebook_checkpoint": true,
 					"notebook_raw_token_budget": 2000
 				}
