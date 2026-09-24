@@ -136,6 +136,41 @@ var evalRunCmd = &cobra.Command{
 	},
 }
 
+var evalCompareCmd = &cobra.Command{
+	Use:   "compare <experiment.json>",
+	Short: "Paired continuous-metric estimator over one invocation's records",
+	Long: `Pairs control/treatment attempts by run_index within each
+trajectory (drift-matched — the scheduler's lead-arm alternation makes
+same-index attempts the temporally closest samples), then reports the
+per-pair log-ratio aggregated across trajectories with a BCa bootstrap
+95% CI and a sign-flip permutation p.
+
+Refuses on cross-invocation record sets (pass --invocation to pick
+one), on invocations a structural alarm voided or that aborted
+mid-run, and on too few pairs. The declared primary's CI is tested
+against its MDE boundary; a CI that spans it reports
+inconclusive-underpowered with the required pair count.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		exp, err := eval.LoadExperiment(args[0])
+		if err != nil {
+			return err
+		}
+		r, err := evalRunner(cmd)
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		inv, _ := cmd.Flags().GetString("invocation")
+		rep, err := r.Compare(exp, inv)
+		if err != nil {
+			return err
+		}
+		fmt.Print(rep.Summary())
+		return nil
+	},
+}
+
 var evalAnalyzeCmd = &cobra.Command{
 	Use:   "analyze <session.db>",
 	Short: "Reconstruct per-call gate metrics from a session DB",
@@ -297,5 +332,6 @@ func init() {
 	evalAnalyzeCmd.Flags().String("session", "", "session ID to analyze (default: latest parent session)")
 	evalAnalyzeCmd.Flags().String("trajectory", "", "corpus trajectory ID — supplies turns for process-turn segmentation")
 	evalAnalyzeCmd.Flags().String("goos", "", "OS whose path conventions produced the artifact (default: this machine)")
-	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd, evalProbeCacheCmd)
+	evalCompareCmd.Flags().String("invocation", "", "invocation ID to compare (required when records span several)")
+	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd, evalProbeCacheCmd, evalCompareCmd)
 }
