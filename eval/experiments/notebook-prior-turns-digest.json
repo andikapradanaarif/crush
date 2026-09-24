@@ -20,18 +20,24 @@
 			"config": {
 				"options": {
 					"notebook_enabled": true,
-					"notebook_prior_turns": "stub"
+					"notebook_prior_turns": "stub",
+					"notebook_raw_token_budget": 2000
 				}
+			},
+			"coverage": {
+				"min_stub_stats.boundary_advances": 1
 			}
 		},
 		"treatment": {
 			"config": {
 				"options": {
 					"notebook_enabled": true,
-					"notebook_prior_turns": "digest"
+					"notebook_prior_turns": "digest",
+					"notebook_raw_token_budget": 2000
 				}
 			},
 			"coverage": {
+				"min_stub_stats.boundary_advances": 1,
 				"min_digests.written": 1,
 				"min_digests.rendered": 1
 			}
