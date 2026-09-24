@@ -131,6 +131,11 @@ func ensureRepoMirror(ctx context.Context, repo string) (string, error) {
 			_ = gitCmd(ctx, mirror, "fetch", "--quiet", "--prune", "origin").Run()
 			return mirror, nil
 		}
+		if ctx.Err() != nil {
+			// The check ran on a dead context — the failure says
+			// nothing about the mirror. Don't rebuild on it.
+			return "", ctx.Err()
+		}
 		// A corrupt or partially-written cache entry would serve a
 		// bad path forever — remove it and rebuild below.
 		_ = os.RemoveAll(mirror)
