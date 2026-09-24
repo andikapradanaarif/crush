@@ -1029,35 +1029,58 @@ contract:
 
 - **Cross-invocation record sets** — pairing across a build/drift
   boundary is meaningless. `--invocation` selects one.
+- **Incomplete invocations** — `run` persists
+  `results/<exp>/report-<invocation>.json` on every exit path, with
+  `aborted` set whenever the run returned an error. A Ctrl-C'd run
+  leaves partial records plus a snapshot that *says so* — compare
+  refuses rather than estimating on a silently truncated corpus.
 - **Voided invocations** — a fired structural alarm (starved,
   saturated, skipped, or a partial noop) voids the efficiency
-  report. `run` persists the alarm set to
-  `results/<exp>/report-<invocation>.json` on every exit path, so
-  compare refuses on the run's own verdicts. Legacy invocations
-  without a snapshot fall back to record inference: noop via
-  resolved options (exact), starve via conclusive-count asymmetry
-  (both arms target the same n — asymmetry is the under-sampling
-  signature).
+  report. The snapshot carries the run's own alarms; conclusive-count
+  asymmetry inference runs *in addition* (both arms target the same
+  n — asymmetry is the under-sampling signature a torn or early
+  snapshot can still miss).
 - **Too few pairs** — below three conclusive pairs an interval is
-  numerology, not inference.
+  numerology, not inference. (At the floor the sign-flip p-value is
+  decorative: n=3 pairs can report no p below ~0.125.)
+
+**Provenance**: the snapshot pins the primary declaration the
+invocation ran under. If the loaded experiment's `primary` has
+drifted since — different metric, direction, or MDE — compare
+suppresses the verdict and prints why: the verdict label is the
+pre-committed part of the apparatus, and a post-hoc MDE is exactly
+the garden-of-forking-paths the declaration exists to prevent.
+Legacy invocations (no snapshot) can't verify provenance; they
+report with a note rather than a refusal.
+
+**Verdicts** exist only on the declared primary: the CI is tested
+against the MDE boundary (`log(1∓mde)`), giving `effect ≥ MDE`,
+`no MDE effect` (a powered null — the CI cleared the boundary on
+the uninteresting side), or `INCONCLUSIVE — underpowered` with the
+required pair count — priced against the data's own paired
+log-ratio variance `⌈6.19·Var(dᵢ)/log(1+mde)²⌉`, falling back to
+the pooled-CV `noise.json` figure when pair variance is degenerate.
+Every other metric gets CI and p only — secondary metrics inform,
+they never decide. The snapshot also carries the run's gate verdict
+and outcome alarms as context lines, so a catastrophic-collapsed
+invocation's cheap-tokens table doesn't read as a win.
+
+Metrics whose mechanism exists on only one arm
+(`prior_turns.turns_collapsed` under a verbatim control,
+`stub_stats.*` under a non-stubbing control) form no pairs and are
+listed as skipped rather than estimated against a fabricated zero;
+unresolvable metrics (`weighted_cost` without weights) are listed
+with their reason. Each metric row reports how many trajectories
+contributed pairs — the estimand averages over those strata, and
+partial coverage weakens the composition defense visibly. Bootstrap
+and permutation seeds derive from the invocation ID, so identical
+data yields identical intervals.
 
 A full-noop invocation — every trajectory's arms resolved
 identically — is not refused; it is reported with a `NULL
 EXPERIMENT` label, because that is exactly what an A/A calibration
 run is, and its CIs measure the harness's own false-effect
 magnitude.
-
-**Verdicts** exist only on the declared primary: the CI is tested
-against the MDE boundary (`log(1∓mde)`), giving `effect ≥ MDE`,
-`no MDE effect` (a powered null — the CI cleared the boundary on
-the uninteresting side), or `INCONCLUSIVE — underpowered` with the
-required n from `noise.json`'s recorded CV. Every other metric gets
-CI and p only — secondary metrics inform, they never decide.
-
-Metrics whose mechanism exists on only one arm
-(`prior_turns.turns_collapsed` under a verbatim control,
-`stub_stats.*` under a non-stubbing control) form no pairs and are
-listed as skipped rather than estimated against a fabricated zero.
 
 ## Benefit, quantified
 

@@ -519,7 +519,7 @@ func (r *Runner) loadRecordsFiltered(match func(RunRecord) bool) ([]RunRecord, e
 // trajectory resampling to N conclusive per arm, arms interleaved in
 // time so provider drift lands on both and cancels in the pairing.
 // Returns the gate report.
-func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, error) {
+func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (rep Report, retErr error) {
 	// Programmatic callers bypass LoadExperiment's validation — the
 	// corpus-shape and arm checks still apply.
 	if err := ValidateExperiment(exp); err != nil {
@@ -610,12 +610,14 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 	// Invocation scopes this call's records: re-running an experiment
 	// under a new build must not pool stale records into the gate.
 	inv := fmt.Sprintf("%s-%04x", r.now().UTC().Format("20060102T150405Z"), r.rng().Uint64()&0xffff)
-	rep := Report{CatastrophicEligible: map[string]bool{}, DiffuseP: 1}
+	rep = Report{CatastrophicEligible: map[string]bool{}, DiffuseP: 1}
 	// The structural-alarm snapshot outlives the process on every
 	// exit path — aborts included — so compare refuses on the run's
-	// own voids rather than re-inferring them from records.
+	// own voids rather than re-inferring them from records. retErr
+	// marks completeness: a partial record set with a clean-looking
+	// snapshot is the silent-wrong-answer case this exists to kill.
 	defer func() {
-		if err := r.persistAlarms(exp.Name, inv, rep); err != nil {
+		if err := r.persistAlarms(exp, inv, rep, retErr); err != nil {
 			slog.Warn("Failed to persist alarm snapshot", "error", err)
 		}
 	}()

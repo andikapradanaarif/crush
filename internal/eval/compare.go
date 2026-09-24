@@ -3,6 +3,7 @@ package eval
 import (
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"maps"
 	"math"
 	"math/rand/v2"
@@ -61,16 +62,33 @@ type CompareReport struct {
 	// SkippedMetrics names registry entries with too few measurable
 	// pairs to estimate — absent telemetry is visible, not silent.
 	SkippedMetrics []string
+	// Provenance notes when the primary verdict's pre-registration
+	// couldn't be verified against the invocation's snapshot — or
+	// why it was suppressed. Empty when clean.
+	Provenance string
+	// GateVerdict/OutcomeAlarms carry the run's own pass/fail
+	// context so a collapsed invocation's token table doesn't read
+	// as a win.
+	GateVerdict   string
+	OutcomeAlarms []string
 }
 
 // MetricCompare is one metric's paired estimate.
 type MetricCompare struct {
 	Name  string
 	Pairs int
-	// Dropped counts pairs excluded because a side was nonpositive
-	// (log-ratio undefined) — e.g. tokens.cache_read on a
-	// non-caching provider.
-	Dropped  int
+	// Trajectories is how many trajectories contributed ≥1 pair —
+	// the estimand averages over this many strata, and partial
+	// coverage weakens the composition-bias defense.
+	Trajectories int
+	// Dropped counts measurable pairs excluded because a side was
+	// nonpositive (log-ratio undefined) — e.g. tokens.cache_read on
+	// a non-caching provider.
+	Dropped int
+	// Absent counts pairs skipped because telemetry was absent on a
+	// side (nil Request/CallMetrics/GeneratorTokens) — distinct from
+	// Dropped: absent means the run never produced the datum.
+	Absent   int
 	Theta    float64 // mean log-ratio across trajectories.
 	DeltaPct float64
 	CILoPct  float64
@@ -84,29 +102,65 @@ type MetricCompare struct {
 	Required int
 }
 
-// alarmSnapshot is the structural-alarm subset of a gate Report,
-// persisted as results/<exp>/report-<invocation>.json so compare can
-// refuse on the run's own verdicts instead of re-inferring them.
+// alarmSnapshot is the refusal/provenance record persisted as
+// results/<exp>/report-<invocation>.json so compare can refuse on
+// the run's own verdicts instead of re-inferring them. Aborted is
+// the completeness bit: set whenever RunExperiment returned an
+// error — aborts and cancellations included — so a partial record
+// set can never masquerade as a finished invocation.
 type alarmSnapshot struct {
-	Invocation string   `json:"invocation"`
-	Starved    []string `json:"starved,omitempty"`
-	Saturated  []string `json:"saturated,omitempty"`
-	Skipped    []string `json:"skipped,omitempty"`
-	NoopFlags  []string `json:"noop_flags,omitempty"`
+	Invocation string `json:"invocation"`
+	Aborted    string `json:"aborted,omitempty"`
+	// Primary pins the declaration in force at run time — compare
+	// suppresses the verdict when the loaded experiment's primary
+	// has drifted since, closing the post-hoc-MDE hole.
+	Primary *Primary `json:"primary,omitempty"`
+	// GateVerdict/OutcomeAlarms are context, not refusals: a
+	// catastrophic-collapsed invocation's token table shouldn't read
+	// as a win without its gate result beside it.
+	GateVerdict   string   `json:"gate_verdict,omitempty"`
+	OutcomeAlarms []string `json:"outcome_alarms,omitempty"`
+	Starved       []string `json:"starved,omitempty"`
+	Saturated     []string `json:"saturated,omitempty"`
+	Skipped       []string `json:"skipped,omitempty"`
+	NoopFlags     []string `json:"noop_flags,omitempty"`
 }
 
 // persistAlarms writes the structural-alarm snapshot for this
 // invocation. The full Report stays process-local (its Summary is
 // the run output); the snapshot is compare's refusal ground truth.
-func (r *Runner) persistAlarms(expName, inv string, rep Report) error {
+func (r *Runner) persistAlarms(exp *Experiment, inv string, rep Report, retErr error) error {
 	snap := alarmSnapshot{
 		Invocation: inv,
+		Primary:    exp.Primary,
 		Starved:    rep.Starved,
 		Saturated:  rep.Saturated,
 		Skipped:    rep.Skipped,
 		NoopFlags:  rep.NoopFlags,
 	}
-	dir := filepath.Join(r.EvalDir, "results", expName)
+	if retErr != nil {
+		snap.Aborted = retErr.Error()
+	}
+	if rep.Fired(r.alpha()) {
+		snap.GateVerdict = "fail"
+	} else if !rep.Powered() {
+		snap.GateVerdict = "inconclusive"
+	} else {
+		snap.GateVerdict = "pass"
+	}
+	if len(rep.Catastrophic) > 0 {
+		snap.OutcomeAlarms = append(snap.OutcomeAlarms, "catastrophic: "+strings.Join(rep.Catastrophic, ", "))
+	}
+	if len(rep.ExcludedDifferential) > 0 {
+		snap.OutcomeAlarms = append(snap.OutcomeAlarms, "excluded-differential: "+strings.Join(rep.ExcludedDifferential, ", "))
+	}
+	if len(rep.Coincident) > 0 {
+		snap.OutcomeAlarms = append(snap.OutcomeAlarms, "coincident-collapse: "+strings.Join(rep.Coincident, ", "))
+	}
+	if rep.DiffuseP < r.alpha() {
+		snap.OutcomeAlarms = append(snap.OutcomeAlarms, fmt.Sprintf("diffuse p=%.3g", rep.DiffuseP))
+	}
+	dir := filepath.Join(r.EvalDir, "results", exp.Name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -124,10 +178,20 @@ const minComparePairs = 3
 // Compare runs the paired estimator over one invocation's records.
 // invocation "" requires the record set to hold exactly one; an
 // explicit value selects among several. Bootstrap and permutation
-// draw from the runner's rng/replicate settings, like the gate.
+// draw replicates from the runner's settings; when the runner has no
+// injected RNG the seed derives from the invocation ID, so identical
+// data yields identical intervals.
 func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, error) {
+	// The eval lock also covers readers — an in-flight run appends
+	// records as it goes, and a torn read could see a balanced
+	// prefix of an invocation whose snapshot doesn't exist yet.
+	unlock, err := r.acquireLock()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
 	replicates := r.permReplicates()
-	rng := r.rng()
 	records, err := r.LoadExperimentRecords(exp.Name)
 	if err != nil {
 		return nil, err
@@ -156,9 +220,8 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 	}
 
 	// Structural-alarm refusal. The persisted snapshot is exact when
-	// present; legacy invocations fall back to record inference —
-	// noop via resolved options, starve via conclusive asymmetry.
-	noop, err := r.invocationAlarms(exp.Name, invocation, recs)
+	// present; legacy invocations fall back to record inference.
+	snap, noop, err := r.invocationAlarms(exp.Name, invocation, recs)
 	if err != nil {
 		return nil, err
 	}
@@ -167,6 +230,40 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 	switch {
 	case len(noop) > 0 && !null:
 		return nil, fmt.Errorf("compare: noop-flag voided the invocation — arms resolved identically on %v", noop)
+	}
+
+	// Primary provenance: the verdict label is the pre-committed
+	// part — it only prints when the declaration in force now
+	// matches what the invocation ran under.
+	primaryTrusted := true
+	var provNote string
+	if snap == nil {
+		// Legacy invocation — no snapshot to verify against.
+		if exp.Primary != nil {
+			provNote = "no alarm snapshot — primary provenance unverifiable"
+		}
+	} else {
+		switch {
+		case snap.Primary == nil && exp.Primary != nil:
+			primaryTrusted = false
+			provNote = "primary declared after the invocation ran — verdict suppressed (post-hoc)"
+		case snap.Primary != nil && exp.Primary != nil && *snap.Primary != *exp.Primary:
+			primaryTrusted = false
+			provNote = fmt.Sprintf("primary drifted since the invocation (ran with %s %s %.3g) — verdict suppressed",
+				snap.Primary.Metric, snap.Primary.Direction, snap.Primary.MDE)
+		case snap.Primary != nil && exp.Primary == nil:
+			provNote = fmt.Sprintf("primary was declared at run time (%s %s %.3g) and has since been removed",
+				snap.Primary.Metric, snap.Primary.Direction, snap.Primary.MDE)
+		}
+	}
+
+	rng := r.RNG
+	if rng == nil {
+		// Deterministic per invocation: identical data → identical
+		// intervals, no nanotime jitter between compare calls.
+		h := fnv.New64a()
+		h.Write([]byte(invocation))
+		rng = rand.New(rand.NewPCG(h.Sum64(), 0))
 	}
 
 	// Pair conclusive records on (trajectory, run_index).
@@ -208,6 +305,11 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		Trajectories: trajIDs,
 		Pairs:        len(pairs),
 		Unmatched:    unmatched,
+		Provenance:   provNote,
+	}
+	if snap != nil {
+		rep.GateVerdict = snap.GateVerdict
+		rep.OutcomeAlarms = snap.OutcomeAlarms
 	}
 
 	// Order: declared primary first, then the rest of the registry.
@@ -216,18 +318,24 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		names = append([]string{exp.Primary.Metric}, slices.DeleteFunc(slices.Clone(names),
 			func(n string) bool { return n == exp.Primary.Metric })...)
 	}
-	noise, _ := r.loadNoiseQuiet()
+	noise, noiseErr := LoadNoise(r.EvalDir)
 	var skippedMetrics []string
 
 	for _, name := range names {
 		fn, err := primaryMetricFunc(exp, name)
 		if err != nil {
-			continue // weighted_cost without weights, etc.
+			// Unresolvable metrics (weighted_cost without weights)
+			// surface like unmeasurable ones — the primary included:
+			// its row is absent but the reason isn't.
+			skippedMetrics = append(skippedMetrics,
+				fmt.Sprintf("%s (unresolvable: %v)", name, err))
+			continue
 		}
 		mc := MetricCompare{Name: name}
 		trajLogR := map[string][]float64{}
 		for k, pr := range pairs {
 			if !primaryMeasurable(name, &pr[0]) || !primaryMeasurable(name, &pr[1]) {
+				mc.Absent++
 				continue
 			}
 			c, t := fn(&pr[0]), fn(&pr[1])
@@ -244,9 +352,10 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 			}
 		}
 		mc.Pairs = countPairs(trajs)
+		mc.Trajectories = len(trajs)
 		if mc.Pairs < minComparePairs {
 			skippedMetrics = append(skippedMetrics,
-				fmt.Sprintf("%s (%d measurable)", name, mc.Pairs))
+				fmt.Sprintf("%s (%d measurable, %d absent)", name, mc.Pairs, mc.Absent))
 			continue // Too few measurable pairs to estimate on.
 		}
 		mc.Theta = thetaMean(trajs)
@@ -254,8 +363,8 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		lo, hi := bcaCI(trajs, replicates, rng)
 		mc.CILoPct, mc.CIHiPct = pctOf(lo), pctOf(hi)
 		mc.P = signFlipP(trajs, mc.Theta, directionOf(exp, name), replicates, rng)
-		if exp.Primary != nil && name == exp.Primary.Metric {
-			fillPrimaryVerdict(&mc, exp.Primary, noise[name])
+		if exp.Primary != nil && name == exp.Primary.Metric && primaryTrusted {
+			fillPrimaryVerdict(&mc, exp.Primary, trajs, noiseCV(noise, noiseErr, name))
 		}
 		rep.Metrics = append(rep.Metrics, mc)
 	}
@@ -267,34 +376,42 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 }
 
 // invocationAlarms applies the structural refusals for one
-// invocation: persisted snapshot when the run wrote one, else
-// records-only inference. Returns the noop trajectory set for the
-// null-experiment label; other alarms return refusal errors.
-func (r *Runner) invocationAlarms(expName, invocation string, recs []RunRecord) (noop []string, err error) {
+// invocation. The persisted snapshot is authoritative for what
+// records can't show (aborted, starved, saturated, skipped, and
+// primary provenance); record inference always runs alongside it —
+// conclusive asymmetry is ground truth a clean-looking snapshot can
+// still be missing (a torn write, a pre-snapshot defect). Returns
+// the parsed snapshot (nil for legacy invocations) and the noop
+// trajectory set for the null-experiment label.
+func (r *Runner) invocationAlarms(expName, invocation string, recs []RunRecord) (snap *alarmSnapshot, noop []string, err error) {
 	// Noop always derives from records — resolved options are exact
 	// on every record, and a partial snapshot (aborted run) can't be
-	// trusted to carry it. The snapshot's role is the scheduling
-	// alarms records can't show: starved, saturated, skipped.
+	// trusted to carry it.
 	noop = noopTrajectories(recs)
 	snapPath := filepath.Join(r.EvalDir, "results", expName, "report-"+invocation+".json")
 	if data, readErr := os.ReadFile(snapPath); readErr == nil {
-		var snap alarmSnapshot
-		if json.Unmarshal(data, &snap) == nil {
-			switch {
-			case len(snap.Starved) > 0:
-				return nil, fmt.Errorf("compare: starved voided the invocation — %v exhausted attempts on inconclusive", snap.Starved)
-			case len(snap.Saturated) > 0:
-				return nil, fmt.Errorf("compare: saturated voided the invocation — %v exhausted attempts on error", snap.Saturated)
-			case len(snap.Skipped) > 0:
-				return nil, fmt.Errorf("compare: skipped voided the invocation — %v never ran; the corpus wasn't covered", snap.Skipped)
-			}
-			return noop, nil
+		var s alarmSnapshot
+		if json.Unmarshal(data, &s) == nil {
+			snap = &s
 		}
 	}
-	// Legacy records (no snapshot): a starved or saturated arm shows
-	// as a conclusive-count asymmetry the scheduler would not
-	// produce on its own — both arms target the same n per
-	// trajectory.
+	if snap != nil {
+		switch {
+		case snap.Aborted != "":
+			return nil, nil, fmt.Errorf("compare: invocation did not complete (%s) — a partial corpus can't carry a verdict", snap.Aborted)
+		case len(snap.Starved) > 0:
+			return nil, nil, fmt.Errorf("compare: starved voided the invocation — %v exhausted attempts on inconclusive", snap.Starved)
+		case len(snap.Saturated) > 0:
+			return nil, nil, fmt.Errorf("compare: saturated voided the invocation — %v exhausted attempts on error", snap.Saturated)
+		case len(snap.Skipped) > 0:
+			return nil, nil, fmt.Errorf("compare: skipped voided the invocation — %v never ran; the corpus wasn't covered", snap.Skipped)
+		}
+	}
+	// A starved or saturated arm shows as a conclusive-count
+	// asymmetry the scheduler would not produce on its own — both
+	// arms target the same n per trajectory. Runs even when a
+	// snapshot parsed: the check is ground truth the snapshot can
+	// only redundantly confirm.
 	for traj, rs := range groupBy(recs, func(r RunRecord) string { return r.TrajectoryID }) {
 		var nc, nt int
 		for _, rec := range rs {
@@ -309,10 +426,10 @@ func (r *Runner) invocationAlarms(expName, invocation string, recs []RunRecord) 
 			}
 		}
 		if nc != nt {
-			return nil, fmt.Errorf("compare: conclusive asymmetry on %s (control %d, treatment %d) — an arm under-sampled, which is the starve/saturate signature; the invocation is void", traj, nc, nt)
+			return nil, nil, fmt.Errorf("compare: conclusive asymmetry on %s (control %d, treatment %d) — an arm under-sampled, which is the starve/saturate signature; the invocation is void", traj, nc, nt)
 		}
 	}
-	return noop, nil
+	return snap, noop, nil
 }
 
 // noopTrajectories lists trajectories whose control/treatment
@@ -341,9 +458,19 @@ func noopTrajectories(recs []RunRecord) []string {
 	return out
 }
 
+// noiseCV pulls a metric's recorded CV, or 0 when the noise file is
+// missing/malformed/entryless — the underpowered verdict degrades
+// to a printed "unknown" rather than a silently absent number.
+func noiseCV(n *NoiseFile, err error, metric string) float64 {
+	if err != nil || n == nil {
+		return 0
+	}
+	return n.CV[metric]
+}
+
 // fillPrimaryVerdict applies the MDE decision boundary to the
 // primary metric's CI.
-func fillPrimaryVerdict(mc *MetricCompare, p *Primary, cv float64) {
+func fillPrimaryVerdict(mc *MetricCompare, p *Primary, trajs [][]float64, cv float64) {
 	var boundary float64
 	if p.Direction == PrimaryDecrease {
 		boundary = math.Log(1 - p.MDE)
@@ -365,10 +492,36 @@ func fillPrimaryVerdict(mc *MetricCompare, p *Primary, cv float64) {
 		mc.Verdict = "no MDE effect"
 	default:
 		mc.Verdict = "inconclusive-underpowered"
-		if cv > 0 {
-			mc.Required = RequiredSamples(cv, p.MDE)
+		mc.Required = requiredPairs(trajs, p.MDE, cv)
+	}
+}
+
+// requiredPairs prices the paired design against its own noise:
+// n = ⌈(zα+zβ)²·Var(dᵢ)/δ²⌉ with δ = log(1+mde) — the paired
+// counterpart of noise.go's pooled-CV formula. Var(dᵢ) pools the
+// pair log-ratios; a degenerate or unmeasurable variance falls back
+// to the pooled-CV n so the verdict never prints an absent n.
+func requiredPairs(trajs [][]float64, mde float64, cv float64) int {
+	var flat []float64
+	for _, d := range trajs {
+		flat = append(flat, d...)
+	}
+	delta := math.Log(1 + mde)
+	if len(flat) >= 2 && delta > 0 {
+		m := mean(flat)
+		var ss float64
+		for _, v := range flat {
+			d := v - m
+			ss += d * d
+		}
+		if v := ss / float64(len(flat)-1); v > 0 {
+			return int(math.Ceil(6.186 * v / (delta * delta)))
 		}
 	}
+	if cv > 0 {
+		return RequiredSamples(cv, mde)
+	}
+	return 0
 }
 
 // directionOf returns the metric's declared direction — the
@@ -432,16 +585,19 @@ func bcaCI(trajs [][]float64, replicates int, rng *rand.Rand) (lo, hi float64) {
 	}
 	slices.Sort(boot)
 
-	// Jackknife: leave one pair out at a time, from its trajectory.
+	// Jackknife at the estimand's own unit: whole-trajectory deletion
+	// when ≥2 trajectories exist — the only unit that sees
+	// single-pair-trajectory leverage. A lone trajectory falls back
+	// to pair-level deletion.
 	var jk []float64
-	for i, d := range trajs {
-		for j := range d {
-			l := make([][]float64, len(trajs))
-			for k := range trajs {
-				l[k] = trajs[k]
-			}
-			l[i] = slices.Delete(slices.Clone(d), j, j+1)
-			if len(l[i]) > 0 {
+	if len(trajs) >= 2 {
+		for i := range trajs {
+			jk = append(jk, thetaMean(slices.Delete(slices.Clone(trajs), i, i+1)))
+		}
+	} else {
+		for j := range trajs[0] {
+			l := [][]float64{slices.Delete(slices.Clone(trajs[0]), j, j+1)}
+			if len(l[0]) > 0 {
 				jk = append(jk, thetaMean(l))
 			}
 		}
@@ -515,8 +671,8 @@ func signFlipP(trajs [][]float64, observed float64, direction string, replicates
 		}
 	}
 	n := len(flat)
-	var hits, total float64
 	if n <= 16 { // 2^16 = 65536 — cheap exact.
+		var hits float64
 		for mask := range 1 << n {
 			signs := make([]bool, n)
 			for i := range n {
@@ -525,22 +681,25 @@ func signFlipP(trajs [][]float64, observed float64, direction string, replicates
 			if extreme(stat(signs)) {
 				hits++
 			}
-			total++
 		}
-	} else {
-		for range replicates {
-			signs := make([]bool, n)
-			for i := range signs {
-				signs[i] = rng.IntN(2) == 0
-			}
-			if extreme(stat(signs)) {
-				hits++
-			}
-			total++
+		// Exact enumeration: the observed arrangement is already
+		// enumerated — no add-one correction (that convention is for
+		// Monte-Carlo draws).
+		return hits / float64(int64(1)<<n)
+	}
+	var hits float64
+	for range replicates {
+		signs := make([]bool, n)
+		for i := range signs {
+			signs[i] = rng.IntN(2) == 0
+		}
+		if extreme(stat(signs)) {
+			hits++
 		}
 	}
-	// Add-one: the unflipped arrangement is itself a legal replicate.
-	return (hits + 1) / (total + 1)
+	// Add-one: the observed arrangement is itself a legal replicate
+	// the draw may have missed — the estimate never reports p=0.
+	return (hits + 1) / (float64(replicates) + 1)
 }
 
 // normCDF / normInv — standard normal, via math.Erf and a bisection
@@ -566,17 +725,6 @@ func normInv(p float64) float64 {
 	return (lo + hi) / 2
 }
 
-// loadNoiseQuiet reads noise.json for the underpowered verdict's
-// required-n line. Missing or malformed → nil; compare reports the
-// estimate regardless — noise only enriches the verdict.
-func (r *Runner) loadNoiseQuiet() (map[string]float64, error) {
-	nf, err := LoadNoise(r.EvalDir)
-	if err != nil {
-		return nil, err
-	}
-	return nf.CV, nil
-}
-
 func groupBy[S ~[]E, E any, K comparable](s S, key func(E) K) map[K]S {
 	out := map[K]S{}
 	for _, e := range s {
@@ -590,25 +738,40 @@ func groupBy[S ~[]E, E any, K comparable](s S, key func(E) K) map[K]S {
 func (rep *CompareReport) Summary() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "compare: %s @ %s\n", rep.Experiment, rep.Invocation)
+	if rep.GateVerdict != "" {
+		line := fmt.Sprintf("  gate verdict: %s", rep.GateVerdict)
+		if len(rep.OutcomeAlarms) > 0 {
+			line += " (" + strings.Join(rep.OutcomeAlarms, "; ") + ")"
+		}
+		fmt.Fprintln(&b, line)
+	}
 	if rep.Null {
 		fmt.Fprintln(&b, "  NULL EXPERIMENT — arms resolved identically on every trajectory;")
 		fmt.Fprintln(&b, "  these CIs measure the harness's own false-effect magnitude.")
 	}
+	if rep.Provenance != "" {
+		fmt.Fprintf(&b, "  provenance: %s\n", rep.Provenance)
+	}
 	fmt.Fprintf(&b, "  pairs: %d conclusive (unmatched: %d) across %d trajectories\n",
 		rep.Pairs, rep.Unmatched, len(rep.Trajectories))
-	fmt.Fprintf(&b, "  %-32s %6s %9s %22s %8s  %s\n", "metric", "pairs", "Δ%", "95% CI (BCa)", "p", "verdict")
+	fmt.Fprintf(&b, "  %-32s %6s %6s %9s %22s %8s  %s\n", "metric", "pairs", "trajs", "Δ%", "95% CI (BCa)", "p", "verdict")
 	for _, m := range rep.Metrics {
 		p := fmt.Sprintf("%.3f", m.P)
 		if m.P < 0.001 {
 			p = "<0.001"
 		}
-		fmt.Fprintf(&b, "  %-32s %6d %+8.1f%%  [%+6.1f%%, %+6.1f%%] %8s  %s\n",
-			m.Name, m.Pairs, m.DeltaPct, m.CILoPct, m.CIHiPct, p, m.Verdict)
-		if m.Dropped > 0 {
-			fmt.Fprintf(&b, "  %-32s %6s\n", "", fmt.Sprintf("(%d pairs dropped — nonpositive side)", m.Dropped))
+		fmt.Fprintf(&b, "  %-32s %6d %6d %+8.1f%%  [%+6.1f%%, %+6.1f%%] %8s  %s\n",
+			m.Name, m.Pairs, m.Trajectories, m.DeltaPct, m.CILoPct, m.CIHiPct, p, m.Verdict)
+		if m.Dropped > 0 || m.Absent > 0 {
+			fmt.Fprintf(&b, "  %-32s %6s\n", "",
+				fmt.Sprintf("(%d nonpositive, %d absent-telemetry pairs)", m.Dropped, m.Absent))
 		}
-		if m.Verdict == "inconclusive-underpowered" && m.Required > 0 {
-			fmt.Fprintf(&b, "  INCONCLUSIVE — underpowered: %s needs n≈%d pairs\n", m.Name, m.Required)
+		if m.Verdict == "inconclusive-underpowered" {
+			if m.Required > 0 {
+				fmt.Fprintf(&b, "  INCONCLUSIVE — underpowered: %s needs n≈%d pairs (paired-variance estimate)\n", m.Name, m.Required)
+			} else {
+				fmt.Fprintf(&b, "  INCONCLUSIVE — underpowered: %s; required n unknown (no recorded CV)\n", m.Name)
+			}
 		}
 	}
 	if len(rep.SkippedMetrics) > 0 {

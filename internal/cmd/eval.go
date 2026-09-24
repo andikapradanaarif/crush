@@ -146,9 +146,10 @@ per-pair log-ratio aggregated across trajectories with a BCa bootstrap
 95% CI and a sign-flip permutation p.
 
 Refuses on cross-invocation record sets (pass --invocation to pick
-one), on invocations a structural alarm voided, and on too few pairs.
-The declared primary's CI is tested against its MDE boundary; a CI
-that spans it reports INCONCLUSIVE — underpowered with the required n.`,
+one), on invocations a structural alarm voided or that aborted
+mid-run, and on too few pairs. The declared primary's CI is tested
+against its MDE boundary; a CI that spans it reports
+inconclusive-underpowered with the required pair count.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		exp, err := eval.LoadExperiment(args[0])

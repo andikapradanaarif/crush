@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"math/rand/v2"
@@ -135,7 +136,7 @@ func TestCompare_SnapshotAlarmsRefuse(t *testing.T) {
 	writeCompareRecords(t, dir, recs...)
 
 	r := seededRunner(dir)
-	require.NoError(t, r.persistAlarms("e", "i1", Report{Starved: []string{"t"}}))
+	require.NoError(t, r.persistAlarms(exp, "i1", Report{Starved: []string{"t"}}, nil))
 	_, err := r.Compare(exp, "i1")
 	require.ErrorContains(t, err, "starved voided")
 }
@@ -272,7 +273,12 @@ func TestCompare_UnderpoweredVerdict(t *testing.T) {
 	rep, err := seededRunner(dir).Compare(exp, "")
 	require.NoError(t, err)
 	require.Equal(t, "inconclusive-underpowered", rep.Metrics[0].Verdict)
-	require.Equal(t, RequiredSamples(0.10, 0.15), rep.Metrics[0].Required)
+	// Required is the paired-variance estimate: 6.186·Var(d)/δ²,
+	// not the pooled-CV gate formula. |d| = log 2 for all 8 pairs;
+	// sample variance divides by n−1: Var = 8·d²/7.
+	d := math.Log(2.0)
+	expN := int(math.Ceil(6.186 * (8 * d * d / 7) / (math.Log(1.15) * math.Log(1.15))))
+	require.Equal(t, expN, rep.Metrics[0].Required)
 }
 
 func TestThetaMean_EqualTrajectoryWeights(t *testing.T) {
@@ -289,13 +295,13 @@ func TestSignFlipP_ExtremeArrangements(t *testing.T) {
 	trajs := [][]float64{{0.2, 0.3, 0.1}}
 	obs := thetaMean(trajs)
 	p := signFlipP(trajs, obs, "", 1000, rand.New(rand.NewPCG(1, 2)))
-	require.InDelta(t, 3.0/9.0, p, 1e-9) // (2 extreme + 1)/(8 + 1).
+	require.InDelta(t, 2.0/8.0, p, 1e-9) // 2 extreme / 8 — exact, no add-one.
 
 	// One-sided increase: only the observed arrangement is ≥ obs.
 	// (decrease on all-positive d correctly reports p≈1 — the
 	// observed θ is the least extreme arrangement for that claim.)
 	p = signFlipP(trajs, obs, PrimaryIncrease, 1000, rand.New(rand.NewPCG(1, 2)))
-	require.InDelta(t, 2.0/9.0, p, 1e-9)
+	require.InDelta(t, 1.0/8.0, p, 1e-9)
 }
 
 func TestBcaCI_SymmetricData(t *testing.T) {
@@ -306,4 +312,181 @@ func TestBcaCI_SymmetricData(t *testing.T) {
 	require.Less(t, lo, theta)
 	require.Greater(t, hi, theta)
 	require.True(t, math.Abs(lo) < 0.5 && math.Abs(hi) < 0.5)
+}
+
+func TestCompare_AbortedSnapshotRefuses(t *testing.T) {
+	dir := t.TempDir()
+	exp := &Experiment{Name: "e"}
+	opts := map[string]any{"f": 1}
+	var recs []RunRecord
+	for i := 1; i <= 4; i++ {
+		recs = append(recs,
+			compareRecord("e", "t", ArmControl, "i1", i, 100, opts),
+			compareRecord("e", "t", ArmTreatment, "i1", i, 90, opts))
+	}
+	writeCompareRecords(t, dir, recs...)
+
+	r := seededRunner(dir)
+	// A cancelled run persists a snapshot whose only void signal is
+	// the completeness bit — the record set itself looks clean.
+	require.NoError(t, r.persistAlarms(exp, "i1", Report{}, context.Canceled))
+	_, err := r.Compare(exp, "i1")
+	require.ErrorContains(t, err, "did not complete")
+}
+
+func TestCompare_CleanSnapshotStillInfersAsymmetry(t *testing.T) {
+	dir := t.TempDir()
+	exp := &Experiment{Name: "e"}
+	opts := map[string]any{"f": 1}
+	var recs []RunRecord
+	for i := 1; i <= 5; i++ {
+		recs = append(recs, compareRecord("e", "t", ArmControl, "i1", i, 100, opts))
+	}
+	for i := 1; i <= 3; i++ {
+		recs = append(recs, compareRecord("e", "t", ArmTreatment, "i1", i, 90, opts))
+	}
+	writeCompareRecords(t, dir, recs...)
+
+	r := seededRunner(dir)
+	// Clean snapshot + asymmetric records — the records-side check
+	// runs regardless; a snapshot can't whitewash the count.
+	require.NoError(t, r.persistAlarms(exp, "i1", Report{}, nil))
+	_, err := r.Compare(exp, "i1")
+	require.ErrorContains(t, err, "conclusive asymmetry")
+}
+
+func TestCompare_AARecordsCannotPair(t *testing.T) {
+	dir := t.TempDir()
+	exp := &Experiment{Name: "e"}
+	optsA := map[string]any{"f": "a"}
+	optsB := map[string]any{"f": "b"}
+	var recs []RunRecord
+	for i := 1; i <= 4; i++ {
+		recs = append(recs,
+			compareRecord("e", "t", ArmControl, "i1", i, 100, optsA),
+			compareRecord("e", "t", ArmTreatment, "i1", i, 90, optsB),
+			compareRecord("e", "t", ArmAA, "i1", i, 50, optsA))
+	}
+	writeCompareRecords(t, dir, recs...)
+
+	rep, err := seededRunner(dir).Compare(exp, "")
+	require.NoError(t, err)
+	require.Equal(t, 4, rep.Pairs)
+	require.Equal(t, 0, rep.Unmatched) // aa records are not "unmatched".
+	for _, m := range rep.Metrics {
+		if m.Name == "tokens.input" {
+			require.InDelta(t, -10.0, m.DeltaPct, 1.0,
+				"aa records must not enter pairs — input Δ stays ~-10%%")
+		}
+	}
+}
+
+func TestCompare_DroppedAndAbsentCounted(t *testing.T) {
+	dir := t.TempDir()
+	exp := &Experiment{Name: "e"}
+	optsA := map[string]any{"f": "a"}
+	optsB := map[string]any{"f": "b"}
+	var recs []RunRecord
+	for i := 1; i <= 5; i++ {
+		c := compareRecord("e", "t", ArmControl, "i1", i, 100, optsA)
+		tr := compareRecord("e", "t", ArmTreatment, "i1", i, 90, optsB)
+		// request.* is pointer-gated: nil telemetry counts absent,
+		// a nonpositive side counts dropped.
+		c.Request = &RequestStats{PromptTokensPeak: 100}
+		tr.Request = &RequestStats{PromptTokensPeak: 90}
+		if i == 4 {
+			tr.Request = nil
+		}
+		if i == 5 {
+			tr.Request.PromptTokensPeak = 0
+		}
+		recs = append(recs, c, tr)
+	}
+	writeCompareRecords(t, dir, recs...)
+
+	rep, err := seededRunner(dir).Compare(exp, "")
+	require.NoError(t, err)
+	for _, m := range rep.Metrics {
+		if m.Name == "request.prompt_tokens_peak" {
+			require.Equal(t, 3, m.Pairs)
+			require.Equal(t, 1, m.Dropped)
+			require.Equal(t, 1, m.Absent)
+		}
+	}
+}
+
+func TestCompare_NoMDEEffectVerdict(t *testing.T) {
+	dir := t.TempDir()
+	exp := &Experiment{
+		Name:    "e",
+		Primary: &Primary{Metric: "tokens.input", Direction: PrimaryDecrease, MDE: 0.15},
+	}
+	c := map[string]any{"f": "c"}
+	tr := map[string]any{"f": "t"}
+	var recs []RunRecord
+	// ~+2% effect: the CI sits entirely above the -15% boundary —
+	// a powered "no MDE decrease" verdict.
+	for i := 1; i <= 8; i++ {
+		recs = append(recs,
+			compareRecord("e", "t", ArmControl, "i1", i, 100+i, c),
+			compareRecord("e", "t", ArmTreatment, "i1", i, 102+i, tr))
+	}
+	writeCompareRecords(t, dir, recs...)
+
+	rep, err := seededRunner(dir).Compare(exp, "")
+	require.NoError(t, err)
+	require.Equal(t, "no MDE effect", rep.Metrics[0].Verdict)
+}
+
+func TestCompare_PrimaryDriftSuppressesVerdict(t *testing.T) {
+	dir := t.TempDir()
+	exp := &Experiment{
+		Name:    "e",
+		Primary: &Primary{Metric: "tokens.input", Direction: PrimaryDecrease, MDE: 0.15},
+	}
+	c := map[string]any{"f": "c"}
+	tr := map[string]any{"f": "t"}
+	var recs []RunRecord
+	for i := 1; i <= 6; i++ {
+		recs = append(recs,
+			compareRecord("e", "t", ArmControl, "i1", i, 100+10*i, c),
+			compareRecord("e", "t", ArmTreatment, "i1", i, 80+8*i, tr))
+	}
+	writeCompareRecords(t, dir, recs...)
+
+	r := seededRunner(dir)
+	// The invocation ran under a different MDE — the snapshot's
+	// primary pins it, the loaded file's 0.15 is post-hoc.
+	ranWith := &Experiment{Name: "e", Primary: &Primary{Metric: "tokens.input", Direction: PrimaryDecrease, MDE: 0.05}}
+	require.NoError(t, r.persistAlarms(ranWith, "i1", Report{}, nil))
+
+	rep, err := r.Compare(exp, "i1")
+	require.NoError(t, err)
+	require.Contains(t, rep.Provenance, "drifted")
+	require.Empty(t, rep.Metrics[0].Verdict, "post-hoc primary must not print a verdict")
+}
+
+func TestCompare_DeterministicPerInvocation(t *testing.T) {
+	dir := t.TempDir()
+	exp := &Experiment{Name: "e"}
+	c := map[string]any{"f": "c"}
+	tr := map[string]any{"f": "t"}
+	var recs []RunRecord
+	for i := 1; i <= 6; i++ {
+		recs = append(recs,
+			compareRecord("e", "t", ArmControl, "i1", i, 100+7*i, c),
+			compareRecord("e", "t", ArmTreatment, "i1", i, 90+3*i, tr))
+	}
+	writeCompareRecords(t, dir, recs...)
+
+	// No injected RNG — seed derives from the invocation ID.
+	r1 := &Runner{EvalDir: dir}
+	r2 := &Runner{EvalDir: dir}
+	rep1, err := r1.Compare(exp, "")
+	require.NoError(t, err)
+	rep2, err := r2.Compare(exp, "")
+	require.NoError(t, err)
+	require.Equal(t, rep1.Metrics[0].CILoPct, rep2.Metrics[0].CILoPct)
+	require.Equal(t, rep1.Metrics[0].CIHiPct, rep2.Metrics[0].CIHiPct)
+	require.Equal(t, rep1.Metrics[0].P, rep2.Metrics[0].P)
 }
