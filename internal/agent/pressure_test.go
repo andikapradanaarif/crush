@@ -1,10 +1,14 @@
 package agent
 
 import (
+	"context"
 	"strings"
+	"sync"
 	"testing"
 
 	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/fantasy"
+	notebooktool "github.com/charmbracelet/crush/internal/agent/tools/notebook"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/notebook"
@@ -293,6 +297,172 @@ func TestPreparePrompt_EmptyCoverageDefersFreeze(t *testing.T) {
 	require.True(t, collapse.Set[0])
 	res := renderedResultText(t, history, "tc-bash")
 	require.Contains(t, res, `recall("result:tc-bash")`)
+}
+
+// wireText serializes everything the provider would receive — text,
+// tool-call inputs, and result outputs — so wire-level assertions can
+// see collapse markers, not just text parts.
+func wireText(p fantasy.Prompt) string {
+	var b strings.Builder
+	for _, msg := range p {
+		for _, part := range msg.Content {
+			if t, ok := fantasy.AsMessagePart[fantasy.TextPart](part); ok {
+				b.WriteString(t.Text)
+			}
+			if tc, ok := fantasy.AsMessagePart[fantasy.ToolCallPart](part); ok {
+				b.WriteString(tc.Input)
+			}
+			if tr, ok := fantasy.AsMessagePart[fantasy.ToolResultPart](part); ok {
+				if txt, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentText](tr.Output); ok {
+					b.WriteString(txt.Text)
+				}
+			}
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+// captureModel records every main-turn request's wire text and answers
+// text finishes — optionally emitting one bash tool call first so the
+// run has a collapsible pair. Title generation is answered without
+// consuming the script.
+type captureModel struct {
+	fakeLanguageModel
+	mu      sync.Mutex
+	prompts []string
+	tool    bool
+	usage   int64
+}
+
+func (m *captureModel) Stream(_ context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
+	if strings.Contains(promptText(call.Prompt), "Generate a concise title") {
+		return gateTextStream("title"), nil
+	}
+	m.mu.Lock()
+	m.prompts = append(m.prompts, wireText(call.Prompt))
+	m.mu.Unlock()
+	if m.tool {
+		m.tool = false
+		input := `{"command":"ls"}`
+		return func(yield func(fantasy.StreamPart) bool) {
+			if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeToolInputStart, ID: "tc1", ToolCallName: "bash"}) {
+				return
+			}
+			if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeToolInputDelta, ID: "tc1", Delta: input}) {
+				return
+			}
+			if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeToolInputEnd, ID: "tc1"}) {
+				return
+			}
+			if !yield(fantasy.StreamPart{
+				Type:          fantasy.StreamPartTypeToolCall,
+				ID:            "tc1",
+				ToolCallName:  "bash",
+				ToolCallInput: input,
+			}) {
+				return
+			}
+			yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonToolCalls, Usage: fantasy.Usage{InputTokens: m.usage, OutputTokens: 5}})
+		}, nil
+	}
+	return func(yield func(fantasy.StreamPart) bool) {
+		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextStart, ID: "t1"}) {
+			return
+		}
+		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, ID: "t1", Delta: "done"}) {
+			return
+		}
+		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextEnd, ID: "t1"}) {
+			return
+		}
+		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonStop, Usage: fantasy.Usage{InputTokens: m.usage, OutputTokens: 5}})
+	}, nil
+}
+
+// TestRun_PressureGateWireProof is the end-to-end evidence: two real
+// Run() "processes" over one session, with the provider-visible
+// request captured on the wire. Below the margin the request is
+// verbatim and uncounted; once stored history crosses it, the same
+// machinery collapses the covered prior turn and the latch records
+// exactly one activation.
+func TestRun_PressureGateWireProof(t *testing.T) {
+	t.Parallel()
+	env, sessionID := newProcessEnv(t, &countingGen{})
+
+	// A 64K window with a 4K output reserve → margin ~54K → engage
+	// threshold ≈ 10K estimated tokens. RawTokenBudget is large so
+	// the boundary stays 0 and collapse renders stubs in place —
+	// the clearest wire evidence.
+	mk := func(m fantasy.LanguageModel) *sessionAgent {
+		model := Model{Model: m, CatwalkCfg: catwalk.Model{ContextWindow: 64_000, DefaultMaxTokens: 4_000}}
+		return NewSessionAgent(SessionAgentOptions{
+			LargeModel:         model,
+			SmallModel:         model,
+			SystemPrompt:       "system",
+			IsYolo:             true,
+			Sessions:           env.sessions,
+			Messages:           env.messages,
+			Notebook:           env.notebook,
+			NotebookEnabled:    true,
+			NotebookPriorTurns: priorTurnsStub,
+			PressureGate:       true,
+			RawTokenBudget:     1_000_000,
+			DetachedWork:       &sync.WaitGroup{},
+			Tools: []fantasy.AgentTool{
+				&fakeTool{name: "bash", resp: fantasy.NewTextResponse("ok")},
+				&fakeTool{name: notebooktool.RecallToolName, resp: fantasy.NewTextResponse("recalled")},
+				&fakeTool{name: notebooktool.SearchToolName, resp: fantasy.NewTextResponse("")},
+			},
+		}).(*sessionAgent)
+	}
+
+	// Process 1: comfortable regime — a small history stays well
+	// under the margin, so the request is verbatim and uncounted.
+	m1 := &captureModel{tool: true, usage: 2_000}
+	a1 := mk(m1)
+	_, err := a1.Run(t.Context(), SessionAgentCall{SessionID: sessionID, Prompt: "turn one"})
+	require.NoError(t, err)
+	a1.detachedWork.Wait()
+
+	require.NotEmpty(t, m1.prompts)
+	wire1 := m1.prompts[len(m1.prompts)-1]
+	require.Contains(t, wire1, `{"command":"ls"}`, "the tool pair must reach the wire verbatim below pressure")
+	require.NotContains(t, wire1, "_collapsed")
+	rs1, ok := a1.reqStats.Get(sessionID)
+	require.True(t, ok)
+	require.False(t, rs1.pressureEngaged)
+	require.Zero(t, rs1.pressureActivations)
+
+	// History grows past the margin between processes — a stored
+	// ~200KB message is ~50K tokens at chars/4, well over the ~10K
+	// threshold of a 64K window.
+	mkMsg(t, env.messages, sessionID, message.User,
+		message.TextContent{Text: strings.Repeat("filler ", 30_000)})
+
+	// Process 2: a fresh agent over the same session, like `crush
+	// run` — no shared in-memory stats, so the cold-start estimate
+	// covers the whole verbatim render and trips immediately.
+	m2 := &captureModel{usage: 2_000}
+	a2 := mk(m2)
+	_, err = a2.Run(t.Context(), SessionAgentCall{SessionID: sessionID, Prompt: "turn two"})
+	require.NoError(t, err)
+	a2.detachedWork.Wait()
+
+	rs2, ok := a2.reqStats.Get(sessionID)
+	require.True(t, ok)
+	require.True(t, rs2.pressureEngaged)
+	require.Equal(t, 1, rs2.pressureActivations)
+	require.NotEmpty(t, rs2.Steps)
+	require.True(t, rs2.Steps[0].PressureEngaged, "the per-step row carries the latch")
+
+	require.NotEmpty(t, m2.prompts)
+	wire2 := m2.prompts[len(m2.prompts)-1]
+	require.Contains(t, wire2, `{"_collapsed":"prior turn 0"}`)
+	require.Contains(t, wire2, `recall("result:tc1")`)
+	require.Contains(t, wire2, "filler", "the uncovered tail stays verbatim")
+	require.NotContains(t, wire2, `{"command":"ls"}`,
+		"the covered prior turn's verbatim call must not reach the wire under pressure")
 }
 
 // The digest-eligibility freeze has the same empty-freeze edge as
