@@ -1,6 +1,6 @@
 # Context Window Safety — Implementation Plan
 
-> **Status:** Partially shipped — issue #100 landed the pressure gate
+> **Status:** Spec — partially shipped: issue #100 landed the pressure gate
 > (`notebook_pressure_gate`, default on): the notebook render path —
 > boundary eviction, prefix render, prior-turn collapse — activates on
 > estimated request pressure vs. the context window instead of a fixed

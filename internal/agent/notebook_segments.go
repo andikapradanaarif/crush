@@ -956,7 +956,7 @@ func (a *sessionAgent) rebuildStepMessages(ctx context.Context, sessionID string
 	if err != nil || len(msgs) == 0 {
 		return nil, false
 	}
-	history, _ := a.preparePrompt(ctx, msgs, supportsImages, collapse)
+	history, _ := a.preparePrompt(ctx, msgs, supportsImages, collapse, false)
 	out := history
 	if a.systemPrompt.Get() != "" && len(optionsMsgs) > 0 && optionsMsgs[0].Role == fantasy.MessageRoleSystem {
 		out = make([]fantasy.Message, 0, len(history)+1)

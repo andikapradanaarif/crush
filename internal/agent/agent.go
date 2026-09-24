@@ -1161,7 +1161,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// set freezes inside this first render — later coverage commits
 	// can't flip a turn mid-window.
 	collapse := a.newTurnCollapse(int64(countUserMessages(msgs)))
-	history, files := a.preparePrompt(ctx, msgs, largeModel.CatwalkCfg.SupportsImages, collapse, call.Attachments...)
+	history, files := a.preparePrompt(ctx, msgs, largeModel.CatwalkCfg.SupportsImages, collapse, false, call.Attachments...)
 
 	// Per-turn tail augmentation: the turn-context blob and the
 	// vagueness pre-filter's clarify directive. Computed once here —
@@ -1949,8 +1949,9 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 
 	// Summarize renders verbatim: the call is one-shot with no cache
 	// reuse, and the summary is the seed the next context window grows
-	// from — stubs would amplify whatever the notebook dropped.
-	aiMsgs, _ := a.preparePrompt(ctx, msgs, largeModel.CatwalkCfg.SupportsImages, nil)
+	// from — stubs would amplify whatever the notebook dropped. The
+	// skip flag keeps the render outside the session's gate state.
+	aiMsgs, _ := a.preparePrompt(ctx, msgs, largeModel.CatwalkCfg.SupportsImages, nil, true)
 
 	genCtx, cancel := context.WithCancel(ctx)
 	ac := &activeCancel{cancel: cancel}
@@ -2062,6 +2063,11 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		return err
 	}
 
+	// Compaction breaks the gate's append-only premise — the latch
+	// and its anchors describe pre-compact history, so they reset
+	// and the next render re-engages only if still over margin.
+	a.clearPressureState(sessionID)
+
 	// Release the active request before processing queued messages so that
 	// Run() does not see the session as busy.
 	a.activeRequests.Del(sessionID)
@@ -2125,7 +2131,15 @@ func (a *sessionAgent) createUserMessage(ctx context.Context, call SessionAgentC
 	return msg, nil
 }
 
-func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message, supportsImages bool, collapse *turnCollapse, attachments ...message.Attachment) ([]fantasy.Message, []fantasy.FilePart) {
+// skipPressureGate marks a one-shot render outside a run's render
+// lifecycle — Summarize is the only such caller. It keeps the render
+// machinery on (an over-margin summarize call still has to fit) but
+// never consults or writes the session's gate state, so a /compact
+// can't move the watermark or trip the latch for renders after it.
+// Run-path callers always pass false — including verbatim mode, whose
+// nil collapse must NOT skip the gate: the gate covers boundary and
+// prefix churn in every mode, not just collapse.
+func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message, supportsImages bool, collapse *turnCollapse, skipPressureGate bool, attachments ...message.Attachment) ([]fantasy.Message, []fantasy.FilePart) {
 	var history []fantasy.Message
 
 	// When notebook is enabled, split messages into notebook (closed
@@ -2165,13 +2179,10 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 		// flag off the machinery runs unconditionally — the pre-gate
 		// behavior — and with no measured headroom to prove (unknown
 		// window, no usage yet) it stays on: deactivating a safety
-		// mechanism needs positive evidence of comfort. A nil
-		// collapse marks a one-shot render outside a run's lifecycle
-		// (Summarize): it keeps the machinery on — an over-margin
-		// summarize call still has to fit — but never consults or
-		// writes the session's gate state, so a /compact can't move
-		// the watermark or trip the latch for renders after it.
-		engaged := collapse == nil || !a.pressureGate || a.pressureEngaged(sessionID, msgs)
+		// mechanism needs positive evidence of comfort. One-shot
+		// renders skip the gate outright (see the signature comment):
+		// machinery on, session state untouched.
+		engaged := skipPressureGate || !a.pressureGate || a.pressureEngaged(sessionID, msgs)
 		// Count before this render refreshes the injected-file set —
 		// the join target is the files the LAST render injected. Runs
 		// in both regimes: the disengaged branch's seeds can inject
@@ -2251,10 +2262,11 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 				}
 			}
 		} else {
-			// Below the margin the render is verbatim — but
-			// hydration seeds still ride the prefix path at
-			// boundary 0; they are session seeding, not
-			// pressure machinery.
+			// Below the margin the render is verbatim — but the
+			// prefix path still runs at boundary 0 for the two
+			// non-pressure cases it serves: hydration seeds
+			// (session seeding) and auto-inject (the user named
+			// a file with committed entries).
 			history = append(history, a.notebookPrefix(ctx, sessionID, msgs, 0, segmentKey{}, segs, collapse)...)
 		}
 		rawMsgs = msgs[boundary:]

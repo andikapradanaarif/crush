@@ -254,7 +254,7 @@ func TestPreparePrompt_DigestModeStubText(t *testing.T) {
 	ctx := t.Context()
 	a.detectSegments(ctx, sessionID, msgs)
 
-	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1))
+	history, _ := a.preparePrompt(ctx, msgs, false, a.newTurnCollapse(1), false)
 
 	// Digest-mode stub text names the consolidation while keeping
 	// the recall pointer — the digest may lag async, so the pointer

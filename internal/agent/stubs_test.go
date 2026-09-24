@@ -939,12 +939,12 @@ func TestPreparePrompt_StubGateOnLiveRecall(t *testing.T) {
 	require.True(t, ok)
 	require.True(t, resultOf(t, msgs[2], "tc-view").Superseded.Applied)
 
-	history, _ := a.preparePrompt(ctx, msgs, false, nil)
+	history, _ := a.preparePrompt(ctx, msgs, false, nil, false)
 	res := renderedResultText(t, history, "tc-view")
 	require.NotContains(t, res, `recall("result:`)
 	require.Contains(t, res, "file content line")
 
 	a.tools = csync.NewSliceFrom([]fantasy.AgentTool{&fakeTool{name: "recall"}})
-	history, _ = a.preparePrompt(ctx, msgs, false, nil)
+	history, _ = a.preparePrompt(ctx, msgs, false, nil, false)
 	require.Contains(t, renderedResultText(t, history, "tc-view"), `recall("result:tc-view")`)
 }

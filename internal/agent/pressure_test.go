@@ -32,17 +32,14 @@ func pressureTestAgent(cw, maxOut int64) *sessionAgent {
 func TestPressureMargin(t *testing.T) {
 	t.Parallel()
 
-	// The step-jump reserve dominates whenever the flat legacy margin
-	// is smaller — a 64K window still carries output reserve + four
-	// capped tool results.
-	require.Equal(t, int64(8_000+4*12_500), pressureMargin(1_000_000, 8_000))
-	require.Equal(t, int64(8_000+4*12_500), pressureMargin(64_000, 8_000))
+	// Window-independent: output reserve plus the bounded step jump.
+	// A window-proportional floor was always dominated by this sum
+	// and is deliberately absent.
+	require.Equal(t, int64(8_000+4*12_500), pressureMargin(8_000))
+	require.Equal(t, int64(4_096+4*12_500), pressureMargin(4_096))
 	// A large catalog output reserve raises the margin further — the
 	// request must leave real generation headroom.
-	require.Equal(t, int64(384_000+4*12_500), pressureMargin(1_000_000, 384_000))
-	// Below the step jump, the legacy 20% floor never wins on small
-	// windows; on very large ones the flat 20K still loses to the jump.
-	require.Equal(t, int64(4*12_500+4_096), pressureMargin(150_000, 4_096))
+	require.Equal(t, int64(384_000+4*12_500), pressureMargin(384_000))
 }
 
 func TestPressureGate_DisengagedBelowMargin(t *testing.T) {
@@ -137,12 +134,17 @@ func TestPressureGate_UnknownWindowKeepsMachineryOn(t *testing.T) {
 	a := pressureTestAgent(0, 8_000)
 	msgs := []message.Message{segUser("hello")}
 
-	// No declared window means no evidence of headroom — the render
-	// machinery stays on (pre-gate behavior), but nothing latches or
-	// counts: "engaged" here is the default, not an activation.
+	// No declared window means no margin to cross — the render
+	// machinery stays on (fail-safe default), but nothing latches or
+	// counts: "engaged" means a measured crossing, not the default.
+	// The estimate and watermark still record so the run audits as
+	// measured rather than absent.
 	require.True(t, a.pressureEngaged("s1", msgs))
-	_, ok := a.reqStats.Get("s1")
-	require.False(t, ok, "unknown window must not write gate state")
+	rs, ok := a.reqStats.Get("s1")
+	require.True(t, ok, "unknown window still records the estimate")
+	require.Positive(t, rs.pressureEstimate)
+	require.False(t, rs.pressureEngaged)
+	require.Zero(t, rs.pressureActivations)
 }
 
 func TestPressureGate_MissingStatsKeepsMachineryOn(t *testing.T) {
@@ -193,7 +195,7 @@ func TestPreparePrompt_PressureGateDisengagedVerbatim(t *testing.T) {
 	msgs := priorTurnFixture(t, svc, sessionID)
 
 	collapse := a.newTurnCollapse(1)
-	history, _ := a.preparePrompt(t.Context(), msgs, false, collapse)
+	history, _ := a.preparePrompt(t.Context(), msgs, false, collapse, false)
 
 	require.Nil(t, collapse.Set, "disengaged render must not freeze a collapse set")
 	res := renderedResultText(t, history, "tc-bash")
@@ -228,7 +230,7 @@ func TestPreparePrompt_PressureGateEngagedCollapses(t *testing.T) {
 	a.detectSegments(t.Context(), sessionID, msgs)
 
 	collapse := a.newTurnCollapse(1)
-	history, _ := a.preparePrompt(t.Context(), msgs, false, collapse)
+	history, _ := a.preparePrompt(t.Context(), msgs, false, collapse, false)
 
 	require.NotEmpty(t, collapse.Set)
 	res := renderedResultText(t, history, "tc-bash")
@@ -252,7 +254,7 @@ func TestPreparePrompt_GateOffCollapsesUnconditionally(t *testing.T) {
 	a.detectSegments(t.Context(), sessionID, msgs)
 
 	collapse := a.newTurnCollapse(1)
-	history, _ := a.preparePrompt(t.Context(), msgs, false, collapse)
+	history, _ := a.preparePrompt(t.Context(), msgs, false, collapse, false)
 
 	require.NotEmpty(t, collapse.Set)
 	res := renderedResultText(t, history, "tc-bash")
@@ -281,18 +283,18 @@ func TestPreparePrompt_EmptyCoverageDefersFreeze(t *testing.T) {
 	ctx := t.Context()
 
 	collapse := a.newTurnCollapse(1)
-	history, _ := a.preparePrompt(ctx, unclosed, false, collapse)
+	history, _ := a.preparePrompt(ctx, unclosed, false, collapse, false)
 	require.Nil(t, collapse.Set, "empty coverage must not freeze the set")
 
 	// The closing user message lands. This render fires turn 0's
 	// coverage but reads the registry pre-commit — still uncovered,
 	// still unfrozen.
-	history, _ = a.preparePrompt(ctx, msgs, false, collapse)
+	history, _ = a.preparePrompt(ctx, msgs, false, collapse, false)
 	require.Nil(t, collapse.Set)
 
 	// The next render observes the committed coverage — the same
 	// run's collapse set activates late rather than never.
-	history, _ = a.preparePrompt(ctx, msgs, false, collapse)
+	history, _ = a.preparePrompt(ctx, msgs, false, collapse, false)
 	require.NotNil(t, collapse.Set)
 	require.True(t, collapse.Set[0])
 	res := renderedResultText(t, history, "tc-bash")
@@ -489,7 +491,7 @@ func TestPreparePrompt_PressureGateIntraProcessTransition(t *testing.T) {
 	ctx := t.Context()
 
 	collapse := a.newTurnCollapse(1)
-	history, _ := a.preparePrompt(ctx, msgs, false, collapse)
+	history, _ := a.preparePrompt(ctx, msgs, false, collapse, false)
 	require.Nil(t, collapse.Set, "below pressure the set stays unfrozen")
 	require.Contains(t, renderedResultText(t, history, "tc-bash"), "file content line")
 	rs, _ := a.reqStats.Get(sessionID)
@@ -503,7 +505,7 @@ func TestPreparePrompt_PressureGateIntraProcessTransition(t *testing.T) {
 	msgs, err = svc.List(ctx, sessionID)
 	require.NoError(t, err)
 
-	history, _ = a.preparePrompt(ctx, msgs, false, collapse)
+	history, _ = a.preparePrompt(ctx, msgs, false, collapse, false)
 	require.True(t, collapse.Set[0], "the engaged render collapses the covered prior turn")
 	res := renderedResultText(t, history, "tc-bash")
 	require.Contains(t, res, `recall("result:tc-bash")`)
@@ -512,11 +514,12 @@ func TestPreparePrompt_PressureGateIntraProcessTransition(t *testing.T) {
 	require.Equal(t, 1, rs.pressureActivations)
 }
 
-// A nil-collapse render is Summarize's one-shot path: machinery stays
-// on but the gate is skipped entirely — no estimate, no watermark
-// move, no latch — so /compact can't corrupt the session's pressure
-// state. On a window smaller than the margin, any evaluation would
-// latch, so staying unlatched proves the gate never ran.
+// A skipPressureGate render is Summarize's one-shot path: machinery
+// stays on but the gate is skipped entirely — no estimate, no
+// watermark move, no latch — so /compact can't corrupt the session's
+// pressure state. On a window smaller than the margin, any
+// evaluation would latch, so staying unlatched proves the gate never
+// ran.
 func TestPreparePrompt_SummarizeRenderSkipsGateState(t *testing.T) {
 	t.Parallel()
 
@@ -531,7 +534,7 @@ func TestPreparePrompt_SummarizeRenderSkipsGateState(t *testing.T) {
 	msgs := priorTurnFixture(t, svc, sessionID)
 	a.reqStats.Set(sessionID, requestStats{LastPromptTokens: 5_000, renderedMsgs: 2, pressureEstimate: 5_500})
 
-	history, _ := a.preparePrompt(t.Context(), msgs, false, nil)
+	history, _ := a.preparePrompt(t.Context(), msgs, false, nil, true)
 	require.NotEmpty(t, history)
 
 	rs, _ := a.reqStats.Get(sessionID)
@@ -539,6 +542,72 @@ func TestPreparePrompt_SummarizeRenderSkipsGateState(t *testing.T) {
 	require.Equal(t, 2, rs.renderedMsgs, "one-shot renders must not move the watermark")
 	require.False(t, rs.pressureEngaged, "a /compact must not trip the latch")
 	require.Zero(t, rs.pressureActivations)
+}
+
+// Verbatim mode is the default and passes a nil collapse — the gate
+// must still evaluate: it covers boundary/prefix churn in every mode,
+// and gate state must be written or pressure.* telemetry starves on
+// the most common configuration.
+func TestPreparePrompt_PressureGateVerbatimModeEvaluates(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsVerbatim // the default — nil collapse.
+	a.pressureGate = true
+	a.largeModel = csync.NewValue(Model{CatwalkCfg: catwalk.Model{
+		ContextWindow:    64_000,
+		DefaultMaxTokens: 4_000,
+	}})
+	a.reqStats = csync.NewMap[string, requestStats]()
+	msgs := priorTurnFixture(t, svc, sessionID)
+	ctx := t.Context()
+
+	// Below the margin: evaluated (estimate lands), no latch.
+	_, _ = a.preparePrompt(ctx, msgs, false, nil, false)
+	rs, ok := a.reqStats.Get(sessionID)
+	require.True(t, ok, "verbatim renders must still record gate state")
+	require.Positive(t, rs.pressureEstimate)
+	require.False(t, rs.pressureEngaged)
+
+	// Past the margin: the verbatim-mode render engages — boundary
+	// and prefix machinery apply in every mode, not just collapse.
+	mkMsg(t, svc, sessionID, message.User,
+		message.TextContent{Text: strings.Repeat("filler ", 30_000)})
+	var err error
+	msgs, err = svc.List(ctx, sessionID)
+	require.NoError(t, err)
+	_, _ = a.preparePrompt(ctx, msgs, false, nil, false)
+	rs, _ = a.reqStats.Get(sessionID)
+	require.True(t, rs.pressureEngaged)
+	require.Equal(t, 1, rs.pressureActivations)
+}
+
+// A successful compact shrinks stored history — the one write that
+// breaks the append-only premise — so the latch and its anchors
+// reset and the next render re-derives engagement.
+func TestPressureGate_CompactClearsLatch(t *testing.T) {
+	t.Parallel()
+
+	a := pressureTestAgent(1_000_000, 8_000)
+	a.reqStats.Set("s1", requestStats{
+		LastPromptTokens:    950_000,
+		renderedMsgs:        40,
+		pressureEstimate:    960_000,
+		pressureEngaged:     true,
+		pressureActivations: 1,
+	})
+
+	a.clearPressureState("s1")
+	rs, _ := a.reqStats.Get("s1")
+	require.False(t, rs.pressureEngaged)
+	require.Zero(t, rs.pressureEstimate)
+	require.Zero(t, rs.renderedMsgs)
+	require.Zero(t, rs.LastPromptTokens)
+	require.Equal(t, 1, rs.pressureActivations, "activation history survives the reset")
+
+	// The next render re-derives from the new, smaller history — a
+	// compacted session is comfortable again.
+	require.False(t, a.pressureEngaged("s1", []message.Message{segUser("small")}))
 }
 
 // The digest-eligibility freeze has the same empty-freeze edge as

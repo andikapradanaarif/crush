@@ -47,10 +47,13 @@ shipped architecture diverged in ways that matter to readers:
   `pressure.activations` telemetry transition. The estimate anchors
   on the provider-reported size of the last request plus a chars/4
   delta over messages persisted since; cold starts estimate the whole
-  verbatim render. The margin is `max(legacy 20K/20%, output reserve
-  + 4×50KB tool results)` — it must exceed the largest plausible
-  single-step jump so a stale estimate can't let the next request
-  overflow. An unknown context window (0) keeps the machinery on
+  verbatim render. The margin is `output reserve + 4×50KB tool
+  results` — it must cover the largest plausible single-step jump so
+  a render-stale estimate can't let the next request overflow (a
+  heuristic, not a bound: wider fan-outs or attachments can still
+  leap it). A successful Summarize clears the latch — compaction is
+  the one write that shrinks history. An unknown context window (0)
+  keeps the machinery on
   without latching — deactivating a safety mechanism needs positive
   evidence of headroom. `false` restores the pre-gate unconditional
   render; mechanism-forcing experiments pin it so coverage predicates

@@ -26,21 +26,17 @@ const defaultOutputReserve = 4_096
 
 // pressureMargin returns the engage threshold expressed as a
 // remaining-window reserve: the gate engages when
-// cw - estimate <= margin. The legacy auto-summarize shape (a flat
-// 20K for windows over 200K, else 20% of the window) is the floor;
-// the step-jump reserve raises it so a single step's growth rarely
-// leaps the margin between renders — rarely, not never, since the
-// jump bound is heuristic (see pressureParallelResults). Small
-// windows therefore engage almost immediately — honest, since a
-// 64K window genuinely cannot absorb one capped-results batch plus
-// a completion.
-func pressureMargin(cw, outputReserve int64) int64 {
-	legacy := int64(float64(cw) * smallContextWindowRatio)
-	if cw > largeContextWindowThreshold {
-		legacy = largeContextWindowBuffer
-	}
-	stepJump := outputReserve + pressureParallelResults*int64(toolResultMaxContentBytes/4)
-	return max(legacy, stepJump)
+// cw - estimate <= margin. The reserve is the output reserve plus a
+// bounded single-step jump — priced to absorb one render-stale step
+// of capped tool results, rarely leapt but not never (the jump is
+// heuristic, not a bound — see pressureParallelResults). No
+// window-proportional term: it was always dominated by this sum and
+// is dropped rather than carried as dead arithmetic. A window smaller
+// than the margin therefore engages on the first render — honest,
+// since a 64K window genuinely cannot absorb one capped-results batch
+// plus a completion.
+func pressureMargin(outputReserve int64) int64 {
+	return outputReserve + pressureParallelResults*int64(toolResultMaxContentBytes/4)
 }
 
 // outputReserve is the completion headroom the margin carries —
@@ -63,20 +59,25 @@ func (a *sessionAgent) outputReserve() int64 {
 // request (requestStats.LastPromptTokens) plus a chars/4 delta over
 // the messages appended since. The last response persists as a
 // message and lands inside that delta, so adding CompletionTokens
-// would double-count it. With no usage recorded — the first
-// request, or a cold process resuming a session — the estimate is
-// the whole verbatim render; fixed overhead (system prompt, tools)
-// rides inside the margin.
+// would double-count it. Two known under-counts, both margin-
+// absorbed: msgs predates the run's own user prompt (the estimate
+// misses one incoming turn), and a request failing before usage
+// leaves the anchor stale one render. With no usage recorded — the
+// first request, or a cold process resuming a session — the estimate
+// is the whole verbatim render; fixed overhead (system prompt,
+// tools) rides inside the margin.
 //
 // Once tripped the gate latches for the session: stored history is
 // append-only, so a verbatim render that overflowed once never fits
-// again — the latch is monotonicity, not just anti-flap. Callers
-// holding no evidence (missing stats, unknown window) keep the
-// machinery on: deactivating a safety mechanism needs positive
-// proof of headroom.
+// again — the latch is monotonicity, not just anti-flap. A
+// successful Summarize is the one write that shrinks history, so it
+// clears the latch (see its save path). Callers holding no evidence
+// (missing stats, unknown window) keep the machinery on:
+// deactivating a safety mechanism needs positive proof of headroom.
+// An unknown window still records the estimate — only the latch
+// decision has nothing to check against.
 func (a *sessionAgent) pressureEngaged(sessionID string, msgs []message.Message) bool {
-	cw := int64(a.largeModel.Get().CatwalkCfg.ContextWindow)
-	if cw == 0 || sessionID == "" || a.reqStats == nil {
+	if sessionID == "" || a.reqStats == nil {
 		return true
 	}
 	rs, _ := a.reqStats.Get(sessionID)
@@ -94,7 +95,17 @@ func (a *sessionAgent) pressureEngaged(sessionID string, msgs []message.Message)
 	// render's growth. Self-correcting on the next success and
 	// priced into the step-jump margin.
 	rs.renderedMsgs = len(msgs)
-	if !rs.pressureEngaged && est >= cw-pressureMargin(cw, a.outputReserve()) {
+	cw := int64(a.largeModel.Get().CatwalkCfg.ContextWindow)
+	if cw == 0 {
+		// No declared window means no margin to cross — machinery
+		// stays on without latching or counting an activation
+		// (engaged means a measured crossing, not the fail-safe
+		// default). The estimate and watermark still record so an
+		// unknown-window run audits as measured, not absent.
+		a.reqStats.Set(sessionID, rs)
+		return true
+	}
+	if !rs.pressureEngaged && est >= cw-pressureMargin(a.outputReserve()) {
 		rs.pressureEngaged = true
 		rs.pressureActivations++
 		slog.Info("Notebook pressure gate engaged",
@@ -105,4 +116,21 @@ func (a *sessionAgent) pressureEngaged(sessionID string, msgs []message.Message)
 	}
 	a.reqStats.Set(sessionID, rs)
 	return rs.pressureEngaged
+}
+
+// clearPressureState drops the gate's session state after a write
+// that shrinks stored history — Summarize is the only one. The
+// latch and its anchors describe pre-compact history, so the next
+// render re-derives engagement from the shrunken list. Activations
+// keep counting: a re-engage post-compact is a real transition.
+func (a *sessionAgent) clearPressureState(sessionID string) {
+	if a.reqStats == nil {
+		return
+	}
+	a.reqStats.Update(sessionID, func(rs *requestStats) {
+		rs.pressureEngaged = false
+		rs.pressureEstimate = 0
+		rs.renderedMsgs = 0
+		rs.LastPromptTokens = 0
+	})
 }

@@ -567,7 +567,10 @@ off (the mechanism-forcing experiments), run notebook-disabled, or
 evaluate against an unknown window carry no `pressure` key at all
 and any `pressure.*` predicate fails closed on them — the assert is
 arm-scoped because trajectory coverage can't express "present on
-some arms, absent on others".
+some arms, absent on others". Note the gate removes render-side
+churn only: coverage accrual (and its `generator_tokens` spend) runs
+in every regime, so below-pressure arms still pay generation cost —
+"does the notebook pay for itself" stays with #90/#106.
 
 `generator_tokens` is the notebook sidecar's generation spend
 (segment, checkpoint, digest calls) — kept out of `tokens` so the
