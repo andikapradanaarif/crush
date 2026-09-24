@@ -156,7 +156,11 @@ func estimateMediaTokens(mediaType, text string, dataBytes int) int64 {
 	if dataBytes == 0 {
 		return approxTokenCount(mediaType) + approxTokenCount(text)
 	}
-	return approxTokenCount(fmt.Sprintf("%s %s %d bytes", mediaType, text, dataBytes))
+	// Payload bytes ride the wire (typically base64 — ~4/3 expansion,
+	// so chars/4 on the raw length stays within the estimator's
+	// accuracy) — the metadata string alone undercounts a large
+	// attachment to nearly nothing.
+	return approxTokenCount(fmt.Sprintf("%s %s %d bytes", mediaType, text, dataBytes)) + int64(dataBytes)/4
 }
 
 func estimateSourceTokens(source fantasy.SourceContent) int64 {

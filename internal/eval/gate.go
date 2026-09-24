@@ -32,6 +32,15 @@ type Report struct {
 	// control — mechanism flags aren't orthogonal to exclusion by
 	// construction, so a differential is a first-class alarm.
 	ExcludedDifferential []string
+	// ExpectedExclusionSatisfied lists trajectories where the
+	// declared arm produced at least expected_exclusion.min records
+	// of the declared error class — the designed exclusion observed.
+	// ExpectedExclusionMissed lists trajectories where it fell
+	// short — the regime the experiment needs never engaged, so the
+	// run was vacuous where it should have been decisive. A miss is
+	// a first-class alarm.
+	ExpectedExclusionSatisfied []string
+	ExpectedExclusionMissed    []string
 	// Starved trajectories exhausted their attempts cap on
 	// inconclusive; Saturated exhausted on error. Alarm labels on the
 	// summary, not persisted trajectory states.
@@ -286,6 +295,7 @@ func (s ArmTokenStats) LastTurnMean() float64 {
 func (r Report) Fired(alpha float64) bool {
 	return r.DiffuseP < alpha ||
 		len(r.Catastrophic) > 0 || len(r.ExcludedDifferential) > 0 ||
+		len(r.ExpectedExclusionMissed) > 0 ||
 		len(r.Starved) > 0 || len(r.Saturated) > 0 || len(r.Smoke) > 0 ||
 		len(r.Coincident) > 0 ||
 		len(r.Skipped) > 0 || // Corpus shrinkage is an alarm.
@@ -320,6 +330,7 @@ func (r Report) Summary(alpha float64) string {
 	}
 	fire("catastrophic", r.Catastrophic)
 	fire("excluded-differential", r.ExcludedDifferential)
+	fire("expected-exclusion-missed", r.ExpectedExclusionMissed)
 	fire("coverage-starved", r.Starved)
 	fire("error-saturated", r.Saturated)
 	fire("smoke", r.Smoke)
@@ -327,6 +338,9 @@ func (r Report) Summary(alpha float64) string {
 	fire("noop-flag", r.NoopFlags)
 	if len(r.Skipped) > 0 {
 		fmt.Fprintf(&b, "  SKIP: %s\n", strings.Join(r.Skipped, ", "))
+	}
+	if len(r.ExpectedExclusionSatisfied) > 0 {
+		fmt.Fprintf(&b, "  expected exclusion met: %s\n", strings.Join(r.ExpectedExclusionSatisfied, ", "))
 	}
 	eligible := 0
 	for _, ok := range r.CatastrophicEligible {
@@ -601,11 +615,31 @@ func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRe
 		}
 
 		// Excluded-class differential, per trajectory: Fisher on
-		// excluded counts between arms.
+		// excluded counts between arms — unless an expected_exclusion
+		// declaration owns the asymmetry.
 		et, ec, tt, tc := excludedCounts(recs)
 		if tt+tc > 0 {
-			exclTraj = append(exclTraj, id)
-			exclP = append(exclP, FisherExactCollapse(et, tt, ec, tc))
+			consume := false
+			if d := exp.ExpectedExclusion; d != nil {
+				if excludedClassCount(recs, d.Arm, d.ErrorClass) >= d.Min {
+					rep.ExpectedExclusionSatisfied = append(rep.ExpectedExclusionSatisfied, id)
+					// The declaration consumes the differential only
+					// when the asymmetry ran the declared direction —
+					// an equal-or-reverse split is still suspect and
+					// keeps its Fisher.
+					declared, other := ec, et
+					if d.Arm == ArmTreatment {
+						declared, other = et, ec
+					}
+					consume = declared > other
+				} else {
+					rep.ExpectedExclusionMissed = append(rep.ExpectedExclusionMissed, id)
+				}
+			}
+			if !consume {
+				exclTraj = append(exclTraj, id)
+				exclP = append(exclP, FisherExactCollapse(et, tt, ec, tc))
+			}
 		}
 	}
 
@@ -626,6 +660,8 @@ func Evaluate(exp *Experiment, bands *Bands, baselineKey string, records []RunRe
 
 	sort.Strings(rep.Catastrophic)
 	sort.Strings(rep.ExcludedDifferential)
+	sort.Strings(rep.ExpectedExclusionSatisfied)
+	sort.Strings(rep.ExpectedExclusionMissed)
 	sort.Strings(rep.Smoke)
 	return rep
 }
@@ -679,6 +715,19 @@ func excludedCounts(recs []RunRecord) (et, ec, tt, tc int) {
 		}
 	}
 	return
+}
+
+// excludedClassCount returns the arm's error records carrying the
+// given class — the satisfaction signal for expected_exclusion.
+// Inconclusive records carry no error class and never count.
+func excludedClassCount(recs []RunRecord, arm, class string) int {
+	n := 0
+	for _, r := range recs {
+		if r.Arm == arm && r.Outcome == OutcomeError && r.ErrorClass == class {
+			n++
+		}
+	}
+	return n
 }
 
 func allFailed(bits []bool) bool {

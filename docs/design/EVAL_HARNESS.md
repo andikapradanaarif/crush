@@ -507,7 +507,7 @@ trajectory twice) is strictly worse.
 		}
 	],
 	"generator_tokens": {"calls": 12, "input": 41000, "output": 900, "cache_read": 0, "cache_write": 0},
-	"error_class": "auth | rate_limit | context_too_large | provider_* | cancelled | timeout",
+	"error_class": "auth | rate_limit | context_too_large | window_cap_enforced | provider_* | cancelled | timeout",
 	"session_db": "results/<experiment>/artifacts/<trajectory_id>-<arm>-<run_index>.db",
 	"env": {"crush_sha": "...", "model_resolved": "...", "go": "1.25", "os": "darwin", "content_hash": "..."}
 }
@@ -571,6 +571,69 @@ some arms, absent on others". Note the gate removes render-side
 churn only: coverage accrual (and its `generator_tokens` spend) runs
 in every regime, so below-pressure arms still pay generation cost —
 "does the notebook pay for itself" stays with #90/#106.
+
+`enforce_context_window` (default off) turns the manifest-declared
+`context_window` into a hard cap: inside `PrepareStep`, a wire-bound
+render whose chars/4 estimate (messages plus tool schemas — the
+schema block is the largest deterministic term after history and
+providers bill it every request) plus the request's output budget
+exceeds the window fails with `ErrContextWindowExceeded`, which
+`classifyRunError` maps to `window_cap_enforced` — deliberately a
+distinct class from `context_too_large`. A real overflow is
+fixture-class (the trajectory can never fit, so two deaths skip
+it); a manufactured death is the experiment's designed condition —
+the control arm is *supposed* to die — so it records as an ordinary
+excluded-class error: sampling continues, no fixture skip. This is
+how a pressure regime is manufactured without a small-window
+endpoint: the manifest pins `context_window: 64000` (with
+`default_max_tokens` reconciled below it) on a model whose real
+window is larger, and enforcement makes the pin real. Deliberately
+not notebook-gated — the uncompressed control arm is the one meant
+to die. Known under-counts: request-level `Files` attachments sit
+outside the message list, provider envelope fields (headers,
+per-request metadata) are uncounted, and chars/4 drifts from real
+tokenization — the cap simulates the provider's check, it isn't
+wire-exact.
+
+`expected_exclusion` is the manifest's declaration that the
+designed death is supposed to happen:
+
+```json
+"expected_exclusion": {"arm": "control", "error_class": "window_cap_enforced", "min": 5}
+```
+
+It claims the declared arm produces at least `min` error records of
+the declared class per trajectory. The designed death is exempted
+at every layer the harness would otherwise treat as void: an arm
+whose exclusions are *entirely* the declared death at-or-beyond
+`min` is exempt from the error-saturated alarm (the saturation is
+the designed condition, not infra bleed — an arm that also starved
+inconclusive or died other ways keeps the alarm); the trajectory's
+excluded-differential is consumed when the declared arm met `min`
+and the asymmetry ran the declared direction; and compare's
+conclusive-asymmetry refusal — the ground-truth check that an
+under-sampled arm voids the invocation — exempts a shortfall fully
+explained by the declared death. A trajectory where the declared
+arm falls short reports `expected-exclusion-missed` — a
+first-class alarm, since a control that survives means the regime
+never engaged and the run is vacuous where it should have been
+decisive. Set `min` to the trajectory's designed n when the claim
+is total death. `window_cap_enforced` declarations additionally
+require the declared arm to pin `enforce_context_window: true` at
+load — an unmeetable expectation fails at validation, not at
+runtime.
+
+`notebook-pressure-regime` (and its `-qwen` sibling) exercise the
+pair: control `notebook_enabled: false` verbatim-until-death vs
+treatment gate-on, both enforcing 64K, with
+`min_pressure.activations: 1` proving the gate fired and
+`expected_exclusion` asserting the control cannot complete. Read
+the expected outcome accordingly: in the regime the experiment
+exists to demonstrate, control produces `error`/
+`window_cap_enforced` records rather than a conclusive pair — the
+satisfied/missed bookkeeping, not the declared primary, is the
+finding. (A primary verdict still emerges in the other regime,
+where trajectories fit and control survives.)
 
 `generator_tokens` is the notebook sidecar's generation spend
 (segment, checkpoint, digest calls) — kept out of `tokens` so the

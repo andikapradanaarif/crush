@@ -287,6 +287,30 @@ func ValidateExperiment(e *Experiment) error {
 			return fmt.Errorf("runs_per_trajectory[%s] must be > 0", band)
 		}
 	}
+	if d := e.ExpectedExclusion; d != nil {
+		if d.Arm != ArmControl && d.Arm != ArmTreatment {
+			return fmt.Errorf("expected_exclusion.arm must be %q or %q — the excluded differential only compares those arms", ArmControl, ArmTreatment)
+		}
+		arm, ok := e.Arms[d.Arm]
+		if !ok {
+			return fmt.Errorf("expected_exclusion.arm %q names no arm in this experiment", d.Arm)
+		}
+		if d.ErrorClass == "" {
+			return fmt.Errorf("expected_exclusion.error_class is required — an unclassified death proves nothing about the regime")
+		}
+		if d.Min < 1 {
+			return fmt.Errorf("expected_exclusion.min must be >= 1")
+		}
+		// window_cap_enforced can only occur under enforcement — a
+		// declaration on an unenforced arm is unmeetable and must
+		// fail at load rather than report a vacuous miss at runtime.
+		if d.ErrorClass == "window_cap_enforced" {
+			v, known := arm.Config.Options["enforce_context_window"]
+			if b, _ := v.(bool); known && !b {
+				return fmt.Errorf("expected_exclusion %s/%s: the declared arm pins enforce_context_window=false — the class can never occur", d.Arm, d.ErrorClass)
+			}
+		}
+	}
 	for name, arm := range e.Arms {
 		for key := range arm.Coverage {
 			op, field, err := ParseArmCoverageKey(key)
@@ -590,6 +614,8 @@ var flagCodeDefaults = map[string]bool{
 	"notebook_pressure_gate":   true,
 	"project_index":            false,
 	"ambiguity_clarification":  false,
+	"enforce_context_window":   false,
+	"disable_auto_summarize":   false,
 }
 
 // ValidateArmCoverageResolved re-runs the starvation check against

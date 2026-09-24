@@ -12,6 +12,8 @@
 		"ambiguity_clarification": false,
 		"notebook_prior_turns": "verbatim",
 		"notebook_pressure_gate": true,
-		"notebook_hydration": true
+		"notebook_hydration": true,
+		"enforce_context_window": false,
+		"disable_auto_summarize": false
 	}
 }

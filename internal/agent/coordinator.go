@@ -1129,8 +1129,12 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 			c.cfg.Config().Options.NotebookIsEnabled(),
 		StubSuperseded: c.cfg.Config().Options.NotebookStubSupersededEnabled() &&
 			notebookOn && recallOn,
-		NotebookPriorTurns:     priorTurns,
-		PressureGate:           c.cfg.Config().Options.NotebookPressureGateEnabled() && notebookOn,
+		NotebookPriorTurns: priorTurns,
+		PressureGate:       c.cfg.Config().Options.NotebookPressureGateEnabled() && notebookOn,
+		// Deliberately not notebook-gated: the cap simulates the
+		// provider's own overflow rejection, which an uncompressed
+		// (notebook-off) control arm is meant to hit.
+		EnforceContextWindow:   c.cfg.Config().Options.EnforceContextWindowEnabled(),
 		StubBoundary:           c.stubBoundary,
 		StubStats:              c.stubStats,
 		CollapseRecorded:       c.collapseRecorded,

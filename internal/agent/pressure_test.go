@@ -633,3 +633,158 @@ func TestFreezeDigestEligibility_EmptyRenderDefers(t *testing.T) {
 	freezeDigestEligibility(collapse, entries, segmentKey{turn: 1})
 	require.Equal(t, map[int64]bool{0: true}, collapse.digestTurns)
 }
+
+func TestEnforceWindowCap(t *testing.T) {
+	t.Parallel()
+
+	big := []fantasy.Message{fantasy.NewUserMessage(strings.Repeat("x", 240_000))} // ~60K est.
+	small := []fantasy.Message{fantasy.NewUserMessage("hi")}
+
+	t.Run("flag off never rejects", func(t *testing.T) {
+		a := pressureTestAgent(64_000, 4_000)
+		require.NoError(t, a.enforceWindowCap(big, nil, 4_000))
+	})
+	t.Run("unknown window never rejects", func(t *testing.T) {
+		a := pressureTestAgent(0, 4_000)
+		a.enforceContextWindow = true
+		require.NoError(t, a.enforceWindowCap(big, nil, 4_000))
+	})
+	t.Run("under cap passes", func(t *testing.T) {
+		a := pressureTestAgent(64_000, 4_000)
+		a.enforceContextWindow = true
+		require.NoError(t, a.enforceWindowCap(small, nil, 4_000))
+	})
+	t.Run("over cap rejects with sentinel", func(t *testing.T) {
+		a := pressureTestAgent(64_000, 4_000)
+		a.enforceContextWindow = true
+		err := a.enforceWindowCap(big, nil, 4_000)
+		require.ErrorIs(t, err, ErrContextWindowExceeded)
+		require.Contains(t, err.Error(), "declared window")
+	})
+	t.Run("output budget counts against the window", func(t *testing.T) {
+		// ~60K input fits a 64K window with a 4K completion but not
+		// with an 8K one — the provider contract is input + output.
+		a := pressureTestAgent(64_000, 4_000)
+		a.enforceContextWindow = true
+		require.NoError(t, a.enforceWindowCap(big, nil, 3_000))
+		require.ErrorIs(t, a.enforceWindowCap(big, nil, 8_000), ErrContextWindowExceeded)
+	})
+	t.Run("unset output budget falls back to catalog default", func(t *testing.T) {
+		a := pressureTestAgent(64_000, 8_000)
+		a.enforceContextWindow = true
+		// ~60K input + 8K catalog default > 64K — the same failure
+		// a real endpoint returns when max_tokens pushes over.
+		require.ErrorIs(t, a.enforceWindowCap(big, nil, 0), ErrContextWindowExceeded)
+	})
+	t.Run("tool schemas count against the window", func(t *testing.T) {
+		// ~60K input + 4K output fits 64K; a ~20K-token schema block
+		// (providers bill it on every request) pushes the same
+		// request over.
+		a := pressureTestAgent(64_000, 4_000)
+		a.enforceContextWindow = true
+		tool := fantasy.NewAgentTool("big_tool", strings.Repeat("d", 80_000),
+			func(context.Context, struct{}, fantasy.ToolCall) (fantasy.ToolResponse, error) {
+				return fantasy.ToolResponse{}, nil
+			})
+		require.NoError(t, a.enforceWindowCap(big, nil, 3_000))
+		require.ErrorIs(t, a.enforceWindowCap(big, []fantasy.AgentTool{tool}, 3_000), ErrContextWindowExceeded)
+	})
+}
+
+// TestRun_EnforceContextWindowCap pins the two-arm contract #112 needs:
+// with a manifest-pinned 64K window and enforcement on, a verbatim
+// (notebook-off) run dies exactly like a small-window endpoint would
+// kill it — terminal error, nothing reaches the wire — while the same
+// history under the gate collapses under the cap and completes.
+func TestRun_EnforceContextWindowCap(t *testing.T) {
+	t.Parallel()
+
+	// A covered turn carrying a ~280KB tool result: ~70K estimated
+	// tokens — over a 64K window verbatim, a stub line collapsed.
+	seed := func(t *testing.T, env *processEnv, sessionID string) []message.Message {
+		t.Helper()
+		mkMsg(t, env.messages, sessionID, message.User, message.TextContent{Text: "first prompt"})
+		mkMsg(t, env.messages, sessionID, message.Assistant,
+			message.ToolCall{ID: "tc-big", Name: "bash", Input: `{"command":"cat huge.log"}`, Finished: true})
+		mkMsg(t, env.messages, sessionID, message.Tool,
+			message.ToolResult{ToolCallID: "tc-big", Name: "bash", Content: strings.Repeat("result ", 40_000)})
+		mkMsg(t, env.messages, sessionID, message.Assistant, message.TextContent{Text: "turn zero answer"})
+		mkMsg(t, env.messages, sessionID, message.User, message.TextContent{Text: "second prompt"})
+		msgs, err := env.messages.List(t.Context(), sessionID)
+		require.NoError(t, err)
+		return msgs
+	}
+	mk := func(env *processEnv, m fantasy.LanguageModel, notebookOn bool) *sessionAgent {
+		model := Model{Model: m, CatwalkCfg: catwalk.Model{ContextWindow: 64_000, DefaultMaxTokens: 4_000}}
+		opts := SessionAgentOptions{
+			LargeModel:           model,
+			SmallModel:           model,
+			SystemPrompt:         "system",
+			IsYolo:               true,
+			Sessions:             env.sessions,
+			Messages:             env.messages,
+			NotebookEnabled:      notebookOn,
+			NotebookPriorTurns:   priorTurnsStub,
+			PressureGate:         true,
+			EnforceContextWindow: true,
+			RawTokenBudget:       1_000_000,
+			DetachedWork:         &sync.WaitGroup{},
+			Tools: []fantasy.AgentTool{
+				&fakeTool{name: "bash", resp: fantasy.NewTextResponse("ok")},
+				&fakeTool{name: notebooktool.RecallToolName, resp: fantasy.NewTextResponse("recalled")},
+				&fakeTool{name: notebooktool.SearchToolName, resp: fantasy.NewTextResponse("")},
+			},
+		}
+		if notebookOn {
+			opts.Notebook = env.notebook
+		}
+		return NewSessionAgent(opts).(*sessionAgent)
+	}
+
+	t.Run("control dies at the cap like a real endpoint", func(t *testing.T) {
+		env, sessionID := newProcessEnv(t, &countingGen{})
+		seed(t, env, sessionID)
+
+		m := &captureModel{usage: 2_000}
+		a := mk(env, m, false)
+
+		_, err := a.Run(t.Context(), SessionAgentCall{SessionID: sessionID, Prompt: "turn two"})
+		require.ErrorIs(t, err, ErrContextWindowExceeded)
+		require.Empty(t, m.prompts, "the rejected request must never reach the model")
+	})
+
+	t.Run("treatment collapses under the cap and completes", func(t *testing.T) {
+		env, sessionID := newProcessEnv(t, &countingGen{})
+		msgs := seed(t, env, sessionID)
+
+		m := &captureModel{usage: 2_000}
+		a := mk(env, m, true)
+
+		// Commit coverage directly — the run's own detectSegments sees
+		// the seeded turn as already processed, so the cold-start
+		// estimate engages the gate and the covered turn collapses.
+		ctx := t.Context()
+		segs := segmentBoundaries(msgs, a.segTokenBudget(), a.segMaxSteps())
+		covered := make([]notebook.ProcessedSegment, 0, len(segs))
+		for _, s := range segs {
+			covered = append(covered, notebook.ProcessedSegment{
+				TurnNumber:    s.turn,
+				SegmentNumber: s.number,
+				StartIndex:    int64(s.start),
+				EndIndex:      int64(s.end),
+				State:         notebook.SegmentProcessed,
+			})
+		}
+		require.NoError(t, env.notebook.MarkSegmentsProcessed(ctx, sessionID, covered))
+
+		_, err := a.Run(ctx, SessionAgentCall{SessionID: sessionID, Prompt: "turn two"})
+		require.NoError(t, err)
+		a.detachedWork.Wait()
+
+		require.NotEmpty(t, m.prompts, "the collapsed render must reach the wire")
+		wire := m.prompts[len(m.prompts)-1]
+		require.Contains(t, wire, `{"_collapsed":"prior turn 0"}`)
+		require.NotContains(t, wire, "result result result",
+			"the giant result must not reach the wire — it is what would have overflowed")
+	})
+}

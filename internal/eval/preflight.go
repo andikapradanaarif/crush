@@ -232,9 +232,11 @@ func dropHint(exp *Experiment, providerID string, known []catwalk.Provider, reso
 //     fixture-class. (A dead endpoint can never produce a completed
 //     request, so it still reads step-0.)
 //   - rate_limit / provider_transient / context_too_large /
-//     provider_other / cancelled / timeout: keep sampling — resampling
-//     or the attempts cap is the right mechanism. (context_too_large
-//     is additionally fixture-class: deterministic per trajectory.)
+//     window_cap_enforced / provider_other / cancelled / timeout: keep
+//     sampling — resampling or the attempts cap is the right mechanism.
+//     (context_too_large is additionally fixture-class: deterministic
+//     per trajectory; window_cap_enforced is deliberately not — see
+//     isFixtureConfigError.)
 //
 // Without error_class (older children), two string-matched classes:
 //
@@ -271,7 +273,7 @@ func isConfigClassError(rec RunRecord) bool {
 		// endpoint still aborts — it can never produce a completed
 		// request, so it never reads mid-run.
 		return rec.Steps == 0 && rec.Request == nil
-	case "rate_limit", "provider_transient", "provider_other", "context_too_large", "cancelled", "timeout":
+	case "rate_limit", "provider_transient", "provider_other", "context_too_large", "window_cap_enforced", "cancelled", "timeout":
 		return false
 	}
 	s, _ := rec.CheckDetail["run_error"].(string)
@@ -319,6 +321,17 @@ func isFixtureConfigError(rec RunRecord) bool {
 	}
 	if rec.ErrorClass == "context_too_large" {
 		return true
+	}
+	// window_cap_enforced is deliberately not fixture-class even
+	// though it is equally deterministic: the manufactured rejection
+	// is the experiment's designed condition (the pressure-regime
+	// control arm is supposed to die at the declared cap), so the
+	// death is data — it keeps sampling, lands as an excluded-class
+	// record, and the excluded-differential reports the asymmetry.
+	// Fixture-classing it would skip the trajectory at two deaths
+	// and void the invocation exactly when the cap works.
+	if rec.ErrorClass == "window_cap_enforced" {
+		return false
 	}
 	// A provider rejection or server failure observed mid-trajectory
 	// is trajectory-scoped — the offending content belongs to this

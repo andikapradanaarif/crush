@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"fmt"
 	"log/slog"
 
+	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/message"
 )
 
@@ -116,6 +118,46 @@ func (a *sessionAgent) pressureEngaged(sessionID string, msgs []message.Message)
 	}
 	a.reqStats.Set(sessionID, rs)
 	return rs.pressureEngaged
+}
+
+// enforceWindowCap is the harness-side stand-in for a provider's own
+// overflow rejection, active only under options.enforce_context_window.
+// A manifest that pins context_window below the endpoint's real window
+// never trips the provider — the endpoint keeps accepting — so the
+// agent rejects locally instead: the declared cap becomes real for the
+// run without needing a small-window model.
+//
+// The measure is the same chars/4 estimate the gate reports, taken over
+// the final wire-bound message list inside PrepareStep plus the tool
+// schemas — providers count the schema block on every request, and for
+// a full toolset it is the largest deterministic term after history
+// (marshaled via toolSchemaBytes, the same sizing step telemetry uses).
+// Rejection mirrors the common provider contract: input plus the
+// requested output budget must fit the window. Callers pass the call's
+// max output; unset falls back to the catalog default (the same
+// stand-in outputReserve uses). Known under-counts: request-level
+// attachments sent as stream Files sit outside the message list and go
+// uncounted, headers and other provider envelopes are uncounted, and
+// chars/4 drifts from real tokenization — the cap is a simulation of
+// the provider's check, not a wire-exact bound.
+func (a *sessionAgent) enforceWindowCap(msgs []fantasy.Message, agentTools []fantasy.AgentTool, maxOutputTokens int64) error {
+	if !a.enforceContextWindow {
+		return nil
+	}
+	cw := int64(a.largeModel.Get().CatwalkCfg.ContextWindow)
+	if cw <= 0 {
+		return nil
+	}
+	if maxOutputTokens <= 0 {
+		maxOutputTokens = a.outputReserve()
+	}
+	builtinSchemas, mcpSchemas := toolSchemaBytes(agentTools)
+	est := estimateMessageTokens(msgs) + (builtinSchemas+mcpSchemas)/4
+	if est+maxOutputTokens <= cw {
+		return nil
+	}
+	return fmt.Errorf("%w: ~%d estimated input + %d output > %d declared window",
+		ErrContextWindowExceeded, est, maxOutputTokens, cw)
 }
 
 // clearPressureState drops the gate's session state after a write

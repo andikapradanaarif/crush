@@ -639,15 +639,31 @@
           "description": "Replace stale or superseded tool results in raw history with labeled stubs (experimental)",
           "default": false
         },
+        "notebook_hydration": {
+          "type": "boolean",
+          "description": "Seed a new session's notebook from cross-session memory on the first turn",
+          "default": true
+        },
         "notebook_prior_turns": {
           "type": "string",
           "enum": [
             "verbatim",
             "stub",
-            "digest"
+            "digest",
+            "summarize"
           ],
-          "description": "Render mode for completed covered turns: verbatim keeps the full transcript, stub collapses prior-turn tool pairs to labeled stubs, digest adds a generated turn digest (experimental).",
+          "description": "Render mode for completed covered turns: verbatim keeps the full transcript, stub collapses prior-turn tool pairs to labeled stubs, digest adds a generated turn digest, summarize replaces the turn span with its generated entries (experimental).",
           "default": "verbatim"
+        },
+        "notebook_pressure_gate": {
+          "type": "boolean",
+          "description": "Gate the notebook render path on estimated request pressure; below the margin the render is verbatim (the notebook-mode overflow guard)",
+          "default": true
+        },
+        "enforce_context_window": {
+          "type": "boolean",
+          "description": "Fail rendered requests estimated to overflow the model's declared context_window; simulates a small-window endpoint (eval use)",
+          "default": false
         },
         "project_index": {
           "type": "boolean",
@@ -718,7 +734,7 @@
         },
         "ambiguity_clarification": {
           "type": "boolean",
-          "description": "Enable deterministic clarification gates: turn-zero vagueness pre-filter, first-write scope gate, and loop-stop escalation. Experimental.",
+          "description": "Enable deterministic clarification gates: turn-zero vagueness pre-filter, first-write scope gate, loop-stop replan and escalation, and the burn-watch spend tripwire. Experimental.",
           "default": false
         }
       },

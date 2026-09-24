@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -120,6 +121,48 @@ func TestCompare_LegacyStarveInference(t *testing.T) {
 	writeCompareRecords(t, dir, recs...)
 
 	_, err := seededRunner(dir).Compare(exp, "")
+	require.ErrorContains(t, err, "conclusive asymmetry")
+}
+
+// A declared expected exclusion exempts the conclusive-asymmetry
+// refusal: an arm whose shortfall is entirely the declared death is
+// the designed condition. Exclusions the declaration doesn't cover
+// keep the refusal.
+func TestInvocationAlarms_ExpectedExclusion(t *testing.T) {
+	dir := t.TempDir()
+	opts := map[string]any{"f": 1}
+	var recs []RunRecord
+	for i := 1; i <= 3; i++ {
+		recs = append(recs, compareRecord("e", "t", ArmTreatment, "i1", i, 90, opts))
+	}
+	for i := 1; i <= 5; i++ {
+		rec := compareRecord("e", "t", ArmControl, "i1", i, 0, opts)
+		rec.Outcome = OutcomeError
+		rec.ErrorClass = "window_cap_enforced"
+		recs = append(recs, rec)
+	}
+	r := seededRunner(dir)
+	decl := &ExpectedExclusion{Arm: ArmControl, ErrorClass: "window_cap_enforced", Min: 3}
+
+	_, _, err := r.invocationAlarms("e", "i1", recs, decl)
+	require.NoError(t, err)
+
+	// Same records, no declaration — unexplained asymmetry refuses.
+	_, _, err = r.invocationAlarms("e", "i1", recs, nil)
+	require.ErrorContains(t, err, "conclusive asymmetry")
+
+	// A death the declaration doesn't cover refuses — the shortfall
+	// isn't entirely the designed one.
+	bad := slices.Clone(recs)
+	bad[3].ErrorClass = "provider_server"
+	_, _, err = r.invocationAlarms("e", "i1", bad, decl)
+	require.ErrorContains(t, err, "conclusive asymmetry")
+
+	// Below the declared minimum — the regime under-engaged.
+	low := slices.Clone(recs)
+	low[3].Outcome = OutcomePass
+	decl4 := &ExpectedExclusion{Arm: ArmControl, ErrorClass: "window_cap_enforced", Min: 5}
+	_, _, err = r.invocationAlarms("e", "i1", low, decl4)
 	require.ErrorContains(t, err, "conclusive asymmetry")
 }
 

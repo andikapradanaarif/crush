@@ -706,6 +706,63 @@ func TestRunExperiment_NoopFlagAlarm(t *testing.T) {
 	require.True(t, rep.Fired(0.05))
 }
 
+// expected_exclusion declares the designed death: a met expectation
+// reports satisfied and consumes the differential; a miss is its own
+// alarm — the regime never engaged, so the run was vacuous.
+func TestEvaluate_ExpectedExclusion(t *testing.T) {
+	t.Parallel()
+	bands := &Bands{Entries: map[string]BandEntry{"t1": {Band: BandMid}}}
+	corpus := map[string]bool{"t1": true}
+	mkRecs := func(arm string, n int, out Outcome, class string) []RunRecord {
+		recs := make([]RunRecord, 0, n)
+		for range n {
+			recs = append(recs, RunRecord{TrajectoryID: "t1", Arm: arm, Outcome: out, ErrorClass: class})
+		}
+		return recs
+	}
+	exp := func(min int) *Experiment {
+		return &Experiment{
+			Name: "ee", Model: "mock/m",
+			Arms:              map[string]Arm{ArmControl: {}, ArmTreatment: {}},
+			ExpectedExclusion: &ExpectedExclusion{Arm: ArmControl, ErrorClass: "window_cap_enforced", Min: min},
+		}
+	}
+	deaths := append(mkRecs(ArmControl, 5, OutcomeError, "window_cap_enforced"),
+		mkRecs(ArmTreatment, 5, OutcomePass, "")...)
+
+	// Declared death met — satisfied; the Fisher is one-sided
+	// treatment-heavy, so a control-heavy split alarms nothing either
+	// way, but the satisfaction bookkeeping is the contract.
+	rep := Evaluate(exp(3), bands, "", deaths, corpus, 0.05, 500, rand.New(rand.NewPCG(1, 2)))
+	require.Equal(t, []string{"t1"}, rep.ExpectedExclusionSatisfied)
+	require.Empty(t, rep.ExpectedExclusionMissed)
+	require.Empty(t, rep.ExcludedDifferential)
+	require.False(t, rep.Fired(0.05))
+
+	// Below the declared minimum — the regime under-engaged; the
+	// miss is the alarm.
+	rep = Evaluate(exp(6), bands, "", deaths, corpus, 0.05, 500, rand.New(rand.NewPCG(1, 2)))
+	require.Empty(t, rep.ExpectedExclusionSatisfied)
+	require.Equal(t, []string{"t1"}, rep.ExpectedExclusionMissed)
+	require.True(t, rep.Fired(0.05))
+
+	// Treatment-side collapse stays alarming: declared on control
+	// but treatment is the arm that died — the expectation missed
+	// and the directional Fisher still evaluates.
+	reverse := append(mkRecs(ArmControl, 5, OutcomePass, ""),
+		mkRecs(ArmTreatment, 5, OutcomeError, "window_cap_enforced")...)
+	rep = Evaluate(exp(3), bands, "", reverse, corpus, 0.05, 500, rand.New(rand.NewPCG(1, 2)))
+	require.Empty(t, rep.ExpectedExclusionSatisfied)
+	require.Equal(t, []string{"t1"}, rep.ExpectedExclusionMissed)
+	require.Equal(t, []string{"t1"}, rep.ExcludedDifferential)
+
+	// No declaration — satisfied/missed machinery is inert.
+	exp2 := &Experiment{Name: "ee2", Model: "mock/m", Arms: map[string]Arm{ArmControl: {}, ArmTreatment: {}}}
+	rep = Evaluate(exp2, bands, "", deaths, corpus, 0.05, 500, rand.New(rand.NewPCG(1, 2)))
+	require.Empty(t, rep.ExpectedExclusionSatisfied)
+	require.Empty(t, rep.ExpectedExclusionMissed)
+}
+
 // A manifest key that isn't a config.Options field must be rejected —
 // otherwise the flag silently no-ops and both arms resolve identically.
 func TestLoadFlagsManifest_RejectsUnknownKeys(t *testing.T) {
@@ -852,6 +909,49 @@ func TestValidateExperiment_Primary(t *testing.T) {
 	exp = base()
 	exp.CostWeights = &CostWeights{CacheRead: -0.1}
 	require.ErrorContains(t, ValidateExperiment(exp), "cost_weights")
+}
+
+func TestValidateExperiment_ExpectedExclusion(t *testing.T) {
+	t.Parallel()
+	base := func() *Experiment {
+		return &Experiment{
+			Name: "x", Model: "mock/m", Temperature: ptr(0.0), Corpus: []string{"*"},
+			RunsPerTrajectory: map[Band]int{BandMid: 1},
+			Arms: map[string]Arm{
+				ArmControl:   {Config: ArmConfig{Options: map[string]any{"enforce_context_window": true}}},
+				ArmTreatment: {},
+			},
+		}
+	}
+
+	exp := base()
+	exp.ExpectedExclusion = &ExpectedExclusion{Arm: ArmControl, ErrorClass: "window_cap_enforced", Min: 5}
+	require.NoError(t, ValidateExperiment(exp))
+
+	// The differential only compares control and treatment.
+	exp = base()
+	exp.ExpectedExclusion = &ExpectedExclusion{Arm: "observer", ErrorClass: "window_cap_enforced", Min: 1}
+	require.ErrorContains(t, ValidateExperiment(exp), "expected_exclusion.arm")
+
+	exp = base()
+	exp.ExpectedExclusion = &ExpectedExclusion{Arm: ArmControl, Min: 1}
+	require.ErrorContains(t, ValidateExperiment(exp), "error_class is required")
+
+	exp = base()
+	exp.ExpectedExclusion = &ExpectedExclusion{Arm: ArmControl, ErrorClass: "window_cap_enforced", Min: 0}
+	require.ErrorContains(t, ValidateExperiment(exp), "min must be >= 1")
+
+	// The manufactured class can't occur on an unenforced arm —
+	// unmeetable expectations fail at load, not at runtime.
+	exp = base()
+	exp.ExpectedExclusion = &ExpectedExclusion{Arm: ArmTreatment, ErrorClass: "window_cap_enforced", Min: 1}
+	exp.Arms[ArmTreatment] = Arm{Config: ArmConfig{Options: map[string]any{"enforce_context_window": false}}}
+	require.ErrorContains(t, ValidateExperiment(exp), "enforce_context_window")
+
+	// A non-manufactured class needs no flag.
+	exp = base()
+	exp.ExpectedExclusion = &ExpectedExclusion{Arm: ArmControl, ErrorClass: "provider_server", Min: 1}
+	require.NoError(t, ValidateExperiment(exp))
 }
 
 func TestPrimaryMetricFunc_WeightedCost(t *testing.T) {

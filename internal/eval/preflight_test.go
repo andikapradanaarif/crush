@@ -2,6 +2,7 @@ package eval
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math/rand/v2"
 	"os"
@@ -225,7 +226,7 @@ func TestIsConfigClassError_ErrorClass(t *testing.T) {
 	for _, class := range []string{"auth", "provider_unreachable"} {
 		require.True(t, isConfigClassError(mk(class)), class)
 	}
-	for _, class := range []string{"rate_limit", "provider_transient", "provider_other", "context_too_large", "cancelled", "timeout"} {
+	for _, class := range []string{"rate_limit", "provider_transient", "provider_other", "context_too_large", "window_cap_enforced", "cancelled", "timeout"} {
 		require.False(t, isConfigClassError(mk(class)), class)
 	}
 	// provider_deterministic and provider_server share the scope
@@ -248,6 +249,12 @@ func TestIsConfigClassError_ErrorClass(t *testing.T) {
 	// context_too_large is trajectory-scoped — fixture-class, so two
 	// strikes skip the trajectory rather than abort the experiment.
 	require.True(t, isFixtureConfigError(mk("context_too_large")))
+	// window_cap_enforced is neither breaker: a manufactured cap
+	// death is the experiment's designed condition, so it keeps
+	// sampling as an ordinary excluded-class error — fixture-classing
+	// it would void the invocation exactly when the cap works.
+	require.False(t, isConfigClassError(mk("window_cap_enforced")))
+	require.False(t, isFixtureConfigError(mk("window_cap_enforced")))
 }
 
 // classRunner fails every run with a fixed typed error class — the
@@ -324,6 +331,70 @@ func TestIsFixtureConfigError_Shapes(t *testing.T) {
 		CheckDetail: map[string]any{"run_error": "crush run failed: exit status 1"},
 	}))
 	require.False(t, isFixtureConfigError(RunRecord{Outcome: OutcomePass}))
+}
+
+// capRunner simulates the harness-enforced cap: an arm whose generated
+// config pins enforce_context_window=true dies with the manufactured
+// class — the control arm's designed death in a pressure-regime
+// experiment.
+type capRunner struct{}
+
+func (capRunner) Run(_ context.Context, workdir string, _ []string, _ Budget) RunResult {
+	data, _ := os.ReadFile(filepath.Join(workdir, ".crush.json"))
+	var doc struct {
+		Options map[string]any `json:"options"`
+	}
+	_ = json.Unmarshal(data, &doc)
+	if on, _ := doc.Options["enforce_context_window"].(bool); on {
+		return RunResult{
+			Err:        errors.New("agent run failed: rendered request exceeds the declared context window"),
+			ErrorClass: "window_cap_enforced",
+		}
+	}
+	return RunResult{Steps: 3, ModelResolved: "mock/m"}
+}
+
+func TestRunTrajectory_ExpectedExclusionSuppressesSaturation(t *testing.T) {
+	t.Parallel()
+	r, exp, tr, trajDir := breakerFixture(t)
+	exp.Arms[ArmControl] = Arm{Config: ArmConfig{Options: map[string]any{"enforce_context_window": true}}}
+	exp.Arms[ArmTreatment] = Arm{Config: ArmConfig{Options: map[string]any{"enforce_context_window": false}}}
+	exp.ExpectedExclusion = &ExpectedExclusion{Arm: ArmControl, ErrorClass: "window_cap_enforced", Min: 3}
+	r.Driver = capRunner{}
+	// Control dies the declared death to the attempts cap; treatment
+	// passes — the declared saturation is the designed condition, so
+	// neither arm reports saturated.
+	rep := r.runTrajectory(t.Context(), exp, tr, trajDir, &FlagsManifest{Defaults: map[string]any{}}, 3, "inv", &configErrorTracker{})
+	require.NoError(t, rep.Abort)
+	require.Empty(t, rep.Saturated)
+	require.Empty(t, rep.Starved)
+	require.Empty(t, rep.Skipped)
+}
+
+func TestRunTrajectory_ExpectedExclusionUndeclaredStillSaturates(t *testing.T) {
+	t.Parallel()
+	r, exp, tr, trajDir := breakerFixture(t)
+	exp.Arms[ArmControl] = Arm{Config: ArmConfig{Options: map[string]any{"enforce_context_window": true}}}
+	exp.Arms[ArmTreatment] = Arm{Config: ArmConfig{Options: map[string]any{"enforce_context_window": false}}}
+	r.Driver = capRunner{}
+	// Same deaths, no declaration — control's saturation is
+	// unexplained and alarms as usual.
+	rep := r.runTrajectory(t.Context(), exp, tr, trajDir, &FlagsManifest{Defaults: map[string]any{}}, 3, "inv", &configErrorTracker{})
+	require.Contains(t, rep.Saturated, "brk-t/control")
+	require.NotContains(t, rep.Saturated, "brk-t/treatment")
+}
+
+func TestRunTrajectory_ExpectedExclusionOtherDeathsStillSaturate(t *testing.T) {
+	t.Parallel()
+	r, exp, tr, trajDir := breakerFixture(t)
+	exp.Arms[ArmControl] = Arm{Config: ArmConfig{Options: map[string]any{"enforce_context_window": true}}}
+	exp.Arms[ArmTreatment] = Arm{Config: ArmConfig{Options: map[string]any{"enforce_context_window": false}}}
+	exp.ExpectedExclusion = &ExpectedExclusion{Arm: ArmControl, ErrorClass: "window_cap_enforced", Min: 3}
+	// The arm dies rate_limit, not the declared class — the
+	// declaration doesn't cover it and saturation stays loud.
+	r.Driver = classRunner{class: "rate_limit"}
+	rep := r.runTrajectory(t.Context(), exp, tr, trajDir, &FlagsManifest{Defaults: map[string]any{}}, 3, "inv", &configErrorTracker{})
+	require.Contains(t, rep.Saturated, "brk-t/control")
 }
 
 func TestRunTrajectory_NonConfigErrorsKeepSampling(t *testing.T) {
