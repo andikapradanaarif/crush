@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -882,6 +883,9 @@ func TestRequiredSamples(t *testing.T) {
 	require.Equal(t, 2, RequiredSamples(0.047, 0.15))
 	require.Zero(t, RequiredSamples(0, 0.1))
 	require.Zero(t, RequiredSamples(0.1, 0))
+	// Schema-valid extremes must refuse, not wrap negative and open
+	// the gate — the clamp keeps "required" beyond any possible plan.
+	require.Equal(t, math.MaxInt32, RequiredSamples(1e200, 1e-160))
 }
 
 func TestLoadNoise(t *testing.T) {
@@ -1040,6 +1044,17 @@ func TestRunExperiment_AAArm(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, noise.CV, "steps")
 
+	// Every Evaluate-produced field reaches the caller — the
+	// wholesale-adoption fix for the dropped-field bug class.
+	require.NotEmpty(t, rep.Guardrails)
+	require.Equal(t, 6, rep.Guardrails[ArmControl].Runs)
+	require.Equal(t, 6, rep.Guardrails[ArmControl].Passes)
+	require.NotEmpty(t, rep.ArmTokens)
+
+	// The aa arm is removed before return — a reused *Experiment
+	// doesn't leak it into the next call.
+	require.NotContains(t, exp.Arms, ArmAA)
+
 	// AA starvation never alarms — it shares control's coverage.
 	require.NotContains(t, s, "/aa")
 }
@@ -1079,6 +1094,13 @@ func TestBuildPrimaryResult_Strata(t *testing.T) {
 	require.InDelta(t, 95, res.TreatmentUnfired.Mean(), 1e-9)
 	require.Equal(t, 1, res.AA.N)
 	require.InDelta(t, 110, res.AA.Mean(), 1e-9)
+
+	// A coverage-free treatment arm has no firing assertion — the
+	// strata must not vacuously report every run as "fired".
+	exp.Arms[ArmTreatment] = Arm{}
+	res = buildPrimaryResult(exp, recs, 0)
+	require.Zero(t, res.TreatmentFired.N)
+	require.Zero(t, res.TreatmentUnfired.N)
 }
 
 func TestUpdateNoiseFromAA(t *testing.T) {
@@ -1115,4 +1137,49 @@ func TestUpdateNoiseFromAA(t *testing.T) {
 	cv0 := n.CV["steps"]
 	n.updateNoiseFromAA(recs, metrics)
 	require.InDelta(t, cv0, n.CV["steps"], cv0*0.25) // 80/20 blend bounds drift.
+}
+
+// The behavioral and guardrail aggregators feed report blocks that
+// Summary prints — pin their filtering the same way the token table
+// is pinned.
+func TestArmMetricAggregators(t *testing.T) {
+	t.Parallel()
+	recs := []RunRecord{
+		{Arm: ArmControl, Outcome: OutcomePass, Steps: 4, CallMetrics: &CallMetrics{RereadsCrossTurn: 2, EditFailures: 1}},
+		{Arm: ArmControl, Outcome: OutcomePass, Steps: 6, CallMetrics: &CallMetrics{RereadsCrossTurn: 4}},
+		{Arm: ArmControl, Outcome: OutcomeInconclusive, Steps: 99, CallMetrics: &CallMetrics{RereadsCrossTurn: 50}},
+		{Arm: ArmControl, Outcome: OutcomePass, Steps: 5}, // No analysis: guardrails counts it, behavior can't.
+		{Arm: ArmTreatment, Outcome: OutcomeFail, Steps: 9, CallMetrics: &CallMetrics{}},
+	}
+	beh := armBehavior(recs)
+	require.Equal(t, 2, beh[ArmControl].Runs) // Analysis-bearing conclusive only.
+	require.InDelta(t, 6, beh[ArmControl].RereadsCrossTurn, 1e-9)
+	require.Equal(t, 1, beh[ArmTreatment].Runs)
+
+	g := armGuardrails(recs)
+	require.Equal(t, 3, g[ArmControl].Runs)
+	require.Equal(t, 3, g[ArmControl].Passes)
+	require.Equal(t, 15, g[ArmControl].StepsSum)
+	require.Equal(t, 1, g[ArmControl].EditFailures)
+	require.Zero(t, g[ArmTreatment].Passes)
+}
+
+// A flag-gated primary on an arm where the gate resolves off
+// compares mechanism-presence to structural zero — validation
+// rejects it like a starved min_ predicate.
+func TestValidateArmCoverageResolved_FlagGatedPrimary(t *testing.T) {
+	t.Parallel()
+	manifest := &FlagsManifest{Defaults: map[string]any{}}
+	exp := &Experiment{
+		Primary: &Primary{Metric: "checkpoints.rendered", Direction: PrimaryIncrease, MDE: 0.5},
+		Arms: map[string]Arm{
+			ArmControl:   {Config: ArmConfig{Options: map[string]any{"notebook_checkpoint": false}}},
+			ArmTreatment: {Config: ArmConfig{Options: map[string]any{"notebook_checkpoint": true}}},
+		},
+	}
+	require.ErrorContains(t, ValidateArmCoverageResolved(exp, manifest), "structural zeros")
+
+	// The mechanism enabled on both arms reopens the metric.
+	exp.Arms[ArmControl] = exp.Arms[ArmTreatment]
+	require.NoError(t, ValidateArmCoverageResolved(exp, manifest))
 }

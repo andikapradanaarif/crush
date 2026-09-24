@@ -897,8 +897,9 @@ decision metric per experiment:
   instead of measuring the prompt. A metric that wants that shape
   doesn't belong in the registry.
 - **`direction` declares the one-sided claim** (`decrease` = the
-  treatment lowers the metric); the sign matters for the power
-  calculation and for reading the reported Δ.
+  treatment lowers the metric). Declaring it is what licenses the
+  one-sided α in the power gate; the reported Δ is signed against
+  it either way.
 - **`mde` is the minimum detectable effect** as a relative change
   (0.15 = 15%). Effects smaller than the MDE are defined as
   uninteresting — which is what lets the power gate be a gate

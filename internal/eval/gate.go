@@ -218,10 +218,16 @@ func buildPrimaryResult(e *Experiment, records []RunRecord, requiredN int) *Prim
 			if r.Outcome.Conclusive() {
 				res.Treatment.add(v)
 			}
-			if fired, err := ArmCoverageMet(treatCov, r); err == nil && fired {
-				res.TreatmentFired.add(v)
-			} else {
-				res.TreatmentUnfired.add(v)
+			// The fired stratum only exists when the arm declares a
+			// firing assertion — coverage-free treatment would vacuously
+			// mark everything fired and duplicate the conclusive mean
+			// under a misleading label.
+			if len(treatCov) > 0 {
+				if fired, err := ArmCoverageMet(treatCov, r); err == nil && fired {
+					res.TreatmentFired.add(v)
+				} else {
+					res.TreatmentUnfired.add(v)
+				}
 			}
 		case ArmAA:
 			if r.Outcome.Conclusive() {
@@ -372,13 +378,13 @@ func (r Report) Summary(alpha float64) string {
 	}
 	if p := r.Primary; p != nil {
 		fmt.Fprintf(&b, "  primary %s (%s, mde %.0f%%):", p.Metric, p.Direction, 100*p.MDE)
-		if p.Control.N > 0 && p.Treatment.N > 0 && p.Control.Mean() > 0 {
-			fmt.Fprintf(&b, " control %.3g (n=%d), treatment %.3g (n=%d), Δ %+.1f%%",
-				p.Control.Mean(), p.Control.N, p.Treatment.Mean(), p.Treatment.N,
+		fmt.Fprintf(&b, " control %.3g (n=%d), treatment %.3g (n=%d)",
+			p.Control.Mean(), p.Control.N, p.Treatment.Mean(), p.Treatment.N)
+		if p.Control.Mean() > 0 {
+			// Only the relative Δ is undefined on a zero control
+			// mean — the absolute comparison still exists.
+			fmt.Fprintf(&b, ", Δ %+.1f%%",
 				100*(p.Treatment.Mean()-p.Control.Mean())/p.Control.Mean())
-		} else {
-			fmt.Fprintf(&b, " control n=%d, treatment n=%d (no conclusive comparison)",
-				p.Control.N, p.Treatment.N)
 		}
 		if p.RequiredPerArm > 0 {
 			fmt.Fprintf(&b, "  [power: %d/arm required]", p.RequiredPerArm)

@@ -571,20 +571,31 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 	}
 
 	// Power gate: a declared primary the planned sample can't resolve
-	// refuses before a single run is scheduled.
-	noise, err := LoadNoise(r.EvalDir)
-	if err != nil {
-		return Report{}, err
-	}
-	requiredN, _, err := checkPower(exp, trajs, frozen, noise)
-	if err != nil {
-		return Report{}, err
+	// refuses before a single run is scheduled. noise.json loads only
+	// when a consumer exists — a malformed file shouldn't abort
+	// primary-free, non-aa runs that never consult it.
+	var noise *NoiseFile
+	requiredN := 0
+	if exp.Primary != nil || r.AA {
+		noise, err = LoadNoise(r.EvalDir)
+		if err != nil {
+			return Report{}, err
+		}
+		if exp.Primary != nil {
+			requiredN, _, err = checkPower(exp, trajs, frozen, noise)
+			if err != nil {
+				return Report{}, err
+			}
+		}
 	}
 
 	// The calibration arm clones control after all validation —
-	// authored experiments stay two-arm, aa exists only in-memory.
+	// authored experiments stay two-arm, aa exists only in-memory and
+	// is removed before returning so a reused *Experiment doesn't
+	// carry it into the next call.
 	if r.AA {
 		exp.Arms[ArmAA] = exp.Arms[ArmControl]
+		defer delete(exp.Arms, ArmAA)
 	}
 
 	baselineKey := manifest.keyWith(exp.Arms[ArmControl].Config.Options,
@@ -666,16 +677,15 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 		baselineKey = k
 	}
 	gate := Evaluate(exp, frozen, baselineKey, records, corpusIDs(corpus), r.alpha(), r.permReplicates(), r.rng())
-	rep.Coincident = gate.Coincident
-	rep.NoopFlags = gate.NoopFlags
-	rep.Catastrophic = gate.Catastrophic
-	rep.CatastrophicEligible = gate.CatastrophicEligible
-	rep.DiffuseP = gate.DiffuseP
-	rep.DiffusePairs = gate.DiffusePairs
-	rep.ArmTokens = gate.ArmTokens
-	rep.ArmTokensExcluded = gate.ArmTokensExcluded
-	rep.ExcludedDifferential = gate.ExcludedDifferential
-	rep.Smoke = gate.Smoke
+	// The gate report IS the verdict surface — adopt it wholesale
+	// and ride the runner's scheduling-time lists over it. A
+	// field-by-field copy silently drops whichever Report field the
+	// next addition forgets to propagate (the second time that bug
+	// has shipped here).
+	gate.Starved = rep.Starved
+	gate.Saturated = rep.Saturated
+	gate.Skipped = rep.Skipped
+	rep = gate
 	rep.Primary = buildPrimaryResult(exp, records, requiredN)
 
 	// The aa arm's other job: its control-condition records measure
@@ -736,7 +746,7 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 		return rep
 	}
 	armNames := []string{ArmControl, ArmTreatment}
-	if _, ok := exp.Arms[ArmAA]; ok {
+	if r.AA {
 		armNames = append(armNames, ArmAA)
 	}
 	maxAttempts := int(float64(n) * r.attemptsFactor())
@@ -767,7 +777,9 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 		// Alternate which arm leads each round — under monotonic
 		// provider drift a fixed control-first order systematically
 		// hands treatment the later sample and biases the pairing.
-		lead := round % 2
+		// Rotating over the full arm list keeps the aa calibration
+		// arm exchangeable too rather than always last.
+		lead := round % len(armNames)
 		round++
 		progressed := false
 		for _, armName := range append(armNames[lead:], armNames[:lead]...) {
