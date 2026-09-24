@@ -113,6 +113,7 @@ var evalRunCmd = &cobra.Command{
 			return err
 		}
 		defer r.Close()
+		r.AA, _ = cmd.Flags().GetBool("aa")
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
 
@@ -272,6 +273,7 @@ func evalRunner(cmd *cobra.Command) (*eval.Runner, error) {
 
 func init() {
 	evalCmd.PersistentFlags().String("eval-dir", eval.DefaultEvalDir, "eval root directory")
+	evalRunCmd.Flags().Bool("aa", false, "add a calibration arm (control clone) measuring the harness's false-effect magnitude; refreshes noise.json")
 	evalCharacterizeCmd.Flags().IntP("runs", "n", eval.GenesisRuns, "runs per trajectory")
 	evalCharacterizeCmd.Flags().StringP("model", "m", "", "model pin (provider/model)")
 	evalCharacterizeCmd.Flags().Float64("temperature", 0, "sampling temperature")

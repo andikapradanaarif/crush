@@ -1,0 +1,9 @@
+{
+  "cv": {
+    "steps": 0.11,
+    "tokens.output": 0.185,
+    "tokens.input": 0.32,
+    "request.prompt_tokens_peak": 0.047,
+    "request.history_bytes": 0.073
+  }
+}

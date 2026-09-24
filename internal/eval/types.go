@@ -63,6 +63,11 @@ const (
 	// ArmBaseline is the characterize/smoke arm name — runs under the
 	// empty arm, i.e. the true default condition.
 	ArmBaseline = "baseline"
+	// ArmAA is the calibration arm --aa injects: a clone of control
+	// whose runs measure the harness's own false-effect magnitude.
+	// The gate only ever compares control vs treatment, so aa records
+	// are excluded from every verdict tier by construction.
+	ArmAA = "aa"
 )
 
 // CharacterizeExperiment is the reserved experiment name for genesis
@@ -142,6 +147,16 @@ type Experiment struct {
 	Corpus            []string       `json:"corpus"` // globs or "band:<name>"
 	RunsPerTrajectory map[Band]int   `json:"runs_per_trajectory"`
 	Arms              map[string]Arm `json:"arms"`
+	// Primary is the experiment's pre-registered decision metric —
+	// the one continuous measurement the run exists to move. The
+	// power gate refuses to schedule a run whose total arm sample
+	// can't resolve Primary.MDE at the recorded noise level. Absent
+	// primary, the experiment runs the binary gate only.
+	Primary *Primary `json:"primary,omitempty"`
+	// CostWeights prices one billed unit of each discounted token
+	// class in uncached-input units — h for cache-read, o for output —
+	// pinned per model so weighted_cost is comparable across runs.
+	CostWeights *CostWeights `json:"cost_weights,omitempty"`
 	// Providers declares custom providers the experiment's model
 	// resolves against — written into the generated .crush.json so
 	// non-builtin providers (e.g. an OpenAI-compatible endpoint) work
@@ -150,6 +165,31 @@ type Experiment struct {
 	// eval environment's credentials pass through, secrets never
 	// enter the repo.
 	Providers map[string]any `json:"providers,omitempty"`
+}
+
+// Primary declares the decision metric, its expected direction, and
+// the minimum detectable effect as a relative change (0.15 = 15%).
+// Direction selects a one-sided comparison: "decrease" claims the
+// treatment lowers the metric, "increase" that it raises it.
+type Primary struct {
+	Metric    string  `json:"metric"`
+	Direction string  `json:"direction"` // increase | decrease
+	MDE       float64 `json:"mde"`
+}
+
+// PrimaryDirection enumerates the legal direction spellings.
+const (
+	PrimaryIncrease = "increase"
+	PrimaryDecrease = "decrease"
+)
+
+// CostWeights converts discounted token classes into uncached-input
+// equivalents: weighted_cost = input + h·cache_read + o·output where
+// h = CacheRead, o = Output. Weights are relative prices, not dollars —
+// e.g. cache-read billed at 10% of input gives CacheRead 0.1.
+type CostWeights struct {
+	CacheRead float64 `json:"cache_read"`
+	Output    float64 `json:"output"`
 }
 
 // Arm is a generated config fragment plus an optional arm-scoped

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"os"
 	"os/exec"
@@ -41,6 +42,11 @@ type Runner struct {
 	PermReplicates int
 	// Alpha is the per-family significance level before correction.
 	Alpha float64
+	// AA adds a calibration arm: the control arm's config runs a
+	// second time under the name "aa", pricing the harness's own
+	// false-effect magnitude and refreshing eval/noise.json. AA
+	// records never enter the control/treatment gate.
+	AA bool
 	// QuarantineRepeats is M — check.sh invocations per state.
 	QuarantineRepeats int
 	// WorkParent is where materialized workdirs are created. Empty
@@ -565,6 +571,40 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 		return Report{}, err
 	}
 
+	// Power gate: a declared primary the planned sample can't resolve
+	// refuses before a single run is scheduled. noise.json loads only
+	// when a consumer exists — a malformed file shouldn't abort
+	// primary-free, non-aa runs that never consult it.
+	var noise *NoiseFile
+	requiredN := 0
+	if exp.Primary != nil || r.AA {
+		noise, err = LoadNoise(r.EvalDir)
+		if err != nil {
+			return Report{}, err
+		}
+		if exp.Primary != nil {
+			requiredN, _, err = checkPower(exp, trajs, frozen, noise)
+			if err != nil {
+				return Report{}, err
+			}
+		}
+	}
+
+	// The calibration arm clones control after all validation —
+	// authored experiments stay two-arm, aa exists only in-memory and
+	// is removed before returning so a reused *Experiment doesn't
+	// carry it into the next call.
+	if r.AA {
+		aa := exp.Arms[ArmControl]
+		// The Arm copy shares the control's maps — clone them so a
+		// future write path through aa can't silently corrupt
+		// control's spec mid-experiment.
+		aa.Config.Options = maps.Clone(aa.Config.Options)
+		aa.Coverage = maps.Clone(aa.Coverage)
+		exp.Arms[ArmAA] = aa
+		defer delete(exp.Arms, ArmAA)
+	}
+
 	baselineKey := manifest.keyWith(exp.Arms[ArmControl].Config.Options,
 		map[string]any{"$temperature": temperatureKey(exp.Temperature)})
 	// Invocation scopes this call's records: re-running an experiment
@@ -644,15 +684,29 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 		baselineKey = k
 	}
 	gate := Evaluate(exp, frozen, baselineKey, records, corpusIDs(corpus), r.alpha(), r.permReplicates(), r.rng())
-	rep.Coincident = gate.Coincident
-	rep.NoopFlags = gate.NoopFlags
-	rep.Catastrophic = gate.Catastrophic
-	rep.CatastrophicEligible = gate.CatastrophicEligible
-	rep.DiffuseP = gate.DiffuseP
-	rep.DiffusePairs = gate.DiffusePairs
-	rep.ArmTokens = gate.ArmTokens
-	rep.ExcludedDifferential = gate.ExcludedDifferential
-	rep.Smoke = gate.Smoke
+	// The gate report IS the verdict surface — adopt it wholesale
+	// and ride the runner's scheduling-time lists over it. A
+	// field-by-field copy silently drops whichever Report field the
+	// next addition forgets to propagate (the second time that bug
+	// has shipped here).
+	gate.Starved = rep.Starved
+	gate.Saturated = rep.Saturated
+	gate.Skipped = rep.Skipped
+	rep = gate
+	rep.Primary = buildPrimaryResult(exp, records, requiredN)
+
+	// The aa arm's other job: its control-condition records measure
+	// pure harness noise, so every --aa run refreshes the CVs the
+	// power gate schedules against.
+	if r.AA {
+		if updated := noise.updateNoiseFromAA(records, noiseUpdateMetrics(exp)); len(updated) > 0 {
+			if err := noise.Save(r.EvalDir); err != nil {
+				slog.Warn("Failed to save noise.json", "error", err)
+			} else {
+				rep.NoiseUpdated = updated
+			}
+		}
+	}
 
 	// Every paired comparison adds baseline samples as a byproduct —
 	// recompute characterization state after gating so the frozen
@@ -699,16 +753,29 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 		return rep
 	}
 	armNames := []string{ArmControl, ArmTreatment}
+	if r.AA {
+		armNames = append(armNames, ArmAA)
+	}
 	maxAttempts := int(float64(n) * r.attemptsFactor())
-	conclusive := map[string]int{ArmControl: 0, ArmTreatment: 0}
-	attempts := map[string]int{ArmControl: 0, ArmTreatment: 0}
-	excluded := map[string]map[Outcome]int{
-		ArmControl: {}, ArmTreatment: {},
+	conclusive := map[string]int{}
+	attempts := map[string]int{}
+	excluded := map[string]map[Outcome]int{}
+	for _, name := range armNames {
+		conclusive[name], attempts[name] = 0, 0
+		excluded[name] = map[Outcome]int{}
 	}
 
 	fixtureErrs := 0
 	round := 0
-	for conclusive[ArmControl] < n || conclusive[ArmTreatment] < n {
+	done := func() bool {
+		for _, name := range armNames {
+			if conclusive[name] < n {
+				return false
+			}
+		}
+		return true
+	}
+	for !done() {
 		if ctx.Err() != nil {
 			// Stop cleanly on cancellation — don't materialize and
 			// error-append up to ~2N records per remaining trajectory.
@@ -717,7 +784,9 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 		// Alternate which arm leads each round — under monotonic
 		// provider drift a fixed control-first order systematically
 		// hands treatment the later sample and biases the pairing.
-		lead := round % 2
+		// Rotating over the full arm list keeps the aa calibration
+		// arm exchangeable too rather than always last.
+		lead := round % len(armNames)
 		round++
 		progressed := false
 		for _, armName := range append(armNames[lead:], armNames[:lead]...) {
@@ -791,8 +860,13 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 	}
 
 	// Attempts-cap exhaustion is a distinct alarm per excluded class:
-	// coverage-starved (inconclusive) vs error-saturated (infra).
+	// coverage-starved (inconclusive) vs error-saturated (infra). The
+	// aa arm never alarms — it shares control's coverage, so control's
+	// own starvation label already reports the same failure.
 	for _, armName := range armNames {
+		if armName == ArmAA {
+			continue
+		}
 		if conclusive[armName] < n {
 			if excluded[armName][OutcomeError] >= excluded[armName][OutcomeInconclusive] {
 				rep.Saturated = append(rep.Saturated, fmt.Sprintf("%s/%s", traj.ID, armName))

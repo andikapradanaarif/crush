@@ -247,6 +247,26 @@ func ValidateExperiment(e *Experiment) error {
 	if e.Temperature == nil {
 		return fmt.Errorf("temperature must be pinned — unpinned arms never join characterized baselines")
 	}
+	if e.Primary != nil {
+		switch e.Primary.Direction {
+		case PrimaryIncrease, PrimaryDecrease:
+		default:
+			return fmt.Errorf("primary.direction must be %q or %q, got %q",
+				PrimaryIncrease, PrimaryDecrease, e.Primary.Direction)
+		}
+		if e.Primary.MDE <= 0 || e.Primary.MDE >= 1 {
+			return fmt.Errorf("primary.mde must be a relative effect in (0,1), got %g", e.Primary.MDE)
+		}
+		if _, err := primaryMetricFunc(e, e.Primary.Metric); err != nil {
+			return err
+		}
+	}
+	if e.CostWeights != nil {
+		if e.CostWeights.CacheRead < 0 || e.CostWeights.Output < 0 {
+			return fmt.Errorf("cost_weights must be non-negative (h=%g, o=%g)",
+				e.CostWeights.CacheRead, e.CostWeights.Output)
+		}
+	}
 	if len(e.Corpus) == 0 {
 		return fmt.Errorf("corpus selector is required")
 	}
@@ -571,30 +591,44 @@ var flagCodeDefaults = map[string]bool{
 // check can't see: a firing assertion on an arm that omits the flag
 // entirely (notebook_stub_superseded defaults false).
 func ValidateArmCoverageResolved(e *Experiment, manifest *FlagsManifest) error {
+	resolveFor := func(arm Arm) func(string) (any, bool) {
+		return func(opt string) (any, bool) {
+			if v, ok := arm.Config.Options[opt]; ok {
+				return v, true
+			}
+			if manifest != nil {
+				if v, ok := manifest.Defaults[opt]; ok {
+					return v, true
+				}
+			}
+			if d, ok := flagCodeDefaults[opt]; ok {
+				return d, true
+			}
+			// An unnamed flag resolves to its code default — off
+			// for bools, verbatim for notebook_prior_turns — and
+			// either way the gated counter is unreachable.
+			return nil, true
+		}
+	}
+	// A flag-gated primary on an arm where the gate resolves off
+	// produces structurally-zero samples — the reported Δ measures
+	// whether the flag exists, not whether it helped.
+	if e.Primary != nil {
+		for _, req := range armStarvationRules(e.Primary.Metric) {
+			for name, arm := range e.Arms {
+				if !req.ok(resolveFor(arm)) {
+					return fmt.Errorf("primary metric %q needs %s on arm %q — its samples are structural zeros, not a comparison", e.Primary.Metric, req.desc, name)
+				}
+			}
+		}
+	}
 	for name, arm := range e.Arms {
 		for key := range arm.Coverage {
 			op, field, err := ParseArmCoverageKey(key)
 			if err != nil {
 				return fmt.Errorf("arm %q coverage %q: %w", name, key, err)
 			}
-			resolve := func(opt string) (any, bool) {
-				if v, ok := arm.Config.Options[opt]; ok {
-					return v, true
-				}
-				if manifest != nil {
-					if v, ok := manifest.Defaults[opt]; ok {
-						return v, true
-					}
-				}
-				if d, ok := flagCodeDefaults[opt]; ok {
-					return d, true
-				}
-				// An unnamed flag resolves to its code default — off
-				// for bools, verbatim for notebook_prior_turns — and
-				// either way the gated counter is unreachable.
-				return nil, true
-			}
-			if err := checkArmStarvation(name, key, op, field, resolve); err != nil {
+			if err := checkArmStarvation(name, key, op, field, resolveFor(arm)); err != nil {
 				return err
 			}
 		}
