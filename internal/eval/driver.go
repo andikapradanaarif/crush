@@ -209,9 +209,10 @@ type runTelemetry struct {
 	Error           string         `json:"error,omitempty"`
 	// ErrorClass is the child's typed classification of the terminal
 	// error — auth/provider_deterministic/provider_server/
-	// rate_limit/context_too_large/provider_unreachable/
-	// provider_transient/cancelled/timeout. The circuit breaker reads
-	// it instead of string-matching when present.
+	// rate_limit/context_too_large/window_cap_enforced/
+	// provider_unreachable/provider_transient/cancelled/timeout. The
+	// circuit breaker reads it instead of string-matching when
+	// present.
 	ErrorClass string `json:"error_class,omitempty"`
 }
 

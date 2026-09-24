@@ -507,7 +507,7 @@ trajectory twice) is strictly worse.
 		}
 	],
 	"generator_tokens": {"calls": 12, "input": 41000, "output": 900, "cache_read": 0, "cache_write": 0},
-	"error_class": "auth | rate_limit | context_too_large | provider_* | cancelled | timeout",
+	"error_class": "auth | rate_limit | context_too_large | window_cap_enforced | provider_* | cancelled | timeout",
 	"session_db": "results/<experiment>/artifacts/<trajectory_id>-<arm>-<run_index>.db",
 	"env": {"crush_sha": "...", "model_resolved": "...", "go": "1.25", "os": "darwin", "content_hash": "..."}
 }
@@ -574,21 +574,37 @@ in every regime, so below-pressure arms still pay generation cost —
 
 `enforce_context_window` (default off) turns the manifest-declared
 `context_window` into a hard cap: inside `PrepareStep`, a wire-bound
-render whose chars/4 estimate plus the request's output budget
+render whose chars/4 estimate (messages plus tool schemas — the
+schema block is the largest deterministic term after history and
+providers bill it every request) plus the request's output budget
 exceeds the window fails with `ErrContextWindowExceeded`, which
-`classifyRunError` maps to `context_too_large` — the same class a
-real provider rejection produces. This is how a pressure regime is
-manufactured without a small-window endpoint: the manifest pins
-`context_window: 64000` (with `default_max_tokens` reconciled below
-it) on a model whose real window is larger, and enforcement makes
-the pin real. Deliberately not notebook-gated — the uncompressed
-control arm is the one meant to die. Known under-counts:
-request-level `Files` attachments sit outside the message list, and
-chars/4 drifts from real tokenization — the cap simulates the
-provider's check, it isn't wire-exact. `notebook-pressure-regime`
-(and its `-qwen` sibling) exercise it: control `notebook_enabled:
-false` verbatim-until-death vs treatment gate-on, both enforcing
-64K, with `min_pressure.activations: 1` proving the gate fired.
+`classifyRunError` maps to `window_cap_enforced` — deliberately a
+distinct class from `context_too_large`. A real overflow is
+fixture-class (the trajectory can never fit, so two deaths skip
+it); a manufactured death is the experiment's designed condition —
+the control arm is *supposed* to die — so it records as an ordinary
+excluded-class error: sampling continues, no skip, no void, and the
+excluded-differential alarm carries the asymmetry (control all-
+excluded, treatment all-conclusive) as the legible finding. This is
+how a pressure regime is manufactured without a small-window
+endpoint: the manifest pins `context_window: 64000` (with
+`default_max_tokens` reconciled below it) on a model whose real
+window is larger, and enforcement makes the pin real. Deliberately
+not notebook-gated — the uncompressed control arm is the one meant
+to die. Known under-counts: request-level `Files` attachments sit
+outside the message list, provider envelope fields (headers,
+per-request metadata) are uncounted, and chars/4 drifts from real
+tokenization — the cap simulates the provider's check, it isn't
+wire-exact. `notebook-pressure-regime` (and its `-qwen` sibling)
+exercise it: control `notebook_enabled: false`
+verbatim-until-death vs treatment gate-on, both enforcing 64K, with
+`min_pressure.activations: 1` proving the gate fired. Read the
+expected outcome accordingly: in the regime the experiment exists
+to demonstrate, control produces `error`/`window_cap_enforced`
+records rather than a conclusive pair — the death-asymmetry report,
+not the declared primary, is the finding. (A primary verdict still
+emerges in the other regime, where trajectories fit and control
+survives.)
 
 `generator_tokens` is the notebook sidecar's generation spend
 (segment, checkpoint, digest calls) — kept out of `tokens` so the

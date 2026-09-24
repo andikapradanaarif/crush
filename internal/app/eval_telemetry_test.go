@@ -28,7 +28,7 @@ func TestClassifyRunError(t *testing.T) {
 		{"auth flag without status", &fantasy.ProviderError{AuthError: true, Message: "token expired"}, "auth"},
 		{"forbidden", &fantasy.ProviderError{StatusCode: 403}, "auth"},
 		{"context too large", &fantasy.ProviderError{StatusCode: 400, ContextTooLargeErr: true}, "context_too_large"},
-		{"enforced window cap", fmt.Errorf("run: %w", agent.ErrContextWindowExceeded), "context_too_large"},
+		{"enforced window cap", fmt.Errorf("run: %w", agent.ErrContextWindowExceeded), "window_cap_enforced"},
 		{"context too large via tokens", &fantasy.ProviderError{ContextMaxTokens: 128000, ContextUsedTokens: 200000}, "context_too_large"},
 		{"rate limit", &fantasy.ProviderError{StatusCode: 429}, "rate_limit"},
 		{"request timeout retryable", &fantasy.ProviderError{StatusCode: 408}, "provider_transient"},

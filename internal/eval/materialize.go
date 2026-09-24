@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -61,7 +62,9 @@ const EvalRepoCacheEnvVar = "CRUSH_EVAL_REPO_CACHE"
 // gitCheckout deliberately runs under the ambient environment, not
 // the pinned eval env: git credentials (ssh keys, credential helpers,
 // .gitconfig) live in the real HOME, and cloning is materialization —
-// not part of the measured run.
+// not part of the measured run. GIT_TERMINAL_PROMPT=0 keeps a repo
+// that wants interactive auth (private URL, expired credential) a
+// fast failure instead of a hang nobody can answer.
 func gitCheckout(ctx context.Context, repo, ref, dest string) error {
 	src := repo
 	if !isLocalRepo(repo) {
@@ -76,13 +79,34 @@ func gitCheckout(ctx context.Context, repo, ref, dest string) error {
 		args = append(args, "--shared")
 	}
 	args = append(args, src, dest)
-	if out, err := exec.CommandContext(ctx, "git", args...).CombinedOutput(); err != nil {
-		return fmt.Errorf("git clone %s: %w: %s", repo, err, out)
+	if out, err := gitCmd(ctx, "", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("git clone %s: %w: %s", displayRepoURL(repo), err, out)
 	}
-	if out, err := exec.CommandContext(ctx, "git", "-C", dest, "checkout", "--quiet", ref).CombinedOutput(); err != nil {
+	if src != repo {
+		// A mirror clone leaves origin pointing at the local cache —
+		// restore the declared URL so in-run git operations see the
+		// repo the trajectory names.
+		if out, err := gitCmd(ctx, dest, "remote", "set-url", "origin", repo).CombinedOutput(); err != nil {
+			return fmt.Errorf("git remote set-url: %w: %s", err, out)
+		}
+	}
+	if out, err := gitCmd(ctx, dest, "checkout", "--quiet", ref).CombinedOutput(); err != nil {
 		return fmt.Errorf("git checkout %s: %w: %s", ref, err, out)
 	}
 	return nil
+}
+
+// gitCmd builds a git command with terminal prompts disabled — the
+// harness never has an interactive stdin, so a credential prompt must
+// fail rather than hang. dir empty runs in the ambient cwd; otherwise
+// it maps to git -C.
+func gitCmd(ctx context.Context, dir string, args ...string) *exec.Cmd {
+	if dir != "" {
+		args = append([]string{"-C", dir}, args...)
+	}
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	return cmd
 }
 
 // ensureRepoMirror returns the path of a bare mirror of repo under the
@@ -103,16 +127,21 @@ func ensureRepoMirror(ctx context.Context, repo string) (string, error) {
 	mirror := filepath.Join(dir, hex.EncodeToString(key[:8])+".git")
 
 	if _, err := os.Stat(mirror); err == nil {
-		_ = exec.CommandContext(ctx, "git", "-C", mirror, "fetch", "--quiet", "--prune", "origin").Run()
-		return mirror, nil
+		if err := gitCmd(ctx, mirror, "rev-parse", "--is-bare-repository").Run(); err == nil {
+			_ = gitCmd(ctx, mirror, "fetch", "--quiet", "--prune", "origin").Run()
+			return mirror, nil
+		}
+		// A corrupt or partially-written cache entry would serve a
+		// bad path forever — remove it and rebuild below.
+		_ = os.RemoveAll(mirror)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
 	tmp := fmt.Sprintf("%s.tmp.%d", mirror, os.Getpid())
-	if out, err := exec.CommandContext(ctx, "git", "clone", "--mirror", "--quiet", repo, tmp).CombinedOutput(); err != nil {
+	if out, err := gitCmd(ctx, "", "clone", "--mirror", "--quiet", repo, tmp).CombinedOutput(); err != nil {
 		_ = os.RemoveAll(tmp)
-		return "", fmt.Errorf("git clone --mirror %s: %w: %s", repo, err, out)
+		return "", fmt.Errorf("git clone --mirror %s: %w: %s", displayRepoURL(repo), err, out)
 	}
 	if err := os.Rename(tmp, mirror); err != nil {
 		_ = os.RemoveAll(tmp)
@@ -127,6 +156,18 @@ func ensureRepoMirror(ctx context.Context, repo string) (string, error) {
 func isLocalRepo(repo string) bool {
 	return strings.HasPrefix(repo, "/") || strings.HasPrefix(repo, ".") ||
 		strings.HasPrefix(repo, "file://")
+}
+
+// displayRepoURL strips embedded credentials from a repo URL for error
+// text — a https://user:token@host remote would otherwise print its
+// token into run records.
+func displayRepoURL(repo string) string {
+	u, err := url.Parse(repo)
+	if err != nil || u.User == nil {
+		return repo
+	}
+	u.User = nil
+	return u.String()
 }
 
 // ApplyPatch applies a patch file to a workdir (git apply; works in

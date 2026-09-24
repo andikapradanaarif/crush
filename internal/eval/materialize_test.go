@@ -58,6 +58,44 @@ func TestEnsureRepoMirror(t *testing.T) {
 	require.FileExists(t, filepath.Join(dest, "f.txt"))
 }
 
+// TestEnsureRepoMirror_CorruptEntry pins the self-heal: a cache entry
+// that exists but is not a valid bare repo is rebuilt rather than
+// served to consumer clones forever.
+func TestEnsureRepoMirror_CorruptEntry(t *testing.T) {
+	src := t.TempDir()
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.CommandContext(t.Context(), "git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+	}
+	git(src, "init", "--quiet")
+	require.NoError(t, os.WriteFile(filepath.Join(src, "f.txt"), []byte("v1"), 0o644))
+	git(src, "add", ".")
+	git(src, "commit", "--quiet", "-m", "init")
+
+	cache := t.TempDir()
+	t.Setenv(EvalRepoCacheEnvVar, cache)
+
+	mirror, err := ensureRepoMirror(t.Context(), src)
+	require.NoError(t, err)
+
+	// Corrupt the entry: a directory with the right name but no repo.
+	require.NoError(t, os.RemoveAll(mirror))
+	require.NoError(t, os.MkdirAll(mirror, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(mirror, "garbage"), []byte("x"), 0o644))
+
+	mirror2, err := ensureRepoMirror(t.Context(), src)
+	require.NoError(t, err)
+	require.Equal(t, mirror, mirror2)
+	out, err := exec.CommandContext(t.Context(), "git", "-C", mirror2, "rev-parse", "--is-bare-repository").CombinedOutput()
+	require.NoError(t, err, "rebuilt mirror is a real bare repo: %s", out)
+}
+
 func TestIsLocalRepo(t *testing.T) {
 	t.Parallel()
 	require.True(t, isLocalRepo("/abs/path"))

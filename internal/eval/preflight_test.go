@@ -225,7 +225,7 @@ func TestIsConfigClassError_ErrorClass(t *testing.T) {
 	for _, class := range []string{"auth", "provider_unreachable"} {
 		require.True(t, isConfigClassError(mk(class)), class)
 	}
-	for _, class := range []string{"rate_limit", "provider_transient", "provider_other", "context_too_large", "cancelled", "timeout"} {
+	for _, class := range []string{"rate_limit", "provider_transient", "provider_other", "context_too_large", "window_cap_enforced", "cancelled", "timeout"} {
 		require.False(t, isConfigClassError(mk(class)), class)
 	}
 	// provider_deterministic and provider_server share the scope
@@ -248,6 +248,12 @@ func TestIsConfigClassError_ErrorClass(t *testing.T) {
 	// context_too_large is trajectory-scoped — fixture-class, so two
 	// strikes skip the trajectory rather than abort the experiment.
 	require.True(t, isFixtureConfigError(mk("context_too_large")))
+	// window_cap_enforced is neither breaker: a manufactured cap
+	// death is the experiment's designed condition, so it keeps
+	// sampling as an ordinary excluded-class error — fixture-classing
+	// it would void the invocation exactly when the cap works.
+	require.False(t, isConfigClassError(mk("window_cap_enforced")))
+	require.False(t, isFixtureConfigError(mk("window_cap_enforced")))
 }
 
 // classRunner fails every run with a fixed typed error class — the

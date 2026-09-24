@@ -1319,7 +1319,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			// a rejection here plays exactly like a provider's own
 			// overflow response: PrepareStep aborts the stream and the
 			// error lands on the run's terminal path.
-			if err := a.enforceWindowCap(prepared.Messages, call.MaxOutputTokens); err != nil {
+			if err := a.enforceWindowCap(prepared.Messages, prepared.Tools, call.MaxOutputTokens); err != nil {
 				return callContext, prepared, err
 			}
 
@@ -2020,7 +2020,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 			if systemPromptPrefix != "" {
 				prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(systemPromptPrefix)}, prepared.Messages...)
 			}
-			if err := a.enforceWindowCap(prepared.Messages, 0); err != nil {
+			if err := a.enforceWindowCap(prepared.Messages, prepared.Tools, 0); err != nil {
 				return callContext, prepared, err
 			}
 			return callContext, prepared, nil

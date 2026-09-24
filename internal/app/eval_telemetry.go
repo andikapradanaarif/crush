@@ -187,10 +187,16 @@ func classifyRunError(err error) string {
 		return "timeout"
 	case errors.Is(err, agent.ErrContextWindowExceeded):
 		// Harness-enforced window cap (options.enforce_context_window)
-		// — the local stand-in for a provider's overflow rejection,
-		// classified identically so a simulated endpoint and a real
-		// small window land in the same bucket.
-		return "context_too_large"
+		// — manufactured by the harness, not observed from the
+		// provider, so it gets its own class. A real
+		// context_too_large is fixture-class: the trajectory can
+		// never fit, so two deaths skip it. A manufactured death is
+		// the experiment's designed condition — the pressure-regime
+		// control arm is supposed to die — so it must record as an
+		// ordinary excluded-class error that keeps sampling and
+		// counts in the excluded-differential, not skip the
+		// trajectory and void the invocation.
+		return "window_cap_enforced"
 	case errors.As(err, &pe):
 		switch {
 		case pe.AuthError || pe.StatusCode == http.StatusUnauthorized || pe.StatusCode == http.StatusForbidden:

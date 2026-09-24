@@ -642,22 +642,22 @@ func TestEnforceWindowCap(t *testing.T) {
 
 	t.Run("flag off never rejects", func(t *testing.T) {
 		a := pressureTestAgent(64_000, 4_000)
-		require.NoError(t, a.enforceWindowCap(big, 4_000))
+		require.NoError(t, a.enforceWindowCap(big, nil, 4_000))
 	})
 	t.Run("unknown window never rejects", func(t *testing.T) {
 		a := pressureTestAgent(0, 4_000)
 		a.enforceContextWindow = true
-		require.NoError(t, a.enforceWindowCap(big, 4_000))
+		require.NoError(t, a.enforceWindowCap(big, nil, 4_000))
 	})
 	t.Run("under cap passes", func(t *testing.T) {
 		a := pressureTestAgent(64_000, 4_000)
 		a.enforceContextWindow = true
-		require.NoError(t, a.enforceWindowCap(small, 4_000))
+		require.NoError(t, a.enforceWindowCap(small, nil, 4_000))
 	})
 	t.Run("over cap rejects with sentinel", func(t *testing.T) {
 		a := pressureTestAgent(64_000, 4_000)
 		a.enforceContextWindow = true
-		err := a.enforceWindowCap(big, 4_000)
+		err := a.enforceWindowCap(big, nil, 4_000)
 		require.ErrorIs(t, err, ErrContextWindowExceeded)
 		require.Contains(t, err.Error(), "declared window")
 	})
@@ -666,15 +666,28 @@ func TestEnforceWindowCap(t *testing.T) {
 		// with an 8K one — the provider contract is input + output.
 		a := pressureTestAgent(64_000, 4_000)
 		a.enforceContextWindow = true
-		require.NoError(t, a.enforceWindowCap(big, 3_000))
-		require.ErrorIs(t, a.enforceWindowCap(big, 8_000), ErrContextWindowExceeded)
+		require.NoError(t, a.enforceWindowCap(big, nil, 3_000))
+		require.ErrorIs(t, a.enforceWindowCap(big, nil, 8_000), ErrContextWindowExceeded)
 	})
 	t.Run("unset output budget falls back to catalog default", func(t *testing.T) {
 		a := pressureTestAgent(64_000, 8_000)
 		a.enforceContextWindow = true
 		// ~60K input + 8K catalog default > 64K — the same failure
 		// a real endpoint returns when max_tokens pushes over.
-		require.ErrorIs(t, a.enforceWindowCap(big, 0), ErrContextWindowExceeded)
+		require.ErrorIs(t, a.enforceWindowCap(big, nil, 0), ErrContextWindowExceeded)
+	})
+	t.Run("tool schemas count against the window", func(t *testing.T) {
+		// ~60K input + 4K output fits 64K; a ~20K-token schema block
+		// (providers bill it on every request) pushes the same
+		// request over.
+		a := pressureTestAgent(64_000, 4_000)
+		a.enforceContextWindow = true
+		tool := fantasy.NewAgentTool("big_tool", strings.Repeat("d", 80_000),
+			func(context.Context, struct{}, fantasy.ToolCall) (fantasy.ToolResponse, error) {
+				return fantasy.ToolResponse{}, nil
+			})
+		require.NoError(t, a.enforceWindowCap(big, nil, 3_000))
+		require.ErrorIs(t, a.enforceWindowCap(big, []fantasy.AgentTool{tool}, 3_000), ErrContextWindowExceeded)
 	})
 }
 
