@@ -995,6 +995,70 @@ Guardrails — steps, pass rate, `edit_failures_*` — stay what they
 are: alarm inputs and informational lines that can block a verdict
 but are never read as wins.
 
+## `crush eval compare` — the paired estimator
+
+The gate answers "did the outcome rate collapse"; `compare` answers
+"by how much did the metric move". It is a report, not a gate — it
+changes no verdict, but it is where the continuous questions
+(efficiency, prompt cost, behavioral side-effects) get statistically
+honest answers.
+
+**Pairing** is attempt-index (`run_index`) within a trajectory — not
+conclusive-ordinal. The scheduler alternates lead arms each round,
+so the two attempts sharing a run_index are the temporally closest
+samples the harness produced; pairing them is what cancels the slow
+provider drift that dominates pooled variance. `run_index` is sparse
+under resampling — an attempt whose counterpart never concluded
+forms no pair (reported as unmatched). Conclusive-ordinal pairing
+was rejected: under asymmetric exclusion it pairs samples taken at
+different wall times, injecting exactly the drift pairing exists to
+remove.
+
+**Estimator**: per-pair log-ratio `d = log(treat/ctrl)` →
+per-trajectory mean → unweighted mean across trajectories. The
+trajectory is the unit of analysis, so one arm landing
+disproportionately on easy trajectories cannot shift the estimate —
+the composition bias pooled strata carry. The CI is BCa over a
+stratified bootstrap (pairs resampled within their trajectory);
+the p-value is a sign-flip permutation on pair log-ratios —
+each `d` is symmetric about zero under the null — one-sided in the
+primary's declared direction, two-sided for every other metric.
+
+**Refusals** are hard errors, matching the harness's fail-closed
+contract:
+
+- **Cross-invocation record sets** — pairing across a build/drift
+  boundary is meaningless. `--invocation` selects one.
+- **Voided invocations** — a fired structural alarm (starved,
+  saturated, skipped, or a partial noop) voids the efficiency
+  report. `run` persists the alarm set to
+  `results/<exp>/report-<invocation>.json` on every exit path, so
+  compare refuses on the run's own verdicts. Legacy invocations
+  without a snapshot fall back to record inference: noop via
+  resolved options (exact), starve via conclusive-count asymmetry
+  (both arms target the same n — asymmetry is the under-sampling
+  signature).
+- **Too few pairs** — below three conclusive pairs an interval is
+  numerology, not inference.
+
+A full-noop invocation — every trajectory's arms resolved
+identically — is not refused; it is reported with a `NULL
+EXPERIMENT` label, because that is exactly what an A/A calibration
+run is, and its CIs measure the harness's own false-effect
+magnitude.
+
+**Verdicts** exist only on the declared primary: the CI is tested
+against the MDE boundary (`log(1∓mde)`), giving `effect ≥ MDE`,
+`no MDE effect` (a powered null — the CI cleared the boundary on
+the uninteresting side), or `INCONCLUSIVE — underpowered` with the
+required n from `noise.json`'s recorded CV. Every other metric gets
+CI and p only — secondary metrics inform, they never decide.
+
+Metrics whose mechanism exists on only one arm
+(`prior_turns.turns_collapsed` under a verbatim control,
+`stub_stats.*` under a non-stubbing control) form no pairs and are
+listed as skipped rather than estimated against a fabricated zero.
+
 ## Benefit, quantified
 
 Three separable wins, each with its own math. Numbers below are

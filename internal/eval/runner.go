@@ -611,6 +611,14 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (Report, er
 	// under a new build must not pool stale records into the gate.
 	inv := fmt.Sprintf("%s-%04x", r.now().UTC().Format("20060102T150405Z"), r.rng().Uint64()&0xffff)
 	rep := Report{CatastrophicEligible: map[string]bool{}, DiffuseP: 1}
+	// The structural-alarm snapshot outlives the process on every
+	// exit path — aborts included — so compare refuses on the run's
+	// own voids rather than re-inferring them from records.
+	defer func() {
+		if err := r.persistAlarms(exp.Name, inv, rep); err != nil {
+			slog.Warn("Failed to persist alarm snapshot", "error", err)
+		}
+	}()
 
 	runnable := 0
 	requiresSkipped := 0
