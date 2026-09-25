@@ -11,7 +11,10 @@
 	"task": {
 		"turns": [
 			"Add a `crush env` subcommand that prints the runtime environment as `key=value` lines — `goos=`, `goarch=`, and `version=` (the version comes from the internal version package). Follow the existing subcommand patterns and register it alongside the others. Keep `go build ./...` green.",
-			"Also print the process working directory as `cwd=` on its own line. Keep the build green."
+			"Also print the process working directory as `cwd=` on its own line. Keep the build green.",
+			"To follow the existing subcommand and flag conventions exactly, first read `internal/cmd/root.go` and `internal/cmd/run.go` end-to-end with the view tool — page through both files completely. Then extend `crush env` with two more `key=value` lines: `shell=` — the basename of the parent shell taken from the `SHELL` environment variable, printing `unknown` when unset — and `terminal=` — the value of the `TERM` environment variable, also `unknown` when unset. Keep the build green.",
+			"To see how the app surfaces version and runtime information, read `internal/app/app.go` end-to-end with the view tool — page through the whole file. Then extend `crush env` with `go_version=` from runtime.Version() and `module=` — the module path read from the `module` line of the go.mod in the working directory, printing `none` when no go.mod exists. Keep the build green.",
+			"For how flags are declared on existing subcommands, read `internal/cmd/stats.go` and `internal/cmd/session.go` end-to-end with the view tool — page through both files completely. Then add a `--json` flag to `crush env` that prints all the same keys as a single JSON object on one line instead of key=value lines. Text output must be unchanged when the flag is absent. Keep the build green."
 		]
 	},
 	"check": {
@@ -23,5 +26,5 @@
 		"min_steps": 3
 	},
 	"requires": {"network": true, "tools": ["go", "git"]},
-	"budget": {"run_timeout_seconds": 1500, "max_steps": 60}
+	"budget": {"run_timeout_seconds": 3000, "max_steps": 180}
 }

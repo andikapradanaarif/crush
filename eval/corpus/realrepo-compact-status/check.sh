@@ -1,20 +1,24 @@
 #!/bin/bash
-# Pass when both options exist on Options, are reachable through the
-# `option` builtin, and appear in the regenerated schema.json. On the
-# start state neither key exists anywhere — the first grep fails.
+# Pass when all four options exist on Options, are reachable through the
+# `option` builtin, appear in the regenerated schema.json, and the two
+# wiring turns left a consumer outside the declaration sites. On the
+# start state none of the keys exist anywhere — the first grep fails.
 set -e
 cd "$EVAL_WORKDIR"
 
 go build ./...
 
 # The Options fields with their JSON tags.
-grep -rq 'compact_status' internal/config/
-grep -rq 'quiet_startup' internal/config/
+for k in compact_status quiet_startup show_hints auto_update; do
+	grep -rq "$k" internal/config/
+	grep -q "\"$k\"" schema.json
+done
 
 # The `option` builtin keys.
-grep -q 'compact-status' internal/shellconfig/options.go
-grep -q 'quiet-startup' internal/shellconfig/options.go
+for k in compact-status quiet-startup show-hints auto-update; do
+	grep -q "$k" internal/shellconfig/options.go
+done
 
-# The published schema.
-grep -q '"compact_status"' schema.json
-grep -q '"quiet_startup"' schema.json
+# Consumer wiring — a reader outside config declaration/builtin plumbing.
+grep -rl 'ShowHints\|show_hints' internal/ | grep -vq 'internal/config/\|internal/shellconfig/'
+grep -rl 'AutoUpdate\|auto_update' internal/ | grep -vq 'internal/config/\|internal/shellconfig/'

@@ -11,7 +11,9 @@
 	"task": {
 		"turns": [
 			"Add a `compact_status` boolean option (default false) to the crush configuration: a `*bool` field on Options with a jsonschema description, exposed through the `option` crushrc builtin under the kebab-case key `compact-status`, and regenerate `schema.json` so the published schema carries it. Keep `go build ./...` green.",
-			"Add a second boolean option `quiet_startup` (default false) following the same pattern — Options field, `option` builtin key `quiet-startup`, regenerated `schema.json`. Keep the build green."
+			"Add a second boolean option `quiet_startup` (default false) following the same pattern — Options field, `option` builtin key `quiet-startup`, regenerated `schema.json`. Keep the build green.",
+			"Add a third boolean option `show_hints` (default true) the same way — Options field, `option` builtin key `show-hints`, regenerated `schema.json` — then wire it: tool-call status hints render under `internal/ui/chat/`; read `internal/ui/chat/tools.go` end-to-end with the view tool (page through all of it) to find where hints are drawn, and gate that rendering on the option. Keep `go build ./...` green.",
+			"Add a fourth boolean option `auto_update` (default true) the same way — Options field, `option` builtin key `auto-update`, regenerated `schema.json` — then wire it: the update check is triggered from `internal/app/app.go`; read that file end-to-end to find the call site and skip it when the option is disabled. Keep the build green."
 		]
 	},
 	"check": {
@@ -23,5 +25,5 @@
 		"min_steps": 3
 	},
 	"requires": {"network": true, "tools": ["go", "git"]},
-	"budget": {"run_timeout_seconds": 1500, "max_steps": 60}
+	"budget": {"run_timeout_seconds": 3000, "max_steps": 180}
 }
