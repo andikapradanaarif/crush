@@ -1,31 +1,91 @@
 diff --git a/internal/cmd/env.go b/internal/cmd/env.go
 new file mode 100644
-index 00000000..7f162b67
+index 00000000..2535e412
 --- /dev/null
 +++ b/internal/cmd/env.go
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,83 @@
 +package cmd
 +
 +import (
++	"encoding/json"
 +	"fmt"
 +	"os"
++	"path/filepath"
 +	"runtime"
++	"strings"
 +
 +	"github.com/charmbracelet/crush/internal/version"
 +	"github.com/spf13/cobra"
 +)
 +
++var envJSON bool
++
 +var envCmd = &cobra.Command{
 +	Use:   "env",
 +	Short: "Print environment information",
-+	Long:  "Print the runtime environment (platform, architecture, version, and working directory) as key=value lines.",
-+	Run: func(cmd *cobra.Command, _ []string) {
++	Long:  "Print the runtime environment (platform, architecture, version, working directory, shell, terminal, and module) as key=value lines, or as a JSON object with --json.",
++	RunE: func(cmd *cobra.Command, _ []string) error {
 +		cwd, _ := os.Getwd()
-+		fmt.Fprintf(cmd.OutOrStdout(), "goos=%s\n", runtime.GOOS)
-+		fmt.Fprintf(cmd.OutOrStdout(), "goarch=%s\n", runtime.GOARCH)
-+		fmt.Fprintf(cmd.OutOrStdout(), "version=%s\n", version.Version)
-+		fmt.Fprintf(cmd.OutOrStdout(), "cwd=%s\n", cwd)
++		rows := []struct{ k, v string }{
++			{"goos", runtime.GOOS},
++			{"goarch", runtime.GOARCH},
++			{"version", version.Version},
++			{"cwd", cwd},
++			{"shell", envShell()},
++			{"terminal", envTerminal()},
++			{"go_version", runtime.Version()},
++			{"module", envModule(cwd)},
++		}
++		if envJSON {
++			obj := make(map[string]string, len(rows))
++			for _, r := range rows {
++				obj[r.k] = r.v
++			}
++			data, err := json.Marshal(obj)
++			if err != nil {
++				return err
++			}
++			fmt.Fprintln(cmd.OutOrStdout(), string(data))
++			return nil
++		}
++		for _, r := range rows {
++			fmt.Fprintf(cmd.OutOrStdout(), "%s=%s\n", r.k, r.v)
++		}
++		return nil
 +	},
++}
++
++// envShell returns the basename of the parent shell from $SHELL.
++func envShell() string {
++	return filepath.Base(os.Getenv("SHELL"))
++}
++
++// envTerminal returns the terminal program name — TERM_PROGRAM when
++// set, else TERM.
++func envTerminal() string {
++	if tp := os.Getenv("TERM_PROGRAM"); tp != "" {
++		return tp
++	}
++	return os.Getenv("TERM")
++}
++
++// envModule reads the module path from the `module` line of the
++// go.mod in dir.
++func envModule(dir string) string {
++	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
++	if err != nil {
++		return ""
++	}
++	for line := range strings.Lines(string(data)) {
++		if m, ok := strings.CutPrefix(strings.TrimSpace(line), "module "); ok {
++			return m
++		}
++	}
++	return ""
++}
++
++func init() {
++	envCmd.Flags().BoolVar(&envJSON, "json", false, "print environment as a single JSON object")
 +}
 diff --git a/internal/cmd/root.go b/internal/cmd/root.go
 index 77d73c3a..617e920d 100644

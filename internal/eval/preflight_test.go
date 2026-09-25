@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -395,6 +396,83 @@ func TestRunTrajectory_ExpectedExclusionOtherDeathsStillSaturate(t *testing.T) {
 	r.Driver = classRunner{class: "rate_limit"}
 	rep := r.runTrajectory(t.Context(), exp, tr, trajDir, &FlagsManifest{Defaults: map[string]any{}}, 3, "inv", &configErrorTracker{})
 	require.Contains(t, rep.Saturated, "brk-t/control")
+}
+
+// capMixRunner is capRunner plus scripted blips: on a cap-armed
+// workdir the first len(extra) calls return the scripted classes
+// instead of the declared death — transient infrastructure records
+// riding alongside the exclusion.
+type capMixRunner struct {
+	extra []string
+	i     atomic.Int32
+}
+
+func (c *capMixRunner) Run(_ context.Context, workdir string, _ []string, _ Budget) RunResult {
+	data, _ := os.ReadFile(filepath.Join(workdir, ".crush.json"))
+	var doc struct {
+		Options map[string]any `json:"options"`
+	}
+	_ = json.Unmarshal(data, &doc)
+	if on, _ := doc.Options["enforce_context_window"].(bool); !on {
+		return RunResult{Steps: 3, ModelResolved: "mock/m"}
+	}
+	if i := int(c.i.Add(1)) - 1; i < len(c.extra) {
+		return RunResult{Err: errors.New("agent run failed: " + c.extra[i]), ErrorClass: c.extra[i]}
+	}
+	return RunResult{
+		Err:        errors.New("agent run failed: rendered request exceeds the declared context window"),
+		ErrorClass: "window_cap_enforced",
+	}
+}
+
+func TestRunTrajectory_ExpectedExclusionToleratesTransientNoise(t *testing.T) {
+	t.Parallel()
+	r, exp, tr, trajDir := breakerFixture(t)
+	exp.Arms[ArmControl] = Arm{Config: ArmConfig{Options: map[string]any{"enforce_context_window": true}}}
+	exp.Arms[ArmTreatment] = Arm{Config: ArmConfig{Options: map[string]any{"enforce_context_window": false}}}
+	exp.ExpectedExclusion = &ExpectedExclusion{Arm: ArmControl, ErrorClass: "window_cap_enforced", Min: 3}
+	// One stray transport blip then declared deaths to the cap: the
+	// noise excuses exclusivity, suppression holds, and the blip is
+	// surfaced on the tolerated line instead of silently dropped.
+	r.Driver = &capMixRunner{extra: []string{"provider_transient"}}
+	rep := r.runTrajectory(t.Context(), exp, tr, trajDir, &FlagsManifest{Defaults: map[string]any{}}, 3, "inv", &configErrorTracker{})
+	require.NoError(t, rep.Abort)
+	require.Empty(t, rep.Saturated)
+	require.Equal(t, []string{"brk-t/control (1 transient)"}, rep.Tolerated)
+}
+
+func TestRunTrajectory_ExpectedExclusionNoiseNeverCountsToMin(t *testing.T) {
+	t.Parallel()
+	r, exp, tr, trajDir := breakerFixture(t)
+	exp.Arms[ArmControl] = Arm{Config: ArmConfig{Options: map[string]any{"enforce_context_window": true}}}
+	exp.Arms[ArmTreatment] = Arm{Config: ArmConfig{Options: map[string]any{"enforce_context_window": false}}}
+	exp.ExpectedExclusion = &ExpectedExclusion{Arm: ArmControl, ErrorClass: "window_cap_enforced", Min: 3}
+	// Transient blips crowd out the declared deaths — 4 transients
+	// leave only 2 cap deaths inside the 6-attempt budget, so min
+	// misses and the arm saturates. Noise is excused, never counted.
+	r.Driver = &capMixRunner{extra: []string{
+		"provider_transient", "provider_transient", "provider_transient", "provider_transient",
+	}}
+	rep := r.runTrajectory(t.Context(), exp, tr, trajDir, &FlagsManifest{Defaults: map[string]any{}}, 3, "inv", &configErrorTracker{})
+	require.NoError(t, rep.Abort)
+	require.Contains(t, rep.Saturated, "brk-t/control")
+	require.Empty(t, rep.Tolerated)
+}
+
+func TestRunTrajectory_ExpectedExclusionOtherClassStillSaturates(t *testing.T) {
+	t.Parallel()
+	r, exp, tr, trajDir := breakerFixture(t)
+	exp.Arms[ArmControl] = Arm{Config: ArmConfig{Options: map[string]any{"enforce_context_window": true}}}
+	exp.Arms[ArmTreatment] = Arm{Config: ArmConfig{Options: map[string]any{"enforce_context_window": false}}}
+	exp.ExpectedExclusion = &ExpectedExclusion{Arm: ArmControl, ErrorClass: "window_cap_enforced", Min: 3}
+	// A provider_other blip — payload-shaped, not weather — keeps the
+	// exclusivity check strict: declared deaths plus an unexplained
+	// class still saturate.
+	r.Driver = &capMixRunner{extra: []string{"provider_other"}}
+	rep := r.runTrajectory(t.Context(), exp, tr, trajDir, &FlagsManifest{Defaults: map[string]any{}}, 3, "inv", &configErrorTracker{})
+	require.NoError(t, rep.Abort)
+	require.Contains(t, rep.Saturated, "brk-t/control")
+	require.Empty(t, rep.Tolerated)
 }
 
 func TestRunTrajectory_NonConfigErrorsKeepSampling(t *testing.T) {
