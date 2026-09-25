@@ -46,6 +46,13 @@ type Report struct {
 	// summary, not persisted trajectory states.
 	Starved   []string
 	Saturated []string
+	// Tolerated lists arms whose error saturation was suppressed by a
+	// met expected_exclusion with transient-infrastructure records
+	// (provider_transient / rate_limit / provider_unreachable) riding
+	// alongside the declared deaths. Informational — the records
+	// remain in the file and the count is reported; the classes are
+	// only exempted from the exclusivity check.
+	Tolerated []string
 	// Coincident lists trajectories where treatment AND the current
 	// control arm both collapsed against baseline — suspect
 	// trajectory rot or model drift, not the change under test.
@@ -341,6 +348,9 @@ func (r Report) Summary(alpha float64) string {
 	}
 	if len(r.ExpectedExclusionSatisfied) > 0 {
 		fmt.Fprintf(&b, "  expected exclusion met: %s\n", strings.Join(r.ExpectedExclusionSatisfied, ", "))
+	}
+	if len(r.Tolerated) > 0 {
+		fmt.Fprintf(&b, "  tolerated transient noise: %s\n", strings.Join(r.Tolerated, ", "))
 	}
 	eligible := 0
 	for _, ok := range r.CatastrophicEligible {

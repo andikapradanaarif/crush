@@ -158,11 +158,24 @@ func TestInvocationAlarms_ExpectedExclusion(t *testing.T) {
 	_, _, err = r.invocationAlarms("e", "i1", bad, decl)
 	require.ErrorContains(t, err, "conclusive asymmetry")
 
+	// A transient-infrastructure record riding alongside the
+	// declared deaths is weather, not an unexplained death — the
+	// shortfall stays explained.
+	mixed := slices.Clone(recs)
+	mixed[3].ErrorClass = "provider_transient"
+	_, _, err = r.invocationAlarms("e", "i1", mixed, decl)
+	require.NoError(t, err)
+
 	// Below the declared minimum — the regime under-engaged.
 	low := slices.Clone(recs)
 	low[3].Outcome = OutcomePass
 	decl4 := &ExpectedExclusion{Arm: ArmControl, ErrorClass: "window_cap_enforced", Min: 5}
 	_, _, err = r.invocationAlarms("e", "i1", low, decl4)
+	require.ErrorContains(t, err, "conclusive asymmetry")
+
+	// Transient noise never counts toward min — declared deaths
+	// short of the floor refuse even with weather alongside.
+	_, _, err = r.invocationAlarms("e", "i1", mixed, decl4)
 	require.ErrorContains(t, err, "conclusive asymmetry")
 }
 

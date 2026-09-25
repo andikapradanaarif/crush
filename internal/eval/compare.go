@@ -122,6 +122,7 @@ type alarmSnapshot struct {
 	OutcomeAlarms []string `json:"outcome_alarms,omitempty"`
 	Starved       []string `json:"starved,omitempty"`
 	Saturated     []string `json:"saturated,omitempty"`
+	Tolerated     []string `json:"tolerated,omitempty"`
 	Skipped       []string `json:"skipped,omitempty"`
 	NoopFlags     []string `json:"noop_flags,omitempty"`
 }
@@ -135,6 +136,7 @@ func (r *Runner) persistAlarms(exp *Experiment, inv string, rep Report, retErr e
 		Primary:    exp.Primary,
 		Starved:    rep.Starved,
 		Saturated:  rep.Saturated,
+		Tolerated:  rep.Tolerated,
 		Skipped:    rep.Skipped,
 		NoopFlags:  rep.NoopFlags,
 	}
@@ -452,17 +454,22 @@ func (r *Runner) invocationAlarms(expName, invocation string, recs []RunRecord, 
 // exclusionShortfallExplained reports whether an arm's conclusive
 // shortfall is fully accounted for by the declared exclusion —
 // every non-conclusive record on the arm carries the declared error
-// class and the count meets the declared minimum.
+// class or a transient-infrastructure class (weather, not an
+// unexplained death) and the declared-class count meets the declared
+// minimum.
 func exclusionShortfallExplained(rs []RunRecord, arm string, d *ExpectedExclusion) bool {
 	declared := 0
 	for _, rec := range rs {
 		if rec.Arm != arm || rec.Outcome.Conclusive() {
 			continue
 		}
-		if rec.Outcome != OutcomeError || rec.ErrorClass != d.ErrorClass {
+		if rec.Outcome != OutcomeError ||
+			(rec.ErrorClass != d.ErrorClass && !infraTransientClasses[rec.ErrorClass]) {
 			return false
 		}
-		declared++
+		if rec.ErrorClass == d.ErrorClass {
+			declared++
+		}
 	}
 	return declared >= d.Min
 }

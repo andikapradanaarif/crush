@@ -1,21 +1,51 @@
+diff --git a/internal/app/app.go b/internal/app/app.go
+index 00e6aaca..6c3a9722 100644
+--- a/internal/app/app.go
++++ b/internal/app/app.go
+@@ -136,7 +136,9 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
+ 	}
+ 
+ 	// Check for updates in the background.
+-	go app.checkForUpdates(ctx)
++	if app.config.Config().Options.AutoUpdate == nil || *app.config.Config().Options.AutoUpdate {
++		go app.checkForUpdates(ctx)
++	}
+ 
+ 	// Arm initialization synchronously before launching it so WaitForInit
+ 	// blocks for the in-flight init instead of racing the goroutine and
+diff --git a/internal/cmd/session.go b/internal/cmd/session.go
+index 33341546..24584a3b 100644
+--- a/internal/cmd/session.go
++++ b/internal/cmd/session.go
+@@ -485,7 +485,7 @@ func outputSessionHuman(ctx context.Context, cfg *config.ConfigStore, sess sessi
+ 
+ 	first := true
+ 	for _, msg := range msgs {
+-		items := chat.ExtractMessageItems(&styles, msg, toolResults, "")
++		items := chat.ExtractMessageItems(&styles, msg, toolResults, "", true)
+ 		for _, item := range items {
+ 			if !first {
+ 				fmt.Fprintln(&buf)
 diff --git a/internal/config/config.go b/internal/config/config.go
-index 2d697dec..27f25ce3 100644
+index 2d697dec..cad4a539 100644
 --- a/internal/config/config.go
 +++ b/internal/config/config.go
-@@ -394,6 +394,8 @@ type Options struct {
+@@ -394,6 +394,10 @@ type Options struct {
  	InitializeAs              string       `json:"initialize_as,omitempty" jsonschema:"description=Name of the context file to create/update during project initialization,default=AGENTS.md,example=AGENTS.md,example=CRUSH.md,example=CLAUDE.md,example=docs/LLMs.md"`
  	AutoLSP                   *bool        `json:"auto_lsp,omitempty" jsonschema:"description=Automatically setup LSPs based on root markers,default=true"`
  	Progress                  *bool        `json:"progress,omitempty" jsonschema:"description=Show indeterminate progress updates during long operations,default=true"`
 +	CompactStatus             *bool        `json:"compact_status,omitempty" jsonschema:"description=Use a compact single-line status area in the TUI,default=false"`
 +	QuietStartup              *bool        `json:"quiet_startup,omitempty" jsonschema:"description=Suppress non-essential output during startup,default=false"`
++	ShowHints                 *bool        `json:"show_hints,omitempty" jsonschema:"description=Show contextual hints on tool-call status lines in the TUI,default=true"`
++	AutoUpdate                *bool        `json:"auto_update,omitempty" jsonschema:"description=Check for new Crush releases in the background on startup,default=true"`
  	Notifications             string       `json:"notifications,omitempty" jsonschema:"description=Notification style to use. Options: auto (default)\\, native\\, osc\\, bell\\, disabled. Auto selects based on environment: native for local sessions\\, osc for SSH (with automatic OSC 99/777 detection).,enum=auto,enum=native,enum=osc,enum=bell,enum=disabled,default=auto"`
  	DisabledSkills            []string     `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=crush-config"`
  	RequestTimeout            *int         `json:"request_timeout,omitempty" jsonschema:"description=Timeout in seconds for each LLM API request. Streaming responses are aborted only after this much inactivity\\, so slow but active streams are never killed. 0 disables it\\, negative values are invalid.,default=60,example=120,example=300,example=0"`
 diff --git a/internal/shellconfig/options.go b/internal/shellconfig/options.go
-index 74cddd1b..4215253c 100644
+index 74cddd1b..08caed3a 100644
 --- a/internal/shellconfig/options.go
 +++ b/internal/shellconfig/options.go
-@@ -194,10 +194,12 @@ type optionSpec struct {
+@@ -194,10 +194,14 @@ type optionSpec struct {
  // handleOption above and do not appear here.
  var optionSpecs = map[string]optionSpec{
  	// Boolean fields (stored as-is).
@@ -29,14 +59,162 @@ index 74cddd1b..4215253c 100644
 +	"progress":       {jsonKey: "progress", kind: optBool},
 +	"compact-status": {jsonKey: "compact_status", kind: optBool},
 +	"quiet-startup":  {jsonKey: "quiet_startup", kind: optBool},
++	"show-hints":     {jsonKey: "show_hints", kind: optBool},
++	"auto-update":    {jsonKey: "auto_update", kind: optBool},
  
  	// Boolean fields exposed positively but stored as their negation.
  	"metrics":              {jsonKey: "disable_metrics", kind: optBool, inverted: true},
+diff --git a/internal/ui/chat/messages.go b/internal/ui/chat/messages.go
+index 2f177ec2..f6b52326 100644
+--- a/internal/ui/chat/messages.go
++++ b/internal/ui/chat/messages.go
+@@ -429,7 +429,7 @@ func formatHypercreditSavings(v float64) string {
+ //
+ // For assistant messages with tool calls, pass a toolResults map to link results.
+ // Use BuildToolResultMap to create this map from all messages in a session.
+-func ExtractMessageItems(sty *styles.Styles, msg *message.Message, toolResults map[string]message.ToolResult, workingDir string) []MessageItem {
++func ExtractMessageItems(sty *styles.Styles, msg *message.Message, toolResults map[string]message.ToolResult, workingDir string, showHints bool) []MessageItem {
+ 	switch msg.Role {
+ 	case message.User:
+ 		// Reconstruct shell command items from ShellCommand parts.
+@@ -461,14 +461,18 @@ func ExtractMessageItems(sty *styles.Styles, msg *message.Message, toolResults m
+ 			if tr, ok := toolResults[tc.ID]; ok {
+ 				result = &tr
+ 			}
+-			items = append(items, NewToolMessageItem(
++			item := NewToolMessageItem(
+ 				sty,
+ 				msg.ID,
+ 				tc,
+ 				result,
+ 				msg.FinishReason() == message.FinishReasonCanceled,
+ 				workingDir,
+-			))
++			)
++			if h, ok := item.(interface{ SetShowHints(bool) }); ok {
++				h.SetShowHints(showHints)
++			}
++			items = append(items, item)
+ 		}
+ 		return items
+ 	}
+diff --git a/internal/ui/chat/resize_bench_test.go b/internal/ui/chat/resize_bench_test.go
+index 98a08094..fa2b99b2 100644
+--- a/internal/ui/chat/resize_bench_test.go
++++ b/internal/ui/chat/resize_bench_test.go
+@@ -55,7 +55,7 @@ func BenchmarkResizeSession(b *testing.B) {
+ 	sty := styles.CharmtonePantera()
+ 	var items []list.Item
+ 	for _, m := range ptrs {
+-		for _, it := range ExtractMessageItems(&sty, m, toolResults, "") {
++		for _, it := range ExtractMessageItems(&sty, m, toolResults, "", true) {
+ 			items = append(items, it)
+ 		}
+ 	}
+diff --git a/internal/ui/chat/tools.go b/internal/ui/chat/tools.go
+index 634b9f07..6ccae5e2 100644
+--- a/internal/ui/chat/tools.go
++++ b/internal/ui/chat/tools.go
+@@ -164,6 +164,9 @@ type baseToolMessageItem struct {
+ 	// spinningFunc allows tools to override the default spinning logic.
+ 	// If nil, uses the default: !toolCall.Finished && !canceled.
+ 	spinningFunc SpinningFunc
++	// showHints gates contextual hint lines (e.g. the hook indicator)
++	// on the rendered tool item.
++	showHints bool
+ 
+ 	sty             *styles.Styles
+ 	anim            *anim.Anim
+@@ -295,6 +298,16 @@ func NewToolMessageItem(
+ 	return item
+ }
+ 
++// SetShowHints enables or disables contextual hint lines on the item.
++func (t *baseToolMessageItem) SetShowHints(show bool) {
++	if t.showHints == show {
++		return
++	}
++	t.showHints = show
++	t.clearCache()
++	t.Bump()
++}
++
+ // SetCompact implements the Compactable interface.
+ func (t *baseToolMessageItem) SetCompact(compact bool) {
+ 	if t.isCompact == compact {
+@@ -351,7 +364,7 @@ func (t *baseToolMessageItem) RawRender(width int) string {
+ 		})
+ 
+ 		// Prepend hook indicator if hooks ran for this tool call.
+-		if t.result != nil {
++		if t.showHints && t.result != nil {
+ 			if hookLine := toolOutputHookIndicator(t.sty, t.result.Metadata, toolItemWidth); hookLine != "" {
+ 				content = hookLine + "\n\n" + content
+ 			}
+diff --git a/internal/ui/model/ui.go b/internal/ui/model/ui.go
+index 0b374705..c9165a72 100644
+--- a/internal/ui/model/ui.go
++++ b/internal/ui/model/ui.go
+@@ -673,6 +673,12 @@ func (m *UI) updateNotificationBackend() {
+ 	m.notifyBackend = selectNotificationBackend(m.caps, cfg)
+ }
+ 
++// showHints resolves the show_hints option — on unless explicitly
++// disabled.
++func (m *UI) showHints() bool {
++	return m.com.Config().Options.ShowHints == nil || *m.com.Config().Options.ShowHints
++}
++
+ // shouldSendNotification returns true if notifications should be sent based on
+ // current state. Focus reporting must be supported, window must not be
+ // focused, and notifications must not be disabled in config.
+@@ -1504,15 +1510,15 @@ func (m *UI) setSessionMessages(msgs []message.Message) tea.Cmd {
+ 		switch msg.Role {
+ 		case message.User:
+ 			m.lastUserMessageTime = msg.CreatedAt
+-			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap, m.com.Workspace.WorkingDir())...)
++			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap, m.com.Workspace.WorkingDir(), m.showHints())...)
+ 		case message.Assistant:
+-			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap, m.com.Workspace.WorkingDir())...)
++			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap, m.com.Workspace.WorkingDir(), m.showHints())...)
+ 			if chat.ShouldShowAssistantInfo(msg) {
+ 				infoItem := chat.NewAssistantInfoItem(m.com.Styles, msg, m.com.Config(), time.Unix(m.lastUserMessageTime, 0))
+ 				items = append(items, infoItem)
+ 			}
+ 		default:
+-			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap, m.com.Workspace.WorkingDir())...)
++			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap, m.com.Workspace.WorkingDir(), m.showHints())...)
+ 		}
+ 	}
+ 
+@@ -1603,7 +1609,7 @@ func (m *UI) loadNestedToolCalls(items []chat.MessageItem) {
+ 		// Extract nested tool items.
+ 		var nestedTools []chat.ToolMessageItem
+ 		for _, nestedMsg := range nestedMsgPtrs {
+-			nestedItems := chat.ExtractMessageItems(m.com.Styles, nestedMsg, nestedToolResultMap, m.com.Workspace.WorkingDir())
++			nestedItems := chat.ExtractMessageItems(m.com.Styles, nestedMsg, nestedToolResultMap, m.com.Workspace.WorkingDir(), m.showHints())
+ 			for _, nestedItem := range nestedItems {
+ 				if nestedToolItem, ok := nestedItem.(chat.ToolMessageItem); ok {
+ 					// Mark nested tools as simple (compact) rendering.
+@@ -1653,11 +1659,11 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
+ 			return nil
+ 		}
+ 		m.lastUserMessageTime = msg.CreatedAt
+-		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil, m.com.Workspace.WorkingDir())
++		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil, m.com.Workspace.WorkingDir(), m.showHints())
+ 		m.chat.AppendMessages(items...)
+ 		m.chat.ScrollToBottom()
+ 	case message.Assistant:
+-		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil, m.com.Workspace.WorkingDir())
++		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil, m.com.Workspace.WorkingDir(), m.showHints())
+ 		m.chat.AppendMessages(items...)
+ 		if m.chat.Follow() {
+ 			m.chat.ScrollToBottom()
 diff --git a/schema.json b/schema.json
-index 8a1939df..6ee53d95 100644
+index 8a1939df..ba6d4805 100644
 --- a/schema.json
 +++ b/schema.json
-@@ -555,6 +555,16 @@
+@@ -555,6 +555,26 @@
            "description": "Show indeterminate progress updates during long operations",
            "default": true
          },
@@ -49,6 +227,16 @@ index 8a1939df..6ee53d95 100644
 +          "type": "boolean",
 +          "description": "Suppress non-essential output during startup",
 +          "default": false
++        },
++        "show_hints": {
++          "type": "boolean",
++          "description": "Show contextual hints on tool-call status lines in the TUI",
++          "default": true
++        },
++        "auto_update": {
++          "type": "boolean",
++          "description": "Check for new Crush releases in the background on startup",
++          "default": true
 +        },
          "notifications": {
            "type": "string",

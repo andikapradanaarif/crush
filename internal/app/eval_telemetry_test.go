@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"syscall"
 	"testing"
@@ -43,6 +44,17 @@ func TestClassifyRunError(t *testing.T) {
 		{"retry-wrapped auth", &fantasy.RetryError{Errors: []error{
 			&fantasy.ProviderError{StatusCode: 401},
 		}}, "auth"},
+		// Transport failures reaching us bare — RetryError.Unwrap
+		// yields the last attempt error without a ProviderError wrap,
+		// the live shape the Alibaba endpoint produced on outages.
+		{"retry-wrapped url timeout", &fantasy.RetryError{Errors: []error{
+			&url.Error{Op: "Post", URL: "https://x/v1/chat/completions", Err: errors.New("net/http: TLS handshake timeout")},
+		}}, "provider_transient"},
+		{"retry-wrapped refused", &fantasy.RetryError{Errors: []error{
+			&url.Error{Op: "Post", URL: "https://x", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}},
+		}}, "provider_unreachable"},
+		{"bare url error", &url.Error{Op: "Post", URL: "https://x", Err: errors.New("EOF")}, "provider_transient"},
+		{"bare net op timeout", &net.OpError{Op: "dial", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ETIMEDOUT}}, "provider_transient"},
 		{"non-provider error", errors.New("disk full"), ""},
 	}
 	for _, tc := range cases {

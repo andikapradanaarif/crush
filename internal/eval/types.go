@@ -181,7 +181,11 @@ type Experiment struct {
 // at least Min error records carrying ErrorClass per trajectory.
 // Min should equal the trajectory's designed n when the claim is
 // total death (control cannot run this corpus); a smaller Min
-// asserts only that the regime engages.
+// asserts only that the regime engages. Transient-infrastructure
+// classes (rate_limit, provider_transient, provider_unreachable)
+// riding alongside are excused from the exclusivity check as
+// weather — they never count toward Min and stay reported on the
+// report's tolerated line.
 type ExpectedExclusion struct {
 	Arm        string `json:"arm"`         // control | treatment
 	ErrorClass string `json:"error_class"` // e.g. window_cap_enforced

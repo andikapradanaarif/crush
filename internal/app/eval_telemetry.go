@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -245,6 +246,27 @@ func classifyRunError(err error) string {
 			}
 		}
 	default:
+		// Transport failures can surface without a ProviderError
+		// wrap — RetryError.Unwrap yields the bare last-attempt
+		// error, so a *url.Error from http.Client.Do (TLS handshake
+		// timeout, reset mid-handshake) reaches here unclassified.
+		// Classify on chain shape the same way the ProviderError
+		// branch does on Cause above.
+		var (
+			dnsErr *net.DNSError
+			netErr net.Error
+		)
+		switch {
+		case errors.Is(err, syscall.ECONNREFUSED) ||
+			errors.Is(err, syscall.EHOSTUNREACH) ||
+			errors.Is(err, syscall.ENETUNREACH) ||
+			errors.As(err, &dnsErr):
+			return "provider_unreachable"
+		case errors.As(err, &netErr) ||
+			errors.Is(err, io.ErrUnexpectedEOF) ||
+			fantasy.IsTransportError(err):
+			return "provider_transient"
+		}
 		return ""
 	}
 }

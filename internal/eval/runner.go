@@ -655,6 +655,7 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (rep Report
 		}
 		rep.Starved = append(rep.Starved, trep.Starved...)
 		rep.Saturated = append(rep.Saturated, trep.Saturated...)
+		rep.Tolerated = append(rep.Tolerated, trep.Tolerated...)
 		if trep.Skipped != "" {
 			requiresSkipped++
 			rep.Skipped = append(rep.Skipped, fmt.Sprintf("%s: %s", traj.ID, trep.Skipped))
@@ -708,6 +709,7 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (rep Report
 	// has shipped here).
 	gate.Starved = rep.Starved
 	gate.Saturated = rep.Saturated
+	gate.Tolerated = rep.Tolerated
 	gate.Skipped = rep.Skipped
 	rep = gate
 	rep.Primary = buildPrimaryResult(exp, records, requiredN)
@@ -742,6 +744,10 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (rep Report
 type trajReport struct {
 	Starved   []string
 	Saturated []string
+	// Tolerated lists arms whose saturation was suppressed with
+	// transient-noise records excused — the noise stays visible on
+	// the report even though it didn't trip the alarm.
+	Tolerated []string
 	Skipped   string
 	// Abort carries a config-class circuit-breaker trip — the parent
 	// aborts the experiment rather than burn attempts on a systemic
@@ -896,14 +902,28 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 			// A declared expected exclusion consumes its own
 			// saturation: every excluded record on the arm being the
 			// declared death at or beyond min is the designed
-			// condition, not infra bleed. An arm that also starved
-			// inconclusive or died other ways keeps the alarm —
-			// unexplained exclusions stay loud.
+			// condition, not infra bleed. Transient infrastructure
+			// classes riding alongside are weather, not unexplained
+			// deaths — they excuse exclusivity but never count toward
+			// min, and an arm that also starved inconclusive or died
+			// other ways keeps the alarm.
 			if d := exp.ExpectedExclusion; d != nil && d.Arm == armName &&
-				excluded[armName][OutcomeInconclusive] == 0 &&
-				excludedClass[armName][d.ErrorClass] == excluded[armName][OutcomeError] &&
-				excludedClass[armName][d.ErrorClass] >= d.Min {
-				continue
+				excluded[armName][OutcomeInconclusive] == 0 {
+				declaredN := excludedClass[armName][d.ErrorClass]
+				toleratedN := 0
+				for class, count := range excludedClass[armName] {
+					if infraTransientClasses[class] {
+						toleratedN += count
+					}
+				}
+				if declaredN >= d.Min &&
+					excluded[armName][OutcomeError]-declaredN-toleratedN == 0 {
+					if toleratedN > 0 {
+						rep.Tolerated = append(rep.Tolerated,
+							fmt.Sprintf("%s/%s (%d transient)", traj.ID, armName, toleratedN))
+					}
+					continue
+				}
 			}
 			if excluded[armName][OutcomeError] >= excluded[armName][OutcomeInconclusive] {
 				rep.Saturated = append(rep.Saturated, fmt.Sprintf("%s/%s", traj.ID, armName))
@@ -913,6 +933,22 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 		}
 	}
 	return rep
+}
+
+// infraTransientClasses are the typed error classes carrying no signal
+// about the arm or trajectory — transport weather and quota
+// back-pressure. A stray transient alongside an expected_exclusion's
+// declared deaths does not break exclusivity: it is noise, not an
+// unexplained death. The classes never count toward the declaration's
+// min and are surfaced on the report's tolerated line. Deliberately
+// narrow: timeout is conclusive data, provider_server /
+// provider_deterministic are payload-shaped, auth / cancelled are
+// operator or credential action — all remain unexplained when they
+// mix into an exclusion.
+var infraTransientClasses = map[string]bool{
+	"rate_limit":           true,
+	"provider_transient":   true,
+	"provider_unreachable": true,
 }
 
 // RecomputeAll rebuilds characterization state from accumulated run

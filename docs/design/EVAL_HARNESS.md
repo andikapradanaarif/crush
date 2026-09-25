@@ -606,8 +606,12 @@ It claims the declared arm produces at least `min` error records of
 the declared class per trajectory. The designed death is exempted
 at every layer the harness would otherwise treat as void: an arm
 whose exclusions are *entirely* the declared death at-or-beyond
-`min` is exempt from the error-saturated alarm (the saturation is
-the designed condition, not infra bleed — an arm that also starved
+`min` — modulo transient-infrastructure classes (`rate_limit`,
+`provider_transient`, `provider_unreachable`), which count as
+weather, are excused from exclusivity but never toward `min`, and
+are surfaced on the report's `tolerated transient noise` line — is
+exempt from the error-saturated alarm (the saturation is the
+designed condition, not infra bleed — an arm that also starved
 inconclusive or died other ways keeps the alarm); the trajectory's
 excluded-differential is consumed when the declared arm met `min`
 and the asymmetry ran the declared direction; and compare's
@@ -642,9 +646,12 @@ can't hide ~100 uncounted calls per run. It does **not** cover the
 other sidecars: `GenerateTitle` (one call per session) and
 auto-summarize ride their own stream calls and stay invisible in both
 `step_records` and `generator_tokens`. `error_class` is the child's
-typed `fantasy.ProviderError` classification; the circuit breaker
-reads it before falling back to string signatures, so deterministic
-provider failures trip at two strikes instead of resampling to `2N`.
+typed `fantasy.ProviderError` classification — with a fallback pass
+over bare transport chains (`*url.Error`/`net.Error` inside a
+`RetryError`) for failures that never produced an HTTP response —
+and the circuit breaker reads it before falling back to string
+signatures, so deterministic provider failures trip at two strikes
+instead of resampling to `2N`.
 
 Sources, all existing: `fantasy.AgentResult` (turns/steps/usage)
 from `agent.Run`; `stubStats` per session (`stubs.go:60`); recall
