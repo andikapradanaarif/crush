@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -48,13 +50,20 @@ func TestClassifyRunError(t *testing.T) {
 		// yields the last attempt error without a ProviderError wrap,
 		// the live shape the Alibaba endpoint produced on outages.
 		{"retry-wrapped url timeout", &fantasy.RetryError{Errors: []error{
-			&url.Error{Op: "Post", URL: "https://x/v1/chat/completions", Err: errors.New("net/http: TLS handshake timeout")},
+			// The real shape: url.Error wrapping a net.Error with
+			// Timeout() — TLS handshake timeouts surface as
+			// http.tlsHandshakeTimeoutError, unexported, so
+			// ETIMEDOUT stands in for the Timeout()=true chain.
+			&url.Error{Op: "Post", URL: "https://x/v1/chat/completions", Err: &os.SyscallError{Syscall: "read", Err: syscall.ETIMEDOUT}},
 		}}, "provider_transient"},
 		{"retry-wrapped refused", &fantasy.RetryError{Errors: []error{
 			&url.Error{Op: "Post", URL: "https://x", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}},
 		}}, "provider_unreachable"},
-		{"bare url error", &url.Error{Op: "Post", URL: "https://x", Err: errors.New("EOF")}, "provider_transient"},
+		{"bare url error", &url.Error{Op: "Post", URL: "https://x", Err: io.ErrUnexpectedEOF}, "provider_transient"},
 		{"bare net op timeout", &net.OpError{Op: "dial", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ETIMEDOUT}}, "provider_transient"},
+		// Non-retryable transport shapes match the ProviderError branch
+		// — cert verification failure is provider_other, not transient.
+		{"bare cert failure", &url.Error{Op: "Post", URL: "https://x", Err: x509.UnknownAuthorityError{}}, "provider_other"},
 		{"non-provider error", errors.New("disk full"), ""},
 	}
 	for _, tc := range cases {

@@ -162,6 +162,9 @@ func (r *Runner) persistAlarms(exp *Experiment, inv string, rep Report, retErr e
 	if len(rep.ExpectedExclusionSatisfied) > 0 {
 		snap.OutcomeAlarms = append(snap.OutcomeAlarms, "expected-exclusion met: "+strings.Join(rep.ExpectedExclusionSatisfied, ", "))
 	}
+	if len(rep.Tolerated) > 0 {
+		snap.OutcomeAlarms = append(snap.OutcomeAlarms, "tolerated transient noise: "+strings.Join(rep.Tolerated, ", "))
+	}
 	if len(rep.Coincident) > 0 {
 		snap.OutcomeAlarms = append(snap.OutcomeAlarms, "coincident-collapse: "+strings.Join(rep.Coincident, ", "))
 	}

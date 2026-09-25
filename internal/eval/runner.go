@@ -945,6 +945,12 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 // provider_deterministic are payload-shaped, auth / cancelled are
 // operator or credential action — all remain unexplained when they
 // mix into an exclusion.
+//
+// provider_unreachable is in the set yet stays unconditionally
+// config-class for the circuit breaker — the tolerance window is
+// therefore exactly one unreachable record per trajectory: a single
+// flap is weather, two in a row abort the experiment before
+// exclusivity is ever consulted.
 var infraTransientClasses = map[string]bool{
 	"rate_limit":           true,
 	"provider_transient":   true,
