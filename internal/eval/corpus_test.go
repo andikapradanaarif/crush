@@ -19,6 +19,12 @@ func TestCorpus_QuarantineClean(t *testing.T) {
 		tr := tr
 		t.Run(id, func(t *testing.T) {
 			t.Parallel()
+			// Network-dependent trajectories (realrepo-* clone and
+			// build a pinned repo per check) can outlast the package
+			// timeout under load; -short keeps the suite hermetic.
+			if testing.Short() && tr.Requires.Network != nil && *tr.Requires.Network {
+				t.Skip("requires network (-short)")
+			}
 			// Quarantine doesn't consult requires — a host missing a
 			// declared tool would report every state as broken rather
 			// than judging the check, so skip instead of failing.
