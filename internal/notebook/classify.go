@@ -198,6 +198,34 @@ func describeToolCall(tc message.ToolCall, result *message.ToolResult) string {
 	return sb.String()
 }
 
+// fileTags returns the file: tags for path: the project-relative path
+// as the primary, unambiguous tag, plus the basename as an alias so
+// recall("file:name.go") and basename-keyed consumers keep matching.
+// An absolute path outside workDir — or any path when workDir is
+// empty — falls back to the basename alone.
+func fileTags(path, workDir string) []string {
+	p := strings.TrimRight(path, "/\\")
+	if p == "" {
+		return nil
+	}
+	rel := filepath.ToSlash(filepath.Clean(p))
+	if filepath.IsAbs(p) {
+		if r, err := filepath.Rel(workDir, p); workDir != "" && err == nil && r != ".." && !strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+			rel = filepath.ToSlash(r)
+		} else {
+			rel = filepath.Base(p)
+		}
+	}
+	if rel == "." {
+		rel = filepath.Base(p)
+	}
+	base := filepath.Base(p)
+	if rel == base {
+		return []string{"file:" + rel}
+	}
+	return []string{"file:" + rel, "file:" + base}
+}
+
 // extractPathFromInput attempts to extract a file path from a tool
 // call's JSON input.
 func extractPathFromInput(input string) string {
@@ -331,7 +359,7 @@ func planItemsFromCall(tc *message.ToolCall) []session.PlanItem {
 // item list is already structured, so a generator paraphrase would only
 // lose information. Dependency edges render as item keys when the id
 // resolves inside the list.
-func buildPlanEntry(input EntryInput) GeneratedEntry {
+func buildPlanEntry(input EntryInput, workDir string) GeneratedEntry {
 	items := planItemsFromResult(input.ToolResult)
 	if len(items) == 0 {
 		items = planItemsFromCall(input.ToolCall)
@@ -355,9 +383,10 @@ func buildPlanEntry(input EntryInput) GeneratedEntry {
 	for _, it := range items {
 		sb.WriteString(session.FormatPlanItemLine(it, keyByID) + "\n")
 		for _, p := range it.EvidencePaths {
-			tag := "file:" + filepath.Base(strings.TrimRight(p, "/\\"))
-			if !slices.Contains(tags, tag) {
-				tags = append(tags, tag)
+			for _, tag := range fileTags(p, workDir) {
+				if !slices.Contains(tags, tag) {
+					tags = append(tags, tag)
+				}
 			}
 		}
 	}
@@ -407,7 +436,7 @@ func (s *service) significantEntries(ctx context.Context, sessionID string, sign
 	entries := make([]GeneratedEntry, 0, len(significant)+len(extras))
 	for i, in := range significant {
 		if in.EventType == EventPlan {
-			entries = append(entries, buildPlanEntry(in))
+			entries = append(entries, buildPlanEntry(in, s.opts.WorkingDir))
 			continue
 		}
 		entry, ok := genAt[i]
@@ -419,7 +448,7 @@ func (s *service) significantEntries(ctx context.Context, sessionID string, sign
 				EventType: in.EventType,
 				Title:     in.Title,
 				Text:      fmt.Sprintf("## %s\n\n%s\n", in.Title, truncate(in.Description, 800)),
-				Tags:      defaultTagsForEvent(in),
+				Tags:      defaultTagsForEvent(in, s.opts.WorkingDir),
 			}
 		}
 		entries = append(entries, entry)

@@ -3,6 +3,8 @@ package notebook
 import (
 	"context"
 	"database/sql"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -36,7 +38,7 @@ func (m *mockGenerator) Generate(ctx context.Context, sessionID string, events [
 				EventType: ev.EventType,
 				Title:     ev.Title,
 				Text:      "## " + ev.Title + "\ncontent",
-				Tags:      defaultTagsForEvent(ev),
+				Tags:      defaultTagsForEvent(ev, ""),
 			}
 		}
 		return entries, nil
@@ -605,17 +607,45 @@ func TestComputeMaxTokens(t *testing.T) {
 	require.Equal(t, int64(16000), computeMaxTokens(100, 1000))
 }
 
-func TestDefaultTagsForEvent_UsesBasename(t *testing.T) {
+func TestDefaultTagsForEvent_FileTags(t *testing.T) {
 	event := EntryInput{
 		EventType: EventFileEdit,
 		ToolCall:  &message.ToolCall{Input: `{"file_path":"internal/middleware/auth.go"}`},
 	}
-	tags := defaultTagsForEvent(event)
+	tags := defaultTagsForEvent(event, "/work/dir")
 	require.Contains(t, tags, "phase:file_edit")
+	// Project-relative path is the primary tag; the basename stays as
+	// a recall alias.
+	require.Contains(t, tags, "file:internal/middleware/auth.go")
 	require.Contains(t, tags, "file:auth.go")
-	// Should NOT contain the full path.
-	for _, tag := range tags {
-		require.False(t, strings.Contains(tag, "internal/middleware"))
+}
+
+func TestFileTags(t *testing.T) {
+	t.Parallel()
+	workDir := t.TempDir()
+	under := filepath.Join(workDir, "internal", "config", "config.go")
+	require.NoError(t, os.MkdirAll(filepath.Dir(under), 0o755))
+	require.NoError(t, os.WriteFile(under, []byte("x"), 0o644))
+
+	tests := []struct {
+		name    string
+		path    string
+		workDir string
+		want    []string
+	}{
+		{"relative path", "internal/config/config.go", workDir, []string{"file:internal/config/config.go", "file:config.go"}},
+		{"dot-prefix cleans", "./internal/config/config.go", workDir, []string{"file:internal/config/config.go", "file:config.go"}},
+		{"absolute under workdir", under, workDir, []string{"file:internal/config/config.go", "file:config.go"}},
+		{"absolute outside workdir", "/etc/hosts", workDir, []string{"file:hosts"}},
+		{"relative path, no workdir", "internal/config/config.go", "", []string{"file:internal/config/config.go", "file:config.go"}},
+		{"absolute, no workdir", "/etc/hosts", "", []string{"file:hosts"}},
+		{"basename only", "config.go", workDir, []string{"file:config.go"}},
+		{"trailing slash", "internal/agent/", workDir, []string{"file:internal/agent", "file:agent"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, fileTags(tt.path, tt.workDir))
+		})
 	}
 }
 

@@ -866,7 +866,7 @@ func (a *sessionAgent) buildSelectionInput(ctx context.Context, sessionID string
 	}
 	sel.livePaths = make(map[string]bool)
 	for base := range want {
-		for _, p := range sel.workingSet[base] {
+		for _, p := range sel.resolveFileTag(base) {
 			_, err := os.Stat(p)
 			// Only ErrNotExist counts as dead — a permission error or
 			// transient FS failure is not evidence of deletion.

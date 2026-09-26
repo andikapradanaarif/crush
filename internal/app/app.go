@@ -149,6 +149,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 	notebookOpts := notebook.Options{
 		MaxEntryTokens:    cfg.Options.NotebookMaxEntryTokens,
 		MaxNotebookTokens: cfg.Options.NotebookMaxTokens,
+		WorkingDir:        store.WorkingDir(),
 	}
 	// Fire PreCompact hooks before entry compression when configured.
 	if preCompactHooks := cfg.Hooks[hooks.EventPreCompact]; len(preCompactHooks) > 0 {
