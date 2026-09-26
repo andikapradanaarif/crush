@@ -408,6 +408,15 @@ tier expresses its corpus. `quarantined` is excluded even under
 rotted trajectory needs agent runs, which is a runner mode
 (characterize), not an experiment arm.
 
+Either selector form takes `@`-refinements on turn count —
+`"*@min_turns>=4"`, `"band:stable@max_turns<=12"`, composable in one
+selector. Filtering happens at selection time, so
+`ValidateArmCoverageVsCorpus` semantics are unchanged: the lint still
+errors if a *selected* trajectory can't reach a `min_` predicate's
+ceiling. The refinement is what keeps broad selectors usable while
+the corpus carries 1-turn entries (`fix-nil-map-write`, `vague-*`)
+that starve prior-turns predicates.
+
 `model` + `temperature` pin at the experiment level —
 `temperature` is required (unpinned arms land in a `default`-
 temperature baseline cell no characterize output joins); run
