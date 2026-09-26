@@ -2044,10 +2044,11 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		return nil
 	}
 
-	// Summarize renders verbatim: the call is one-shot with no cache
-	// reuse, and the summary is the seed the next context window grows
-	// from — stubs would amplify whatever the notebook dropped. The
-	// skip flag keeps the render outside the session's gate state.
+	// Summarize renders through the full notebook machinery with the
+	// session's gate state skipped — the call is one-shot, an
+	// over-margin render still has to fit, but it must not move the
+	// watermark or trip the latch for renders after it. A prior
+	// summary floor also applies, so a re-summarize sends the tail.
 	aiMsgs, _ := a.preparePrompt(ctx, msgs, largeModel.CatwalkCfg.SupportsImages, nil, true)
 
 	genCtx, cancel := context.WithCancel(ctx)
@@ -2263,6 +2264,10 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 
 	var rawMsgs []message.Message
 	boundary := 0
+	// rawStart is the msgs index rawMsgs[0] came from — the coverage
+	// boundary or a later summary floor. collapsedTurn needs it to
+	// keep its absolute turn lookup aligned.
+	rawStart := 0
 	if notebookEnabled {
 		budget := a.rawTokenBudget
 		if budget <= 0 {
@@ -2369,7 +2374,23 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 			// a file with committed entries).
 			history = append(history, a.notebookPrefix(ctx, sessionID, msgs, 0, segmentKey{}, segs, collapse)...)
 		}
-		rawMsgs = msgs[boundary:]
+		rawStart = boundary
+		if summaryIdx := lastSummaryIndex(msgs); summaryIdx > rawStart {
+			// A stored summary is a hard render floor: /summarize
+			// must actually shrink the render. The list stays
+			// absolute for indexing — only the rendered tail
+			// moves. Once coverage passes the summary the
+			// machinery owns the span and the floor goes quiet.
+			rawStart = summaryIdx
+		}
+		rawMsgs = msgs[rawStart:]
+		if len(rawMsgs) > 0 && rawMsgs[0].IsSummaryMessage {
+			// Providers need a user-role head on the rendered
+			// tail — the same flip the non-notebook summary
+			// path applies. Clone so the stored role survives.
+			rawMsgs = slices.Clone(rawMsgs)
+			rawMsgs[0].Role = message.User
+		}
 	} else {
 		rawMsgs = msgs
 	}
@@ -2388,7 +2409,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 		if turns == nil {
 			return 0, false
 		}
-		t := turns[boundary+i]
+		t := turns[rawStart+i]
 		if a.priorTurns == priorTurnsSummarize {
 			// The entry-joined set is the render gate — a covered turn
 			// with no entries stays verbatim rather than collapsing to
@@ -2945,6 +2966,17 @@ func (a *sessionAgent) getSessionMessages(ctx context.Context, session session.S
 		msgs[0].Role = message.User
 	}
 	return msgs, nil
+}
+
+// lastSummaryIndex returns the index of the newest stored summary
+// message — the /summarize render floor — or -1 when none exists.
+func lastSummaryIndex(msgs []message.Message) int {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].IsSummaryMessage {
+			return i
+		}
+	}
+	return -1
 }
 
 // countUserMessages counts the number of user messages in the slice.
