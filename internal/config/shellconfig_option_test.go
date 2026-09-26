@@ -100,6 +100,11 @@ func TestShellConfigOptionPriorTurns(t *testing.T) {
 	store := loadCrushSh(t, `option notebook-prior-turns stub`)
 	require.Equal(t, "stub", store.Config().Options.NotebookPriorTurns)
 	require.Equal(t, "stub", store.Config().Options.NotebookPriorTurnsMode())
+
+	// Enum keys reject typos instead of silently resolving a
+	// default at the Options layer.
+	_, err := loadCrushShErr(t, `option notebook-prior-turns stubs`)
+	require.Error(t, err)
 }
 
 func TestNotebookPriorTurnsModeResolves(t *testing.T) {
@@ -118,6 +123,9 @@ func TestNotebookGenerateModeResolves(t *testing.T) {
 	store := loadCrushSh(t, `option notebook-generate never`)
 	require.Equal(t, "never", store.Config().Options.NotebookGenerate)
 	require.Equal(t, "never", store.Config().Options.NotebookGenerateMode())
+
+	_, err := loadCrushShErr(t, `option notebook-generate sometime`)
+	require.Error(t, err)
 }
 
 func TestShellConfigOptionListAppends(t *testing.T) {

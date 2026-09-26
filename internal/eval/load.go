@@ -321,6 +321,9 @@ func ValidateExperiment(e *Experiment) error {
 		}
 	}
 	for name, arm := range e.Arms {
+		if err := checkUnderPressureGate(name, armOptionResolver(arm)); err != nil {
+			return err
+		}
 		for key := range arm.Coverage {
 			op, field, err := ParseArmCoverageKey(key)
 			if err != nil {
@@ -419,6 +422,22 @@ func modeIs(opt string, modes ...string) starvationRule {
 		s, _ := v.(string)
 		return slices.Contains(modes, s)
 	}}
+}
+
+// generatesEntries requires the sidecar generator to be reachable —
+// checkpoints and digests skip outright under notebook_generate=never.
+// An absent value resolves to the code default ("always"), so the
+// rule passes unknown/nil rather than the restrictive modeIs read.
+var generatesEntries = starvationRule{
+	"notebook_generate != never",
+	func(resolve func(string) (any, bool)) bool {
+		v, known := resolve("notebook_generate")
+		if !known {
+			return true
+		}
+		s, _ := v.(string)
+		return s != "never"
+	},
 }
 
 // notebookRecallTool is internal/agent/tools/notebook's
@@ -552,7 +571,7 @@ func armStarvationRules(field string) []starvationRule {
 		}
 	}
 	if strings.HasPrefix(field, "checkpoints.") {
-		return []starvationRule{boolOn("notebook_checkpoint"), boolOn("notebook_enabled")}
+		return []starvationRule{boolOn("notebook_checkpoint"), boolOn("notebook_enabled"), generatesEntries}
 	}
 	if field == "request.notebook_bytes" {
 		// The rendered notebook block only exists when the feature
@@ -566,7 +585,7 @@ func armStarvationRules(field string) []starvationRule {
 		return []starvationRule{boolOn("notebook_enabled"), modeIs("notebook_prior_turns", "stub", "digest", "summarize"), priorTurnsRecallLive}
 	}
 	if strings.HasPrefix(field, "digests.") {
-		return []starvationRule{boolOn("notebook_enabled"), modeIs("notebook_prior_turns", "digest"), priorTurnsRecallLive}
+		return []starvationRule{boolOn("notebook_enabled"), modeIs("notebook_prior_turns", "digest"), priorTurnsRecallLive, generatesEntries}
 	}
 	if strings.HasPrefix(field, "recalls.") {
 		return []starvationRule{boolOn("notebook_enabled"), recallToolLive}
@@ -588,6 +607,24 @@ func armOptionResolver(arm Arm) func(string) (any, bool) {
 		v, ok := arm.Config.Options[opt]
 		return v, ok
 	}
+}
+
+// checkUnderPressureGate rejects notebook_generate=under_pressure
+// where the pressure gate resolves off — the latch is the only
+// SetPressure caller, so generation can never run and the arm is a
+// silent never. An undeclared context_window degenerates the same
+// way, but the window lives on the model manifest, not the arm —
+// uncheckable here.
+func checkUnderPressureGate(armName string, resolve func(string) (any, bool)) error {
+	g, _ := resolve("notebook_generate")
+	if s, _ := g.(string); s != "under_pressure" {
+		return nil
+	}
+	pg, known := resolve("notebook_pressure_gate")
+	if b, _ := pg.(bool); !known || b {
+		return nil
+	}
+	return fmt.Errorf("arm %q: notebook_generate=under_pressure needs notebook_pressure_gate on — the gate can never latch, so generation never runs", armName)
 }
 
 // checkArmStarvation rejects min_ predicates that can't measure what
@@ -665,6 +702,9 @@ func ValidateArmCoverageResolved(e *Experiment, manifest *FlagsManifest) error {
 		}
 	}
 	for name, arm := range e.Arms {
+		if err := checkUnderPressureGate(name, resolveFor(arm)); err != nil {
+			return err
+		}
 		for key := range arm.Coverage {
 			op, field, err := ParseArmCoverageKey(key)
 			if err != nil {

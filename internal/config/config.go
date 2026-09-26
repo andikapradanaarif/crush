@@ -505,6 +505,11 @@ type Options struct {
 	// never (deterministic entries only — no notebook LLM calls, so
 	// checkpoints and turn digests are skipped). The mask-only eval
 	// arm uses never to price collapse without generation spend.
+	// under_pressure is "generate only post-latch", not defer-and-
+	// backfill: pre-latch segments keep their deterministic fallback
+	// entries permanently, and it silently degenerates to never when
+	// the gate can't latch (pressure gate off or no declared
+	// context_window).
 	NotebookGenerate string `json:"notebook_generate,omitempty" jsonschema:"description=When the notebook's sidecar LLM generates entries: always\\, under_pressure\\, or never (deterministic entries only).,enum=always,enum=under_pressure,enum=never,default=always"`
 	// EnforceContextWindow turns the model's declared context_window
 	// into a hard cap: a rendered request estimated to overflow it

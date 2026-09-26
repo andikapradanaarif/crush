@@ -579,7 +579,25 @@ arm-scoped because trajectory coverage can't express "present on
 some arms, absent on others". Note the gate removes render-side
 churn only: coverage accrual (and its `generator_tokens` spend) runs
 in every regime, so below-pressure arms still pay generation cost —
-"does the notebook pay for itself" stays with #90/#106.
+"does the notebook pay for itself" stays with #90/#106. That last
+part is now arm-controllable: `notebook_generate` (default
+`always`) gates the sidecar itself — `never` runs the mask-only arm
+(deterministic fallback entries commit; checkpoints and digests
+skip outright, so `checkpoints.*`/`digests.*` coverage on a `never`
+arm is a load-time starvation error) and `under_pressure` generates
+only after the gate latches for the session. `under_pressure` is
+"generate only post-latch", not defer-and-backfill: pre-latch
+segment closures keep their permanent fallback entries — larger
+than generated summaries and semantically thinner — and pre-latch
+checkpoint/digest triggers are never regenerated, so the arm's
+prompt-side content differs from `always`, not just its spend.
+Validation rejects `under_pressure` with the gate pinned off (the
+latch is the only `SetPressure` caller — gate off is a silent
+`never`); an undeclared `context_window` degenerates the same way
+but lives on the model manifest, outside arm validation. Pressure
+state is in-memory: a restart-per-turn driver re-derives the latch
+from the persisted history's cold-start estimate each process —
+correct per-turn, but not a durable session flag.
 
 `enforce_context_window` (default off) turns the manifest-declared
 `context_window` into a hard cap: inside `PrepareStep`, a wire-bound
@@ -1013,7 +1031,9 @@ decision metric per experiment:
   at most this absolute fraction (0.10 = 10pp) for an "effect"
   verdict to stand — a cheaper arm that fails more often isn't
   cheaper. The outcome prints beside the verdict as
-  `guardrail: ok|violated|unevaluable`; 0 disables the check.
+  `guardrail: ok|violated|unevaluable`, and a violation suffixes the
+  verdict itself (`— GUARDRAIL VIOLATED`) so the stop rule can't
+  stand on cost alone; 0 disables the check.
 - **`cost_weights` prices the cost metric.** `weighted_cost =
   input + h·cache_read + o·output`, computed over the main-model
   tokens **and `generator_tokens`** (the sidecar prices at the same

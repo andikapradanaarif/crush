@@ -398,10 +398,24 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		lo, hi := bcaCI(trajs, replicates, rng)
 		mc.CILoPct, mc.CIHiPct = pctOf(lo), pctOf(hi)
 		mc.P = signFlipP(trajs, mc.Theta, directionOf(exp, name), replicates, rng)
-		if exp.Primary != nil && name == exp.Primary.Metric && primaryTrusted {
-			fillPrimaryVerdict(&mc, exp.Primary, trajs, noiseCV(noise, noiseErr, name))
-			if exp.Primary.MaxPassDrop > 0 {
-				mc.Guardrail = passGuardrail(recs, exp.Primary.MaxPassDrop)
+		if exp.Primary != nil && name == exp.Primary.Metric {
+			switch {
+			case primaryTrusted:
+				fillPrimaryVerdict(&mc, exp.Primary, trajs, noiseCV(noise, noiseErr, name))
+				if exp.Primary.MaxPassDrop > 0 {
+					mc.Guardrail = passGuardrail(recs, exp.Primary.MaxPassDrop)
+					// A violated guardrail un-stands the verdict —
+					// "cheaper but failing more" is not the declared
+					// decision.
+					if strings.HasPrefix(mc.Guardrail, "violated") && mc.Verdict != "" {
+						mc.Verdict += " — GUARDRAIL VIOLATED"
+					}
+				}
+			case exp.Primary.MaxPassDrop > 0:
+				// The declared bound may have drifted with the
+				// suppressed verdict — show the check's presence,
+				// not a number the run wasn't committed to.
+				mc.Guardrail = "unevaluable (provenance untrusted)"
 			}
 		}
 		rep.Metrics = append(rep.Metrics, mc)

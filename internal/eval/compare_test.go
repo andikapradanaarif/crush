@@ -633,4 +633,7 @@ func TestCompare_GuardrailViolated(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, rep.Metrics[0].Guardrail, "violated")
 	require.Contains(t, rep.Metrics[0].Guardrail, "0.75")
+	// The effect verdict doesn't stand alongside a violated
+	// guardrail — the suffix is what the stop rule reads.
+	require.Contains(t, rep.Metrics[0].Verdict, "GUARDRAIL VIOLATED")
 }
