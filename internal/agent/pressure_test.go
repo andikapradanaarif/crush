@@ -544,6 +544,49 @@ func TestPreparePrompt_SummarizeRenderSkipsGateState(t *testing.T) {
 	require.Zero(t, rs.pressureActivations)
 }
 
+// A stored summary is a hard render floor in notebook mode: /summarize
+// must actually compact, not append a placebo message. The rendered
+// tail starts at the summary — role-flipped to user like the
+// non-notebook path — and pre-summary content never reaches the wire.
+func TestPreparePrompt_SummaryFloorInNotebookMode(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.reqStats = csync.NewMap[string, requestStats]()
+	// A huge raw budget pins the coverage boundary at 0 so the test
+	// isolates the summary floor, not the compaction machinery.
+	a.rawTokenBudget = 1_000_000
+
+	viewThenEdit(t, svc, sessionID, "file body", true)
+	_, err := svc.Create(t.Context(), sessionID, message.CreateMessageParams{
+		Role:             message.Assistant,
+		Parts:            []message.ContentPart{message.TextContent{Text: "SUMMARY-BODY"}},
+		IsSummaryMessage: true,
+	})
+	require.NoError(t, err)
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "after summary"})
+	msgs, err := svc.List(t.Context(), sessionID)
+	require.NoError(t, err)
+
+	history, _ := a.preparePrompt(t.Context(), msgs, false, nil, false)
+	text := renderedText(history)
+	require.Contains(t, text, "SUMMARY-BODY")
+	require.Contains(t, text, "after summary")
+	require.NotContains(t, text, "start")
+	require.NotContains(t, text, "edit it")
+	require.NotContains(t, text, "next")
+
+	// The summary head renders as user — strict-adjacency providers
+	// reject an assistant-role first message.
+	for _, m := range history {
+		for _, p := range m.Content {
+			if tp, ok := p.(fantasy.TextPart); ok && strings.Contains(tp.Text, "SUMMARY-BODY") {
+				require.Equal(t, fantasy.MessageRoleUser, m.Role)
+			}
+		}
+	}
+}
+
 // Verbatim mode is the default and passes a nil collapse — the gate
 // must still evaluate: it covers boundary/prefix churn in every mode,
 // and gate state must be written or pressure.* telemetry starves on
