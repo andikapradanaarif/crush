@@ -543,24 +543,31 @@ func fillPrimaryVerdict(mc *MetricCompare, p *Primary, trajs [][]float64, cv flo
 
 // requiredPairs prices the paired design against its own noise:
 // n = ⌈(zα+zβ)²·Var(dᵢ)/δ²⌉ with δ = log(1+mde) — the paired
-// counterpart of noise.go's pooled-CV formula. Var(dᵢ) pools the
-// pair log-ratios; a degenerate or unmeasurable variance falls back
-// to the pooled-CV n so the verdict never prints an absent n.
+// counterpart of noise.go's pooled-CV formula. The estimand weights
+// trajectories equally, so Var(dᵢ) averages the within-trajectory
+// variances — pooling the flat array would fold between-trajectory
+// baseline spread into the noise and overstate n. A degenerate or
+// unmeasurable variance falls back to the pooled-CV n so the verdict
+// never prints an absent n.
 func requiredPairs(trajs [][]float64, mde float64, cv float64) int {
-	var flat []float64
-	for _, d := range trajs {
-		flat = append(flat, d...)
-	}
 	delta := math.Log(1 + mde)
-	if len(flat) >= 2 && delta > 0 {
-		m := mean(flat)
-		var ss float64
-		for _, v := range flat {
-			d := v - m
-			ss += d * d
+	if delta > 0 {
+		var sum, cnt float64
+		for _, d := range trajs {
+			if len(d) < 2 {
+				continue
+			}
+			m := mean(d)
+			var ss float64
+			for _, v := range d {
+				x := v - m
+				ss += x * x
+			}
+			sum += ss / float64(len(d)-1)
+			cnt++
 		}
-		if v := ss / float64(len(flat)-1); v > 0 {
-			return int(math.Ceil(6.186 * v / (delta * delta)))
+		if cnt > 0 && sum > 0 {
+			return int(math.Ceil(6.186 * (sum / cnt) / (delta * delta)))
 		}
 	}
 	if cv > 0 {

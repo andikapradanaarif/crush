@@ -337,6 +337,20 @@ func TestCompare_UnderpoweredVerdict(t *testing.T) {
 	require.Equal(t, expN, rep.Metrics[0].Required)
 }
 
+func TestRequiredPairs_WithinTrajectoryVariance(t *testing.T) {
+	// Trajectories with different baselines: pooling the flat array
+	// would fold the between-trajectory spread into the noise term
+	// and overstate n. The estimand weights trajectories equally, so
+	// the variance term is the mean within-trajectory variance —
+	// each {a−0.1, a+0.1} trajectory has s² = 0.02.
+	trajs := [][]float64{{0.0, 0.2}, {0.5, 0.7}, {0.9, 1.1}}
+	expN := int(math.Ceil(6.186 * 0.02 / (math.Log(1.1) * math.Log(1.1))))
+	require.Equal(t, expN, requiredPairs(trajs, 0.10, 0))
+	// Pooled flat variance would be ~0.115 — a materially larger n.
+	pooled := int(math.Ceil(6.186 * 0.115 / (math.Log(1.1) * math.Log(1.1))))
+	require.Less(t, expN, pooled)
+}
+
 func TestThetaMean_EqualTrajectoryWeights(t *testing.T) {
 	// Trajectory composition: t1 has 3 pairs, t2 has 1 — the
 	// estimand weights trajectories equally, not pairs.
