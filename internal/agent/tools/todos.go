@@ -85,7 +85,10 @@ func NewTodosTool(sessions session.Service, checkNames []string, workingDir stri
 			}
 
 			if err := ValidatePlanItems(params.Todos, bindable, workingDir); err != nil {
-				return fantasy.ToolResponse{}, err
+				// Rejections are model-repairable: return them as tool
+				// errors so the model sees the offending item and fixes
+				// it, rather than aborting the run via the fatal channel.
+				return fantasy.NewTextErrorResponse(err.Error()), nil
 			}
 
 			currentSession, err := sessions.Get(ctx, sessionID)
