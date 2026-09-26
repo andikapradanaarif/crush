@@ -579,7 +579,25 @@ arm-scoped because trajectory coverage can't express "present on
 some arms, absent on others". Note the gate removes render-side
 churn only: coverage accrual (and its `generator_tokens` spend) runs
 in every regime, so below-pressure arms still pay generation cost —
-"does the notebook pay for itself" stays with #90/#106.
+"does the notebook pay for itself" stays with #90/#106. That last
+part is now arm-controllable: `notebook_generate` (default
+`always`) gates the sidecar itself — `never` runs the mask-only arm
+(deterministic fallback entries commit; checkpoints and digests
+skip outright, so `checkpoints.*`/`digests.*` coverage on a `never`
+arm is a load-time starvation error) and `under_pressure` generates
+only after the gate latches for the session. `under_pressure` is
+"generate only post-latch", not defer-and-backfill: pre-latch
+segment closures keep their permanent fallback entries — larger
+than generated summaries and semantically thinner — and pre-latch
+checkpoint/digest triggers are never regenerated, so the arm's
+prompt-side content differs from `always`, not just its spend.
+Validation rejects `under_pressure` with the gate pinned off (the
+latch is the only `SetPressure` caller — gate off is a silent
+`never`); an undeclared `context_window` degenerates the same way
+but lives on the model manifest, outside arm validation. Pressure
+state is in-memory: a restart-per-turn driver re-derives the latch
+from the persisted history's cold-start estimate each process —
+correct per-turn, but not a durable session flag.
 
 `enforce_context_window` (default off) turns the manifest-declared
 `context_window` into a hard cap: inside `PrepareStep`, a wire-bound
@@ -1008,14 +1026,26 @@ decision metric per experiment:
   (0.15 = 15%). Effects smaller than the MDE are defined as
   uninteresting — which is what lets the power gate be a gate
   rather than an aspiration.
+- **`max_pass_drop` is the pass-rate guardrail** on the primary
+  verdict: treatment's conclusive pass rate may trail control's by
+  at most this absolute fraction (0.10 = 10pp) for an "effect"
+  verdict to stand — a cheaper arm that fails more often isn't
+  cheaper. The outcome prints beside the verdict as
+  `guardrail: ok|violated|unevaluable`, and a violation suffixes the
+  verdict itself (`— GUARDRAIL VIOLATED`) so the stop rule can't
+  stand on cost alone; 0 disables the check.
 - **`cost_weights` prices the cost metric.** `weighted_cost =
-  input + h·cache_read + o·output` with `h`/`o` pinned per model in
-  the experiment JSON — relative prices in uncached-input units, so
-  the metric is comparable across runs without embedding a dollar
-  table in the repo. Its CV can't bootstrap itself: the power gate
-  refuses before scheduling, so a `weighted_cost` primary must be
-  hand-seeded in noise.json or measured by an `--aa` run on another
-  `cost_weights`-bearing experiment first.
+  input + h·cache_read + o·output`, computed over the main-model
+  tokens **and `generator_tokens`** (the sidecar prices at the same
+  class rates — an overstatement when the generator runs a cheaper
+  tier; a separate weight lands if one ships). `h`/`o` are pinned
+  per model in the experiment JSON — relative prices in
+  uncached-input units, so the metric is comparable across runs
+  without embedding a dollar table in the repo. Its CV can't
+  bootstrap itself: the power gate refuses before scheduling, so a
+  `weighted_cost` primary must be hand-seeded in noise.json or
+  measured by an `--aa` run on another `cost_weights`-bearing
+  experiment first.
 
 ### noise.json + the scheduling refusal
 
@@ -1164,6 +1194,15 @@ Every other metric gets CI and p only — secondary metrics inform,
 they never decide. The snapshot also carries the run's gate verdict
 and outcome alarms as context lines, so a catastrophic-collapsed
 invocation's cheap-tokens table doesn't read as a win.
+
+**Arm totals** print whenever the experiment pins `cost_weights`:
+per arm, every *attempted* run's weighted cost (errors and
+inconclusives spend tokens too), `cost per attempt`, and `cost per
+pass` — the tokens-to-done figure. Pairing conditions on conclusive
+runs, so a per-pass-run mean is survivorship-biased by construction;
+the totals table is the unbiased companion. Arms beyond
+control/treatment (a mask-only comparator arm) get a row even though
+they never pair — pairing itself stays two-arm.
 
 Metrics whose mechanism exists on only one arm
 (`prior_turns.turns_collapsed` under a verbatim control,

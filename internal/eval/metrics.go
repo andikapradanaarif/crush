@@ -23,9 +23,19 @@ func primaryMetricFunc(e *Experiment, name string) (func(*RunRecord) float64, er
 		}
 		w := *e.CostWeights
 		return func(r *RunRecord) float64 {
-			return float64(r.Tokens.Input) +
+			cost := float64(r.Tokens.Input) +
 				w.CacheRead*float64(r.Tokens.CacheRead) +
 				w.Output*float64(r.Tokens.Output)
+			// Sidecar generation spend prices at the same class
+			// rates — a deliberate overstatement when the generator
+			// runs a cheaper tier; a separate generator weight lands
+			// if a different-tier sidecar ships.
+			if r.GeneratorTokens != nil {
+				cost += float64(r.GeneratorTokens.Input) +
+					w.CacheRead*float64(r.GeneratorTokens.CacheRead) +
+					w.Output*float64(r.GeneratorTokens.Output)
+			}
+			return cost
 		}, nil
 	case "generator_tokens.input":
 		return func(r *RunRecord) float64 {

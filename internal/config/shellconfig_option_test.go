@@ -100,6 +100,11 @@ func TestShellConfigOptionPriorTurns(t *testing.T) {
 	store := loadCrushSh(t, `option notebook-prior-turns stub`)
 	require.Equal(t, "stub", store.Config().Options.NotebookPriorTurns)
 	require.Equal(t, "stub", store.Config().Options.NotebookPriorTurnsMode())
+
+	// Enum keys reject typos instead of silently resolving a
+	// default at the Options layer.
+	_, err := loadCrushShErr(t, `option notebook-prior-turns stubs`)
+	require.Error(t, err)
 }
 
 func TestNotebookPriorTurnsModeResolves(t *testing.T) {
@@ -107,6 +112,20 @@ func TestNotebookPriorTurnsModeResolves(t *testing.T) {
 	require.Equal(t, "verbatim", (&config.Options{NotebookPriorTurns: "bogus"}).NotebookPriorTurnsMode())
 	require.Equal(t, "stub", (&config.Options{NotebookPriorTurns: "stub"}).NotebookPriorTurnsMode())
 	require.Equal(t, "digest", (&config.Options{NotebookPriorTurns: "digest"}).NotebookPriorTurnsMode())
+}
+
+func TestNotebookGenerateModeResolves(t *testing.T) {
+	require.Equal(t, "always", (&config.Options{}).NotebookGenerateMode())
+	require.Equal(t, "always", (&config.Options{NotebookGenerate: "bogus"}).NotebookGenerateMode())
+	require.Equal(t, "under_pressure", (&config.Options{NotebookGenerate: "under_pressure"}).NotebookGenerateMode())
+	require.Equal(t, "never", (&config.Options{NotebookGenerate: "never"}).NotebookGenerateMode())
+
+	store := loadCrushSh(t, `option notebook-generate never`)
+	require.Equal(t, "never", store.Config().Options.NotebookGenerate)
+	require.Equal(t, "never", store.Config().Options.NotebookGenerateMode())
+
+	_, err := loadCrushShErr(t, `option notebook-generate sometime`)
+	require.Error(t, err)
 }
 
 func TestShellConfigOptionListAppends(t *testing.T) {

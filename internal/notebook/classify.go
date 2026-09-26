@@ -417,7 +417,7 @@ func (s *service) significantEntries(ctx context.Context, sessionID string, sign
 		llmInputs = append(llmInputs, in)
 	}
 	var generated []GeneratedEntry
-	if len(llmInputs) > 0 {
+	if len(llmInputs) > 0 && s.shouldGenerate(sessionID) {
 		var err error
 		generated, err = s.generator.Generate(ctx, sessionID, llmInputs)
 		if err != nil {

@@ -906,6 +906,14 @@ func TestValidateExperiment_Primary(t *testing.T) {
 	exp.CostWeights = &CostWeights{CacheRead: 0.1, Output: 4}
 	require.NoError(t, ValidateExperiment(exp))
 
+	// max_pass_drop bounds the guardrail.
+	exp.Primary.MaxPassDrop = 0.1
+	require.NoError(t, ValidateExperiment(exp))
+	exp.Primary.MaxPassDrop = -0.05
+	require.ErrorContains(t, ValidateExperiment(exp), "max_pass_drop")
+	exp.Primary.MaxPassDrop = 1
+	require.ErrorContains(t, ValidateExperiment(exp), "max_pass_drop")
+
 	exp = base()
 	exp.CostWeights = &CostWeights{CacheRead: -0.1}
 	require.ErrorContains(t, ValidateExperiment(exp), "cost_weights")
@@ -962,6 +970,11 @@ func TestPrimaryMetricFunc_WeightedCost(t *testing.T) {
 	rec := &RunRecord{Tokens: TokenUsage{Input: 1000, CacheRead: 10000, Output: 500}}
 	// 1000 + 0.1*10000 + 4*500 = 4000.
 	require.InDelta(t, 4000, f(rec), 1e-9)
+
+	// Sidecar spend prices at the same class rates.
+	rec.GeneratorTokens = &GeneratorTokens{Input: 100, Output: 50, CacheRead: 200}
+	// 4000 + 100 + 0.1*200 + 4*50 = 4320.
+	require.InDelta(t, 4320, f(rec), 1e-9)
 
 	// The closed registry rejects ratios by construction — there is
 	// no grammar for "X/steps".

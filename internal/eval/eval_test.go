@@ -568,6 +568,89 @@ func TestValidateArmCoverageResolved(t *testing.T) {
 	require.NoError(t, ValidateArmCoverageResolved(exp, manifest))
 }
 
+func TestValidateExperiment_NotebookGenerate(t *testing.T) {
+	t.Parallel()
+	temp := 0.7
+	mk := func(opts map[string]any, cov Coverage) *Experiment {
+		return &Experiment{
+			Name:              "x",
+			Model:             "p/m",
+			Temperature:       &temp,
+			Corpus:            []string{"*"},
+			RunsPerTrajectory: map[Band]int{BandUncharacterized: 1},
+			Arms: map[string]Arm{
+				ArmControl: {},
+				ArmTreatment: {
+					Config:   ArmConfig{Options: opts},
+					Coverage: cov,
+				},
+			},
+		}
+	}
+
+	// Checkpoints and digests are generator-only — never starves
+	// them even though fallback segment entries still commit.
+	require.Error(t, ValidateExperiment(mk(
+		map[string]any{"notebook_generate": "never"},
+		Coverage{"min_checkpoints.rendered": 1})))
+	require.Error(t, ValidateExperiment(mk(
+		map[string]any{"notebook_generate": "never", "notebook_prior_turns": "digest"},
+		Coverage{"min_digests.rendered": 1})))
+
+	// Generating modes keep the asserts legal.
+	require.NoError(t, ValidateExperiment(mk(
+		map[string]any{"notebook_generate": "always"},
+		Coverage{"min_checkpoints.rendered": 1})))
+	require.NoError(t, ValidateExperiment(mk(
+		map[string]any{"notebook_generate": "under_pressure"},
+		Coverage{"min_checkpoints.rendered": 1})))
+
+	// Counters fed by the deterministic fallback path stay
+	// assertable under never.
+	require.NoError(t, ValidateExperiment(mk(
+		map[string]any{"notebook_generate": "never"},
+		Coverage{"min_stub_stats.boundary_advances": 1})))
+
+	// under_pressure + gate pinned off: the latch can never fire —
+	// the arm is a silent never, rejected even with no coverage.
+	require.Error(t, ValidateExperiment(mk(
+		map[string]any{"notebook_generate": "under_pressure", "notebook_pressure_gate": false},
+		nil)))
+	require.NoError(t, ValidateExperiment(mk(
+		map[string]any{"notebook_generate": "under_pressure"}, nil)))
+	require.NoError(t, ValidateExperiment(mk(
+		map[string]any{"notebook_generate": "under_pressure", "notebook_pressure_gate": true},
+		nil)))
+}
+
+func TestValidateArmCoverageResolved_NotebookGenerate(t *testing.T) {
+	t.Parallel()
+	manifest := &FlagsManifest{Defaults: map[string]any{
+		"notebook_enabled":       true,
+		"notebook_checkpoint":    true,
+		"notebook_prior_turns":   "digest",
+		"notebook_pressure_gate": true,
+		"notebook_generate":      "never",
+	}}
+	exp := &Experiment{Arms: map[string]Arm{
+		ArmControl:   {},
+		ArmTreatment: {Coverage: Coverage{"min_checkpoints.rendered": 1}},
+	}}
+	// The arm doesn't pin generate — the manifest's never resolves
+	// the starvation the literal check can't see.
+	require.Error(t, ValidateArmCoverageResolved(exp, manifest))
+	manifest.Defaults["notebook_generate"] = "always"
+	require.NoError(t, ValidateArmCoverageResolved(exp, manifest))
+
+	// under_pressure resolving over a manifest-pinned off gate is
+	// the same silent never — the resolved check catches what the
+	// literal pass can't.
+	manifest.Defaults["notebook_generate"] = "under_pressure"
+	manifest.Defaults["notebook_pressure_gate"] = false
+	exp.Arms[ArmTreatment] = Arm{}
+	require.Error(t, ValidateArmCoverageResolved(exp, manifest))
+}
+
 func TestValidateExperiment_PriorTurnsModeStarvation(t *testing.T) {
 	t.Parallel()
 	temp := 0.7

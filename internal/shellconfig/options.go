@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -153,6 +154,17 @@ func handleOption(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		slog.Info("Option set in shell config", "key", key, "value", n)
 		return nil
 
+	case optEnum:
+		if val == "" {
+			return usage(stderr, fmt.Sprintf("option: %s requires a value", key))
+		}
+		if !slices.Contains(spec.values, val) {
+			return usage(stderr, fmt.Sprintf("option: %s expects %s, got %q", key, strings.Join(spec.values, "|"), val))
+		}
+		o[spec.jsonKey] = val
+		slog.Info("Option set in shell config", "key", key, "value", val)
+		return nil
+
 	default: // optString
 		if val == "" {
 			return usage(stderr, fmt.Sprintf("option: %s requires a value", key))
@@ -171,17 +183,19 @@ const (
 	optBool
 	optList
 	optInt
+	optEnum
 )
 
 // optionSpec describes one user-facing option key: the JSON field it writes,
 // its value type, and (for booleans) whether the stored value is the inverse
 // of what the user typed. Several config fields are phrased negatively
 // (disable_metrics) but exposed positively (metrics), so "metrics false"
-// stores "disable_metrics true".
+// stores "disable_metrics true". Enum keys carry their accepted values.
 type optionSpec struct {
 	jsonKey  string
 	kind     optionKind
 	inverted bool
+	values   []string
 }
 
 // optionSpecs maps user-facing kebab-case keys to their JSON field and type.
@@ -219,7 +233,8 @@ var optionSpecs = map[string]optionSpec{
 	"initialize-as":          {jsonKey: "initialize_as", kind: optString},
 	"turn-context":           {jsonKey: "turn_context", kind: optString},
 	"notebook-memory-server": {jsonKey: "notebook_memory_server", kind: optString},
-	"notebook-prior-turns":   {jsonKey: "notebook_prior_turns", kind: optString},
+	"notebook-prior-turns":   {jsonKey: "notebook_prior_turns", kind: optEnum, values: []string{"verbatim", "stub", "digest", "summarize"}},
+	"notebook-generate":      {jsonKey: "notebook_generate", kind: optEnum, values: []string{"always", "under_pressure", "never"}},
 
 	// Integer fields, in seconds.
 	"request-timeout": {jsonKey: "request_timeout", kind: optInt},

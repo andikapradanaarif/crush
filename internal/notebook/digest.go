@@ -72,6 +72,9 @@ func (s *service) GenerateTurnDigest(ctx context.Context, sessionID string, req 
 			Succeeded:   true,
 		})
 	}
+	if !s.shouldGenerate(sessionID) {
+		return false, nil
+	}
 	interrupted := turnInterrupted(req.Msgs)
 	entry, err := s.generator.GenerateDigest(ctx, sessionID, buildDigestInput(events, req.TurnNumber, interrupted, digestUserPrompt(req.Msgs)))
 	if err != nil {

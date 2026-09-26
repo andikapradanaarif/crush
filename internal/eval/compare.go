@@ -71,6 +71,23 @@ type CompareReport struct {
 	// as a win.
 	GateVerdict   string
 	OutcomeAlarms []string
+	// ArmTotals is the survivorship-free spend view — populated only
+	// when the experiment pins cost_weights.
+	ArmTotals []ArmTotal
+}
+
+// ArmTotal summarizes one arm's spend across every attempted run.
+type ArmTotal struct {
+	Arm    string
+	Runs   int
+	Passes int
+	// WeightedCost sums all token classes incl. generator_tokens over
+	// attempted runs — a failed run's spend is real cost, so the
+	// denominator is attempts, not passes.
+	WeightedCost   float64
+	CostPerAttempt float64
+	// CostPerPass is tokens-to-done; 0 when Passes == 0 (read Passes).
+	CostPerPass float64
 }
 
 // MetricCompare is one metric's paired estimate.
@@ -100,6 +117,10 @@ type MetricCompare struct {
 	// Required then holds the powered sample size).
 	Verdict  string
 	Required int
+	// Guardrail carries the primary's max_pass_drop outcome:
+	// "ok", "violated (...)", or "unevaluable (...)" — empty when
+	// undeclared.
+	Guardrail string
 }
 
 // alarmSnapshot is the refusal/provenance record persisted as
@@ -322,6 +343,9 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		rep.GateVerdict = snap.GateVerdict
 		rep.OutcomeAlarms = snap.OutcomeAlarms
 	}
+	if costFn, err := primaryMetricFunc(exp, "weighted_cost"); err == nil {
+		rep.ArmTotals = armTotals(recs, costFn)
+	}
 
 	// Order: declared primary first, then the rest of the registry.
 	names := primaryMetricNames()
@@ -374,8 +398,25 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		lo, hi := bcaCI(trajs, replicates, rng)
 		mc.CILoPct, mc.CIHiPct = pctOf(lo), pctOf(hi)
 		mc.P = signFlipP(trajs, mc.Theta, directionOf(exp, name), replicates, rng)
-		if exp.Primary != nil && name == exp.Primary.Metric && primaryTrusted {
-			fillPrimaryVerdict(&mc, exp.Primary, trajs, noiseCV(noise, noiseErr, name))
+		if exp.Primary != nil && name == exp.Primary.Metric {
+			switch {
+			case primaryTrusted:
+				fillPrimaryVerdict(&mc, exp.Primary, trajs, noiseCV(noise, noiseErr, name))
+				if exp.Primary.MaxPassDrop > 0 {
+					mc.Guardrail = passGuardrail(recs, exp.Primary.MaxPassDrop)
+					// A violated guardrail un-stands the verdict —
+					// "cheaper but failing more" is not the declared
+					// decision.
+					if strings.HasPrefix(mc.Guardrail, "violated") && mc.Verdict != "" {
+						mc.Verdict += " — GUARDRAIL VIOLATED"
+					}
+				}
+			case exp.Primary.MaxPassDrop > 0:
+				// The declared bound may have drifted with the
+				// suppressed verdict — show the check's presence,
+				// not a number the run wasn't committed to.
+				mc.Guardrail = "unevaluable (provenance untrusted)"
+			}
 		}
 		rep.Metrics = append(rep.Metrics, mc)
 	}
@@ -777,6 +818,67 @@ func normInv(p float64) float64 {
 	return (lo + hi) / 2
 }
 
+// armTotals aggregates weighted spend per arm over every attempted
+// run — including error/inconclusive attempts, whose tokens are real
+// cost even though they form no pair. Sorted by arm name; any arm
+// beyond control/treatment (e.g. a mask-only comparator arm) gets a
+// row here even though it never pairs.
+func armTotals(recs []RunRecord, costFn func(*RunRecord) float64) []ArmTotal {
+	byArm := groupBy(recs, func(r RunRecord) string { return r.Arm })
+	out := make([]ArmTotal, 0, len(byArm))
+	for _, arm := range slices.Sorted(maps.Keys(byArm)) {
+		at := ArmTotal{Arm: arm}
+		for _, rec := range byArm[arm] {
+			at.Runs++
+			if rec.Outcome == OutcomePass {
+				at.Passes++
+			}
+			at.WeightedCost += costFn(&rec)
+		}
+		if at.Runs > 0 {
+			at.CostPerAttempt = at.WeightedCost / float64(at.Runs)
+		}
+		if at.Passes > 0 {
+			at.CostPerPass = at.WeightedCost / float64(at.Passes)
+		}
+		out = append(out, at)
+	}
+	return out
+}
+
+// passGuardrail evaluates the primary's max_pass_drop: treatment's
+// conclusive pass rate may trail control's by at most maxDrop.
+// Errors and inconclusives don't count as outcomes — the rate is
+// pass / conclusive on each side.
+func passGuardrail(recs []RunRecord, maxDrop float64) string {
+	var cPass, cConc, tPass, tConc int
+	for _, rec := range recs {
+		if !rec.Outcome.Conclusive() {
+			continue
+		}
+		switch rec.Arm {
+		case ArmControl:
+			cConc++
+			if rec.Outcome == OutcomePass {
+				cPass++
+			}
+		case ArmTreatment:
+			tConc++
+			if rec.Outcome == OutcomePass {
+				tPass++
+			}
+		}
+	}
+	if cConc == 0 || tConc == 0 {
+		return fmt.Sprintf("unevaluable (control %d, treatment %d conclusive)", cConc, tConc)
+	}
+	cRate, tRate := float64(cPass)/float64(cConc), float64(tPass)/float64(tConc)
+	if drop := cRate - tRate; drop > maxDrop {
+		return fmt.Sprintf("violated (pass %.2f vs %.2f, drop %.2f > %.2f)", tRate, cRate, drop, maxDrop)
+	}
+	return fmt.Sprintf("ok (pass %.2f vs %.2f)", tRate, cRate)
+}
+
 func groupBy[S ~[]E, E any, K comparable](s S, key func(E) K) map[K]S {
 	out := map[K]S{}
 	for _, e := range s {
@@ -818,12 +920,22 @@ func (rep *CompareReport) Summary() string {
 			fmt.Fprintf(&b, "  %-32s %6s\n", "",
 				fmt.Sprintf("(%d nonpositive, %d absent-telemetry pairs)", m.Dropped, m.Absent))
 		}
+		if m.Guardrail != "" {
+			fmt.Fprintf(&b, "  %-32s guardrail: %s\n", "", m.Guardrail)
+		}
 		if m.Verdict == "inconclusive-underpowered" {
 			if m.Required > 0 {
 				fmt.Fprintf(&b, "  INCONCLUSIVE — underpowered: %s needs n≈%d pairs (paired-variance estimate)\n", m.Name, m.Required)
 			} else {
 				fmt.Fprintf(&b, "  INCONCLUSIVE — underpowered: %s; required n unknown (no recorded CV)\n", m.Name)
 			}
+		}
+	}
+	if len(rep.ArmTotals) > 0 {
+		fmt.Fprintf(&b, "  %-32s %6s %6s %12s %14s %14s\n", "arm", "runs", "passes", "wtd cost", "per attempt", "per pass")
+		for _, a := range rep.ArmTotals {
+			fmt.Fprintf(&b, "  %-32s %6d %6d %12.0f %14.0f %14.0f\n",
+				a.Arm, a.Runs, a.Passes, a.WeightedCost, a.CostPerAttempt, a.CostPerPass)
 		}
 	}
 	if len(rep.SkippedMetrics) > 0 {

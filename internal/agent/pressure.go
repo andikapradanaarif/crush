@@ -110,6 +110,9 @@ func (a *sessionAgent) pressureEngaged(sessionID string, msgs []message.Message)
 	if !rs.pressureEngaged && est >= cw-pressureMargin(a.outputReserve()) {
 		rs.pressureEngaged = true
 		rs.pressureActivations++
+		if a.notebook != nil {
+			a.notebook.SetPressure(sessionID, true)
+		}
 		slog.Info("Notebook pressure gate engaged",
 			"session_id", sessionID,
 			"estimate_tokens", est,
@@ -166,6 +169,9 @@ func (a *sessionAgent) enforceWindowCap(msgs []fantasy.Message, agentTools []fan
 // render re-derives engagement from the shrunken list. Activations
 // keep counting: a re-engage post-compact is a real transition.
 func (a *sessionAgent) clearPressureState(sessionID string) {
+	if a.notebook != nil {
+		a.notebook.SetPressure(sessionID, false)
+	}
 	if a.reqStats == nil {
 		return
 	}
