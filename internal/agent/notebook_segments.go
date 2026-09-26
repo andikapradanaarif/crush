@@ -528,15 +528,15 @@ func (a *sessionAgent) detectSegments(ctx context.Context, sessionID string, msg
 		// and with stub promotion on this goroutine. The context is
 		// detached but bounded — a hung call must release the
 		// in-flight mark so the segment retries under backoff.
-		genMsgs := cloneMessagesForGen(msgs)
+		genMsgs := cloneMessagesForGen(msgs[s.start:s.end])
 		genCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), segmentGenTimeout)
 		if a.syncSegmentGen {
-			a.generateSegment(genCtx, sessionID, s, genMsgs[s.start:s.end], tracker)
+			a.generateSegment(genCtx, sessionID, s, genMsgs, tracker)
 			cancel()
 		} else {
 			a.spawnDetached(func() {
 				defer cancel()
-				a.generateSegment(genCtx, sessionID, s, genMsgs[s.start:s.end], tracker)
+				a.generateSegment(genCtx, sessionID, s, genMsgs, tracker)
 			})
 		}
 	}
@@ -739,15 +739,15 @@ func (a *sessionAgent) generateRunEndSegments(ctx context.Context, sessionID str
 		if row.State == notebook.SegmentProcessed || !tracker.markInflight(key) {
 			continue
 		}
-		genMsgs := cloneMessagesForGen(msgs)
+		genMsgs := cloneMessagesForGen(msgs[s.start:s.end])
 		genCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), segmentGenTimeout)
 		if a.syncSegmentGen {
-			a.generateSegment(genCtx, sessionID, s, genMsgs[s.start:s.end], tracker)
+			a.generateSegment(genCtx, sessionID, s, genMsgs, tracker)
 			cancel()
 		} else {
 			a.spawnDetached(func() {
 				defer cancel()
-				a.generateSegment(genCtx, sessionID, s, genMsgs[s.start:s.end], tracker)
+				a.generateSegment(genCtx, sessionID, s, genMsgs, tracker)
 			})
 		}
 	}
