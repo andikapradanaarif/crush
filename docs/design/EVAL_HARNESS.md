@@ -694,7 +694,12 @@ for itself over deterministic masking alone?") is a separate
 manifest, `notebook-mask-regime` — the two-arm analysis can't
 hold a third arm — pairing `notebook_generate: never` control
 against the same generating treatment, with the summarize arm's
-spend readable off the first experiment's `arm_totals`.
+spend readable off the first experiment's `arm_totals`. Read a
+mask-regime verdict carefully: under `never`, fallback entries
+carry raw truncated descriptions that can render *larger* than
+generated summaries, so a treatment win bundles "smaller prompt
+entries" with "paid generation spend" — the primary can't
+decompose the two.
 
 The earlier survival form of this experiment — verbatim-until-
 death control (`notebook_enabled: false`, `disable_auto_summarize:

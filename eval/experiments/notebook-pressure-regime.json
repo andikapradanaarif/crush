@@ -6,9 +6,9 @@
 		"realrepo-*@min_turns>=4"
 	],
 	"runs_per_trajectory": {
-		"stable": 3,
-		"mid": 10,
-		"uncharacterized": 5
+		"stable": 25,
+		"mid": 25,
+		"uncharacterized": 25
 	},
 	"primary": {
 		"metric": "weighted_cost",
@@ -54,12 +54,6 @@
 				{
 					"id": "deepseek-v4.1-flash",
 					"name": "DeepSeek V4.1 Flash",
-					"context_window": 64000,
-					"default_max_tokens": 8192
-				},
-				{
-					"id": "qwen3.8-flash",
-					"name": "Qwen 3.8 Flash",
 					"context_window": 64000,
 					"default_max_tokens": 8192
 				}

@@ -6,9 +6,9 @@
 		"realrepo-*@min_turns>=4"
 	],
 	"runs_per_trajectory": {
-		"stable": 3,
-		"mid": 10,
-		"uncharacterized": 5
+		"stable": 25,
+		"mid": 25,
+		"uncharacterized": 25
 	},
 	"primary": {
 		"metric": "weighted_cost",
