@@ -220,6 +220,19 @@ func TestTodosToolMintsDeterministicIDs(t *testing.T) {
 	require.NotEqual(t, session.MintPlanItemID("", "unkeyed work"), sess.Todos[2].ID)
 }
 
+func TestTodosToolValidationErrorsAreRepairable(t *testing.T) {
+	t.Parallel()
+	sessions, sessionID := newTodosTestSession(t)
+	tool := NewTodosTool(sessions, []string{"verify:build"}, t.TempDir())
+
+	resp, err := runTodosTool(t, tool, sessionID, []TodoItem{
+		{Content: "run the checks", Status: "pending", EvidenceChecks: []string{"build"}},
+	})
+	require.NoError(t, err, "validation rejections must not take the fatal error channel")
+	require.True(t, resp.IsError)
+	require.Contains(t, resp.Content, "unknown check")
+}
+
 func TestTodosToolDescriptionSurfacesCheckNames(t *testing.T) {
 	t.Parallel()
 	sessions, _ := newTodosTestSession(t)
