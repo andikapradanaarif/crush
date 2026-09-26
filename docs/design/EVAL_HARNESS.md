@@ -689,7 +689,12 @@ MDE 15%, `max_pass_drop` 0.1) prices the notebook stack against
 the incumbent fallback. `min_pressure.activations: 1` coverage on
 the treatment arm is the regime proof — a trajectory that never
 pressures lands the arm's runs inconclusive rather than passing as
-evidence of nothing. The mask-only question ("does generation pay
+evidence of nothing. Note it is a *weak* proof at a 64K window:
+the margin (~5.8K estimated tokens: 8K output reserve + a bounded
+tool-result jump) means nearly any real task latches the gate —
+the predicate proves "the gate ran", not "the cap was threatened".
+The strong regime signal remains the outcome split and the
+`request.prompt_tokens_peak` trajectories. The mask-only question ("does generation pay
 for itself over deterministic masking alone?") is a separate
 manifest, `notebook-mask-regime` — the two-arm analysis can't
 hold a third arm — pairing `notebook_generate: never` control
