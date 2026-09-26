@@ -99,6 +99,29 @@ func TestUnmarshalTodosMintsDeterministicIDs(t *testing.T) {
 	require.Equal(t, "k", kept[0].Key)
 }
 
+func TestSessionChannelPersists(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	t.Cleanup(func() {
+		require.NoError(t, db.Release(dataDir))
+		db.ResetPool()
+	})
+
+	conn, err := db.Connect(t.Context(), dataDir)
+	require.NoError(t, err)
+	sessions := NewService(db.New(conn), conn)
+
+	created, err := sessions.Create(t.Context(), "channel")
+	require.NoError(t, err)
+	updated, err := sessions.SetChannel(t.Context(), created.ID, "signal")
+	require.NoError(t, err)
+	require.Equal(t, "signal", updated.Channel)
+
+	fetched, err := sessions.Get(t.Context(), created.ID)
+	require.NoError(t, err)
+	require.Equal(t, "signal", fetched.Channel)
+}
+
 func TestEstimatedUsageStateCanBeClearedByExplicitSave(t *testing.T) {
 	dataDir := t.TempDir()
 	t.Cleanup(func() {

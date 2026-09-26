@@ -209,8 +209,12 @@ func runStats(cmd *cobra.Command, _ []string) error {
 	crawlDir, _ := cmd.Flags().GetString("crawl-dir")
 	useAll, _ := cmd.Flags().GetBool("all")
 
+	cwd, err := ResolveCwd(cmd)
+	if err != nil {
+		return err
+	}
+
 	var projectStats []ProjectStats
-	var err error
 
 	switch {
 	case crawlDir != "":
@@ -224,7 +228,7 @@ func runStats(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("failed to gather stats from projects: %w", err)
 		}
 	default:
-		cfg, err := config.Init("", dataDir, false)
+		cfg, err := config.Init(cwd, dataDir, false)
 		if err != nil {
 			return fmt.Errorf("failed to initialize config: %w", err)
 		}
@@ -284,7 +288,7 @@ func runStats(cmd *cobra.Command, _ []string) error {
 
 	outputDataDir := dataDir
 	if outputDataDir == "" {
-		cfg, err := config.Init("", "", false)
+		cfg, err := config.Init(cwd, "", false)
 		if err == nil {
 			outputDataDir = cfg.Config().Options.DataDirectory
 		}

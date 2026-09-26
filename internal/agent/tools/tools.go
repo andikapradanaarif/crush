@@ -16,6 +16,7 @@ type (
 	supportsImagesKey   string
 	modelNameKey        string
 	runStampKey         string
+	channelContextKey   string
 )
 
 const (
@@ -31,6 +32,8 @@ const (
 	// unique to each Run invocation so tool decorators can tell one
 	// run's calls from a retried or queued follow-up run's.
 	RunStampContextKey runStampKey = "run_stamp"
+	// ChannelContextKey is the key for the channel that originated the turn.
+	ChannelContextKey channelContextKey = "channel"
 )
 
 // getContextValue is a generic helper that retrieves a typed value from context.
@@ -49,6 +52,11 @@ func getContextValue[T any](ctx context.Context, key any, defaultValue T) T {
 // GetSessionFromContext retrieves the session ID from the context.
 func GetSessionFromContext(ctx context.Context) string {
 	return getContextValue(ctx, SessionIDContextKey, "")
+}
+
+// GetChannelFromContext retrieves the channel that originated the current turn.
+func GetChannelFromContext(ctx context.Context) string {
+	return getContextValue(ctx, ChannelContextKey, "")
 }
 
 // GetMessageFromContext retrieves the message ID from the context.

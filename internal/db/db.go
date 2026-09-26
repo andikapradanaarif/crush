@@ -225,6 +225,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.searchNotebookByTextStmt, err = db.PrepareContext(ctx, searchNotebookByText); err != nil {
 		return nil, fmt.Errorf("error preparing query SearchNotebookByText: %w", err)
 	}
+	if q.setSessionChannelStmt, err = db.PrepareContext(ctx, setSessionChannel); err != nil {
+		return nil, fmt.Errorf("error preparing query SetSessionChannel: %w", err)
+	}
 	if q.updateMessageStmt, err = db.PrepareContext(ctx, updateMessage); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateMessage: %w", err)
 	}
@@ -577,6 +580,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing searchNotebookByTextStmt: %w", cerr)
 		}
 	}
+	if q.setSessionChannelStmt != nil {
+		if cerr := q.setSessionChannelStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing setSessionChannelStmt: %w", cerr)
+		}
+	}
 	if q.updateMessageStmt != nil {
 		if cerr := q.updateMessageStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing updateMessageStmt: %w", cerr)
@@ -703,6 +711,7 @@ type Queries struct {
 	renameSessionStmt                    *sql.Stmt
 	searchNotebookByTagStmt              *sql.Stmt
 	searchNotebookByTextStmt             *sql.Stmt
+	setSessionChannelStmt                *sql.Stmt
 	updateMessageStmt                    *sql.Stmt
 	updateNotebookCompressionStmt        *sql.Stmt
 	updateSessionStmt                    *sql.Stmt
@@ -780,6 +789,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		renameSessionStmt:                    q.renameSessionStmt,
 		searchNotebookByTagStmt:              q.searchNotebookByTagStmt,
 		searchNotebookByTextStmt:             q.searchNotebookByTextStmt,
+		setSessionChannelStmt:                q.setSessionChannelStmt,
 		updateMessageStmt:                    q.updateMessageStmt,
 		updateNotebookCompressionStmt:        q.updateNotebookCompressionStmt,
 		updateSessionStmt:                    q.updateSessionStmt,
