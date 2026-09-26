@@ -680,17 +680,30 @@ require the declared arm to pin `enforce_context_window: true` at
 load — an unmeetable expectation fails at validation, not at
 runtime.
 
-`notebook-pressure-regime` (and its `-qwen` sibling) exercise the
-pair: control `notebook_enabled: false` verbatim-until-death vs
-treatment gate-on, both enforcing 64K, with
-`min_pressure.activations: 1` proving the gate fired and
-`expected_exclusion` asserting the control cannot complete. Read
-the expected outcome accordingly: in the regime the experiment
-exists to demonstrate, control produces `error`/
-`window_cap_enforced` records rather than a conclusive pair — the
-satisfied/missed bookkeeping, not the declared primary, is the
-finding. (A primary verdict still emerges in the other regime,
-where trajectories fit and control survives.)
+`notebook-pressure-regime` (and its `-qwen` sibling) is the
+comparator: control is upstream auto-summarize under the cap
+(`notebook_enabled: false`, `disable_auto_summarize: false`,
+`enforce_context_window: true`), treatment is the notebook with
+its gate on, and the paired verdict on `weighted_cost` (decrease,
+MDE 15%, `max_pass_drop` 0.1) prices the notebook stack against
+the incumbent fallback. `min_pressure.activations: 1` coverage on
+the treatment arm is the regime proof — a trajectory that never
+pressures lands the arm's runs inconclusive rather than passing as
+evidence of nothing. The mask-only question ("does generation pay
+for itself over deterministic masking alone?") is a separate
+manifest, `notebook-mask-regime` — the two-arm analysis can't
+hold a third arm — pairing `notebook_generate: never` control
+against the same generating treatment, with the summarize arm's
+spend readable off the first experiment's `arm_totals`.
+
+The earlier survival form of this experiment — verbatim-until-
+death control (`notebook_enabled: false`, `disable_auto_summarize:
+true`) under `expected_exclusion` — is retired: the designed death
+replicated cleanly across three invocations (30/30 cap deaths), so
+re-running it buys no information, and `expected_exclusion.arm`
+can only name control or treatment, which the comparator needs for
+the summarize pair. Its records remain under
+`eval/results/notebook-pressure-regime/` for provenance.
 
 `generator_tokens` is the notebook sidecar's generation spend
 (segment, checkpoint, digest calls) — kept out of `tokens` so the

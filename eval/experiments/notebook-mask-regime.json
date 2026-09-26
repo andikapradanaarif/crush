@@ -1,5 +1,5 @@
 {
-	"name": "notebook-pressure-regime",
+	"name": "notebook-mask-regime",
 	"model": "alibaba-tp/deepseek-v4.1-flash",
 	"temperature": 0,
 	"corpus": [
@@ -24,10 +24,15 @@
 		"control": {
 			"config": {
 				"options": {
-					"notebook_enabled": false,
-					"disable_auto_summarize": false,
+					"notebook_enabled": true,
+					"notebook_pressure_gate": true,
+					"notebook_generate": "never",
+					"disable_auto_summarize": true,
 					"enforce_context_window": true
 				}
+			},
+			"coverage": {
+				"min_pressure.activations": 1
 			}
 		},
 		"treatment": {
@@ -54,12 +59,6 @@
 				{
 					"id": "deepseek-v4.1-flash",
 					"name": "DeepSeek V4.1 Flash",
-					"context_window": 64000,
-					"default_max_tokens": 8192
-				},
-				{
-					"id": "qwen3.8-flash",
-					"name": "Qwen 3.8 Flash",
 					"context_window": 64000,
 					"default_max_tokens": 8192
 				}
