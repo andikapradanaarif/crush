@@ -24,6 +24,9 @@ var turnDigestPrompt []byte
 type llmGenerator struct {
 	resolveModel   func() fantasy.LanguageModel
 	maxEntryTokens int64
+	// workDir makes file: tags project-relative; set by NewService
+	// from Options.WorkingDir. Empty tags basename-only.
+	workDir string
 	// onUsage reports each generation call's token usage — the
 	// sidecar spend the run's token totals can't see. Nil-safe.
 	onUsage func(sessionID string, usage fantasy.Usage)
@@ -83,7 +86,7 @@ func (g *llmGenerator) Generate(ctx context.Context, sessionID string, events []
 				EventType: event.EventType,
 				Title:     event.Title,
 				Text:      fmt.Sprintf("## %s\n\n%s\n", event.Title, truncate(event.Description, 800)),
-				Tags:      defaultTagsForEvent(event),
+				Tags:      defaultTagsForEvent(event, g.workDir),
 			})
 		}
 		return entries, nil
@@ -115,7 +118,7 @@ func (g *llmGenerator) Generate(ctx context.Context, sessionID string, events []
 				EventType: event.EventType,
 				Title:     event.Title,
 				Text:      fmt.Sprintf("## %s\n\n%s\n", event.Title, truncate(event.Description, 800)),
-				Tags:      defaultTagsForEvent(event),
+				Tags:      defaultTagsForEvent(event, g.workDir),
 			})
 		}
 	}
@@ -304,18 +307,12 @@ func extractTitle(text string) string {
 }
 
 // defaultTagsForEvent returns default tags for an event type.
-func defaultTagsForEvent(event EntryInput) []string {
+func defaultTagsForEvent(event EntryInput, workDir string) []string {
 	tags := []string{"phase:" + event.EventType}
 	if event.ToolCall != nil {
 		path := extractPathFromInput(event.ToolCall.Input)
 		if path != "" {
-			// Use basename for the file tag so recall("file:auth.go")
-			// matches regardless of the full path.
-			basename := path
-			if idx := strings.LastIndex(path, "/"); idx >= 0 {
-				basename = path[idx+1:]
-			}
-			tags = append(tags, "file:"+basename)
+			tags = append(tags, fileTags(path, workDir)...)
 		}
 	}
 	return tags

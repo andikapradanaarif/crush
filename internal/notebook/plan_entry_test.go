@@ -64,7 +64,7 @@ func TestBuildPlanEntry(t *testing.T) {
 	require.Len(t, inputs, 1)
 	require.Equal(t, EventPlan, inputs[0].EventType)
 
-	entry := buildPlanEntry(inputs[0])
+	entry := buildPlanEntry(inputs[0], "")
 	require.Equal(t, EventPlan, entry.EventType)
 	require.Equal(t, "Plan update", entry.Title)
 	require.Contains(t, entry.Text, "1 pending, 0 in progress, 1 completed")
@@ -75,6 +75,7 @@ func TestBuildPlanEntry(t *testing.T) {
 	require.Contains(t, entry.Text, "checks: verify:build")
 	require.Contains(t, entry.Text, "paths: internal/agent/")
 	require.Contains(t, entry.Tags, "plan")
+	require.Contains(t, entry.Tags, "file:internal/agent")
 	require.Contains(t, entry.Tags, "file:agent")
 }
 
@@ -85,7 +86,7 @@ func TestBuildPlanEntryFallsBackToCallInput(t *testing.T) {
 			Input: `{"todos":[{"content":"from input","status":"pending","key":"a","depends_on":[],"evidence_paths":["x.go"]}]}`, Finished: true},
 		EventType: EventPlan,
 	}
-	entry := buildPlanEntry(input)
+	entry := buildPlanEntry(input, "")
 	require.Contains(t, entry.Text, "[pending] from input")
 	require.Contains(t, entry.Tags, "file:x.go")
 }

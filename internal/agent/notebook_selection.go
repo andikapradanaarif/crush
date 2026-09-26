@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -104,6 +105,29 @@ func (sel selectionInput) withinBand(e notebook.Entry) bool {
 		(e.TurnNumber == sel.bandFloor.turn && e.SegmentNumber >= sel.bandFloor.segment)
 }
 
+// resolveFileTag returns the tracked paths a file: tag value names.
+// A bare basename resolves through the workingSet key; a value with
+// separators is a path (project-relative or absolute) and matches
+// tracked paths by boundary suffix — the collision fix, since two
+// same-named files now tag their full paths.
+func (sel selectionInput) resolveFileTag(base string) []string {
+	if paths, ok := sel.workingSet[base]; ok {
+		return paths
+	}
+	if !strings.ContainsAny(base, "/\\") {
+		return nil
+	}
+	var paths []string
+	for _, tracked := range sel.workingSet {
+		for _, p := range tracked {
+			if p == base || strings.HasSuffix(p, string(filepath.Separator)+filepath.FromSlash(base)) {
+				paths = append(paths, p)
+			}
+		}
+	}
+	return paths
+}
+
 // workingSetMatch reports how an entry's file: tags intersect the
 // working set: confident when a tag resolves to exactly one tracked
 // path or the entry text disambiguates a collision by naming a tracked
@@ -114,8 +138,8 @@ func (sel selectionInput) workingSetMatch(e notebook.Entry) (confident, ambiguou
 		if !ok {
 			continue
 		}
-		paths, ok := sel.workingSet[base]
-		if !ok {
+		paths := sel.resolveFileTag(base)
+		if len(paths) == 0 {
 			continue
 		}
 		if len(paths) == 1 {
@@ -198,7 +222,7 @@ func (sel selectionInput) entryIsDead(e notebook.Entry) bool {
 		if !ok {
 			continue
 		}
-		for _, p := range sel.workingSet[base] {
+		for _, p := range sel.resolveFileTag(base) {
 			if exists, tracked := sel.livePaths[p]; tracked {
 				resolved = true
 				if exists {

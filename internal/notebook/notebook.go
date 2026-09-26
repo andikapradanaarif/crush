@@ -387,6 +387,10 @@ type Options struct {
 	// waiting out a TTL. It runs under the service's stall mutex:
 	// implementations must not block or call back into the service.
 	OnCompactionStall func(sessionID, reason string)
+	// WorkingDir makes file: tags project-relative — same-named files
+	// in different directories no longer collide in recall and
+	// selection. Paths outside it (or an empty value) tag basename.
+	WorkingDir string
 }
 
 // CheckpointRequest parameterizes GenerateCheckpoint. The caller
@@ -473,6 +477,7 @@ func NewService(q *db.Queries, generator Generator, opts Options) Service {
 	// max output token budget based on event count.
 	if llmGen, ok := generator.(*llmGenerator); ok {
 		llmGen.maxEntryTokens = opts.MaxEntryTokens
+		llmGen.workDir = opts.WorkingDir
 	}
 	return &service{
 		q:           q,

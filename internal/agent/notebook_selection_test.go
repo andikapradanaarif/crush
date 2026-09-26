@@ -375,6 +375,25 @@ func TestSelectNotebookEntries_WorkingSet(t *testing.T) {
 		require.Equal(t, 1, diff.working)
 	})
 
+	t.Run("path tag resolves a basename collision", func(t *testing.T) {
+		t.Parallel()
+		// Two tracked files share the basename. The path tag
+		// suffix-matches exactly one, so the entry is confident
+		// without the text naming a tracked path — even though its
+		// basename alias tag alone would be ambiguous.
+		entries := []notebook.Entry{
+			nbEntry("clear", 1, 1, notebook.EventFileRead, "read auth.go", 10,
+				"file:internal/api/auth.go", "file:auth.go"),
+		}
+		sel := selForFiles(
+			map[string][]string{"auth.go": {"/w/internal/api/auth.go", "/w/web/auth.go"}},
+			nil,
+		)
+		got, diff := selectNotebookEntries(entries, nil, segmentKey{turn: 2}, sel)
+		require.Equal(t, []string{"clear"}, entryIDs(got))
+		require.Equal(t, 1, diff.working)
+	})
+
 	t.Run("collided basename without disambiguation runs second", func(t *testing.T) {
 		t.Parallel()
 		// Two tracked files share the basename; only the entry whose

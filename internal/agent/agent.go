@@ -2621,29 +2621,31 @@ func notebookRelevanceRefs(ctx context.Context, sessions session.Service, sessio
 var fullPathRegex = regexp.MustCompile(`(?:^|\s)((?:\./)?(?:[a-zA-Z0-9_-]+/)+[a-zA-Z0-9_][a-zA-Z0-9_.-]*)`)
 
 // extractExplicitFilePaths finds file paths in the user's message
-// and returns them as "file:basename" tags for notebook lookup.
-// Trailing punctuation (e.g., periods, commas) is stripped from
-// the basename so "internal/auth.go." produces "file:auth.go".
+// and returns them as "file:" refs for notebook lookup — the path as
+// written (unambiguous under the working dir) plus its basename, which
+// still matches entries that carry basename-only tags. Trailing
+// punctuation (e.g., periods, commas) is stripped so
+// "internal/auth.go." produces "file:internal/auth.go" and
+// "file:auth.go".
 func extractExplicitFilePaths(msg string) []string {
 	var refs []string
 	matches := fullPathRegex.FindAllStringSubmatch(msg, -1)
 	seen := make(map[string]bool)
 	for _, m := range matches {
-		path := m[1]
+		path := strings.TrimPrefix(m[1], "./")
+		path = strings.TrimRight(path, ".,;:")
 		basename := path
 		if idx := strings.LastIndex(path, "/"); idx >= 0 {
 			basename = path[idx+1:]
 		}
-		// Strip trailing punctuation that isn't part of a real
-		// filename (periods, commas, semicolons, colons).
-		basename = strings.TrimRight(basename, ".,;:")
 		if basename == "" {
 			continue
 		}
-		tag := "file:" + basename
-		if !seen[tag] {
-			seen[tag] = true
-			refs = append(refs, tag)
+		for _, ref := range []string{"file:" + path, "file:" + basename} {
+			if !seen[ref] {
+				seen[ref] = true
+				refs = append(refs, ref)
+			}
 		}
 	}
 	return refs
