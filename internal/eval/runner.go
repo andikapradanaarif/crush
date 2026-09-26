@@ -3,6 +3,7 @@ package eval
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -95,7 +96,7 @@ func (r *Runner) home() string {
 	if r.Home != "" {
 		return r.Home
 	}
-	h, err := os.MkdirTemp("", "crush-eval-home-*")
+	h, err := os.MkdirTemp("", tempDirPattern("crush-eval-home-"))
 	if err == nil {
 		r.Home = h
 		r.homeCreated = true
@@ -1313,7 +1314,10 @@ func pidAlive(pid int) bool {
 	if err != nil {
 		return false
 	}
-	return p.Signal(syscall.Signal(0)) == nil
+	err = p.Signal(syscall.Signal(0))
+	// EPERM means the process exists but is owned by another uid —
+	// alive for our purposes.
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 // EvalGoCacheEnvVar overrides the shared Go build/module cache location
@@ -1330,9 +1334,17 @@ const EvalGoCacheEnvVar = "CRUSH_EVAL_GO_CACHE"
 // — or reserved by a caller's ExtraEnv — are honored, not overridden.
 func goCachePins(reserved map[string]bool) map[string]string {
 	dir := os.Getenv(EvalGoCacheEnvVar)
+	if dir != "" && !filepath.IsAbs(dir) {
+		slog.Warn("Ignoring relative "+EvalGoCacheEnvVar+" — Go caches need an absolute path", "dir", dir)
+		dir = ""
+	}
 	if dir == "" {
 		cache, err := os.UserCacheDir()
 		if err != nil {
+			// Without a resolvable cache dir the pin is skipped and
+			// go falls back to per-home caches — the leak pattern
+			// this exists to prevent. Warn so it isn't silent.
+			slog.Warn("Cannot resolve user cache dir — eval children fall back to per-home Go caches", "error", err)
 			return nil
 		}
 		dir = filepath.Join(cache, "crush", "eval-go")

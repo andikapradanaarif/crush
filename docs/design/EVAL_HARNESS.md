@@ -363,10 +363,18 @@ honored as-is.
 
 Temp-home cleanup is two-layered: `Runner.Close` removes the
 runner-allocated home on graceful exits, and every `eval` invocation
-sweeps `crush-eval-home-*`/`eval-run*` dirs older than 24h under the
-eval lock (bounded per invocation; read-only `pkg/mod` trees are
-chmod-walked first). The sweep is the backstop for killed or hung
-runs — `os.MkdirTemp` registers no cleanup on its own.
+sweeps `crush-eval-home-*`/`eval-run-*` dirs under the eval lock
+(bounded to 64 removals per invocation; read-only `pkg/mod` trees are
+chmod-walked first). Liveness comes from the name itself — the
+creator encodes its PID (`eval-run-p<pid>-*`): a live owner is
+skipped regardless of age (the lock only serializes one `--eval-dir`;
+a concurrent run under another would otherwise see a >24h home's
+top-level mtime go stale mid-run, since nested writes don't freshen
+it), and a dead owner is collectible immediately. Dirs without the
+marker — legacy leaks, foreign collisions — fall back to a 24h mtime
+threshold. Windows keeps only the mtime path since `pidAlive` can't
+probe there. The sweep is the backstop for killed or hung runs —
+`os.MkdirTemp` registers no cleanup on its own.
 
 An arm may also carry `coverage` — predicates applied only to that
 arm's runs, evaluated after the trajectory's shared coverage at the
