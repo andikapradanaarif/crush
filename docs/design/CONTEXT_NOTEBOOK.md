@@ -1404,6 +1404,31 @@ Calls mem0 MCP tool to add memory with tags. Enables cross-session recall:
 
 Only runs when `notebook_sync_mem0` config is true.
 
+#### Trust boundary
+
+Enabling `notebook_sync_mem0` moves notebook content into a separate
+trust domain. Two consequences to weigh before turning it on:
+
+- **Outbound (sync)**: entries summarize tool output, which can
+  include file contents the agent read — `.env` files, credentials,
+  private config. `SyncEntries` runs a redaction pass
+  (`internal/notebook/redact.go`) that strips secret-shaped material
+  — `KEY=value` assignments on sensitive names, auth headers,
+  recognizable token formats, PEM blocks — before anything reaches
+  the `add_memory` call. The filter is a heuristic net, not a
+  guarantee: it errs toward named/format-shaped matches, so an
+  unusual secret format can still leak. If the memory server is
+  hosted or shared, treat redaction as mitigation, not proof.
+- **Inbound (hydration/search)**: memories fetched from the server
+  are injected into the prompt as notebook entries. The partition is
+  enforced and verified client-side (`working_dir` metadata — a
+  memory that can't prove same-project origin is dropped), but the
+  *content* is trusted. A compromised or misconfigured memory server
+  is therefore a prompt-injection channel: it can write instructions
+  the model will read as project context. Acceptable for a
+  single-user local server; think twice before pointing
+  `notebook_memory_server` at infrastructure you don't control.
+
 ### Step 11: Config option
 
 **File**: `internal/config/config.go`

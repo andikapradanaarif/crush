@@ -112,6 +112,14 @@ func (m *Mem0Sync) SyncEntries(ctx context.Context, entries []Entry) {
 		if text == "" {
 			text = entry.EntryText
 		}
+		outbound := fmt.Sprintf("## %s\n%s", entry.Title, text)
+		if redacted := redactSecrets(outbound); redacted != outbound {
+			slog.Debug("Redacted secret-shaped content from mem0 sync payload",
+				"server", m.serverName,
+				"turn", entry.TurnNumber,
+			)
+			outbound = redacted
+		}
 		metadata := map[string]any{
 			"session_id": entry.SessionID,
 			// Always equal to session_id today; kept distinct so
@@ -126,7 +134,7 @@ func (m *Mem0Sync) SyncEntries(ctx context.Context, entries []Entry) {
 			"compression":       entry.CompressionLevel,
 		}
 		args := map[string]any{
-			"text":     fmt.Sprintf("## %s\n%s", entry.Title, text),
+			"text":     outbound,
 			"agent_id": mem0AgentID,
 			"metadata": metadata,
 			"infer":    false,
