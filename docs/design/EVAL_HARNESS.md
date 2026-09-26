@@ -350,6 +350,24 @@ prompts replay verbatim; run experiments that replay real prompts in a
 credential-scoped environment or accept that exposure as the runner's
 documented posture.
 
+`GOMODCACHE`/`GOCACHE` pin to a shared eval cache
+(`<user cache>/crush/eval-go`, overridable via
+`CRUSH_EVAL_GO_CACHE`) rather than the per-run home — otherwise `go`
+derives `GOPATH` from the pinned `HOME` and every run re-downloads the
+full module graph into a tempdir. The cache is shared across runs and
+arms, so the first attempt pays cold downloads where later attempts
+run warm — a deliberate trade: schedulers alternate arms so the
+asymmetry lands on attempt 0 of each side, and paired analysis
+absorbs it. Operator-set `GOMODCACHE`/`GOCACHE` in the ambient env are
+honored as-is.
+
+Temp-home cleanup is two-layered: `Runner.Close` removes the
+runner-allocated home on graceful exits, and every `eval` invocation
+sweeps `crush-eval-home-*`/`eval-run*` dirs older than 24h under the
+eval lock (bounded per invocation; read-only `pkg/mod` trees are
+chmod-walked first). The sweep is the backstop for killed or hung
+runs — `os.MkdirTemp` registers no cleanup on its own.
+
 An arm may also carry `coverage` — predicates applied only to that
 arm's runs, evaluated after the trajectory's shared coverage at the
 same gate point (pass → `inconclusive`, and the run's

@@ -1244,6 +1244,11 @@ func (r *Runner) checkEnv() []string {
 		"XDG_DATA_HOME":   filepath.Join(r.home(), ".local", "share"),
 		"XDG_STATE_HOME":  filepath.Join(r.home(), ".local", "state"),
 	}
+	// Go caches pin to a shared eval cache, not the per-run home —
+	// see goCachePins.
+	for k, v := range goCachePins(nil) {
+		pinned[k] = v
+	}
 	env := make([]string, 0, len(os.Environ()))
 	for _, kv := range os.Environ() {
 		k, _, _ := strings.Cut(kv, "=")
@@ -1279,6 +1284,7 @@ func (r *Runner) acquireLock() (func(), error) {
 	for range 100 {
 		if err := os.Mkdir(dir, 0o755); err == nil {
 			_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o644)
+			r.sweepStaleTemps()
 			return func() { _ = os.RemoveAll(dir) }, nil
 		}
 		// Break a lock whose holder is dead — a killed `crush eval`
@@ -1308,6 +1314,40 @@ func pidAlive(pid int) bool {
 		return false
 	}
 	return p.Signal(syscall.Signal(0)) == nil
+}
+
+// EvalGoCacheEnvVar overrides the shared Go build/module cache location
+// eval children use. Default is <user cache dir>/crush/eval-go — the
+// same pattern as EvalRepoCacheEnvVar.
+const EvalGoCacheEnvVar = "CRUSH_EVAL_GO_CACHE"
+
+// goCachePins returns GOMODCACHE/GOCACHE pins into the shared eval
+// cache. Without the pin, go derives GOPATH from the run's pinned HOME
+// and every run re-downloads the entire module graph into its temp
+// home — observed 1–3 GB per leaked home on a live machine. A shared
+// cache keeps runs hermetic against the operator's real caches while
+// ending the per-home duplication. Keys already set in the ambient env
+// — or reserved by a caller's ExtraEnv — are honored, not overridden.
+func goCachePins(reserved map[string]bool) map[string]string {
+	dir := os.Getenv(EvalGoCacheEnvVar)
+	if dir == "" {
+		cache, err := os.UserCacheDir()
+		if err != nil {
+			return nil
+		}
+		dir = filepath.Join(cache, "crush", "eval-go")
+	}
+	pins := map[string]string{}
+	for _, kv := range [][2]string{
+		{"GOMODCACHE", filepath.Join(dir, "mod")},
+		{"GOCACHE", filepath.Join(dir, "build")},
+	} {
+		if _, set := os.LookupEnv(kv[0]); set || reserved[kv[0]] {
+			continue
+		}
+		pins[kv[0]] = kv[1]
+	}
+	return pins
 }
 
 // goToolchain records the `go` on PATH — the check script's toolchain
