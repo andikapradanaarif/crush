@@ -9,7 +9,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -271,7 +273,11 @@ func ValidateExperiment(e *Experiment) error {
 		return fmt.Errorf("corpus selector is required")
 	}
 	for _, sel := range e.Corpus {
-		if sel == "band:"+string(BandQuarantined) {
+		base, _, _, err := parseCorpusSelector(sel)
+		if err != nil {
+			return err
+		}
+		if base == "band:"+string(BandQuarantined) {
 			return fmt.Errorf("band:quarantined is never selectable — re-validating needs characterize mode, not an experiment arm")
 		}
 	}
@@ -737,6 +743,50 @@ func ValidateArmCoverageVsCorpus(e *Experiment, trajs []*Trajectory) error {
 	return nil
 }
 
+// corpusRefineRe parses a "@key<op>N" selector refinement.
+var corpusRefineRe = regexp.MustCompile(`^(min_turns|max_turns)(>=|<=)(\d+)$`)
+
+// parseCorpusSelector splits a corpus selector into its base — a glob
+// or "band:<name>" — and any turn-count refinements. "@min_turns>=N"
+// and "@max_turns<=N" filter the base's matches by trajectory turn
+// count, so a broad selector like "*" stays usable when short
+// trajectories would starve an arm's min_ predicate against
+// ValidateArmCoverageVsCorpus (#113). Unknown keys or wrong-direction
+// operators are errors: a silently ignored refinement would select
+// trajectories the experiment can't run.
+func parseCorpusSelector(sel string) (base string, minTurns, maxTurns int, err error) {
+	minTurns, maxTurns = -1, -1
+	parts := strings.Split(sel, "@")
+	base = parts[0]
+	for _, clause := range parts[1:] {
+		m := corpusRefineRe.FindStringSubmatch(clause)
+		if m == nil {
+			return "", 0, 0, fmt.Errorf("corpus selector %q: unsupported refinement %q — want @min_turns>=N or @max_turns<=N", sel, clause)
+		}
+		n, _ := strconv.Atoi(m[3])
+		switch m[1] {
+		case "min_turns":
+			if m[2] != ">=" {
+				return "", 0, 0, fmt.Errorf("corpus selector %q: min_turns takes >=, not %s", sel, m[2])
+			}
+			minTurns = n
+		case "max_turns":
+			if m[2] != "<=" {
+				return "", 0, 0, fmt.Errorf("corpus selector %q: max_turns takes <=, not %s", sel, m[2])
+			}
+			maxTurns = n
+		}
+	}
+	return base, minTurns, maxTurns, nil
+}
+
+// turnCountOK reports whether a trajectory's turn count satisfies the
+// selector refinements; -1 marks an unset bound.
+func turnCountOK(t *Trajectory, minTurns, maxTurns int) bool {
+	n := len(t.Task.Turns)
+	return (minTurns < 0 || n >= minTurns) && (maxTurns < 0 || n <= maxTurns)
+}
+
 // SelectCorpus resolves the corpus selector against loaded trajectories
 // and band state. Quarantined trajectories are excluded even under "*".
 func SelectCorpus(corpus map[string]*Trajectory, bands *Bands, selectors []string) ([]*Trajectory, error) {
@@ -749,28 +799,36 @@ func SelectCorpus(corpus map[string]*Trajectory, bands *Bands, selectors []strin
 func selectCorpus(corpus map[string]*Trajectory, bands *Bands, selectors []string, includeQuarantined bool) ([]*Trajectory, error) {
 	want := make(map[string]bool)
 	for _, sel := range selectors {
-		if rest, ok := strings.CutPrefix(sel, "band:"); ok {
+		base, minTurns, maxTurns, err := parseCorpusSelector(sel)
+		if err != nil {
+			return nil, err
+		}
+		if rest, ok := strings.CutPrefix(base, "band:"); ok {
 			band := Band(rest)
-			for id := range corpus {
-				if bands.Band(id) == band && (band != BandQuarantined || includeQuarantined) {
+			for id, t := range corpus {
+				if bands.Band(id) == band && (band != BandQuarantined || includeQuarantined) && turnCountOK(t, minTurns, maxTurns) {
 					want[id] = true
 				}
 			}
 			continue
 		}
-		// Glob over trajectory ids.
+		// Glob over trajectory ids. "matched" tracks the base glob —
+		// a refinement that empties the selection is a valid result,
+		// not a selector typo.
 		matched := false
-		for id := range corpus {
-			ok, err := filepath.Match(sel, id)
+		for id, t := range corpus {
+			ok, err := filepath.Match(base, id)
 			if err != nil {
 				return nil, fmt.Errorf("corpus selector %q: %w", sel, err)
 			}
 			if ok {
 				matched = true
-				want[id] = true
+				if turnCountOK(t, minTurns, maxTurns) {
+					want[id] = true
+				}
 			}
 		}
-		if !matched && sel != "*" {
+		if !matched && base != "*" {
 			return nil, fmt.Errorf("corpus selector %q matched no trajectories", sel)
 		}
 	}
