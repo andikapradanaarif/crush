@@ -652,8 +652,9 @@ never writes back.
   passing as evidence of nothing. The arm
   still needs its signal path: hydration requires a configured
   mem0 MCP server and memories keyed to the materialized workdir,
-  and eval children get a sanitized HOME, a random `eval-run-*`
-  workdir, and a fresh data dir — so a corpus-side mem0 stub (or
+  and eval children get a sanitized HOME, a PID-marked
+  `eval-run-p<pid>-*` workdir, and a fresh data dir — so a
+  corpus-side mem0 stub (or
   setup-time memory seeding keyed to `$PWD`) must land before runs
   produce evidence.
 - **Checkpoint utility:** within a long session, recall calls and

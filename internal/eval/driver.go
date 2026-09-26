@@ -457,6 +457,16 @@ func (c CrushRunner) subprocessEnv(telemetryFile string, maxSteps int) []string 
 	if len(c.FlagKeys) > 0 {
 		pinned[EvalFlagsEnvVar] = strings.Join(c.FlagKeys, ",")
 	}
+	// Go caches share the eval-wide cache, not the per-run home — see
+	// goCachePins. ExtraEnv-reserved keys keep caller intent.
+	reserved := map[string]bool{}
+	for _, kv := range c.ExtraEnv {
+		k, _, _ := strings.Cut(kv, "=")
+		reserved[k] = true
+	}
+	for k, v := range goCachePins(reserved) {
+		pinned[k] = v
+	}
 	// Replace rather than append: duplicated keys in environ are
 	// resolved first-match by getenv, so a second HOME wouldn't pin.
 	env := make([]string, 0, len(os.Environ()))

@@ -22,7 +22,7 @@ import (
 // pinned env so e.g. `go mod download` populates the pinned module
 // cache, not the operator's real HOME.
 func Materialize(ctx context.Context, traj *Trajectory, trajDir, parentDir string, env []string) (string, error) {
-	workdir, err := os.MkdirTemp(parentDir, "eval-run-*")
+	workdir, err := os.MkdirTemp(parentDir, tempDirPattern("eval-run-"))
 	if err != nil {
 		return "", fmt.Errorf("create workdir: %w", err)
 	}
