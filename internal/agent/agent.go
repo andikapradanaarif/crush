@@ -244,10 +244,10 @@ type sessionAgent struct {
 
 	// promptSections holds the per-section measurements of the last
 	// built system prompt, used for request composition telemetry.
-	promptSections       *csync.Slice[prompt.PromptSection]
-	isSubAgent           bool
-	sessions             session.Service
-	messages             message.Service
+	promptSections *csync.Slice[prompt.PromptSection]
+	isSubAgent     bool
+	sessions       session.Service
+	messages       message.Service
 	// cfg backs channel reply routing (config lookup + MCP tool
 	// invocation). Nil in tests and sub-agents that never see channel
 	// turns; sendChannelReply treats nil as "routing disabled".
