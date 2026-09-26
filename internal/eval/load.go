@@ -259,6 +259,9 @@ func ValidateExperiment(e *Experiment) error {
 		if e.Primary.MDE <= 0 || e.Primary.MDE >= 1 {
 			return fmt.Errorf("primary.mde must be a relative effect in (0,1), got %g", e.Primary.MDE)
 		}
+		if e.Primary.MaxPassDrop < 0 || e.Primary.MaxPassDrop >= 1 {
+			return fmt.Errorf("primary.max_pass_drop must be an absolute pass-rate fraction in [0,1), got %g", e.Primary.MaxPassDrop)
+		}
 		if _, err := primaryMetricFunc(e, e.Primary.Metric); err != nil {
 			return err
 		}

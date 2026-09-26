@@ -499,6 +499,13 @@ type Options struct {
 	// render is verbatim; coverage accrual still runs (eviction
 	// itself requires it). This is the notebook-mode overflow guard.
 	NotebookPressureGate *bool `json:"notebook_pressure_gate,omitempty" jsonschema:"description=Gate the notebook render path on estimated request pressure; below the margin the render is verbatim (the notebook-mode overflow guard),default=true"`
+	// NotebookGenerate selects when the notebook's sidecar LLM
+	// generates entries: always (every closed segment), under_pressure
+	// (only once the pressure gate has latched for the session), or
+	// never (deterministic entries only — no notebook LLM calls, so
+	// checkpoints and turn digests are skipped). The mask-only eval
+	// arm uses never to price collapse without generation spend.
+	NotebookGenerate string `json:"notebook_generate,omitempty" jsonschema:"description=When the notebook's sidecar LLM generates entries: always\\, under_pressure\\, or never (deterministic entries only).,enum=always,enum=under_pressure,enum=never,default=always"`
 	// EnforceContextWindow turns the model's declared context_window
 	// into a hard cap: a rendered request estimated to overflow it
 	// fails with a context-overflow error before reaching the
@@ -1512,6 +1519,19 @@ func (o *Options) NotebookPriorTurnsMode() string {
 		return o.NotebookPriorTurns
 	default:
 		return "verbatim"
+	}
+}
+
+// NotebookGenerateMode returns the resolved generation policy —
+// "always", "under_pressure", or "never". Unrecognized values resolve
+// to "always" so a typo keeps generation on rather than silently
+// dropping entries.
+func (o *Options) NotebookGenerateMode() string {
+	switch o.NotebookGenerate {
+	case "under_pressure", "never":
+		return o.NotebookGenerate
+	default:
+		return "always"
 	}
 }
 

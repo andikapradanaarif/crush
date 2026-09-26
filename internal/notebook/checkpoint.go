@@ -112,6 +112,9 @@ func (s *service) GenerateCheckpoint(ctx context.Context, sessionID string, req 
 	if gathered < req.MinExploration {
 		return false, nil
 	}
+	if !s.shouldGenerate(sessionID) {
+		return false, nil
+	}
 
 	input := buildCheckpointInput(inputEntries, tailInputs, cutoffTurn, cutoffEvent)
 	entry, err := s.generator.GenerateCheckpoint(ctx, sessionID, input)

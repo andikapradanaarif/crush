@@ -200,6 +200,12 @@ type Primary struct {
 	Metric    string  `json:"metric"`
 	Direction string  `json:"direction"` // increase | decrease
 	MDE       float64 `json:"mde"`
+	// MaxPassDrop attaches a pass-rate guardrail to the primary
+	// verdict: treatment's conclusive pass rate may trail control's
+	// by at most this absolute fraction (0.10 = 10pp) for an "effect"
+	// verdict to stand — a cheaper arm that fails more often isn't
+	// cheaper. 0 disables the check.
+	MaxPassDrop float64 `json:"max_pass_drop,omitempty"`
 }
 
 // PrimaryDirection enumerates the legal direction spellings.

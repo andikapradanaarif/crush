@@ -560,3 +560,77 @@ func TestCompare_DeterministicPerInvocation(t *testing.T) {
 	require.Equal(t, rep1.Metrics[0].CIHiPct, rep2.Metrics[0].CIHiPct)
 	require.Equal(t, rep1.Metrics[0].P, rep2.Metrics[0].P)
 }
+
+// ArmTotals is the survivorship-free spend view: failed runs still
+// cost, and a third unpaired arm still gets a row.
+func TestCompare_ArmTotalsAndGuardrail(t *testing.T) {
+	dir := t.TempDir()
+	exp := &Experiment{
+		Name:        "e",
+		Corpus:      []string{"t"},
+		CostWeights: &CostWeights{CacheRead: 0.1, Output: 1},
+		Primary:     &Primary{Metric: "weighted_cost", Direction: PrimaryDecrease, MDE: 0.05, MaxPassDrop: 0.5},
+	}
+	c := map[string]any{"f": "c"}
+	tr := map[string]any{"f": "t"}
+	var recs []RunRecord
+	for i := 1; i <= 4; i++ {
+		recs = append(recs, compareRecord("e", "t", ArmControl, "i1", i, 100, c))
+	}
+	for i := 1; i <= 3; i++ {
+		recs = append(recs, compareRecord("e", "t", ArmTreatment, "i1", i, 80, tr))
+	}
+	failed := compareRecord("e", "t", ArmTreatment, "i1", 4, 80, tr)
+	failed.Outcome = OutcomeFail
+	recs = append(recs, failed)
+	// An unpaired third arm (e.g. mask-only) still gets a row.
+	recs = append(recs, compareRecord("e", "t", "mask", "i1", 1, 50, c))
+	writeCompareRecords(t, dir, recs...)
+
+	rep, err := seededRunner(dir).Compare(exp, "")
+	require.NoError(t, err)
+
+	// compareRecord tokens: input + 1*output(100) → control 200,
+	// treatment 180, mask 150 per attempt.
+	totals := map[string]ArmTotal{}
+	for _, a := range rep.ArmTotals {
+		totals[a.Arm] = a
+	}
+	require.Len(t, rep.ArmTotals, 3)
+	require.Equal(t, ArmTotal{Arm: ArmControl, Runs: 4, Passes: 4, WeightedCost: 800, CostPerAttempt: 200, CostPerPass: 200}, totals[ArmControl])
+	// The failed run's spend lands in the total and divides only by
+	// passes — cost-per-pass is 720/3, not the pass-run mean.
+	require.Equal(t, ArmTotal{Arm: ArmTreatment, Runs: 4, Passes: 3, WeightedCost: 720, CostPerAttempt: 180, CostPerPass: 240}, totals[ArmTreatment])
+	require.Equal(t, ArmTotal{Arm: "mask", Runs: 1, Passes: 1, WeightedCost: 150, CostPerAttempt: 150, CostPerPass: 150}, totals["mask"])
+
+	// 4/4 control vs 3/4 treatment conclusive → drop 0.25 ≤ 0.5.
+	require.Equal(t, "ok (pass 0.75 vs 1.00)", rep.Metrics[0].Guardrail)
+}
+
+func TestCompare_GuardrailViolated(t *testing.T) {
+	dir := t.TempDir()
+	exp := &Experiment{
+		Name:        "e",
+		Corpus:      []string{"t"},
+		CostWeights: &CostWeights{CacheRead: 0.1, Output: 1},
+		Primary:     &Primary{Metric: "weighted_cost", Direction: PrimaryDecrease, MDE: 0.05, MaxPassDrop: 0.1},
+	}
+	c := map[string]any{"f": "c"}
+	tr := map[string]any{"f": "t"}
+	var recs []RunRecord
+	for i := 1; i <= 4; i++ {
+		recs = append(recs, compareRecord("e", "t", ArmControl, "i1", i, 100, c))
+	}
+	for i := 1; i <= 3; i++ {
+		recs = append(recs, compareRecord("e", "t", ArmTreatment, "i1", i, 80, tr))
+	}
+	failed := compareRecord("e", "t", ArmTreatment, "i1", 4, 80, tr)
+	failed.Outcome = OutcomeFail
+	recs = append(recs, failed)
+	writeCompareRecords(t, dir, recs...)
+
+	rep, err := seededRunner(dir).Compare(exp, "")
+	require.NoError(t, err)
+	require.Contains(t, rep.Metrics[0].Guardrail, "violated")
+	require.Contains(t, rep.Metrics[0].Guardrail, "0.75")
+}

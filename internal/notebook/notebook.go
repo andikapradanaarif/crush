@@ -344,6 +344,10 @@ type Service interface {
 
 	// DeleteEntries removes all notebook entries for a session.
 	DeleteEntries(ctx context.Context, sessionID string) error
+	// SetPressure marks a session's pressure-gate state — the agent
+	// sets it when the gate latches and clears it after a history-
+	// shrinking write. Only consulted under GenerateUnderPressure.
+	SetPressure(sessionID string, engaged bool)
 	// ForgetSession drops the service's in-memory per-session state
 	// (the compaction-stall counter). Called on session deletion; the
 	// DB rows are already cascade-deleted.
@@ -363,6 +367,9 @@ type service struct {
 	// per-segment generation runs Compacts on concurrent goroutines.
 	stallCounts *csync.Map[string, int]
 	stallMu     sync.Mutex
+	// pressured marks sessions whose pressure gate has latched —
+	// consulted only when opts.GeneratePolicy is under_pressure.
+	pressured *csync.Map[string, bool]
 }
 
 // Options configures the notebook service.
@@ -391,6 +398,11 @@ type Options struct {
 	// in different directories no longer collide in recall and
 	// selection. Paths outside it (or an empty value) tag basename.
 	WorkingDir string
+	// GeneratePolicy selects when the generator runs — GenerateAlways
+	// (default), GenerateUnderPressure (only for sessions the agent
+	// has marked pressured via SetPressure), or GenerateNever (no LLM
+	// calls; checkpoints and turn digests are skipped too).
+	GeneratePolicy string
 }
 
 // CheckpointRequest parameterizes GenerateCheckpoint. The caller
@@ -457,6 +469,15 @@ type Generator interface {
 	GenerateDigest(ctx context.Context, sessionID, input string) (GeneratedEntry, error)
 }
 
+// Generation policies for Options.GeneratePolicy — when the sidecar
+// LLM is called at all. Deterministic fallback entries still commit
+// under every policy; never/under_pressure only skip the model call.
+const (
+	GenerateAlways        = "always"
+	GenerateUnderPressure = "under_pressure"
+	GenerateNever         = "never"
+)
+
 // GeneratedEntry is the output of the Generator for one event.
 type GeneratedEntry struct {
 	EventType string
@@ -485,5 +506,30 @@ func NewService(q *db.Queries, generator Generator, opts Options) Service {
 		generator:   generator,
 		opts:        opts,
 		stallCounts: csync.NewMap[string, int](),
+		pressured:   csync.NewMap[string, bool](),
+	}
+}
+
+// shouldGenerate reports whether the sidecar generator runs for this
+// session under the configured policy. Skipped calls leave callers to
+// their deterministic path — fallback entries, or no checkpoint.
+func (s *service) shouldGenerate(sessionID string) bool {
+	switch s.opts.GeneratePolicy {
+	case GenerateNever:
+		return false
+	case GenerateUnderPressure:
+		on, _ := s.pressured.Get(sessionID)
+		return on
+	default:
+		return true
+	}
+}
+
+// SetPressure marks or clears a session's pressured state.
+func (s *service) SetPressure(sessionID string, engaged bool) {
+	if engaged {
+		s.pressured.Set(sessionID, true)
+	} else {
+		s.pressured.Del(sessionID)
 	}
 }

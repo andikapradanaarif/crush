@@ -109,6 +109,17 @@ func TestNotebookPriorTurnsModeResolves(t *testing.T) {
 	require.Equal(t, "digest", (&config.Options{NotebookPriorTurns: "digest"}).NotebookPriorTurnsMode())
 }
 
+func TestNotebookGenerateModeResolves(t *testing.T) {
+	require.Equal(t, "always", (&config.Options{}).NotebookGenerateMode())
+	require.Equal(t, "always", (&config.Options{NotebookGenerate: "bogus"}).NotebookGenerateMode())
+	require.Equal(t, "under_pressure", (&config.Options{NotebookGenerate: "under_pressure"}).NotebookGenerateMode())
+	require.Equal(t, "never", (&config.Options{NotebookGenerate: "never"}).NotebookGenerateMode())
+
+	store := loadCrushSh(t, `option notebook-generate never`)
+	require.Equal(t, "never", store.Config().Options.NotebookGenerate)
+	require.Equal(t, "never", store.Config().Options.NotebookGenerateMode())
+}
+
 func TestShellConfigOptionListAppends(t *testing.T) {
 	store := loadCrushSh(t, `option disable-skill crush-config
 option disable-skill jq`)

@@ -259,11 +259,13 @@ func (s *service) Compact(ctx context.Context, sessionID string) error {
 // segment commit, so a streak this long can accrue within one turn.
 const compactionStallThreshold = 3
 
-// ForgetSession drops the session's in-memory stall counter.
+// ForgetSession drops the session's in-memory stall counter and
+// pressure mark.
 func (s *service) ForgetSession(sessionID string) {
 	s.stallMu.Lock()
 	defer s.stallMu.Unlock()
 	s.stallCounts.Del(sessionID)
+	s.pressured.Del(sessionID)
 }
 
 // noteCompactStall counts a no-progress compaction round and fires the

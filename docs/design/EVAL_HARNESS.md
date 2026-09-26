@@ -1008,14 +1008,24 @@ decision metric per experiment:
   (0.15 = 15%). Effects smaller than the MDE are defined as
   uninteresting — which is what lets the power gate be a gate
   rather than an aspiration.
+- **`max_pass_drop` is the pass-rate guardrail** on the primary
+  verdict: treatment's conclusive pass rate may trail control's by
+  at most this absolute fraction (0.10 = 10pp) for an "effect"
+  verdict to stand — a cheaper arm that fails more often isn't
+  cheaper. The outcome prints beside the verdict as
+  `guardrail: ok|violated|unevaluable`; 0 disables the check.
 - **`cost_weights` prices the cost metric.** `weighted_cost =
-  input + h·cache_read + o·output` with `h`/`o` pinned per model in
-  the experiment JSON — relative prices in uncached-input units, so
-  the metric is comparable across runs without embedding a dollar
-  table in the repo. Its CV can't bootstrap itself: the power gate
-  refuses before scheduling, so a `weighted_cost` primary must be
-  hand-seeded in noise.json or measured by an `--aa` run on another
-  `cost_weights`-bearing experiment first.
+  input + h·cache_read + o·output`, computed over the main-model
+  tokens **and `generator_tokens`** (the sidecar prices at the same
+  class rates — an overstatement when the generator runs a cheaper
+  tier; a separate weight lands if one ships). `h`/`o` are pinned
+  per model in the experiment JSON — relative prices in
+  uncached-input units, so the metric is comparable across runs
+  without embedding a dollar table in the repo. Its CV can't
+  bootstrap itself: the power gate refuses before scheduling, so a
+  `weighted_cost` primary must be hand-seeded in noise.json or
+  measured by an `--aa` run on another `cost_weights`-bearing
+  experiment first.
 
 ### noise.json + the scheduling refusal
 
@@ -1164,6 +1174,15 @@ Every other metric gets CI and p only — secondary metrics inform,
 they never decide. The snapshot also carries the run's gate verdict
 and outcome alarms as context lines, so a catastrophic-collapsed
 invocation's cheap-tokens table doesn't read as a win.
+
+**Arm totals** print whenever the experiment pins `cost_weights`:
+per arm, every *attempted* run's weighted cost (errors and
+inconclusives spend tokens too), `cost per attempt`, and `cost per
+pass` — the tokens-to-done figure. Pairing conditions on conclusive
+runs, so a per-pass-run mean is survivorship-biased by construction;
+the totals table is the unbiased companion. Arms beyond
+control/treatment (a mask-only comparator arm) get a row even though
+they never pair — pairing itself stays two-arm.
 
 Metrics whose mechanism exists on only one arm
 (`prior_turns.turns_collapsed` under a verbatim control,
