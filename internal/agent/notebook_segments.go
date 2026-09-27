@@ -941,26 +941,32 @@ func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msg
 	// mid-render cannot split the cache key from the content it keys.
 	toolPtr := a.recallVia()
 	fp := prefixFingerprint(boundary, bKey, floor, entries, refs, sel, toolPtr)
+	var (
+		prefix  []fantasy.Message
+		covered bool
+	)
+	hit := false
 	if a.prefixCache != nil {
 		if c, ok := a.prefixCache.Get(sessionID); ok && c.boundary == boundary && c.fingerprint == fp {
-			if boundary > 0 && !c.covered {
-				return c.msgs, errNotebookPrefixEmpty
-			}
-			return c.msgs, nil
+			prefix, covered = c.msgs, c.covered
+			hit = true
 		}
 	}
-	prefix, files, covered := a.renderNotebookPrefix(detCtx, sessionID, entries, msgs, bKey, floor, refs, sel, collapse, toolPtr)
-	if a.prefixCache != nil {
-		a.prefixCache.Set(sessionID, cachedPrefix{boundary: boundary, fingerprint: fp, msgs: prefix, files: files, covered: covered})
+	if !hit {
+		var files map[string]bool
+		prefix, files, covered = a.renderNotebookPrefix(detCtx, sessionID, entries, msgs, bKey, floor, refs, sel, collapse, toolPtr)
+		if a.prefixCache != nil {
+			a.prefixCache.Set(sessionID, cachedPrefix{boundary: boundary, fingerprint: fp, msgs: prefix, files: files, covered: covered})
+		}
 	}
 	if boundary > 0 && !covered {
 		// The covered span produced no render — entries may be
 		// missing for processed segments (a zero-event segment marks
 		// coverage without writing any). Applying the boundary
 		// anyway would evict that history to nothing; the caller
-		// rolls back. The prefix still returns — an auto-inject
-		// blob it carries is current-turn context, not a covered-
-		// span substitute.
+		// rolls back. The prefix still returns — nearly always nil
+		// here since an auto-inject blob needs a covered entry, but
+		// an entry committing mid-render could fill one.
 		slog.Warn("Notebook prefix rendered no covered entries; boundary will roll back",
 			"session", sessionID, "boundary", boundary)
 		return prefix, errNotebookPrefixEmpty
@@ -1190,6 +1196,11 @@ func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID strin
 		}
 		var omitted []int64
 		for _, e := range filtered {
+			// Seeds key below every boundary — an evicted one would
+			// print as "turn -1", so they never join the breadcrumb.
+			if isHydratedSeed(e) {
+				continue
+			}
 			if (rendered == "" || !selectedTurns[e.TurnNumber]) && !slices.Contains(omitted, e.TurnNumber) {
 				omitted = append(omitted, e.TurnNumber)
 			}
