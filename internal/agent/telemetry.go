@@ -40,6 +40,53 @@ func logPromptComposition(sessionID string, systemPromptBytes int, mcpInstructio
 	slog.Debug("Prompt composition", attrs...)
 }
 
+// ledgerUsage is the per-session usage ledger: every model invocation
+// accumulates here — main runs, queue continuations, repair chains,
+// summarize calls, title generation. The eval export reads this rather
+// than whichever AgentResult happened to return last, so a
+// summarize-then-continue run reports the summarize call and the
+// pre-continuation steps too. Steps counts AgentResult steps across
+// those invocations — the same quantity len(result.Steps) reports for
+// a single call. Sidecar generation keeps its own accumulator
+// (GeneratorTokens).
+//
+// Keyed by session ID, not by process: a sub-agent run ledgers under
+// its own child session, so the parent's totals never include
+// agent-tool spend — consistent with TotalUsage's accounting, where
+// parent cost propagates separately via updateParentSessionCost.
+//
+// Reconciliation: ledger usage should equal the per-request step
+// table's sum plus the summarize call (which runs a separate fantasy
+// agent and produces no step rows). A request that dies before
+// returning usage lands in neither.
+type ledgerUsage struct {
+	InputTokens         int64
+	OutputTokens        int64
+	ReasoningTokens     int64
+	CacheCreationTokens int64
+	CacheReadTokens     int64
+	Steps               int
+}
+
+// recordUsage folds one completed invocation's usage into the
+// session's ledger. result may be nil — a failed Stream that returned
+// no result consumed an unknowable amount and is simply not counted.
+func (a *sessionAgent) recordUsage(sessionID string, result *fantasy.AgentResult) {
+	if result == nil || a.usageLedger == nil || sessionID == "" {
+		return
+	}
+	u := result.TotalUsage
+	steps := len(result.Steps)
+	a.usageLedger.Update(sessionID, func(cur *ledgerUsage) {
+		cur.InputTokens += u.InputTokens
+		cur.OutputTokens += u.OutputTokens
+		cur.ReasoningTokens += u.ReasoningTokens
+		cur.CacheCreationTokens += u.CacheCreationTokens
+		cur.CacheReadTokens += u.CacheReadTokens
+		cur.Steps += steps
+	})
+}
+
 // requestStats accumulates per-session request-size telemetry: the
 // prompt-token growth curve and the last rendered request's byte
 // composition — the "does context stay flat" signal the eval

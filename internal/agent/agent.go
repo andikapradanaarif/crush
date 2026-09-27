@@ -364,6 +364,11 @@ type sessionAgent struct {
 	// composition — shared across agent rebuilds. Nil allocates its
 	// own.
 	reqStats *csync.Map[string, requestStats]
+	// usageLedger accumulates usage from EVERY model invocation on
+	// the session — main runs, queue/repair continuations, summarize
+	// calls — the single ledger the eval export reads. Shared across
+	// agent rebuilds. Nil allocates its own.
+	usageLedger *csync.Map[string, ledgerUsage]
 	// detachedWork tracks spawned detached goroutines (segment,
 	// checkpoint, and digest generation, flagging, title) so a
 	// short-lived process can join them before exiting instead of
@@ -553,6 +558,12 @@ type SessionAgentOptions struct {
 	// growth curve, rendered composition) across agent rebuilds.
 	// When nil the agent allocates its own.
 	RequestStats *csync.Map[string, requestStats]
+	// UsageLedger shares the per-session all-invocation usage ledger
+	// across agent rebuilds — every model call (runs, queue
+	// continuations, summarize) accumulates here so exported totals
+	// don't depend on which AgentResult returned last. When nil the
+	// agent allocates its own.
+	UsageLedger *csync.Map[string, ledgerUsage]
 	// DetachedWork is the shared wait group for spawned detached
 	// goroutines — the coordinator drains it on process exit. When
 	// nil the agent allocates its own.
@@ -611,6 +622,7 @@ func NewSessionAgent(
 		edgeStore:              opts.EdgeStore,
 		edgeStats:              cmp.Or(opts.EdgeStats, csync.NewMap[string, map[string]int]()),
 		reqStats:               cmp.Or(opts.RequestStats, csync.NewMap[string, requestStats]()),
+		usageLedger:            cmp.Or(opts.UsageLedger, csync.NewMap[string, ledgerUsage]()),
 		detachedWork:           cmp.Or(opts.DetachedWork, &sync.WaitGroup{}),
 		hydrateFetch:           notebook.FetchHydrationMemories,
 	}
@@ -1629,6 +1641,17 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		}, evalStepCaps()...),
 	})
 
+	// runResult is this Run invocation's own result — the named
+	// return gets clobbered by the queue-continuation recursion's
+	// return value, so snapshot it for the usage ledger before any
+	// handoff. Deferred so every exit path (errors included) counts
+	// this invocation exactly once, while each continuation records
+	// its own through the inner Run's defer.
+	runResult := result
+	defer func() {
+		a.recordUsage(call.SessionID, runResult)
+	}()
+
 	a.eventPromptResponded(call.SessionID, time.Since(startTime).Truncate(time.Second))
 
 	if err != nil {
@@ -2117,6 +2140,10 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 			return a.messages.Update(genCtx, summaryMessage)
 		},
 	})
+	// The summarize call runs its own fantasy agent — its usage never
+	// reaches the caller's AgentResult, so the ledger records it here,
+	// including whatever partial usage a failed stream returned.
+	a.recordUsage(sessionID, resp)
 	if err != nil {
 		isCancelErr := errors.Is(err, context.Canceled)
 		if isCancelErr {
@@ -3124,6 +3151,9 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 		}
 		agent := newAgent(attempt.model.Model, titlePrompt, tok)
 		resp, err = agent.Stream(ctx, streamCall)
+		// Title generation is a real model call; count every
+		// attempt's usage — failed attempts burned tokens too.
+		a.recordUsage(sessionID, resp)
 		if err == nil && resp.Response.FinishReason != fantasy.FinishReasonLength {
 			model = attempt.model
 			slog.Debug("Generated title with " + attempt.name + " model")

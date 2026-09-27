@@ -229,6 +229,12 @@ type coordinator struct {
 	// (prompt growth curve, rendered composition) — always-on, two
 	// map writes per step.
 	reqStats *csync.Map[string, requestStats]
+	// usageLedger accumulates per-session usage from every model
+	// invocation (runs, continuations, summarize, title-gen) — the
+	// single source the eval export reads so reported cost doesn't
+	// depend on which AgentResult returned last. Always-on like
+	// reqStats.
+	usageLedger *csync.Map[string, ledgerUsage]
 	// detachedWork is shared with every built agent: each detached
 	// notebook/title goroutine Adds before spawning so
 	// WaitForDetachedWork can join them before a short-lived
@@ -318,6 +324,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		edgeStats:             csync.NewMap[string, map[string]int](),
 		edgeFiringEmitted:     csync.NewMap[string, map[string]int](),
 		reqStats:              csync.NewMap[string, requestStats](),
+		usageLedger:           csync.NewMap[string, ledgerUsage](),
 		detachedWork:          &sync.WaitGroup{},
 	}
 
@@ -1186,6 +1193,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		EdgeStore:              c.edgeStore,
 		EdgeStats:              c.edgeStats,
 		RequestStats:           c.reqStats,
+		UsageLedger:            c.usageLedger,
 		DetachedWork:           c.detachedWork,
 	})
 
