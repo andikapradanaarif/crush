@@ -71,6 +71,11 @@ type stubStats struct {
 	// marker it would poison the treatment arm as a control-shaped
 	// sample.
 	SummaryFetchFailed bool
+	// PrefixFetchFailed marks an engaged render whose notebook prefix
+	// could not be built — the boundary rolled back to verbatim for
+	// that render, so a compacted-arm run served a control-shaped
+	// prompt.
+	PrefixFetchFailed bool
 	// Kinds splits Results by stub kind — the counter backing the
 	// eval harness's min_stub_stats.kinds.* coverage predicates.
 	// Like Results it counts promoted stubs only; a flag still

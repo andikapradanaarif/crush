@@ -906,7 +906,8 @@ func TestCoveredReViews_CountsViewOnInjectedFile(t *testing.T) {
 	// Render — the covered entry is selected, so its basename lands
 	// in the cached file set.
 	msgs := []message.Message{segUser("go")}
-	prefix := a.notebookPrefix(t.Context(), sessionID, msgs, len(msgs), segmentKey{turn: 2, segment: 0}, nil, nil)
+	prefix, err := a.notebookPrefix(t.Context(), sessionID, msgs, len(msgs), segmentKey{turn: 2, segment: 0}, nil, nil)
+	require.NoError(t, err)
 	require.NotEmpty(t, prefix)
 	cached, ok := a.prefixCache.Get(sessionID)
 	require.True(t, ok)

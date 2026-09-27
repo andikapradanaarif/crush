@@ -598,8 +598,10 @@ func TestNotebookPrefix_ByteIdenticalOnUnmovedBoundary(t *testing.T) {
 	// Seed an entry so the prefix is non-empty.
 	require.NoError(t, nb.GenerateSegmentEntries(ctx, sessionID, segs[0].turn, segs[0].number, int64(segs[0].start), int64(segs[0].end), msgs[segs[0].start:segs[0].end]))
 
-	first := a.notebookPrefix(ctx, sessionID, msgs, boundary, bKey, segs, nil)
-	second := a.notebookPrefix(ctx, sessionID, msgs, boundary, bKey, segs, nil)
+	first, err := a.notebookPrefix(ctx, sessionID, msgs, boundary, bKey, segs, nil)
+	require.NoError(t, err)
+	second, err := a.notebookPrefix(ctx, sessionID, msgs, boundary, bKey, segs, nil)
+	require.NoError(t, err)
 	require.NotEmpty(t, first)
 	require.Equal(t, first, second, "unmoved boundary must render a byte-identical prefix")
 }
@@ -965,7 +967,8 @@ func TestNotebookPrefix_SeedsRenderAtBoundaryZero(t *testing.T) {
 
 	// Boundary 0 — nothing covered yet — still renders the seeds:
 	// turn 1 is exactly when they exist for.
-	prefix := a.notebookPrefix(ctx, sessionID, msgs, 0, boundarySegmentKey(segs, 0), segs, nil)
+	prefix, err := a.notebookPrefix(ctx, sessionID, msgs, 0, boundarySegmentKey(segs, 0), segs, nil)
+	require.NoError(t, err)
 	require.NotEmpty(t, prefix, "hydrated seeds must render at boundary 0")
 	var rendered string
 	for _, m := range prefix {
@@ -982,6 +985,7 @@ func TestNotebookPrefix_BoundaryZeroWithoutSeedsStillNil(t *testing.T) {
 	msgs := segBuildTurn(t, svc, sessionID, "first turn", 2, "step")
 	segs, _ := a.detectSegments(ctx, sessionID, msgs)
 
-	prefix := a.notebookPrefix(ctx, sessionID, msgs, 0, boundarySegmentKey(segs, 0), segs, nil)
+	prefix, err := a.notebookPrefix(ctx, sessionID, msgs, 0, boundarySegmentKey(segs, 0), segs, nil)
+	require.NoError(t, err)
 	require.Empty(t, prefix, "no coverage and no seeds — nothing to render")
 }

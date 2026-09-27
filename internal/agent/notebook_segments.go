@@ -883,16 +883,19 @@ func (a *sessionAgent) buildSelectionInput(ctx context.Context, sessionID string
 // collapse carries the run's prior-turn collapse state — its
 // digestTurns freeze is populated on the run's first call, before
 // the cache check.
-func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msgs []message.Message, boundary int, bKey segmentKey, segs []segment, collapse *turnCollapse) []fantasy.Message {
+func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msgs []message.Message, boundary int, bKey segmentKey, segs []segment, collapse *turnCollapse) ([]fantasy.Message, error) {
 	if a.notebook == nil || sessionID == "" {
-		return nil
+		return nil, nil
 	}
 	detCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	entries, err := a.notebook.GetEntries(detCtx, sessionID)
 	if err != nil {
 		slog.Error("Failed to get notebook entries", "error", err)
-		return nil
+		// The prefix is the only render of the covered span — the
+		// caller needs the error to roll the boundary back rather
+		// than evict raw history to nothing.
+		return nil, err
 	}
 	if boundary <= 0 && !slices.ContainsFunc(entries, isHydratedSeed) {
 		// No covered segments yet and nothing seeded — nothing to
@@ -900,7 +903,7 @@ func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msg
 		// precisely for the first turn, and their sentinel keys sit
 		// below every real boundary key so the downstream filters
 		// pass them unmodified.
-		return nil
+		return nil, nil
 	}
 	// Freeze digest eligibility here, before the cache check — a
 	// prefix cache hit must not defer the per-run freeze past the
@@ -929,14 +932,14 @@ func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msg
 	fp := prefixFingerprint(boundary, bKey, floor, entries, refs, sel, toolPtr)
 	if a.prefixCache != nil {
 		if c, ok := a.prefixCache.Get(sessionID); ok && c.boundary == boundary && c.fingerprint == fp {
-			return c.msgs
+			return c.msgs, nil
 		}
 	}
 	prefix, files := a.renderNotebookPrefix(detCtx, sessionID, entries, msgs, bKey, floor, refs, sel, collapse, toolPtr)
 	if a.prefixCache != nil {
 		a.prefixCache.Set(sessionID, cachedPrefix{boundary: boundary, fingerprint: fp, msgs: prefix, files: files})
 	}
-	return prefix
+	return prefix, nil
 }
 
 // rebuildStepMessages recomputes the prompt from stored messages for

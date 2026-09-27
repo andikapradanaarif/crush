@@ -426,7 +426,8 @@ func TestNotebookPrefix_DigestEligibilityBustsPrefixCache(t *testing.T) {
 	// Run 1: an earlier run froze before the digest committed —
 	// eligibility stays empty, no demotion.
 	collapse1 := &turnCollapse{Before: 1, digestTurns: map[int64]bool{}}
-	prefix1 := a.notebookPrefix(t.Context(), sessionID, msgs, len(msgs), bKey, nil, collapse1)
+	prefix1, err := a.notebookPrefix(t.Context(), sessionID, msgs, len(msgs), bKey, nil, collapse1)
+	require.NoError(t, err)
 	require.Contains(t, prefixText(prefix1), "SEGMENT-ENTRY-TAIL",
 		"run 1 renders the digested turn's entries alongside the digest")
 
@@ -434,7 +435,8 @@ func TestNotebookPrefix_DigestEligibilityBustsPrefixCache(t *testing.T) {
 	// the digest. The widened set changes the fingerprint, so this
 	// re-renders under demotion rather than serving run 1's cache.
 	collapse2 := &turnCollapse{Before: 1}
-	prefix2 := a.notebookPrefix(t.Context(), sessionID, msgs, len(msgs), bKey, nil, collapse2)
+	prefix2, err := a.notebookPrefix(t.Context(), sessionID, msgs, len(msgs), bKey, nil, collapse2)
+	require.NoError(t, err)
 	require.True(t, collapse2.digestTurns[0])
 	text2 := prefixText(prefix2)
 	require.Contains(t, text2, "## Turn digest")
