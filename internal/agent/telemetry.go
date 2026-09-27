@@ -42,12 +42,18 @@ func logPromptComposition(sessionID string, systemPromptBytes int, mcpInstructio
 
 // ledgerUsage is the per-session usage ledger: every model invocation
 // accumulates here — main runs, queue continuations, repair chains,
-// summarize calls. The eval export reads this rather than whichever
-// AgentResult happened to return last, so a summarize-then-continue
-// run reports the summarize call and the pre-continuation steps too.
-// Steps counts AgentResult steps across those invocations — the same
-// quantity len(result.Steps) reports for a single call. Sidecar
-// generation keeps its own accumulator (GeneratorTokens).
+// summarize calls, title generation. The eval export reads this rather
+// than whichever AgentResult happened to return last, so a
+// summarize-then-continue run reports the summarize call and the
+// pre-continuation steps too. Steps counts AgentResult steps across
+// those invocations — the same quantity len(result.Steps) reports for
+// a single call. Sidecar generation keeps its own accumulator
+// (GeneratorTokens).
+//
+// Keyed by session ID, not by process: a sub-agent run ledgers under
+// its own child session, so the parent's totals never include
+// agent-tool spend — consistent with TotalUsage's accounting, where
+// parent cost propagates separately via updateParentSessionCost.
 //
 // Reconciliation: ledger usage should equal the per-request step
 // table's sum plus the summarize call (which runs a separate fantasy

@@ -230,9 +230,10 @@ type coordinator struct {
 	// map writes per step.
 	reqStats *csync.Map[string, requestStats]
 	// usageLedger accumulates per-session usage from every model
-	// invocation (runs, continuations, summarize) — the single
-	// source the eval export reads so reported cost doesn't depend
-	// on which AgentResult returned last. Always-on like reqStats.
+	// invocation (runs, continuations, summarize, title-gen) — the
+	// single source the eval export reads so reported cost doesn't
+	// depend on which AgentResult returned last. Always-on like
+	// reqStats.
 	usageLedger *csync.Map[string, ledgerUsage]
 	// detachedWork is shared with every built agent: each detached
 	// notebook/title goroutine Adds before spawning so

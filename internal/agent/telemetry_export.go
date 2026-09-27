@@ -102,9 +102,10 @@ type SessionTelemetry struct {
 	EdgeFirings map[string]map[string]int `json:"edge_firings,omitempty"`
 	// LedgerUsage/LedgerSteps are the all-invocation usage
 	// accumulator — main runs, queue continuations, repair chains,
-	// summarize calls. The eval export prefers it over the returned
-	// AgentResult so continuations and side-channel calls can't
-	// drop spend.
+	// summarize calls, title generation. Session-keyed: sub-agent
+	// runs ledger under their child session, not the parent's. The
+	// eval export prefers it over the returned AgentResult so
+	// continuations and side-channel calls can't drop spend.
 	LedgerUsage fantasy.Usage `json:"ledger_usage"`
 	LedgerSteps int           `json:"ledger_steps"`
 }
