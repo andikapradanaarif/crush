@@ -709,6 +709,49 @@ func TestPreparePrompt_PrefixFailureRollsBackBoundary(t *testing.T) {
 	require.True(t, s.PrefixFetchFailed, "a verbatim fallback under pressure must be marked")
 }
 
+// Coverage without entries — a processed pure-text segment produces
+// no events, so the prefix has nothing to render for it. The boundary
+// must still roll back to verbatim: coverage is a promise of
+// representation, and an empty render does not honor it.
+func TestPreparePrompt_EmptyCoverageRollsBackBoundary(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, &countingGen{})
+	a.reqStats = csync.NewMap[string, requestStats]()
+	a.segmentMaxSteps = 2
+	ctx := t.Context()
+
+	// Turn 1 is pure assistant text — zero events, zero entries, but
+	// the segments still mark processed on the second pass.
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "EARLYTEXT"})
+	for range 4 {
+		mkMsg(t, svc, sessionID, message.Assistant, message.TextContent{Text: "thinking out loud"})
+	}
+	msgs, err := svc.List(ctx, sessionID)
+	require.NoError(t, err)
+	a.detectSegments(ctx, sessionID, msgs)
+
+	// Turn 2's arrival closes turn 1's tail segment; its own segment
+	// stays the open tail — unprocessed, always raw.
+	msgs = segBuildTurn(t, svc, sessionID, "LATETURN", 1, "step")
+	a.detectSegments(ctx, sessionID, msgs)
+	_, processed := a.detectSegments(ctx, sessionID, msgs)
+	require.NotEmpty(t, processed, "zero-event segments must mark coverage")
+
+	// A small raw budget pushes the boundary onto the covered-but-
+	// entryless segments — the empty render must not evict them.
+	a.rawTokenBudget = 20
+	history, _ := a.preparePrompt(ctx, msgs, false, nil, true)
+	text := renderedText(history)
+	require.Contains(t, text, "EARLYTEXT",
+		"empty prefix render must not evict the covered span")
+	require.Contains(t, text, "LATETURN")
+
+	s, _ := a.stubStats.Get(sessionID)
+	require.True(t, s.PrefixFetchFailed,
+		"a verbatim fallback under an empty render must be marked")
+}
+
 // Verbatim mode is the default and passes a nil collapse — the gate
 // must still evaluate: it covers boundary/prefix churn in every mode,
 // and gate state must be written or pressure.* telemetry starves on

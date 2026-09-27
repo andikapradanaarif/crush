@@ -364,7 +364,7 @@ func TestRenderNotebookPrefix_DigestFreezeEligibility(t *testing.T) {
 
 	// The first render freezes eligibility — the digest's turn
 	// becomes demotion-eligible for the rest of the run.
-	prefix, _ := a.renderNotebookPrefix(t.Context(), sessionID, entries,
+	prefix, _, _ := a.renderNotebookPrefix(t.Context(), sessionID, entries,
 		[]message.Message{segUser("go")}, segmentKey{turn: 1, segment: 0},
 		segmentKey{turn: 0, segment: 0}, nil, selectionInput{}, collapse, a.recallVia())
 	require.NotNil(t, collapse.digestTurns)

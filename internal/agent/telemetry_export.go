@@ -67,8 +67,9 @@ type SessionTelemetry struct {
 	// inside the treatment arm.
 	SummaryFetchFailed bool `json:"summary_fetch_failed,omitempty"`
 	// PrefixFetchFailed marks an engaged render whose notebook prefix
-	// build failed — the boundary rolled back, so that render served
-	// a verbatim, control-shaped prompt.
+	// build failed or emitted no covered-span render — the boundary
+	// rolled back, so that render served a verbatim, control-shaped
+	// prompt.
 	PrefixFetchFailed bool `json:"prefix_fetch_failed,omitempty"`
 	// Request telemetry: the prompt growth curve (last/peak
 	// normalized prompt tokens across the run's steps) and the last

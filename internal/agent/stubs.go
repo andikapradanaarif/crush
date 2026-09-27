@@ -72,9 +72,9 @@ type stubStats struct {
 	// sample.
 	SummaryFetchFailed bool
 	// PrefixFetchFailed marks an engaged render whose notebook prefix
-	// could not be built — the boundary rolled back to verbatim for
-	// that render, so a compacted-arm run served a control-shaped
-	// prompt.
+	// could not be built — the read failed or produced no covered-
+	// span render — so the boundary rolled back to verbatim for that
+	// render and a compacted-arm run served a control-shaped prompt.
 	PrefixFetchFailed bool
 	// Kinds splits Results by stub kind — the counter backing the
 	// eval harness's min_stub_stats.kinds.* coverage predicates.

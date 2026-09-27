@@ -658,8 +658,9 @@ func TestRenderNotebookPrefix_SegmentCoverageFilter(t *testing.T) {
 		nbSegEntry("e02", 0, 2, 1, notebook.EventGeneral, "segment two content", 10),
 	}
 	rawMsgs := []message.Message{segUser("go"), segAssistant("work")}
-	prefix, files := a.renderNotebookPrefix(t.Context(), "sess", entries, rawMsgs,
+	prefix, files, covered := a.renderNotebookPrefix(t.Context(), "sess", entries, rawMsgs,
 		segmentKey{turn: 0, segment: 2}, segmentKey{turn: 0, segment: 0}, nil, selectionInput{}, nil, a.recallVia())
+	require.True(t, covered)
 	require.Len(t, prefix, 1)
 	require.Equal(t, fantasy.MessageRoleSystem, prefix[0].Role)
 	require.Empty(t, files)
@@ -684,7 +685,7 @@ func TestRenderNotebookPrefix_OmittedTurnBreadcrumb(t *testing.T) {
 	}
 	rawMsgs := []message.Message{segUser("go"), segAssistant("work")}
 	render := func(a *sessionAgent) string {
-		prefix, _ := a.renderNotebookPrefix(t.Context(), "sess", entries, rawMsgs,
+		prefix, _, _ := a.renderNotebookPrefix(t.Context(), "sess", entries, rawMsgs,
 			segmentKey{turn: 2, segment: 0}, segmentKey{turn: 0, segment: 0}, nil, selectionInput{}, nil, a.recallVia())
 		require.Len(t, prefix, 1)
 		return prefix[0].Content[0].(fantasy.TextPart).Text
@@ -709,6 +710,35 @@ func TestRenderNotebookPrefix_OmittedTurnBreadcrumb(t *testing.T) {
 	none := render(&sessionAgent{})
 	require.Contains(t, none, "turns 0 have notebook entries not injected here]")
 	require.NotContains(t, none, "recallable")
+}
+
+// When EVERY filtered entry is budget-evicted the covered span must
+// still get a render — a pointers-only breadcrumb — rather than
+// emitting nothing while the boundary evicts the raw history.
+// covered stays true: entries exist, so the span is represented.
+func TestRenderNotebookPrefix_TotalEvictionBreadcrumb(t *testing.T) {
+	t.Parallel()
+
+	entries := []notebook.Entry{
+		nbSegEntry("big1", 0, 0, 1, notebook.EventGeneral, "oversized", maxNotebookInjectionTokens+1),
+		nbSegEntry("big2", 1, 0, 1, notebook.EventGeneral, "oversized", maxNotebookInjectionTokens+1),
+	}
+	rawMsgs := []message.Message{segUser("go"), segAssistant("work")}
+	a := &sessionAgent{tools: csync.NewSliceFrom([]fantasy.AgentTool{&fakeTool{name: "recall"}})}
+	prefix, _, covered := a.renderNotebookPrefix(t.Context(), "sess", entries, rawMsgs,
+		segmentKey{turn: 2, segment: 0}, segmentKey{turn: 0, segment: 0}, nil, selectionInput{}, nil, a.recallVia())
+
+	require.True(t, covered)
+	require.Len(t, prefix, 1)
+	text := prefix[0].Content[0].(fantasy.TextPart).Text
+	require.Contains(t, text, "turns 0-1 have notebook entries not injected here")
+	require.NotContains(t, text, "oversized")
+
+	// The covered signal must be false when the span holds no real
+	// entries at all — hydration seeds alone do not count.
+	_, _, covered = a.renderNotebookPrefix(t.Context(), "sess", nil, rawMsgs,
+		segmentKey{turn: 2, segment: 0}, segmentKey{turn: 0, segment: 0}, nil, selectionInput{}, nil, a.recallVia())
+	require.False(t, covered)
 }
 
 // TestDetectSegments_AsyncCloses exercises the real goroutine path —

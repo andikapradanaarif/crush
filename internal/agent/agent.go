@@ -2346,9 +2346,12 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 				// The prefix is the only render of the covered
 				// span — with no replacement, evicting at the
 				// boundary would drop that history from the
-				// prompt entirely. Roll back to a verbatim tail
-				// and skip stub bookkeeping: nothing was evicted,
-				// nothing should promote.
+				// prompt entirely. Both failure shapes land here:
+				// the read error and the empty render (processed
+				// segments with no entries to stand in for them).
+				// Roll back to a verbatim tail and skip stub
+				// bookkeeping: nothing was evicted, nothing should
+				// promote.
 				boundary = 0
 				prefixFailed = true
 				if a.stubStats != nil {
