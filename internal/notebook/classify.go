@@ -444,12 +444,7 @@ func (s *service) significantEntries(ctx context.Context, sessionID string, sign
 			// The generator under-produced (merged inputs into one
 			// entry) — store a deterministic fallback rather than a
 			// zero-value entry, matching the no-model path.
-			entry = GeneratedEntry{
-				EventType: in.EventType,
-				Title:     in.Title,
-				Text:      fmt.Sprintf("## %s\n\n%s\n", in.Title, truncate(in.Description, 800)),
-				Tags:      defaultTagsForEvent(in, s.opts.WorkingDir),
-			}
+			entry = fallbackEntry(in, s.opts.WorkingDir)
 		}
 		entries = append(entries, entry)
 	}

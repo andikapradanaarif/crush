@@ -5,6 +5,8 @@ import (
 	_ "embed"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"charm.land/fantasy"
@@ -82,12 +84,7 @@ func (g *llmGenerator) Generate(ctx context.Context, sessionID string, events []
 		// Fallback: create simple entries without LLM.
 		var entries []GeneratedEntry
 		for _, event := range events {
-			entries = append(entries, GeneratedEntry{
-				EventType: event.EventType,
-				Title:     event.Title,
-				Text:      fmt.Sprintf("## %s\n\n%s\n", event.Title, truncate(event.Description, 800)),
-				Tags:      defaultTagsForEvent(event, g.workDir),
-			})
+			entries = append(entries, fallbackEntry(event, g.workDir))
 		}
 		return entries, nil
 	}
@@ -109,18 +106,10 @@ func (g *llmGenerator) Generate(ctx context.Context, sessionID string, events []
 	g.reportUsage(sessionID, resp.TotalUsage)
 
 	text := resp.Response.Content.Text()
-	entries := parseGeneratedEntries(text, events)
-	if len(entries) == 0 {
-		// Fallback: create simple entries from the event inputs.
-		slog.Warn("LLM returned no parseable notebook entries, using fallback")
-		for _, event := range events {
-			entries = append(entries, GeneratedEntry{
-				EventType: event.EventType,
-				Title:     event.Title,
-				Text:      fmt.Sprintf("## %s\n\n%s\n", event.Title, truncate(event.Description, 800)),
-				Tags:      defaultTagsForEvent(event, g.workDir),
-			})
-		}
+	entries, parsed := alignGeneratedEntries(text, events, g.workDir)
+	if parsed == 0 {
+		slog.Warn("LLM produced no bound notebook entries, using fallbacks",
+			"extras", len(entries)-len(events))
 	}
 	return entries, nil
 }
@@ -215,12 +204,13 @@ func (g *llmGenerator) GenerateDigest(ctx context.Context, sessionID string, inp
 // additionally carry their ErrorHeadline — the distilled first line
 // plus the "Exit code N" tail that describeToolCall's 2000-char cut
 // can lose, so a failure entry anchors on a digest guaranteed to
-// survive truncation.
+// survive truncation. The "### Event N" echo is the binding contract:
+// the parser aligns entries to inputs by marker, not position.
 func buildGeneratePrompt(events []EntryInput) string {
 	var promptSB strings.Builder
 	promptSB.WriteString("Generate a notebook entry for each of the following events. ")
 	promptSB.WriteString("Use the exact format from the instructions. ")
-	promptSB.WriteString("Separate entries with '---' on its own line.\n\n")
+	promptSB.WriteString("Head each entry with '### Event N' on its own line, echoing its input's number.\n\n")
 
 	for i, event := range events {
 		fmt.Fprintf(&promptSB, "### Event %d\n", i+1)
@@ -245,30 +235,174 @@ func buildGeneratePrompt(events []EntryInput) string {
 	return promptSB.String()
 }
 
-// parseGeneratedEntries splits the LLM output by '---' delimiters and
-// extracts tags from each section.
-func parseGeneratedEntries(text string, events []EntryInput) []GeneratedEntry {
-	sections := strings.Split(text, "\n---\n")
-	var entries []GeneratedEntry
-	for i, section := range sections {
-		section = strings.TrimSpace(section)
-		if section == "" {
+// eventMarkerRe matches the "### Event N" line the prompt asks the
+// model to echo — lenient on heading depth, case, and trailing text
+// so "## event 3 — auth fix" still binds. The capture is 1-based,
+// the same numbering buildGeneratePrompt stamps on its inputs.
+var eventMarkerRe = regexp.MustCompile(`(?i)^#{2,6}\s+Event\s+(\d+)\b`)
+
+// trailingDelimRe matches a markdown break line ('---', '***', '___',
+// spaced variants) so a model that mixes the old delimiter
+// convention into marked output doesn't leave it dangling in a body.
+var trailingDelimRe = regexp.MustCompile(`^\s*[-*_](?:\s*[-*_]){2,}\s*$`)
+
+// markedSection is one parse region: the model's body text plus the
+// 0-based input index its "### Event N" header declared (-1 when the
+// section carries no marker — the legacy '---' shape).
+type markedSection struct {
+	idx  int
+	body string
+}
+
+// splitMarkedSections cuts the model output on "### Event N" marker
+// lines when any are present — a marker binds its section to input N
+// regardless of position, so merges, splits, and reorderings can't
+// cascade into misalignment. Text before the first marker is preamble
+// and dropped. A "---" line inside a marked section is body content,
+// not a delimiter — only a trailing delimiter line is stripped.
+// Returns nil when no markers appear; the caller then uses the
+// legacy positional split. Not fence-aware: a literal "### Event N"
+// inside a fenced code block still splits — a narrower residual of
+// the hazard '---' had.
+func splitMarkedSections(text string) []markedSection {
+	var sections []markedSection
+	var cur strings.Builder
+	curIdx := -2 // -2 = preamble, not yet inside a marked section.
+	flush := func() {
+		body := strings.TrimSpace(cur.String())
+		cur.Reset()
+		if body != "" && curIdx >= 0 {
+			sections = append(sections, markedSection{idx: curIdx, body: body})
+		}
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if m := eventMarkerRe.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+			// A marker that can't declare a valid input ('Event 0',
+			// overflow) folds forward like a forgotten marker —
+			// its body joins the current section instead of
+			// vanishing or stealing a slot.
+			if n, err := strconv.Atoi(m[1]); err == nil && n > 0 {
+				flush()
+				curIdx = n - 1
+			}
 			continue
 		}
-		tags := extractTags(section)
-		title := extractTitle(section)
-		eventType := EventGeneral
-		if i < len(events) {
-			eventType = events[i].EventType
-		}
-		entries = append(entries, GeneratedEntry{
-			EventType: eventType,
-			Title:     title,
-			Text:      section,
-			Tags:      tags,
-		})
+		cur.WriteString(line)
+		cur.WriteString("\n")
 	}
-	return entries
+	flush()
+	// Strip a trailing separator line each section's body picked
+	// up when the model still emitted delimiters between markers.
+	for i := range sections {
+		lines := strings.Split(strings.TrimRight(sections[i].body, "\n"), "\n")
+		for len(lines) > 0 && trailingDelimRe.MatchString(lines[len(lines)-1]) {
+			lines = lines[:len(lines)-1]
+		}
+		sections[i].body = strings.TrimSpace(strings.Join(lines, "\n"))
+	}
+	// A section that was ONLY a trailing delimiter is gone now.
+	out := sections[:0]
+	for _, s := range sections {
+		if s.body != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// fallbackEntry is the deterministic entry for an input the model
+// produced nothing for — same shape as the no-model path.
+func fallbackEntry(event EntryInput, workDir string) GeneratedEntry {
+	return GeneratedEntry{
+		EventType: event.EventType,
+		Title:     event.Title,
+		Text:      fmt.Sprintf("## %s\n\n%s\n", event.Title, truncate(event.Description, 800)),
+		Tags:      defaultTagsForEvent(event, workDir),
+	}
+}
+
+// alignGeneratedEntries parses the model output and returns entries
+// ALIGNED to the input order: the entry bound to input i sits at
+// position i, inputs the model merged or skipped get the
+// deterministic fallback at their own position, and out-of-range,
+// duplicate, or overflowing sections append after the aligned run.
+// The second return counts model-produced entries (0 = all
+// fallbacks). Positional binding is therefore correct by
+// construction — callers map aligned[j] to events[j] without
+// re-deriving correspondence.
+func alignGeneratedEntries(text string, events []EntryInput, workDir string) ([]GeneratedEntry, int) {
+	newEntry := func(body string, idx int) GeneratedEntry {
+		return GeneratedEntry{
+			EventType: events[idx].EventType,
+			Title:     extractTitle(body),
+			Text:      body,
+			Tags:      extractTags(body),
+		}
+	}
+	var sections []markedSection
+	if marked := splitMarkedSections(text); len(marked) > 0 {
+		sections = marked
+	} else {
+		// No markers at all — the model ignored the echo contract.
+		// Legacy shape: '---' splits, every section unmarked.
+		for _, section := range strings.Split(text, "\n---\n") {
+			if s := strings.TrimSpace(section); s != "" {
+				sections = append(sections, markedSection{idx: -1, body: s})
+			}
+		}
+	}
+	bound := make([]GeneratedEntry, len(events))
+	taken := make([]bool, len(events))
+	var extras []GeneratedEntry
+	parsed := 0
+	for _, s := range sections {
+		if s.idx >= 0 {
+			switch {
+			case s.idx < len(events) && !taken[s.idx]:
+				bound[s.idx] = newEntry(s.body, s.idx)
+				taken[s.idx] = true
+				parsed++
+			default:
+				// Out-of-range or a duplicate marker — keep as an
+				// extra rather than positional-filling a wrong slot.
+				extras = append(extras, GeneratedEntry{
+					EventType: EventGeneral,
+					Title:     extractTitle(s.body),
+					Text:      s.body,
+					Tags:      extractTags(s.body),
+				})
+			}
+			continue
+		}
+		// Unmarked section (legacy '---' path): fill the first
+		// still-unbound slot in order — the old positional contract.
+		placed := false
+		for i := range events {
+			if !taken[i] {
+				bound[i] = newEntry(s.body, i)
+				taken[i] = true
+				parsed++
+				placed = true
+				break
+			}
+		}
+		if !placed {
+			extras = append(extras, GeneratedEntry{
+				EventType: EventGeneral,
+				Title:     extractTitle(s.body),
+				Text:      s.body,
+				Tags:      extractTags(s.body),
+			})
+		}
+	}
+	entries := make([]GeneratedEntry, 0, len(events)+len(extras))
+	for i, e := range bound {
+		if !taken[i] {
+			e = fallbackEntry(events[i], workDir)
+		}
+		entries = append(entries, e)
+	}
+	return append(entries, extras...), parsed
 }
 
 // extractTags finds all #tag patterns in the text. A tag is a token
