@@ -1,0 +1,20 @@
+{
+	"id": "warm-fix-failing-test",
+	"schema_version": 1,
+	"origin": {"kind": "synthetic"},
+	"start_state": {"kind": "fixture", "fixture_dir": "fixture"},
+	"prior_sessions": [
+		{"turns": ["run the test suite, find the failing test and the buggy function, and report which file it's in — do not modify any files"]}
+	],
+	"task": {
+		"turns": ["the test fails — fix it"]
+	},
+	"check": {
+		"script": "check.sh",
+		"expect_start_state": "fail",
+		"timeout_seconds": 300
+	},
+	"coverage": {"min_steps": 1, "min_warm_start.sessions": 1},
+	"requires": {"tools": ["go"]},
+	"budget": {"run_timeout_seconds": 300, "max_steps": 15}
+}

@@ -124,6 +124,22 @@ func TestValidateTrajectory_OK(t *testing.T) {
 	require.Equal(t, "t1", tr.ID)
 }
 
+func TestValidateTrajectory_PriorSessionsNeedTurns(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	dir := writeTrajectory(t, filepath.Join(root, "corpus"), "t1", map[string]any{
+		"prior_sessions": []any{
+			map[string]any{"turns": []string{"explore — change nothing"}},
+			map[string]any{"turns": []string{}},
+			map[string]any{"turns": []string{"  "}},
+		},
+	})
+	_, err := LoadTrajectory(dir)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "prior_sessions[1].turns must contain at least one prompt")
+	require.Contains(t, err.Error(), "prior_sessions[2].turns[0] is empty")
+}
+
 // --- content hash ---
 
 func TestContentHash_ScopesToRevision(t *testing.T) {

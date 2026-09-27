@@ -279,6 +279,37 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 		cr.FlagKeys = flagNames(manifest)
 		drv = cr
 	}
+
+	// Seed sessions first: each drv.Run opens a NEW session on the
+	// same workdir + crush.db, so whatever a seed persisted is the
+	// measured session's starting state. A seed that errors or times
+	// out leaves a warm state other than the designed one — classify
+	// error rather than measure a degraded seeding.
+	if len(traj.PriorSessions) > 0 {
+		warm := &WarmStart{Sessions: len(traj.PriorSessions)}
+		for i, ps := range traj.PriorSessions {
+			seedStart := r.now()
+			seed := drv.Run(ctx, workdir, ps.Turns, traj.Budget)
+			warm.DurationS += r.now().Sub(seedStart).Seconds()
+			warm.Steps += seed.Steps
+			warm.Tokens.Input += seed.Tokens.Input
+			warm.Tokens.Output += seed.Tokens.Output
+			warm.Tokens.CacheRead += seed.Tokens.CacheRead
+			warm.Tokens.CacheWrite += seed.Tokens.CacheWrite
+			if seed.SessionID != "" {
+				warm.SessionIDs = append(warm.SessionIDs, seed.SessionID)
+			}
+			rec.WarmStart = warm
+			if seed.Err != nil || seed.TimedOut {
+				rec.Outcome = OutcomeError
+				rec.CheckDetail = map[string]any{
+					"prior_session": fmt.Sprintf("seed %d of %d failed (timeout=%v): %v",
+						i+1, len(traj.PriorSessions), seed.TimedOut, seed.Err),
+				}
+				return rec, nil
+			}
+		}
+	}
 	res := drv.Run(ctx, workdir, traj.Task.Turns, traj.Budget)
 	rec.DurationS = r.now().Sub(rec.StartedAt).Seconds()
 	rec.Steps = res.Steps

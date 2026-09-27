@@ -137,6 +137,18 @@ func ValidateTrajectory(t *Trajectory, trajDir string) []string {
 		}
 	}
 
+	for i, ps := range t.PriorSessions {
+		if len(ps.Turns) == 0 {
+			problems = append(problems, fmt.Sprintf("prior_sessions[%d].turns must contain at least one prompt", i))
+			continue
+		}
+		for j, turn := range ps.Turns {
+			if strings.TrimSpace(turn) == "" {
+				problems = append(problems, fmt.Sprintf("prior_sessions[%d].turns[%d] is empty", i, j))
+			}
+		}
+	}
+
 	if t.Check.Script == "" {
 		problems = append(problems, "check.script is required")
 	} else if _, err := os.Stat(filepath.Join(trajDir, t.Check.Script)); err != nil {

@@ -82,10 +82,13 @@ type Trajectory struct {
 	Origin        Origin     `json:"origin"`
 	StartState    StartState `json:"start_state"`
 	Task          Task       `json:"task"`
-	Check         Check      `json:"check"`
-	Coverage      Coverage   `json:"coverage,omitempty"`
-	Requires      Requires   `json:"requires,omitempty"`
-	Budget        Budget     `json:"budget,omitempty"`
+	// PriorSessions seed the run — see the type doc. Warm-start
+	// trajectories pair them with a deliberately vague task prompt.
+	PriorSessions PriorSessions `json:"prior_sessions,omitempty"`
+	Check         Check         `json:"check"`
+	Coverage      Coverage      `json:"coverage,omitempty"`
+	Requires      Requires      `json:"requires,omitempty"`
+	Budget        Budget        `json:"budget,omitempty"`
 }
 
 // Origin records what a trajectory guards.
@@ -108,6 +111,18 @@ type StartState struct {
 type Task struct {
 	Turns []string `json:"turns"`
 }
+
+// PriorSessions are seed sessions run before the measured task, each
+// one a fresh session against the SAME workdir and crush.db. They
+// model the user who returns to a project: whatever a seed persisted
+// — entries, digests, hydrations, file changes — is the measured
+// session's starting state. This is the warm-start tier's raison
+// d'être: eval runs otherwise materialize a fresh data dir per run
+// and cross-session learning is invisible by construction. A seed
+// that errors or times out aborts the run as error — measuring a
+// degraded seeding would answer a different question than the one
+// the trajectory poses.
+type PriorSessions []Task
 
 // Check is the scoring-function contract.
 type Check struct {
@@ -336,7 +351,25 @@ type RunRecord struct {
 	// flag off, unknown window), so pressure.* predicates fail closed
 	// rather than reading unmeasured silence as zero.
 	Pressure *Pressure `json:"pressure,omitempty"`
-	Env      Env       `json:"env"`
+	// WarmStart summarizes the seeding phase when the trajectory
+	// declares prior_sessions: how many seed sessions ran, their ids
+	// (the preserved crush.db holds them — the join anchor between
+	// seed output and measured-session recalls), and the aggregate
+	// seeding spend. Seeding cost is real spend: cost-per-pass on a
+	// warm trajectory that ignores it misprices the arm.
+	WarmStart *WarmStart `json:"warm_start,omitempty"`
+	Env       Env        `json:"env"`
+}
+
+// WarmStart is the run's seeding ledger — count, session ids, and
+// total spend across the prior sessions that preceded the measured
+// task.
+type WarmStart struct {
+	Sessions   int        `json:"sessions"`
+	SessionIDs []string   `json:"session_ids,omitempty"`
+	Steps      int        `json:"steps"`
+	Tokens     TokenUsage `json:"tokens"`
+	DurationS  float64    `json:"duration_s"`
 }
 
 // RequestStats is the run's request-size snapshot: the last rendered

@@ -83,6 +83,10 @@ every characterization pass a diff to reviewed files.
 	"task": {
 		"turns": ["the user prompt, verbatim", "optional follow-up"]
 	},
+	"prior_sessions": [
+		{"turns": ["seed session 1 prompt"]},
+		{"turns": ["seed session 2 prompt", "follow-up"]}
+	],
 	"check": {
 		"script": "check.sh",
 		"expect_start_state": "fail",
@@ -128,6 +132,27 @@ every characterization pass a diff to reviewed files.
   trajectory as `error`. Checks see only the final tree — a turn-1
   failure the agent self-heals by the end is invisible; authors
   wanting intermediate assertions need separate trajectories.
+- **`prior_sessions`.** Seed sessions that run before `task.turns`,
+  each a separate session against the same workdir and crush.db —
+  the warm-start tier. Whatever a seed persists (entries, digests,
+  file changes) is the measured session's starting state, which is
+  what makes cross-session learning measurable at all: every other
+  run materializes a fresh data dir, so without seeds the learning
+  claim is invisible by construction. Pair with a deliberately vague
+  `task.turns` — the seed should plant knowledge the vague prompt
+  needs ("find the failing test, report the file — change nothing"),
+  then the measured prompt demands the fix. A seed that errors or
+  times out aborts the run as `error` (`check_detail.prior_session`
+  names the index): a half-seeded warm state is a different
+  condition than the one designed. Seeding spend lands in the
+  record's `warm_start` ledger — sessions, ids, steps, tokens — so
+  cost-per-pass can include it; the session ids join the preserved
+  crush.db's seed rows to measured-session recalls. Budget is
+  per-session: each seed gets its own `run_timeout_seconds` /
+  `max_steps`, so a warm trajectory's wall clock is
+  (n_seeds + 1) × budget. Coverage: `warm_start.*` is
+  flag-invariant — `min_warm_start.sessions` on a warm trajectory
+  asserts the phase ran and fails closed on cold runs.
 - **`origin`.** `scrubbed` must be `true` — a value, not just a
   present field — when `kind` is `production`, and for `regression`
   whenever `source` is a real session or bug report — the same
@@ -542,6 +567,13 @@ trajectory twice) is strictly worse.
 		}
 	],
 	"generator_tokens": {"calls": 12, "input": 41000, "output": 900, "cache_read": 0, "cache_write": 0},
+	"warm_start": {
+		"sessions": 2,
+		"session_ids": ["<seed-session-id>", "..."],
+		"steps": 14,
+		"tokens": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
+		"duration_s": 96
+	},
 	"error_class": "auth | rate_limit | context_too_large | window_cap_enforced | provider_* | cancelled | timeout",
 	"session_db": "results/<experiment>/artifacts/<trajectory_id>-<arm>-<run_index>.db",
 	"env": {"crush_sha": "...", "model_resolved": "...", "go": "1.25", "os": "darwin", "content_hash": "..."}

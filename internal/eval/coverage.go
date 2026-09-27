@@ -49,6 +49,17 @@ var coverageFields = map[string]func(*RunRecord) float64{
 	"hydration.seeds":              func(r *RunRecord) float64 { return float64(r.Hydration.Seeds) },
 	"hydration.plan_seeds":         func(r *RunRecord) float64 { return float64(r.Hydration.PlanSeeds) },
 	"hydration.rendered":           func(r *RunRecord) float64 { return float64(r.Hydration.Rendered) },
+	// warm_start.* is the seeding ledger — flag-invariant (it exists
+	// whenever the trajectory declares prior_sessions), so shared
+	// min_ predicates are safe: a warm trajectory can assert the
+	// seeding phase ran, and a cold run fails closed rather than
+	// reading a nil ledger as zero.
+	"warm_start.sessions":           func(r *RunRecord) float64 { return float64(warmStart(r).Sessions) },
+	"warm_start.steps":              func(r *RunRecord) float64 { return float64(warmStart(r).Steps) },
+	"warm_start.tokens.input":       func(r *RunRecord) float64 { return float64(warmStart(r).Tokens.Input) },
+	"warm_start.tokens.output":      func(r *RunRecord) float64 { return float64(warmStart(r).Tokens.Output) },
+	"warm_start.tokens.cache_read":  func(r *RunRecord) float64 { return float64(warmStart(r).Tokens.CacheRead) },
+	"warm_start.tokens.cache_write": func(r *RunRecord) float64 { return float64(warmStart(r).Tokens.CacheWrite) },
 	// pressure.* is the gate's own coverage — activations counts
 	// engage transitions (the "did it fire" predicate), engaged the
 	// latch as 0/1. Flag-gated on notebook_pressure_gate (and
@@ -173,6 +184,17 @@ func pressure(r *RunRecord) Pressure {
 	return *r.Pressure
 }
 
+// warmStart dereferences the optional seeding ledger. coverageMet
+// short-circuits nil WarmStart before reaching field funcs — a cold
+// run must not satisfy a "did seeding happen" predicate by reading
+// absent as zero.
+func warmStart(r *RunRecord) WarmStart {
+	if r.WarmStart == nil {
+		return WarmStart{}
+	}
+	return *r.WarmStart
+}
+
 func init() {
 	// Per-kind stub counts: stub_stats.kinds.<kind> for every
 	// message.StubKind, keyed by the kind's telemetry label — the
@@ -289,6 +311,11 @@ func coverageMet(cov Coverage, rec *RunRecord, fields map[string]func(*RunRecord
 		// measure against) — silence must not satisfy either a min_
 		// "did it fire" or a max_ "did it stay quiet" predicate.
 		if strings.HasPrefix(field, "pressure.") && rec.Pressure == nil {
+			return false, key, nil
+		}
+		// And warm_start.*: a cold run carries no seeding ledger —
+		// absent must not satisfy a "did seeding happen" predicate.
+		if strings.HasPrefix(field, "warm_start.") && rec.WarmStart == nil {
 			return false, key, nil
 		}
 		got := fn(rec)
