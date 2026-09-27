@@ -41,4 +41,6 @@ State outcomes only as given: when an event carries a Verification line,
 the entry must report that outcome exactly — never describe a change as
 verified or passing when it failed or was not checked.
 
-Separate multiple entries with "---" on its own line.
+Head each entry with "### Event N" on its own line, echoing the input
+event's number — the marker is what binds the entry to its event, so
+never omit or renumber it.
