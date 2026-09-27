@@ -59,7 +59,10 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 	// model invocation (main runs, queue continuations, summarize
 	// calls), while result.TotalUsage is whichever call returned last
 	// — continuations clobber earlier results and summarize never
-	// reaches it at all.
+	// reaches it at all. Note the ledger is process-lifetime
+	// cumulative per session: correct today because telemetry emits
+	// once per `crush run` process, but a future emission path that
+	// serves multiple runs per session must emit a delta instead.
 	lu := tel.LedgerUsage
 	ledgerUsed := haveTel && (lu.InputTokens != 0 || lu.OutputTokens != 0 ||
 		lu.CacheReadTokens != 0 || lu.CacheCreationTokens != 0)
