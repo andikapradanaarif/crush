@@ -169,3 +169,35 @@ func TestAlignGeneratedEntries_ForgottenMarkerFoldsForward(t *testing.T) {
 		"event 2 gets the deterministic fallback, not a shifted bind")
 	require.Equal(t, EventFileEdit, entries[2].EventType)
 }
+
+// A marker that can't declare an input ("### Event 0") folds its body
+// into the preceding section instead of dropping the text outright.
+func TestAlignGeneratedEntries_MalformedMarkerFoldsForward(t *testing.T) {
+	t.Parallel()
+
+	events := alignEvents()[:1]
+	text := "### Event 1\n## Read a.go\ncontents\n" +
+		"### Event 0\nleftover\n"
+
+	entries, parsed := alignGeneratedEntries(text, events, "")
+	require.Equal(t, 1, parsed)
+	require.Len(t, entries, 1)
+	require.Contains(t, entries[0].Text, "contents")
+	require.Contains(t, entries[0].Text, "leftover",
+		"the malformed-marker body stays inside event 1's entry")
+}
+
+// Mixed conventions: a model that still separates marked entries with
+// '***' or '----' doesn't leave the rule dangling in the body.
+func TestAlignGeneratedEntries_AlternateTrailingDelimiterStripped(t *testing.T) {
+	t.Parallel()
+
+	events := alignEvents()[:2]
+	text := "### Event 1\n## Read a.go\ncontents\n***\n" +
+		"### Event 2\n## Run: go test\nok\n"
+
+	entries, parsed := alignGeneratedEntries(text, events, "")
+	require.Equal(t, 2, parsed)
+	require.NotContains(t, entries[0].Text, "***")
+	require.Contains(t, entries[1].Text, "go test")
+}

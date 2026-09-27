@@ -108,7 +108,8 @@ func (g *llmGenerator) Generate(ctx context.Context, sessionID string, events []
 	text := resp.Response.Content.Text()
 	entries, parsed := alignGeneratedEntries(text, events, g.workDir)
 	if parsed == 0 {
-		slog.Warn("LLM returned no parseable notebook entries, using fallback")
+		slog.Warn("LLM produced no bound notebook entries, using fallbacks",
+			"extras", len(entries)-len(events))
 	}
 	return entries, nil
 }
@@ -235,10 +236,15 @@ func buildGeneratePrompt(events []EntryInput) string {
 }
 
 // eventMarkerRe matches the "### Event N" line the prompt asks the
-// model to echo — lenient on heading depth and trailing text so
-// "## Event 3 — auth fix" still binds. The capture is 1-based, the
-// same numbering buildGeneratePrompt stamps on its inputs.
-var eventMarkerRe = regexp.MustCompile(`^#{2,6}\s+Event\s+(\d+)\b`)
+// model to echo — lenient on heading depth, case, and trailing text
+// so "## event 3 — auth fix" still binds. The capture is 1-based,
+// the same numbering buildGeneratePrompt stamps on its inputs.
+var eventMarkerRe = regexp.MustCompile(`(?i)^#{2,6}\s+Event\s+(\d+)\b`)
+
+// trailingDelimRe matches a markdown break line ('---', '***', '___',
+// spaced variants) so a model that mixes the old delimiter
+// convention into marked output doesn't leave it dangling in a body.
+var trailingDelimRe = regexp.MustCompile(`^\s*[-*_](?:\s*[-*_]){2,}\s*$`)
 
 // markedSection is one parse region: the model's body text plus the
 // 0-based input index its "### Event N" header declared (-1 when the
@@ -255,7 +261,9 @@ type markedSection struct {
 // and dropped. A "---" line inside a marked section is body content,
 // not a delimiter — only a trailing delimiter line is stripped.
 // Returns nil when no markers appear; the caller then uses the
-// legacy positional split.
+// legacy positional split. Not fence-aware: a literal "### Event N"
+// inside a fenced code block still splits — a narrower residual of
+// the hazard '---' had.
 func splitMarkedSections(text string) []markedSection {
 	var sections []markedSection
 	var cur strings.Builder
@@ -269,20 +277,25 @@ func splitMarkedSections(text string) []markedSection {
 	}
 	for _, line := range strings.Split(text, "\n") {
 		if m := eventMarkerRe.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
-			flush()
-			n, _ := strconv.Atoi(m[1])
-			curIdx = n - 1
+			// A marker that can't declare a valid input ('Event 0',
+			// overflow) folds forward like a forgotten marker —
+			// its body joins the current section instead of
+			// vanishing or stealing a slot.
+			if n, err := strconv.Atoi(m[1]); err == nil && n > 0 {
+				flush()
+				curIdx = n - 1
+			}
 			continue
 		}
 		cur.WriteString(line)
 		cur.WriteString("\n")
 	}
 	flush()
-	// Strip a trailing '---' separator line each section's body picked
+	// Strip a trailing separator line each section's body picked
 	// up when the model still emitted delimiters between markers.
 	for i := range sections {
 		lines := strings.Split(strings.TrimRight(sections[i].body, "\n"), "\n")
-		for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "---" {
+		for len(lines) > 0 && trailingDelimRe.MatchString(lines[len(lines)-1]) {
 			lines = lines[:len(lines)-1]
 		}
 		sections[i].body = strings.TrimSpace(strings.Join(lines, "\n"))
