@@ -3,19 +3,105 @@ package app
 import (
 	"context"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/stretchr/testify/require"
 )
+
+// stubTelemetryCoordinator embeds a nil Coordinator — only the
+// SessionTelemetry assertion in emitEvalTelemetry ever calls into it.
+type stubTelemetryCoordinator struct {
+	agent.Coordinator
+	tel agent.SessionTelemetry
+}
+
+func (s stubTelemetryCoordinator) SessionTelemetry(string) agent.SessionTelemetry {
+	return s.tel
+}
+
+func telemetryApp(tel agent.SessionTelemetry) *App {
+	return &App{
+		AgentCoordinator: stubTelemetryCoordinator{tel: tel},
+		config:           config.NewTestStore(&config.Config{Options: &config.Options{}}),
+	}
+}
+
+func readTelemetryDoc(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(data, &doc))
+	return doc
+}
+
+// The ledger counts every model invocation; result.TotalUsage covers
+// only whichever call returned last. When the ledger has usage it
+// must win — this is the fix for continuation/summarize spend going
+// uncounted.
+func TestEmitEvalTelemetry_PrefersLedger(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tel.json")
+	t.Setenv(EvalTelemetryEnvVar, path)
+
+	app := telemetryApp(agent.SessionTelemetry{
+		LedgerUsage: fantasy.Usage{InputTokens: 500, OutputTokens: 40, CacheReadTokens: 12},
+		LedgerSteps: 9,
+	})
+	result := &fantasy.AgentResult{
+		TotalUsage: fantasy.Usage{InputTokens: 100, OutputTokens: 10},
+		Steps:      make([]fantasy.StepResult, 3),
+	}
+	app.emitEvalTelemetry("sess", result, nil, 0)
+
+	doc := readTelemetryDoc(t, path)
+	tokens, ok := doc["tokens"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, float64(500), tokens["input"])
+	require.Equal(t, float64(40), tokens["output"])
+	require.Equal(t, float64(12), tokens["cache_read"])
+	require.Equal(t, float64(9), doc["steps"])
+}
+
+// A session with no ledger usage (e.g. the run failed before any
+// model call completed) falls back to the returned result, then to
+// the approximate step count for killed runs.
+func TestEmitEvalTelemetry_LedgerFallback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tel.json")
+	t.Setenv(EvalTelemetryEnvVar, path)
+
+	app := telemetryApp(agent.SessionTelemetry{})
+	result := &fantasy.AgentResult{
+		TotalUsage: fantasy.Usage{InputTokens: 100, OutputTokens: 10},
+		Steps:      make([]fantasy.StepResult, 3),
+	}
+	app.emitEvalTelemetry("sess", result, nil, 7)
+
+	doc := readTelemetryDoc(t, path)
+	tokens, ok := doc["tokens"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, float64(100), tokens["input"])
+	require.Equal(t, float64(3), doc["steps"])
+
+	// No result at all — the approximate count from observed
+	// assistant messages is the last resort.
+	path2 := filepath.Join(t.TempDir(), "tel2.json")
+	t.Setenv(EvalTelemetryEnvVar, path2)
+	app.emitEvalTelemetry("sess", nil, nil, 7)
+	doc = readTelemetryDoc(t, path2)
+	require.Equal(t, float64(7), doc["steps"])
+}
 
 func TestClassifyRunError(t *testing.T) {
 	t.Parallel()

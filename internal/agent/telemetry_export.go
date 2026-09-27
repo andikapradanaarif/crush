@@ -99,6 +99,13 @@ type SessionTelemetry struct {
 	// emits EdgeFiringDelta instead so multi-emission processes
 	// can't double-count.
 	EdgeFirings map[string]map[string]int `json:"edge_firings,omitempty"`
+	// LedgerUsage/LedgerSteps are the all-invocation usage
+	// accumulator — main runs, queue continuations, repair chains,
+	// summarize calls. The eval export prefers it over the returned
+	// AgentResult so continuations and side-channel calls can't
+	// drop spend.
+	LedgerUsage fantasy.Usage `json:"ledger_usage"`
+	LedgerSteps int           `json:"ledger_steps"`
 }
 
 // SessionTelemetry returns the coordinator's per-session counters.
@@ -172,6 +179,18 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 				}
 				t.EdgeFirings[edge][outcome] += n
 			}
+		}
+	}
+	if sa.usageLedger != nil {
+		if u, ok := sa.usageLedger.Get(sessionID); ok {
+			t.LedgerUsage = fantasy.Usage{
+				InputTokens:         u.InputTokens,
+				OutputTokens:        u.OutputTokens,
+				ReasoningTokens:     u.ReasoningTokens,
+				CacheCreationTokens: u.CacheCreationTokens,
+				CacheReadTokens:     u.CacheReadTokens,
+			}
+			t.LedgerSteps = u.Steps
 		}
 	}
 	return t

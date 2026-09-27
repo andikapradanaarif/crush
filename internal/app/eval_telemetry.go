@@ -45,7 +45,34 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 		doc["resolved_options"] = config.OptionsProjection(
 			*app.config.Config().Options, strings.Split(keys, ","))
 	}
-	if result != nil {
+	// SessionTelemetry is not on the Coordinator interface — assert so
+	// test stubs and alternate coordinators needn't implement it.
+	var tel agent.SessionTelemetry
+	haveTel := false
+	if c, ok := app.AgentCoordinator.(interface {
+		SessionTelemetry(string) agent.SessionTelemetry
+	}); ok {
+		tel = c.SessionTelemetry(sessionID)
+		haveTel = true
+	}
+	// The usage ledger is the authoritative spend: it counts every
+	// model invocation (main runs, queue continuations, summarize
+	// calls), while result.TotalUsage is whichever call returned last
+	// — continuations clobber earlier results and summarize never
+	// reaches it at all.
+	lu := tel.LedgerUsage
+	ledgerUsed := haveTel && (lu.InputTokens != 0 || lu.OutputTokens != 0 ||
+		lu.CacheReadTokens != 0 || lu.CacheCreationTokens != 0)
+	switch {
+	case ledgerUsed:
+		doc["tokens"] = map[string]int64{
+			"input":       lu.InputTokens,
+			"output":      lu.OutputTokens,
+			"cache_read":  lu.CacheReadTokens,
+			"cache_write": lu.CacheCreationTokens,
+		}
+		doc["steps"] = tel.LedgerSteps
+	case result != nil:
 		doc["steps"] = len(result.Steps)
 		doc["tokens"] = map[string]int64{
 			"input":       result.TotalUsage.InputTokens,
@@ -53,18 +80,13 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 			"cache_read":  result.TotalUsage.CacheReadTokens,
 			"cache_write": result.TotalUsage.CacheCreationTokens,
 		}
-	} else if approxSteps > 0 {
+	case approxSteps > 0:
 		// Killed mid-run — approximate from distinct assistant
 		// messages observed so the record isn't 0/0 for a run that
 		// burned real budget.
 		doc["steps"] = approxSteps
 	}
-	// SessionTelemetry is not on the Coordinator interface — assert so
-	// test stubs and alternate coordinators needn't implement it.
-	if c, ok := app.AgentCoordinator.(interface {
-		SessionTelemetry(string) agent.SessionTelemetry
-	}); ok {
-		tel := c.SessionTelemetry(sessionID)
+	if haveTel {
 		kinds := tel.StubKinds
 		if kinds == nil {
 			// Emit an object, not null, so the doc's shape is stable

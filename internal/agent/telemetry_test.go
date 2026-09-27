@@ -246,6 +246,59 @@ func TestRecordGeneratorUsage(t *testing.T) {
 	require.False(t, ok)
 }
 
+// The usage ledger counts every invocation — continuations and
+// summarize calls included — unlike the returned AgentResult, which
+// only covers whichever call came back last.
+func TestRecordUsage_LedgerAccumulatesAllInvocations(t *testing.T) {
+	t.Parallel()
+
+	a := &sessionAgent{usageLedger: csync.NewMap[string, ledgerUsage]()}
+	a.recordUsage("sess", &fantasy.AgentResult{
+		TotalUsage: fantasy.Usage{InputTokens: 100, OutputTokens: 10},
+		Steps:      make([]fantasy.StepResult, 2),
+	})
+	// A second invocation — a queue continuation or a summarize call —
+	// adds to the same session's total rather than replacing it.
+	a.recordUsage("sess", &fantasy.AgentResult{
+		TotalUsage: fantasy.Usage{InputTokens: 50, OutputTokens: 5, CacheReadTokens: 7},
+		Steps:      make([]fantasy.StepResult, 3),
+	})
+
+	u, ok := a.usageLedger.Get("sess")
+	require.True(t, ok)
+	require.Equal(t, int64(150), u.InputTokens)
+	require.Equal(t, int64(15), u.OutputTokens)
+	require.Equal(t, int64(7), u.CacheReadTokens)
+	require.Equal(t, 5, u.Steps)
+
+	// A nil result (failed stream), a nil ledger (ledger-less agent),
+	// and an empty session ID are all no-ops.
+	a.recordUsage("sess", nil)
+	(&sessionAgent{}).recordUsage("sess", &fantasy.AgentResult{TotalUsage: fantasy.Usage{InputTokens: 1}})
+	a.recordUsage("", &fantasy.AgentResult{TotalUsage: fantasy.Usage{InputTokens: 1}})
+	u, _ = a.usageLedger.Get("sess")
+	require.Equal(t, int64(150), u.InputTokens)
+	_, ok = a.usageLedger.Get("")
+	require.False(t, ok)
+}
+
+func TestSessionTelemetry_LedgerUsage(t *testing.T) {
+	t.Parallel()
+
+	a := &sessionAgent{
+		usageLedger: csync.NewMap[string, ledgerUsage](),
+		stubStats:   csync.NewMap[string, stubStats](),
+		nbStats:     csync.NewMap[string, notebook.Stats](),
+	}
+	a.usageLedger.Set("sess", ledgerUsage{InputTokens: 42, OutputTokens: 7, Steps: 5})
+	c := &coordinator{mainAgent: a}
+
+	tel := c.SessionTelemetry("sess")
+	require.Equal(t, int64(42), tel.LedgerUsage.InputTokens)
+	require.Equal(t, int64(7), tel.LedgerUsage.OutputTokens)
+	require.Equal(t, 5, tel.LedgerSteps)
+}
+
 // unknownPart stands in for a MessagePart kind hashPart doesn't know
 // — the hash must still separate on the discriminator.
 type unknownPart struct{ kind fantasy.ContentType }
