@@ -2264,6 +2264,10 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 
 	var rawMsgs []message.Message
 	boundary := 0
+	// prefixFailed marks an engaged render whose notebook prefix
+	// could not be built — the boundary rolled back to verbatim, so
+	// turn collapse must not fire on the covered span either.
+	prefixFailed := false
 	// rawStart is the msgs index rawMsgs[0] came from — the coverage
 	// boundary or a later summary floor. collapsedTurn needs it to
 	// keep its absolute turn lookup aligned.
@@ -2336,8 +2340,25 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 					}
 				}
 			}
-			history = append(history, a.notebookPrefix(ctx, sessionID, msgs, boundary, boundarySegmentKey(segs, boundary), segs, collapse)...)
-			if sessionID != "" {
+			prefix, perr := a.notebookPrefix(ctx, sessionID, msgs, boundary, boundarySegmentKey(segs, boundary), segs, collapse)
+			history = append(history, prefix...)
+			if perr != nil {
+				// The prefix is the only render of the covered
+				// span — with no replacement, evicting at the
+				// boundary would drop that history from the
+				// prompt entirely. Both failure shapes land here:
+				// the read error and the empty render (processed
+				// segments with no entries to stand in for them).
+				// Roll back to a verbatim tail and skip stub
+				// bookkeeping: nothing was evicted, nothing should
+				// promote.
+				boundary = 0
+				prefixFailed = true
+				if a.stubStats != nil {
+					a.stubStats.Update(sessionID, func(s *stubStats) { s.PrefixFetchFailed = true })
+				}
+			}
+			if perr == nil && sessionID != "" {
 				if last, ok := a.stubBoundary.Get(sessionID); !ok || last != boundary {
 					moved := ok
 					persisted := true
@@ -2372,7 +2393,8 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 			// non-pressure cases it serves: hydration seeds
 			// (session seeding) and auto-inject (the user named
 			// a file with committed entries).
-			history = append(history, a.notebookPrefix(ctx, sessionID, msgs, 0, segmentKey{}, segs, collapse)...)
+			prefix, _ := a.notebookPrefix(ctx, sessionID, msgs, 0, segmentKey{}, segs, collapse)
+			history = append(history, prefix...)
 		}
 		rawStart = boundary
 		if summaryIdx := lastSummaryIndex(msgs); summaryIdx > rawStart {
@@ -2402,7 +2424,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 	// Stub/digest renders print recall pointers, so they collapse only
 	// when recall is live; summarize renders the entries themselves
 	// and needs no recall tool.
-	if collapse != nil && len(collapse.Set) > 0 && (recallLive || a.priorTurns == priorTurnsSummarize) {
+	if collapse != nil && len(collapse.Set) > 0 && !prefixFailed && (recallLive || a.priorTurns == priorTurnsSummarize) {
 		turns = messageTurns(msgs)
 	}
 	collapsedTurn := func(i int) (int64, bool) {
@@ -2970,15 +2992,36 @@ func (a *sessionAgent) getSessionMessages(ctx context.Context, session session.S
 	return msgs, nil
 }
 
-// lastSummaryIndex returns the index of the newest stored summary
-// message — the /summarize render floor — or -1 when none exists.
+// lastSummaryIndex returns the index of the newest successfully
+// committed summary message — the /summarize render floor — or -1
+// when none exists. Only committed summaries count: Summarize writes
+// the IsSummaryMessage record before generation, so a failed or
+// interrupted call leaves a record that must not evict the raw
+// history it was meant to compress.
 func lastSummaryIndex(msgs []message.Message) int {
 	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].IsSummaryMessage {
+		if summaryCommitted(msgs[i]) {
 			return i
 		}
 	}
 	return -1
+}
+
+// summaryCommitted reports whether a summary-flagged message carries
+// a finished, non-error generation. The end_turn check is strict —
+// the only success write the summarize path produces — so error,
+// cancelled, filtered, truncated, and unfinished records all stay
+// visible to the render as ordinary history rather than flooring it.
+func summaryCommitted(m message.Message) bool {
+	if !m.IsSummaryMessage {
+		return false
+	}
+	for _, part := range m.Parts {
+		if f, ok := part.(message.Finish); ok {
+			return f.Reason == message.FinishReasonEndTurn
+		}
+	}
+	return false
 }
 
 // countUserMessages counts the number of user messages in the slice.

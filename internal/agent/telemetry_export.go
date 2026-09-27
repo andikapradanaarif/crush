@@ -66,6 +66,11 @@ type SessionTelemetry struct {
 	// failed — the run rendered verbatim, a control-shaped prompt
 	// inside the treatment arm.
 	SummaryFetchFailed bool `json:"summary_fetch_failed,omitempty"`
+	// PrefixFetchFailed marks an engaged render whose notebook prefix
+	// build failed or emitted no covered-span render — the boundary
+	// rolled back, so that render served a verbatim, control-shaped
+	// prompt.
+	PrefixFetchFailed bool `json:"prefix_fetch_failed,omitempty"`
 	// Request telemetry: the prompt growth curve (last/peak
 	// normalized prompt tokens across the run's steps) and the last
 	// rendered request's content-byte composition. This is the
@@ -115,6 +120,7 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 		t.TurnsCollapsed = s.TurnsCollapsed
 		t.EventsCollapsed = s.EventsCollapsed
 		t.SummaryFetchFailed = s.SummaryFetchFailed
+		t.PrefixFetchFailed = s.PrefixFetchFailed
 		if len(s.Kinds) > 0 {
 			t.StubKinds = make(map[string]int, len(s.Kinds))
 			for kind, n := range s.Kinds {

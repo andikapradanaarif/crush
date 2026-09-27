@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -558,9 +559,14 @@ func TestPreparePrompt_SummaryFloorInNotebookMode(t *testing.T) {
 	a.rawTokenBudget = 1_000_000
 
 	viewThenEdit(t, svc, sessionID, "file body", true)
+	// A committed summary: the record's finish part carries end_turn,
+	// matching what Summarize writes after a successful generation.
 	_, err := svc.Create(t.Context(), sessionID, message.CreateMessageParams{
-		Role:             message.Assistant,
-		Parts:            []message.ContentPart{message.TextContent{Text: "SUMMARY-BODY"}},
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "SUMMARY-BODY"},
+			message.Finish{Reason: message.FinishReasonEndTurn, Time: 1},
+		},
 		IsSummaryMessage: true,
 	})
 	require.NoError(t, err)
@@ -585,6 +591,165 @@ func TestPreparePrompt_SummaryFloorInNotebookMode(t *testing.T) {
 			}
 		}
 	}
+}
+
+// A summary record whose generation failed must not floor the render —
+// the record exists (Summarize writes it before the call) but compresses
+// nothing, so flooring on it would hide committed history.
+func TestPreparePrompt_FailedSummaryDoesNotFloor(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.reqStats = csync.NewMap[string, requestStats]()
+	a.rawTokenBudget = 1_000_000
+
+	viewThenEdit(t, svc, sessionID, "file body", true)
+	// The failed-summarize record shape: flagged, finished with error.
+	_, err := svc.Create(t.Context(), sessionID, message.CreateMessageParams{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.Finish{Reason: message.FinishReasonError, Time: 1, Message: "Summarization Error"},
+		},
+		IsSummaryMessage: true,
+	})
+	require.NoError(t, err)
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "after failed summary"})
+	msgs, err := svc.List(t.Context(), sessionID)
+	require.NoError(t, err)
+
+	history, _ := a.preparePrompt(t.Context(), msgs, false, nil, false)
+	text := renderedText(history)
+	require.Contains(t, text, "start", "pre-summary history must survive a failed summary")
+	require.Contains(t, text, "after failed summary")
+}
+
+// An unfinished summary record — the process died between create and
+// finish — must not floor either: nothing was generated, so nothing may
+// be evicted on its behalf.
+func TestPreparePrompt_UnfinishedSummaryDoesNotFloor(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.reqStats = csync.NewMap[string, requestStats]()
+	a.rawTokenBudget = 1_000_000
+
+	viewThenEdit(t, svc, sessionID, "file body", true)
+	_, err := svc.Create(t.Context(), sessionID, message.CreateMessageParams{
+		Role:             message.Assistant,
+		Parts:            []message.ContentPart{message.TextContent{Text: "partial"}},
+		IsSummaryMessage: true,
+	})
+	require.NoError(t, err)
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "after partial summary"})
+	msgs, err := svc.List(t.Context(), sessionID)
+	require.NoError(t, err)
+
+	history, _ := a.preparePrompt(t.Context(), msgs, false, nil, false)
+	text := renderedText(history)
+	require.Contains(t, text, "start", "an unfinished summary must not evict pre-summary history")
+	require.Contains(t, text, "after partial summary")
+}
+
+// failingEntriesNotebook wraps a working Service with a GetEntries that
+// always errors — the transient prefix-read failure the render must
+// survive by falling back to verbatim rather than evicting to nothing.
+type failingEntriesNotebook struct {
+	notebook.Service
+	err error
+}
+
+func (f failingEntriesNotebook) GetEntries(context.Context, string) ([]notebook.Entry, error) {
+	return nil, f.err
+}
+
+// Prefix-read failure must roll the boundary back: the prefix is the
+// only render of the covered span, so applying the boundary without it
+// produces a prompt missing that history entirely.
+func TestPreparePrompt_PrefixFailureRollsBackBoundary(t *testing.T) {
+	t.Parallel()
+
+	// emptyEntryGen marks coverage without writing content-echoing
+	// entries. The marker is the turn's user text: entries cover only
+	// tool events, so "EARLYTURN" appears in raw history (message and
+	// tool-call IDs) but never in the prefix.
+	a, svc, nb, sessionID := newSegmentTestAgent(t, emptyEntryGen{})
+	a.reqStats = csync.NewMap[string, requestStats]()
+	a.segmentMaxSteps = 2
+	ctx := t.Context()
+
+	// Turn 1 covered: two detectSegments passes — the first generates,
+	// the second sees committed coverage.
+	segBuildTurn(t, svc, sessionID, "EARLYTURN", 4, "step")
+	msgs, err := svc.List(ctx, sessionID)
+	require.NoError(t, err)
+	a.detectSegments(ctx, sessionID, msgs)
+	a.detectSegments(ctx, sessionID, msgs)
+
+	// Turn 2 stays uncovered — the boundary can only eat turn 1.
+	msgs = segBuildTurn(t, svc, sessionID, "LATETURN", 4, "step")
+	a.detectSegments(ctx, sessionID, msgs)
+
+	// A small raw budget pushes the boundary onto covered segments.
+	a.rawTokenBudget = 20
+	engagedHistory, _ := a.preparePrompt(ctx, msgs, false, nil, true)
+	engagedText := renderedText(engagedHistory)
+	require.NotContains(t, engagedText, "EARLYTURN",
+		"sanity check: covered history is evicted when the prefix renders")
+
+	// Same render under a failing prefix read: verbatim fallback — the
+	// covered span's raw history is back in the prompt.
+	a.notebook = failingEntriesNotebook{Service: nb, err: errors.New("db read failed")}
+	fallbackHistory, _ := a.preparePrompt(ctx, msgs, false, nil, true)
+	text := renderedText(fallbackHistory)
+	require.Contains(t, text, "EARLYTURN",
+		"prefix failure must keep the covered span's raw history")
+	require.Contains(t, text, "LATETURN")
+
+	s, _ := a.stubStats.Get(sessionID)
+	require.True(t, s.PrefixFetchFailed, "a verbatim fallback under pressure must be marked")
+}
+
+// Coverage without entries — a processed pure-text segment produces
+// no events, so the prefix has nothing to render for it. The boundary
+// must still roll back to verbatim: coverage is a promise of
+// representation, and an empty render does not honor it.
+func TestPreparePrompt_EmptyCoverageRollsBackBoundary(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, &countingGen{})
+	a.reqStats = csync.NewMap[string, requestStats]()
+	a.segmentMaxSteps = 2
+	ctx := t.Context()
+
+	// Turn 1 is pure assistant text — zero events, zero entries, but
+	// the segments still mark processed on the second pass.
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "EARLYTEXT"})
+	for range 4 {
+		mkMsg(t, svc, sessionID, message.Assistant, message.TextContent{Text: "thinking out loud"})
+	}
+	msgs, err := svc.List(ctx, sessionID)
+	require.NoError(t, err)
+	a.detectSegments(ctx, sessionID, msgs)
+
+	// Turn 2's arrival closes turn 1's tail segment; its own segment
+	// stays the open tail — unprocessed, always raw.
+	msgs = segBuildTurn(t, svc, sessionID, "LATETURN", 1, "step")
+	a.detectSegments(ctx, sessionID, msgs)
+	_, processed := a.detectSegments(ctx, sessionID, msgs)
+	require.NotEmpty(t, processed, "zero-event segments must mark coverage")
+
+	// A small raw budget pushes the boundary onto the covered-but-
+	// entryless segments — the empty render must not evict them.
+	a.rawTokenBudget = 20
+	history, _ := a.preparePrompt(ctx, msgs, false, nil, true)
+	text := renderedText(history)
+	require.Contains(t, text, "EARLYTEXT",
+		"empty prefix render must not evict the covered span")
+	require.Contains(t, text, "LATETURN")
+
+	s, _ := a.stubStats.Get(sessionID)
+	require.True(t, s.PrefixFetchFailed,
+		"a verbatim fallback under an empty render must be marked")
 }
 
 // Verbatim mode is the default and passes a nil collapse — the gate

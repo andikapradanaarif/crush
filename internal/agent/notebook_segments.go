@@ -405,7 +405,18 @@ type cachedPrefix struct {
 	fingerprint uint64
 	msgs        []fantasy.Message
 	files       map[string]bool
+	// covered records whether the render's covered span had any real
+	// entries — the value the boundary-rollback check needs on a
+	// cache hit, where renderNotebookPrefix doesn't run.
+	covered bool
 }
+
+// errNotebookPrefixEmpty marks a successful render that emitted
+// nothing for the covered span — coverage said the segments were
+// processed but no entries exist to stand in for them. The caller
+// treats it like a fetch failure: the boundary rolls back to
+// verbatim rather than evicting history to nothing.
+var errNotebookPrefixEmpty = errors.New("notebook prefix rendered no covered entries")
 
 func (a *sessionAgent) segTokenBudget() int {
 	if a.segmentTokenBudget > 0 {
@@ -883,16 +894,19 @@ func (a *sessionAgent) buildSelectionInput(ctx context.Context, sessionID string
 // collapse carries the run's prior-turn collapse state — its
 // digestTurns freeze is populated on the run's first call, before
 // the cache check.
-func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msgs []message.Message, boundary int, bKey segmentKey, segs []segment, collapse *turnCollapse) []fantasy.Message {
+func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msgs []message.Message, boundary int, bKey segmentKey, segs []segment, collapse *turnCollapse) ([]fantasy.Message, error) {
 	if a.notebook == nil || sessionID == "" {
-		return nil
+		return nil, nil
 	}
 	detCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	entries, err := a.notebook.GetEntries(detCtx, sessionID)
 	if err != nil {
 		slog.Error("Failed to get notebook entries", "error", err)
-		return nil
+		// The prefix is the only render of the covered span — the
+		// caller needs the error to roll the boundary back rather
+		// than evict raw history to nothing.
+		return nil, err
 	}
 	if boundary <= 0 && !slices.ContainsFunc(entries, isHydratedSeed) {
 		// No covered segments yet and nothing seeded — nothing to
@@ -900,7 +914,7 @@ func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msg
 		// precisely for the first turn, and their sentinel keys sit
 		// below every real boundary key so the downstream filters
 		// pass them unmodified.
-		return nil
+		return nil, nil
 	}
 	// Freeze digest eligibility here, before the cache check — a
 	// prefix cache hit must not defer the per-run freeze past the
@@ -927,16 +941,37 @@ func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msg
 	// mid-render cannot split the cache key from the content it keys.
 	toolPtr := a.recallVia()
 	fp := prefixFingerprint(boundary, bKey, floor, entries, refs, sel, toolPtr)
+	var (
+		prefix  []fantasy.Message
+		covered bool
+	)
+	hit := false
 	if a.prefixCache != nil {
 		if c, ok := a.prefixCache.Get(sessionID); ok && c.boundary == boundary && c.fingerprint == fp {
-			return c.msgs
+			prefix, covered = c.msgs, c.covered
+			hit = true
 		}
 	}
-	prefix, files := a.renderNotebookPrefix(detCtx, sessionID, entries, msgs, bKey, floor, refs, sel, collapse, toolPtr)
-	if a.prefixCache != nil {
-		a.prefixCache.Set(sessionID, cachedPrefix{boundary: boundary, fingerprint: fp, msgs: prefix, files: files})
+	if !hit {
+		var files map[string]bool
+		prefix, files, covered = a.renderNotebookPrefix(detCtx, sessionID, entries, msgs, bKey, floor, refs, sel, collapse, toolPtr)
+		if a.prefixCache != nil {
+			a.prefixCache.Set(sessionID, cachedPrefix{boundary: boundary, fingerprint: fp, msgs: prefix, files: files, covered: covered})
+		}
 	}
-	return prefix
+	if boundary > 0 && !covered {
+		// The covered span produced no render — entries may be
+		// missing for processed segments (a zero-event segment marks
+		// coverage without writing any). Applying the boundary
+		// anyway would evict that history to nothing; the caller
+		// rolls back. The prefix still returns — nearly always nil
+		// here since an auto-inject blob needs a covered entry, but
+		// an entry committing mid-render could fill one.
+		slog.Warn("Notebook prefix rendered no covered entries; boundary will roll back",
+			"session", sessionID, "boundary", boundary)
+		return prefix, errNotebookPrefixEmpty
+	}
+	return prefix, nil
 }
 
 // rebuildStepMessages recomputes the prompt from stored messages for
@@ -1099,12 +1134,22 @@ func fantasyToolResultOutputEqual(a, b fantasy.ToolResultOutputContent) bool {
 // check; the call here covers direct render callers. toolPtr is the
 // recall-pointer suffix the caller computed once for this render —
 // the same value the fingerprint hashed, so content and cache key
-// can never split across a palette swap.
-func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID string, entries []notebook.Entry, msgs []message.Message, bKey segmentKey, floor segmentKey, refs []string, sel selectionInput, collapse *turnCollapse, toolPtr string) ([]fantasy.Message, map[string]bool) {
+// can never split across a palette swap. The third return reports
+// whether the covered span held any real entries — the signal the
+// boundary-rollback check needs, since an auto-inject blob alone is
+// not a covered-span render.
+func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID string, entries []notebook.Entry, msgs []message.Message, bKey segmentKey, floor segmentKey, refs []string, sel selectionInput, collapse *turnCollapse, toolPtr string) ([]fantasy.Message, map[string]bool, bool) {
 	var filtered []notebook.Entry
+	covered := false
 	for _, e := range entries {
 		if e.TurnNumber < bKey.turn || (e.TurnNumber == bKey.turn && e.SegmentNumber < bKey.segment) {
 			filtered = append(filtered, e)
+			// Hydration seeds key below every real boundary, so they
+			// always filter in — they must not satisfy the covered-
+			// span representation check on their own.
+			if !isHydratedSeed(e) {
+				covered = true
+			}
 		}
 	}
 	// notebookPrefix freezes digest eligibility before the cache
@@ -1138,25 +1183,36 @@ func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID strin
 				}
 			}
 		}
-		if rendered := notebook.RenderEntries(selected); rendered != "" {
-			// Turns whose every entry was budget-evicted have entries
-			// but nothing rendered. Emit a breadcrumb so the omission
-			// isn't silent — the raw window intentionally does not
-			// extend to them.
-			selectedTurns := make(map[int64]bool, len(selected))
-			for _, e := range selected {
-				selectedTurns[e.TurnNumber] = true
+		rendered := notebook.RenderEntries(selected)
+		// Turns whose every entry was budget-evicted have entries but
+		// nothing rendered. Emit a breadcrumb so the omission isn't
+		// silent — the raw window intentionally does not extend to
+		// them. The omission check runs against the FULL filtered
+		// set, so a render where every entry was evicted still emits
+		// a pointers-only notebook message rather than nothing.
+		selectedTurns := make(map[int64]bool, len(selected))
+		for _, e := range selected {
+			selectedTurns[e.TurnNumber] = true
+		}
+		var omitted []int64
+		for _, e := range filtered {
+			// Seeds key below every boundary — an evicted one would
+			// print as "turn -1", so they never join the breadcrumb.
+			if isHydratedSeed(e) {
+				continue
 			}
-			var omitted []int64
-			for _, e := range filtered {
-				if !selectedTurns[e.TurnNumber] && !slices.Contains(omitted, e.TurnNumber) {
-					omitted = append(omitted, e.TurnNumber)
-				}
+			if (rendered == "" || !selectedTurns[e.TurnNumber]) && !slices.Contains(omitted, e.TurnNumber) {
+				omitted = append(omitted, e.TurnNumber)
 			}
-			if len(omitted) > 0 {
-				slices.Sort(omitted)
-				rendered += "\n\n[turns " + formatTurnRanges(omitted) + " have notebook entries not injected here" + toolPtr + "]"
+		}
+		if len(omitted) > 0 {
+			slices.Sort(omitted)
+			if rendered != "" {
+				rendered += "\n\n"
 			}
+			rendered += "[turns " + formatTurnRanges(omitted) + " have notebook entries not injected here" + toolPtr + "]"
+		}
+		if rendered != "" {
 			msg := fantasy.NewSystemMessage("<notebook>\n" + rendered + "</notebook>")
 			out = append(out, msg)
 		}
@@ -1166,7 +1222,7 @@ func (a *sessionAgent) renderNotebookPrefix(ctx context.Context, sessionID strin
 			out = append(out, *injectMsg)
 		}
 	}
-	return out, files
+	return out, files, covered
 }
 
 // recallVia names the notebook lookup tools the rendering agent can
