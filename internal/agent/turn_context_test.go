@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"strings"
 	"testing"
 
 	"charm.land/fantasy"
@@ -116,6 +117,18 @@ func TestAmbiguityDirective(t *testing.T) {
 		}, nil))
 	})
 
+	t.Run("prior-session heat suppresses the gate", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.ambiguityClarification = true
+		prior, err := env.sessions.Create(t.Context(), "prior")
+		require.NoError(t, err)
+		(*env.filetracker).RecordRead(t.Context(), prior.ID, "auth.go")
+		require.Empty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
+			SessionID: sessionID, Prompt: "fix the bug",
+		}, nil))
+	})
+
 	t.Run("earlier user text suppresses the gate", func(t *testing.T) {
 		t.Parallel()
 		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})
@@ -175,6 +188,33 @@ func TestTurnContextBlob(t *testing.T) {
 		require.Contains(t, blob, "<turn_context>")
 		require.Contains(t, blob, "<working_set>")
 		require.Contains(t, blob, "main.go")
+	})
+
+	t.Run("session tier renders prior-session file heat", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.turnContext = "session"
+		prior, err := env.sessions.Create(t.Context(), "prior")
+		require.NoError(t, err)
+		(*env.filetracker).RecordRead(t.Context(), prior.ID, "auth.go")
+		blob := a.turnContextBlob(t.Context(), SessionAgentCall{SessionID: sessionID})
+		require.Contains(t, blob, "<file_heat>")
+		require.Contains(t, blob, "auth.go (1 sessions)")
+	})
+
+	t.Run("file heat dedupes the working set", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.turnContext = "session"
+		prior, err := env.sessions.Create(t.Context(), "prior")
+		require.NoError(t, err)
+		(*env.filetracker).RecordRead(t.Context(), prior.ID, "main.go")
+		(*env.filetracker).RecordRead(t.Context(), prior.ID, "auth.go")
+		(*env.filetracker).RecordRead(t.Context(), sessionID, "main.go")
+		blob := a.turnContextBlob(t.Context(), SessionAgentCall{SessionID: sessionID})
+		heat := blob[strings.Index(blob, "<file_heat>"):]
+		require.NotContains(t, heat, "main.go")
+		require.Contains(t, heat, "auth.go")
 	})
 
 	t.Run("session tier renders the intent record", func(t *testing.T) {

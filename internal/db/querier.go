@@ -75,6 +75,12 @@ type Querier interface {
 	ListAllUserMessages(ctx context.Context) ([]Message, error)
 	ListFilesByPath(ctx context.Context, path string) ([]File, error)
 	ListFilesBySession(ctx context.Context, sessionID string) ([]File, error)
+	// Project-wide file heat: files prior sessions in this workspace
+	// touched, ranked by persistence (how many sessions read the file)
+	// then recency. The current session is excluded -- its files are the
+	// working set, not heat; a file only this session read would carry
+	// a sessions count of 1 noise-signal anyway.
+	ListHotReadFiles(ctx context.Context, arg ListHotReadFilesParams) ([]ListHotReadFilesRow, error)
 	ListLatestSessionFiles(ctx context.Context, sessionID string) ([]File, error)
 	ListMessagesBySession(ctx context.Context, sessionID string) ([]Message, error)
 	// Messages from the summary onward, which is all a compacted session sends.

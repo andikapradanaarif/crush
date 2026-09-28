@@ -30,6 +30,10 @@ const (
 	// as a different instruction — so the budget drops whole oldest
 	// items instead.
 	turnContextIntentMaxBytes = 4096
+	// turnContextFileHeatLimit bounds the cross-session heat section —
+	// a hint list, not working state, so it runs tighter than the
+	// working-set cap.
+	turnContextFileHeatLimit = 5
 )
 
 // vagueReferentRe matches prompts that lean on a definite or anaphoric
@@ -127,12 +131,31 @@ func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCal
 	}
 
 	if a.filetracker != nil {
+		var wsSet map[string]bool
 		if files, err := a.filetracker.ListRecentReadFiles(ctx, call.SessionID, turnContextWorkingSetLimit); err == nil && len(files) > 0 {
+			wsSet = make(map[string]bool, len(files))
 			b.WriteString("<working_set>\nRecently read or edited files — the most likely referents for \"the file\", \"the bug\", and similar:\n")
 			for _, f := range files {
+				wsSet[f] = true
 				fmt.Fprintf(&b, "- %s\n", a.relWorkdir(f))
 			}
 			b.WriteString("</working_set>\n")
+		}
+		if hot, err := a.filetracker.ListHotFiles(ctx, call.SessionID, turnContextFileHeatLimit); err == nil {
+			var lines []string
+			for _, h := range hot {
+				if wsSet[h.Path] {
+					continue
+				}
+				lines = append(lines, fmt.Sprintf("- %s (%d sessions)", a.relWorkdir(h.Path), h.Sessions))
+			}
+			if len(lines) > 0 {
+				b.WriteString("<file_heat>\nFiles prior sessions in this workspace kept returning to — strong referents for vague mentions:\n")
+				for _, l := range lines {
+					b.WriteString(l + "\n")
+				}
+				b.WriteString("</file_heat>\n")
+			}
 		}
 	}
 
@@ -230,9 +253,13 @@ func (a *sessionAgent) ambiguityDirective(ctx context.Context, call SessionAgent
 	if hasSubstantiveUserMessage(msgs) {
 		return ""
 	}
-	// A non-empty working set gives the referent candidates.
+	// A non-empty working set or cross-session heat gives the
+	// referent candidates.
 	if a.filetracker != nil {
 		if files, err := a.filetracker.ListRecentReadFiles(ctx, call.SessionID, 1); err == nil && len(files) > 0 {
+			return ""
+		}
+		if hot, err := a.filetracker.ListHotFiles(ctx, call.SessionID, 1); err == nil && len(hot) > 0 {
 			return ""
 		}
 	}

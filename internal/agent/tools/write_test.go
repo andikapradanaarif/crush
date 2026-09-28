@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/stretchr/testify/require"
 )
 
@@ -21,6 +22,10 @@ func (m mockFileTrackerService) LastReadTime(ctx context.Context, sessionID, pat
 }
 
 func (m mockFileTrackerService) ListReadFiles(ctx context.Context, sessionID string) ([]string, error) {
+	return nil, nil
+}
+
+func (m mockFileTrackerService) ListHotFiles(ctx context.Context, sessionID string, limit int) ([]filetracker.HotFile, error) {
 	return nil, nil
 }
 

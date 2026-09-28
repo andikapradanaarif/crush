@@ -248,6 +248,10 @@ func (m mockFileTracker) ListReadFiles(ctx context.Context, sessionID string) ([
 	return nil, nil
 }
 
+func (m mockFileTracker) ListHotFiles(ctx context.Context, sessionID string, limit int) ([]filetracker.HotFile, error) {
+	return nil, nil
+}
+
 func (m mockFileTracker) ListRecentReadFiles(ctx context.Context, sessionID string, limit int) ([]string, error) {
 	return nil, nil
 }
