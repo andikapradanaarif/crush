@@ -153,6 +153,32 @@ func TestService_RecordRead_KeysStableAcrossCwd(t *testing.T) {
 	require.Equal(t, []string{path}, paths)
 }
 
+func TestService_RelativeWorkingDirResolvesAtConstruction(t *testing.T) {
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+
+	parent := t.TempDir()
+	t.Chdir(parent)
+	svc := NewService(db.New(conn), "ws")
+
+	ctx := t.Context()
+	sessionID := "test-session-relroot"
+	_, err = db.New(conn).CreateSession(ctx, db.CreateSessionParams{
+		ID:    sessionID,
+		Title: "Test Session",
+	})
+	require.NoError(t, err)
+
+	path := filepath.Join(parent, "ws", "file.go")
+	svc.RecordRead(ctx, sessionID, path)
+	require.False(t, svc.LastReadTime(ctx, sessionID, path).IsZero())
+
+	paths, err := svc.ListReadFiles(ctx, sessionID)
+	require.NoError(t, err)
+	require.Equal(t, []string{path}, paths)
+}
+
 func TestService_RecordRead_RelativeInputResolvesToWorkspace(t *testing.T) {
 	env := setupTest(t)
 

@@ -38,8 +38,15 @@ type service struct {
 // NewService creates a new file tracker service rooted at workingDir.
 // Paths are stored relative to workingDir and resolved back against it,
 // so the same file keys identically across sessions and processes
-// regardless of the process's current working directory.
+// regardless of the process's current working directory. workingDir is
+// made absolute at construction; keys are lexical — paths are matched
+// by spelling, so symlinked roots keep the caller's spelling rather
+// than canonicalizing (consistent with how WorkingDir-derived paths
+// reach the tools).
 func NewService(q *db.Queries, workingDir string) Service {
+	if abs, err := filepath.Abs(workingDir); err == nil {
+		workingDir = abs
+	}
 	return &service{q: q, workingDir: workingDir}
 }
 
