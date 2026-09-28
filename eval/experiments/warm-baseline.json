@@ -15,10 +15,18 @@
 	},
 	"arms": {
 		"control": {
-			"config": {}
+			"config": {
+				"options": {
+					"turn_context": "off"
+				}
+			}
 		},
 		"treatment": {
-			"config": {}
+			"config": {
+				"options": {
+					"turn_context": "session"
+				}
+			}
 		}
 	},
 	"providers": {
