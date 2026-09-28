@@ -133,6 +133,9 @@ func (s *service) ListRecentReadFiles(ctx context.Context, sessionID string, lim
 // ListHotFiles returns the cross-session file heat for the workspace:
 // files other sessions read, most persistent then most recent first.
 func (s *service) ListHotFiles(ctx context.Context, sessionID string, limit int) ([]HotFile, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
 	rows, err := s.q.ListHotReadFiles(ctx, db.ListHotReadFilesParams{
 		SessionID: sessionID,
 		Limit:     int64(limit),

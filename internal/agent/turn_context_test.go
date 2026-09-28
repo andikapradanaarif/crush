@@ -199,7 +199,7 @@ func TestTurnContextBlob(t *testing.T) {
 		(*env.filetracker).RecordRead(t.Context(), prior.ID, "auth.go")
 		blob := a.turnContextBlob(t.Context(), SessionAgentCall{SessionID: sessionID})
 		require.Contains(t, blob, "<file_heat>")
-		require.Contains(t, blob, "auth.go (1 sessions)")
+		require.Contains(t, blob, "auth.go (1 session)")
 	})
 
 	t.Run("file heat dedupes the working set", func(t *testing.T) {
