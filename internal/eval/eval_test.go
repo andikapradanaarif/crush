@@ -124,6 +124,44 @@ func TestValidateTrajectory_OK(t *testing.T) {
 	require.Equal(t, "t1", tr.ID)
 }
 
+func TestValidateTrajectory_PriorSessionsNeedTurns(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	dir := writeTrajectory(t, filepath.Join(root, "corpus"), "t1", map[string]any{
+		"prior_sessions": []any{
+			map[string]any{"turns": []string{"explore — change nothing"}},
+			map[string]any{"turns": []string{}},
+			map[string]any{"turns": []string{"  "}},
+		},
+	})
+	_, err := LoadTrajectory(dir)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "prior_sessions[1].turns must contain at least one prompt")
+	require.Contains(t, err.Error(), "prior_sessions[2].turns[0] is empty")
+}
+
+// warm_start.* predicates on a cold trajectory can never be met —
+// the ledger only exists when prior_sessions seeds. Reject at load
+// rather than starving every run inconclusive.
+func TestValidateTrajectory_WarmStartCoverageNeedsPriorSessions(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	dir := writeTrajectory(t, filepath.Join(root, "corpus"), "t1", map[string]any{
+		"coverage": map[string]any{"min_warm_start.sessions": 1},
+	})
+	_, err := LoadTrajectory(dir)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "warm_start.* requires prior_sessions")
+
+	// Same predicate on a seeded trajectory loads clean.
+	dir = writeTrajectory(t, filepath.Join(root, "corpus"), "t2", map[string]any{
+		"prior_sessions": []any{map[string]any{"turns": []string{"seed"}}},
+		"coverage":       map[string]any{"min_warm_start.sessions": 1},
+	})
+	_, err = LoadTrajectory(dir)
+	require.NoError(t, err)
+}
+
 // --- content hash ---
 
 func TestContentHash_ScopesToRevision(t *testing.T) {
@@ -919,6 +957,14 @@ func TestValidateArmCoverageVsCorpus(t *testing.T) {
 	// max_ bounds and non-turn-bounded fields pass anywhere.
 	require.NoError(t, ValidateArmCoverageVsCorpus(mk(Coverage{"max_prior_turns.turns_collapsed": 5}), []*Trajectory{mkTraj("one", 1)}))
 	require.NoError(t, ValidateArmCoverageVsCorpus(mk(Coverage{"min_checkpoints.written": 9}), trajs3))
+
+	// warm_start.* reads a ledger only seeded trajectories produce —
+	// rejected on cold ones regardless of operator.
+	warm := []*Trajectory{mkTraj("w", 1)}
+	warm[0].PriorSessions = PriorSessions{{Turns: []string{"seed"}}}
+	require.Error(t, ValidateArmCoverageVsCorpus(mk(Coverage{"min_warm_start.sessions": 1}), trajs3))
+	require.Error(t, ValidateArmCoverageVsCorpus(mk(Coverage{"max_warm_start.steps": 5}), trajs3))
+	require.NoError(t, ValidateArmCoverageVsCorpus(mk(Coverage{"min_warm_start.sessions": 1}), warm))
 
 	// A violation on ANY selected trajectory errors and names it.
 	err := ValidateArmCoverageVsCorpus(mk(Coverage{"min_prior_turns.turns_collapsed": 1}), []*Trajectory{mkTraj("ok", 3), mkTraj("short", 1)})

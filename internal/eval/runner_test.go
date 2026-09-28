@@ -1296,3 +1296,180 @@ func TestValidateArmCoverageResolved_FlagGatedPrimary(t *testing.T) {
 	exp.Arms[ArmControl] = exp.Arms[ArmTreatment]
 	require.NoError(t, ValidateArmCoverageResolved(exp, manifest))
 }
+
+// seedRecorder drives ExecuteRun's prior_sessions loop — records each
+// call's workdir and turns in order and stamps a session id, so a
+// test can assert seeds ran before the measured task on one workdir.
+// failAt fails the Nth call with Err, timeoutAt times it out (1-based).
+// Every call drops a crush.db so the run's preservation step has an
+// artifact to snapshot.
+type seedRecorder struct {
+	calls     [][]string
+	workdirs  []string
+	failAt    int
+	timeoutAt int
+	gen       bool // every call reports sidecar generation spend
+}
+
+func (s *seedRecorder) Run(_ context.Context, workdir string, turns []string, _ Budget) RunResult {
+	s.calls = append(s.calls, turns)
+	s.workdirs = append(s.workdirs, workdir)
+	dataDir := DataDirFor(workdir)
+	_ = os.MkdirAll(dataDir, 0o755)
+	_ = os.WriteFile(filepath.Join(dataDir, "crush.db"), []byte("seeddb"), 0o644)
+	res := RunResult{
+		Steps:         2,
+		SessionID:     fmt.Sprintf("sess-%d", len(s.calls)),
+		ModelResolved: "mock/m",
+		Tokens:        TokenUsage{Input: 10, Output: 5},
+	}
+	if s.gen {
+		res.GeneratorTokens = GeneratorTokens{Calls: 1, Input: 100, Output: 20}
+	}
+	switch len(s.calls) {
+	case s.failAt:
+		res.Err = fmt.Errorf("seed session blew up")
+		res.ErrorClass = "provider_deterministic"
+	case s.timeoutAt:
+		res.TimedOut = true
+	default:
+		_ = os.WriteFile(filepath.Join(workdir, "fixed.marker"), []byte("x"), 0o644)
+	}
+	return res
+}
+
+// Warm-start ordering: prior_sessions run first as separate sessions
+// on one workdir, then the measured task — the record's Steps/Tokens
+// stay the measured session's while WarmStart carries the seeding
+// ledger.
+func TestExecuteRun_PriorSessionsSeedThenMeasure(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "warm-t", map[string]any{
+		"prior_sessions": []any{
+			map[string]any{"turns": []string{"explore — change nothing"}},
+			map[string]any{"turns": []string{"explain the bug"}},
+		},
+		"task": map[string]any{"turns": []string{"fix it"}},
+	})
+	tr, err := LoadTrajectory(trajDir)
+	require.NoError(t, err)
+	drv := &seedRecorder{gen: true}
+	r := &Runner{
+		EvalDir:    root,
+		Driver:     drv,
+		WorkParent: t.TempDir(),
+		RNG:        rand.New(rand.NewPCG(1, 2)),
+	}
+	exp := &Experiment{Name: "exp1", Model: "mock/m", Temperature: ptr(0.0)}
+	manifest := &FlagsManifest{Defaults: map[string]any{}}
+
+	rec, err := r.ExecuteRun(context.Background(), exp, tr, trajDir, ArmControl, Arm{}, manifest, 1, "inv")
+	require.NoError(t, err)
+	require.Equal(t, OutcomePass, rec.Outcome)
+
+	require.Len(t, drv.calls, 3)
+	require.Equal(t, []string{"explore — change nothing"}, drv.calls[0])
+	require.Equal(t, []string{"explain the bug"}, drv.calls[1])
+	require.Equal(t, []string{"fix it"}, drv.calls[2])
+	require.Equal(t, drv.workdirs[0], drv.workdirs[2],
+		"seeds and the measured session share one workdir + crush.db")
+
+	require.NotNil(t, rec.WarmStart)
+	require.Equal(t, 2, rec.WarmStart.Sessions)
+	require.Equal(t, []string{"sess-1", "sess-2"}, rec.WarmStart.SessionIDs)
+	require.Equal(t, 4, rec.WarmStart.Steps)
+	require.Equal(t, int64(20), rec.WarmStart.Tokens.Input)
+	require.Equal(t, 2, rec.WarmStart.GeneratorTokens.Calls)
+	require.Equal(t, int64(200), rec.WarmStart.GeneratorTokens.Input,
+		"the seeds' sidecar generation spend is priced in the ledger")
+	require.Equal(t, 2, rec.Steps, "recorded steps are the measured session's, not the seeds'")
+	require.NotNil(t, rec.GeneratorTokens)
+	require.Equal(t, 1, rec.GeneratorTokens.Calls,
+		"the record's sidecar count is the measured session's alone")
+	require.Equal(t, "sess-3", rec.SessionID,
+		"the record names the measured session — seeds live in warm_start.session_ids")
+}
+
+// A seed that errors leaves a warm state other than the designed
+// one — error out instead of measuring a degraded seeding, and never
+// launch the measured session. The failure path still preserves the
+// db (the artifact the session ids point at), reports the seed's
+// ErrorClass for the circuit breaker, and counts real wall clock.
+func TestExecuteRun_PriorSessionFailureIsError(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "warm-t", map[string]any{
+		"prior_sessions": []any{
+			map[string]any{"turns": []string{"first seed"}},
+			map[string]any{"turns": []string{"second seed"}},
+		},
+		"task": map[string]any{"turns": []string{"fix it"}},
+	})
+	tr, err := LoadTrajectory(trajDir)
+	require.NoError(t, err)
+	drv := &seedRecorder{failAt: 1}
+	r := &Runner{
+		EvalDir:    root,
+		Driver:     drv,
+		WorkParent: t.TempDir(),
+		RNG:        rand.New(rand.NewPCG(1, 2)),
+	}
+	exp := &Experiment{Name: "exp1", Model: "mock/m", Temperature: ptr(0.0)}
+	manifest := &FlagsManifest{Defaults: map[string]any{}}
+
+	rec, err := r.ExecuteRun(context.Background(), exp, tr, trajDir, ArmControl, Arm{}, manifest, 1, "inv")
+	require.NoError(t, err)
+	require.Equal(t, OutcomeError, rec.Outcome)
+	require.Contains(t, rec.CheckDetail["prior_session"], "seed 1 of 2")
+	require.Len(t, drv.calls, 1, "no further session launches after a failed seed")
+	require.Equal(t, "provider_deterministic", rec.ErrorClass,
+		"the breaker reads the seed's typed class, not a bare error")
+	require.Positive(t, rec.DurationS, "seeding wall clock was real")
+	require.NotEmpty(t, rec.SessionDB,
+		"the failed seed's db is preserved — the artifact session_ids promise")
+	require.True(t, rec.SessionDBIncomplete,
+		"the stub db isn't SQLite — the raw-copy fallback marks it incomplete")
+	require.NotNil(t, rec.WarmStart)
+	require.Equal(t, 1, rec.WarmStart.Sessions, "sessions counts attempted, not declared")
+	require.Equal(t, []string{"sess-1"}, rec.WarmStart.SessionIDs,
+		"the failed seed's session id is recorded — the db artifact holds it for forensics")
+
+	// The cold path is untouched: no prior_sessions → no ledger.
+	tr.PriorSessions = nil
+	rec, err = r.ExecuteRun(context.Background(), exp, tr, trajDir, ArmControl, Arm{}, manifest, 2, "inv")
+	require.NoError(t, err)
+	require.Nil(t, rec.WarmStart)
+}
+
+// A timed-out seed is a failed seeding, not a measured-run timeout —
+// the record classifies it error with the same preservation as an
+// errored seed.
+func TestExecuteRun_PriorSessionTimeoutIsError(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "warm-t", map[string]any{
+		"prior_sessions": []any{
+			map[string]any{"turns": []string{"only seed"}},
+		},
+		"task": map[string]any{"turns": []string{"fix it"}},
+	})
+	tr, err := LoadTrajectory(trajDir)
+	require.NoError(t, err)
+	drv := &seedRecorder{timeoutAt: 1}
+	r := &Runner{
+		EvalDir:    root,
+		Driver:     drv,
+		WorkParent: t.TempDir(),
+		RNG:        rand.New(rand.NewPCG(1, 2)),
+	}
+	exp := &Experiment{Name: "exp1", Model: "mock/m", Temperature: ptr(0.0)}
+	manifest := &FlagsManifest{Defaults: map[string]any{}}
+
+	rec, err := r.ExecuteRun(context.Background(), exp, tr, trajDir, ArmControl, Arm{}, manifest, 1, "inv")
+	require.NoError(t, err)
+	require.Equal(t, OutcomeError, rec.Outcome)
+	require.Contains(t, rec.CheckDetail["prior_session"], "timeout=true")
+	require.Len(t, drv.calls, 1)
+	require.NotEmpty(t, rec.SessionDB)
+}

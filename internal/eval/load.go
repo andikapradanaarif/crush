@@ -119,6 +119,13 @@ func ValidateTrajectory(t *Trajectory, trajDir string) []string {
 				}
 			}
 		}
+		// warm_start.* reads a ledger that only exists when the
+		// trajectory seeds — the predicate would fail closed on
+		// every run of a cold trajectory: permanently inconclusive
+		// at load time, not a runtime surprise.
+		if strings.HasPrefix(field, "warm_start.") && len(t.PriorSessions) == 0 {
+			problems = append(problems, fmt.Sprintf("coverage %q: warm_start.* requires prior_sessions — a cold trajectory carries no seeding ledger", key))
+		}
 	}
 	if t.Requires.Network != nil && !*t.Requires.Network && t.StartState.Kind == "git" {
 		repo := t.StartState.Repo
@@ -133,6 +140,18 @@ func ValidateTrajectory(t *Trajectory, trajDir string) []string {
 		for i, turn := range t.Task.Turns {
 			if strings.TrimSpace(turn) == "" {
 				problems = append(problems, fmt.Sprintf("task.turns[%d] is empty", i))
+			}
+		}
+	}
+
+	for i, ps := range t.PriorSessions {
+		if len(ps.Turns) == 0 {
+			problems = append(problems, fmt.Sprintf("prior_sessions[%d].turns must contain at least one prompt", i))
+			continue
+		}
+		for j, turn := range ps.Turns {
+			if strings.TrimSpace(turn) == "" {
+				problems = append(problems, fmt.Sprintf("prior_sessions[%d].turns[%d] is empty", i, j))
 			}
 		}
 	}
@@ -768,6 +787,10 @@ func ValidateArmCoverageVsCorpus(e *Experiment, trajs []*Trajectory) error {
 				op, field, err := ParseArmCoverageKey(key)
 				if err != nil {
 					continue // Load-time validation reports the bad key.
+				}
+				if strings.HasPrefix(field, "warm_start.") && len(t.PriorSessions) == 0 {
+					problems = append(problems, fmt.Sprintf("arm %q coverage %q: warm_start.* requires prior_sessions on trajectory %q — a cold run carries no seeding ledger", name, key, t.ID))
+					continue
 				}
 				if op != "min" {
 					continue
