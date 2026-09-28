@@ -1308,6 +1308,7 @@ type seedRecorder struct {
 	workdirs  []string
 	failAt    int
 	timeoutAt int
+	gen       bool // every call reports sidecar generation spend
 }
 
 func (s *seedRecorder) Run(_ context.Context, workdir string, turns []string, _ Budget) RunResult {
@@ -1321,6 +1322,9 @@ func (s *seedRecorder) Run(_ context.Context, workdir string, turns []string, _ 
 		SessionID:     fmt.Sprintf("sess-%d", len(s.calls)),
 		ModelResolved: "mock/m",
 		Tokens:        TokenUsage{Input: 10, Output: 5},
+	}
+	if s.gen {
+		res.GeneratorTokens = GeneratorTokens{Calls: 1, Input: 100, Output: 20}
 	}
 	switch len(s.calls) {
 	case s.failAt:
@@ -1350,7 +1354,7 @@ func TestExecuteRun_PriorSessionsSeedThenMeasure(t *testing.T) {
 	})
 	tr, err := LoadTrajectory(trajDir)
 	require.NoError(t, err)
-	drv := &seedRecorder{}
+	drv := &seedRecorder{gen: true}
 	r := &Runner{
 		EvalDir:    root,
 		Driver:     drv,
@@ -1376,7 +1380,13 @@ func TestExecuteRun_PriorSessionsSeedThenMeasure(t *testing.T) {
 	require.Equal(t, []string{"sess-1", "sess-2"}, rec.WarmStart.SessionIDs)
 	require.Equal(t, 4, rec.WarmStart.Steps)
 	require.Equal(t, int64(20), rec.WarmStart.Tokens.Input)
+	require.Equal(t, 2, rec.WarmStart.GeneratorTokens.Calls)
+	require.Equal(t, int64(200), rec.WarmStart.GeneratorTokens.Input,
+		"the seeds' sidecar generation spend is priced in the ledger")
 	require.Equal(t, 2, rec.Steps, "recorded steps are the measured session's, not the seeds'")
+	require.NotNil(t, rec.GeneratorTokens)
+	require.Equal(t, 1, rec.GeneratorTokens.Calls,
+		"the record's sidecar count is the measured session's alone")
 	require.Equal(t, "sess-3", rec.SessionID,
 		"the record names the measured session — seeds live in warm_start.session_ids")
 }

@@ -367,13 +367,17 @@ type RunRecord struct {
 
 // WarmStart is the run's seeding ledger — count, session ids, and
 // total spend across the prior sessions that preceded the measured
-// task.
+// task. GeneratorTokens carries the seeds' sidecar spend
+// specifically: warm-start is exactly the tier where seed sessions
+// generate notebook entries, and weighted_cost deliberately ignores
+// seed spend — the ledger is the vehicle for pricing it.
 type WarmStart struct {
-	Sessions   int        `json:"sessions"`
-	SessionIDs []string   `json:"session_ids,omitempty"`
-	Steps      int        `json:"steps"`
-	Tokens     TokenUsage `json:"tokens"`
-	DurationS  float64    `json:"duration_s"`
+	Sessions        int             `json:"sessions"`
+	SessionIDs      []string        `json:"session_ids,omitempty"`
+	Steps           int             `json:"steps"`
+	Tokens          TokenUsage      `json:"tokens"`
+	GeneratorTokens GeneratorTokens `json:"generator_tokens"`
+	DurationS       float64         `json:"duration_s"`
 }
 
 // RequestStats is the run's request-size snapshot: the last rendered

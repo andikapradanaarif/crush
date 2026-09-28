@@ -60,6 +60,25 @@ var coverageFields = map[string]func(*RunRecord) float64{
 	"warm_start.tokens.output":      func(r *RunRecord) float64 { return float64(warmStart(r).Tokens.Output) },
 	"warm_start.tokens.cache_read":  func(r *RunRecord) float64 { return float64(warmStart(r).Tokens.CacheRead) },
 	"warm_start.tokens.cache_write": func(r *RunRecord) float64 { return float64(warmStart(r).Tokens.CacheWrite) },
+	// generator_tokens.* inside the ledger reports honest zeros on a
+	// warm run whose seeds never generated — the nil-guard at
+	// warm_start.* is the cold-run boundary, and no deeper guard is
+	// needed: 0 calls is a measurement, not an absence.
+	"warm_start.generator_tokens.calls": func(r *RunRecord) float64 {
+		return float64(warmStart(r).GeneratorTokens.Calls)
+	},
+	"warm_start.generator_tokens.input": func(r *RunRecord) float64 {
+		return float64(warmStart(r).GeneratorTokens.Input)
+	},
+	"warm_start.generator_tokens.output": func(r *RunRecord) float64 {
+		return float64(warmStart(r).GeneratorTokens.Output)
+	},
+	"warm_start.generator_tokens.cache_read": func(r *RunRecord) float64 {
+		return float64(warmStart(r).GeneratorTokens.CacheRead)
+	},
+	"warm_start.generator_tokens.cache_write": func(r *RunRecord) float64 {
+		return float64(warmStart(r).GeneratorTokens.CacheWrite)
+	},
 	// pressure.* is the gate's own coverage — activations counts
 	// engage transitions (the "did it fire" predicate), engaged the
 	// latch as 0/1. Flag-gated on notebook_pressure_gate (and

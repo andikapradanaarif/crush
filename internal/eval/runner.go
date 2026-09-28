@@ -297,6 +297,16 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 			warm.Tokens.Output += seed.Tokens.Output
 			warm.Tokens.CacheRead += seed.Tokens.CacheRead
 			warm.Tokens.CacheWrite += seed.Tokens.CacheWrite
+			// Sidecar spend is the cost this tier exists to
+			// measure — seeds generating entries must be priced.
+			// A seed dying before telemetry lands contributes
+			// zeros: the ledger understates partial spend, like
+			// the measured run's fields do.
+			warm.GeneratorTokens.Calls += seed.GeneratorTokens.Calls
+			warm.GeneratorTokens.Input += seed.GeneratorTokens.Input
+			warm.GeneratorTokens.Output += seed.GeneratorTokens.Output
+			warm.GeneratorTokens.CacheRead += seed.GeneratorTokens.CacheRead
+			warm.GeneratorTokens.CacheWrite += seed.GeneratorTokens.CacheWrite
 			if seed.SessionID != "" {
 				warm.SessionIDs = append(warm.SessionIDs, seed.SessionID)
 			}
