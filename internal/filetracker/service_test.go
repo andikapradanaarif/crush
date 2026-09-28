@@ -2,6 +2,7 @@ package filetracker
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -11,9 +12,10 @@ import (
 )
 
 type testEnv struct {
-	ctx context.Context
-	q   *db.Queries
-	svc Service
+	ctx        context.Context
+	q          *db.Queries
+	svc        Service
+	workingDir string
 }
 
 func setupTest(t *testing.T) *testEnv {
@@ -23,11 +25,13 @@ func setupTest(t *testing.T) *testEnv {
 	require.NoError(t, err)
 	t.Cleanup(func() { conn.Close() })
 
+	workingDir := t.TempDir()
 	q := db.New(conn)
 	return &testEnv{
-		ctx: t.Context(),
-		q:   q,
-		svc: NewService(q),
+		ctx:        t.Context(),
+		q:          q,
+		svc:        NewService(q, workingDir),
+		workingDir: workingDir,
 	}
 }
 
@@ -113,4 +117,58 @@ func TestService_RecordRead_DifferentPaths(t *testing.T) {
 
 	lastRead2 := env.svc.LastReadTime(env.ctx, sessionID, path2)
 	require.True(t, lastRead2.IsZero(), "path2 should not be recorded")
+}
+
+func TestService_RecordRead_StoresWorkspaceRelativePath(t *testing.T) {
+	env := setupTest(t)
+
+	sessionID := "test-session-rel"
+	path := filepath.Join(env.workingDir, "sub", "file.go")
+	env.createSession(t, sessionID)
+
+	env.svc.RecordRead(env.ctx, sessionID, path)
+
+	readFiles, err := env.q.ListSessionReadFiles(env.ctx, sessionID)
+	require.NoError(t, err)
+	require.Len(t, readFiles, 1)
+	require.Equal(t, filepath.Join("sub", "file.go"), readFiles[0].Path)
+}
+
+func TestService_RecordRead_KeysStableAcrossCwd(t *testing.T) {
+	env := setupTest(t)
+
+	sessionID := "test-session-cwd"
+	path := filepath.Join(env.workingDir, "file.go")
+	env.createSession(t, sessionID)
+
+	// Recording and lookup happen under a cwd unrelated to the
+	// workspace root; the stored key must not move.
+	t.Chdir(t.TempDir())
+
+	env.svc.RecordRead(env.ctx, sessionID, path)
+	require.False(t, env.svc.LastReadTime(env.ctx, sessionID, path).IsZero())
+
+	paths, err := env.svc.ListReadFiles(env.ctx, sessionID)
+	require.NoError(t, err)
+	require.Equal(t, []string{path}, paths)
+}
+
+func TestService_RecordRead_RelativeInputResolvesToWorkspace(t *testing.T) {
+	env := setupTest(t)
+
+	sessionID := "test-session-relin"
+	env.createSession(t, sessionID)
+
+	t.Chdir(t.TempDir())
+
+	env.svc.RecordRead(env.ctx, sessionID, "sub/file.go")
+
+	readFiles, err := env.q.ListSessionReadFiles(env.ctx, sessionID)
+	require.NoError(t, err)
+	require.Len(t, readFiles, 1)
+	require.Equal(t, filepath.Join("sub", "file.go"), readFiles[0].Path)
+
+	paths, err := env.svc.ListReadFiles(env.ctx, sessionID)
+	require.NoError(t, err)
+	require.Equal(t, []string{filepath.Join(env.workingDir, "sub", "file.go")}, paths)
 }
