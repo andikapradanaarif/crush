@@ -669,9 +669,10 @@ func TestPreparePrompt_PrefixFailureRollsBackBoundary(t *testing.T) {
 	t.Parallel()
 
 	// emptyEntryGen marks coverage without writing content-echoing
-	// entries. The marker is the turn's user text: entries cover only
-	// tool events, so "EARLYTURN" appears in raw history (message and
-	// tool-call IDs) but never in the prefix.
+	// entries. The eviction marker is the covered turn's tool calls:
+	// the intent record re-renders the user statement verbatim and
+	// deterministic entries echo step text, so raw history is proven
+	// dropped only by the calls' presence.
 	a, svc, nb, sessionID := newSegmentTestAgent(t, emptyEntryGen{})
 	a.reqStats = csync.NewMap[string, requestStats]()
 	a.segmentMaxSteps = 2
@@ -692,8 +693,7 @@ func TestPreparePrompt_PrefixFailureRollsBackBoundary(t *testing.T) {
 	// A small raw budget pushes the boundary onto covered segments.
 	a.rawTokenBudget = 20
 	engagedHistory, _ := a.preparePrompt(ctx, msgs, false, nil, true)
-	engagedText := renderedText(engagedHistory)
-	require.NotContains(t, engagedText, "EARLYTURN",
+	require.False(t, callPresent(engagedHistory, "tc-EARLYTURN-a"),
 		"sanity check: covered history is evicted when the prefix renders")
 
 	// Same render under a failing prefix read: verbatim fallback — the
@@ -701,7 +701,7 @@ func TestPreparePrompt_PrefixFailureRollsBackBoundary(t *testing.T) {
 	a.notebook = failingEntriesNotebook{Service: nb, err: errors.New("db read failed")}
 	fallbackHistory, _ := a.preparePrompt(ctx, msgs, false, nil, true)
 	text := renderedText(fallbackHistory)
-	require.Contains(t, text, "EARLYTURN",
+	require.True(t, callPresent(fallbackHistory, "tc-EARLYTURN-a"),
 		"prefix failure must keep the covered span's raw history")
 	require.Contains(t, text, "LATETURN")
 
@@ -722,8 +722,10 @@ func TestPreparePrompt_EmptyCoverageRollsBackBoundary(t *testing.T) {
 	ctx := t.Context()
 
 	// Turn 1 is pure assistant text — zero events, zero entries, but
-	// the segments still mark processed on the second pass.
-	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "EARLYTEXT"})
+	// the segments still mark processed on the second pass. The user
+	// message is hidden: a visible statement would store an intent
+	// entry and make the covered prefix non-empty by design.
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "EARLYTEXT", Hidden: true})
 	for range 4 {
 		mkMsg(t, svc, sessionID, message.Assistant, message.TextContent{Text: "thinking out loud"})
 	}

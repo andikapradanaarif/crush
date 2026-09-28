@@ -307,14 +307,18 @@ func (s *service) noteCompactProgress(sessionID string) {
 }
 
 // pinnedEntryIDs returns the IDs of entries compaction must not
-// compress: entries pinned to files under active edit, plus the
-// latest checkpoint at each position granularity. A pinned boundary
-// or session checkpoint is fully exempt — compressing the consolidated
-// position to a sentence would destroy the Established/Open structure
-// it exists to carry. Only the latest per granularity pins: historical
-// checkpoints compress like any other entry once a newer position
-// lands. Turn-grain digests are ordinary entries — compressible and
-// unpinned.
+// compress: entries pinned to files under active edit, the latest
+// checkpoint at each position granularity, and every intent item. A
+// pinned boundary or session checkpoint is fully exempt — compressing
+// the consolidated position to a sentence would destroy the
+// Established/Open structure it exists to carry. Only the latest per
+// granularity pins: historical checkpoints compress like any other
+// entry once a newer position lands. Intent items pin for the same
+// reason — level-1 compression keeps the first sentence, which for
+// this shape is the "## User instruction" heading alone, silently
+// losing the verbatim statement; they are bounded by intentMaxChars so
+// the pin is cheap. Turn-grain digests are ordinary entries —
+// compressible and unpinned.
 func (s *service) pinnedEntryIDs(ctx context.Context, sessionID string) (map[string]bool, error) {
 	entries, err := s.GetEntries(ctx, sessionID)
 	if err != nil {
@@ -325,10 +329,11 @@ func (s *service) pinnedEntryIDs(ctx context.Context, sessionID string) (map[str
 		ids[e] = true
 	}
 	tags := PinnedFileTags(entries)
-	if len(tags) == 0 && len(ids) == 0 {
-		return nil, nil
-	}
 	for _, e := range entries {
+		if e.EventType == EventUserIntent {
+			ids[e.ID] = true
+			continue
+		}
 		// Checkpoints are pinned only via LatestCheckpointIDs above —
 		// a stale checkpoint's file: tags must not keep it pinned.
 		if e.EventType == EventCheckpoint {
@@ -340,6 +345,9 @@ func (s *service) pinnedEntryIDs(ctx context.Context, sessionID string) (map[str
 				break
 			}
 		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
 	}
 	return ids, nil
 }

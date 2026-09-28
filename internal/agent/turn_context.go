@@ -169,12 +169,21 @@ func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCal
 // intentLine renders one intent item for the tail: the verbatim
 // statement with its embedded heading stripped, labeled by provenance
 // — turn number for this session's statements, "prior session" for
-// hydrated seeds.
+// hydrated seeds. Hydrated items carry a "_Seeded from …" preamble
+// paragraph that duplicates the label's provenance signal, so it is
+// stripped; internal newlines collapse to keep the statement one
+// bullet (a newline before "-" would inject a phantom list item).
 func intentLine(e notebook.Entry) string {
 	text := e.EntryText
 	if i := strings.IndexByte(text, '\n'); i >= 0 {
 		text = text[i+1:]
 	}
+	if rest, ok := strings.CutPrefix(strings.TrimSpace(text), "_Seeded from"); ok {
+		if i := strings.IndexByte(rest, '\n'); i >= 0 {
+			text = rest[i+1:]
+		}
+	}
+	text = strings.Join(strings.Fields(text), " ")
 	label := fmt.Sprintf("turn %d", e.TurnNumber)
 	if e.TurnNumber == notebook.HydrationTurnNumber {
 		label = "prior session"

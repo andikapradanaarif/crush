@@ -119,12 +119,21 @@ func intentEntries(msgs []message.Message) []GeneratedEntry {
 		if msg.Role != message.User {
 			continue
 		}
-		text := strings.TrimSpace(msg.Content().Text)
+		// Hidden text parts are generated continuations kept for model
+		// history ("Implement the plan.") — not user statements, so they
+		// never enter the intent record.
+		var texts []string
+		for _, part := range msg.Parts {
+			if c, ok := part.(message.TextContent); ok && !c.Hidden {
+				texts = append(texts, c.Text)
+			}
+		}
+		text := strings.TrimSpace(strings.Join(texts, "\n"))
 		if text == "" {
 			continue
 		}
-		if len(text) > intentMaxChars {
-			text = text[:intentMaxChars-1] + "…"
+		if runes := []rune(text); len(runes) > intentMaxChars {
+			text = string(runes[:intentMaxChars-1]) + "…"
 		}
 		out = append(out, GeneratedEntry{
 			EventType: EventUserIntent,
@@ -660,6 +669,17 @@ func boolToInt64(b bool) int64 {
 	return 0
 }
 
+// storeIntentEntries persists the turn's verbatim intent items —
+// stored even when a turn carries no other entries, since a bare
+// constraint is exactly what the intent record exists to keep.
+func (s *service) storeIntentEntries(ctx context.Context, sessionID string, turnNumber int64, intents []GeneratedEntry) {
+	for _, entry := range intents {
+		if err := storeEntry(ctx, s.q, sessionID, turnNumber, 0, 0, entry, true, "", ""); err != nil {
+			slog.Error("Failed to store intent entry", "error", err)
+		}
+	}
+}
+
 // GenerateEntries implements the Service interface.
 func (s *service) GenerateEntries(ctx context.Context, sessionID string, turnNumber int64, msgs []message.Message) error {
 	significant, trivial := classifyEvents(msgs)
@@ -687,19 +707,11 @@ func (s *service) GenerateEntries(ctx context.Context, sessionID string, turnNum
 	// decision, this is a trivial turn — but a user statement still
 	// lands in the intent record.
 	if len(significant) == 0 && len(trivial) == 0 {
-		for _, entry := range intents {
-			if err := storeEntry(ctx, s.q, sessionID, turnNumber, 0, 0, entry, true, "", ""); err != nil {
-				slog.Error("Failed to store intent entry", "error", err)
-			}
-		}
+		s.storeIntentEntries(ctx, sessionID, turnNumber, intents)
 		return nil
 	}
 
-	for _, entry := range intents {
-		if err := storeEntry(ctx, s.q, sessionID, turnNumber, 0, 0, entry, true, "", ""); err != nil {
-			slog.Error("Failed to store intent entry", "error", err)
-		}
-	}
+	s.storeIntentEntries(ctx, sessionID, turnNumber, intents)
 
 	// Store trivial exploration mini-entry.
 	if len(trivial) > 0 {

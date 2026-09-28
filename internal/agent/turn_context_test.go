@@ -204,8 +204,18 @@ func TestTurnContextBlob(t *testing.T) {
 			TurnNumber: notebook.HydrationTurnNumber,
 			EntryText:  "## User instruction\n_Seeded from an earlier session._\n\nnever commit secrets",
 		})
-		require.Contains(t, line, "prior session: ")
-		require.Contains(t, line, "never commit secrets")
+		// The seed preamble duplicates the "prior session" label —
+		// the rendered line is the bare statement.
+		require.Equal(t, "- prior session: never commit secrets\n", line)
+	})
+
+	t.Run("intentLine collapses multi-line statements to one bullet", func(t *testing.T) {
+		t.Parallel()
+		line := intentLine(notebook.Entry{
+			TurnNumber: 3,
+			EntryText:  "## User instruction\nuse sqlite\n- never an ORM",
+		})
+		require.Equal(t, "- turn 3: use sqlite - never an ORM\n", line)
 	})
 
 	t.Run("session tier renders open todos", func(t *testing.T) {
