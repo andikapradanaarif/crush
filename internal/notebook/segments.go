@@ -186,6 +186,11 @@ func (s *service) GenerateSegmentEntries(ctx context.Context, sessionID string, 
 		verified  string
 	}
 	var pending []pendingEntry
+	// The user statement precedes the segment's events chronologically
+	// — intent items take the head of the event sequence.
+	for _, e := range intentEntries(msgs) {
+		pending = append(pending, pendingEntry{entry: e, succeeded: true})
+	}
 	if len(trivial) > 0 {
 		pending = append(pending, pendingEntry{
 			entry:     buildTrivialExplorationEntry(trivial),

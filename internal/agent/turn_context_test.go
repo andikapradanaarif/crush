@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/notebook"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/stretchr/testify/require"
 )
@@ -176,6 +177,37 @@ func TestTurnContextBlob(t *testing.T) {
 		require.Contains(t, blob, "main.go")
 	})
 
+	t.Run("session tier renders the intent record", func(t *testing.T) {
+		t.Parallel()
+		a, _, sessionID := newNotebookTestAgent(t)
+		a.turnContext = "session"
+		require.NoError(t, a.notebook.GenerateSegmentEntries(t.Context(), sessionID, 1, 0, 0, 1, []message.Message{
+			userMsg("do not change the public API"),
+		}))
+		blob := a.turnContextBlob(t.Context(), SessionAgentCall{SessionID: sessionID})
+		require.Contains(t, blob, "<user_intent>")
+		require.Contains(t, blob, "turn 1: do not change the public API")
+	})
+
+	t.Run("intent record is off with the tier", func(t *testing.T) {
+		t.Parallel()
+		a, _, sessionID := newNotebookTestAgent(t)
+		require.NoError(t, a.notebook.GenerateSegmentEntries(t.Context(), sessionID, 1, 0, 0, 1, []message.Message{
+			userMsg("do not change the public API"),
+		}))
+		require.Empty(t, a.turnContextBlob(t.Context(), SessionAgentCall{SessionID: sessionID}))
+	})
+
+	t.Run("intentLine labels hydrated items as prior session", func(t *testing.T) {
+		t.Parallel()
+		line := intentLine(notebook.Entry{
+			TurnNumber: notebook.HydrationTurnNumber,
+			EntryText:  "## User instruction\n_Seeded from an earlier session._\n\nnever commit secrets",
+		})
+		require.Contains(t, line, "prior session: ")
+		require.Contains(t, line, "never commit secrets")
+	})
+
 	t.Run("session tier renders open todos", func(t *testing.T) {
 		t.Parallel()
 		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})
@@ -201,10 +233,14 @@ func TestTurnContextBlob(t *testing.T) {
 		sess, err := a.sessions.Get(t.Context(), sessionID)
 		require.NoError(t, err)
 		sess.Todos = []session.PlanItem{
-			{ID: "i1", Key: "setup", Content: "set things up", Status: session.PlanItemPending,
-				EvidencePaths: []string{"cfg/"}},
-			{ID: "i2", Key: "impl", Content: "implement it", Status: session.PlanItemInProgress,
-				DependsOn: []string{"i1"}, EvidenceChecks: []string{"verify:build"}},
+			{
+				ID: "i1", Key: "setup", Content: "set things up", Status: session.PlanItemPending,
+				EvidencePaths: []string{"cfg/"},
+			},
+			{
+				ID: "i2", Key: "impl", Content: "implement it", Status: session.PlanItemInProgress,
+				DependsOn: []string{"i1"}, EvidenceChecks: []string{"verify:build"},
+			},
 		}
 		_, err = a.sessions.Save(t.Context(), sess)
 		require.NoError(t, err)

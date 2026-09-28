@@ -149,7 +149,8 @@ func TestClassifyEvents_EditAlwaysSignificant(t *testing.T) {
 func TestGenerateEntries_TrivialTurnSkipped(t *testing.T) {
 	svc, _, sessionID := newTestService(t, nil)
 
-	// No tool calls, no decision → skip entirely.
+	// No tool calls, no decision → only the intent record's verbatim
+	// user statement is stored; no event entries are produced.
 	msgs := []message.Message{
 		{Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "hello"}}},
 		{Role: message.Assistant, Parts: []message.ContentPart{message.TextContent{Text: "hi there"}}},
@@ -158,7 +159,8 @@ func TestGenerateEntries_TrivialTurnSkipped(t *testing.T) {
 	require.NoError(t, err)
 	entries, err := svc.GetEntries(context.Background(), sessionID)
 	require.NoError(t, err)
-	require.Empty(t, entries)
+	require.Len(t, entries, 1)
+	require.Equal(t, EventUserIntent, entries[0].EventType)
 }
 
 func TestGenerateEntries_WithSignificantEvent(t *testing.T) {
@@ -561,8 +563,10 @@ func TestGenerateEntries_DecisionOnlyTurn(t *testing.T) {
 	require.NoError(t, err)
 	entries, err := svc.GetEntries(context.Background(), sessionID)
 	require.NoError(t, err)
-	require.Len(t, entries, 1)
-	require.Equal(t, EventDecision, entries[0].EventType)
+	// The intent item heads the turn's entries, the decision follows.
+	require.Len(t, entries, 2)
+	require.Equal(t, EventUserIntent, entries[0].EventType)
+	require.Equal(t, EventDecision, entries[1].EventType)
 }
 
 func TestExtractTags_SkipsMarkdownHeadings(t *testing.T) {

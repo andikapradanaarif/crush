@@ -53,6 +53,53 @@ func segmentEditMsgs() []message.Message {
 	}
 }
 
+func TestGenerateSegmentEntries_UserStatementCaptured(t *testing.T) {
+	svc, _, sessionID := newSegmentTestService(t, nil)
+	ctx := context.Background()
+
+	msgs := append([]message.Message{
+		{ID: "u1", Role: message.User, Parts: []message.ContentPart{
+			message.TextContent{Text: "do not change the public API"},
+		}},
+	}, segmentEditMsgs()...)
+
+	require.NoError(t, svc.GenerateSegmentEntries(ctx, sessionID, 0, 0, 0, int64(len(msgs)), msgs))
+
+	entries, err := svc.SearchByEventType(ctx, sessionID, EventUserIntent)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Contains(t, entries[0].EntryText, "do not change the public API")
+	require.Contains(t, entries[0].Tags, "intent")
+	require.Contains(t, entries[0].Tags, "msg:u1")
+	// The user statement precedes the segment's events — the intent
+	// item heads the event sequence.
+	require.Equal(t, int64(0), entries[0].EventNumber)
+}
+
+func TestGenerateSegmentEntries_PureUserTurnStoresIntent(t *testing.T) {
+	svc, q, sessionID := newSegmentTestService(t, nil)
+	ctx := context.Background()
+
+	msgs := []message.Message{
+		{ID: "u2", Role: message.User, Parts: []message.ContentPart{
+			message.TextContent{Text: "keep the migration readable"},
+		}},
+	}
+
+	require.NoError(t, svc.GenerateSegmentEntries(ctx, sessionID, 1, 0, 0, 1, msgs))
+
+	entries, err := svc.SearchByEventType(ctx, sessionID, EventUserIntent)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Contains(t, entries[0].EntryText, "keep the migration readable")
+
+	seg, err := q.GetProcessedSegment(ctx, db.GetProcessedSegmentParams{
+		SessionID: sessionID, TurnNumber: 1, SegmentNumber: 0,
+	})
+	require.NoError(t, err)
+	require.Equal(t, SegmentProcessed, seg.State)
+}
+
 func TestGenerateSegmentEntries_ContinuesEventNumbering(t *testing.T) {
 	svc, _, sessionID := newSegmentTestService(t, nil)
 	ctx := context.Background()

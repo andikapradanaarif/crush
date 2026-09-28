@@ -12,6 +12,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/notebook"
 	"github.com/charmbracelet/crush/internal/session"
 )
 
@@ -24,6 +25,11 @@ const (
 	// longer than this carry enough of their own context that a
 	// missing referent is unlikely.
 	vaguePromptMaxWords = 12
+	// turnContextIntentMaxBytes bounds the rendered intent record. A
+	// statement must never render truncated — a cut constraint reads
+	// as a different instruction — so the budget drops whole oldest
+	// items instead.
+	turnContextIntentMaxBytes = 4096
 )
 
 // vagueReferentRe matches prompts that lean on a definite or anaphoric
@@ -93,6 +99,33 @@ func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCal
 	}
 	var b strings.Builder
 
+	if a.notebook != nil {
+		if entries, err := a.notebook.SearchByEventType(ctx, call.SessionID, notebook.EventUserIntent); err == nil && len(entries) > 0 {
+			// Budget drops whole oldest items — a constraint rendered
+			// partial is worse than absent.
+			var items []string
+			size := 0
+			for i := len(entries) - 1; i >= 0; i-- {
+				line := intentLine(entries[i])
+				if size+len(line) > turnContextIntentMaxBytes && len(items) > 0 {
+					break
+				}
+				items = append([]string{line}, items...)
+				size += len(line)
+			}
+			if len(items) > 0 {
+				b.WriteString("<user_intent>\nUser statements this session, verbatim — constraints and scope in the user's own words, oldest first; a later statement may override an earlier one:\n")
+				if dropped := len(entries) - len(items); dropped > 0 {
+					fmt.Fprintf(&b, "- … %d earlier statement(s) omitted\n", dropped)
+				}
+				for _, line := range items {
+					b.WriteString(line)
+				}
+				b.WriteString("</user_intent>\n")
+			}
+		}
+	}
+
 	if a.filetracker != nil {
 		if files, err := a.filetracker.ListRecentReadFiles(ctx, call.SessionID, turnContextWorkingSetLimit); err == nil && len(files) > 0 {
 			b.WriteString("<working_set>\nRecently read or edited files — the most likely referents for \"the file\", \"the bug\", and similar:\n")
@@ -131,6 +164,22 @@ func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCal
 		return ""
 	}
 	return "<turn_context>\n" + b.String() + "</turn_context>"
+}
+
+// intentLine renders one intent item for the tail: the verbatim
+// statement with its embedded heading stripped, labeled by provenance
+// — turn number for this session's statements, "prior session" for
+// hydrated seeds.
+func intentLine(e notebook.Entry) string {
+	text := e.EntryText
+	if i := strings.IndexByte(text, '\n'); i >= 0 {
+		text = text[i+1:]
+	}
+	label := fmt.Sprintf("turn %d", e.TurnNumber)
+	if e.TurnNumber == notebook.HydrationTurnNumber {
+		label = "prior session"
+	}
+	return fmt.Sprintf("- %s: %s\n", label, text)
 }
 
 // hasTool reports whether the agent's current toolset includes the
