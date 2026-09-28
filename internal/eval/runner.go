@@ -286,10 +286,11 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	// out leaves a warm state other than the designed one — classify
 	// error rather than measure a degraded seeding.
 	if len(traj.PriorSessions) > 0 {
-		warm := &WarmStart{Sessions: len(traj.PriorSessions)}
+		warm := &WarmStart{}
 		for i, ps := range traj.PriorSessions {
 			seedStart := r.now()
 			seed := drv.Run(ctx, workdir, ps.Turns, traj.Budget)
+			warm.Sessions++
 			warm.DurationS += r.now().Sub(seedStart).Seconds()
 			warm.Steps += seed.Steps
 			warm.Tokens.Input += seed.Tokens.Input
@@ -301,6 +302,31 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 			}
 			rec.WarmStart = warm
 			if seed.Err != nil || seed.TimedOut {
+				// Everything the measured-run error path gets: the
+				// failed seed's db is exactly the artifact its
+				// session ids promise, ErrorClass feeds the circuit
+				// breaker, and the seeding wall clock was real.
+				rec.ErrorClass = seed.ErrorClass
+				rec.DurationS = r.now().Sub(rec.StartedAt).Seconds()
+				rec.Workdir = workdir
+				dst, walSafe, perr := r.preserveSessionDB(ctx, exp.Name, traj.ID, armName, inv, attempt, workdir)
+				if perr != nil {
+					rec.CallMetricsError = fmt.Sprintf("session db not preserved: %v", perr)
+				} else {
+					rec.SessionDB = dst
+					rec.SessionDBIncomplete = !walSafe
+					metrics, aerr := AnalyzeSessionDB(ctx, filepath.Join(r.EvalDir, dst), AnalyzeOptions{
+						SessionID: seed.SessionID,
+						Workdir:   workdir,
+						Turns:     ps.Turns,
+						GOOS:      rec.Env.OS,
+					})
+					if aerr != nil {
+						rec.CallMetricsError = aerr.Error()
+					} else {
+						rec.CallMetrics = metrics
+					}
+				}
 				rec.Outcome = OutcomeError
 				rec.CheckDetail = map[string]any{
 					"prior_session": fmt.Sprintf("seed %d of %d failed (timeout=%v): %v",
@@ -312,6 +338,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	}
 	res := drv.Run(ctx, workdir, traj.Task.Turns, traj.Budget)
 	rec.DurationS = r.now().Sub(rec.StartedAt).Seconds()
+	rec.SessionID = res.SessionID
 	rec.Steps = res.Steps
 	rec.Tokens = res.Tokens
 	rec.StubStats = res.StubStats

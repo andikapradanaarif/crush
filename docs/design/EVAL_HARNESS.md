@@ -147,12 +147,23 @@ every characterization pass a diff to reviewed files.
   condition than the one designed. Seeding spend lands in the
   record's `warm_start` ledger — sessions, ids, steps, tokens — so
   cost-per-pass can include it; the session ids join the preserved
-  crush.db's seed rows to measured-session recalls. Budget is
-  per-session: each seed gets its own `run_timeout_seconds` /
-  `max_steps`, so a warm trajectory's wall clock is
-  (n_seeds + 1) × budget. Coverage: `warm_start.*` is
+  crush.db's seed rows to measured-session recalls, and the
+  failure path still snapshots the db so a dead seed's partial
+  state is inspectable. Budget is per-session: each seed gets its
+  own `run_timeout_seconds` / `max_steps`, so a warm trajectory's
+  wall clock is (n_seeds + 1) × budget. The record's `duration_s`
+  is that total — seeds included; the measured task's duration is
+  `duration_s − warm_start.duration_s`. Coverage: `warm_start.*` is
   flag-invariant — `min_warm_start.sessions` on a warm trajectory
   asserts the phase ran and fails closed on cold runs.
+  **Caveat — disobedient seeds.** "Change nothing" is a soft prompt
+  instruction: a seed that edits the fixture anyway leaves the task
+  pre-done, the vague prompt passes trivially, and the warm-vs-cold
+  delta misattributes seed labor to memory benefit. `check` sees
+  only the final tree so nothing catches it mid-run — audit via the
+  preserved db (`warm_start.session_ids` → the seed session's tool
+  calls) or compare workdir diffs; a `seed_writes` counter off
+  filetracker rows is the planned detection channel.
 - **`origin`.** `scrubbed` must be `true` — a value, not just a
   present field — when `kind` is `production`, and for `regression`
   whenever `source` is a real session or bug report — the same
@@ -575,6 +586,7 @@ trajectory twice) is strictly worse.
 		"duration_s": 96
 	},
 	"error_class": "auth | rate_limit | context_too_large | window_cap_enforced | provider_* | cancelled | timeout",
+	"session_id": "<measured-session-id>",
 	"session_db": "results/<experiment>/artifacts/<trajectory_id>-<arm>-<run_index>.db",
 	"env": {"crush_sha": "...", "model_resolved": "...", "go": "1.25", "os": "darwin", "content_hash": "..."}
 }

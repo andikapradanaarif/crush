@@ -293,7 +293,11 @@ type RunRecord struct {
 	// EdgeFirings is the run's per-edge outcome split — the
 	// edge_firings telemetry the flag-flip decisions consume.
 	EdgeFirings map[string]map[string]int `json:"edge_firings,omitempty"`
-	SessionDB   string                    `json:"session_db,omitempty"`
+	// SessionID is the measured session's id — the explicit join
+	// key into the preserved crush.db (warm_start.session_ids names
+	// the seeds; this names the session the record measures).
+	SessionID string `json:"session_id,omitempty"`
+	SessionDB string `json:"session_db,omitempty"`
 	// Workdir is the materialized run directory — recorded so a
 	// post-hoc `crush eval analyze` on the artifact can anchor relative
 	// call paths correctly (the directory itself is deleted).
