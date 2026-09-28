@@ -30,6 +30,10 @@ const (
 	// as a different instruction — so the budget drops whole oldest
 	// items instead.
 	turnContextIntentMaxBytes = 4096
+	// turnContextFileHeatLimit bounds the cross-session heat section —
+	// a hint list, not working state, so it runs tighter than the
+	// working-set cap.
+	turnContextFileHeatLimit = 5
 )
 
 // vagueReferentRe matches prompts that lean on a definite or anaphoric
@@ -127,12 +131,41 @@ func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCal
 	}
 
 	if a.filetracker != nil {
-		if files, err := a.filetracker.ListRecentReadFiles(ctx, call.SessionID, turnContextWorkingSetLimit); err == nil && len(files) > 0 {
+		// Fetch the session's full read set once: the working-set
+		// section renders its head, and the whole set dedupes heat —
+		// a file this session already touched is not a hint.
+		read, _ := a.filetracker.ListRecentReadFiles(ctx, call.SessionID, 0)
+		if len(read) > 0 {
 			b.WriteString("<working_set>\nRecently read or edited files — the most likely referents for \"the file\", \"the bug\", and similar:\n")
-			for _, f := range files {
+			for _, f := range read[:min(len(read), turnContextWorkingSetLimit)] {
 				fmt.Fprintf(&b, "- %s\n", a.relWorkdir(f))
 			}
 			b.WriteString("</working_set>\n")
+		}
+		// Over-fetch so working-set overlap cannot starve the section.
+		if hot, err := a.filetracker.ListHotFiles(ctx, call.SessionID, turnContextFileHeatLimit*4); err == nil {
+			wsSet := make(map[string]bool, len(read))
+			for _, f := range read {
+				wsSet[f] = true
+			}
+			var lines []string
+			for _, h := range hot {
+				if wsSet[h.Path] || len(lines) >= turnContextFileHeatLimit {
+					continue
+				}
+				sessions := "sessions"
+				if h.Sessions == 1 {
+					sessions = "session"
+				}
+				lines = append(lines, fmt.Sprintf("- %s (%d %s)", a.relWorkdir(h.Path), h.Sessions, sessions))
+			}
+			if len(lines) > 0 {
+				b.WriteString("<file_heat>\nFiles prior sessions in this workspace kept returning to — strong referents for vague mentions:\n")
+				for _, l := range lines {
+					b.WriteString(l + "\n")
+				}
+				b.WriteString("</file_heat>\n")
+			}
 		}
 	}
 
@@ -230,9 +263,13 @@ func (a *sessionAgent) ambiguityDirective(ctx context.Context, call SessionAgent
 	if hasSubstantiveUserMessage(msgs) {
 		return ""
 	}
-	// A non-empty working set gives the referent candidates.
+	// A non-empty working set or cross-session heat gives the
+	// referent candidates.
 	if a.filetracker != nil {
 		if files, err := a.filetracker.ListRecentReadFiles(ctx, call.SessionID, 1); err == nil && len(files) > 0 {
+			return ""
+		}
+		if hot, err := a.filetracker.ListHotFiles(ctx, call.SessionID, 1); err == nil && len(hot) > 0 {
 			return ""
 		}
 	}

@@ -26,6 +26,56 @@ func (q *Queries) GetFileRead(ctx context.Context, arg GetFileReadParams) (ReadF
 	return i, err
 }
 
+const listHotReadFiles = `-- name: ListHotReadFiles :many
+SELECT path,
+    COUNT(DISTINCT session_id) AS sessions,
+    MAX(read_at) AS last_read
+FROM read_files
+WHERE session_id != ?
+GROUP BY path
+ORDER BY sessions DESC, last_read DESC
+LIMIT ?
+`
+
+type ListHotReadFilesParams struct {
+	SessionID string `json:"session_id"`
+	Limit     int64  `json:"limit"`
+}
+
+type ListHotReadFilesRow struct {
+	Path     string      `json:"path"`
+	Sessions int64       `json:"sessions"`
+	LastRead interface{} `json:"last_read"`
+}
+
+// Project-wide file heat: files prior sessions in this workspace
+// touched, ranked by persistence (how many sessions read the file)
+// then recency. The current session is excluded -- its files are the
+// working set, not heat; a file only this session read would carry
+// a sessions count of 1 noise-signal anyway.
+func (q *Queries) ListHotReadFiles(ctx context.Context, arg ListHotReadFilesParams) ([]ListHotReadFilesRow, error) {
+	rows, err := q.query(ctx, q.listHotReadFilesStmt, listHotReadFiles, arg.SessionID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListHotReadFilesRow{}
+	for rows.Next() {
+		var i ListHotReadFilesRow
+		if err := rows.Scan(&i.Path, &i.Sessions, &i.LastRead); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSessionReadFiles = `-- name: ListSessionReadFiles :many
 SELECT session_id, path, read_at FROM read_files
 WHERE session_id = ?

@@ -231,3 +231,40 @@ func TestService_RecordRead_RelativeInputResolvesToWorkspace(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{filepath.Join(filepathext.Canonical(env.workingDir), "sub", "file.go")}, paths)
 }
+
+func TestService_ListHotFiles(t *testing.T) {
+	env := setupTest(t)
+
+	env.createSession(t, "s1")
+	env.createSession(t, "s2")
+	env.createSession(t, "s3")
+
+	env.svc.RecordRead(env.ctx, "s1", "shared.go")
+	env.svc.RecordRead(env.ctx, "s1", "a.go")
+	env.svc.RecordRead(env.ctx, "s2", "shared.go")
+	env.svc.RecordRead(env.ctx, "s2", "b.go")
+	env.svc.RecordRead(env.ctx, "s3", "current.go")
+
+	root := filepathext.Canonical(env.workingDir)
+	hot, err := env.svc.ListHotFiles(env.ctx, "s3", 10)
+	require.NoError(t, err)
+	require.Len(t, hot, 3)
+
+	// Persistence outranks recency: the file two sessions read first.
+	require.Equal(t, filepath.Join(root, "shared.go"), hot[0].Path)
+	require.Equal(t, int64(2), hot[0].Sessions)
+	require.False(t, hot[0].LastRead.IsZero())
+
+	// The current session's reads are the working set, not heat.
+	for _, h := range hot {
+		require.NotEqual(t, "current.go", filepath.Base(h.Path))
+	}
+	require.ElementsMatch(t,
+		[]string{filepath.Join(root, "a.go"), filepath.Join(root, "b.go")},
+		[]string{hot[1].Path, hot[2].Path})
+
+	// The cap applies at the query.
+	hot, err = env.svc.ListHotFiles(env.ctx, "s3", 1)
+	require.NoError(t, err)
+	require.Len(t, hot, 1)
+}

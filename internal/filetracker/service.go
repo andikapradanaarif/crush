@@ -29,6 +29,22 @@ type Service interface {
 	// exists because the read set is cumulative — unbounded it
 	// degenerates to "every file ever touched".
 	ListRecentReadFiles(ctx context.Context, sessionID string, limit int) ([]string, error)
+
+	// ListHotFiles returns files prior sessions in this workspace
+	// read — the cross-session heat signal — ranked by how many
+	// sessions touched the file, then by recency, capped at limit.
+	// The current session is excluded: its reads are the working
+	// set, not heat.
+	ListHotFiles(ctx context.Context, sessionID string, limit int) ([]HotFile, error)
+}
+
+// HotFile is one entry of project-wide file heat: a file prior
+// sessions touched, with the count of sessions that read it and the
+// most recent read timestamp.
+type HotFile struct {
+	Path     string
+	Sessions int64
+	LastRead time.Time
 }
 
 type service struct {
@@ -112,6 +128,33 @@ func (s *service) ListRecentReadFiles(ctx context.Context, sessionID string, lim
 		readFiles = readFiles[:limit]
 	}
 	return s.absPaths(readFiles), nil
+}
+
+// ListHotFiles returns the cross-session file heat for the workspace:
+// files other sessions read, most persistent then most recent first.
+func (s *service) ListHotFiles(ctx context.Context, sessionID string, limit int) ([]HotFile, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.q.ListHotReadFiles(ctx, db.ListHotReadFilesParams{
+		SessionID: sessionID,
+		Limit:     int64(limit),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing hot files: %w", err)
+	}
+	out := make([]HotFile, 0, len(rows))
+	for _, r := range rows {
+		h := HotFile{
+			Path:     filepath.Join(s.workingDir, r.Path),
+			Sessions: r.Sessions,
+		}
+		if t, ok := r.LastRead.(int64); ok {
+			h.LastRead = time.Unix(t, 0)
+		}
+		out = append(out, h)
+	}
+	return out, nil
 }
 
 // absPaths joins the stored relative paths to the workspace root — the
