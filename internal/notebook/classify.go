@@ -101,6 +101,50 @@ func classifyEvents(msgs []message.Message) (significant []EntryInput, trivial [
 	return significant, trivial
 }
 
+// intentMaxChars bounds a verbatim user statement stored as an intent
+// item. The bound exists for pathological pastes, not real
+// instructions — a truncated constraint is worse than none, so the
+// limit is generous.
+const intentMaxChars = 800
+
+// intentEntries builds one verbatim entry per user message in the
+// segment — the intent record's fact items. The statement is stored in
+// the user's own words because a paraphrase can soften a prohibition,
+// and msg:<id> tags carry provenance. Entries commit inside the
+// segment transaction, so segment-level once semantics make them
+// idempotent without a marker query.
+func intentEntries(msgs []message.Message) []GeneratedEntry {
+	var out []GeneratedEntry
+	for _, msg := range msgs {
+		if msg.Role != message.User {
+			continue
+		}
+		// Hidden text parts are generated continuations kept for model
+		// history ("Implement the plan.") — not user statements, so they
+		// never enter the intent record.
+		var texts []string
+		for _, part := range msg.Parts {
+			if c, ok := part.(message.TextContent); ok && !c.Hidden {
+				texts = append(texts, c.Text)
+			}
+		}
+		text := strings.TrimSpace(strings.Join(texts, "\n"))
+		if text == "" {
+			continue
+		}
+		if runes := []rune(text); len(runes) > intentMaxChars {
+			text = string(runes[:intentMaxChars-1]) + "…"
+		}
+		out = append(out, GeneratedEntry{
+			EventType: EventUserIntent,
+			Title:     "User instruction",
+			Text:      "## User instruction\n" + text,
+			Tags:      []string{"intent", "msg:" + msg.ID},
+		})
+	}
+	return out
+}
+
 // findToolResult searches the tool messages for a result matching the
 // given tool call ID.
 func findToolResult(msgs []message.Message, toolCallID string) *message.ToolResult {
@@ -625,6 +669,17 @@ func boolToInt64(b bool) int64 {
 	return 0
 }
 
+// storeIntentEntries persists the turn's verbatim intent items —
+// stored even when a turn carries no other entries, since a bare
+// constraint is exactly what the intent record exists to keep.
+func (s *service) storeIntentEntries(ctx context.Context, sessionID string, turnNumber int64, intents []GeneratedEntry) {
+	for _, entry := range intents {
+		if err := storeEntry(ctx, s.q, sessionID, turnNumber, 0, 0, entry, true, "", ""); err != nil {
+			slog.Error("Failed to store intent entry", "error", err)
+		}
+	}
+}
+
 // GenerateEntries implements the Service interface.
 func (s *service) GenerateEntries(ctx context.Context, sessionID string, turnNumber int64, msgs []message.Message) error {
 	significant, trivial := classifyEvents(msgs)
@@ -643,11 +698,20 @@ func (s *service) GenerateEntries(ctx context.Context, sessionID string, turnNum
 		})
 	}
 
+	// The user statement precedes the turn's events — intent items are
+	// stored even on a no-tool turn, since a bare constraint is exactly
+	// what the intent record exists to keep.
+	intents := intentEntries(msgs)
+
 	// If there are no significant events, no trivial events, and no
-	// decision, this is a trivial turn — skip entirely.
+	// decision, this is a trivial turn — but a user statement still
+	// lands in the intent record.
 	if len(significant) == 0 && len(trivial) == 0 {
+		s.storeIntentEntries(ctx, sessionID, turnNumber, intents)
 		return nil
 	}
+
+	s.storeIntentEntries(ctx, sessionID, turnNumber, intents)
 
 	// Store trivial exploration mini-entry.
 	if len(trivial) > 0 {

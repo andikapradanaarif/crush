@@ -136,14 +136,15 @@ func (s *service) GetByTurnSegment(ctx context.Context, sessionID string, turnNu
 // TurnsWithEntries returns the set of turn numbers that have at least
 // one coverage-bearing entry. Used by the migration backfill: a
 // pre-upgrade turn with entries is covered at turn grain and is marked
-// processed directly. Checkpoints are excluded at the query level — a
-// checkpoint is a consolidation OF coverage, not coverage itself; a
-// checkpoint-only turn marked processed would pin its real events raw
-// and un-summarized forever (coverage poisoning).
+// processed directly. Checkpoints and intent items are excluded at the
+// query level — a checkpoint is a consolidation OF coverage, not
+// coverage itself, and an intent item stores even on a turn with no
+// other events; either counting alone would pin its turn's real events
+// raw and un-summarized forever (coverage poisoning).
 func (s *service) TurnsWithEntries(ctx context.Context, sessionID string) (map[int64]bool, error) {
 	turns, err := s.q.GetNotebookTurnsWithEntries(ctx, db.GetNotebookTurnsWithEntriesParams{
-		SessionID:         sessionID,
-		ExcludedEventType: EventCheckpoint,
+		SessionID:          sessionID,
+		ExcludedEventTypes: []string{EventCheckpoint, EventUserIntent},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list turns with entries: %w", err)
@@ -186,6 +187,11 @@ func (s *service) GenerateSegmentEntries(ctx context.Context, sessionID string, 
 		verified  string
 	}
 	var pending []pendingEntry
+	// The user statement precedes the segment's events chronologically
+	// — intent items take the head of the event sequence.
+	for _, e := range intentEntries(msgs) {
+		pending = append(pending, pendingEntry{entry: e, succeeded: true})
+	}
 	if len(trivial) > 0 {
 		pending = append(pending, pendingEntry{
 			entry:     buildTrivialExplorationEntry(trivial),

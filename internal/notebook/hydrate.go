@@ -73,7 +73,7 @@ func hydrationTier(it memoryItem) int {
 		return 1
 	}
 	switch it.EventType {
-	case EventDecision, EventFileEdit, EventPlan:
+	case EventDecision, EventFileEdit, EventPlan, EventUserIntent:
 		return 2
 	default:
 		return 3

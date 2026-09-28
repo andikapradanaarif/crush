@@ -8,6 +8,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"strings"
 )
 
 const createNotebookEntry = `-- name: CreateNotebookEntry :one
@@ -400,17 +401,28 @@ func (q *Queries) GetNotebookTokenCount(ctx context.Context, sessionID string) (
 const getNotebookTurnsWithEntries = `-- name: GetNotebookTurnsWithEntries :many
 SELECT DISTINCT turn_number
 FROM notebook_entries
-WHERE session_id = ? AND event_type != ?2
+WHERE session_id = ? AND event_type NOT IN (/*SLICE:excluded_event_types*/?)
 ORDER BY turn_number ASC
 `
 
 type GetNotebookTurnsWithEntriesParams struct {
-	SessionID         string `json:"session_id"`
-	ExcludedEventType string `json:"excluded_event_type"`
+	SessionID          string   `json:"session_id"`
+	ExcludedEventTypes []string `json:"excluded_event_types"`
 }
 
 func (q *Queries) GetNotebookTurnsWithEntries(ctx context.Context, arg GetNotebookTurnsWithEntriesParams) ([]int64, error) {
-	rows, err := q.query(ctx, q.getNotebookTurnsWithEntriesStmt, getNotebookTurnsWithEntries, arg.SessionID, arg.ExcludedEventType)
+	query := getNotebookTurnsWithEntries
+	var queryParams []interface{}
+	queryParams = append(queryParams, arg.SessionID)
+	if len(arg.ExcludedEventTypes) > 0 {
+		for _, v := range arg.ExcludedEventTypes {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:excluded_event_types*/?", strings.Repeat(",?", len(arg.ExcludedEventTypes))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:excluded_event_types*/?", "NULL", 1)
+	}
+	rows, err := q.query(ctx, nil, query, queryParams...)
 	if err != nil {
 		return nil, err
 	}

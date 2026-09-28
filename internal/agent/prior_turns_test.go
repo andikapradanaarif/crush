@@ -845,7 +845,10 @@ func TestPreparePrompt_SummarizeStraddledTurn(t *testing.T) {
 	text := renderedText(history)
 
 	require.Equal(t, 1, strings.Count(text, "[Summary of turn 0]"))
-	require.NotContains(t, text, "work")
+	// The covered prompt's raw message is evicted — the statement
+	// survives exactly once, via the intent record's entry.
+	require.Equal(t, 1, strings.Count(text, "work"),
+		"the covered statement renders only via the intent record, not raw")
 	require.Contains(t, text, "next prompt")
 	// The rendered remainder of the span still drops — no dangling
 	// calls from either segment.

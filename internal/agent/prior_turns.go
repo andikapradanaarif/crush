@@ -305,6 +305,13 @@ func (a *sessionAgent) turnSummaries(ctx context.Context, sessionID string, cove
 		})
 		texts := make([]string, 0, len(list))
 		for _, e := range list {
+			// Intent items render via the segment prefix and the
+			// turn-context tail — steering, not a summary of the
+			// turn's work. Excluding them keeps an intent-only turn
+			// verbatim instead of collapsing it to a bare statement.
+			if e.EventType == notebook.EventUserIntent {
+				continue
+			}
 			if t := strings.TrimSpace(cmp.Or(e.EntryTextFull, e.EntryText)); t != "" {
 				texts = append(texts, t)
 			}

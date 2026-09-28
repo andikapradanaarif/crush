@@ -36,6 +36,12 @@ const (
 	// turn is not a covered turn (see TurnsWithEntries), and its
 	// file: tags never supersede the reads it cites.
 	EventCheckpoint = "checkpoint"
+	// EventUserIntent records a user statement verbatim — the intent
+	// record's fact items. The user's own words are kept (bounded)
+	// rather than paraphrased, and provenance is the msg:<id> tag —
+	// constraints survive segment eviction because the turn-context
+	// tail re-reads them by event type, independent of coverage.
+	EventUserIntent = "user_intent"
 )
 
 // Checkpoint granularity values, carried as granularity:<value> tags
