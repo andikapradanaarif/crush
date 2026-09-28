@@ -168,7 +168,7 @@ func TestPatchCoderCassetteEditResults(t *testing.T) {
 		sess, err := session.NewService(q, conn).Create(t.Context(), "patch")
 		require.NoError(t, err)
 		hist := history.NewService(q, conn)
-		tracker := filetracker.NewService(q)
+		tracker := filetracker.NewService(q, workingDir)
 		perms := permission.NewPermissionService(workingDir, true, []string{})
 
 		editTool := tools.NewEditTool(perms, hist, tracker, workingDir)
