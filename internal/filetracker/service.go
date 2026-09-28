@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/crush/internal/db"
+	"github.com/charmbracelet/crush/internal/filepathext"
 )
 
 // Service defines the interface for tracking file reads in sessions.
@@ -38,14 +39,17 @@ type service struct {
 // NewService creates a new file tracker service rooted at workingDir.
 // Paths are stored relative to workingDir and resolved back against it,
 // so the same file keys identically across sessions and processes
-// regardless of the process's current working directory. workingDir is
-// made absolute at construction; keys are lexical — paths are matched
-// by spelling, so symlinked roots keep the caller's spelling rather
-// than canonicalizing (consistent with how WorkingDir-derived paths
-// reach the tools).
+// regardless of the process's current working directory. Both the root
+// and incoming paths are canonicalized (symlinks resolved, best-effort
+// for not-yet-existing tails) — LSP-sourced paths arrive canonicalized
+// while tool paths arrive workingDir-spelled, and only canonical keys
+// converge the two families on symlinked roots.
 func NewService(q *db.Queries, workingDir string) Service {
+	if workingDir == "" {
+		slog.Warn("Filetracker got an empty workspace root; keys will follow the process working directory")
+	}
 	if abs, err := filepath.Abs(workingDir); err == nil {
-		workingDir = abs
+		workingDir = filepathext.Canonical(abs)
 	}
 	return &service{q: q, workingDir: workingDir}
 }
@@ -79,6 +83,7 @@ func (s *service) relpath(path string) string {
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(s.workingDir, path)
 	}
+	path = filepathext.Canonical(path)
 	relpath, err := filepath.Rel(s.workingDir, path)
 	if err != nil {
 		slog.Warn("Error getting relpath", "error", err)

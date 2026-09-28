@@ -2,12 +2,14 @@ package filetracker
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/charmbracelet/crush/internal/db"
+	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/stretchr/testify/require"
 )
 
@@ -150,7 +152,38 @@ func TestService_RecordRead_KeysStableAcrossCwd(t *testing.T) {
 
 	paths, err := env.svc.ListReadFiles(env.ctx, sessionID)
 	require.NoError(t, err)
-	require.Equal(t, []string{path}, paths)
+	require.Equal(t, []string{filepathext.Canonical(path)}, paths)
+}
+
+func TestService_SymlinkedRootKeysConverge(t *testing.T) {
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+	q := db.New(conn)
+
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	require.NoError(t, os.Symlink(real, link))
+
+	// The service roots at the symlinked spelling while callers report
+	// the canonical spelling — the LSP caller family's shape.
+	svc := NewService(q, link)
+
+	ctx := t.Context()
+	sessionID := "test-session-symlink"
+	_, err = q.CreateSession(ctx, db.CreateSessionParams{ID: sessionID, Title: "t"})
+	require.NoError(t, err)
+
+	svc.RecordRead(ctx, sessionID, filepath.Join(real, "f.go"))
+
+	readFiles, err := q.ListSessionReadFiles(ctx, sessionID)
+	require.NoError(t, err)
+	require.Len(t, readFiles, 1)
+	require.Equal(t, "f.go", readFiles[0].Path)
+
+	paths, err := svc.ListReadFiles(ctx, sessionID)
+	require.NoError(t, err)
+	require.Equal(t, []string{filepath.Join(filepathext.Canonical(real), "f.go")}, paths)
 }
 
 func TestService_RelativeWorkingDirResolvesAtConstruction(t *testing.T) {
@@ -176,7 +209,7 @@ func TestService_RelativeWorkingDirResolvesAtConstruction(t *testing.T) {
 
 	paths, err := svc.ListReadFiles(ctx, sessionID)
 	require.NoError(t, err)
-	require.Equal(t, []string{path}, paths)
+	require.Equal(t, []string{filepathext.Canonical(path)}, paths)
 }
 
 func TestService_RecordRead_RelativeInputResolvesToWorkspace(t *testing.T) {
@@ -196,5 +229,5 @@ func TestService_RecordRead_RelativeInputResolvesToWorkspace(t *testing.T) {
 
 	paths, err := env.svc.ListReadFiles(env.ctx, sessionID)
 	require.NoError(t, err)
-	require.Equal(t, []string{filepath.Join(env.workingDir, "sub", "file.go")}, paths)
+	require.Equal(t, []string{filepath.Join(filepathext.Canonical(env.workingDir), "sub", "file.go")}, paths)
 }
