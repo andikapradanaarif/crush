@@ -11,6 +11,7 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/notebook"
 	"github.com/charmbracelet/crush/internal/session"
@@ -40,6 +41,10 @@ const (
 	// turnContextFailureFileHints bounds file hints rendered per
 	// failure row.
 	turnContextFailureFileHints = 3
+	// Render-side caps on echoed failure fields — write-side caps
+	// already bound them, these keep the tail bounded regardless.
+	turnContextFailureCmdRunes      = 200
+	turnContextFailureHeadlineRunes = 140
 )
 
 // vagueReferentRe matches prompts that lean on a definite or anaphoric
@@ -50,6 +55,30 @@ const (
 var vagueReferentRe = regexp.MustCompile(`(?i)\b(it|its|this|that|them|they)\b|` +
 	`\bthe\s+(bug|bugfix|crash|error|errors|failure|fail|issue|problem|panic|regression|leak|typo|warnings?|` +
 	`config|configuration|test|spec|endpoint|handler|route|feature|changes?|fix|workaround|hack|todo|fixme)\b`)
+
+// failureReferentNouns are the "the N" referents an open failure can
+// be the target of — the failing test, the crash, the regression. A
+// vague prompt naming any other noun ("the config", "the endpoint")
+// refers to something failure memory cannot supply.
+var failureReferentNouns = map[string]bool{
+	"bug": true, "bugfix": true, "crash": true, "error": true,
+	"errors": true, "failure": true, "fail": true, "panic": true,
+	"regression": true, "leak": true, "issue": true, "problem": true,
+	"test": true, "spec": true, "warning": true, "warnings": true,
+}
+
+var theNounRe = regexp.MustCompile(`(?i)\bthe\s+(\w+)\b`)
+
+// vagueReferentIsFailureShaped reports whether the prompt's referent
+// could point at an open failure: an explicit "the <failure-noun>",
+// or a bare anaphora ("fix it", "this crashes") — with no noun the
+// failing thing is a plausible referent.
+func vagueReferentIsFailureShaped(prompt string) bool {
+	if m := theNounRe.FindStringSubmatch(prompt); m != nil {
+		return failureReferentNouns[strings.ToLower(m[1])]
+	}
+	return true
+}
 
 // isVaguePrompt reports whether the prompt is underspecified in the way
 // the pre-filter cares about: short enough to carry no context of its
@@ -80,11 +109,19 @@ func isVaguePrompt(prompt string) bool {
 // providers where cache stability matters most. A user-role tail
 // survives every provider.
 func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCall, msgs []message.Message) []fantasy.Message {
+	// Open failures are fetched once per Run — the tail blob renders
+	// them and the ambiguity gate reads the same slice.
+	var openFailures []cmdlog.Failure
+	if a.failureMemory && a.cmdlog != nil {
+		if f, err := a.cmdlog.ListOpenFailures(ctx, turnContextOpenFailuresLimit); err == nil {
+			openFailures = f
+		}
+	}
 	var sections []string
-	if blob := a.turnContextBlob(ctx, call); blob != "" {
+	if blob := a.turnContextBlob(ctx, call, openFailures); blob != "" {
 		sections = append(sections, blob)
 	}
-	if directive := a.ambiguityDirective(ctx, call, msgs); directive != "" {
+	if directive := a.ambiguityDirective(ctx, call, msgs, openFailures); directive != "" {
 		sections = append(sections, directive)
 	}
 	if len(sections) == 0 {
@@ -99,46 +136,66 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	return []fantasy.Message{fantasy.NewUserMessage(text)}
 }
 
-// turnContextBlob renders the <turn_context> blob — deterministic
-// session signals at the "session" tier plus project failure memory
-// under its own flag, each in a labeled section, appended at the
-// request tail. Returns "" for a sub-agent or when no enabled signal
-// has content.
-func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCall) string {
+// turnContextBlob renders the tail context sections — the session
+// signals wrapped in <turn_context> when that tier is on, and project
+// failure memory under its own <open_failures> envelope. The failure
+// section renders outside the tier's wrapper: with
+// turn_context=off + failure_memory=on an <open_failures> inside
+// <turn_context> would attribute its content to a disabled tier.
+// Returns "" for a sub-agent or when no enabled signal has content.
+func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCall, openFailures []cmdlog.Failure) string {
 	if a.isSubAgent {
 		return ""
 	}
-	var b strings.Builder
+	var sections []string
 
 	if a.turnContext == "session" {
+		var b strings.Builder
 		a.renderSessionSignals(ctx, call, &b)
-	}
-
-	if a.failureMemory && a.cmdlog != nil {
-		if failures, err := a.cmdlog.ListOpenFailures(ctx, turnContextOpenFailuresLimit); err == nil && len(failures) > 0 {
-			b.WriteString("<open_failures>\nCommands that failed in this workspace and have not passed since — the likely referents for \"the failing test\" or \"the build error\"; a clean re-run resolves one:\n")
-			for _, f := range failures {
-				b.WriteString("- ")
-				b.WriteString(f.Cmd)
-				if f.CWD != "" && f.CWD != "." {
-					fmt.Fprintf(&b, " (in %s)", f.CWD)
-				}
-				if f.Headline != "" {
-					fmt.Fprintf(&b, ": %s", f.Headline)
-				}
-				if n := min(len(f.Files), turnContextFailureFileHints); n > 0 {
-					fmt.Fprintf(&b, " [%s]", strings.Join(f.Files[:n], ", "))
-				}
-				b.WriteString("\n")
-			}
-			b.WriteString("</open_failures>\n")
+		if b.Len() > 0 {
+			sections = append(sections, "<turn_context>\n"+b.String()+"</turn_context>")
 		}
 	}
 
-	if b.Len() == 0 {
-		return ""
+	if a.failureMemory && len(openFailures) > 0 {
+		var b strings.Builder
+		b.WriteString("<open_failures>\nCommands that failed in this workspace and have not passed since — the likely referents for \"the failing test\" or \"the build error\"; a clean re-run resolves one:\n")
+		for _, f := range openFailures {
+			b.WriteString("- ")
+			b.WriteString(tailSafeText(truncateTailText(f.Cmd, turnContextFailureCmdRunes)))
+			if f.CWD != "" && f.CWD != "." {
+				fmt.Fprintf(&b, " (in %s)", tailSafeText(f.CWD))
+			}
+			if f.Headline != "" {
+				fmt.Fprintf(&b, ": %s", tailSafeText(truncateTailText(f.Headline, turnContextFailureHeadlineRunes)))
+			}
+			if n := min(len(f.Files), turnContextFailureFileHints); n > 0 {
+				hints := make([]string, n)
+				for i := range hints {
+					hints[i] = tailSafeText(f.Files[i])
+				}
+				fmt.Fprintf(&b, " [%s]", strings.Join(hints, ", "))
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString("</open_failures>\n")
+		sections = append(sections, b.String())
 	}
-	return "<turn_context>\n" + b.String() + "</turn_context>"
+
+	return strings.Join(sections, "\n")
+}
+
+// tailSafeText neutralizes angle brackets in content echoed into the
+// tail — a stored headline like "</open_failures>" could otherwise
+// spoof a section boundary. Write-side caps bound length; the
+// render-side truncate below keeps that bound honest if they loosen.
+var tailSafeText = strings.NewReplacer("<", "(", ">", ")").Replace
+
+func truncateTailText(s string, maxRunes int) string {
+	if r := []rune(s); len(r) > maxRunes {
+		return string(r[:maxRunes])
+	}
+	return s
 }
 
 // renderSessionSignals writes the session-tier sections — intent,
@@ -288,7 +345,7 @@ func (a *sessionAgent) relWorkdir(p string) string {
 // resolvable signal exists — a working set or earlier substantive user
 // text means the referent has candidates — and stays opt-in behind
 // options.ambiguity_clarification.
-func (a *sessionAgent) ambiguityDirective(ctx context.Context, call SessionAgentCall, msgs []message.Message) string {
+func (a *sessionAgent) ambiguityDirective(ctx context.Context, call SessionAgentCall, msgs []message.Message, openFailures []cmdlog.Failure) string {
 	// An attached file is almost certainly the referent — "fix it"
 	// with a file dropped on the prompt needs no clarification.
 	if !a.ambiguityClarification || a.isSubAgent || len(call.Attachments) > 0 || !isVaguePrompt(call.Prompt) {
@@ -309,14 +366,12 @@ func (a *sessionAgent) ambiguityDirective(ctx context.Context, call SessionAgent
 			return ""
 		}
 	}
-	// An open failure is itself the likely referent for "the
-	// failure" — a candidate already exists. Only when the memory is
-	// actually injected: an invisible signal must not suppress the
-	// clarify path.
-	if a.failureMemory && a.cmdlog != nil {
-		if failures, err := a.cmdlog.ListOpenFailures(ctx, 1); err == nil && len(failures) > 0 {
-			return ""
-		}
+	// An open failure is itself the likely referent — but only for a
+	// failure-shaped referent or bare anaphora. "Fix the config"
+	// names a target the memory cannot supply: suppressing there
+	// would disarm the gate for the life of the row.
+	if a.failureMemory && len(openFailures) > 0 && vagueReferentIsFailureShaped(call.Prompt) {
+		return ""
 	}
 	if a.interactive && a.hasTool(tools.QuestionToolName) {
 		return `<ambiguity_gate>
