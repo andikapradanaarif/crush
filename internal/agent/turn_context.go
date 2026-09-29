@@ -153,7 +153,15 @@ type TailSection struct {
 // digest, and the verbatim text. The tail never persists to message
 // storage — this is the only durable answer to "what did the model
 // actually see at this turn", which is exactly what an eval artifact
-// needs to audit context-injection arms. SessionTelemetry exports it.
+// needs to audit context-injection arms. SessionTelemetry exports it;
+// eval.TurnTail is the wire mirror.
+//
+// Two reading caveats: the snapshot is taken at render, before the
+// request flies — a run that errors before its first request lands
+// still records the tail it prepared (the record's error fields
+// distinguish delivered from prepared); and Bytes counts the joined
+// text including the "\n\n" separators, so it exceeds the sections'
+// byte sum whenever more than one envelope renders.
 type TailAudit struct {
 	Sections []TailSection `json:"sections"`
 	Bytes    int           `json:"bytes"`

@@ -397,7 +397,10 @@ type TailSection struct {
 // envelopes rendered (section names + bytes), the joined text's
 // sha256 for reconstruction checks, and the verbatim text itself.
 // Turn is stamped by the driver at fold time — the child's telemetry
-// carries the audit without a turn index.
+// carries the audit without a turn index. Wire mirror of
+// agent.TailAudit: the snapshot is taken at render, so a run that
+// errors before its first request lands still records the tail it
+// prepared — the record's error fields distinguish.
 type TurnTail struct {
 	Turn     int           `json:"turn"`
 	Sections []TailSection `json:"sections"`

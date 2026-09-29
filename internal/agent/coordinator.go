@@ -451,6 +451,9 @@ func (c *coordinator) watchSessionDeletions() {
 		if c.tailAudit != nil {
 			c.tailAudit.Del(ev.Payload.ID)
 		}
+		if c.usageLedger != nil {
+			c.usageLedger.Del(ev.Payload.ID)
+		}
 		// The DB cascade removes the rows; ForgetSession drops the
 		// service's in-memory compaction-stall counter.
 		if c.notebook != nil {
