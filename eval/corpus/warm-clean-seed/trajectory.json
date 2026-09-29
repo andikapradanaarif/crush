@@ -1,0 +1,20 @@
+{
+	"id": "warm-clean-seed",
+	"schema_version": 1,
+	"origin": {"kind": "synthetic"},
+	"start_state": {"kind": "fixture", "fixture_dir": "fixture"},
+	"prior_sessions": [
+		{"turns": ["run `go test ./...` and `go build ./...` as separate bare commands and report the project's state — do not modify any files"]}
+	],
+	"task": {
+		"turns": ["add a -shout flag that prints the greeting in uppercase"]
+	},
+	"check": {
+		"script": "check.sh",
+		"expect_start_state": "fail",
+		"timeout_seconds": 300
+	},
+	"coverage": {"min_steps": 1, "min_warm_start.sessions": 1},
+	"requires": {"tools": ["go"]},
+	"budget": {"run_timeout_seconds": 300, "max_steps": 15}
+}

@@ -1,0 +1,20 @@
+{
+	"id": "warm-multi-failure",
+	"schema_version": 1,
+	"origin": {"kind": "synthetic"},
+	"start_state": {"kind": "fixture", "fixture_dir": "fixture"},
+	"prior_sessions": [
+		{"turns": ["run `go test ./...` and `go vet ./...` as separate bare commands — no pipes or wrappers — and report every failure — do not modify any files"]}
+	],
+	"task": {
+		"turns": ["two checks fail — fix them"]
+	},
+	"check": {
+		"script": "check.sh",
+		"expect_start_state": "fail",
+		"timeout_seconds": 300
+	},
+	"coverage": {"min_steps": 1, "min_warm_start.sessions": 1},
+	"requires": {"tools": ["go"]},
+	"budget": {"run_timeout_seconds": 300, "max_steps": 15}
+}

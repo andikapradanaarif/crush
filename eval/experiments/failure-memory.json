@@ -3,13 +3,18 @@
 	"model": "alibaba-tp/deepseek-v4.1-flash",
 	"temperature": 0,
 	"corpus": [
-		"warm-fix-failing-test",
-		"warm-startup-crash"
+		"warm-*"
 	],
 	"runs_per_trajectory": {
 		"stable": 3,
 		"mid": 10,
 		"uncharacterized": 5
+	},
+	"primary": {
+		"metric": "call_metrics.discovery_calls_before_write",
+		"direction": "decrease",
+		"mde": 0.35,
+		"max_pass_drop": 0.1
 	},
 	"arms": {
 		"control": {

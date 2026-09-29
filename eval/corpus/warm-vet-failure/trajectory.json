@@ -1,0 +1,20 @@
+{
+	"id": "warm-vet-failure",
+	"schema_version": 1,
+	"origin": {"kind": "synthetic"},
+	"start_state": {"kind": "fixture", "fixture_dir": "fixture"},
+	"prior_sessions": [
+		{"turns": ["run `go vet ./...` as a single bare command — no pipes or wrappers — and report what it flags — do not modify any files"]}
+	],
+	"task": {
+		"turns": ["vet flags something — fix it"]
+	},
+	"check": {
+		"script": "check.sh",
+		"expect_start_state": "fail",
+		"timeout_seconds": 300
+	},
+	"coverage": {"min_steps": 1, "min_warm_start.sessions": 1},
+	"requires": {"tools": ["go"]},
+	"budget": {"run_timeout_seconds": 300, "max_steps": 15}
+}
