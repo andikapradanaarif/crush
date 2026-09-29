@@ -1,26 +1,14 @@
 {
-	"name": "failure-memory",
+	"name": "failure-memory-clean",
 	"model": "alibaba-tp/deepseek-v4.1-flash",
 	"temperature": 0,
 	"corpus": [
-		"warm-build-break",
-		"warm-fix-failing-test",
-		"warm-multi-failure",
-		"warm-panic-subdir",
-		"warm-startup-crash",
-		"warm-test-subpackage",
-		"warm-vet-failure"
+		"warm-clean-seed"
 	],
 	"runs_per_trajectory": {
 		"stable": 3,
 		"mid": 10,
 		"uncharacterized": 4
-	},
-	"primary": {
-		"metric": "call_metrics.discovery_calls_before_write",
-		"direction": "decrease",
-		"mde": 0.35,
-		"max_pass_drop": 0.1
 	},
 	"arms": {
 		"control": {
