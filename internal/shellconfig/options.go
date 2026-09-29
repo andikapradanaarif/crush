@@ -214,6 +214,7 @@ var optionSpecs = map[string]optionSpec{
 	"progress":                 {jsonKey: "progress", kind: optBool},
 	"project-index":            {jsonKey: "project_index", kind: optBool},
 	"ambiguity-clarification":  {jsonKey: "ambiguity_clarification", kind: optBool},
+	"failure-memory":           {jsonKey: "failure_memory", kind: optBool},
 	"notebook-enabled":         {jsonKey: "notebook_enabled", kind: optBool},
 	"notebook-sync-mem0":       {jsonKey: "notebook_sync_mem0", kind: optBool},
 	"notebook-auto-inject":     {jsonKey: "notebook_auto_inject", kind: optBool},

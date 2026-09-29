@@ -34,6 +34,12 @@ const (
 	// a hint list, not working state, so it runs tighter than the
 	// working-set cap.
 	turnContextFileHeatLimit = 5
+	// turnContextOpenFailuresLimit bounds the failure-memory tail —
+	// recent-first, so the cap keeps the freshest unresolved failures.
+	turnContextOpenFailuresLimit = 5
+	// turnContextFailureFileHints bounds file hints rendered per
+	// failure row.
+	turnContextFailureFileHints = 3
 )
 
 // vagueReferentRe matches prompts that lean on a definite or anaphoric
@@ -93,16 +99,51 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	return []fantasy.Message{fantasy.NewUserMessage(text)}
 }
 
-// turnContextBlob renders the <turn_context> blob for the session
-// tier — deterministic session signals, each in a labeled section,
-// appended at the request tail. Returns "" when the tier is off, the
-// agent is a sub-agent, or no signal has content.
+// turnContextBlob renders the <turn_context> blob — deterministic
+// session signals at the "session" tier plus project failure memory
+// under its own flag, each in a labeled section, appended at the
+// request tail. Returns "" for a sub-agent or when no enabled signal
+// has content.
 func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCall) string {
-	if a.turnContext != "session" || a.isSubAgent {
+	if a.isSubAgent {
 		return ""
 	}
 	var b strings.Builder
 
+	if a.turnContext == "session" {
+		a.renderSessionSignals(ctx, call, &b)
+	}
+
+	if a.failureMemory && a.cmdlog != nil {
+		if failures, err := a.cmdlog.ListOpenFailures(ctx, turnContextOpenFailuresLimit); err == nil && len(failures) > 0 {
+			b.WriteString("<open_failures>\nCommands that failed in this workspace and have not passed since — the likely referents for \"the failing test\" or \"the build error\"; a clean re-run resolves one:\n")
+			for _, f := range failures {
+				b.WriteString("- ")
+				b.WriteString(f.Cmd)
+				if f.CWD != "" && f.CWD != "." {
+					fmt.Fprintf(&b, " (in %s)", f.CWD)
+				}
+				if f.Headline != "" {
+					fmt.Fprintf(&b, ": %s", f.Headline)
+				}
+				if n := min(len(f.Files), turnContextFailureFileHints); n > 0 {
+					fmt.Fprintf(&b, " [%s]", strings.Join(f.Files[:n], ", "))
+				}
+				b.WriteString("\n")
+			}
+			b.WriteString("</open_failures>\n")
+		}
+	}
+
+	if b.Len() == 0 {
+		return ""
+	}
+	return "<turn_context>\n" + b.String() + "</turn_context>"
+}
+
+// renderSessionSignals writes the session-tier sections — intent,
+// working set, file heat, open todos — into b.
+func (a *sessionAgent) renderSessionSignals(ctx context.Context, call SessionAgentCall, b *strings.Builder) {
 	if a.notebook != nil {
 		if entries, err := a.notebook.SearchByEventType(ctx, call.SessionID, notebook.EventUserIntent); err == nil && len(entries) > 0 {
 			// Budget drops whole oldest items — a constraint rendered
@@ -120,7 +161,7 @@ func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCal
 			if len(items) > 0 {
 				b.WriteString("<user_intent>\nUser statements this session, verbatim — constraints and scope in the user's own words, oldest first; a later statement may override an earlier one:\n")
 				if dropped := len(entries) - len(items); dropped > 0 {
-					fmt.Fprintf(&b, "- … %d earlier statement(s) omitted\n", dropped)
+					fmt.Fprintf(b, "- … %d earlier statement(s) omitted\n", dropped)
 				}
 				for _, line := range items {
 					b.WriteString(line)
@@ -138,7 +179,7 @@ func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCal
 		if len(read) > 0 {
 			b.WriteString("<working_set>\nRecently read or edited files — the most likely referents for \"the file\", \"the bug\", and similar:\n")
 			for _, f := range read[:min(len(read), turnContextWorkingSetLimit)] {
-				fmt.Fprintf(&b, "- %s\n", a.relWorkdir(f))
+				fmt.Fprintf(b, "- %s\n", a.relWorkdir(f))
 			}
 			b.WriteString("</working_set>\n")
 		}
@@ -183,7 +224,7 @@ func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCal
 				const maxListedTodos = 10
 				for i, t := range open {
 					if i >= maxListedTodos {
-						fmt.Fprintf(&b, "- … and %d more\n", len(open)-maxListedTodos)
+						fmt.Fprintf(b, "- … and %d more\n", len(open)-maxListedTodos)
 						break
 					}
 					b.WriteString(session.FormatPlanItemLine(t, keyByID) + "\n")
@@ -192,11 +233,6 @@ func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCal
 			}
 		}
 	}
-
-	if b.Len() == 0 {
-		return ""
-	}
-	return "<turn_context>\n" + b.String() + "</turn_context>"
 }
 
 // intentLine renders one intent item for the tail: the verbatim
@@ -270,6 +306,15 @@ func (a *sessionAgent) ambiguityDirective(ctx context.Context, call SessionAgent
 			return ""
 		}
 		if hot, err := a.filetracker.ListHotFiles(ctx, call.SessionID, 1); err == nil && len(hot) > 0 {
+			return ""
+		}
+	}
+	// An open failure is itself the likely referent for "the
+	// failure" — a candidate already exists. Only when the memory is
+	// actually injected: an invisible signal must not suppress the
+	// clarify path.
+	if a.failureMemory && a.cmdlog != nil {
+		if failures, err := a.cmdlog.ListOpenFailures(ctx, 1); err == nil && len(failures) > 0 {
 			return ""
 		}
 	}

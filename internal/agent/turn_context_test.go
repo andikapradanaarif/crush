@@ -1,11 +1,14 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/message"
@@ -52,6 +55,7 @@ func newTurnCtxAgent(t *testing.T, cfg *config.Config) (*sessionAgent, fakeEnv, 
 		sessions:    env.sessions,
 		messages:    env.messages,
 		filetracker: *env.filetracker,
+		cmdlog:      env.cmdlog,
 		tools:       csync.NewSlice[fantasy.AgentTool](),
 	}
 	return a, env, sess.ID
@@ -136,6 +140,20 @@ func TestAmbiguityDirective(t *testing.T) {
 		require.Empty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "fix it",
 		}, []message.Message{userMsg("auth.go panics on nil tokens")}))
+	})
+
+	t.Run("an open failure suppresses the gate", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.ambiguityClarification = true
+		a.failureMemory = true
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: "prior", Command: "make test",
+			CWD: env.workingDir, Stdout: "FAIL", ExitCode: 1, Ran: true,
+		})
+		require.Empty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
+			SessionID: sessionID, Prompt: "fix the failure",
+		}, nil))
 	})
 
 	t.Run("an attachment suppresses the gate", func(t *testing.T) {
@@ -302,6 +320,59 @@ func TestTurnContextBlob(t *testing.T) {
 		require.Contains(t, blob, "paths: cfg/")
 	})
 
+	t.Run("session tier renders open failures", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.turnContext = "session"
+		a.failureMemory = true
+		require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "db_test.go"), []byte("package db"), 0o644))
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: "prior", Command: "go test ./internal/db",
+			CWD:      env.workingDir,
+			Stdout:   "db_test.go:12: dial failed\nFAIL",
+			ExitCode: 1, Ran: true,
+		})
+		blob := a.turnContextBlob(t.Context(), SessionAgentCall{SessionID: sessionID})
+		require.Contains(t, blob, "<open_failures>")
+		require.Contains(t, blob, "go test ./internal/db")
+		require.Contains(t, blob, "dial failed")
+		require.Contains(t, blob, "[db_test.go]")
+	})
+
+	t.Run("a clean re-run clears the failure section", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.turnContext = "session"
+		a.failureMemory = true
+		run := cmdlog.Run{
+			SessionID: "prior", Command: "go test ./internal/db",
+			CWD: env.workingDir, Stdout: "FAIL", ExitCode: 1, Ran: true,
+		}
+		env.cmdlog.RecordRun(t.Context(), run)
+		run.ExitCode = 0
+		run.Stdout = "ok"
+		env.cmdlog.RecordRun(t.Context(), run)
+		blob := a.turnContextBlob(t.Context(), SessionAgentCall{SessionID: sessionID})
+		require.NotContains(t, blob, "<open_failures>")
+	})
+
+	t.Run("failures in another cwd keep their scope label", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.turnContext = "session"
+		a.failureMemory = true
+		sub := filepath.Join(env.workingDir, "packages", "api")
+		require.NoError(t, os.MkdirAll(sub, 0o755))
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: "prior", Command: "npm test",
+			CWD:      sub,
+			Stdout:   "FAIL auth.spec.ts",
+			ExitCode: 1, Ran: true,
+		})
+		blob := a.turnContextBlob(t.Context(), SessionAgentCall{SessionID: sessionID})
+		require.Contains(t, blob, "npm test (in "+filepath.Join("packages", "api")+")")
+	})
+
 	t.Run("empty session produces no blob", func(t *testing.T) {
 		t.Parallel()
 		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})
@@ -332,4 +403,32 @@ func TestTurnTailMessages(t *testing.T) {
 	// tail would never reach the model on those providers.
 	require.Equal(t, fantasy.MessageRoleUser, tail[0].Role)
 	require.Contains(t, tail[0].Content[0].(fantasy.TextPart).Text, "<ambiguity_gate>")
+}
+
+func TestTurnContextBlob_OpenFailuresFlagIsTierIndependent(t *testing.T) {
+	t.Parallel()
+
+	t.Run("flag on renders with the tier off", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.failureMemory = true
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: "prior", Command: "make test",
+			CWD: env.workingDir, Stdout: "FAIL", ExitCode: 1, Ran: true,
+		})
+		blob := a.turnContextBlob(t.Context(), SessionAgentCall{SessionID: sessionID})
+		require.Contains(t, blob, "<open_failures>")
+	})
+
+	t.Run("flag off hides failures under the session tier", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.turnContext = "session"
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: "prior", Command: "make test",
+			CWD: env.workingDir, Stdout: "FAIL", ExitCode: 1, Ran: true,
+		})
+		blob := a.turnContextBlob(t.Context(), SessionAgentCall{SessionID: sessionID})
+		require.NotContains(t, blob, "<open_failures>")
+	})
 }
