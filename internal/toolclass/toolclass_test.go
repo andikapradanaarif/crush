@@ -64,3 +64,28 @@ func TestBashRedirectTargets(t *testing.T) {
 		})
 	}
 }
+
+func TestCommandKind(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		command string
+		want    string
+	}{
+		{"go test ./...", CommandKindTest},
+		{"go build .", CommandKindBuild},
+		{"go vet ./...", CommandKindLint},
+		{"npm run test", CommandKindTest},
+		{"npm run dev", CommandKindRun},
+		{"go run main.go", CommandKindRun},
+		{"make", CommandKindBuild},
+		{"make test", CommandKindTest},
+		{"make -j4 lint", CommandKindLint},
+		{"pytest -x", CommandKindTest},
+		{"env FOO=1 go test ./...", CommandKindTest},
+		{"ls -la", CommandKindOther},
+		{"cd x && go test", CommandKindTest},
+	}
+	for _, tc := range cases {
+		require.Equal(t, tc.want, CommandKind(tc.command), tc.command)
+	}
+}

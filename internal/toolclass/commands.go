@@ -192,6 +192,31 @@ func IsBuildOrTestCommand(command string) bool {
 	return ok
 }
 
+// bareSubcommandKind refines a subcommand-less tool ("make test",
+// "task lint") by its first positional arg when the arg names a known
+// kind — bare tools carry no required subcommand but may still take
+// one by convention.
+func bareSubcommandKind(command, name string) string {
+	if _, bare := bareCommandKinds[name]; !bare {
+		return ""
+	}
+	for _, fields := range commandSegments(command) {
+		if len(fields) < 2 {
+			continue
+		}
+		if strings.TrimSuffix(filepath.Base(fields[0]), ".exe") != name {
+			continue
+		}
+		for _, arg := range fields[1:] {
+			if strings.HasPrefix(arg, "-") {
+				continue
+			}
+			return subcommandKinds[arg]
+		}
+	}
+	return ""
+}
+
 // CommandKind classifies a shell command for command memory: build,
 // test, lint, run, or other. Verification commands split by their
 // subcommand ("go test" is test, "go vet" is lint); bare build/test
@@ -201,6 +226,9 @@ func IsBuildOrTestCommand(command string) bool {
 func CommandKind(command string) string {
 	if name, sub, ok := matchBuildTest(command); ok {
 		if sub == "" {
+			if kind := bareSubcommandKind(command, name); kind != "" {
+				return kind
+			}
 			return bareCommandKinds[name]
 		}
 		return subcommandKinds[sub]

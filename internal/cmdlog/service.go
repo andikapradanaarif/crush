@@ -161,7 +161,7 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 		Cmd:       cmdNorm,
 		Cwd:       cwd,
 		Headline:  headline,
-		Files:     failureFilesJSON(run.Stderr, run.Stdout),
+		Files:     s.failureFilesJSON(run.Stderr, run.Stdout, cwd),
 		FirstSeen: time.Now().Unix(),
 		LastSeen:  time.Now().Unix(),
 	}); err != nil {
@@ -272,8 +272,10 @@ var (
 	// first lines so a passing "ok pkg" prelude doesn't headline.
 	failureLinePattern = regexp.MustCompile(`(?i)\b(?:fail(?:ed|ure)?|error|panic|assert)\b|exit status \d+`)
 	// fileTokenPattern matches path-shaped tokens: segments joined by
-	// / or \ with a dotted extension, optionally carrying :line.
-	fileTokenPattern = regexp.MustCompile(`[\w.-]+(?:[/\\][\w.-]+)*\.[A-Za-z]{1,6}(?::\d+){0,2}`)
+	// / or \ with a dotted extension, optionally carrying :line. The
+	// extension starts lowercase so dotted identifiers like
+	// errors.New or filepath.Base are not files.
+	fileTokenPattern = regexp.MustCompile(`[\w.-]+(?:[/\\][\w.-]+)*\.[a-z][a-z0-9]{0,5}(?::\d+){0,2}`)
 	// lineSuffix strips a trailing :line[:col] — but not a Windows
 	// drive letter, which is a colon before the path, not after it.
 	lineSuffix = regexp.MustCompile(`:\d+(:\d+)?$`)
@@ -295,10 +297,12 @@ func firstFailureLine(s string) string {
 }
 
 // failureFilesJSON extracts the file paths a failing run named, from
-// both streams, for join-against-file_heat queries later.
-// Conservative: path-shaped tokens only, deduped, capped.
-func failureFilesJSON(stderr, stdout string) string {
-	files := extractFiles(stderr + "\n" + stdout)
+// both streams, normalized against the run's directory to
+// workspace-relative keys — the same spelling file_heat carries, so a
+// later join matches. Conservative: path-shaped tokens only, deduped,
+// capped.
+func (s *service) failureFilesJSON(stderr, stdout, cwd string) string {
+	files := s.extractFiles(stderr+"\n"+stdout, cwd)
 	data, err := json.Marshal(files)
 	if err != nil {
 		return "[]"
@@ -306,7 +310,7 @@ func failureFilesJSON(stderr, stdout string) string {
 	return string(data)
 }
 
-func extractFiles(output string) []string {
+func (s *service) extractFiles(output, cwd string) []string {
 	seen := map[string]bool{}
 	var files []string
 	lines := strings.Split(output, "\n")
@@ -316,11 +320,24 @@ func extractFiles(output string) []string {
 	for _, line := range lines {
 		for _, tok := range fileTokenPattern.FindAllString(line, -1) {
 			path := strings.TrimSpace(lineSuffix.ReplaceAllString(tok, ""))
-			if path == "" || seen[path] {
+			if path == "" {
 				continue
 			}
-			seen[path] = true
-			files = append(files, path)
+			// Tokens resolve against the run's directory; the stored
+			// key is workspace-relative or nothing.
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(s.workingDir, cwd, path)
+			}
+			path = filepathext.Canonical(path)
+			rel, err := filepath.Rel(s.workingDir, path)
+			if err != nil || strings.HasPrefix(rel, "..") {
+				continue
+			}
+			if seen[rel] {
+				continue
+			}
+			seen[rel] = true
+			files = append(files, rel)
 			if len(files) >= maxFilesRecorded {
 				return files
 			}

@@ -300,3 +300,24 @@ func TestRecordRun_EmptyCommandSkipped(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, cmds)
 }
+
+func TestRecordRun_FilesWorkspaceRelative(t *testing.T) {
+	env := setupTest(t)
+	api := filepath.Join(env.workingDir, "packages", "api")
+
+	// A path relative to the run's cwd joins as workspace-relative —
+	// the spelling file_heat carries — while dotted identifiers like
+	// errors.New are not files, and paths escaping the root drop.
+	run(env, "s1", "npm test", api, "", "FAIL auth.spec.ts\n  at errors.New (errors.go:1)\n  ../../etc/passwd:3 leaked", nil, 1)
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1)
+	require.Contains(t, open[0].Files, filepath.Join("packages", "api", "auth.spec.ts"))
+	for _, f := range open[0].Files {
+		// The identifier errors.New is not a file; errors.go inside
+		// the stack frame is.
+		require.NotEqual(t, "errors.New", filepath.Base(f))
+		require.NotContains(t, f, "passwd")
+	}
+}
