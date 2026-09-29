@@ -157,6 +157,19 @@ var armOnlyCoverageFields = map[string]func(*RunRecord) float64{
 	"call_metrics.question_calls":              func(r *RunRecord) float64 { return float64(callMetrics(r).QuestionCalls) },
 	"call_metrics.question_calls_errored":      func(r *RunRecord) float64 { return float64(callMetrics(r).QuestionCallsErrored) },
 	"call_metrics.wrong_pointer_events":        func(r *RunRecord) float64 { return float64(callMetrics(r).WrongPointerEvents) },
+	// tail.sections.<envelope> counts turns whose rendered tail
+	// included the named context envelope — the "did the injection
+	// reach the prompt" firing assertion for context-injection arms.
+	// Every current envelope is flag-gated (open_failures needs
+	// failure_memory, turn_context needs the session tier,
+	// ambiguity_gate needs ambiguity_clarification), so these are
+	// arm-scoped only; trajectory coverage rejects them by parse.
+	// The name set mirrors the renderer's envelope list — a new
+	// envelope registers here explicitly rather than starving or
+	// passing silently.
+	"tail.sections.open_failures":  func(r *RunRecord) float64 { return tailSectionTurns(r, "open_failures") },
+	"tail.sections.turn_context":   func(r *RunRecord) float64 { return tailSectionTurns(r, "turn_context") },
+	"tail.sections.ambiguity_gate": func(r *RunRecord) float64 { return tailSectionTurns(r, "ambiguity_gate") },
 }
 
 // armFields is the arm-coverage grammar: every trajectory-coverage
@@ -201,6 +214,21 @@ func pressure(r *RunRecord) Pressure {
 		return Pressure{}
 	}
 	return *r.Pressure
+}
+
+// tailSectionTurns counts the turns whose rendered tail included the
+// named envelope.
+func tailSectionTurns(r *RunRecord, name string) float64 {
+	n := 0
+	for _, t := range r.Tail {
+		for _, s := range t.Sections {
+			if s.Name == name {
+				n++
+				break
+			}
+		}
+	}
+	return float64(n)
 }
 
 // warmStart dereferences the optional seeding ledger. coverageMet
@@ -335,6 +363,13 @@ func coverageMet(cov Coverage, rec *RunRecord, fields map[string]func(*RunRecord
 		// And warm_start.*: a cold run carries no seeding ledger —
 		// absent must not satisfy a "did seeding happen" predicate.
 		if strings.HasPrefix(field, "warm_start.") && rec.WarmStart == nil {
+			return false, key, nil
+		}
+		// And tail.*: an empty Tail means no turn rendered an
+		// envelope OR the telemetry never emitted — indistinguishable
+		// at record level, so a max_ "didn't render" predicate must
+		// not be satisfied by silence.
+		if strings.HasPrefix(field, "tail.") && len(rec.Tail) == 0 {
 			return false, key, nil
 		}
 		got := fn(rec)

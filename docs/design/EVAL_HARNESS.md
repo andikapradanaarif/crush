@@ -653,8 +653,14 @@ flies, so a run that errors before its first request lands still
 records the tail it prepared (`error`/`error_class` distinguish
 delivered from prepared); and `bytes` counts the joined text
 including section separators, so it exceeds the `sections` byte sum
-when more than one envelope renders. Informational only — coverage
-grammar cannot reach it and the gate never reads it.
+when more than one envelope renders. `tail.sections.<envelope>` is
+reachable from **arm-scoped** coverage only (every envelope is
+flag-gated): `min_tail.sections.open_failures: 1` on a treatment arm
+is the firing assertion that turns a laundered seed — a failure the
+write path never recorded, so nothing could render — into
+inconclusive-and-resampled instead of a hidden null. The verdict
+gate itself never reads tail rows; they feed the fired/unfired
+strata and coverage starvation, not the primary comparison.
 `pressure` is the notebook pressure gate's own coverage (#100):
 `activations` counts engage transitions — the "did the overflow
 machinery fire" predicate — and `engaged` is the per-session latch at
