@@ -237,6 +237,10 @@ type coordinator struct {
 	// depend on which AgentResult returned last. Always-on like
 	// reqStats.
 	usageLedger *csync.Map[string, ledgerUsage]
+	// tailAudit snapshots each session's last rendered turn tail —
+	// the ephemeral tail's only durable trace, exported through
+	// SessionTelemetry so eval records can audit what the model saw.
+	tailAudit *csync.Map[string, TailAudit]
 	// detachedWork is shared with every built agent: each detached
 	// notebook/title goroutine Adds before spawning so
 	// WaitForDetachedWork can join them before a short-lived
@@ -331,6 +335,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		edgeFiringEmitted:     csync.NewMap[string, map[string]int](),
 		reqStats:              csync.NewMap[string, requestStats](),
 		usageLedger:           csync.NewMap[string, ledgerUsage](),
+		tailAudit:             csync.NewMap[string, TailAudit](),
 		detachedWork:          &sync.WaitGroup{},
 	}
 
@@ -442,6 +447,9 @@ func (c *coordinator) watchSessionDeletions() {
 		}
 		if c.reqStats != nil {
 			c.reqStats.Del(ev.Payload.ID)
+		}
+		if c.tailAudit != nil {
+			c.tailAudit.Del(ev.Payload.ID)
 		}
 		// The DB cascade removes the rows; ForgetSession drops the
 		// service's in-memory compaction-stall counter.
@@ -1202,6 +1210,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		EdgeStats:              c.edgeStats,
 		RequestStats:           c.reqStats,
 		UsageLedger:            c.usageLedger,
+		TailAudit:              c.tailAudit,
 		DetachedWork:           c.detachedWork,
 	})
 

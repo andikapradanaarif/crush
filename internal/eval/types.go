@@ -333,6 +333,12 @@ type RunRecord struct {
 	// forensics: which component first differed and what the volatile
 	// prefix hashed to. Informational only; never a predicate.
 	StepRecords []StepRecord `json:"step_records,omitempty"`
+	// Tail is the per-turn tail audit — which context envelopes the
+	// model actually saw each turn (section names, sizes, digest,
+	// verbatim text). The tail is ephemeral by design; absent from
+	// this record it is unobservable after the run. Informational
+	// only; never a predicate.
+	Tail []TurnTail `json:"tail,omitempty"`
 	// GeneratorTokens accounts the sidecar LLM calls that produced
 	// notebook entries — generation spend invisible in Tokens. Absent
 	// on arms where the notebook never generated.
@@ -378,6 +384,26 @@ type WarmStart struct {
 	Tokens          TokenUsage      `json:"tokens"`
 	GeneratorTokens GeneratorTokens `json:"generator_tokens"`
 	DurationS       float64         `json:"duration_s"`
+}
+
+// TailSection names one rendered tail envelope and its size — one
+// row of a turn's tail audit.
+type TailSection struct {
+	Name  string `json:"name"`
+	Bytes int    `json:"bytes"`
+}
+
+// TurnTail is one turn's ephemeral-tail audit: which context
+// envelopes rendered (section names + bytes), the joined text's
+// sha256 for reconstruction checks, and the verbatim text itself.
+// Turn is stamped by the driver at fold time — the child's telemetry
+// carries the audit without a turn index.
+type TurnTail struct {
+	Turn     int           `json:"turn"`
+	Sections []TailSection `json:"sections"`
+	Bytes    int           `json:"bytes"`
+	SHA256   string        `json:"sha256"`
+	Text     string        `json:"text,omitempty"`
 }
 
 // RequestStats is the run's request-size snapshot: the last rendered

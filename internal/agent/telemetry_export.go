@@ -94,6 +94,11 @@ type SessionTelemetry struct {
 	ReqHistoryBytes     int64 `json:"req_history_bytes"`
 	ReqToolCallBytes    int64 `json:"req_tool_call_bytes"`
 	ReqToolResultBytes  int64 `json:"req_tool_result_bytes"`
+	// Tail is the session's last rendered turn-tail audit — which
+	// context envelopes the model actually saw (names, sizes,
+	// digest, verbatim text). Nil when no tail rendered: the audit
+	// distinguishes "section absent" from "telemetry absent".
+	Tail *TailAudit `json:"tail,omitempty"`
 	// EdgeFirings splits run-boundary edge firing counts by edge and
 	// outcome — the in-memory mirror of the edge_firings rows this
 	// process wrote. Cumulative for the process; the eval harness
@@ -181,6 +186,11 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 				}
 				t.EdgeFirings[edge][outcome] += n
 			}
+		}
+	}
+	if sa.tailAudit != nil {
+		if ta, ok := sa.tailAudit.Get(sessionID); ok {
+			t.Tail = &ta
 		}
 	}
 	if sa.usageLedger != nil {

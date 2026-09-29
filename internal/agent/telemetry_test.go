@@ -299,6 +299,34 @@ func TestSessionTelemetry_LedgerUsage(t *testing.T) {
 	require.Equal(t, 5, tel.LedgerSteps)
 }
 
+func TestSessionTelemetry_Tail(t *testing.T) {
+	t.Parallel()
+
+	a := &sessionAgent{
+		tailAudit: csync.NewMap[string, TailAudit](),
+		stubStats: csync.NewMap[string, stubStats](),
+		nbStats:   csync.NewMap[string, notebook.Stats](),
+	}
+	a.tailAudit.Set("sess", TailAudit{
+		Sections: []TailSection{{Name: "open_failures", Bytes: 120}},
+		Bytes:    120,
+		SHA256:   "abc",
+		Text:     "<open_failures>\n- make test: FAIL\n</open_failures>\n",
+	})
+	c := &coordinator{mainAgent: a}
+
+	tel := c.SessionTelemetry("sess")
+	require.NotNil(t, tel.Tail)
+	require.Equal(t, "open_failures", tel.Tail.Sections[0].Name)
+	require.Equal(t, 120, tel.Tail.Bytes)
+	require.Equal(t, "abc", tel.Tail.SHA256)
+	require.Contains(t, tel.Tail.Text, "make test")
+
+	// A session that never rendered a tail reports nil — "no tail"
+	// must not alias "telemetry absent".
+	require.Nil(t, c.SessionTelemetry("other").Tail)
+}
+
 // unknownPart stands in for a MessagePart kind hashPart doesn't know
 // — the hash must still separate on the discriminator.
 type unknownPart struct{ kind fantasy.ContentType }

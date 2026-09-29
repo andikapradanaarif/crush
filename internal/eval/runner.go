@@ -360,6 +360,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	rec.EdgeFirings = res.EdgeFirings
 	rec.PromptTokensPerTurn = res.PromptTokensPerTurn
 	rec.StepRecords = res.StepRecords
+	rec.Tail = res.Tail
 	// Pressure is pointer-gated presence: a positive estimate means
 	// the gate evaluated (engaged/activations imply it — the latch
 	// only trips after the estimate lands). Absent means unmeasured,

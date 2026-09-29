@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -133,7 +135,53 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		"sections", len(sections),
 		"bytes", len(text),
 	)
+	a.recordTailAudit(call.SessionID, sections, text)
 	return []fantasy.Message{fantasy.NewUserMessage(text)}
+}
+
+// TailSection names one rendered tail envelope and its size — one
+// row of the per-turn audit.
+type TailSection struct {
+	Name  string `json:"name"`
+	Bytes int    `json:"bytes"`
+}
+
+// TailAudit is the ephemeral per-turn tail's observable record:
+// which context envelopes rendered, their sizes, the joined text's
+// digest, and the verbatim text. The tail never persists to message
+// storage — this is the only durable answer to "what did the model
+// actually see at this turn", which is exactly what an eval artifact
+// needs to audit context-injection arms. SessionTelemetry exports it.
+type TailAudit struct {
+	Sections []TailSection `json:"sections"`
+	Bytes    int           `json:"bytes"`
+	SHA256   string        `json:"sha256"`
+	Text     string        `json:"text"`
+}
+
+var tailSectionNameRe = regexp.MustCompile(`^<(\w+)>`)
+
+// recordTailAudit snapshots the rendered tail for SessionTelemetry.
+// Last-write-wins per session: a process's later Run replaces the
+// audit, matching the telemetry emission's once-per-process shape.
+func (a *sessionAgent) recordTailAudit(sessionID string, sections []string, text string) {
+	if a.tailAudit == nil || sessionID == "" {
+		return
+	}
+	sum := sha256.Sum256([]byte(text))
+	audit := TailAudit{
+		Bytes:  len(text),
+		SHA256: hex.EncodeToString(sum[:]),
+		Text:   text,
+	}
+	for _, s := range sections {
+		name := "unknown"
+		if m := tailSectionNameRe.FindStringSubmatch(strings.TrimSpace(s)); m != nil {
+			name = m[1]
+		}
+		audit.Sections = append(audit.Sections, TailSection{Name: name, Bytes: len(s)})
+	}
+	a.tailAudit.Set(sessionID, audit)
 }
 
 // turnContextBlob renders the tail context sections — the session
