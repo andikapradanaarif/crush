@@ -3,6 +3,8 @@ package cmdlog
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -32,6 +34,8 @@ func setupTest(t *testing.T) *testEnv {
 	}
 }
 
+// run simulates a completed run that reached a real exit status —
+// Ran mirrors what bash.go computes with shell.IsExitStatus.
 func run(env *testEnv, sessionID, command, cwd, stdout, stderr string, runErr error, exitCode int) {
 	env.svc.RecordRun(env.ctx, Run{
 		SessionID: sessionID,
@@ -41,7 +45,17 @@ func run(env *testEnv, sessionID, command, cwd, stdout, stderr string, runErr er
 		Stderr:    stderr,
 		Err:       runErr,
 		ExitCode:  exitCode,
+		Ran:       true,
 	})
+}
+
+// touch creates a workspace file so the os.Stat gate in extractFiles
+// accepts the hint.
+func touch(t *testing.T, env *testEnv, rel string) {
+	t.Helper()
+	path := filepath.Join(env.workingDir, rel)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("x"), 0o644))
 }
 
 func TestRecordRun_UpsertsCommandLedger(t *testing.T) {
@@ -86,6 +100,7 @@ func TestRecordRun_CommandKinds(t *testing.T) {
 
 func TestRecordRun_FailureLifecycle(t *testing.T) {
 	env := setupTest(t)
+	touch(t, env, "foo_test.go")
 	stderr := "FAIL: TestFoo\n\tfoo_test.go:42: expected 1, got 2"
 
 	run(env, "s1", "go test ./...", env.workingDir, "", stderr, nil, 1)
@@ -109,6 +124,7 @@ func TestRecordRun_FailureLifecycle(t *testing.T) {
 
 func TestRecordRun_StdoutFailure(t *testing.T) {
 	env := setupTest(t)
+	touch(t, env, "parse_test.go")
 	// go test writes FAIL lines to stdout with empty stderr.
 	stdout := "ok  \texample.com/pkg/a\t0.012s\n--- FAIL: TestParse (0.00s)\n    parse_test.go:31: bad parse\nFAIL\texample.com/pkg/b\t0.041s"
 
@@ -121,6 +137,11 @@ func TestRecordRun_StdoutFailure(t *testing.T) {
 	// bare exec error.
 	require.Equal(t, "--- FAIL: TestParse (0.00s)", open[0].Headline)
 	require.Contains(t, open[0].Files, "parse_test.go")
+	// Hostnames and module paths parse as dotted tokens but are not
+	// files — the on-disk gate drops them.
+	for _, f := range open[0].Files {
+		require.NotContains(t, f, "example.com")
+	}
 }
 
 func TestRecordRun_DistinctStdoutFailures(t *testing.T) {
@@ -140,6 +161,8 @@ func TestRecordRun_DirectoryScopedResolution(t *testing.T) {
 	env := setupTest(t)
 	api := filepath.Join(env.workingDir, "packages", "api")
 	web := filepath.Join(env.workingDir, "packages", "web")
+	touch(t, env, filepath.Join("packages", "api", "auth.spec.ts"))
+	touch(t, env, filepath.Join("packages", "web", "cart.spec.ts"))
 
 	run(env, "s1", "npm test", api, "", "FAIL auth.spec.ts", nil, 1)
 	run(env, "s1", "npm test", web, "", "FAIL cart.spec.ts", nil, 1)
@@ -150,10 +173,24 @@ func TestRecordRun_DirectoryScopedResolution(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, open, 1)
 	require.Equal(t, filepath.Join("packages", "api"), open[0].CWD)
+
+	// The ledger scopes the same way: "npm test" in api and web are
+	// two rows, so "run the tests" knows where it last ran.
+	cmds, err := env.svc.ListCommands(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, cmds, 2)
+	cwds := map[string]bool{}
+	for _, c := range cmds {
+		require.Equal(t, "npm test", c.CmdNorm)
+		cwds[c.CWD] = true
+	}
+	require.True(t, cwds[filepath.Join("packages", "api")])
+	require.True(t, cwds[filepath.Join("packages", "web")])
 }
 
 func TestRecordRun_RefailReopensAndRefreshes(t *testing.T) {
 	env := setupTest(t)
+	touch(t, env, "foo_test.go")
 
 	run(env, "s1", "go test ./...", env.workingDir, "", "FAIL: TestFoo\n\tfoo_test.go:42: boom", nil, 1)
 	run(env, "s2", "go test ./...", env.workingDir, "", "", nil, 0)
@@ -304,6 +341,8 @@ func TestRecordRun_EmptyCommandSkipped(t *testing.T) {
 func TestRecordRun_FilesWorkspaceRelative(t *testing.T) {
 	env := setupTest(t)
 	api := filepath.Join(env.workingDir, "packages", "api")
+	touch(t, env, filepath.Join("packages", "api", "auth.spec.ts"))
+	touch(t, env, filepath.Join("packages", "api", "errors.go"))
 
 	// A path relative to the run's cwd joins as workspace-relative —
 	// the spelling file_heat carries — while dotted identifiers like
@@ -320,4 +359,79 @@ func TestRecordRun_FilesWorkspaceRelative(t *testing.T) {
 		require.NotEqual(t, "errors.New", filepath.Base(f))
 		require.NotContains(t, f, "passwd")
 	}
+}
+
+func TestRecordRun_DeniedIsNotAFailure(t *testing.T) {
+	env := setupTest(t)
+
+	// A blockHandler denial never executed: the ledger notes the
+	// attempt without a verdict and no failure row opens.
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID: "s1",
+		Command:   "sudo rm -rf /",
+		CWD:       env.workingDir,
+		Err:       errors.New(`command is not allowed for security reasons: "sudo"`),
+		ExitCode:  1,
+		Ran:       false,
+	})
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Empty(t, open)
+
+	cmds, err := env.svc.ListCommands(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, cmds, 1)
+	require.Equal(t, int64(-1), cmds[0].LastExit)
+	require.Equal(t, int64(0), cmds[0].OKCount)
+	require.Equal(t, int64(0), cmds[0].FailCount)
+}
+
+func TestRecordRun_FilesScannedRedacted(t *testing.T) {
+	env := setupTest(t)
+
+	// A credential-shaped token must not persist as a file hint:
+	// extraction scans the redacted stream, and [REDACTED] is not
+	// path-shaped.
+	run(env, "s1", "go test ./...", env.workingDir, "",
+		"FAIL: TestAuth\n\ttoken eyJhbg.pwt.secret signed", nil, 1)
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1)
+	for _, f := range open[0].Files {
+		require.NotContains(t, f, "secret")
+	}
+}
+
+func TestRecordRun_GoBuildDiagnosticHeadline(t *testing.T) {
+	env := setupTest(t)
+
+	// go build errors carry no "error" word — the file:line:col:
+	// diagnostic is the verdict line, not the "# pkg" banner.
+	run(env, "s1", "go build ./...", env.workingDir, "",
+		"# command-line-arguments\nmain.go:10:2: undefined: doThing", nil, 1)
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1)
+	require.Equal(t, "main.go:10:2: undefined: doThing", open[0].Headline)
+}
+
+func TestRecordRun_StdoutSurvivesLoudStderr(t *testing.T) {
+	env := setupTest(t)
+	touch(t, env, "late_test.go")
+
+	// Each stream scans its own first lines — a loud stderr can't
+	// starve stdout's file tokens.
+	loud := ""
+	for i := range 50 {
+		loud += fmt.Sprintf("noise line %d\n", i)
+	}
+	run(env, "s1", "go test ./...", env.workingDir, "FAIL late_test.go:9", loud, nil, 1)
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1)
+	require.Contains(t, open[0].Files, "late_test.go")
 }

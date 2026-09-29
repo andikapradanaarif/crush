@@ -17,6 +17,7 @@ type CollapsedTurn struct {
 
 type CommandMemory struct {
 	CmdNorm       string `json:"cmd_norm"`
+	Cwd           string `json:"cwd"`
 	Kind          string `json:"kind"`
 	LastExit      int64  `json:"last_exit"`
 	LastAt        int64  `json:"last_at"`

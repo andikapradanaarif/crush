@@ -46,10 +46,11 @@ func (q *Queries) ListOpenFailures(ctx context.Context, limit int64) ([]FailureM
 }
 
 const listRecentCommands = `-- name: ListRecentCommands :many
-SELECT cmd_norm, kind, last_exit, last_at, ok_count, fail_count, last_session_id FROM command_memory ORDER BY last_at DESC, rowid DESC LIMIT ?
+SELECT cmd_norm, cwd, kind, last_exit, last_at, ok_count, fail_count, last_session_id FROM command_memory ORDER BY last_at DESC, rowid DESC LIMIT ?
 `
 
-// rowid breaks same-second ties: the later insert is the later run.
+// last_at is millisecond-granularity so re-runs order by recency;
+// rowid settles ties for rows written in the same millisecond.
 func (q *Queries) ListRecentCommands(ctx context.Context, limit int64) ([]CommandMemory, error) {
 	rows, err := q.query(ctx, q.listRecentCommandsStmt, listRecentCommands, limit)
 	if err != nil {
@@ -61,6 +62,7 @@ func (q *Queries) ListRecentCommands(ctx context.Context, limit int64) ([]Comman
 		var i CommandMemory
 		if err := rows.Scan(
 			&i.CmdNorm,
+			&i.Cwd,
 			&i.Kind,
 			&i.LastExit,
 			&i.LastAt,
@@ -104,6 +106,7 @@ func (q *Queries) ResolveFailuresForCommand(ctx context.Context, arg ResolveFail
 const upsertCommandRun = `-- name: UpsertCommandRun :exec
 INSERT INTO command_memory (
     cmd_norm,
+    cwd,
     kind,
     last_exit,
     last_at,
@@ -117,8 +120,9 @@ INSERT INTO command_memory (
     ?,
     ?,
     ?,
+    ?,
     ?
-) ON CONFLICT(cmd_norm) DO UPDATE SET
+) ON CONFLICT(cmd_norm, cwd) DO UPDATE SET
     kind = excluded.kind,
     -- Interrupted runs carry last_exit = -1: the run is noted but
     -- never overwrites the command's last real verdict.
@@ -131,6 +135,7 @@ INSERT INTO command_memory (
 
 type UpsertCommandRunParams struct {
 	CmdNorm       string `json:"cmd_norm"`
+	Cwd           string `json:"cwd"`
 	Kind          string `json:"kind"`
 	LastExit      int64  `json:"last_exit"`
 	LastAt        int64  `json:"last_at"`
@@ -145,6 +150,7 @@ type UpsertCommandRunParams struct {
 func (q *Queries) UpsertCommandRun(ctx context.Context, arg UpsertCommandRunParams) error {
 	_, err := q.exec(ctx, q.upsertCommandRunStmt, upsertCommandRun,
 		arg.CmdNorm,
+		arg.Cwd,
 		arg.Kind,
 		arg.LastExit,
 		arg.LastAt,

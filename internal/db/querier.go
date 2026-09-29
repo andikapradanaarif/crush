@@ -90,7 +90,8 @@ type Querier interface {
 	ListNewFiles(ctx context.Context) ([]File, error)
 	ListOpenFailures(ctx context.Context, limit int64) ([]FailureMemory, error)
 	ListProcessedSegments(ctx context.Context, sessionID string) ([]ProcessedSegment, error)
-	// rowid breaks same-second ties: the later insert is the later run.
+	// last_at is millisecond-granularity so re-runs order by recency;
+	// rowid settles ties for rows written in the same millisecond.
 	ListRecentCommands(ctx context.Context, limit int64) ([]CommandMemory, error)
 	ListSessionCounters(ctx context.Context) ([]ListSessionCountersRow, error)
 	ListSessionReadFiles(ctx context.Context, sessionID string) ([]ReadFile, error)

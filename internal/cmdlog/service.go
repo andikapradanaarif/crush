@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -59,21 +60,32 @@ type Service interface {
 
 // Run is one completed command invocation.
 type Run struct {
-	SessionID   string
-	Command     string
-	CWD         string
-	Stdout      string
-	Stderr      string
-	Err         error
-	ExitCode    int
+	SessionID string
+	Command   string
+	// CWD is the directory the command's output paths resolve
+	// against — the shell's post-run directory, not the launch dir,
+	// so "cd x && go test" keys failures under x.
+	CWD      string
+	Stdout   string
+	Stderr   string
+	Err      error
+	ExitCode int
+	// Ran reports the command actually executed and the shell
+	// reported a real exit status. A policy denial, parse error, or
+	// context kill is not a project failure — it never ran.
+	Ran         bool
 	Interrupted bool
 }
 
-// Command is one command_memory row: a normalized command and its
-// running tally.
+// Command is one command_memory row: a normalized command in a
+// workspace-relative directory, and its running tally.
 type Command struct {
-	CmdNorm       string
-	Kind          string
+	CmdNorm string
+	CWD     string
+	Kind    string
+	// LastExit is the command's last real verdict. The -1 sentinel
+	// means the last run never produced one (interrupt or denial) —
+	// != 0 alone is not a failure signal.
 	LastExit      int64
 	LastAt        time.Time
 	OKCount       int64
@@ -113,17 +125,24 @@ func NewService(q *db.Queries, workingDir string) Service {
 }
 
 func (s *service) RecordRun(ctx context.Context, run Run) {
+	// The tool's ctx dies with the run — a cancel racing the
+	// completion must not drop the memory write.
+	ctx = context.WithoutCancel(ctx)
 	cmdNorm := normalizeCommand(run.Command)
 	if cmdNorm == "" {
 		return
 	}
 	cwd := s.relDir(run.CWD)
+	// A run has a verdict only if it executed to an exit status and
+	// was not interrupted. Denied, unparseable, or killed commands
+	// never ran — the ledger notes them but they open no failure and
+	// resolve none.
 	interrupted := run.Interrupted || run.ExitCode == 130 // SIGINT by convention, ctx path or not.
+	verdict := run.Ran && !interrupted
 	ok, fail := int64(0), int64(0)
 	lastExit := int64(run.ExitCode)
 	switch {
-	case interrupted:
-		// Neither outcome — the command's verdict never arrived.
+	case !verdict:
 		lastExit = interruptedExit
 	case run.ExitCode == 0:
 		ok = 1
@@ -132,9 +151,10 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 	}
 	if err := s.q.UpsertCommandRun(ctx, db.UpsertCommandRunParams{
 		CmdNorm:       cmdNorm,
+		Cwd:           cwd,
 		Kind:          toolclass.CommandKind(run.Command),
 		LastExit:      lastExit,
-		LastAt:        time.Now().Unix(),
+		LastAt:        time.Now().UnixMilli(),
 		OkCount:       ok,
 		FailCount:     fail,
 		LastSessionID: run.SessionID,
@@ -142,7 +162,7 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 		slog.Error("Error recording command run", "error", err)
 		return
 	}
-	if interrupted {
+	if !verdict {
 		return
 	}
 	if run.ExitCode == 0 {
@@ -156,14 +176,15 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 		return
 	}
 	headline := failureHeadline(run.Stderr, run.Stdout, run.Err)
+	now := time.Now().UnixMilli()
 	if err := s.q.UpsertFailure(ctx, db.UpsertFailureParams{
 		Signature: failureSignature(cmdNorm, cwd, headline),
 		Cmd:       cmdNorm,
 		Cwd:       cwd,
 		Headline:  headline,
 		Files:     s.failureFilesJSON(run.Stderr, run.Stdout, cwd),
-		FirstSeen: time.Now().Unix(),
-		LastSeen:  time.Now().Unix(),
+		FirstSeen: now,
+		LastSeen:  now,
 	}); err != nil {
 		slog.Error("Error recording failure", "error", err)
 	}
@@ -181,9 +202,10 @@ func (s *service) ListCommands(ctx context.Context, limit int) ([]Command, error
 	for _, r := range rows {
 		out = append(out, Command{
 			CmdNorm:       r.CmdNorm,
+			CWD:           r.Cwd,
 			Kind:          r.Kind,
 			LastExit:      r.LastExit,
-			LastAt:        time.Unix(r.LastAt, 0),
+			LastAt:        time.UnixMilli(r.LastAt),
 			OKCount:       r.OkCount,
 			FailCount:     r.FailCount,
 			LastSessionID: r.LastSessionID,
@@ -208,8 +230,8 @@ func (s *service) ListOpenFailures(ctx context.Context, limit int) ([]Failure, e
 			CWD:        r.Cwd,
 			Headline:   r.Headline,
 			Files:      parseFilesJSON(r.Files),
-			FirstSeen:  time.Unix(r.FirstSeen, 0),
-			LastSeen:   time.Unix(r.LastSeen, 0),
+			FirstSeen:  time.UnixMilli(r.FirstSeen),
+			LastSeen:   time.UnixMilli(r.LastSeen),
 			ResolvedIn: r.ResolvedIn,
 		})
 	}
@@ -268,14 +290,17 @@ func failureSignature(cmdNorm, cwd, headline string) string {
 var (
 	digitsPattern = regexp.MustCompile(`\d+`)
 	// failureLinePattern matches the lines that carry a verdict —
-	// FAIL marks, error headlines, panics — preferred over arbitrary
-	// first lines so a passing "ok pkg" prelude doesn't headline.
-	failureLinePattern = regexp.MustCompile(`(?i)\b(?:fail(?:ed|ure)?|error|panic|assert)\b|exit status \d+`)
+	// FAIL marks, error headlines, panics, or a file:line:col:
+	// diagnostic (go build errors carry no "error" word) — preferred
+	// over arbitrary first lines so an "ok pkg" prelude or a
+	// "# pkg" banner doesn't headline.
+	failureLinePattern = regexp.MustCompile(`(?i)\b(?:fail(?:ed|ure)?|error|panic|assert)\b|exit status \d+|[\w./\\-]+\.[a-z0-9]+:\d+(:\d+)?:`)
 	// fileTokenPattern matches path-shaped tokens: segments joined by
-	// / or \ with a dotted extension, optionally carrying :line. The
-	// extension starts lowercase so dotted identifiers like
-	// errors.New or filepath.Base are not files.
-	fileTokenPattern = regexp.MustCompile(`[\w.-]+(?:[/\\][\w.-]+)*\.[a-z][a-z0-9]{0,5}(?::\d+){0,2}`)
+	// / or \ with a dotted extension, optionally carrying :line or a
+	// Windows drive-letter prefix. The extension starts lowercase so
+	// dotted identifiers like errors.New or filepath.Base are not
+	// files.
+	fileTokenPattern = regexp.MustCompile(`(?:[A-Za-z]:[\\/])?[\w.-]+(?:[/\\][\w.-]+)*\.[a-z][a-z0-9]{0,5}(?::\d+){0,2}`)
 	// lineSuffix strips a trailing :line[:col] — but not a Windows
 	// drive letter, which is a colon before the path, not after it.
 	lineSuffix = regexp.MustCompile(`:\d+(:\d+)?$`)
@@ -284,25 +309,36 @@ var (
 // firstFailureLine scans for a verdict-shaped line first, then falls
 // back to the first content line — "FAIL: TestFoo" beats "ok pkg".
 func firstFailureLine(s string) string {
-	lines := strings.Split(s, "\n")
-	if len(lines) > failureScanLines {
-		lines = lines[:failureScanLines]
-	}
-	for _, line := range lines {
-		if trimmed := strings.TrimSpace(line); trimmed != "" && failureLinePattern.MatchString(trimmed) {
+	var first string
+	n := 0
+	for line := range strings.Lines(s) {
+		if n++; n > failureScanLines {
+			break
+		}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if failureLinePattern.MatchString(trimmed) {
 			return trimmed
 		}
+		if first == "" {
+			first = trimmed
+		}
 	}
-	return firstContentLine(strings.Join(lines, "\n"))
+	return first
 }
 
 // failureFilesJSON extracts the file paths a failing run named, from
 // both streams, normalized against the run's directory to
 // workspace-relative keys — the same spelling file_heat carries, so a
-// later join matches. Conservative: path-shaped tokens only, deduped,
-// capped.
+// later join matches. Streams are scanned redacted (a credential
+// fragment is not a file hint) and separately so a loud stderr can't
+// starve stdout's tokens; candidates must exist on disk, which drops
+// hostnames, module paths, and stale references alike.
 func (s *service) failureFilesJSON(stderr, stdout, cwd string) string {
-	files := s.extractFiles(stderr+"\n"+stdout, cwd)
+	files := s.extractFiles(redact.Secrets(stderr), cwd, nil)
+	files = s.extractFiles(redact.Secrets(stdout), cwd, files)
 	data, err := json.Marshal(files)
 	if err != nil {
 		return "[]"
@@ -310,14 +346,19 @@ func (s *service) failureFilesJSON(stderr, stdout, cwd string) string {
 	return string(data)
 }
 
-func (s *service) extractFiles(output, cwd string) []string {
-	seen := map[string]bool{}
-	var files []string
-	lines := strings.Split(output, "\n")
-	if len(lines) > failureScanLines {
-		lines = lines[:failureScanLines]
+// extractFiles scans output's first lines for path-shaped tokens,
+// resolving each against the run directory and keeping only files
+// that exist inside the workspace.
+func (s *service) extractFiles(output, cwd string, files []string) []string {
+	seen := make(map[string]bool, len(files))
+	for _, f := range files {
+		seen[f] = true
 	}
-	for _, line := range lines {
+	n := 0
+	for line := range strings.Lines(output) {
+		if n++; n > failureScanLines {
+			break
+		}
 		for _, tok := range fileTokenPattern.FindAllString(line, -1) {
 			path := strings.TrimSpace(lineSuffix.ReplaceAllString(tok, ""))
 			if path == "" {
@@ -331,6 +372,11 @@ func (s *service) extractFiles(output, cwd string) []string {
 			path = filepathext.Canonical(path)
 			rel, err := filepath.Rel(s.workingDir, path)
 			if err != nil || strings.HasPrefix(rel, "..") {
+				continue
+			}
+			// Only real files are hints: "example.com" parses as a
+			// path but isn't one.
+			if info, err := os.Stat(path); err != nil || info.IsDir() {
 				continue
 			}
 			if seen[rel] {

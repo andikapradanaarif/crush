@@ -80,6 +80,7 @@ func TestCommandKind(t *testing.T) {
 		{"make", CommandKindBuild},
 		{"make test", CommandKindTest},
 		{"make -j4 lint", CommandKindLint},
+		{"task -t Taskfile lint", CommandKindLint},
 		{"pytest -x", CommandKindTest},
 		{"env FOO=1 go test ./...", CommandKindTest},
 		{"ls -la", CommandKindOther},

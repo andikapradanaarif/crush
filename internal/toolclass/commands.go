@@ -211,7 +211,9 @@ func bareSubcommandKind(command, name string) string {
 			if strings.HasPrefix(arg, "-") {
 				continue
 			}
-			return subcommandKinds[arg]
+			if kind := subcommandKinds[arg]; kind != "" {
+				return kind
+			}
 		}
 	}
 	return ""

@@ -96,6 +96,10 @@ internal/
   event/                           Telemetry (PostHog)
   pubsub/                          Internal pub/sub for cross-component messaging
   filetracker/                     Tracks files touched per session
+  cmdlog/                          Project command/failure memory (write path;
+                                   read consumer pending)
+  redact/                          Shared secret redaction (leaf; used by
+                                   cmdlog, notebook, mem0 sync)
   history/                         Prompt history
 eval/                              Eval corpus, experiments, and flags
 docs/                              Docs: config/, design/ (design docs), hooks/

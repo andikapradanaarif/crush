@@ -310,3 +310,15 @@ func ExitCode(err error) int {
 	}
 	return 1
 }
+
+// IsExitStatus reports whether err is a real process exit status —
+// the command ran and the interpreter reported its code — as opposed
+// to a policy denial, parse error, or context error, which carry an
+// error but no verdict. Nil counts as ran (a clean exit).
+func IsExitStatus(err error) bool {
+	if err == nil {
+		return true
+	}
+	_, ok := errors.AsType[interp.ExitStatus](err)
+	return ok
+}

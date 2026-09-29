@@ -6,16 +6,20 @@
 -- must not cascade-delete what later sessions learned from it).
 -- last_session_id / resolved_in are provenance, not key material.
 
--- One row per normalized command: the project's command ledger.
--- "run the tests" resolves against the most recent kind=test row.
+-- One row per (normalized command, directory): the project's command
+-- ledger, scoped the same way failure_memory is scoped — "npm test"
+-- in packages/api and packages/web are different rows, and "run the
+-- tests" resolves against a row that knows where it ran.
 CREATE TABLE IF NOT EXISTS command_memory (
-    cmd_norm        TEXT NOT NULL PRIMARY KEY,
+    cmd_norm        TEXT NOT NULL,
+    cwd             TEXT NOT NULL DEFAULT '',
     kind            TEXT NOT NULL DEFAULT 'other',
     last_exit       INTEGER NOT NULL,
-    last_at         INTEGER NOT NULL,  -- Unix timestamp in seconds
+    last_at         INTEGER NOT NULL,  -- Unix timestamp in milliseconds
     ok_count        INTEGER NOT NULL DEFAULT 0,
     fail_count      INTEGER NOT NULL DEFAULT 0,
-    last_session_id TEXT NOT NULL DEFAULT ''
+    last_session_id TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (cmd_norm, cwd)
 );
 
 -- One row per failure signature (normalized command + directory +
@@ -31,8 +35,8 @@ CREATE TABLE IF NOT EXISTS failure_memory (
     cwd         TEXT NOT NULL DEFAULT '',
     headline    TEXT NOT NULL,
     files       TEXT NOT NULL DEFAULT '[]',
-    first_seen  INTEGER NOT NULL,  -- Unix timestamp in seconds
-    last_seen   INTEGER NOT NULL,  -- Unix timestamp in seconds
+    first_seen  INTEGER NOT NULL,  -- Unix timestamp in milliseconds
+    last_seen   INTEGER NOT NULL,  -- Unix timestamp in milliseconds
     resolved_in TEXT NOT NULL DEFAULT ''
 );
 -- +goose StatementEnd

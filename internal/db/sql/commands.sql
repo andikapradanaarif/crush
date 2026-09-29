@@ -4,6 +4,7 @@
 -- is the running tally, not a per-session sample.
 INSERT INTO command_memory (
     cmd_norm,
+    cwd,
     kind,
     last_exit,
     last_at,
@@ -17,8 +18,9 @@ INSERT INTO command_memory (
     ?,
     ?,
     ?,
+    ?,
     ?
-) ON CONFLICT(cmd_norm) DO UPDATE SET
+) ON CONFLICT(cmd_norm, cwd) DO UPDATE SET
     kind = excluded.kind,
     -- Interrupted runs carry last_exit = -1: the run is noted but
     -- never overwrites the command's last real verdict.
@@ -63,7 +65,8 @@ UPDATE failure_memory SET
 WHERE cmd = ? AND cwd = ? AND resolved_in = '';
 
 -- name: ListRecentCommands :many
--- rowid breaks same-second ties: the later insert is the later run.
+-- last_at is millisecond-granularity so re-runs order by recency;
+-- rowid settles ties for rows written in the same millisecond.
 SELECT * FROM command_memory ORDER BY last_at DESC, rowid DESC LIMIT ?;
 
 -- name: ListOpenFailures :many

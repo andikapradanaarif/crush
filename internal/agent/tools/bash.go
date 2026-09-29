@@ -283,11 +283,12 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 						cmdLog.RecordRun(ctx, cmdlog.Run{
 							SessionID:   sessionID,
 							Command:     params.Command,
-							CWD:         bgShell.WorkingDir,
+							CWD:         bgShell.Shell.GetWorkingDir(),
 							Stdout:      stdout,
 							Stderr:      stderr,
 							Err:         execErr,
 							ExitCode:    exitCode,
+							Ran:         shell.IsExitStatus(execErr),
 							Interrupted: interrupted,
 						})
 					}
@@ -363,6 +364,18 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 					// Incoming context was cancelled before we moved to background
 					// Kill the shell and return error
 					bgManager.Kill(bgShell.ID)
+					if cmdLog != nil {
+						killOut, killErr, _, _ := bgShell.GetOutput()
+						cmdLog.RecordRun(ctx, cmdlog.Run{
+							SessionID:   sessionID,
+							Command:     params.Command,
+							CWD:         bgShell.Shell.GetWorkingDir(),
+							Stdout:      killOut,
+							Stderr:      killErr,
+							Err:         ctx.Err(),
+							Interrupted: true,
+						})
+					}
 					return fantasy.ToolResponse{}, ctx.Err()
 				}
 			}
@@ -382,11 +395,12 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 					cmdLog.RecordRun(ctx, cmdlog.Run{
 						SessionID:   sessionID,
 						Command:     params.Command,
-						CWD:         bgShell.WorkingDir,
+						CWD:         bgShell.Shell.GetWorkingDir(),
 						Stdout:      stdout,
 						Stderr:      stderr,
 						Err:         execErr,
 						ExitCode:    exitCode,
+						Ran:         shell.IsExitStatus(execErr),
 						Interrupted: interrupted,
 					})
 				}
