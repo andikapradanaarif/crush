@@ -189,8 +189,14 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listNewFilesStmt, err = db.PrepareContext(ctx, listNewFiles); err != nil {
 		return nil, fmt.Errorf("error preparing query ListNewFiles: %w", err)
 	}
+	if q.listOpenFailuresStmt, err = db.PrepareContext(ctx, listOpenFailures); err != nil {
+		return nil, fmt.Errorf("error preparing query ListOpenFailures: %w", err)
+	}
 	if q.listProcessedSegmentsStmt, err = db.PrepareContext(ctx, listProcessedSegments); err != nil {
 		return nil, fmt.Errorf("error preparing query ListProcessedSegments: %w", err)
+	}
+	if q.listRecentCommandsStmt, err = db.PrepareContext(ctx, listRecentCommands); err != nil {
+		return nil, fmt.Errorf("error preparing query ListRecentCommands: %w", err)
 	}
 	if q.listSessionCountersStmt, err = db.PrepareContext(ctx, listSessionCounters); err != nil {
 		return nil, fmt.Errorf("error preparing query ListSessionCounters: %w", err)
@@ -222,6 +228,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.renameSessionStmt, err = db.PrepareContext(ctx, renameSession); err != nil {
 		return nil, fmt.Errorf("error preparing query RenameSession: %w", err)
 	}
+	if q.resolveFailuresForCommandStmt, err = db.PrepareContext(ctx, resolveFailuresForCommand); err != nil {
+		return nil, fmt.Errorf("error preparing query ResolveFailuresForCommand: %w", err)
+	}
 	if q.searchNotebookByTagStmt, err = db.PrepareContext(ctx, searchNotebookByTag); err != nil {
 		return nil, fmt.Errorf("error preparing query SearchNotebookByTag: %w", err)
 	}
@@ -242,6 +251,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.updateSessionTitleAndUsageStmt, err = db.PrepareContext(ctx, updateSessionTitleAndUsage); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateSessionTitleAndUsage: %w", err)
+	}
+	if q.upsertCommandRunStmt, err = db.PrepareContext(ctx, upsertCommandRun); err != nil {
+		return nil, fmt.Errorf("error preparing query UpsertCommandRun: %w", err)
+	}
+	if q.upsertFailureStmt, err = db.PrepareContext(ctx, upsertFailure); err != nil {
+		return nil, fmt.Errorf("error preparing query UpsertFailure: %w", err)
 	}
 	return &q, nil
 }
@@ -523,9 +538,19 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listNewFilesStmt: %w", cerr)
 		}
 	}
+	if q.listOpenFailuresStmt != nil {
+		if cerr := q.listOpenFailuresStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listOpenFailuresStmt: %w", cerr)
+		}
+	}
 	if q.listProcessedSegmentsStmt != nil {
 		if cerr := q.listProcessedSegmentsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listProcessedSegmentsStmt: %w", cerr)
+		}
+	}
+	if q.listRecentCommandsStmt != nil {
+		if cerr := q.listRecentCommandsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listRecentCommandsStmt: %w", cerr)
 		}
 	}
 	if q.listSessionCountersStmt != nil {
@@ -578,6 +603,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing renameSessionStmt: %w", cerr)
 		}
 	}
+	if q.resolveFailuresForCommandStmt != nil {
+		if cerr := q.resolveFailuresForCommandStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing resolveFailuresForCommandStmt: %w", cerr)
+		}
+	}
 	if q.searchNotebookByTagStmt != nil {
 		if cerr := q.searchNotebookByTagStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing searchNotebookByTagStmt: %w", cerr)
@@ -611,6 +641,16 @@ func (q *Queries) Close() error {
 	if q.updateSessionTitleAndUsageStmt != nil {
 		if cerr := q.updateSessionTitleAndUsageStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing updateSessionTitleAndUsageStmt: %w", cerr)
+		}
+	}
+	if q.upsertCommandRunStmt != nil {
+		if cerr := q.upsertCommandRunStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing upsertCommandRunStmt: %w", cerr)
+		}
+	}
+	if q.upsertFailureStmt != nil {
+		if cerr := q.upsertFailureStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing upsertFailureStmt: %w", cerr)
 		}
 	}
 	return err
@@ -707,7 +747,9 @@ type Queries struct {
 	listMessagesBySessionStmt            *sql.Stmt
 	listMessagesBySessionFromSummaryStmt *sql.Stmt
 	listNewFilesStmt                     *sql.Stmt
+	listOpenFailuresStmt                 *sql.Stmt
 	listProcessedSegmentsStmt            *sql.Stmt
+	listRecentCommandsStmt               *sql.Stmt
 	listSessionCountersStmt              *sql.Stmt
 	listSessionReadFilesStmt             *sql.Stmt
 	listSessionsStmt                     *sql.Stmt
@@ -718,6 +760,7 @@ type Queries struct {
 	recordProcessedSegmentStmt           *sql.Stmt
 	recordSegmentAttemptStmt             *sql.Stmt
 	renameSessionStmt                    *sql.Stmt
+	resolveFailuresForCommandStmt        *sql.Stmt
 	searchNotebookByTagStmt              *sql.Stmt
 	searchNotebookByTextStmt             *sql.Stmt
 	setSessionChannelStmt                *sql.Stmt
@@ -725,6 +768,8 @@ type Queries struct {
 	updateNotebookCompressionStmt        *sql.Stmt
 	updateSessionStmt                    *sql.Stmt
 	updateSessionTitleAndUsageStmt       *sql.Stmt
+	upsertCommandRunStmt                 *sql.Stmt
+	upsertFailureStmt                    *sql.Stmt
 }
 
 func (q *Queries) WithTx(tx *sql.Tx) *Queries {
@@ -786,7 +831,9 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listMessagesBySessionStmt:            q.listMessagesBySessionStmt,
 		listMessagesBySessionFromSummaryStmt: q.listMessagesBySessionFromSummaryStmt,
 		listNewFilesStmt:                     q.listNewFilesStmt,
+		listOpenFailuresStmt:                 q.listOpenFailuresStmt,
 		listProcessedSegmentsStmt:            q.listProcessedSegmentsStmt,
+		listRecentCommandsStmt:               q.listRecentCommandsStmt,
 		listSessionCountersStmt:              q.listSessionCountersStmt,
 		listSessionReadFilesStmt:             q.listSessionReadFilesStmt,
 		listSessionsStmt:                     q.listSessionsStmt,
@@ -797,6 +844,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		recordProcessedSegmentStmt:           q.recordProcessedSegmentStmt,
 		recordSegmentAttemptStmt:             q.recordSegmentAttemptStmt,
 		renameSessionStmt:                    q.renameSessionStmt,
+		resolveFailuresForCommandStmt:        q.resolveFailuresForCommandStmt,
 		searchNotebookByTagStmt:              q.searchNotebookByTagStmt,
 		searchNotebookByTextStmt:             q.searchNotebookByTextStmt,
 		setSessionChannelStmt:                q.setSessionChannelStmt,
@@ -804,5 +852,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		updateNotebookCompressionStmt:        q.updateNotebookCompressionStmt,
 		updateSessionStmt:                    q.updateSessionStmt,
 		updateSessionTitleAndUsageStmt:       q.updateSessionTitleAndUsageStmt,
+		upsertCommandRunStmt:                 q.upsertCommandRunStmt,
+		upsertFailureStmt:                    q.upsertFailureStmt,
 	}
 }

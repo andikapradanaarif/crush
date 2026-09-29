@@ -1,4 +1,4 @@
-package notebook
+package redact
 
 import "regexp"
 
@@ -7,15 +7,16 @@ import "regexp"
 // partial credential survives a boundary-case regex.
 const redactedPlaceholder = "[REDACTED]"
 
-// secretPatterns are the outbound redaction rules applied to notebook
-// entries before they leave the machine via mem0 sync. Entries
-// summarize tool output, and that output can hold the contents of a
-// .env or a config the agent read — the memory server is a different
-// trust domain, so credential-shaped material is stripped at the
-// boundary. The list is deliberately pattern-shaped — named keys,
-// auth headers, recognizable token formats — rather than
-// entropy-based, so hashes and identifiers survive while credential
-// material does not. Heuristic, not a guarantee.
+// secretPatterns are the outbound redaction rules applied to text
+// before it leaves the machine via mem0 sync or lands in a durable
+// project-memory row. Entries summarize tool output, and that output
+// can hold the contents of a .env or a config the agent read — the
+// memory server and the shared .crush database are different trust
+// domains, so credential-shaped material is stripped at the boundary.
+// The list is deliberately pattern-shaped — named keys, auth headers,
+// recognizable token formats — rather than entropy-based, so hashes
+// and identifiers survive while credential material does not.
+// Heuristic, not a guarantee.
 var secretPatterns = []*regexp.Regexp{
 	// KEY=VALUE / "key": "value" assignments on sensitive names:
 	// API_KEY=..., "password": "...", AWS_SECRET_ACCESS_KEY=....
@@ -32,11 +33,11 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----`),
 }
 
-// redactSecrets scrubs credential-shaped substrings from text bound
-// for the memory server. It errs toward named/format-shaped matches:
+// Secrets scrubs credential-shaped substrings from text bound for a
+// different trust domain. It errs toward named/format-shaped matches:
 // a false positive costs one word of an entry, a false negative costs
-// a credential on a third-party server.
-func redactSecrets(s string) string {
+// a credential leaving the machine or persisting in project memory.
+func Secrets(s string) string {
 	for _, p := range secretPatterns {
 		s = p.ReplaceAllString(s, redactedPlaceholder)
 	}

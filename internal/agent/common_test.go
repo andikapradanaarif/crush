@@ -14,6 +14,7 @@ import (
 	"charm.land/x/vcr"
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/db"
@@ -36,6 +37,7 @@ type fakeEnv struct {
 	permissions permission.Service
 	history     history.Service
 	filetracker *filetracker.Service
+	cmdlog      cmdlog.Service
 	lspClients  *csync.Map[string, *lsp.Client]
 }
 
@@ -78,6 +80,7 @@ func testEnv(t *testing.T) fakeEnv {
 	permissions := permission.NewPermissionService(workingDir, true, []string{})
 	history := history.NewService(q, conn)
 	filetrackerService := filetracker.NewService(q, workingDir)
+	cmdlogService := cmdlog.NewService(q)
 	lspClients := csync.NewMap[string, *lsp.Client]()
 
 	t.Cleanup(func() {
@@ -92,6 +95,7 @@ func testEnv(t *testing.T) fakeEnv {
 		permissions,
 		history,
 		&filetrackerService,
+		cmdlogService,
 		lspClients,
 	}
 }
@@ -155,7 +159,7 @@ func coderAgent(r *vcr.Recorder, env fakeEnv, large, small fantasy.LanguageModel
 	}
 
 	allTools := []fantasy.AgentTool{
-		tools.NewBashTool(nil, env.permissions, env.workingDir, cfg.Config().Options.DataDirectory, cfg.Config().Options.Attribution, modelName),
+		tools.NewBashTool(nil, env.permissions, env.workingDir, cfg.Config().Options.DataDirectory, cfg.Config().Options.Attribution, modelName, env.cmdlog),
 		tools.NewDownloadTool(env.permissions, env.workingDir, r.GetDefaultClient()),
 		tools.NewEditTool(env.permissions, env.history, *env.filetracker, env.workingDir),
 		tools.NewMultiEditTool(env.permissions, env.history, *env.filetracker, env.workingDir),

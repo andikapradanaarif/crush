@@ -28,6 +28,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	notebooktool "github.com/charmbracelet/crush/internal/agent/tools/notebook"
 	"github.com/charmbracelet/crush/internal/agent/tools/notebooktools"
+	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/discover"
@@ -159,6 +160,7 @@ type coordinator struct {
 	questions   question.Service
 	history     history.Service
 	filetracker filetracker.Service
+	cmdlog      cmdlog.Service
 	lspManager  *lsp.Manager
 	notify      pubsub.Publisher[notify.Notification]
 	runComplete pubsub.Publisher[notify.RunComplete]
@@ -269,6 +271,9 @@ type CoordinatorOptions struct {
 	Questions   question.Service
 	History     history.Service
 	FileTracker filetracker.Service
+	// CmdLog is the project command/failure memory. May be nil; the
+	// records then skip.
+	CmdLog      cmdlog.Service
 	LSPManager  *lsp.Manager
 	Notify      pubsub.Publisher[notify.Notification]
 	RunComplete pubsub.Publisher[notify.RunComplete]
@@ -308,6 +313,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		questions:             opts.Questions,
 		history:               opts.History,
 		filetracker:           opts.FileTracker,
+		cmdlog:                opts.CmdLog,
 		lspManager:            opts.LSPManager,
 		notify:                opts.Notify,
 		runComplete:           opts.RunComplete,
@@ -1308,7 +1314,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 
 	allTools = append(
 		allTools,
-		tools.NewBashTool(c.lspManager, c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.DataDirectory, c.cfg.Config().Options.Attribution, modelID),
+		tools.NewBashTool(c.lspManager, c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.DataDirectory, c.cfg.Config().Options.Attribution, modelID, c.cmdlog),
 		tools.NewCrushInfoTool(c.cfg, c.lspManager, c.allSkills, c.activeSkills, c.skillTracker),
 		tools.NewCrushLogsTool(logFile),
 		tools.NewJobOutputTool(c.cfg.Config().Options.DataDirectory),
