@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -441,6 +443,84 @@ func TestTurnTailMessages(t *testing.T) {
 	// tail would never reach the model on those providers.
 	require.Equal(t, fantasy.MessageRoleUser, tail[0].Role)
 	require.Contains(t, tail[0].Content[0].(fantasy.TextPart).Text, "<ambiguity_gate>")
+}
+
+func TestTurnTailAudit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the rendered tail lands in the audit map", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.tailAudit = csync.NewMap[string, TailAudit]()
+		a.failureMemory = true
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: "prior", Command: "make test",
+			CWD: env.workingDir, Stdout: "FAIL", ExitCode: 1, Ran: true,
+		})
+		tail := a.turnTailMessages(t.Context(), SessionAgentCall{SessionID: sessionID}, nil)
+		require.Len(t, tail, 1)
+		text := tail[0].Content[0].(fantasy.TextPart).Text
+
+		audit, ok := a.tailAudit.Get(sessionID)
+		require.True(t, ok)
+		require.Equal(t, text, audit.Text)
+		require.Equal(t, len(text), audit.Bytes)
+		sum := sha256.Sum256([]byte(text))
+		require.Equal(t, hex.EncodeToString(sum[:]), audit.SHA256)
+		require.Len(t, audit.Sections, 1)
+		require.Equal(t, "open_failures", audit.Sections[0].Name)
+		require.Equal(t, len(text), audit.Sections[0].Bytes)
+	})
+
+	t.Run("each envelope audits as its own row", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.tailAudit = csync.NewMap[string, TailAudit]()
+		a.turnContext = "session"
+		a.failureMemory = true
+		(*env.filetracker).RecordRead(t.Context(), sessionID, "main.go")
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: "prior", Command: "make test",
+			CWD: env.workingDir, Stdout: "FAIL", ExitCode: 1, Ran: true,
+		})
+		require.Len(t, a.turnTailMessages(t.Context(), SessionAgentCall{SessionID: sessionID}, nil), 1)
+
+		audit, ok := a.tailAudit.Get(sessionID)
+		require.True(t, ok)
+		names := make([]string, len(audit.Sections))
+		for i, s := range audit.Sections {
+			names[i] = s.Name
+		}
+		require.Equal(t, []string{"turn_context", "open_failures"}, names)
+	})
+
+	t.Run("an empty render clears a stale audit", func(t *testing.T) {
+		t.Parallel()
+		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.tailAudit = csync.NewMap[string, TailAudit]()
+		a.tailAudit.Set(sessionID, TailAudit{Bytes: 10, Text: "old"})
+		require.Empty(t, a.turnTailMessages(t.Context(), SessionAgentCall{SessionID: sessionID}, nil))
+		_, ok := a.tailAudit.Get(sessionID)
+		require.False(t, ok)
+	})
+
+	t.Run("no tail means no audit — absent, not empty", func(t *testing.T) {
+		t.Parallel()
+		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.tailAudit = csync.NewMap[string, TailAudit]()
+		require.Empty(t, a.turnTailMessages(t.Context(), SessionAgentCall{SessionID: sessionID}, nil))
+		_, ok := a.tailAudit.Get(sessionID)
+		require.False(t, ok)
+	})
+
+	t.Run("a nil audit map skips recording", func(t *testing.T) {
+		t.Parallel()
+		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.ambiguityClarification = true
+		require.Len(t, a.turnTailMessages(t.Context(), SessionAgentCall{
+			SessionID: sessionID, Prompt: "fix the bug",
+		}, nil), 1)
+	})
 }
 
 func TestTurnContextBlob_OpenFailuresFlagIsTierIndependent(t *testing.T) {

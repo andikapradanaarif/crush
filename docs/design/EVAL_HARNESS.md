@@ -577,6 +577,15 @@ trajectory twice) is strictly worse.
 			"first_changed_cause": "notebook-prefix"
 		}
 	],
+	"tail": [
+		{
+			"turn": 0,
+			"sections": [{"name": "open_failures", "bytes": 210}],
+			"bytes": 210,
+			"sha256": "abc123...",
+			"text": "<open_failures>\n- make test: FAIL ...\n</open_failures>"
+		}
+	],
 	"generator_tokens": {"calls": 12, "input": 41000, "output": 900, "cache_read": 0, "cache_write": 0},
 	"warm_start": {
 		"sessions": 2,
@@ -631,6 +640,21 @@ in the message hashes at all. `turnTailMessages` pins a message at
 the tail: with a non-empty tail, new step content inserts before it
 and the positional diff reports `history`, not `append` — default
 eval arms have empty tails, so the primary signal is clean.
+`tail` is the ephemeral turn tail's only durable trace — one row per
+turn that rendered tail context, with each envelope's name and byte
+size (`turn_context`, `open_failures`, `ambiguity_gate`), the joined
+text's `sha256`, and the verbatim text. The tail is appended to the
+prompt at render and never persisted to message storage, so without
+this field "did the model actually see the injected context" is
+inference, not audit. Presence semantics matter: a turn with no tail
+row means nothing rendered — distinct from telemetry absence. Two
+reading caveats: the snapshot is taken at render, before the request
+flies, so a run that errors before its first request lands still
+records the tail it prepared (`error`/`error_class` distinguish
+delivered from prepared); and `bytes` counts the joined text
+including section separators, so it exceeds the `sections` byte sum
+when more than one envelope renders. Informational only — coverage
+grammar cannot reach it and the gate never reads it.
 `pressure` is the notebook pressure gate's own coverage (#100):
 `activations` counts engage transitions — the "did the overflow
 machinery fire" predicate — and `engaged` is the per-session latch at

@@ -406,6 +406,29 @@ func TestRunTelemetry_PressureDecodeAndFold(t *testing.T) {
 	require.Equal(t, int64(61_000), res.Pressure.Estimate)
 }
 
+// The tail audit's wire contract: the child emits sections/bytes/
+// sha256/text without a turn index; the driver stamps Turn at fold
+// time and appends — a nil tail appends nothing so "no tail" and
+// "telemetry absent" stay distinguishable.
+func TestRunTelemetry_TailDecodeAndFold(t *testing.T) {
+	t.Parallel()
+
+	var tel runTelemetry
+	require.NoError(t, json.Unmarshal([]byte(
+		`{"tail":{"sections":[{"name":"open_failures","bytes":120}],"bytes":120,"sha256":"abc","text":"<open_failures>x</open_failures>"}}`), &tel))
+	require.NotNil(t, tel.Tail)
+	require.Equal(t, "open_failures", tel.Tail.Sections[0].Name)
+
+	var res RunResult
+	res.addTurnTelemetry(tel, 2)
+	res.addTurnTelemetry(runTelemetry{}, 3) // no tail this turn
+	require.Len(t, res.Tail, 1)
+	require.Equal(t, 2, res.Tail[0].Turn)
+	require.Equal(t, 120, res.Tail[0].Bytes)
+	require.Equal(t, "abc", res.Tail[0].SHA256)
+	require.Equal(t, "<open_failures>x</open_failures>", res.Tail[0].Text)
+}
+
 func TestWriteOnlyCoverageWarnings(t *testing.T) {
 	t.Parallel()
 

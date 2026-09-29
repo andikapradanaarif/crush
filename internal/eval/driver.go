@@ -60,6 +60,10 @@ type RunResult struct {
 	// turn's steps with usage and prefix attribution, Turn stamped
 	// at fold time.
 	StepRecords []StepRecord
+	// Tail is the trajectory-wide per-turn tail audit — each turn's
+	// rendered context envelopes with sizes, digest, and text, Turn
+	// stamped at fold time. Absent on turns where no tail rendered.
+	Tail []TurnTail
 	// Pressure carries the pressure gate's trajectory-wide state —
 	// summed engage transitions and the last turn's latch and
 	// estimate.
@@ -196,6 +200,10 @@ type runTelemetry struct {
 		Engaged     bool  `json:"engaged"`
 		Estimate    int64 `json:"estimate"`
 	} `json:"pressure"`
+	// Tail is the turn's ephemeral-tail audit — which context
+	// envelopes the model saw. Pointer-gated: nil when no tail
+	// rendered, so "no tail" doesn't alias "telemetry missing".
+	Tail *TurnTail `json:"tail,omitempty"`
 	// EdgeFirings splits run-boundary edge firing counts by edge and
 	// outcome — the per-turn delta of the session's edge_firings rows
 	// this process recorded (repair retries share the process).
@@ -384,6 +392,11 @@ func (res *RunResult) addTurnTelemetry(tel runTelemetry, turn int) {
 	for _, s := range tel.Request.Steps {
 		s.Turn = turn
 		res.StepRecords = append(res.StepRecords, s)
+	}
+	if tel.Tail != nil {
+		t := *tel.Tail
+		t.Turn = turn
+		res.Tail = append(res.Tail, t)
 	}
 	res.GeneratorTokens.Calls += tel.GeneratorTokens.Calls
 	res.GeneratorTokens.Input += tel.GeneratorTokens.Input
