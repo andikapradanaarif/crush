@@ -472,6 +472,38 @@ func TestTurnTailAudit(t *testing.T) {
 		require.Equal(t, len(text), audit.Sections[0].Bytes)
 	})
 
+	t.Run("each envelope audits as its own row", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.tailAudit = csync.NewMap[string, TailAudit]()
+		a.turnContext = "session"
+		a.failureMemory = true
+		(*env.filetracker).RecordRead(t.Context(), sessionID, "main.go")
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: "prior", Command: "make test",
+			CWD: env.workingDir, Stdout: "FAIL", ExitCode: 1, Ran: true,
+		})
+		require.Len(t, a.turnTailMessages(t.Context(), SessionAgentCall{SessionID: sessionID}, nil), 1)
+
+		audit, ok := a.tailAudit.Get(sessionID)
+		require.True(t, ok)
+		names := make([]string, len(audit.Sections))
+		for i, s := range audit.Sections {
+			names[i] = s.Name
+		}
+		require.Equal(t, []string{"turn_context", "open_failures"}, names)
+	})
+
+	t.Run("an empty render clears a stale audit", func(t *testing.T) {
+		t.Parallel()
+		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.tailAudit = csync.NewMap[string, TailAudit]()
+		a.tailAudit.Set(sessionID, TailAudit{Bytes: 10, Text: "old"})
+		require.Empty(t, a.turnTailMessages(t.Context(), SessionAgentCall{SessionID: sessionID}, nil))
+		_, ok := a.tailAudit.Get(sessionID)
+		require.False(t, ok)
+	})
+
 	t.Run("no tail means no audit — absent, not empty", func(t *testing.T) {
 		t.Parallel()
 		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})

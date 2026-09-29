@@ -119,14 +119,16 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 			openFailures = f
 		}
 	}
-	var sections []string
-	if blob := a.turnContextBlob(ctx, call, openFailures); blob != "" {
-		sections = append(sections, blob)
-	}
+	sections := a.turnContextSections(ctx, call, openFailures)
 	if directive := a.ambiguityDirective(ctx, call, msgs, openFailures); directive != "" {
 		sections = append(sections, directive)
 	}
 	if len(sections) == 0 {
+		// A Run that renders nothing must not re-export a stale audit
+		// from an earlier Run in the same process.
+		if a.tailAudit != nil {
+			a.tailAudit.Del(call.SessionID)
+		}
 		return nil
 	}
 	text := strings.Join(sections, "\n\n")
@@ -184,16 +186,23 @@ func (a *sessionAgent) recordTailAudit(sessionID string, sections []string, text
 	a.tailAudit.Set(sessionID, audit)
 }
 
-// turnContextBlob renders the tail context sections — the session
+// turnContextBlob renders the tail context sections joined for
+// display and tests. The tail and its audit need the per-envelope
+// split — see turnContextSections.
+func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCall, openFailures []cmdlog.Failure) string {
+	return strings.Join(a.turnContextSections(ctx, call, openFailures), "\n")
+}
+
+// turnContextSections renders the tail context sections — the session
 // signals wrapped in <turn_context> when that tier is on, and project
 // failure memory under its own <open_failures> envelope. The failure
 // section renders outside the tier's wrapper: with
 // turn_context=off + failure_memory=on an <open_failures> inside
 // <turn_context> would attribute its content to a disabled tier.
-// Returns "" for a sub-agent or when no enabled signal has content.
-func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCall, openFailures []cmdlog.Failure) string {
+// Returns nil for a sub-agent or when no enabled signal has content.
+func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgentCall, openFailures []cmdlog.Failure) []string {
 	if a.isSubAgent {
-		return ""
+		return nil
 	}
 	var sections []string
 
@@ -230,7 +239,7 @@ func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCal
 		sections = append(sections, b.String())
 	}
 
-	return strings.Join(sections, "\n")
+	return sections
 }
 
 // tailSafeText neutralizes angle brackets in content echoed into the
