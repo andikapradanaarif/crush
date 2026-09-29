@@ -376,6 +376,10 @@ type sessionAgent struct {
 	// calls — the single ledger the eval export reads. Shared across
 	// agent rebuilds. Nil allocates its own.
 	usageLedger *csync.Map[string, ledgerUsage]
+	// tailAudit snapshots the session's last rendered turn tail for
+	// SessionTelemetry — the ephemeral tail's only durable trace.
+	// Shared across agent rebuilds. Nil allocates its own.
+	tailAudit *csync.Map[string, TailAudit]
 	// detachedWork tracks spawned detached goroutines (segment,
 	// checkpoint, and digest generation, flagging, title) so a
 	// short-lived process can join them before exiting instead of
@@ -577,6 +581,9 @@ type SessionAgentOptions struct {
 	// don't depend on which AgentResult returned last. When nil the
 	// agent allocates its own.
 	UsageLedger *csync.Map[string, ledgerUsage]
+	// TailAudit shares the per-session tail audit across agent
+	// rebuilds. When nil the agent allocates its own.
+	TailAudit *csync.Map[string, TailAudit]
 	// DetachedWork is the shared wait group for spawned detached
 	// goroutines — the coordinator drains it on process exit. When
 	// nil the agent allocates its own.
@@ -638,6 +645,7 @@ func NewSessionAgent(
 		edgeStats:              cmp.Or(opts.EdgeStats, csync.NewMap[string, map[string]int]()),
 		reqStats:               cmp.Or(opts.RequestStats, csync.NewMap[string, requestStats]()),
 		usageLedger:            cmp.Or(opts.UsageLedger, csync.NewMap[string, ledgerUsage]()),
+		tailAudit:              cmp.Or(opts.TailAudit, csync.NewMap[string, TailAudit]()),
 		detachedWork:           cmp.Or(opts.DetachedWork, &sync.WaitGroup{}),
 		hydrateFetch:           notebook.FetchHydrationMemories,
 	}

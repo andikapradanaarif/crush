@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -117,14 +119,16 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 			openFailures = f
 		}
 	}
-	var sections []string
-	if blob := a.turnContextBlob(ctx, call, openFailures); blob != "" {
-		sections = append(sections, blob)
-	}
+	sections := a.turnContextSections(ctx, call, openFailures)
 	if directive := a.ambiguityDirective(ctx, call, msgs, openFailures); directive != "" {
 		sections = append(sections, directive)
 	}
 	if len(sections) == 0 {
+		// A Run that renders nothing must not re-export a stale audit
+		// from an earlier Run in the same process.
+		if a.tailAudit != nil {
+			a.tailAudit.Del(call.SessionID)
+		}
 		return nil
 	}
 	text := strings.Join(sections, "\n\n")
@@ -133,19 +137,80 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		"sections", len(sections),
 		"bytes", len(text),
 	)
+	a.recordTailAudit(call.SessionID, sections, text)
 	return []fantasy.Message{fantasy.NewUserMessage(text)}
 }
 
-// turnContextBlob renders the tail context sections — the session
+// TailSection names one rendered tail envelope and its size — one
+// row of the per-turn audit.
+type TailSection struct {
+	Name  string `json:"name"`
+	Bytes int    `json:"bytes"`
+}
+
+// TailAudit is the ephemeral per-turn tail's observable record:
+// which context envelopes rendered, their sizes, the joined text's
+// digest, and the verbatim text. The tail never persists to message
+// storage — this is the only durable answer to "what did the model
+// actually see at this turn", which is exactly what an eval artifact
+// needs to audit context-injection arms. SessionTelemetry exports it;
+// eval.TurnTail is the wire mirror.
+//
+// Two reading caveats: the snapshot is taken at render, before the
+// request flies — a run that errors before its first request lands
+// still records the tail it prepared (the record's error fields
+// distinguish delivered from prepared); and Bytes counts the joined
+// text including the "\n\n" separators, so it exceeds the sections'
+// byte sum whenever more than one envelope renders.
+type TailAudit struct {
+	Sections []TailSection `json:"sections"`
+	Bytes    int           `json:"bytes"`
+	SHA256   string        `json:"sha256"`
+	Text     string        `json:"text"`
+}
+
+var tailSectionNameRe = regexp.MustCompile(`^<(\w+)>`)
+
+// recordTailAudit snapshots the rendered tail for SessionTelemetry.
+// Last-write-wins per session: a process's later Run replaces the
+// audit, matching the telemetry emission's once-per-process shape.
+func (a *sessionAgent) recordTailAudit(sessionID string, sections []string, text string) {
+	if a.tailAudit == nil || sessionID == "" {
+		return
+	}
+	sum := sha256.Sum256([]byte(text))
+	audit := TailAudit{
+		Bytes:  len(text),
+		SHA256: hex.EncodeToString(sum[:]),
+		Text:   text,
+	}
+	for _, s := range sections {
+		name := "unknown"
+		if m := tailSectionNameRe.FindStringSubmatch(strings.TrimSpace(s)); m != nil {
+			name = m[1]
+		}
+		audit.Sections = append(audit.Sections, TailSection{Name: name, Bytes: len(s)})
+	}
+	a.tailAudit.Set(sessionID, audit)
+}
+
+// turnContextBlob renders the tail context sections joined for
+// display and tests. The tail and its audit need the per-envelope
+// split — see turnContextSections.
+func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCall, openFailures []cmdlog.Failure) string {
+	return strings.Join(a.turnContextSections(ctx, call, openFailures), "\n")
+}
+
+// turnContextSections renders the tail context sections — the session
 // signals wrapped in <turn_context> when that tier is on, and project
 // failure memory under its own <open_failures> envelope. The failure
 // section renders outside the tier's wrapper: with
 // turn_context=off + failure_memory=on an <open_failures> inside
 // <turn_context> would attribute its content to a disabled tier.
-// Returns "" for a sub-agent or when no enabled signal has content.
-func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCall, openFailures []cmdlog.Failure) string {
+// Returns nil for a sub-agent or when no enabled signal has content.
+func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgentCall, openFailures []cmdlog.Failure) []string {
 	if a.isSubAgent {
-		return ""
+		return nil
 	}
 	var sections []string
 
@@ -182,7 +247,7 @@ func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCal
 		sections = append(sections, b.String())
 	}
 
-	return strings.Join(sections, "\n")
+	return sections
 }
 
 // tailSafeText neutralizes angle brackets in content echoed into the

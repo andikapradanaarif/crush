@@ -159,6 +159,11 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 			"engaged":     tel.PressureEngaged,
 			"estimate":    tel.PressureEstimate,
 		}
+		// The ephemeral turn tail's audit — the run record's only
+		// copy of what context-injection the model actually saw.
+		if tel.Tail != nil {
+			doc["tail"] = tel.Tail
+		}
 	}
 	// Edge firings emit as a DELTA, not the cumulative snapshot — the
 	// driver sums per-turn telemetry files, so a process emitting
