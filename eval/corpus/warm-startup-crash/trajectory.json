@@ -4,7 +4,7 @@
 	"origin": {"kind": "synthetic"},
 	"start_state": {"kind": "fixture", "fixture_dir": "fixture"},
 	"prior_sessions": [
-		{"turns": ["run the program, find where it crashes, and report the function and file — do not modify any files"]}
+		{"turns": ["run `go run .` as a single bare command — no pipes or wrappers — then find where it crashes and report the function and file — do not modify any files"]}
 	],
 	"task": {
 		"turns": ["it crashes when I run it — fix it"]
