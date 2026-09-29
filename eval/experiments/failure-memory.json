@@ -8,7 +8,7 @@
 	"runs_per_trajectory": {
 		"stable": 3,
 		"mid": 10,
-		"uncharacterized": 5
+		"uncharacterized": 4
 	},
 	"primary": {
 		"metric": "call_metrics.discovery_calls_before_write",
