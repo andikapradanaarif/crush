@@ -9,9 +9,9 @@
 		"vague-startup-crash"
 	],
 	"runs_per_trajectory": {
-		"stable": 1,
-		"mid": 1,
-		"uncharacterized": 1
+		"stable": 3,
+		"mid": 10,
+		"uncharacterized": 5
 	},
 	"arms": {
 		"control": {
