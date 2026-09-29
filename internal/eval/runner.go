@@ -1077,7 +1077,7 @@ func (r *Runner) RecomputeAll(bands *Bands, corpus map[string]*Trajectory, manif
 // Characterize runs genesis/re-characterization: n runs per trajectory
 // under the current default condition (empty arm options → the
 // manifest's baseline key), then recompute.
-func (r *Runner) Characterize(ctx context.Context, model string, temperature *float64, n int, selectors []string) error {
+func (r *Runner) Characterize(ctx context.Context, model string, temperature *float64, n int, selectors []string, providers map[string]any) error {
 	unlock, err := r.acquireLock()
 	if err != nil {
 		return err
@@ -1102,7 +1102,7 @@ func (r *Runner) Characterize(ctx context.Context, model string, temperature *fl
 	if n <= 0 {
 		n = GenesisRuns
 	}
-	exp := &Experiment{Name: CharacterizeExperiment, Model: model, Temperature: temperature}
+	exp := &Experiment{Name: CharacterizeExperiment, Model: model, Temperature: temperature, Providers: providers}
 	charInv := fmt.Sprintf("characterize-%s-%04x", r.now().UTC().Format("20060102T150405Z"), r.rng().Uint64()&0xffff)
 	for _, traj := range trajs {
 		if missing := CheckRequires(traj); len(missing) > 0 {
@@ -1135,7 +1135,7 @@ func (r *Runner) Characterize(ctx context.Context, model string, temperature *fl
 // collapse alarm. Smoke is not a sample for p̂ — its records flow
 // through the _characterize pipeline anyway since they're
 // baseline-eligible under current defaults.
-func (r *Runner) Smoke(ctx context.Context, model string, temperature *float64, n int) ([]string, error) {
+func (r *Runner) Smoke(ctx context.Context, model string, temperature *float64, n int, providers map[string]any) ([]string, error) {
 	unlock, err := r.acquireLock()
 	if err != nil {
 		return nil, err
@@ -1169,7 +1169,7 @@ func (r *Runner) Smoke(ctx context.Context, model string, temperature *float64, 
 	if n <= 0 {
 		n = 5
 	}
-	exp := &Experiment{Name: CharacterizeExperiment, Model: model, Temperature: temperature}
+	exp := &Experiment{Name: CharacterizeExperiment, Model: model, Temperature: temperature, Providers: providers}
 	smokeInv := fmt.Sprintf("smoke-%s-%04x", r.now().UTC().Format("20060102T150405Z"), r.rng().Uint64()&0xffff)
 	var alarms []string
 	for _, traj := range trajs {
