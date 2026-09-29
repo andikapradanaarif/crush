@@ -15,6 +15,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/db"
@@ -786,4 +787,43 @@ drain:
 		}
 	}
 	require.True(t, found, "stored tool result for tc1 not found")
+}
+
+type gateRecordingCmdLog struct {
+	runs []cmdlog.Run
+}
+
+func (r *gateRecordingCmdLog) RecordRun(_ context.Context, run cmdlog.Run) {
+	r.runs = append(r.runs, run)
+}
+
+func (r *gateRecordingCmdLog) ListCommands(context.Context, int) ([]cmdlog.Command, error) {
+	return nil, nil
+}
+
+func (r *gateRecordingCmdLog) ListOpenFailures(context.Context, int) ([]cmdlog.Failure, error) {
+	return nil, nil
+}
+
+func TestRunGateChecks_RecordsVerdictsToCmdLog(t *testing.T) {
+	dir := t.TempDir()
+	log := &gateRecordingCmdLog{}
+	a := &sessionAgent{cmdlog: log}
+
+	res := a.runGateChecks(t.Context(), "s1", dir, []gateCheckOutcome{{
+		toolCallID: "tc-1",
+		check: message.VerificationCheck{
+			Check: "verify:pass", State: message.VerificationPending,
+			Command: "echo ok", Timeout: 30,
+		},
+	}}, nil)
+
+	require.Equal(t, message.VerificationPassed, res["verify:pass"].state)
+	require.Len(t, log.runs, 1)
+	require.Equal(t, "echo ok", log.runs[0].Command)
+	// A completed check is a verdict, not an interrupt — the
+	// post-cancel() context read must not mark it interrupted.
+	require.False(t, log.runs[0].Interrupted)
+	require.True(t, log.runs[0].Ran)
+	require.Equal(t, 0, log.runs[0].ExitCode)
 }

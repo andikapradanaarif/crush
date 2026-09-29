@@ -365,8 +365,8 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 					// Kill the shell and return error
 					bgManager.Kill(bgShell.ID)
 					if cmdLog != nil && bgShell.TakeRecorded() {
-						killOut, killErr, _, _ := bgShell.GetOutput()
-						cmdLog.RecordRun(ctx, cmdlog.Run{
+						killOut, killErr, kDone, kErr := bgShell.GetOutput()
+						run := cmdlog.Run{
 							SessionID:   sessionID,
 							Command:     params.Command,
 							CWD:         bgShell.Shell.GetWorkingDir(),
@@ -374,7 +374,16 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 							Stderr:      killErr,
 							Err:         ctx.Err(),
 							Interrupted: true,
-						})
+						}
+						// The job may have reached its own verdict
+						// just before the kill landed — record it.
+						if kDone {
+							run.Err = kErr
+							run.ExitCode = shell.ExitCode(kErr)
+							run.Ran = shell.IsExitStatus(kErr)
+							run.Interrupted = shell.IsInterrupt(kErr)
+						}
+						cmdLog.RecordRun(ctx, run)
 					}
 					return fantasy.ToolResponse{}, ctx.Err()
 				}

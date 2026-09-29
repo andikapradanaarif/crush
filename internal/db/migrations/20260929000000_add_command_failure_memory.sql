@@ -39,6 +39,13 @@ CREATE TABLE IF NOT EXISTS failure_memory (
     last_seen   INTEGER NOT NULL,  -- Unix timestamp in milliseconds
     resolved_in TEXT NOT NULL DEFAULT ''
 );
+
+-- Resolution and open-failure listing both filter/scan these shapes;
+-- failure_memory is unbounded, so keep them indexed.
+CREATE INDEX IF NOT EXISTS idx_failure_memory_cmd_cwd
+    ON failure_memory(cmd, cwd);
+CREATE INDEX IF NOT EXISTS idx_failure_memory_open
+    ON failure_memory(last_seen) WHERE resolved_in = '';
 -- +goose StatementEnd
 
 -- +goose Down

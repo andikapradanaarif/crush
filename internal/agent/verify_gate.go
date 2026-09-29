@@ -199,6 +199,10 @@ func (a *sessionAgent) runGateChecks(ctx context.Context, sessionID, workingDir 
 			Command: cmd,
 			Cwd:     workingDir,
 		})
+		// Read the check context BEFORE cancel(): cancel makes
+		// Err() unconditionally non-nil, which would mark every
+		// completed check interrupted and hide its verdict.
+		checkErr := checkCtx.Err()
 		cancel()
 		// A gate check is a real verification run — its outcome
 		// belongs in command memory alongside the agent's own runs.
@@ -209,9 +213,10 @@ func (a *sessionAgent) runGateChecks(ctx context.Context, sessionID, workingDir 
 				Command:     cmd,
 				CWD:         workingDir,
 				Stdout:      res.Output,
+				Err:         checkErr,
 				ExitCode:    res.ExitCode,
 				Ran:         res.Verdict,
-				Interrupted: checkCtx.Err() != nil,
+				Interrupted: checkErr != nil,
 			})
 		}
 		switch {

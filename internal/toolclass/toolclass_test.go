@@ -109,3 +109,23 @@ func TestCommandKind(t *testing.T) {
 		require.Equal(t, tc.want, CommandKind(tc.command), tc.command)
 	}
 }
+
+func TestCommandKind_RoundFiveEdges(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{"time -p is a flag not an arg", "time -p make", "build"},
+		{"bun x passthrough", "bun x vitest run", "test"},
+		{"npm exec flags", "npm exec --yes -- vitest run", "test"},
+		{"npm exec bare tool", "npm exec -- tsc --noEmit", "lint"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CommandKind(tt.command); got != tt.want {
+				t.Fatalf("CommandKind(%q) = %q, want %q", tt.command, got, tt.want)
+			}
+		})
+	}
+}

@@ -22,8 +22,8 @@ const (
 // itself a build/test tool and needs no subcommand. The "run" and
 // "exec" subcommands are handled separately via buildTestRunTargets.
 var buildTestCommands = map[string][]string{
-	"go":            {"build", "test", "vet"},
-	"cargo":         {"build", "test", "check", "clippy"},
+	"go":    {"build", "test", "vet"},
+	"cargo": {"build", "test", "check", "clippy"},
 	// "npm ci" is a clean-install, not a test run — it is not a
 	// subcommand here. "npm start" is shorthand for "npm run start".
 	"npm":           {"test", "start"},
@@ -52,10 +52,12 @@ var buildTestCommands = map[string][]string{
 	"tap":           {},
 }
 
-// runSubIsTest lists test runners whose "run" subcommand IS the test
+// runSubIsTest lists tools whose "run" subcommand IS the test
 // invocation ("vitest run"), unlike "npm run dev" which launches.
+// Bare runners (jest, mocha, ava, tap) classify via bareCommandKinds
+// and never reach this branch.
 var runSubIsTest = map[string]bool{
-	"vitest": true, "jest": true, "mocha": true, "ava": true, "tap": true,
+	"vitest": true,
 }
 
 // packageRunners take "dlx"/"exec" passthrough subcommands that precede
@@ -90,7 +92,8 @@ var wrapperFlagArgs = map[string]map[string]bool{
 	"nohup":   {},
 	"command": {},
 	"exec":    {},
-	"time":    {"o": true, "f": true, "a": true, "p": true, "output": true, "format": true, "append": true},
+	// time -o FILE / -f FORMAT take values; -p/-a/--append do not.
+	"time":    {"o": true, "f": true, "output": true, "format": true},
 	"npx":     {"p": true, "package": true, "c": true, "call": true},
 	"bunx":    {"b": true, "bun": true, "p": true, "package": true},
 	"pnpx":    {"p": true, "package": true},
@@ -130,13 +133,19 @@ var bareCommandKinds = map[string]string{
 // Taskfile — so a flag value never masquerades as the positional
 // subcommand that sets the kind.
 var bareToolFlagArgs = map[string]map[string]bool{
-	"make": {"C": true, "f": true, "I": true, "j": true, "l": true, "o": true, "O": true, "W": true,
+	"make": {
+		"C": true, "f": true, "I": true, "j": true, "l": true, "o": true, "O": true, "W": true,
 		"directory": true, "file": true, "makefile": true, "include-dir": true, "jobs": true,
-		"old-file": true, "new-file": true, "what-if": true, "output-sync": true},
-	"task": {"t": true, "taskfile": true, "d": true, "dir": true, "c": true, "concurrency": true,
-		"o": true, "output": true, "sort": true},
-	"just": {"f": true, "justfile": true, "d": true, "working-directory": true, "set": true,
-		"shell": true, "shell-arg": true, "chooser": true, "dotenv-path": true, "dotenv-filename": true},
+		"old-file": true, "new-file": true, "what-if": true, "output-sync": true,
+	},
+	"task": {
+		"t": true, "taskfile": true, "d": true, "dir": true, "c": true, "concurrency": true,
+		"o": true, "output": true, "sort": true,
+	},
+	"just": {
+		"f": true, "justfile": true, "d": true, "working-directory": true, "set": true,
+		"shell": true, "shell-arg": true, "chooser": true, "dotenv-path": true, "dotenv-filename": true,
+	},
 }
 
 // subcommandKinds map a recognized build/test subcommand to its kind.
@@ -234,9 +243,18 @@ func matchBuildTest(command string) (name, sub string, ok bool) {
 		}
 		name := strings.TrimSuffix(filepath.Base(fields[0]), ".exe")
 		// Package-runner passthroughs precede the real tool name:
-		// "pnpm dlx vitest run" classifies as "vitest run".
-		if packageRunners[name] && len(fields) >= 3 && (fields[1] == "dlx" || fields[1] == "exec") {
-			return matchBuildTest(strings.Join(fields[2:], " "))
+		// "pnpm dlx vitest run" classifies as "vitest run". "bun x" is
+		// bun's dlx alias. Runner flags and a "--" separator come
+		// between exec and the tool ("npm exec --yes -- tsc").
+		if packageRunners[name] && len(fields) >= 2 && (fields[1] == "dlx" || fields[1] == "exec" || (name == "bun" && fields[1] == "x")) {
+			rest := fields[2:]
+			for len(rest) > 0 && strings.HasPrefix(rest[0], "-") {
+				rest = rest[1:]
+			}
+			if len(rest) > 0 {
+				return matchBuildTest(strings.Join(rest, " "))
+			}
+			continue
 		}
 		subs, known := buildTestCommands[name]
 		if !known {

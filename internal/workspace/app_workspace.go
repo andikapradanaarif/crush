@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent"
 	mcptools "github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/app"
+	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/commands"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/history"
@@ -155,6 +156,21 @@ func (w *AppWorkspace) AgentRunShellCommand(ctx context.Context, sessionID, comm
 		if persistErr := persist(command, result.Output, result.ExitCode); persistErr != nil {
 			slog.Error("Failed to persist shell command output", "error", persistErr, "command", command)
 		}
+	}
+
+	// User-run `!` commands are the strongest signal this memory
+	// carries — a human's `!make test` failing belongs in the same
+	// ledger as the agent's runs.
+	if w.app.CmdLog != nil {
+		w.app.CmdLog.RecordRun(ctx, cmdlog.Run{
+			SessionID:   sessionID,
+			Command:     command,
+			CWD:         w.store.WorkingDir(),
+			Stdout:      result.Output,
+			ExitCode:    result.ExitCode,
+			Ran:         result.Verdict,
+			Interrupted: ctx.Err() != nil,
+		})
 	}
 
 	// Generate a title from the shell command if it was the first message.

@@ -128,11 +128,12 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 	// The tool's ctx dies with the run — a cancel racing the
 	// completion must not drop the memory write.
 	ctx = context.WithoutCancel(ctx)
-	cmdNorm := normalizeCommand(run.Command)
+	command, runDir := foldLeadingChdir(run.Command, run.CWD)
+	cmdNorm := normalizeCommand(command)
 	if cmdNorm == "" {
 		return
 	}
-	cwd := s.relDir(run.CWD)
+	cwd := s.relDir(runDir)
 	// A run has a verdict only if it executed to an exit status and
 	// was not interrupted. Denied, unparseable, or killed commands
 	// never ran — the ledger notes them but they open no failure and
@@ -152,7 +153,7 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 	if err := s.q.UpsertCommandRun(ctx, db.UpsertCommandRunParams{
 		CmdNorm:       cmdNorm,
 		Cwd:           cwd,
-		Kind:          toolclass.CommandKind(run.Command),
+		Kind:          toolclass.CommandKind(command),
 		LastExit:      lastExit,
 		LastAt:        time.Now().UnixMilli(),
 		OkCount:       ok,
@@ -254,6 +255,34 @@ func (s *service) relDir(cwd string) string {
 	return rel
 }
 
+// foldLeadingChdir turns "cd dir && cmd" and "cd dir; cmd" into
+// (cmd, cwd+dir): the directory the command runs in is scope, not
+// command identity — "npm test" launched under working_dir=api and
+// "cd api && npm test" launched at root are the same run. Only a
+// single leading cd segment folds; anything else keeps both.
+func foldLeadingChdir(command, cwd string) (string, string) {
+	m := leadingChdirPattern.FindStringSubmatch(command)
+	if m == nil {
+		return command, cwd
+	}
+	dir := strings.Trim(m[1], `"'`)
+	rest := strings.TrimSpace(m[3])
+	// Only fold a dir spelling the pattern can resolve: "cd -"
+	// (OLDPWD), "cd ~", and "cd $VAR" would key a bogus scope.
+	if rest == "" || dir == "-" || dir == "" || dir[0] == '~' || dir[0] == '$' {
+		return command, cwd
+	}
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(cwd, dir)
+	}
+	return rest, dir
+}
+
+// leadingChdirPattern matches "cd DIR &&" or "cd DIR;" at the head of
+// a command. DIR is one arg: quoted, or a bare field. A bare cd (no
+// arg) changes nothing — $HOME folds back to itself.
+var leadingChdirPattern = regexp.MustCompile(`^\s*cd\s+((?:"[^"]+")|(?:'[^']+')|[^\s;&|]+)\s*(&&|;)\s*(.*)$`)
+
 // normalizeCommand is the join key for command memory: whitespace-
 // collapsed, redacted (a command can carry a credential inline), and
 // length-bounded so cosmetic respellings share a row.
@@ -312,7 +341,7 @@ var (
 	// diagnostic (go build errors carry no "error" word) — preferred
 	// over arbitrary first lines so an "ok pkg" prelude or a
 	// "# pkg" banner doesn't headline.
-	failureLinePattern = regexp.MustCompile(`(?i)\b(?:fail(?:ed|ure)?|error|panic|assert)\b|exit status \d+|[\w./\\-]+\.[a-z0-9]+:\d+(:\d+)?:`)
+	failureLinePattern = regexp.MustCompile(`(?i)\b(?:fail(?:ed|ure)?|error|panic|assert)\b|\b[A-Za-z_]+(?:Error|Exception)\b|exit status \d+|[\w./\\-]+\.[a-z0-9]+:\d+(:\d+)?:`)
 	// fileTokenPattern matches path-shaped tokens: segments joined by
 	// / or \ with a dotted extension, optionally carrying :line or a
 	// Windows drive-letter prefix. The extension starts lowercase so

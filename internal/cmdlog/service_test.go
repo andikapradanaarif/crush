@@ -467,3 +467,37 @@ func TestRecordRun_NumberedTestsStayDistinct(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, open, 2)
 }
+
+func TestRecordRun_LeadingChdirFoldsIntoScope(t *testing.T) {
+	env := setupTest(t)
+	api := filepath.Join(env.workingDir, "packages", "api")
+
+	// "cd api && npm test" at root and "npm test" with cwd=api are
+	// the same run — same ledger row, same failure scope.
+	run(env, "s1", "cd packages/api && npm test", env.workingDir, "", "FAIL auth.spec.ts", nil, 1)
+	run(env, "s2", "npm test", api, "", "", nil, 0)
+
+	cmds, err := env.svc.ListCommands(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, cmds, 1)
+	require.Equal(t, "npm test", cmds[0].CmdNorm)
+	require.Equal(t, filepath.Join("packages", "api"), cmds[0].CWD)
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Empty(t, open, "green run resolves the cd-spelled failure")
+}
+
+func TestRecordRun_CamelCaseErrorHeadlines(t *testing.T) {
+	env := setupTest(t)
+
+	// A pytest-style CamelCase error is a verdict line — without it
+	// the Traceback banner headlines.
+	run(env, "s1", "pytest", env.workingDir, "",
+		"Traceback (most recent call last):\nAssertionError: expected 1", nil, 1)
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1)
+	require.Contains(t, open[0].Headline, "AssertionError")
+}
