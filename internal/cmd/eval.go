@@ -87,13 +87,17 @@ var evalCharacterizeCmd = &cobra.Command{
 			return err
 		}
 		defer r.Close()
+		providers, err := evalProvidersFlag(cmd)
+		if err != nil {
+			return err
+		}
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
 		sel := args
 		if len(sel) == 0 {
 			sel = []string{"*"}
 		}
-		return r.Characterize(ctx, model, &temp, n, sel)
+		return r.Characterize(ctx, model, &temp, n, sel, providers)
 	},
 }
 
@@ -289,7 +293,11 @@ var evalSmokeCmd = &cobra.Command{
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
 
-		alarms, err := r.Smoke(ctx, model, &temp, n)
+		providers, err := evalProvidersFlag(cmd)
+		if err != nil {
+			return err
+		}
+		alarms, err := r.Smoke(ctx, model, &temp, n, providers)
 		if err != nil {
 			return err
 		}
@@ -306,15 +314,32 @@ func evalRunner(cmd *cobra.Command) (*eval.Runner, error) {
 	return &eval.Runner{EvalDir: dir}, nil
 }
 
+// evalProvidersFlag resolves --providers: an experiment file whose
+// providers block is borrowed for the child's pinned-HOME config —
+// providers are infrastructure, not part of the measured condition.
+func evalProvidersFlag(cmd *cobra.Command) (map[string]any, error) {
+	path, _ := cmd.Flags().GetString("providers")
+	if path == "" {
+		return nil, nil
+	}
+	exp, err := eval.LoadExperiment(path)
+	if err != nil {
+		return nil, fmt.Errorf("providers %s: %w", path, err)
+	}
+	return exp.Providers, nil
+}
+
 func init() {
 	evalCmd.PersistentFlags().String("eval-dir", eval.DefaultEvalDir, "eval root directory")
 	evalRunCmd.Flags().Bool("aa", false, "add a calibration arm (control clone) measuring the harness's false-effect magnitude; refreshes noise.json")
 	evalCharacterizeCmd.Flags().IntP("runs", "n", eval.GenesisRuns, "runs per trajectory")
 	evalCharacterizeCmd.Flags().StringP("model", "m", "", "model pin (provider/model)")
 	evalCharacterizeCmd.Flags().Float64("temperature", 0, "sampling temperature")
+	evalCharacterizeCmd.Flags().String("providers", "", "experiment file whose providers block supplies the child's provider config")
 	evalSmokeCmd.Flags().IntP("runs", "n", 5, "runs per stable trajectory")
 	evalSmokeCmd.Flags().StringP("model", "m", "", "model pin (provider/model)")
 	evalSmokeCmd.Flags().Float64("temperature", 0, "sampling temperature")
+	evalSmokeCmd.Flags().String("providers", "", "experiment file whose providers block supplies the child's provider config")
 	_ = evalCharacterizeCmd.MarkFlagRequired("model")
 	_ = evalSmokeCmd.MarkFlagRequired("model")
 	evalProbeCacheCmd.Flags().String("base-url", "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", "serving endpoint")
