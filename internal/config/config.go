@@ -536,6 +536,12 @@ type Options struct {
 	// tripwire. Experimental; default off until the vague-prompt
 	// corpus arm justifies flipping it.
 	AmbiguityClarification *bool `json:"ambiguity_clarification,omitempty" jsonschema:"description=Enable deterministic clarification gates: turn-zero vagueness pre-filter\\, first-write scope gate\\, loop-stop replan and escalation\\, and the burn-watch spend tripwire. Experimental.,default=false"`
+	// FailureMemory injects the <open_failures> tail — commands that
+	// failed in this workspace and have not passed since — independent
+	// of the turn_context tier so its contribution can be measured on
+	// its own. Recording is always on; this option gates injection.
+	// Experimental; default off until the corpus arm justifies it.
+	FailureMemory *bool `json:"failure_memory,omitempty" jsonschema:"description=Inject unresolved command/failure memory at the request tail (the <open_failures> section). Recording happens regardless; this gates injection. Experimental.,default=false"`
 }
 
 // OptionKeys returns the Options struct's JSON field names — the set
@@ -1561,6 +1567,15 @@ func (o *Options) EnforceContextWindowEnabled() bool {
 		return false
 	}
 	return *o.EnforceContextWindow
+}
+
+// FailureMemoryEnabled returns the resolved failure-memory injection
+// flag — off unless explicitly enabled.
+func (o *Options) FailureMemoryEnabled() bool {
+	if o.FailureMemory == nil {
+		return false
+	}
+	return *o.FailureMemory
 }
 
 // AmbiguityClarificationEnabled returns the resolved

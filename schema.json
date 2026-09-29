@@ -726,6 +726,16 @@
           "description": "Gate the notebook render path on estimated request pressure; below the margin the render is verbatim (the notebook-mode overflow guard)",
           "default": true
         },
+        "notebook_generate": {
+          "type": "string",
+          "enum": [
+            "always",
+            "under_pressure",
+            "never"
+          ],
+          "description": "When the notebook's sidecar LLM generates entries: always, under_pressure, or never (deterministic entries only).",
+          "default": "always"
+        },
         "enforce_context_window": {
           "type": "boolean",
           "description": "Fail rendered requests estimated to overflow the model's declared context_window; simulates a small-window endpoint (eval use)",
@@ -801,6 +811,11 @@
         "ambiguity_clarification": {
           "type": "boolean",
           "description": "Enable deterministic clarification gates: turn-zero vagueness pre-filter, first-write scope gate, loop-stop replan and escalation, and the burn-watch spend tripwire. Experimental.",
+          "default": false
+        },
+        "failure_memory": {
+          "type": "boolean",
+          "description": "Inject unresolved command/failure memory at the request tail (the \u003copen_failures\u003e section). Recording happens regardless; this gates injection. Experimental.",
           "default": false
         }
       },

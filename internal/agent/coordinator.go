@@ -1194,6 +1194,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		FileTracker:            c.filetracker,
 		CmdLog:                 c.cmdlog,
 		TurnContext:            c.cfg.Config().Options.TurnContextMode(),
+		FailureMemory:          c.cfg.Config().Options.FailureMemoryEnabled(),
 		AmbiguityClarification: c.cfg.Config().Options.AmbiguityClarificationEnabled(),
 		Interactive:            c.interactive,
 		LSPManager:             c.lspManager,

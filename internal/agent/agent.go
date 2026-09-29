@@ -335,6 +335,10 @@ type sessionAgent struct {
 	nbPendingReads *csync.Map[string, map[string]string]
 	// cmdlog is the project command/failure memory. May be nil.
 	cmdlog cmdlog.Service
+	// failureMemory injects the <open_failures> tail — cmdlog's
+	// unresolved rows — at the request tail. Recording is always on;
+	// this gates injection.
+	failureMemory bool
 	// filetracker provides the session's read/write working set for
 	// notebook selection and turn-context augmentation. Nil skips the
 	// working-set and liveness passes.
@@ -537,6 +541,9 @@ type SessionAgentOptions struct {
 	// TurnContext is the resolved options.turn_context tier: "off"
 	// or "session".
 	TurnContext string
+	// FailureMemory injects the <open_failures> tail
+	// (options.failure_memory), independent of the turn_context tier.
+	FailureMemory bool
 	// AmbiguityClarification enables the calibrated-autonomy gates
 	// (options.ambiguity_clarification).
 	AmbiguityClarification bool
@@ -623,6 +630,7 @@ func NewSessionAgent(
 		filetracker:            opts.FileTracker,
 		cmdlog:                 opts.CmdLog,
 		turnContext:            opts.TurnContext,
+		failureMemory:          opts.FailureMemory,
 		ambiguityClarification: opts.AmbiguityClarification,
 		interactive:            opts.Interactive,
 		lspManager:             opts.LSPManager,
