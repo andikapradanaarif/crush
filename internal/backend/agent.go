@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/proto"
@@ -340,6 +341,21 @@ func (b *Backend) RunShellCommand(ctx context.Context, workspaceID string, req p
 	}, persist)
 	if err != nil {
 		return proto.ShellCommandResponse{}, err
+	}
+
+	// The client/server shell path records to the same project
+	// memory — a `crush run --shell` failure is still a project
+	// failure.
+	if ws.CmdLog != nil {
+		ws.CmdLog.RecordRun(ctx, cmdlog.Run{
+			SessionID:   req.SessionID,
+			Command:     req.Command,
+			CWD:         ws.Path,
+			Stdout:      result.Output,
+			ExitCode:    result.ExitCode,
+			Ran:         result.Verdict,
+			Interrupted: ctx.Err() != nil,
+		})
 	}
 
 	return proto.ShellCommandResponse{

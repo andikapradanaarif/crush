@@ -15,6 +15,17 @@ type CollapsedTurn struct {
 	CreatedAt  int64  `json:"created_at"`
 }
 
+type CommandMemory struct {
+	CmdNorm       string `json:"cmd_norm"`
+	Cwd           string `json:"cwd"`
+	Kind          string `json:"kind"`
+	LastExit      int64  `json:"last_exit"`
+	LastAt        int64  `json:"last_at"`
+	OkCount       int64  `json:"ok_count"`
+	FailCount     int64  `json:"fail_count"`
+	LastSessionID string `json:"last_session_id"`
+}
+
 type EdgeFiring struct {
 	SessionID      string `json:"session_id"`
 	TurnSeq        int64  `json:"turn_seq"`
@@ -25,6 +36,17 @@ type EdgeFiring struct {
 	Outcome        string `json:"outcome"`
 	RunStamp       int64  `json:"run_stamp"`
 	CreatedAt      int64  `json:"created_at"`
+}
+
+type FailureMemory struct {
+	Signature  string `json:"signature"`
+	Cmd        string `json:"cmd"`
+	Cwd        string `json:"cwd"`
+	Headline   string `json:"headline"`
+	Files      string `json:"files"`
+	FirstSeen  int64  `json:"first_seen"`
+	LastSeen   int64  `json:"last_seen"`
+	ResolvedIn string `json:"resolved_in"`
 }
 
 type File struct {

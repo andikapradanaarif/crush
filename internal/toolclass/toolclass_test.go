@@ -64,3 +64,68 @@ func TestBashRedirectTargets(t *testing.T) {
 		})
 	}
 }
+
+func TestCommandKind(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		command string
+		want    string
+	}{
+		{"go test ./...", CommandKindTest},
+		{"go build .", CommandKindBuild},
+		{"go vet ./...", CommandKindLint},
+		{"npm run test", CommandKindTest},
+		{"npm run dev", CommandKindRun},
+		{"go run main.go", CommandKindRun},
+		{"make", CommandKindBuild},
+		{"make test", CommandKindTest},
+		{"make -j4 lint", CommandKindLint},
+		{"task -t Taskfile lint", CommandKindLint},
+		{"make -C test build", CommandKindBuild},
+		{"pytest -x", CommandKindTest},
+		{"env FOO=1 go test ./...", CommandKindTest},
+		{"ls -la", CommandKindOther},
+		{"cd x && go test", CommandKindTest},
+		{"npm ci", CommandKindOther},
+		{"vitest run", CommandKindTest},
+		{"vitest related src/a.ts", CommandKindTest},
+		{"jest", CommandKindTest},
+		{"npx vitest run", CommandKindTest},
+		{"pnpm dlx vitest run", CommandKindTest},
+		{"npm exec tsc", CommandKindLint},
+		{"npm start", CommandKindRun},
+		{"yarn dev", CommandKindRun},
+		{"sudo -n go test", CommandKindTest},
+		{"nice -n 5 go test", CommandKindTest},
+		{"timeout 60 go test", CommandKindTest},
+		{"timeout -k 5 60 go test", CommandKindTest},
+		{"stdbuf -oL go test", CommandKindTest},
+		{"watch -n 2 make test", CommandKindTest},
+		{"xargs go test", CommandKindTest},
+		{"mvnw test", CommandKindTest},
+		{"./mvnw verify", CommandKindTest},
+	}
+	for _, tc := range cases {
+		require.Equal(t, tc.want, CommandKind(tc.command), tc.command)
+	}
+}
+
+func TestCommandKind_RoundFiveEdges(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{"time -p is a flag not an arg", "time -p make", "build"},
+		{"bun x passthrough", "bun x vitest run", "test"},
+		{"npm exec flags", "npm exec --yes -- vitest run", "test"},
+		{"npm exec bare tool", "npm exec -- tsc --noEmit", "lint"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CommandKind(tt.command); got != tt.want {
+				t.Fatalf("CommandKind(%q) = %q, want %q", tt.command, got, tt.want)
+			}
+		})
+	}
+}

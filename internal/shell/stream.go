@@ -48,5 +48,6 @@ func RunAndCaptureStream(ctx context.Context, opts RunOptions, onProgress func(s
 	return CaptureResult{
 		Output:   buf.buf.String(),
 		ExitCode: exitCode,
+		Verdict:  IsExitStatus(runErr),
 	}, nil
 }

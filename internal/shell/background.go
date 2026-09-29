@@ -57,6 +57,10 @@ type BackgroundShell struct {
 	done        chan struct{}
 	exitErr     error
 	completedAt atomic.Int64 // Unix timestamp when job completed (0 if still running)
+	// recorded gates durable memory writes: a job's completion is
+	// observable from several paths (synchronous return, kill,
+	// job_output poll) and must be recorded exactly once.
+	recorded atomic.Bool
 }
 
 // BackgroundShellManager manages background shell instances.
@@ -208,6 +212,13 @@ func (m *BackgroundShellManager) KillAll(ctx context.Context) {
 		})
 	}
 	wg.Wait()
+}
+
+// TakeRecorded reports whether the caller should record this job's
+// outcome — true exactly once per job, so the sync-return, kill, and
+// job_output paths cannot double-count the same run.
+func (bs *BackgroundShell) TakeRecorded() bool {
+	return bs.recorded.CompareAndSwap(false, true)
 }
 
 // GetOutput returns the current output of a background shell.

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/shell"
 )
 
@@ -35,7 +36,7 @@ type JobOutputResponseMetadata struct {
 	ExitCode int `json:"exit_code"`
 }
 
-func NewJobOutputTool(spillDir string) fantasy.AgentTool {
+func NewJobOutputTool(spillDir string, cmdLog cmdlog.Service) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		JobOutputToolName,
 		jobOutputDescription,
@@ -55,6 +56,25 @@ func NewJobOutputTool(spillDir string) fantasy.AgentTool {
 			}
 
 			stdout, stderr, done, err := bgShell.GetOutput()
+
+			// A job that outlived the synchronous wait lands here:
+			// its completion is the first real verdict the ledger
+			// sees, so a 90s `go test` still reaches command memory.
+			// TakeRecorded keeps one write per job across poll calls.
+			if done && cmdLog != nil && bgShell.TakeRecorded() {
+				interrupted := shell.IsInterrupt(err)
+				cmdLog.RecordRun(ctx, cmdlog.Run{
+					SessionID:   GetSessionFromContext(ctx),
+					Command:     bgShell.Command,
+					CWD:         bgShell.Shell.GetWorkingDir(),
+					Stdout:      stdout,
+					Stderr:      stderr,
+					Err:         err,
+					ExitCode:    shell.ExitCode(err),
+					Ran:         shell.IsExitStatus(err),
+					Interrupted: interrupted,
+				})
+			}
 
 			var outputParts []string
 			if stdout != "" {

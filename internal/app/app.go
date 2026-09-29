@@ -21,6 +21,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/clipboard"
+	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/event"
@@ -61,6 +62,8 @@ type App struct {
 	Permissions permission.Service
 	Questions   question.Service
 	FileTracker filetracker.Service
+	// CmdLog is the project command/failure memory service.
+	CmdLog cmdlog.Service
 
 	// Notebook provides per-event context summarization. Nil when
 	// notebook is disabled in config.
@@ -127,6 +130,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		Permissions: permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, allowedTools),
 		Questions:   question.NewService(),
 		FileTracker: filetracker.NewService(q, store.WorkingDir()),
+		CmdLog:      cmdlog.NewService(q, store.WorkingDir()),
 		LSPManager:  lsp.NewManager(store),
 		Skills:      skillsMgr,
 		queries:     q,
@@ -937,6 +941,7 @@ func (app *App) initCoderAgent(ctx context.Context, interactive bool) error {
 		Questions:             app.Questions,
 		History:               app.History,
 		FileTracker:           app.FileTracker,
+		CmdLog:                app.CmdLog,
 		LSPManager:            app.LSPManager,
 		Notify:                app.agentNotifications,
 		RunComplete:           app.runCompletions,

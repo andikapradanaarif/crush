@@ -88,7 +88,11 @@ type Querier interface {
 	// summary can come back too; the caller slices from the summary by ID.
 	ListMessagesBySessionFromSummary(ctx context.Context, arg ListMessagesBySessionFromSummaryParams) ([]Message, error)
 	ListNewFiles(ctx context.Context) ([]File, error)
+	ListOpenFailures(ctx context.Context, limit int64) ([]FailureMemory, error)
 	ListProcessedSegments(ctx context.Context, sessionID string) ([]ProcessedSegment, error)
+	// last_at is millisecond-granularity so re-runs order by recency;
+	// rowid settles ties for rows written in the same millisecond.
+	ListRecentCommands(ctx context.Context, limit int64) ([]CommandMemory, error)
 	ListSessionCounters(ctx context.Context) ([]ListSessionCountersRow, error)
 	ListSessionReadFiles(ctx context.Context, sessionID string) ([]ReadFile, error)
 	ListSessions(ctx context.Context) ([]Session, error)
@@ -103,6 +107,10 @@ type Querier interface {
 	RecordProcessedSegment(ctx context.Context, arg RecordProcessedSegmentParams) error
 	RecordSegmentAttempt(ctx context.Context, arg RecordSegmentAttemptParams) error
 	RenameSession(ctx context.Context, arg RenameSessionParams) error
+	// A clean run of a normalized command resolves its open failure rows
+	// in the same directory -- "go test ./..." passing in packages/web
+	// does not close packages/api's failure.
+	ResolveFailuresForCommand(ctx context.Context, arg ResolveFailuresForCommandParams) error
 	SearchNotebookByTag(ctx context.Context, arg SearchNotebookByTagParams) ([]NotebookEntry, error)
 	SearchNotebookByText(ctx context.Context, arg SearchNotebookByTextParams) ([]NotebookEntry, error)
 	SetSessionChannel(ctx context.Context, arg SetSessionChannelParams) (Session, error)
@@ -110,6 +118,14 @@ type Querier interface {
 	UpdateNotebookCompression(ctx context.Context, arg UpdateNotebookCompressionParams) error
 	UpdateSession(ctx context.Context, arg UpdateSessionParams) (Session, error)
 	UpdateSessionTitleAndUsage(ctx context.Context, arg UpdateSessionTitleAndUsageParams) error
+	// Project-scoped command ledger: one row per normalized command,
+	// shared across sessions. ok/fail counts merge additively so the row
+	// is the running tally, not a per-session sample.
+	UpsertCommandRun(ctx context.Context, arg UpsertCommandRunParams) error
+	// One row per (normalized command, directory, error headline)
+	// signature. A re-fail refreshes the observation -- headline and
+	// file hints move with the latest failure, not the first.
+	UpsertFailure(ctx context.Context, arg UpsertFailureParams) error
 }
 
 var _ Querier = (*Queries)(nil)

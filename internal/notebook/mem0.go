@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
+	"github.com/charmbracelet/crush/internal/redact"
 )
 
 const (
@@ -113,7 +114,7 @@ func (m *Mem0Sync) SyncEntries(ctx context.Context, entries []Entry) {
 			text = entry.EntryText
 		}
 		outbound := fmt.Sprintf("## %s\n%s", entry.Title, text)
-		if redacted := redactSecrets(outbound); redacted != outbound {
+		if redacted := redact.Secrets(outbound); redacted != outbound {
 			slog.Debug("Redacted secret-shaped content from mem0 sync payload",
 				"server", m.serverName,
 				"turn", entry.TurnNumber,

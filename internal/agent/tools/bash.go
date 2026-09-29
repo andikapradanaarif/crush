@@ -9,16 +9,17 @@ import (
 	"html/template"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"time"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/shell"
+	"github.com/charmbracelet/crush/internal/toolclass"
 )
 
 type BashParams struct {
@@ -203,7 +204,7 @@ func blockFuncs() []shell.BlockFunc {
 	}
 }
 
-func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workingDir, spillDir string, attribution *config.Attribution, modelID string) fantasy.AgentTool {
+func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workingDir, spillDir string, attribution *config.Attribution, modelID string, cmdLog cmdlog.Service) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		BashToolName,
 		string(bashDescription(attribution, modelID)),
@@ -278,6 +279,19 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 					if exitCode == 0 && !interrupted && execErr != nil {
 						return fantasy.ToolResponse{}, fmt.Errorf("[Job %s] error executing command: %w", bgShell.ID, execErr)
 					}
+					if cmdLog != nil && bgShell.TakeRecorded() {
+						cmdLog.RecordRun(ctx, cmdlog.Run{
+							SessionID:   sessionID,
+							Command:     params.Command,
+							CWD:         bgShell.Shell.GetWorkingDir(),
+							Stdout:      stdout,
+							Stderr:      stderr,
+							Err:         execErr,
+							ExitCode:    exitCode,
+							Ran:         shell.IsExitStatus(execErr),
+							Interrupted: interrupted,
+						})
+					}
 
 					stdout = formatOutput(stdout, stderr, execErr, spillDir)
 					stdout += lspDiagnosticsForFailure(params.Command, exitCode, interrupted, lspManager)
@@ -350,6 +364,27 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 					// Incoming context was cancelled before we moved to background
 					// Kill the shell and return error
 					bgManager.Kill(bgShell.ID)
+					if cmdLog != nil && bgShell.TakeRecorded() {
+						killOut, killErr, kDone, kErr := bgShell.GetOutput()
+						run := cmdlog.Run{
+							SessionID:   sessionID,
+							Command:     params.Command,
+							CWD:         bgShell.Shell.GetWorkingDir(),
+							Stdout:      killOut,
+							Stderr:      killErr,
+							Err:         ctx.Err(),
+							Interrupted: true,
+						}
+						// The job may have reached its own verdict
+						// just before the kill landed — record it.
+						if kDone {
+							run.Err = kErr
+							run.ExitCode = shell.ExitCode(kErr)
+							run.Ran = shell.IsExitStatus(kErr)
+							run.Interrupted = shell.IsInterrupt(kErr)
+						}
+						cmdLog.RecordRun(ctx, run)
+					}
 					return fantasy.ToolResponse{}, ctx.Err()
 				}
 			}
@@ -364,6 +399,19 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 				exitCode := shell.ExitCode(execErr)
 				if exitCode == 0 && !interrupted && execErr != nil {
 					return fantasy.ToolResponse{}, fmt.Errorf("[Job %s] error executing command: %w", bgShell.ID, execErr)
+				}
+				if cmdLog != nil && bgShell.TakeRecorded() {
+					cmdLog.RecordRun(ctx, cmdlog.Run{
+						SessionID:   sessionID,
+						Command:     params.Command,
+						CWD:         bgShell.Shell.GetWorkingDir(),
+						Stdout:      stdout,
+						Stderr:      stderr,
+						Err:         execErr,
+						ExitCode:    exitCode,
+						Ran:         shell.IsExitStatus(execErr),
+						Interrupted: interrupted,
+					})
 				}
 
 				stdout = formatOutput(stdout, stderr, execErr, spillDir)
@@ -446,131 +494,11 @@ func normalizeWorkingDir(path string) string {
 	return filepath.ToSlash(path)
 }
 
-// buildTestCommands maps a command name to the subcommands that mark a
-// build, test, or lint invocation. An empty slice means the command is
-// itself a build/test tool and needs no subcommand. The "run" and
-// "exec" subcommands are handled separately via buildTestRunTargets.
-var buildTestCommands = map[string][]string{
-	"go":            {"build", "test", "vet"},
-	"cargo":         {"build", "test", "check", "clippy"},
-	"npm":           {"test", "ci"},
-	"pnpm":          {"test", "build", "lint"},
-	"yarn":          {"test", "build", "lint"},
-	"bun":           {"test", "build"},
-	"deno":          {"test", "check", "lint"},
-	"dotnet":        {"build", "test"},
-	"mvn":           {"compile", "test", "verify", "package"},
-	"gradle":        {"build", "test", "check"},
-	"gradlew":       {"build", "test", "check"},
-	"cmake":         {"--build"},
-	"pytest":        {},
-	"tsc":           {},
-	"make":          {},
-	"task":          {},
-	"just":          {},
-	"ctest":         {},
-	"golangci-lint": {},
-	"staticcheck":   {},
-}
-
-// buildTestRunTargets lists script names accepted after a "run"
-// subcommand (e.g. "npm run build").
-var buildTestRunTargets = []string{
-	"build", "test", "lint", "check", "typecheck", "type-check", "tsc", "ci",
-}
-
-// commandWrappers are leading words that wrap the real command.
-var commandWrappers = map[string]bool{
-	"sudo": true, "env": true, "time": true,
-	"nice": true, "nohup": true, "command": true, "exec": true,
-}
-
-// wrapperFlagArgs are wrapper flags that consume a following value
-// argument (e.g. "env -u NAME", "nice -n 5", "sudo -u root"). Keyed by
-// flag name without leading dashes.
-var wrapperFlagArgs = map[string]bool{
-	"u": true, "g": true, "h": true, "unset": true,
-	"C": true, "chdir": true, "S": true, "split-string": true,
-	"P": true, "alternate-argv": true,
-	"n": true, "adjustment": true,
-}
-
-// isEnvAssignment reports whether a leading field is a KEY=VALUE env
-// assignment rather than the command name.
-func isEnvAssignment(field string) bool {
-	if strings.HasPrefix(field, "-") {
-		return false
-	}
-	idx := strings.IndexByte(field, '=')
-	if idx <= 0 {
-		return false
-	}
-	for i := range idx {
-		c := field[i]
-		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' ||
-			'0' <= c && c <= '9' || c == '_') {
-			return false
-		}
-	}
-	return true
-}
-
 // isBuildOrTestCommand reports whether command invokes a known build,
-// test, or lint tool. Each segment separated by shell chaining
-// operators is checked, so "cd x && go test" still matches.
+// test, or lint tool. The vocabulary lives in internal/toolclass so
+// command-memory classification shares it.
 func isBuildOrTestCommand(command string) bool {
-	segments := strings.FieldsFunc(command, func(r rune) bool {
-		return r == ';' || r == '&' || r == '|' || r == '\n'
-	})
-	for _, seg := range segments {
-		fields := strings.Fields(seg)
-		// Skip leading env assignments, command wrappers, and wrapper
-		// flags so "CGO_ENABLED=0 go test", "env -i go test", or
-		// "nice -n 5 make" still classify.
-		sawWrapper := false
-	fieldsLoop:
-		for len(fields) > 0 {
-			f := fields[0]
-			switch {
-			case isEnvAssignment(f):
-				fields = fields[1:]
-			case commandWrappers[f]:
-				sawWrapper = true
-				fields = fields[1:]
-			case sawWrapper && strings.HasPrefix(f, "-"):
-				fields = fields[1:]
-				if wrapperFlagArgs[strings.TrimLeft(f, "-")] && len(fields) > 0 {
-					fields = fields[1:]
-				}
-			default:
-				break fieldsLoop
-			}
-		}
-		if len(fields) == 0 {
-			continue
-		}
-		name := strings.TrimSuffix(filepath.Base(fields[0]), ".exe")
-		subs, ok := buildTestCommands[name]
-		if !ok {
-			continue
-		}
-		if len(subs) == 0 {
-			return true
-		}
-		if len(fields) < 2 {
-			continue
-		}
-		if fields[1] == "run" || fields[1] == "exec" {
-			if len(fields) >= 3 && slices.Contains(buildTestRunTargets, fields[2]) {
-				return true
-			}
-			continue
-		}
-		if slices.Contains(subs, fields[1]) {
-			return true
-		}
-	}
-	return false
+	return toolclass.IsBuildOrTestCommand(command)
 }
 
 // lspDiagnosticsForFailure appends current LSP project diagnostics to

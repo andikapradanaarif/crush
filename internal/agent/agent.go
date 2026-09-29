@@ -44,6 +44,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	notebooktool "github.com/charmbracelet/crush/internal/agent/tools/notebook"
+	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/filetracker"
@@ -332,6 +333,8 @@ type sessionAgent struct {
 	// (toolCallID → file basename) so a call that completes after
 	// the cursor swept past its index still counts once.
 	nbPendingReads *csync.Map[string, map[string]string]
+	// cmdlog is the project command/failure memory. May be nil.
+	cmdlog cmdlog.Service
 	// filetracker provides the session's read/write working set for
 	// notebook selection and turn-context augmentation. Nil skips the
 	// working-set and liveness passes.
@@ -528,6 +531,9 @@ type SessionAgentOptions struct {
 	// notebook selection and turn-context augmentation. May be nil —
 	// the working-set and liveness passes are skipped without it.
 	FileTracker filetracker.Service
+	// CmdLog is the project command/failure memory. May be nil; the
+	// verify-gate's harness-run checks are not recorded without it.
+	CmdLog cmdlog.Service
 	// TurnContext is the resolved options.turn_context tier: "off"
 	// or "session".
 	TurnContext string
@@ -615,6 +621,7 @@ func NewSessionAgent(
 		nbScanIdx:              cmp.Or(opts.NotebookScanIdx, csync.NewMap[string, int]()),
 		nbPendingReads:         cmp.Or(opts.NotebookPendingReads, csync.NewMap[string, map[string]string]()),
 		filetracker:            opts.FileTracker,
+		cmdlog:                 opts.CmdLog,
 		turnContext:            opts.TurnContext,
 		ambiguityClarification: opts.AmbiguityClarification,
 		interactive:            opts.Interactive,

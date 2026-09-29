@@ -15,6 +15,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/db"
@@ -191,7 +192,7 @@ func TestRunGateChecks(t *testing.T) {
 	}
 
 	t.Run("runs command and records exit code", func(t *testing.T) {
-		res := a.runGateChecks(t.Context(), dir, []gateCheckOutcome{
+		res := a.runGateChecks(t.Context(), "", dir, []gateCheckOutcome{
 			mkPending("verify:fail", "exit 3", 0),
 			mkPending("verify:pass", "echo ok", 0),
 		}, nil)
@@ -201,7 +202,7 @@ func TestRunGateChecks(t *testing.T) {
 	})
 
 	t.Run("dedups identical pending checks", func(t *testing.T) {
-		res := a.runGateChecks(t.Context(), dir, []gateCheckOutcome{
+		res := a.runGateChecks(t.Context(), "", dir, []gateCheckOutcome{
 			mkPending("verify:x", "echo hi", 0),
 			mkPending("verify:x", "echo hi", 1),
 		}, nil)
@@ -209,7 +210,7 @@ func TestRunGateChecks(t *testing.T) {
 	})
 
 	t.Run("observed bash run satisfies pending check", func(t *testing.T) {
-		res := a.runGateChecks(t.Context(), dir, []gateCheckOutcome{
+		res := a.runGateChecks(t.Context(), "", dir, []gateCheckOutcome{
 			mkPending("verify:test", "go test ./pkg", 0),
 		}, []observedBash{
 			{stepIdx: 2, command: "go test ./pkg", isError: false, output: "PASS"},
@@ -218,7 +219,7 @@ func TestRunGateChecks(t *testing.T) {
 	})
 
 	t.Run("observed failure resolves pending as failed", func(t *testing.T) {
-		res := a.runGateChecks(t.Context(), dir, []gateCheckOutcome{
+		res := a.runGateChecks(t.Context(), "", dir, []gateCheckOutcome{
 			mkPending("verify:test", "go test ./pkg", 0),
 		}, []observedBash{
 			{stepIdx: 2, command: "go test ./pkg", isError: true, output: "FAIL"},
@@ -227,7 +228,7 @@ func TestRunGateChecks(t *testing.T) {
 	})
 
 	t.Run("observed run before the writes does not satisfy", func(t *testing.T) {
-		res := a.runGateChecks(t.Context(), dir, []gateCheckOutcome{
+		res := a.runGateChecks(t.Context(), "", dir, []gateCheckOutcome{
 			mkPending("verify:test", "echo ran", 5),
 		}, []observedBash{
 			{stepIdx: 2, command: "echo ran", isError: false},
@@ -242,7 +243,7 @@ func TestRunGateChecks(t *testing.T) {
 		// The same check pending on writes at steps 0 and 4 must not be
 		// satisfied by a matching bash run at step 2 — the step-4 write
 		// is not covered.
-		res := a.runGateChecks(t.Context(), dir, []gateCheckOutcome{
+		res := a.runGateChecks(t.Context(), "", dir, []gateCheckOutcome{
 			mkPending("verify:test", "echo ran", 0),
 			mkPending("verify:test", "echo ran", 4),
 		}, []observedBash{
@@ -252,7 +253,7 @@ func TestRunGateChecks(t *testing.T) {
 	})
 
 	t.Run("prefix command does not match observed run", func(t *testing.T) {
-		res := a.runGateChecks(t.Context(), dir, []gateCheckOutcome{
+		res := a.runGateChecks(t.Context(), "", dir, []gateCheckOutcome{
 			mkPending("verify:test", "echo safe", 0),
 		}, []observedBash{
 			{stepIdx: 2, command: "echo safe && exit 1", isError: true},
@@ -261,7 +262,7 @@ func TestRunGateChecks(t *testing.T) {
 	})
 
 	t.Run("hung check times out as failed", func(t *testing.T) {
-		res := a.runGateChecks(t.Context(), dir, []gateCheckOutcome{
+		res := a.runGateChecks(t.Context(), "", dir, []gateCheckOutcome{
 			{toolCallID: "tc-hang", stepIndex: 0, check: message.VerificationCheck{
 				Check: "verify:slow", State: message.VerificationPending,
 				Command: "sleep 60", Timeout: 1,
@@ -274,7 +275,7 @@ func TestRunGateChecks(t *testing.T) {
 	t.Run("run cancel aborts remaining checks", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel() // cancelled before the first check runs
-		res := a.runGateChecks(ctx, dir, []gateCheckOutcome{
+		res := a.runGateChecks(ctx, "", dir, []gateCheckOutcome{
 			mkPending("verify:x", "exit 1", 0),
 		}, nil)
 		require.Empty(t, res, "a cancelled run records no verdict for unrunnable checks")
@@ -786,4 +787,43 @@ drain:
 		}
 	}
 	require.True(t, found, "stored tool result for tc1 not found")
+}
+
+type gateRecordingCmdLog struct {
+	runs []cmdlog.Run
+}
+
+func (r *gateRecordingCmdLog) RecordRun(_ context.Context, run cmdlog.Run) {
+	r.runs = append(r.runs, run)
+}
+
+func (r *gateRecordingCmdLog) ListCommands(context.Context, int) ([]cmdlog.Command, error) {
+	return nil, nil
+}
+
+func (r *gateRecordingCmdLog) ListOpenFailures(context.Context, int) ([]cmdlog.Failure, error) {
+	return nil, nil
+}
+
+func TestRunGateChecks_RecordsVerdictsToCmdLog(t *testing.T) {
+	dir := t.TempDir()
+	log := &gateRecordingCmdLog{}
+	a := &sessionAgent{cmdlog: log}
+
+	res := a.runGateChecks(t.Context(), "s1", dir, []gateCheckOutcome{{
+		toolCallID: "tc-1",
+		check: message.VerificationCheck{
+			Check: "verify:pass", State: message.VerificationPending,
+			Command: "echo ok", Timeout: 30,
+		},
+	}}, nil)
+
+	require.Equal(t, message.VerificationPassed, res["verify:pass"].state)
+	require.Len(t, log.runs, 1)
+	require.Equal(t, "echo ok", log.runs[0].Command)
+	// A completed check is a verdict, not an interrupt — the
+	// post-cancel() context read must not mark it interrupted.
+	require.False(t, log.runs[0].Interrupted)
+	require.True(t, log.runs[0].Ran)
+	require.Equal(t, 0, log.runs[0].ExitCode)
 }
