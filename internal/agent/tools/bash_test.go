@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -297,4 +298,70 @@ func TestTruncateOutputANSISafe(t *testing.T) {
 	tail := parts[1]
 	require.NotContains(t, tail[:len(esc)], "\x1b[38;5;2",
 		"tail must not begin inside an ANSI escape")
+}
+
+// recordingCmdLog captures the Run struct bash hands to command
+// memory — the seam where ExitCode/Ran/Interrupted/CWD get derived
+// from the shell's execErr.
+type recordingCmdLog struct {
+	runs []cmdlog.Run
+}
+
+func (r *recordingCmdLog) RecordRun(_ context.Context, run cmdlog.Run) {
+	r.runs = append(r.runs, run)
+}
+
+func (r *recordingCmdLog) ListCommands(context.Context, int) ([]cmdlog.Command, error) {
+	return nil, nil
+}
+
+func (r *recordingCmdLog) ListOpenFailures(context.Context, int) ([]cmdlog.Failure, error) {
+	return nil, nil
+}
+
+func TestBashTool_RecordsRunToCmdLog(t *testing.T) {
+	workingDir := t.TempDir()
+	perms := &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
+	attribution := &config.Attribution{TrailerStyle: config.TrailerStyleNone}
+	log := &recordingCmdLog{}
+	tool := NewBashTool(nil, perms, workingDir, workingDir, attribution, "test-model", log)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+
+	resp := runBashTool(t, tool, ctx, BashParams{
+		Description: "failing test",
+		Command:     "echo '--- FAIL: TestX' && exit 1",
+	})
+	require.False(t, resp.IsError)
+
+	require.Len(t, log.runs, 1)
+	run := log.runs[0]
+	require.Equal(t, "test-session", run.SessionID)
+	require.Equal(t, "echo '--- FAIL: TestX' && exit 1", run.Command)
+	require.Equal(t, workingDir, run.CWD)
+	require.Equal(t, 1, run.ExitCode)
+	require.True(t, run.Ran, "a real exit status means the command ran")
+	require.False(t, run.Interrupted)
+	require.Contains(t, run.Stdout, "FAIL: TestX")
+}
+
+func TestBashTool_BlockedCommandNotAProjectFailure(t *testing.T) {
+	workingDir := t.TempDir()
+	perms := &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
+	attribution := &config.Attribution{TrailerStyle: config.TrailerStyleNone}
+	log := &recordingCmdLog{}
+	tool := NewBashTool(nil, perms, workingDir, workingDir, attribution, "test-model", log)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+
+	resp := runBashTool(t, tool, ctx, BashParams{
+		Description: "blocked",
+		Command:     "sudo echo hi",
+	})
+
+	// A policy denial never executed: it reaches the ledger (noted)
+	// but carries Ran=false so no failure row opens.
+	require.Len(t, log.runs, 1)
+	run := log.runs[0]
+	require.False(t, run.Ran, "a blocked command never ran")
+	require.NotNil(t, run.Err)
+	_ = resp
 }

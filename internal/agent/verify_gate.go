@@ -11,6 +11,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/shell"
@@ -143,7 +144,7 @@ func scanVerification(steps []fantasy.StepResult) (failed, pending []gateCheckOu
 // an observed bash run of the exact command when one postdates the
 // pending, and otherwise executes it harness-side under a per-check
 // timeout derived from the run context.
-func (a *sessionAgent) runGateChecks(ctx context.Context, workingDir string, pending []gateCheckOutcome, observed []observedBash) map[string]resolvedCheck {
+func (a *sessionAgent) runGateChecks(ctx context.Context, sessionID, workingDir string, pending []gateCheckOutcome, observed []observedBash) map[string]resolvedCheck {
 	type uniqueCheck struct {
 		check      message.VerificationCheck
 		latestStep int
@@ -199,6 +200,20 @@ func (a *sessionAgent) runGateChecks(ctx context.Context, workingDir string, pen
 			Cwd:     workingDir,
 		})
 		cancel()
+		// A gate check is a real verification run — its outcome
+		// belongs in command memory alongside the agent's own runs.
+		// A deadline/cancel kill is an interrupt, not a verdict.
+		if a.cmdlog != nil {
+			a.cmdlog.RecordRun(ctx, cmdlog.Run{
+				SessionID:   sessionID,
+				Command:     cmd,
+				CWD:         workingDir,
+				Stdout:      res.Output,
+				ExitCode:    res.ExitCode,
+				Ran:         res.Verdict,
+				Interrupted: checkCtx.Err() != nil,
+			})
+		}
 		switch {
 		case ctx.Err() != nil:
 			// The run was cancelled mid-check — stop resolving and leave

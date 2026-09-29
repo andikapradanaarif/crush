@@ -833,7 +833,7 @@ func (a *sessionAgent) resolveVerificationEdge(ctx context.Context, call Session
 		unique[p.check.Identity()] = true
 	}
 	a.notifyVerifying(call, len(unique))
-	resolved := a.runGateChecks(ctx, a.configStore.WorkingDir(), t.pending, t.observed)
+	resolved := a.runGateChecks(ctx, call.SessionID, a.configStore.WorkingDir(), t.pending, t.observed)
 	if ctx.Err() != nil {
 		// Cancelled mid-gate: leave pending entries pending (the
 		// notebook maps them to unverified) rather than writing

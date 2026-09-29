@@ -96,6 +96,10 @@ func Run(ctx context.Context, opts RunOptions) (err error) {
 type CaptureResult struct {
 	Output   string
 	ExitCode int
+	// Verdict reports the command ran to a real exit status — a
+	// policy denial, parse error, or context kill surfaces as
+	// ExitCode 1 with Verdict false, and is not a project failure.
+	Verdict bool
 }
 
 // PersistFunc is a callback that persists a shell command result.
@@ -150,6 +154,7 @@ func RunAndCapture(ctx context.Context, opts RunOptions) (CaptureResult, error) 
 	return CaptureResult{
 		Output:   output,
 		ExitCode: exitCode,
+		Verdict:  IsExitStatus(runErr),
 	}, nil
 }
 

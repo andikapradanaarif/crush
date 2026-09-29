@@ -261,15 +261,24 @@ func normalizeCommand(command string) string {
 	return truncateRunes(redact.Secrets(strings.Join(strings.Fields(command), " ")), maxCmdNormRunes)
 }
 
-// failureHeadline picks the most informative line of a failing run.
-// stderr first, then stdout — most test runners (go test, pytest,
-// npm test) write their FAIL lines to stdout, so a stderr-only scan
-// collapses every distinct failure onto "exit status 1". The exec
-// error is the last resort. Redacted before it touches a durable row.
+// failureHeadline picks the most informative line of a failing run:
+// a verdict-shaped line, stderr first then stdout — most test
+// runners (go test, pytest, npm test) write FAIL lines to stdout
+// while routine warnings crowd stderr, so a content-fallback on
+// stderr would shadow stdout's real verdict and collapse every
+// distinct failure onto one signature. Only when neither stream
+// carries a verdict does arbitrary content headline. The exec error
+// is the last resort. Redacted before it touches a durable row.
 func failureHeadline(stderr, stdout string, runErr error) string {
-	headline := firstFailureLine(stderr)
+	headline := firstVerdictLine(stderr)
 	if headline == "" {
-		headline = firstFailureLine(stdout)
+		headline = firstVerdictLine(stdout)
+	}
+	if headline == "" {
+		headline = firstContentLine(stderr)
+	}
+	if headline == "" {
+		headline = firstContentLine(stdout)
 	}
 	if headline == "" && runErr != nil {
 		headline = firstContentLine(runErr.Error())
@@ -278,17 +287,26 @@ func failureHeadline(stderr, stdout string, runErr error) string {
 }
 
 // failureSignature is the dedupe key for a failure: normalized command
-// + directory + digit-stripped headline, so the same failure with a
-// fresh line number or address still joins, while the same command
-// failing in a sibling directory stays a distinct row.
+// + directory + headline with positional noise stripped — line
+// references, durations, and hex addresses churn between runs of the
+// same failure — while digits that name the failure itself
+// (TestParse2 vs TestParse3) stay part of the identity. The same
+// command failing in a sibling directory is a distinct row.
 func failureSignature(cmdNorm, cwd, headline string) string {
-	stable := digitsPattern.ReplaceAllString(headline, "")
+	stable := lineRefPattern.ReplaceAllString(headline, "")
+	stable = durationPattern.ReplaceAllString(stable, "()")
+	stable = hexAddrPattern.ReplaceAllString(stable, "0x")
 	sum := sha256.Sum256([]byte(cmdNorm + "\x00" + cwd + "\x00" + stable))
 	return hex.EncodeToString(sum[:8])
 }
 
 var (
-	digitsPattern = regexp.MustCompile(`\d+`)
+	// Signature noise patterns: a :line[:col] reference, a (0.00s)
+	// duration, or a 0x address changes run to run; digits inside
+	// identifiers (TestParse2) are identity, not noise.
+	lineRefPattern  = regexp.MustCompile(`:\d+(:\d+)?`)
+	durationPattern = regexp.MustCompile(`\(\s*\d+(?:\.\d+)?\s*(?:ns|µs|ms|s|m|h)?\s*\)`)
+	hexAddrPattern  = regexp.MustCompile(`\b0x[0-9a-fA-F]+\b`)
 	// failureLinePattern matches the lines that carry a verdict —
 	// FAIL marks, error headlines, panics, or a file:line:col:
 	// diagnostic (go build errors carry no "error" word) — preferred
@@ -306,27 +324,20 @@ var (
 	lineSuffix = regexp.MustCompile(`:\d+(:\d+)?$`)
 )
 
-// firstFailureLine scans for a verdict-shaped line first, then falls
-// back to the first content line — "FAIL: TestFoo" beats "ok pkg".
-func firstFailureLine(s string) string {
-	var first string
+// firstVerdictLine scans only for verdict-shaped lines — it does not
+// fall back to arbitrary content, so a noisy "npm warn" on stderr can
+// never shadow a FAIL line waiting in stdout.
+func firstVerdictLine(s string) string {
 	n := 0
 	for line := range strings.Lines(s) {
 		if n++; n > failureScanLines {
 			break
 		}
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if failureLinePattern.MatchString(trimmed) {
+		if trimmed := strings.TrimSpace(line); trimmed != "" && failureLinePattern.MatchString(trimmed) {
 			return trimmed
 		}
-		if first == "" {
-			first = trimmed
-		}
 	}
-	return first
+	return ""
 }
 
 // failureFilesJSON extracts the file paths a failing run named, from
@@ -371,7 +382,9 @@ func (s *service) extractFiles(output, cwd string, files []string) []string {
 			}
 			path = filepathext.Canonical(path)
 			rel, err := filepath.Rel(s.workingDir, path)
-			if err != nil || strings.HasPrefix(rel, "..") {
+			// A path must stay inside the workspace — "..foo.go" is a
+			// legal workspace file, ".." or "../x" is an escape.
+			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 				continue
 			}
 			// Only real files are hints: "example.com" parses as a

@@ -279,7 +279,7 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 					if exitCode == 0 && !interrupted && execErr != nil {
 						return fantasy.ToolResponse{}, fmt.Errorf("[Job %s] error executing command: %w", bgShell.ID, execErr)
 					}
-					if cmdLog != nil {
+					if cmdLog != nil && bgShell.TakeRecorded() {
 						cmdLog.RecordRun(ctx, cmdlog.Run{
 							SessionID:   sessionID,
 							Command:     params.Command,
@@ -364,7 +364,7 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 					// Incoming context was cancelled before we moved to background
 					// Kill the shell and return error
 					bgManager.Kill(bgShell.ID)
-					if cmdLog != nil {
+					if cmdLog != nil && bgShell.TakeRecorded() {
 						killOut, killErr, _, _ := bgShell.GetOutput()
 						cmdLog.RecordRun(ctx, cmdlog.Run{
 							SessionID:   sessionID,
@@ -391,7 +391,7 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 				if exitCode == 0 && !interrupted && execErr != nil {
 					return fantasy.ToolResponse{}, fmt.Errorf("[Job %s] error executing command: %w", bgShell.ID, execErr)
 				}
-				if cmdLog != nil {
+				if cmdLog != nil && bgShell.TakeRecorded() {
 					cmdLog.RecordRun(ctx, cmdlog.Run{
 						SessionID:   sessionID,
 						Command:     params.Command,

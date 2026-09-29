@@ -389,18 +389,18 @@ func TestRecordRun_DeniedIsNotAFailure(t *testing.T) {
 
 func TestRecordRun_FilesScannedRedacted(t *testing.T) {
 	env := setupTest(t)
+	// The credential-shaped token would resolve to a real workspace
+	// file — it persists only if extraction skipped redaction.
+	touch(t, env, "abcdefgh1234.pem")
 
-	// A credential-shaped token must not persist as a file hint:
-	// extraction scans the redacted stream, and [REDACTED] is not
-	// path-shaped.
 	run(env, "s1", "go test ./...", env.workingDir, "",
-		"FAIL: TestAuth\n\ttoken eyJhbg.pwt.secret signed", nil, 1)
+		"FAIL: TestAuth\nAuthorization: Bearer abcdefgh1234.pem", nil, 1)
 
 	open, err := env.svc.ListOpenFailures(env.ctx, 10)
 	require.NoError(t, err)
 	require.Len(t, open, 1)
 	for _, f := range open[0].Files {
-		require.NotContains(t, f, "secret")
+		require.NotContains(t, f, "pem")
 	}
 }
 
@@ -434,4 +434,36 @@ func TestRecordRun_StdoutSurvivesLoudStderr(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, open, 1)
 	require.Contains(t, open[0].Files, "late_test.go")
+}
+
+func TestRecordRun_StderrNoiseDoesNotShadowStdoutVerdict(t *testing.T) {
+	env := setupTest(t)
+
+	// A constant stderr warning must not headline: stdout's verdict
+	// line wins, so two distinct test failures stay two rows.
+	run(env, "s1", "npm test", env.workingDir, "--- FAIL: TestA", "npm warn deprecated foo", nil, 1)
+	run(env, "s2", "npm test", env.workingDir, "--- FAIL: TestB", "npm warn deprecated foo", nil, 1)
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 2)
+	for _, f := range open {
+		require.Contains(t, f.Headline, "FAIL")
+		require.NotContains(t, f.Headline, "npm warn")
+	}
+}
+
+func TestRecordRun_NumberedTestsStayDistinct(t *testing.T) {
+	env := setupTest(t)
+
+	// Digits in identifiers are identity: TestParse2 and TestParse3
+	// are different failures, even though :line noise still joins
+	// the same test across line moves.
+	run(env, "s1", "go test ./...", env.workingDir, "--- FAIL: TestParse2 (0.01s)", "", nil, 1)
+	run(env, "s1", "go test ./...", env.workingDir, "--- FAIL: TestParse3 (0.02s)", "", nil, 1)
+	run(env, "s1", "go test ./...", env.workingDir, "--- FAIL: TestParse2 (0.03s)", "", nil, 1)
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 2)
 }
