@@ -204,7 +204,7 @@ func blockFuncs() []shell.BlockFunc {
 	}
 }
 
-func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workingDir, spillDir string, attribution *config.Attribution, modelID string, cmdlog cmdlog.Service) fantasy.AgentTool {
+func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workingDir, spillDir string, attribution *config.Attribution, modelID string, cmdLog cmdlog.Service) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		BashToolName,
 		string(bashDescription(attribution, modelID)),
@@ -279,8 +279,17 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 					if exitCode == 0 && !interrupted && execErr != nil {
 						return fantasy.ToolResponse{}, fmt.Errorf("[Job %s] error executing command: %w", bgShell.ID, execErr)
 					}
-					if cmdlog != nil {
-						cmdlog.RecordRun(ctx, sessionID, params.Command, bgShell.WorkingDir, stderr, execErr, exitCode, interrupted)
+					if cmdLog != nil {
+						cmdLog.RecordRun(ctx, cmdlog.Run{
+							SessionID:   sessionID,
+							Command:     params.Command,
+							CWD:         bgShell.WorkingDir,
+							Stdout:      stdout,
+							Stderr:      stderr,
+							Err:         execErr,
+							ExitCode:    exitCode,
+							Interrupted: interrupted,
+						})
 					}
 
 					stdout = formatOutput(stdout, stderr, execErr, spillDir)
@@ -369,8 +378,17 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 				if exitCode == 0 && !interrupted && execErr != nil {
 					return fantasy.ToolResponse{}, fmt.Errorf("[Job %s] error executing command: %w", bgShell.ID, execErr)
 				}
-				if cmdlog != nil {
-					cmdlog.RecordRun(ctx, sessionID, params.Command, bgShell.WorkingDir, stderr, execErr, exitCode, interrupted)
+				if cmdLog != nil {
+					cmdLog.RecordRun(ctx, cmdlog.Run{
+						SessionID:   sessionID,
+						Command:     params.Command,
+						CWD:         bgShell.WorkingDir,
+						Stdout:      stdout,
+						Stderr:      stderr,
+						Err:         execErr,
+						ExitCode:    exitCode,
+						Interrupted: interrupted,
+					})
 				}
 
 				stdout = formatOutput(stdout, stderr, execErr, spillDir)

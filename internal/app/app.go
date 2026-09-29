@@ -130,7 +130,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		Permissions: permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, allowedTools),
 		Questions:   question.NewService(),
 		FileTracker: filetracker.NewService(q, store.WorkingDir()),
-		CmdLog:      cmdlog.NewService(q),
+		CmdLog:      cmdlog.NewService(q, store.WorkingDir()),
 		LSPManager:  lsp.NewManager(store),
 		Skills:      skillsMgr,
 		queries:     q,

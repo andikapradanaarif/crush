@@ -18,12 +18,17 @@ CREATE TABLE IF NOT EXISTS command_memory (
     last_session_id TEXT NOT NULL DEFAULT ''
 );
 
--- One row per failure signature (normalized command + redacted error
--- headline). resolved_in records the session where the same command
--- next exited clean; empty means the failure is open.
+-- One row per failure signature (normalized command + directory +
+-- redacted error headline). cwd is workspace-relative so "npm test"
+-- in packages/api and packages/web are different rows: the same
+-- command failing in a sibling directory is a different failure, and
+-- a green run only resolves the open failures of its own directory.
+-- resolved_in records the session where the same command next exited
+-- clean in the same directory; empty means the failure is open.
 CREATE TABLE IF NOT EXISTS failure_memory (
     signature   TEXT NOT NULL PRIMARY KEY,
     cmd         TEXT NOT NULL,
+    cwd         TEXT NOT NULL DEFAULT '',
     headline    TEXT NOT NULL,
     files       TEXT NOT NULL DEFAULT '[]',
     first_seen  INTEGER NOT NULL,  -- Unix timestamp in seconds

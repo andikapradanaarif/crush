@@ -3,6 +3,7 @@ package cmdlog
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,8 +12,9 @@ import (
 )
 
 type testEnv struct {
-	ctx context.Context
-	svc Service
+	ctx        context.Context
+	svc        Service
+	workingDir string
 }
 
 func setupTest(t *testing.T) *testEnv {
@@ -22,17 +24,31 @@ func setupTest(t *testing.T) *testEnv {
 	require.NoError(t, err)
 	t.Cleanup(func() { conn.Close() })
 
+	workingDir := t.TempDir()
 	return &testEnv{
-		ctx: t.Context(),
-		svc: NewService(db.New(conn)),
+		ctx:        t.Context(),
+		svc:        NewService(db.New(conn), workingDir),
+		workingDir: workingDir,
 	}
+}
+
+func run(env *testEnv, sessionID, command, cwd, stdout, stderr string, runErr error, exitCode int) {
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID: sessionID,
+		Command:   command,
+		CWD:       cwd,
+		Stdout:    stdout,
+		Stderr:    stderr,
+		Err:       runErr,
+		ExitCode:  exitCode,
+	})
 }
 
 func TestRecordRun_UpsertsCommandLedger(t *testing.T) {
 	env := setupTest(t)
 
-	env.svc.RecordRun(env.ctx, "s1", "go  test   ./...", "/w", "", nil, 0, false)
-	env.svc.RecordRun(env.ctx, "s2", "go test ./...", "/w", "", nil, 1, false)
+	run(env, "s1", "go  test   ./...", env.workingDir, "", "", nil, 0)
+	run(env, "s2", "go test ./...", env.workingDir, "", "", nil, 1)
 
 	cmds, err := env.svc.ListCommands(env.ctx, 10)
 	require.NoError(t, err)
@@ -51,10 +67,10 @@ func TestRecordRun_UpsertsCommandLedger(t *testing.T) {
 func TestRecordRun_CommandKinds(t *testing.T) {
 	env := setupTest(t)
 
-	env.svc.RecordRun(env.ctx, "s1", "go build ./...", "/w", "", nil, 0, false)
-	env.svc.RecordRun(env.ctx, "s1", "npm run lint", "/w", "", nil, 0, false)
-	env.svc.RecordRun(env.ctx, "s1", "npm run dev", "/w", "", nil, 0, false)
-	env.svc.RecordRun(env.ctx, "s1", "ls -la", "/w", "", nil, 0, false)
+	run(env, "s1", "go build ./...", env.workingDir, "", "", nil, 0)
+	run(env, "s1", "npm run lint", env.workingDir, "", "", nil, 0)
+	run(env, "s1", "npm run dev", env.workingDir, "", "", nil, 0)
+	run(env, "s1", "ls -la", env.workingDir, "", "", nil, 0)
 
 	cmds, err := env.svc.ListCommands(env.ctx, 10)
 	require.NoError(t, err)
@@ -72,42 +88,91 @@ func TestRecordRun_FailureLifecycle(t *testing.T) {
 	env := setupTest(t)
 	stderr := "FAIL: TestFoo\n\tfoo_test.go:42: expected 1, got 2"
 
-	env.svc.RecordRun(env.ctx, "s1", "go test ./...", "/w", stderr, nil, 1, false)
+	run(env, "s1", "go test ./...", env.workingDir, "", stderr, nil, 1)
 
 	failures, err := env.svc.ListOpenFailures(env.ctx, 10)
 	require.NoError(t, err)
 	require.Len(t, failures, 1)
 	require.Equal(t, "go test ./...", failures[0].Cmd)
+	require.Equal(t, ".", failures[0].CWD)
 	require.Equal(t, "FAIL: TestFoo", failures[0].Headline)
 	require.Contains(t, failures[0].Files, "foo_test.go")
 	require.Empty(t, failures[0].ResolvedIn)
 
-	// A clean run of the same normalized command resolves it in the
-	// resolving session.
-	env.svc.RecordRun(env.ctx, "s2", "go  test ./...", "/w", "", nil, 0, false)
+	// A clean run of the same normalized command in the same
+	// directory resolves it in the resolving session.
+	run(env, "s2", "go  test ./...", env.workingDir, "", "", nil, 0)
 	open, err := env.svc.ListOpenFailures(env.ctx, 10)
 	require.NoError(t, err)
 	require.Empty(t, open)
 }
 
-func TestRecordRun_RefailReopens(t *testing.T) {
+func TestRecordRun_StdoutFailure(t *testing.T) {
 	env := setupTest(t)
-	stderr := "FAIL: TestFoo\n\tfoo_test.go:42: expected 1, got 2"
+	// go test writes FAIL lines to stdout with empty stderr.
+	stdout := "ok  \texample.com/pkg/a\t0.012s\n--- FAIL: TestParse (0.00s)\n    parse_test.go:31: bad parse\nFAIL\texample.com/pkg/b\t0.041s"
 
-	env.svc.RecordRun(env.ctx, "s1", "go test ./...", "/w", stderr, nil, 1, false)
-	env.svc.RecordRun(env.ctx, "s2", "go test ./...", "/w", "", nil, 0, false)
-	env.svc.RecordRun(env.ctx, "s3", "go test ./...", "/w", stderr, nil, 1, false)
+	run(env, "s1", "go test ./...", env.workingDir, stdout, "", nil, 1)
 
 	open, err := env.svc.ListOpenFailures(env.ctx, 10)
 	require.NoError(t, err)
 	require.Len(t, open, 1)
+	// The verdict line headlines, not the "ok pkg" prelude or the
+	// bare exec error.
+	require.Equal(t, "--- FAIL: TestParse (0.00s)", open[0].Headline)
+	require.Contains(t, open[0].Files, "parse_test.go")
+}
+
+func TestRecordRun_DistinctStdoutFailures(t *testing.T) {
+	env := setupTest(t)
+
+	run(env, "s1", "go test ./...", env.workingDir, "--- FAIL: TestA\n", "", nil, 1)
+	run(env, "s2", "go test ./...", env.workingDir, "--- FAIL: TestB\n", "", nil, 1)
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	// Two distinct test failures stay two rows, not one collapsed
+	// "exit status 1".
+	require.Len(t, open, 2)
+}
+
+func TestRecordRun_DirectoryScopedResolution(t *testing.T) {
+	env := setupTest(t)
+	api := filepath.Join(env.workingDir, "packages", "api")
+	web := filepath.Join(env.workingDir, "packages", "web")
+
+	run(env, "s1", "npm test", api, "", "FAIL auth.spec.ts", nil, 1)
+	run(env, "s1", "npm test", web, "", "FAIL cart.spec.ts", nil, 1)
+	// Green in web must not close api's open row.
+	run(env, "s2", "npm test", web, "", "", nil, 0)
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1)
+	require.Equal(t, filepath.Join("packages", "api"), open[0].CWD)
+}
+
+func TestRecordRun_RefailReopensAndRefreshes(t *testing.T) {
+	env := setupTest(t)
+
+	run(env, "s1", "go test ./...", env.workingDir, "", "FAIL: TestFoo\n\tfoo_test.go:42: boom", nil, 1)
+	run(env, "s2", "go test ./...", env.workingDir, "", "", nil, 0)
+	run(env, "s3", "go test ./...", env.workingDir, "", "FAIL: TestFoo\n\tfoo_test.go:88: new hint", nil, 1)
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1)
+	// The re-fail refreshes the observation: the latest line hint
+	// shows, not the stale first sighting.
+	require.Contains(t, open[0].Headline, "FAIL: TestFoo")
+	require.Contains(t, open[0].Files, "foo_test.go")
 }
 
 func TestRecordRun_SignatureIgnoresLineNumbers(t *testing.T) {
 	env := setupTest(t)
 
-	env.svc.RecordRun(env.ctx, "s1", "go test ./...", "/w", "FAIL: TestFoo\n\tfoo_test.go:42: boom", nil, 1, false)
-	env.svc.RecordRun(env.ctx, "s1", "go test ./...", "/w", "FAIL: TestFoo\n\tfoo_test.go:97: boom", nil, 1, false)
+	run(env, "s1", "go test ./...", env.workingDir, "", "FAIL: TestFoo\n\tfoo_test.go:42: boom", nil, 1)
+	run(env, "s1", "go test ./...", env.workingDir, "", "FAIL: TestFoo\n\tfoo_test.go:97: boom", nil, 1)
 
 	open, err := env.svc.ListOpenFailures(env.ctx, 10)
 	require.NoError(t, err)
@@ -118,13 +183,21 @@ func TestRecordRun_SignatureIgnoresLineNumbers(t *testing.T) {
 func TestRecordRun_InterruptedSkipsFailure(t *testing.T) {
 	env := setupTest(t)
 
-	env.svc.RecordRun(env.ctx, "s1", "go test ./...", "/w", "", nil, 130, true)
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID:   "s1",
+		Command:     "go test ./...",
+		CWD:         env.workingDir,
+		ExitCode:    130,
+		Interrupted: true,
+	})
 
 	open, err := env.svc.ListOpenFailures(env.ctx, 10)
 	require.NoError(t, err)
 	require.Empty(t, open)
 
-	// The ledger still notes the run — neither ok nor fail counted.
+	// The ledger still notes the run — neither ok nor fail counted,
+	// and last_exit keeps any prior verdict rather than the
+	// interrupt code.
 	cmds, err := env.svc.ListCommands(env.ctx, 10)
 	require.NoError(t, err)
 	require.Len(t, cmds, 1)
@@ -132,10 +205,46 @@ func TestRecordRun_InterruptedSkipsFailure(t *testing.T) {
 	require.Equal(t, int64(0), cmds[0].FailCount)
 }
 
+func TestRecordRun_SigintExitWithoutFlagCountsAsInterrupt(t *testing.T) {
+	env := setupTest(t)
+
+	// A real SIGINT exit (130) that didn't arrive via the ctx path
+	// is still not a project failure.
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID: "s1",
+		Command:   "go test ./...",
+		CWD:       env.workingDir,
+		ExitCode:  130,
+	})
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Empty(t, open)
+}
+
+func TestRecordRun_InterruptKeepsPriorVerdict(t *testing.T) {
+	env := setupTest(t)
+
+	run(env, "s1", "make", env.workingDir, "", "", nil, 1)
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID:   "s1",
+		Command:     "make",
+		CWD:         env.workingDir,
+		ExitCode:    130,
+		Interrupted: true,
+	})
+
+	cmds, err := env.svc.ListCommands(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, cmds, 1)
+	// The interrupt noted the run but the last real verdict stands.
+	require.Equal(t, int64(1), cmds[0].LastExit)
+}
+
 func TestRecordRun_HeadlineRedacted(t *testing.T) {
 	env := setupTest(t)
 
-	env.svc.RecordRun(env.ctx, "s1", "./deploy.sh", "/w", "auth failed: API_KEY=supersecretvalue999", nil, 1, false)
+	run(env, "s1", "./deploy.sh", env.workingDir, "", "auth failed: API_KEY=supersecretvalue999", nil, 1)
 
 	open, err := env.svc.ListOpenFailures(env.ctx, 10)
 	require.NoError(t, err)
@@ -143,10 +252,24 @@ func TestRecordRun_HeadlineRedacted(t *testing.T) {
 	require.NotContains(t, open[0].Headline, "supersecretvalue999")
 }
 
+func TestRecordRun_CommandRedacted(t *testing.T) {
+	env := setupTest(t)
+
+	// Credentials inline in the command itself get scrubbed before
+	// the durable row — joins stay deterministic on the redacted key.
+	run(env, "s1", `curl -H "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.secret" https://x`, env.workingDir, "", "", nil, 0)
+
+	cmds, err := env.svc.ListCommands(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, cmds, 1)
+	require.NotContains(t, cmds[0].CmdNorm, "eyJhbGciOiJIUzI1NiJ9.secret")
+	require.Contains(t, cmds[0].CmdNorm, "[REDACTED]")
+}
+
 func TestRecordRun_HeadlineFallsBackToError(t *testing.T) {
 	env := setupTest(t)
 
-	env.svc.RecordRun(env.ctx, "s1", "make build", "/w", "", errors.New("exit status 2"), 2, false)
+	run(env, "s1", "make build", env.workingDir, "", "", errors.New("exit status 2"), 2)
 
 	open, err := env.svc.ListOpenFailures(env.ctx, 10)
 	require.NoError(t, err)
@@ -157,9 +280,9 @@ func TestRecordRun_HeadlineFallsBackToError(t *testing.T) {
 func TestListCommands_MostRecentFirst(t *testing.T) {
 	env := setupTest(t)
 
-	env.svc.RecordRun(env.ctx, "s1", "make", "/w", "", nil, 0, false)
+	run(env, "s1", "make", env.workingDir, "", "", nil, 0)
 	time.Sleep(10 * time.Millisecond)
-	env.svc.RecordRun(env.ctx, "s1", "go vet ./...", "/w", "", nil, 0, false)
+	run(env, "s1", "go vet ./...", env.workingDir, "", "", nil, 0)
 
 	cmds, err := env.svc.ListCommands(env.ctx, 10)
 	require.NoError(t, err)
@@ -171,7 +294,7 @@ func TestListCommands_MostRecentFirst(t *testing.T) {
 func TestRecordRun_EmptyCommandSkipped(t *testing.T) {
 	env := setupTest(t)
 
-	env.svc.RecordRun(env.ctx, "s1", "   ", "/w", "", nil, 0, false)
+	run(env, "s1", "   ", env.workingDir, "", "", nil, 0)
 
 	cmds, err := env.svc.ListCommands(env.ctx, 10)
 	require.NoError(t, err)

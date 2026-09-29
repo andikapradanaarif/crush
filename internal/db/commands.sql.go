@@ -10,7 +10,7 @@ import (
 )
 
 const listOpenFailures = `-- name: ListOpenFailures :many
-SELECT signature, cmd, headline, files, first_seen, last_seen, resolved_in FROM failure_memory WHERE resolved_in = '' ORDER BY last_seen DESC, rowid DESC LIMIT ?
+SELECT signature, cmd, cwd, headline, files, first_seen, last_seen, resolved_in FROM failure_memory WHERE resolved_in = '' ORDER BY last_seen DESC, rowid DESC LIMIT ?
 `
 
 func (q *Queries) ListOpenFailures(ctx context.Context, limit int64) ([]FailureMemory, error) {
@@ -25,6 +25,7 @@ func (q *Queries) ListOpenFailures(ctx context.Context, limit int64) ([]FailureM
 		if err := rows.Scan(
 			&i.Signature,
 			&i.Cmd,
+			&i.Cwd,
 			&i.Headline,
 			&i.Files,
 			&i.FirstSeen,
@@ -83,18 +84,20 @@ func (q *Queries) ListRecentCommands(ctx context.Context, limit int64) ([]Comman
 const resolveFailuresForCommand = `-- name: ResolveFailuresForCommand :exec
 UPDATE failure_memory SET
     resolved_in = ?
-WHERE cmd = ? AND resolved_in = ''
+WHERE cmd = ? AND cwd = ? AND resolved_in = ''
 `
 
 type ResolveFailuresForCommandParams struct {
 	ResolvedIn string `json:"resolved_in"`
 	Cmd        string `json:"cmd"`
+	Cwd        string `json:"cwd"`
 }
 
-// A clean run of a normalized command resolves its open failure rows:
-// "go test ./..." passing closes every open failure of that command.
+// A clean run of a normalized command resolves its open failure rows
+// in the same directory -- "go test ./..." passing in packages/web
+// does not close packages/api's failure.
 func (q *Queries) ResolveFailuresForCommand(ctx context.Context, arg ResolveFailuresForCommandParams) error {
-	_, err := q.exec(ctx, q.resolveFailuresForCommandStmt, resolveFailuresForCommand, arg.ResolvedIn, arg.Cmd)
+	_, err := q.exec(ctx, q.resolveFailuresForCommandStmt, resolveFailuresForCommand, arg.ResolvedIn, arg.Cmd, arg.Cwd)
 	return err
 }
 
@@ -117,7 +120,9 @@ INSERT INTO command_memory (
     ?
 ) ON CONFLICT(cmd_norm) DO UPDATE SET
     kind = excluded.kind,
-    last_exit = excluded.last_exit,
+    -- Interrupted runs carry last_exit = -1: the run is noted but
+    -- never overwrites the command's last real verdict.
+    last_exit = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_exit ELSE command_memory.last_exit END,
     last_at = excluded.last_at,
     ok_count = command_memory.ok_count + excluded.ok_count,
     fail_count = command_memory.fail_count + excluded.fail_count,
@@ -154,6 +159,7 @@ const upsertFailure = `-- name: UpsertFailure :exec
 INSERT INTO failure_memory (
     signature,
     cmd,
+    cwd,
     headline,
     files,
     first_seen,
@@ -164,8 +170,11 @@ INSERT INTO failure_memory (
     ?,
     ?,
     ?,
+    ?,
     ?
 ) ON CONFLICT(signature) DO UPDATE SET
+    headline = excluded.headline,
+    files = excluded.files,
     last_seen = excluded.last_seen,
     resolved_in = ''
 `
@@ -173,19 +182,21 @@ INSERT INTO failure_memory (
 type UpsertFailureParams struct {
 	Signature string `json:"signature"`
 	Cmd       string `json:"cmd"`
+	Cwd       string `json:"cwd"`
 	Headline  string `json:"headline"`
 	Files     string `json:"files"`
 	FirstSeen int64  `json:"first_seen"`
 	LastSeen  int64  `json:"last_seen"`
 }
 
-// One row per (normalized command, error headline) signature. A
-// re-fail after resolution reopens the row -- the same signature
-// failing again is the same failure, not a new one.
+// One row per (normalized command, directory, error headline)
+// signature. A re-fail refreshes the observation -- headline and
+// file hints move with the latest failure, not the first.
 func (q *Queries) UpsertFailure(ctx context.Context, arg UpsertFailureParams) error {
 	_, err := q.exec(ctx, q.upsertFailureStmt, upsertFailure,
 		arg.Signature,
 		arg.Cmd,
+		arg.Cwd,
 		arg.Headline,
 		arg.Files,
 		arg.FirstSeen,

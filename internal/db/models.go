@@ -40,6 +40,7 @@ type EdgeFiring struct {
 type FailureMemory struct {
 	Signature  string `json:"signature"`
 	Cmd        string `json:"cmd"`
+	Cwd        string `json:"cwd"`
 	Headline   string `json:"headline"`
 	Files      string `json:"files"`
 	FirstSeen  int64  `json:"first_seen"`

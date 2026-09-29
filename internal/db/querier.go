@@ -106,8 +106,9 @@ type Querier interface {
 	RecordProcessedSegment(ctx context.Context, arg RecordProcessedSegmentParams) error
 	RecordSegmentAttempt(ctx context.Context, arg RecordSegmentAttemptParams) error
 	RenameSession(ctx context.Context, arg RenameSessionParams) error
-	// A clean run of a normalized command resolves its open failure rows:
-	// "go test ./..." passing closes every open failure of that command.
+	// A clean run of a normalized command resolves its open failure rows
+	// in the same directory -- "go test ./..." passing in packages/web
+	// does not close packages/api's failure.
 	ResolveFailuresForCommand(ctx context.Context, arg ResolveFailuresForCommandParams) error
 	SearchNotebookByTag(ctx context.Context, arg SearchNotebookByTagParams) ([]NotebookEntry, error)
 	SearchNotebookByText(ctx context.Context, arg SearchNotebookByTextParams) ([]NotebookEntry, error)
@@ -120,9 +121,9 @@ type Querier interface {
 	// shared across sessions. ok/fail counts merge additively so the row
 	// is the running tally, not a per-session sample.
 	UpsertCommandRun(ctx context.Context, arg UpsertCommandRunParams) error
-	// One row per (normalized command, error headline) signature. A
-	// re-fail after resolution reopens the row -- the same signature
-	// failing again is the same failure, not a new one.
+	// One row per (normalized command, directory, error headline)
+	// signature. A re-fail refreshes the observation -- headline and
+	// file hints move with the latest failure, not the first.
 	UpsertFailure(ctx context.Context, arg UpsertFailureParams) error
 }
 
