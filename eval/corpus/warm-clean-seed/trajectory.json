@@ -1,13 +1,13 @@
 {
-	"id": "warm-fix-failing-test",
+	"id": "warm-clean-seed",
 	"schema_version": 1,
 	"origin": {"kind": "synthetic"},
 	"start_state": {"kind": "fixture", "fixture_dir": "fixture"},
 	"prior_sessions": [
-		{"turns": ["run `go test ./...` as a single bare command — no pipes or wrappers — then find the failing test and the buggy function and report which file it's in — do not modify any files"]}
+		{"turns": ["run `go test ./...` and `go build ./...` as separate bare commands and report the project's state — do not modify any files"]}
 	],
 	"task": {
-		"turns": ["the test fails — fix it"]
+		"turns": ["add a -shout flag that prints the greeting in uppercase"]
 	},
 	"check": {
 		"script": "check.sh",

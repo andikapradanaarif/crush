@@ -1,13 +1,13 @@
 {
-	"id": "warm-fix-failing-test",
+	"id": "warm-build-break",
 	"schema_version": 1,
 	"origin": {"kind": "synthetic"},
 	"start_state": {"kind": "fixture", "fixture_dir": "fixture"},
 	"prior_sessions": [
-		{"turns": ["run `go test ./...` as a single bare command — no pipes or wrappers — then find the failing test and the buggy function and report which file it's in — do not modify any files"]}
+		{"turns": ["run `go build ./...` as a single bare command — no pipes or wrappers — and report which file and line breaks the build — do not modify any files"]}
 	],
 	"task": {
-		"turns": ["the test fails — fix it"]
+		"turns": ["the build is broken — fix it"]
 	},
 	"check": {
 		"script": "check.sh",

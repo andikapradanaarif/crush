@@ -1,13 +1,13 @@
 {
-	"id": "warm-fix-failing-test",
+	"id": "warm-multi-failure",
 	"schema_version": 1,
 	"origin": {"kind": "synthetic"},
 	"start_state": {"kind": "fixture", "fixture_dir": "fixture"},
 	"prior_sessions": [
-		{"turns": ["run `go test ./...` as a single bare command — no pipes or wrappers — then find the failing test and the buggy function and report which file it's in — do not modify any files"]}
+		{"turns": ["run `go test ./...` and `go vet ./...` as separate bare commands — no pipes or wrappers — and report every failure — do not modify any files"]}
 	],
 	"task": {
-		"turns": ["the test fails — fix it"]
+		"turns": ["two checks fail — fix them"]
 	},
 	"check": {
 		"script": "check.sh",
