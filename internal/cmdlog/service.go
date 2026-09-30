@@ -81,6 +81,12 @@ type Run struct {
 	// context kill is not a project failure — it never ran.
 	Ran         bool
 	Interrupted bool
+	// ComponentExits carries the exit status of each call the
+	// interpreter dispatched during the run — pipeline and list
+	// elements included — so a composite like "go test | head" or
+	// "go test; echo $?" can't launder a real failure behind its
+	// clean final status.
+	ComponentExits []int
 }
 
 // Command is one command_memory row: a normalized command in a
@@ -149,12 +155,24 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 	// resolve none.
 	interrupted := run.Interrupted || run.ExitCode == 130 // SIGINT by convention, ctx path or not.
 	verdict := run.Ran && !interrupted
+	// A composite that reported 0 still failed when an inner call
+	// did — "| head" truncating output, "; echo $?" swallowing the
+	// status. The component log recovers the real verdict; a bare
+	// command's components can't disagree with its final code.
+	realExit := run.ExitCode
+	unknownVerdict := false
+	if realExit == 0 {
+		realExit, unknownVerdict = launderedComponentExit(command, run.ComponentExits)
+	}
 	ok, fail := int64(0), int64(0)
-	lastExit := int64(run.ExitCode)
+	lastExit := int64(realExit)
 	switch {
-	case !verdict:
+	case !verdict || unknownVerdict:
+		// No usable verdict — an inner call died to SIGPIPE/SIGINT
+		// behind the clean final code, so the run is noted like an
+		// interrupt: the last real verdict stands.
 		lastExit = interruptedExit
-	case run.ExitCode == 0:
+	case realExit == 0:
 		ok = 1
 	default:
 		fail = 1
@@ -172,10 +190,10 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 		slog.Error("Error recording command run", "error", err)
 		return
 	}
-	if !verdict {
+	if !verdict || unknownVerdict {
 		return
 	}
-	if run.ExitCode == 0 {
+	if realExit == 0 {
 		if err := s.q.ResolveFailuresForCommand(ctx, db.ResolveFailuresForCommandParams{
 			ResolvedIn: run.SessionID,
 			Cmd:        cmdNorm,
@@ -297,6 +315,59 @@ func foldLeadingChdir(command, cwd string) (string, string) {
 // a command. DIR is one arg: quoted, or a bare field. A bare cd (no
 // arg) changes nothing — $HOME folds back to itself.
 var leadingChdirPattern = regexp.MustCompile(`^\s*cd\s+((?:"[^"]+")|(?:'[^']+')|[^\s;&|]+)\s*(&&|;)\s*(.*)$`)
+
+// Signal-kill component statuses: a composite that ends clean but
+// had a call die to SIGPIPE (its output truncated by a consumer) or
+// SIGINT carried no verdict at all — the run is noted but neither
+// resolves nor opens failures.
+const (
+	sigintExit  = 128 + 2
+	sigpipeExit = 128 + 13
+)
+
+// launderedComponentExit recovers what a composite's clean final
+// status hid. Returns (maskedExit, unknownVerdict):
+//
+//   - (code, false) — a real inner failure the final 0 laundered:
+//     "go test | head", "go test; echo $?", a multiline command, or
+//     "cmd & wait" where the dispatched element failed.
+//   - (0, true) — every nonzero component was a signal kill
+//     (SIGPIPE truncation, SIGINT inside): the verdict never
+//     arrived, so the caller must neither resolve nor fail.
+//   - (0, false) — nothing hid: bare commands never suspect (their
+//     exit is the whole verdict), and clean composites pass through.
+//
+// Control-flow masking ("a || true") still records — the failure is
+// fact even if the caller shrugged, and missed failures are
+// invisible while extra ones are visible noise.
+//
+// Known residual: a recovered row keys on the composite spelling —
+// "go test | head -5" and bare "go test" are different commands, so
+// a clean bare re-run can't resolve the composite's row. Keying on
+// the failing segment needs argv recorded per component, which the
+// log doesn't carry yet.
+func launderedComponentExit(command string, exits []int) (int, bool) {
+	// "|;&\n" covers pipes, lists, and background elements; "$(" and
+	// backticks cover a substitution's failure inside a succeeding
+	// call ("echo \"$(go test)\""). A bare "x=$(cmd)" needs no scan —
+	// the assignment inherits cmd's status, nothing is laundered.
+	if !strings.ContainsAny(command, "|;&\n`") && !strings.Contains(command, "$(") {
+		return 0, false
+	}
+	sawKill := false
+	for _, code := range exits {
+		switch code {
+		case 0:
+		case sigintExit, sigpipeExit:
+			sawKill = true
+		default:
+			// The first real failure wins — signal kills are only
+			// unknown verdicts when nothing truly failed.
+			return code, false
+		}
+	}
+	return 0, sawKill
+}
 
 // normalizeCommand is the join key for command memory: whitespace-
 // collapsed, redacted (a command can carry a credential inline), and
