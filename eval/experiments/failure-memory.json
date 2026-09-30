@@ -36,6 +36,9 @@
 					"turn_context": "off",
 					"failure_memory": true
 				}
+			},
+			"coverage": {
+				"min_tail.sections.open_failures": 1
 			}
 		}
 	},
