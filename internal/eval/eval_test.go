@@ -429,6 +429,41 @@ func TestRunTelemetry_TailDecodeAndFold(t *testing.T) {
 	require.Equal(t, "<open_failures>x</open_failures>", res.Tail[0].Text)
 }
 
+// tail.sections.* is the arm-scoped firing assertion for context-
+// injection arms: the named envelope must appear in at least one
+// turn's rendered tail, or the run starves as inconclusive instead
+// of counting a treatment-without-treatment as a null.
+func TestArmCoverage_TailSections(t *testing.T) {
+	t.Parallel()
+
+	rec := &RunRecord{Tail: []TurnTail{
+		{Turn: 0, Sections: []TailSection{{Name: "open_failures", Bytes: 120}}, Bytes: 120},
+	}}
+	met, err := ArmCoverageMet(Coverage{"min_tail.sections.open_failures": 1}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+
+	// A tail without the envelope fails the firing assertion.
+	rec.Tail[0].Sections[0].Name = "turn_context"
+	met, err = ArmCoverageMet(Coverage{"min_tail.sections.open_failures": 1}, rec)
+	require.NoError(t, err)
+	require.False(t, met)
+
+	// An absent tail fails closed in BOTH directions — a max_
+	// "didn't render" predicate must not be satisfied by silence
+	// (nothing rendered vs telemetry missing is indistinguishable).
+	met, err = ArmCoverageMet(Coverage{"max_tail.sections.open_failures": 0}, &RunRecord{})
+	require.NoError(t, err)
+	require.False(t, met)
+
+	// The flag-gated envelope is unreachable from trajectory
+	// coverage — one arm can never render it.
+	_, _, err = ParseCoverageKey("min_tail.sections.open_failures")
+	require.Error(t, err)
+	_, _, err = ParseArmCoverageKey("min_tail.sections.open_failures")
+	require.NoError(t, err)
+}
+
 func TestWriteOnlyCoverageWarnings(t *testing.T) {
 	t.Parallel()
 
