@@ -301,7 +301,7 @@ func (s *Shell) execStream(ctx context.Context, command string, stdout, stderr i
 
 // TakeComponentExits returns the exit status of every call the
 // interpreter dispatched during the last Exec — one entry per call
-// that reached the exec-handler chain, in execution order. The bash
+// that reached the exec-handler chain, in completion order. The bash
 // tool reads it so a composite command's clean final code ("cmd |
 // head", "cmd; echo $?") can't launder a real component failure out
 // of command memory.

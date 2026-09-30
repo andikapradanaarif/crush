@@ -60,7 +60,15 @@ type RunOptions struct {
 // Errors returned from the command itself (non-zero exit, context
 // cancellation, parse failures) follow the same conventions as
 // [Shell.Exec]: inspect with [IsInterrupt] and [ExitCode].
-func Run(ctx context.Context, opts RunOptions) (err error) {
+func Run(ctx context.Context, opts RunOptions) error {
+	// The bare Run surface (hooks) never feeds command memory — no
+	// component collection.
+	return run(ctx, opts, nil)
+}
+
+// run is Run with an optional component log: nil means no per-call
+// status collection.
+func run(ctx context.Context, opts RunOptions, components *componentLog) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("command execution panic: %v", r)
@@ -85,7 +93,7 @@ func Run(ctx context.Context, opts RunOptions) (err error) {
 		return fmt.Errorf("could not parse command: %w", err)
 	}
 
-	runner, err := newRunner(opts.Cwd, opts.Env, opts.Stdin, stdout, stderr, opts.BlockFuncs, nil)
+	runner, err := newRunner(opts.Cwd, opts.Env, opts.Stdin, stdout, stderr, opts.BlockFuncs, components)
 	if err != nil {
 		return fmt.Errorf("could not run command: %w", err)
 	}
@@ -102,6 +110,11 @@ type CaptureResult struct {
 	// policy denial, parse error, or context kill surfaces as
 	// ExitCode 1 with Verdict false, and is not a project failure.
 	Verdict bool
+	// ComponentExits is the per-call exit log — one entry per call
+	// the interpreter dispatched, in completion order — so a
+	// composite's clean final code can't launder a real failure out
+	// of command memory.
+	ComponentExits []int
 }
 
 // PersistFunc is a callback that persists a shell command result.
@@ -138,7 +151,8 @@ func RunAndCapture(ctx context.Context, opts RunOptions) (CaptureResult, error) 
 	opts.Stdout = &stdout
 	opts.Stderr = &stderr
 
-	runErr := Run(ctx, opts)
+	components := &componentLog{}
+	runErr := run(ctx, opts, components)
 
 	exitCode := 0
 	if runErr != nil {
@@ -154,9 +168,10 @@ func RunAndCapture(ctx context.Context, opts RunOptions) (CaptureResult, error) 
 	}
 
 	return CaptureResult{
-		Output:   output,
-		ExitCode: exitCode,
-		Verdict:  IsExitStatus(runErr),
+		Output:         output,
+		ExitCode:       exitCode,
+		Verdict:        IsExitStatus(runErr),
+		ComponentExits: components.take(),
 	}, nil
 }
 
@@ -298,7 +313,8 @@ type execMiddleware = func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc
 
 // componentLog records the exit status of every call that reached the
 // exec-handler chain during one command run — one entry per dispatched
-// external or Crush builtin, in execution order. mvdan's own builtins
+// external or Crush builtin, in completion order (parallel pipeline
+// elements race). mvdan's own builtins
 // (echo, cd, test, ...) never reach the chain, so a composite like
 // "go test; echo $?" still surfaces the test's status: exactly the
 // verdict a "cmd | head" or "cmd; echo $?" launders out of the run's

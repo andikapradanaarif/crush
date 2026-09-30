@@ -38,7 +38,8 @@ func RunAndCaptureStream(ctx context.Context, opts RunOptions, onProgress func(s
 	opts.Stdout = buf
 	opts.Stderr = buf
 
-	runErr := Run(ctx, opts)
+	components := &componentLog{}
+	runErr := run(ctx, opts, components)
 
 	exitCode := 0
 	if runErr != nil {
@@ -46,8 +47,9 @@ func RunAndCaptureStream(ctx context.Context, opts RunOptions, onProgress func(s
 	}
 
 	return CaptureResult{
-		Output:   buf.buf.String(),
-		ExitCode: exitCode,
-		Verdict:  IsExitStatus(runErr),
+		Output:         buf.buf.String(),
+		ExitCode:       exitCode,
+		Verdict:        IsExitStatus(runErr),
+		ComponentExits: components.take(),
 	}, nil
 }

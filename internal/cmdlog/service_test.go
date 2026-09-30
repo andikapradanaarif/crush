@@ -173,18 +173,18 @@ func TestRecordRun_LaunderedSemicolonStillFails(t *testing.T) {
 	require.Len(t, open, 1)
 }
 
-func TestRecordRun_SigpipeHeadIsNotAFailure(t *testing.T) {
+func TestRecordRun_SigpipeTruncationIsNoVerdict(t *testing.T) {
 	env := setupTest(t)
 
-	// "yes | head" kills the writer with SIGPIPE (141) — truncation
-	// by design, not a project failure. The run stays green and
-	// still resolves open failures.
-	run(env, "s1", "yes | head -1", env.workingDir, "", "", nil, 1)
+	// "go test | head" dying 141 means the output was truncated —
+	// pass/fail never arrived. The run is noted but must not close
+	// the command's open failure, count a pass, or mint a failure.
+	run(env, "s1", "go test | head -5", env.workingDir, "", "FAIL: TestParse", nil, 1)
 	env.svc.RecordRun(env.ctx, Run{
 		SessionID:      "s2",
-		Command:        "yes | head -1",
+		Command:        "go test | head -5",
 		CWD:            env.workingDir,
-		Stdout:         "y",
+		Stdout:         "partial",
 		ExitCode:       0,
 		Ran:            true,
 		ComponentExits: []int{sigpipeExit, 0},
@@ -192,12 +192,85 @@ func TestRecordRun_SigpipeHeadIsNotAFailure(t *testing.T) {
 
 	open, err := env.svc.ListOpenFailures(env.ctx, 10)
 	require.NoError(t, err)
-	require.Empty(t, open)
+	require.Len(t, open, 1)
 
 	cmds, err := env.svc.ListCommands(env.ctx, 10)
 	require.NoError(t, err)
-	require.Equal(t, int64(0), cmds[0].LastExit)
-	require.Equal(t, int64(1), cmds[0].OKCount)
+	require.Equal(t, int64(1), cmds[0].LastExit)
+	require.Equal(t, int64(0), cmds[0].OKCount)
+	require.Equal(t, int64(1), cmds[0].FailCount)
+}
+
+func TestRecordRun_InterruptedComponentIsNoVerdict(t *testing.T) {
+	env := setupTest(t)
+
+	// "timeout -s INT 5 go test; echo done" — the inner SIGINT
+	// (130) is an interrupt, not a project failure, and the masked
+	// composite must not resolve the real open row.
+	run(env, "s1", "go test; echo done", env.workingDir, "", "FAIL", nil, 1)
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID:      "s2",
+		Command:        "go test; echo done",
+		CWD:            env.workingDir,
+		ExitCode:       0,
+		Ran:            true,
+		ComponentExits: []int{sigintExit},
+	})
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1)
+}
+
+func TestRecordRun_LaunderedNewlineAndAmpersand(t *testing.T) {
+	env := setupTest(t)
+
+	// Multiline commands launder like ';' — the second statement's
+	// clean exit hid the first's failure.
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID:      "s1",
+		Command:        "go test\necho done",
+		CWD:            env.workingDir,
+		Stdout:         "FAIL\n done",
+		ExitCode:       0,
+		Ran:            true,
+		ComponentExits: []int{1},
+	})
+	// A backgrounded element's failure hides behind "&" too —
+	// "cmd & wait" where wait succeeded but cmd did not.
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID:      "s1",
+		Command:        "go build & wait",
+		CWD:            env.workingDir,
+		ExitCode:       0,
+		Ran:            true,
+		ComponentExits: []int{2, 0},
+	})
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 2)
+}
+
+func TestRecordRun_RealFailureBeatsSignalKill(t *testing.T) {
+	env := setupTest(t)
+
+	// A pipeline holding both a SIGPIPE'd element and a genuine
+	// failure records the failure — signal kills only mean
+	// "unknown" when nothing else failed.
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID:      "s1",
+		Command:        "yes | go test | head",
+		CWD:            env.workingDir,
+		Stdout:         "FAIL",
+		ExitCode:       0,
+		Ran:            true,
+		ComponentExits: []int{sigpipeExit, 1, 0},
+	})
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1)
 }
 
 func TestRecordRun_LaunderedZeroDoesNotResolve(t *testing.T) {

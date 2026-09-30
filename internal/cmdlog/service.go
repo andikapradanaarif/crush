@@ -151,13 +151,17 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 	// status. The component log recovers the real verdict; a bare
 	// command's components can't disagree with its final code.
 	realExit := run.ExitCode
+	unknownVerdict := false
 	if realExit == 0 {
-		realExit = launderedComponentExit(command, run.ComponentExits)
+		realExit, unknownVerdict = launderedComponentExit(command, run.ComponentExits)
 	}
 	ok, fail := int64(0), int64(0)
 	lastExit := int64(realExit)
 	switch {
-	case !verdict:
+	case !verdict || unknownVerdict:
+		// No usable verdict — an inner call died to SIGPIPE/SIGINT
+		// behind the clean final code, so the run is noted like an
+		// interrupt: the last real verdict stands.
 		lastExit = interruptedExit
 	case realExit == 0:
 		ok = 1
@@ -177,7 +181,7 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 		slog.Error("Error recording command run", "error", err)
 		return
 	}
-	if !verdict {
+	if !verdict || unknownVerdict {
 		return
 	}
 	if realExit == 0 {
@@ -297,29 +301,47 @@ func foldLeadingChdir(command, cwd string) (string, string) {
 // arg) changes nothing — $HOME folds back to itself.
 var leadingChdirPattern = regexp.MustCompile(`^\s*cd\s+((?:"[^"]+")|(?:'[^']+')|[^\s;&|]+)\s*(&&|;)\s*(.*)$`)
 
-// sigpipeExit is the status a truncated pipeline head reports
-// (128+SIGPIPE): "go test | head" cutting the stream early is output
-// management, not a project failure.
-const sigpipeExit = 128 + 13
+// Signal-kill component statuses: a composite that ends clean but
+// had a call die to SIGPIPE (its output truncated by a consumer) or
+// SIGINT carried no verdict at all — the run is noted but neither
+// resolves nor opens failures.
+const (
+	sigintExit  = 128 + 2
+	sigpipeExit = 128 + 13
+)
 
-// launderedComponentExit recovers a failure hidden behind a
-// composite's clean final status. Only sequencing operators are
-// suspect — "a | b" and "a; b" where the left side is the real work
-// and the right side truncates or swallows — so bare commands are
-// skipped outright. The first failing dispatched call wins; a
-// SIGPIPE'd head doesn't count. Control-flow masking ("a || true")
-// still records: the failure is fact, even if the caller shrugged —
-// missed failures are invisible, extra ones are visible noise.
-func launderedComponentExit(command string, exits []int) int {
-	if !strings.ContainsAny(command, "|;") {
-		return 0
+// launderedComponentExit recovers what a composite's clean final
+// status hid. Returns (maskedExit, unknownVerdict):
+//
+//   - (code, false) — a real inner failure the final 0 laundered:
+//     "go test | head", "go test; echo $?", a multiline command, or
+//     "cmd & wait" where the dispatched element failed.
+//   - (0, true) — every nonzero component was a signal kill
+//     (SIGPIPE truncation, SIGINT inside): the verdict never
+//     arrived, so the caller must neither resolve nor fail.
+//   - (0, false) — nothing hid: bare commands never suspect (their
+//     exit is the whole verdict), and clean composites pass through.
+//
+// Control-flow masking ("a || true") still records — the failure is
+// fact even if the caller shrugged, and missed failures are
+// invisible while extra ones are visible noise.
+func launderedComponentExit(command string, exits []int) (int, bool) {
+	if !strings.ContainsAny(command, "|;&\n") {
+		return 0, false
 	}
+	sawKill := false
 	for _, code := range exits {
-		if code != 0 && code != sigpipeExit {
-			return code
+		switch code {
+		case 0:
+		case sigintExit, sigpipeExit:
+			sawKill = true
+		default:
+			// The first real failure wins — signal kills are only
+			// unknown verdicts when nothing truly failed.
+			return code, false
 		}
 	}
-	return 0
+	return 0, sawKill
 }
 
 // normalizeCommand is the join key for command memory: whitespace-

@@ -209,14 +209,15 @@ func (a *sessionAgent) runGateChecks(ctx context.Context, sessionID, workingDir 
 		// A deadline/cancel kill is an interrupt, not a verdict.
 		if a.cmdlog != nil {
 			a.cmdlog.RecordRun(ctx, cmdlog.Run{
-				SessionID:   sessionID,
-				Command:     cmd,
-				CWD:         workingDir,
-				Stdout:      res.Output,
-				Err:         checkErr,
-				ExitCode:    res.ExitCode,
-				Ran:         res.Verdict,
-				Interrupted: checkErr != nil,
+				SessionID:      sessionID,
+				Command:        cmd,
+				CWD:            workingDir,
+				Stdout:         res.Output,
+				Err:            checkErr,
+				ExitCode:       res.ExitCode,
+				Ran:            res.Verdict,
+				Interrupted:    checkErr != nil,
+				ComponentExits: res.ComponentExits,
 			})
 		}
 		switch {
