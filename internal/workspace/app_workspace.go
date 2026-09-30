@@ -163,13 +163,14 @@ func (w *AppWorkspace) AgentRunShellCommand(ctx context.Context, sessionID, comm
 	// ledger as the agent's runs.
 	if w.app.CmdLog != nil {
 		w.app.CmdLog.RecordRun(ctx, cmdlog.Run{
-			SessionID:   sessionID,
-			Command:     command,
-			CWD:         w.store.WorkingDir(),
-			Stdout:      result.Output,
-			ExitCode:    result.ExitCode,
-			Ran:         result.Verdict,
-			Interrupted: ctx.Err() != nil,
+			SessionID:      sessionID,
+			Command:        command,
+			CWD:            w.store.WorkingDir(),
+			Stdout:         result.Output,
+			ExitCode:       result.ExitCode,
+			Ran:            result.Verdict,
+			Interrupted:    ctx.Err() != nil,
+			ComponentExits: result.ComponentExits,
 		})
 	}
 

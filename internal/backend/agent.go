@@ -348,13 +348,14 @@ func (b *Backend) RunShellCommand(ctx context.Context, workspaceID string, req p
 	// failure.
 	if ws.CmdLog != nil {
 		ws.CmdLog.RecordRun(ctx, cmdlog.Run{
-			SessionID:   req.SessionID,
-			Command:     req.Command,
-			CWD:         ws.Path,
-			Stdout:      result.Output,
-			ExitCode:    result.ExitCode,
-			Ran:         result.Verdict,
-			Interrupted: ctx.Err() != nil,
+			SessionID:      req.SessionID,
+			Command:        req.Command,
+			CWD:            ws.Path,
+			Stdout:         result.Output,
+			ExitCode:       result.ExitCode,
+			Ran:            result.Verdict,
+			Interrupted:    ctx.Err() != nil,
+			ComponentExits: result.ComponentExits,
 		})
 	}
 

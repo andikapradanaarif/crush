@@ -3,12 +3,14 @@ package shell
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"slices"
 	"strings"
+	"sync"
 
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
@@ -58,7 +60,15 @@ type RunOptions struct {
 // Errors returned from the command itself (non-zero exit, context
 // cancellation, parse failures) follow the same conventions as
 // [Shell.Exec]: inspect with [IsInterrupt] and [ExitCode].
-func Run(ctx context.Context, opts RunOptions) (err error) {
+func Run(ctx context.Context, opts RunOptions) error {
+	// The bare Run surface (hooks) never feeds command memory — no
+	// component collection.
+	return run(ctx, opts, nil)
+}
+
+// run is Run with an optional component log: nil means no per-call
+// status collection.
+func run(ctx context.Context, opts RunOptions, components *componentLog) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("command execution panic: %v", r)
@@ -83,7 +93,7 @@ func Run(ctx context.Context, opts RunOptions) (err error) {
 		return fmt.Errorf("could not parse command: %w", err)
 	}
 
-	runner, err := newRunner(opts.Cwd, opts.Env, opts.Stdin, stdout, stderr, opts.BlockFuncs)
+	runner, err := newRunner(opts.Cwd, opts.Env, opts.Stdin, stdout, stderr, opts.BlockFuncs, components)
 	if err != nil {
 		return fmt.Errorf("could not run command: %w", err)
 	}
@@ -100,6 +110,11 @@ type CaptureResult struct {
 	// policy denial, parse error, or context kill surfaces as
 	// ExitCode 1 with Verdict false, and is not a project failure.
 	Verdict bool
+	// ComponentExits is the per-call exit log — one entry per call
+	// the interpreter dispatched, in completion order — so a
+	// composite's clean final code can't launder a real failure out
+	// of command memory.
+	ComponentExits []int
 }
 
 // PersistFunc is a callback that persists a shell command result.
@@ -136,7 +151,8 @@ func RunAndCapture(ctx context.Context, opts RunOptions) (CaptureResult, error) 
 	opts.Stdout = &stdout
 	opts.Stderr = &stderr
 
-	runErr := Run(ctx, opts)
+	components := &componentLog{}
+	runErr := run(ctx, opts, components)
 
 	exitCode := 0
 	if runErr != nil {
@@ -152,9 +168,10 @@ func RunAndCapture(ctx context.Context, opts RunOptions) (CaptureResult, error) 
 	}
 
 	return CaptureResult{
-		Output:   output,
-		ExitCode: exitCode,
-		Verdict:  IsExitStatus(runErr),
+		Output:         output,
+		ExitCode:       exitCode,
+		Verdict:        IsExitStatus(runErr),
+		ComponentExits: components.take(),
 	}, nil
 }
 
@@ -187,14 +204,14 @@ func RunAndCapturePTY(ctx context.Context, opts RunOptions) (CaptureResult, erro
 // newRunner constructs an [interp.Runner] configured with the standard
 // Crush handler stack. Shared by the stateless [Run] entrypoint and the
 // stateful [Shell] so the two surfaces cannot drift.
-func newRunner(cwd string, env []string, stdin io.Reader, stdout, stderr io.Writer, blockFuncs []BlockFunc) (*interp.Runner, error) {
+func newRunner(cwd string, env []string, stdin io.Reader, stdout, stderr io.Writer, blockFuncs []BlockFunc, components *componentLog) (*interp.Runner, error) {
 	env = withNonInteractiveEnv(env)
 	return interp.New(
 		interp.StdIO(stdin, stdout, stderr),
 		interp.Interactive(false),
 		interp.Env(expand.ListEnviron(env...)),
 		interp.Dir(cwd),
-		execHandlerOption(blockFuncs),
+		execHandlerOption(blockFuncs, components),
 	)
 }
 
@@ -208,10 +225,10 @@ func newRunner(cwd string, env []string, stdin io.Reader, stdout, stderr io.Writ
 // isolation. Without isolation, shells like zsh that set up job control
 // when sourcing framework files can send SIGINT/SIGTERM to Crush's process
 // group and crash the parent.
-func execHandlerOption(blockFuncs []BlockFunc) interp.RunnerOption {
+func execHandlerOption(blockFuncs []BlockFunc, components *componentLog) interp.RunnerOption {
 	base := processGroupExecHandler(defaultKillTimeout)
 	handler := base
-	for _, mw := range slices.Backward(standardHandlers(blockFuncs)) {
+	for _, mw := range slices.Backward(standardHandlers(blockFuncs, components)) {
 		handler = mw(handler)
 	}
 	// ExecHandlers always appends DefaultExecHandler which lacks process
@@ -294,17 +311,68 @@ func withoutHerdrEnv(env []string) []string {
 // next handler in the chain.
 type execMiddleware = func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc
 
+// componentLog records the exit status of every call that reached the
+// exec-handler chain during one command run — one entry per dispatched
+// external or Crush builtin, in completion order (parallel pipeline
+// elements race). mvdan's own builtins
+// (echo, cd, test, ...) never reach the chain, so a composite like
+// "go test; echo $?" still surfaces the test's status: exactly the
+// verdict a "cmd | head" or "cmd; echo $?" launders out of the run's
+// final code.
+type componentLog struct {
+	mu    sync.Mutex
+	codes []int
+}
+
+func (l *componentLog) record(code int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.codes = append(l.codes, code)
+}
+
+func (l *componentLog) take() []int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	codes := l.codes
+	l.codes = nil
+	return codes
+}
+
+// componentStatusHandler returns middleware that records each call's
+// real exit status into log. A nil log is a no-op — the stateless
+// [Run] surface and nested runners don't collect. Non-status errors
+// (policy denials, handler faults) carry no verdict and are skipped.
+func componentStatusHandler(log *componentLog) execMiddleware {
+	return func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+		return func(ctx context.Context, args []string) error {
+			err := next(ctx, args)
+			if log == nil {
+				return err
+			}
+			if err == nil {
+				log.record(0)
+			} else if status, ok := errors.AsType[interp.ExitStatus](err); ok {
+				log.record(int(status))
+			}
+			return err
+		}
+	}
+}
+
 // standardHandlers returns the exec-handler middleware chain used by both
 // [Run] and [Shell]. Order matters:
-//  1. builtins first (so Crush's in-process jq wins over any PATH binary);
-//  2. script dispatch (shebang / binary / shell-source for path-prefixed
+//  1. component status recording (outermost — sees every dispatched
+//     call including Crush builtins and script dispatches);
+//  2. builtins (so Crush's in-process jq wins over any PATH binary);
+//  3. script dispatch (shebang / binary / shell-source for path-prefixed
 //     argv[0], no-op for bare commands) — runs before the block list so
 //     that deny rules see the already-resolved argv of anything the
 //     script exec's rather than the outer path-prefixed wrapper;
-//  3. block list;
-//  4. optional Go coreutils (only when useGoCoreUtils is on).
-func standardHandlers(blockFuncs []BlockFunc) []execMiddleware {
+//  4. block list;
+//  5. optional Go coreutils (only when useGoCoreUtils is on).
+func standardHandlers(blockFuncs []BlockFunc, components *componentLog) []execMiddleware {
 	handlers := []execMiddleware{
+		componentStatusHandler(components),
 		builtinHandler(),
 		scriptDispatchHandler(blockFuncs),
 		blockHandler(blockFuncs),
