@@ -325,8 +325,18 @@ const (
 // Control-flow masking ("a || true") still records — the failure is
 // fact even if the caller shrugged, and missed failures are
 // invisible while extra ones are visible noise.
+//
+// Known residual: a recovered row keys on the composite spelling —
+// "go test | head -5" and bare "go test" are different commands, so
+// a clean bare re-run can't resolve the composite's row. Keying on
+// the failing segment needs argv recorded per component, which the
+// log doesn't carry yet.
 func launderedComponentExit(command string, exits []int) (int, bool) {
-	if !strings.ContainsAny(command, "|;&\n") {
+	// "|;&\n" covers pipes, lists, and background elements; "$(" and
+	// backticks cover a substitution's failure inside a succeeding
+	// call ("echo \"$(go test)\""). A bare "x=$(cmd)" needs no scan —
+	// the assignment inherits cmd's status, nothing is laundered.
+	if !strings.ContainsAny(command, "|;&\n`") && !strings.Contains(command, "$(") {
 		return 0, false
 	}
 	sawKill := false

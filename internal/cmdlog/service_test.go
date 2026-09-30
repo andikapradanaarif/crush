@@ -252,6 +252,44 @@ func TestRecordRun_LaunderedNewlineAndAmpersand(t *testing.T) {
 	require.Len(t, open, 2)
 }
 
+func TestRecordRun_LaunderedCommandSubstitution(t *testing.T) {
+	env := setupTest(t)
+
+	// A substitution's failure inside a succeeding call launders
+	// identically: "echo \"$(go test)\"" reports echo's 0.
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID:      "s1",
+		Command:        `echo "$(go test)"`,
+		CWD:            env.workingDir,
+		Stdout:         "FAIL",
+		ExitCode:       0,
+		Ran:            true,
+		ComponentExits: []int{1, 0},
+	})
+	// Backtick form, same hole.
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID:      "s1",
+		Command:        "echo `go build`",
+		CWD:            env.workingDir,
+		ExitCode:       0,
+		Ran:            true,
+		ComponentExits: []int{2, 0},
+	})
+	// A bare variable is not suspicious — "echo $OUT" scans nothing.
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID:      "s1",
+		Command:        "echo $OUT",
+		CWD:            env.workingDir,
+		ExitCode:       0,
+		Ran:            true,
+		ComponentExits: []int{9},
+	})
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 2)
+}
+
 func TestRecordRun_RealFailureBeatsSignalKill(t *testing.T) {
 	env := setupTest(t)
 

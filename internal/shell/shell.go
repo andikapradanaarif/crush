@@ -277,6 +277,10 @@ func (s *Shell) execCommon(ctx context.Context, command string, stdout, stderr i
 		return fmt.Errorf("could not parse command: %w", err)
 	}
 
+	// Callers (Exec/ExecStream) already hold s.mu for the whole run,
+	// so this store is serialized without locking again — and
+	// TakeComponentExits under the same mutex can't observe it
+	// mid-exec.
 	s.components = &componentLog{}
 	runner, err = s.newInterp(nil, stdout, stderr)
 	if err != nil {

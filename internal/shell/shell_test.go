@@ -103,11 +103,18 @@ func TestComponentExits(t *testing.T) {
 
 	// A pipeline whose head fails plus a trailing clean call: the
 	// composite reports 0 but the log kept every real verdict.
+	// Pipeline elements race to record, so assert membership, not
+	// position.
 	if _, _, err := shell.Exec(t.Context(), `sh -c 'exit 3' | cat; sh -c 'exit 0'`); err != nil {
 		t.Fatalf("composite exec failed: %v", err)
 	}
-	if got := shell.TakeComponentExits(); len(got) != 3 || got[0] != 3 || got[1] != 0 || got[2] != 0 {
-		t.Fatalf("component exits = %v, want [3 0 0]", got)
+	got := shell.TakeComponentExits()
+	counts := map[int]int{}
+	for _, code := range got {
+		counts[code]++
+	}
+	if len(got) != 3 || counts[3] != 1 || counts[0] != 2 {
+		t.Fatalf("component exits = %v, want one 3 and two 0s", got)
 	}
 
 	// interp builtins (echo, true) never reach the exec-handler
