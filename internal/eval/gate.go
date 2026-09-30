@@ -112,6 +112,12 @@ type ArmBehavior struct {
 	RereadsSameTurn     float64
 	DiscoveryCalls      float64
 	RequestsToFirstEdit float64
+	// Calls is all tool calls — bash-inclusive, so it sees the
+	// command re-runs discovery_calls_before_write structurally
+	// misses (analyze.go's documented blind spot). The mechanism-
+	// effect cross-check: a memory that skips the failing command's
+	// re-run shrinks calls even when discovery is flat.
+	Calls float64
 }
 
 // ArmGuardrail is one arm's guardrail tallies over conclusive runs.
@@ -146,6 +152,7 @@ func armBehavior(records []RunRecord) map[string]ArmBehavior {
 		s.RereadsSameTurn += float64(r.CallMetrics.RereadsSameTurn)
 		s.DiscoveryCalls += float64(r.CallMetrics.DiscoveryCallsBeforeWrite)
 		s.RequestsToFirstEdit += float64(r.CallMetrics.RequestsToFirstEdit)
+		s.Calls += float64(r.CallMetrics.Calls)
 		out[r.Arm] = s
 	}
 	return out
@@ -431,8 +438,8 @@ func (r Report) Summary(alpha float64) string {
 				continue
 			}
 			n := float64(s.Runs)
-			fmt.Fprintf(&b, "    %-9s rereads_xt %.2f  rereads_st %.2f  discovery %.2f  first_edit_req %.2f\n",
-				arm, s.RereadsCrossTurn/n, s.RereadsSameTurn/n, s.DiscoveryCalls/n, s.RequestsToFirstEdit/n)
+			fmt.Fprintf(&b, "    %-9s calls %.2f  rereads_xt %.2f  rereads_st %.2f  discovery %.2f  first_edit_req %.2f\n",
+				arm, s.Calls/n, s.RereadsCrossTurn/n, s.RereadsSameTurn/n, s.DiscoveryCalls/n, s.RequestsToFirstEdit/n)
 		}
 	}
 	if len(r.Guardrails) > 0 {
