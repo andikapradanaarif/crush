@@ -1258,15 +1258,16 @@ func TestUpdateNoiseFromAA(t *testing.T) {
 func TestArmMetricAggregators(t *testing.T) {
 	t.Parallel()
 	recs := []RunRecord{
-		{Arm: ArmControl, Outcome: OutcomePass, Steps: 4, CallMetrics: &CallMetrics{RereadsCrossTurn: 2, EditFailures: 1}},
-		{Arm: ArmControl, Outcome: OutcomePass, Steps: 6, CallMetrics: &CallMetrics{RereadsCrossTurn: 4}},
-		{Arm: ArmControl, Outcome: OutcomeInconclusive, Steps: 99, CallMetrics: &CallMetrics{RereadsCrossTurn: 50}},
+		{Arm: ArmControl, Outcome: OutcomePass, Steps: 4, CallMetrics: &CallMetrics{RereadsCrossTurn: 2, Calls: 7, EditFailures: 1}},
+		{Arm: ArmControl, Outcome: OutcomePass, Steps: 6, CallMetrics: &CallMetrics{RereadsCrossTurn: 4, Calls: 9}},
+		{Arm: ArmControl, Outcome: OutcomeInconclusive, Steps: 99, CallMetrics: &CallMetrics{RereadsCrossTurn: 50, Calls: 50}},
 		{Arm: ArmControl, Outcome: OutcomePass, Steps: 5}, // No analysis: guardrails counts it, behavior can't.
 		{Arm: ArmTreatment, Outcome: OutcomeFail, Steps: 9, CallMetrics: &CallMetrics{}},
 	}
 	beh := armBehavior(recs)
 	require.Equal(t, 2, beh[ArmControl].Runs) // Analysis-bearing conclusive only.
 	require.InDelta(t, 6, beh[ArmControl].RereadsCrossTurn, 1e-9)
+	require.InDelta(t, 16, beh[ArmControl].Calls, 1e-9)
 	require.Equal(t, 1, beh[ArmTreatment].Runs)
 
 	g := armGuardrails(recs)
