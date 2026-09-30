@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
@@ -377,6 +378,22 @@ func TestTurnContextBlob(t *testing.T) {
 		require.Contains(t, blob, "go test ./internal/db")
 		require.Contains(t, blob, "dial failed")
 		require.Contains(t, blob, "[db_test.go]")
+	})
+
+	t.Run("an old open failure renders its age", func(t *testing.T) {
+		t.Parallel()
+		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.failureMemory = true
+		blob := a.turnContextBlob(t.Context(), SessionAgentCall{SessionID: sessionID}, []cmdlog.Failure{
+			{Cmd: "go test", LastSeen: time.Now().Add(-72 * time.Hour)},
+		})
+		require.Contains(t, blob, "3d ago")
+
+		// A failure seen this minute carries no suffix.
+		blob = a.turnContextBlob(t.Context(), SessionAgentCall{SessionID: sessionID}, []cmdlog.Failure{
+			{Cmd: "go test", LastSeen: time.Now()},
+		})
+		require.NotContains(t, blob, "ago")
 	})
 
 	t.Run("a clean re-run clears the failure section", func(t *testing.T) {

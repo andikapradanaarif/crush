@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
@@ -241,6 +242,9 @@ func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgen
 				}
 				fmt.Fprintf(&b, " [%s]", strings.Join(hints, ", "))
 			}
+			if age := failureAge(f.LastSeen); age != "" {
+				fmt.Fprintf(&b, " — %s", age)
+			}
 			b.WriteString("\n")
 		}
 		b.WriteString("</open_failures>\n")
@@ -255,6 +259,22 @@ func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgen
 // spoof a section boundary. Write-side caps bound length; the
 // render-side truncate below keeps that bound honest if they loosen.
 var tailSafeText = strings.NewReplacer("<", "(", ">", ")").Replace
+
+// failureAge is the staleness hint rendered on an open failure — a
+// failure last seen twenty days ago weighs differently than one seen
+// this hour. Fresh rows render nothing: no suffix noise on the
+// common case.
+func failureAge(lastSeen time.Time) string {
+	age := time.Since(lastSeen)
+	switch {
+	case age >= 24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(age.Hours()/24))
+	case age >= time.Hour:
+		return fmt.Sprintf("%dh ago", int(age.Hours()))
+	default:
+		return ""
+	}
+}
 
 func truncateTailText(s string, maxRunes int) string {
 	if r := []rune(s); len(r) > maxRunes {
