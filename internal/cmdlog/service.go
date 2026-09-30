@@ -39,6 +39,12 @@ const (
 // the command's last real exit code.
 const interruptedExit = -1
 
+// defaultOpenFailureTTL bounds failure memory's reach: a row not
+// re-observed for this long stops rendering. Generous on purpose —
+// the cost asymmetry favors recall: a stale row costs the agent one
+// verification re-run, a missing row costs full rediscovery.
+const defaultOpenFailureTTL = 30 * 24 * time.Hour
+
 // Service defines the command/failure memory write and read path.
 type Service interface {
 	// RecordRun records one completed command run: upserts the
@@ -109,6 +115,9 @@ type Failure struct {
 type service struct {
 	q          *db.Queries
 	workingDir string
+	// openFailureTTL is the read-side staleness bound for open
+	// failures; 0 disables the filter.
+	openFailureTTL time.Duration
 }
 
 // NewService creates the command/failure memory service rooted at
@@ -121,7 +130,7 @@ func NewService(q *db.Queries, workingDir string) Service {
 	if abs, err := filepath.Abs(workingDir); err == nil {
 		workingDir = filepathext.Canonical(abs)
 	}
-	return &service{q: q, workingDir: workingDir}
+	return &service{q: q, workingDir: workingDir, openFailureTTL: defaultOpenFailureTTL}
 }
 
 func (s *service) RecordRun(ctx context.Context, run Run) {
@@ -224,7 +233,13 @@ func (s *service) ListOpenFailures(ctx context.Context, limit int) ([]Failure, e
 		return nil, fmt.Errorf("listing open failures: %w", err)
 	}
 	out := make([]Failure, 0, len(rows))
+	cutoff := time.Now().Add(-s.openFailureTTL).UnixMilli()
 	for _, r := range rows {
+		// Rows order freshest-first, so everything past the cutoff
+		// is a suffix — the rest can only be older.
+		if s.openFailureTTL != 0 && r.LastSeen < cutoff {
+			break
+		}
 		out = append(out, Failure{
 			Signature:  r.Signature,
 			Cmd:        r.Cmd,

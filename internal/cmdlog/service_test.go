@@ -122,6 +122,31 @@ func TestRecordRun_FailureLifecycle(t *testing.T) {
 	require.Empty(t, open)
 }
 
+func TestListOpenFailures_TTLFiltersStaleRows(t *testing.T) {
+	env := setupTest(t)
+
+	run(env, "s1", "go test", env.workingDir, "", "FAIL", nil, 1)
+
+	// A negative TTL pushes the cutoff into the future — every row
+	// reads as stale and the tail goes quiet.
+	env.svc.(*service).openFailureTTL = -time.Hour
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Empty(t, open)
+
+	// A zero TTL disables the filter entirely.
+	env.svc.(*service).openFailureTTL = 0
+	open, err = env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1)
+
+	// The default bound keeps a fresh row.
+	env.svc.(*service).openFailureTTL = defaultOpenFailureTTL
+	open, err = env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1)
+}
+
 func TestRecordRun_StdoutFailure(t *testing.T) {
 	env := setupTest(t)
 	touch(t, env, "parse_test.go")
