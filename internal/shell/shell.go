@@ -68,6 +68,10 @@ type Shell struct {
 	mu         sync.Mutex
 	logger     Logger
 	blockFuncs []BlockFunc
+	// components is the per-exec record of dispatched-call exit
+	// statuses — reset at the top of each execCommon so a stale run
+	// can't leak into the next verdict.
+	components *componentLog
 }
 
 // Options for creating a new shell
@@ -241,7 +245,7 @@ func splitArgsFlags(parts []string) (args []string, flags []string) {
 // newInterp creates a new interpreter with the current shell state. A nil
 // stdin is equivalent to an empty input stream.
 func (s *Shell) newInterp(stdin io.Reader, stdout, stderr io.Writer) (*interp.Runner, error) {
-	return newRunner(s.cwd, s.env, stdin, stdout, stderr, s.blockFuncs)
+	return newRunner(s.cwd, s.env, stdin, stdout, stderr, s.blockFuncs, s.components)
 }
 
 // updateShellFromRunner updates the shell from the interpreter after execution.
@@ -273,6 +277,7 @@ func (s *Shell) execCommon(ctx context.Context, command string, stdout, stderr i
 		return fmt.Errorf("could not parse command: %w", err)
 	}
 
+	s.components = &componentLog{}
 	runner, err = s.newInterp(nil, stdout, stderr)
 	if err != nil {
 		return fmt.Errorf("could not run command: %w", err)
@@ -292,6 +297,21 @@ func (s *Shell) exec(ctx context.Context, command string) (string, string, error
 // execStream executes commands using POSIX shell emulation with streaming output
 func (s *Shell) execStream(ctx context.Context, command string, stdout, stderr io.Writer) error {
 	return s.execCommon(ctx, command, stdout, stderr)
+}
+
+// TakeComponentExits returns the exit status of every call the
+// interpreter dispatched during the last Exec — one entry per call
+// that reached the exec-handler chain, in execution order. The bash
+// tool reads it so a composite command's clean final code ("cmd |
+// head", "cmd; echo $?") can't launder a real component failure out
+// of command memory.
+func (s *Shell) TakeComponentExits() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.components == nil {
+		return nil
+	}
+	return s.components.take()
 }
 
 // IsInterrupt checks if an error is due to interruption

@@ -75,6 +75,12 @@ type Run struct {
 	// context kill is not a project failure — it never ran.
 	Ran         bool
 	Interrupted bool
+	// ComponentExits carries the exit status of each call the
+	// interpreter dispatched during the run — pipeline and list
+	// elements included — so a composite like "go test | head" or
+	// "go test; echo $?" can't launder a real failure behind its
+	// clean final status.
+	ComponentExits []int
 }
 
 // Command is one command_memory row: a normalized command in a
@@ -140,12 +146,20 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 	// resolve none.
 	interrupted := run.Interrupted || run.ExitCode == 130 // SIGINT by convention, ctx path or not.
 	verdict := run.Ran && !interrupted
+	// A composite that reported 0 still failed when an inner call
+	// did — "| head" truncating output, "; echo $?" swallowing the
+	// status. The component log recovers the real verdict; a bare
+	// command's components can't disagree with its final code.
+	realExit := run.ExitCode
+	if realExit == 0 {
+		realExit = launderedComponentExit(command, run.ComponentExits)
+	}
 	ok, fail := int64(0), int64(0)
-	lastExit := int64(run.ExitCode)
+	lastExit := int64(realExit)
 	switch {
 	case !verdict:
 		lastExit = interruptedExit
-	case run.ExitCode == 0:
+	case realExit == 0:
 		ok = 1
 	default:
 		fail = 1
@@ -166,7 +180,7 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 	if !verdict {
 		return
 	}
-	if run.ExitCode == 0 {
+	if realExit == 0 {
 		if err := s.q.ResolveFailuresForCommand(ctx, db.ResolveFailuresForCommandParams{
 			ResolvedIn: run.SessionID,
 			Cmd:        cmdNorm,
@@ -282,6 +296,31 @@ func foldLeadingChdir(command, cwd string) (string, string) {
 // a command. DIR is one arg: quoted, or a bare field. A bare cd (no
 // arg) changes nothing — $HOME folds back to itself.
 var leadingChdirPattern = regexp.MustCompile(`^\s*cd\s+((?:"[^"]+")|(?:'[^']+')|[^\s;&|]+)\s*(&&|;)\s*(.*)$`)
+
+// sigpipeExit is the status a truncated pipeline head reports
+// (128+SIGPIPE): "go test | head" cutting the stream early is output
+// management, not a project failure.
+const sigpipeExit = 128 + 13
+
+// launderedComponentExit recovers a failure hidden behind a
+// composite's clean final status. Only sequencing operators are
+// suspect — "a | b" and "a; b" where the left side is the real work
+// and the right side truncates or swallows — so bare commands are
+// skipped outright. The first failing dispatched call wins; a
+// SIGPIPE'd head doesn't count. Control-flow masking ("a || true")
+// still records: the failure is fact, even if the caller shrugged —
+// missed failures are invisible, extra ones are visible noise.
+func launderedComponentExit(command string, exits []int) int {
+	if !strings.ContainsAny(command, "|;") {
+		return 0
+	}
+	for _, code := range exits {
+		if code != 0 && code != sigpipeExit {
+			return code
+		}
+	}
+	return 0
+}
 
 // normalizeCommand is the join key for command memory: whitespace-
 // collapsed, redacted (a command can carry a credential inline), and

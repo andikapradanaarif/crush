@@ -122,6 +122,124 @@ func TestRecordRun_FailureLifecycle(t *testing.T) {
 	require.Empty(t, open)
 }
 
+func TestRecordRun_LaunderedPipeStillFails(t *testing.T) {
+	env := setupTest(t)
+
+	// "go test | head" exits 0 on head's clean close — but the test
+	// binary failed and the component log knows it.
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID:      "s1",
+		Command:        "go test ./... | head -5",
+		CWD:            env.workingDir,
+		Stdout:         "--- FAIL: TestParse",
+		ExitCode:       0,
+		Ran:            true,
+		ComponentExits: []int{1, 0},
+	})
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1)
+	require.Equal(t, "go test ./... | head -5", open[0].Cmd)
+	require.Equal(t, "--- FAIL: TestParse", open[0].Headline)
+
+	// The ledger records the real verdict, not the laundered 0.
+	cmds, err := env.svc.ListCommands(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, cmds, 1)
+	require.Equal(t, int64(1), cmds[0].LastExit)
+	require.Equal(t, int64(1), cmds[0].FailCount)
+	require.Equal(t, int64(0), cmds[0].OKCount)
+}
+
+func TestRecordRun_LaunderedSemicolonStillFails(t *testing.T) {
+	env := setupTest(t)
+
+	// "go test; echo $?" exits 0 on the echo — the test's failure
+	// survives in the component log (echo is an interp builtin and
+	// never reaches the handler, so only the test's status lands).
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID:      "s1",
+		Command:        "go test; echo $?",
+		CWD:            env.workingDir,
+		Stdout:         "--- FAIL: TestParse",
+		ExitCode:       0,
+		Ran:            true,
+		ComponentExits: []int{1},
+	})
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1)
+}
+
+func TestRecordRun_SigpipeHeadIsNotAFailure(t *testing.T) {
+	env := setupTest(t)
+
+	// "yes | head" kills the writer with SIGPIPE (141) — truncation
+	// by design, not a project failure. The run stays green and
+	// still resolves open failures.
+	run(env, "s1", "yes | head -1", env.workingDir, "", "", nil, 1)
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID:      "s2",
+		Command:        "yes | head -1",
+		CWD:            env.workingDir,
+		Stdout:         "y",
+		ExitCode:       0,
+		Ran:            true,
+		ComponentExits: []int{sigpipeExit, 0},
+	})
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Empty(t, open)
+
+	cmds, err := env.svc.ListCommands(env.ctx, 10)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), cmds[0].LastExit)
+	require.Equal(t, int64(1), cmds[0].OKCount)
+}
+
+func TestRecordRun_LaunderedZeroDoesNotResolve(t *testing.T) {
+	env := setupTest(t)
+
+	// A masked failure must not close the command's real open row —
+	// it re-observes the same signature instead.
+	run(env, "s1", "go test | head -3", env.workingDir, "", "FAIL", nil, 1)
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID:      "s2",
+		Command:        "go test | head -3",
+		CWD:            env.workingDir,
+		Stdout:         "FAIL",
+		ExitCode:       0,
+		Ran:            true,
+		ComponentExits: []int{2, 0},
+	})
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1)
+}
+
+func TestRecordRun_BareCommandIgnoresComponents(t *testing.T) {
+	env := setupTest(t)
+
+	// A bare command's exit code is the whole verdict — stray
+	// component data can't manufacture a failure.
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID:      "s1",
+		Command:        "go test ./...",
+		CWD:            env.workingDir,
+		ExitCode:       0,
+		Ran:            true,
+		ComponentExits: []int{1},
+	})
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Empty(t, open)
+}
+
 func TestRecordRun_StdoutFailure(t *testing.T) {
 	env := setupTest(t)
 	touch(t, env, "parse_test.go")

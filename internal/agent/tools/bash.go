@@ -281,15 +281,16 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 					}
 					if cmdLog != nil && bgShell.TakeRecorded() {
 						cmdLog.RecordRun(ctx, cmdlog.Run{
-							SessionID:   sessionID,
-							Command:     params.Command,
-							CWD:         bgShell.Shell.GetWorkingDir(),
-							Stdout:      stdout,
-							Stderr:      stderr,
-							Err:         execErr,
-							ExitCode:    exitCode,
-							Ran:         shell.IsExitStatus(execErr),
-							Interrupted: interrupted,
+							SessionID:      sessionID,
+							Command:        params.Command,
+							CWD:            bgShell.Shell.GetWorkingDir(),
+							Stdout:         stdout,
+							Stderr:         stderr,
+							Err:            execErr,
+							ExitCode:       exitCode,
+							Ran:            shell.IsExitStatus(execErr),
+							Interrupted:    interrupted,
+							ComponentExits: bgShell.Shell.TakeComponentExits(),
 						})
 					}
 
@@ -367,13 +368,14 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 					if cmdLog != nil && bgShell.TakeRecorded() {
 						killOut, killErr, kDone, kErr := bgShell.GetOutput()
 						run := cmdlog.Run{
-							SessionID:   sessionID,
-							Command:     params.Command,
-							CWD:         bgShell.Shell.GetWorkingDir(),
-							Stdout:      killOut,
-							Stderr:      killErr,
-							Err:         ctx.Err(),
-							Interrupted: true,
+							SessionID:      sessionID,
+							Command:        params.Command,
+							CWD:            bgShell.Shell.GetWorkingDir(),
+							Stdout:         killOut,
+							Stderr:         killErr,
+							Err:            ctx.Err(),
+							Interrupted:    true,
+							ComponentExits: bgShell.Shell.TakeComponentExits(),
 						}
 						// The job may have reached its own verdict
 						// just before the kill landed — record it.
@@ -402,15 +404,16 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 				}
 				if cmdLog != nil && bgShell.TakeRecorded() {
 					cmdLog.RecordRun(ctx, cmdlog.Run{
-						SessionID:   sessionID,
-						Command:     params.Command,
-						CWD:         bgShell.Shell.GetWorkingDir(),
-						Stdout:      stdout,
-						Stderr:      stderr,
-						Err:         execErr,
-						ExitCode:    exitCode,
-						Ran:         shell.IsExitStatus(execErr),
-						Interrupted: interrupted,
+						SessionID:      sessionID,
+						Command:        params.Command,
+						CWD:            bgShell.Shell.GetWorkingDir(),
+						Stdout:         stdout,
+						Stderr:         stderr,
+						Err:            execErr,
+						ExitCode:       exitCode,
+						Ran:            shell.IsExitStatus(execErr),
+						Interrupted:    interrupted,
+						ComponentExits: bgShell.Shell.TakeComponentExits(),
 					})
 				}
 

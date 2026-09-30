@@ -98,6 +98,46 @@ func TestRunContinuity(t *testing.T) {
 	}
 }
 
+func TestComponentExits(t *testing.T) {
+	shell := NewShell(&Options{WorkingDir: t.TempDir()})
+
+	// A pipeline whose head fails plus a trailing clean call: the
+	// composite reports 0 but the log kept every real verdict.
+	if _, _, err := shell.Exec(t.Context(), `sh -c 'exit 3' | cat; sh -c 'exit 0'`); err != nil {
+		t.Fatalf("composite exec failed: %v", err)
+	}
+	if got := shell.TakeComponentExits(); len(got) != 3 || got[0] != 3 || got[1] != 0 || got[2] != 0 {
+		t.Fatalf("component exits = %v, want [3 0 0]", got)
+	}
+
+	// interp builtins (echo, true) never reach the exec-handler
+	// chain — the issue's "cmd; echo $?" shape still surfaces the
+	// real command's status.
+	if _, _, err := shell.Exec(t.Context(), `sh -c 'exit 2'; echo $?`); err != nil {
+		t.Fatalf("semicolon exec failed: %v", err)
+	}
+	if got := shell.TakeComponentExits(); len(got) != 1 || got[0] != 2 {
+		t.Fatalf("component exits = %v, want [2]", got)
+	}
+
+	// A pure-builtin run records nothing.
+	if _, _, err := shell.Exec(t.Context(), "echo hi; true"); err != nil {
+		t.Fatalf("builtin exec failed: %v", err)
+	}
+	if got := shell.TakeComponentExits(); len(got) != 0 {
+		t.Fatalf("component exits = %v, want empty", got)
+	}
+
+	// Crush builtins go through the handler chain and do record —
+	// jq in a pipe counts as a component.
+	if _, _, err := shell.Exec(t.Context(), `echo '{"a":1}' | jq .a`); err != nil {
+		t.Fatalf("jq exec failed: %v", err)
+	}
+	if got := shell.TakeComponentExits(); len(got) != 1 || got[0] != 0 {
+		t.Fatalf("component exits = %v, want [0]", got)
+	}
+}
+
 func TestCrossPlatformExecution(t *testing.T) {
 	shell := NewShell(&Options{WorkingDir: "."})
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
