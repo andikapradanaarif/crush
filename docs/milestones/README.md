@@ -68,12 +68,14 @@ precision is now correctness machinery, not an optimization.
 records (confound isolation), 2 negative-control records (gate honesty) —
 every claim above has a preserved invocation behind it.
 
-## Index
+## Index — dated experiment records
 
-- **[EXPERIMENTS.md](EXPERIMENTS.md)** — the complete run ledger: all 46
-  invocations, ~1,340 records, three eras (notebook-stack → warm-start →
-  failure-memory), each row resolving to preserved artifacts.
-
-| Date | Milestone |
+| Date | File |
 |---|---|
-| [2026-10-01](2026-10-01-failure-memory-existence-proof.md) | Existence proof complete; mask arm resolved (presence effect + wrong-memory harm); referent-caution fix under validation |
+| 2026-09-21 | [Notebook prior-turns-stub regime](2026-09-21-notebook-prior-turns-stub.md) — first clean batch after harness debugging |
+| 2026-09-22 | [Small probes](2026-09-22-probes.md) — prior-turns-long, summarize, edit-region |
+| 2026-09-23 | [Notebook checkpoint + stub at scale](2026-09-23-notebook-checkpoint.md) — 96+120 clean records |
+| 2026-09-24→27 | [Notebook pressure-regime saga](2026-09-24-notebook-pressure-regime.md) — ~290 records, mostly infra; alarms held |
+| 2026-09-28→29 | [Warm-baseline + noise characterization](2026-09-28-warm-baseline.md) — seeding proven, CVs calibrated |
+| 2026-09-30 | [Failure-memory powered runs + negative control](2026-09-30-failure-memory-powered.md) — the existence proof |
+| 2026-10-01 | [Existence-proof position + mask verdict](2026-10-01-failure-memory-existence-proof.md) — current snapshot |
