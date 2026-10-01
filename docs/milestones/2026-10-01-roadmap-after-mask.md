@@ -61,7 +61,7 @@ none of these completely. This is the frame the selection layer must answer.
 
 | Work | Detail |
 |---|---|
-| **Zero-safe estimator (#203, done 10-01)** | `(t−c)/μ_c` per trajectory (ratio-of-means); zero-side counted, no-baseline excluded (+`NoBaselinePos` for invisible regressions), `min-baseline` surfaced; log-ratio kept as secondary view. All four preserved invocations re-scored — mask steering doubled (−64% vs −48% reported). CI conditioning on estimated baselines tracked as #209 |
+| **Zero-safe estimator (#203, done 10-01)** | `(t−c)/μ_c` per trajectory (ratio-of-means); zero-side counted, no-baseline excluded (+`NoBaselinePos` for invisible regressions), `min-baseline` surfaced; bootstrap re-normalizes each replicate's baseline so Var(c̄) enters the CI; log-ratio kept as secondary view. All four preserved invocations re-scored — mask steering doubled (−64% vs −48% reported) |
 | **Real-usage telemetry (#206, start now)** | opt-in local logging: tail fired? first actions touched referents? failure age when used? user revised after? Value = lead time — every idle day is data never collected |
 | **Separate planning-MDE from shipping-MDE** | design effect (sizing) ≠ minimum worthwhile benefit (ship gate) ≠ non-inferiority margin ≠ cost ceiling ≠ stopping rule. CI crossing the bound = "inconclusive", not "underpowered" |
 | **Unified verdict fields** | `execution_validity` / `mechanism_exposure` / `quality_guardrail` / `benefit_estimate` / `cost_guardrail` → single `acceptance`. "Pass + guardrail violated" was ambiguous |

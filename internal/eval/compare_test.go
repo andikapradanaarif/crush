@@ -375,14 +375,46 @@ func TestSignFlipP_ExtremeArrangements(t *testing.T) {
 	require.InDelta(t, 1.0/8.0, p, 1e-9)
 }
 
+func tp(c, t []float64) trajPairs {
+	var cs, ts float64
+	for _, v := range c {
+		cs += v
+	}
+	for _, v := range t {
+		ts += v
+	}
+	return trajPairs{c: c, t: t, cSum: cs, tSum: ts}
+}
+
 func TestBcaCI_SymmetricData(t *testing.T) {
 	rng := rand.New(rand.NewPCG(3, 4))
-	trajs := [][]float64{{-0.1, 0.05, -0.02, 0.08, -0.05, 0.01}}
+	// Baseline 10 with diffs summing ≈0 — θ sits near zero and the
+	// interval must bracket it.
+	trajs := []trajPairs{
+		tp([]float64{10, 10, 10, 10, 10, 10},
+			[]float64{9, 10.5, 9.8, 10.8, 9.5, 10.1}),
+	}
+	theta := thetaMeanRaw(trajs)
 	lo, hi := bcaCI(trajs, 5000, rng)
-	theta := thetaMean(trajs)
 	require.Less(t, lo, theta)
 	require.Greater(t, hi, theta)
 	require.True(t, math.Abs(lo) < 0.5 && math.Abs(hi) < 0.5)
+}
+
+func TestBcaCI_ZeroControlReplicatesSkipped(t *testing.T) {
+	// Half this trajectory's controls are zero — ~25% of replicates
+	// resample an all-zero baseline and must be skipped, not floored
+	// on a fabricated denominator. The interval stays finite and
+	// brackets the point estimate.
+	rng := rand.New(rand.NewPCG(5, 6))
+	trajs := []trajPairs{
+		tp([]float64{0, 0, 10, 10}, []float64{0, 0, 8, 8}),
+	}
+	lo, hi := bcaCI(trajs, 5000, rng)
+	theta := thetaMeanRaw(trajs)
+	require.False(t, math.IsNaN(lo) || math.IsNaN(hi))
+	require.LessOrEqual(t, lo, theta)
+	require.GreaterOrEqual(t, hi, theta)
 }
 
 func TestCompare_AbortedSnapshotRefuses(t *testing.T) {

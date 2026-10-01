@@ -147,7 +147,8 @@ var evalCompareCmd = &cobra.Command{
 trajectory (drift-matched — the scheduler's lead-arm alternation makes
 same-index attempts the temporally closest samples), then reports each
 pair's difference normalized by its trajectory's mean control baseline,
-aggregated across trajectories with a BCa bootstrap 95% CI and a
+aggregated across trajectories with a BCa bootstrap 95% CI (raw pairs
+resampled, each replicate re-normalized by its own baseline) and a
 sign-flip permutation p. Zero-valued pairs are kept — a treatment zero
 is often the effect itself.
 

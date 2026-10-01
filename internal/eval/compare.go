@@ -409,11 +409,13 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 			continue
 		}
 		mc := MetricCompare{Name: name}
-		// Accumulate per trajectory: raw diffs for the normalized
-		// estimand, the control sum for its baseline mean, and the
-		// strictly-positive pairs for the legacy log-ratio view.
+		// Accumulate per trajectory: aligned raw (control, treatment)
+		// pair values — the bootstrap resamples these and
+		// re-normalizes per replicate, so baseline estimation noise
+		// enters the CI — plus the strictly-positive pairs for the
+		// legacy log-ratio view.
 		type acc struct {
-			diffs  []float64
+			c, t   []float64
 			posLog []float64
 			cSum   float64
 			tSum   float64
@@ -433,7 +435,10 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 				a = &acc{}
 				perTraj[k.traj] = a
 			}
-			a.diffs = append(a.diffs, t-c)
+			// (0,0) pairs are real observations — both arms did
+			// nothing — contributing d=0, not absence.
+			a.c = append(a.c, c)
+			a.t = append(a.t, t)
 			a.cSum += c
 			a.tSum += t
 			if t > 0 {
@@ -446,6 +451,7 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 			}
 		}
 		trajs := make([][]float64, 0, len(perTraj))
+		raws := make([]trajPairs, 0, len(perTraj))
 		posTrajs := make([][]float64, 0, len(perTraj))
 		var nTraj int
 		mc.MinBaseline = math.Inf(1)
@@ -454,28 +460,29 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 			if a == nil {
 				continue
 			}
-			mu := a.cSum / float64(len(a.diffs))
+			mu := a.cSum / float64(len(a.c))
 			if mu <= 0 {
 				// No positive control baseline — relative change
 				// undefined for this trajectory. A positive
 				// treatment sum here is an invisible regression:
 				// count it separately rather than letting it
 				// vanish into Dropped.
-				mc.Dropped += len(a.diffs)
+				mc.Dropped += len(a.c)
 				mc.NoBaselinePos += a.tPos
 				continue
 			}
-			d := make([]float64, len(a.diffs))
-			for i, v := range a.diffs {
-				d[i] = v / mu
+			d := make([]float64, len(a.c))
+			for i := range d {
+				d[i] = (a.t[i] - a.c[i]) / mu
 			}
 			trajs = append(trajs, d)
+			raws = append(raws, trajPairs{c: a.c, t: a.t, cSum: a.cSum, tSum: a.tSum})
 			if len(a.posLog) > 0 {
 				posTrajs = append(posTrajs, a.posLog)
 			}
 			mc.Zeroes += a.zeroes
 			mc.CtrlMean += mu
-			mc.TreatMean += a.tSum / float64(len(a.diffs))
+			mc.TreatMean += a.tSum / float64(len(a.c))
 			mc.MinBaseline = min(mc.MinBaseline, mu)
 			nTraj++
 		}
@@ -494,10 +501,14 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 				fmt.Sprintf("%s (%d measurable, %d no-baseline, %d absent)", name, mc.Pairs, mc.Dropped, mc.Absent))
 			continue // Too few measurable pairs to estimate on.
 		}
-		mc.Theta = thetaMean(trajs)
+		mc.Theta = thetaMeanRaw(raws)
 		mc.DeltaPct = mc.Theta * 100
-		lo, hi := bcaCI(trajs, replicates, rng)
+		lo, hi := bcaCI(raws, replicates, rng)
 		mc.CILoPct, mc.CIHiPct = lo*100, hi*100
+		// The permutation test deliberately normalizes on the
+		// observed baseline: conditioning on μ̂ is defensible under
+		// permutation (positive scaling preserves sign symmetry),
+		// unlike the interval, which must propagate baseline noise.
 		mc.P = signFlipP(trajs, mc.Theta, directionOf(exp, name), replicates, rng)
 		if exp.Primary != nil && name == exp.Primary.Metric {
 			switch {
@@ -730,6 +741,28 @@ func directionOf(e *Experiment, name string) string {
 	return ""
 }
 
+// trajPairs carries one trajectory's raw (control, treatment) pair
+// values and their sums — the bootstrap resamples these and
+// re-normalizes each replicate by its own resampled baseline, so
+// denominator noise enters the interval rather than being frozen at
+// the observed μ̂.
+type trajPairs struct {
+	c, t       []float64
+	cSum, tSum float64
+}
+
+// thetaMeanRaw is the estimand computed from raw pair sums:
+// per-trajectory (Σt−Σc)/Σc — identical to the mean of normalized
+// diffs on observed data — averaged unweighted across trajectories.
+// Callers must exclude non-positive-baseline trajectories upstream.
+func thetaMeanRaw(trajs []trajPairs) float64 {
+	var sum float64
+	for _, tr := range trajs {
+		sum += (tr.tSum - tr.cSum) / tr.cSum
+	}
+	return sum / float64(len(trajs))
+}
+
 // thetaMean is the estimand: unweighted mean across trajectories of
 // each trajectory's mean normalized pair difference.
 func thetaMean(trajs [][]float64) float64 {
@@ -758,53 +791,68 @@ func countPairs(trajs [][]float64) int {
 
 func pctOf(theta float64) float64 { return (math.Exp(theta) - 1) * 100 }
 
-// bcaCI is a BCa 95% interval over a stratified bootstrap: pairs
-// resample within their own trajectory, preserving trajectory
-// weights — the same stratification the estimand uses. Jackknife
-// over pairs supplies the acceleration term.
-//
-// Known limitation: trajs carries already-normalized diffs, so
-// replicates hold each trajectory's baseline μ̂_c fixed — the
-// interval captures numerator noise only and is conditional on the
-// estimated baselines. For tightly-clustered controls this is
-// second-order; for sparse metrics it can understate the width.
-// Propagating Var(c̄) through requires carrying raw pairs and
-// re-normalizing per replicate — a tracked follow-up.
-func bcaCI(trajs [][]float64, replicates int, rng *rand.Rand) (lo, hi float64) {
-	thetaHat := thetaMean(trajs)
-	boot := make([]float64, replicates)
+// bcaCI is a BCa 95% interval over a stratified bootstrap on raw
+// pairs: (c,t) values resample jointly within their own trajectory,
+// and each replicate re-normalizes by its own resampled control sum —
+// preserving trajectory weights and propagating baseline estimation
+// noise into the interval (θ̂ is a ratio-of-means; treating μ̂_c as a
+// constant would capture numerator noise only). A replicate whose
+// resampled control sum is non-positive has no defined baseline and
+// is skipped rather than floored on a fabricated denominator.
+// Jackknife at the estimand's own unit supplies the acceleration term.
+func bcaCI(trajs []trajPairs, replicates int, rng *rand.Rand) (lo, hi float64) {
+	thetaHat := thetaMeanRaw(trajs)
+	boot := make([]float64, 0, replicates)
 	var below int
-	for b := range replicates {
-		rs := make([][]float64, len(trajs))
-		for i, d := range trajs {
-			s := make([]float64, len(d))
-			for j := range s {
-				s[j] = d[rng.IntN(len(d))]
+	for range replicates {
+		var sum float64
+		degenerate := false
+		for _, tr := range trajs {
+			var cs, ts float64
+			for range len(tr.c) {
+				j := rng.IntN(len(tr.c))
+				cs += tr.c[j]
+				ts += tr.t[j]
 			}
-			rs[i] = s
+			if cs <= 0 {
+				degenerate = true
+				break
+			}
+			sum += (ts - cs) / cs
 		}
-		boot[b] = thetaMean(rs)
-		if boot[b] < thetaHat {
+		if degenerate {
+			continue
+		}
+		theta := sum / float64(len(trajs))
+		boot = append(boot, theta)
+		if theta < thetaHat {
 			below++
 		}
 	}
+	if len(boot) == 0 {
+		// Every replicate resampled an all-zero baseline — no
+		// resample variance is expressible; collapse to the point.
+		return thetaHat, thetaHat
+	}
 	slices.Sort(boot)
 
-	// Jackknife at the estimand's own unit: whole-trajectory deletion
-	// when ≥2 trajectories exist — the only unit that sees
-	// single-pair-trajectory leverage. A lone trajectory falls back
-	// to pair-level deletion.
+	// Whole-trajectory deletion when ≥2 trajectories exist — the only
+	// unit that sees single-pair-trajectory leverage. A lone
+	// trajectory falls back to pair-level deletion, skipping
+	// deletions that zero the baseline.
 	var jk []float64
 	if len(trajs) >= 2 {
 		for i := range trajs {
-			jk = append(jk, thetaMean(slices.Delete(slices.Clone(trajs), i, i+1)))
+			jk = append(jk, thetaMeanRaw(slices.Delete(slices.Clone(trajs), i, i+1)))
 		}
 	} else {
-		for j := range trajs[0] {
-			l := [][]float64{slices.Delete(slices.Clone(trajs[0]), j, j+1)}
-			if len(l[0]) > 0 {
-				jk = append(jk, thetaMean(l))
+		tr := trajs[0]
+		for j := range tr.c {
+			cs := tr.cSum - tr.c[j]
+			if cs <= 0 {
+				continue
 			}
+			jk = append(jk, (tr.tSum-tr.t[j]-cs)/cs)
 		}
 	}
 	jkMean := mean(jk)
@@ -819,7 +867,7 @@ func bcaCI(trajs [][]float64, replicates int, rng *rand.Rand) (lo, hi float64) {
 		a = num / (6 * math.Pow(den, 1.5))
 	}
 
-	z0 := normInv(float64(below) / float64(replicates))
+	z0 := normInv(float64(below) / float64(len(boot)))
 	if math.IsInf(z0, 0) || math.IsNaN(z0) {
 		z0 = 0 // Degenerate resample (all-equal pairs) — fall back to percentile.
 	}
@@ -827,8 +875,8 @@ func bcaCI(trajs [][]float64, replicates int, rng *rand.Rand) (lo, hi float64) {
 		z := normInv(q)
 		return normCDF(z0 + (z0+z)/(1-a*(z0+z)))
 	}
-	return boot[clampIdx(adj(0.025)*float64(replicates), replicates)],
-		boot[clampIdx(adj(0.975)*float64(replicates), replicates)]
+	return boot[clampIdx(adj(0.025)*float64(len(boot)), len(boot))],
+		boot[clampIdx(adj(0.975)*float64(len(boot)), len(boot))]
 }
 
 func clampIdx(x float64, n int) int {
@@ -838,9 +886,12 @@ func clampIdx(x float64, n int) int {
 
 // signFlipP is the paired permutation test: under the null, each
 // pair's difference is symmetric about 0, so replicates flip every
-// pair's sign independently and recompute θ. Exact enumeration when
-// 2^pairs is tractable. One-sided in the declared direction when
-// given; two-sided (|θ*| ≥ |θ̂|) otherwise.
+// pair's sign independently and recompute θ. Operates on diffs
+// normalized by the observed baseline — conditioning on μ̂ is
+// defensible under permutation since positive scaling preserves
+// sign symmetry. Exact enumeration when 2^pairs is tractable.
+// One-sided in the declared direction when given; two-sided
+// (|θ*| ≥ |θ̂|) otherwise.
 func signFlipP(trajs [][]float64, observed float64, direction string, replicates int, rng *rand.Rand) float64 {
 	var flat []float64
 	var sizes []int

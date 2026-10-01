@@ -129,8 +129,10 @@ first establishes its own baseline, then every pair's change is expressed
 relative to it (a per-trajectory ratio-of-means). A treatment zero
 contributes `d = −c/μ_c` instead of vanishing. Only a trajectory whose
 entire control baseline is ≤0 is excluded, since relative change is
-undefined without one. CI, p, and trajectory weighting are unchanged —
-only the per-pair transform.
+undefined without one. The BCa bootstrap resamples raw `(c,t)` pairs
+and re-normalizes each replicate by its own resampled baseline, so
+baseline noise enters the interval; the sign-flip p conditions on the
+observed baseline; trajectory weighting is unchanged.
 
 **How to read the new report lines.** Each metric now prints
 `ctrl≈x → treat≈y` (absolute means — the magnitude Δ% is relative to),
@@ -143,10 +145,16 @@ positive-only pairs for continuity.
 
 | Invocation | Reported (log-ratio, zeros dropped) | Re-scored (all pairs) |
 |---|---|---|
-| `bc5a` powered | −41.1% on 18 prs | −41.2% [−67.4,−15.9] p=0.003 on **26 prs** |
-| `f0b6` top-up | −27.6% on 27 prs | −30.3% [−47.9,−5.3] p=0.009 on **42 prs** |
-| mask `4965` | −47.9% on 11 prs | **−64.1%** [−85.2,−41.7] p<0.001 on **22 prs** |
-| mask `382f` | −8.2% on 15 prs | −27.2% [−60.2,+10.3] p=0.082 on **22 prs** |
+| `bc5a` powered | −41.1% on 18 prs | −41.2% [−61.6,−11.0] p=0.004 on **26 prs** |
+| `f0b6` top-up | −27.6% on 27 prs | −30.3% [−46.6,+25.0] p=0.012 on **42 prs** |
+| mask `4965` | −47.9% on 11 prs | **−64.1%** [−81.4,−44.0] p<0.001 on **22 prs** |
+| mask `382f` | −8.2% on 15 prs | −27.2% [−56.4,+17.5] p=0.079 on **22 prs** |
+
+CIs above are from the final estimator: raw-pair resampling that
+re-normalizes each replicate by its own resampled baseline — once
+`Var(c̄)` enters the interval, `f0b6`'s bound honestly spans zero
+(p still 0.012; the estimate holds, the interval is just honest
+about baseline noise).
 
 **What the re-score teaches.** The powered conclusions *hold* (−41%/−30%
 stand) — the dropped pairs there were wins consistent with the headline.

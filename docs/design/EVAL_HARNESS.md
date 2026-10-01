@@ -1267,15 +1267,38 @@ was rejected: under asymmetric exclusion it pairs samples taken at
 different wall times, injecting exactly the drift pairing exists to
 remove.
 
-**Estimator**: per-pair log-ratio `d = log(treat/ctrl)` →
-per-trajectory mean → unweighted mean across trajectories. The
-trajectory is the unit of analysis, so one arm landing
-disproportionately on easy trajectories cannot shift the estimate —
-the composition bias pooled strata carry. The CI is BCa over a
-stratified bootstrap (pairs resampled within their trajectory);
-the p-value is a sign-flip permutation on pair log-ratios —
-each `d` is symmetric about zero under the null — one-sided in the
-primary's declared direction, two-sided for every other metric.
+**Estimator**: per-trajectory ratio-of-means — each pair's raw
+difference normalized by that trajectory's mean control baseline,
+`d = (t−c)/μ_c` → per-trajectory mean `(μ_t−μ_c)/μ_c` → unweighted
+mean across trajectories. The trajectory is the unit of analysis, so
+one arm landing disproportionately on easy trajectories cannot shift
+the estimate — the composition bias pooled strata carry. Zero-valued
+pairs are kept: on count metrics a treatment zero is the effect
+itself (e.g. discovery calls eliminated), not missing data — the
+earlier `log(t/c)` estimand discarded exactly those pairs, biasing
+estimates toward null in proportion to effect size. `(0,0)` pairs
+are real observations — both arms did nothing — contributing `d=0`.
+A trajectory whose control baseline is non-positive has no defined
+relative change and is excluded (`no-baseline`); dropped pairs whose
+treatment side was positive are counted separately, since a
+treatment that invents activity where control had none is a
+regression the relative estimand cannot express. Δ% is a mean of
+per-trajectory ratios and is unbounded — a pair whose control value
+exceeds its trajectory mean can contribute below −100% — and can
+diverge from the printed `ctrl≈→treat≈` means under heterogeneous
+baselines. The CI is BCa over a stratified bootstrap on raw pairs:
+`(c,t)` values resample jointly within their trajectory and each
+replicate re-normalizes by its own resampled control sum, so
+baseline estimation noise enters the interval; replicates that
+resample an all-zero baseline are skipped. The p-value is a
+sign-flip permutation on observed-baseline-normalized pair
+differences — each `d` is symmetric about zero under the null, and
+conditioning on the observed baseline is defensible under
+permutation since positive scaling preserves sign symmetry —
+one-sided in the primary's declared direction, two-sided for every
+other metric. A legacy log-ratio view (mean of per-pair `log(t/c)`
+over strictly-positive pairs) prints as a secondary column for
+continuity with pre-#203 reports.
 
 **Refusals** are hard errors, matching the harness's fail-closed
 contract:
@@ -1307,12 +1330,15 @@ Legacy invocations (no snapshot) can't verify provenance; they
 report with a note rather than a refusal.
 
 **Verdicts** exist only on the declared primary: the CI is tested
-against the MDE boundary (`log(1∓mde)`), giving `effect ≥ MDE`,
-`no MDE effect` (a powered null — the CI cleared the boundary on
-the uninteresting side), or `INCONCLUSIVE — underpowered` with the
-required pair count — priced against the data's own paired
-log-ratio variance `⌈6.19·Var(dᵢ)/log(1+mde)²⌉`, falling back to
-the pooled-CV `noise.json` figure when pair variance is degenerate.
+against the MDE boundary (`±mde` in normalized-difference units),
+giving `effect ≥ MDE`, `no MDE effect` (a powered null — the CI
+cleared the boundary on the uninteresting side), or `INCONCLUSIVE`
+with the required pair count — priced against the data's own paired
+normalized-difference variance `⌈6.186·Var(dᵢ)/mde²⌉`, falling back
+to the pooled-CV `noise.json` figure when pair variance is
+degenerate. "Inconclusive" is the honest label: a CI spanning the
+boundary may mean the effect is *below* the bound, not merely that
+n is small.
 Every other metric gets CI and p only — secondary metrics inform,
 they never decide. The snapshot also carries the run's gate verdict
 and outcome alarms as context lines, so a catastrophic-collapsed
