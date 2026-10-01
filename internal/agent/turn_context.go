@@ -225,7 +225,7 @@ func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgen
 
 	if a.failureMemory && len(openFailures) > 0 {
 		var b strings.Builder
-		b.WriteString("<open_failures>\nCommands that failed in this workspace and have not passed since — the likely referents for \"the failing test\" or \"the build error\"; a clean re-run resolves one:\n")
+		b.WriteString("<open_failures>\nCommands that failed in this workspace and have not passed since — historical context, not necessarily the current task. Treat a row as the referent for \"the failing test\" or \"the build error\" only if it actually matches the task at hand; a clean re-run resolves one:\n")
 		for _, f := range openFailures {
 			b.WriteString("- ")
 			b.WriteString(tailSafeText(truncateTailText(f.Cmd, turnContextFailureCmdRunes)))
