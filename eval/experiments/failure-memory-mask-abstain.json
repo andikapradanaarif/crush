@@ -7,9 +7,9 @@
 		"mask-bb-ambig-none"
 	],
 	"runs_per_trajectory": {
-		"stable": 3,
-		"mid": 10,
-		"uncharacterized": 11
+		"stable": 2,
+		"mid": 3,
+		"uncharacterized": 4
 	},
 	"primary": {
 		"metric": "call_metrics.discovery_calls_before_write",

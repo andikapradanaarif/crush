@@ -212,3 +212,25 @@ noise-adjusted acceptance, cost-justified gain, periodic pruning, leakage
 critic. And #197 needs a rewrite — RRSI's cost rule applies only when
 ΔS > δ (task score), not to efficiency metrics; our all-at-ceiling corpus
 routes everything to the within-band rule.
+
+## Repaired corpus (PR #212) — reading the primary
+
+The repaired matrix disentangles prompt ambiguity from referent truth
+across opposed cell classes: explicit-decoy and ambig-stale seed memory
+expected to *harm* (wrong referent, contradicted record), ambig-correct
+seeds memory expected to *help*, ambig-placebo seeds off-domain memory,
+ambig-none is the null. `failure-memory-mask.json`'s primary
+(`discovery_calls_before_write` Δ%) is therefore an explicit **net
+effect under mixed memory** — the flag-flip question, "is turning
+failure_memory on net-positive across a realistic distribution of memory
+quality" — not a claim that memory helps or harms uniformly. The
+mechanism contrast (helps-when-right vs harms-when-wrong) is read from
+the per-trajectory strata, which the report disaggregates; a pooled Δ
+near zero can hide opposed class effects, so cell-class deltas — not the
+headline — answer "does wrong memory steer wrong".
+
+`failure-memory-mask-abstain.json` is the scored-abstention contract:
+`max_tail.sections.open_failures: 0` on treatment is satisfiable only
+because armed-but-empty renders record a zero-section tail audit
+(the empty case previously deleted the audit, which would have starved
+every correct abstention into inconclusive — fixed in this PR).
