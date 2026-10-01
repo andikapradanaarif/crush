@@ -328,12 +328,12 @@ func TestCompare_UnderpoweredVerdict(t *testing.T) {
 
 	rep, err := seededRunner(dir).Compare(exp, "")
 	require.NoError(t, err)
-	require.Equal(t, "inconclusive-underpowered", rep.Metrics[0].Verdict)
+	require.Equal(t, "inconclusive", rep.Metrics[0].Verdict)
 	// Required is the paired-variance estimate: 6.186·Var(d)/δ²,
-	// not the pooled-CV gate formula. |d| = log 2 for all 8 pairs;
-	// sample variance divides by n−1: Var = 8·d²/7.
-	d := math.Log(2.0)
-	expN := int(math.Ceil(6.186 * (8 * d * d / 7) / (math.Log(1.15) * math.Log(1.15))))
+	// not the pooled-CV gate formula. Normalized diffs alternate
+	// −0.5/+1.0 (control baseline 100); mean 0.25, so
+	// Var = (4·0.5625 + 4·0.5625)/7 = 4.5/7, δ = mde = 0.15.
+	expN := int(math.Ceil(6.186 * (4.5 / 7) / (0.15 * 0.15)))
 	require.Equal(t, expN, rep.Metrics[0].Required)
 }
 
@@ -342,12 +342,13 @@ func TestRequiredPairs_WithinTrajectoryVariance(t *testing.T) {
 	// would fold the between-trajectory spread into the noise term
 	// and overstate n. The estimand weights trajectories equally, so
 	// the variance term is the mean within-trajectory variance —
-	// each {a−0.1, a+0.1} trajectory has s² = 0.02.
+	// each {a−0.1, a+0.1} trajectory has s² = 0.02. δ = mde in
+	// normalized-diff units.
 	trajs := [][]float64{{0.0, 0.2}, {0.5, 0.7}, {0.9, 1.1}}
-	expN := int(math.Ceil(6.186 * 0.02 / (math.Log(1.1) * math.Log(1.1))))
+	expN := int(math.Ceil(6.186 * 0.02 / (0.10 * 0.10)))
 	require.Equal(t, expN, requiredPairs(trajs, 0.10, 0))
 	// Pooled flat variance would be ~0.115 — a materially larger n.
-	pooled := int(math.Ceil(6.186 * 0.115 / (math.Log(1.1) * math.Log(1.1))))
+	pooled := int(math.Ceil(6.186 * 0.115 / (0.10 * 0.10)))
 	require.Less(t, expN, pooled)
 }
 
@@ -460,8 +461,9 @@ func TestCompare_DroppedAndAbsentCounted(t *testing.T) {
 	for i := 1; i <= 5; i++ {
 		c := compareRecord("e", "t", ArmControl, "i1", i, 100, optsA)
 		tr := compareRecord("e", "t", ArmTreatment, "i1", i, 90, optsB)
-		// request.* is pointer-gated: nil telemetry counts absent,
-		// a nonpositive side counts dropped.
+		// request.* is pointer-gated: nil telemetry counts absent;
+		// a zero value is a zero-side pair — kept by the
+		// normalized-difference estimand, counted in Zeroes.
 		c.Request = &RequestStats{PromptTokensPeak: 100}
 		tr.Request = &RequestStats{PromptTokensPeak: 90}
 		if i == 4 {
@@ -478,9 +480,49 @@ func TestCompare_DroppedAndAbsentCounted(t *testing.T) {
 	require.NoError(t, err)
 	for _, m := range rep.Metrics {
 		if m.Name == "request.prompt_tokens_peak" {
-			require.Equal(t, 3, m.Pairs)
-			require.Equal(t, 1, m.Dropped)
+			require.Equal(t, 4, m.Pairs)
+			require.Equal(t, 1, m.Zeroes)
+			require.Equal(t, 0, m.Dropped)
 			require.Equal(t, 1, m.Absent)
+		}
+	}
+}
+
+func TestCompare_TreatmentZeroPairKept(t *testing.T) {
+	dir := t.TempDir()
+	exp := &Experiment{Name: "e"}
+	c := map[string]any{"f": "c"}
+	tr := map[string]any{"f": "t"}
+	var recs []RunRecord
+	// Treatment eliminates discovery calls on half the pairs — the
+	// log-ratio estimator discarded these (the strongest effect);
+	// the normalized estimator keeps them.
+	for i := 1; i <= 6; i++ {
+		calls := 4
+		if i%2 == 0 {
+			calls = 0
+		}
+		cr := compareRecord("e", "t", ArmControl, "i1", i, 100, c)
+		tr_ := compareRecord("e", "t", ArmTreatment, "i1", i, 90, tr)
+		cr.CallMetrics = &CallMetrics{DiscoveryCallsBeforeWrite: 5}
+		tr_.CallMetrics = &CallMetrics{DiscoveryCallsBeforeWrite: calls}
+		recs = append(recs, cr, tr_)
+	}
+	writeCompareRecords(t, dir, recs...)
+
+	rep, err := seededRunner(dir).Compare(exp, "")
+	require.NoError(t, err)
+	for _, m := range rep.Metrics {
+		if m.Name == "call_metrics.discovery_calls_before_write" {
+			require.Equal(t, 6, m.Pairs)
+			require.Equal(t, 3, m.Zeroes)
+			// Mean diff −3 over baseline 5 → −60%.
+			require.InDelta(t, -60.0, m.DeltaPct, 1.0)
+			require.InDelta(t, 5.0, m.CtrlMean, 0.1)
+			require.InDelta(t, 2.0, m.TreatMean, 0.1)
+			// Legacy log-ratio sees only the 3 positive pairs.
+			require.Equal(t, 3, m.LogRatioPairs)
+			require.InDelta(t, -20.0, m.LogRatioPct, 1.0)
 		}
 	}
 }

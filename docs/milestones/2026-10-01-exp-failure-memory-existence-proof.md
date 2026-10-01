@@ -113,6 +113,19 @@ the session DBs, fixtures, and `compare.go` corrected three readings:
    `compare.go` drops zero-value pairs — mostly *treatment* zeros, i.e.
    memory's biggest wins — so powered effect sizes are understated.
 
+**Re-scored under the zero-safe estimator** (normalized per-pair difference
+vs trajectory control mean; all pairs kept, zeros counted):
+
+| Invocation | Old (log-ratio, zeros dropped) | New |
+|---|---|---|
+| `bc5a` | −41.1% on 18 prs | −41.2% [−67.4,−15.9] p=0.003 on **26 prs** |
+| `f0b6` | −27.6% on 27 prs | −30.3% [−47.9,−5.3] p=0.009 on **42 prs** |
+| mask `4965` | −47.9% on 11 prs | **−64.1%** [−85.2,−41.7] p<0.001 on **22 prs** |
+| mask `382f` | −8.2% on 15 prs | −27.2% [−60.2,+10.3] p=0.082 on **22 prs** |
+
+The mask's steering was understated by nearly half — the decoy-anchored
+runs were exactly the dropped zeros.
+
 Corrected claim hierarchy and revised roadmap live in `README.md` and
 `2026-10-01-roadmap-after-mask.md`.
 
