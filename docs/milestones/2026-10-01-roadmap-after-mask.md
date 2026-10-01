@@ -66,6 +66,7 @@ none of these completely. This is the frame the selection layer must answer.
 | **Separate planning-MDE from shipping-MDE** | design effect (sizing) ≠ minimum worthwhile benefit (ship gate) ≠ non-inferiority margin ≠ cost ceiling ≠ stopping rule. CI crossing the bound = "inconclusive", not "underpowered" |
 | **Unified verdict fields** | `execution_validity` / `mechanism_exposure` / `quality_guardrail` / `benefit_estimate` / `cost_guardrail` → single `acceptance`. "Pass + guardrail violated" was ambiguous |
 | **Coverage contract fix** | `min_tail.sections.open_failures: 1` currently penalizes *correct abstention* as unexposed. Distinguish relevant-injected / correct-reject / ambiguous-surfaced. Injection rate ≠ retrieval quality |
+| **Tokens-to-done (#151)** | all token classes per attempt with CIs; unknown cost stays unknown (never estimate as 0); seed/acquisition spend tracked separately — report both marginal next-task cost and amortized lifecycle cost |
 | **Offline decision tests** | synthetic/preserved records: noisy-null, known pass regression, lower-calls-worse-pass, cost inflation, missing telemetry, valid abstention — calibrate the gate beyond the noop alarm (#152, #159 folded in) |
 | **#138** | Zero CI runs ever; `TestClientServerSpawnRace` flake already bit us |
 | **#109 probe tier** | Narrow scope: package the manual decoy-forensics (session-DB queries) as reusable probes |
