@@ -89,7 +89,7 @@ cannot fix a precision problem; precision must live at retrieval/write time.**
 #201 closed unmerged. #166 (relevance-ranked failures) is now *proven
 necessary by measurement*, not just promoted.
 
-## Post-review corrections (same-day, two external artifact reviews)
+## Post-review corrections (same-day artifact re-check)
 
 The mask sections above are preserved as written at the time. Re-checks of
 the session DBs, fixtures, and `compare.go` corrected three readings:
@@ -114,7 +114,7 @@ the session DBs, fixtures, and `compare.go` corrected three readings:
    memory's biggest wins — so powered effect sizes are understated.
 
 Corrected claim hierarchy and revised roadmap live in `README.md` and
-`2026-10-01-roadmap-after-mask.md` (rev 2).
+`2026-10-01-roadmap-after-mask.md`.
 
 ## The plan, in steps
 

@@ -1,10 +1,10 @@
-# 2026-10-01 — Roadmap after the mask verdict (rev 2)
+# 2026-10-01 — Roadmap after the mask verdict
 
-Revised after two external reviews that re-checked the raw artifacts (session
-DBs, JSONL records, fixtures, `internal/cmdlog`, `turn_context.go`,
-`compare.go`). Several of this document's original claims did not survive
-that re-check — the corrections are recorded first, because the plan below
-only makes sense with the corrected evidence base.
+Re-checking the raw artifacts behind the earlier readings (session DBs,
+JSONL records, fixtures, `internal/cmdlog`, `turn_context.go`,
+`compare.go`) surfaced corrections to several claims. The corrections are
+recorded first, because the plan below only makes sense with the corrected
+evidence base.
 
 ## Corrections to the evidence record
 
@@ -120,7 +120,7 @@ none of these completely. This is the frame the selection layer must answer.
 | **#54/#38** | standing release policy, not a late phase — every default flip behind its own powered read |
 | **#78 containment** | parallel track — a memory-induced wrong action makes sandboxing directly relevant, not orthogonal |
 
-## Issue disposition changes from the reviews
+## Issue disposition changes
 
 - **#197** — rewrite required: floor on pass rate; cost rule only when
   ΔS > δ; within-band → ΔC ≤ 0 + efficiency tie-break; cost includes
@@ -158,8 +158,9 @@ none of these completely. This is the frame the selection layer must answer.
   stage-B/C numbers mean anything.
 - **Abstention invisibility**: a selector that returns nothing must be
   scored as success, not missing coverage — baked into the contract change.
-- **Self-reinforcing heat**: attribution needed before file-heat informs
-  ranking (review 2's feedback loop).
+- **Self-reinforcing heat**: `read_files` can't distinguish user-initiated
+  from memory-suggested reads — attribution needed before file-heat informs
+  ranking, or heat reinforces itself (suggest → read → hotter → suggest).
 - **Corpus ceiling**: all-warm fixtures sit at pass 1.00 — efficiency-only.
   Harder tasks (control ~40–70%) needed before "smarter" can mean
   *capability*, not just speed.
