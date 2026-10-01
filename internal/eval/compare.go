@@ -117,9 +117,21 @@ type MetricCompare struct {
 	// kept by the normalized-difference estimand; a zero treatment
 	// mean is often the effect itself (e.g. discovery eliminated).
 	Zeroes int
+	// NoBaselinePos counts pairs inside no-baseline (μ_c ≤ 0)
+	// trajectories whose treatment value was positive — a regression
+	// class the relative estimand structurally cannot see (treatment
+	// invented calls where control made none) and that would
+	// otherwise vanish into Dropped.
+	NoBaselinePos int
+	// MinBaseline is the smallest trajectory control mean among the
+	// estimated trajectories — thin baselines amplify every
+	// normalized diff, so the reader needs the floor visible.
+	MinBaseline float64
 	// CtrlMean/TreatMean are the mean arm values averaged across
 	// estimated trajectories — the absolute magnitudes the Δ% is
-	// relative to.
+	// relative to (Δ% itself is a mean of per-trajectory ratios, not
+	// the ratio of these means — they can diverge under
+	// heterogeneous baselines).
 	CtrlMean  float64
 	TreatMean float64
 	// LogRatioPct/LogRatioPairs carry the legacy estimand — mean of
@@ -351,6 +363,14 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		return nil, fmt.Errorf("compare: %d conclusive pairs — need ≥%d for an interval (unmatched conclusive runs: %d)",
 			len(pairs), minComparePairs, unmatched)
 	}
+	// Deterministic pair order — the FNV-seeded bootstrap reuses
+	// diff positions, so identical data must build identical diffs.
+	pairKeys := slices.SortedFunc(maps.Keys(pairs), func(a, b pairKey) int {
+		if c := strings.Compare(a.traj, b.traj); c != 0 {
+			return c
+		}
+		return a.idx - b.idx
+	})
 
 	rep := &CompareReport{
 		Experiment:   exp.Name,
@@ -398,9 +418,11 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 			cSum   float64
 			tSum   float64
 			zeroes int
+			tPos   int
 		}
 		perTraj := map[string]*acc{}
-		for k, pr := range pairs {
+		for _, k := range pairKeys {
+			pr := pairs[k]
 			if !primaryMeasurable(name, &pr[0]) || !primaryMeasurable(name, &pr[1]) {
 				mc.Absent++
 				continue
@@ -414,6 +436,9 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 			a.diffs = append(a.diffs, t-c)
 			a.cSum += c
 			a.tSum += t
+			if t > 0 {
+				a.tPos++
+			}
 			if c <= 0 || t <= 0 {
 				a.zeroes++
 			} else {
@@ -423,6 +448,7 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		trajs := make([][]float64, 0, len(perTraj))
 		posTrajs := make([][]float64, 0, len(perTraj))
 		var nTraj int
+		mc.MinBaseline = math.Inf(1)
 		for _, tr := range trajIDs {
 			a := perTraj[tr]
 			if a == nil {
@@ -431,8 +457,12 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 			mu := a.cSum / float64(len(a.diffs))
 			if mu <= 0 {
 				// No positive control baseline — relative change
-				// undefined for this trajectory.
+				// undefined for this trajectory. A positive
+				// treatment sum here is an invisible regression:
+				// count it separately rather than letting it
+				// vanish into Dropped.
 				mc.Dropped += len(a.diffs)
+				mc.NoBaselinePos += a.tPos
 				continue
 			}
 			d := make([]float64, len(a.diffs))
@@ -446,6 +476,7 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 			mc.Zeroes += a.zeroes
 			mc.CtrlMean += mu
 			mc.TreatMean += a.tSum / float64(len(a.diffs))
+			mc.MinBaseline = min(mc.MinBaseline, mu)
 			nTraj++
 		}
 		if nTraj > 0 {
@@ -460,7 +491,7 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		mc.Trajectories = len(trajs)
 		if mc.Pairs < minComparePairs {
 			skippedMetrics = append(skippedMetrics,
-				fmt.Sprintf("%s (%d measurable, %d absent)", name, mc.Pairs, mc.Absent))
+				fmt.Sprintf("%s (%d measurable, %d no-baseline, %d absent)", name, mc.Pairs, mc.Dropped, mc.Absent))
 			continue // Too few measurable pairs to estimate on.
 		}
 		mc.Theta = thetaMean(trajs)
@@ -731,6 +762,14 @@ func pctOf(theta float64) float64 { return (math.Exp(theta) - 1) * 100 }
 // resample within their own trajectory, preserving trajectory
 // weights — the same stratification the estimand uses. Jackknife
 // over pairs supplies the acceleration term.
+//
+// Known limitation: trajs carries already-normalized diffs, so
+// replicates hold each trajectory's baseline μ̂_c fixed — the
+// interval captures numerator noise only and is conditional on the
+// estimated baselines. For tightly-clustered controls this is
+// second-order; for sparse metrics it can understate the width.
+// Propagating Var(c̄) through requires carrying raw pairs and
+// re-normalizing per replicate — a tracked follow-up.
 func bcaCI(trajs [][]float64, replicates int, rng *rand.Rand) (lo, hi float64) {
 	thetaHat := thetaMean(trajs)
 	boot := make([]float64, replicates)
@@ -798,7 +837,7 @@ func clampIdx(x float64, n int) int {
 }
 
 // signFlipP is the paired permutation test: under the null, each
-// pair's log-ratio is symmetric about 0, so replicates flip every
+// pair's difference is symmetric about 0, so replicates flip every
 // pair's sign independently and recompute θ. Exact enumeration when
 // 2^pairs is tractable. One-sided in the declared direction when
 // given; two-sided (|θ*| ≥ |θ̂|) otherwise.
@@ -981,6 +1020,8 @@ func (rep *CompareReport) Summary() string {
 	}
 	fmt.Fprintf(&b, "  pairs: %d conclusive (unmatched: %d) across %d trajectories\n",
 		rep.Pairs, rep.Unmatched, len(rep.Trajectories))
+	fmt.Fprintln(&b, "  Δ% is the mean of per-trajectory normalized diffs — the ctrl≈/treat≈")
+	fmt.Fprintln(&b, "  means below are magnitude context, not the ratio's numerator/denominator.")
 	fmt.Fprintf(&b, "  %-32s %6s %6s %9s %22s %8s  %s\n", "metric", "pairs", "trajs", "Δ%", "95% CI (BCa)", "p", "verdict")
 	for _, m := range rep.Metrics {
 		p := fmt.Sprintf("%.3f", m.P)
@@ -990,8 +1031,9 @@ func (rep *CompareReport) Summary() string {
 		fmt.Fprintf(&b, "  %-32s %6d %6d %+8.1f%%  [%+6.1f%%, %+6.1f%%] %8s  %s\n",
 			m.Name, m.Pairs, m.Trajectories, m.DeltaPct, m.CILoPct, m.CIHiPct, p, m.Verdict)
 		fmt.Fprintf(&b, "  %-32s %6s\n", "",
-			fmt.Sprintf("(ctrl≈%.1f → treat≈%.1f; %d zero-side, %d no-baseline, %d absent)",
-				m.CtrlMean, m.TreatMean, m.Zeroes, m.Dropped, m.Absent))
+			fmt.Sprintf("(ctrl≈%.1f → treat≈%.1f, min-baseline %.2g; %d zero-side, %d no-baseline%s, %d absent)",
+				m.CtrlMean, m.TreatMean, m.MinBaseline, m.Zeroes, m.Dropped,
+				noBaselinePosNote(m.NoBaselinePos), m.Absent))
 		if m.LogRatioPairs >= minComparePairs {
 			fmt.Fprintf(&b, "  %-32s %6s\n", "",
 				fmt.Sprintf("(legacy log-ratio %+.1f%% on %d positive pairs)", m.LogRatioPct, m.LogRatioPairs))
@@ -1019,4 +1061,14 @@ func (rep *CompareReport) Summary() string {
 			minComparePairs, strings.Join(rep.SkippedMetrics, ", "))
 	}
 	return b.String()
+}
+
+// noBaselinePosNote flags no-baseline pairs whose treatment side was
+// positive — treatment invented activity where control had none, a
+// regression direction the relative estimand cannot express.
+func noBaselinePosNote(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (%d with treat>0 — invisible regression)", n)
 }

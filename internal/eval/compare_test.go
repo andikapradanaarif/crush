@@ -527,6 +527,47 @@ func TestCompare_TreatmentZeroPairKept(t *testing.T) {
 	}
 }
 
+func TestCompare_NoBaselineTrajectoryDropped(t *testing.T) {
+	dir := t.TempDir()
+	exp := &Experiment{Name: "e"}
+	c := map[string]any{"f": "c"}
+	tr := map[string]any{"f": "t"}
+	var recs []RunRecord
+	// Trajectory t1 has a positive control baseline — estimated.
+	for i := 1; i <= 3; i++ {
+		cr := compareRecord("e", "t1", ArmControl, "i1", i, 100, c)
+		tr_ := compareRecord("e", "t1", ArmTreatment, "i1", i, 90, tr)
+		cr.CallMetrics = &CallMetrics{DiscoveryCallsBeforeWrite: 5}
+		tr_.CallMetrics = &CallMetrics{DiscoveryCallsBeforeWrite: 2}
+		recs = append(recs, cr, tr_)
+	}
+	// Trajectory t2's controls are all zero — the relative
+	// estimand is undefined there, so its pairs drop. Treatment
+	// ran 4 calls where control ran none: a regression direction
+	// the estimand can't express, surfaced in NoBaselinePos.
+	for i := 4; i <= 6; i++ {
+		cr := compareRecord("e", "t2", ArmControl, "i1", i, 100, c)
+		tr_ := compareRecord("e", "t2", ArmTreatment, "i1", i, 90, tr)
+		cr.CallMetrics = &CallMetrics{DiscoveryCallsBeforeWrite: 0}
+		tr_.CallMetrics = &CallMetrics{DiscoveryCallsBeforeWrite: 4}
+		recs = append(recs, cr, tr_)
+	}
+	writeCompareRecords(t, dir, recs...)
+
+	rep, err := seededRunner(dir).Compare(exp, "")
+	require.NoError(t, err)
+	for _, m := range rep.Metrics {
+		if m.Name == "call_metrics.discovery_calls_before_write" {
+			require.Equal(t, 3, m.Pairs)
+			require.Equal(t, 3, m.Dropped)
+			require.Equal(t, 3, m.NoBaselinePos)
+			require.InDelta(t, 5.0, m.MinBaseline, 0.01)
+			// Only t1 estimated: mean diff −3 over baseline 5.
+			require.InDelta(t, -60.0, m.DeltaPct, 1.0)
+		}
+	}
+}
+
 func TestCompare_NoMDEEffectVerdict(t *testing.T) {
 	dir := t.TempDir()
 	exp := &Experiment{
