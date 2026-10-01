@@ -23,9 +23,12 @@ instrumentation cannot be fooled (composite-command verdict recovery), the
 data ages out honestly (30-day TTL), and the evaluation gate provably detects
 a guaranteed-null experiment.
 
-**Open question being measured now:** whether the gain is the failure *content*
-or merely context presence — the `failure-memory-mask` run seeds a real
-failure row pointing at an inert decoy package.
+**Mask arm resolved (mixed verdict):** wrong-referent memory produced the
+same effort reduction as correct memory (−14.5% calls, −57% files viewed) —
+so part of the powered gain is a *presence effect*, not content. But wrong
+memory also dropped pass to 0.86 vs 1.00 by redirecting work onto the decoy:
+content correctness is what makes the confidence warranted. Retrieval
+precision is now correctness machinery, not an optimization.
 
 **The claim hierarchy:**
 
@@ -33,7 +36,8 @@ failure row pointing at an inert decoy package.
 |---|---|
 | Memory exists and persists | Proven (tables, tail rendering) |
 | One session's memory helps the next | **Proven** — replicated powered runs |
-| The *content* does the work (not token presence) | In flight — mask arm |
+| The *content* does the work (not token presence) | **Partially falsified** — effort gain is substantially presence; content determines whether it's net-positive or harmful |
+| Wrong memory is harmful | **Proven** — pass 0.86 vs 1.00, decoy-chasing signature |
 | Smarter *every time* (compounding with depth) | Unproven — needs the depth ladder |
 | Selectivity survives scale | Unproven — needs noise-seeded ledger |
 | Generalizes (models, task classes, memory types) | Unproven — single model so far |

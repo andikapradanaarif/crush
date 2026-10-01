@@ -42,18 +42,34 @@ acceptance, `ΔC ≤ β₀ + β₁ΔS` as a gate alarm), #198 (periodic feature
 re-verification — the structural pruner, zero code), design note on #165
 (leakage screen requirement for referent memory).
 
-## In flight
+## Mask arm — resolved (invocation `20261001T081327Z-4965`)
 
-**`failure-memory-mask` run** (~39/44 records at snapshot): treatment renders
-`<open_failures>` seeded with a *real* failure whose referent is an inert
-decoy package — memory armed but pointing at the wrong thing.
+44/44 records, gate pass; all 22 treatment runs fired `<open_failures>`.
 
-| Δ_mask reads | Interpretation |
-|---|---|
-| ≈ 0 | Content-specific — the information did the work |
-| ≈ −27% (matches real) | Presence effect — extra tokens, not memory content |
-| > 0 | Wrong memory actively misleads — quantifies the harm bound |
-| Ambiguous CI | Inconclusive — add reps; no forced narrative |
+| Metric | Δ_mask | vs real Δ |
+|---|---|---|
+| `calls` | −14.5% (p=0.033) | −27% |
+| `files_viewed` | −57.3% (p=0.001) | −43% |
+| `discovery_calls_before_write` | −47.9% on 11 pairs (underpowered) | −27.6% |
+| **pass rate** | **0.86 — guardrail violated** | 1.00 |
+
+Forensics: all 3 treatment failures (in `mask-fix-failing-test`) spent their
+steps fixing the decoy's failing test — which `check` doesn't run — and never
+edited the real bug. Wrong-referent memory actively redirected the work.
+
+**Verdict: a two-part finding, neither clean read.** (a) *Presence effect is
+real* — any `<open_failures>` content cuts discovery-type work in the same
+direction and similar magnitude as correct memory; part of the powered
+headline is generic "warm repo → act decisively" behavior. (b) *Content
+decides whether the confidence is warranted* — correct referent kept pass at
+1.00; wrong referent dropped it to 0.86 at +30% output tokens. Wrong memory
+is measured-harmful, not neutral. Full report: PR #196 comment; addendum on
+#160.
+
+**Roadmap consequence:** retrieval precision (#166) is promoted to
+correctness-adjacent; the #165 leakage screen now has empirical backing;
+TTL (#193) is load-bearing. Tier-2 work should be designed around referent
+accuracy, not just recall.
 
 ## The plan, in steps
 
@@ -62,7 +78,8 @@ decoy package — memory armed but pointing at the wrong thing.
 2. ~~Make the write path un-launderable~~ — **done** (#192, #195).
 3. ~~Bound staleness~~ — **done** (#193).
 4. ~~Prove the gate detects a null~~ — **done** (#194).
-5. **Content vs presence** — mask run, in flight.
+5. ~~Content vs presence~~ — **resolved, mixed**: presence effect confirmed
+   on effort metrics; wrong content proven harmful (pass −0.14). See above.
 6. **Compounding ladder** — fixture with K quirks exposed over K seeding
    sessions; measure Δ vs memory depth. Monotone slope = "smarter every time"
    as a number. *Decides whether the product claim survives.*
