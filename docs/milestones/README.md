@@ -42,8 +42,34 @@ precision is now correctness machinery, not an optimization.
 | Selectivity survives scale | Unproven — needs noise-seeded ledger |
 | Generalizes (models, task classes, memory types) | Unproven — single model so far |
 
+## The machine today — quantified
+
+**Memory (durable, per-project, in `crush.db`):**
+
+| Component | Detail |
+|---|---|
+| `command_memory` | `(cmd, cwd)`-keyed; kind, last exit, ok/fail counts, last session |
+| `failure_memory` | Open failures; resolved on clean re-run; 30-day TTL + `Nd ago` age hints |
+| Write path | `RecordRun` instrumented at **7 call sites** (bash, job_output, job_kill, verify gate, workspace, backend); `ComponentExits` recover real verdicts inside pipelines/lists/substitutions — composites can't launder |
+| Read path | `<open_failures>` tail: freshest **5** rows, ≤3 file hints, cmd ≤200 runes, headline ≤140 runes, envelope-neutralized; referent-gated by failure-noun detection; framed as *historical context* (#201) |
+
+**Evaluation machinery:**
+
+| Component | Count / detail |
+|---|---|
+| Corpus trajectories | 23 (`eval/corpus/`) |
+| Experiment manifests | 18 (`eval/experiments/`) |
+| Preserved run records | ~1,300+ across 12 result dirs, incl. per-run session DBs for forensics |
+| Metrics per record | 32 fields; ~60 metric families in compare (calls, tokens, requests, steps, warm-start, edge firings) |
+| Gate alarm kinds | 8 — catastrophic, coincident-collapse, coverage-starved, error-saturated, excluded-differential, expected-exclusion-missed, noop-flag, smoke |
+| Power gate | CV-seeded sizing (`eval/noise.json`); refuses underpowered manifests |
+
+**Evidence produced so far:** 68 conclusive powered pairs (existence), 44 mask
+records (confound isolation), 2 negative-control records (gate honesty) —
+every claim above has a preserved invocation behind it.
+
 ## Index
 
 | Date | Milestone |
 |---|---|
-| [2026-10-01](2026-10-01-failure-memory-existence-proof.md) | Failure-memory existence proof complete; mask arm in flight; RRSI-derived acceptance rules filed |
+| [2026-10-01](2026-10-01-failure-memory-existence-proof.md) | Existence proof complete; mask arm resolved (presence effect + wrong-memory harm); referent-caution fix under validation |
