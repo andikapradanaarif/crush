@@ -61,7 +61,7 @@ none of these completely. This is the frame the selection layer must answer.
 
 | Work | Detail |
 |---|---|
-| **Zero-safe estimator (#203)** | Chosen estimand: paired absolute difference (or Hodges–Lehmann) + zero-rate reported as its own metric; log-ratio demoted to positive-only secondary. Re-score `bc5a`/`f0b6`/`4965`/`382f` — data is preserved |
+| **Zero-safe estimator (#203, done 10-01)** | `(t−c)/μ_c` per trajectory (ratio-of-means); zero-side counted, no-baseline excluded; log-ratio kept as secondary view. All four preserved invocations re-scored — mask steering doubled (−64% vs −48% reported) |
 | **Real-usage telemetry (#206, start now)** | opt-in local logging: tail fired? first actions touched referents? failure age when used? user revised after? Value = lead time — every idle day is data never collected |
 | **Separate planning-MDE from shipping-MDE** | design effect (sizing) ≠ minimum worthwhile benefit (ship gate) ≠ non-inferiority margin ≠ cost ceiling ≠ stopping rule. CI crossing the bound = "inconclusive", not "underpowered" |
 | **Unified verdict fields** | `execution_validity` / `mechanism_exposure` / `quality_guardrail` / `benefit_estimate` / `cost_guardrail` → single `acceptance`. "Pass + guardrail violated" was ambiguous |
@@ -141,8 +141,9 @@ none of these completely. This is the frame the selection layer must answer.
 1. Fix README/code drift + correct these claims (done in this rev).
 2. **Start real-usage telemetry now (#206)** — lead time is the cost; every
    idle day is data never collected.
-3. Zero-safe estimator (#203) + unified verdict fields (#152); re-score
-   `bc5a`, `f0b6`, `4965`, `382f` under the new estimator.
+3. ~~Zero-safe estimator (#203)~~ — **done 10-01**: normalized-diff
+   estimator shipped; all four preserved invocations re-scored. Remaining:
+   unified verdict fields (#152).
 4. Repair the mask corpus (#204) — explicit vs ambiguous tasks, dual check;
    parallel with 3.
 5. Reconciliation edge + deterministic selector w/ abstention (#207) →

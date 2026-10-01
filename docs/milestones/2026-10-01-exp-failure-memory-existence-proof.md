@@ -89,7 +89,7 @@ cannot fix a precision problem; precision must live at retrieval/write time.**
 #201 closed unmerged. #166 (relevance-ranked failures) is now *proven
 necessary by measurement*, not just promoted.
 
-## Post-review corrections (same-day artifact re-check)
+## Post-review corrections (artifact re-check)
 
 The mask sections above are preserved as written at the time. Re-checks of
 the session DBs, fixtures, and `compare.go` corrected three readings:
@@ -113,7 +113,7 @@ the session DBs, fixtures, and `compare.go` corrected three readings:
    `compare.go` drops zero-value pairs — mostly *treatment* zeros, i.e.
    memory's biggest wins — so powered effect sizes are understated.
 
-## Re-scored under the zero-safe estimator (same-day, PR #208)
+## Re-scored under the zero-safe estimator (PR #208)
 
 **Why the old numbers were wrong.** The compare estimator scored each pair
 as `log(t/c)` — and a log is undefined at zero, so any pair where either
