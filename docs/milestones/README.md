@@ -23,7 +23,7 @@ instrumentation cannot be fooled (composite-command verdict recovery), the
 data ages out honestly (30-day TTL), and the evaluation gate provably detects
 a guaranteed-null experiment.
 
-**Mask arm resolved — interpretation corrected by external review:** the mask
+**Mask arm resolved — interpretation corrected on artifact re-check:** the mask
 seeded *true* memory (the decoy's test really failed) under an ambiguous
 prompt ("the test fails" — check.sh scored only the root package). The 3
 treatment fails were early termination after too-narrow verification, not
