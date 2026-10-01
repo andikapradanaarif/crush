@@ -1,5 +1,12 @@
 # 2026-10-01 — Failure-memory existence proof
 
+Motivation: Crush's `crush.db` already accumulated command/failure history,
+but nothing read it back — "the agent has memory" was a write-only claim.
+"Prove it learns" is the narrow scope that had to come first: show that
+durable memory written in one session measurably changes behavior in a later
+session, with the mechanism proven (not inferred) and the verdict machinery
+proven honest.
+
 Position snapshot: the "prove it learns" scope is complete and armored. The
 product-level claim ("smarter every time") is now falsifiable engineering
 rather than a slogan — one tier of evidence deep.

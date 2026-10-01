@@ -10,6 +10,11 @@ position and the index; the history lives in the dated files.
 
 ## Current position
 
+**Scope: "prove it learns."** Crush already wrote substantial information to
+`crush.db` but never effectively read it back across sessions — memory was a
+write-only ledger. This milestone series exists to turn "it learns" from a
+claim into a measurement.
+
 **Failure memory — existence proof: DONE and armored.** A durable failure
 record written in session N provably changes behavior in session N+1, measured
 across two powered runs (−27% total calls, ~25–30% discovery savings,
