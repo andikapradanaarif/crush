@@ -344,6 +344,31 @@ func TestBashTool_RecordsRunToCmdLog(t *testing.T) {
 	require.Contains(t, run.Stdout, "FAIL: TestX")
 }
 
+func TestBashTool_RecordsComponentExits(t *testing.T) {
+	workingDir := t.TempDir()
+	perms := &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
+	attribution := &config.Attribution{TrailerStyle: config.TrailerStyleNone}
+	log := &recordingCmdLog{}
+	tool := NewBashTool(nil, perms, workingDir, workingDir, attribution, "test-model", log)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+
+	// The whole #185 chain in one pin: the pipe's clean final code
+	// reaches the ledger alongside the component list that lets the
+	// write path recover the laundered failure.
+	resp := runBashTool(t, tool, ctx, BashParams{
+		Description: "piped failure",
+		Command:     "sh -c 'exit 3' | cat",
+	})
+	require.False(t, resp.IsError)
+
+	require.Len(t, log.runs, 1)
+	run := log.runs[0]
+	require.Equal(t, 0, run.ExitCode, "the composite's final code is head's clean close")
+	require.True(t, run.Ran)
+	require.Contains(t, run.ComponentExits, 3,
+		"the component log must carry the failed element's real verdict")
+}
+
 func TestBashTool_BlockedCommandNotAProjectFailure(t *testing.T) {
 	workingDir := t.TempDir()
 	perms := &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
