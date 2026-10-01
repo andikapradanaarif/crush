@@ -97,12 +97,13 @@ of context size. The metric that matters is **tokens-to-done per
 task** (cost-normalized across model tiers), not cache-hit rate or
 raw token count.
 
-**Memory is this same principle stretched across sessions.** Crush
-reuses verified project experience to reduce repeated work, while
-detecting uncertainty, respecting current intent, and bounding harm
-from stale or irrelevant memory. A remembered fact that silently
-redirects the task is worse than none at all — history informs the
-current decision; it does not make one in advance.
+**Memory is this same principle stretched across sessions.** The
+harness reuses verified project experience to reduce repeated work,
+while detecting uncertainty, respecting current intent, and
+bounding harm from stale or irrelevant memory. A remembered fact
+that silently redirects the task is worse than none at all —
+history informs the current decision; it does not make one in
+advance.
 
 ## What this means for the harness
 

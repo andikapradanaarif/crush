@@ -37,9 +37,9 @@ stored. A flat slope would prove capacity ceiling, not "doesn't learn."
 
 ## Corrected product claim
 
-> Crush reuses verified project experience to reduce repeated work, while
-> detecting uncertainty, respecting current intent, and bounding harm from
-> stale or irrelevant memory.
+> The harness reuses verified project experience to reduce repeated work,
+> while detecting uncertainty, respecting current intent, and bounding harm
+> from stale or irrelevant memory.
 
 (replaces "smarter every time / cannot be misdirected" — an implementable
 contract, not an unbounded promise)
