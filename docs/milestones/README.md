@@ -68,14 +68,18 @@ precision is now correctness machinery, not an optimization.
 records (confound isolation), 2 negative-control records (gate honesty) —
 every claim above has a preserved invocation behind it.
 
-## Index — dated experiment records
+## Index — dated records
 
-| Date | File |
-|---|---|
-| 2026-09-21 | [Notebook prior-turns-stub regime](2026-09-21-exp-notebook-prior-turns-stub.md) — first clean batch after harness debugging |
-| 2026-09-22 | [Small probes](2026-09-22-exp-probes.md) — prior-turns-long, summarize, edit-region |
-| 2026-09-23 | [Notebook checkpoint + stub at scale](2026-09-23-exp-notebook-checkpoint.md) — 96+120 clean records |
-| 2026-09-24→27 | [Notebook pressure-regime saga](2026-09-24-exp-notebook-pressure-regime.md) — ~290 records, mostly infra; alarms held |
-| 2026-09-28→29 | [Warm-baseline + noise characterization](2026-09-28-exp-warm-baseline.md) — seeding proven, CVs calibrated |
-| 2026-09-30 | [Failure-memory powered runs + negative control](2026-09-30-exp-failure-memory-powered.md) — the existence proof |
-| 2026-10-01 | [Existence-proof position + mask verdict](2026-10-01-exp-failure-memory-existence-proof.md) — current snapshot |
+`*-exp-*` files record what an experiment produced. `*-roadmap-*` files
+record the plan that followed from it.
+
+| Date | Type | File |
+|---|---|---|
+| 2026-09-21 | exp | [Notebook prior-turns-stub regime](2026-09-21-exp-notebook-prior-turns-stub.md) — first clean batch after harness debugging |
+| 2026-09-22 | exp | [Small probes](2026-09-22-exp-probes.md) — prior-turns-long, summarize, edit-region |
+| 2026-09-23 | exp | [Notebook checkpoint + stub at scale](2026-09-23-exp-notebook-checkpoint.md) — 96+120 clean records |
+| 2026-09-24→27 | exp | [Notebook pressure-regime saga](2026-09-24-exp-notebook-pressure-regime.md) — ~290 records, mostly infra; alarms held |
+| 2026-09-28→29 | exp | [Warm-baseline + noise characterization](2026-09-28-exp-warm-baseline.md) — seeding proven, CVs calibrated |
+| 2026-09-30 | exp | [Failure-memory powered runs + negative control](2026-09-30-exp-failure-memory-powered.md) — the existence proof |
+| 2026-10-01 | exp | [Existence-proof position + mask verdict](2026-10-01-exp-failure-memory-existence-proof.md) — current snapshot |
+| 2026-10-01 | roadmap | [Roadmap after the mask verdict](2026-10-01-roadmap-after-mask.md) — the five-phase plan and its decision points |
