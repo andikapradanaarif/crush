@@ -1,26 +1,14 @@
 {
-	"name": "failure-memory",
+	"name": "gate-negative-control",
 	"model": "alibaba-tp/deepseek-v4.1-flash",
 	"temperature": 0,
 	"corpus": [
-		"warm-build-break",
-		"warm-fix-failing-test",
-		"warm-multi-failure",
-		"warm-panic-subdir",
-		"warm-startup-crash",
-		"warm-test-subpackage",
-		"warm-vet-failure"
+		"neg-control"
 	],
 	"runs_per_trajectory": {
-		"stable": 3,
-		"mid": 10,
-		"uncharacterized": 6
-	},
-	"primary": {
-		"metric": "call_metrics.discovery_calls_before_write",
-		"direction": "decrease",
-		"mde": 0.35,
-		"max_pass_drop": 0.1
+		"stable": 1,
+		"mid": 1,
+		"uncharacterized": 1
 	},
 	"arms": {
 		"control": {
@@ -33,12 +21,8 @@
 		"treatment": {
 			"config": {
 				"options": {
-					"turn_context": "off",
-					"failure_memory": true
+					"turn_context": "off"
 				}
-			},
-			"coverage": {
-				"min_tail.sections.open_failures": 1
 			}
 		}
 	},
