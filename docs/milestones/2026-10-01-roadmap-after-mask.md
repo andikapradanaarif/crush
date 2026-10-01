@@ -79,7 +79,7 @@ none of these completely. This is the frame the selection layer must answer.
 | Work | Detail |
 |---|---|
 | **Mask corpus repair (#204)** | Same task/fixture across no-memory / correct / irrelevant / stale-contradicted arms; split prompts into *explicit-target* ("fix the root package's test") vs *genuinely ambiguous* ("the test fails") where clarify-or-declare-scope is the correct behavior. Ambiguous tasks need a scorer a script can't provide — user-oracle or accept-any-declared-scope check. Add suite-wide check alongside the scored check — with `go test ./...` as the score, control would have failed for *not* fixing the decoy |
-| **Smallest deterministic selector** | eligibility → validation → ranking → inject/offer/abstain. Signals: current user scope, command/package/CWD match, provenance, repo-state compat, resolution state, recency. **No embeddings, no LLM critic** until measured failure cases justify them |
+| **Smallest deterministic selector (#207)** | eligibility → validation → ranking → inject/offer/abstain. Signals: current user scope, command/package/CWD match, provenance, repo-state compat, resolution state, recency. **No embeddings, no LLM critic** until measured failure cases justify them |
 | **Decision-level observability** | record per decision: candidate IDs, selected, rejection reasons, source session/tool call, validity + task-match evidence, rendered bytes, action targets, verification outcome — the missing bridge between "tail rendered" and "memory helped" |
 | **End-of-turn reconciliation edge** | deterministic: failures observed this run still open? → don't report done. Re-run broad check or name what's open. Targets the exact mask failure signature (early termination); hypothesis to test on the repaired corpus |
 | **Write-side injection screening** | failure headlines come from tool output = repo content = attacker text. `tailSafeText` neutralizes brackets only. Memory is now a persistent prompt-injection channel |
@@ -105,7 +105,7 @@ none of these completely. This is the frame the selection layer must answer.
 |---|---|
 | #165 referents | **Defer until provenance + abstention exist.** "No correction next turn" is weak feedback. Split: episodic storage / promotion-to-reusable / contamination screen — three mechanisms, not one |
 | #164 digest + FTS5 | Gated — FTS5 is lexical, not semantic. Test simpler structured cmd/pkg/path matching first |
-| #166 | **Split issue**: map-skeleton ranking (as filed) ≠ failure-selection (what the mask needs). Separate acceptance criteria |
+| #166 | **Split issue**: map-skeleton ranking (as filed) ≠ failure-selection (now #207). Separate acceptance criteria |
 | Notebook stack (#86/#90/#91, #153; flip decision #205) | **Prune candidate**: `notebook_enabled`/`notebook_checkpoint` still default-on with zero powered positive reads — contradicts our own evidence gate. Turn off by default or freeze until a comparator clears the floor |
 | #110/#139/#107 | Context-economics, not cross-session learning — schedule by production impact, don't gate on depth slope |
 
@@ -144,8 +144,9 @@ none of these completely. This is the frame the selection layer must answer.
    `bc5a`, `f0b6`, `4965`, `382f` under the new estimator.
 4. Repair the mask corpus (#204) — explicit vs ambiguous tasks, dual check;
    parallel with 3.
-5. Reconciliation edge + deterministic selector w/ abstention → validate on
-   repaired mask corpus (bar: pass ~1.00 *and* effort savings retained).
+5. Reconciliation edge + deterministic selector w/ abstention (#207) →
+   validate on repaired mask corpus (bar: pass ~1.00 *and* effort savings
+   retained).
 6. Decision-level observability records.
 7. Command/convention memory rendering (capacity fix for Stage C).
 8. Notebook default-off decision (#205).
