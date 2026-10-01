@@ -30,6 +30,12 @@ memory also dropped pass to 0.86 vs 1.00 by redirecting work onto the decoy:
 content correctness is what makes the confidence warranted. Retrieval
 precision is now correctness machinery, not an optimization.
 
+**Framing fix failed validation (`382f`):** cautionary header text did not
+recover pass (0.77, worse) and collapsed the effort benefit — agents verified
+referents first, spending the calls memory saves. Prompt text cannot fix a
+precision problem; #166 relevance-ranked retrieval is now *measured
+necessary*. PR #201 closed unmerged.
+
 **The claim hierarchy:**
 
 | Claim | Status |

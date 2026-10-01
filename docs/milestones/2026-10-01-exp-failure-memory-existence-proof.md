@@ -71,6 +71,24 @@ correctness-adjacent; the #165 leakage screen now has empirical backing;
 TTL (#193) is load-bearing. Tier-2 work should be designed around referent
 accuracy, not just recall.
 
+## Framing-fix validation — failed (invocation `20261001T125941Z-382f`)
+
+PR #201 re-rendered `<open_failures>` as "historical context, not the task"
+and reran the identical mask corpus:
+
+| | Baseline `4965` | With framing `382f` |
+|---|---|---|
+| Gate | pass + guardrail violated | **FAIL** (diffuse regression) |
+| Pass | 0.86 | **0.77** — worse |
+| `calls` | −14.5% | −6.1% — collapsed |
+| Failures | 3× decoy-chase | 2× decoy-chase + 3× referent-verify timeouts |
+
+The caution made agents *verify the referent first* — spending the discovery
+calls memory exists to skip — and still misdirected 2/11. **Prompt text
+cannot fix a precision problem; precision must live at retrieval/write time.**
+#201 closed unmerged. #166 (relevance-ranked failures) is now *proven
+necessary by measurement*, not just promoted.
+
 ## The plan, in steps
 
 1. ~~Prove memory written in session N changes session N+1~~ — **done**,
