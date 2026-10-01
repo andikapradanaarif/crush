@@ -21,6 +21,8 @@ type Querier interface {
 	CreateNotebookTag(ctx context.Context, arg CreateNotebookTagParams) error
 	CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error)
 	DeleteFile(ctx context.Context, id string) error
+	DeleteMCPDisabledServer(ctx context.Context, name string) error
+	DeleteMCPEnabledServer(ctx context.Context, name string) error
 	DeleteMessage(ctx context.Context, id string) error
 	DeleteNotebookEntriesBySession(ctx context.Context, sessionID string) error
 	DeleteProcessedSegmentsBySession(ctx context.Context, sessionID string) error
@@ -70,6 +72,8 @@ type Querier interface {
 	// idempotent within a boundary, so callers count a firing only when
 	// this reports a new row.
 	InsertEdgeFiring(ctx context.Context, arg InsertEdgeFiringParams) (int64, error)
+	InsertMCPDisabledServer(ctx context.Context, name string) error
+	InsertMCPEnabledServer(ctx context.Context, name string) error
 	// Backs prompt history when no session is open. Needs
 	// idx_messages_role_created_at to seek rather than scan the table.
 	ListAllUserMessages(ctx context.Context) ([]Message, error)
@@ -82,6 +86,8 @@ type Querier interface {
 	// a sessions count of 1 noise-signal anyway.
 	ListHotReadFiles(ctx context.Context, arg ListHotReadFilesParams) ([]ListHotReadFilesRow, error)
 	ListLatestSessionFiles(ctx context.Context, sessionID string) ([]File, error)
+	ListMCPDisabledServers(ctx context.Context) ([]string, error)
+	ListMCPEnabledServers(ctx context.Context) ([]string, error)
 	ListMessagesBySession(ctx context.Context, sessionID string) ([]Message, error)
 	// Messages from the summary onward, which is all a compacted session sends.
 	// created_at has one-second resolution, so a few messages preceding the
