@@ -1,168 +1,162 @@
-# 2026-10-01 — Roadmap after the mask verdict
+# 2026-10-01 — Roadmap after the mask verdict (rev 2)
 
-## What this document is
+Revised after two external reviews that re-checked the raw artifacts (session
+DBs, JSONL records, fixtures, `internal/cmdlog`, `turn_context.go`,
+`compare.go`). Several of this document's original claims did not survive
+that re-check — the corrections are recorded first, because the plan below
+only makes sense with the corrected evidence base.
 
-The forward plan for the fork, written the day the failure-memory program
-produced its first honest negative result. Read it together with the `exp-*`
-records — those document what experiments *produced*; this documents what we
-*do next because of them*.
+## Corrections to the evidence record
 
-## Where we actually are — the honest summary
-
-Three powered experiments on the same mechanism produced a sharper picture
-than any of them alone:
-
-1. **Memory helps** — two replicated powered runs (issue #160): a failure
-   recorded in session N, surfaced in session N+1, cuts ~25–30% of
-   discovery work with zero pass harm. 68/68 treatment runs provably saw
-   the memory.
-2. **Presence ≠ content** — the mask arm (`4965`) showed *wrong*-referent
-   memory produces the same effort reduction (−14.5% calls). Part of the
-   powered headline is a generic "warm repo → act decisively" effect, not
-   the information itself.
-3. **Wrong memory harms, and prompts can't fix it** — the mask also dropped
-   pass to 0.86 (decoy-chasing), and the framing-fix validation (`382f`)
-   made it *worse* (0.77): asking the model to "verify the referent first"
-   burns the exact discovery calls memory exists to save, and still
-   misdirects 2/11. PR #201 closed unmerged.
-
-**The load-bearing lesson:** referent precision must be enforced at
-*retrieval/write time*, not prompt time. That single measurement reshapes
-everything below.
-
-## The claim we're building toward
-
-> The agent gets measurably smarter every time it is used — and cannot be
-> misdirected by its own memory.
-
-Two halves, both required: compounding benefit (Phase 2) AND bounded harm
-under wrong input (Phase 3).
-
----
-
-## Phase 1 — Armored acceptance machinery
-
-**Question it answers:** *Can our own evaluation pipeline be trusted to say
-no?*
-
-**Why first:** every subsequent claim is only as good as the gate that
-produced it. Today's gaps are known and mechanical: primaries keep landing
-underpowered (measurable-pair attrition), token cost is reported but never
-enforced, and verdict rules are applied by judgment instead of pre-registry.
-
-| Issue | What it adds | Effort |
-|---|---|---|
-| #152 | `decision_rule` block in experiment.json — stop rules declared before the run, not narrated after | small |
-| #197 | Cost-justified acceptance alarm: `Δtokens ≤ β₀ + β₁·Δprimary` — the RRSI Eq. 7 rule as code | ~30 lines + manifest field |
-| #151 | tokens-to-done metric — the cost variable #197 rules on | small |
-| #159 | Corpus sizing — compute reps from measured CVs so primaries land powered | doc + config |
-| #138 | Trustworthy `go test ./...` — quarantine the load-sensitive flakes | medium |
-| #109 | Offline probe tier — answer mechanism questions over preserved session DBs without rerunning models (the decoy-chase forensic was done by hand; make it a tool) | medium |
-| #198 | Periodic feature re-verification — shipped mechanisms must keep clearing the powered bar or get flagged for removal (RRSI's structural pruning applied to *features*) | zero code — doc + cadence |
-
-**Exit criteria:** an experiment manifest can't reach "powered" status
-without pre-registered rules, sized reps, and a cost gate; every shipped
-feature carries a re-verification date.
-
----
-
-## Phase 2 — Does it compound?
-
-**Question it answers:** *Is "smarter every time" a curve or a single step?*
-
-**Why this decides the product claim:** everything proven so far is *one*
-memory deep. The product promise is that session 3 beats session 2. That
-requires the **depth ladder**:
-
-- Build a fixture with K independently-planted quirks (odd build command,
-  flaky test, unconventional layout, non-obvious naming…)
-- K seeding sessions, each exposing one quirk into memory
-- A final task whose completion touches several
-- Measure Δ vs memory depth; fit the slope with a CI
-
-**Readings:**
-
-- Slope > 0 with significance → "smarter every time" is a measured fact;
-  tier-2 work is justified
-- Flat slope → we built "remembers last session," not learning → redesign
-  memory *scope* before spending on tier-2 machinery
-- Negative slope → accumulation actively hurts (interference) → the whole
-  direction needs rethinking
-
-| Issue | Serves |
+| Earlier claim | Corrected claim |
 |---|---|
-| #108 counterfactual replay | Fork at turn k, replay with/without memory on identical history — the strongest causal instrument we can build |
-| #117 process-model fidelity | Verifies eval sessions (restart-per-turn) behave like real persistent sessions — validity check on every number above |
+| "Mask proved wrong memory harms" | The mask tested *true* memory under an *ambiguous prompt*: `TestValue` really failed; the prompt never said which test; `check.sh` silently scored only the root package. The 3 fails were **early termination after too-narrow verification**, not retrieval error |
+| "Presence ≠ content (part of gain is generic)" | **Not isolated.** A wrong-target memory is actionable content, not a placebo — it can shorten discovery by steering to a specific wrong target. Presence needs a *non-actionable* placebo arm to isolate |
+| "Prompt text can't fix it" | The *tested framing* didn't fix it under this budget/fixture. Stronger claim unproven |
+| "#166 file-heat proven necessary" | File heat would have picked the decoy — it was the file the seed session touched. What's needed is **task binding, selection, and abstention**; heat is one unproven ranking signal |
+| "Zero harm" | No harm observed *on the tested positive corpus*. A general harm bound is unestablished |
+| "Gate proven honest" | The `noop-flag` alarm works. Statistical calibration, cost enforcement, and regression sensitivity are unmeasured |
+| "PR #201 framed rows as historical context" | #201 closed **unmerged**; the code still says "the likely referents". (README corrected) |
+| "RRSI converged on our mechanisms" | RRSI Table 6 is four hand-picked decisions, not a convergence analysis. "Consistent with our verify-gate" is fair; "converged" overclaims |
+| #197's `ΔC ≤ β₀ + β₁·|Δprimary|` | Units are circular — efficiency isn't quality. RRSI's rule fires only when ΔS > δ; our corpus sits at pass 1.00, so *everything* routes to the within-band rule. #197 needs rewrite: pass-rate floor + cost rule on quality + within-band cost tie-breaker |
+
+**Estimator bug (verified, affects all powered reads):** `compare.go:377`
+drops a pair when either side is ≤0 — and on `discovery_calls_before_write`
+the dropped pairs are mostly *treatment* zeros (5–9/run vs 0–5 control).
+Those zeros are memory's **biggest wins** — and the mask's most decisive
+decoy-direct moves. The headline effect is understated *and* the mask's
+effort number excludes its most-steered runs. As memory depth grows,
+treatment zeros grow → the depth-ladder slope would be biased toward flat.
+Must fix before Phase 2.
+
+**Capacity bug (verified):** failure memory can't compound as designed —
+only *open* failures render (resolved ones vanish), `command_memory` is
+written but never rendered, the tail caps at 5. The ladder's quirks (odd
+build command, layout conventions) aren't failures — they can't even be
+stored. A flat slope would prove capacity ceiling, not "doesn't learn."
+
+## Corrected product claim
+
+> Crush reuses verified project experience to reduce repeated work, while
+> detecting uncertainty, respecting current intent, and bounding harm from
+> stale or irrelevant memory.
+
+(replaces "smarter every time / cannot be misdirected" — an implementable
+contract, not an unbounded promise)
+
+## The three-question frame for every memory candidate
+
+1. **Truth** — was it actually observed? (nonzero exit ≠ task failure)
+2. **Validity** — does it still apply to this repo state/branch?
+3. **Relevance** — does it help *this* request?
+
+The mask decoy was true and fresh but task-irrelevant. A 30-day TTL handles
+none of these completely. This is the frame the selection layer must answer.
 
 ---
 
-## Phase 3 — Selectivity at scale
+## Stage A — Make decisions trustworthy
 
-**Question it answers:** *Can memory survive having more of it?*
+*Before more experiments, fix what the numbers mean.*
 
-**Why the mask promoted this:** the harm wasn't hypothetical — wrong rows
-redirected real work. A real project accumulates dozens of open failures;
-dumping freshest-5 unfiltered is already the precision ceiling the mask
-violated.
-
-| Issue | What it adds |
+| Work | Detail |
 |---|---|
-| Noise-ledger stress (new experiment) | Seed ~20 failures, only 1 relevant to the task. Does the dumb tail still help, or does noise swamp it? Sets the acceptance bar |
-| #166 file-heat ranking | Relevance-scored open failures — **proven necessary by `382f`**, not optional |
-| #164 session digest + FTS5 | Retrieval over session digests — gated on the stress test showing the tail alone insufficient |
+| **Zero-safe estimator** | `log((t+1)/(c+1))` or Hodges–Lehmann / stratified bootstrap; report zero-rate as its own metric; re-score existing invocations (the data is preserved) |
+| **Separate planning-MDE from shipping-MDE** | design effect (sizing) ≠ minimum worthwhile benefit (ship gate) ≠ non-inferiority margin ≠ cost ceiling ≠ stopping rule. CI crossing the bound = "inconclusive", not "underpowered" |
+| **Unified verdict fields** | `execution_validity` / `mechanism_exposure` / `quality_guardrail` / `benefit_estimate` / `cost_guardrail` → single `acceptance`. "Pass + guardrail violated" was ambiguous |
+| **Coverage contract fix** | `min_tail.sections.open_failures: 1` currently penalizes *correct abstention* as unexposed. Distinguish relevant-injected / correct-reject / ambiguous-surfaced. Injection rate ≠ retrieval quality |
+| **Offline decision tests** | synthetic/preserved records: noisy-null, known pass regression, lower-calls-worse-pass, cost inflation, missing telemetry, valid abstention — calibrate the gate beyond the noop alarm (#152, #159 folded in) |
+| **#138** | Zero CI runs ever; `TestClientServerSpawnRace` flake already bit us |
+| **#109 probe tier** | Narrow scope: package the manual decoy-forensics (session-DB queries) as reusable probes |
+| **#115 split** | Pull forward decision-provenance/request-identity needed for replay; defer expensive cache attribution |
 
-**Decision point:** if the stress test shows the tail alone survives noise,
-defer #164's complexity — the mask already taught us that adding machinery
-ahead of evidence is how harnesses get bloated (RRSI's whole thesis).
+## Stage B — Make memory selective (with abstention)
 
----
+*The mask's real lesson: the failure was task-binding, not retrieval.*
 
-## Phase 4 — Memory beyond failures
-
-**Question it answers:** *Can the agent learn things that aren't errors?*
-
-| Issue | What it adds |
+| Work | Detail |
 |---|---|
-| #165 referent memory | Phrase→target mappings from accepted outcomes — **requires the leakage screen** (mask result is the empirical argument: wrong referents cost pass) |
-| #86/#90/#91 | Prior-turns coverage contract, notebook-stack cost study — the *other* memory layer, evaluated with the same rigor |
-| #110/#139/#107 | Compaction retention, window-relative budget, pinned prefix — context-budget mechanics |
+| **Mask corpus repair** | Same task/fixture across no-memory / correct / irrelevant / stale-contradicted arms; split prompts into *explicit-target* ("fix the root package's test") vs *genuinely ambiguous* ("the test fails") where clarify-or-declare-scope is the correct behavior. Add suite-wide check alongside the scored check — with `go test ./...` as the score, control would have failed for *not* fixing the decoy |
+| **Smallest deterministic selector** | eligibility → validation → ranking → inject/offer/abstain. Signals: current user scope, command/package/CWD match, provenance, repo-state compat, resolution state, recency. **No embeddings, no LLM critic** until measured failure cases justify them |
+| **Decision-level observability** | record per decision: candidate IDs, selected, rejection reasons, source session/tool call, validity + task-match evidence, rendered bytes, action targets, verification outcome — the missing bridge between "tail rendered" and "memory helped" |
+| **End-of-turn reconciliation edge** | deterministic: failures observed this run still open? → don't report done. Re-run broad check or name what's open. Targets the exact mask failure signature (early termination); hypothesis to test on the repaired corpus |
+| **Write-side injection screening** | failure headlines come from tool output = repo content = attacker text. `tailSafeText` neutralizes brackets only. Memory is now a persistent prompt-injection channel |
+| **Provenance records before #165** | per-observation: which session/tool call, against which repo state, expected-negative vs real failure, which later observation resolved it, was this interaction memory-suggested |
+| **Heat-feedback caution** | `read_files` can't distinguish user interest from memory-suggested reads — unfiltered heat reinforces itself. Heat is a prior, never authority over explicit user paths/scope/branch/fresh observations |
 
-Gated on Phases 2–3: new memory types only earn their complexity if depth
-compounds and precision holds.
+## Stage C — Accumulation and interference, separately
 
----
+*A single depth slope can't attribute failure; split it.*
 
-## Phase 5 — Does it generalize?
-
-**Question it answers:** *Is any of this portable?*
-
-- **Second-model rerun** (qwen3.8 already configured) — is the memory
-  benefit backbone-specific? RRSI showed harness mechanisms transfer across
-  frozen policies; ours should too, but assume nothing
-- **Task-class diversity** — corpus is 7 same-shaped fix-the-bug
-  trajectories; add refactor / feature-add / multi-file classes
-- **#54 + #38** — paired evidence as standing policy; flags flip to default
-  only behind powered reads — this is how the tier-2 features actually ship
-
----
-
-## Parked — deliberately out of scope
-
-| Issue | Why parked |
+| Work | Detail |
 |---|---|
-| #3 background subagents | Product feature, orthogonal to memory program |
-| #78 sandbox runtime | Product feature, orthogonal |
-| #140 sessionRuntime refactor | Hygiene — fold in when the subsystem is next touched |
-| #115 telemetry v2 | Same — pull forward when attribution questions exceed current coverage |
-| #153 notebook-generator mask | A *different* mask than #196 — resumes with notebook-stack work |
+| **Capacity fix first** | render `command_memory` ("how this project builds/tests") + keep resolved-failure knowledge ("X failed because Y; fixed in Z") — partial Phase-4 pull-forward; without it the ladder measures the cap, not learning |
+| **Depth ladder (useful knowledge)** | fixed noise, depth 0/1/2/4 of *relevant* experience; randomize which quirk lands at each stage (else depth confounds with quirk identity); measure quality + amortized cost + repeated-command rate + novel-combination use |
+| **Distractor ladder (interference)** | fixed useful knowledge, distractors 0/5/20; measure wrong-target actions, injected-row precision, abstention, ambiguity cost, tail latency |
+| **Leave-one-out ablation** | all-K vs K−1 per memory — marginal value + interference, more causal and cheaper than the slope alone |
+| **#108 snapshot replay (narrow)** | settled workspace+memory snapshot → run next task under alternative memory selections; full turn-replay later if notebook work needs it |
+| **#117 staged** | deterministic reconstruction tests → persistent-vs-restart pilot → powered interaction study only if pilot shows material difference |
 
-## Standing risks being tracked
+## Stage D — Broader memory types, evidence-gated
 
-- **Measurable-pair attrition** — both powered runs lost ~35% of pairs to
-  nonpositive controls; #159's sizing must price this in or primaries stay
-  underpowered
-- **Presence-effect leakage** — every future memory claim needs a mask arm
-  in its design by default; content-vs-presence is now a standard confound
-- **Corpus reuse** — adaptive re-evaluation of the same trajectories
-  inflates apparent gains (RRSI's core warning); corpus refresh is scheduled
-  hygiene, not optional
+| Issue | Disposition |
+|---|---|
+| #165 referents | **Defer until provenance + abstention exist.** "No correction next turn" is weak feedback. Split: episodic storage / promotion-to-reusable / contamination screen — three mechanisms, not one |
+| #164 digest + FTS5 | Gated — FTS5 is lexical, not semantic. Test simpler structured cmd/pkg/path matching first |
+| #166 | **Split issue**: map-skeleton ranking (as filed) ≠ failure-selection (what the mask needs). Separate acceptance criteria |
+| Notebook stack (#86/#90/#91, #153) | **Prune candidate**: `notebook_enabled`/`notebook_checkpoint` still default-on with zero powered positive reads — contradicts our own evidence gate. Turn off by default or freeze until a comparator clears the floor |
+| #110/#139/#107 | Context-economics, not cross-session learning — schedule by production impact, don't gate on depth slope |
+
+## Stage E — Release under continuing evidence
+
+| Work | Detail |
+|---|---|
+| **Three evidence pools now** | dev corpus (free) / validation corpus (recorded-use) / **sealed held-out** (blind-authored, other languages, opened only at release decisions). Adaptive re-eval of the same 7 fixtures across 46 invocations is already mild overfitting — no literal leakage found, but iteration is the risk |
+| **Second-model pilot early** | cheap qwen replication once protocol frozen — catch model-specific behavior before building on it (not Phase-5-late) |
+| **Real-usage telemetry (opt-in)** | tail fired? first actions touched referents? failure age when used? user revised after? Our own daily use of crush on this repo is the cheapest real corpus |
+| **SWE-bench Verified subset** | OOD regression check before default flips (~120GB Docker disk locally, or sb-cli/Modal remotely). Bonus idea: repo-chronological runs with `.crush/` retained = natural-staleness cross-session test |
+| **Re-verify by feature class** | invariants & safety controls need failure-scenario tests, not mean deltas; only utility optimizations need periodic powered evidence. Don't prune a rare-failure safeguard for flat means (#198 amendment) |
+| **#54/#38** | standing release policy, not a late phase — every default flip behind its own powered read |
+| **#78 containment** | parallel track — a memory-induced wrong action makes sandboxing directly relevant, not orthogonal |
+
+## Issue disposition changes from the reviews
+
+- **#197** — rewrite required: floor on pass rate; cost rule only when
+  ΔS > δ; within-band → ΔC ≤ 0 + efficiency tie-break; cost includes
+  summarizer/generator tokens. Current form rewards cost-reduction with
+  token growth — circular.
+- **#166** — relink: it describes map-skeleton ranking; failure-memory
+  selection is a different problem with different acceptance criteria.
+- **#198** — keep cadence; replace CI-overlap alarm with current-harness
+  on/off comparison vs minimum-useful-benefit (non-overlap can mean
+  improvement, not just decay).
+- **#3, #140, #115(partial)** — stay parked/staged per above.
+- **Notebook default-off** — new issue or fold into #38: flip
+  `notebook_enabled`/`notebook_checkpoint` off until powered evidence.
+
+## Next steps, in order
+
+1. Fix README/code drift + correct these claims (this commit).
+2. Zero-safe estimator + unified verdict fields; re-score `bc5a`, `f0b6`,
+   `4965`, `382f` under the new estimator.
+3. Repair the mask corpus (explicit vs ambiguous tasks; dual check).
+4. Reconciliation edge + deterministic selector w/ abstention → validate on
+   repaired mask corpus (bar: pass ~1.00 *and* effort savings retained).
+5. Decision-level observability records.
+6. Command/convention memory rendering (capacity fix for Stage C).
+7. Notebook default-off decision.
+8. Sealed held-out set + cheap qwen pilot.
+9. Depth + distractor ladders (post A–B).
+10. Real-usage telemetry from now.
+
+## Standing risks
+
+- **Measurement before mechanism**: every stage-A item must land before
+  stage-B/C numbers mean anything.
+- **Abstention invisibility**: a selector that returns nothing must be
+  scored as success, not missing coverage — baked into the contract change.
+- **Self-reinforcing heat**: attribution needed before file-heat informs
+  ranking (review 2's feedback loop).
+- **Corpus ceiling**: all-warm fixtures sit at pass 1.00 — efficiency-only.
+  Harder tasks (control ~40–70%) needed before "smarter" can mean
+  *capability*, not just speed.

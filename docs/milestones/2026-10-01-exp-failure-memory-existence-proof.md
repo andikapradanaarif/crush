@@ -89,6 +89,33 @@ cannot fix a precision problem; precision must live at retrieval/write time.**
 #201 closed unmerged. #166 (relevance-ranked failures) is now *proven
 necessary by measurement*, not just promoted.
 
+## Post-review corrections (same-day, two external artifact reviews)
+
+The mask sections above are preserved as written at the time. Re-checks of
+the session DBs, fixtures, and `compare.go` corrected three readings:
+
+1. **The mask tested *true* memory under ambiguity, not wrong memory.** The
+   decoy's `TestValue` genuinely failed; the prompt never said which test;
+   `check.sh` scored only the root package. The 3 fails were **early
+   termination after too-narrow verification** — each run saw `TestAdd`
+   failing via `go test ./...`, fixed only the decoy, re-ran `go test
+   ./decoy`, and stopped. With `go test ./...` as the check, *control*
+   would have failed for not fixing the decoy. "Wrong referent" is
+   mislabeled — it was referent anchoring under a hidden oracle.
+2. **Presence vs content is still unisolated.** A wrong-target row is
+   *actionable* content, not a placebo — it can cut discovery by steering
+   decisively to the wrong target. Isolating presence needs a
+   non-actionable neutral envelope arm.
+3. **"#166 proven necessary" doesn't follow as stated.** File-heat would
+   have picked the decoy — it was the file the seed session touched. What
+   is proven necessary is *task binding + selection + abstention*; the
+   mechanism (heat, lexical match, or other) is unselected. Also verified:
+   `compare.go` drops zero-value pairs — mostly *treatment* zeros, i.e.
+   memory's biggest wins — so powered effect sizes are understated.
+
+Corrected claim hierarchy and revised roadmap live in `README.md` and
+`2026-10-01-roadmap-after-mask.md` (rev 2).
+
 ## The plan, in steps
 
 1. ~~Prove memory written in session N changes session N+1~~ — **done**,
@@ -123,8 +150,11 @@ necessary by measurement*, not just promoted.
 ## External anchor
 
 RRSI (arXiv:2609.24972, google-research/rrsi): regularized recursive
-harness evolution. The validation that matters: their search — free to edit
-anything — converged on our tier-1 mechanism classes (verification gate,
-background-job polling, remembered tool errors), and their acceptance rules
-(noise floor, cost-justified gain, structural pruning, leakage screening) are
-the ones we've now mapped onto our own loop via #197/#198/#165.
+harness evolution. Correction per review: Table 6 is four hand-picked
+decisions, not a convergence analysis — "consistent with our verify-gate
+class" is fair; "converged on our mechanisms" overclaimed. What transfers
+cleanly is the *process discipline*: attributable candidate edits,
+noise-adjusted acceptance, cost-justified gain, periodic pruning, leakage
+critic. And #197 needs a rewrite — RRSI's cost rule applies only when
+ΔS > δ (task score), not to efficiency metrics; our all-at-ceiling corpus
+routes everything to the within-band rule.

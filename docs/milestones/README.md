@@ -23,30 +23,30 @@ instrumentation cannot be fooled (composite-command verdict recovery), the
 data ages out honestly (30-day TTL), and the evaluation gate provably detects
 a guaranteed-null experiment.
 
-**Mask arm resolved (mixed verdict):** wrong-referent memory produced the
-same effort reduction as correct memory (−14.5% calls, −57% files viewed) —
-so part of the powered gain is a *presence effect*, not content. But wrong
-memory also dropped pass to 0.86 vs 1.00 by redirecting work onto the decoy:
-content correctness is what makes the confidence warranted. Retrieval
-precision is now correctness machinery, not an optimization.
-
-**Framing fix failed validation (`382f`):** cautionary header text did not
-recover pass (0.77, worse) and collapsed the effort benefit — agents verified
-referents first, spending the calls memory saves. Prompt text cannot fix a
-precision problem; #166 relevance-ranked retrieval is now *measured
-necessary*. PR #201 closed unmerged.
+**Mask arm resolved — interpretation corrected by external review:** the mask
+seeded *true* memory (the decoy's test really failed) under an ambiguous
+prompt ("the test fails" — check.sh scored only the root package). The 3
+treatment fails were early termination after too-narrow verification, not
+retrieval error — and file-heat would have picked the decoy anyway (it was
+the seed session's file). The `382f` framing-fix rerun made pass *worse*
+(0.77) and collapsed effort savings — the tested framing didn't fix it;
+prompt-level fixes remain unproven, not disproven. **Real lesson: memory
+anchors referent choice under ambiguity; selection/abstention is
+correctness-relevant.** Presence-vs-content stays unisolated until a
+non-actionable placebo arm exists.
 
 **The claim hierarchy:**
 
 | Claim | Status |
 |---|---|
 | Memory exists and persists | Proven (tables, tail rendering) |
-| One session's memory helps the next | **Proven** — replicated powered runs |
-| The *content* does the work (not token presence) | **Partially falsified** — effort gain is substantially presence; content determines whether it's net-positive or harmful |
-| Wrong memory is harmful | **Proven** — pass 0.86 vs 1.00, decoy-chasing signature |
-| Smarter *every time* (compounding with depth) | Unproven — needs the depth ladder |
-| Selectivity survives scale | Unproven — needs noise-seeded ledger |
-| Generalizes (models, task classes, memory types) | Unproven — single model so far |
+| One session's memory reduces measured discovery work | **Proven** — replicated powered runs; *behavior change* shown, useful-information vs presence not yet decomposed |
+| The *content* does the work (not token presence) | **Unisolated** — wrong-target memory is actionable content, not placebo; needs a non-actionable placebo arm |
+| True-but-task-irrelevant memory can redirect work | **Observed** — pass 0.86 vs 1.00 via early termination on an ambiguous prompt (mask); mechanism = referent anchoring + narrow verify, not retrieval error |
+| Estimator reports the true effect | **Corrected** — zero-count pairs (mostly treatment wins) dropped by log-ratio; headline understated; zero-safe estimator queued |
+| Smarter *every time* (compounding with depth) | Unproven — and currently *untestable*: only open failures render; `command_memory` never read. Capacity fix precedes the ladder |
+| Selectivity survives scale | Unproven — needs distractor ladder; abstention must be scoreable first |
+| Generalizes (models, task classes, memory types) | Unproven — one model, Go fixtures, all-at-ceiling pass rates |
 
 ## The machine today — quantified
 
@@ -57,7 +57,7 @@ necessary*. PR #201 closed unmerged.
 | `command_memory` | `(cmd, cwd)`-keyed; kind, last exit, ok/fail counts, last session |
 | `failure_memory` | Open failures; resolved on clean re-run; 30-day TTL + `Nd ago` age hints |
 | Write path | `RecordRun` instrumented at **7 call sites** (bash, job_output, job_kill, verify gate, workspace, backend); `ComponentExits` recover real verdicts inside pipelines/lists/substitutions — composites can't launder |
-| Read path | `<open_failures>` tail: freshest **5** rows, ≤3 file hints, cmd ≤200 runes, headline ≤140 runes, envelope-neutralized; referent-gated by failure-noun detection; framed as *historical context* (#201) |
+| Read path | `<open_failures>` tail: freshest **5** rows, ≤3 file hints, cmd ≤200 runes, headline ≤140 runes, envelope-neutralized; referent-gated by failure-noun detection. (Header still reads "the likely referents" — #201's reframe was closed unmerged after failing validation) |
 
 **Evaluation machinery:**
 
