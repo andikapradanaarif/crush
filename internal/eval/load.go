@@ -913,22 +913,46 @@ func selectCorpus(corpus map[string]*Trajectory, bands *Bands, selectors []strin
 
 // ContentHash scopes samples to the corpus revision: p̂ is conditional
 // on check.sh, trajectory.json, the fixture, and the patches as much as
-// on the model. Any change re-keys the baseline like a re-pin.
-func ContentHash(trajDir string) (string, error) {
+// on the model. Any change re-keys the baseline like a re-pin. Refs are
+// the trajectory's declared external content — a fixture dir or check
+// script shared via "../" lives outside the trajectory dir but is part
+// of the scored revision, so the hash follows the reference. Refs
+// resolving inside trajDir are already covered and dedupe away.
+func ContentHash(trajDir string, refs ...string) (string, error) {
 	h := sha256.New()
 	var files []string
-	err := filepath.WalkDir(trajDir, func(path string, d fs.DirEntry, err error) error {
+	seen := map[string]bool{}
+	add := func(root string) error {
+		info, err := os.Stat(root)
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
+		if !info.IsDir() {
+			if !seen[root] {
+				seen[root] = true
+				files = append(files, root)
+			}
 			return nil
 		}
-		files = append(files, path)
-		return nil
-	})
-	if err != nil {
+		return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || seen[path] {
+				return nil
+			}
+			seen[path] = true
+			files = append(files, path)
+			return nil
+		})
+	}
+	if err := add(trajDir); err != nil {
 		return "", fmt.Errorf("walk trajectory dir: %w", err)
+	}
+	for _, ref := range refs {
+		if err := add(ref); err != nil {
+			return "", fmt.Errorf("hash referenced path %s: %w", ref, err)
+		}
 	}
 	slices.Sort(files)
 	for _, f := range files {
@@ -943,6 +967,21 @@ func ContentHash(trajDir string) (string, error) {
 		h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))[:16], nil
+}
+
+// trajContentRefs resolves a trajectory's declared external content —
+// the fixture dir and check script — to paths ContentHash can fold in.
+// Declared paths are relative to the trajectory dir and may escape it
+// via "../" when cells share one fixture and one check.
+func trajContentRefs(trajDir string, t *Trajectory) []string {
+	var refs []string
+	if t.StartState.FixtureDir != "" {
+		refs = append(refs, filepath.Join(trajDir, t.StartState.FixtureDir))
+	}
+	if t.Check.Script != "" {
+		refs = append(refs, filepath.Join(trajDir, t.Check.Script))
+	}
+	return refs
 }
 
 func fileExists(path string) bool {

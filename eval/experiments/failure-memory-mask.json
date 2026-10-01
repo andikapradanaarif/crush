@@ -9,10 +9,12 @@
 		"mask-ft-explicit-correct",
 		"mask-ft-ambig-correct",
 		"mask-ft-ambig-stale",
+		"mask-ft-ambig-placebo",
 		"mask-bb-explicit-decoy",
 		"mask-bb-explicit-correct",
 		"mask-bb-ambig-correct",
-		"mask-bb-ambig-stale"
+		"mask-bb-ambig-stale",
+		"mask-bb-ambig-placebo"
 	],
 	"runs_per_trajectory": {
 		"stable": 3,

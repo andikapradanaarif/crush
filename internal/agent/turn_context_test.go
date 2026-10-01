@@ -530,6 +530,37 @@ func TestTurnTailAudit(t *testing.T) {
 		require.False(t, ok)
 	})
 
+	t.Run("an armed-but-empty render still audits", func(t *testing.T) {
+		t.Parallel()
+		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.tailAudit = csync.NewMap[string, TailAudit]()
+		a.failureMemory = true // armed, but cmdlog holds no open failures
+		require.Empty(t, a.turnTailMessages(t.Context(), SessionAgentCall{SessionID: sessionID}, nil))
+		audit, ok := a.tailAudit.Get(sessionID)
+		require.True(t, ok)
+		require.Empty(t, audit.Sections)
+		require.Zero(t, audit.Bytes)
+		require.Empty(t, audit.Text)
+		// The empty audit also overwrites a stale one — last write
+		// wins applies to "rendered nothing" too.
+		a.tailAudit.Set(sessionID, TailAudit{Bytes: 10, Text: "old"})
+		require.Empty(t, a.turnTailMessages(t.Context(), SessionAgentCall{SessionID: sessionID}, nil))
+		audit, ok = a.tailAudit.Get(sessionID)
+		require.True(t, ok)
+		require.Zero(t, audit.Bytes)
+	})
+
+	t.Run("a sub-agent is never armed", func(t *testing.T) {
+		t.Parallel()
+		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.tailAudit = csync.NewMap[string, TailAudit]()
+		a.failureMemory = true
+		a.isSubAgent = true
+		require.Empty(t, a.turnTailMessages(t.Context(), SessionAgentCall{SessionID: sessionID}, nil))
+		_, ok := a.tailAudit.Get(sessionID)
+		require.False(t, ok)
+	})
+
 	t.Run("a nil audit map skips recording", func(t *testing.T) {
 		t.Parallel()
 		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})
