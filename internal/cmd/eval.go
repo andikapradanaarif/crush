@@ -145,15 +145,18 @@ var evalCompareCmd = &cobra.Command{
 	Short: "Paired continuous-metric estimator over one invocation's records",
 	Long: `Pairs control/treatment attempts by run_index within each
 trajectory (drift-matched — the scheduler's lead-arm alternation makes
-same-index attempts the temporally closest samples), then reports the
-per-pair log-ratio aggregated across trajectories with a BCa bootstrap
-95% CI and a sign-flip permutation p.
+same-index attempts the temporally closest samples), then reports each
+pair's difference normalized by its trajectory's mean control baseline,
+aggregated across trajectories with a BCa bootstrap 95% CI (raw pairs
+resampled, each replicate re-normalized by its own baseline) and a
+sign-flip permutation p. Zero-valued pairs are kept — a treatment zero
+is often the effect itself.
 
 Refuses on cross-invocation record sets (pass --invocation to pick
 one), on invocations a structural alarm voided or that aborted
 mid-run, and on too few pairs. The declared primary's CI is tested
-against its MDE boundary; a CI that spans it reports
-inconclusive-underpowered with the required pair count.`,
+against its MDE boundary; a CI that spans it reports inconclusive
+with the required pair count when recorded noise allows.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		exp, err := eval.LoadExperiment(args[0])

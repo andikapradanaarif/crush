@@ -89,7 +89,7 @@ cannot fix a precision problem; precision must live at retrieval/write time.**
 #201 closed unmerged. #166 (relevance-ranked failures) is now *proven
 necessary by measurement*, not just promoted.
 
-## Post-review corrections (same-day artifact re-check)
+## Post-review corrections (artifact re-check)
 
 The mask sections above are preserved as written at the time. Re-checks of
 the session DBs, fixtures, and `compare.go` corrected three readings:
@@ -112,6 +112,60 @@ the session DBs, fixtures, and `compare.go` corrected three readings:
    mechanism (heat, lexical match, or other) is unselected. Also verified:
    `compare.go` drops zero-value pairs — mostly *treatment* zeros, i.e.
    memory's biggest wins — so powered effect sizes are understated.
+
+## Re-scored under the zero-safe estimator (PR #208)
+
+**Why the old numbers were wrong.** The compare estimator scored each pair
+as `log(t/c)` — and a log is undefined at zero, so any pair where either
+arm recorded 0 was silently discarded. But on
+`discovery_calls_before_write`, zero is the *result*, not missing data: a
+treatment run that went straight to writing did 0 discovery calls. The
+pairs most influenced by memory — for better (correct steer) or worse
+(decoy steer) — were exactly the pairs thrown away.
+
+**What the new estimator computes.** For each pair: `d = (t − c) / μ_c`,
+where `μ_c` is the trajectory's mean control value — i.e. each trajectory
+first establishes its own baseline, then every pair's change is expressed
+relative to it (a per-trajectory ratio-of-means). A treatment zero
+contributes `d = −c/μ_c` instead of vanishing. Only a trajectory whose
+entire control baseline is ≤0 is excluded, since relative change is
+undefined without one. The BCa bootstrap resamples raw `(c,t)` pairs
+and re-normalizes each replicate by its own resampled baseline, so
+baseline noise enters the interval; the sign-flip p conditions on the
+observed baseline; trajectory weighting is unchanged.
+
+**How to read the new report lines.** Each metric now prints
+`ctrl≈x → treat≈y` (absolute means — the magnitude Δ% is relative to),
+`N zero-side` (pairs with a 0 arm — kept), `N no-baseline` (pairs in
+all-zero-control trajectories — excluded), `N absent` (telemetry missing),
+and a `legacy log-ratio` line showing the old estimand's answer on the
+positive-only pairs for continuity.
+
+**What changed when the dropped pairs came back:**
+
+| Invocation | Reported (log-ratio, zeros dropped) | Re-scored (all pairs) |
+|---|---|---|
+| `bc5a` powered | −41.1% on 18 prs | −41.2% [−61.6,−11.0] p=0.004 on **26 prs** |
+| `f0b6` top-up | −27.6% on 27 prs | −30.3% [−46.6,+25.0] p=0.012 on **42 prs** |
+| mask `4965` | −47.9% on 11 prs | **−64.1%** [−81.4,−44.0] p<0.001 on **22 prs** |
+| mask `382f` | −8.2% on 15 prs | −27.2% [−56.4,+17.5] p=0.079 on **22 prs** |
+
+CIs above are from the final estimator: raw-pair resampling that
+re-normalizes each replicate by its own resampled baseline — once
+`Var(c̄)` enters the interval, `f0b6`'s bound honestly spans zero
+(p still 0.012; the estimate holds, the interval is just honest
+about baseline noise).
+
+**What the re-score teaches.** The powered conclusions *hold* (−41%/−30%
+stand) — the dropped pairs there were wins consistent with the headline.
+The mask picture *changes*: its steering effect nearly doubles (−47.9% →
+−64.1%), because the discarded pairs were the decisive decoy-anchored runs
+— the ones that wrote immediately, to the wrong file. Wrong-referent
+memory steered *harder* than correct memory did (−64% vs −30/−41%), which
+is the sharpest single datum for "a plausible-but-irrelevant target makes
+the agent more decisive, not more careful." And `382f` moves too: the
+framing fix retained real steering (−27.2%, not the reported −8.2%) — it
+just bought pass regression instead of safety.
 
 Corrected claim hierarchy and revised roadmap live in `README.md` and
 `2026-10-01-roadmap-after-mask.md`.

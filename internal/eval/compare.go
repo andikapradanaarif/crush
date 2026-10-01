@@ -30,15 +30,22 @@ import (
 // asymmetric exclusion it pairs samples taken at different wall
 // times, injecting the drift the pairing exists to remove.
 //
-// Estimator: per-pair log-ratio d_i = log(treat/ctrl) → per-trajectory
-// mean → unweighted mean across trajectories. The trajectory is the
-// unit of analysis, so one arm landing disproportionately on easy
-// trajectories can't shift the estimate — the composition bias the
-// pooled gate strata are subject to. CI is BCa over a stratified
-// bootstrap (pairs resampled within their trajectory); p is a
-// sign-flip permutation on pair log-ratios (each pair's d is
-// symmetric about 0 under the null), one-sided in the primary's
-// declared direction, two-sided otherwise.
+// Estimator: per-pair normalized difference d_i = (t_i − c_i)/μ_c —
+// the pair's change scaled by its trajectory's mean control value,
+// i.e. a per-trajectory ratio-of-means that remains defined when a
+// side is 0 (a treatment zero is the effect, not missing data).
+// Per-trajectory mean → unweighted mean across trajectories. The
+// trajectory is the unit of analysis, so one arm landing
+// disproportionately on easy trajectories can't shift the estimate —
+// the composition bias the pooled gate strata are subject to. A
+// trajectory whose control baseline is nonpositive is dropped for
+// that metric (relative change undefined without a baseline). CI is
+// BCa over a stratified bootstrap (pairs resampled within their
+// trajectory); p is a sign-flip permutation on pair differences
+// (each pair's d is symmetric about 0 under the null), one-sided in
+// the primary's declared direction, two-sided otherwise. The legacy
+// positive-pairs-only log-ratio is reported alongside as a secondary
+// view when enough pairs survive it.
 //
 // Refusals are hard errors, matching the harness's fail-closed
 // contract: cross-invocation record sets (pairing across a drift
@@ -98,23 +105,50 @@ type MetricCompare struct {
 	// the estimand averages over this many strata, and partial
 	// coverage weakens the composition-bias defense.
 	Trajectories int
-	// Dropped counts measurable pairs excluded because a side was
-	// nonpositive (log-ratio undefined) — e.g. tokens.cache_read on
-	// a non-caching provider.
+	// Dropped counts pairs in trajectories with a nonpositive control
+	// baseline — the relative estimand is undefined there (e.g.
+	// tokens.cache_read on a non-caching provider).
 	Dropped int
 	// Absent counts pairs skipped because telemetry was absent on a
 	// side (nil Request/CallMetrics/GeneratorTokens) — distinct from
 	// Dropped: absent means the run never produced the datum.
-	Absent   int
-	Theta    float64 // mean log-ratio across trajectories.
-	DeltaPct float64
-	CILoPct  float64
-	CIHiPct  float64
-	P        float64
+	Absent int
+	// Zeroes counts estimated pairs where an arm's value was 0 —
+	// kept by the normalized-difference estimand; a zero treatment
+	// mean is often the effect itself (e.g. discovery eliminated).
+	Zeroes int
+	// NoBaselinePos counts pairs inside no-baseline (μ_c ≤ 0)
+	// trajectories whose treatment value was positive — a regression
+	// class the relative estimand structurally cannot see (treatment
+	// invented calls where control made none) and that would
+	// otherwise vanish into Dropped.
+	NoBaselinePos int
+	// MinBaseline is the smallest trajectory control mean among the
+	// estimated trajectories — thin baselines amplify every
+	// normalized diff, so the reader needs the floor visible.
+	MinBaseline float64
+	// CtrlMean/TreatMean are the mean arm values averaged across
+	// estimated trajectories — the absolute magnitudes the Δ% is
+	// relative to (Δ% itself is a mean of per-trajectory ratios, not
+	// the ratio of these means — they can diverge under
+	// heterogeneous baselines).
+	CtrlMean  float64
+	TreatMean float64
+	// LogRatioPct/LogRatioPairs carry the legacy estimand — mean of
+	// per-pair log-ratios over strictly-positive pairs — as a
+	// secondary view when ≥minComparePairs survive.
+	LogRatioPct   float64
+	LogRatioPairs int
+	Theta         float64 // mean normalized difference across trajectories.
+	DeltaPct      float64
+	CILoPct       float64
+	CIHiPct       float64
+	P             float64
 	// Verdict is set only on the primary metric: "effect" (CI clears
 	// the MDE boundary), "no-mde-effect" (CI clears on the null
-	// side), or "inconclusive-underpowered" (CI spans the boundary —
-	// Required then holds the powered sample size).
+	// side), or "inconclusive" (CI spans the boundary — Required
+	// then holds the powered sample size; inconclusive means the
+	// true effect may sit below the bound, not merely too few runs).
 	Verdict  string
 	Required int
 	// Guardrail carries the primary's max_pass_drop outcome:
@@ -329,6 +363,14 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		return nil, fmt.Errorf("compare: %d conclusive pairs — need ≥%d for an interval (unmatched conclusive runs: %d)",
 			len(pairs), minComparePairs, unmatched)
 	}
+	// Deterministic pair order — the FNV-seeded bootstrap reuses
+	// diff positions, so identical data must build identical diffs.
+	pairKeys := slices.SortedFunc(maps.Keys(pairs), func(a, b pairKey) int {
+		if c := strings.Compare(a.traj, b.traj); c != 0 {
+			return c
+		}
+		return a.idx - b.idx
+	})
 
 	rep := &CompareReport{
 		Experiment:   exp.Name,
@@ -367,36 +409,106 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 			continue
 		}
 		mc := MetricCompare{Name: name}
-		trajLogR := map[string][]float64{}
-		for k, pr := range pairs {
+		// Accumulate per trajectory: aligned raw (control, treatment)
+		// pair values — the bootstrap resamples these and
+		// re-normalizes per replicate, so baseline estimation noise
+		// enters the CI — plus the strictly-positive pairs for the
+		// legacy log-ratio view.
+		type acc struct {
+			c, t   []float64
+			posLog []float64
+			cSum   float64
+			tSum   float64
+			zeroes int
+			tPos   int
+		}
+		perTraj := map[string]*acc{}
+		for _, k := range pairKeys {
+			pr := pairs[k]
 			if !primaryMeasurable(name, &pr[0]) || !primaryMeasurable(name, &pr[1]) {
 				mc.Absent++
 				continue
 			}
 			c, t := fn(&pr[0]), fn(&pr[1])
+			a := perTraj[k.traj]
+			if a == nil {
+				a = &acc{}
+				perTraj[k.traj] = a
+			}
+			// (0,0) pairs are real observations — both arms did
+			// nothing — contributing d=0, not absence.
+			a.c = append(a.c, c)
+			a.t = append(a.t, t)
+			a.cSum += c
+			a.tSum += t
+			if t > 0 {
+				a.tPos++
+			}
 			if c <= 0 || t <= 0 {
-				mc.Dropped++
+				a.zeroes++
+			} else {
+				a.posLog = append(a.posLog, math.Log(t/c))
+			}
+		}
+		trajs := make([][]float64, 0, len(perTraj))
+		raws := make([]trajPairs, 0, len(perTraj))
+		posTrajs := make([][]float64, 0, len(perTraj))
+		var nTraj int
+		mc.MinBaseline = math.Inf(1)
+		for _, tr := range trajIDs {
+			a := perTraj[tr]
+			if a == nil {
 				continue
 			}
-			trajLogR[k.traj] = append(trajLogR[k.traj], math.Log(t/c))
-		}
-		trajs := make([][]float64, 0, len(trajLogR))
-		for _, tr := range trajIDs {
-			if d, ok := trajLogR[tr]; ok {
-				trajs = append(trajs, d)
+			mu := a.cSum / float64(len(a.c))
+			if mu <= 0 {
+				// No positive control baseline — relative change
+				// undefined for this trajectory. A positive
+				// treatment sum here is an invisible regression:
+				// count it separately rather than letting it
+				// vanish into Dropped.
+				mc.Dropped += len(a.c)
+				mc.NoBaselinePos += a.tPos
+				continue
 			}
+			d := make([]float64, len(a.c))
+			for i := range d {
+				d[i] = (a.t[i] - a.c[i]) / mu
+			}
+			trajs = append(trajs, d)
+			raws = append(raws, trajPairs{c: a.c, t: a.t, cSum: a.cSum, tSum: a.tSum})
+			if len(a.posLog) > 0 {
+				posTrajs = append(posTrajs, a.posLog)
+			}
+			mc.Zeroes += a.zeroes
+			mc.CtrlMean += mu
+			mc.TreatMean += a.tSum / float64(len(a.c))
+			mc.MinBaseline = min(mc.MinBaseline, mu)
+			nTraj++
+		}
+		if nTraj > 0 {
+			mc.CtrlMean /= float64(nTraj)
+			mc.TreatMean /= float64(nTraj)
+		}
+		if n := countPairs(posTrajs); n >= minComparePairs {
+			mc.LogRatioPct = pctOf(thetaMean(posTrajs))
+			mc.LogRatioPairs = n
 		}
 		mc.Pairs = countPairs(trajs)
 		mc.Trajectories = len(trajs)
 		if mc.Pairs < minComparePairs {
 			skippedMetrics = append(skippedMetrics,
-				fmt.Sprintf("%s (%d measurable, %d absent)", name, mc.Pairs, mc.Absent))
+				fmt.Sprintf("%s (%d measurable, %d no-baseline, %d absent)", name, mc.Pairs, mc.Dropped, mc.Absent))
 			continue // Too few measurable pairs to estimate on.
 		}
-		mc.Theta = thetaMean(trajs)
-		mc.DeltaPct = pctOf(mc.Theta)
-		lo, hi := bcaCI(trajs, replicates, rng)
-		mc.CILoPct, mc.CIHiPct = pctOf(lo), pctOf(hi)
+		mc.Theta = thetaMeanRaw(raws)
+		mc.DeltaPct = mc.Theta * 100
+		lo, hi := bcaCI(raws, replicates, rng)
+		mc.CILoPct, mc.CIHiPct = lo*100, hi*100
+		// The permutation test deliberately normalizes on the
+		// observed baseline: conditioning on μ̂ is defensible under
+		// permutation (positive scaling preserves sign symmetry),
+		// unlike the interval, which must propagate baseline noise.
 		mc.P = signFlipP(trajs, mc.Theta, directionOf(exp, name), replicates, rng)
 		if exp.Primary != nil && name == exp.Primary.Metric {
 			switch {
@@ -555,18 +667,21 @@ func noiseCV(n *NoiseFile, err error, metric string) float64 {
 }
 
 // fillPrimaryVerdict applies the MDE decision boundary to the
-// primary metric's CI.
+// primary metric's CI. The normalized-difference estimand is already
+// in relative units, so the boundary is ±MDE directly and a CI
+// spanning it is "inconclusive" — the true effect may simply be
+// below the bound; underpowered is only the case where a powered n
+// would tighten it.
 func fillPrimaryVerdict(mc *MetricCompare, p *Primary, trajs [][]float64, cv float64) {
 	var boundary float64
 	if p.Direction == PrimaryDecrease {
-		boundary = math.Log(1 - p.MDE)
+		boundary = -p.MDE
 	} else {
-		boundary = math.Log(1 + p.MDE)
+		boundary = p.MDE
 	}
-	// Back-translate the pct-space CI to theta space for the
-	// comparison — cleaner than converting the boundary.
-	lo := math.Log(1 + mc.CILoPct/100)
-	hi := math.Log(1 + mc.CIHiPct/100)
+	// The pct-space CI translates to fraction space by /100.
+	lo := mc.CILoPct / 100
+	hi := mc.CIHiPct / 100
 	effectSide := mc.Theta < boundary
 	if p.Direction == PrimaryIncrease {
 		effectSide = mc.Theta > boundary
@@ -577,21 +692,21 @@ func fillPrimaryVerdict(mc *MetricCompare, p *Primary, trajs [][]float64, cv flo
 	case !effectSide && (p.Direction == PrimaryDecrease && lo > boundary || p.Direction == PrimaryIncrease && hi < boundary):
 		mc.Verdict = "no MDE effect"
 	default:
-		mc.Verdict = "inconclusive-underpowered"
+		mc.Verdict = "inconclusive"
 		mc.Required = requiredPairs(trajs, p.MDE, cv)
 	}
 }
 
 // requiredPairs prices the paired design against its own noise:
-// n = ⌈(zα+zβ)²·Var(dᵢ)/δ²⌉ with δ = log(1+mde) — the paired
-// counterpart of noise.go's pooled-CV formula. The estimand weights
+// n = ⌈(zα+zβ)²·Var(dᵢ)/δ²⌉ with δ = mde — the normalized-diff
+// estimand is already in relative units. The estimand weights
 // trajectories equally, so Var(dᵢ) averages the within-trajectory
 // variances — pooling the flat array would fold between-trajectory
 // baseline spread into the noise and overstate n. A degenerate or
 // unmeasurable variance falls back to the pooled-CV n so the verdict
 // never prints an absent n.
 func requiredPairs(trajs [][]float64, mde float64, cv float64) int {
-	delta := math.Log(1 + mde)
+	delta := mde
 	if delta > 0 {
 		var sum, cnt float64
 		for _, d := range trajs {
@@ -626,8 +741,30 @@ func directionOf(e *Experiment, name string) string {
 	return ""
 }
 
+// trajPairs carries one trajectory's raw (control, treatment) pair
+// values and their sums — the bootstrap resamples these and
+// re-normalizes each replicate by its own resampled baseline, so
+// denominator noise enters the interval rather than being frozen at
+// the observed μ̂.
+type trajPairs struct {
+	c, t       []float64
+	cSum, tSum float64
+}
+
+// thetaMeanRaw is the estimand computed from raw pair sums:
+// per-trajectory (Σt−Σc)/Σc — identical to the mean of normalized
+// diffs on observed data — averaged unweighted across trajectories.
+// Callers must exclude non-positive-baseline trajectories upstream.
+func thetaMeanRaw(trajs []trajPairs) float64 {
+	var sum float64
+	for _, tr := range trajs {
+		sum += (tr.tSum - tr.cSum) / tr.cSum
+	}
+	return sum / float64(len(trajs))
+}
+
 // thetaMean is the estimand: unweighted mean across trajectories of
-// each trajectory's mean pair log-ratio.
+// each trajectory's mean normalized pair difference.
 func thetaMean(trajs [][]float64) float64 {
 	var sum float64
 	for _, d := range trajs {
@@ -654,45 +791,68 @@ func countPairs(trajs [][]float64) int {
 
 func pctOf(theta float64) float64 { return (math.Exp(theta) - 1) * 100 }
 
-// bcaCI is a BCa 95% interval over a stratified bootstrap: pairs
-// resample within their own trajectory, preserving trajectory
-// weights — the same stratification the estimand uses. Jackknife
-// over pairs supplies the acceleration term.
-func bcaCI(trajs [][]float64, replicates int, rng *rand.Rand) (lo, hi float64) {
-	thetaHat := thetaMean(trajs)
-	boot := make([]float64, replicates)
+// bcaCI is a BCa 95% interval over a stratified bootstrap on raw
+// pairs: (c,t) values resample jointly within their own trajectory,
+// and each replicate re-normalizes by its own resampled control sum —
+// preserving trajectory weights and propagating baseline estimation
+// noise into the interval (θ̂ is a ratio-of-means; treating μ̂_c as a
+// constant would capture numerator noise only). A replicate whose
+// resampled control sum is non-positive has no defined baseline and
+// is skipped rather than floored on a fabricated denominator.
+// Jackknife at the estimand's own unit supplies the acceleration term.
+func bcaCI(trajs []trajPairs, replicates int, rng *rand.Rand) (lo, hi float64) {
+	thetaHat := thetaMeanRaw(trajs)
+	boot := make([]float64, 0, replicates)
 	var below int
-	for b := range replicates {
-		rs := make([][]float64, len(trajs))
-		for i, d := range trajs {
-			s := make([]float64, len(d))
-			for j := range s {
-				s[j] = d[rng.IntN(len(d))]
+	for range replicates {
+		var sum float64
+		degenerate := false
+		for _, tr := range trajs {
+			var cs, ts float64
+			for range len(tr.c) {
+				j := rng.IntN(len(tr.c))
+				cs += tr.c[j]
+				ts += tr.t[j]
 			}
-			rs[i] = s
+			if cs <= 0 {
+				degenerate = true
+				break
+			}
+			sum += (ts - cs) / cs
 		}
-		boot[b] = thetaMean(rs)
-		if boot[b] < thetaHat {
+		if degenerate {
+			continue
+		}
+		theta := sum / float64(len(trajs))
+		boot = append(boot, theta)
+		if theta < thetaHat {
 			below++
 		}
 	}
+	if len(boot) == 0 {
+		// Every replicate resampled an all-zero baseline — no
+		// resample variance is expressible; collapse to the point.
+		return thetaHat, thetaHat
+	}
 	slices.Sort(boot)
 
-	// Jackknife at the estimand's own unit: whole-trajectory deletion
-	// when ≥2 trajectories exist — the only unit that sees
-	// single-pair-trajectory leverage. A lone trajectory falls back
-	// to pair-level deletion.
+	// Whole-trajectory deletion when ≥2 trajectories exist — the only
+	// unit that sees single-pair-trajectory leverage. A lone
+	// trajectory falls back to pair-level deletion, skipping
+	// deletions that zero the baseline.
 	var jk []float64
 	if len(trajs) >= 2 {
 		for i := range trajs {
-			jk = append(jk, thetaMean(slices.Delete(slices.Clone(trajs), i, i+1)))
+			jk = append(jk, thetaMeanRaw(slices.Delete(slices.Clone(trajs), i, i+1)))
 		}
 	} else {
-		for j := range trajs[0] {
-			l := [][]float64{slices.Delete(slices.Clone(trajs[0]), j, j+1)}
-			if len(l[0]) > 0 {
-				jk = append(jk, thetaMean(l))
+		tr := trajs[0]
+		for j := range tr.c {
+			cs := tr.cSum - tr.c[j]
+			if cs <= 0 {
+				continue
 			}
+			jk = append(jk, (tr.tSum-tr.t[j]-cs)/cs)
 		}
 	}
 	jkMean := mean(jk)
@@ -707,7 +867,7 @@ func bcaCI(trajs [][]float64, replicates int, rng *rand.Rand) (lo, hi float64) {
 		a = num / (6 * math.Pow(den, 1.5))
 	}
 
-	z0 := normInv(float64(below) / float64(replicates))
+	z0 := normInv(float64(below) / float64(len(boot)))
 	if math.IsInf(z0, 0) || math.IsNaN(z0) {
 		z0 = 0 // Degenerate resample (all-equal pairs) — fall back to percentile.
 	}
@@ -715,8 +875,8 @@ func bcaCI(trajs [][]float64, replicates int, rng *rand.Rand) (lo, hi float64) {
 		z := normInv(q)
 		return normCDF(z0 + (z0+z)/(1-a*(z0+z)))
 	}
-	return boot[clampIdx(adj(0.025)*float64(replicates), replicates)],
-		boot[clampIdx(adj(0.975)*float64(replicates), replicates)]
+	return boot[clampIdx(adj(0.025)*float64(len(boot)), len(boot))],
+		boot[clampIdx(adj(0.975)*float64(len(boot)), len(boot))]
 }
 
 func clampIdx(x float64, n int) int {
@@ -725,10 +885,13 @@ func clampIdx(x float64, n int) int {
 }
 
 // signFlipP is the paired permutation test: under the null, each
-// pair's log-ratio is symmetric about 0, so replicates flip every
-// pair's sign independently and recompute θ. Exact enumeration when
-// 2^pairs is tractable. One-sided in the declared direction when
-// given; two-sided (|θ*| ≥ |θ̂|) otherwise.
+// pair's difference is symmetric about 0, so replicates flip every
+// pair's sign independently and recompute θ. Operates on diffs
+// normalized by the observed baseline — conditioning on μ̂ is
+// defensible under permutation since positive scaling preserves
+// sign symmetry. Exact enumeration when 2^pairs is tractable.
+// One-sided in the declared direction when given; two-sided
+// (|θ*| ≥ |θ̂|) otherwise.
 func signFlipP(trajs [][]float64, observed float64, direction string, replicates int, rng *rand.Rand) float64 {
 	var flat []float64
 	var sizes []int
@@ -908,6 +1071,8 @@ func (rep *CompareReport) Summary() string {
 	}
 	fmt.Fprintf(&b, "  pairs: %d conclusive (unmatched: %d) across %d trajectories\n",
 		rep.Pairs, rep.Unmatched, len(rep.Trajectories))
+	fmt.Fprintln(&b, "  Δ% is the mean of per-trajectory normalized diffs — the ctrl≈/treat≈")
+	fmt.Fprintln(&b, "  means below are magnitude context, not the ratio's numerator/denominator.")
 	fmt.Fprintf(&b, "  %-32s %6s %6s %9s %22s %8s  %s\n", "metric", "pairs", "trajs", "Δ%", "95% CI (BCa)", "p", "verdict")
 	for _, m := range rep.Metrics {
 		p := fmt.Sprintf("%.3f", m.P)
@@ -916,18 +1081,22 @@ func (rep *CompareReport) Summary() string {
 		}
 		fmt.Fprintf(&b, "  %-32s %6d %6d %+8.1f%%  [%+6.1f%%, %+6.1f%%] %8s  %s\n",
 			m.Name, m.Pairs, m.Trajectories, m.DeltaPct, m.CILoPct, m.CIHiPct, p, m.Verdict)
-		if m.Dropped > 0 || m.Absent > 0 {
+		fmt.Fprintf(&b, "  %-32s %6s\n", "",
+			fmt.Sprintf("(ctrl≈%.1f → treat≈%.1f, min-baseline %.2g; %d zero-side, %d no-baseline%s, %d absent)",
+				m.CtrlMean, m.TreatMean, m.MinBaseline, m.Zeroes, m.Dropped,
+				noBaselinePosNote(m.NoBaselinePos), m.Absent))
+		if m.LogRatioPairs >= minComparePairs {
 			fmt.Fprintf(&b, "  %-32s %6s\n", "",
-				fmt.Sprintf("(%d nonpositive, %d absent-telemetry pairs)", m.Dropped, m.Absent))
+				fmt.Sprintf("(legacy log-ratio %+.1f%% on %d positive pairs)", m.LogRatioPct, m.LogRatioPairs))
 		}
 		if m.Guardrail != "" {
 			fmt.Fprintf(&b, "  %-32s guardrail: %s\n", "", m.Guardrail)
 		}
-		if m.Verdict == "inconclusive-underpowered" {
+		if m.Verdict == "inconclusive" {
 			if m.Required > 0 {
-				fmt.Fprintf(&b, "  INCONCLUSIVE — underpowered: %s needs n≈%d pairs (paired-variance estimate)\n", m.Name, m.Required)
+				fmt.Fprintf(&b, "  INCONCLUSIVE — CI spans the MDE boundary: %s needs n≈%d pairs to resolve (paired-variance estimate)\n", m.Name, m.Required)
 			} else {
-				fmt.Fprintf(&b, "  INCONCLUSIVE — underpowered: %s; required n unknown (no recorded CV)\n", m.Name)
+				fmt.Fprintf(&b, "  INCONCLUSIVE — CI spans the MDE boundary: %s; required n unknown (no recorded CV)\n", m.Name)
 			}
 		}
 	}
@@ -943,4 +1112,14 @@ func (rep *CompareReport) Summary() string {
 			minComparePairs, strings.Join(rep.SkippedMetrics, ", "))
 	}
 	return b.String()
+}
+
+// noBaselinePosNote flags no-baseline pairs whose treatment side was
+// positive — treatment invented activity where control had none, a
+// regression direction the relative estimand cannot express.
+func noBaselinePosNote(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (%d with treat>0 — invisible regression)", n)
 }

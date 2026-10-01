@@ -328,12 +328,12 @@ func TestCompare_UnderpoweredVerdict(t *testing.T) {
 
 	rep, err := seededRunner(dir).Compare(exp, "")
 	require.NoError(t, err)
-	require.Equal(t, "inconclusive-underpowered", rep.Metrics[0].Verdict)
+	require.Equal(t, "inconclusive", rep.Metrics[0].Verdict)
 	// Required is the paired-variance estimate: 6.186·Var(d)/δ²,
-	// not the pooled-CV gate formula. |d| = log 2 for all 8 pairs;
-	// sample variance divides by n−1: Var = 8·d²/7.
-	d := math.Log(2.0)
-	expN := int(math.Ceil(6.186 * (8 * d * d / 7) / (math.Log(1.15) * math.Log(1.15))))
+	// not the pooled-CV gate formula. Normalized diffs alternate
+	// −0.5/+1.0 (control baseline 100); mean 0.25, so
+	// Var = (4·0.5625 + 4·0.5625)/7 = 4.5/7, δ = mde = 0.15.
+	expN := int(math.Ceil(6.186 * (4.5 / 7) / (0.15 * 0.15)))
 	require.Equal(t, expN, rep.Metrics[0].Required)
 }
 
@@ -342,12 +342,13 @@ func TestRequiredPairs_WithinTrajectoryVariance(t *testing.T) {
 	// would fold the between-trajectory spread into the noise term
 	// and overstate n. The estimand weights trajectories equally, so
 	// the variance term is the mean within-trajectory variance —
-	// each {a−0.1, a+0.1} trajectory has s² = 0.02.
+	// each {a−0.1, a+0.1} trajectory has s² = 0.02. δ = mde in
+	// normalized-diff units.
 	trajs := [][]float64{{0.0, 0.2}, {0.5, 0.7}, {0.9, 1.1}}
-	expN := int(math.Ceil(6.186 * 0.02 / (math.Log(1.1) * math.Log(1.1))))
+	expN := int(math.Ceil(6.186 * 0.02 / (0.10 * 0.10)))
 	require.Equal(t, expN, requiredPairs(trajs, 0.10, 0))
 	// Pooled flat variance would be ~0.115 — a materially larger n.
-	pooled := int(math.Ceil(6.186 * 0.115 / (math.Log(1.1) * math.Log(1.1))))
+	pooled := int(math.Ceil(6.186 * 0.115 / (0.10 * 0.10)))
 	require.Less(t, expN, pooled)
 }
 
@@ -374,14 +375,46 @@ func TestSignFlipP_ExtremeArrangements(t *testing.T) {
 	require.InDelta(t, 1.0/8.0, p, 1e-9)
 }
 
+func tp(c, t []float64) trajPairs {
+	var cs, ts float64
+	for _, v := range c {
+		cs += v
+	}
+	for _, v := range t {
+		ts += v
+	}
+	return trajPairs{c: c, t: t, cSum: cs, tSum: ts}
+}
+
 func TestBcaCI_SymmetricData(t *testing.T) {
 	rng := rand.New(rand.NewPCG(3, 4))
-	trajs := [][]float64{{-0.1, 0.05, -0.02, 0.08, -0.05, 0.01}}
+	// Baseline 10 with diffs summing ≈0 — θ sits near zero and the
+	// interval must bracket it.
+	trajs := []trajPairs{
+		tp([]float64{10, 10, 10, 10, 10, 10},
+			[]float64{9, 10.5, 9.8, 10.8, 9.5, 10.1}),
+	}
+	theta := thetaMeanRaw(trajs)
 	lo, hi := bcaCI(trajs, 5000, rng)
-	theta := thetaMean(trajs)
 	require.Less(t, lo, theta)
 	require.Greater(t, hi, theta)
 	require.True(t, math.Abs(lo) < 0.5 && math.Abs(hi) < 0.5)
+}
+
+func TestBcaCI_ZeroControlReplicatesSkipped(t *testing.T) {
+	// Half this trajectory's controls are zero — ~25% of replicates
+	// resample an all-zero baseline and must be skipped, not floored
+	// on a fabricated denominator. The interval stays finite and
+	// brackets the point estimate.
+	rng := rand.New(rand.NewPCG(5, 6))
+	trajs := []trajPairs{
+		tp([]float64{0, 0, 10, 10}, []float64{0, 0, 8, 8}),
+	}
+	lo, hi := bcaCI(trajs, 5000, rng)
+	theta := thetaMeanRaw(trajs)
+	require.False(t, math.IsNaN(lo) || math.IsNaN(hi))
+	require.LessOrEqual(t, lo, theta)
+	require.GreaterOrEqual(t, hi, theta)
 }
 
 func TestCompare_AbortedSnapshotRefuses(t *testing.T) {
@@ -460,8 +493,9 @@ func TestCompare_DroppedAndAbsentCounted(t *testing.T) {
 	for i := 1; i <= 5; i++ {
 		c := compareRecord("e", "t", ArmControl, "i1", i, 100, optsA)
 		tr := compareRecord("e", "t", ArmTreatment, "i1", i, 90, optsB)
-		// request.* is pointer-gated: nil telemetry counts absent,
-		// a nonpositive side counts dropped.
+		// request.* is pointer-gated: nil telemetry counts absent;
+		// a zero value is a zero-side pair — kept by the
+		// normalized-difference estimand, counted in Zeroes.
 		c.Request = &RequestStats{PromptTokensPeak: 100}
 		tr.Request = &RequestStats{PromptTokensPeak: 90}
 		if i == 4 {
@@ -478,9 +512,90 @@ func TestCompare_DroppedAndAbsentCounted(t *testing.T) {
 	require.NoError(t, err)
 	for _, m := range rep.Metrics {
 		if m.Name == "request.prompt_tokens_peak" {
-			require.Equal(t, 3, m.Pairs)
-			require.Equal(t, 1, m.Dropped)
+			require.Equal(t, 4, m.Pairs)
+			require.Equal(t, 1, m.Zeroes)
+			require.Equal(t, 0, m.Dropped)
 			require.Equal(t, 1, m.Absent)
+		}
+	}
+}
+
+func TestCompare_TreatmentZeroPairKept(t *testing.T) {
+	dir := t.TempDir()
+	exp := &Experiment{Name: "e"}
+	c := map[string]any{"f": "c"}
+	tr := map[string]any{"f": "t"}
+	var recs []RunRecord
+	// Treatment eliminates discovery calls on half the pairs — the
+	// log-ratio estimator discarded these (the strongest effect);
+	// the normalized estimator keeps them.
+	for i := 1; i <= 6; i++ {
+		calls := 4
+		if i%2 == 0 {
+			calls = 0
+		}
+		cr := compareRecord("e", "t", ArmControl, "i1", i, 100, c)
+		tr_ := compareRecord("e", "t", ArmTreatment, "i1", i, 90, tr)
+		cr.CallMetrics = &CallMetrics{DiscoveryCallsBeforeWrite: 5}
+		tr_.CallMetrics = &CallMetrics{DiscoveryCallsBeforeWrite: calls}
+		recs = append(recs, cr, tr_)
+	}
+	writeCompareRecords(t, dir, recs...)
+
+	rep, err := seededRunner(dir).Compare(exp, "")
+	require.NoError(t, err)
+	for _, m := range rep.Metrics {
+		if m.Name == "call_metrics.discovery_calls_before_write" {
+			require.Equal(t, 6, m.Pairs)
+			require.Equal(t, 3, m.Zeroes)
+			// Mean diff −3 over baseline 5 → −60%.
+			require.InDelta(t, -60.0, m.DeltaPct, 1.0)
+			require.InDelta(t, 5.0, m.CtrlMean, 0.1)
+			require.InDelta(t, 2.0, m.TreatMean, 0.1)
+			// Legacy log-ratio sees only the 3 positive pairs.
+			require.Equal(t, 3, m.LogRatioPairs)
+			require.InDelta(t, -20.0, m.LogRatioPct, 1.0)
+		}
+	}
+}
+
+func TestCompare_NoBaselineTrajectoryDropped(t *testing.T) {
+	dir := t.TempDir()
+	exp := &Experiment{Name: "e"}
+	c := map[string]any{"f": "c"}
+	tr := map[string]any{"f": "t"}
+	var recs []RunRecord
+	// Trajectory t1 has a positive control baseline — estimated.
+	for i := 1; i <= 3; i++ {
+		cr := compareRecord("e", "t1", ArmControl, "i1", i, 100, c)
+		tr_ := compareRecord("e", "t1", ArmTreatment, "i1", i, 90, tr)
+		cr.CallMetrics = &CallMetrics{DiscoveryCallsBeforeWrite: 5}
+		tr_.CallMetrics = &CallMetrics{DiscoveryCallsBeforeWrite: 2}
+		recs = append(recs, cr, tr_)
+	}
+	// Trajectory t2's controls are all zero — the relative
+	// estimand is undefined there, so its pairs drop. Treatment
+	// ran 4 calls where control ran none: a regression direction
+	// the estimand can't express, surfaced in NoBaselinePos.
+	for i := 4; i <= 6; i++ {
+		cr := compareRecord("e", "t2", ArmControl, "i1", i, 100, c)
+		tr_ := compareRecord("e", "t2", ArmTreatment, "i1", i, 90, tr)
+		cr.CallMetrics = &CallMetrics{DiscoveryCallsBeforeWrite: 0}
+		tr_.CallMetrics = &CallMetrics{DiscoveryCallsBeforeWrite: 4}
+		recs = append(recs, cr, tr_)
+	}
+	writeCompareRecords(t, dir, recs...)
+
+	rep, err := seededRunner(dir).Compare(exp, "")
+	require.NoError(t, err)
+	for _, m := range rep.Metrics {
+		if m.Name == "call_metrics.discovery_calls_before_write" {
+			require.Equal(t, 3, m.Pairs)
+			require.Equal(t, 3, m.Dropped)
+			require.Equal(t, 3, m.NoBaselinePos)
+			require.InDelta(t, 5.0, m.MinBaseline, 0.01)
+			// Only t1 estimated: mean diff −3 over baseline 5.
+			require.InDelta(t, -60.0, m.DeltaPct, 1.0)
 		}
 	}
 }
