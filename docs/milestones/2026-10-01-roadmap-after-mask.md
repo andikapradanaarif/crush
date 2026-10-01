@@ -7,8 +7,6 @@ those say *what happened*; this says *what follows from it*.
 ## Where the decision tree stands
 
 ```
-Phase 0: fix-or-require     → #201 referent-caution + mask validation rerun
-                              (invocation 382f — PENDING at this writing)
 Phase 1: honest machinery   → acceptance rules that future claims must clear
 Phase 2: COMPOUNDS?         → depth ladder decides the product claim
 Phase 3: SELECTIVITY?       → noise stress decides whether retrieval is needed
@@ -16,21 +14,11 @@ Phase 4: BEYOND FAILURES    → referent/prior-turn/notebook memory types
 Phase 5: GENERALIZES?       → cross-model + task-class diversity + flips
 ```
 
-## Phase 0 — the open node
-
-The mask arm (invocation `4965`) proved two things: presence alone cuts
-discovery-type work (−14.5% calls, −57% files viewed — same direction as
-correct memory), and wrong referents actively misdirect (pass 0.86 vs 1.00,
-all 3 fails = decoy-chasing). PR #201 reframes `<open_failures>` as
-historical context and puts referent-matching on the model.
-
-Validation = rerun of the identical mask corpus on the patched binary:
-
-| Outcome | Decision |
-|---|---|
-| Pass ~1.00 + effort savings persist | **Merge #201** — framing fixed it; mask corpus becomes a standing regression arm |
-| Pass ~1.00 but effort savings collapse | Fix works, but the powered headline was mostly misplaced confidence |
-| Pass stays ~0.86 | Framing insufficient → **#166 relevance filtering is mandatory**, promoted from roadmap to requirement |
+Background context for this plan: the mask arm (invocation `4965`) proved
+that wrong-referent memory actively misdirects (pass 0.86 vs 1.00, all 3
+fails = decoy-chasing). PR #201's referent-caution framing and its mask
+validation rerun (`382f`) are the in-flight resolution of that finding —
+tracked on the PR, outside this roadmap.
 
 ## Phase 1 — armored acceptance (cheap, gates everything below)
 
@@ -89,8 +77,3 @@ redesign before any tier-2 spend.*
   the subsystem next gets touched.
 - #153 notebook-generator mask — resumes with notebook-stack work; distinct
   from #196's failure-memory mask.
-
-## Current write markers
-
-- Validation run `382f` in flight at this writing — this doc's Phase-0 cell
-  is the only cell that changes based on its result.
