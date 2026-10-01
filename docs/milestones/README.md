@@ -70,6 +70,10 @@ every claim above has a preserved invocation behind it.
 
 ## Index
 
+- **[EXPERIMENTS.md](EXPERIMENTS.md)** — the complete run ledger: all 46
+  invocations, ~1,340 records, three eras (notebook-stack → warm-start →
+  failure-memory), each row resolving to preserved artifacts.
+
 | Date | Milestone |
 |---|---|
 | [2026-10-01](2026-10-01-failure-memory-existence-proof.md) | Existence proof complete; mask arm resolved (presence effect + wrong-memory harm); referent-caution fix under validation |
