@@ -97,6 +97,27 @@ func TestPromptScope(t *testing.T) {
 			wantPos: nil,
 			wantNeg: nil,
 		},
+		{
+			// A directive verb restarts intent mid-clause — the
+			// negation binds decoy only, not the post-comma fix.
+			name:    "verb reset ends negation scope",
+			prompt:  "don't touch decoy/, fix main.go",
+			wantPos: []string{"main.go"},
+			wantNeg: []string{"decoy"},
+		},
+		{
+			// The negated verb itself is not a reset — "do not fix
+			// main.go" denies main.go.
+			name:    "negated verb keeps its object negated",
+			prompt:  "do not fix main.go",
+			wantPos: nil,
+			wantNeg: []string{"main.go"},
+		},
+		{
+			name:    "go recursive pattern binds the parent dir",
+			prompt:  "fix decoy/...",
+			wantPos: []string{"decoy"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -362,6 +383,116 @@ func TestSelectOpenFailures(t *testing.T) {
 			failures:   []cmdlog.Failure{mkFailure("go test ./decoy", ".")},
 			wantReason: map[string]string{"go test ./decoy@.": failNegatedScope},
 		},
+		{
+			// "go test ./decoy/..." binds decoy — the recursive tail
+			// is the parent dir, not a literal "..." segment.
+			name:      "recursive pattern row binds the parent dir",
+			prompt:    "fix decoy/x.go",
+			failures:  []cmdlog.Failure{mkFailure("go test ./decoy/...", ".")},
+			wantAdmit: []string{"go test ./decoy/...@."},
+		},
+		{
+			name:      "recursive pattern row binds a nested path",
+			prompt:    "fix decoy/sub/y.go",
+			failures:  []cmdlog.Failure{mkFailure("go test ./decoy/...", ".")},
+			wantAdmit: []string{"go test ./decoy/...@."},
+		},
+		{
+			name:       "recursive pattern row is still narrow under ambiguity",
+			prompt:     promptAmbigTest,
+			failures:   []cmdlog.Failure{mkFailure("go test ./decoy/...", ".")},
+			wantReason: map[string]string{"go test ./decoy/...@.": failNarrowScope},
+		},
+		{
+			// "-o ./bin/t" is a flag value, not a target — it must
+			// not mint bin/ binding scope.
+			name:       "flag-valued args do not mint scope",
+			prompt:     "fix bin/t/y.go",
+			failures:   []cmdlog.Failure{mkFailure("go test -o ./bin/t ./decoy", ".")},
+			wantReason: map[string]string{"go test -o ./bin/t ./decoy@.": failOutOfScope},
+		},
+		{
+			name:      "flag-valued args keep the real target",
+			prompt:    "fix decoy/x.go",
+			failures:  []cmdlog.Failure{mkFailure("go test -o ./bin/t ./decoy", ".")},
+			wantAdmit: []string{"go test -o ./bin/t ./decoy@."},
+		},
+		{
+			name:      "plural failure nouns bind",
+			prompt:    "the failures — fix them",
+			failures:  []cmdlog.Failure{mkFailure("go test .", ".", "main_test.go")},
+			wantAdmit: []string{"go test .@."},
+		},
+		{
+			name:      "plural bug binds a run row",
+			prompt:    "the bugs — fix them",
+			failures:  []cmdlog.Failure{mkFailure("go run .", ".")},
+			wantAdmit: []string{"go run .@."},
+		},
+		{
+			name:      "check referent binds a test row",
+			prompt:    "the check fails — fix it",
+			failures:  []cmdlog.Failure{mkFailure("go test .", ".", "main_test.go")},
+			wantAdmit: []string{"go test .@."},
+		},
+		{
+			name:      "suite referent binds a test row",
+			prompt:    "the suite is red — fix it",
+			failures:  []cmdlog.Failure{mkFailure("go test .", ".", "main_test.go")},
+			wantAdmit: []string{"go test .@."},
+		},
+		{
+			name:      "pipeline referent binds a build row",
+			prompt:    "the pipeline is broken — fix it",
+			failures:  []cmdlog.Failure{mkFailure("go build ./...", ".")},
+			wantAdmit: []string{"go build ./...@."},
+		},
+		{
+			// A known non-failure noun claims the anaphora — "it"
+			// points at the config, not at any open failure.
+			name:       "non-failure noun blocks the anaphora fallback",
+			prompt:     "the config is wrong — fix it",
+			failures:   []cmdlog.Failure{mkFailure("go test .", ".", "main_test.go")},
+			wantReason: map[string]string{"go test .@.": failReferentNone},
+		},
+		{
+			// An unrecognized noun does not poison the pronoun —
+			// "fix it" still has a referent a bound row can claim.
+			name:      "unknown noun yields to the anaphora",
+			prompt:    "the frobnicate is broken — fix it",
+			failures:  []cmdlog.Failure{mkFailure("go test .", ".", "main_test.go")},
+			wantAdmit: []string{"go test .@."},
+		},
+		{
+			name:      "comma verb reset keeps positive scope",
+			prompt:    "don't touch decoy/, fix main.go",
+			failures:  []cmdlog.Failure{mkFailure("go test .", ".", "main_test.go")},
+			wantAdmit: []string{"go test .@."},
+		},
+		{
+			name:       "comma verb reset still excludes the negated dir",
+			prompt:     "don't touch decoy/, fix main.go",
+			failures:   []cmdlog.Failure{mkFailure("go test ./decoy", ".")},
+			wantReason: map[string]string{"go test ./decoy@.": failNegatedScope},
+		},
+		{
+			name:      "smart apostrophe still negates",
+			prompt:    "fix main.go — don\u2019t touch decoy/",
+			failures:  []cmdlog.Failure{mkFailure("go test .", ".", "main_test.go")},
+			wantAdmit: []string{"go test .@."},
+		},
+		{
+			name:       "smart apostrophe negation still excludes",
+			prompt:     "fix main.go — don\u2019t touch decoy/",
+			failures:   []cmdlog.Failure{mkFailure("go test ./decoy", ".")},
+			wantReason: map[string]string{"go test ./decoy@.": failNegatedScope},
+		},
+		{
+			name:      "backticked noun binds like a bare one",
+			prompt:    "the `tests` are failing",
+			failures:  []cmdlog.Failure{mkFailure("go test .", ".", "main_test.go")},
+			wantAdmit: []string{"go test .@."},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -414,4 +545,34 @@ func TestSelectOpenFailures_Validity(t *testing.T) {
 		"fix the failing test in decoy/deleted_test.go",
 		[]cmdlog.Failure{gone}, dir)
 	require.Equal(t, failPathGone, decisions[0].Reason)
+}
+
+func TestSelectOpenFailures_DiskScope(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "v1.0"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "v1.0", "handler.go"), []byte("package v1"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "decoy"), 0o755))
+
+	// A dotted first segment is host-like unless it exists on disk —
+	// v1.0/handler.go is a real versioned dir, github.com/x/y is not.
+	admitted, _ := selectOpenFailures("fix v1.0/handler.go",
+		[]cmdlog.Failure{mkFailure("go test ./v1.0", ".")}, dir)
+	require.Len(t, admitted, 1)
+
+	_, decisions := selectOpenFailures("fix v2.0/handler.go",
+		[]cmdlog.Failure{mkFailure("go test ./v1.0", ".")}, dir)
+	require.Equal(t, failReferentNone, decisions[0].Reason,
+		"a dotted dir absent from disk reads as a URL, not scope")
+
+	// A bare dir name mints scope when it exists on disk — "fix decoy"
+	// carries no path signal of its own.
+	admitted, _ = selectOpenFailures("fix decoy",
+		[]cmdlog.Failure{mkFailure("go test ./decoy", ".")}, dir)
+	require.Len(t, admitted, 1)
+
+	// And the same bare word mints negative scope under a cue.
+	_, decisions = selectOpenFailures("fix main.go — don't touch decoy",
+		[]cmdlog.Failure{mkFailure("go test ./decoy", ".")}, dir)
+	require.Equal(t, failNegatedScope, decisions[0].Reason)
 }

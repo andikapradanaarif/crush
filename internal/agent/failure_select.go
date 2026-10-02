@@ -59,18 +59,56 @@ var verificationKinds = []string{"test", "build", "lint", "run"}
 // while kind-naming nouns ("the build") stay specific.
 var referentKindHints = map[string][]string{
 	"test": {"test"}, "tests": {"test"}, "spec": {"test"}, "specs": {"test"},
-	"build": {"build"}, "compile": {"build"}, "compilation": {"build"},
-	"lint": {"lint"}, "vet": {"lint"}, "linter": {"lint"},
+	"suite": {"test"}, "suites": {"test"},
+	"build": {"build"}, "builds": {"build"}, "compile": {"build"},
+	"compilation": {"build"},
+	"lint":        {"lint"}, "vet": {"lint"}, "linter": {"lint"},
 	"typecheck": {"lint"}, "warning": {"lint"}, "warnings": {"lint"},
-	"ci":  {"test", "build", "lint"},
-	"bug": verificationKinds, "bugfix": verificationKinds,
-	"crash": verificationKinds, "error": verificationKinds,
+	"ci": {"test", "build", "lint"}, "check": {"test", "build", "lint"},
+	"checks": {"test", "build", "lint"}, "pipeline": {"test", "build", "lint"},
+	"pipelines": {"test", "build", "lint"}, "job": {"test", "build", "lint"},
+	"jobs": {"test", "build", "lint"},
+	"bug":  verificationKinds, "bugs": verificationKinds,
+	"bugfix": verificationKinds, "crash": verificationKinds,
+	"crashes": verificationKinds, "error": verificationKinds,
 	"errors": verificationKinds, "failure": verificationKinds,
-	"fail": verificationKinds, "panic": verificationKinds,
-	"regression": verificationKinds, "leak": verificationKinds,
-	"issue": verificationKinds, "problem": verificationKinds,
-	"hang": verificationKinds, "deadlock": verificationKinds,
+	"failures": verificationKinds, "fail": verificationKinds,
+	"panic": verificationKinds, "panics": verificationKinds,
+	"regression": verificationKinds, "regressions": verificationKinds,
+	"leak": verificationKinds, "leaks": verificationKinds,
+	"issue": verificationKinds, "issues": verificationKinds,
+	"problem": verificationKinds, "problems": verificationKinds,
+	"hang": verificationKinds, "hangs": verificationKinds,
+	"deadlock": verificationKinds, "deadlocks": verificationKinds,
 }
+
+// nonFailureNouns are "the <noun>" referents that claim a
+// non-failure target — "update the config", "fix the endpoint". A
+// known non-failure noun suppresses the bare-anaphora fallback: in
+// "the config is wrong — fix it", "it" points at the config, not at
+// any open failure.
+var nonFailureNouns = map[string]bool{
+	"config": true, "configuration": true, "endpoint": true,
+	"handler": true, "route": true, "feature": true, "change": true,
+	"changes": true, "fix": true, "workaround": true, "hack": true,
+	"todo": true, "fixme": true, "typo": true, "log": true,
+	"logs": true, "doc": true, "docs": true, "readme": true,
+	"ui": true, "cli": true, "api": true, "name": true,
+	"output": true, "message": true, "text": true, "style": true,
+	"color": true, "layout": true, "icon": true, "button": true,
+	"link": true, "version": true, "schema": true, "flag": true,
+	"option": true, "comment": true, "file": true, "format": true,
+	"variable": true, "function": true, "method": true, "class": true,
+	"module": true, "package": true, "import": true, "line": true,
+	"table": true, "page": true, "menu": true, "title": true,
+	"image": true, "url": true, "path": true, "directory": true,
+	"folder": true, "setting": true, "settings": true, "key": true,
+	"value": true, "header": true, "deps": true, "dependency": true,
+}
+
+// anaphoraRe matches the bare pronouns — the referent an open failure
+// can claim even when no the-noun spelled one out.
+var anaphoraRe = regexp.MustCompile(`(?i)\b(?:it|its|this|that|them|they|these|those)\b`)
 
 // bareReferentKinds applies when the prompt leans on a bare anaphora
 // ("fix it", "this is broken") or a failure cue with no noun — an
@@ -82,9 +120,9 @@ var bareReferentKinds = verificationKinds
 // — "tests are red", "build fails" — so an ambiguous prompt that
 // mentions failure at all can bind, while an unrelated request
 // ("add a README") rejects every candidate.
-var failureCueRe = regexp.MustCompile(`(?i)\b(?:fails?|failed|failing|failure|broke|broken|breaks|` +
-	`crash(?:es|ed|ing)?|panic(?:s|ked|king)?|regress(?:ed|es|ing|ion)?|red|errors?|erroring|` +
-	`flaky|dies|hangs?|deadlocks?)\b`)
+var failureCueRe = regexp.MustCompile(`(?i)\b(?:fails?|failed|failing|failures?|broke|broken|breaks?|` +
+	`bugs?|crash(?:es|ed|ing)?|panic(?:s|ked|king)?|regress(?:ed|es|ing|ions?)?|red|errors?|erroring|` +
+	`flaky|dies|hangs?|deadlocks?|issues?|problems?|leaks?|risky)\b`)
 
 // scopeSlashPathRe matches tokens containing a path separator —
 // "decoy/foo.go", "./decoy", "src/pkg/". Matched candidates are gated
@@ -97,6 +135,66 @@ var scopeSlashPathRe = regexp.MustCompile(`[\w.-]+/[\w./~-]*`)
 var scopeFileRe = regexp.MustCompile(`\b[\w-]+\.(?:go|py|rs|ts|tsx|js|jsx|mjs|c|cc|cpp|cxx|h|hpp|` +
 	`java|kt|rb|sh|bash|zsh|fish|md|json|ya?ml|toml|mod|sum|sql|proto|css|scss|html|vue|svelte|mk|cfg|ini)\b`)
 
+// scopeBareWordRe finds candidate tokens for the on-disk directory
+// check — "fix decoy" carries no path signal, but if decoy/ exists it
+// is scope. Only the disk disambiguates, and grammatical words are
+// skipped via scopeStopWords.
+var scopeBareWordRe = regexp.MustCompile(`\b[\w][\w-]*\b`)
+
+// scopeStopWords are grammatical and directive words that never mint
+// bare-dir scope — articles, pronouns, auxiliaries, and the verbs that
+// introduce a target. Nouns that could plausibly be directories
+// (test, docs, src) are deliberately absent: if such a dir exists the
+// disk check is the truth we have.
+var scopeStopWords = map[string]bool{
+	"a": true, "an": true, "the": true, "and": true, "or": true,
+	"but": true, "for": true, "with": true, "from": true, "into": true,
+	"onto": true, "this": true, "that": true, "them": true, "they": true,
+	"these": true, "those": true, "then": true, "when": true,
+	"while": true, "where": true, "what": true, "why": true,
+	"how": true, "who": true, "are": true, "was": true, "were": true,
+	"been": true, "being": true, "not": true, "now": true, "out": true,
+	"all": true, "any": true, "some": true, "none": true, "each": true,
+	"every": true, "such": true, "same": true, "other": true,
+	"another": true, "still": true, "just": true, "only": true,
+	"also": true, "too": true, "very": true, "again": true,
+	"after": true, "before": true, "there": true, "here": true,
+	"please": true, "help": true, "want": true, "need": true,
+	"like": true, "have": true, "has": true, "had": true, "can": true,
+	"could": true, "should": true, "would": true, "may": true,
+	"might": true, "must": true, "shall": true, "will": true,
+	"use": true, "see": true, "make": true, "get": true, "got": true,
+	"let": true, "way": true, "thing": true, "things": true,
+	"something": true, "anything": true, "everything": true,
+	"you": true, "your": true, "we": true, "our": true, "me": true,
+	"my": true, "him": true, "his": true, "her": true, "its": true,
+	"is": true, "it": true, "in": true, "on": true, "at": true,
+	"of": true, "to": true, "by": true, "as": true, "be": true,
+	"do": true, "does": true, "did": true, "if": true, "so": true,
+	"up": true, "down": true, "no": true, "yes": true,
+	// Directive verbs — "fix decoy" means decoy is the object, and
+	// the verb itself must not mint scope.
+	"fix": true, "edit": true, "change": true, "update": true,
+	"add": true, "create": true, "remove": true, "delete": true,
+	"modify": true, "patch": true, "write": true, "read": true,
+	"view": true, "check": true, "handle": true, "work": true,
+	"run": true, "build": true, "test": true, "touch": true,
+	"implement": true, "correct": true, "repair": true, "address": true,
+	"resolve": true, "rework": true, "rewrite": true, "refactor": true,
+	"adjust": true, "revert": true, "restore": true, "rebuild": true,
+	// Negation vocabulary — "don't touch decoy" needs decoy negated,
+	// not the cue words themselves.
+	"dont": true, "doesnt": true, "didnt": true, "isnt": true,
+	"arent": true, "wasnt": true, "cant": true, "wont": true,
+	"couldnt": true, "shouldnt": true, "wouldnt": true, "never": true,
+	"avoid": true, "without": true, "skip": true, "except": true,
+	"leave": true, "outside": true, "untouched": true, "unmodified": true,
+	"keep": true, "keeping": true,
+	// Reset conjunctions.
+	"however": true, "instead": true, "whereas": true,
+	"afterward": true, "afterwards": true,
+}
+
 // scopeNegationRe marks a clause as exclusionary — a path after one of
 // these cues is scope the user denied, not a target. n't carries no
 // leading \b: inside "don't" the n sits mid-word after 'o', so a
@@ -106,7 +204,13 @@ var scopeNegationRe = regexp.MustCompile(`(?i)(?:n't\b|\b(?:not|never|avoid|with
 // scopeResetRe marks cue reset points — a negation ends at a
 // conjunction that starts a new directive: "don't touch decoy/, but
 // fix main.go" negates decoy only.
-var scopeResetRe = regexp.MustCompile(`(?i)\b(?:but|however|instead|then|while|whereas|instead|afterwards?)\b`)
+var scopeResetRe = regexp.MustCompile(`(?i)\b(?:but|however|instead|then|while|whereas|afterwards?)\b`)
+
+// scopeVerbResetRe marks the other reset class — a directive verb
+// restarts intent after a comma: "don't touch decoy/, fix main.go"
+// negates decoy only. A verb that is itself the negated predicate
+// ("do not fix main.go") is not a reset — see verbNegated.
+var scopeVerbResetRe = regexp.MustCompile(`(?i)\b(?:fix|change|update|edit|patch|implement|create|add|modify|handle|correct|repair|address|resolve|rework|rewrite|refactor|adjust|revert|build|rebuild|restore)\b`)
 
 // cmdPathTokenRe matches command arguments that name a repo-relative
 // target: "./decoy", ".", "./...", "decoy/", "/abs/path".
@@ -137,12 +241,32 @@ func promptScope(prompt, workDir string) (pos, neg []string) {
 				pos = append(pos, rest[loc[0]:loc[1]])
 			}
 		}
+		if workDir == "" {
+			continue
+		}
+		// Bare directory names carry no path signal — "fix decoy" —
+		// but the disk check disambiguates a real dir from English.
+		for _, loc := range scopeBareWordRe.FindAllStringIndex(rest, -1) {
+			w := rest[loc[0]:loc[1]]
+			lw := strings.ToLower(w)
+			if len(lw) < 3 || scopeStopWords[lw] {
+				continue
+			}
+			if st, err := os.Stat(filepath.Join(workDir, w)); err == nil && st.IsDir() {
+				if cuePrecedes(rest, loc[0]) {
+					neg = append(neg, w)
+				} else {
+					pos = append(pos, w)
+				}
+			}
+		}
 	}
 	return dedupeScope(pos), dedupeScope(neg)
 }
 
 // cuePrecedes reports whether the text before offset carries an
-// exclusion cue more recent than any reset conjunction.
+// exclusion cue more recent than any reset — a reset conjunction or
+// a directive verb that isn't itself negated.
 func cuePrecedes(text string, offset int) bool {
 	prefix := text[:offset]
 	lastNeg, lastReset := 0, 0
@@ -152,7 +276,27 @@ func cuePrecedes(text string, offset int) bool {
 	if idx := scopeResetRe.FindAllStringIndex(prefix, -1); idx != nil {
 		lastReset = idx[len(idx)-1][1]
 	}
+	for _, v := range scopeVerbResetRe.FindAllStringIndex(prefix, -1) {
+		if v[1] > lastReset && !verbNegated(prefix, v[0]) {
+			lastReset = v[1]
+		}
+	}
 	return lastNeg > lastReset
+}
+
+// verbNegated reports whether the verb at vstart is the negated
+// predicate itself — a negation cue ending immediately before it
+// (modulo whitespace). "do not fix main.go" negates the fix, so the
+// path stays negative; "don't touch decoy/, fix main.go" negates
+// touch, and fix is a fresh directive.
+func verbNegated(prefix string, vstart int) bool {
+	pre := strings.TrimRight(prefix[:vstart], " \t")
+	for _, m := range scopeNegationRe.FindAllStringIndex(pre, -1) {
+		if m[1] == len(pre) {
+			return true
+		}
+	}
+	return false
 }
 
 // isScopePath gates slash-bearing tokens so idioms ("and/or",
@@ -164,13 +308,18 @@ func isScopePath(tok, workDir string) bool {
 	if strings.HasPrefix(tok, "./") || strings.HasPrefix(tok, "../") || strings.HasPrefix(tok, "/") {
 		return true
 	}
-	if strings.HasSuffix(tok, "/") || strings.HasSuffix(tok, "/.") {
-		return true
-	}
 	// A dotted first segment reads as a host — "github.com/x/y" is a
-	// URL, not a repo path.
+	// URL, not a repo path — unless it exists on disk ("v1.0/dir/").
 	if strings.Contains(tok[:strings.IndexByte(tok, '/')], ".") {
+		if workDir != "" {
+			if _, err := os.Stat(filepath.Join(workDir, normScopePath(tok))); err == nil {
+				return true
+			}
+		}
 		return false
+	}
+	if strings.HasSuffix(tok, "/") || strings.HasSuffix(tok, "/.") || strings.HasSuffix(tok, "/...") {
+		return true
 	}
 	if strings.Count(tok, "/") >= 2 {
 		// Multi-slash idioms ("pass/fail/skip", "on/off/auto") are
@@ -206,7 +355,7 @@ func splitClauses(prompt string) []string {
 	start := 0
 	for i, r := range prompt {
 		boundary := r == '!' || r == '?' || r == ';' || r == '\n' ||
-			(r == '.' && (i+1 == len(prompt) || prompt[i+1] == ' ' || prompt[i+1] == '\t'))
+			(r == '.' && (i == 0 || prompt[i-1] != '.') && (i+1 == len(prompt) || prompt[i+1] == ' ' || prompt[i+1] == '\t'))
 		if boundary {
 			out = append(out, prompt[start:i])
 			start = i + 1
@@ -238,6 +387,8 @@ func normScopePath(p string) string {
 			return ""
 		}
 	}
+	// A Go recursive tail binds the parent dir — "decoy/..." is decoy.
+	p = strings.TrimSuffix(p, "/...")
 	p = path.Clean("/" + p)
 	p = strings.TrimPrefix(p, "/")
 	if p == "." || p == "..." || p == "" {
@@ -314,19 +465,46 @@ func dirWithinNegated(dir, p string, pos []string) bool {
 	return true
 }
 
+// cmdValueFlags take their value as a separate token — the value is
+// not a target, so it never enters binding scope ("-o ./bin/t" mints
+// no bin/ dir). Flags spelled -flag=value skip as flag tokens anyway.
+var cmdValueFlags = map[string]bool{
+	"-o": true, "-exec": true, "-cpuprofile": true, "-memprofile": true,
+	"-mutexprofile": true, "-blockprofile": true, "-trace": true,
+	"-coverprofile": true, "-coverpkg": true, "-outputdir": true,
+	"-modfile": true, "-overlay": true, "-pkgdir": true, "-toolexec": true,
+	"-ldflags": true, "-gcflags": true, "-asmflags": true, "-tags": true,
+	"-run": true, "-bench": true, "-benchtime": true, "-skip": true,
+	"-count": true, "-timeout": true, "-parallel": true, "-cpu": true,
+	"-covermode": true, "-work": true,
+}
+
 // cmdTargets extracts the command's repo-relative target args.
-// "go test -count=1 ./decoy" → ["decoy"]; "go test ." → ["."]; a
-// command with no path args returns nil — its scope is its CWD.
+// "go test -count=1 ./decoy" → ["decoy"]; "go test ." → ["."]; a Go
+// recursive pattern sheds its "/..." tail to the parent dir ("go test
+// ./decoy/..." → "decoy"); a command with no path args returns nil —
+// its scope is its CWD.
 func cmdTargets(cmd string) []string {
 	var out []string
+	skipValue := false
 	for _, tok := range strings.Fields(cmd) {
+		if skipValue {
+			skipValue = false
+			continue
+		}
+		if tok == "-args" {
+			// Everything after -args belongs to the test binary.
+			break
+		}
 		if strings.HasPrefix(tok, "-") {
+			skipValue = cmdValueFlags[tok]
 			continue
 		}
 		if !cmdPathTokenRe.MatchString(tok) {
 			continue
 		}
 		t := strings.TrimPrefix(tok, "./")
+		t = strings.TrimSuffix(t, "/...")
 		if t == "..." || t == "" || t == "." {
 			out = append(out, ".")
 		} else {
@@ -347,11 +525,10 @@ func relCWD(cwd, workDir string) string {
 	}
 	if workDir != "" {
 		if rel, err := filepath.Rel(workDir, cwd); err == nil {
-			if rel == "" {
-				return "."
-			}
-			if !strings.HasPrefix(rel, "..") {
-				return rel
+			// ".." and "../…" escape the workdir; a leading-dot name
+			// like "..foo" is a real dir inside it, not an escape.
+			if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return filepath.ToSlash(rel)
 			}
 			return cwd // outside the workdir — never repo-root scope.
 		}
@@ -405,6 +582,13 @@ func failureDirs(f cmdlog.Failure, workDir string) []string {
 // CWD. A subpath-bound row under an ambiguous prompt is a
 // wrong-referent risk: it anchors the agent to a corner while the
 // declared referent usually lives at top scope.
+//
+// Deliberately narrower than failureDirs: file hints widen a row's
+// binding scope for exclusion/overlap purposes, but hints in sub/
+// don't mean the command was scoped to sub/ — "go test" at root whose
+// output names sub/x_test.go is still a top-level run. The two read
+// different signals: top-levelness is where the command ran, scope is
+// everything the failure implicates.
 func failureTopLevel(f cmdlog.Failure, workDir string) bool {
 	cwd := relCWD(f.CWD, workDir)
 	targets := cmdTargets(f.Cmd)
@@ -436,9 +620,14 @@ func referentKinds(prompt string) []string {
 		return bareReferentKinds
 	}
 	var kinds []string
+	claimedNonFailure := false
 	for _, m := range matches {
 		noun := strings.ToLower(prompt[m[2]:m[3]])
 		cands := referentKindHints[noun]
+		if cands == nil && nonFailureNouns[noun] {
+			claimedNonFailure = true
+			continue
+		}
 		if cands == nil {
 			// Adjective/qualifier form: "the failing test" captured
 			// "failing" — try the word after it.
@@ -451,6 +640,12 @@ func referentKinds(prompt string) []string {
 				kinds = append(kinds, k)
 			}
 		}
+	}
+	// Bare-anaphora fallback: "the <unknown> — fix them" has a pronoun
+	// a bound failure could claim, unless a known non-failure noun
+	// already claimed it.
+	if len(kinds) == 0 && !claimedNonFailure && anaphoraRe.MatchString(prompt) {
+		return bareReferentKinds
 	}
 	return kinds
 }
@@ -503,6 +698,14 @@ func failurePaths(f cmdlog.Failure, workDir string) []string {
 // must bind the user's real request, not the harness framing.
 var interruptedRequestRe = regexp.MustCompile("(?s)the initial user request was: `(.+)`\\s*$")
 
+// selectorPromptReplacer folds typographic variants into the forms
+// the parser knows: smart apostrophes to ASCII (don't vs don't —
+// a miss would silently invert negation to positive scope) and
+// backticks out ("the `tests` are failing" binds like "the tests").
+var selectorPromptReplacer = strings.NewReplacer(
+	"‘", "'", "’", "'", "`", "",
+)
+
 // selectOpenFailures is the deterministic task-binding filter between
 // ListOpenFailures and tail rendering. Checks run most-explanatory
 // first — explicit user scope beats kind binding beats validity — so
@@ -511,12 +714,24 @@ var interruptedRequestRe = regexp.MustCompile("(?s)the initial user request was:
 //
 // Abstention is a valid outcome: an all-rejected set renders no
 // <open_failures> section at all, and the decisions record that the
-// selector ran and found nothing bound. Two design constraints worth
-// stating plainly: under ambiguity only top-scope verification rows
-// bind — a legitimately-failing subpackage row never surfaces for "the
-// test fails"; and stale_suspect cannot distinguish the agent's own
-// in-flight fix (mtime moves as the agent edits) — both read as
-// fail-closed by design.
+// selector ran and found nothing bound. Design constraints stated
+// plainly:
+//
+//   - Under ambiguity only top-scope verification rows bind — a
+//     legitimately-failing subpackage row never surfaces for "the
+//     test fails".
+//   - Explicit scope means "the prompt named paths", not "the
+//     prompt is about a failure" — "add a README.md" still admits an
+//     overlapping root `go test .` row, because a failing root check
+//     is global signal; scope decides overlap, not relevance.
+//   - stale_suspect is an mtime proxy for content change — a
+//     formatter, go generate, git checkout/pull, or an unrelated
+//     edit to a hinted file suppresses the row until re-observed,
+//     including the agent's own in-flight fix. Fail-closed by
+//     design: the row hides rather than anchors.
+//   - Exclusion strength is asymmetric: a dir-form exclusion
+//     ("don't touch decoy/") always binds rows inside it, while a
+//     file-form exclusion yields to same-dir positive scope.
 func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string) ([]cmdlog.Failure, []FailureDecision) {
 	if len(failures) == 0 {
 		return nil, nil
@@ -524,6 +739,7 @@ func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string
 	if m := interruptedRequestRe.FindStringSubmatch(prompt); m != nil {
 		prompt = m[1]
 	}
+	prompt = selectorPromptReplacer.Replace(prompt)
 	pos, neg := promptScope(prompt, workDir)
 	explicit := len(pos) > 0
 	var kinds []string
