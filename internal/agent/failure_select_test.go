@@ -57,10 +57,42 @@ func TestPromptScope(t *testing.T) {
 			prompt:  "fix ./pkg/util.go",
 			wantPos: []string{"pkg/util.go"},
 		},
+		{
+			// "don't" is n-'-t — a leading \b before n't can never
+			// match inside the contraction.
+			name:    "contraction negation",
+			prompt:  "fix main.go — don't touch decoy/",
+			wantPos: []string{"main.go"},
+			wantNeg: []string{"decoy"},
+		},
+		{
+			name:    "comma clause keeps polarity positional",
+			prompt:  "fix main.go, do not touch decoy/",
+			wantPos: []string{"main.go"},
+			wantNeg: []string{"decoy"},
+		},
+		{
+			name:    "negated list stays negated",
+			prompt:  "don't touch decoy/, vendor/, but fix main.go",
+			wantPos: []string{"main.go"},
+			wantNeg: []string{"decoy", "vendor"},
+		},
+		{
+			name:    "slash idiom is not scope",
+			prompt:  "check the pass/fail logic",
+			wantPos: nil,
+			wantNeg: nil,
+		},
+		{
+			name:    "url path is not scope",
+			prompt:  "mirror github.com/charmbracelet/crush locally",
+			wantPos: nil,
+			wantNeg: nil,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			pos, neg := promptScope(tc.prompt)
+			pos, neg := promptScope(tc.prompt, "")
 			require.ElementsMatch(t, tc.wantPos, pos)
 			require.ElementsMatch(t, tc.wantNeg, neg)
 		})
@@ -190,6 +222,44 @@ func TestSelectOpenFailures(t *testing.T) {
 			prompt:     "fix the nil pointer in main.go",
 			failures:   []cmdlog.Failure{mkFailure("pytest tests/api", ".", "tests/api/x_test.py")},
 			wantReason: map[string]string{"pytest tests/api@.": failOutOfScope},
+		},
+		{
+			name:       "explicit scope rejects non-verification row",
+			prompt:     "fix the nil pointer in main.go",
+			failures:   []cmdlog.Failure{mkFailure("git push origin main", ".")},
+			wantReason: map[string]string{"git push origin main@.": failKindMismatch},
+		},
+		{
+			name:      "adjective referent binds via next word",
+			prompt:    "the failing test — fix it",
+			failures:  []cmdlog.Failure{mkFailure("go test .", ".", "main_test.go")},
+			wantAdmit: []string{"go test .@."},
+		},
+		{
+			name:      "first the-noun does not shadow a later failure noun",
+			prompt:    "look at the logs — the test is failing",
+			failures:  []cmdlog.Failure{mkFailure("go test .", ".", "main_test.go")},
+			wantAdmit: []string{"go test .@."},
+		},
+		{
+			name:      "interrupted-session wrapper binds the inner request",
+			prompt:    "The previous session was interrupted because it got too long, the initial user request was: `the test fails — fix it`",
+			failures:  []cmdlog.Failure{mkFailure("go test .", ".", "main_test.go")},
+			wantAdmit: []string{"go test .@."},
+		},
+		{
+			name:       "slash idiom does not mint explicit scope",
+			prompt:     "check the pass/fail logic",
+			failures:   []cmdlog.Failure{mkFailure("go test .", ".", "main_test.go")},
+			wantReason: map[string]string{"go test .@.": failReferentNone},
+		},
+		{
+			// Files are stored workspace-relative: a row recorded
+			// after `cd pkg` must not double-join to pkg/pkg.
+			name:      "workspace-relative files survive a non-root cwd",
+			prompt:    "fix pkg/x_test.go",
+			failures:  []cmdlog.Failure{mkFailure("go test", "pkg", "pkg/x_test.go")},
+			wantAdmit: []string{"go test@pkg"},
 		},
 	}
 	for _, tc := range tests {

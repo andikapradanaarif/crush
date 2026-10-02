@@ -40,6 +40,9 @@ const (
 	turnContextFileHeatLimit = 5
 	// turnContextOpenFailuresLimit bounds the failure-memory tail —
 	// recent-first, so the cap keeps the freshest unresolved failures.
+	// It is also the selector's candidate cap: a bound row ranked
+	// beyond it is invisible to both, and tail.decisions.candidates
+	// reads as a lower bound on true open-failure count.
 	turnContextOpenFailuresLimit = 5
 	// turnContextFailureFileHints bounds file hints rendered per
 	// failure row.
@@ -100,13 +103,16 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	// candidates" versus "candidates rejected".
 	var openFailures []cmdlog.Failure
 	var failureDecisions []FailureDecision
-	if a.failureMemory && a.cmdlog != nil {
+	if a.failureMemory && a.cmdlog != nil && !a.isSubAgent {
 		if f, err := a.cmdlog.ListOpenFailures(ctx, turnContextOpenFailuresLimit); err == nil {
 			var workDir string
 			if a.configStore != nil {
 				workDir = a.configStore.WorkingDir()
 			}
 			openFailures, failureDecisions = selectOpenFailures(call.Prompt, f, workDir)
+		} else {
+			slog.Debug("Open-failure fetch failed; tail renders without memory",
+				"session_id", call.SessionID, "error", err)
 		}
 	}
 	sections := a.turnContextSections(ctx, call, openFailures)

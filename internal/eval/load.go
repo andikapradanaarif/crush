@@ -603,6 +603,20 @@ func armStarvationRules(field string) []starvationRule {
 	if strings.HasPrefix(field, "prior_turns.") {
 		return []starvationRule{boolOn("notebook_enabled"), modeIs("notebook_prior_turns", "stub", "digest", "summarize"), priorTurnsRecallLive}
 	}
+	if strings.HasPrefix(field, "tail.") {
+		// Every tail producer is flag-gated: a min_tail.* predicate
+		// on the wrong arm starves by construction. Decisions and
+		// open_failures need failure_memory; the other envelopes need
+		// their own flags.
+		switch field {
+		case "tail.sections.turn_context":
+			return []starvationRule{modeIs("turn_context", "session")}
+		case "tail.sections.ambiguity_gate":
+			return []starvationRule{boolOn("ambiguity_clarification")}
+		default: // open_failures + tail.decisions.*
+			return []starvationRule{boolOn("failure_memory")}
+		}
+	}
 	if strings.HasPrefix(field, "digests.") {
 		return []starvationRule{boolOn("notebook_enabled"), modeIs("notebook_prior_turns", "digest"), priorTurnsRecallLive, generatesEntries}
 	}

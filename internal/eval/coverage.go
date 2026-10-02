@@ -244,7 +244,9 @@ func tailSectionTurns(r *RunRecord, name string) float64 {
 
 // tailDecisions counts the failure-memory selector's decision rows
 // across the run's tail audits — "" counts every candidate the
-// selector evaluated, "admitted" only those that rendered.
+// selector evaluated, "admitted" only those that rendered. Rows are
+// per-turn evaluations, not distinct candidates: a candidate surviving
+// to turn N counts N times.
 func tailDecisions(r *RunRecord, which string) float64 {
 	n := 0
 	for _, t := range r.Tail {

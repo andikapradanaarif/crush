@@ -649,6 +649,24 @@ func TestValidateExperiment_ArmCoverageStarvation(t *testing.T) {
 	}
 	require.Error(t, ValidateExperiment(exp))
 
+	// tail.* predicates need their producer flags — failure_memory
+	// off starves decisions and open_failures alike.
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"failure_memory": false}},
+		Coverage: Coverage{"min_tail.decisions.candidates": 1},
+	}
+	require.Error(t, ValidateExperiment(exp))
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"failure_memory": true}},
+		Coverage: Coverage{"min_tail.decisions.candidates": 1},
+	}
+	require.NoError(t, ValidateExperiment(exp))
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"failure_memory": false}},
+		Coverage: Coverage{"min_tail.sections.open_failures": 1},
+	}
+	require.Error(t, ValidateExperiment(exp))
+
 	// request.notebook_bytes is zero by construction when the
 	// notebook is off — min_ starves on a notebook-disabled arm.
 	exp.Arms[ArmTreatment] = Arm{

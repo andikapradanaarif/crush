@@ -74,8 +74,9 @@ var failureCueRe = regexp.MustCompile(`(?i)\b(?:fails?|failed|failing|failure|br
 	`crash(?:es|ed|ing)?|panic(?:s|ked|king)?|regress(?:ed|es|ing|ion)?|red|errors?|erroring|flaky)\b`)
 
 // scopeSlashPathRe matches tokens containing a path separator —
-// "decoy/foo.go", "./decoy", "src/pkg/". Requires a word char before
-// the first slash so URLs and "//" do not match.
+// "decoy/foo.go", "./decoy", "src/pkg/". Matched candidates are gated
+// by isScopePath so idioms like "and/or" and "pass/fail" don't mint
+// bogus scope — a bare word/word token is not a path.
 var scopeSlashPathRe = regexp.MustCompile(`[\w.-]+/[\w./~-]*`)
 
 // scopeFileRe matches bare filenames with a source-ish extension so
@@ -83,9 +84,16 @@ var scopeSlashPathRe = regexp.MustCompile(`[\w.-]+/[\w./~-]*`)
 var scopeFileRe = regexp.MustCompile(`\b[\w-]+\.(?:go|py|rs|ts|tsx|js|jsx|mjs|c|cc|cpp|cxx|h|hpp|` +
 	`java|kt|rb|sh|bash|zsh|fish|md|json|ya?ml|toml|mod|sum|sql|proto|css|scss|html|vue|svelte|mk|cfg|ini)\b`)
 
-// scopeNegationRe marks a clause as exclusionary — a path inside it is
-// scope the user denied, not a target.
-var scopeNegationRe = regexp.MustCompile(`(?i)\b(?:not|n't|never|avoid|without|skip|exclude[sd]?|except|leave|outside|untouched|unmodified)\b`)
+// scopeNegationRe marks a clause as exclusionary — a path after one of
+// these cues is scope the user denied, not a target. n't carries no
+// leading \b: inside "don't" the n sits mid-word after 'o', so a
+// boundary there would never match the most common negation form.
+var scopeNegationRe = regexp.MustCompile(`(?i)(?:n't\b|\b(?:not|never|avoid|without|skip|exclud(?:e[sd]?|ing)|except|leave|outside|untouched|unmodified)\b)`)
+
+// scopeResetRe marks cue reset points — a negation ends at a
+// conjunction that starts a new directive: "don't touch decoy/, but
+// fix main.go" negates decoy only.
+var scopeResetRe = regexp.MustCompile(`(?i)\b(?:but|however|instead|then|while|whereas|instead|afterwards?)\b`)
 
 // cmdPathTokenRe matches command arguments that name a repo-relative
 // target: "./decoy", ".", "./...", "decoy/", "/abs/path".
@@ -93,31 +101,77 @@ var cmdPathTokenRe = regexp.MustCompile(`^(?:\.{1,2}/\S*|\.{3}|\./|\.$|/\S*|[\w.
 
 // promptScope splits the prompt's path mentions into positive scope
 // (things the user asked to change) and negative scope (things they
-// excluded). A path's polarity comes from negation cues in its own
-// clause — "do not touch decoy/" makes decoy negative even though the
-// sentence names it.
-func promptScope(prompt string) (pos, neg []string) {
+// excluded). Polarity is positional: a path is negative iff a negation
+// cue precedes it in its clause with no reset conjunction between —
+// "fix main.go, do not touch decoy/" keeps main.go positive because
+// its own span carries no cue.
+func promptScope(prompt, workDir string) (pos, neg []string) {
 	for _, c := range splitClauses(prompt) {
-		negated := scopeNegationRe.MatchString(c)
 		rest := scopeSlashPathRe.ReplaceAllString(c, " ")
-		for _, m := range scopeSlashPathRe.FindAllString(c, -1) {
-			if p := normScopePath(m); p != "" {
-				if negated {
+		for _, loc := range scopeSlashPathRe.FindAllStringIndex(c, -1) {
+			if p := normScopePath(c[loc[0]:loc[1]]); p != "" && isScopePath(c[loc[0]:loc[1]], workDir) {
+				if cuePrecedes(c, loc[0]) {
 					neg = append(neg, p)
 				} else {
 					pos = append(pos, p)
 				}
 			}
 		}
-		for _, m := range scopeFileRe.FindAllString(rest, -1) {
-			if negated {
-				neg = append(neg, m)
+		for _, loc := range scopeFileRe.FindAllStringIndex(rest, -1) {
+			if cuePrecedes(rest, loc[0]) {
+				neg = append(neg, rest[loc[0]:loc[1]])
 			} else {
-				pos = append(pos, m)
+				pos = append(pos, rest[loc[0]:loc[1]])
 			}
 		}
 	}
 	return dedupeScope(pos), dedupeScope(neg)
+}
+
+// cuePrecedes reports whether the text before offset carries an
+// exclusion cue more recent than any reset conjunction.
+func cuePrecedes(text string, offset int) bool {
+	prefix := text[:offset]
+	lastNeg, lastReset := 0, 0
+	if idx := scopeNegationRe.FindAllStringIndex(prefix, -1); idx != nil {
+		lastNeg = idx[len(idx)-1][1]
+	}
+	if idx := scopeResetRe.FindAllStringIndex(prefix, -1); idx != nil {
+		lastReset = idx[len(idx)-1][1]
+	}
+	return lastNeg > lastReset
+}
+
+// isScopePath gates slash-bearing tokens so idioms ("and/or",
+// "pass/fail", "read/write") and URL suffixes never count as scope —
+// the one fail-open direction this selector must not take. A token is
+// a path when it has a path-only shape (./ ../ / prefix, trailing
+// slash, 3+ segments, or a source extension) or exists on disk.
+func isScopePath(tok, workDir string) bool {
+	if strings.HasPrefix(tok, "./") || strings.HasPrefix(tok, "../") || strings.HasPrefix(tok, "/") {
+		return true
+	}
+	if strings.HasSuffix(tok, "/") || strings.HasSuffix(tok, "/.") {
+		return true
+	}
+	// A dotted first segment reads as a host — "github.com/x/y" is a
+	// URL, not a repo path.
+	if strings.Contains(tok[:strings.IndexByte(tok, '/')], ".") {
+		return false
+	}
+	if strings.Count(tok, "/") >= 2 {
+		return true
+	}
+	last := tok[strings.LastIndexByte(tok, '/')+1:]
+	if scopeFileRe.MatchString(last) && !strings.Contains(last, "/") {
+		return true
+	}
+	if workDir != "" {
+		if _, err := os.Stat(filepath.Join(workDir, normScopePath(tok))); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // splitClauses breaks a prompt at sentence boundaries — negation in
@@ -244,21 +298,20 @@ func relCWD(cwd, workDir string) string {
 }
 
 // failureDirs is the candidate's binding scope: the dirs its command
-// targets plus the dirs its implicated files live in (CWD-joined).
-// CWD itself joins only when nothing narrower identifies scope — a
-// command run from root that names decoy/ is decoy-scoped, not
-// root-scoped.
+// targets plus the dirs its implicated files live in. File hints are
+// stored workspace-relative, so they join scope unmodified. CWD joins
+// only when nothing narrower identifies scope — a command run from
+// root that names decoy/ is decoy-scoped, not root-scoped.
 func failureDirs(f cmdlog.Failure, workDir string) []string {
 	var dirs []string
 	for _, t := range cmdTargets(f.Cmd) {
 		dirs = append(dirs, t)
 	}
-	cwd := relCWD(f.CWD, workDir)
 	for _, file := range f.Files {
-		dirs = append(dirs, path.Dir(path.Join(cwd, file)))
+		dirs = append(dirs, path.Dir(file))
 	}
 	if len(dirs) == 0 {
-		return []string{cwd}
+		return []string{relCWD(f.CWD, workDir)}
 	}
 	return dedupeScope(dirs)
 }
@@ -276,18 +329,48 @@ func failureTopLevel(f cmdlog.Failure, workDir string) bool {
 	return slices.Contains(targets, ".")
 }
 
-// referentKinds resolves the ambiguous prompt's "the <noun>" or bare
-// anaphora to the command kinds an open failure may claim. Nil means
-// the prompt names a target failure memory cannot supply ("the
-// config") or doesn't mention failure at all.
+// referentKinds resolves the ambiguous prompt's referents to the
+// command kinds an open failure may claim, unioning across every
+// "the <noun>" in the prompt — an adjective capture ("the failing
+// test" → "failing") falls through to the next word, and a
+// non-failure noun never disqualifies a later failure noun. Nil
+// means no the-noun bound a kind: either the prompt names targets
+// failure memory cannot supply ("the config"), or it never mentions
+// failure at all.
 func referentKinds(prompt string) []string {
 	if !vagueReferentRe.MatchString(prompt) && !failureCueRe.MatchString(prompt) {
 		return nil
 	}
-	if m := theNounRe.FindStringSubmatch(prompt); m != nil {
-		return referentKindHints[strings.ToLower(m[1])]
+	matches := theNounRe.FindAllStringSubmatchIndex(prompt, -1)
+	if len(matches) == 0 {
+		return bareReferentKinds
 	}
-	return bareReferentKinds
+	var kinds []string
+	for _, m := range matches {
+		noun := strings.ToLower(prompt[m[2]:m[3]])
+		cands := referentKindHints[noun]
+		if cands == nil {
+			// Adjective/qualifier form: "the failing test" captured
+			// "failing" — try the word after it.
+			if next := nextWord(prompt[m[1]:]); next != "" {
+				cands = referentKindHints[next]
+			}
+		}
+		for _, k := range cands {
+			if !slices.Contains(kinds, k) {
+				kinds = append(kinds, k)
+			}
+		}
+	}
+	return kinds
+}
+
+// nextWord returns the first word in s, lowercased.
+func nextWord(s string) string {
+	for _, f := range strings.Fields(s) {
+		return strings.ToLower(strings.Trim(f, `"'`+"`.,;:!?"))
+	}
+	return ""
 }
 
 // failurePaths maps the candidate's implicated files to plausible
@@ -319,6 +402,12 @@ func failurePaths(f cmdlog.Failure, workDir string) []string {
 	return out
 }
 
+// interruptedRequestRe unwraps the summarization resume prompt —
+// agent.go wraps an unfinished turn's prompt as "The previous session
+// was interrupted…, the initial user request was: `…`", and selection
+// must bind the user's real request, not the harness framing.
+var interruptedRequestRe = regexp.MustCompile("(?s)the initial user request was: `(.+)`\\s*$")
+
 // selectOpenFailures is the deterministic task-binding filter between
 // ListOpenFailures and tail rendering. Checks run most-explanatory
 // first — explicit user scope beats kind binding beats validity — so
@@ -327,12 +416,20 @@ func failurePaths(f cmdlog.Failure, workDir string) []string {
 //
 // Abstention is a valid outcome: an all-rejected set renders no
 // <open_failures> section at all, and the decisions record that the
-// selector ran and found nothing bound.
+// selector ran and found nothing bound. Two design constraints worth
+// stating plainly: under ambiguity only top-scope verification rows
+// bind — a legitimately-failing subpackage row never surfaces for "the
+// test fails"; and stale_suspect cannot distinguish the agent's own
+// in-flight fix (mtime moves as the agent edits) — both read as
+// fail-closed by design.
 func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string) ([]cmdlog.Failure, []FailureDecision) {
 	if len(failures) == 0 {
 		return nil, nil
 	}
-	pos, neg := promptScope(prompt)
+	if m := interruptedRequestRe.FindStringSubmatch(prompt); m != nil {
+		prompt = m[1]
+	}
+	pos, neg := promptScope(prompt, workDir)
 	explicit := len(pos) > 0
 	var kinds []string
 	if !explicit {
@@ -345,15 +442,21 @@ func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string
 		d := FailureDecision{Signature: f.Signature, Cmd: f.Cmd}
 		reason := failAdmit
 		dirs := failureDirs(f, workDir)
+		kind := toolclass.CommandKind(f.Cmd)
 
 		switch {
 		case negatedByAny(dirs, neg):
 			reason = failNegatedScope
 		case explicit && !overlapsAny(dirs, pos):
 			reason = failOutOfScope
+		case explicit && kind != "test" && kind != "build" && kind != "lint":
+			// Explicit scope still requires a verification-flavored
+			// row — a failed ls/git/curl at root must not inject into
+			// an unrelated "fix main.go".
+			reason = failKindMismatch
 		case !explicit && kinds == nil:
 			reason = failReferentNone
-		case !explicit && !slices.Contains(kinds, toolclass.CommandKind(f.Cmd)):
+		case !explicit && !slices.Contains(kinds, kind):
 			reason = failKindMismatch
 		case !explicit && !failureTopLevel(f, workDir):
 			reason = failNarrowScope
