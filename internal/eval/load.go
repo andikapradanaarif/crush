@@ -607,15 +607,18 @@ func armStarvationRules(field string) []starvationRule {
 		// Every tail producer is flag-gated: a min_tail.* predicate
 		// on the wrong arm starves by construction. Decisions and
 		// open_failures need failure_memory; the other envelopes need
-		// their own flags.
+		// their own flags. Unknown tail fields get no rule — a future
+		// tail.* key must opt into a gate, not inherit the wrong one.
 		switch field {
 		case "tail.sections.turn_context":
 			return []starvationRule{modeIs("turn_context", "session")}
 		case "tail.sections.ambiguity_gate":
 			return []starvationRule{boolOn("ambiguity_clarification")}
-		default: // open_failures + tail.decisions.*
+		case "tail.sections.open_failures",
+			"tail.decisions.candidates", "tail.decisions.admitted":
 			return []starvationRule{boolOn("failure_memory")}
 		}
+		return nil
 	}
 	if strings.HasPrefix(field, "digests.") {
 		return []starvationRule{boolOn("notebook_enabled"), modeIs("notebook_prior_turns", "digest"), priorTurnsRecallLive, generatesEntries}

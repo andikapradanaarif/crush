@@ -88,22 +88,39 @@ var referentKindHints = map[string][]string{
 // "the config is wrong — fix it", "it" points at the config, not at
 // any open failure.
 var nonFailureNouns = map[string]bool{
-	"config": true, "configuration": true, "endpoint": true,
-	"handler": true, "route": true, "feature": true, "change": true,
-	"changes": true, "fix": true, "workaround": true, "hack": true,
-	"todo": true, "fixme": true, "typo": true, "log": true,
+	"config": true, "configs": true, "configuration": true,
+	"configurations": true, "endpoint": true, "endpoints": true,
+	"handler": true, "handlers": true, "route": true, "routes": true,
+	"feature": true, "features": true, "change": true, "changes": true,
+	"fix": true, "fixes": true, "workaround": true, "workarounds": true,
+	"hack": true, "hacks": true, "todo": true, "todos": true,
+	"fixme": true, "typo": true, "typos": true, "log": true,
 	"logs": true, "doc": true, "docs": true, "readme": true,
-	"ui": true, "cli": true, "api": true, "name": true,
-	"output": true, "message": true, "text": true, "style": true,
-	"color": true, "layout": true, "icon": true, "button": true,
-	"link": true, "version": true, "schema": true, "flag": true,
-	"option": true, "comment": true, "file": true, "format": true,
-	"variable": true, "function": true, "method": true, "class": true,
-	"module": true, "package": true, "import": true, "line": true,
-	"table": true, "page": true, "menu": true, "title": true,
-	"image": true, "url": true, "path": true, "directory": true,
-	"folder": true, "setting": true, "settings": true, "key": true,
-	"value": true, "header": true, "deps": true, "dependency": true,
+	"readmes": true, "ui": true, "cli": true, "api": true,
+	"apis": true, "name": true, "names": true, "output": true,
+	"outputs": true, "message": true, "messages": true, "text": true,
+	"texts": true, "style": true, "styles": true, "color": true,
+	"colors": true, "layout": true, "layouts": true, "icon": true,
+	"icons": true, "button": true, "buttons": true, "link": true,
+	"links": true, "version": true, "versions": true, "schema": true,
+	"schemas": true, "flag": true, "flags": true, "option": true,
+	"options": true, "comment": true, "comments": true, "file": true,
+	"files": true, "format": true, "formats": true, "variable": true,
+	"variables": true, "function": true, "functions": true,
+	"method": true, "methods": true, "class": true, "classes": true,
+	"module": true, "modules": true, "package": true, "packages": true,
+	"import": true, "imports": true, "line": true, "lines": true,
+	"table": true, "tables": true, "page": true, "pages": true,
+	"menu": true, "menus": true, "title": true, "titles": true,
+	"image": true, "images": true, "url": true, "urls": true,
+	"path": true, "paths": true, "directory": true, "directories": true,
+	"folder": true, "folders": true, "setting": true, "settings": true,
+	"key": true, "keys": true, "value": true, "values": true,
+	"header": true, "headers": true, "dep": true, "deps": true,
+	"dependency": true, "dependencies": true, "param": true,
+	"params": true, "field": true, "fields": true, "column": true,
+	"columns": true, "dialog": true, "dialogs": true, "font": true,
+	"fonts": true, "example": true, "examples": true,
 }
 
 // anaphoraRe matches the bare pronouns — the referent an open failure
@@ -209,8 +226,21 @@ var scopeResetRe = regexp.MustCompile(`(?i)\b(?:but|however|instead|then|while|w
 // scopeVerbResetRe marks the other reset class — a directive verb
 // restarts intent after a comma: "don't touch decoy/, fix main.go"
 // negates decoy only. A verb that is itself the negated predicate
-// ("do not fix main.go") is not a reset — see verbNegated.
-var scopeVerbResetRe = regexp.MustCompile(`(?i)\b(?:fix|change|update|edit|patch|implement|create|add|modify|handle|correct|repair|address|resolve|rework|rewrite|refactor|adjust|revert|build|rebuild|restore)\b`)
+// ("do not fix main.go") or a noun ("the test") is not a reset —
+// see directiveVerb.
+var scopeVerbResetRe = regexp.MustCompile(`(?i)\b(?:fix|change|update|edit|patch|implement|create|add|modify|handle|correct|repair|address|resolve|rework|rewrite|refactor|adjust|revert|build|rebuild|restore|run|test|check|verify|validate|retry|execute|start|restart|touch|keep|open|watch|use|make)\b`)
+
+// scopeDeterminers make the following word a noun phrase, not a
+// directive — "the test" in "don't touch the test in decoy/" is an
+// object, so it must not reset the negation and free decoy.
+var scopeDeterminers = map[string]bool{
+	"the": true, "a": true, "an": true, "this": true, "that": true,
+	"these": true, "those": true, "my": true, "your": true,
+	"our": true, "his": true, "her": true, "its": true, "their": true,
+}
+
+// lastWordRe captures the final word before a verb match.
+var lastWordRe = regexp.MustCompile(`(\w+)\s*$`)
 
 // cmdPathTokenRe matches command arguments that name a repo-relative
 // target: "./decoy", ".", "./...", "decoy/", "/abs/path".
@@ -226,12 +256,24 @@ func promptScope(prompt, workDir string) (pos, neg []string) {
 	for _, c := range splitClauses(prompt) {
 		rest := scopeSlashPathRe.ReplaceAllString(c, " ")
 		for _, loc := range scopeSlashPathRe.FindAllStringIndex(c, -1) {
-			if p := normScopePath(c[loc[0]:loc[1]]); p != "" && isScopePath(c[loc[0]:loc[1]], workDir) {
-				if cuePrecedes(c, loc[0]) {
-					neg = append(neg, p)
-				} else {
-					pos = append(pos, p)
-				}
+			tok := c[loc[0]:loc[1]]
+			p := normScopePath(tok)
+			if p == "" {
+				continue
+			}
+			negated := cuePrecedes(c, loc[0])
+			// A negated trailing-slash token mints without path
+			// evidence — "don't touch decoy/" is a veto, and a veto
+			// that names nothing harms nothing. Positive scope
+			// keeps the strict evidence bar.
+			if !isScopePath(tok, workDir) &&
+				!(negated && (strings.HasSuffix(tok, "/") || strings.HasSuffix(tok, "/."))) {
+				continue
+			}
+			if negated {
+				neg = append(neg, p)
+			} else {
+				pos = append(pos, p)
 			}
 		}
 		for _, loc := range scopeFileRe.FindAllStringIndex(rest, -1) {
@@ -277,26 +319,31 @@ func cuePrecedes(text string, offset int) bool {
 		lastReset = idx[len(idx)-1][1]
 	}
 	for _, v := range scopeVerbResetRe.FindAllStringIndex(prefix, -1) {
-		if v[1] > lastReset && !verbNegated(prefix, v[0]) {
+		if v[1] > lastReset && directiveVerb(prefix, v[0]) {
 			lastReset = v[1]
 		}
 	}
 	return lastNeg > lastReset
 }
 
-// verbNegated reports whether the verb at vstart is the negated
-// predicate itself — a negation cue ending immediately before it
-// (modulo whitespace). "do not fix main.go" negates the fix, so the
-// path stays negative; "don't touch decoy/, fix main.go" negates
-// touch, and fix is a fresh directive.
-func verbNegated(prefix string, vstart int) bool {
+// directiveVerb reports whether the verb at vstart starts a fresh
+// directive — it does not when a negation cue ends immediately before
+// it ("do not fix main.go" negates the fix, so the path stays
+// negative) or a determiner precedes it ("the fix" is a noun). In
+// "don't touch decoy/, fix main.go" the post-comma fix is a fresh
+// directive and resets.
+func directiveVerb(prefix string, vstart int) bool {
 	pre := strings.TrimRight(prefix[:vstart], " \t")
 	for _, m := range scopeNegationRe.FindAllStringIndex(pre, -1) {
 		if m[1] == len(pre) {
-			return true
+			return false
 		}
 	}
-	return false
+	if m := lastWordRe.FindStringSubmatch(pre); m != nil &&
+		scopeDeterminers[strings.ToLower(m[1])] {
+		return false
+	}
+	return true
 }
 
 // isScopePath gates slash-bearing tokens so idioms ("and/or",
@@ -318,8 +365,24 @@ func isScopePath(tok, workDir string) bool {
 		}
 		return false
 	}
-	if strings.HasSuffix(tok, "/") || strings.HasSuffix(tok, "/.") || strings.HasSuffix(tok, "/...") {
+	if strings.HasSuffix(tok, "/...") {
 		return true
+	}
+	if strings.HasSuffix(tok, "/") || strings.HasSuffix(tok, "/.") {
+		// A bare trailing slash is a weak signal — "w/" is English
+		// for "with", not a directory. It mints scope only with a
+		// second segment ("src/decoy/") or a disk hit; negated
+		// single-segment forms ("don't touch decoy/") mint via the
+		// veto exception in promptScope.
+		if strings.Count(tok, "/") >= 2 {
+			return true
+		}
+		if workDir != "" {
+			if _, err := os.Stat(filepath.Join(workDir, normScopePath(tok))); err == nil {
+				return true
+			}
+		}
+		return false
 	}
 	if strings.Count(tok, "/") >= 2 {
 		// Multi-slash idioms ("pass/fail/skip", "on/off/auto") are
@@ -483,7 +546,12 @@ var cmdValueFlags = map[string]bool{
 // "go test -count=1 ./decoy" → ["decoy"]; "go test ." → ["."]; a Go
 // recursive pattern sheds its "/..." tail to the parent dir ("go test
 // ./decoy/..." → "decoy"); a command with no path args returns nil —
-// its scope is its CWD.
+// its scope is its CWD. Quoted single-word args ("./decoy") unwrap.
+// Composite commands mint scope from every segment — "go test . &&
+// rm -rf decoy/" binds both "." and "decoy" — because cmdlog keeps no
+// per-segment argv; under negation that over-rejects, under explicit
+// scope it over-admits. Known distortion, same resolution limit the
+// ledger itself has.
 func cmdTargets(cmd string) []string {
 	var out []string
 	skipValue := false
@@ -492,6 +560,7 @@ func cmdTargets(cmd string) []string {
 			skipValue = false
 			continue
 		}
+		tok = strings.Trim(tok, `"'`)
 		if tok == "-args" {
 			// Everything after -args belongs to the test binary.
 			break
@@ -610,7 +679,12 @@ func failureTopLevel(f cmdlog.Failure, workDir string) bool {
 // non-failure noun never disqualifies a later failure noun. Nil
 // means no the-noun bound a kind: either the prompt names targets
 // failure memory cannot supply ("the config"), or it never mentions
-// failure at all.
+// failure at all. Asymmetry worth stating: "the server is broken"
+// rejects (the article claims a specific referent the hints can't
+// map) while "my server is broken" admits — only a bare anaphora
+// rescues an unrecognized the-noun, so the definite article is the
+// more restrictive construction unless the noun is a known
+// non-failure word, in which case even a pronoun can't rescue it.
 func referentKinds(prompt string) []string {
 	if !vagueReferentRe.MatchString(prompt) && !failureCueRe.MatchString(prompt) {
 		return nil
@@ -732,6 +806,8 @@ var selectorPromptReplacer = strings.NewReplacer(
 //   - Exclusion strength is asymmetric: a dir-form exclusion
 //     ("don't touch decoy/") always binds rows inside it, while a
 //     file-form exclusion yields to same-dir positive scope.
+//   - An empty prompt (attachment-only turns) binds nothing —
+//     referent_none, consistent fail-closed.
 func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string) ([]cmdlog.Failure, []FailureDecision) {
 	if len(failures) == 0 {
 		return nil, nil

@@ -103,8 +103,11 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	// candidates" versus "candidates rejected".
 	var openFailures []cmdlog.Failure
 	var failureDecisions []FailureDecision
+	var fetchErr error
 	if a.failureMemory && a.cmdlog != nil && !a.isSubAgent {
-		if f, err := a.cmdlog.ListOpenFailures(ctx, turnContextOpenFailuresLimit); err == nil {
+		var f []cmdlog.Failure
+		f, fetchErr = a.cmdlog.ListOpenFailures(ctx, turnContextOpenFailuresLimit)
+		if fetchErr == nil {
 			var workDir string
 			if a.configStore != nil {
 				workDir = a.configStore.WorkingDir()
@@ -112,7 +115,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 			openFailures, failureDecisions = selectOpenFailures(call.Prompt, f, workDir)
 		} else {
 			slog.Debug("Open-failure fetch failed; tail renders without memory",
-				"session_id", call.SessionID, "error", err)
+				"session_id", call.SessionID, "error", fetchErr)
 		}
 	}
 	sections := a.turnContextSections(ctx, call, openFailures)
@@ -127,7 +130,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		// predicate checkable. An unarmed agent still clears a stale
 		// audit from an earlier Run in the same process.
 		if a.tailArmed() {
-			a.recordTailAudit(call.SessionID, nil, "", failureDecisions)
+			a.recordTailAudit(call.SessionID, nil, "", failureDecisions, fetchErr)
 		} else if a.tailAudit != nil {
 			a.tailAudit.Del(call.SessionID)
 		}
@@ -139,7 +142,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		"sections", len(sections),
 		"bytes", len(text),
 	)
-	a.recordTailAudit(call.SessionID, sections, text, failureDecisions)
+	a.recordTailAudit(call.SessionID, sections, text, failureDecisions, fetchErr)
 	return []fantasy.Message{fantasy.NewUserMessage(text)}
 }
 
@@ -184,6 +187,10 @@ type TailAudit struct {
 	// for open_failures — every evaluated row, admitted or rejected
 	// with its reason. Empty when the selector saw no candidates.
 	Decisions []FailureDecision `json:"decisions,omitempty"`
+	// FetchError is set when ListOpenFailures itself failed — the
+	// empty Decisions then mean "couldn't evaluate", which an eval
+	// must not read as "evaluated, none bound".
+	FetchError string `json:"fetch_error,omitempty"`
 }
 
 var tailSectionNameRe = regexp.MustCompile(`^<(\w+)>`)
@@ -191,7 +198,7 @@ var tailSectionNameRe = regexp.MustCompile(`^<(\w+)>`)
 // recordTailAudit snapshots the rendered tail for SessionTelemetry.
 // Last-write-wins per session: a process's later Run replaces the
 // audit, matching the telemetry emission's once-per-process shape.
-func (a *sessionAgent) recordTailAudit(sessionID string, sections []string, text string, decisions []FailureDecision) {
+func (a *sessionAgent) recordTailAudit(sessionID string, sections []string, text string, decisions []FailureDecision, fetchErr error) {
 	if a.tailAudit == nil || sessionID == "" {
 		return
 	}
@@ -201,6 +208,9 @@ func (a *sessionAgent) recordTailAudit(sessionID string, sections []string, text
 		SHA256:    hex.EncodeToString(sum[:]),
 		Text:      text,
 		Decisions: decisions,
+	}
+	if fetchErr != nil {
+		audit.FetchError = fetchErr.Error()
 	}
 	for _, s := range sections {
 		name := "unknown"

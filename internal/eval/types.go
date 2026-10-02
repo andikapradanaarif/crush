@@ -413,6 +413,10 @@ type TurnTail struct {
 	// reason. Wire mirror of agent.FailureDecision; empty when the
 	// selector saw no candidates.
 	Decisions []FailureDecision `json:"decisions,omitempty"`
+	// FetchError mirrors TailAudit.FetchError — set when the
+	// open-failure read itself failed, so an empty Decisions reads
+	// "couldn't evaluate" rather than "evaluated, none bound".
+	FetchError string `json:"fetch_error,omitempty"`
 }
 
 // FailureDecision is the eval-side mirror of agent.FailureDecision:

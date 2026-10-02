@@ -118,6 +118,36 @@ func TestPromptScope(t *testing.T) {
 			prompt:  "fix decoy/...",
 			wantPos: []string{"decoy"},
 		},
+		{
+			// "w/" is English for "with" — a one-segment trailing
+			// slash must not flip the prompt to explicit scope.
+			name:    "w/ idiom mints no scope",
+			prompt:  "check w/ the team, then fix the tests",
+			wantPos: nil,
+			wantNeg: nil,
+		},
+		{
+			// A multi-segment trailing slash is still a path.
+			name:    "nested trailing slash mints scope",
+			prompt:  "fix src/decoy/",
+			wantPos: []string{"src/decoy"},
+		},
+		{
+			// "run" is a directive verb like "fix" — it restarts
+			// intent after the negated clause.
+			name:    "run resets negation scope",
+			prompt:  "don't touch decoy/, run main.go",
+			wantPos: []string{"main.go"},
+			wantNeg: []string{"decoy"},
+		},
+		{
+			// "the test" is a noun phrase — it must not reset the
+			// negation and free the excluded dir.
+			name:    "determiner keeps negation alive",
+			prompt:  "don't touch the test in decoy/",
+			wantPos: nil,
+			wantNeg: []string{"decoy"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -492,6 +522,42 @@ func TestSelectOpenFailures(t *testing.T) {
 			prompt:    "the `tests` are failing",
 			failures:  []cmdlog.Failure{mkFailure("go test .", ".", "main_test.go")},
 			wantAdmit: []string{"go test .@."},
+		},
+		{
+			// A quoted target binds like its unquoted twin — the
+			// row must not fall back to cwd scope and read as
+			// top-level.
+			name:       "quoted path target binds the real scope",
+			prompt:     promptAmbigTest,
+			failures:   []cmdlog.Failure{mkFailure(`go test "./decoy"`, ".")},
+			wantReason: map[string]string{`go test "./decoy"@.`: failNarrowScope},
+		},
+		{
+			name:       "plural non-failure noun rejects",
+			prompt:     "the typos — fix them",
+			failures:   []cmdlog.Failure{mkFailure("go test .", ".", "main_test.go")},
+			wantReason: map[string]string{"go test .@.": failReferentNone},
+		},
+		{
+			name:       "unknown the-noun without a pronoun rejects",
+			prompt:     "the server is broken",
+			failures:   []cmdlog.Failure{mkFailure("go test .", ".", "main_test.go")},
+			wantReason: map[string]string{"go test .@.": failReferentNone},
+		},
+		{
+			name:      "possessive noun still admits",
+			prompt:    "my server is broken",
+			failures:  []cmdlog.Failure{mkFailure("go test .", ".", "main_test.go")},
+			wantAdmit: []string{"go test .@."},
+		},
+		{
+			// "w/" minted explicit scope before the disk/segment
+			// gate — under ambiguity the decoy row should read
+			// narrow_scope, not out_of_scope.
+			name:       "w/ idiom does not flip to explicit scope",
+			prompt:     "check w/ the team — the test is failing",
+			failures:   []cmdlog.Failure{mkFailure("go test ./decoy", ".")},
+			wantReason: map[string]string{"go test ./decoy@.": failNarrowScope},
 		},
 	}
 	for _, tc := range tests {

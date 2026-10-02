@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,6 +71,18 @@ func listOpenFailures(t *testing.T, env fakeEnv) []cmdlog.Failure {
 	f, err := env.cmdlog.ListOpenFailures(t.Context(), turnContextOpenFailuresLimit)
 	require.NoError(t, err)
 	return f
+}
+
+// failingCmdlog errors on the open-failure read so the tail exercises
+// the "couldn't evaluate" path.
+type failingCmdlog struct{}
+
+func (failingCmdlog) RecordRun(context.Context, cmdlog.Run) {}
+func (failingCmdlog) ListCommands(context.Context, int) ([]cmdlog.Command, error) {
+	return nil, nil
+}
+func (failingCmdlog) ListOpenFailures(context.Context, int) ([]cmdlog.Failure, error) {
+	return nil, errors.New("cmdlog unavailable")
 }
 
 func userMsg(text string) message.Message {
@@ -558,6 +572,21 @@ func TestTurnTailAudit(t *testing.T) {
 		audit, ok = a.tailAudit.Get(sessionID)
 		require.True(t, ok)
 		require.Zero(t, audit.Bytes)
+	})
+
+	t.Run("a fetch error records on the audit", func(t *testing.T) {
+		t.Parallel()
+		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.tailAudit = csync.NewMap[string, TailAudit]()
+		a.failureMemory = true
+		// A fetch error must read as "couldn't evaluate", not
+		// "evaluated, zero candidates".
+		a.cmdlog = failingCmdlog{}
+		require.Empty(t, a.turnTailMessages(t.Context(), SessionAgentCall{SessionID: sessionID}, nil))
+		audit, ok := a.tailAudit.Get(sessionID)
+		require.True(t, ok)
+		require.NotEmpty(t, audit.FetchError)
+		require.Empty(t, audit.Decisions)
 	})
 
 	t.Run("a sub-agent is never armed", func(t *testing.T) {
