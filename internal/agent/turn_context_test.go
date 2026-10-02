@@ -176,10 +176,14 @@ func TestAmbiguityDirective(t *testing.T) {
 			CWD: env.workingDir, Stdout: "FAIL", ExitCode: 1, Ran: true,
 		})
 		// "the config" names a target failure memory cannot supply —
-		// the stale row must not disarm clarification.
+		// the selector rejects the row, and an all-rejected set must
+		// not disarm clarification.
+		admitted, _ := selectOpenFailures("update the config",
+			listOpenFailures(t, env), env.workingDir)
+		require.Empty(t, admitted)
 		require.NotEmpty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "update the config",
-		}, nil, listOpenFailures(t, env)))
+		}, nil, admitted))
 	})
 
 	t.Run("a bare anaphora suppresses the gate", func(t *testing.T) {
@@ -474,7 +478,11 @@ func TestTurnTailAudit(t *testing.T) {
 			SessionID: "prior", Command: "make test",
 			CWD: env.workingDir, Stdout: "FAIL", ExitCode: 1, Ran: true,
 		})
-		tail := a.turnTailMessages(t.Context(), SessionAgentCall{SessionID: sessionID}, nil)
+		// The selector binds the test-kind row to the failure-shaped
+		// referent — an unrelated prompt would render nothing.
+		tail := a.turnTailMessages(t.Context(), SessionAgentCall{
+			SessionID: sessionID, Prompt: "the test fails — fix it",
+		}, nil)
 		require.Len(t, tail, 1)
 		text := tail[0].Content[0].(fantasy.TextPart).Text
 
@@ -500,7 +508,9 @@ func TestTurnTailAudit(t *testing.T) {
 			SessionID: "prior", Command: "make test",
 			CWD: env.workingDir, Stdout: "FAIL", ExitCode: 1, Ran: true,
 		})
-		require.Len(t, a.turnTailMessages(t.Context(), SessionAgentCall{SessionID: sessionID}, nil), 1)
+		require.Len(t, a.turnTailMessages(t.Context(), SessionAgentCall{
+			SessionID: sessionID, Prompt: "the test fails — fix it",
+		}, nil), 1)
 
 		audit, ok := a.tailAudit.Get(sessionID)
 		require.True(t, ok)

@@ -59,29 +59,10 @@ var vagueReferentRe = regexp.MustCompile(`(?i)\b(it|its|this|that|them|they)\b|`
 	`\bthe\s+(bug|bugfix|crash|error|errors|failure|fail|issue|problem|panic|regression|leak|typo|warnings?|` +
 	`config|configuration|test|spec|endpoint|handler|route|feature|changes?|fix|workaround|hack|todo|fixme)\b`)
 
-// failureReferentNouns are the "the N" referents an open failure can
-// be the target of — the failing test, the crash, the regression. A
-// vague prompt naming any other noun ("the config", "the endpoint")
-// refers to something failure memory cannot supply.
-var failureReferentNouns = map[string]bool{
-	"bug": true, "bugfix": true, "crash": true, "error": true,
-	"errors": true, "failure": true, "fail": true, "panic": true,
-	"regression": true, "leak": true, "issue": true, "problem": true,
-	"test": true, "spec": true, "warning": true, "warnings": true,
-}
-
+// theNounRe extracts the definite-article noun for referent shape
+// checks — "the test" → "test". The task-binding selector maps it to
+// command kinds via referentKindHints.
 var theNounRe = regexp.MustCompile(`(?i)\bthe\s+(\w+)\b`)
-
-// vagueReferentIsFailureShaped reports whether the prompt's referent
-// could point at an open failure: an explicit "the <failure-noun>",
-// or a bare anaphora ("fix it", "this crashes") — with no noun the
-// failing thing is a plausible referent.
-func vagueReferentIsFailureShaped(prompt string) bool {
-	if m := theNounRe.FindStringSubmatch(prompt); m != nil {
-		return failureReferentNouns[strings.ToLower(m[1])]
-	}
-	return true
-}
 
 // isVaguePrompt reports whether the prompt is underspecified in the way
 // the pre-filter cares about: short enough to carry no context of its
@@ -113,11 +94,19 @@ func isVaguePrompt(prompt string) bool {
 // survives every provider.
 func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCall, msgs []message.Message) []fantasy.Message {
 	// Open failures are fetched once per Run — the tail blob renders
-	// them and the ambiguity gate reads the same slice.
+	// the subset the task-binding selector admits and the ambiguity
+	// gate reads the same slice. The decision list records every
+	// candidate's verdict so "rendered nothing" decomposes into "no
+	// candidates" versus "candidates rejected".
 	var openFailures []cmdlog.Failure
+	var failureDecisions []FailureDecision
 	if a.failureMemory && a.cmdlog != nil {
 		if f, err := a.cmdlog.ListOpenFailures(ctx, turnContextOpenFailuresLimit); err == nil {
-			openFailures = f
+			var workDir string
+			if a.configStore != nil {
+				workDir = a.configStore.WorkingDir()
+			}
+			openFailures, failureDecisions = selectOpenFailures(call.Prompt, f, workDir)
 		}
 	}
 	sections := a.turnContextSections(ctx, call, openFailures)
@@ -132,7 +121,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		// predicate checkable. An unarmed agent still clears a stale
 		// audit from an earlier Run in the same process.
 		if a.tailArmed() {
-			a.recordTailAudit(call.SessionID, nil, "")
+			a.recordTailAudit(call.SessionID, nil, "", failureDecisions)
 		} else if a.tailAudit != nil {
 			a.tailAudit.Del(call.SessionID)
 		}
@@ -144,7 +133,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		"sections", len(sections),
 		"bytes", len(text),
 	)
-	a.recordTailAudit(call.SessionID, sections, text)
+	a.recordTailAudit(call.SessionID, sections, text, failureDecisions)
 	return []fantasy.Message{fantasy.NewUserMessage(text)}
 }
 
@@ -185,6 +174,10 @@ type TailAudit struct {
 	Bytes    int           `json:"bytes"`
 	SHA256   string        `json:"sha256"`
 	Text     string        `json:"text"`
+	// Decisions is the task-binding selector's per-candidate verdict
+	// for open_failures — every evaluated row, admitted or rejected
+	// with its reason. Empty when the selector saw no candidates.
+	Decisions []FailureDecision `json:"decisions,omitempty"`
 }
 
 var tailSectionNameRe = regexp.MustCompile(`^<(\w+)>`)
@@ -192,15 +185,16 @@ var tailSectionNameRe = regexp.MustCompile(`^<(\w+)>`)
 // recordTailAudit snapshots the rendered tail for SessionTelemetry.
 // Last-write-wins per session: a process's later Run replaces the
 // audit, matching the telemetry emission's once-per-process shape.
-func (a *sessionAgent) recordTailAudit(sessionID string, sections []string, text string) {
+func (a *sessionAgent) recordTailAudit(sessionID string, sections []string, text string, decisions []FailureDecision) {
 	if a.tailAudit == nil || sessionID == "" {
 		return
 	}
 	sum := sha256.Sum256([]byte(text))
 	audit := TailAudit{
-		Bytes:  len(text),
-		SHA256: hex.EncodeToString(sum[:]),
-		Text:   text,
+		Bytes:     len(text),
+		SHA256:    hex.EncodeToString(sum[:]),
+		Text:      text,
+		Decisions: decisions,
 	}
 	for _, s := range sections {
 		name := "unknown"
@@ -468,11 +462,13 @@ func (a *sessionAgent) ambiguityDirective(ctx context.Context, call SessionAgent
 			return ""
 		}
 	}
-	// An open failure is itself the likely referent — but only for a
-	// failure-shaped referent or bare anaphora. "Fix the config"
-	// names a target the memory cannot supply: suppressing there
-	// would disarm the gate for the life of the row.
-	if a.failureMemory && len(openFailures) > 0 && vagueReferentIsFailureShaped(call.Prompt) {
+	// An admitted open failure is itself the likely referent — the
+	// selector only admits candidates bound to a failure-shaped
+	// referent or an explicit path scope, so presence here already
+	// implies shape. An all-rejected set must NOT suppress: those
+	// candidates could not be bound, and the gate's declare-scope
+	// path is exactly what the prompt needs.
+	if a.failureMemory && len(openFailures) > 0 {
 		return ""
 	}
 	if a.interactive && a.hasTool(tools.QuestionToolName) {

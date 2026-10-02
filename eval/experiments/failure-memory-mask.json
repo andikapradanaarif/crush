@@ -3,18 +3,10 @@
 	"model": "alibaba-tp/deepseek-v4.1-flash",
 	"temperature": 0,
 	"corpus": [
-		"mask-build-break",
-		"mask-fix-failing-test",
-		"mask-ft-explicit-decoy",
 		"mask-ft-explicit-correct",
 		"mask-ft-ambig-correct",
-		"mask-ft-ambig-stale",
-		"mask-ft-ambig-placebo",
-		"mask-bb-explicit-decoy",
 		"mask-bb-explicit-correct",
-		"mask-bb-ambig-correct",
-		"mask-bb-ambig-stale",
-		"mask-bb-ambig-placebo"
+		"mask-bb-ambig-correct"
 	],
 	"runs_per_trajectory": {
 		"stable": 3,
@@ -43,7 +35,8 @@
 				}
 			},
 			"coverage": {
-				"min_tail.sections.open_failures": 1
+				"min_tail.sections.open_failures": 1,
+				"min_tail.decisions.admitted": 1
 			}
 		}
 	},

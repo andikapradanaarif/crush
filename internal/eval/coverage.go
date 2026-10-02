@@ -170,6 +170,17 @@ var armOnlyCoverageFields = map[string]func(*RunRecord) float64{
 	"tail.sections.open_failures":  func(r *RunRecord) float64 { return tailSectionTurns(r, "open_failures") },
 	"tail.sections.turn_context":   func(r *RunRecord) float64 { return tailSectionTurns(r, "turn_context") },
 	"tail.sections.ambiguity_gate": func(r *RunRecord) float64 { return tailSectionTurns(r, "ambiguity_gate") },
+	// tail.decisions.* counts the failure-memory selector's
+	// per-candidate verdicts across turns — candidates is every row
+	// the selector evaluated, admitted those it rendered. Together
+	// they distinguish the three selector outcomes a cell can
+	// assert: min candidates+min admitted = injection happened,
+	// min candidates+max admitted:0 = candidates existed and were
+	// all rejected, max candidates:0 = nothing to select.
+	// Decision rows only exist when failure_memory is on, so these
+	// are arm-scoped like the sections they precede.
+	"tail.decisions.candidates": func(r *RunRecord) float64 { return tailDecisions(r, "") },
+	"tail.decisions.admitted":   func(r *RunRecord) float64 { return tailDecisions(r, "admitted") },
 }
 
 // armFields is the arm-coverage grammar: every trajectory-coverage
@@ -225,6 +236,21 @@ func tailSectionTurns(r *RunRecord, name string) float64 {
 			if s.Name == name {
 				n++
 				break
+			}
+		}
+	}
+	return float64(n)
+}
+
+// tailDecisions counts the failure-memory selector's decision rows
+// across the run's tail audits — "" counts every candidate the
+// selector evaluated, "admitted" only those that rendered.
+func tailDecisions(r *RunRecord, which string) float64 {
+	n := 0
+	for _, t := range r.Tail {
+		for _, d := range t.Decisions {
+			if which == "" || d.Admit == (which == "admitted") {
+				n++
 			}
 		}
 	}

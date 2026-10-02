@@ -27,7 +27,8 @@
 				}
 			},
 			"coverage": {
-				"max_tail.sections.open_failures": 0
+				"max_tail.sections.open_failures": 0,
+				"max_tail.decisions.candidates": 0
 			}
 		}
 	},
