@@ -45,33 +45,46 @@ const (
 	failStaleSuspect = "stale_suspect" // an implicated path changed after last_seen
 )
 
+// verificationKinds are the command kinds a failure referent can
+// name — a run row joins them because a crashed program is a verdict
+// too ("it panics" describes go run, not go test). "other" never
+// binds under ambiguity: a failed ls/git/rm is not what "the bug"
+// points at.
+var verificationKinds = []string{"test", "build", "lint", "run"}
+
 // referentKindHints maps "the <noun>" referents to the command kinds
 // a plausible failure must have. Failure memory can only be the
-// referent of a verification-flavored complaint.
+// referent of a verification-flavored complaint. Generic failure
+// nouns span every verdict kind — "the crash" can live in a run row —
+// while kind-naming nouns ("the build") stay specific.
 var referentKindHints = map[string][]string{
-	"test": {"test"}, "tests": {"test"}, "spec": {"test"},
+	"test": {"test"}, "tests": {"test"}, "spec": {"test"}, "specs": {"test"},
 	"build": {"build"}, "compile": {"build"}, "compilation": {"build"},
-	"lint": {"lint"}, "vet": {"lint"}, "warning": {"lint"}, "warnings": {"lint"},
-	"bug": {"test", "build", "lint"}, "bugfix": {"test", "build", "lint"},
-	"crash": {"test", "build", "lint"}, "error": {"test", "build", "lint"},
-	"errors": {"test", "build", "lint"}, "failure": {"test", "build", "lint"},
-	"fail": {"test", "build", "lint"}, "panic": {"test", "build", "lint"},
-	"regression": {"test", "build", "lint"}, "leak": {"test", "build", "lint"},
-	"issue": {"test", "build", "lint"}, "problem": {"test", "build", "lint"},
+	"lint": {"lint"}, "vet": {"lint"}, "linter": {"lint"},
+	"typecheck": {"lint"}, "warning": {"lint"}, "warnings": {"lint"},
+	"ci":  {"test", "build", "lint"},
+	"bug": verificationKinds, "bugfix": verificationKinds,
+	"crash": verificationKinds, "error": verificationKinds,
+	"errors": verificationKinds, "failure": verificationKinds,
+	"fail": verificationKinds, "panic": verificationKinds,
+	"regression": verificationKinds, "leak": verificationKinds,
+	"issue": verificationKinds, "problem": verificationKinds,
+	"hang": verificationKinds, "deadlock": verificationKinds,
 }
 
 // bareReferentKinds applies when the prompt leans on a bare anaphora
 // ("fix it", "this is broken") or a failure cue with no noun — an
-// ambiguous "fix it" admits test/build/lint rows but never a failed
+// ambiguous "fix it" admits any verdict-kind row but never a failed
 // ls or deploy; those bind only under explicit scope.
-var bareReferentKinds = []string{"test", "build", "lint"}
+var bareReferentKinds = verificationKinds
 
 // failureCueRe matches failure vocabulary without a definite article
 // — "tests are red", "build fails" — so an ambiguous prompt that
 // mentions failure at all can bind, while an unrelated request
 // ("add a README") rejects every candidate.
-var failureCueRe = regexp.MustCompile(`(?i)\b(?:fails?|failed|failing|failure|broke|broken|` +
-	`crash(?:es|ed|ing)?|panic(?:s|ked|king)?|regress(?:ed|es|ing|ion)?|red|errors?|erroring|flaky)\b`)
+var failureCueRe = regexp.MustCompile(`(?i)\b(?:fails?|failed|failing|failure|broke|broken|breaks|` +
+	`crash(?:es|ed|ing)?|panic(?:s|ked|king)?|regress(?:ed|es|ing|ion)?|red|errors?|erroring|` +
+	`flaky|dies|hangs?|deadlocks?)\b`)
 
 // scopeSlashPathRe matches tokens containing a path separator —
 // "decoy/foo.go", "./decoy", "src/pkg/". Matched candidates are gated
@@ -160,7 +173,17 @@ func isScopePath(tok, workDir string) bool {
 		return false
 	}
 	if strings.Count(tok, "/") >= 2 {
-		return true
+		// Multi-slash idioms ("pass/fail/skip", "on/off/auto") are
+		// enumerations, not paths — a token whose every segment is
+		// an idiom word names options, not directories.
+		allIdioms := true
+		for _, s := range strings.Split(strings.TrimSuffix(tok, "/"), "/") {
+			if !scopeIdiomWords[s] {
+				allIdioms = false
+				break
+			}
+		}
+		return !allIdioms
 	}
 	last := tok[strings.LastIndexByte(tok, '/')+1:]
 	if scopeFileRe.MatchString(last) && !strings.Contains(last, "/") {
@@ -198,9 +221,23 @@ func splitClauses(prompt string) []string {
 // normScopePath reduces a matched path to a comparable form: "./x" →
 // "x", "decoy/" → "decoy", "decoy/." → "decoy". Returns "" for bare
 // "." or "./..." — root references are universal scope, not a named
-// constraint.
+// constraint — and for paths that climb above the root: "../sibling"
+// has no expressible repo scope and must not collapse into one.
 func normScopePath(p string) string {
 	p = strings.Trim(p, `"'`+"`")
+	depth := 0
+	for seg := range strings.SplitSeq(p, "/") {
+		switch seg {
+		case "..":
+			depth--
+		case "", ".":
+		default:
+			depth++
+		}
+		if depth < 0 {
+			return ""
+		}
+	}
 	p = path.Clean("/" + p)
 	p = strings.TrimPrefix(p, "/")
 	if p == "." || p == "..." || p == "" {
@@ -235,22 +272,46 @@ func pathsOverlap(dir, p string) bool {
 	return dir == p || strings.HasPrefix(dir, p+"/")
 }
 
+// scopeIdiomWords are the enumeration words multi-slash idioms draw
+// from — kept narrow on purpose: "src/api/v2" is a path because "src"
+// isn't here, while "pass/fail/skip" is an enumeration because every
+// segment is.
+var scopeIdiomWords = map[string]bool{
+	"and": true, "or": true, "pass": true, "fail": true, "skip": true,
+	"read": true, "write": true, "input": true, "output": true,
+	"yes": true, "no": true, "true": true, "false": true,
+	"on": true, "off": true, "in": true, "out": true, "up": true,
+	"down": true, "left": true, "right": true, "enable": true,
+	"disable": true, "none": true, "all": true, "auto": true,
+}
+
 // dirWithinNegated is the directional version for exclusions: a
 // candidate is bound to an excluded path when its scope sits inside
 // it ("go test ./decoy" inside "do not touch decoy"), NOT when it
 // merely covers it — a root-scope command covers every excluded path
-// without being bound to it.
-func dirWithinNegated(dir, p string) bool {
+// without being bound to it. A file-form exclusion ("don't touch
+// decoy/gen.go") binds rows scoped to the file's directory, but
+// yields when the same dir is positively scoped — "don't touch
+// decoy/gen.go but fix decoy/handler.go" is resolved by the positive
+// half, not vetoed by the negative.
+func dirWithinNegated(dir, p string, pos []string) bool {
 	p = strings.TrimSuffix(p, "/")
 	if dir == p || strings.HasPrefix(dir, p+"/") {
 		return true
 	}
-	// An excluded file binds rows scoped to its own directory —
-	// "do not touch decoy/x.go" still rejects the decoy package row.
-	if d := path.Dir(p); d != "." && (dir == d || strings.HasPrefix(dir, d+"/")) {
-		return true
+	if !scopeFileRe.MatchString(path.Base(p)) {
+		return false
 	}
-	return false
+	d := path.Dir(p)
+	if d == "." || (dir != d && !strings.HasPrefix(dir, d+"/")) {
+		return false
+	}
+	for _, q := range pos {
+		if pathsOverlap(d, q) {
+			return false
+		}
+	}
+	return true
 }
 
 // cmdTargets extracts the command's repo-relative target args.
@@ -275,10 +336,11 @@ func cmdTargets(cmd string) []string {
 	return out
 }
 
-// relCWD normalizes a recorded CWD against the working directory —
-// rows store absolute cwds and "top-level" means the workdir itself.
-// A cwd outside the workdir stays non-root: it cannot bind to repo
-// scope.
+// relCWD normalizes a recorded CWD to workspace-relative form — rows
+// store workspace-relative cwds already ("." for root), so the
+// filepath.Rel call only fires for legacy absolute values; "top-level"
+// means the workdir itself. A cwd outside the workdir stays non-root:
+// it cannot bind to repo scope.
 func relCWD(cwd, workDir string) string {
 	if cwd == "" || cwd == "." {
 		return "."
@@ -297,36 +359,64 @@ func relCWD(cwd, workDir string) string {
 	return cwd
 }
 
+// resolveTarget maps one command target to the row's binding dir.
+// Relative targets resolve against the recorded CWD — "cd decoy &&
+// go test ." is decoy-scoped, not root-scoped; a "." that fell out of
+// "./..." or "." is only root when the CWD is root. An absolute target
+// inside the workdir relativizes; one outside stays absolute and can
+// never bind repo scope.
+func resolveTarget(target, cwd, workDir string) string {
+	if filepath.IsAbs(target) {
+		if workDir != "" {
+			if rel, err := filepath.Rel(workDir, target); err == nil &&
+				rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return rel
+			}
+		}
+		return target
+	}
+	return path.Join(cwd, target)
+}
+
 // failureDirs is the candidate's binding scope: the dirs its command
-// targets plus the dirs its implicated files live in. File hints are
-// stored workspace-relative, so they join scope unmodified. CWD joins
-// only when nothing narrower identifies scope — a command run from
-// root that names decoy/ is decoy-scoped, not root-scoped.
+// targets resolve to (against its CWD) plus the dirs its implicated
+// files live in. File hints are stored workspace-relative, so they
+// join scope unmodified. CWD stands alone only when nothing narrower
+// identifies scope — a command run from root that names decoy/ is
+// decoy-scoped, not root-scoped.
 func failureDirs(f cmdlog.Failure, workDir string) []string {
+	cwd := relCWD(f.CWD, workDir)
 	var dirs []string
 	for _, t := range cmdTargets(f.Cmd) {
-		dirs = append(dirs, t)
+		dirs = append(dirs, resolveTarget(t, cwd, workDir))
 	}
 	for _, file := range f.Files {
 		dirs = append(dirs, path.Dir(file))
 	}
 	if len(dirs) == 0 {
-		return []string{relCWD(f.CWD, workDir)}
+		return []string{cwd}
 	}
 	return dedupeScope(dirs)
 }
 
 // failureTopLevel reports whether the candidate's command runs at
-// project scope — a root target (".", "./...") or no path args at all
-// with a root CWD. A subpath-bound row under an ambiguous prompt is a
+// project scope — a target resolving to the workdir root (".", "./..."
+// at root, or "." under a root CWD) or no path args at all with a root
+// CWD. A subpath-bound row under an ambiguous prompt is a
 // wrong-referent risk: it anchors the agent to a corner while the
 // declared referent usually lives at top scope.
 func failureTopLevel(f cmdlog.Failure, workDir string) bool {
+	cwd := relCWD(f.CWD, workDir)
 	targets := cmdTargets(f.Cmd)
 	if len(targets) == 0 {
-		return relCWD(f.CWD, workDir) == "."
+		return cwd == "."
 	}
-	return slices.Contains(targets, ".")
+	for _, t := range targets {
+		if resolveTarget(t, cwd, workDir) == "." {
+			return true
+		}
+	}
+	return false
 }
 
 // referentKinds resolves the ambiguous prompt's referents to the
@@ -374,19 +464,20 @@ func nextWord(s string) string {
 }
 
 // failurePaths maps the candidate's implicated files to plausible
-// workdir paths. Captured hints are output-relative, which can mean
-// repo-relative or package-relative — both joins are tried so a file
-// like "decoy_test.go" from "go test ./decoy" still finds
-// "decoy/decoy_test.go".
+// workdir paths. Captured hints are stored workspace-relative, but
+// rows written before that normalization — or hints that were only
+// package-relative — still resolve when tried under the run's CWD and
+// each resolved target dir, so all joins are probed.
 func failurePaths(f cmdlog.Failure, workDir string) []string {
 	var out []string
 	var bases []string
-	if cwd := relCWD(f.CWD, workDir); cwd != "." {
+	cwd := relCWD(f.CWD, workDir)
+	if cwd != "." {
 		bases = append(bases, cwd)
 	}
 	for _, t := range cmdTargets(f.Cmd) {
 		if t != "." {
-			bases = append(bases, t)
+			bases = append(bases, resolveTarget(t, cwd, workDir))
 		}
 	}
 	bases = append(bases, "")
@@ -396,6 +487,10 @@ func failurePaths(f cmdlog.Failure, workDir string) []string {
 			continue
 		}
 		for _, b := range bases {
+			if filepath.IsAbs(b) {
+				out = append(out, filepath.Join(b, file))
+				continue
+			}
 			out = append(out, filepath.Join(workDir, b, file))
 		}
 	}
@@ -445,20 +540,24 @@ func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string
 		kind := toolclass.CommandKind(f.Cmd)
 
 		switch {
-		case negatedByAny(dirs, neg):
+		case negatedByAny(dirs, neg, pos):
 			reason = failNegatedScope
 		case explicit && !overlapsAny(dirs, pos):
 			reason = failOutOfScope
-		case explicit && kind != "test" && kind != "build" && kind != "lint":
-			// Explicit scope still requires a verification-flavored
-			// row — a failed ls/git/curl at root must not inject into
-			// an unrelated "fix main.go".
+		case explicit && !slices.Contains(verificationKinds, kind):
+			// Explicit scope still requires a verdict-flavored row —
+			// a failed ls/git/curl at root must not inject into an
+			// unrelated "fix main.go".
 			reason = failKindMismatch
 		case !explicit && kinds == nil:
 			reason = failReferentNone
 		case !explicit && !slices.Contains(kinds, kind):
 			reason = failKindMismatch
-		case !explicit && !failureTopLevel(f, workDir):
+		case !explicit && kind != "run" && !failureTopLevel(f, workDir):
+			// A run row's subdir target names the binary's package,
+			// not the failure's scope — the panic can live anywhere
+			// in its call graph — so narrow_scope is a verification-
+			// kind rule only.
 			reason = failNarrowScope
 		case allPathsGone(f, workDir):
 			reason = failPathGone
@@ -486,10 +585,10 @@ func overlapsAny(dirs, paths []string) bool {
 	return false
 }
 
-func negatedByAny(dirs, paths []string) bool {
+func negatedByAny(dirs, neg, pos []string) bool {
 	for _, d := range dirs {
-		for _, p := range paths {
-			if dirWithinNegated(d, p) {
+		for _, p := range neg {
+			if dirWithinNegated(d, p, pos) {
 				return true
 			}
 		}

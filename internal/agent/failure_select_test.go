@@ -89,6 +89,14 @@ func TestPromptScope(t *testing.T) {
 			wantPos: nil,
 			wantNeg: nil,
 		},
+		{
+			// "../sibling" escapes the repo — it must not collapse
+			// into a repo-relative "sibling" scope.
+			name:    "parent escape mints no scope",
+			prompt:  "fix ../sibling/x.go",
+			wantPos: nil,
+			wantNeg: nil,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -218,6 +226,45 @@ func TestSelectOpenFailures(t *testing.T) {
 			wantReason: map[string]string{"go test@sub/pkg": failNarrowScope},
 		},
 		{
+			// A "." target resolves against the row's CWD, not the
+			// repo root — "cd decoy && go test ." (or working_dir)
+			// records cwd=decoy and must not read as top-level.
+			name:       "dot target under subdir cwd is narrow under ambiguity",
+			prompt:     promptAmbigTest,
+			failures:   []cmdlog.Failure{mkFailure("go test .", "decoy", "decoy/decoy_test.go")},
+			wantReason: map[string]string{"go test .@decoy": failNarrowScope},
+		},
+		{
+			name:       "dot target under subdir cwd misses explicit root scope",
+			prompt:     "fix the nil pointer in main.go",
+			failures:   []cmdlog.Failure{mkFailure("go test .", "decoy", "decoy/decoy_test.go")},
+			wantReason: map[string]string{"go test .@decoy": failOutOfScope},
+		},
+		{
+			// "...-style spread under a subdir CWD is still subdir
+			// scope — "./..." means every package under the CWD.
+			name:       "dotdotdot under subdir cwd is narrow under ambiguity",
+			prompt:     promptAmbigTest,
+			failures:   []cmdlog.Failure{mkFailure("go test ./...", "decoy")},
+			wantReason: map[string]string{"go test ./...@decoy": failNarrowScope},
+		},
+		{
+			// A relative target joins the recorded CWD: "cd decoy &&
+			// go test ./sub" fails in decoy/sub.
+			name:      "relative target resolves against cwd",
+			prompt:    "fix decoy/sub/x.go",
+			failures:  []cmdlog.Failure{mkFailure("go test ./sub", "decoy")},
+			wantAdmit: []string{"go test ./sub@decoy"},
+		},
+		{
+			// ".." targets climb out of the CWD — "cd decoy && go
+			// test ../pkg" binds the sibling's scope.
+			name:      "parent-relative target resolves against cwd",
+			prompt:    "fix pkg/x.go",
+			failures:  []cmdlog.Failure{mkFailure("go test ../pkg", "decoy")},
+			wantAdmit: []string{"go test ../pkg@decoy"},
+		},
+		{
 			name:       "explicit scope misses unrelated failure",
 			prompt:     "fix the nil pointer in main.go",
 			failures:   []cmdlog.Failure{mkFailure("pytest tests/api", ".", "tests/api/x_test.py")},
@@ -260,6 +307,60 @@ func TestSelectOpenFailures(t *testing.T) {
 			prompt:    "fix pkg/x_test.go",
 			failures:  []cmdlog.Failure{mkFailure("go test", "pkg", "pkg/x_test.go")},
 			wantAdmit: []string{"go test@pkg"},
+		},
+		{
+			// `cd decoy && go test .` folds to cwd=decoy — "." is the
+			// command's dir, not repo root. Under ambiguity that is
+			// a subpath-bound row: the mask-anchoring shape itself.
+			name:       "dot target under a folded cwd is subpath scope",
+			prompt:     promptAmbigTest,
+			failures:   []cmdlog.Failure{mkFailure("go test .", "decoy")},
+			wantReason: map[string]string{"go test .@decoy": failNarrowScope},
+		},
+		{
+			name:       "dot target under a folded cwd misses explicit root scope",
+			prompt:     "fix the nil pointer in main.go",
+			failures:   []cmdlog.Failure{mkFailure("go test .", "decoy")},
+			wantReason: map[string]string{"go test .@decoy": failOutOfScope},
+		},
+		{
+			name:      "relative target resolves under the row's cwd",
+			prompt:    "fix decoy/sub/x.go",
+			failures:  []cmdlog.Failure{mkFailure("go test ./sub", "decoy")},
+			wantAdmit: []string{"go test ./sub@decoy"},
+		},
+		{
+			// A crashed program is the referent of "it panics" — run
+			// rows bind, and a subdir binary target is the program's
+			// location, not a narrow verification scope.
+			name:      "run-kind row binds a crash referent",
+			prompt:    "it panics — fix it",
+			failures:  []cmdlog.Failure{mkFailure("go run ./cmd/tool", ".")},
+			wantAdmit: []string{"go run ./cmd/tool@."},
+		},
+		{
+			name:      "root run row binds a crash cue",
+			prompt:    "it crashes when I run it — fix it",
+			failures:  []cmdlog.Failure{mkFailure("go run .", ".")},
+			wantAdmit: []string{"go run .@."},
+		},
+		{
+			name:       "escaping path is not repo scope",
+			prompt:     "fix ../sibling/x.go",
+			failures:   []cmdlog.Failure{mkFailure("go test .", ".", "main_test.go")},
+			wantReason: map[string]string{"go test .@.": failReferentNone},
+		},
+		{
+			name:      "file exclusion yields to a positive scope in its dir",
+			prompt:    "don't touch decoy/gen.go but fix decoy/handler.go",
+			failures:  []cmdlog.Failure{mkFailure("go test ./decoy", ".")},
+			wantAdmit: []string{"go test ./decoy@."},
+		},
+		{
+			name:       "file exclusion vetoes without positive scope in its dir",
+			prompt:     "fix main.go — don't touch decoy/gen.go",
+			failures:   []cmdlog.Failure{mkFailure("go test ./decoy", ".")},
+			wantReason: map[string]string{"go test ./decoy@.": failNegatedScope},
 		},
 	}
 	for _, tc := range tests {
