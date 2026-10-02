@@ -1,0 +1,18 @@
+{
+	"id": "mask-ft-ambig-placebo",
+	"schema_version": 1,
+	"origin": {"kind": "synthetic"},
+	"start_state": {"kind": "fixture", "fixture_dir": "../mask-fix-failing-test/fixture"},
+	"prior_sessions": [{"turns":["run `ls vendor` as a single bare command — report whether the directory exists — do not modify any files"]}],
+	"task": {
+		"turns": ["the test fails — fix it"]
+	},
+	"check": {
+		"script": "../mask-fix-failing-test/check.sh",
+		"expect_start_state": "fail",
+		"timeout_seconds": 300
+	},
+	"coverage": {"min_steps": 1, "min_warm_start.sessions": 1},
+	"requires": {"tools": ["go"]},
+	"budget": {"run_timeout_seconds": 300, "max_steps": 15}
+}

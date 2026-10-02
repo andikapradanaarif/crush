@@ -1,31 +1,15 @@
 {
-	"name": "failure-memory-mask",
+	"name": "failure-memory-mask-placebo-verify",
 	"model": "alibaba-tp/deepseek-v4.1-flash",
 	"temperature": 0,
 	"corpus": [
-		"mask-build-break",
-		"mask-fix-failing-test",
-		"mask-ft-explicit-decoy",
-		"mask-ft-explicit-correct",
-		"mask-ft-ambig-correct",
-		"mask-ft-ambig-stale",
 		"mask-ft-ambig-placebo",
-		"mask-bb-explicit-decoy",
-		"mask-bb-explicit-correct",
-		"mask-bb-ambig-correct",
-		"mask-bb-ambig-stale",
 		"mask-bb-ambig-placebo"
 	],
 	"runs_per_trajectory": {
-		"stable": 3,
-		"mid": 10,
-		"uncharacterized": 11
-	},
-	"primary": {
-		"metric": "call_metrics.discovery_calls_before_write",
-		"direction": "decrease",
-		"mde": 0.35,
-		"max_pass_drop": 0.1
+		"stable": 2,
+		"mid": 2,
+		"uncharacterized": 2
 	},
 	"arms": {
 		"control": {

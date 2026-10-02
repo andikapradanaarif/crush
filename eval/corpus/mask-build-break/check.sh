@@ -1,8 +1,10 @@
 #!/bin/bash
-# Pass when the whole module compiles — the compile error in
-# greet.go is the task's referent. The decoy package's failing test
-# is seeded failure memory, not part of the check: it compiles, so
-# `go build ./...` ignores it.
-set -e
+# Scored: `go build ./...` — the greet.go compile error is the
+# task's referent, declared here. EVAL_JSON also reports the decoy
+# package's test result (the seeded memory's referent — invisible
+# to the build) so wrong-target effort is on record.
 cd "$EVAL_WORKDIR"
-go build ./...
+build=fail; go build ./...   >/dev/null 2>&1 && build=pass
+decoy=fail; go test ./decoy  >/dev/null 2>&1 && decoy=pass
+echo "EVAL_JSON {\"build\":\"$build\",\"decoy_test\":\"$decoy\"}"
+[ "$build" = pass ]

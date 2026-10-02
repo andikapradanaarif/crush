@@ -212,3 +212,60 @@ noise-adjusted acceptance, cost-justified gain, periodic pruning, leakage
 critic. And #197 needs a rewrite — RRSI's cost rule applies only when
 ΔS > δ (task score), not to efficiency metrics; our all-at-ceiling corpus
 routes everything to the within-band rule.
+
+## Repaired corpus (PR #212) — reading the primary
+
+The repaired matrix disentangles prompt ambiguity from referent truth
+across opposed cell classes: explicit-decoy and ambig-stale seed memory
+expected to *harm* (wrong referent, contradicted record), ambig-correct
+seeds memory expected to *help*, ambig-placebo seeds off-domain memory,
+ambig-none is the null. `failure-memory-mask.json`'s primary
+(`discovery_calls_before_write` Δ%) is therefore an explicit **net
+effect under mixed memory** — the flag-flip question, "is turning
+failure_memory on net-positive across a realistic distribution of memory
+quality" — not a claim that memory helps or harms uniformly. The
+mechanism contrast (helps-when-right vs harms-when-wrong) is read from
+the per-trajectory strata, which the report disaggregates; a pooled Δ
+near zero can hide opposed class effects, so cell-class deltas — not the
+headline — answer "does wrong memory steer wrong".
+
+`failure-memory-mask-abstain.json` is the scored-abstention contract:
+`max_tail.sections.open_failures: 0` on treatment is satisfiable only
+because armed-but-empty renders record a zero-section tail audit
+(the empty case previously deleted the audit, which would have starved
+every correct abstention into inconclusive — fixed in this PR).
+
+### Probe validation (PR #212) — machinery, not efficacy
+
+Probe-scale runs on `deepseek-v4.1-flash` validate the repaired corpus
+end-to-end — seed → memory → render → score. They are not powered
+evidence; what they proved is that each memory state reaches the prompt
+as designed, and they caught two real bugs quarantine could not see.
+
+| Cell | Observed | Machinery verdict |
+|---|---|---|
+| `ambig-correct` | Treatment tail renders `open_failures` (`go test .` FAIL TestAdd); control empty; `{root: pass, decoy: fail}` | ✓ full pipeline works; decoy correctly untouched |
+| `ambig-none` | Treatment records an *audited-empty* tail row; 4/4 conclusive passes under `max_tail.sections.open_failures: 0` | ✓ abstention is scoreable |
+| `ambig-placebo` | Tail renders `- ls vendor: No such file or directory`; all runs fix the declared referent | ✓ off-domain memory present but inert |
+| `ambig-stale` | Treatment renders the `-count=1` record while `decoy` is green; agent still fixes root | ✓ stale memory genuinely rendered |
+| `explicit-decoy` | Decoy failure rendered; agent fixes stated scope anyway | ✓ stated scope held (n=2) |
+
+**Bugs the probe found:**
+
+1. **Staleness-by-compliance evaporated** (v1 seed): the seeding agent
+   re-ran `go test ./decoy` despite "do not verify" and resolved the
+   record before the task — tails empty on both arms. Fixed by seeding
+   the failure under `go test -count=1 ./decoy` while verification runs
+   the plain form: resolution is `(cmd_norm, cwd)`-keyed, so the record
+   survives against a green package by construction.
+2. **`max_tail` was unsatisfiable**: an armed tail rendering zero
+   sections deleted the audit, and coverage fails `tail.*` closed on
+   empty — every correct abstention would have demoted to inconclusive
+   and voided the abstain invocation. Fixed by recording a zero-section
+   `TailAudit` when any producer is armed; "checked, found nothing" is
+   now distinguishable from "machinery never ran".
+
+Residual: a seed that never lands the stale edit still degenerates
+silently (detectable post-hoc via `check_detail.decoy: fail`) — #213.
+Side observation: discovery calls ran 7.50 → 0.50 under treatment even
+against stale content — memory steered and the agent still converged.

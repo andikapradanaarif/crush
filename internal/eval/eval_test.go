@@ -182,6 +182,48 @@ func TestContentHash_ScopesToRevision(t *testing.T) {
 	require.NotEqual(t, h1, h3)
 }
 
+// TestContentHash_ExternalRefs pins the shared-fixture case: a cell
+// borrowing "../shared/fixture" must re-key when the borrowed content
+// changes — the borrowing dir's own files are untouched, so a dir-only
+// hash would carry a stale baseline across the fixture revision.
+func TestContentHash_ExternalRefs(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	corpusDir := filepath.Join(root, "corpus")
+	shared := filepath.Join(corpusDir, "shared", "fixture")
+	require.NoError(t, os.MkdirAll(shared, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(shared, "main.go"), []byte("package main\n"), 0o644))
+	borrower := writeTrajectory(t, corpusDir, "borrower", map[string]any{
+		"start_state": map[string]any{"kind": "fixture", "fixture_dir": "../shared/fixture"},
+	})
+	tr, err := LoadTrajectory(borrower)
+	require.NoError(t, err)
+	refs := trajContentRefs(borrower, tr)
+	require.Len(t, refs, 2)
+
+	h1, err := ContentHash(borrower, refs...)
+	require.NoError(t, err)
+	// Repeating is stable; the borrower's own files are inside its
+	// dir so passing its dir again dedupes to the same hash.
+	h2, err := ContentHash(borrower, shared, borrower)
+	require.NoError(t, err)
+	require.Equal(t, h1, h2)
+
+	// Editing the shared fixture changes the borrower's hash even
+	// though nothing under its own dir moved — while the dir-only
+	// hash stays put, which is the stale-baseline failure mode this
+	// signature exists to prevent.
+	dirOnly, err := ContentHash(borrower)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(shared, "main.go"), []byte("package main\n// v2\n"), 0o644))
+	h3, err := ContentHash(borrower, refs...)
+	require.NoError(t, err)
+	require.NotEqual(t, h1, h3)
+	dirOnlyAfter, err := ContentHash(borrower)
+	require.NoError(t, err)
+	require.Equal(t, dirOnly, dirOnlyAfter)
+}
+
 // --- check.sh contract ---
 
 func TestRunCheck_PassFailAndEvalJSON(t *testing.T) {
@@ -453,6 +495,18 @@ func TestArmCoverage_TailSections(t *testing.T) {
 	// "didn't render" predicate must not be satisfied by silence
 	// (nothing rendered vs telemetry missing is indistinguishable).
 	met, err = ArmCoverageMet(Coverage{"max_tail.sections.open_failures": 0}, &RunRecord{})
+	require.NoError(t, err)
+	require.False(t, met)
+
+	// An audited-empty tail is evidence, not silence: the agent ran
+	// its tail producers and rendered no envelopes, so the max_
+	// abstention predicate is met while a min_ firing predicate
+	// still fails.
+	rec = &RunRecord{Tail: []TurnTail{{Turn: 0, Bytes: 0}}}
+	met, err = ArmCoverageMet(Coverage{"max_tail.sections.open_failures": 0}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+	met, err = ArmCoverageMet(Coverage{"min_tail.sections.open_failures": 1}, rec)
 	require.NoError(t, err)
 	require.False(t, met)
 

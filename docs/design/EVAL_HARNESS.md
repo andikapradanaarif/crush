@@ -647,13 +647,19 @@ text's `sha256`, and the verbatim text. The tail is appended to the
 prompt at render and never persisted to message storage, so without
 this field "did the model actually see the injected context" is
 inference, not audit. Presence semantics matter: a turn with no tail
-row means nothing rendered — distinct from telemetry absence. Two
-reading caveats: the snapshot is taken at render, before the request
-flies, so a run that errors before its first request lands still
-records the tail it prepared (`error`/`error_class` distinguish
-delivered from prepared); and `bytes` counts the joined text
-including section separators, so it exceeds the `sections` byte sum
-when more than one envelope renders. `tail.sections.<envelope>` is
+row means the tail machinery never ran on that arm — while a turn
+whose producers were armed but rendered nothing records a row with
+empty `sections` (`bytes: 0`, empty `sha256`), the "checked and found
+nothing" measurement. That distinction is what makes
+`max_tail.sections.<envelope>: 0` checkable: the abstention predicate
+is satisfied by an audited-empty tail but still fails closed on a
+missing one. Two reading caveats: the snapshot is taken at render,
+before the request flies, so a run that errors before its first
+request lands still records the tail it prepared (`error`/
+`error_class` distinguish delivered from prepared); and `bytes`
+counts the joined text including section separators, so it exceeds
+the `sections` byte sum when more than one envelope renders.
+`tail.sections.<envelope>` is
 reachable from **arm-scoped** coverage only (every envelope is
 flag-gated): `min_tail.sections.open_failures: 1` on a treatment arm
 is the firing assertion that turns a laundered seed — a failure the
@@ -931,7 +937,7 @@ safety:
 	"fix-nil-map-write": {
 		"band": "stable | mid | uncharacterized | quarantined",
 		"quarantine_reason": "flaky | vacuous | miscalibrated | suspect_check | never_passed",
-		"content_hash": "<sha of check.sh + trajectory.json + fixture/ + patches>",
+		"content_hash": "<sha of check.sh + trajectory.json + fixture/ + patches + referenced ../ content>",
 		"last_characterized": "2026-09-10",
 		"baselines": {
 			"<model>": {

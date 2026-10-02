@@ -246,7 +246,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 		},
 	}
 
-	contentHash, err := ContentHash(trajDir)
+	contentHash, err := ContentHash(trajDir, trajContentRefs(trajDir, traj)...)
 	if err != nil {
 		return rec, fmt.Errorf("content hash: %w", err)
 	}
@@ -1064,9 +1064,9 @@ func (r *Runner) RecomputeAll(bands *Bands, corpus map[string]*Trajectory, manif
 		// namespace stays coherent with what records would stamp.
 		curKey = manifest.keyWith(nil, map[string]any{"$temperature": temp})
 	}
-	for id := range corpus {
+	for id, traj := range corpus {
 		trajDir := filepath.Join(r.EvalDir, "corpus", id)
-		hash, err := ContentHash(trajDir)
+		hash, err := ContentHash(trajDir, trajContentRefs(trajDir, traj)...)
 		if err != nil {
 			return fmt.Errorf("content hash %s: %w", id, err)
 		}
@@ -1249,7 +1249,7 @@ func (r *Runner) QuarantineCorpus(ctx context.Context, selectors []string) (map[
 		}
 		verdicts[traj.ID] = reason
 		e := bands.Entry(traj.ID)
-		if h, err := ContentHash(trajDir); err == nil {
+		if h, err := ContentHash(trajDir, trajContentRefs(trajDir, traj)...); err == nil {
 			e.ContentHash = h
 		}
 		if reason != "" {

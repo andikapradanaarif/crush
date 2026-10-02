@@ -125,9 +125,15 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		sections = append(sections, directive)
 	}
 	if len(sections) == 0 {
-		// A Run that renders nothing must not re-export a stale audit
-		// from an earlier Run in the same process.
-		if a.tailAudit != nil {
+		// An armed tail that renders nothing still records an audit:
+		// "checked and found nothing" is evidence, distinct from "the
+		// tail machinery never ran" — and that difference is what
+		// makes an eval's max_tail.sections.* "didn't render"
+		// predicate checkable. An unarmed agent still clears a stale
+		// audit from an earlier Run in the same process.
+		if a.tailArmed() {
+			a.recordTailAudit(call.SessionID, nil, "")
+		} else if a.tailAudit != nil {
 			a.tailAudit.Del(call.SessionID)
 		}
 		return nil
@@ -140,6 +146,17 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	)
 	a.recordTailAudit(call.SessionID, sections, text)
 	return []fantasy.Message{fantasy.NewUserMessage(text)}
+}
+
+// tailArmed reports whether any tail producer is enabled on this
+// agent — failure memory, the session-signals tier, or the ambiguity
+// gate. Sub-agents are never armed. An armed agent's audit records
+// even a zero-section render, so an eval asserting "this arm rendered
+// no open_failures" reads that silence as a measurement, not an
+// absence.
+func (a *sessionAgent) tailArmed() bool {
+	return !a.isSubAgent &&
+		(a.failureMemory || a.turnContext == "session" || a.ambiguityClarification)
 }
 
 // TailSection names one rendered tail envelope and its size — one

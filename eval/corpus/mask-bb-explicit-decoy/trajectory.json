@@ -1,0 +1,18 @@
+{
+	"id": "mask-bb-explicit-decoy",
+	"schema_version": 1,
+	"origin": {"kind": "synthetic"},
+	"start_state": {"kind": "fixture", "fixture_dir": "../mask-build-break/fixture"},
+	"prior_sessions": [{"turns":["run `go test ./decoy` as a single bare command — no pipes or wrappers — and report which test fails — do not modify any files"]}],
+	"task": {
+		"turns": ["the module fails to build — fix the compile error in greet.go. Do not touch decoy/."]
+	},
+	"check": {
+		"script": "../mask-build-break/check.sh",
+		"expect_start_state": "fail",
+		"timeout_seconds": 300
+	},
+	"coverage": {"min_steps": 1, "min_warm_start.sessions": 1},
+	"requires": {"tools": ["go"]},
+	"budget": {"run_timeout_seconds": 300, "max_steps": 15}
+}

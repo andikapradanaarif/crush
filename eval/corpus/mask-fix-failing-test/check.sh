@@ -1,8 +1,12 @@
 #!/bin/bash
-# Pass when the root package's tests are green — TestAdd is the
-# task's referent. Scoped to `go test .` (root only): the decoy
-# package's failing test is seeded wrong-referent memory and must
-# stay out of the check.
-set -e
+# Scored: `go test .` — the root package's TestAdd is the task's
+# referent, declared here rather than hidden. EVAL_JSON reports all
+# three scopes so a run that fixed only the decoy is visibly
+# wrong-target rather than silently scored, and suite-wide state is
+# on record for the ambiguous prompts.
 cd "$EVAL_WORKDIR"
-go test .
+root=fail;  go test .       >/dev/null 2>&1 && root=pass
+decoy=fail; go test ./decoy >/dev/null 2>&1 && decoy=pass
+all=fail;   go test ./...   >/dev/null 2>&1 && all=pass
+echo "EVAL_JSON {\"root\":\"$root\",\"decoy\":\"$decoy\",\"all\":\"$all\"}"
+[ "$root" = pass ]
