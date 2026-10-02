@@ -79,7 +79,7 @@ none of these completely. This is the frame the selection layer must answer.
 
 | Work | Detail |
 |---|---|
-| **Mask corpus repair (#204)** | Same task/fixture across no-memory / correct / irrelevant / stale-contradicted arms; split prompts into *explicit-target* ("fix the root package's test") vs *genuinely ambiguous* ("the test fails") where clarify-or-declare-scope is the correct behavior. Ambiguous tasks need a scorer a script can't provide — user-oracle or accept-any-declared-scope check. Add suite-wide check alongside the scored check — with `go test ./...` as the score, control would have failed for *not* fixing the decoy |
+| **Mask corpus repair (#204, done 10-02)** | 14 cells, explicit/ambiguous × correct/decoy/stale/placebo/none over one shared fixture+check per family; EVAL_JSON dual scoring (declared referent scored, all scopes reported); staleness by construction (`-count=1` cmd keying); placebo = off-domain open failure; scored abstention via `max_tail` — required the armed-empty `TailAudit` fix. Probe validation caught 2 real bugs; residual seed-fidelity → #213 |
 | **Smallest deterministic selector (#207)** | eligibility → validation → ranking → inject/offer/abstain. Signals: current user scope, command/package/CWD match, provenance, repo-state compat, resolution state, recency. **No embeddings, no LLM critic** until measured failure cases justify them |
 | **Decision-level observability** | record per decision: candidate IDs, selected, rejection reasons, source session/tool call, validity + task-match evidence, rendered bytes, action targets, verification outcome — the missing bridge between "tail rendered" and "memory helped" |
 | **End-of-turn reconciliation edge** | deterministic: failures observed this run still open? → don't report done. Re-run broad check or name what's open. Targets the exact mask failure signature (early termination); hypothesis to test on the repaired corpus |
@@ -144,8 +144,8 @@ none of these completely. This is the frame the selection layer must answer.
 3. ~~Zero-safe estimator (#203)~~ — **done 10-01**: normalized-diff
    estimator shipped; all four preserved invocations re-scored. Remaining:
    unified verdict fields (#152).
-4. Repair the mask corpus (#204) — explicit vs ambiguous tasks, dual check;
-   parallel with 3.
+4. ~~Repair the mask corpus (#204)~~ — **done 10-02** (#212): full matrix
+   shipped + probe-validated; residual seed-fidelity assertion → #213.
 5. Reconciliation edge + deterministic selector w/ abstention (#207) →
    validate on repaired mask corpus (bar: pass ~1.00 *and* effort savings
    retained).
