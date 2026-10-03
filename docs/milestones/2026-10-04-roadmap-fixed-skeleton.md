@@ -57,6 +57,9 @@ never flows back to user level without screened promotion.
   alarms, sealed pools. Telemetry may retire a *mechanism*; it may not
   relax any of the above.
 
+The enumerated route space — every decision path's checks, exits, and
+guards, as a diffable document — is `docs/design/ROUTE_SPACE.md`.
+
 ## What learns (per-project variables, user-level priors)
 
 | Variable | Evidence source | Issue |
