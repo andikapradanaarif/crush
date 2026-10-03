@@ -969,7 +969,7 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 				fixtureErrs++
 				if fixtureErrs >= 2 {
 					detail := "fixture config"
-					for _, key := range []string{"harness", "check_error", "run_error"} {
+					for _, key := range []string{"harness", "check_error", "seed_check_error", "run_error"} {
 						if v, ok := rec.CheckDetail[key].(string); ok && v != "" {
 							detail += ": " + v
 							break

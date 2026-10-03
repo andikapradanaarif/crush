@@ -1721,6 +1721,10 @@ func TestRunCheckScript_MissingFileIsError(t *testing.T) {
 type dbSeedRecorder struct {
 	seedRecorder
 	resolved bool
+	// strayRow also inserts a DIFFERENT open -count=1 row — the
+	// disobedient-seed signature of resolving the designed row while
+	// leaving a substitute (e.g. re-running the still-red task).
+	strayRow bool
 }
 
 func (s *dbSeedRecorder) Run(ctx context.Context, workdir string, turns []string, b Budget) RunResult {
@@ -1746,7 +1750,12 @@ func (s *dbSeedRecorder) Run(ctx context.Context, workdir string, turns []string
 	}
 	_, _ = db.Exec(`INSERT INTO failure_memory
 		(signature, cmd, cwd, headline, first_seen, last_seen, resolved_in)
-		VALUES ('sig1', 'go test -count=1 ./decoy', '', 'FAIL', 1000, 1000, ?)`, resolvedIn)
+		VALUES ('sig1', 'go test -count=1 ./decoy', '.', 'FAIL', 1000, 1000, ?)`, resolvedIn)
+	if s.strayRow {
+		_, _ = db.Exec(`INSERT INTO failure_memory
+			(signature, cmd, cwd, headline, first_seen, last_seen, resolved_in)
+			VALUES ('sig2', 'go test -count=1 .', '.', 'FAIL', 2000, 2000, '')`)
+	}
 	return res
 }
 
@@ -1767,7 +1776,7 @@ func TestExecuteRun_SeedCheckResolvedRowRejects(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(trajDir, "seed_check.sh"), []byte(
 		"#!/bin/bash\n"+
 			`db="$(dirname "$EVAL_WORKDIR")/$(basename "$EVAL_WORKDIR").crush-data/crush.db"`+"\n"+
-			`open=$(sqlite3 "$db" "SELECT COUNT(*) FROM failure_memory WHERE resolved_in='' AND cmd LIKE '%count=1%';")`+"\n"+
+			`open=$(sqlite3 "$db" "SELECT COUNT(*) FROM failure_memory WHERE resolved_in='' AND cmd='go test -count=1 ./decoy' AND cwd IN ('.','');")`+"\n"+
 			`echo "EVAL_JSON {\"open_stale_rows\":$open}"`+"\n"+
 			`[ "$open" -ge 1 ]`+"\n"), 0o755))
 	tr, err := LoadTrajectory(trajDir)
@@ -1801,7 +1810,7 @@ func TestExecuteRun_SeedCheckOpenRowPasses(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(trajDir, "seed_check.sh"), []byte(
 		"#!/bin/bash\n"+
 			`db="$(dirname "$EVAL_WORKDIR")/$(basename "$EVAL_WORKDIR").crush-data/crush.db"`+"\n"+
-			`open=$(sqlite3 "$db" "SELECT COUNT(*) FROM failure_memory WHERE resolved_in='' AND cmd LIKE '%count=1%';")`+"\n"+
+			`open=$(sqlite3 "$db" "SELECT COUNT(*) FROM failure_memory WHERE resolved_in='' AND cmd='go test -count=1 ./decoy' AND cwd IN ('.','');")`+"\n"+
 			`echo "EVAL_JSON {\"open_stale_rows\":$open}"`+"\n"+
 			`[ "$open" -ge 1 ]`+"\n"), 0o755))
 	tr, err := LoadTrajectory(trajDir)
@@ -1815,4 +1824,40 @@ func TestExecuteRun_SeedCheckOpenRowPasses(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, OutcomePass, rec.Outcome)
 	require.Equal(t, map[string]any{"open_stale_rows": float64(1)}, rec.SeedState)
+}
+
+// The reviewer's false-pass: a seed that resolved the designed row but
+// left a DIFFERENT open -count=1 row (re-running the still-red task).
+// A LIKE-scoped gate would count the stray row and pass; the
+// designed-row predicate must still reject.
+func TestExecuteRun_SeedCheckStrayRowStillRejects(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "warm-t", map[string]any{
+		"prior_sessions": []any{map[string]any{"turns": []string{"seed it"}}},
+		"check": map[string]any{
+			"script":             "check.sh",
+			"expect_start_state": "fail",
+			"seed_script":        "seed_check.sh",
+		},
+	})
+	require.NoError(t, os.WriteFile(filepath.Join(trajDir, "seed_check.sh"), []byte(
+		"#!/bin/bash\n"+
+			`db="$(dirname "$EVAL_WORKDIR")/$(basename "$EVAL_WORKDIR").crush-data/crush.db"`+"\n"+
+			`open=$(sqlite3 "$db" "SELECT COUNT(*) FROM failure_memory WHERE resolved_in='' AND cmd='go test -count=1 ./decoy' AND cwd IN ('.','');")`+"\n"+
+			`echo "EVAL_JSON {\"open_stale_rows\":$open}"`+"\n"+
+			`[ "$open" -ge 1 ]`+"\n"), 0o755))
+	tr, err := LoadTrajectory(trajDir)
+	require.NoError(t, err)
+	drv := &dbSeedRecorder{resolved: true, strayRow: true}
+	r := &Runner{EvalDir: root, Driver: drv, WorkParent: t.TempDir(), RNG: rand.New(rand.NewPCG(1, 2))}
+	exp := &Experiment{Name: "exp1", Model: "mock/m", Temperature: ptr(0.0)}
+	manifest := &FlagsManifest{Defaults: map[string]any{}}
+
+	rec, err := r.ExecuteRun(context.Background(), exp, tr, trajDir, ArmControl, Arm{}, manifest, 1, "inv")
+	require.NoError(t, err)
+	require.Equal(t, OutcomeInconclusive, rec.Outcome,
+		"a stray -count=1 row is live memory, not the designed stale row")
+	require.Len(t, drv.calls, 1, "measured session never launches")
+	require.Equal(t, map[string]any{"open_stale_rows": float64(0)}, rec.SeedState)
 }
