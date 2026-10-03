@@ -57,7 +57,7 @@ non-actionable placebo arm exists.
 | `command_memory` | `(cmd, cwd)`-keyed; kind, last exit, ok/fail counts, last session |
 | `failure_memory` | Open failures; resolved on clean re-run; 30-day TTL + `Nd ago` age hints |
 | Write path | `RecordRun` instrumented at **7 call sites** (bash, job_output, job_kill, verify gate, workspace, backend); `ComponentExits` recover real verdicts inside pipelines/lists/substitutions — composites can't launder |
-| Read path | `<open_failures>` tail: freshest **5** rows, ≤3 file hints, cmd ≤200 runes, headline ≤140 runes, envelope-neutralized; referent-gated by failure-noun detection. (Header still reads "the likely referents" — #201's reframe was closed unmerged after failing validation) |
+| Read path | `<open_failures>` tail: freshest **5** rows, ≤3 file hints, cmd ≤200 runes, headline ≤140 runes, envelope-neutralized; task-bound by the deterministic selector (#207): prompt scope/referent → admit or abstain, per-candidate verdicts in `tail.decisions`. (Header still reads "the likely referents" — #201's reframe was closed unmerged after failing validation) |
 
 **Evaluation machinery:**
 

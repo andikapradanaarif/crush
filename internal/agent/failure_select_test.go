@@ -223,6 +223,21 @@ func TestPromptScope(t *testing.T) {
 			prompt:  "fix main.go, decoy/x.go, and pkg/y.go",
 			wantPos: []string{"main.go", "decoy/x.go", "pkg/y.go"},
 		},
+		{
+			// "then" is a hard boundary — the sequential item is
+			// its own signal-free span, hence exclusion. Bounded
+			// asymmetry, documented on promptScope.
+			name:    "then restarts the span",
+			prompt:  "fix a.go, then b.go",
+			wantPos: []string{"a.go"},
+			wantNeg: []string{"b.go"},
+		},
+		{
+			// Data files mint scope like source files.
+			name:    "data file extension mints scope",
+			prompt:  "fix output.txt",
+			wantPos: []string{"output.txt"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -692,6 +707,67 @@ func TestSelectOpenFailures(t *testing.T) {
 			prompt:     "don't touch pkg/, fix other.go",
 			failures:   []cmdlog.Failure{mkFailure("go test .", ".", `pkg\x.go`)},
 			wantReason: map[string]string{"go test .@.": failNegatedScope},
+		},
+		{
+			// The space form worked; the = spelling must too —
+			// make --directory=decoy ran in decoy, not at root.
+			name:       "dir flag equals spelling binds its dir",
+			prompt:     "the build fails — fix it",
+			failures:   []cmdlog.Failure{mkFailure("make --directory=decoy", ".")},
+			wantReason: map[string]string{"make --directory=decoy@.": failNarrowScope},
+		},
+		{
+			name:      "dir flag equals spelling admits under scope",
+			prompt:    "fix decoy/x.go",
+			failures:  []cmdlog.Failure{mkFailure("make --prefix=decoy", ".")},
+			wantAdmit: []string{"make --prefix=decoy@."},
+		},
+		{
+			// -Cdecoy — joined short-flag spelling (make, git).
+			name:       "joined short dir flag binds its dir",
+			prompt:     "the build fails — fix it",
+			failures:   []cmdlog.Failure{mkFailure("make -Cdecoy", ".")},
+			wantReason: map[string]string{"make -Cdecoy@.": failNarrowScope},
+		},
+		{
+			// The dir flag is the effective CWD: "make -C decoy ."
+			// runs in decoy, so the "." target joins it — not root.
+			name:       "dir flag is effective cwd for later targets",
+			prompt:     "the build fails — fix it",
+			failures:   []cmdlog.Failure{mkFailure("make -C decoy .", ".")},
+			wantReason: map[string]string{"make -C decoy .@.": failNarrowScope},
+		},
+		{
+			// -args ends the target scan for its own segment only —
+			// the next composite segment still mints scope.
+			name:       "args does not eat the next segment",
+			prompt:     "the test fails — fix it",
+			failures:   []cmdlog.Failure{mkFailure("go test -args -v && go test ./decoy", ".")},
+			wantReason: map[string]string{"go test -args -v && go test ./decoy@.": failNarrowScope},
+		},
+		{
+			// A file-form veto at root binds the implicated file —
+			// dir "." can't bind through containment, so the Files
+			// entry itself is the binding surface.
+			name:       "root file veto binds the hinted file",
+			prompt:     "don't touch main_test.go — fix decoy/x.go",
+			failures:   []cmdlog.Failure{mkFailure("go test .", ".", "main_test.go")},
+			wantReason: map[string]string{"go test .@.": failNegatedScope},
+		},
+		{
+			// Same veto yields to positive scope in the same dir —
+			// the file-form asymmetry holds at root too.
+			name:      "root file veto yields to same-dir positive",
+			prompt:    "don't touch main_test.go — fix main.go",
+			failures:  []cmdlog.Failure{mkFailure("go test .", ".", "main_test.go")},
+			wantAdmit: []string{"go test .@."},
+		},
+		{
+			// The veto names a different file — no binding.
+			name:      "root file veto misses unrelated hints",
+			prompt:    "don't touch main_test.go — fix main.go",
+			failures:  []cmdlog.Failure{mkFailure("go test .", ".", "other.go")},
+			wantAdmit: []string{"go test .@."},
 		},
 	}
 	for _, tc := range tests {

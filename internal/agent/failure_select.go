@@ -151,7 +151,8 @@ var scopeSlashPathRe = regexp.MustCompile(`[\w.-]+/[\w./~-]*`)
 // scopeFileRe matches bare filenames with a source-ish extension so
 // "fix main.go" scopes like "fix decoy/main.go" does.
 var scopeFileRe = regexp.MustCompile(`\b[\w-]+\.(?:go|py|rs|ts|tsx|js|jsx|mjs|c|cc|cpp|cxx|h|hpp|` +
-	`java|kt|rb|sh|bash|zsh|fish|md|json|ya?ml|toml|mod|sum|sql|proto|css|scss|html|vue|svelte|mk|cfg|ini)\b`)
+	`java|kt|rb|sh|bash|zsh|fish|md|json|ya?ml|toml|mod|sum|sql|proto|css|scss|html|vue|svelte|mk|cfg|ini|` +
+	`txt|csv|xml|ipynb|swift|dart)\b`)
 
 // scopeBareWordRe finds candidate tokens for the on-disk directory
 // check — "fix decoy" carries no path signal, but if decoy/ exists it
@@ -263,7 +264,14 @@ var cmdPathTokenRe = regexp.MustCompile(`^(?:\.{1,2}/\S*|\.{3}|\./|\.$|/\S*|[\w.
 // absence of a recognized negation is not evidence of assent, and
 // this is the one direction the selector must never fail open —
 // "ignore decoy/" and a non-English veto alike suppress rather than
-// inject.
+// inject. Two bounded asymmetries follow: "then" is a hard boundary
+// ("fix a.go, then b.go" treats b.go as its own signal-free span,
+// hence exclusion), and unrecognized action verbs suppress while
+// stopword verbs leave bare navigation ("rm decoy/" excludes —
+// "rm" is unknown so the span has no signal — but "delete decoy/"
+// mints positive because "delete" is a stopword, so nothing but
+// the path remains). Both fail toward the safe side for veto
+// shapes; the second direction is the price of a stopword lexicon.
 func promptScope(prompt, workDir string) (pos, neg []string) {
 	lone := lonePathPrompt(prompt)
 	for _, c := range splitClauses(prompt) {
@@ -632,22 +640,50 @@ var cmdDirFlags = map[string]bool{
 	"--working-directory": true, "--prefix": true,
 }
 
+// shellSepRe marks shell separators — tokens after them belong to the
+// next composite segment.
+var shellSepRe = regexp.MustCompile(`^(?:&&|\|\||[;|&])$`)
+
 // cmdTargets extracts the command's repo-relative target args.
 // "go test -count=1 ./decoy" → ["decoy"]; "go test ." → ["."]; a Go
 // recursive pattern sheds its "/..." tail to the parent dir ("go test
 // ./decoy/..." → "decoy"); a dir-flag value is scope too ("make -C
-// decoy" → ["decoy"], the same folded-CWD class); a command with no
-// path args returns nil — its scope is its CWD. Quoted single-word
-// args ("./decoy") unwrap. Composite commands mint scope from every
-// segment — "go test . && rm -rf decoy/" binds both "." and "decoy" —
-// because cmdlog keeps no per-segment argv; under negation that
-// over-rejects, under explicit scope it over-admits. Known
-// distortion, same resolution limit the ledger itself has.
+// decoy" → ["decoy"], the same folded-CWD class) and becomes the
+// effective CWD for later relative targets ("go -C decoy test ." →
+// ["decoy"], not root); a command with no path args returns nil — its
+// scope is its CWD. Quoted single-word args ("./decoy") unwrap.
+// Composite commands mint scope from every segment — "go test . &&
+// rm -rf decoy/" binds both "." and "decoy" — because cmdlog keeps no
+// per-segment argv; under negation that over-rejects, under explicit
+// scope it over-admits. Known distortion, same resolution limit the
+// ledger itself has.
 func cmdTargets(cmd string) []string {
 	var out []string
 	skipValue := false
 	dirValue := false
+	skipArgs := false
+	base := "" // Dir-flag effective CWD for later relative targets.
+	mint := func(t string) {
+		t = strings.TrimPrefix(t, "./")
+		t = strings.TrimSuffix(t, "/...")
+		if scopeFileRe.MatchString(path.Base(t)) {
+			t = path.Dir(t)
+		}
+		if t == "..." || t == "" {
+			t = "."
+		}
+		if base != "" && !path.IsAbs(t) && !strings.HasPrefix(t, "..") {
+			t = path.Join(base, t)
+		}
+		out = append(out, path.Clean(t))
+	}
 	for _, tok := range strings.Fields(cmd) {
+		if skipArgs {
+			// Everything after -args belongs to the test binary —
+			// until the next segment starts.
+			skipArgs = !shellSepRe.MatchString(tok)
+			continue
+		}
 		if skipValue {
 			skipValue = false
 			continue
@@ -655,39 +691,57 @@ func cmdTargets(cmd string) []string {
 		tok = strings.Trim(tok, `"'`)
 		if dirValue {
 			dirValue = false
-			t := strings.TrimPrefix(tok, "./")
-			t = strings.TrimSuffix(t, "/...")
-			if scopeFileRe.MatchString(path.Base(t)) {
-				t = path.Dir(t)
-			}
-			if t == "..." || t == "" || t == "." {
-				out = append(out, ".")
-			} else {
-				out = append(out, path.Clean(t))
-			}
+			base = joinCmdBase(base, tok)
+			out = append(out, base)
 			continue
 		}
 		if tok == "-args" {
-			// Everything after -args belongs to the test binary.
-			break
+			skipArgs = true
+			continue
 		}
 		if strings.HasPrefix(tok, "-") {
-			skipValue = cmdValueFlags[tok]
-			dirValue = cmdDirFlags[tok]
+			name, val := tok, ""
+			hasInline := false
+			if i := strings.IndexByte(tok, '='); i >= 0 {
+				name, val, hasInline = tok[:i], tok[i+1:], true
+			}
+			skipValue = cmdValueFlags[name] && !hasInline
+			dirValue = cmdDirFlags[name] && !hasInline
+			switch {
+			case cmdDirFlags[name] && hasInline:
+				base = joinCmdBase(base, val)
+				out = append(out, base)
+			case strings.HasPrefix(tok, "-C") && len(tok) > 2:
+				// -Cdecoy — joined short-flag spelling (make, git).
+				base = joinCmdBase(base, tok[2:])
+				out = append(out, base)
+			}
 			continue
 		}
 		if !cmdPathTokenRe.MatchString(tok) {
 			continue
 		}
-		t := strings.TrimPrefix(tok, "./")
-		t = strings.TrimSuffix(t, "/...")
-		if t == "..." || t == "" || t == "." {
-			out = append(out, ".")
-		} else {
-			out = append(out, path.Clean(t))
-		}
+		mint(tok)
 	}
 	return out
+}
+
+// joinCmdBase folds a dir-flag value into the command's effective
+// working directory — repeated -C flags nest ("make -C a -C b" runs
+// in a/b), and an absolute value starts over.
+func joinCmdBase(base, val string) string {
+	val = strings.Trim(val, `"'`)
+	v := strings.TrimSuffix(strings.TrimPrefix(val, "./"), "/")
+	if path.IsAbs(v) {
+		return path.Clean(v)
+	}
+	if v == "" || v == "." {
+		return base
+	}
+	if base == "" || base == "." {
+		return path.Clean(v)
+	}
+	return path.Join(base, v)
 }
 
 // relCWD normalizes a recorded CWD to workspace-relative form — rows
@@ -952,8 +1006,10 @@ func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string
 	for _, f := range failures {
 		// Windows rows arrive OS-native — normalize to slashes so
 		// dir/prefix comparisons work in the separator the path
-		// helpers assume.
+		// helpers assume. Clone before rewriting in place: the
+		// slice shares the caller's backing array.
 		f.CWD = strings.ReplaceAll(f.CWD, `\`, "/")
+		f.Files = slices.Clone(f.Files)
 		for i := range f.Files {
 			f.Files[i] = strings.ReplaceAll(f.Files[i], `\`, "/")
 		}
@@ -963,7 +1019,7 @@ func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string
 		kind := toolclass.CommandKind(f.Cmd)
 
 		switch {
-		case negatedByAny(dirs, neg, pos):
+		case negatedByAny(dirs, f.Files, neg, pos):
 			reason = failNegatedScope
 		case explicit && !overlapsAny(dirs, pos):
 			reason = failOutOfScope
@@ -1008,10 +1064,33 @@ func overlapsAny(dirs, paths []string) bool {
 	return false
 }
 
-func negatedByAny(dirs, neg, pos []string) bool {
+func negatedByAny(dirs, files, neg, pos []string) bool {
 	for _, d := range dirs {
 		for _, p := range neg {
 			if dirWithinNegated(d, p, pos) {
+				return true
+			}
+		}
+	}
+	// A file-form veto at root cannot bind through dir containment —
+	// every dir sits under "." — so it binds the implicated file
+	// itself: "don't touch main_test.go — fix decoy/x.go" vetoes a
+	// row whose Files name main_test.go. It yields only to positive
+	// scope in that same (root) dir — "fix main.go" resolves toward
+	// the file's neighbors.
+	for _, fp := range files {
+		for _, p := range neg {
+			if fp != p || path.Dir(p) != "." ||
+				!scopeFileRe.MatchString(path.Base(p)) {
+				continue
+			}
+			yielded := false
+			for _, q := range pos {
+				if path.Dir(q) == "." {
+					yielded = true
+				}
+			}
+			if !yielded {
 				return true
 			}
 		}

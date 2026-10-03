@@ -76,6 +76,9 @@ func TestHasSubstantiveUserMessage(t *testing.T) {
 		{"fix the failing test in auth", true},
 		{"テストが失敗しているので直してください", true},
 		{"短い", false},
+		// The rune clause is for unspaced scripts — a two-word
+		// English aside stays cheap even past twelve runes.
+		{"sounds good!", false},
 	} {
 		t.Run(tc.text, func(t *testing.T) {
 			t.Parallel()
