@@ -81,6 +81,30 @@ func TestValidateTrajectory_CounterexampleOnFailIsError(t *testing.T) {
 	require.Contains(t, err.Error(), "counterexample.patch on a \"fail\" trajectory")
 }
 
+func TestValidateTrajectory_SeedScriptRequiresPriorSessions(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	dir := writeTrajectory(t, filepath.Join(root, "corpus"), "t1", map[string]any{
+		"check": map[string]any{"script": "check.sh", "expect_start_state": "fail", "seed_script": "seed_check.sh"},
+	})
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "seed_check.sh"), []byte("#!/bin/bash\nexit 0\n"), 0o755))
+	_, err := LoadTrajectory(dir)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "seed_script requires prior_sessions")
+}
+
+func TestValidateTrajectory_SeedScriptMustExist(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	writeTrajectory(t, filepath.Join(root, "corpus"), "t1", map[string]any{
+		"prior_sessions": []any{map[string]any{"turns": []string{"seed it"}}},
+		"check":          map[string]any{"script": "check.sh", "expect_start_state": "fail", "seed_script": "seed_check.sh"},
+	})
+	_, err := LoadTrajectory(filepath.Join(root, "corpus", "t1"))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "seed check script")
+}
+
 func TestValidateTrajectory_RegressionRequiresReference(t *testing.T) {
 	t.Parallel()
 	root := newEvalDir(t)

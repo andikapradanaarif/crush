@@ -1474,3 +1474,120 @@ func TestExecuteRun_PriorSessionTimeoutIsError(t *testing.T) {
 	require.Len(t, drv.calls, 1)
 	require.NotEmpty(t, rec.SessionDB)
 }
+
+// seedGateRecorder is seedRecorder plus a per-call marker file —
+// call-N.marker — so a seed script can assert it ran after the seeds
+// and before the measured session.
+type seedGateRecorder struct{ seedRecorder }
+
+func (s *seedGateRecorder) Run(ctx context.Context, workdir string, turns []string, b Budget) RunResult {
+	res := s.seedRecorder.Run(ctx, workdir, turns, b)
+	_ = os.WriteFile(filepath.Join(workdir, fmt.Sprintf("call-%d.marker", len(s.calls))), []byte("x"), 0o644)
+	return res
+}
+
+// The seed-state gate runs after every prior session and before the
+// measured one: a valid designed state lets the run proceed and the
+// script's EVAL_JSON lands on the record as SeedState.
+func TestExecuteRun_SeedCheckPass(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "warm-t", map[string]any{
+		"prior_sessions": []any{map[string]any{"turns": []string{"seed it"}}},
+		"task":           map[string]any{"turns": []string{"fix it"}},
+		"check": map[string]any{
+			"script":             "check.sh",
+			"expect_start_state": "fail",
+			"seed_script":        "seed_check.sh",
+		},
+	})
+	require.NoError(t, os.WriteFile(filepath.Join(trajDir, "seed_check.sh"), []byte(
+		"#!/bin/bash\n"+
+			"test -f call-1.marker && ! test -f call-2.marker\n"+
+			"echo 'EVAL_JSON {\"seeded\":\"yes\"}'\n"), 0o755))
+	tr, err := LoadTrajectory(trajDir)
+	require.NoError(t, err)
+	drv := &seedGateRecorder{}
+	r := &Runner{EvalDir: root, Driver: drv, WorkParent: t.TempDir(), RNG: rand.New(rand.NewPCG(1, 2))}
+	exp := &Experiment{Name: "exp1", Model: "mock/m", Temperature: ptr(0.0)}
+	manifest := &FlagsManifest{Defaults: map[string]any{}}
+
+	rec, err := r.ExecuteRun(context.Background(), exp, tr, trajDir, ArmControl, Arm{}, manifest, 1, "inv")
+	require.NoError(t, err)
+	require.Equal(t, OutcomePass, rec.Outcome)
+	require.Len(t, drv.calls, 2, "seed then measured — the gate does not consume a session")
+	require.Equal(t, map[string]any{"seeded": "yes"}, rec.SeedState,
+		"the gate's EVAL_JSON is what the workdir verifiably looked like")
+}
+
+// A gate that exits non-zero rejects the warm start before the
+// measured session launches — clean execution, wrong state is
+// inconclusive, not a model failure.
+func TestExecuteRun_SeedCheckRejectsBeforeMeasure(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "warm-t", map[string]any{
+		"prior_sessions": []any{map[string]any{"turns": []string{"seed it"}}},
+		"task":           map[string]any{"turns": []string{"fix it"}},
+		"check": map[string]any{
+			"script":             "check.sh",
+			"expect_start_state": "fail",
+			"seed_script":        "seed_check.sh",
+		},
+	})
+	require.NoError(t, os.WriteFile(filepath.Join(trajDir, "seed_check.sh"), []byte(
+		"#!/bin/bash\n"+
+			"echo 'EVAL_JSON {\"decoy\":\"fail\"}'\n"+
+			"echo 'decoy still broken' >&2\n"+
+			"exit 1\n"), 0o755))
+	tr, err := LoadTrajectory(trajDir)
+	require.NoError(t, err)
+	drv := &seedGateRecorder{}
+	r := &Runner{EvalDir: root, Driver: drv, WorkParent: t.TempDir(), RNG: rand.New(rand.NewPCG(1, 2))}
+	exp := &Experiment{Name: "exp1", Model: "mock/m", Temperature: ptr(0.0)}
+	manifest := &FlagsManifest{Defaults: map[string]any{}}
+
+	rec, err := r.ExecuteRun(context.Background(), exp, tr, trajDir, ArmControl, Arm{}, manifest, 1, "inv")
+	require.NoError(t, err)
+	require.Equal(t, OutcomeInconclusive, rec.Outcome)
+	require.Len(t, drv.calls, 1, "the measured session never launches on a rejected seeding")
+	require.Contains(t, rec.CheckDetail["seed_state"], "assertion failed")
+	require.Contains(t, rec.CheckDetail["seed_check_stderr"], "decoy still broken")
+	require.Equal(t, map[string]any{"decoy": "fail"}, rec.SeedState,
+		"the failing detail is what forensics inspects")
+	require.NotEmpty(t, rec.SessionDB,
+		"the rejected seeding's db is preserved like a failed seed's")
+	require.NotNil(t, rec.WarmStart)
+	require.Equal(t, 1, rec.WarmStart.Sessions)
+}
+
+// A gate that cannot complete — here, timeout — is a harness error,
+// not an invalid seeding.
+func TestExecuteRun_SeedCheckHarnessError(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "warm-t", map[string]any{
+		"prior_sessions": []any{map[string]any{"turns": []string{"seed it"}}},
+		"task":           map[string]any{"turns": []string{"fix it"}},
+		"check": map[string]any{
+			"script":             "check.sh",
+			"expect_start_state": "fail",
+			"timeout_seconds":    1,
+			"seed_script":        "seed_check.sh",
+		},
+	})
+	require.NoError(t, os.WriteFile(filepath.Join(trajDir, "seed_check.sh"),
+		[]byte("#!/bin/bash\nsleep 5\n"), 0o755))
+	tr, err := LoadTrajectory(trajDir)
+	require.NoError(t, err)
+	drv := &seedGateRecorder{}
+	r := &Runner{EvalDir: root, Driver: drv, WorkParent: t.TempDir(), RNG: rand.New(rand.NewPCG(1, 2))}
+	exp := &Experiment{Name: "exp1", Model: "mock/m", Temperature: ptr(0.0)}
+	manifest := &FlagsManifest{Defaults: map[string]any{}}
+
+	rec, err := r.ExecuteRun(context.Background(), exp, tr, trajDir, ArmControl, Arm{}, manifest, 1, "inv")
+	require.NoError(t, err)
+	require.Equal(t, OutcomeError, rec.Outcome)
+	require.Contains(t, rec.CheckDetail["seed_check_error"], "timed out")
+	require.Len(t, drv.calls, 1)
+}

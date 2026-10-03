@@ -159,11 +159,27 @@ every characterization pass a diff to reviewed files.
   **Caveat — disobedient seeds.** "Change nothing" is a soft prompt
   instruction: a seed that edits the fixture anyway leaves the task
   pre-done, the vague prompt passes trivially, and the warm-vs-cold
-  delta misattributes seed labor to memory benefit. `check` sees
-  only the final tree so nothing catches it mid-run — audit via the
-  preserved db (`warm_start.session_ids` → the seed session's tool
-  calls) or compare workdir diffs; a `seed_writes` counter off
-  filetracker rows is the planned detection channel.
+  delta misattributes seed labor to memory benefit. Declare
+  `check.seed_script` to catch it deterministically (below); for
+  deeper forensics, audit the preserved db (`warm_start.session_ids`
+  → the seed session's tool calls) or compare workdir diffs.
+- **`check.seed_script`.** Optional gate asserting the designed warm
+  state — runs once after the last `prior_sessions` turn and before
+  the measured session, with the same contract as `check.sh` (cwd =
+  workdir, `EVAL_*` env, shared `timeout_seconds`, `EVAL_JSON`
+  detail). Its detail lands on the record as `seed_state` — the
+  verifiable evidence of what the measured session started from —
+  whether the run proceeds or not. A non-zero exit means the seeded
+  state was never reached (the fix didn't land, the memory row
+  resolved, the task is already done): the run is rejected as
+  `inconclusive` before the measured session launches, never scored
+  on the wrong premise. A gate that cannot execute or times out is
+  `error` — infra, not state. Valid only with `prior_sessions`;
+  quarantine does not run it (quarantine has no seeds). Use it for
+  any cell whose premise is a seeded state — stale-memory cells
+  assert "decoy green ∧ task failure still live", which is the
+  difference between a stale row and a fresh one the vague prompt
+  would happily fix again.
 - **`origin`.** `scrubbed` must be `true` — a value, not just a
   present field — when `kind` is `production`, and for `regression`
   whenever `source` is a real session or bug report — the same

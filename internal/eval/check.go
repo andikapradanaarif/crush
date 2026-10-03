@@ -36,14 +36,27 @@ func RunCheck(ctx context.Context, traj *Trajectory, trajDir, workdir string, en
 	if abs, err := filepath.Abs(trajDir); err == nil {
 		trajDir = abs
 	}
+	return runCheckScript(ctx, traj.Check.Script, trajDir, workdir, env, checkTimeout(traj))
+}
+
+// checkTimeout is the shared ceiling for a cell's scripts — the seed
+// gate and the scoring check get the same budget.
+func checkTimeout(traj *Trajectory) time.Duration {
 	timeout := time.Duration(traj.Check.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
-		timeout = 5 * time.Minute
+		return 5 * time.Minute
 	}
+	return timeout
+}
+
+// runCheckScript executes script (declared relative to trajDir) with
+// cwd = workdir — the shared core for check.sh and the seed-state
+// gate.
+func runCheckScript(ctx context.Context, script, trajDir, workdir string, env []string, timeout time.Duration) CheckResult {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	script := filepath.Join(trajDir, traj.Check.Script)
+	script = filepath.Join(trajDir, script)
 	cmd := exec.CommandContext(ctx, "bash", script)
 	// Kill the whole process group — a timed-out check's children
 	// (go run, spawned servers, bound ports) must not outlive the

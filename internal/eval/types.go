@@ -129,6 +129,14 @@ type Check struct {
 	Script           string `json:"script"`             // relative to trajectory dir, e.g. "check.sh"
 	ExpectStartState string `json:"expect_start_state"` // fail | pass
 	TimeoutSeconds   int    `json:"timeout_seconds,omitempty"`
+	// SeedScript, when set, runs once after prior_sessions and before
+	// the measured session — same contract as Script but it judges the
+	// seeded state, not the agent's output. A non-zero exit means the
+	// designed warm state was never reached (the fix did not land,
+	// the memory row resolved); the run is rejected as inconclusive
+	// before any measurement rather than scored on the wrong premise.
+	// Valid only on trajectories that declare prior_sessions.
+	SeedScript string `json:"seed_script,omitempty"`
 }
 
 // Coverage is the closed predicate grammar over run-record fields:
@@ -269,6 +277,10 @@ type RunRecord struct {
 	RunIndex    int            `json:"run_index"` // attempt index, sparse under resampling
 	Outcome     Outcome        `json:"outcome"`
 	CheckDetail map[string]any `json:"check_detail,omitempty"`
+	// SeedState carries the seed_script's EVAL_JSON detail — what the
+	// workdir verifiably looked like when the measured session was
+	// about to start. Present only on trajectories with a seed gate.
+	SeedState map[string]any `json:"seed_state,omitempty"`
 	// Bounded tails of check.sh output — the first forensic stop on
 	// failure is what the check actually said.
 	CheckStdout string      `json:"check_stdout,omitempty"`
