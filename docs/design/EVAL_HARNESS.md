@@ -179,7 +179,12 @@ every characterization pass a diff to reviewed files.
   any cell whose premise is a seeded state — stale-memory cells
   assert "decoy green ∧ task failure still live", which is the
   difference between a stale row and a fresh one the vague prompt
-  would happily fix again.
+  would happily fix again. Caution: a gate asserting an unreachable
+  state inconcluses every attempt at full seed cost — the same
+  starvation exposure as a coverage miss, and quarantine can't
+  pre-flight it (no seeds there), so the first signal is a
+  trajectory landing all-inconclusive with `seed_state` details to
+  inspect.
 - **`origin`.** `scrubbed` must be `true` — a value, not just a
   present field — when `kind` is `production`, and for `regression`
   whenever `source` is a real session or bug report — the same

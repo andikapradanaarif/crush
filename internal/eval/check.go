@@ -31,11 +31,6 @@ type CheckResult struct {
 // the working tree as the agent left it. The runner exports
 // EVAL_WORKDIR and EVAL_TRAJECTORY_DIR for checks needing oracles.
 func RunCheck(ctx context.Context, traj *Trajectory, trajDir, workdir string, env []string) CheckResult {
-	// The check chdirs into the workdir; a relative trajDir would
-	// resolve against it, so absolutize first.
-	if abs, err := filepath.Abs(trajDir); err == nil {
-		trajDir = abs
-	}
 	return runCheckScript(ctx, traj.Check.Script, trajDir, workdir, env, checkTimeout(traj))
 }
 
@@ -53,10 +48,25 @@ func checkTimeout(traj *Trajectory) time.Duration {
 // cwd = workdir — the shared core for check.sh and the seed-state
 // gate.
 func runCheckScript(ctx context.Context, script, trajDir, workdir string, env []string, timeout time.Duration) CheckResult {
+	// The check chdirs into the workdir; a relative trajDir would
+	// resolve against it (the default --eval-dir "eval" is relative),
+	// so absolutize first — bash exit 127 on a not-found script would
+	// otherwise masquerade as a judged outcome rather than an infra
+	// error. EVAL_TRAJECTORY_DIR exports the same absolute path.
+	if abs, err := filepath.Abs(trajDir); err == nil {
+		trajDir = abs
+	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	script = filepath.Join(trajDir, script)
+	if !fileExists(script) {
+		// Load validated the script's existence — a missing file here
+		// is an infra fault, not a verdict the model earned.
+		res := CheckResult{Exit: -1}
+		res.Err = fmt.Errorf("check script %q does not exist", script)
+		return res
+	}
 	cmd := exec.CommandContext(ctx, "bash", script)
 	// Kill the whole process group — a timed-out check's children
 	// (go run, spawned servers, bound ports) must not outlive the

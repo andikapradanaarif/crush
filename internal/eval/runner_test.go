@@ -1589,5 +1589,124 @@ func TestExecuteRun_SeedCheckHarnessError(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, OutcomeError, rec.Outcome)
 	require.Contains(t, rec.CheckDetail["seed_check_error"], "timed out")
+	require.Contains(t, rec.CheckDetail, "seed_check_stderr",
+		"a half-run gate's partial output stays on the error record")
 	require.Len(t, drv.calls, 1)
+}
+
+// The gate must resolve its script under a relative trajDir — the
+// default --eval-dir is "eval", and bash would otherwise resolve the
+// relative script path against the workdir and exit 127, masquerading
+// as an invalid seeding.
+func TestExecuteRun_SeedCheckRelativeTrajDir(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "ev")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "corpus"), 0o755))
+	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "warm-t", map[string]any{
+		"prior_sessions": []any{map[string]any{"turns": []string{"seed it"}}},
+		"task":           map[string]any{"turns": []string{"fix it"}},
+		"check": map[string]any{
+			"script":             "check.sh",
+			"expect_start_state": "fail",
+			"seed_script":        "seed_check.sh",
+		},
+	})
+	// EVAL_TRAJECTORY_DIR must resolve for gate scripts too.
+	require.NoError(t, os.WriteFile(filepath.Join(trajDir, "seed_check.sh"), []byte(
+		"#!/bin/bash\n"+
+			"test -f \"$EVAL_TRAJECTORY_DIR/check.sh\"\n"+
+			"echo 'EVAL_JSON {\"seeded\":\"yes\"}'\n"), 0o755))
+	// Not parallel — the chdir is process-global.
+	t.Chdir(parent)
+	relTraj := filepath.Join("ev", "corpus", "warm-t")
+	tr, err := LoadTrajectory(relTraj)
+	require.NoError(t, err)
+	drv := &seedGateRecorder{}
+	r := &Runner{EvalDir: "ev", Driver: drv, WorkParent: t.TempDir(), RNG: rand.New(rand.NewPCG(1, 2))}
+	exp := &Experiment{Name: "exp1", Model: "mock/m", Temperature: ptr(0.0)}
+	manifest := &FlagsManifest{Defaults: map[string]any{}}
+
+	rec, err := r.ExecuteRun(context.Background(), exp, tr, relTraj, ArmControl, Arm{}, manifest, 1, "inv")
+	require.NoError(t, err)
+	require.Equal(t, OutcomePass, rec.Outcome)
+	require.Equal(t, map[string]any{"seeded": "yes"}, rec.SeedState)
+}
+
+// With multiple seeds the gate asserts only the final state — and its
+// db analysis pairs with the last seed's session.
+func TestExecuteRun_SeedCheckMultipleSeeds(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "warm-t", map[string]any{
+		"prior_sessions": []any{
+			map[string]any{"turns": []string{"first seed"}},
+			map[string]any{"turns": []string{"second seed"}},
+		},
+		"task": map[string]any{"turns": []string{"fix it"}},
+		"check": map[string]any{
+			"script":             "check.sh",
+			"expect_start_state": "fail",
+			"seed_script":        "seed_check.sh",
+		},
+	})
+	require.NoError(t, os.WriteFile(filepath.Join(trajDir, "seed_check.sh"), []byte(
+		"#!/bin/bash\n"+
+			"test -f call-2.marker && ! test -f call-3.marker\n"+
+			"echo 'EVAL_JSON {\"seeded\":\"after-both\"}'\n"), 0o755))
+	tr, err := LoadTrajectory(trajDir)
+	require.NoError(t, err)
+	drv := &seedGateRecorder{}
+	r := &Runner{EvalDir: root, Driver: drv, WorkParent: t.TempDir(), RNG: rand.New(rand.NewPCG(1, 2))}
+	exp := &Experiment{Name: "exp1", Model: "mock/m", Temperature: ptr(0.0)}
+	manifest := &FlagsManifest{Defaults: map[string]any{}}
+
+	rec, err := r.ExecuteRun(context.Background(), exp, tr, trajDir, ArmControl, Arm{}, manifest, 1, "inv")
+	require.NoError(t, err)
+	require.Equal(t, OutcomePass, rec.Outcome)
+	require.Len(t, drv.calls, 3, "two seeds, gate, then measured")
+	require.Equal(t, map[string]any{"seeded": "after-both"}, rec.SeedState)
+	require.Equal(t, []string{"sess-1", "sess-2"}, rec.WarmStart.SessionIDs)
+}
+
+// A rejecting gate that prints no EVAL_JSON leaves SeedState nil —
+// absent detail is distinguishable from a reported wrong state.
+func TestExecuteRun_SeedCheckRejectNoDetail(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "warm-t", map[string]any{
+		"prior_sessions": []any{map[string]any{"turns": []string{"seed it"}}},
+		"check": map[string]any{
+			"script":             "check.sh",
+			"expect_start_state": "fail",
+			"seed_script":        "seed_check.sh",
+		},
+	})
+	require.NoError(t, os.WriteFile(filepath.Join(trajDir, "seed_check.sh"),
+		[]byte("#!/bin/bash\nexit 1\n"), 0o755))
+	tr, err := LoadTrajectory(trajDir)
+	require.NoError(t, err)
+	drv := &seedGateRecorder{}
+	r := &Runner{EvalDir: root, Driver: drv, WorkParent: t.TempDir(), RNG: rand.New(rand.NewPCG(1, 2))}
+	exp := &Experiment{Name: "exp1", Model: "mock/m", Temperature: ptr(0.0)}
+	manifest := &FlagsManifest{Defaults: map[string]any{}}
+
+	rec, err := r.ExecuteRun(context.Background(), exp, tr, trajDir, ArmControl, Arm{}, manifest, 1, "inv")
+	require.NoError(t, err)
+	require.Equal(t, OutcomeInconclusive, rec.Outcome)
+	require.Nil(t, rec.SeedState)
+	require.Len(t, drv.calls, 1)
+}
+
+// A seed script that vanishes between load and run is infra, not an
+// invalid seeding. Through ExecuteRun the content hash catches it
+// first (seed_script is a hashed ref); the stat belt inside
+// runCheckScript covers the race window directly — a missing script
+// is Err, never a judged exit.
+func TestRunCheckScript_MissingFileIsError(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	res := runCheckScript(context.Background(), "gone.sh", dir, dir, nil, time.Second)
+	require.Error(t, res.Err)
+	require.Contains(t, res.Err.Error(), "does not exist")
+	require.Equal(t, -1, res.Exit)
 }

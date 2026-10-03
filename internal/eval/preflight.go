@@ -344,6 +344,15 @@ func isFixtureConfigError(rec RunRecord) bool {
 	if _, ok := rec.CheckDetail["harness"]; ok {
 		return true
 	}
-	_, ok := rec.CheckDetail["check_error"]
-	return ok
+	// check_error and seed_check_error share the class: a check or
+	// seed-state gate that cannot execute is the same deterministic
+	// trajectory-scoped config fault. Skipping the gate's error class
+	// would resample a persistently broken gate to the attempt cap,
+	// each attempt paying full prior_sessions cost first.
+	for _, k := range []string{"check_error", "seed_check_error"} {
+		if _, ok := rec.CheckDetail[k]; ok {
+			return true
+		}
+	}
+	return false
 }

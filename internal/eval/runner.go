@@ -343,21 +343,25 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 			if schk.Err != nil || schk.Exit != 0 {
 				rec.DurationS = r.now().Sub(rec.StartedAt).Seconds()
 				r.preserveArtifacts(ctx, &rec, exp.Name, traj.ID, armName, inv, attempt, workdir, lastSeed.SessionID, lastSeedTurns)
+				// Keep the script's output on both paths — a
+				// half-run gate's partial stdout/stderr is exactly
+				// the evidence its error record needs.
+				detail := map[string]any{
+					"seed_check_stdout": string(tail([]byte(schk.Stdout), 4096)),
+					"seed_check_stderr": string(tail([]byte(schk.Stderr), 4096)),
+				}
 				if schk.Err != nil {
 					// The gate itself broke — infra, not state.
 					rec.Outcome = OutcomeError
-					rec.CheckDetail = map[string]any{"seed_check_error": schk.Err.Error()}
+					detail["seed_check_error"] = schk.Err.Error()
 				} else {
 					// Clean execution, wrong state: the seeding is
 					// invalid — reject like a coverage miss rather
 					// than fail the model for a state it never saw.
 					rec.Outcome = OutcomeInconclusive
-					rec.CheckDetail = map[string]any{
-						"seed_state":        fmt.Sprintf("seed state assertion failed (exit %d)", schk.Exit),
-						"seed_check_stdout": string(tail([]byte(schk.Stdout), 4096)),
-						"seed_check_stderr": string(tail([]byte(schk.Stderr), 4096)),
-					}
+					detail["seed_state"] = fmt.Sprintf("seed state assertion failed (exit %d)", schk.Exit)
 				}
+				rec.CheckDetail = detail
 				return rec, nil
 			}
 		}
