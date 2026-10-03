@@ -164,8 +164,8 @@ every characterization pass a diff to reviewed files.
   deeper forensics, audit the preserved db (`warm_start.session_ids`
   → the seed session's tool calls) or compare workdir diffs.
 - **`check.seed_script`.** Optional gate asserting the designed warm
-  state — runs once after the last `prior_sessions` turn and before
-  the measured session, with the same contract as `check.sh` (cwd =
+  state — runs once after the last prior session and before the
+  measured session, with the same contract as `check.sh` (cwd =
   workdir, `EVAL_*` env, shared `timeout_seconds`, `EVAL_JSON`
   detail). Its detail lands on the record as `seed_state` — the
   verifiable evidence of what the measured session started from —
@@ -175,16 +175,26 @@ every characterization pass a diff to reviewed files.
   `inconclusive` before the measured session launches, never scored
   on the wrong premise. A gate that cannot execute or times out is
   `error` — infra, not state. Valid only with `prior_sessions`;
-  quarantine does not run it (quarantine has no seeds). Use it for
-  any cell whose premise is a seeded state — stale-memory cells
-  assert "decoy green ∧ task failure still live", which is the
-  difference between a stale row and a fresh one the vague prompt
-  would happily fix again. Caution: a gate asserting an unreachable
-  state inconcluses every attempt at full seed cost — the same
-  starvation exposure as a coverage miss, and quarantine can't
-  pre-flight it (no seeds there), so the first signal is a
-  trajectory landing all-inconclusive with `seed_state` details to
-  inspect.
+  quarantine does not run it (quarantine has no seeds). Gate output
+  lands in `check_detail` (`seed_check_*` keys on failure) — not
+  `check_stdout`, which is check.sh-only.
+  **Assert the memory state, not just the worktree.** The premise of
+  a warm cell lives in crush.db, reachable from the gate at
+  `$(dirname "$EVAL_WORKDIR")/$(basename "$EVAL_WORKDIR").crush-data/
+  crush.db`. A disobedient seed can leave a plausible worktree while
+  corrupting the premise — re-running the verbatim recorded command
+  resolves the row (`resolved_in`), a post-touch re-run refreshes
+  `last_seen` and un-stales the file. Stale-memory cells therefore
+  assert both halves: "decoy green ∧ task failure still live" on the
+  worktree *and* an open `-count=1` row (or `last_seen` older than
+  the touched file) on the db — which is the difference between a
+  stale row and a fresh one the vague prompt would happily fix
+  again. Declare `sqlite3` in `requires.tools` for db-asserting
+  gates. Caution: a gate asserting an unreachable state inconcluses
+  every attempt at full seed cost — the same starvation exposure as
+  a coverage miss, and quarantine can't pre-flight it (no seeds
+  there), so the first signal is a trajectory landing
+  all-inconclusive with `seed_state` details to inspect.
 - **`origin`.** `scrubbed` must be `true` — a value, not just a
   present field — when `kind` is `production`, and for `regression`
   whenever `source` is a real session or bug report — the same

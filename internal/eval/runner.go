@@ -359,7 +359,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 					// invalid — reject like a coverage miss rather
 					// than fail the model for a state it never saw.
 					rec.Outcome = OutcomeInconclusive
-					detail["seed_state"] = fmt.Sprintf("seed state assertion failed (exit %d)", schk.Exit)
+					detail["seed_check"] = fmt.Sprintf("seed state assertion failed (exit %d)", schk.Exit)
 				}
 				rec.CheckDetail = detail
 				return rec, nil
