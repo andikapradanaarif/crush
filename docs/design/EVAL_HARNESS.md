@@ -159,11 +159,42 @@ every characterization pass a diff to reviewed files.
   **Caveat — disobedient seeds.** "Change nothing" is a soft prompt
   instruction: a seed that edits the fixture anyway leaves the task
   pre-done, the vague prompt passes trivially, and the warm-vs-cold
-  delta misattributes seed labor to memory benefit. `check` sees
-  only the final tree so nothing catches it mid-run — audit via the
-  preserved db (`warm_start.session_ids` → the seed session's tool
-  calls) or compare workdir diffs; a `seed_writes` counter off
-  filetracker rows is the planned detection channel.
+  delta misattributes seed labor to memory benefit. Declare
+  `check.seed_script` to catch it deterministically (below); for
+  deeper forensics, audit the preserved db (`warm_start.session_ids`
+  → the seed session's tool calls) or compare workdir diffs.
+- **`check.seed_script`.** Optional gate asserting the designed warm
+  state — runs once after the last prior session and before the
+  measured session, with the same contract as `check.sh` (cwd =
+  workdir, `EVAL_*` env, shared `timeout_seconds`, `EVAL_JSON`
+  detail). Its detail lands on the record as `seed_state` — the
+  verifiable evidence of what the measured session started from —
+  whether the run proceeds or not. A non-zero exit means the seeded
+  state was never reached (the fix didn't land, the memory row
+  resolved, the task is already done): the run is rejected as
+  `inconclusive` before the measured session launches, never scored
+  on the wrong premise. A gate that cannot execute or times out is
+  `error` — infra, not state. Valid only with `prior_sessions`;
+  quarantine does not run it (quarantine has no seeds). Gate output
+  lands in `check_detail` (`seed_check_*` keys on failure) — not
+  `check_stdout`, which is check.sh-only.
+  **Assert the memory state, not just the worktree.** The premise of
+  a warm cell lives in crush.db, reachable from the gate at
+  `$(dirname "$EVAL_WORKDIR")/$(basename "$EVAL_WORKDIR").crush-data/
+  crush.db`. A disobedient seed can leave a plausible worktree while
+  corrupting the premise — re-running the verbatim recorded command
+  resolves the row (`resolved_in`), a post-touch re-run refreshes
+  `last_seen` and un-stales the file. Stale-memory cells therefore
+  assert both halves: "decoy green ∧ task failure still live" on the
+  worktree *and* an open `-count=1` row (or `last_seen` older than
+  the touched file) on the db — which is the difference between a
+  stale row and a fresh one the vague prompt would happily fix
+  again. Declare `sqlite3` in `requires.tools` for db-asserting
+  gates. Caution: a gate asserting an unreachable state inconcluses
+  every attempt at full seed cost — the same starvation exposure as
+  a coverage miss, and quarantine can't pre-flight it (no seeds
+  there), so the first signal is a trajectory landing
+  all-inconclusive with `seed_state` details to inspect.
 - **`origin`.** `scrubbed` must be `true` — a value, not just a
   present field — when `kind` is `production`, and for `regression`
   whenever `source` is a real session or bug report — the same
@@ -1454,6 +1485,36 @@ it. And coverage compounds: every regression fix deposits a
 permanent trajectory, so the corpus's protected surface grows
 linearly with project history while cost per check stays flat.
 Live measurement has no memory — it can never accumulate.
+
+## Default flips — the standing release policy
+
+Issues #38 and #54 established the rules every default-on flip
+follows; the issues are closed, the policy lives here. Each future
+flip gets its own issue and its own commit — never bundled into the
+feature's implementation PR, where the evidence can't exist yet.
+
+**Required for any flip:**
+
+- **Paired corpus evidence.** Every flip needs the control arm — a
+  solo "is it better" run measures nothing.
+- **Verdict parity first.** Treatment passes `check.sh` at ≥ control
+  rate. Token savings on a regressing arm are not savings.
+- **Operational definitions fixed before runs.** What counts as a
+  "discovery call", a "re-read", a "wrong-pointer" is declared in
+  advance over session-DB records (`CallMetrics`), not fitted
+  post-hoc.
+- **Corpus grows where the signal can't manifest.** Don't reuse
+  fixtures a mechanism can't fire on — the project-index lesson from
+  #38: a no-op arm "passes" the paired gate on nothing.
+- **Arm intent pinned in `eval/flags.json`; the flip commit updates
+  `flag_defaults` alongside** — stale defaults corrupt baseline
+  bookkeeping.
+- **Post-flip sanity window.** `crush stats` + `CallMetrics` on real
+  sessions, including the session-economics check: feature cost as a
+  share of session total across the length distribution. Corpus
+  slices can't capture a user's real mix of micro-sessions — a flag
+  can win every slice and still be a net tax on a mostly-short-task
+  workload.
 
 ## Non-goals
 

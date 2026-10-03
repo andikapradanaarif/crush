@@ -162,6 +162,18 @@ func ValidateTrajectory(t *Trajectory, trajDir string) []string {
 		problems = append(problems, fmt.Sprintf("check script %q: %v", t.Check.Script, err))
 	}
 
+	if t.Check.SeedScript != "" {
+		// The gate exists to judge the state seeding left behind —
+		// on a cold trajectory it would assert a state nothing
+		// produces, which is a manifest bug, not a weaker check.
+		if len(t.PriorSessions) == 0 {
+			problems = append(problems, "check.seed_script requires prior_sessions — there is no seeded state to assert")
+		}
+		if _, err := os.Stat(filepath.Join(trajDir, t.Check.SeedScript)); err != nil {
+			problems = append(problems, fmt.Sprintf("seed check script %q: %v", t.Check.SeedScript, err))
+		}
+	}
+
 	hasRef := fileExists(filepath.Join(trajDir, "reference.patch"))
 	hasCounter := fileExists(filepath.Join(trajDir, "counterexample.patch"))
 
@@ -997,6 +1009,9 @@ func trajContentRefs(trajDir string, t *Trajectory) []string {
 	}
 	if t.Check.Script != "" {
 		refs = append(refs, filepath.Join(trajDir, t.Check.Script))
+	}
+	if t.Check.SeedScript != "" {
+		refs = append(refs, filepath.Join(trajDir, t.Check.SeedScript))
 	}
 	return refs
 }

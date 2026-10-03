@@ -13,9 +13,10 @@
 	"check": {
 		"script": "../mask-fix-failing-test/check.sh",
 		"expect_start_state": "fail",
-		"timeout_seconds": 300
+		"timeout_seconds": 300,
+		"seed_script": "seed_check.sh"
 	},
 	"coverage": {"min_steps": 1, "min_warm_start.sessions": 1},
-	"requires": {"tools": ["go"]},
+	"requires": {"tools": ["go", "sqlite3"]},
 	"budget": {"run_timeout_seconds": 300, "max_steps": 15}
 }

@@ -325,6 +325,12 @@ func TestIsFixtureConfigError_Shapes(t *testing.T) {
 		Outcome:     OutcomeError,
 		CheckDetail: map[string]any{"check_error": "exec check.sh: no such file"},
 	}))
+	// A gate that cannot execute is the same trajectory-scoped config
+	// fault — resampling would burn full seed cost per attempt.
+	require.True(t, isFixtureConfigError(RunRecord{
+		Outcome:     OutcomeError,
+		CheckDetail: map[string]any{"seed_check_error": "check timed out after 1s"},
+	}))
 	// Subprocess errors are not fixture-class — they run through the
 	// config-class classifier instead.
 	require.False(t, isFixtureConfigError(RunRecord{

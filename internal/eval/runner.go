@@ -287,6 +287,8 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	// error rather than measure a degraded seeding.
 	if len(traj.PriorSessions) > 0 {
 		warm := &WarmStart{}
+		var lastSeed RunResult
+		var lastSeedTurns []string
 		for i, ps := range traj.PriorSessions {
 			seedStart := r.now()
 			seed := drv.Run(ctx, workdir, ps.Turns, traj.Budget)
@@ -311,6 +313,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 				warm.SessionIDs = append(warm.SessionIDs, seed.SessionID)
 			}
 			rec.WarmStart = warm
+			lastSeed, lastSeedTurns = seed, ps.Turns
 			if seed.Err != nil || seed.TimedOut {
 				// Everything the measured-run error path gets: the
 				// failed seed's db is exactly the artifact its
@@ -318,30 +321,47 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 				// breaker, and the seeding wall clock was real.
 				rec.ErrorClass = seed.ErrorClass
 				rec.DurationS = r.now().Sub(rec.StartedAt).Seconds()
-				rec.Workdir = workdir
-				dst, walSafe, perr := r.preserveSessionDB(ctx, exp.Name, traj.ID, armName, inv, attempt, workdir)
-				if perr != nil {
-					rec.CallMetricsError = fmt.Sprintf("session db not preserved: %v", perr)
-				} else {
-					rec.SessionDB = dst
-					rec.SessionDBIncomplete = !walSafe
-					metrics, aerr := AnalyzeSessionDB(ctx, filepath.Join(r.EvalDir, dst), AnalyzeOptions{
-						SessionID: seed.SessionID,
-						Workdir:   workdir,
-						Turns:     ps.Turns,
-						GOOS:      rec.Env.OS,
-					})
-					if aerr != nil {
-						rec.CallMetricsError = aerr.Error()
-					} else {
-						rec.CallMetrics = metrics
-					}
-				}
+				r.preserveArtifacts(ctx, &rec, exp.Name, traj.ID, armName, inv, attempt, workdir, seed.SessionID, ps.Turns)
 				rec.Outcome = OutcomeError
 				rec.CheckDetail = map[string]any{
 					"prior_session": fmt.Sprintf("seed %d of %d failed (timeout=%v): %v",
 						i+1, len(traj.PriorSessions), seed.TimedOut, seed.Err),
 				}
+				return rec, nil
+			}
+		}
+
+		// Seeds running cleanly is necessary but not sufficient:
+		// the designed warm state itself is asserted before the
+		// measured session launches. A seed can succeed yet leave
+		// the wrong state — the fix didn't land, or the confirming
+		// rerun resolved the memory row — and measuring anyway
+		// would answer a different question than the cell poses.
+		if traj.Check.SeedScript != "" {
+			schk := runCheckScript(ctx, traj.Check.SeedScript, trajDir, workdir, r.checkEnv(), checkTimeout(traj))
+			rec.SeedState = schk.Detail
+			if schk.Err != nil || schk.Exit != 0 {
+				rec.DurationS = r.now().Sub(rec.StartedAt).Seconds()
+				r.preserveArtifacts(ctx, &rec, exp.Name, traj.ID, armName, inv, attempt, workdir, lastSeed.SessionID, lastSeedTurns)
+				// Keep the script's output on both paths — a
+				// half-run gate's partial stdout/stderr is exactly
+				// the evidence its error record needs.
+				detail := map[string]any{
+					"seed_check_stdout": string(tail([]byte(schk.Stdout), 4096)),
+					"seed_check_stderr": string(tail([]byte(schk.Stderr), 4096)),
+				}
+				if schk.Err != nil {
+					// The gate itself broke — infra, not state.
+					rec.Outcome = OutcomeError
+					detail["seed_check_error"] = schk.Err.Error()
+				} else {
+					// Clean execution, wrong state: the seeding is
+					// invalid — reject like a coverage miss rather
+					// than fail the model for a state it never saw.
+					rec.Outcome = OutcomeInconclusive
+					detail["seed_check"] = fmt.Sprintf("seed state assertion failed (exit %d)", schk.Exit)
+				}
+				rec.CheckDetail = detail
 				return rec, nil
 			}
 		}
@@ -390,35 +410,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	// the full message/tool trace, free. Attempted regardless of
 	// whether telemetry reported a session: a turn-0 hard-kill writes
 	// no telemetry but still leaves a DB worth keeping.
-	dst, walSafe, err := r.preserveSessionDB(ctx, exp.Name, traj.ID, armName, inv, attempt, workdir)
-	// Record the run's workdir unconditionally — the materialized dir is
-	// deleted after the run, and the anchor is the only way a post-hoc
-	// `eval analyze` can resolve relative call paths correctly.
-	rec.Workdir = workdir
-	if err != nil {
-		// Record why the metrics are absent — indistinguishable from
-		// "no metrics by design" otherwise.
-		rec.CallMetricsError = fmt.Sprintf("session db not preserved: %v", err)
-	} else {
-		rec.SessionDB = dst
-		rec.SessionDBIncomplete = !walSafe
-		// Sequence analysis runs on the preserved artifact, not the
-		// about-to-be-deleted source — `crush eval analyze <artifact>`
-		// then reproduces exactly what the record carries.
-		metrics, aerr := AnalyzeSessionDB(ctx, filepath.Join(r.EvalDir, dst), AnalyzeOptions{
-			SessionID: res.SessionID,
-			Workdir:   workdir,
-			Turns:     traj.Task.Turns,
-			// The producing host's conventions — rec.Env.OS — not the
-			// analyzer's, in case artifacts are analyzed cross-platform.
-			GOOS: rec.Env.OS,
-		})
-		if aerr != nil {
-			rec.CallMetricsError = aerr.Error()
-		} else {
-			rec.CallMetrics = metrics
-		}
-	}
+	r.preserveArtifacts(ctx, &rec, exp.Name, traj.ID, armName, inv, attempt, workdir, res.SessionID, traj.Task.Turns)
 
 	switch {
 	case res.Err != nil:
@@ -480,6 +472,41 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	}
 	rec.Outcome = OutcomePass
 	return rec, nil
+}
+
+// preserveArtifacts snapshots the session db and runs sequence
+// analysis on the artifact, recording both on rec — shared by every
+// exit path that leaves a db worth keeping. The workdir is recorded
+// unconditionally: the materialized dir is deleted after the run, and
+// the anchor is the only way a post-hoc `eval analyze` can resolve
+// relative call paths correctly.
+func (r *Runner) preserveArtifacts(ctx context.Context, rec *RunRecord, expName, trajID, armName, inv string, runIndex int, workdir, sessionID string, turns []string) {
+	dst, walSafe, err := r.preserveSessionDB(ctx, expName, trajID, armName, inv, runIndex, workdir)
+	rec.Workdir = workdir
+	if err != nil {
+		// Record why the metrics are absent — indistinguishable from
+		// "no metrics by design" otherwise.
+		rec.CallMetricsError = fmt.Sprintf("session db not preserved: %v", err)
+		return
+	}
+	rec.SessionDB = dst
+	rec.SessionDBIncomplete = !walSafe
+	// Sequence analysis runs on the preserved artifact, not the
+	// about-to-be-deleted source — `crush eval analyze <artifact>`
+	// then reproduces exactly what the record carries.
+	metrics, aerr := AnalyzeSessionDB(ctx, filepath.Join(r.EvalDir, dst), AnalyzeOptions{
+		SessionID: sessionID,
+		Workdir:   workdir,
+		Turns:     turns,
+		// The producing host's conventions — rec.Env.OS — not the
+		// analyzer's, in case artifacts are analyzed cross-platform.
+		GOOS: rec.Env.OS,
+	})
+	if aerr != nil {
+		rec.CallMetricsError = aerr.Error()
+	} else {
+		rec.CallMetrics = metrics
+	}
 }
 
 // preserveSessionDB snapshots the run's SQLite DB into
@@ -942,7 +969,7 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 				fixtureErrs++
 				if fixtureErrs >= 2 {
 					detail := "fixture config"
-					for _, key := range []string{"harness", "check_error", "run_error"} {
+					for _, key := range []string{"harness", "check_error", "seed_check_error", "run_error"} {
 						if v, ok := rec.CheckDetail[key].(string); ok && v != "" {
 							detail += ": " + v
 							break
