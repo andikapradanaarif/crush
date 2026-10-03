@@ -1,15 +1,22 @@
 {
-	"name": "failure-memory-mask-abstain",
+	"name": "failure-memory-mask-reject",
 	"model": "alibaba-tp/deepseek-v4.1-flash",
 	"temperature": 0,
 	"corpus": [
-		"mask-ft-ambig-none",
-		"mask-bb-ambig-none"
+		"mask-ft-explicit-decoy",
+		"mask-ft-explicit-stalefile",
+		"mask-ft-ambig-stale",
+		"mask-ft-ambig-placebo",
+		"mask-bb-explicit-decoy",
+		"mask-bb-ambig-stale",
+		"mask-bb-ambig-placebo",
+		"mask-fix-failing-test",
+		"mask-build-break"
 	],
 	"runs_per_trajectory": {
-		"stable": 2,
-		"mid": 3,
-		"uncharacterized": 4
+		"stable": 3,
+		"mid": 10,
+		"uncharacterized": 11
 	},
 	"primary": {
 		"metric": "call_metrics.discovery_calls_before_write",
@@ -33,8 +40,9 @@
 				}
 			},
 			"coverage": {
-				"max_tail.sections.open_failures": 0,
-				"max_tail.decisions.candidates": 0
+				"min_tail.decisions.candidates": 1,
+				"max_tail.decisions.admitted": 0,
+				"max_tail.sections.open_failures": 0
 			}
 		}
 	},

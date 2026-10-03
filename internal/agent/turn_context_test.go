@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,11 +32,25 @@ func TestIsVaguePrompt(t *testing.T) {
 		{"it crashes on startup", true},
 		{"update the config", true},
 		{"the test fails", true},
-		{"run the tests", false},
+		// Pluralized with referentKindHints — "the tests" is
+		// referent-shaped now; the advisory directive absorbs the
+		// over-fire on an actionable prompt.
+		{"run the tests", true},
+		{"fix the tests", true},
 		{"fix the bug in internal/agent/agent.go", false},
 		{"fix internal/agent/agent.go", false},
 		{"", false},
+		// A bare plausible-command token is anchored in any
+		// language.
 		{"ls", false},
+		{"go build", false},
+		// Short and unreadable by the English machinery — vague in
+		// any language; the model judges in the user's words.
+		{"直して", true},
+		// An ASCII-lower foreign word still reads as command-shaped
+		// — the accented form makes the boundary honest.
+		{"arreglalo", false},
+		{"arrégalo", true},
 		{"add a README section explaining the project layout and how to run the tests", false},
 		{"rename foo to bar everywhere in the codebase and update all the callers", false},
 	}
@@ -42,6 +58,32 @@ func TestIsVaguePrompt(t *testing.T) {
 		t.Run(tc.prompt, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, tc.want, isVaguePrompt(tc.prompt))
+		})
+	}
+}
+
+// Substance counts runes as well as fields — an unspaced script is
+// one field but many runes, and still carries context.
+func TestHasSubstantiveUserMessage(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		text string
+		want bool
+	}{
+		{"hi", false},
+		{"ok thanks", false},
+		{"src/x.go", true},
+		{"fix the failing test in auth", true},
+		{"テストが失敗しているので直してください", true},
+		{"短い", false},
+		// The rune clause is for unspaced scripts — a two-word
+		// English aside stays cheap even past twelve runes.
+		{"sounds good!", false},
+	} {
+		t.Run(tc.text, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want,
+				hasSubstantiveUserMessage([]message.Message{userMsg(tc.text)}))
 		})
 	}
 }
@@ -69,6 +111,18 @@ func listOpenFailures(t *testing.T, env fakeEnv) []cmdlog.Failure {
 	f, err := env.cmdlog.ListOpenFailures(t.Context(), turnContextOpenFailuresLimit)
 	require.NoError(t, err)
 	return f
+}
+
+// failingCmdlog errors on the open-failure read so the tail exercises
+// the "couldn't evaluate" path.
+type failingCmdlog struct{}
+
+func (failingCmdlog) RecordRun(context.Context, cmdlog.Run) {}
+func (failingCmdlog) ListCommands(context.Context, int) ([]cmdlog.Command, error) {
+	return nil, nil
+}
+func (failingCmdlog) ListOpenFailures(context.Context, int) ([]cmdlog.Failure, error) {
+	return nil, errors.New("cmdlog unavailable")
 }
 
 func userMsg(text string) message.Message {
@@ -176,10 +230,14 @@ func TestAmbiguityDirective(t *testing.T) {
 			CWD: env.workingDir, Stdout: "FAIL", ExitCode: 1, Ran: true,
 		})
 		// "the config" names a target failure memory cannot supply —
-		// the stale row must not disarm clarification.
+		// the selector rejects the row, and an all-rejected set must
+		// not disarm clarification.
+		admitted, _ := selectOpenFailures("update the config",
+			listOpenFailures(t, env), env.workingDir)
+		require.Empty(t, admitted)
 		require.NotEmpty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "update the config",
-		}, nil, listOpenFailures(t, env)))
+		}, nil, admitted))
 	})
 
 	t.Run("a bare anaphora suppresses the gate", func(t *testing.T) {
@@ -474,7 +532,11 @@ func TestTurnTailAudit(t *testing.T) {
 			SessionID: "prior", Command: "make test",
 			CWD: env.workingDir, Stdout: "FAIL", ExitCode: 1, Ran: true,
 		})
-		tail := a.turnTailMessages(t.Context(), SessionAgentCall{SessionID: sessionID}, nil)
+		// The selector binds the test-kind row to the failure-shaped
+		// referent — an unrelated prompt would render nothing.
+		tail := a.turnTailMessages(t.Context(), SessionAgentCall{
+			SessionID: sessionID, Prompt: "the test fails — fix it",
+		}, nil)
 		require.Len(t, tail, 1)
 		text := tail[0].Content[0].(fantasy.TextPart).Text
 
@@ -500,7 +562,9 @@ func TestTurnTailAudit(t *testing.T) {
 			SessionID: "prior", Command: "make test",
 			CWD: env.workingDir, Stdout: "FAIL", ExitCode: 1, Ran: true,
 		})
-		require.Len(t, a.turnTailMessages(t.Context(), SessionAgentCall{SessionID: sessionID}, nil), 1)
+		require.Len(t, a.turnTailMessages(t.Context(), SessionAgentCall{
+			SessionID: sessionID, Prompt: "the test fails — fix it",
+		}, nil), 1)
 
 		audit, ok := a.tailAudit.Get(sessionID)
 		require.True(t, ok)
@@ -548,6 +612,21 @@ func TestTurnTailAudit(t *testing.T) {
 		audit, ok = a.tailAudit.Get(sessionID)
 		require.True(t, ok)
 		require.Zero(t, audit.Bytes)
+	})
+
+	t.Run("a fetch error records on the audit", func(t *testing.T) {
+		t.Parallel()
+		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.tailAudit = csync.NewMap[string, TailAudit]()
+		a.failureMemory = true
+		// A fetch error must read as "couldn't evaluate", not
+		// "evaluated, zero candidates".
+		a.cmdlog = failingCmdlog{}
+		require.Empty(t, a.turnTailMessages(t.Context(), SessionAgentCall{SessionID: sessionID}, nil))
+		audit, ok := a.tailAudit.Get(sessionID)
+		require.True(t, ok)
+		require.NotEmpty(t, audit.FetchError)
+		require.Empty(t, audit.Decisions)
 	})
 
 	t.Run("a sub-agent is never armed", func(t *testing.T) {

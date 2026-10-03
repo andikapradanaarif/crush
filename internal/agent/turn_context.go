@@ -40,6 +40,9 @@ const (
 	turnContextFileHeatLimit = 5
 	// turnContextOpenFailuresLimit bounds the failure-memory tail —
 	// recent-first, so the cap keeps the freshest unresolved failures.
+	// It is also the selector's candidate cap: a bound row ranked
+	// beyond it is invisible to both, and tail.decisions.candidates
+	// reads as a lower bound on true open-failure count.
 	turnContextOpenFailuresLimit = 5
 	// turnContextFailureFileHints bounds file hints rendered per
 	// failure row.
@@ -52,40 +55,30 @@ const (
 
 // vagueReferentRe matches prompts that lean on a definite or anaphoric
 // referent whose target context must supply — "the bug", "it", "this
-// crash". The noun list is deliberately referent-shaped and singular:
-// "run the tests" acts on the whole suite and stays actionable on its
-// own; "the test" names a specific one the context must supply.
+// crash". The noun list mirrors referentKindHints so a mapped noun can
+// never be gated out upstream — the cost is that "run the tests" now
+// reads as referent-shaped even though the whole suite is actionable;
+// the directive is advisory, so over-firing is cheap.
 var vagueReferentRe = regexp.MustCompile(`(?i)\b(it|its|this|that|them|they)\b|` +
-	`\bthe\s+(bug|bugfix|crash|error|errors|failure|fail|issue|problem|panic|regression|leak|typo|warnings?|` +
-	`config|configuration|test|spec|endpoint|handler|route|feature|changes?|fix|workaround|hack|todo|fixme)\b`)
+	`\bthe\s+(bugs?|bugfix|crash(?:es)?|errors?|failures?|fail|issues?|problems?|panics?|regressions?|` +
+	`leaks?|typo|warnings?|hangs?|deadlocks?|suites?|pipelines?|jobs?|` +
+	`config|configuration|tests?|specs?|endpoint|handler|route|feature|changes?|fix|workaround|hack|todo|fixme)\b`)
 
-// failureReferentNouns are the "the N" referents an open failure can
-// be the target of — the failing test, the crash, the regression. A
-// vague prompt naming any other noun ("the config", "the endpoint")
-// refers to something failure memory cannot supply.
-var failureReferentNouns = map[string]bool{
-	"bug": true, "bugfix": true, "crash": true, "error": true,
-	"errors": true, "failure": true, "fail": true, "panic": true,
-	"regression": true, "leak": true, "issue": true, "problem": true,
-	"test": true, "spec": true, "warning": true, "warnings": true,
-}
-
+// theNounRe extracts the definite-article noun for referent shape
+// checks — "the test" → "test". The task-binding selector maps it to
+// command kinds via referentKindHints.
 var theNounRe = regexp.MustCompile(`(?i)\bthe\s+(\w+)\b`)
 
-// vagueReferentIsFailureShaped reports whether the prompt's referent
-// could point at an open failure: an explicit "the <failure-noun>",
-// or a bare anaphora ("fix it", "this crashes") — with no noun the
-// failing thing is a plausible referent.
-func vagueReferentIsFailureShaped(prompt string) bool {
-	if m := theNounRe.FindStringSubmatch(prompt); m != nil {
-		return failureReferentNouns[strings.ToLower(m[1])]
-	}
-	return true
-}
-
-// isVaguePrompt reports whether the prompt is underspecified in the way
-// the pre-filter cares about: short enough to carry no context of its
-// own, naming no explicit file paths, and leaning on a referent.
+// isVaguePrompt reports whether the prompt is underspecified in the
+// way the pre-filter cares about: short enough to carry no context of
+// its own, naming no explicit file paths, and either leaning on a
+// referent or carrying no parseable English anchors at all. The
+// last clause covers non-English prompts: the referent regex only
+// reads English, but a short, path-less prompt is vague in any
+// language, and the directive it arms is advisory — the model judges
+// underspecification in the user's own words. Fields-style word
+// counts stay: an unspaced script is "one word", which is already
+// the vague direction.
 func isVaguePrompt(prompt string) bool {
 	n := len(strings.Fields(prompt))
 	if n == 0 || n > vaguePromptMaxWords {
@@ -94,8 +87,27 @@ func isVaguePrompt(prompt string) bool {
 	if len(extractExplicitFilePaths(prompt)) > 0 {
 		return false
 	}
-	return vagueReferentRe.MatchString(prompt)
+	if vagueReferentRe.MatchString(prompt) {
+		return true
+	}
+	// No recognized English function words at all — a prompt this
+	// layer cannot read, treated as vague so the model, which can
+	// read it, gets the clarify directive. A bare plausible command
+	// ("ls", "htop") is anchored on its own — it stays non-vague.
+	for _, w := range strings.Fields(prompt) {
+		w = strings.ToLower(strings.Trim(w, " \t.,;:!?()[]{}\"'`—–-"))
+		if scopeStopWords[w] || commandTokenRe.MatchString(w) {
+			return false
+		}
+	}
+	return true
 }
+
+// commandTokenRe matches a bare plausible executable — lowercase
+// ASCII like "ls" or "htop" — so a one-word command prompt isn't
+// read as vague. Non-ASCII words can't match, which is correct:
+// an unreadable token is the vague case, not the anchored one.
+var commandTokenRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,15}$`)
 
 // turnTailMessages returns the ephemeral per-turn tail messages — the
 // turn-context blob and, when the vagueness pre-filter fires, the
@@ -113,11 +125,25 @@ func isVaguePrompt(prompt string) bool {
 // survives every provider.
 func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCall, msgs []message.Message) []fantasy.Message {
 	// Open failures are fetched once per Run — the tail blob renders
-	// them and the ambiguity gate reads the same slice.
+	// the subset the task-binding selector admits and the ambiguity
+	// gate reads the same slice. The decision list records every
+	// candidate's verdict so "rendered nothing" decomposes into "no
+	// candidates" versus "candidates rejected".
 	var openFailures []cmdlog.Failure
-	if a.failureMemory && a.cmdlog != nil {
-		if f, err := a.cmdlog.ListOpenFailures(ctx, turnContextOpenFailuresLimit); err == nil {
-			openFailures = f
+	var failureDecisions []FailureDecision
+	var fetchErr error
+	if a.failureMemory && a.cmdlog != nil && !a.isSubAgent {
+		var f []cmdlog.Failure
+		f, fetchErr = a.cmdlog.ListOpenFailures(ctx, turnContextOpenFailuresLimit)
+		if fetchErr == nil {
+			var workDir string
+			if a.configStore != nil {
+				workDir = a.configStore.WorkingDir()
+			}
+			openFailures, failureDecisions = selectOpenFailures(call.Prompt, f, workDir)
+		} else {
+			slog.Debug("Open-failure fetch failed; tail renders without memory",
+				"session_id", call.SessionID, "error", fetchErr)
 		}
 	}
 	sections := a.turnContextSections(ctx, call, openFailures)
@@ -132,7 +158,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		// predicate checkable. An unarmed agent still clears a stale
 		// audit from an earlier Run in the same process.
 		if a.tailArmed() {
-			a.recordTailAudit(call.SessionID, nil, "")
+			a.recordTailAudit(call.SessionID, nil, "", failureDecisions, fetchErr)
 		} else if a.tailAudit != nil {
 			a.tailAudit.Del(call.SessionID)
 		}
@@ -144,7 +170,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		"sections", len(sections),
 		"bytes", len(text),
 	)
-	a.recordTailAudit(call.SessionID, sections, text)
+	a.recordTailAudit(call.SessionID, sections, text, failureDecisions, fetchErr)
 	return []fantasy.Message{fantasy.NewUserMessage(text)}
 }
 
@@ -185,6 +211,14 @@ type TailAudit struct {
 	Bytes    int           `json:"bytes"`
 	SHA256   string        `json:"sha256"`
 	Text     string        `json:"text"`
+	// Decisions is the task-binding selector's per-candidate verdict
+	// for open_failures — every evaluated row, admitted or rejected
+	// with its reason. Empty when the selector saw no candidates.
+	Decisions []FailureDecision `json:"decisions,omitempty"`
+	// FetchError is set when ListOpenFailures itself failed — the
+	// empty Decisions then mean "couldn't evaluate", which an eval
+	// must not read as "evaluated, none bound".
+	FetchError string `json:"fetch_error,omitempty"`
 }
 
 var tailSectionNameRe = regexp.MustCompile(`^<(\w+)>`)
@@ -192,15 +226,19 @@ var tailSectionNameRe = regexp.MustCompile(`^<(\w+)>`)
 // recordTailAudit snapshots the rendered tail for SessionTelemetry.
 // Last-write-wins per session: a process's later Run replaces the
 // audit, matching the telemetry emission's once-per-process shape.
-func (a *sessionAgent) recordTailAudit(sessionID string, sections []string, text string) {
+func (a *sessionAgent) recordTailAudit(sessionID string, sections []string, text string, decisions []FailureDecision, fetchErr error) {
 	if a.tailAudit == nil || sessionID == "" {
 		return
 	}
 	sum := sha256.Sum256([]byte(text))
 	audit := TailAudit{
-		Bytes:  len(text),
-		SHA256: hex.EncodeToString(sum[:]),
-		Text:   text,
+		Bytes:     len(text),
+		SHA256:    hex.EncodeToString(sum[:]),
+		Text:      text,
+		Decisions: decisions,
+	}
+	if fetchErr != nil {
+		audit.FetchError = fetchErr.Error()
 	}
 	for _, s := range sections {
 		name := "unknown"
@@ -468,11 +506,13 @@ func (a *sessionAgent) ambiguityDirective(ctx context.Context, call SessionAgent
 			return ""
 		}
 	}
-	// An open failure is itself the likely referent — but only for a
-	// failure-shaped referent or bare anaphora. "Fix the config"
-	// names a target the memory cannot supply: suppressing there
-	// would disarm the gate for the life of the row.
-	if a.failureMemory && len(openFailures) > 0 && vagueReferentIsFailureShaped(call.Prompt) {
+	// An admitted open failure is itself the likely referent — the
+	// selector only admits candidates bound to a failure-shaped
+	// referent or an explicit path scope, so presence here already
+	// implies shape. An all-rejected set must NOT suppress: those
+	// candidates could not be bound, and the gate's declare-scope
+	// path is exactly what the prompt needs.
+	if a.failureMemory && len(openFailures) > 0 {
 		return ""
 	}
 	if a.interactive && a.hasTool(tools.QuestionToolName) {

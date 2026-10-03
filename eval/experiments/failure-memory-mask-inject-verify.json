@@ -1,21 +1,15 @@
 {
-	"name": "failure-memory-mask-abstain",
+	"name": "failure-memory-mask-inject-verify",
 	"model": "alibaba-tp/deepseek-v4.1-flash",
 	"temperature": 0,
 	"corpus": [
-		"mask-ft-ambig-none",
-		"mask-bb-ambig-none"
+		"mask-ft-ambig-correct",
+		"mask-bb-ambig-correct"
 	],
 	"runs_per_trajectory": {
 		"stable": 2,
-		"mid": 3,
-		"uncharacterized": 4
-	},
-	"primary": {
-		"metric": "call_metrics.discovery_calls_before_write",
-		"direction": "decrease",
-		"mde": 0.35,
-		"max_pass_drop": 0.1
+		"mid": 2,
+		"uncharacterized": 2
 	},
 	"arms": {
 		"control": {
@@ -33,8 +27,8 @@
 				}
 			},
 			"coverage": {
-				"max_tail.sections.open_failures": 0,
-				"max_tail.decisions.candidates": 0
+				"min_tail.decisions.admitted": 1,
+				"min_tail.sections.open_failures": 1
 			}
 		}
 	},

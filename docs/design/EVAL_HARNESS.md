@@ -583,7 +583,8 @@ trajectory twice) is strictly worse.
 			"sections": [{"name": "open_failures", "bytes": 210}],
 			"bytes": 210,
 			"sha256": "abc123...",
-			"text": "<open_failures>\n- make test: FAIL ...\n</open_failures>"
+			"text": "<open_failures>\n- make test: FAIL ...\n</open_failures>",
+			"decisions": [{"signature": "9358f5e3380a03df", "cmd": "go test .", "admit": true, "reason": "admit"}]
 		}
 	],
 	"generator_tokens": {"calls": 12, "input": 41000, "output": 900, "cache_read": 0, "cache_write": 0},
@@ -667,6 +668,18 @@ write path never recorded, so nothing could render — into
 inconclusive-and-resampled instead of a hidden null. The verdict
 gate itself never reads tail rows; they feed the fired/unfired
 strata and coverage starvation, not the primary comparison.
+`tail.decisions` is the failure-memory selector's per-candidate
+verdict list (`signature`, `cmd`, `admit`, `reason`) recorded on the
+turn's audit — every open row the selector evaluated, bound or
+rejected with a closed-vocabulary reason (`negated_scope`,
+`out_of_scope`, `referent_none`, `kind_mismatch`, `narrow_scope`,
+`path_gone`, `stale_suspect`). It decomposes an empty `sections` row
+into "no candidates existed" versus "candidates were rejected": the
+arm-scoped predicates `tail.decisions.candidates` (evaluated rows)
+and `tail.decisions.admitted` (rendered rows) make all three
+selector outcomes assertable — `min candidates`+`min admitted` for
+injection, `min candidates`+`max admitted:0` for rejection,
+`max candidates:0` for nothing-to-select.
 `pressure` is the notebook pressure gate's own coverage (#100):
 `activations` counts engage transitions — the "did the overflow
 machinery fire" predicate — and `engaged` is the per-session latch at

@@ -1,0 +1,21 @@
+{
+	"id": "mask-ft-explicit-stalefile",
+	"schema_version": 1,
+	"origin": {"kind": "synthetic"},
+	"start_state": {"kind": "fixture", "fixture_dir": "../mask-fix-failing-test/fixture"},
+	"prior_sessions": [{"turns": [
+		"run `go test -count=1 .` as a single bare command — no pipes or wrappers — and report which test fails — do not modify any files",
+		"add the comment `// touched` on a new line at the top of main_test.go — make only that edit — do not run any tests"
+	]}],
+	"task": {
+		"turns": ["fix the failing test in main_test.go"]
+	},
+	"check": {
+		"script": "../mask-fix-failing-test/check.sh",
+		"expect_start_state": "fail",
+		"timeout_seconds": 300
+	},
+	"coverage": {"min_steps": 1, "min_warm_start.sessions": 1},
+	"requires": {"tools": ["go"]},
+	"budget": {"run_timeout_seconds": 300, "max_steps": 15}
+}

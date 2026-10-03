@@ -457,9 +457,20 @@ func TestRunTelemetry_TailDecodeAndFold(t *testing.T) {
 
 	var tel runTelemetry
 	require.NoError(t, json.Unmarshal([]byte(
-		`{"tail":{"sections":[{"name":"open_failures","bytes":120}],"bytes":120,"sha256":"abc","text":"<open_failures>x</open_failures>"}}`), &tel))
+		`{"tail":{"sections":[{"name":"open_failures","bytes":120}],"bytes":120,"sha256":"abc","text":"<open_failures>x</open_failures>",`+
+			`"decisions":[{"signature":"go test ./decoy@.","cmd":"go test ./decoy","admit":false,"reason":"narrow_scope"}],`+
+			`"fetch_error":"cmdlog unavailable"}}`), &tel))
 	require.NotNil(t, tel.Tail)
 	require.Equal(t, "open_failures", tel.Tail.Sections[0].Name)
+	// The decisions + fetch_error wire fields decode — a tag drift
+	// between agent and eval mirrors silently zeroes every
+	// decisions.* predicate, so the round-trip pins the contract.
+	require.Len(t, tel.Tail.Decisions, 1)
+	require.Equal(t, "go test ./decoy@.", tel.Tail.Decisions[0].Signature)
+	require.Equal(t, "go test ./decoy", tel.Tail.Decisions[0].Cmd)
+	require.False(t, tel.Tail.Decisions[0].Admit)
+	require.Equal(t, "narrow_scope", tel.Tail.Decisions[0].Reason)
+	require.Equal(t, "cmdlog unavailable", tel.Tail.FetchError)
 
 	var res RunResult
 	res.addTurnTelemetry(tel, 2)
@@ -469,6 +480,40 @@ func TestRunTelemetry_TailDecodeAndFold(t *testing.T) {
 	require.Equal(t, 120, res.Tail[0].Bytes)
 	require.Equal(t, "abc", res.Tail[0].SHA256)
 	require.Equal(t, "<open_failures>x</open_failures>", res.Tail[0].Text)
+	require.Len(t, res.Tail[0].Decisions, 1)
+	require.Equal(t, "cmdlog unavailable", res.Tail[0].FetchError)
+}
+
+// tail.decisions.* counts the selector's per-candidate verdicts —
+// candidates every evaluated row, admitted only the rendered ones.
+func TestArmCoverage_TailDecisions(t *testing.T) {
+	t.Parallel()
+
+	rec := &RunRecord{Tail: []TurnTail{
+		{Turn: 0, Decisions: []FailureDecision{
+			{Signature: "go test .@.", Cmd: "go test .", Admit: true, Reason: "admit"},
+			{Signature: "go test ./decoy@.", Cmd: "go test ./decoy", Admit: false, Reason: "narrow_scope"},
+			{Signature: "ls vendor@.", Cmd: "ls vendor", Admit: false, Reason: "kind_mismatch"},
+		}},
+	}}
+	met, err := ArmCoverageMet(Coverage{"min_tail.decisions.candidates": 3}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+	met, err = ArmCoverageMet(Coverage{"min_tail.decisions.admitted": 1}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+	met, err = ArmCoverageMet(Coverage{"max_tail.decisions.admitted": 0}, rec)
+	require.NoError(t, err)
+	require.False(t, met)
+
+	// An audited-empty decision list satisfies max_ abstention —
+	// "evaluated, none bound" is evidence, not silence.
+	rec = &RunRecord{Tail: []TurnTail{{Turn: 0, Decisions: []FailureDecision{
+		{Signature: "go test ./decoy@.", Cmd: "go test ./decoy", Admit: false, Reason: "negated_scope"},
+	}}}}
+	met, err = ArmCoverageMet(Coverage{"max_tail.decisions.admitted": 0}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
 }
 
 // tail.sections.* is the arm-scoped firing assertion for context-
@@ -646,6 +691,24 @@ func TestValidateExperiment_ArmCoverageStarvation(t *testing.T) {
 	exp.Arms[ArmTreatment] = Arm{
 		Config:   ArmConfig{Options: map[string]any{"project_index": false}},
 		Coverage: Coverage{"min_call_metrics.wrong_pointer_events": 1},
+	}
+	require.Error(t, ValidateExperiment(exp))
+
+	// tail.* predicates need their producer flags — failure_memory
+	// off starves decisions and open_failures alike.
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"failure_memory": false}},
+		Coverage: Coverage{"min_tail.decisions.candidates": 1},
+	}
+	require.Error(t, ValidateExperiment(exp))
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"failure_memory": true}},
+		Coverage: Coverage{"min_tail.decisions.candidates": 1},
+	}
+	require.NoError(t, ValidateExperiment(exp))
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"failure_memory": false}},
+		Coverage: Coverage{"min_tail.sections.open_failures": 1},
 	}
 	require.Error(t, ValidateExperiment(exp))
 

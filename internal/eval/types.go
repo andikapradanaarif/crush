@@ -407,6 +407,25 @@ type TurnTail struct {
 	Bytes    int           `json:"bytes"`
 	SHA256   string        `json:"sha256"`
 	Text     string        `json:"text,omitempty"`
+	// Decisions is the failure-memory selector's per-candidate
+	// verdicts for this turn — which open_failures rows were
+	// evaluated, which rendered, and which were rejected with their
+	// reason. Wire mirror of agent.FailureDecision; empty when the
+	// selector saw no candidates.
+	Decisions []FailureDecision `json:"decisions,omitempty"`
+	// FetchError mirrors TailAudit.FetchError — set when the
+	// open-failure read itself failed, so an empty Decisions reads
+	// "couldn't evaluate" rather than "evaluated, none bound".
+	FetchError string `json:"fetch_error,omitempty"`
+}
+
+// FailureDecision is the eval-side mirror of agent.FailureDecision:
+// one open-failure candidate's task-binding verdict.
+type FailureDecision struct {
+	Signature string `json:"signature"`
+	Cmd       string `json:"cmd,omitempty"`
+	Admit     bool   `json:"admit"`
+	Reason    string `json:"reason"`
 }
 
 // RequestStats is the run's request-size snapshot: the last rendered

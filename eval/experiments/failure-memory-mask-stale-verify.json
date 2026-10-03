@@ -24,6 +24,11 @@
 					"turn_context": "off",
 					"failure_memory": true
 				}
+			},
+			"coverage": {
+				"min_tail.decisions.candidates": 1,
+				"max_tail.decisions.admitted": 0,
+				"max_tail.sections.open_failures": 0
 			}
 		}
 	},

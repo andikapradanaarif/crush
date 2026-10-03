@@ -81,8 +81,9 @@ none of these completely. This is the frame the selection layer must answer.
 | Work | Detail |
 |---|---|
 | **Mask corpus repair (#204, done 10-02)** | 14 cells, explicit/ambiguous × correct/decoy/stale/placebo/none over one shared fixture+check per family; EVAL_JSON dual scoring (declared referent scored, all scopes reported); staleness by construction (`-count=1` cmd keying); placebo = off-domain open failure; scored abstention via `max_tail` — required the armed-empty `TailAudit` fix. Probe validation caught 2 real bugs; residual seed-fidelity → #213 |
-| **Smallest deterministic selector (#207)** | eligibility → validation → ranking → inject/offer/abstain. Signals: current user scope, command/package/CWD match, provenance, repo-state compat, resolution state, recency. **No embeddings, no LLM critic** until measured failure cases justify them |
-| **Decision-level observability** | record per decision: candidate IDs, selected, rejection reasons, source session/tool call, validity + task-match evidence, rendered bytes, action targets, verification outcome — the missing bridge between "tail rendered" and "memory helped" |
+| **Smallest deterministic selector (#207)** | Implemented: `failure_select.go` — explicit scope (span-based polarity: positive scope requires affirmative signal — directive verb, failure cue, referent, or bare-path prompt — and unrecognized text defaults to exclusion, so a non-English or unparseable veto suppresses rather than minting scope) → referent-kind binding (all `the-N` matches, adjective fall-through) → narrow-scope/path-gone/stale-suspect validity → admit/abstain. Per-candidate verdicts in `tail.decisions`; arm predicates `tail.decisions.candidates`/`.admitted`. Corpus split by expected outcome: mask (inject) / reject / abstain manifests. Probe-verified on corpus prompt shapes: admit renders correct row (Δ−17% tokens), stale+placebo reject with recorded reasons. Known phrasing limits: scope extraction is regex-based; `path_gone` stays unit-test-only, `stale_suspect` now has a corpus cell (`mask-ft-explicit-stalefile`: explicit scope + post-record file touch) pending a probe run. **Accepted tradeoffs:** `stale_suspect` is an mtime proxy — any write to a hinted file (formatter, generate, `git checkout`, an unverified fix, a comment edit) hides the open row until the exact command is re-run; the row stays open in cmdlog but is permanently suppressed at the prompt. We accept this false-negative — the cell encodes it deliberately — because a stale row anchoring the task is the worse direction. The same accept-loss direction governs language: the English lexicon may only *grant* scope, so positive binding in a language it can't read is lost recall — the model's own multilingual understanding carries intent instead of the parser guessing |
+| **Layered language-neutral resolver (#216; #215 = its artifact layer)** | The selector makes three decisions — relevance (is this about a failure?), selection (which row?), veto (excluded?) — and prompt-text parsing is English-only, so two of three currently depend on language. The fix shrinks what relevance/veto must infer: L0 candidate-set structure (singleton top-level vs multi-candidate needs no language) → L1 language-neutral identifiers (paths, basenames, `Test\w+` vs headline, attachments — also closes "headline never binds") → L2 artifacts (#215: working set + cmd recency; promotes *unmentioned* candidates only, never resurrects a typed-but-unparseable token) → L3 small-model resolver for the residue (closed output `{about_failure, include_paths, exclude_paths, kind}`, deterministic validation, cached, abstains on failure — reuses the title-model slot) → L4 question tool when interactive. English lexicon shrinks from decision-maker to fast path. Methodology gate: offline binding benchmark over `selectOpenFailures` (labeled prompt×candidate cells by language; metrics = admit precision/recall, veto violations target 0, abstain rate, per layer) before any powered agent run. Sequenced: L0–L1 + benchmark first, L3 only if the deterministic layers leave measurable recall on the table. Known structural gap folded in: `toolclass.CommandKind` can't see through a leading `-C` (`go -C decoy test .` → kind other → `kind_mismatch` everywhere — fail-closed; flag-aware subcommand scanning belongs to toolclass, while `cmdTargets` already treats the `-C` value as the effective CWD for later relative targets) |
+| **Decision-level observability** | Partially shipped with the selector: candidate signatures, admit flag, rejection reason in `tail.decisions`. Still open: source session/tool call, action targets, post-run verification outcome |
 | **End-of-turn reconciliation edge** | deterministic: failures observed this run still open? → don't report done. Re-run broad check or name what's open. Targets the exact mask failure signature (early termination); hypothesis to test on the repaired corpus |
 | **Write-side injection screening** | failure headlines come from tool output = repo content = attacker text. `tailSafeText` neutralizes brackets only. Memory is now a persistent prompt-injection channel |
 | **Provenance records before #165** | per-observation: which session/tool call, against which repo state, expected-negative vs real failure, which later observation resolved it, was this interaction memory-suggested |
@@ -150,11 +151,15 @@ none of these completely. This is the frame the selection layer must answer.
 5. Reconciliation edge + deterministic selector w/ abstention (#207) →
    validate on repaired mask corpus (bar: pass ~1.00 *and* effort savings
    retained).
-6. Decision-level observability records.
-7. Command/convention memory rendering (capacity fix for Stage C).
-8. Notebook default-off decision (#205).
-9. Sealed held-out set + cheap qwen pilot.
-10. Depth + distractor ladders (post A–B).
+6. Layered scope resolver (#216) → L0 structure + L1 identifiers +
+   offline binding benchmark first; L2 artifacts (#215) next; L3
+   small-model only if the benchmark shows deterministic layers leave
+   real recall unclaimed.
+7. Decision-level observability records.
+8. Command/convention memory rendering (capacity fix for Stage C).
+9. Notebook default-off decision (#205).
+10. Sealed held-out set + cheap qwen pilot.
+11. Depth + distractor ladders (post A–B).
 
 ## Standing risks
 
