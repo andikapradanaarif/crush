@@ -3,7 +3,8 @@
 > **Status:** Reference. Defines the contract every harness decision
 > path must satisfy: routes are enumerable, exits carry
 > closed-vocabulary reasons, and dispatch — not topology — is what
-> learns. Sibling to `HARNESS_TOPOLOGY.md` (the control-flow skeleton:
+> learns. Sibling to `HARNESS_TOPOLOGY.md` (local-only — untracked;
+> the control-flow skeleton:
 > loop kernel + named edges); this doc owns the *decision* skeleton —
 > what the harness injects, gates, or resolves, and which legal path
 > each input travels. The four-tier learning model and what may adapt
@@ -13,10 +14,16 @@
 
 Five rules. All five are load-bearing for auditability:
 
-1. **Routes are enumerable.** Every mechanism's legal paths — the
-   checks, their order, the exits — are listed here or in a doc this
-   one links. A path that exists in code but not here is a bug in one
-   of them; the doc is diffable precisely so that drift is visible.
+1. **Routes are enumerable.** Every context-and-memory decision
+   path's legal routes — the checks, their order, the exits — are
+   listed here or in a doc this one links. A path that exists in code
+   but not here is a bug in one of them; the doc is diffable precisely
+   so that drift is visible. Scope, stated plainly: mid-run decision
+   paths (permissions/hooks, the pressure gate, the summarization
+   trigger) are not yet enumerated — the contract applies to them when
+   they land, not retroactively. Enumerability itself is today
+   enforced by review discipline; making it a property of the dispatch
+   code's shape (a table-driven check list) is #232.
 2. **Exits carry a closed-vocabulary reason.** A decision record
    answers "which check fired" with a stable string evals and
    dashboards can group on (`tail.decisions.reason`). A new exit
@@ -134,9 +141,11 @@ precision/recall, veto violations (target 0), abstain rate.
 ## Route space 4 — run edges (control flow)
 
 Catalog lives in `RUN_EDGES.md`; the "why specified transitions" is
-`HARNESS_TOPOLOGY.md`. Same contract, different layer: edges are named
-transitions the model cannot route around (verify gate today; join,
-stall-replan, burn-watch specified). The loop kernel itself — the
+`HARNESS_TOPOLOGY.md` (local-only — untracked). Same contract,
+different layer: edges are named transitions the model cannot route
+around (verification, todos-reconcile, stall-replan, escalate-human,
+phase-confirm, burn-watch shipped; join-subagents, summarize-continue
+specified). The loop kernel itself — the
 model's own tool choices inside a turn — is deliberately *not* in the
 route space: the skeleton wraps the model, it does not replace its
 autonomy.

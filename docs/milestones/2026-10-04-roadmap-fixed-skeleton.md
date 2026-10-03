@@ -94,7 +94,8 @@ Evidence never flows back to user level without screened promotion.
   relax any of the above.
 
 The enumerated route space — every decision path's checks, exits, and
-guards, as a diffable document — is `docs/design/ROUTE_SPACE.md`.
+guards, as a diffable document — is
+[ROUTE_SPACE.md](../design/ROUTE_SPACE.md).
 
 ## What learns (per-project variables, user-level priors)
 
@@ -112,7 +113,12 @@ All of it hangs off two items:
   provenance, version, last-verified, evidence window. Learned state
   never lives in user config (config is authored intent; learned params
   are harness state). Decay is required — params without decay become
-  another stale-memory channel.
+  another stale-memory channel. And a param update is itself an
+  evidence decision: updates travel the same noise-adjusted acceptance
+  rule as mechanism changes — windowed evidence, never single-turn
+  outcome reactions — else tuning becomes adaptive evaluation over the
+  corpus, the channel #224's sealed pool exists to control. The
+  per-param acceptance spec is part of #228's design.
 - **#229 user-level memory** — the slow tier: what transfers
   (preferences, correction style) vs what never does (code/work memory).
   Promotion requires evidence across ≥2 projects plus a contamination
@@ -123,7 +129,7 @@ All of it hangs off two items:
 
 | Source | What transfers | What doesn't |
 |---|---|---|
-| **Survey** (ETCLOVG) | The layer map — this fork builds in its thinnest layers (context/memory: 9 projects vs lifecycle: 47; observability + governance mostly commercial). Open problems #2/#3/#5 ≈ our #220 provenance/staleness, trace-native diagnosis, #198 re-verification | — |
+| **Survey** (ETCLOVG; OpenReview `eONq7FdiHa`) | The layer map — this fork builds in its thinnest layers (context/memory: 9 projects vs lifecycle: 47; observability + governance mostly commercial). Open problems #2/#3/#5 ≈ our #220 provenance/staleness, trace-native diagnosis, #198 re-verification | — |
 | **RRSI** | The fixed *evolution* loop — attributable edits, noise-adjusted acceptance, cost-justified gain, periodic pruning. It governs which mechanisms stay installed; it says nothing about per-turn routing | The "converged" reading (Table 6 = four hand-picked decisions); the circular cost rule (#197, already corrected) |
 | **HarnessX** (arXiv:2606.14249) | Typed primitives + substitution over a slot schema — the honest ceiling if slot *contents* ever need structural evolution. "Gains largest where baselines lowest" (+14.5% avg, up to +44%) confirms mechanism value is conditional on baseline gaps | Structural rewriting of the skeleton itself — un-auditable learned routing, worse in multi-project where it can smuggle cross-context associations no deterministic check catches. Trajectory→model-training loop is out of scope |
 
@@ -140,9 +146,9 @@ blind search.
 | Work | Detail | Status |
 |---|---|---|
 | **Zero-safe estimator (#203)** | `(t−c)/μ_c` ratio-of-means; zero-side counted; bootstrap re-normalizes baseline; log-ratio secondary | done 10-01 |
-| **Coverage contract (#212)** | armed-but-empty renders record a zero-section `TailAudit` — "checked, nothing rendered" ≠ "never ran" | done 10-02 |
-| **Stale-seed fidelity (#213)** | `check.seed_script` gate after last seed, before measured run; rejects wrong state → `inconclusive`; gates assert `failure_memory` row state via sqlite, not just worktree | implemented in #217 (open) |
-| **Real-usage telemetry (#206)** | opt-in logging: tail fired? actions touched referents? failure age? user revised? — **plus** randomized on/off holdout + session-start snapshots, or it shows use, not cause | start now — lead time is the cost |
+| **Coverage contract** | armed-but-empty renders record a zero-section `TailAudit` — "checked, nothing rendered" ≠ "never ran" (d2fcfee1, shipped inside #212) | done 10-02 |
+| **Stale-seed fidelity (#213)** | `check.seed_script` gate after last seed, before measured run; rejects wrong state → `inconclusive`; gates assert `failure_memory` row state via sqlite, not just worktree | merged 10-04 in #217 |
+| **Real-usage telemetry (#206)** | opt-in logging: tail fired? actions touched referents? failure age? user revised? — **plus** randomized on/off holdout + session-start snapshots, or it shows use, not cause | implemented in #231 (open) — lead time is the cost |
 | **Unified verdict fields (#152)** | `execution_validity`/`mechanism_exposure`/`quality_guardrail`/`benefit_estimate`/`cost_guardrail` → single `acceptance` | open |
 | **Planning-MDE vs shipping-MDE** | sizing ≠ minimum-worthwhile ≠ non-inferiority ≠ cost ceiling ≠ stopping rule; CI crossing bound = "inconclusive" | open |
 | **Tokens-to-done (#151)** | all token classes per attempt w/ CIs; unknown stays unknown; seed spend reported separately (marginal + amortized) | open |
@@ -157,9 +163,9 @@ blind search.
 
 | Work | Detail | Status |
 |---|---|---|
-| **Mask corpus repair (#204)** | 14 cells over shared fixture+check per family; EVAL_JSON dual scoring; staleness by construction; non-actionable placebo; scored abstention via `max_tail` | done 10-02 |
+| **Mask corpus repair (#204)** | the explicit/ambiguous × memory-type matrix over bb + ft families — 15 trajectory dirs (13 matrix cells + the legacy pair); EVAL_JSON dual scoring; staleness by construction; non-actionable placebo; scored abstention via `max_tail` | done 10-02 |
 | **Deterministic selector (#207)** | `failure_select.go`: explicit scope → span polarity → referent-kind binding → validity (`narrow_scope`/`path_gone`/`stale_suspect`) → admit/abstain; per-candidate verdicts in `tail.decisions`. Accepted tradeoffs: `stale_suspect` is an mtime proxy (formatter/generate/checksum hides the row — deliberate false-negative); English lexicon may only *grant* scope | merged 10-03 in #214 |
-| **Layered language-neutral resolver (#216)** | L0 candidate-set structure → L1 language-neutral ids (paths, `Test\w+`, attachments — closes "headline never binds") → L2 artifacts (promotes *unmentioned* candidates only — never resurrects typed-but-unparseable tokens; #215 closed, subsumed) → L3 small-model resolver (closed output, validated, cached, abstains on failure) → L4 ask when interactive. Methodology gate: offline binding benchmark (per-language veto violations target 0) before any powered run | open — L0–L1 + benchmark first |
+| **Layered language-neutral resolver (#216)** | L0 candidate-set structure → L1 language-neutral ids (paths, `Test\w+`, attachments — closes "headline never binds") → L2 artifacts (promotes *unmentioned* candidates only — never resurrects typed-but-unparseable tokens; #215 closed, subsumed) → L3 small-model resolver (closed output, validated, cached, abstains on failure) → L4 ask when interactive. Methodology gate: offline binding benchmark (per-language veto violations target 0) before any powered run. The English-lexicon coverage hole is silent today — a `lang_unsupported`-class reason should make it measurable before L1 lands (#232) | open — L0–L1 + benchmark first |
 | **Reconciliation edge (#218)** | deterministic: failures observed this run still open → don't report done. Targets the mask signature (early termination) | open |
 | **Injection screening (#219)** | failure headlines = tool output = attacker text; memory is a persistent prompt-injection channel; `tailSafeText` neutralizes brackets only | open — security, sequenced early |
 | **Provenance (#220)** | per-observation: session/tool call, repo state, expected-negative vs real failure, resolving observation, memory-suggested flag — **+ `project_key` + `param_version` (10-04 amendment)** | open — gates #165 |
@@ -183,8 +189,8 @@ blind search.
 | **#165 referents** | Deferred until provenance + abstention exist; split: episodic storage / promotion / contamination screen |
 | **#164 digest + FTS5** | FTS5 is lexical not semantic — test structured cmd/pkg/path matching first |
 | **#166** | Map-skeleton ranking only (retitled; `memory` label dropped) |
-| **Notebook stack** | `parked`: #86/#90/#91/#107/#110/#139/#153 dormant while default-off; #205 = the default-off decision itself |
-| **#110/#139/#107** | Context-economics, not cross-session learning — schedule by production impact |
+| **Notebook stack** | `parked`: #86/#90/#91/#153 dormant while default-off; #205 = the default-off decision itself |
+| **#110/#139/#107** | Same issues, second hat: parked *qua notebook mechanism*, but their context-economics content is schedulable by production impact independent of the notebook — not cross-session learning |
 
 ### Stage E — Release under continuing evidence
 
@@ -205,13 +211,14 @@ blind search.
    historical comparisons stay honest.
 2. **Write-side injection screening (#219)** — persistent prompt
    channel; security item, cheap.
-3. **Real-usage telemetry (#206)** — + randomized holdout +
-   session-start snapshots. Lead time is the cost, and #228's
-   learning needs the data.
+3. **Real-usage telemetry (#206)** — implemented in #231 (open):
+   randomized holdout + session-start snapshots. Lead time is the
+   cost, and #228's learning needs the data — merge lands the
+   collection path.
 4. **Trustworthy CI (#138)**.
-5. **Merge #217** (stale-seed gate, open) → powered selector run on
-   the repaired mask corpus (bar: pass ~1.00 *and* effort savings
-   retained).
+5. **Powered selector run on the repaired mask corpus** — #217
+   merged 10-04, so the stale cells now assert the premise they
+   claim (bar: pass ~1.00 *and* effort savings retained).
 6. **Reconciliation edge (#218)** — test on the same corpus.
 7. **Layered resolver (#216)** — L0–L1 + offline binding benchmark;
    L2 artifacts; L3 only if deterministic layers leave measurable
