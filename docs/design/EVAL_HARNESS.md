@@ -1476,6 +1476,36 @@ permanent trajectory, so the corpus's protected surface grows
 linearly with project history while cost per check stays flat.
 Live measurement has no memory — it can never accumulate.
 
+## Default flips — the standing release policy
+
+Issues #38 and #54 established the rules every default-on flip
+follows; the issues are closed, the policy lives here. Each future
+flip gets its own issue and its own commit — never bundled into the
+feature's implementation PR, where the evidence can't exist yet.
+
+**Required for any flip:**
+
+- **Paired corpus evidence.** Every flip needs the control arm — a
+  solo "is it better" run measures nothing.
+- **Verdict parity first.** Treatment passes `check.sh` at ≥ control
+  rate. Token savings on a regressing arm are not savings.
+- **Operational definitions fixed before runs.** What counts as a
+  "discovery call", a "re-read", a "wrong-pointer" is declared in
+  advance over session-DB records (`CallMetrics`), not fitted
+  post-hoc.
+- **Corpus grows where the signal can't manifest.** Don't reuse
+  fixtures a mechanism can't fire on — the project-index lesson from
+  #38: a no-op arm "passes" the paired gate on nothing.
+- **Arm intent pinned in `eval/flags.json`; the flip commit updates
+  `flag_defaults` alongside** — stale defaults corrupt baseline
+  bookkeeping.
+- **Post-flip sanity window.** `crush stats` + `CallMetrics` on real
+  sessions, including the session-economics check: feature cost as a
+  share of session total across the length distribution. Corpus
+  slices can't capture a user's real mix of micro-sessions — a flag
+  can win every slice and still be a net tax on a mostly-short-task
+  workload.
+
 ## Non-goals
 
 - **Model-path replay.** No VCR anywhere near the LLM calls —
