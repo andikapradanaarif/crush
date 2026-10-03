@@ -32,11 +32,25 @@ func TestIsVaguePrompt(t *testing.T) {
 		{"it crashes on startup", true},
 		{"update the config", true},
 		{"the test fails", true},
-		{"run the tests", false},
+		// Pluralized with referentKindHints — "the tests" is
+		// referent-shaped now; the advisory directive absorbs the
+		// over-fire on an actionable prompt.
+		{"run the tests", true},
+		{"fix the tests", true},
 		{"fix the bug in internal/agent/agent.go", false},
 		{"fix internal/agent/agent.go", false},
 		{"", false},
+		// A bare plausible-command token is anchored in any
+		// language.
 		{"ls", false},
+		{"go build", false},
+		// Short and unreadable by the English machinery — vague in
+		// any language; the model judges in the user's words.
+		{"直して", true},
+		// An ASCII-lower foreign word still reads as command-shaped
+		// — the accented form makes the boundary honest.
+		{"arreglalo", false},
+		{"arrégalo", true},
 		{"add a README section explaining the project layout and how to run the tests", false},
 		{"rename foo to bar everywhere in the codebase and update all the callers", false},
 	}
@@ -44,6 +58,29 @@ func TestIsVaguePrompt(t *testing.T) {
 		t.Run(tc.prompt, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, tc.want, isVaguePrompt(tc.prompt))
+		})
+	}
+}
+
+// Substance counts runes as well as fields — an unspaced script is
+// one field but many runes, and still carries context.
+func TestHasSubstantiveUserMessage(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		text string
+		want bool
+	}{
+		{"hi", false},
+		{"ok thanks", false},
+		{"src/x.go", true},
+		{"fix the failing test in auth", true},
+		{"テストが失敗しているので直してください", true},
+		{"短い", false},
+	} {
+		t.Run(tc.text, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want,
+				hasSubstantiveUserMessage([]message.Message{userMsg(tc.text)}))
 		})
 	}
 }

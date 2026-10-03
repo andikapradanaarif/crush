@@ -148,6 +148,81 @@ func TestPromptScope(t *testing.T) {
 			wantPos: nil,
 			wantNeg: []string{"decoy"},
 		},
+		{
+			// The cue governs its span — filler adverbs do not
+			// shield it.
+			name:    "adverb gap does not shield the cue",
+			prompt:  "don't even touch decoy/",
+			wantNeg: []string{"decoy"},
+		},
+		{
+			name:    "multi-word adverb gap stays negated",
+			prompt:  "do not ever touch decoy/",
+			wantNeg: []string{"decoy"},
+		},
+		{
+			name:    "negated verb keeps its object negated via span",
+			prompt:  "don't really fix main.go",
+			wantNeg: []string{"main.go"},
+		},
+		{
+			name:    "bother-to stays negated",
+			prompt:  "don't bother to fix main.go",
+			wantNeg: []string{"main.go"},
+		},
+		{
+			// "ignore" is not a known cue — the span carries no
+			// signal, and unrecognized intent defaults to
+			// exclusion, not scope.
+			name:    "unrecognized exclusion defaults to exclude",
+			prompt:  "ignore decoy/, fix main.go",
+			wantPos: []string{"main.go"},
+			wantNeg: []string{"decoy"},
+		},
+		{
+			// "instead of" is a hard boundary — the post-boundary
+			// span carries no signal, so the alternative is the
+			// exclusion the sentence means.
+			name:    "instead-of alternative excludes",
+			prompt:  "fix main.go instead of decoy/x.go",
+			wantPos: []string{"main.go"},
+			wantNeg: []string{"decoy/x.go"},
+		},
+		{
+			name:    "unparseable veto defaults to exclude",
+			prompt:  "stay away from decoy/",
+			wantNeg: []string{"decoy"},
+		},
+		{
+			// A non-English veto gets the same fail-closed
+			// default — no cue, no signal, exclusion.
+			name:    "spanish veto suppresses",
+			prompt:  "no toques decoy/, arregla main.go",
+			wantNeg: []string{"decoy", "main.go"},
+		},
+		{
+			name:    "german veto suppresses",
+			prompt:  "decoy/ nicht anfassen",
+			wantNeg: []string{"decoy"},
+		},
+		{
+			// A bare path prompt is affirmative by convention.
+			name:    "lone path mints scope",
+			prompt:  "main.go",
+			wantPos: []string{"main.go"},
+		},
+		{
+			// Object-first claims signal within the segment.
+			name:    "object-first claim binds",
+			prompt:  "main.go is broken",
+			wantPos: []string{"main.go"},
+		},
+		{
+			// A comma list inherits the governing directive.
+			name:    "list items inherit the directive",
+			prompt:  "fix main.go, decoy/x.go, and pkg/y.go",
+			wantPos: []string{"main.go", "decoy/x.go", "pkg/y.go"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -558,6 +633,65 @@ func TestSelectOpenFailures(t *testing.T) {
 			prompt:     "check w/ the team — the test is failing",
 			failures:   []cmdlog.Failure{mkFailure("go test ./decoy", ".")},
 			wantReason: map[string]string{"go test ./decoy@.": failNarrowScope},
+		},
+		{
+			// The exact decoy-anchoring case: an adverb between
+			// the cue and verb flipped the veto into an admit.
+			name:       "adverb-gap veto still excludes",
+			prompt:     "don't even touch decoy/ — fix main.go",
+			failures:   []cmdlog.Failure{mkFailure("go test ./decoy", ".")},
+			wantReason: map[string]string{"go test ./decoy@.": failNegatedScope},
+		},
+		{
+			name:       "unrecognized veto excludes rather than scopes",
+			prompt:     "ignore decoy/, fix main.go",
+			failures:   []cmdlog.Failure{mkFailure("go test ./decoy", ".")},
+			wantReason: map[string]string{"go test ./decoy@.": failNegatedScope},
+		},
+		{
+			name:       "instead-of alternative is the exclusion",
+			prompt:     "fix main.go instead of decoy/x.go",
+			failures:   []cmdlog.Failure{mkFailure("go test ./decoy", ".")},
+			wantReason: map[string]string{"go test ./decoy@.": failNegatedScope},
+		},
+		{
+			name:       "unparseable veto suppresses rather than scopes",
+			prompt:     "stay away from decoy/",
+			failures:   []cmdlog.Failure{mkFailure("go test ./decoy", ".")},
+			wantReason: map[string]string{"go test ./decoy@.": failNegatedScope},
+		},
+		{
+			// The language-neutral bound: a veto in a language
+			// the lexicon can't read still cannot mint positive
+			// scope — the row suppresses, never injects.
+			name:       "non-english veto suppresses rather than admits",
+			prompt:     "no toques decoy/, arregla main.go",
+			failures:   []cmdlog.Failure{mkFailure("go test ./decoy", ".")},
+			wantReason: map[string]string{"go test ./decoy@.": failNegatedScope},
+		},
+		{
+			// A dir-flag value is the command's scope — "make -C
+			// decoy" ran in decoy, not at root, so ambiguity
+			// reads it as narrow, not top-level.
+			name:       "dir flag binds the real working dir",
+			prompt:     "the build fails — fix it",
+			failures:   []cmdlog.Failure{mkFailure("make -C decoy", ".")},
+			wantReason: map[string]string{"make -C decoy@.": failNarrowScope},
+		},
+		{
+			name:      "dir flag row admits under its own scope",
+			prompt:    "fix decoy/x.go",
+			failures:  []cmdlog.Failure{mkFailure("make -C decoy", ".")},
+			wantAdmit: []string{"make -C decoy@."},
+		},
+		{
+			// Windows-native file hints normalize to slashes —
+			// "pkg\x.go" must yield dir pkg (bound to the veto),
+			// not "." (unbound, admitting via root overlap).
+			name:       "windows-native hints bind their dir",
+			prompt:     "don't touch pkg/, fix other.go",
+			failures:   []cmdlog.Failure{mkFailure("go test .", ".", `pkg\x.go`)},
+			wantReason: map[string]string{"go test .@.": failNegatedScope},
 		},
 	}
 	for _, tc := range tests {

@@ -55,21 +55,30 @@ const (
 
 // vagueReferentRe matches prompts that lean on a definite or anaphoric
 // referent whose target context must supply — "the bug", "it", "this
-// crash". The noun list is deliberately referent-shaped and singular:
-// "run the tests" acts on the whole suite and stays actionable on its
-// own; "the test" names a specific one the context must supply.
+// crash". The noun list mirrors referentKindHints so a mapped noun can
+// never be gated out upstream — the cost is that "run the tests" now
+// reads as referent-shaped even though the whole suite is actionable;
+// the directive is advisory, so over-firing is cheap.
 var vagueReferentRe = regexp.MustCompile(`(?i)\b(it|its|this|that|them|they)\b|` +
-	`\bthe\s+(bug|bugfix|crash|error|errors|failure|fail|issue|problem|panic|regression|leak|typo|warnings?|` +
-	`config|configuration|test|spec|endpoint|handler|route|feature|changes?|fix|workaround|hack|todo|fixme)\b`)
+	`\bthe\s+(bugs?|bugfix|crash(?:es)?|errors?|failures?|fail|issues?|problems?|panics?|regressions?|` +
+	`leaks?|typo|warnings?|hangs?|deadlocks?|suites?|pipelines?|jobs?|` +
+	`config|configuration|tests?|specs?|endpoint|handler|route|feature|changes?|fix|workaround|hack|todo|fixme)\b`)
 
 // theNounRe extracts the definite-article noun for referent shape
 // checks — "the test" → "test". The task-binding selector maps it to
 // command kinds via referentKindHints.
 var theNounRe = regexp.MustCompile(`(?i)\bthe\s+(\w+)\b`)
 
-// isVaguePrompt reports whether the prompt is underspecified in the way
-// the pre-filter cares about: short enough to carry no context of its
-// own, naming no explicit file paths, and leaning on a referent.
+// isVaguePrompt reports whether the prompt is underspecified in the
+// way the pre-filter cares about: short enough to carry no context of
+// its own, naming no explicit file paths, and either leaning on a
+// referent or carrying no parseable English anchors at all. The
+// last clause covers non-English prompts: the referent regex only
+// reads English, but a short, path-less prompt is vague in any
+// language, and the directive it arms is advisory — the model judges
+// underspecification in the user's own words. Fields-style word
+// counts stay: an unspaced script is "one word", which is already
+// the vague direction.
 func isVaguePrompt(prompt string) bool {
 	n := len(strings.Fields(prompt))
 	if n == 0 || n > vaguePromptMaxWords {
@@ -78,8 +87,27 @@ func isVaguePrompt(prompt string) bool {
 	if len(extractExplicitFilePaths(prompt)) > 0 {
 		return false
 	}
-	return vagueReferentRe.MatchString(prompt)
+	if vagueReferentRe.MatchString(prompt) {
+		return true
+	}
+	// No recognized English function words at all — a prompt this
+	// layer cannot read, treated as vague so the model, which can
+	// read it, gets the clarify directive. A bare plausible command
+	// ("ls", "htop") is anchored on its own — it stays non-vague.
+	for _, w := range strings.Fields(prompt) {
+		w = strings.ToLower(strings.Trim(w, " \t.,;:!?()[]{}\"'`—–-"))
+		if scopeStopWords[w] || commandTokenRe.MatchString(w) {
+			return false
+		}
+	}
+	return true
 }
+
+// commandTokenRe matches a bare plausible executable — lowercase
+// ASCII like "ls" or "htop" — so a one-word command prompt isn't
+// read as vague. Non-ASCII words can't match, which is correct:
+// an unreadable token is the vague case, not the anchored one.
+var commandTokenRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,15}$`)
 
 // turnTailMessages returns the ephemeral per-turn tail messages — the
 // turn-context blob and, when the vagueness pre-filter fires, the

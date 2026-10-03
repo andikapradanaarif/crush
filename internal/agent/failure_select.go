@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/toolclass"
@@ -218,21 +219,27 @@ var scopeStopWords = map[string]bool{
 // boundary there would never match the most common negation form.
 var scopeNegationRe = regexp.MustCompile(`(?i)(?:n't\b|\b(?:not|never|avoid|without|skip|exclud(?:e[sd]?|ing)|except|leave|outside|untouched|unmodified)\b)`)
 
-// scopeResetRe marks cue reset points — a negation ends at a
-// conjunction that starts a new directive: "don't touch decoy/, but
-// fix main.go" negates decoy only.
-var scopeResetRe = regexp.MustCompile(`(?i)\b(?:but|however|instead|then|while|whereas|afterwards?)\b`)
+// scopeResetRe marks hard span boundaries — a reset conjunction ends
+// one directive and starts another: "don't touch decoy/, but fix
+// main.go" negates decoy only; "fix main.go instead of decoy/x.go"
+// re-evaluates decoy/x.go on its own, where it finds no signal.
+var scopeResetRe = regexp.MustCompile(`(?i)\b(?:but|however|instead|then|while|whereas|afterwards?|rather)\b`)
 
-// scopeVerbResetRe marks the other reset class — a directive verb
-// restarts intent after a comma: "don't touch decoy/, fix main.go"
-// negates decoy only. A verb that is itself the negated predicate
-// ("do not fix main.go") or a noun ("the test") is not a reset —
-// see directiveVerb.
-var scopeVerbResetRe = regexp.MustCompile(`(?i)\b(?:fix|change|update|edit|patch|implement|create|add|modify|handle|correct|repair|address|resolve|rework|rewrite|refactor|adjust|revert|build|rebuild|restore|run|test|check|verify|validate|retry|execute|start|restart|touch|keep|open|watch|use|make)\b`)
+// scopeSoftBoundaryRe marks soft span boundaries — punctuation that
+// ends a directive segment but lets a signal-free segment inherit the
+// governing verdict: "fix main.go, decoy/, and pkg/" keeps the list
+// positive.
+var scopeSoftBoundaryRe = regexp.MustCompile(`[,;—–]`)
+
+// scopeDirectiveVerbRe marks recognized affirmative signal — a
+// directive verb in the token's span declares intent toward it.
+// A determiner-led use ("the fix") is a noun phrase, not a
+// directive — see determinerLed.
+var scopeDirectiveVerbRe = regexp.MustCompile(`(?i)\b(?:fix|change|update|edit|patch|implement|create|add|modify|handle|correct|repair|address|resolve|rework|rewrite|refactor|adjust|revert|build|rebuild|restore|run|test|check|verify|validate|retry|execute|start|restart|touch|keep|open|watch|use|make|see|look|view|inspect|explore|read|review|debug|diagnose|trace|investigate|work)\b`)
 
 // scopeDeterminers make the following word a noun phrase, not a
 // directive — "the test" in "don't touch the test in decoy/" is an
-// object, so it must not reset the negation and free decoy.
+// object, not intent.
 var scopeDeterminers = map[string]bool{
 	"the": true, "a": true, "an": true, "this": true, "that": true,
 	"these": true, "those": true, "my": true, "your": true,
@@ -248,11 +255,17 @@ var cmdPathTokenRe = regexp.MustCompile(`^(?:\.{1,2}/\S*|\.{3}|\./|\.$|/\S*|[\w.
 
 // promptScope splits the prompt's path mentions into positive scope
 // (things the user asked to change) and negative scope (things they
-// excluded). Polarity is positional: a path is negative iff a negation
-// cue precedes it in its clause with no reset conjunction between —
-// "fix main.go, do not touch decoy/" keeps main.go positive because
-// its own span carries no cue.
+// excluded or whose intent could not be established). Polarity is
+// span-based: a path mints positive scope only when its span carries
+// affirmative signal — a directive verb, a failure cue, or a
+// referent — or when the prompt is bare navigation (lonePathPrompt).
+// An unrecognized span defaults to exclusion, never to scope: the
+// absence of a recognized negation is not evidence of assent, and
+// this is the one direction the selector must never fail open —
+// "ignore decoy/" and a non-English veto alike suppress rather than
+// inject.
 func promptScope(prompt, workDir string) (pos, neg []string) {
+	lone := lonePathPrompt(prompt)
 	for _, c := range splitClauses(prompt) {
 		rest := scopeSlashPathRe.ReplaceAllString(c, " ")
 		for _, loc := range scopeSlashPathRe.FindAllStringIndex(c, -1) {
@@ -261,7 +274,7 @@ func promptScope(prompt, workDir string) (pos, neg []string) {
 			if p == "" {
 				continue
 			}
-			negated := cuePrecedes(c, loc[0])
+			negated := !lone && spanNegated(c, loc[0])
 			// A negated trailing-slash token mints without path
 			// evidence — "don't touch decoy/" is a veto, and a veto
 			// that names nothing harms nothing. Positive scope
@@ -277,7 +290,7 @@ func promptScope(prompt, workDir string) (pos, neg []string) {
 			}
 		}
 		for _, loc := range scopeFileRe.FindAllStringIndex(rest, -1) {
-			if cuePrecedes(rest, loc[0]) {
+			if !lone && spanNegated(rest, loc[0]) {
 				neg = append(neg, rest[loc[0]:loc[1]])
 			} else {
 				pos = append(pos, rest[loc[0]:loc[1]])
@@ -288,14 +301,16 @@ func promptScope(prompt, workDir string) (pos, neg []string) {
 		}
 		// Bare directory names carry no path signal — "fix decoy" —
 		// but the disk check disambiguates a real dir from English.
+		// Non-failure nouns never mint: "update the config" cannot
+		// turn a config/ dir into failure scope, whatever is on disk.
 		for _, loc := range scopeBareWordRe.FindAllStringIndex(rest, -1) {
 			w := rest[loc[0]:loc[1]]
 			lw := strings.ToLower(w)
-			if len(lw) < 3 || scopeStopWords[lw] {
+			if len(lw) < 3 || scopeStopWords[lw] || nonFailureNouns[lw] {
 				continue
 			}
 			if st, err := os.Stat(filepath.Join(workDir, w)); err == nil && st.IsDir() {
-				if cuePrecedes(rest, loc[0]) {
+				if !lone && spanNegated(rest, loc[0]) {
 					neg = append(neg, w)
 				} else {
 					pos = append(pos, w)
@@ -306,42 +321,106 @@ func promptScope(prompt, workDir string) (pos, neg []string) {
 	return dedupeScope(pos), dedupeScope(neg)
 }
 
-// cuePrecedes reports whether the text before offset carries an
-// exclusion cue more recent than any reset — a reset conjunction or
-// a directive verb that isn't itself negated.
-func cuePrecedes(text string, offset int) bool {
-	prefix := text[:offset]
-	lastNeg, lastReset := 0, 0
-	if idx := scopeNegationRe.FindAllStringIndex(prefix, -1); idx != nil {
-		lastNeg = idx[len(idx)-1][1]
+// spanNegated reports whether the token at start is excluded rather
+// than claimed. Its segment runs boundary-to-boundary — soft
+// punctuation and hard reset conjunctions both bound it. A negation
+// cue anywhere between the last boundary and the token vetoes it —
+// "don't even touch decoy/" is negated even though the cue does not
+// abut a verb, while "fix decoy/ and skip main.go" negates main.go
+// only. With no cue before the token, positive scope must still be
+// affirmed by recognized signal anywhere in the segment — object-
+// first claims like "main.go is broken" count. A signal-free segment
+// inherits the governing verdict across a soft boundary ("fix
+// main.go, decoy/" keeps decoy positive) and otherwise excludes.
+func spanNegated(c string, start int) bool {
+	prefix := c[:start]
+	bEnd, bStart, hard := lastScopeBoundary(prefix)
+	if scopeNegationRe.MatchString(prefix[bEnd:]) {
+		return true
 	}
-	if idx := scopeResetRe.FindAllStringIndex(prefix, -1); idx != nil {
-		lastReset = idx[len(idx)-1][1]
+	if spanSignal(c[bEnd:nextScopeBoundary(c, start)]) {
+		return false
 	}
-	for _, v := range scopeVerbResetRe.FindAllStringIndex(prefix, -1) {
-		if v[1] > lastReset && directiveVerb(prefix, v[0]) {
-			lastReset = v[1]
-		}
+	if hard || bStart < 0 {
+		return true
 	}
-	return lastNeg > lastReset
+	return spanNegated(c, bStart)
 }
 
-// directiveVerb reports whether the verb at vstart starts a fresh
-// directive — it does not when a negation cue ends immediately before
-// it ("do not fix main.go" negates the fix, so the path stays
-// negative) or a determiner precedes it ("the fix" is a noun). In
-// "don't touch decoy/, fix main.go" the post-comma fix is a fresh
-// directive and resets.
-func directiveVerb(prefix string, vstart int) bool {
-	pre := strings.TrimRight(prefix[:vstart], " \t")
-	for _, m := range scopeNegationRe.FindAllStringIndex(pre, -1) {
-		if m[1] == len(pre) {
-			return false
+// lastScopeBoundary finds the last span boundary in prefix: a soft
+// punctuation mark or a hard reset conjunction, whichever ends
+// closest to the token. Returns the boundary's end (where the token's
+// span begins), its start (where the previous span ends, for
+// inheritance), and whether it is hard. No boundary returns
+// start=-1.
+func lastScopeBoundary(prefix string) (end, start int, hard bool) {
+	end, start = 0, -1
+	if m := scopeSoftBoundaryRe.FindAllStringIndex(prefix, -1); m != nil {
+		l := m[len(m)-1]
+		end, start = l[1], l[0]
+	}
+	if m := scopeResetRe.FindAllStringIndex(prefix, -1); m != nil {
+		if l := m[len(m)-1]; l[1] > end {
+			end, start, hard = l[1], l[0], true
 		}
 	}
-	if m := lastWordRe.FindStringSubmatch(pre); m != nil &&
-		scopeDeterminers[strings.ToLower(m[1])] {
+	return end, start, hard
+}
+
+// nextScopeBoundary finds where the token's segment ends — the first
+// boundary at or after start, or end of clause.
+func nextScopeBoundary(c string, start int) int {
+	end := len(c)
+	if m := scopeSoftBoundaryRe.FindStringIndex(c[start:]); m != nil {
+		end = start + m[0]
+	}
+	if m := scopeResetRe.FindStringIndex(c[start:]); m != nil && start+m[0] < end {
+		end = start + m[0]
+	}
+	return end
+}
+
+// spanSignal reports whether a segment carries recognized affirmative
+// intent — a directive verb (not a determiner-led noun use), a
+// failure cue, or a referent. Recognized signal is what affirms
+// positive scope; its absence is never evidence of assent.
+func spanSignal(seg string) bool {
+	for _, v := range scopeDirectiveVerbRe.FindAllStringIndex(seg, -1) {
+		if !determinerLed(seg, v[0]) {
+			return true
+		}
+	}
+	return vagueReferentRe.MatchString(seg) ||
+		failureCueRe.MatchString(seg) ||
+		anaphoraRe.MatchString(seg)
+}
+
+// determinerLed reports whether the word at offset follows a
+// determiner — "the fix" is a noun phrase, not a directive.
+func determinerLed(seg string, offset int) bool {
+	m := lastWordRe.FindStringSubmatch(strings.TrimRight(seg[:offset], " \t"))
+	return m != nil && scopeDeterminers[strings.ToLower(m[1])]
+}
+
+// lonePathPrompt reports whether the prompt is bare navigation — only
+// path tokens, stopwords, and punctuation. A bare path is affirmative
+// by convention: nobody types a path alone to veto it, and there is
+// no unrecognized text to misparse. A negation cue anywhere still
+// disqualifies.
+func lonePathPrompt(prompt string) bool {
+	rest := scopeSlashPathRe.ReplaceAllString(prompt, " ")
+	rest = scopeFileRe.ReplaceAllString(rest, " ")
+	// A negation cue or a boundary conjunction means real syntax to
+	// parse — "fix main.go instead of decoy/x.go" is not bare
+	// navigation even though its words are all stopwords.
+	if scopeNegationRe.MatchString(rest) || scopeResetRe.MatchString(rest) {
 		return false
+	}
+	for _, w := range strings.Fields(rest) {
+		w = strings.Trim(w, " \t.,;:!?()[]{}\"'`—–-")
+		if w != "" && !scopeStopWords[strings.ToLower(w)] {
+			return false
+		}
 	}
 	return true
 }
@@ -542,31 +621,59 @@ var cmdValueFlags = map[string]bool{
 	"-covermode": true, "-work": true,
 }
 
+// cmdDirFlags carry the command's working directory as their value —
+// "make -C decoy" runs in decoy, so the flag's argument is the scope,
+// not an opaque operand. Only unambiguous dir flags qualify: -d/-f
+// toggle boolean modes on most tools (rm -f x.go must not eat x.go
+// as a directory), so they stay with the composite limitation rather
+// than guess per-tool.
+var cmdDirFlags = map[string]bool{
+	"-C": true, "--directory": true, "--dir": true,
+	"--working-directory": true, "--prefix": true,
+}
+
 // cmdTargets extracts the command's repo-relative target args.
 // "go test -count=1 ./decoy" → ["decoy"]; "go test ." → ["."]; a Go
 // recursive pattern sheds its "/..." tail to the parent dir ("go test
-// ./decoy/..." → "decoy"); a command with no path args returns nil —
-// its scope is its CWD. Quoted single-word args ("./decoy") unwrap.
-// Composite commands mint scope from every segment — "go test . &&
-// rm -rf decoy/" binds both "." and "decoy" — because cmdlog keeps no
-// per-segment argv; under negation that over-rejects, under explicit
-// scope it over-admits. Known distortion, same resolution limit the
-// ledger itself has.
+// ./decoy/..." → "decoy"); a dir-flag value is scope too ("make -C
+// decoy" → ["decoy"], the same folded-CWD class); a command with no
+// path args returns nil — its scope is its CWD. Quoted single-word
+// args ("./decoy") unwrap. Composite commands mint scope from every
+// segment — "go test . && rm -rf decoy/" binds both "." and "decoy" —
+// because cmdlog keeps no per-segment argv; under negation that
+// over-rejects, under explicit scope it over-admits. Known
+// distortion, same resolution limit the ledger itself has.
 func cmdTargets(cmd string) []string {
 	var out []string
 	skipValue := false
+	dirValue := false
 	for _, tok := range strings.Fields(cmd) {
 		if skipValue {
 			skipValue = false
 			continue
 		}
 		tok = strings.Trim(tok, `"'`)
+		if dirValue {
+			dirValue = false
+			t := strings.TrimPrefix(tok, "./")
+			t = strings.TrimSuffix(t, "/...")
+			if scopeFileRe.MatchString(path.Base(t)) {
+				t = path.Dir(t)
+			}
+			if t == "..." || t == "" || t == "." {
+				out = append(out, ".")
+			} else {
+				out = append(out, path.Clean(t))
+			}
+			continue
+		}
 		if tok == "-args" {
 			// Everything after -args belongs to the test binary.
 			break
 		}
 		if strings.HasPrefix(tok, "-") {
 			skipValue = cmdValueFlags[tok]
+			dirValue = cmdDirFlags[tok]
 			continue
 		}
 		if !cmdPathTokenRe.MatchString(tok) {
@@ -791,9 +898,18 @@ var selectorPromptReplacer = strings.NewReplacer(
 // selector ran and found nothing bound. Design constraints stated
 // plainly:
 //
+//   - Polarity is affirmed, never assumed. Positive scope requires
+//     recognized signal in the token's span — a directive verb, a
+//     failure cue, a referent, or a bare-path prompt. A negation cue
+//     vetoes; everything else defaults to exclusion. Unparseable
+//     text — an unfamiliar English veto, a non-English prompt —
+//     therefore suppresses rather than scopes: the lexicon may only
+//     grant, never assent by absence.
 //   - Under ambiguity only top-scope verification rows bind — a
 //     legitimately-failing subpackage row never surfaces for "the
-//     test fails".
+//     test fails". The run-kind carve-out covers cwd-bound runs
+//     too ("cd decoy && npm start"): a run target names the
+//     binary's package, not the panic's scope.
 //   - Explicit scope means "the prompt named paths", not "the
 //     prompt is about a failure" — "add a README.md" still admits an
 //     overlapping root `go test .` row, because a failing root check
@@ -805,9 +921,14 @@ var selectorPromptReplacer = strings.NewReplacer(
 //     design: the row hides rather than anchors.
 //   - Exclusion strength is asymmetric: a dir-form exclusion
 //     ("don't touch decoy/") always binds rows inside it, while a
-//     file-form exclusion yields to same-dir positive scope.
+//     file-form exclusion binds the file's directory and everything
+//     under it but yields to same-dir positive scope.
 //   - An empty prompt (attachment-only turns) binds nothing —
 //     referent_none, consistent fail-closed.
+//   - Headline text never binds — "fix TestAdd" can't match a row's
+//     recorded headline; only commands, paths, and cwd are binding
+//     signals. cmdNorm truncates at 500 runes and quoted multi-word
+//     paths split at the space — both bounded.
 func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string) ([]cmdlog.Failure, []FailureDecision) {
 	if len(failures) == 0 {
 		return nil, nil
@@ -815,7 +936,10 @@ func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string
 	if m := interruptedRequestRe.FindStringSubmatch(prompt); m != nil {
 		prompt = m[1]
 	}
-	prompt = selectorPromptReplacer.Replace(prompt)
+	// Windows-native strings normalize by literal replacement —
+	// filepath.ToSlash is a no-op off Windows, and rows produced on
+	// Windows must still bind everywhere.
+	prompt = strings.ReplaceAll(selectorPromptReplacer.Replace(prompt), `\`, "/")
 	pos, neg := promptScope(prompt, workDir)
 	explicit := len(pos) > 0
 	var kinds []string
@@ -826,6 +950,13 @@ func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string
 	var admitted []cmdlog.Failure
 	decisions := make([]FailureDecision, 0, len(failures))
 	for _, f := range failures {
+		// Windows rows arrive OS-native — normalize to slashes so
+		// dir/prefix comparisons work in the separator the path
+		// helpers assume.
+		f.CWD = strings.ReplaceAll(f.CWD, `\`, "/")
+		for i := range f.Files {
+			f.Files[i] = strings.ReplaceAll(f.Files[i], `\`, "/")
+		}
 		d := FailureDecision{Signature: f.Signature, Cmd: f.Cmd}
 		reason := failAdmit
 		dirs := failureDirs(f, workDir)
@@ -914,7 +1045,10 @@ func anyPathNewer(f cmdlog.Failure, workDir string) bool {
 		return false
 	}
 	for _, p := range failurePaths(f, workDir) {
-		if st, err := os.Stat(p); err == nil && st.ModTime().After(f.LastSeen) {
+		// LastSeen is millisecond-truncated — a file written inside
+		// the same instant is not "after" the record, so compare
+		// against the next millisecond.
+		if st, err := os.Stat(p); err == nil && st.ModTime().After(f.LastSeen.Add(time.Millisecond)) {
 			return true
 		}
 	}

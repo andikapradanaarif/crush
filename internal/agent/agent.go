@@ -28,6 +28,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
@@ -3123,8 +3124,9 @@ func countUserMessages(msgs []message.Message) int {
 
 // hasSubstantiveUserMessage reports whether any user message in msgs
 // contains text that can carry context — explicit paths or more than a
-// couple of words. A bare greeting or acknowledgement ("hi", "ok
-// thanks") does not suppress downstream context checks.
+// couple of words, where word count is measured in runes too so an
+// unspaced script still counts. A bare greeting or acknowledgement
+// ("hi", "ok thanks") does not suppress downstream context checks.
 func hasSubstantiveUserMessage(msgs []message.Message) bool {
 	for _, msg := range msgs {
 		if msg.Role != message.User {
@@ -3135,7 +3137,11 @@ func hasSubstantiveUserMessage(msgs []message.Message) bool {
 			if !ok || tc.Text == "" {
 				continue
 			}
-			if len(extractExplicitFilePaths(tc.Text)) > 0 || len(strings.Fields(tc.Text)) >= 3 {
+			// Three words or a dozen runes — either counts as
+			// substance; unspaced scripts count few fields.
+			if len(extractExplicitFilePaths(tc.Text)) > 0 ||
+				len(strings.Fields(tc.Text)) >= 3 ||
+				utf8.RuneCountInString(tc.Text) >= 12 {
 				return true
 			}
 		}
