@@ -542,6 +542,15 @@ type Options struct {
 	// its own. Recording is always on; this option gates injection.
 	// Experimental; default off until the corpus arm justifies it.
 	FailureMemory *bool `json:"failure_memory,omitempty" jsonschema:"description=Inject unresolved command/failure memory at the request tail (the <open_failures> section). Recording happens regardless; this gates injection. Experimental.,default=false"`
+	// MemoryTelemetry opts in to local-only memory-usage logging:
+	// append-only JSONL records at data_directory/memory-telemetry.jsonl
+	// describing what memory did each turn — sections rendered,
+	// candidates admitted/rejected with reasons, failure ages — plus a
+	// session-start snapshot (worktree SHA, first prompt) and a ~10%
+	// randomized holdout that suppresses injection for the session so
+	// "memory helped" can be told apart from "memory was used". The log
+	// never leaves the machine; default off.
+	MemoryTelemetry *bool `json:"memory_telemetry,omitempty" jsonschema:"description=Opt in to local-only memory-usage telemetry: append-only JSONL at data_directory/memory-telemetry.jsonl recording per-turn memory behavior and a per-session randomized injection holdout. Never transmitted. Experimental.,default=false"`
 }
 
 // OptionKeys returns the Options struct's JSON field names — the set
@@ -1576,6 +1585,15 @@ func (o *Options) FailureMemoryEnabled() bool {
 		return false
 	}
 	return *o.FailureMemory
+}
+
+// MemoryTelemetryEnabled returns the resolved local-only memory-usage
+// logging flag — off unless explicitly enabled.
+func (o *Options) MemoryTelemetryEnabled() bool {
+	if o.MemoryTelemetry == nil {
+		return false
+	}
+	return *o.MemoryTelemetry
 }
 
 // AmbiguityClarificationEnabled returns the resolved

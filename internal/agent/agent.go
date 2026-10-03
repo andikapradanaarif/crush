@@ -341,6 +341,9 @@ type sessionAgent struct {
 	// unresolved rows — at the request tail. Recording is always on;
 	// this gates injection.
 	failureMemory bool
+	// memoryTelemetry is the opt-in local-only usage log (issue #206)
+	// — nil when disabled.
+	memoryTelemetry *memoryTelemetry
 	// filetracker provides the session's read/write working set for
 	// notebook selection and turn-context augmentation. Nil skips the
 	// working-set and liveness passes.
@@ -550,6 +553,9 @@ type SessionAgentOptions struct {
 	// FailureMemory injects the <open_failures> tail
 	// (options.failure_memory), independent of the turn_context tier.
 	FailureMemory bool
+	// MemoryTelemetry is the opt-in local-only usage log
+	// (options.memory_telemetry); nil when disabled.
+	MemoryTelemetry *memoryTelemetry
 	// AmbiguityClarification enables the calibrated-autonomy gates
 	// (options.ambiguity_clarification).
 	AmbiguityClarification bool
@@ -640,6 +646,7 @@ func NewSessionAgent(
 		cmdlog:                 opts.CmdLog,
 		turnContext:            opts.TurnContext,
 		failureMemory:          opts.FailureMemory,
+		memoryTelemetry:        opts.MemoryTelemetry,
 		ambiguityClarification: opts.AmbiguityClarification,
 		interactive:            opts.Interactive,
 		lspManager:             opts.LSPManager,
