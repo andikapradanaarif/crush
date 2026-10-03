@@ -82,6 +82,7 @@ none of these completely. This is the frame the selection layer must answer.
 |---|---|
 | **Mask corpus repair (#204, done 10-02)** | 14 cells, explicit/ambiguous × correct/decoy/stale/placebo/none over one shared fixture+check per family; EVAL_JSON dual scoring (declared referent scored, all scopes reported); staleness by construction (`-count=1` cmd keying); placebo = off-domain open failure; scored abstention via `max_tail` — required the armed-empty `TailAudit` fix. Probe validation caught 2 real bugs; residual seed-fidelity → #213 |
 | **Smallest deterministic selector (#207)** | Implemented: `failure_select.go` — explicit scope (span-based polarity: positive scope requires affirmative signal — directive verb, failure cue, referent, or bare-path prompt — and unrecognized text defaults to exclusion, so a non-English or unparseable veto suppresses rather than minting scope) → referent-kind binding (all `the-N` matches, adjective fall-through) → narrow-scope/path-gone/stale-suspect validity → admit/abstain. Per-candidate verdicts in `tail.decisions`; arm predicates `tail.decisions.candidates`/`.admitted`. Corpus split by expected outcome: mask (inject) / reject / abstain manifests. Probe-verified on corpus prompt shapes: admit renders correct row (Δ−17% tokens), stale+placebo reject with recorded reasons. Known phrasing limits: scope extraction is regex-based; `path_gone` stays unit-test-only, `stale_suspect` now has a corpus cell (`mask-ft-explicit-stalefile`: explicit scope + post-record file touch) pending a probe run. **Accepted tradeoffs:** `stale_suspect` is an mtime proxy — any write to a hinted file (formatter, generate, `git checkout`, an unverified fix, a comment edit) hides the open row until the exact command is re-run; the row stays open in cmdlog but is permanently suppressed at the prompt. We accept this false-negative — the cell encodes it deliberately — because a stale row anchoring the task is the worse direction. The same accept-loss direction governs language: the English lexicon may only *grant* scope, so positive binding in a language it can't read is lost recall — the model's own multilingual understanding carries intent instead of the parser guessing |
+| **Language-neutral scope binding (#215)** | The selector's only scope source is parsed prompt text and the lexicon is English — fail-closed since fb6ff72e, so non-English vetoes suppress safely but non-English *positive* scope is unrecoverable. Per-language lexicons are the overfit treadmill (German post-object negation, French `ne…pas`, JA/ZH morphology differ positionally, not just lexically). Direction: bind on artifacts, not words — filetracker working set + session cmd CWD/recency mint scope where the prompt yields nothing; prompt negation stays a hard veto (an excluded token never resurrects via artifact overlap). Gate to edit-side or most-recent-read — unfiltered read heat feeds back. Scope source recorded per decision for eval. Requires ≥1 non-English corpus cell — the harness can't measure a gap it can't see |
 | **Decision-level observability** | Partially shipped with the selector: candidate signatures, admit flag, rejection reason in `tail.decisions`. Still open: source session/tool call, action targets, post-run verification outcome |
 | **End-of-turn reconciliation edge** | deterministic: failures observed this run still open? → don't report done. Re-run broad check or name what's open. Targets the exact mask failure signature (early termination); hypothesis to test on the repaired corpus |
 | **Write-side injection screening** | failure headlines come from tool output = repo content = attacker text. `tailSafeText` neutralizes brackets only. Memory is now a persistent prompt-injection channel |
@@ -150,11 +151,14 @@ none of these completely. This is the frame the selection layer must answer.
 5. Reconciliation edge + deterministic selector w/ abstention (#207) →
    validate on repaired mask corpus (bar: pass ~1.00 *and* effort savings
    retained).
-6. Decision-level observability records.
-7. Command/convention memory rendering (capacity fix for Stage C).
-8. Notebook default-off decision (#205).
-9. Sealed held-out set + cheap qwen pilot.
-10. Depth + distractor ladders (post A–B).
+6. Language-neutral scope binding (#215) → artifact channels (working
+   set, cmd recency) mint scope where prompt parsing yields nothing;
+   needs one non-English corpus cell to be measurable.
+7. Decision-level observability records.
+8. Command/convention memory rendering (capacity fix for Stage C).
+9. Notebook default-off decision (#205).
+10. Sealed held-out set + cheap qwen pilot.
+11. Depth + distractor ladders (post A–B).
 
 ## Standing risks
 
