@@ -1,5 +1,11 @@
 # 2026-10-01 — Roadmap after the mask verdict
 
+> **Superseded 2026-10-04 by
+> [the fixed-skeleton roadmap](2026-10-04-roadmap-fixed-skeleton.md).**
+> The evidence corrections and stage work items below remain valid and
+> are the execution base; the plan of record, tier structure, and issue
+> numbering live in the new document.
+
 Re-checking the raw artifacts behind the earlier readings (session DBs,
 JSONL records, fixtures, `internal/cmdlog`, `turn_context.go`,
 `compare.go`) surfaced corrections to several claims. The corrections are

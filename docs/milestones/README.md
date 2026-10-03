@@ -88,4 +88,5 @@ record the plan that followed from it.
 | 2026-09-28→29 | exp | [Warm-baseline + noise characterization](2026-09-28-exp-warm-baseline.md) — seeding proven, CVs calibrated |
 | 2026-09-30 | exp | [Failure-memory powered runs + negative control](2026-09-30-exp-failure-memory-powered.md) — the existence proof |
 | 2026-10-01 | exp | [Existence-proof position + mask verdict](2026-10-01-exp-failure-memory-existence-proof.md) — current snapshot |
-| 2026-10-01 | roadmap | [Roadmap after the mask verdict](2026-10-01-roadmap-after-mask.md) — the five-phase plan and its decision points |
+| 2026-10-01 | roadmap | [Roadmap after the mask verdict](2026-10-01-roadmap-after-mask.md) — the five-phase plan (superseded 10-04; evidence corrections still valid) |
+| 2026-10-04 | roadmap | [Fixed skeleton, learned variables](2026-10-04-roadmap-fixed-skeleton.md) — plan of record: four-tier memory, per-project learned params, user-level priors |
