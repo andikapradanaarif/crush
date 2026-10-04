@@ -85,13 +85,23 @@ Evidence never flows back to user level without screened promotion.
   comparable across runs.
 - **Project partition** — `project_key(candidate) = project_key(current)`
   is an admissibility clause decided *before* relevance logic: a join
-  condition, not a ranking signal. Leakage is a measurable, veto-class
-  failure.
+  condition, not a ranking signal. The key is a stable repo identity —
+  the canonical git common-dir path (linked worktrees fold into the
+  owning repo, sharing one partition) plus the normalized remote when
+  one exists — never repo state: the session-start SHA lives in
+  provenance as `repo_state` for validity checks, not partitioning.
+  Leakage is a measurable, veto-class failure.
 - **Provenance** — every recorded decision carries session, tool call,
   repo state, and the parameter version that produced it.
 - **Measurement contracts** — paired evidence, coverage contract, gate
   alarms, sealed pools. Telemetry may retire a *mechanism*; it may not
   relax any of the above.
+- **Learned-param asymmetry** — learned values may only tighten freely:
+  more abstention, shorter TTLs, more veto words. Any relaxation
+  requires the full evolution loop including the sealed pool (#224)
+  and stays inside skeleton-defined bounds (TTL ∈ [1d, 30d]; the
+  lexicon may only gain veto words, never grant words). Otherwise a
+  learned value relaxes fail-closed safety through the side door.
 
 The enumerated route space — every decision path's checks, exits, and
 guards, as a diffable document — is
@@ -109,21 +119,30 @@ guards, as a diffable document — is
 
 All of it hangs off two items:
 
-- **#228 learned-params substrate** — the `crush.db` store: name, value,
-  provenance, version, last-verified, evidence window. Learned state
-  never lives in user config (config is authored intent; learned params
-  are harness state). Decay is required — params without decay become
-  another stale-memory channel. And a param update is itself an
-  evidence decision: updates travel the same noise-adjusted acceptance
-  rule as mechanism changes — windowed evidence, never single-turn
-  outcome reactions — else tuning becomes adaptive evaluation over the
-  corpus, the channel #224's sealed pool exists to control. The
-  per-param acceptance spec is part of #228's design.
+- **#228 learned-params substrate** — a design contract first, a store
+  when the first real parameter needs it (today `failure_select.go`
+  holds ~6 numeric constants and no tunable thresholds — there's
+  almost nothing to learn yet, and little data to learn it from).
+  Learned state never lives in user config (config is authored intent;
+  learned params are harness state). Decay is required — params
+  without decay become another stale-memory channel. And a param
+  update is itself an evidence decision: updates travel the same
+  noise-adjusted acceptance rule as mechanism changes — windowed
+  evidence, never single-turn outcome reactions — else tuning becomes
+  adaptive evaluation over the corpus, the channel #224's sealed pool
+  exists to control. Tuning ladder: tune globally first (binding
+  benchmark + #206 telemetry pooled across projects); promote a param
+  to per-project only when it demonstrably differs across projects
+  *and* earns enough events per window to move under the acceptance
+  rule — a hierarchical shrinkage estimate, honest that sparse
+  evidence stays at the prior.
 - **#229 user-level memory** — the slow tier: what transfers
   (preferences, correction style) vs what never does (code/work memory).
   Promotion requires evidence across ≥2 projects plus a contamination
   screen. Global defaults must be safe alone — priors only nudge, so a
-  fresh install degrades gracefully.
+  fresh install degrades gracefully to defaults, not to abstention.
+  That is rule-5 compatible, not an exception: the defaults *are* the
+  fail-closed state.
 
 ## Literature anchors
 
@@ -131,7 +150,7 @@ All of it hangs off two items:
 |---|---|---|
 | **Survey** (ETCLOVG; OpenReview `eONq7FdiHa`) | The layer map — this fork builds in its thinnest layers (context/memory: 9 projects vs lifecycle: 47; observability + governance mostly commercial). Open problems #2/#3/#5 ≈ our #220 provenance/staleness, trace-native diagnosis, #198 re-verification | — |
 | **RRSI** | The fixed *evolution* loop — attributable edits, noise-adjusted acceptance, cost-justified gain, periodic pruning. It governs which mechanisms stay installed; it says nothing about per-turn routing | The "converged" reading (Table 6 = four hand-picked decisions); the circular cost rule (#197, already corrected) |
-| **HarnessX** (arXiv:2606.14249) | Typed primitives + substitution over a slot schema — the honest ceiling if slot *contents* ever need structural evolution. "Gains largest where baselines lowest" (+14.5% avg, up to +44%) confirms mechanism value is conditional on baseline gaps | Structural rewriting of the skeleton itself — un-auditable learned routing, worse in multi-project where it can smuggle cross-context associations no deterministic check catches. Trajectory→model-training loop is out of scope |
+| **HarnessX** (arXiv:2606.14249) | Typed primitives + substitution over a slot schema — the honest ceiling if slot *contents* ever need structural evolution. "Gains largest where baselines lowest" (+14.5% avg, up to +44%) is **in-distribution** evidence — candidates were tested on the same adaptation batch; RRSI's independent Table 1 shows HarnessX's OOD scores ≈ the base harness's (36.3/48.5/34.3 vs 36.0/48.8/34.2 — no transfer). Confirms mechanism value is conditional on baseline gaps, not that structure evolution transfers | Structural rewriting of the skeleton itself — un-auditable learned routing, worse in multi-project where it can smuggle cross-context associations no deterministic check catches. Trajectory→model-training loop is out of scope |
 
 The convergence worth stating: all three treat **the trace as the
 primary object**. Our preserved session DBs, `AnalyzeSessionDB`, and
@@ -167,8 +186,9 @@ blind search.
 | **Deterministic selector (#207)** | `failure_select.go`: explicit scope → span polarity → referent-kind binding → validity (`narrow_scope`/`path_gone`/`stale_suspect`) → admit/abstain; per-candidate verdicts in `tail.decisions`. Accepted tradeoffs: `stale_suspect` is an mtime proxy (formatter/generate/checksum hides the row — deliberate false-negative); English lexicon may only *grant* scope | merged 10-03 in #214 |
 | **Layered language-neutral resolver (#216)** | L0 candidate-set structure → L1 language-neutral ids (paths, `Test\w+`, attachments — closes "headline never binds") → L2 artifacts (promotes *unmentioned* candidates only — never resurrects typed-but-unparseable tokens; #215 closed, subsumed) → L3 small-model resolver (closed output, validated, cached, abstains on failure) → L4 ask when interactive. Methodology gate: offline binding benchmark (per-language veto violations target 0) before any powered run. The English-lexicon coverage hole is silent today — a `lang_unsupported`-class reason should make it measurable before L1 lands (#232) | open — L0–L1 + benchmark first |
 | **Reconciliation edge (#218)** | deterministic: failures observed this run still open → don't report done. Targets the mask signature (early termination) | open |
+| **Candidate-pool cap (#233)** | fetch limit = render limit (5): rows 6+ never become candidates and get no decision record — a silent route outside the selector's enumeration. Widen the pool, record `render_capped` for admitted-but-cut rows | open |
 | **Injection screening (#219)** | failure headlines = tool output = attacker text; memory is a persistent prompt-injection channel; `tailSafeText` neutralizes brackets only | open — security, sequenced early |
-| **Provenance (#220)** | per-observation: session/tool call, repo state, expected-negative vs real failure, resolving observation, memory-suggested flag — **+ `project_key` + `param_version` (10-04 amendment)** | open — gates #165 |
+| **Provenance (#220)** | per-observation: session/tool call, repo state, expected-negative vs real failure, resolving observation, memory-suggested flag — **+ `project_key` (stable repo identity, 10-05) + `param_version`** | open — gates #165 |
 | **Decision observability (#221)** | shipped partially w/ selector (signatures, admit, reason); open: source session/tool call, action targets, post-run outcome | partial |
 | **Heat-feedback caution** | `read_files` can't distinguish user interest from memory-suggested reads — attribution before heat informs ranking, or it reinforces itself | standing constraint |
 
@@ -243,9 +263,14 @@ blind search.
 - **Corpus ceiling + absolute magnitude** — all-warm fixtures at pass
   1.00 with ~3-call discovery: −27% of 3 calls is mechanism-true but
   user-invisible → #227 fixes both.
-- **Cross-project leakage** — a foreign-project row anchors a referent
-  that can never bind; worse than stale memory. The partition clause
-  is the mitigation; leakage must be a scored benchmark metric.
+- **Partition errors in either direction** — *leakage* is the future
+  risk (a foreign-project row anchors a referent that can never bind;
+  becomes possible with #229's user tier or a multi-workspace server
+  process; the partition clause is the mitigation). *Fragmentation* is
+  the present one: `crush.db` already partitions per-project via the
+  nearest ancestor `.crush/` — a first launch from a subdirectory
+  before a root `.crush/` exists creates `subdir/.crush` and splits
+  the repo's memory. Both directions are scored benchmark metrics.
 - **Parameter staleness** — learned params without decay are the next
   stale-memory channel, one layer down. Repo-shape change must erode
   evidence support automatically.

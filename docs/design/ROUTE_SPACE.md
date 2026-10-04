@@ -61,6 +61,12 @@ where the **first disqualifying check wins** and its reason is
 recorded:
 
 ```
+fetch: ListOpenFailures(ctx, 5) ── candidate pool = freshest 5 rows
+     (silent truncation today: rows 6+ never become candidates and
+      get no decision record — a route the contract doesn't yet
+      enforce; #233 widens the pool and records render_capped for
+      admitted-but-cut rows)
+
 prompt ──→ scope extraction ──┬── explicit scope ──────────┐
                               └── ambiguous (no scope) ────┤
 per candidate row:            │                            │
@@ -68,11 +74,11 @@ per candidate row:            │                            │
      outranks everything; unrecognized text defaults to    │
      exclusion, not grant)                                 │
   2. explicit && miss    → out_of_scope                    │
-  3. explicit && kind ∉  → kind_mismatch                   │
+  3. explicit && kind ∉  → kind_mismatch*                  │
      {test,build,lint,run}                                 │
   4. ambiguous && no     → referent_none                   │
      failure referent                                      │
-  5. ambiguous && kind   → kind_mismatch                   │
+  5. ambiguous && kind   → kind_mismatch*                  │
      ∉ referent kinds                                      │
   6. ambiguous && non-   → narrow_scope                    │
      top-level && ≠run                                     │
@@ -81,6 +87,10 @@ per candidate row:            │                            │
      newer than last_seen                                  │
   else                   → admit → renders into            │
                           <open_failures>                  │
+
+* kind_mismatch is emitted by two different checks (3, 5), so
+  tail.decisions can't distinguish which site rejected — split into
+  explicit_kind_mismatch / referent_kind_mismatch tracked in #232.
 ```
 
 Guards: all deterministic today — regex scope extraction, lexicon
