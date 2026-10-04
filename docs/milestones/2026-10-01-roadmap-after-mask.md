@@ -1,5 +1,12 @@
 # 2026-10-01 — Roadmap after the mask verdict
 
+> **Superseded 2026-10-04 by
+> [the fixed-skeleton roadmap](2026-10-04-roadmap-fixed-skeleton.md).**
+> This file is kept as a dated log — frozen, not maintained. Its
+> evidence corrections and stage work items were carried into the new
+> plan of record; what remains below is the historical record of how
+> the plan was derived.
+
 Re-checking the raw artifacts behind the earlier readings (session DBs,
 JSONL records, fixtures, `internal/cmdlog`, `turn_context.go`,
 `compare.go`) surfaced corrections to several claims. The corrections are
