@@ -51,14 +51,15 @@ func TestMemoryTelemetry_RecordTurn(t *testing.T) {
 		{Signature: "s2", Admit: false, Reason: "stale_suspect"},
 		{Signature: "s3", Admit: false, Reason: "stale_suspect"},
 	}
-	mt.recordTurn("sess-1", "fix the test", []string{"<open_failures>x</open_failures>"}, []cmdlog.Failure{old}, decisions, true, false, nil)
-	mt.recordTurn("sess-1", "again", nil, nil, nil, true, false, nil)
+	mt.recordTurn("sess-1", "fix the test", []string{"<open_failures>x</open_failures>"}, []cmdlog.Failure{old}, decisions, "coder", true, false, nil)
+	mt.recordTurn("sess-1", "again", nil, nil, nil, "coder", true, false, nil)
 
 	recs := readTelemetry(t, dir)
 	require.Len(t, recs, 3, "one session_start + two turn records")
 
 	require.Equal(t, "session_start", recs[0]["type"])
 	require.Equal(t, "sess-1", recs[0]["session_id"])
+	require.Equal(t, "coder", recs[0]["agent"])
 	require.Equal(t, "fix the test", recs[0]["prompt"])
 	require.Equal(t, true, recs[0]["memory_armed"])
 	require.Equal(t, false, recs[0]["holdout"])
@@ -106,6 +107,41 @@ func TestMemoryTelemetry_AppendFailureSwallowed(t *testing.T) {
 	blocked := filepath.Join(dir, "memory-telemetry.jsonl")
 	// A directory where the file should be makes OpenFile fail.
 	require.NoError(t, os.MkdirAll(blocked, 0o755))
-	mt.recordTurn("s", "p", nil, nil, nil, false, false, nil) // must not panic
+	mt.recordTurn("s", "p", nil, nil, nil, "coder", false, false, nil) // must not panic
 	require.False(t, mt.seen["s"], "session_start stays unwritten after a failed append")
+}
+
+// One logger shared across agents (the coordinator's shape): the
+// session's holdout arm and session_start are written once no
+// matter which agent asks — a session switching coder→plan keeps
+// the same control arm instead of flipping a second coin.
+func TestMemoryTelemetry_SharedAcrossAgents(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	mt := newMemoryTelemetry(true, dir, t.TempDir())
+	mt.roll = func() float64 { return 0.05 } // held out
+
+	require.True(t, mt.holdoutOff("s"), "coder's coin")
+	require.True(t, mt.holdoutOff("s"), "plan sees the same arm — one session, one coin")
+
+	mt.recordTurn("s", "p", nil, nil, nil, "coder", true, true, nil)
+	mt.recordTurn("s", "p", nil, nil, nil, "plan", true, true, nil)
+	recs := readTelemetry(t, dir)
+	require.Len(t, recs, 3, "one session_start + two turn records — not two session_starts")
+	require.Equal(t, "session_start", recs[0]["type"])
+	require.Equal(t, "coder", recs[1]["agent"])
+	require.Equal(t, "plan", recs[2]["agent"])
+}
+
+// forget drops a deleted session's bookkeeping so seen/arms don't
+// grow unboundedly in a long-lived process.
+func TestMemoryTelemetry_Forget(t *testing.T) {
+	t.Parallel()
+	mt := newMemoryTelemetry(true, t.TempDir(), "/w")
+	mt.roll = func() float64 { return 0.99 }
+	require.False(t, mt.holdoutOff("s"))
+	mt.seen["s"] = true
+	mt.forget("s")
+	require.NotContains(t, mt.arms, "s")
+	require.NotContains(t, mt.seen, "s")
 }

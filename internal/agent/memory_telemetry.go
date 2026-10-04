@@ -76,14 +76,27 @@ func (t *memoryTelemetry) holdoutOff(sessionID string) bool {
 }
 
 // recordTurn writes the session_start record on a session's first
-// call, then the per-turn record. armed is the session's
-// failure_memory flag, so "memory off" stays distinguishable from
-// "armed but found nothing" — the same conflation tail.audit
-// refuses to make. Logging failures are swallowed — telemetry is
-// observability, never a reason to disturb a run.
-func (t *memoryTelemetry) recordTurn(sessionID, prompt string, sections []string, candidates []cmdlog.Failure, decisions []FailureDecision, armed, holdout bool, fetchErr error) {
+// call, then the per-turn record. agent attributes the record in
+// multi-agent sessions — one logger is shared by every built agent,
+// so the same session_id may produce coder and plan turn lines.
+// armed is effective arming (flag on AND a store to read), so
+// "memory off" stays distinguishable from "armed but found nothing"
+// — the same conflation tail.audit refuses to make. Logging
+// failures are swallowed — telemetry is observability, never a
+// reason to disturb a run.
+func (t *memoryTelemetry) recordTurn(sessionID, prompt string, sections []string, candidates []cmdlog.Failure, decisions []FailureDecision, agent string, armed, holdout bool, fetchErr error) {
 	if sessionID == "" {
 		return
+	}
+	t.mu.Lock()
+	needStart := !t.seen[sessionID]
+	t.mu.Unlock()
+	// headSHA spawns git — worst case its 3s timeout would serialize
+	// every session's writes if run under the lock. Compute it
+	// outside; a racing second caller just redoes the same lookup.
+	sha := ""
+	if needStart {
+		sha = headSHA(t.workDir)
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -91,8 +104,9 @@ func (t *memoryTelemetry) recordTurn(sessionID, prompt string, sections []string
 		"type":         "session_start",
 		"ts":           time.Now().UnixMilli(),
 		"session_id":   sessionID,
+		"agent":        agent,
 		"workdir":      t.workDir,
-		"head_sha":     headSHA(t.workDir),
+		"head_sha":     sha,
 		"prompt":       prompt,
 		"memory_armed": armed,
 		"holdout":      holdout,
@@ -103,6 +117,7 @@ func (t *memoryTelemetry) recordTurn(sessionID, prompt string, sections []string
 		"type":         "turn",
 		"ts":           time.Now().UnixMilli(),
 		"session_id":   sessionID,
+		"agent":        agent,
 		"prompt":       prompt,
 		"sections":     telemetrySectionNames(sections),
 		"memory_armed": armed,
@@ -120,6 +135,16 @@ func (t *memoryTelemetry) recordTurn(sessionID, prompt string, sections []string
 		turn["fetch_error"] = fetchErr.Error()
 	}
 	_ = t.append(turn)
+}
+
+// forget drops a deleted session's bookkeeping — the deletion
+// watcher calls it so seen/arms don't grow unboundedly across a
+// process's lifetime, same contract as the other per-session maps.
+func (t *memoryTelemetry) forget(sessionID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.seen, sessionID)
+	delete(t.arms, sessionID)
 }
 
 // append encodes one record as a JSON line. Returns whether the

@@ -136,10 +136,17 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	// The telemetry holdout suppresses injection for the session but
 	// not the fetch: the turn record still captures which candidates
 	// the suppressed arm would have rendered — the control group's
-	// counterfactual, not just a blank.
+	// counterfactual, not just a blank. Note the suppression covers
+	// every openFailures consumer in this function — including
+	// ambiguityDirective — which is the correct counterfactual for
+	// "did memory help" (full effect, not render only).
 	holdout := false
 	telemetryOn := a.memoryTelemetry != nil && !a.isSubAgent
-	if telemetryOn && a.failureMemory {
+	// armed is effective arming — flag on AND a store to read. A
+	// flag-on session with a nil cmdlog records memory_armed:false
+	// rather than coining a holdout that could never inject.
+	armed := a.failureMemory && a.cmdlog != nil
+	if telemetryOn && armed {
 		holdout = a.memoryTelemetry.holdoutOff(call.SessionID)
 	}
 	if a.failureMemory && a.cmdlog != nil && !a.isSubAgent {
@@ -167,7 +174,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	}
 	if telemetryOn {
 		a.memoryTelemetry.recordTurn(call.SessionID, call.Prompt, sections,
-			failureCandidates, failureDecisions, a.failureMemory, holdout, fetchErr)
+			failureCandidates, failureDecisions, a.agentID, armed, holdout, fetchErr)
 	}
 	if len(sections) == 0 {
 		// An armed tail that renders nothing still records an audit:

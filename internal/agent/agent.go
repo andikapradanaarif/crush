@@ -342,8 +342,10 @@ type sessionAgent struct {
 	// this gates injection.
 	failureMemory bool
 	// memoryTelemetry is the opt-in local-only usage log (issue #206)
-	// — nil when disabled.
+	// — nil when disabled. agentID attributes its records in
+	// multi-agent sessions.
 	memoryTelemetry *memoryTelemetry
+	agentID         string
 	// filetracker provides the session's read/write working set for
 	// notebook selection and turn-context augmentation. Nil skips the
 	// working-set and liveness passes.
@@ -554,8 +556,11 @@ type SessionAgentOptions struct {
 	// (options.failure_memory), independent of the turn_context tier.
 	FailureMemory bool
 	// MemoryTelemetry is the opt-in local-only usage log
-	// (options.memory_telemetry); nil when disabled.
+	// (options.memory_telemetry); nil when disabled. Shared across
+	// built agents so the holdout assignment is per-session, not
+	// per-agent-instance. AgentID attributes the records.
 	MemoryTelemetry *memoryTelemetry
+	AgentID         string
 	// AmbiguityClarification enables the calibrated-autonomy gates
 	// (options.ambiguity_clarification).
 	AmbiguityClarification bool
@@ -647,6 +652,7 @@ func NewSessionAgent(
 		turnContext:            opts.TurnContext,
 		failureMemory:          opts.FailureMemory,
 		memoryTelemetry:        opts.MemoryTelemetry,
+		agentID:                opts.AgentID,
 		ambiguityClarification: opts.AmbiguityClarification,
 		interactive:            opts.Interactive,
 		lspManager:             opts.LSPManager,
