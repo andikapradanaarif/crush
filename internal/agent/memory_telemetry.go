@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/crush/internal/cmdlog"
+	"github.com/charmbracelet/crush/internal/redact"
 )
 
 // memoryTelemetryHoldoutRate is the fraction of opted-in sessions
@@ -20,21 +21,29 @@ import (
 // turns the log from "was memory used" into "did memory help".
 const memoryTelemetryHoldoutRate = 0.1
 
+// memoryTelemetryPromptRunes bounds the prompt written per record —
+// the log is append-only with no rotation, so per-record size is the
+// only bound on growth. Generous enough that referent-touch analysis
+// keeps paths and test names.
+const memoryTelemetryPromptRunes = 4096
+
 // memoryTelemetry is the opt-in, local-only usage log for memory
 // features (issue #206): append-only JSONL inside the project data
 // dir, never transmitted. Two record kinds — session_start (once per
-// process per session: workdir, HEAD sha, first prompt, holdout arm)
-// and turn (per tail computation: prompt, sections rendered,
-// candidate counts, per-reason rejections, candidate ages). Records
-// carry raw signals; deriving acceptance — did first actions touch
-// the referents, did the user revise — is analysis-side work for
-// eval probes over this file plus the session DB.
+// process per session: workdir, HEAD sha, first prompt) and turn
+// (per tail computation: prompt, sections rendered, candidate
+// counts, per-reason rejections, candidate ages, the holdout arm).
+// Records carry raw signals; deriving acceptance — did first actions
+// touch the referents, did the user revise — is analysis-side work
+// for eval probes over this file plus the session DB.
 type memoryTelemetry struct {
 	dataDir string
 	workDir string
 
 	mu sync.Mutex
 	// f is the lazily opened log file; the first record creates it.
+	// It is never closed — the logger lives for process lifetime on
+	// the coordinator, like the other process-scoped resources.
 	f *os.File
 	// seen marks sessions whose session_start record was written this
 	// process. arms is the per-session holdout assignment (true =
@@ -104,13 +113,21 @@ func holdoutRoll(sessionID string) float64 {
 // records stay attributable.
 // armed is effective arming (flag on AND a store to read), so
 // "memory off" stays distinguishable from "armed but found nothing"
-// — the same conflation tail.audit refuses to make. Logging
+// — the same conflation tail.audit refuses to make. The arm label
+// lives only on turn records: session_start may be written before
+// the coin exists (a session's first turn can be unarmed), so a
+// session-level label there could mislabel the eventual arm. Logging
 // failures are swallowed — telemetry is observability, never a
 // reason to disturb a run.
 func (t *memoryTelemetry) recordTurn(sessionID, prompt string, sections []string, candidates []cmdlog.Failure, decisions []FailureDecision, agent string, armed, holdout bool, fetchErr error) {
 	if sessionID == "" {
 		return
 	}
+	// Same convention as cmdlog: the file is local-only, but a
+	// credential pasted into a prompt still must not persist in
+	// plaintext. Redact before truncating so a secret can't be
+	// split mid-pattern.
+	prompt = truncateTailText(redact.Secrets(prompt), memoryTelemetryPromptRunes)
 	t.mu.Lock()
 	needStart := !t.seen[sessionID]
 	t.mu.Unlock()
@@ -132,7 +149,6 @@ func (t *memoryTelemetry) recordTurn(sessionID, prompt string, sections []string
 		"head_sha":     sha,
 		"prompt":       prompt,
 		"memory_armed": armed,
-		"holdout":      holdout,
 	}) {
 		t.seen[sessionID] = true
 	}

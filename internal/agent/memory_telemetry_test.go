@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -54,7 +55,7 @@ func TestMemoryTelemetry_RecordTurn(t *testing.T) {
 		{Signature: "s3", Admit: false, Reason: "stale_suspect"},
 	}
 	mt.recordTurn("sess-1", "fix the test", []string{"<open_failures>x</open_failures>"}, []cmdlog.Failure{old}, decisions, "coder", true, false, nil)
-	mt.recordTurn("sess-1", "again", nil, nil, nil, "coder", true, false, nil)
+	mt.recordTurn("sess-1", "again", nil, nil, nil, "coder", true, false, errors.New("cmdlog unavailable"))
 
 	recs := readTelemetry(t, dir)
 	require.Len(t, recs, 3, "one session_start + two turn records")
@@ -64,7 +65,9 @@ func TestMemoryTelemetry_RecordTurn(t *testing.T) {
 	require.Equal(t, "coder", recs[0]["agent"])
 	require.Equal(t, "fix the test", recs[0]["prompt"])
 	require.Equal(t, true, recs[0]["memory_armed"])
-	require.Equal(t, false, recs[0]["holdout"])
+	// session_start carries no arm label: the coin may not exist yet
+	// when it is written — turn records are the authoritative arm.
+	require.NotContains(t, recs[0], "holdout")
 	require.Contains(t, recs[0], "workdir")
 	require.Contains(t, recs[0], "head_sha") // empty outside a repo — present either way
 
@@ -84,6 +87,8 @@ func TestMemoryTelemetry_RecordTurn(t *testing.T) {
 	require.Equal(t, float64(0), quiet["candidates"])
 	require.Equal(t, float64(0), quiet["admitted"])
 	require.NotContains(t, quiet, "rejections")
+	require.Equal(t, "cmdlog unavailable", quiet["fetch_error"],
+		"a fetch failure is recorded as couldn't-evaluate, not silence")
 }
 
 // The holdout coin flips once per session and the assignment is
@@ -213,7 +218,6 @@ func TestMemoryTelemetry_HoldoutSuppressesInjection(t *testing.T) {
 	// The log records the arm and the would-be render.
 	recs := readTelemetry(t, dir)
 	require.Len(t, recs, 2)
-	require.Equal(t, true, recs[0]["holdout"])
 	require.Equal(t, true, recs[1]["holdout"])
 	require.Equal(t, float64(1), recs[1]["admitted"])
 	require.Empty(t, recs[1]["sections"])
@@ -242,7 +246,46 @@ func TestMemoryTelemetry_TreatmentArmStillRenders(t *testing.T) {
 
 	recs := readTelemetry(t, dir)
 	require.Len(t, recs, 2)
-	require.Equal(t, false, recs[0]["holdout"])
 	require.Equal(t, false, recs[1]["holdout"])
 	require.Equal(t, []any{"open_failures"}, recs[1]["sections"])
+}
+
+// A session's first turn can be unarmed (memory off, no store) — the
+// coin flips only when armed, so session_start predates it. It must
+// not carry an arm label: turn records are authoritative, and a
+// session-level false would mislabel the arm a later turn coins.
+func TestMemoryTelemetry_SessionStartHasNoArmLabel(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	mt := newMemoryTelemetry(true, dir, t.TempDir())
+	mt.roll = func(string) float64 { return 0 }
+
+	// Unarmed first turn — no coin exists yet. A later armed turn
+	// coins the session's real arm.
+	mt.recordTurn("s", "p1", nil, nil, nil, "coder", false, false, nil)
+	mt.recordTurn("s", "p2", nil, nil, nil, "coder", true, true, nil)
+
+	recs := readTelemetry(t, dir)
+	require.NotContains(t, recs[0], "holdout")
+	require.Equal(t, false, recs[1]["holdout"], "the unarmed turn")
+	require.Equal(t, true, recs[2]["holdout"], "the armed turn shows the eventual arm")
+}
+
+// A credential pasted into a prompt must not persist in plaintext —
+// the same redact.Secrets convention cmdlog applies to stored
+// commands — and the prompt is bounded so the append-only file's
+// per-record size stays finite.
+func TestMemoryTelemetry_PromptRedactedAndCapped(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	mt := newMemoryTelemetry(true, dir, t.TempDir())
+	mt.roll = func(string) float64 { return 0.99 }
+
+	mt.recordTurn("s", "use ghp_0123456789abcdefTOKEN here", nil, nil, nil, "coder", false, false, nil)
+
+	recs := readTelemetry(t, dir)
+	for _, rec := range recs {
+		require.NotContains(t, rec["prompt"], "ghp_0123456789abcdefTOKEN")
+		require.Contains(t, rec["prompt"], "[REDACTED]")
+	}
 }
