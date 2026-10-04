@@ -108,7 +108,7 @@ func newTurnCtxAgent(t *testing.T, cfg *config.Config) (*sessionAgent, fakeEnv, 
 
 func listOpenFailures(t *testing.T, env fakeEnv) []cmdlog.Failure {
 	t.Helper()
-	f, err := env.cmdlog.ListOpenFailures(t.Context(), turnContextOpenFailuresLimit)
+	f, err := env.cmdlog.ListOpenFailures(t.Context(), turnContextOpenFailuresFetchLimit)
 	require.NoError(t, err)
 	return f
 }
@@ -233,7 +233,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		// the selector rejects the row, and an all-rejected set must
 		// not disarm clarification.
 		admitted, _ := selectOpenFailures("update the config",
-			listOpenFailures(t, env), env.workingDir)
+			listOpenFailures(t, env), env.workingDir, 0)
 		require.Empty(t, admitted)
 		require.NotEmpty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "update the config",

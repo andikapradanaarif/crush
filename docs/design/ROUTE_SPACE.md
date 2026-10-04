@@ -61,11 +61,9 @@ where the **first disqualifying check wins** and its reason is
 recorded:
 
 ```
-fetch: ListOpenFailures(ctx, 5) ── candidate pool = freshest 5 rows
-     (silent truncation today: rows 6+ never become candidates and
-      get no decision record — a route the contract doesn't yet
-      enforce; #233 widens the pool and records render_capped for
-      admitted-but-cut rows)
+fetch: ListOpenFailures(ctx, 50) ── candidate pool = freshest 50 rows
+     (bounded for fetch cost; wide enough that a relevant row past
+      the render cap still earns a decision record)
 
 prompt ──→ scope extraction ──┬── explicit scope ──────────┐
                               └── ambiguous (no scope) ────┤
@@ -85,8 +83,12 @@ per candidate row:            │                            │
   7. all paths absent    → path_gone                       │
   8. implicated path     → stale_suspect                   │
      newer than last_seen                                  │
-  else                   → admit → renders into            │
-                          <open_failures>                  │
+  else                   → admit                           │
+
+render cap (post-selection, recent-first order):
+  bound rows ≤ cap       → renders into <open_failures>
+  bound rows beyond cap  → render_capped (admit=false —
+                           cut by budget, not by the prompt)
 
 * kind_mismatch is emitted by two different checks (3, 5), so
   tail.decisions can't distinguish which site rejected — split into

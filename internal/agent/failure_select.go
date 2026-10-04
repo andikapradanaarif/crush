@@ -28,7 +28,8 @@ type FailureDecision struct {
 	// Admit reports whether the failure rendered into the tail.
 	Admit bool `json:"admit"`
 	// Reason is a closed vocabulary — the first disqualifying check
-	// that fired, or "admit". Stable strings: evals and dashboards
+	// that fired, "admit", or "render_capped" when the row bound but
+	// the render budget cut it. Stable strings: evals and dashboards
 	// may group on them.
 	Reason string `json:"reason"`
 }
@@ -44,6 +45,10 @@ const (
 	failNarrowScope  = "narrow_scope"  // subpath-bound candidate under an ambiguous prompt
 	failPathGone     = "path_gone"     // every implicated path is absent from the workdir
 	failStaleSuspect = "stale_suspect" // an implicated path changed after last_seen
+	// failRenderCapped is not a selection check — the row bound, but
+	// the render cap cut it. Admit stays false: the field means
+	// "rendered into the tail", and this row did not.
+	failRenderCapped = "render_capped"
 )
 
 // verificationKinds are the command kinds a failure referent can
@@ -983,9 +988,19 @@ var selectorPromptReplacer = strings.NewReplacer(
 //     recorded headline; only commands, paths, and cwd are binding
 //     signals. cmdNorm truncates at 500 runes and quoted multi-word
 //     paths split at the space — both bounded.
-func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string) ([]cmdlog.Failure, []FailureDecision) {
+//
+// renderLimit is the render stage's budget, applied after selection:
+// the freshest renderLimit bound rows render (input order is
+// recent-first), and every bound row beyond it keeps a decision with
+// render_capped — cut by budget, not by the prompt. renderLimit <= 0
+// renders everything that binds.
+func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string,
+	renderLimit int) ([]cmdlog.Failure, []FailureDecision) {
 	if len(failures) == 0 {
 		return nil, nil
+	}
+	if renderLimit <= 0 {
+		renderLimit = len(failures)
 	}
 	if m := interruptedRequestRe.FindStringSubmatch(prompt); m != nil {
 		prompt = m[1]
@@ -1044,7 +1059,12 @@ func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string
 			reason = failStaleSuspect
 		}
 		d.Admit = reason == failAdmit
-		d.Reason = reason
+		if d.Admit && len(admitted) >= renderLimit {
+			d.Admit = false
+			d.Reason = failRenderCapped
+		} else {
+			d.Reason = reason
+		}
 		decisions = append(decisions, d)
 		if d.Admit {
 			admitted = append(admitted, f)

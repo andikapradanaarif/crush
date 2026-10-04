@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -773,7 +774,7 @@ func TestSelectOpenFailures(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			admitted, decisions := selectOpenFailures(tc.prompt, tc.failures, "")
+			admitted, decisions := selectOpenFailures(tc.prompt, tc.failures, "", 0)
 			var gotAdmit []string
 			for _, f := range admitted {
 				gotAdmit = append(gotAdmit, f.Signature)
@@ -803,7 +804,7 @@ func TestSelectOpenFailures_Validity(t *testing.T) {
 	fresh := mkFailure("go test ./decoy", ".", "decoy/decoy_test.go")
 	admitted, _ := selectOpenFailures(
 		"fix the failing test in decoy/decoy_test.go",
-		[]cmdlog.Failure{fresh}, dir)
+		[]cmdlog.Failure{fresh}, dir, 0)
 	require.Len(t, admitted, 1)
 
 	// File touched after last_seen → stale_suspect.
@@ -812,14 +813,14 @@ func TestSelectOpenFailures_Validity(t *testing.T) {
 	require.NoError(t, os.Chtimes(decoyFile, time.Now(), time.Now()))
 	_, decisions := selectOpenFailures(
 		"fix the failing test in decoy/decoy_test.go",
-		[]cmdlog.Failure{stale}, dir)
+		[]cmdlog.Failure{stale}, dir, 0)
 	require.Equal(t, failStaleSuspect, decisions[0].Reason)
 
 	// Every implicated file absent → path_gone.
 	gone := mkFailure("go test ./decoy", ".", "decoy/deleted_test.go")
 	_, decisions = selectOpenFailures(
 		"fix the failing test in decoy/deleted_test.go",
-		[]cmdlog.Failure{gone}, dir)
+		[]cmdlog.Failure{gone}, dir, 0)
 	require.Equal(t, failPathGone, decisions[0].Reason)
 }
 
@@ -833,22 +834,53 @@ func TestSelectOpenFailures_DiskScope(t *testing.T) {
 	// A dotted first segment is host-like unless it exists on disk —
 	// v1.0/handler.go is a real versioned dir, github.com/x/y is not.
 	admitted, _ := selectOpenFailures("fix v1.0/handler.go",
-		[]cmdlog.Failure{mkFailure("go test ./v1.0", ".")}, dir)
+		[]cmdlog.Failure{mkFailure("go test ./v1.0", ".")}, dir, 0)
 	require.Len(t, admitted, 1)
 
 	_, decisions := selectOpenFailures("fix v2.0/handler.go",
-		[]cmdlog.Failure{mkFailure("go test ./v1.0", ".")}, dir)
+		[]cmdlog.Failure{mkFailure("go test ./v1.0", ".")}, dir, 0)
 	require.Equal(t, failReferentNone, decisions[0].Reason,
 		"a dotted dir absent from disk reads as a URL, not scope")
 
 	// A bare dir name mints scope when it exists on disk — "fix decoy"
 	// carries no path signal of its own.
 	admitted, _ = selectOpenFailures("fix decoy",
-		[]cmdlog.Failure{mkFailure("go test ./decoy", ".")}, dir)
+		[]cmdlog.Failure{mkFailure("go test ./decoy", ".")}, dir, 0)
 	require.Len(t, admitted, 1)
 
 	// And the same bare word mints negative scope under a cue.
 	_, decisions = selectOpenFailures("fix main.go — don't touch decoy",
-		[]cmdlog.Failure{mkFailure("go test ./decoy", ".")}, dir)
+		[]cmdlog.Failure{mkFailure("go test ./decoy", ".")}, dir, 0)
 	require.Equal(t, failNegatedScope, decisions[0].Reason)
+}
+
+func TestSelectOpenFailures_RenderCap(t *testing.T) {
+	t.Parallel()
+	// Seven bound rows, cap of two: the freshest two render, the rest
+	// record render_capped — cut by budget, not rejected by the
+	// prompt, and still visible in the decisions list.
+	var failures []cmdlog.Failure
+	for i := range 7 {
+		f := mkFailure("go test .", ".")
+		f.Signature = fmt.Sprintf("sig-%d", i)
+		failures = append(failures, f)
+	}
+	admitted, decisions := selectOpenFailures("the tests are failing", failures, "", 2)
+	require.Len(t, admitted, 2)
+	require.Equal(t, "sig-0", admitted[0].Signature)
+	require.Equal(t, "sig-1", admitted[1].Signature)
+	require.Len(t, decisions, 7)
+	for i, d := range decisions {
+		if i < 2 {
+			require.True(t, d.Admit)
+			require.Equal(t, failAdmit, d.Reason)
+		} else {
+			require.False(t, d.Admit)
+			require.Equal(t, failRenderCapped, d.Reason,
+				"bound row past the cap is capped, not rejected")
+		}
+	}
+	// A non-positive limit renders everything that binds.
+	admitted, _ = selectOpenFailures("the tests are failing", failures, "", 0)
+	require.Len(t, admitted, 7)
 }
