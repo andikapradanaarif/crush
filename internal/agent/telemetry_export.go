@@ -295,10 +295,16 @@ func (c *coordinator) EdgeFiringDelta(sessionID string) map[string]map[string]in
 const EvalMaxStepsEnvVar = "CRUSH_EVAL_MAX_STEPS"
 
 // EvalFlagsEnvVar carries the eval flag manifest into the child
-// process — its presence marks a harness-driven run, which the
-// memory-telemetry holdout must never arm inside an experiment.
-// Kept in sync with internal/eval.EvalFlagsEnvVar.
+// process — pinned only when the manifest declares flags, so it does
+// not mark every harness-driven run. Kept in sync with
+// internal/eval.EvalFlagsEnvVar.
 const EvalFlagsEnvVar = "CRUSH_EVAL_FLAGS"
+
+// EvalTelemetryEnvVar carries the per-run telemetry file path into
+// the child process — pinned unconditionally for every eval child,
+// so its presence is the universal harness-driven marker. Kept in
+// sync with internal/eval.EvalTelemetryEnvVar.
+const EvalTelemetryEnvVar = "CRUSH_EVAL_TELEMETRY"
 
 // evalStepCaps returns the eval step cap as a StopCondition, or nil
 // when the harness isn't driving this process.

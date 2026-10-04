@@ -150,15 +150,21 @@ func TestMemoryTelemetry_Forget(t *testing.T) {
 
 // An eval child must never coin a holdout: a trajectory arm enabling
 // telemetry would silently drop ~10% of runs to suppression with no
-// marker in the RunRecord. The flag-manifest env var marks a
-// harness-driven process.
+// marker in the RunRecord. CRUSH_EVAL_TELEMETRY marks every
+// harness-driven process — including a flagless arm — while
+// CRUSH_EVAL_FLAGS only exists when the manifest declares flags.
 func TestMemoryTelemetry_EvalEnvSkipsHoldout(t *testing.T) {
 	// Not parallel — Setenv is process-global.
-	t.Setenv(EvalFlagsEnvVar, "failure_memory")
+	t.Setenv(EvalTelemetryEnvVar, "/tmp/run-telemetry.json")
 	mt := newMemoryTelemetry(true, t.TempDir(), "/w")
 	mt.roll = func(string) float64 { return 0 } // would always hold out
 	require.False(t, mt.holdoutOff("s"))
 	require.False(t, mt.holdoutOff(""), "an empty key never arms")
+	// The flag-manifest var alone guards too — an arm that does
+	// declare flags carries it without the telemetry path var.
+	t.Setenv(EvalTelemetryEnvVar, "")
+	t.Setenv(EvalFlagsEnvVar, "memory_telemetry")
+	require.False(t, mt.holdoutOff("s2"))
 }
 
 // The default coin is deterministic per session ID: a process restart

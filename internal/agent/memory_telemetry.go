@@ -72,8 +72,10 @@ func (t *memoryTelemetry) holdoutOff(sessionID string) bool {
 	// An eval child must never hold out: a trajectory arm enabling
 	// telemetry would otherwise lose ~10% of runs to suppression
 	// with no marker in the RunRecord. Records still write — only
-	// the coin is suppressed.
-	if os.Getenv(EvalFlagsEnvVar) != "" {
+	// the coin is suppressed. CRUSH_EVAL_TELEMETRY is pinned for
+	// every eval child; CRUSH_EVAL_FLAGS only when the manifest
+	// declares flags — check both so a flagless arm is covered too.
+	if os.Getenv(EvalTelemetryEnvVar) != "" || os.Getenv(EvalFlagsEnvVar) != "" {
 		return false
 	}
 	t.mu.Lock()
