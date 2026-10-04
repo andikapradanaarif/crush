@@ -131,7 +131,24 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	// candidates" versus "candidates rejected".
 	var openFailures []cmdlog.Failure
 	var failureDecisions []FailureDecision
+	var failureCandidates []cmdlog.Failure
 	var fetchErr error
+	// The telemetry holdout suppresses injection for the session but
+	// not the fetch: the turn record still captures which candidates
+	// the suppressed arm would have rendered — the control group's
+	// counterfactual, not just a blank. Note the suppression covers
+	// every openFailures consumer in this function — including
+	// ambiguityDirective — which is the correct counterfactual for
+	// "did memory help" (full effect, not render only).
+	holdout := false
+	telemetryOn := a.memoryTelemetry != nil && !a.isSubAgent
+	// armed is effective arming — flag on AND a store to read. A
+	// flag-on session with a nil cmdlog records memory_armed:false
+	// rather than coining a holdout that could never inject.
+	armed := a.failureMemory && a.cmdlog != nil
+	if telemetryOn && armed {
+		holdout = a.memoryTelemetry.holdoutOff(call.SessionID)
+	}
 	if a.failureMemory && a.cmdlog != nil && !a.isSubAgent {
 		var f []cmdlog.Failure
 		f, fetchErr = a.cmdlog.ListOpenFailures(ctx, turnContextOpenFailuresLimit)
@@ -140,7 +157,12 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 			if a.configStore != nil {
 				workDir = a.configStore.WorkingDir()
 			}
-			openFailures, failureDecisions = selectOpenFailures(call.Prompt, f, workDir)
+			var selected []cmdlog.Failure
+			selected, failureDecisions = selectOpenFailures(call.Prompt, f, workDir)
+			failureCandidates = f
+			if !holdout {
+				openFailures = selected
+			}
 		} else {
 			slog.Debug("Open-failure fetch failed; tail renders without memory",
 				"session_id", call.SessionID, "error", fetchErr)
@@ -149,6 +171,10 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	sections := a.turnContextSections(ctx, call, openFailures)
 	if directive := a.ambiguityDirective(ctx, call, msgs, openFailures); directive != "" {
 		sections = append(sections, directive)
+	}
+	if telemetryOn {
+		a.memoryTelemetry.recordTurn(call.SessionID, call.Prompt, sections,
+			failureCandidates, failureDecisions, a.agentID, armed, holdout, fetchErr)
 	}
 	if len(sections) == 0 {
 		// An armed tail that renders nothing still records an audit:
@@ -223,6 +249,15 @@ type TailAudit struct {
 
 var tailSectionNameRe = regexp.MustCompile(`^<(\w+)>`)
 
+// tailSectionName extracts the envelope name from a rendered tail
+// blob — the audit and the telemetry log name sections identically.
+func tailSectionName(s string) string {
+	if m := tailSectionNameRe.FindStringSubmatch(strings.TrimSpace(s)); m != nil {
+		return m[1]
+	}
+	return "unknown"
+}
+
 // recordTailAudit snapshots the rendered tail for SessionTelemetry.
 // Last-write-wins per session: a process's later Run replaces the
 // audit, matching the telemetry emission's once-per-process shape.
@@ -241,11 +276,7 @@ func (a *sessionAgent) recordTailAudit(sessionID string, sections []string, text
 		audit.FetchError = fetchErr.Error()
 	}
 	for _, s := range sections {
-		name := "unknown"
-		if m := tailSectionNameRe.FindStringSubmatch(strings.TrimSpace(s)); m != nil {
-			name = m[1]
-		}
-		audit.Sections = append(audit.Sections, TailSection{Name: name, Bytes: len(s)})
+		audit.Sections = append(audit.Sections, TailSection{Name: tailSectionName(s), Bytes: len(s)})
 	}
 	a.tailAudit.Set(sessionID, audit)
 }

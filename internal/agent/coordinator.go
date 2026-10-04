@@ -241,6 +241,12 @@ type coordinator struct {
 	// the ephemeral tail's only durable trace, exported through
 	// SessionTelemetry so eval records can audit what the model saw.
 	tailAudit *csync.Map[string, TailAudit]
+	// memoryTelemetry is the opt-in local-only usage log (issue #206)
+	// — one instance shared by every built agent. Per-agent
+	// instances would flip the session holdout coin once per agent:
+	// a coder-held-out session would still see injected memory on
+	// plan turns, a contaminated control. Nil when disabled.
+	memoryTelemetry *memoryTelemetry
 	// detachedWork is shared with every built agent: each detached
 	// notebook/title goroutine Adds before spawning so
 	// WaitForDetachedWork can join them before a short-lived
@@ -361,6 +367,15 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		c.stubBoundary = csync.NewMap[string, int]()
 		c.stubStats = csync.NewMap[string, stubStats]()
 	}
+	// The usage logger is shared by every built agent — the holdout
+	// assignment and session_start records are session-keyed, which
+	// only holds if the same instance serves coder and plan alike.
+	c.memoryTelemetry = newMemoryTelemetry(
+		c.cfg.Config().Options.MemoryTelemetryEnabled(),
+		c.cfg.Config().Options.DataDirectory,
+		c.cfg.WorkingDir(),
+	)
+
 	// reqStats exists regardless of the notebook gate, so the
 	// deletion watcher runs whenever the session service does —
 	// every map access inside is nil-guarded, making the
@@ -453,6 +468,9 @@ func (c *coordinator) watchSessionDeletions() {
 		}
 		if c.usageLedger != nil {
 			c.usageLedger.Del(ev.Payload.ID)
+		}
+		if c.memoryTelemetry != nil {
+			c.memoryTelemetry.forget(ev.Payload.ID)
 		}
 		// The DB cascade removes the rows; ForgetSession drops the
 		// service's in-memory compaction-stall counter.
@@ -1162,6 +1180,13 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 	notebookOn := c.cfg.Config().Options.NotebookIsEnabled()
 	recallOn := slices.Contains(agent.AllowedTools, notebooktool.RecallToolName)
 	priorTurns := resolvePriorTurns(c.cfg.Config().Options.NotebookPriorTurnsMode(), notebookOn, recallOn)
+	// Sub-agents get no telemetry writer — the call site re-checks
+	// isSubAgent, so this only avoids handing them a writer they
+	// never use.
+	var memTelemetry *memoryTelemetry
+	if !isSubAgent {
+		memTelemetry = c.memoryTelemetry
+	}
 	result := NewSessionAgent(SessionAgentOptions{
 		LargeModel:           large,
 		SmallModel:           small,
@@ -1206,6 +1231,8 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		CmdLog:                 c.cmdlog,
 		TurnContext:            c.cfg.Config().Options.TurnContextMode(),
 		FailureMemory:          c.cfg.Config().Options.FailureMemoryEnabled(),
+		MemoryTelemetry:        memTelemetry,
+		AgentID:                agent.ID,
 		AmbiguityClarification: c.cfg.Config().Options.AmbiguityClarificationEnabled(),
 		Interactive:            c.interactive,
 		LSPManager:             c.lspManager,

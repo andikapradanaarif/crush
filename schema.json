@@ -817,6 +817,11 @@
           "type": "boolean",
           "description": "Inject unresolved command/failure memory at the request tail (the \u003copen_failures\u003e section). Recording happens regardless; this gates injection. Experimental.",
           "default": false
+        },
+        "memory_telemetry": {
+          "type": "boolean",
+          "description": "Opt in to local-only memory-usage telemetry: append-only JSONL at data_directory/memory-telemetry.jsonl recording per-turn memory behavior including the prompt text plus a per-session randomized injection holdout. Never transmitted. Experimental.",
+          "default": false
         }
       },
       "additionalProperties": false,
