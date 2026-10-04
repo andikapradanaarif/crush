@@ -294,6 +294,12 @@ func (c *coordinator) EdgeFiringDelta(sessionID string) map[string]map[string]in
 // per turn; kept in sync with internal/eval.EvalMaxStepsEnvVar.
 const EvalMaxStepsEnvVar = "CRUSH_EVAL_MAX_STEPS"
 
+// EvalFlagsEnvVar carries the eval flag manifest into the child
+// process — its presence marks a harness-driven run, which the
+// memory-telemetry holdout must never arm inside an experiment.
+// Kept in sync with internal/eval.EvalFlagsEnvVar.
+const EvalFlagsEnvVar = "CRUSH_EVAL_FLAGS"
+
 // evalStepCaps returns the eval step cap as a StopCondition, or nil
 // when the harness isn't driving this process.
 func evalStepCaps() []fantasy.StopCondition {

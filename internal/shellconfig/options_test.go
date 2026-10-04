@@ -228,6 +228,26 @@ func TestOption_UnknownKey(t *testing.T) {
 	require.Contains(t, err.Error(), "unknown key")
 }
 
+// The memory-telemetry flag must be reachable through the option
+// builtin — an unregistered key hard-errors (see TestOption_UnknownKey),
+// which would leave the opt-in feature unsettable from crushrc.
+func TestOption_MemoryTelemetry(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	script := `option memory-telemetry true`
+	path := filepath.Join(dir, "crushrc")
+
+	jsonBytes, err := LoadShellConfig(t.Context(), path, []byte(script))
+	require.NoError(t, err)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(jsonBytes, &result))
+
+	opts := result["options"].(map[string]any)
+	require.Equal(t, true, opts["memory_telemetry"])
+}
+
 func TestOption_RequestTimeout(t *testing.T) {
 	t.Parallel()
 

@@ -249,6 +249,15 @@ type TailAudit struct {
 
 var tailSectionNameRe = regexp.MustCompile(`^<(\w+)>`)
 
+// tailSectionName extracts the envelope name from a rendered tail
+// blob — the audit and the telemetry log name sections identically.
+func tailSectionName(s string) string {
+	if m := tailSectionNameRe.FindStringSubmatch(strings.TrimSpace(s)); m != nil {
+		return m[1]
+	}
+	return "unknown"
+}
+
 // recordTailAudit snapshots the rendered tail for SessionTelemetry.
 // Last-write-wins per session: a process's later Run replaces the
 // audit, matching the telemetry emission's once-per-process shape.
@@ -267,11 +276,7 @@ func (a *sessionAgent) recordTailAudit(sessionID string, sections []string, text
 		audit.FetchError = fetchErr.Error()
 	}
 	for _, s := range sections {
-		name := "unknown"
-		if m := tailSectionNameRe.FindStringSubmatch(strings.TrimSpace(s)); m != nil {
-			name = m[1]
-		}
-		audit.Sections = append(audit.Sections, TailSection{Name: name, Bytes: len(s)})
+		audit.Sections = append(audit.Sections, TailSection{Name: tailSectionName(s), Bytes: len(s)})
 	}
 	a.tailAudit.Set(sessionID, audit)
 }

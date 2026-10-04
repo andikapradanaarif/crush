@@ -2,8 +2,9 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
-	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,10 +39,10 @@ type memoryTelemetry struct {
 	// seen marks sessions whose session_start record was written this
 	// process. arms is the per-session holdout assignment (true =
 	// injection suppressed). roll is the holdout coin — injectable so
-	// tests can force an arm.
+	// tests can force an arm; the default hashes the session ID.
 	seen map[string]bool
 	arms map[string]bool
-	roll func() float64
+	roll func(sessionID string) float64
 }
 
 // newMemoryTelemetry returns the logger, or nil when the option is
@@ -56,29 +57,49 @@ func newMemoryTelemetry(enabled bool, dataDir, workDir string) *memoryTelemetry 
 		workDir: workDir,
 		seen:    map[string]bool{},
 		arms:    map[string]bool{},
-		roll:    rand.Float64,
+		roll:    holdoutRoll,
 	}
 }
 
-// holdoutOff reports the session's control-arm assignment, flipping
-// the coin once per session on first call. true means this session
-// must not see injected memory — the fetch and selection still run
-// so the record captures what the suppressed arm would have said.
+// holdoutOff reports the session's control-arm assignment, coining
+// once per session on first call. true means this session must not
+// see injected memory — the fetch and selection still run so the
+// record captures what the suppressed arm would have said.
 func (t *memoryTelemetry) holdoutOff(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	// An eval child must never hold out: a trajectory arm enabling
+	// telemetry would otherwise lose ~10% of runs to suppression
+	// with no marker in the RunRecord. Records still write — only
+	// the coin is suppressed.
+	if os.Getenv(EvalFlagsEnvVar) != "" {
+		return false
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if off, ok := t.arms[sessionID]; ok {
 		return off
 	}
-	off := t.roll() < memoryTelemetryHoldoutRate
+	off := t.roll(sessionID) < memoryTelemetryHoldoutRate
 	t.arms[sessionID] = off
 	return off
 }
 
+// holdoutRoll is the default coin — a SHA-256 fraction of the session
+// ID. The arm is stable across process restarts (a relaunch cannot
+// re-flip a held-out session into the treatment arm) while remaining
+// effectively uniform over distinct sessions.
+func holdoutRoll(sessionID string) float64 {
+	sum := sha256.Sum256([]byte(sessionID))
+	return float64(binary.BigEndian.Uint64(sum[:8])) / (1 << 64)
+}
+
 // recordTurn writes the session_start record on a session's first
-// call, then the per-turn record. agent attributes the record in
-// multi-agent sessions — one logger is shared by every built agent,
-// so the same session_id may produce coder and plan turn lines.
+// call, then the per-turn record. agent attributes the record — on
+// session_start it names the agent whose first turn produced it;
+// each turn line carries its own writer, so a multi-agent session's
+// records stay attributable.
 // armed is effective arming (flag on AND a store to read), so
 // "memory off" stays distinguishable from "armed but found nothing"
 // — the same conflation tail.audit refuses to make. Logging
@@ -171,11 +192,7 @@ func (t *memoryTelemetry) append(rec map[string]any) bool {
 func telemetrySectionNames(sections []string) []string {
 	names := make([]string, 0, len(sections))
 	for _, s := range sections {
-		name := "unknown"
-		if m := tailSectionNameRe.FindStringSubmatch(strings.TrimSpace(s)); m != nil {
-			name = m[1]
-		}
-		names = append(names, name)
+		names = append(names, tailSectionName(s))
 	}
 	return names
 }
