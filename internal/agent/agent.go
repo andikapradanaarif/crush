@@ -353,6 +353,12 @@ type sessionAgent struct {
 	// unresolved rows — at the request tail. Recording is always on;
 	// this gates injection.
 	failureMemory bool
+	// failureMemoryEdgesOff records the reconcile run-edge gated
+	// under failure_memory instead of firing (options.failure_memory_edges
+	// resolves off) — the edge's contribution can be ablated apart
+	// from the tail (#249). Inverted so the zero value stays armed,
+	// matching the flag's default-true semantics.
+	failureMemoryEdgesOff bool
 	// memoryTelemetry is the opt-in local-only usage log (issue #206)
 	// — nil when disabled. agentID attributes its records in
 	// multi-agent sessions.
@@ -573,6 +579,10 @@ type SessionAgentOptions struct {
 	// FailureMemory injects the <open_failures> tail
 	// (options.failure_memory), independent of the turn_context tier.
 	FailureMemory bool
+	// FailureMemoryEdges narrows failure_memory's read side
+	// (options.failure_memory_edges): off records the reconcile edge
+	// gated instead of firing. On by default.
+	FailureMemoryEdges bool
 	// MemoryTelemetry is the opt-in local-only usage log
 	// (options.memory_telemetry); nil when disabled. Shared across
 	// built agents so the holdout assignment is per-session, not
@@ -669,6 +679,7 @@ func NewSessionAgent(
 		cmdlog:                 opts.CmdLog,
 		turnContext:            opts.TurnContext,
 		failureMemory:          opts.FailureMemory,
+		failureMemoryEdgesOff:  !opts.FailureMemoryEdges,
 		memoryTelemetry:        opts.MemoryTelemetry,
 		agentID:                opts.AgentID,
 		ambiguityClarification: opts.AmbiguityClarification,
