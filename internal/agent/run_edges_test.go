@@ -1416,6 +1416,44 @@ func TestReconcileEdge(t *testing.T) {
 		require.Equal(t, "fired", firingOutcome(t, conn, sessionID, "reconcile"))
 	})
 
+	t.Run("a deferred firing does not consume the reminder", func(t *testing.T) {
+		t.Parallel()
+		a, conn, svc, sessionID, dir := reconcileEdgeAgent(t)
+		a.ambiguityClarification = true
+		a.interactive = true
+		a.tools = csync.NewSliceFrom([]fantasy.AgentTool{
+			&fakeTool{name: tools.TodosToolName},
+			&fakeTool{name: tools.QuestionToolName},
+		})
+		recordCmd(t, svc, sessionID, dir, "go test ./x", 1)
+		// Burn-watch's escalation wins the slot outright; reconcile's
+		// session-state trigger rides the deferred carrier.
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: burnResult(burnWatchStepsThreshold+1, 0),
+				turnSeq: 1, startedAt: time.Now().Add(-time.Hour)})
+		require.True(t, queued)
+		q, _ := a.messageQueue.Get(sessionID)
+		require.Len(t, q, 1)
+		require.True(t, strings.HasPrefix(q[0].Prompt, burnWatchPrefix))
+		require.Len(t, q[0].deferred, 1)
+		require.Equal(t, "reconcile", q[0].deferred[0].edge.name)
+		require.Equal(t, "deferred", firingOutcome(t, conn, sessionID, "reconcile"))
+		// The reminder never rendered, so the deferral must not stamp
+		// the rows seen — the escalate run's clean boundary re-fires
+		// and lands it rather than recording suppressed.
+		queued = runEdgesForTest(a, t.Context(), q[0],
+			edgeInput{result: cleanResult(), turnSeq: 2, startedAt: time.Now().Add(-time.Hour)})
+		require.True(t, queued)
+		q2, _ := a.messageQueue.Get(sessionID)
+		require.True(t, strings.HasPrefix(q2[0].Prompt, reconcileRetryPrefix))
+		require.Equal(t, "fired", firingOutcome(t, conn, sessionID, "reconcile"))
+		// Once the reminder has landed, the next boundary suppresses.
+		queued = runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: cleanResult(), turnSeq: 3, startedAt: time.Now().Add(-time.Hour)})
+		require.False(t, queued)
+		require.Equal(t, "suppressed", firingOutcome(t, conn, sessionID, "reconcile"))
+	})
+
 	t.Run("a gated boundary does not consume suppression", func(t *testing.T) {
 		t.Parallel()
 		a, conn, svc, sessionID, dir := reconcileEdgeAgent(t)

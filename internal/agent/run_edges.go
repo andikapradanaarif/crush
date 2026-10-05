@@ -151,6 +151,12 @@ type edgeTrigger struct {
 	// session-state evidence cleared during the escalation turn
 	// records cleared instead of standing for a retry slot.
 	sessionState bool
+	// commit runs only when the trigger's prompt actually lands on
+	// the enqueued retry — the reconcile edge's once-per-epoch mark
+	// lives here so a deferred, exhausted, or cancelled firing
+	// leaves its rows unseen and re-fires at the next boundary.
+	// Suppression bounds reminders delivered, not verdicts recorded.
+	commit func()
 	// steps/inputTokens stash step-bound run evidence for resolve and
 	// prompt rendering — resolve doesn't receive edgeInput.
 	steps       []fantasy.StepResult
@@ -611,6 +617,13 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		outcome := edgeOutcomeFired
 		if !c.prompted {
 			outcome = edgeOutcomeCleared
+		} else if c.t.commit != nil {
+			// The retry enqueued carrying this prompt — commit is
+			// where a landed firing acknowledges its evidence
+			// (reconcile stamps its once-per-epoch mark here, never
+			// at scan, so a losing or cancelled boundary can't
+			// consume a reminder that was never rendered).
+			c.t.commit()
 		}
 		a.recordEdgeFiring(ctx, call, in, c.edge.name, c.t, outcome)
 	}
@@ -1625,13 +1638,15 @@ func (a *sessionAgent) scanReconcileEdge(ctx context.Context, call SessionAgentC
 		return nil
 	}
 	// Once-per-session suppression, keyed on the row's open epoch
-	// (signature + first_seen): a row flagged at one boundary landed
-	// its reminder — the model's explanation or tolerance stands for
-	// the session and re-firing every clean stop would tax an
-	// intentionally-open failure forever. A resolve-and-reopen has a
-	// fresh first_seen and flags again; so does a new session. The
-	// ledger row is untouched — suppression is attention, not
-	// resolution.
+	// (signature + first_seen): a row whose reminder landed at one
+	// boundary is not re-flagged — the model's explanation or
+	// tolerance stands for the session and re-firing every clean
+	// stop would tax an intentionally-open failure forever. Landing
+	// means the trigger's commit ran (the retry enqueued carrying
+	// the prompt); a firing that deferred or cancelled marked
+	// nothing and re-fires. A resolve-and-reopen has a fresh
+	// first_seen and flags again; so does a new session. The ledger
+	// row is untouched — suppression is attention, not resolution.
 	var unseen []cmdlog.Failure
 	suppressed := 0
 	for _, f := range open {
@@ -1661,9 +1676,15 @@ func (a *sessionAgent) scanReconcileEdge(ctx context.Context, call SessionAgentC
 	}
 	switch {
 	case len(unseen) == 0:
-		// Every qualifying row was flagged at an earlier boundary —
-		// suppressed, not silently clean, so the ledger shows the
-		// predicate still held.
+		// Every qualifying row's reminder already landed — the
+		// predicate held, so the verdict records suppressed rather
+		// than reading as clean. Ordered before the flag check on
+		// purpose-but-fragile: reconcileSeen only populates from a
+		// fired trigger's commit, which requires flag-on — under
+		// flag-off the unseen set can never empty, so suppressed is
+		// unreachable there and eval's flag-on starvation rule stays
+		// honest. Moving the mark into a flag-off path would let
+		// suppressed leak into the wrong arm.
 		t.hint = edgeOutcomeSuppressed
 	case !a.failureMemory:
 		// Memory reads are off: the flag gates acting, not
@@ -1671,11 +1692,14 @@ func (a *sessionAgent) scanReconcileEdge(ctx context.Context, call SessionAgentC
 		t.hint = edgeOutcomeGated
 	default:
 		t.fire = true
-		// Mark at scan time — a firing trigger that later defers or
-		// exhausts still recorded its row, which is the
-		// acknowledgment the suppression exists to bound.
-		for _, f := range unseen {
-			a.reconcileSeen.Store(reconcileSeenKey(call.SessionID, f), true)
+		// Stamping waits for the prompt to land — commit runs only
+		// after the retry enqueues, so a firing that defers to an
+		// escalation winner or dies to a mid-boundary cancel leaves
+		// the rows unseen and re-fires at the next one.
+		t.commit = func() {
+			for _, f := range unseen {
+				a.reconcileSeen.Store(reconcileSeenKey(call.SessionID, f), true)
+			}
 		}
 	}
 	return t

@@ -573,15 +573,21 @@ this-run rows are unresolved at turn end.
   the last verdict's writer, so a no-verdict run can neither
   disown the observer nor claim a failure it never saw exit.
   `detail` records `open=N introduced=M suppressed=K` where
-  introduced counts rows whose open epoch (`first_seen`, which
-  resets on resurrection) began inside this run's window — the
-  firing record distinguishes "the run left its own mess" from
-  "the run left a pre-existing failure open." Rows already flagged
-  this session are suppressed at scan: the reminder lands once per
-  session per open epoch — an explanation or tolerated red stands —
-  while a resolve-and-reopen or a new session flags fresh. A
-  boundary where every qualifying row was seen records `suppressed`
-  rather than silent-clean.
+  introduced counts **unseen** rows whose open epoch
+  (`first_seen`, which resets on resurrection) began inside this
+  run's window — the firing record distinguishes "the run left its
+  own mess" from "the run left a pre-existing failure open," and a
+  fully-suppressed boundary therefore reads `introduced=0` even
+  when this run caused the rows (they were counted in the first
+  firing's detail). The seen-mark is the firing trigger's commit:
+  it stamps only when the retry prompt lands on the queue, so a
+  firing that defers to an escalation winner or dies to a
+  mid-boundary cancel marks nothing and re-fires at the next
+  boundary — the reminder lands once per session per open epoch
+  *delivered*, and an explanation or tolerated red stands — while
+  a resolve-and-reopen or a new session flags fresh. A boundary
+  where every qualifying row was seen records `suppressed` rather
+  than silent-clean.
 - **resolve:** none — the evidence is already the durable rows.
 - **prompt:** the still-open rows rendered as `cmd` in `cwd` —
   headline — with the resolution contract stated ("a failure row
@@ -604,9 +610,11 @@ this-run rows are unresolved at turn end.
   verification's resolve: a pending check that passes writes
   through cmdlog and resolves the row before the edge reads it.
 - **Cost, stated plainly:** once per session per open epoch — a row
-  flagged at one boundary suppresses at later ones, so an
-  intentionally-open failure costs one retry turn per session, not
-  one per run. The flag persists across sessions by design: the
+  whose reminder landed at one boundary suppresses at later ones,
+  so an intentionally-open failure costs one retry turn per
+  session, not one per run. A firing that loses the prompt slot or
+  dies to a cancel costs nothing — the row stays unflagged and
+  re-fires. The flag persists across sessions by design: the
   ledger row outlives the attention suppression.
 - **Evaluable:** `edge_firings.reconcile.*` coverage predicates —
   fired/suppressed/exhausted/cleared/gated counts are the "run ends
