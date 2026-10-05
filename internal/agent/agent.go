@@ -1184,7 +1184,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// goroutine survives Run's cancel.
 	if !hasSubstantiveUserMessage(msgs) {
 		titleCtx := context.WithoutCancel(ctx)
-		a.spawnDetached(func() { a.GenerateTitle(titleCtx, call.SessionID, call.Prompt) })
+		// Capture the fields now — runEdges reassigns call at the
+		// run-boundary seam, which the detached goroutine would race.
+		titleSessionID, titlePrompt := call.SessionID, call.Prompt
+		a.spawnDetached(func() { a.GenerateTitle(titleCtx, titleSessionID, titlePrompt) })
 	}
 
 	// Add the user message to the session.

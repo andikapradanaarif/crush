@@ -858,7 +858,7 @@ func TestStallReplanHandoff(t *testing.T) {
 		require.True(t, queued)
 		q, _ := a.messageQueue.Get(sessionID)
 		require.Contains(t, q[0].Prompt, "Files written before the stall:")
-		require.Contains(t, q[0].Prompt, "internal/x.go")
+		require.Contains(t, q[0].Prompt, filepath.Join("internal", "x.go"))
 	})
 
 	t.Run("no writes renders no write set section", func(t *testing.T) {

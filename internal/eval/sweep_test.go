@@ -157,10 +157,13 @@ func TestTempDirPID(t *testing.T) {
 func TestGoCachePins(t *testing.T) {
 	unsetEnv(t, "GOMODCACHE")
 	unsetEnv(t, "GOCACHE")
-	t.Setenv(EvalGoCacheEnvVar, "/x/eval-go")
+	// A real temp dir keeps the override absolute on Windows too —
+	// "/x/eval-go" is not filepath.IsAbs there and would be ignored.
+	cacheDir := filepath.Join(os.TempDir(), "eval-go")
+	t.Setenv(EvalGoCacheEnvVar, cacheDir)
 	pins := goCachePins(nil)
-	require.Equal(t, filepath.Join("/x/eval-go", "mod"), pins["GOMODCACHE"])
-	require.Equal(t, filepath.Join("/x/eval-go", "build"), pins["GOCACHE"])
+	require.Equal(t, filepath.Join(cacheDir, "mod"), pins["GOMODCACHE"])
+	require.Equal(t, filepath.Join(cacheDir, "build"), pins["GOCACHE"])
 }
 
 func TestGoCachePins_RelativeOverrideIgnored(t *testing.T) {

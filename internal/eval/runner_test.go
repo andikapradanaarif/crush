@@ -8,6 +8,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sync/atomic"
@@ -1489,11 +1490,25 @@ func (s *seedGateRecorder) Run(ctx context.Context, workdir string, turns []stri
 	return res
 }
 
+// requireSeedCheckTooling skips when the shell toolchain seed-check
+// scripts exec isn't on PATH — corpus scripts are POSIX-authored, so
+// this is a tooling gate, not a verdict. bash is always required;
+// db-aware scripts pass their extra tools (e.g. sqlite3) explicitly.
+func requireSeedCheckTooling(t *testing.T, extra ...string) {
+	t.Helper()
+	for _, tool := range append([]string{"bash"}, extra...) {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("seed-check script needs %s on PATH", tool)
+		}
+	}
+}
+
 // The seed-state gate runs after every prior session and before the
 // measured one: a valid designed state lets the run proceed and the
 // script's EVAL_JSON lands on the record as SeedState.
 func TestExecuteRun_SeedCheckPass(t *testing.T) {
 	t.Parallel()
+	requireSeedCheckTooling(t)
 	root := newEvalDir(t)
 	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "warm-t", map[string]any{
 		"prior_sessions": []any{map[string]any{"turns": []string{"seed it"}}},
@@ -1528,6 +1543,7 @@ func TestExecuteRun_SeedCheckPass(t *testing.T) {
 // inconclusive, not a model failure.
 func TestExecuteRun_SeedCheckRejectsBeforeMeasure(t *testing.T) {
 	t.Parallel()
+	requireSeedCheckTooling(t)
 	root := newEvalDir(t)
 	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "warm-t", map[string]any{
 		"prior_sessions": []any{map[string]any{"turns": []string{"seed it"}}},
@@ -1568,6 +1584,7 @@ func TestExecuteRun_SeedCheckRejectsBeforeMeasure(t *testing.T) {
 // not an invalid seeding.
 func TestExecuteRun_SeedCheckHarnessError(t *testing.T) {
 	t.Parallel()
+	requireSeedCheckTooling(t)
 	root := newEvalDir(t)
 	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "warm-t", map[string]any{
 		"prior_sessions": []any{map[string]any{"turns": []string{"seed it"}}},
@@ -1602,6 +1619,7 @@ func TestExecuteRun_SeedCheckHarnessError(t *testing.T) {
 // relative script path against the workdir and exit 127, masquerading
 // as an invalid seeding.
 func TestExecuteRun_SeedCheckRelativeTrajDir(t *testing.T) {
+	requireSeedCheckTooling(t)
 	parent := t.TempDir()
 	root := filepath.Join(parent, "ev")
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "corpus"), 0o755))
@@ -1639,6 +1657,7 @@ func TestExecuteRun_SeedCheckRelativeTrajDir(t *testing.T) {
 // db analysis pairs with the last seed's session.
 func TestExecuteRun_SeedCheckMultipleSeeds(t *testing.T) {
 	t.Parallel()
+	requireSeedCheckTooling(t)
 	root := newEvalDir(t)
 	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "warm-t", map[string]any{
 		"prior_sessions": []any{
@@ -1675,6 +1694,7 @@ func TestExecuteRun_SeedCheckMultipleSeeds(t *testing.T) {
 // absent detail is distinguishable from a reported wrong state.
 func TestExecuteRun_SeedCheckRejectNoDetail(t *testing.T) {
 	t.Parallel()
+	requireSeedCheckTooling(t)
 	root := newEvalDir(t)
 	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "warm-t", map[string]any{
 		"prior_sessions": []any{map[string]any{"turns": []string{"seed it"}}},
@@ -1764,6 +1784,7 @@ func (s *dbSeedRecorder) Run(ctx context.Context, workdir string, turns []string
 // failure) is gone. A db-aware gate must catch it.
 func TestExecuteRun_SeedCheckResolvedRowRejects(t *testing.T) {
 	t.Parallel()
+	requireSeedCheckTooling(t, "sqlite3")
 	root := newEvalDir(t)
 	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "warm-t", map[string]any{
 		"prior_sessions": []any{map[string]any{"turns": []string{"seed it"}}},
@@ -1798,6 +1819,7 @@ func TestExecuteRun_SeedCheckResolvedRowRejects(t *testing.T) {
 // is a premise check, not a universal veto.
 func TestExecuteRun_SeedCheckOpenRowPasses(t *testing.T) {
 	t.Parallel()
+	requireSeedCheckTooling(t, "sqlite3")
 	root := newEvalDir(t)
 	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "warm-t", map[string]any{
 		"prior_sessions": []any{map[string]any{"turns": []string{"seed it"}}},
@@ -1832,6 +1854,7 @@ func TestExecuteRun_SeedCheckOpenRowPasses(t *testing.T) {
 // designed-row predicate must still reject.
 func TestExecuteRun_SeedCheckStrayRowStillRejects(t *testing.T) {
 	t.Parallel()
+	requireSeedCheckTooling(t, "sqlite3")
 	root := newEvalDir(t)
 	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "warm-t", map[string]any{
 		"prior_sessions": []any{map[string]any{"turns": []string{"seed it"}}},

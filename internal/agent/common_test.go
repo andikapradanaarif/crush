@@ -64,7 +64,10 @@ func hyperBuilder(model string) builderFunc {
 }
 
 func testEnv(t *testing.T) fakeEnv {
-	workingDir := filepath.Join("/tmp/crush-test/", t.Name())
+	// os.TempDir keeps the fake root platform-absolute — a literal
+	// "/tmp" is not filepath.IsAbs on Windows, which silently drops
+	// every absoluteness check the tests exercise.
+	workingDir := filepath.Join(os.TempDir(), "crush-test", t.Name())
 	os.RemoveAll(workingDir)
 
 	err := os.MkdirAll(workingDir, 0o755)
