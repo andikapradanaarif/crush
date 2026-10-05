@@ -1414,11 +1414,16 @@ func TestExecuteRun_PriorSessionFailureIsError(t *testing.T) {
 	tr, err := LoadTrajectory(trajDir)
 	require.NoError(t, err)
 	drv := &seedRecorder{failAt: 1}
+	// A stepping clock keeps the wall-clock pin deterministic — a
+	// near-instant stub seed can land inside one Windows timer tick
+	// and read as exactly 0.
+	var clock atomic.Int64
 	r := &Runner{
 		EvalDir:    root,
 		Driver:     drv,
 		WorkParent: t.TempDir(),
 		RNG:        rand.New(rand.NewPCG(1, 2)),
+		Now:        func() time.Time { return time.Unix(0, clock.Add(int64(time.Millisecond))) },
 	}
 	exp := &Experiment{Name: "exp1", Model: "mock/m", Temperature: ptr(0.0)}
 	manifest := &FlagsManifest{Defaults: map[string]any{}}
