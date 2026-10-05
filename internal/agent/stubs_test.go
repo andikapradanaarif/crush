@@ -537,7 +537,7 @@ func TestStubSupersededRequiresNotebook(t *testing.T) {
 	})
 
 	t.Run("option with notebook enables stubbing", func(t *testing.T) {
-		coord := newSummaryTestCoordinator(t, crushJSON(`, "notebook_stub_superseded": true`))
+		coord := newSummaryTestCoordinator(t, crushJSON(`, "notebook_stub_superseded": true, "notebook_enabled": true`))
 		sa, ok := coord.currentAgent().(*sessionAgent)
 		require.True(t, ok)
 		require.True(t, sa.stubSuperseded)
