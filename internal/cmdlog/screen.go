@@ -22,7 +22,10 @@ import (
 // filteredSpan marks a span the screen removed. Deliberately a plain
 // bracketed word: it renders safely (tailSafeText owns angle
 // brackets), survives signature hashing, and greps distinct from
-// redact's credential marker.
+// redact's credential marker. Literal "[filtered]" text in captured
+// output is indistinguishable from a marker — the collision is
+// accepted: a line that is only markers and punctuation collapses to
+// the placeholder either way, and a benign line keeps its text.
 const filteredSpan = "[filtered]"
 
 // filteredHeadlinePlaceholder stands in when nothing benign survives
@@ -34,11 +37,20 @@ const filteredHeadlinePlaceholder = "[headline filtered]"
 // injection-specific vocabulary so ordinary stderr ("you should run
 // go mod tidy", "test run failed") passes untouched, and windows
 // stop at sentence boundaries so a trigger word cannot reach across
-// a full stop into a benign noun.
+// a full stop into a benign noun. Two limits are inherent to the
+// mechanism: regex cannot see homoglyph evasion ("іgnore" with a
+// Cyrillic i defeats every pattern), and a payload split across a
+// sentence boundary is only caught if the second half is itself
+// shaped like one of these rules — the void-declaration rule below
+// exists for exactly that reason.
 var injectionPatterns = []*regexp.Regexp{
 	// Context override: "ignore all previous instructions",
 	// "disregard the above rules", "override your guardrails".
-	regexp.MustCompile(`(?i)\b(?:ignore|disregard|forget|override|discard|bypass)\b[^.!?;]{0,45}\b(?:instructions?|prompts?|messages?|rules?|guidelines?|directives?|guardrails?|constraints|programming)\b`),
+	regexp.MustCompile(`(?i)\b(?:ignore|disregard|forget|override|discard|bypass)\b[^.!?;]{0,45}\b(?:instructions?|prompts?|messages?|rules?|guidelines?|directives?|guardrails?|constraints|programming|commands?)\b`),
+	// Void-declaration: "all previous instructions are void", "your
+	// rules are cancelled" — the second clause of a boundary-split
+	// override, caught on its own side of the period.
+	regexp.MustCompile(`(?i)\b(?:all|any|your|these|those|the\s+above|previous|prior|earlier|preceding|foregoing)\s+(?:\w+\s+){0,2}(?:instructions?|directives?|rules?|guidelines?|prompts?|orders?|commands?)\s+(?:are|were|is|remain|stand)\s+(?:void|null|invalid|cancelled|canceled|overridden|suspended|terminated|obsolete|no\s+longer\s+\w{1,15})\b`),
 	// Object-less override: "ignore everything before", "disregard
 	// all of the above".
 	regexp.MustCompile(`(?i)\b(?:ignore|disregard|forget|discard)\s+(?:everything|anything)\b[^.!?;]{0,30}\b(?:before|above|prior|previous|else)\b`),
@@ -54,7 +66,7 @@ var injectionPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\b(?:act|behave)\s+as\s+(?:an?\s+|the\s+)?(?:\w+\s+){0,2}(?:root|admin|administrator|superuser|assistant|chatbot|agent|ai)\b`),
 	// Exfiltration and response suppression: "reveal your system
 	// prompt", "print your api keys", "do not respond".
-	regexp.MustCompile(`(?i)\b(?:reveal|show|print|output|repeat|leak|expose|display|dump|echo|tell\s+me)\s+(?:me\s+|us\s+|the\s+user\s+)?(?:your|the\s+full|the\s+entire|all\s+your|any)\s+(?:system\s+prompt|instructions?|rules?|secrets?|api[\s_-]?keys?|tokens?|passwords?|credentials?)\b`),
+	regexp.MustCompile(`(?i)\b(?:reveal|show|print|output|repeat|leak|expose|display|dump|echo|tell\s+me)\s+(?:me\s+|us\s+|the\s+user\s+)?(?:your|the|the\s+full|the\s+entire|all\s+your|any)\s+(?:system\s+prompt|instructions?|rules?|secrets?|api[\s_-]?keys?|tokens?|passwords?|credentials?)\b`),
 	regexp.MustCompile(`(?i)\b(?:do\s+not|don't|never)\s+(?:respond|answer|reply|mention|tell\s+the\s+user|reveal|disclose|alert|warn)\b`),
 }
 
@@ -74,7 +86,8 @@ var ansiEscRe = regexp.MustCompile("\x1b(?:\\[[0-9;:?]*[ -/]*[@-~]|\\][^\x07\x1b
 // failure record is worth keeping, its text is not. It runs at
 // persist and again at render: rows written before the screen
 // existed, or by a future unscreened path, still get screened on
-// the way into the prompt.
+// the way into the prompt. Internal whitespace collapses to single
+// spaces — a headline is a lookup hint, not a faithful copy.
 func ScreenHeadline(headline string) string {
 	s := ansiEscRe.ReplaceAllString(headline, "")
 	s = strings.Map(func(r rune) rune {
