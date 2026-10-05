@@ -248,7 +248,10 @@ blind search.
    starved both arms: the seed's don't-fix instruction doesn't
    survive this model family's verify instinct, so the stale premise
    is unseedable — quarantined as a corpus-design limitation
-   (rework filed as #238). Re-derived view committed at
+   (rework filed as #238, landed: seed touch moved to a new
+   `notes.txt` so the seeded agent never sees the bug; cell restored
+   to the powered manifest, seedability to be confirmed on the next
+   reject read). Re-derived view committed at
    `eval/experiments/failure-memory-mask-reject-powered.json`
    (provenance: post-hoc, no run-time snapshot).
 6. **Reconciliation edge (#218)** — implemented; eval read recorded
