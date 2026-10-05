@@ -383,7 +383,9 @@ func normalizeCommand(command string) string {
 // stderr would shadow stdout's real verdict and collapse every
 // distinct failure onto one signature. Only when neither stream
 // carries a verdict does arbitrary content headline. The exec error
-// is the last resort. Redacted before it touches a durable row.
+// is the last resort. Screened for instruction-shaped spans, then
+// redacted, before it touches a durable row — captured output is
+// attacker-controlled text that replays into later prompts.
 func failureHeadline(stderr, stdout string, runErr error) string {
 	headline := firstVerdictLine(stderr)
 	if headline == "" {
@@ -398,7 +400,7 @@ func failureHeadline(stderr, stdout string, runErr error) string {
 	if headline == "" && runErr != nil {
 		headline = firstContentLine(runErr.Error())
 	}
-	return truncateRunes(redact.Secrets(headline), maxHeadlineRunes)
+	return truncateRunes(redact.Secrets(screenHeadline(headline)), maxHeadlineRunes)
 }
 
 // failureSignature is the dedupe key for a failure: normalized command
