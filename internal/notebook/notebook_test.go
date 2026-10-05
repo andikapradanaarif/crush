@@ -627,6 +627,9 @@ func TestDefaultTagsForEvent_FileTags(t *testing.T) {
 func TestFileTags(t *testing.T) {
 	t.Parallel()
 	workDir := t.TempDir()
+	// A real TempDir keeps the "absolute outside" case absolute on
+	// Windows too — "/etc/hosts" is not filepath.IsAbs there.
+	outside := t.TempDir()
 	under := filepath.Join(workDir, "internal", "config", "config.go")
 	require.NoError(t, os.MkdirAll(filepath.Dir(under), 0o755))
 	require.NoError(t, os.WriteFile(under, []byte("x"), 0o644))
@@ -640,9 +643,9 @@ func TestFileTags(t *testing.T) {
 		{"relative path", "internal/config/config.go", workDir, []string{"file:internal/config/config.go", "file:config.go"}},
 		{"dot-prefix cleans", "./internal/config/config.go", workDir, []string{"file:internal/config/config.go", "file:config.go"}},
 		{"absolute under workdir", under, workDir, []string{"file:internal/config/config.go", "file:config.go"}},
-		{"absolute outside workdir", "/etc/hosts", workDir, []string{"file:hosts"}},
+		{"absolute outside workdir", outside, workDir, []string{"file:" + filepath.Base(outside)}},
 		{"relative path, no workdir", "internal/config/config.go", "", []string{"file:internal/config/config.go", "file:config.go"}},
-		{"absolute, no workdir", "/etc/hosts", "", []string{"file:hosts"}},
+		{"absolute, no workdir", outside, "", []string{"file:" + filepath.Base(outside)}},
 		{"basename only", "config.go", workDir, []string{"file:config.go"}},
 		{"trailing slash", "internal/agent/", workDir, []string{"file:internal/agent", "file:agent"}},
 	}

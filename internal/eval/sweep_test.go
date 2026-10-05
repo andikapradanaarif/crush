@@ -192,26 +192,28 @@ func TestGoCachePins_HonorsReserved(t *testing.T) {
 func TestCheckEnv_PinsGoCaches(t *testing.T) {
 	unsetEnv(t, "GOMODCACHE")
 	unsetEnv(t, "GOCACHE")
-	t.Setenv(EvalGoCacheEnvVar, "/x/eval-go")
+	cacheDir := filepath.Join(os.TempDir(), "eval-go")
+	t.Setenv(EvalGoCacheEnvVar, cacheDir)
 	r := &Runner{Home: t.TempDir()}
 	env := r.checkEnv()
 	mod, ok := envValue(env, "GOMODCACHE")
 	require.True(t, ok)
-	require.Equal(t, filepath.Join("/x/eval-go", "mod"), mod)
+	require.Equal(t, filepath.Join(cacheDir, "mod"), mod)
 	build, ok := envValue(env, "GOCACHE")
 	require.True(t, ok)
-	require.Equal(t, filepath.Join("/x/eval-go", "build"), build)
+	require.Equal(t, filepath.Join(cacheDir, "build"), build)
 }
 
 func TestSubprocessEnv_PinsGoCaches(t *testing.T) {
 	unsetEnv(t, "GOMODCACHE")
 	unsetEnv(t, "GOCACHE")
-	t.Setenv(EvalGoCacheEnvVar, "/x/eval-go")
+	cacheDir := filepath.Join(os.TempDir(), "eval-go")
+	t.Setenv(EvalGoCacheEnvVar, cacheDir)
 	c := CrushRunner{Home: t.TempDir()}
 	env := c.subprocessEnv("tel", 0)
 	mod, ok := envValue(env, "GOMODCACHE")
 	require.True(t, ok)
-	require.Equal(t, filepath.Join("/x/eval-go", "mod"), mod)
+	require.Equal(t, filepath.Join(cacheDir, "mod"), mod)
 }
 
 func TestSubprocessEnv_GoCacheYieldsToExtraEnv(t *testing.T) {
