@@ -251,9 +251,14 @@ blind search.
    (rework filed as #238). Re-derived view committed at
    `eval/experiments/failure-memory-mask-reject-powered.json`
    (provenance: post-hoc, no run-time snapshot).
-6. **Reconciliation edge (#218)** — mechanism implemented; the
-   corpus-cell assertion (`edge_firings.reconcile.*`) is the pending
-   eval read on the same corpus.
+6. **Reconciliation edge (#218)** — implemented; eval read recorded
+   (10-05, invocation `20261005T115552Z`,
+   `eval/experiments/failure-memory-reconcile.json`):
+   PASS on `reconcile-open-failure` — control recorded
+   `reconcile.gated` 3/3, treatment `reconcile.fired` + `suppressed`
+   per open epoch 3/3. Machinery/firing check at n=3/3, no primary
+   metric; informational deltas were +14% prompt tokens and higher
+   discovery (4.3 vs 2.7 calls/run).
 7. **Layered resolver (#216)** — L1 identifier layer + offline
    binding benchmark landed (`failure_binding.jsonl`,
    `settled_by`/`lang_unsupported` observability); L3 only if the
