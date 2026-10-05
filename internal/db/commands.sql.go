@@ -93,6 +93,7 @@ WHERE f.resolved_in = ''
     AND c.last_session_id = ?
     AND c.last_exit > 0
 ORDER BY f.last_seen DESC, f.rowid DESC
+LIMIT 50
 `
 
 // Open failure rows whose commands the given session last ran and
@@ -101,6 +102,9 @@ ORDER BY f.last_seen DESC, f.rowid DESC
 // session re-ran more recently drops out of this session's set even
 // while it stays open; a concurrently opened row the run never
 // invoked can never flag here.
+// Same bound as the tail's fetch pool -- a session can observe more
+// distinct commands than this only pathologically, and the retry
+// prompt renders at most ten.
 func (q *Queries) ListSessionOpenFailures(ctx context.Context, lastSessionID string) ([]FailureMemory, error) {
 	rows, err := q.query(ctx, q.listSessionOpenFailuresStmt, listSessionOpenFailures, lastSessionID)
 	if err != nil {
@@ -175,12 +179,15 @@ INSERT INTO command_memory (
 ) ON CONFLICT(cmd_norm, cwd) DO UPDATE SET
     kind = excluded.kind,
     -- Interrupted runs carry last_exit = -1: the run is noted but
-    -- never overwrites the command's last real verdict.
+    -- never overwrites the command's last real verdict -- nor the
+    -- session stamp, which must stay with the last verdict's writer
+    -- so a denied or killed re-run cannot disown the observing
+    -- session (or claim a failing verdict it never saw).
     last_exit = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_exit ELSE command_memory.last_exit END,
     last_at = excluded.last_at,
     ok_count = command_memory.ok_count + excluded.ok_count,
     fail_count = command_memory.fail_count + excluded.fail_count,
-    last_session_id = excluded.last_session_id
+    last_session_id = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_session_id ELSE command_memory.last_session_id END
 `
 
 type UpsertCommandRunParams struct {

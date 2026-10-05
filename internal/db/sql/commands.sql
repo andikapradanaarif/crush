@@ -23,12 +23,15 @@ INSERT INTO command_memory (
 ) ON CONFLICT(cmd_norm, cwd) DO UPDATE SET
     kind = excluded.kind,
     -- Interrupted runs carry last_exit = -1: the run is noted but
-    -- never overwrites the command's last real verdict.
+    -- never overwrites the command's last real verdict -- nor the
+    -- session stamp, which must stay with the last verdict's writer
+    -- so a denied or killed re-run cannot disown the observing
+    -- session (or claim a failing verdict it never saw).
     last_exit = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_exit ELSE command_memory.last_exit END,
     last_at = excluded.last_at,
     ok_count = command_memory.ok_count + excluded.ok_count,
     fail_count = command_memory.fail_count + excluded.fail_count,
-    last_session_id = excluded.last_session_id;
+    last_session_id = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_session_id ELSE command_memory.last_session_id END;
 
 -- name: UpsertFailure :exec
 -- One row per (normalized command, directory, error headline)
@@ -87,4 +90,8 @@ INNER JOIN command_memory c
 WHERE f.resolved_in = ''
     AND c.last_session_id = ?
     AND c.last_exit > 0
-ORDER BY f.last_seen DESC, f.rowid DESC;
+ORDER BY f.last_seen DESC, f.rowid DESC
+-- Same bound as the tail's fetch pool -- a session can observe more
+-- distinct commands than this only pathologically, and the retry
+-- prompt renders at most ten.
+LIMIT 50;

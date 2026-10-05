@@ -568,6 +568,10 @@ this-run rows are unresolved at turn end.
   write took the stamp. Its cost is the symmetric bound — a
   session that observed a failure, then watched another session
   re-run the same command, drops out of its own observed set.
+  The stamp only moves on a real verdict: a denied or interrupted
+  re-run is noted in the ledger but leaves `last_session_id` with
+  the last verdict's writer, so a no-verdict run can neither
+  disown the observer nor claim a failure it never saw exit.
   `detail` records `open=N introduced=M` where introduced counts
   rows whose `first_seen` lands inside this run's window — the
   firing record distinguishes "the run left its own mess" from
@@ -586,10 +590,20 @@ this-run rows are unresolved at turn end.
   `crush run` output too.
 - **flag:** `options.failure_memory` gates acting, not measuring —
   flag-off boundaries still evaluate the join and record `gated`.
-  The edge is ordered last in `runEdgeSet` so its join observes
-  memory state *after* verification's resolve: a pending check
-  that passes writes through cmdlog and resolves the row before
-  the edge reads it.
+  The telemetry holdout is a stronger gate: a held-out session
+  returns no trigger at all, because firing would re-inject the
+  suppressed memory signal through the retry prompt and break the
+  control arm's counterfactual. The edge is ordered last in
+  `runEdgeSet` so its join observes memory state *after*
+  verification's resolve: a pending check that passes writes
+  through cmdlog and resolves the row before the edge reads it.
+- **Cost, stated plainly:** a row lives until its recorded command
+  passes, so every clean-stopping run in the session re-fires the
+  edge while the row persists — up to `maxRepairAttempts` retry
+  turns per run, for as long as the failure stays unresolvable
+  (environment breakage, a failure kept on purpose). Per-run
+  renewal is the current contract; a suppress-once marker per row
+  is the listed follow-up if the retry tax proves noisy.
 - **Evaluable:** `edge_firings.reconcile.*` coverage predicates —
   fired/exhausted/cleared/gated counts are the "run ends with
   observed-failure still open" assertion the repaired mask corpus

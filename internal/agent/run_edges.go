@@ -1605,6 +1605,16 @@ func (a *sessionAgent) scanReconcileEdge(ctx context.Context, call SessionAgentC
 	if a.cmdlog == nil {
 		return nil
 	}
+	if a.memoryTelemetry != nil && a.memoryTelemetry.holdoutOff(call.SessionID) {
+		// The holdout suppresses every memory read for the session,
+		// not just the tail render — firing here would re-inject the
+		// suppressed signal through the retry prompt and contaminate
+		// the control arm. No row is recorded: the session must
+		// behave as if the edge did not exist (a gated row would land
+		// in the flag-on arm, where eval's gated starvation rule
+		// requires the flag off).
+		return nil
+	}
 	open, err := a.cmdlog.ListSessionOpenFailures(ctx, call.SessionID)
 	if err != nil {
 		slog.Warn("Reconcile edge failed to list session failures", "session_id", call.SessionID, "error", err)

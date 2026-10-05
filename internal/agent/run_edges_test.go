@@ -1338,6 +1338,48 @@ func TestReconcileEdge(t *testing.T) {
 		require.False(t, queued)
 		require.Empty(t, firingOutcome(t, conn, sessionID, "reconcile"))
 	})
+
+	t.Run("a no-verdict rerun cannot disown the observing session", func(t *testing.T) {
+		t.Parallel()
+		a, conn, svc, sessionID, dir := reconcileEdgeAgent(t)
+		recordCmd(t, svc, sessionID, dir, "go test ./x", 1)
+		// Another session's interrupted attempt is noted in the
+		// ledger but produces no verdict — the stamp must stay with
+		// the observing session rather than transfer to a run that
+		// never saw the command exit.
+		svc.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: "session-b", Command: "go test ./x", CWD: dir,
+			Ran: true, Interrupted: true, ExitCode: 130,
+		})
+		// A denied run is the same no-verdict shape on a second
+		// command: noted in the ledger, holds no stamp.
+		recordCmd(t, svc, sessionID, dir, "make build", 1)
+		svc.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: "session-b", Command: "make build", CWD: dir,
+			Ran: false, ExitCode: -1,
+		})
+		open, err := svc.ListSessionOpenFailures(t.Context(), "session-b")
+		require.NoError(t, err)
+		require.Empty(t, open, "an interrupted or denied run holds no failing verdict to observe")
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: cleanResult(), startedAt: time.Now().Add(-time.Hour)})
+		require.True(t, queued, "the interrupt must not lift the row out of the observer's set")
+		require.Equal(t, "fired", firingOutcome(t, conn, sessionID, "reconcile"))
+	})
+
+	t.Run("telemetry holdout suppresses the edge entirely", func(t *testing.T) {
+		t.Parallel()
+		a, conn, svc, sessionID, dir := reconcileEdgeAgent(t)
+		a.memoryTelemetry = newMemoryTelemetry(true, t.TempDir(), dir)
+		a.memoryTelemetry.roll = func(string) float64 { return 0 }
+		recordCmd(t, svc, sessionID, dir, "go test ./x", 1)
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: cleanResult(), startedAt: time.Now().Add(-time.Hour)})
+		require.False(t, queued,
+			"a held-out session must behave as if reconcile did not exist")
+		require.Empty(t, firingOutcome(t, conn, sessionID, "reconcile"),
+			"no row — a gated row would land in the flag-on arm and starve its predicate")
+	})
 }
 
 func TestReconcileRetrySection(t *testing.T) {

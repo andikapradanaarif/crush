@@ -106,6 +106,9 @@ type Querier interface {
 	// session re-ran more recently drops out of this session's set even
 	// while it stays open; a concurrently opened row the run never
 	// invoked can never flag here.
+	// Same bound as the tail's fetch pool -- a session can observe more
+	// distinct commands than this only pathologically, and the retry
+	// prompt renders at most ten.
 	ListSessionOpenFailures(ctx context.Context, lastSessionID string) ([]FailureMemory, error)
 	ListSessionReadFiles(ctx context.Context, sessionID string) ([]ReadFile, error)
 	ListSessions(ctx context.Context) ([]Session, error)
