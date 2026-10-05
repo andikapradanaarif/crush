@@ -471,14 +471,14 @@ type Options struct {
 	Attribution               *Attribution `json:"attribution,omitempty" jsonschema:"description=Attribution settings for generated content"`
 	DisableMetrics            bool         `json:"disable_metrics,omitempty" jsonschema:"description=Disable sending metrics,default=false"`
 	// Notebook configuration for per-event context summarization.
-	NotebookEnabled        *bool  `json:"notebook_enabled,omitempty" jsonschema:"description=Enable per-event context notebook for reducing token usage,default=true"`
+	NotebookEnabled        *bool  `json:"notebook_enabled,omitempty" jsonschema:"description=Enable per-event context notebook for reducing token usage,default=false"`
 	NotebookRawTokenBudget int    `json:"notebook_raw_token_budget,omitempty" jsonschema:"description=Token budget for raw recent turns in notebook mode,default=25000"`
 	NotebookMaxTokens      int64  `json:"notebook_max_tokens,omitempty" jsonschema:"description=Maximum total tokens for notebook entries before compaction,default=100000"`
 	NotebookMaxEntryTokens int64  `json:"notebook_max_entry_tokens,omitempty" jsonschema:"description=Maximum tokens per notebook entry,default=1000"`
 	NotebookSyncMem0       *bool  `json:"notebook_sync_mem0,omitempty" jsonschema:"description=Sync notebook entries to mem0 for cross-session search,default=false"`
 	NotebookMemoryServer   string `json:"notebook_memory_server,omitempty" jsonschema:"description=Name of the MCP server to use for mem0 cross-session memory sync and search,default=mem0"`
 	NotebookAutoInject     *bool  `json:"notebook_auto_inject,omitempty" jsonschema:"description=Auto-inject full notebook entries for files mentioned in the user message,default=false"`
-	NotebookCheckpoint     *bool  `json:"notebook_checkpoint,omitempty" jsonschema:"description=Write a consolidated checkpoint entry (established facts vs open questions) at the write boundary and run end,default=true"`
+	NotebookCheckpoint     *bool  `json:"notebook_checkpoint,omitempty" jsonschema:"description=Write a consolidated checkpoint entry (established facts vs open questions) at the write boundary and run end — defaults to the resolved notebook_enabled value,default=false"`
 	NotebookStubSuperseded *bool  `json:"notebook_stub_superseded,omitempty" jsonschema:"description=Replace stale or superseded tool results in raw history with labeled stubs (experimental),default=false"`
 	// NotebookHydration seeds a new session's notebook from the
 	// memory server's prior entries for this working directory —
@@ -1450,10 +1450,12 @@ func ptr[T any](v T) *T {
 }
 
 // NotebookIsEnabled returns the resolved notebook-enabled setting,
-// defaulting to true when not explicitly set.
+// defaulting to false when not explicitly set — the stack carries a
+// token cost and no powered comparison has shown it paying for
+// itself (#205), so it ships opt-in until the eval clears the floor.
 func (o *Options) NotebookIsEnabled() bool {
 	if o.NotebookEnabled == nil {
-		return true
+		return false
 	}
 	return *o.NotebookEnabled
 }

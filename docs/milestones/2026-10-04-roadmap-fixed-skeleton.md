@@ -226,9 +226,11 @@ blind search.
 
 ## Next steps, in order
 
-1. **Notebook default-off (#205)** — the only item affecting every
-   user today; record which invocations ran under which default so
-   historical comparisons stay honest.
+1. **Notebook default-off (#205)** — implemented: `notebook_enabled`
+   and `notebook_checkpoint` (which follows it) resolve false when
+   unset; the resolved value is materialized into the options
+   projection, so each invocation's effective default is recorded in
+   the config the run reports.
 2. **Write-side injection screening (#219)** — persistent prompt
    channel; security item, cheap.
 3. **Real-usage telemetry (#206)** — implemented in #231 (open):
