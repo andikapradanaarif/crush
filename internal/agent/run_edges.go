@@ -13,6 +13,7 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/index"
 	"github.com/charmbracelet/crush/internal/message"
@@ -107,6 +108,10 @@ type edgeInput struct {
 	// Repair retries persist their prompts as user messages, so each
 	// attempt's boundary gets a distinct ordinal.
 	turnSeq int64
+	// startedAt is when the run began — the reconcile edge compares
+	// failure rows' FirstSeen against it to distinguish rows this run
+	// introduced from pre-existing ones it re-observed.
+	startedAt time.Time
 }
 
 // edgeTrigger is one edge's scan output: the evidence a retry prompt or
@@ -121,7 +126,11 @@ type edgeTrigger struct {
 	plan      []planVerdict
 	assistant *message.Message
 	report    string
-	fire      bool
+	// openFailures is the reconcile edge's evidence — the failure
+	// rows this session last ran and last failed that are still open
+	// at run end.
+	openFailures []cmdlog.Failure
+	fire         bool
 	// family decides prompt contention between firing triggers; the
 	// zero value is retry.
 	family edgeFamily
@@ -193,7 +202,8 @@ type runEdge struct {
 
 // runEdgeSet is the evaluated order: verification and todos are the
 // original gate halves; stall converts a loop-detector stop into a
-// replan-or-escalate turn; burn-watch is the write-less spend tripwire.
+// replan-or-escalate turn; burn-watch is the write-less spend
+// tripwire; reconcile flags failure rows the run observed still open.
 // All firing retry-family edges merge into ONE retry prompt — two edges
 // each enqueueing a turn would double every repair. Escalation-family
 // triggers win the slot outright and the rest defer.
@@ -234,6 +244,16 @@ func (a *sessionAgent) runEdgeSet() []runEdge {
 			resolve: a.resolveBurnWatchEdge,
 			prompt:  burnWatchRetrySection,
 			note:    burnWatchExhaustNote,
+		},
+		{
+			// Reconcile runs last so its open-failure join observes
+			// memory state after verification's resolve — a pending
+			// check that passes writes through cmdlog and resolves
+			// the row before the edge reads it.
+			name:   "reconcile",
+			scan:   a.scanReconcileEdge,
+			prompt: reconcileRetrySection,
+			note:   reconcileExhaustNote,
 		},
 	}
 }
@@ -1567,4 +1587,95 @@ func humanTokens(n int64) string {
 		return fmt.Sprintf("%dK tokens", n/1000)
 	}
 	return fmt.Sprintf("%d tokens", n)
+}
+
+// --- reconcile edge ---
+
+// scanReconcileEdge fires when a clean stop leaves failure rows this
+// session observed still open: the run reported done while a command
+// it ran last failed and the row is still live. Evidence is the join
+// of open failure_memory rows against command_memory's last-writer
+// stamp — a row another session opened or re-ran since never enters
+// the set, which is what keeps a concurrently opened row this run
+// never observed from flagging.
+func (a *sessionAgent) scanReconcileEdge(ctx context.Context, call SessionAgentCall, in edgeInput) *edgeTrigger {
+	if !cleanStop(in) || a.isSubAgent {
+		return nil
+	}
+	if a.cmdlog == nil {
+		return nil
+	}
+	open, err := a.cmdlog.ListSessionOpenFailures(ctx, call.SessionID)
+	if err != nil {
+		slog.Warn("Reconcile edge failed to list session failures", "session_id", call.SessionID, "error", err)
+		return nil
+	}
+	if len(open) == 0 {
+		return nil
+	}
+	introduced := 0
+	for _, f := range open {
+		if !in.startedAt.IsZero() && !f.FirstSeen.Before(in.startedAt) {
+			introduced++
+		}
+	}
+	t := &edgeTrigger{
+		openFailures: open,
+		fire:         true,
+		// Open-failure state re-scans from the ledger, so a deferred
+		// reconcile trigger records cleared when the escalation
+		// turn's re-runs resolved the rows.
+		sessionState: true,
+		detail:       fmt.Sprintf("open=%d introduced=%d", len(open), introduced),
+	}
+	if !a.failureMemory {
+		// Memory reads are off: the flag gates acting, not
+		// measuring — record the would-have-fired verdict.
+		t.hint = edgeOutcomeGated
+	}
+	return t
+}
+
+// reconcileRetryPrefix heads the repair prompt's reconcile section.
+const reconcileRetryPrefix = "Observed failures still open"
+
+// reconcileRetrySection renders the rows the finished run observed and
+// left open. A row resolves only when its recorded command re-runs
+// clean — the prompt names the exact commands rather than asking the
+// model to rediscover them.
+func reconcileRetrySection(t *edgeTrigger) string {
+	if len(t.openFailures) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s — a run is not done while command(s) it ran still have open failure rows:\n", reconcileRetryPrefix)
+	const maxListedFailures = 10
+	for i, f := range t.openFailures {
+		if i >= maxListedFailures {
+			fmt.Fprintf(&b, "- … and %d more\n", len(t.openFailures)-maxListedFailures)
+			break
+		}
+		where := ""
+		if f.CWD != "" && f.CWD != "." {
+			where = " in " + tailSafeText(f.CWD)
+		}
+		// The row's fields are tool output persisted into memory —
+		// the same neutralization and headline screen the tail render
+		// applies runs here so a legacy poisoned row can't ride the
+		// retry. The SQL join already happened; this is display only.
+		headline := tailSafeText(cmdlog.ScreenHeadline(f.Headline))
+		fmt.Fprintf(&b, "- `%s`%s — %s\n", tailSafeText(f.Cmd), where, headline)
+	}
+	b.WriteString("A failure row resolves only when its recorded command is re-run and passes. Re-run each listed command to verify the failure is gone; if it still fails, fix the cause or explain why it stays open. Do not report the task finished while these rows remain open.\n")
+	return b.String()
+}
+
+// reconcileExhaustNote renders the budget-exhausted line for observed
+// failures still open.
+func reconcileExhaustNote(t *edgeTrigger, attempts int) string {
+	if len(t.openFailures) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d observed failure(s) still open after %d attempt(s).",
+		len(t.openFailures), attempts)
 }

@@ -185,7 +185,7 @@ blind search.
 | **Mask corpus repair (#204)** | the explicit/ambiguous × memory-type matrix over bb + ft families — 15 trajectory dirs (13 matrix cells + the legacy pair); EVAL_JSON dual scoring; staleness by construction; non-actionable placebo; scored abstention via `max_tail` | done 10-02 |
 | **Deterministic selector (#207)** | `failure_select.go`: explicit scope → span polarity → referent-kind binding → validity (`narrow_scope`/`path_gone`/`stale_suspect`) → admit/abstain; per-candidate verdicts in `tail.decisions`. Accepted tradeoffs: `stale_suspect` is an mtime proxy (formatter/generate/checksum hides the row — deliberate false-negative); English lexicon may only *grant* scope | merged 10-03 in #214 |
 | **Layered language-neutral resolver (#216)** | L0 candidate-set structure → L1 language-neutral ids (paths, `Test\w+`, attachments — closes "headline never binds") → L2 artifacts (promotes *unmentioned* candidates only — never resurrects typed-but-unparseable tokens; #215 closed, subsumed) → L3 small-model resolver (closed output, validated, cached, abstains on failure) → L4 ask when interactive. Methodology gate: offline binding benchmark (per-language veto violations target 0) before any powered run. The English-lexicon coverage hole is silent today — a `lang_unsupported`-class reason should make it measurable before L1 lands (#232) | open — L0–L1 + benchmark first |
-| **Reconciliation edge (#218)** | deterministic: failures observed this run still open → don't report done. Targets the mask signature (early termination) | open |
+| **Reconciliation edge (#218)** | `reconcile` run-edge: open `failure_memory` rows joined on `command_memory.last_session_id` — the run's session last ran and last failed → bounded retry names the resolving commands; `edge_firings` row is the decision record (`open=N introduced=M`). Accepted bound: last-writer session key — a concurrent session's re-run lifts the row | implemented |
 | **Candidate-pool cap (#233)** | fetch pool (50) and render cap (5) are separate stages: bound rows beyond the cap record `render_capped`, so "admitted but not rendered" is a named exit, not silence | implemented |
 | **Injection screening (#219)** | `screenHeadline` at persist: ANSI/format-rune strip + phrase-level override/role/exfiltration scrub; cut spans leave `[filtered]` markers, all-payload lines persist as a placeholder | implemented |
 | **Provenance (#220)** | per-observation: session/tool call, repo state, expected-negative vs real failure, resolving observation, memory-suggested flag — **+ `project_key` (stable repo identity, 10-05) + `param_version`** | open — gates #165 |
@@ -239,7 +239,9 @@ blind search.
 5. **Powered selector run on the repaired mask corpus** — #217
    merged 10-04, so the stale cells now assert the premise they
    claim (bar: pass ~1.00 *and* effort savings retained).
-6. **Reconciliation edge (#218)** — test on the same corpus.
+6. **Reconciliation edge (#218)** — mechanism implemented; the
+   corpus-cell assertion (`edge_firings.reconcile.*`) is the pending
+   eval read on the same corpus.
 7. **Layered resolver (#216)** — L0–L1 + offline binding benchmark;
    L2 artifacts; L3 only if deterministic layers leave measurable
    recall unclaimed.

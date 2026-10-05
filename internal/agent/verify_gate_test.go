@@ -805,6 +805,10 @@ func (r *gateRecordingCmdLog) ListOpenFailures(context.Context, int) ([]cmdlog.F
 	return nil, nil
 }
 
+func (r *gateRecordingCmdLog) ListSessionOpenFailures(context.Context, string) ([]cmdlog.Failure, error) {
+	return nil, nil
+}
+
 func TestRunGateChecks_RecordsVerdictsToCmdLog(t *testing.T) {
 	dir := t.TempDir()
 	log := &gateRecordingCmdLog{}

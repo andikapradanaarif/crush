@@ -815,7 +815,7 @@
         },
         "failure_memory": {
           "type": "boolean",
-          "description": "Inject unresolved command/failure memory at the request tail (the \u003copen_failures\u003e section). Recording happens regardless; this gates injection. Experimental.",
+          "description": "Read unresolved command/failure memory: inject the \u003copen_failures\u003e tail section and arm the reconcile run-edge (open failures the run observed still open block done-ness). Recording happens regardless; this gates the read side. Experimental.",
           "default": false
         },
         "memory_telemetry": {

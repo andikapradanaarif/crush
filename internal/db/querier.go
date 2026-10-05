@@ -100,6 +100,13 @@ type Querier interface {
 	// rowid settles ties for rows written in the same millisecond.
 	ListRecentCommands(ctx context.Context, limit int64) ([]CommandMemory, error)
 	ListSessionCounters(ctx context.Context) ([]ListSessionCountersRow, error)
+	// Open failure rows whose commands the given session last ran and
+	// last failed: the reconcile edge's "observed and left open" set.
+	// command_memory's last_session_id is last-writer, so a row another
+	// session re-ran more recently drops out of this session's set even
+	// while it stays open; a concurrently opened row the run never
+	// invoked can never flag here.
+	ListSessionOpenFailures(ctx context.Context, lastSessionID string) ([]FailureMemory, error)
 	ListSessionReadFiles(ctx context.Context, sessionID string) ([]ReadFile, error)
 	ListSessions(ctx context.Context) ([]Session, error)
 	// Backs prompt history, which steps back one entry at a time.

@@ -71,3 +71,20 @@ SELECT * FROM command_memory ORDER BY last_at DESC, rowid DESC LIMIT ?;
 
 -- name: ListOpenFailures :many
 SELECT * FROM failure_memory WHERE resolved_in = '' ORDER BY last_seen DESC, rowid DESC LIMIT ?;
+
+-- name: ListSessionOpenFailures :many
+-- Open failure rows whose commands the given session last ran and
+-- last failed: the reconcile edge's "observed and left open" set.
+-- command_memory's last_session_id is last-writer, so a row another
+-- session re-ran more recently drops out of this session's set even
+-- while it stays open; a concurrently opened row the run never
+-- invoked can never flag here.
+SELECT f.*
+FROM failure_memory f
+INNER JOIN command_memory c
+    ON c.cmd_norm = f.cmd
+    AND c.cwd = f.cwd
+WHERE f.resolved_in = ''
+    AND c.last_session_id = ?
+    AND c.last_exit > 0
+ORDER BY f.last_seen DESC, f.rowid DESC;

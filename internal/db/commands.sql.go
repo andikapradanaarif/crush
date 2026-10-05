@@ -83,6 +83,56 @@ func (q *Queries) ListRecentCommands(ctx context.Context, limit int64) ([]Comman
 	return items, nil
 }
 
+const listSessionOpenFailures = `-- name: ListSessionOpenFailures :many
+SELECT f.signature, f.cmd, f.cwd, f.headline, f.files, f.first_seen, f.last_seen, f.resolved_in
+FROM failure_memory f
+INNER JOIN command_memory c
+    ON c.cmd_norm = f.cmd
+    AND c.cwd = f.cwd
+WHERE f.resolved_in = ''
+    AND c.last_session_id = ?
+    AND c.last_exit > 0
+ORDER BY f.last_seen DESC, f.rowid DESC
+`
+
+// Open failure rows whose commands the given session last ran and
+// last failed: the reconcile edge's "observed and left open" set.
+// command_memory's last_session_id is last-writer, so a row another
+// session re-ran more recently drops out of this session's set even
+// while it stays open; a concurrently opened row the run never
+// invoked can never flag here.
+func (q *Queries) ListSessionOpenFailures(ctx context.Context, lastSessionID string) ([]FailureMemory, error) {
+	rows, err := q.query(ctx, q.listSessionOpenFailuresStmt, listSessionOpenFailures, lastSessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []FailureMemory{}
+	for rows.Next() {
+		var i FailureMemory
+		if err := rows.Scan(
+			&i.Signature,
+			&i.Cmd,
+			&i.Cwd,
+			&i.Headline,
+			&i.Files,
+			&i.FirstSeen,
+			&i.LastSeen,
+			&i.ResolvedIn,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const resolveFailuresForCommand = `-- name: ResolveFailuresForCommand :exec
 UPDATE failure_memory SET
     resolved_in = ?

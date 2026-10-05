@@ -1192,6 +1192,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// edge-firing records — counted now, before folded queued prompts
 	// create non-initiating user messages mid-run.
 	turnSeq := a.edgeTurnSeq(ctx, call.SessionID)
+	// runStart anchors the reconcile edge's introduced-this-run
+	// comparison — failure rows first seen after this instant are the
+	// run's own, older ones are pre-existing observations.
+	runStart := time.Now()
 
 	// Add the session to the context. The run context (genCtx) and its
 	// cancel func were already created and registered under the dispatch
@@ -1874,6 +1878,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		currentAssistant: currentAssistant,
 		stalled:          loopStopped,
 		turnSeq:          turnSeq,
+		startedAt:        runStart,
 	})
 
 	// Generate notebook entries asynchronously when notebook is

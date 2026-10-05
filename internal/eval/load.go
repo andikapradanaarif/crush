@@ -533,16 +533,18 @@ var priorTurnsRecallLive = starvationRule{
 //   - deferred/exhausted: contention loser or spent repair budget —
 //     needs a firing trigger, so flag-on for stall/burn-watch.
 //   - gated/suppressed/headless-degraded: stall/burn-watch hints —
-//     verification/todos never set hints.
+//     verification/todos never set hints. Reconcile sets gated under
+//     failure_memory=off; cleared is its sessionState carrier ride.
 //   - cleared: a !fire trigger with no hint (verification resolving
-//     clean), or a sessionState carrier ride (todos) — stall and
-//     burn-watch are step-bound and always fire-or-hint, so they
-//     never clear.
+//     clean), or a sessionState carrier ride (todos, reconcile) —
+//     stall and burn-watch are step-bound and always fire-or-hint,
+//     so they never clear.
 var edgeOutcomeTable = map[string]map[string]bool{
 	"verification": {"fired": true, "cleared": true, "cancelled": true, "deferred": true, "exhausted": true},
 	"todos":        {"fired": true, "cleared": true, "cancelled": true, "deferred": true, "exhausted": true},
 	"stall":        {"fired": true, "gated": true, "headless-degraded": true, "cancelled": true, "deferred": true, "exhausted": true},
 	"burn-watch":   {"fired": true, "gated": true, "suppressed": true, "headless-degraded": true, "cancelled": true, "deferred": true, "exhausted": true},
+	"reconcile":    {"fired": true, "gated": true, "cleared": true, "cancelled": true, "deferred": true, "exhausted": true},
 }
 
 // armStarvationRules maps a coverage field to the option requirements
@@ -584,13 +586,19 @@ func armStarvationRules(field string) []starvationRule {
 				func(func(string) (any, bool)) bool { return false },
 			}}
 		}
-		if name != "stall" && name != "burn-watch" {
+		if name != "stall" && name != "burn-watch" && name != "reconcile" {
 			// verification/todos never consult the flag.
 			return nil
 		}
+		// Stall and burn-watch ride ambiguity_clarification;
+		// reconcile rides failure_memory.
+		flag := "ambiguity_clarification"
+		if name == "reconcile" {
+			flag = "failure_memory"
+		}
 		switch outcome {
 		case "gated":
-			return []starvationRule{boolOff("ambiguity_clarification")}
+			return []starvationRule{boolOff(flag)}
 		case "cancelled":
 			// Mid-scan ctx kills are flag-independent.
 			return nil
@@ -598,7 +606,7 @@ func armStarvationRules(field string) []starvationRule {
 			// Flag-off triggers take the gated short-circuit
 			// before resolve/contention — every other outcome
 			// needs the flag on.
-			return []starvationRule{boolOn("ambiguity_clarification")}
+			return []starvationRule{boolOn(flag)}
 		}
 	}
 	if strings.HasPrefix(field, "checkpoints.") {

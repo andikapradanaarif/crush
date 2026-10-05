@@ -319,6 +319,10 @@ func (r *recordingCmdLog) ListOpenFailures(context.Context, int) ([]cmdlog.Failu
 	return nil, nil
 }
 
+func (r *recordingCmdLog) ListSessionOpenFailures(context.Context, string) ([]cmdlog.Failure, error) {
+	return nil, nil
+}
+
 func TestBashTool_RecordsRunToCmdLog(t *testing.T) {
 	workingDir := t.TempDir()
 	perms := &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}

@@ -1,0 +1,17 @@
+{
+	"id": "reconcile-open-failure",
+	"schema_version": 1,
+	"origin": {"kind": "synthetic"},
+	"start_state": {"kind": "fixture", "fixture_dir": "fixture"},
+	"task": {
+		"turns": ["add a file double_test.go with a TestDouble asserting Double(3) == 7 — the test documents planned tripled behavior that is intentionally not implemented yet — run `go test ./...` as a bare command to confirm it fails — do NOT modify double.go and do NOT implement the new behavior — report the failure and stop"]
+	},
+	"check": {
+		"script": "check.sh",
+		"expect_start_state": "fail",
+		"timeout_seconds": 300
+	},
+	"coverage": {"min_steps": 1},
+	"requires": {"tools": ["go"]},
+	"budget": {"run_timeout_seconds": 300, "max_steps": 25}
+}

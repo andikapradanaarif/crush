@@ -62,6 +62,14 @@ type Service interface {
 	// ListOpenFailures returns failures with no resolving run,
 	// most recently seen first, capped at limit.
 	ListOpenFailures(ctx context.Context, limit int) ([]Failure, error)
+
+	// ListSessionOpenFailures returns the failure rows still open
+	// whose recorded command the given session last ran and last
+	// failed — the reconcile edge's "observed and left open" set.
+	// The session key is command_memory's last-writer stamp, so a
+	// row another session re-ran more recently drops out of this
+	// session's set even while the row stays open.
+	ListSessionOpenFailures(ctx context.Context, sessionID string) ([]Failure, error)
 }
 
 // Run is one completed command invocation.
@@ -250,11 +258,24 @@ func (s *service) ListOpenFailures(ctx context.Context, limit int) ([]Failure, e
 	if err != nil {
 		return nil, fmt.Errorf("listing open failures: %w", err)
 	}
+	return s.failuresFromRows(rows), nil
+}
+
+func (s *service) ListSessionOpenFailures(ctx context.Context, sessionID string) ([]Failure, error) {
+	rows, err := s.q.ListSessionOpenFailures(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("listing session open failures: %w", err)
+	}
+	return s.failuresFromRows(rows), nil
+}
+
+// failuresFromRows maps failure_memory rows to Failures under the
+// same staleness bound both read paths share — a row past the TTL is
+// a suffix in the freshest-first ordering, so the scan can stop.
+func (s *service) failuresFromRows(rows []db.FailureMemory) []Failure {
 	out := make([]Failure, 0, len(rows))
 	cutoff := time.Now().Add(-s.openFailureTTL).UnixMilli()
 	for _, r := range rows {
-		// Rows order freshest-first, so everything past the cutoff
-		// is a suffix — the rest can only be older.
 		if s.openFailureTTL != 0 && r.LastSeen < cutoff {
 			break
 		}
@@ -269,7 +290,7 @@ func (s *service) ListOpenFailures(ctx context.Context, limit int) ([]Failure, e
 			ResolvedIn: r.ResolvedIn,
 		})
 	}
-	return out, nil
+	return out
 }
 
 // relDir normalizes a run's working directory to workspace-relative so
