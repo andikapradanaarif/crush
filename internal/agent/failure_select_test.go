@@ -884,3 +884,172 @@ func TestSelectOpenFailures_RenderCap(t *testing.T) {
 	admitted, _ = selectOpenFailures("the tests are failing", failures, "", 0)
 	require.Len(t, admitted, 7)
 }
+
+func mkFailureHeadline(cmd, cwd, headline string, files ...string) cmdlog.Failure {
+	f := mkFailure(cmd, cwd, files...)
+	f.Headline = headline
+	return f
+}
+
+func TestSelectOpenFailures_IdentifierLayer(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		prompt      string
+		failures    []cmdlog.Failure
+		wantAdmit   []string
+		wantReason  map[string]string
+		wantSettled map[string]string
+	}{
+		{
+			// The headline-binding gap: "fix TestAdd" names a
+			// failure only the recorded headline can identify.
+			name:      "identifier mention binds the named row",
+			prompt:    "fix TestAdd",
+			failures:  []cmdlog.Failure{mkFailureHeadline("go test .", ".", "--- FAIL: TestAdd (0.00s)", "main_test.go")},
+			wantAdmit: []string{"go test .@."},
+			wantSettled: map[string]string{
+				"go test .@.": settledIdentifier,
+			},
+		},
+		{
+			name:       "identifier mention inside a negated span vetoes",
+			prompt:     "don't touch TestAdd — fix main.go",
+			failures:   []cmdlog.Failure{mkFailureHeadline("go test .", ".", "--- FAIL: TestAdd (0.00s)", "main_test.go")},
+			wantReason: map[string]string{"go test .@.": failNegatedScope},
+			wantSettled: map[string]string{
+				"go test .@.": settledIdentifier,
+			},
+		},
+		{
+			// Bare identifier navigation is affirmative, same as a
+			// bare path.
+			name:      "lone identifier binds",
+			prompt:    "TestAdd",
+			failures:  []cmdlog.Failure{mkFailureHeadline("go test .", ".", "--- FAIL: TestAdd (0.00s)", "main_test.go")},
+			wantAdmit: []string{"go test .@."},
+		},
+		{
+			// A failure cue in the mention's span affirms polarity
+			// without a directive verb.
+			name:      "object-first identifier claim binds",
+			prompt:    "TestAdd is broken",
+			failures:  []cmdlog.Failure{mkFailureHeadline("go test .", ".", "--- FAIL: TestAdd (0.00s)", "main_test.go")},
+			wantAdmit: []string{"go test .@."},
+		},
+		{
+			// The mention disambiguates what ambiguity couldn't:
+			// the named row binds, the plausible sibling does not.
+			name:   "identifier disambiguates a candidate pair",
+			prompt: "fix TestAdd",
+			failures: []cmdlog.Failure{
+				mkFailureHeadline("go test .", ".", "--- FAIL: TestAdd (0.00s)", "main_test.go"),
+				mkFailureHeadline("go test ./decoy", ".", "--- FAIL: TestDecoy (0.00s)", "decoy/decoy_test.go"),
+			},
+			wantAdmit:  []string{"go test .@."},
+			wantReason: map[string]string{"go test ./decoy@.": failReferentNone},
+		},
+		{
+			// A subpath-bound row admits on its own identifier —
+			// the mention is the scope, so narrow_scope does not
+			// apply to a named row.
+			name:      "identifier binds a narrow-scoped row",
+			prompt:    "fix TestDecoy",
+			failures:  []cmdlog.Failure{mkFailureHeadline("go test ./decoy", ".", "--- FAIL: TestDecoy (0.00s)", "decoy/decoy_test.go")},
+			wantAdmit: []string{"go test ./decoy@."},
+		},
+		{
+			// Non-verification rows still can't bind — a named
+			// identifier doesn't lift the kind gate.
+			name:       "identifier on a non-verification row misses",
+			prompt:     "fix TestAdd",
+			failures:   []cmdlog.Failure{mkFailureHeadline("ls TestAdd", ".", "ls: TestAdd: No such file")},
+			wantReason: map[string]string{"ls TestAdd@.": failKindMismatch},
+		},
+		{
+			// Typed-but-unparseable: the token names the row but
+			// its polarity is unresolvable — fail-closed, the
+			// mention never binds at this layer (L3/L4 territory).
+			name:       "non-English mention stays closed",
+			prompt:     "TestAddを直して",
+			failures:   []cmdlog.Failure{mkFailureHeadline("go test .", ".", "--- FAIL: TestAdd (0.00s)", "main_test.go")},
+			wantReason: map[string]string{"go test .@.": failLangUnsupported},
+		},
+		{
+			// The lexicon coverage hole is measured, not silent —
+			// a prompt outside English reports lang_unsupported
+			// rather than a clean referent_none.
+			name:       "non-English prompt reports lang_unsupported",
+			prompt:     "テストが落ちてる",
+			failures:   []cmdlog.Failure{mkFailure("go test .", ".", "main_test.go")},
+			wantReason: map[string]string{"go test .@.": failLangUnsupported},
+		},
+		{
+			// An unrelated non-English task must not inject either —
+			// fail-closed means closed in both directions.
+			name:       "non-English unrelated prompt also fails closed",
+			prompt:     "READMEを追加して",
+			failures:   []cmdlog.Failure{mkFailure("go test .", ".", "main_test.go")},
+			wantReason: map[string]string{"go test .@.": failLangUnsupported},
+		},
+		{
+			// English prompts unaffected: referent_none stays
+			// referent_none.
+			name:       "english referent_none is not a lang hole",
+			prompt:     "add a README for the project",
+			failures:   []cmdlog.Failure{mkFailure("go test .", ".", "main_test.go")},
+			wantReason: map[string]string{"go test .@.": failReferentNone},
+		},
+		{
+			// English-shaped headline words mint no identifier
+			// mentions — "runtime" is not a mention vocabulary, so
+			// naming it changes nothing.
+			name:       "english words in the headline never mint mentions",
+			prompt:     "document the runtime behavior",
+			failures:   []cmdlog.Failure{mkFailureHeadline("go run .", ".", "panic: runtime error: index out of range")},
+			wantReason: map[string]string{"go run .@.": failReferentNone},
+		},
+		{
+			// A path-vetoed row stays vetoed even when its
+			// identifier is positively mentioned — the negated
+			// scope check runs first.
+			name:   "path veto beats a positive identifier mention",
+			prompt: "fix TestDecoy — don't touch decoy/",
+			failures: []cmdlog.Failure{
+				mkFailureHeadline("go test ./decoy", ".", "--- FAIL: TestDecoy (0.00s)", "decoy/decoy_test.go"),
+			},
+			wantReason: map[string]string{"go test ./decoy@.": failNegatedScope},
+		},
+		{
+			// Soft-boundary inheritance: the mention inherits the
+			// governing span's positive verdict across a comma.
+			name:      "identifier inherits positive across a soft boundary",
+			prompt:    "fix main.go, TestAdd",
+			failures:  []cmdlog.Failure{mkFailureHeadline("go test .", ".", "--- FAIL: TestAdd (0.00s)", "main_test.go")},
+			wantAdmit: []string{"go test .@."},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			admitted, decisions := selectOpenFailures(tc.prompt, tc.failures, "", 0)
+			var gotAdmit []string
+			for _, f := range admitted {
+				gotAdmit = append(gotAdmit, f.Signature)
+			}
+			require.ElementsMatch(t, tc.wantAdmit, gotAdmit)
+			require.Len(t, decisions, len(tc.failures))
+			for _, d := range decisions {
+				want, ok := tc.wantReason[d.Signature]
+				if !ok {
+					want = failAdmit
+				}
+				require.Equal(t, want, d.Reason, "signature %s", d.Signature)
+				require.Equal(t, d.Admit, d.Reason == failAdmit)
+				if want, ok := tc.wantSettled[d.Signature]; ok {
+					require.Equal(t, want, d.SettledBy, "signature %s", d.Signature)
+				}
+			}
+		})
+	}
+}

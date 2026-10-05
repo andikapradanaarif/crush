@@ -184,7 +184,7 @@ blind search.
 |---|---|---|
 | **Mask corpus repair (#204)** | the explicit/ambiguous × memory-type matrix over bb + ft families — 15 trajectory dirs (13 matrix cells + the legacy pair); EVAL_JSON dual scoring; staleness by construction; non-actionable placebo; scored abstention via `max_tail` | done 10-02 |
 | **Deterministic selector (#207)** | `failure_select.go`: explicit scope → span polarity → referent-kind binding → validity (`narrow_scope`/`path_gone`/`stale_suspect`) → admit/abstain; per-candidate verdicts in `tail.decisions`. Accepted tradeoffs: `stale_suspect` is an mtime proxy (formatter/generate/checksum hides the row — deliberate false-negative); English lexicon may only *grant* scope | merged 10-03 in #214 |
-| **Layered language-neutral resolver (#216)** | L0 candidate-set structure → L1 language-neutral ids (paths, `Test\w+`, attachments — closes "headline never binds") → L2 artifacts (promotes *unmentioned* candidates only — never resurrects typed-but-unparseable tokens; #215 closed, subsumed) → L3 small-model resolver (closed output, validated, cached, abstains on failure) → L4 ask when interactive. Methodology gate: offline binding benchmark (per-language veto violations target 0) before any powered run. The English-lexicon coverage hole is silent today — a `lang_unsupported`-class reason should make it measurable before L1 lands (#232) | open — L0–L1 + benchmark first |
+| **Layered language-neutral resolver (#216)** | L0 candidate-set structure → L1 language-neutral ids (paths, `Test\w+`, attachments — closes "headline never binds") → L2 artifacts (promotes *unmentioned* candidates only — never resurrects typed-but-unparseable tokens; #215 closed, subsumed) → L3 small-model resolver (closed output, validated, cached, abstains on failure) → L4 ask when interactive. Methodology gate: offline binding benchmark (per-language veto violations target 0) before any powered run. The English-lexicon coverage hole is silent today — a `lang_unsupported`-class reason should make it measurable before L1 lands (#232) | L1 + benchmark landed (`settled_by`, identifier mentions, `lang_unsupported`, `tail.decisions.settled.*`); L3 gated on bench recall gap |
 | **Reconciliation edge (#218)** | `reconcile` run-edge: open `failure_memory` rows joined on `command_memory.last_session_id` — the session (or its task-tool children) last ran and last failed → bounded retry names the resolving commands; `edge_firings` row is the decision record (`open=N introduced=M`). Accepted bound: last-writer session key — a concurrent session's re-run lifts the row | implemented |
 | **Candidate-pool cap (#233)** | fetch pool (50) and render cap (5) are separate stages: bound rows beyond the cap record `render_capped`, so "admitted but not rendered" is a named exit, not silence | implemented; named exits assertable via `tail.decisions.reasons.*` (#235) |
 | **Injection screening (#219)** | `screenHeadline` at persist: ANSI/format-rune strip + phrase-level override/role/exfiltration scrub; cut spans leave `[filtered]` markers, all-payload lines persist as a placeholder | implemented |
@@ -263,9 +263,10 @@ blind search.
    per open epoch 3/3. Machinery/firing check at n=3/3, no primary
    metric; informational deltas were +14% prompt tokens and higher
    discovery (4.3 vs 2.7 calls/run).
-7. **Layered resolver (#216)** — L0–L1 + offline binding benchmark;
-   L2 artifacts; L3 only if deterministic layers leave measurable
-   recall unclaimed.
+7. **Layered resolver (#216)** — L1 identifier layer + offline
+   binding benchmark landed (`failure_binding.jsonl`,
+   `settled_by`/`lang_unsupported` observability); L3 only if the
+   benchmark shows measurable recall unclaimed.
 8. **#222 capacity → #220 provenance (+`project_key`/`param_version`)
    → #221 → #228 params substrate → #223 ladders.**
 9. **#224 sealed pool + #225 qwen + #226 SWE-bench + #227

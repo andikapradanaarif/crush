@@ -434,12 +434,15 @@ type TurnTail struct {
 // FailureDecision is the eval-side mirror of agent.FailureDecision:
 // one open-failure candidate's task-binding verdict. Reason is the
 // agent-side closed vocabulary — admit, a disqualifying check, or
-// render_capped for a bound row the render budget cut.
+// render_capped for a bound row the render budget cut. SettledBy
+// names the resolver layer that produced Reason ("identifier",
+// "lexicon", "state") — #216's per-layer attribution.
 type FailureDecision struct {
 	Signature string `json:"signature"`
 	Cmd       string `json:"cmd,omitempty"`
 	Admit     bool   `json:"admit"`
 	Reason    string `json:"reason"`
+	SettledBy string `json:"settled_by,omitempty"`
 }
 
 // RequestStats is the run's request-size snapshot: the last rendered

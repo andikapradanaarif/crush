@@ -126,7 +126,7 @@ measured run → preserve artifacts → check.sh → coverage/verdict
 A gate that ran after the measured session would not be a gate. The
 positions are the skeleton; each gate's *script* is a corpus variable.
 
-## Route space 3 — layered resolver (planned, #216)
+## Route space 3 — layered resolver (#216, L1 landed)
 
 The selector's three decisions (relevance / selection / veto) shrink
 into an escalation cascade — each layer may only resolve what earlier
@@ -134,7 +134,9 @@ layers left open:
 
 ```
 L0 candidate-set structure ──→ resolve singleton/top-level, or escalate
-L1 language-neutral ids ─────→ paths, basenames, Test\w+ vs headline
+L1 language-neutral ids ─────→ paths, basenames, identifier-shaped
+                               tokens (interior capital or underscore)
+                               vs headline
 L2 artifact promotion ───────→ working set + cmd recency; promotes
                                unmentioned candidates only — never
                                resurrects a typed-but-unparseable token
@@ -149,6 +151,24 @@ Every layer has the same exit set: resolve / veto / escalate. L3 is
 the sole model guard and obeys rule 3 — closed schema, validated,
 abstain-on-failure. The binding benchmark scores per-layer: admit
 precision/recall, veto violations (target 0), abstain rate.
+
+Landed: each decision carries `settled_by` (`identifier` / `lexicon` /
+`state`) so per-layer volume is countable via
+`tail.decisions.settled.*`; L1 binds headline identifiers whose
+mention span carries recognized signal, vetoes negated mentions,
+and leaves typed-but-unparseable mentions for L3/L4 — never binding
+them. The shape rule mints tokens carrying a lowercase letter plus
+an underscore or an uppercase letter past the first position
+(`TestAdd`, `test_add`, `AssertionError`); single capitalized words
+(`Test`, `Parser`), kebab-case, all-caps, and prose can't mint — on
+either side, so neither prompt nor headline conjures a vocabulary
+from English. The lexicon coverage hole is
+measured: `lang_unsupported` replaces `referent_none` when the prompt
+carries letters outside English, and `mention_unknown` marks a named
+identifier whose polarity parsed neither way — the L3-gate count. The offline benchmark is
+`internal/agent/testdata/failure_binding.jsonl` scored by
+`TestBindingBenchmark` — per-language admit precision/recall, veto
+violations hard-gated at 0.
 
 ## Route space 4 — run edges (control flow)
 

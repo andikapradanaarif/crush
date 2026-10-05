@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/toolclass"
@@ -32,6 +33,12 @@ type FailureDecision struct {
 	// the render budget cut it. Stable strings: evals and dashboards
 	// may group on them.
 	Reason string `json:"reason"`
+	// SettledBy names the resolver layer that produced Reason — a
+	// closed vocabulary ("identifier", "lexicon", "state") so evals
+	// can attribute admits and vetoes to the layer that earned them
+	// (#216). render_capped rows keep the binding layer here; Reason
+	// already records the budget cut.
+	SettledBy string `json:"settled_by,omitempty"`
 }
 
 // Failure-selection reasons — a closed vocabulary so eval predicates
@@ -45,10 +52,34 @@ const (
 	failNarrowScope  = "narrow_scope"  // subpath-bound candidate under an ambiguous prompt
 	failPathGone     = "path_gone"     // every implicated path is absent from the workdir
 	failStaleSuspect = "stale_suspect" // an implicated path changed after last_seen
+	// failLangUnsupported is referent_none when the prompt carries
+	// letters the English lexicon cannot parse — a coverage hole, not
+	// a clean "no referent". Keeping it a distinct reason makes the
+	// hole measurable (#216) instead of invisible inside
+	// referent_none.
+	failLangUnsupported = "lang_unsupported"
+	// failMentionUnknown is referent_none when an identifier was
+	// named but its polarity parsed neither way — typed-but-
+	// unparseable text. The count is the L3 gate's key quantity:
+	// these are the rows a deeper resolver would need to arbitrate.
+	// lang_unsupported keeps precedence when both apply — the
+	// script hole dominates the mention hole.
+	failMentionUnknown = "mention_unknown"
 	// failRenderCapped is not a selection check — the row bound, but
 	// the render cap cut it. Admit stays false: the field means
 	// "rendered into the tail", and this row did not.
 	failRenderCapped = "render_capped"
+)
+
+// Settled-by layers — the closed SettledBy vocabulary. "identifier"
+// is the L1 language-neutral mention layer (#216); "lexicon" is the
+// English scope/referent checks; "state" is the language-neutral
+// validity checks (path_gone, stale_suspect) that no language can
+// excuse.
+const (
+	settledIdentifier = "identifier"
+	settledLexicon    = "lexicon"
+	settledState      = "state"
 )
 
 // verificationKinds are the command kinds a failure referent can
@@ -436,6 +467,178 @@ func lonePathPrompt(prompt string) bool {
 		}
 	}
 	return true
+}
+
+// identRe extracts identifier-shaped tokens — the language-neutral
+// surface vocabulary a headline or a prompt can carry ("TestAdd",
+// "test_add"). Shape alone is not proof: isIdentifier filters out
+// ordinary English words before a token counts as an identifier.
+var identRe = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]{2,}`)
+
+// isIdentifier reports whether a token is code-shaped rather than
+// English-shaped: it needs a lowercase letter plus an underscore or
+// an uppercase letter past the first position ("TestAdd", "test_add",
+// "AssertionError"). All-caps words ("FAIL") and plain lowercase
+// words ("panic", "runtime") fail — a headline's English is not a
+// mention vocabulary, and neither is a prompt's.
+func isIdentifier(tok string) bool {
+	hasLower, hasSignal := false, false
+	for i, r := range tok {
+		switch {
+		case r == '_':
+			hasSignal = true
+		case unicode.IsLower(r):
+			hasLower = true
+		case unicode.IsUpper(r) && i > 0:
+			hasSignal = true
+		}
+	}
+	return hasLower && hasSignal
+}
+
+// headlineIdentifiers is the row's language-neutral mention
+// vocabulary: the identifier-shaped tokens its recorded headline
+// carries. "--- FAIL: TestAdd (0.00s)" yields {TestAdd}; subtest
+// segments yield their own entries, so "TestAdd/sub_1" binds on
+// either name. This is the L1 answer to the headline-binding gap —
+// "fix TestAdd" names the row in any language.
+func headlineIdentifiers(f cmdlog.Failure) map[string]bool {
+	ids := map[string]bool{}
+	for _, tok := range identRe.FindAllString(f.Headline, -1) {
+		if isIdentifier(tok) {
+			ids[tok] = true
+		}
+	}
+	return ids
+}
+
+// identSite is one identifier mention in the prompt — the clause and
+// byte offset where it appeared, so its polarity resolves against its
+// own span.
+type identSite struct {
+	clause string
+	start  int
+}
+
+// promptIdentSites indexes identifier-shaped prompt tokens by token.
+// Extraction is symmetric with headlineIdentifiers: the same shape
+// rule applies, so English words cannot mint a mention of nothing.
+func promptIdentSites(prompt string) map[string][]identSite {
+	sites := map[string][]identSite{}
+	for _, c := range splitClauses(prompt) {
+		for _, loc := range identRe.FindAllStringIndex(c, -1) {
+			if tok := c[loc[0]:loc[1]]; isIdentifier(tok) {
+				sites[tok] = append(sites[tok], identSite{clause: c, start: loc[0]})
+			}
+		}
+	}
+	return sites
+}
+
+// mentionPolarity is a mention's three-valued verdict for one
+// candidate. Veto means a site's span carried a recognized negation
+// ("don't touch TestAdd"); positive means recognized signal or bare
+// navigation ("fix TestAdd", "TestAdd is broken", a lone identifier);
+// unknown means the token was named but its span parsed neither way —
+// typed-but-unparseable text, a non-English polarity. Unknown never
+// binds and never vetoes at this layer: the mention is real, so the
+// row is *mentioned* — L2 cannot resurrect it — and the unresolved
+// polarity is what L3/L4 exist for.
+type mentionPolarity int
+
+const (
+	mentionNone mentionPolarity = iota
+	mentionVeto
+	mentionPositive
+	mentionUnknown
+)
+
+// mentionPolarityAt resolves one mention site's polarity — negation
+// cue in its segment vetoes, recognized signal affirms, and a
+// signal-free segment after only a soft boundary inherits the
+// governing span's verdict (same rule paths follow: "fix main.go,
+// TestAdd" keeps TestAdd positive). A signal-free root or hard-bounded
+// segment is unknown, not vetoed: the absence of a recognized negation
+// is not a veto, and the absence of signal is not assent.
+func mentionPolarityAt(c string, start int, lone bool) mentionPolarity {
+	prefix := c[:start]
+	bEnd, bStart, hard := lastScopeBoundary(prefix)
+	if scopeNegationRe.MatchString(prefix[bEnd:]) {
+		return mentionVeto
+	}
+	if lone || spanSignal(c[bEnd:nextScopeBoundary(c, start)]) {
+		return mentionPositive
+	}
+	if !hard && bStart >= 0 {
+		return mentionPolarityAt(c, bStart, false)
+	}
+	return mentionUnknown
+}
+
+// candidateMention folds every mention site naming one of the
+// candidate's identifiers into a single polarity. A veto anywhere
+// wins over positive mentions ("don't touch TestAdd — fix TestOther"
+// vetoes TestAdd even if a later span is positive); unknown sites
+// only matter when no recognized polarity exists.
+func candidateMention(sites map[string][]identSite, ids map[string]bool, lone bool) mentionPolarity {
+	pol := mentionNone
+	for tok, ss := range sites {
+		if !ids[tok] {
+			continue
+		}
+		for _, s := range ss {
+			switch p := mentionPolarityAt(s.clause, s.start, lone); p {
+			case mentionVeto:
+				return mentionVeto
+			case mentionPositive:
+				pol = mentionPositive
+			case mentionUnknown:
+				if pol == mentionNone {
+					pol = mentionUnknown
+				}
+			}
+		}
+	}
+	return pol
+}
+
+// loneIdentPrompt reports whether the prompt is bare identifier
+// navigation — the lonePathPrompt convention extended to L1: nobody
+// types "TestAdd" alone to veto it, so a lone identifier is an
+// affirmative mention. Negation cues and reset conjunctions still
+// disqualify.
+func loneIdentPrompt(prompt string) bool {
+	rest := scopeSlashPathRe.ReplaceAllString(prompt, " ")
+	rest = scopeFileRe.ReplaceAllString(rest, " ")
+	rest = identRe.ReplaceAllStringFunc(rest, func(tok string) string {
+		if isIdentifier(tok) {
+			return " "
+		}
+		return tok
+	})
+	if scopeNegationRe.MatchString(rest) || scopeResetRe.MatchString(rest) {
+		return false
+	}
+	for _, w := range strings.Fields(rest) {
+		w = strings.Trim(w, " \t.,;:!?()[]{}\"'`—–-")
+		if w != "" && !scopeStopWords[strings.ToLower(w)] {
+			return false
+		}
+	}
+	return true
+}
+
+// nonASCIILetter reports whether the prompt carries letters outside
+// the lexicon's English — CJK, accented Latin, Cyrillic. The lexicon
+// cannot parse them, so a referent_none there is a coverage hole the
+// selector must measure (lang_unsupported), not a clean absence.
+func nonASCIILetter(s string) bool {
+	for _, r := range s {
+		if r > 0x7F && unicode.IsLetter(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // isScopePath gates slash-bearing tokens so idioms ("and/or",
@@ -984,10 +1187,27 @@ var selectorPromptReplacer = strings.NewReplacer(
 //     under it but yields to same-dir positive scope.
 //   - An empty prompt (attachment-only turns) binds nothing —
 //     referent_none, consistent fail-closed.
-//   - Headline text never binds — "fix TestAdd" can't match a row's
-//     recorded headline; only commands, paths, and cwd are binding
-//     signals. cmdNorm truncates at 500 runes and quoted multi-word
-//     paths split at the space — both bounded.
+//   - Headline identifiers bind through the L1 mention layer —
+//     "fix TestAdd" matches a row whose recorded headline names
+//     TestAdd, in any surrounding language, because the token's own
+//     span still has to carry recognized signal (a directive verb, a
+//     cue, or bare navigation). A mention whose span parses neither
+//     way neither binds nor vetoes: it is recorded as a mention and
+//     left for deeper layers (#216's L3/L4). cmdNorm truncates at
+//     500 runes and quoted multi-word paths split at the space —
+//     both bounded.
+//   - Prompts the English lexicon cannot parse report
+//     lang_unsupported instead of referent_none, so the coverage
+//     hole is measured rather than silent.
+//   - A mention whose polarity parses neither way neither binds nor
+//     vetoes. When nothing else decides the row it records
+//     mention_unknown (settled=identifier) — the unresolvable-
+//     mention count the L3 gate watches — rather than a bare
+//     referent_none. lang_unsupported keeps precedence on
+//     non-ASCII prompts: the script hole dominates the mention
+//     hole. On rows other evidence settles (an admit, a path
+//     veto) the causal reason stands and the unknown mention is
+//     not separately marked.
 //
 // renderLimit is the render stage's budget, applied after selection:
 // the freshest renderLimit bound rows render (input order is
@@ -1015,6 +1235,13 @@ func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string
 	if !explicit {
 		kinds = referentKinds(prompt)
 	}
+	// L1: language-neutral identifier mentions — the same scan once,
+	// folded per candidate below. lone is bare-identifier navigation
+	// only: a prompt carrying an identifier site can never satisfy
+	// lonePathPrompt (the token survives its strips), so it adds
+	// nothing here.
+	identSites := promptIdentSites(prompt)
+	lone := loneIdentPrompt(prompt)
 
 	var admitted []cmdlog.Failure
 	decisions := make([]FailureDecision, 0, len(failures))
@@ -1028,14 +1255,41 @@ func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string
 		for i := range f.Files {
 			f.Files[i] = strings.ReplaceAll(f.Files[i], `\`, "/")
 		}
-		d := FailureDecision{Signature: f.Signature, Cmd: f.Cmd}
+		d := FailureDecision{Signature: f.Signature, Cmd: f.Cmd, SettledBy: settledLexicon}
 		reason := failAdmit
 		dirs := failureDirs(f, workDir)
 		kind := toolclass.CommandKind(f.Cmd)
+		mention := candidateMention(identSites, headlineIdentifiers(f), lone)
 
 		switch {
 		case negatedByAny(dirs, f.Files, neg, pos):
 			reason = failNegatedScope
+		case mention == mentionVeto:
+			// A named identifier inside a negated span vetoes its
+			// own row — path-veto parity at the mention layer.
+			reason = failNegatedScope
+			d.SettledBy = settledIdentifier
+		case mention == mentionPositive && !slices.Contains(verificationKinds, kind):
+			// A named identifier binds a row the way explicit scope
+			// does — and still requires a verdict-flavored row: a
+			// failed ls whose headline happens to carry the token
+			// must not inject.
+			reason = failKindMismatch
+			d.SettledBy = settledIdentifier
+		case mention == mentionPositive && allPathsGone(f, workDir):
+			reason = failPathGone
+			d.SettledBy = settledState
+		case mention == mentionPositive && anyPathNewer(f, workDir):
+			reason = failStaleSuspect
+			d.SettledBy = settledState
+		case mention == mentionPositive:
+			// A positively-mentioned identifier binds regardless of
+			// dir scope or top-levelness — the mention IS the
+			// scope. Polarity was resolved language-neutrally (cue,
+			// verb, or lone), so non-English positive prompts only
+			// bind here when the English signal is genuinely
+			// present.
+			d.SettledBy = settledIdentifier
 		case explicit && !overlapsAny(dirs, pos):
 			reason = failOutOfScope
 		case explicit && !slices.Contains(verificationKinds, kind):
@@ -1044,7 +1298,22 @@ func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string
 			// unrelated "fix main.go".
 			reason = failKindMismatch
 		case !explicit && kinds == nil:
-			reason = failReferentNone
+			switch {
+			case nonASCIILetter(prompt):
+				// The lexicon could not parse the prompt — a
+				// measured coverage hole, not a clean referent
+				// absence.
+				reason = failLangUnsupported
+			case mention == mentionUnknown:
+				// An identifier was named but its polarity parsed
+				// neither way. Nothing else bound, so the record
+				// marks the unresolvable mention rather than a
+				// bare referent absence.
+				reason = failMentionUnknown
+				d.SettledBy = settledIdentifier
+			default:
+				reason = failReferentNone
+			}
 		case !explicit && !slices.Contains(kinds, kind):
 			reason = failKindMismatch
 		case !explicit && kind != "run" && !failureTopLevel(f, workDir):
@@ -1055,8 +1324,10 @@ func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string
 			reason = failNarrowScope
 		case allPathsGone(f, workDir):
 			reason = failPathGone
+			d.SettledBy = settledState
 		case anyPathNewer(f, workDir):
 			reason = failStaleSuspect
+			d.SettledBy = settledState
 		}
 		d.Admit = reason == failAdmit
 		if d.Admit && len(admitted) >= renderLimit {

@@ -269,12 +269,21 @@ var tailDecisionReasons = []string{
 	"negated_scope",
 	"out_of_scope",
 	"referent_none",
+	"lang_unsupported",
+	"mention_unknown",
 	"kind_mismatch",
 	"narrow_scope",
 	"path_gone",
 	"stale_suspect",
 	"render_capped",
 }
+
+// tailDecisionLayers mirrors the closed SettledBy vocabulary in
+// agent/failure_select.go — which resolver layer produced each
+// decision. Per-layer counts are how the #216 benchmark's language
+// coverage is read: identifier-layer admits mean the prompt bound
+// without the English lexicon.
+var tailDecisionLayers = []string{"identifier", "lexicon", "state"}
 
 // tailDecisionsByReason counts decision rows by their closed-vocabulary
 // Reason — the split candidates−admitted can't express: render_capped
@@ -284,6 +293,20 @@ func tailDecisionsByReason(r *RunRecord, reason string) float64 {
 	for _, t := range r.Tail {
 		for _, d := range t.Decisions {
 			if d.Reason == reason {
+				n++
+			}
+		}
+	}
+	return float64(n)
+}
+
+// tailDecisionsByLayer counts decision rows by SettledBy — per-layer
+// attribution for the layered resolver (#216).
+func tailDecisionsByLayer(r *RunRecord, layer string) float64 {
+	n := 0
+	for _, t := range r.Tail {
+		for _, d := range t.Decisions {
+			if d.SettledBy == layer {
 				n++
 			}
 		}
@@ -349,6 +372,14 @@ func init() {
 	for _, reason := range tailDecisionReasons {
 		armOnlyCoverageFields["tail.decisions.reasons."+reason] = func(r *RunRecord) float64 {
 			return tailDecisionsByReason(r, reason)
+		}
+	}
+	// Per-layer decision counts: tail.decisions.settled.<layer> —
+	// the layer that produced each decision, so a lang-split eval
+	// can show identifier-layer binding carrying non-English turns.
+	for _, layer := range tailDecisionLayers {
+		armOnlyCoverageFields["tail.decisions.settled."+layer] = func(r *RunRecord) float64 {
+			return tailDecisionsByLayer(r, layer)
 		}
 	}
 	armFields = maps.Clone(coverageFields)
