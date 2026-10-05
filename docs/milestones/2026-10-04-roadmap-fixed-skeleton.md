@@ -259,25 +259,22 @@ blind search.
    `eval/experiments/failure-memory-mask-reject-powered.json`
    (provenance: post-hoc, no run-time snapshot).
    **Reject rerun (10-06, invocation `20261005T141152Z-7491`)** —
-   first powered read with L1 live: gate **FAIL**. Stalefile
-   seedability disconfirmed — 0/22 treatment runs seeded; the powered
-   seed agent opens the implicated file, refreshing `last_seen` past
-   the touch mtime (`row_older_than_touch: false`). `touch` removed
-   the incentive to look, not the behavior. All three stale-file-seed
-   cells reject at `seed_check`; the other cells starve on the
-   coverage gate — runs pass every check but count inconclusive on
-   `coverage_key: max_tail.sections.open_failures`, plausibly because
-   an all-reject treatment run emits no `<open_failures>` section at
-   all (the coverage key may be mis-scoped for a reject corpus — a
-   correct all-reject run would starve itself). Eligible-subset
-   guardrails also breach: treatment pass 47/54 vs control 99/99,
-   prompt tokens +69%. Next: (1) verify the coverage-key hypothesis —
-   if confirmed, scope the key on candidates surviving selection;
-   (2) fixture-level seeding (write the stale row directly, agent
-   can't invalidate) — #244 `files_viewed` then becomes optional
-   detection rather than a blocker; (3) rerun to certify L1. Do not
-   rerun before both fixes — a third starved run only burns records.
-   Full writeup:
+   first powered read with L1 live: gate **FAIL**, 116/171 treatment
+   runs inconclusive. Root cause (artifact-verified): the #218
+   reconciliation edge is `failure_memory`-gated, so it fires only in
+   treatment — it nudges seed agents to keep working the seeded
+   failure (`row_older_than_touch: false` / `open_stale_rows: 0` →
+   `seed_check` rejects), and its retry prompt becomes `call.Prompt`
+   on retry Runs, so L1 identifier-binds the literal cmd+headline
+   tokens in it (85/96 admits `settled_by: identifier`; `go test
+   ./decoy` admitted 8× under a zero-identifier user prompt).
+   `selectOpenFailures` unwraps `interruptedRequestRe` but not the
+   reconcile retry prefix. Harness bugs filed as #248 (seeds run under
+   arm config — need a fixed neutral seed config) and #249 (tail
+   selects per `Run` incl. retries; select once per user turn from the
+   user prompt, per-Run audit). Next: land those, then an ablation
+   rerun (#218 off / L1 on, then #218 on + fixes) to certify L1. Full
+   writeup:
    `docs/milestones/2026-10-06-exp-failure-memory-mask-reject-rerun.md`.
 6. **Reconciliation edge (#218)** — implemented; eval read recorded
    (10-05, invocation `20261005T115552Z`,
@@ -291,9 +288,10 @@ blind search.
    binding benchmark landed (`failure_binding.jsonl`,
    `settled_by`/`lang_unsupported` observability); L3 only if the
    benchmark shows measurable recall unclaimed. First powered
-   exercise (10-06 reject rerun) is unreadable — the corpus starved
-   before L1's reject-side effect could be measured; rerun needed
-   after the stale-file seed fix (step 5).
+   exercise (10-06 reject rerun) is unreadable — the #218 edge's
+   retry prompt fed L1 identifier-bearing text, so L1 bound decoy
+   rows (it behaved as designed on the input). Certify L1's reject
+   side after #248/#249 land, via the ablation rerun (step 5).
 8. **#222 capacity → #220 provenance (+`project_key`/`param_version`)
    → #221 → #228 params substrate → #223 ladders.**
 9. **#224 sealed pool + #225 qwen + #226 SWE-bench + #227
