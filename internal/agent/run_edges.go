@@ -1695,9 +1695,13 @@ func (a *sessionAgent) scanReconcileEdge(ctx context.Context, call SessionAgentC
 		// Stamping waits for the prompt to land — commit runs only
 		// after the retry enqueues, so a firing that defers to an
 		// escalation winner or dies to a mid-boundary cancel leaves
-		// the rows unseen and re-fires at the next one.
+		// the rows unseen and re-fires at the next one. And only the
+		// rendered prefix marks: the prompt names at most
+		// maxReconcileListed commands, so rows past the cut were
+		// never named, stay unseen, and get their own firing at a
+		// later boundary.
 		t.commit = func() {
-			for _, f := range unseen {
+			for _, f := range unseen[:min(maxReconcileListed, len(unseen))] {
 				a.reconcileSeen.Store(reconcileSeenKey(call.SessionID, f), true)
 			}
 		}
@@ -1710,8 +1714,28 @@ func reconcileSeenKey(sessionID string, f cmdlog.Failure) string {
 	return sessionID + "\x00" + f.Signature + "\x00" + strconv.FormatInt(f.FirstSeen.UnixMilli(), 10)
 }
 
+// forgetReconcileSession drops the session's suppression entries —
+// the agent is shared across sessions, so deleted sessions' seen
+// marks would otherwise accumulate for the process's lifetime.
+// Called from the coordinator's session-deletion watcher.
+func (a *sessionAgent) forgetReconcileSession(sessionID string) {
+	prefix := sessionID + "\x00"
+	a.reconcileSeen.Range(func(key, _ any) bool {
+		if s, ok := key.(string); ok && strings.HasPrefix(s, prefix) {
+			a.reconcileSeen.Delete(key)
+		}
+		return true
+	})
+}
+
 // reconcileRetryPrefix heads the repair prompt's reconcile section.
 const reconcileRetryPrefix = "Observed failures still open"
+
+// maxReconcileListed caps the rows the retry prompt names — and the
+// rows commit marks seen. Rows past the cut render only as "… and N
+// more" and stay unflagged, so they re-fire at a later boundary
+// rather than being suppressed for reminders never delivered.
+const maxReconcileListed = 10
 
 // reconcileRetrySection renders the rows the finished run observed and
 // left open. A row resolves only when its recorded command re-runs
@@ -1723,10 +1747,9 @@ func reconcileRetrySection(t *edgeTrigger) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s — a run is not done while command(s) it ran still have open failure rows:\n", reconcileRetryPrefix)
-	const maxListedFailures = 10
 	for i, f := range t.openFailures {
-		if i >= maxListedFailures {
-			fmt.Fprintf(&b, "- … and %d more\n", len(t.openFailures)-maxListedFailures)
+		if i >= maxReconcileListed {
+			fmt.Fprintf(&b, "- … and %d more\n", len(t.openFailures)-maxReconcileListed)
 			break
 		}
 		where := ""

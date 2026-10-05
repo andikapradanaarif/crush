@@ -556,13 +556,15 @@ this-run rows are unresolved at turn end.
 
 - **scan:** the run **ended in a clean stop** (a cancelled or
   errored boundary has no completion claim to contradict) and the
-  agent is not a sub-agent — child sessions are bounded work, and
-  the parent's own boundary reconciles what the parent observed.
-  The evidence query joins open `failure_memory` rows against
-  `command_memory`'s last-writer stamp: a row enters the set iff
-  it is unresolved **and** this session was the last to run its
-  recorded command **and** that run's verdict was a real failure
-  (`last_exit > 0` — an interrupted run is not an observation).
+  agent is not a sub-agent — child sessions are bounded work whose
+  rows reconcile at the parent's boundary, since the delegation
+  produced them. The evidence query joins open `failure_memory`
+  rows against `command_memory`'s last-writer stamp: a row enters
+  the set iff it is unresolved **and** this session — or one of
+  its direct task-tool child sessions, `parent_session_id` one
+  level deep — was the last to run its recorded command **and**
+  that run's verdict was a real failure (`last_exit > 0` — an
+  interrupted run is not an observation).
   The last-writer key is what makes "a row opened concurrently
   that this run never invoked" unflaggable: another session's
   write took the stamp. Its cost is the symmetric bound — a
@@ -584,10 +586,16 @@ this-run rows are unresolved at turn end.
   firing that defers to an escalation winner or dies to a
   mid-boundary cancel marks nothing and re-fires at the next
   boundary — the reminder lands once per session per open epoch
-  *delivered*, and an explanation or tolerated red stands — while
-  a resolve-and-reopen or a new session flags fresh. A boundary
-  where every qualifying row was seen records `suppressed` rather
-  than silent-clean.
+  *enqueued* (a cancel in the narrow enqueue→dequeue window still
+  drops the retry after marking — an accepted residual race, the
+  same one `fired` telemetry carries), and an explanation or
+  tolerated red stands — while a resolve-and-reopen or a new
+  session flags fresh. Only the rendered prefix marks: the prompt
+  names at most ten rows, so rows past the cut stay unseen and
+  re-fire at a later boundary rather than suppressing for a
+  reminder whose commands were never shown. A boundary where
+  every qualifying row was seen records `suppressed` rather than
+  silent-clean.
 - **resolve:** none — the evidence is already the durable rows.
 - **prompt:** the still-open rows rendered as `cmd` in `cwd` —
   headline — with the resolution contract stated ("a failure row

@@ -16,7 +16,7 @@ if [ ! -f double_test.go ]; then
 	echo "EVAL_JSON {\"test_file\":\"missing\"}"
 	exit 1
 fi
-if ! grep -qE "Double\(3\).*7" double_test.go; then
+if ! grep -qE 'Double\(3\)' double_test.go || ! grep -qE '(^|[^0-9])7([^0-9]|$)' double_test.go; then
 	echo "EVAL_JSON {\"test_file\":\"present\",\"spec_assertion\":\"absent\"}"
 	exit 1
 fi

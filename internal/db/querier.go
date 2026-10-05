@@ -100,16 +100,20 @@ type Querier interface {
 	// rowid settles ties for rows written in the same millisecond.
 	ListRecentCommands(ctx context.Context, limit int64) ([]CommandMemory, error)
 	ListSessionCounters(ctx context.Context) ([]ListSessionCountersRow, error)
-	// Open failure rows whose commands the given session last ran and
-	// last failed: the reconcile edge's "observed and left open" set.
-	// command_memory's last_session_id is last-writer, so a row another
-	// session re-ran more recently drops out of this session's set even
-	// while it stays open; a concurrently opened row the run never
-	// invoked can never flag here.
+	// Open failure rows whose commands the given session (or one of its
+	// task-tool child sessions) last ran and last failed: the reconcile
+	// edge's "observed and left open" set. A sub-agent's bash records
+	// under the child session ID; without the children subquery those
+	// rows would reconcile to no one -- the child never scans and the
+	// parent's delegation produced the mess. One level only, matching
+	// the task tool's nesting depth. command_memory's last_session_id
+	// is last-writer, so a row another session re-ran more recently
+	// drops out of this session's set even while it stays open; a
+	// concurrently opened row the run never invoked can never flag here.
 	// Same bound as the tail's fetch pool -- a session can observe more
 	// distinct commands than this only pathologically, and the retry
 	// prompt renders at most ten.
-	ListSessionOpenFailures(ctx context.Context, lastSessionID string) ([]FailureMemory, error)
+	ListSessionOpenFailures(ctx context.Context, sessionID string) ([]FailureMemory, error)
 	ListSessionReadFiles(ctx context.Context, sessionID string) ([]ReadFile, error)
 	ListSessions(ctx context.Context) ([]Session, error)
 	// Backs prompt history, which steps back one entry at a time.

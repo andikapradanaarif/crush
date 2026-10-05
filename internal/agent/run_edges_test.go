@@ -1298,6 +1298,37 @@ func TestReconcileEdge(t *testing.T) {
 		require.Empty(t, firingOutcome(t, conn, sessionID, "reconcile"))
 	})
 
+	t.Run("a task sub-agent's failure flags the parent session", func(t *testing.T) {
+		t.Parallel()
+		a, conn, svc, sessionID, dir := reconcileEdgeAgent(t)
+		// The task tool's child session ran and failed the command —
+		// the child never scans (isSubAgent), so the parent's join
+		// must accept child-session stamps or the delegated mess
+		// reconciles to no one.
+		child, err := a.sessions.CreateTaskSession(t.Context(), "tc-child", sessionID, "child")
+		require.NoError(t, err)
+		recordCmd(t, svc, child.ID, dir, "go test ./x", 1)
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: cleanResult(), startedAt: time.Now().Add(-time.Hour)})
+		require.True(t, queued, "the parent reconciles failures its delegation produced")
+		require.Equal(t, "fired", firingOutcome(t, conn, sessionID, "reconcile"))
+	})
+
+	t.Run("another session's child does not flag this session", func(t *testing.T) {
+		t.Parallel()
+		a, conn, svc, sessionID, dir := reconcileEdgeAgent(t)
+		other, err := a.sessions.Create(t.Context(), "other")
+		require.NoError(t, err)
+		child, err := a.sessions.CreateTaskSession(t.Context(), "tc-other", other.ID, "child")
+		require.NoError(t, err)
+		recordCmd(t, svc, child.ID, dir, "go test ./x", 1)
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: cleanResult(), startedAt: time.Now().Add(-time.Hour)})
+		require.False(t, queued,
+			"the children subquery scopes to this session's own delegation tree")
+		require.Empty(t, firingOutcome(t, conn, sessionID, "reconcile"))
+	})
+
 	t.Run("memory flag off records gated", func(t *testing.T) {
 		t.Parallel()
 		a, conn, svc, sessionID, dir := reconcileEdgeAgent(t)

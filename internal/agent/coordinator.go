@@ -472,6 +472,16 @@ func (c *coordinator) watchSessionDeletions() {
 		if c.memoryTelemetry != nil {
 			c.memoryTelemetry.forget(ev.Payload.ID)
 		}
+		if c.edgeStats != nil {
+			c.edgeStats.Del(ev.Payload.ID)
+		}
+		// reconcileSeen lives on the agent, not the coordinator —
+		// sweep every built agent's suppression marks.
+		for _, agent := range c.agents {
+			if sa, ok := agent.(*sessionAgent); ok {
+				sa.forgetReconcileSession(ev.Payload.ID)
+			}
+		}
 		// The DB cascade removes the rows; ForgetSession drops the
 		// service's in-memory compaction-stall counter.
 		if c.notebook != nil {
