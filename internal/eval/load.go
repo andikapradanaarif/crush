@@ -631,6 +631,9 @@ func armStarvationRules(field string) []starvationRule {
 		// open_failures need failure_memory; the other envelopes need
 		// their own flags. Unknown tail fields get no rule — a future
 		// tail.* key must opt into a gate, not inherit the wrong one.
+		if strings.HasPrefix(field, "tail.decisions.reasons.") {
+			return []starvationRule{boolOn("failure_memory")}
+		}
 		switch field {
 		case "tail.sections.turn_context":
 			return []starvationRule{modeIs("turn_context", "session")}

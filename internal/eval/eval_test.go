@@ -517,10 +517,11 @@ func TestArmCoverage_TailDecisions(t *testing.T) {
 		{Turn: 0, Decisions: []FailureDecision{
 			{Signature: "go test .@.", Cmd: "go test .", Admit: true, Reason: "admit"},
 			{Signature: "go test ./decoy@.", Cmd: "go test ./decoy", Admit: false, Reason: "narrow_scope"},
+			{Signature: "go test ./extra@.", Cmd: "go test ./extra", Admit: false, Reason: "render_capped"},
 			{Signature: "ls vendor@.", Cmd: "ls vendor", Admit: false, Reason: "kind_mismatch"},
 		}},
 	}}
-	met, err := ArmCoverageMet(Coverage{"min_tail.decisions.candidates": 3}, rec)
+	met, err := ArmCoverageMet(Coverage{"min_tail.decisions.candidates": 4}, rec)
 	require.NoError(t, err)
 	require.True(t, met)
 	met, err = ArmCoverageMet(Coverage{"min_tail.decisions.admitted": 1}, rec)
@@ -529,6 +530,24 @@ func TestArmCoverage_TailDecisions(t *testing.T) {
 	met, err = ArmCoverageMet(Coverage{"max_tail.decisions.admitted": 0}, rec)
 	require.NoError(t, err)
 	require.False(t, met)
+
+	// Reason-keyed counts split what candidates−admitted conflates:
+	// the capped row was bound but budget-cut, not vetoed.
+	met, err = ArmCoverageMet(Coverage{"min_tail.decisions.reasons.render_capped": 1}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+	met, err = ArmCoverageMet(Coverage{"min_tail.decisions.reasons.kind_mismatch": 1,
+		"min_tail.decisions.reasons.narrow_scope": 1}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+	met, err = ArmCoverageMet(Coverage{"min_tail.decisions.reasons.stale_suspect": 1}, rec)
+	require.NoError(t, err)
+	require.False(t, met)
+
+	// A reason outside the closed vocabulary fails parse rather than
+	// starving silently.
+	_, err = ArmCoverageMet(Coverage{"min_tail.decisions.reasons.bogus": 1}, rec)
+	require.Error(t, err)
 
 	// An audited-empty decision list satisfies max_ abstention —
 	// "evaluated, none bound" is evidence, not silence.
@@ -735,6 +754,19 @@ func TestValidateExperiment_ArmCoverageStarvation(t *testing.T) {
 		Coverage: Coverage{"min_tail.sections.open_failures": 1},
 	}
 	require.Error(t, ValidateExperiment(exp))
+
+	// Reason-keyed decision counts ride the same gate — their rows
+	// only exist when the selector ran.
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"failure_memory": false}},
+		Coverage: Coverage{"min_tail.decisions.reasons.render_capped": 1},
+	}
+	require.Error(t, ValidateExperiment(exp))
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"failure_memory": true}},
+		Coverage: Coverage{"min_tail.decisions.reasons.render_capped": 1},
+	}
+	require.NoError(t, ValidateExperiment(exp))
 
 	// request.notebook_bytes is zero by construction when the
 	// notebook is off — min_ starves on a notebook-disabled arm.

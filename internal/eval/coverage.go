@@ -259,6 +259,38 @@ func tailDecisions(r *RunRecord, which string) float64 {
 	return float64(n)
 }
 
+// tailDecisionReasons mirrors the closed Reason vocabulary in
+// agent/failure_select.go — same discipline as the eval.FailureDecision
+// wire mirror: a new reason registers here or its coverage field is
+// unreachable. Ordering keeps the selection-check sequence, then the
+// render-budget exit.
+var tailDecisionReasons = []string{
+	"admit",
+	"negated_scope",
+	"out_of_scope",
+	"referent_none",
+	"kind_mismatch",
+	"narrow_scope",
+	"path_gone",
+	"stale_suspect",
+	"render_capped",
+}
+
+// tailDecisionsByReason counts decision rows by their closed-vocabulary
+// Reason — the split candidates−admitted can't express: render_capped
+// rows bound but lost to the render budget, not to a selection veto.
+func tailDecisionsByReason(r *RunRecord, reason string) float64 {
+	n := 0
+	for _, t := range r.Tail {
+		for _, d := range t.Decisions {
+			if d.Reason == reason {
+				n++
+			}
+		}
+	}
+	return float64(n)
+}
+
 // warmStart dereferences the optional seeding ledger. coverageMet
 // short-circuits nil WarmStart before reaching field funcs — a cold
 // run must not satisfy a "did seeding happen" predicate by reading
@@ -306,6 +338,17 @@ func init() {
 			armOnlyCoverageFields["edge_firings."+edge+"."+outcome] = func(r *RunRecord) float64 {
 				return float64(r.EdgeFirings[edge][outcome])
 			}
+		}
+	}
+	// Per-reason decision counts: tail.decisions.reasons.<reason>
+	// for the mirrored selector vocabulary — candidates−admitted
+	// conflates render-capped rows with selection vetoes, so a cell
+	// that must show "the cap engaged" (a distractor-ladder premise)
+	// reads render_capped directly. Arm-scoped with the rest of the
+	// decision family: rows only exist under failure_memory.
+	for _, reason := range tailDecisionReasons {
+		armOnlyCoverageFields["tail.decisions.reasons."+reason] = func(r *RunRecord) float64 {
+			return tailDecisionsByReason(r, reason)
 		}
 	}
 	armFields = maps.Clone(coverageFields)
