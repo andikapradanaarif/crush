@@ -572,10 +572,16 @@ this-run rows are unresolved at turn end.
   re-run is noted in the ledger but leaves `last_session_id` with
   the last verdict's writer, so a no-verdict run can neither
   disown the observer nor claim a failure it never saw exit.
-  `detail` records `open=N introduced=M` where introduced counts
-  rows whose `first_seen` lands inside this run's window — the
+  `detail` records `open=N introduced=M suppressed=K` where
+  introduced counts rows whose open epoch (`first_seen`, which
+  resets on resurrection) began inside this run's window — the
   firing record distinguishes "the run left its own mess" from
-  "the run left a pre-existing failure open."
+  "the run left a pre-existing failure open." Rows already flagged
+  this session are suppressed at scan: the reminder lands once per
+  session per open epoch — an explanation or tolerated red stands —
+  while a resolve-and-reopen or a new session flags fresh. A
+  boundary where every qualifying row was seen records `suppressed`
+  rather than silent-clean.
 - **resolve:** none — the evidence is already the durable rows.
 - **prompt:** the still-open rows rendered as `cmd` in `cwd` —
   headline — with the resolution contract stated ("a failure row
@@ -597,17 +603,15 @@ this-run rows are unresolved at turn end.
   `runEdgeSet` so its join observes memory state *after*
   verification's resolve: a pending check that passes writes
   through cmdlog and resolves the row before the edge reads it.
-- **Cost, stated plainly:** a row lives until its recorded command
-  passes, so every clean-stopping run in the session re-fires the
-  edge while the row persists — up to `maxRepairAttempts` retry
-  turns per run, for as long as the failure stays unresolvable
-  (environment breakage, a failure kept on purpose). Per-run
-  renewal is the current contract; a suppress-once marker per row
-  is the listed follow-up if the retry tax proves noisy.
+- **Cost, stated plainly:** once per session per open epoch — a row
+  flagged at one boundary suppresses at later ones, so an
+  intentionally-open failure costs one retry turn per session, not
+  one per run. The flag persists across sessions by design: the
+  ledger row outlives the attention suppression.
 - **Evaluable:** `edge_firings.reconcile.*` coverage predicates —
-  fired/exhausted/cleared/gated counts are the "run ends with
-  observed-failure still open" assertion the repaired mask corpus
-  composes against.
+  fired/suppressed/exhausted/cleared/gated counts are the "run ends
+  with observed-failure still open" assertion the repaired mask
+  corpus composes against.
 - **Boundary, stated plainly:** "resolved by a different command"
   is indistinguishable from "left open" — a fix verified by `go
   build` while `go test` holds the row still flags, because the

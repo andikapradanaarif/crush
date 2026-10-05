@@ -335,6 +335,12 @@ type sessionAgent struct {
 	// (toolCallID → file basename) so a call that completes after
 	// the cursor swept past its index still counts once.
 	nbPendingReads *csync.Map[string, map[string]string]
+	// reconcileSeen is the reconcile edge's once-per-session
+	// suppression: (session, failure signature, open epoch) → the row
+	// already flagged at a boundary. A flagged row's explanation or
+	// tolerance stands for the session; a resolve-and-reopen (new
+	// first_seen) flags fresh, and a new session flags fresh.
+	reconcileSeen sync.Map
 	// cmdlog is the project command/failure memory. May be nil.
 	cmdlog cmdlog.Service
 	// failureMemory injects the <open_failures> tail — cmdlog's

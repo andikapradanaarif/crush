@@ -534,7 +534,9 @@ var priorTurnsRecallLive = starvationRule{
 //     needs a firing trigger, so flag-on for stall/burn-watch.
 //   - gated/suppressed/headless-degraded: stall/burn-watch hints —
 //     verification/todos never set hints. Reconcile sets gated under
-//     failure_memory=off; cleared is its sessionState carrier ride.
+//     failure_memory=off, suppressed when every qualifying row was
+//     already flagged this session; cleared is its sessionState
+//     carrier ride.
 //   - cleared: a !fire trigger with no hint (verification resolving
 //     clean), or a sessionState carrier ride (todos, reconcile) —
 //     stall and burn-watch are step-bound and always fire-or-hint,
@@ -544,7 +546,7 @@ var edgeOutcomeTable = map[string]map[string]bool{
 	"todos":        {"fired": true, "cleared": true, "cancelled": true, "deferred": true, "exhausted": true},
 	"stall":        {"fired": true, "gated": true, "headless-degraded": true, "cancelled": true, "deferred": true, "exhausted": true},
 	"burn-watch":   {"fired": true, "gated": true, "suppressed": true, "headless-degraded": true, "cancelled": true, "deferred": true, "exhausted": true},
-	"reconcile":    {"fired": true, "gated": true, "cleared": true, "cancelled": true, "deferred": true, "exhausted": true},
+	"reconcile":    {"fired": true, "gated": true, "suppressed": true, "cleared": true, "cancelled": true, "deferred": true, "exhausted": true},
 }
 
 // armStarvationRules maps a coverage field to the option requirements

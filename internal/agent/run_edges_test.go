@@ -1244,7 +1244,7 @@ func TestReconcileEdge(t *testing.T) {
 				row = r
 			}
 		}
-		require.Equal(t, "open=1 introduced=1", row.detail)
+		require.Equal(t, "open=1 introduced=1 suppressed=0", row.detail)
 	})
 
 	t.Run("pre-existing row is not counted as introduced", func(t *testing.T) {
@@ -1260,7 +1260,7 @@ func TestReconcileEdge(t *testing.T) {
 				row = r
 			}
 		}
-		require.Equal(t, "open=1 introduced=0", row.detail)
+		require.Equal(t, "open=1 introduced=0 suppressed=0", row.detail)
 	})
 
 	t.Run("exact-command rerun resolves the row", func(t *testing.T) {
@@ -1379,6 +1379,59 @@ func TestReconcileEdge(t *testing.T) {
 			"a held-out session must behave as if reconcile did not exist")
 		require.Empty(t, firingOutcome(t, conn, sessionID, "reconcile"),
 			"no row — a gated row would land in the flag-on arm and starve its predicate")
+	})
+
+	t.Run("a flagged row suppresses at the next boundary", func(t *testing.T) {
+		t.Parallel()
+		a, conn, svc, sessionID, dir := reconcileEdgeAgent(t)
+		recordCmd(t, svc, sessionID, dir, "go test ./x", 1)
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: cleanResult(), startedAt: time.Now().Add(-time.Hour), turnSeq: 1})
+		require.True(t, queued)
+		// Same row, same session, next boundary: the reminder landed
+		// once — an explanation or tolerance stands, so the edge
+		// records suppressed instead of re-firing every clean stop.
+		queued = runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: cleanResult(), startedAt: time.Now().Add(-time.Hour), turnSeq: 2})
+		require.False(t, queued)
+		require.Equal(t, "suppressed", firingOutcome(t, conn, sessionID, "reconcile"))
+	})
+
+	t.Run("a resurrected row re-flags in the same session", func(t *testing.T) {
+		t.Parallel()
+		a, conn, svc, sessionID, dir := reconcileEdgeAgent(t)
+		recordCmd(t, svc, sessionID, dir, "go test ./x", 1)
+		runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: cleanResult(), startedAt: time.Now().Add(-time.Hour), turnSeq: 1})
+		// Resolve, then re-break: the reopened row is a new open
+		// epoch — a new first_seen — so suppression keyed on the old
+		// epoch does not swallow the regression. The sleep keeps the
+		// resurrected first_seen distinct in millisecond precision.
+		recordCmd(t, svc, sessionID, dir, "go test ./x", 0)
+		time.Sleep(2 * time.Millisecond)
+		recordCmd(t, svc, sessionID, dir, "go test ./x", 1)
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: cleanResult(), startedAt: time.Now().Add(-time.Hour), turnSeq: 2})
+		require.True(t, queued, "resurrection opens a new epoch — the suppress key no longer matches")
+		require.Equal(t, "fired", firingOutcome(t, conn, sessionID, "reconcile"))
+	})
+
+	t.Run("a gated boundary does not consume suppression", func(t *testing.T) {
+		t.Parallel()
+		a, conn, svc, sessionID, dir := reconcileEdgeAgent(t)
+		a.failureMemory = false
+		recordCmd(t, svc, sessionID, dir, "go test ./x", 1)
+		runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: cleanResult(), startedAt: time.Now().Add(-time.Hour), turnSeq: 1})
+		require.Equal(t, "gated", firingOutcome(t, conn, sessionID, "reconcile"))
+		// Flag flips on mid-session: the row must still fire — a
+		// gated boundary measured the would-have-fired, it did not
+		// land the reminder.
+		a.failureMemory = true
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: cleanResult(), startedAt: time.Now().Add(-time.Hour), turnSeq: 2})
+		require.True(t, queued)
+		require.Equal(t, "fired", firingOutcome(t, conn, sessionID, "reconcile"))
 	})
 }
 

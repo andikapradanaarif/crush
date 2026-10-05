@@ -184,7 +184,7 @@ INSERT INTO command_memory (
     -- so a denied or killed re-run cannot disown the observing
     -- session (or claim a failing verdict it never saw).
     last_exit = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_exit ELSE command_memory.last_exit END,
-    last_at = excluded.last_at,
+    last_at = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_at ELSE command_memory.last_at END,
     ok_count = command_memory.ok_count + excluded.ok_count,
     fail_count = command_memory.fail_count + excluded.fail_count,
     last_session_id = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_session_id ELSE command_memory.last_session_id END
@@ -238,6 +238,10 @@ INSERT INTO failure_memory (
 ) ON CONFLICT(signature) DO UPDATE SET
     headline = excluded.headline,
     files = excluded.files,
+    -- first_seen stamps the open epoch, not the original birth: a
+    -- resurrected row (was resolved) counts as newly introduced, a
+    -- continuously-open re-fail keeps its first observation.
+    first_seen = CASE WHEN failure_memory.resolved_in != '' THEN excluded.first_seen ELSE failure_memory.first_seen END,
     last_seen = excluded.last_seen,
     resolved_in = ''
 `

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1623,27 +1624,66 @@ func (a *sessionAgent) scanReconcileEdge(ctx context.Context, call SessionAgentC
 	if len(open) == 0 {
 		return nil
 	}
-	introduced := 0
+	// Once-per-session suppression, keyed on the row's open epoch
+	// (signature + first_seen): a row flagged at one boundary landed
+	// its reminder — the model's explanation or tolerance stands for
+	// the session and re-firing every clean stop would tax an
+	// intentionally-open failure forever. A resolve-and-reopen has a
+	// fresh first_seen and flags again; so does a new session. The
+	// ledger row is untouched — suppression is attention, not
+	// resolution.
+	var unseen []cmdlog.Failure
+	suppressed := 0
 	for _, f := range open {
-		if !in.startedAt.IsZero() && !f.FirstSeen.Before(in.startedAt) {
+		if _, ok := a.reconcileSeen.Load(reconcileSeenKey(call.SessionID, f)); ok {
+			suppressed++
+			continue
+		}
+		unseen = append(unseen, f)
+	}
+	introduced := 0
+	for _, f := range unseen {
+		// Both sides truncate to milliseconds — a row created in
+		// the run's first partial millisecond still reads as the
+		// run's own, and a resurrected row counts as introduced
+		// (its open epoch started now, which IS this run's mess).
+		if !in.startedAt.IsZero() && f.FirstSeen.UnixMilli() >= in.startedAt.UnixMilli() {
 			introduced++
 		}
 	}
 	t := &edgeTrigger{
-		openFailures: open,
-		fire:         true,
+		openFailures: unseen,
 		// Open-failure state re-scans from the ledger, so a deferred
 		// reconcile trigger records cleared when the escalation
 		// turn's re-runs resolved the rows.
 		sessionState: true,
-		detail:       fmt.Sprintf("open=%d introduced=%d", len(open), introduced),
+		detail:       fmt.Sprintf("open=%d introduced=%d suppressed=%d", len(open), introduced, suppressed),
 	}
-	if !a.failureMemory {
+	switch {
+	case len(unseen) == 0:
+		// Every qualifying row was flagged at an earlier boundary —
+		// suppressed, not silently clean, so the ledger shows the
+		// predicate still held.
+		t.hint = edgeOutcomeSuppressed
+	case !a.failureMemory:
 		// Memory reads are off: the flag gates acting, not
 		// measuring — record the would-have-fired verdict.
 		t.hint = edgeOutcomeGated
+	default:
+		t.fire = true
+		// Mark at scan time — a firing trigger that later defers or
+		// exhausts still recorded its row, which is the
+		// acknowledgment the suppression exists to bound.
+		for _, f := range unseen {
+			a.reconcileSeen.Store(reconcileSeenKey(call.SessionID, f), true)
+		}
 	}
 	return t
+}
+
+// reconcileSeenKey scopes suppression to the row's open epoch.
+func reconcileSeenKey(sessionID string, f cmdlog.Failure) string {
+	return sessionID + "\x00" + f.Signature + "\x00" + strconv.FormatInt(f.FirstSeen.UnixMilli(), 10)
 }
 
 // reconcileRetryPrefix heads the repair prompt's reconcile section.
@@ -1676,7 +1716,7 @@ func reconcileRetrySection(t *edgeTrigger) string {
 		headline := tailSafeText(cmdlog.ScreenHeadline(f.Headline))
 		fmt.Fprintf(&b, "- `%s`%s — %s\n", tailSafeText(f.Cmd), where, headline)
 	}
-	b.WriteString("A failure row resolves only when its recorded command is re-run and passes. Re-run each listed command to verify the failure is gone; if it still fails, fix the cause or explain why it stays open. Do not report the task finished while these rows remain open.\n")
+	b.WriteString("A failure row resolves only when its recorded command is re-run and passes. Re-run each listed command to verify the failure is gone; if it still fails, fix the cause or explain why it stays open. Do not report the task finished while these rows remain open. Flagged rows are not re-litigated this session — an explanation stands — but a row stays in memory until its command passes and flags again in a new session.\n")
 	return b.String()
 }
 
