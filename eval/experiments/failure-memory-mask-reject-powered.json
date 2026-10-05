@@ -4,6 +4,7 @@
 	"temperature": 0,
 	"corpus": [
 		"mask-ft-explicit-decoy",
+		"mask-ft-explicit-stalefile",
 		"mask-ft-ambig-stale",
 		"mask-ft-ambig-placebo",
 		"mask-bb-explicit-decoy",
