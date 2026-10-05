@@ -2,6 +2,7 @@ package agent
 
 import (
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -99,6 +100,11 @@ type SessionTelemetry struct {
 	// digest, verbatim text). Nil when no tail rendered: the audit
 	// distinguishes "section absent" from "telemetry absent".
 	Tail *TailAudit `json:"tail,omitempty"`
+	// TailRuns is the per-Run audit history — every tail this
+	// process rendered in order, attributed by run_stamp and
+	// repair_attempts, so a user turn's retry-chain renders stay
+	// individually inspectable instead of last-write-wins (#249).
+	TailRuns []TailAudit `json:"tail_runs,omitempty"`
 	// EdgeFirings splits run-boundary edge firing counts by edge and
 	// outcome — the in-memory mirror of the edge_firings rows this
 	// process wrote. Cumulative for the process; the eval harness
@@ -191,6 +197,11 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 	if sa.tailAudit != nil {
 		if ta, ok := sa.tailAudit.Get(sessionID); ok {
 			t.Tail = &ta
+		}
+	}
+	if sa.tailRuns != nil {
+		if runs, ok := sa.tailRuns.Get(sessionID); ok && len(runs) > 0 {
+			t.TailRuns = slices.Clone(runs)
 		}
 	}
 	if sa.usageLedger != nil {

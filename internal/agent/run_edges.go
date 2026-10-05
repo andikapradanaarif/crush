@@ -1714,11 +1714,13 @@ func reconcileSeenKey(sessionID string, f cmdlog.Failure) string {
 	return sessionID + "\x00" + f.Signature + "\x00" + strconv.FormatInt(f.FirstSeen.UnixMilli(), 10)
 }
 
-// forgetReconcileSession drops the session's suppression entries —
-// the agent is shared across sessions, so deleted sessions' seen
-// marks would otherwise accumulate for the process's lifetime.
-// Called from the coordinator's session-deletion watcher.
-func (a *sessionAgent) forgetReconcileSession(sessionID string) {
+// forgetSessionState drops the session's agent-local caches —
+// reconcile suppression entries, the user-turn selection, and the
+// per-Run tail audit history. The agent is shared across sessions,
+// so deleted sessions' entries would otherwise accumulate for the
+// process's lifetime. Called from the coordinator's session-deletion
+// watcher.
+func (a *sessionAgent) forgetSessionState(sessionID string) {
 	prefix := sessionID + "\x00"
 	a.reconcileSeen.Range(func(key, _ any) bool {
 		if s, ok := key.(string); ok && strings.HasPrefix(s, prefix) {
@@ -1726,6 +1728,12 @@ func (a *sessionAgent) forgetReconcileSession(sessionID string) {
 		}
 		return true
 	})
+	if a.turnSels != nil {
+		a.turnSels.Del(sessionID)
+	}
+	if a.tailRuns != nil {
+		a.tailRuns.Del(sessionID)
+	}
 }
 
 // reconcileRetryPrefix heads the repair prompt's reconcile section.
