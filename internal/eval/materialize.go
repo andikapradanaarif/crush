@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -280,7 +281,7 @@ func writeRunConfig(workdir string, exp *Experiment, armOptions map[string]any, 
 			// A corrupt fixture config must not be silently clobbered.
 			return fmt.Errorf("existing .crush.json does not parse: %w", err)
 		}
-		if err := rejectFixtureProviderKeys(existing, ".crush.json"); err != nil {
+		if err := rejectDivergentProviderKeys(existing, exp, ".crush.json"); err != nil {
 			return err
 		}
 		if opts, ok := existing["options"].(map[string]any); ok {
@@ -355,6 +356,37 @@ func rejectFixtureProviderKeys(existing map[string]any, name string) error {
 			return fmt.Errorf("existing %s sets %q — providers and env belong on the experiment, not the fixture", name, k)
 		}
 	}
+	return rejectFixtureProviderVisibility(existing, name)
+}
+
+// rejectDivergentProviderKeys applies the same invariant to
+// .crush.json with one carve-out: the arm pass re-reads the seed
+// pass's own write, so an existing providers block identical to the
+// experiment's declaration is harness content, not fixture content.
+// env and disable_default_providers are never harness-written — any
+// presence stays a rejection.
+func rejectDivergentProviderKeys(existing map[string]any, exp *Experiment, name string) error {
+	if v, ok := existing["providers"]; ok {
+		// Byte-compare via marshal: both sides decode to map[string]any
+		// and Marshal sorts keys, so semantically equal blocks compare
+		// equal. A fixture could only produce an identical block by
+		// copying the experiment's own declaration — which resolves
+		// identically anyway.
+		want, _ := json.Marshal(exp.Providers)
+		got, _ := json.Marshal(v)
+		if !bytes.Equal(got, want) {
+			return fmt.Errorf("existing %s sets %q — providers and env belong on the experiment, not the fixture", name, "providers")
+		}
+	}
+	if _, ok := existing["env"]; ok {
+		return fmt.Errorf("existing %s sets %q — providers and env belong on the experiment, not the fixture", name, "env")
+	}
+	return rejectFixtureProviderVisibility(existing, name)
+}
+
+// rejectFixtureProviderVisibility is the options half of the
+// provider-ownership check, shared by both file variants.
+func rejectFixtureProviderVisibility(existing map[string]any, name string) error {
 	if opts, ok := existing["options"].(map[string]any); ok {
 		if _, ok := opts["disable_default_providers"]; ok {
 			return fmt.Errorf("existing %s sets \"disable_default_providers\" — provider visibility belongs to the experiment", name)
