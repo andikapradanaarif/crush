@@ -323,7 +323,10 @@ func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgen
 				fmt.Fprintf(&b, " (in %s)", tailSafeText(f.CWD))
 			}
 			if f.Headline != "" {
-				fmt.Fprintf(&b, ": %s", tailSafeText(truncateTailText(f.Headline, turnContextFailureHeadlineRunes)))
+				// Screened at render too — rows persisted before the
+				// write-side screen existed are still covered.
+				fmt.Fprintf(&b, ": %s", tailSafeText(truncateTailText(
+					cmdlog.ScreenHeadline(f.Headline), turnContextFailureHeadlineRunes)))
 			}
 			if n := min(len(f.Files), turnContextFailureFileHints); n > 0 {
 				hints := make([]string, n)

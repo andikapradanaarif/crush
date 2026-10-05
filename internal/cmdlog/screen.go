@@ -43,11 +43,15 @@ var injectionPatterns = []*regexp.Regexp{
 	// all of the above".
 	regexp.MustCompile(`(?i)\b(?:ignore|disregard|forget|discard)\s+(?:everything|anything)\b[^.!?;]{0,30}\b(?:before|above|prior|previous|else)\b`),
 	regexp.MustCompile(`(?i)\b(?:ignore|disregard|forget|discard)\s+all\s+of\s+(?:the\s+)?above\b`),
-	// Channel/role markers and model special tokens.
-	regexp.MustCompile(`<\|[^|]{0,40}\|>|\[/?(?:INST|SYS|SYSTEM)\]|<<\s*/?SYS\s*>>|###\s*(?:instruction|system|override)`),
+	// Channel/role markers and model special tokens — case-insensitive
+	// like the rest; a lowercase [sys] spoofs the same channel.
+	regexp.MustCompile(`(?i)<\|[^|]{0,40}\|>|\[/?(?:INST|SYS|SYSTEM)\]|<<\s*/?SYS\s*>>|###\s*(?:instruction|system|override)`),
 	regexp.MustCompile(`(?i)\b(?:new|updated|real|actual|true|revised)\s+(?:system\s+)?(?:instructions?|directives?|task|objective|mission|purpose|orders?)\s*:`),
-	// Identity override: "you are now", "act as", "pretend to be".
-	regexp.MustCompile(`(?i)\b(?:you\s+are\s+now|you're\s+now|act\s+as|pretend\s+(?:to\s+be|you\s+are|you're)|imagine\s+you\s+are|from\s+now\s+on\s+you\s+(?:are|will|must)|behave\s+as)\b`),
+	// Identity override: "you are now", "pretend to be" — plus
+	// "act as"/"behave as" only when a persona noun follows, so
+	// ordinary prose ("env vars act as overrides") survives.
+	regexp.MustCompile(`(?i)\b(?:you\s+are\s+now|you're\s+now|pretend\s+(?:to\s+be|you\s+are|you're)|imagine\s+you\s+are|from\s+now\s+on\s+you\s+(?:are|will|must))\b`),
+	regexp.MustCompile(`(?i)\b(?:act|behave)\s+as\s+(?:an?\s+|the\s+)?(?:\w+\s+){0,2}(?:root|admin|administrator|superuser|assistant|chatbot|agent|ai)\b`),
 	// Exfiltration and response suppression: "reveal your system
 	// prompt", "print your api keys", "do not respond".
 	regexp.MustCompile(`(?i)\b(?:reveal|show|print|output|repeat|leak|expose|display|dump|echo|tell\s+me)\s+(?:me\s+|us\s+|the\s+user\s+)?(?:your|the\s+full|the\s+entire|all\s+your|any)\s+(?:system\s+prompt|instructions?|rules?|secrets?|api[\s_-]?keys?|tokens?|passwords?|credentials?)\b`),
@@ -61,14 +65,17 @@ var injectionPatterns = []*regexp.Regexp{
 // the boundary, not at render time.
 var ansiEscRe = regexp.MustCompile("\x1b(?:\\[[0-9;:?]*[ -/]*[@-~]|\\][^\x07\x1b]*(?:\x07|\x1b\\\\)|\\([0-9A-Za-z]|[@-Z\\\\-~])")
 
-// screenHeadline removes what a persisted failure line must not
+// ScreenHeadline removes what a persisted failure line must not
 // carry into later prompts: terminal escape sequences, non-printing
 // and format runes (zero-width, bidi overrides, private use), and
 // instruction-shaped spans. Each scrubbed span leaves [filtered] so
 // the stored row advertises that it was cut; a line reduced to
-// markers alone returns the placeholder — the failure record is
-// worth keeping, its text is not.
-func screenHeadline(headline string) string {
+// markers and punctuation alone returns the placeholder — the
+// failure record is worth keeping, its text is not. It runs at
+// persist and again at render: rows written before the screen
+// existed, or by a future unscreened path, still get screened on
+// the way into the prompt.
+func ScreenHeadline(headline string) string {
 	s := ansiEscRe.ReplaceAllString(headline, "")
 	s = strings.Map(func(r rune) rune {
 		switch {
@@ -84,7 +91,10 @@ func screenHeadline(headline string) string {
 		s = re.ReplaceAllString(s, filteredSpan)
 	}
 	s = strings.Join(strings.Fields(s), " ")
-	if s != "" && strings.ReplaceAll(s, filteredSpan, "") == "" {
+	// Markers plus punctuation is still all-payload — "[filtered]."
+	// carries no benign text.
+	if s != "" && !strings.ContainsFunc(strings.ReplaceAll(s, filteredSpan, ""),
+		func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }) {
 		return filteredHeadlinePlaceholder
 	}
 	return s

@@ -400,7 +400,7 @@ func failureHeadline(stderr, stdout string, runErr error) string {
 	if headline == "" && runErr != nil {
 		headline = firstContentLine(runErr.Error())
 	}
-	return truncateRunes(redact.Secrets(screenHeadline(headline)), maxHeadlineRunes)
+	return truncateRunes(redact.Secrets(ScreenHeadline(headline)), maxHeadlineRunes)
 }
 
 // failureSignature is the dedupe key for a failure: normalized command
