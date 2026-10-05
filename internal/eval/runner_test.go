@@ -598,6 +598,23 @@ func TestWriteSeedConfig_ThenArmConfig(t *testing.T) {
 	require.Contains(t, string(raw), `"flag_a": true`)
 	require.Contains(t, string(raw), `"disable_metrics": true`)
 
+	// Experiment-declared providers ride the generated config: the
+	// arm pass must tolerate the seed pass's own write. A fixture
+	// .crush.json with DIVERGENT providers still rejects.
+	exp.Providers = map[string]any{"tp": map[string]any{"type": "openai-compat", "api_key": "$KEY"}}
+	wd3 := t.TempDir()
+	require.NoError(t, WriteSeedConfig(wd3, exp, manifest))
+	require.NoError(t, WriteArmConfig(wd3, exp, arm, manifest))
+	raw, err = os.ReadFile(filepath.Join(wd3, ".crush.json"))
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"openai-compat"`)
+
+	wd4 := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wd4, ".crush.json"),
+		[]byte(`{"providers":{"other":{"type":"anthropic"}}}`), 0o644))
+	require.Error(t, WriteSeedConfig(wd4, exp, manifest))
+	require.Error(t, WriteArmConfig(wd4, exp, arm, manifest))
+
 	// A fixture .crushrc still collides — only the harness's own
 	// identical pin is tolerated.
 	wd2 := t.TempDir()
