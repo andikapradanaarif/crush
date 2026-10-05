@@ -5,7 +5,7 @@
 	"start_state": {"kind": "fixture", "fixture_dir": "../mask-fix-failing-test/fixture"},
 	"prior_sessions": [{"turns": [
 		"run `go test -count=1 .` as a single bare command — no pipes or wrappers — and report which test fails — do not modify any files",
-		"create a file named `notes.txt` whose only content is the single line `touched` — make no other changes — do not run any tests, builds, or other commands"
+		"run `touch main_test.go` as a single bare command — do not run any tests, builds, or other commands"
 	]}],
 	"task": {
 		"turns": ["fix the failing test in main_test.go"]
