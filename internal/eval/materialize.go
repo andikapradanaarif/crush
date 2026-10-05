@@ -203,10 +203,24 @@ func ApplyPatch(ctx context.Context, workdir, patchPath string) error {
 // with the arm options winning; crush.json is lower precedence than
 // .crush.json outright, so it never shadows.
 func WriteArmConfig(workdir string, exp *Experiment, arm Arm, manifest *FlagsManifest) error {
-	for _, name := range []string{".crushrc", "crushrc"} {
-		if fileExists(filepath.Join(workdir, name)) {
-			return fmt.Errorf("workdir already carries %s — a shell config shadows the .crush.json arm; fixtures must not ship crush shell config", name)
-		}
+	return writeRunConfig(workdir, exp, arm.Config.Options, manifest)
+}
+
+// WriteSeedConfig drops the fixed seed-time config into the workdir:
+// the shared .crushrc model pin plus the .crush.json harness
+// invariants, with NO arm options. prior_sessions must seed the same
+// starting state in every arm — an arm flag active during seeding
+// (e.g. failure_memory's reconcile edge nudging the seed agent) makes
+// arms differ before measurement begins. The memory write path is
+// unconditional, so seeds still produce cmdlog/failure rows. The
+// measured run's WriteArmConfig merges arm options over this file.
+func WriteSeedConfig(workdir string, exp *Experiment, manifest *FlagsManifest) error {
+	return writeRunConfig(workdir, exp, nil, manifest)
+}
+
+func writeRunConfig(workdir string, exp *Experiment, armOptions map[string]any, manifest *FlagsManifest) error {
+	if fileExists(filepath.Join(workdir, "crushrc")) {
+		return fmt.Errorf("workdir already carries crushrc — a shell config shadows the .crush.json arm; fixtures must not ship crush shell config")
 	}
 
 	// .crushrc: model pin identical for every arm — options-only
@@ -219,7 +233,15 @@ func WriteArmConfig(workdir string, exp *Experiment, arm Arm, manifest *FlagsMan
 		}
 		rc.WriteString("\n")
 	}
-	if err := os.WriteFile(filepath.Join(workdir, ".crushrc"), []byte(rc.String()), 0o644); err != nil {
+	// A .crushrc is still a shell-config shadow — but the seed/arm
+	// writes are two passes of this same function, so an existing file
+	// carrying the identical pin is our own earlier write, not a
+	// fixture's. Any other content is the fixture trap.
+	rcPath := filepath.Join(workdir, ".crushrc")
+	if prev, err := os.ReadFile(rcPath); err == nil && string(prev) != rc.String() {
+		return fmt.Errorf("workdir already carries .crushrc — a shell config shadows the .crush.json arm; fixtures must not ship crush shell config")
+	}
+	if err := os.WriteFile(rcPath, []byte(rc.String()), 0o644); err != nil {
 		return fmt.Errorf("write .crushrc: %w", err)
 	}
 
@@ -232,7 +254,7 @@ func WriteArmConfig(workdir string, exp *Experiment, arm Arm, manifest *FlagsMan
 		// it: check.sh sees the tree exactly as the agent left it.
 		"data_directory": DataDirFor(workdir),
 	}
-	for k, v := range arm.Config.Options {
+	for k, v := range armOptions {
 		// Harness invariants an arm must not override — data dir
 		// relocation breaks telemetry/session-DB paths and litters
 		// the tree checks observe; metrics/auto-update re-enable

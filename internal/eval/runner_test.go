@@ -573,6 +573,39 @@ func TestWriteArmConfig_MergesJSONConfig(t *testing.T) {
 	require.NoError(t, WriteArmConfig(wd2, exp, arm, &FlagsManifest{Defaults: map[string]any{}}))
 }
 
+// Seeds run under WriteSeedConfig — the shared model pin plus harness
+// invariants and NO arm options — so both arms start the measured
+// session from the same state. WriteArmConfig then merges the arm
+// delta over the seed file: the second pass must tolerate its own
+// earlier .crushrc write.
+func TestWriteSeedConfig_ThenArmConfig(t *testing.T) {
+	t.Parallel()
+	wd := t.TempDir()
+	exp := &Experiment{Model: "hyper/x", Temperature: ptr(0.0)}
+	manifest := &FlagsManifest{Defaults: map[string]any{}}
+	arm := Arm{Config: ArmConfig{Options: map[string]any{"flag_a": true}}}
+
+	require.NoError(t, WriteSeedConfig(wd, exp, manifest))
+	raw, err := os.ReadFile(filepath.Join(wd, ".crush.json"))
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"disable_metrics": true`)
+	require.Contains(t, string(raw), `"data_directory"`)
+	require.NotContains(t, string(raw), "flag_a")
+
+	require.NoError(t, WriteArmConfig(wd, exp, arm, manifest))
+	raw, err = os.ReadFile(filepath.Join(wd, ".crush.json"))
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"flag_a": true`)
+	require.Contains(t, string(raw), `"disable_metrics": true`)
+
+	// A fixture .crushrc still collides — only the harness's own
+	// identical pin is tolerated.
+	wd2 := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wd2, ".crushrc"), []byte("model large other/y\n"), 0o644))
+	require.Error(t, WriteSeedConfig(wd2, exp, manifest))
+	require.Error(t, WriteArmConfig(wd2, exp, arm, manifest))
+}
+
 func TestBands_PinSpellingVsResolved(t *testing.T) {
 	t.Parallel()
 	b := &Bands{Entries: map[string]BandEntry{}}
@@ -1493,6 +1526,59 @@ func (s *seedGateRecorder) Run(ctx context.Context, workdir string, turns []stri
 	res := s.seedRecorder.Run(ctx, workdir, turns, b)
 	_ = os.WriteFile(filepath.Join(workdir, fmt.Sprintf("call-%d.marker", len(s.calls))), []byte("x"), 0o644)
 	return res
+}
+
+// configSnapshotter records the workdir's .crush.json at each Run —
+// the proof that prior_sessions execute under the neutral seed
+// config and the measured session under the arm's.
+type configSnapshotter struct {
+	seedRecorder
+	configs []string
+}
+
+func (c *configSnapshotter) Run(ctx context.Context, workdir string, turns []string, b Budget) RunResult {
+	raw, _ := os.ReadFile(filepath.Join(workdir, ".crush.json"))
+	c.configs = append(c.configs, string(raw))
+	return c.seedRecorder.Run(ctx, workdir, turns, b)
+}
+
+// Arm options must not reach the seeds: an option active during
+// seeding (the reconcile edge, the tail) makes the arms' starting
+// states differ before measurement. Only the measured call sees them.
+func TestExecuteRun_SeedsRunNeutralConfig(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "warm-t", map[string]any{
+		"prior_sessions": []any{
+			map[string]any{"turns": []string{"seed one"}},
+			map[string]any{"turns": []string{"seed two"}},
+		},
+		"task": map[string]any{"turns": []string{"fix it"}},
+	})
+	tr, err := LoadTrajectory(trajDir)
+	require.NoError(t, err)
+	drv := &configSnapshotter{}
+	r := &Runner{
+		EvalDir:    root,
+		Driver:     drv,
+		WorkParent: t.TempDir(),
+		RNG:        rand.New(rand.NewPCG(1, 2)),
+	}
+	exp := &Experiment{Name: "exp1", Model: "mock/m", Temperature: ptr(0.0)}
+	manifest := &FlagsManifest{Defaults: map[string]any{}}
+	arm := Arm{Config: ArmConfig{Options: map[string]any{"failure_memory": true}}}
+
+	rec, err := r.ExecuteRun(context.Background(), exp, tr, trajDir, ArmTreatment, arm, manifest, 1, "inv")
+	require.NoError(t, err)
+	require.Equal(t, OutcomePass, rec.Outcome)
+	require.Len(t, drv.configs, 3, "two seeds plus the measured run")
+	for i, cfg := range drv.configs[:2] {
+		require.NotContains(t, cfg, "failure_memory",
+			"seed %d ran under the arm config — arms' seed states diverge", i+1)
+		require.Contains(t, cfg, "disable_metrics")
+	}
+	require.Contains(t, drv.configs[2], `"failure_memory": true`,
+		"the measured session must carry the arm delta")
 }
 
 // requireSeedCheckTooling skips when the shell toolchain seed-check

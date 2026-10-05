@@ -267,7 +267,12 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	defer os.RemoveAll(workdir)
 	defer os.RemoveAll(DataDirFor(workdir))
 
-	if err := WriteArmConfig(workdir, exp, arm, manifest); err != nil {
+	// Seeds run under the fixed neutral config, not the arm's — arm
+	// options active during seeding (a reconcile edge nudging the
+	// seed agent, a tail injecting memory) make the arms' starting
+	// states differ before measurement begins. WriteArmConfig lands
+	// the arm delta only on the measured session below.
+	if err := WriteSeedConfig(workdir, exp, manifest); err != nil {
 		rec.Outcome = OutcomeError
 		rec.CheckDetail = map[string]any{"harness": err.Error()}
 		return rec, nil
@@ -365,6 +370,12 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 				return rec, nil
 			}
 		}
+	}
+	// The measured session is where the arm's flag delta belongs.
+	if err := WriteArmConfig(workdir, exp, arm, manifest); err != nil {
+		rec.Outcome = OutcomeError
+		rec.CheckDetail = map[string]any{"harness": err.Error()}
+		return rec, nil
 	}
 	res := drv.Run(ctx, workdir, traj.Task.Turns, traj.Budget)
 	rec.DurationS = r.now().Sub(rec.StartedAt).Seconds()
