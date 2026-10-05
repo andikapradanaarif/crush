@@ -38,12 +38,15 @@ const (
 	// a hint list, not working state, so it runs tighter than the
 	// working-set cap.
 	turnContextFileHeatLimit = 5
-	// turnContextOpenFailuresLimit bounds the failure-memory tail —
-	// recent-first, so the cap keeps the freshest unresolved failures.
-	// It is also the selector's candidate cap: a bound row ranked
-	// beyond it is invisible to both, and tail.decisions.candidates
-	// reads as a lower bound on true open-failure count.
-	turnContextOpenFailuresLimit = 5
+	// turnContextOpenFailuresFetchLimit bounds the candidate pool the
+	// selector sees — bounded for fetch cost, wide enough that a
+	// relevant row past the render cap still earns a decision record
+	// instead of vanishing before selection.
+	turnContextOpenFailuresFetchLimit = 50
+	// turnContextOpenFailuresRenderLimit bounds the failure-memory
+	// tail itself — recent-first, so the cap keeps the freshest bound
+	// rows; rows it cuts record render_capped, not silence.
+	turnContextOpenFailuresRenderLimit = 5
 	// turnContextFailureFileHints bounds file hints rendered per
 	// failure row.
 	turnContextFailureFileHints = 3
@@ -151,14 +154,15 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	}
 	if a.failureMemory && a.cmdlog != nil && !a.isSubAgent {
 		var f []cmdlog.Failure
-		f, fetchErr = a.cmdlog.ListOpenFailures(ctx, turnContextOpenFailuresLimit)
+		f, fetchErr = a.cmdlog.ListOpenFailures(ctx, turnContextOpenFailuresFetchLimit)
 		if fetchErr == nil {
 			var workDir string
 			if a.configStore != nil {
 				workDir = a.configStore.WorkingDir()
 			}
 			var selected []cmdlog.Failure
-			selected, failureDecisions = selectOpenFailures(call.Prompt, f, workDir)
+			selected, failureDecisions = selectOpenFailures(call.Prompt, f, workDir,
+				turnContextOpenFailuresRenderLimit)
 			failureCandidates = f
 			if !holdout {
 				openFailures = selected
