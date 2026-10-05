@@ -1250,6 +1250,17 @@ func TestReconcileEdge(t *testing.T) {
 		require.Equal(t, "open=1 introduced=1 suppressed=0", row.detail)
 	})
 
+	t.Run("failure_memory_edges off gates the edge", func(t *testing.T) {
+		t.Parallel()
+		a, conn, svc, sessionID, dir := reconcileEdgeAgent(t)
+		a.failureMemoryEdgesOff = true
+		recordCmd(t, svc, sessionID, dir, "go test ./x", 1)
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: cleanResult(), startedAt: time.Now().Add(-time.Hour)})
+		require.False(t, queued)
+		require.Equal(t, "gated", firingOutcome(t, conn, sessionID, "reconcile"))
+	})
+
 	t.Run("pre-existing row is not counted as introduced", func(t *testing.T) {
 		t.Parallel()
 		a, conn, svc, sessionID, dir := reconcileEdgeAgent(t)

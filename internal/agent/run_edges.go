@@ -1686,9 +1686,10 @@ func (a *sessionAgent) scanReconcileEdge(ctx context.Context, call SessionAgentC
 		// honest. Moving the mark into a flag-off path would let
 		// suppressed leak into the wrong arm.
 		t.hint = edgeOutcomeSuppressed
-	case !a.failureMemory:
-		// Memory reads are off: the flag gates acting, not
-		// measuring — record the would-have-fired verdict.
+	case !a.failureMemory || a.failureMemoryEdgesOff:
+		// Memory reads are off (or the edge is ablated off): the flag
+		// gates acting, not measuring — record the would-have-fired
+		// verdict.
 		t.hint = edgeOutcomeGated
 	default:
 		t.fire = true
