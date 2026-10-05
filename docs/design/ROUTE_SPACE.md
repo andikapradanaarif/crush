@@ -164,7 +164,8 @@ an underscore or an uppercase letter past the first position
 either side, so neither prompt nor headline conjures a vocabulary
 from English. The lexicon coverage hole is
 measured: `lang_unsupported` replaces `referent_none` when the prompt
-carries letters outside English. The offline benchmark is
+carries letters outside English, and `mention_unknown` marks a named
+identifier whose polarity parsed neither way — the L3-gate count. The offline benchmark is
 `internal/agent/testdata/failure_binding.jsonl` scored by
 `TestBindingBenchmark` — per-language admit precision/recall, veto
 violations hard-gated at 0.

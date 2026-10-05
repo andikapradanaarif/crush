@@ -58,6 +58,13 @@ const (
 	// hole measurable (#216) instead of invisible inside
 	// referent_none.
 	failLangUnsupported = "lang_unsupported"
+	// failMentionUnknown is referent_none when an identifier was
+	// named but its polarity parsed neither way — typed-but-
+	// unparseable text. The count is the L3 gate's key quantity:
+	// these are the rows a deeper resolver would need to arbitrate.
+	// lang_unsupported keeps precedence when both apply — the
+	// script hole dominates the mention hole.
+	failMentionUnknown = "mention_unknown"
 	// failRenderCapped is not a selection check — the row bound, but
 	// the render cap cut it. Admit stays false: the field means
 	// "rendered into the tail", and this row did not.
@@ -1193,11 +1200,14 @@ var selectorPromptReplacer = strings.NewReplacer(
 //     lang_unsupported instead of referent_none, so the coverage
 //     hole is measured rather than silent.
 //   - A mention whose polarity parses neither way neither binds nor
-//     vetoes — and today's record can't see it: the decision lands as
-//     referent_none/lang_unsupported like a prompt with no mention.
-//     If the L3 gate needs that count, a mention_unknown marker
-//     lands with it; the non-English case is already visible via
-//     lang_unsupported.
+//     vetoes. When nothing else decides the row it records
+//     mention_unknown (settled=identifier) — the unresolvable-
+//     mention count the L3 gate watches — rather than a bare
+//     referent_none. lang_unsupported keeps precedence on
+//     non-ASCII prompts: the script hole dominates the mention
+//     hole. On rows other evidence settles (an admit, a path
+//     veto) the causal reason stands and the unknown mention is
+//     not separately marked.
 //
 // renderLimit is the render stage's budget, applied after selection:
 // the freshest renderLimit bound rows render (input order is
@@ -1288,12 +1298,20 @@ func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string
 			// unrelated "fix main.go".
 			reason = failKindMismatch
 		case !explicit && kinds == nil:
-			if nonASCIILetter(prompt) {
+			switch {
+			case nonASCIILetter(prompt):
 				// The lexicon could not parse the prompt — a
 				// measured coverage hole, not a clean referent
 				// absence.
 				reason = failLangUnsupported
-			} else {
+			case mention == mentionUnknown:
+				// An identifier was named but its polarity parsed
+				// neither way. Nothing else bound, so the record
+				// marks the unresolvable mention rather than a
+				// bare referent absence.
+				reason = failMentionUnknown
+				d.SettledBy = settledIdentifier
+			default:
 				reason = failReferentNone
 			}
 		case !explicit && !slices.Contains(kinds, kind):

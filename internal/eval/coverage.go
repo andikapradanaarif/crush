@@ -270,6 +270,7 @@ var tailDecisionReasons = []string{
 	"out_of_scope",
 	"referent_none",
 	"lang_unsupported",
+	"mention_unknown",
 	"kind_mismatch",
 	"narrow_scope",
 	"path_gone",
