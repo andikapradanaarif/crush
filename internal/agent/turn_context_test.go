@@ -121,7 +121,12 @@ func (failingCmdlog) RecordRun(context.Context, cmdlog.Run) {}
 func (failingCmdlog) ListCommands(context.Context, int) ([]cmdlog.Command, error) {
 	return nil, nil
 }
+
 func (failingCmdlog) ListOpenFailures(context.Context, int) ([]cmdlog.Failure, error) {
+	return nil, errors.New("cmdlog unavailable")
+}
+
+func (failingCmdlog) ListSessionOpenFailures(context.Context, string) ([]cmdlog.Failure, error) {
 	return nil, errors.New("cmdlog unavailable")
 }
 

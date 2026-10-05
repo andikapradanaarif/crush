@@ -122,6 +122,31 @@ func TestRecordRun_FailureLifecycle(t *testing.T) {
 	require.Empty(t, open)
 }
 
+func TestRecordRun_ResurrectionResetsFirstSeen(t *testing.T) {
+	env := setupTest(t)
+	touch(t, env, "foo_test.go")
+	stderr := "FAIL: TestFoo\n\tfoo_test.go:42: expected 1, got 2"
+
+	run(env, "s1", "go test ./...", env.workingDir, "", stderr, nil, 1)
+	first, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, first, 1)
+
+	// Resolve, then re-break: the reopened row is a new open epoch —
+	// first_seen must advance or the reconcile edge's
+	// (session, signature, first_seen) suppression would swallow the
+	// regression.
+	run(env, "s1", "go test ./...", env.workingDir, "", "", nil, 0)
+	time.Sleep(2 * time.Millisecond)
+	run(env, "s1", "go test ./...", env.workingDir, "", stderr, nil, 1)
+	second, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, second, 1)
+	require.True(t, second[0].FirstSeen.After(first[0].FirstSeen),
+		"resurrection opens a new epoch: %v must postdate %v",
+		second[0].FirstSeen, first[0].FirstSeen)
+}
+
 func TestListOpenFailures_TTLFiltersStaleRows(t *testing.T) {
 	env := setupTest(t)
 

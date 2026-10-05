@@ -335,6 +335,12 @@ type sessionAgent struct {
 	// (toolCallID → file basename) so a call that completes after
 	// the cursor swept past its index still counts once.
 	nbPendingReads *csync.Map[string, map[string]string]
+	// reconcileSeen is the reconcile edge's once-per-session
+	// suppression: (session, failure signature, open epoch) → the row
+	// already flagged at a boundary. A flagged row's explanation or
+	// tolerance stands for the session; a resolve-and-reopen (new
+	// first_seen) flags fresh, and a new session flags fresh.
+	reconcileSeen sync.Map
 	// cmdlog is the project command/failure memory. May be nil.
 	cmdlog cmdlog.Service
 	// failureMemory injects the <open_failures> tail — cmdlog's
@@ -1192,6 +1198,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// edge-firing records — counted now, before folded queued prompts
 	// create non-initiating user messages mid-run.
 	turnSeq := a.edgeTurnSeq(ctx, call.SessionID)
+	// runStart anchors the reconcile edge's introduced-this-run
+	// comparison — failure rows first seen after this instant are the
+	// run's own, older ones are pre-existing observations.
+	runStart := time.Now()
 
 	// Add the session to the context. The run context (genCtx) and its
 	// cancel func were already created and registered under the dispatch
@@ -1874,6 +1884,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		currentAssistant: currentAssistant,
 		stalled:          loopStopped,
 		turnSeq:          turnSeq,
+		startedAt:        runStart,
 	})
 
 	// Generate notebook entries asynchronously when notebook is

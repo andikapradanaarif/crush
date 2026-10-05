@@ -97,7 +97,8 @@ internal/
   pubsub/                          Internal pub/sub for cross-component messaging
   filetracker/                     Tracks files touched per session
   cmdlog/                          Project command/failure memory (write path;
-                                   read consumer pending)
+                                   read consumers: failure selector, reconcile
+                                   edge)
   redact/                          Shared secret redaction (leaf; used by
                                    cmdlog, notebook, mem0 sync)
   history/                         Prompt history

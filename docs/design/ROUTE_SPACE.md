@@ -156,8 +156,8 @@ Catalog lives in `RUN_EDGES.md`; the "why specified transitions" is
 `HARNESS_TOPOLOGY.md` (local-only — untracked). Same contract,
 different layer: edges are named transitions the model cannot route
 around (verification, todos-reconcile, stall-replan, escalate-human,
-phase-confirm, burn-watch shipped; join-subagents, summarize-continue
-specified). The loop kernel itself — the
+phase-confirm, burn-watch, reconcile shipped; join-subagents,
+summarize-continue specified). The loop kernel itself — the
 model's own tool choices inside a turn — is deliberately *not* in the
 route space: the skeleton wraps the model, it does not replace its
 autonomy.

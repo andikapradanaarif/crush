@@ -83,6 +83,67 @@ func (q *Queries) ListRecentCommands(ctx context.Context, limit int64) ([]Comman
 	return items, nil
 }
 
+const listSessionOpenFailures = `-- name: ListSessionOpenFailures :many
+SELECT f.signature, f.cmd, f.cwd, f.headline, f.files, f.first_seen, f.last_seen, f.resolved_in
+FROM failure_memory f
+INNER JOIN command_memory c
+    ON c.cmd_norm = f.cmd
+    AND c.cwd = f.cwd
+WHERE f.resolved_in = ''
+    AND c.last_session_id IN (
+        SELECT id FROM sessions
+        WHERE id = ?1 OR parent_session_id = ?1
+    )
+    AND c.last_exit > 0
+ORDER BY f.last_seen DESC, f.rowid DESC
+LIMIT 50
+`
+
+// Open failure rows whose commands the given session (or one of its
+// task-tool child sessions) last ran and last failed: the reconcile
+// edge's "observed and left open" set. A sub-agent's bash records
+// under the child session ID; without the children subquery those
+// rows would reconcile to no one -- the child never scans and the
+// parent's delegation produced the mess. One level only, matching
+// the task tool's nesting depth. command_memory's last_session_id
+// is last-writer, so a row another session re-ran more recently
+// drops out of this session's set even while it stays open; a
+// concurrently opened row the run never invoked can never flag here.
+// Same bound as the tail's fetch pool -- a session can observe more
+// distinct commands than this only pathologically, and the retry
+// prompt renders at most ten.
+func (q *Queries) ListSessionOpenFailures(ctx context.Context, sessionID string) ([]FailureMemory, error) {
+	rows, err := q.query(ctx, q.listSessionOpenFailuresStmt, listSessionOpenFailures, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []FailureMemory{}
+	for rows.Next() {
+		var i FailureMemory
+		if err := rows.Scan(
+			&i.Signature,
+			&i.Cmd,
+			&i.Cwd,
+			&i.Headline,
+			&i.Files,
+			&i.FirstSeen,
+			&i.LastSeen,
+			&i.ResolvedIn,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const resolveFailuresForCommand = `-- name: ResolveFailuresForCommand :exec
 UPDATE failure_memory SET
     resolved_in = ?
@@ -123,14 +184,17 @@ INSERT INTO command_memory (
     ?,
     ?
 ) ON CONFLICT(cmd_norm, cwd) DO UPDATE SET
-    kind = excluded.kind,
+    kind = CASE WHEN excluded.last_exit >= 0 THEN excluded.kind ELSE command_memory.kind END,
     -- Interrupted runs carry last_exit = -1: the run is noted but
-    -- never overwrites the command's last real verdict.
+    -- never overwrites the command's last real verdict -- nor the
+    -- session stamp, which must stay with the last verdict's writer
+    -- so a denied or killed re-run cannot disown the observing
+    -- session (or claim a failing verdict it never saw).
     last_exit = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_exit ELSE command_memory.last_exit END,
-    last_at = excluded.last_at,
+    last_at = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_at ELSE command_memory.last_at END,
     ok_count = command_memory.ok_count + excluded.ok_count,
     fail_count = command_memory.fail_count + excluded.fail_count,
-    last_session_id = excluded.last_session_id
+    last_session_id = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_session_id ELSE command_memory.last_session_id END
 `
 
 type UpsertCommandRunParams struct {
@@ -181,6 +245,10 @@ INSERT INTO failure_memory (
 ) ON CONFLICT(signature) DO UPDATE SET
     headline = excluded.headline,
     files = excluded.files,
+    -- first_seen stamps the open epoch, not the original birth: a
+    -- resurrected row (was resolved) counts as newly introduced, a
+    -- continuously-open re-fail keeps its first observation.
+    first_seen = CASE WHEN failure_memory.resolved_in != '' THEN excluded.first_seen ELSE failure_memory.first_seen END,
     last_seen = excluded.last_seen,
     resolved_in = ''
 `

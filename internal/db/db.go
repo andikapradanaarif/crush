@@ -219,6 +219,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listSessionCountersStmt, err = db.PrepareContext(ctx, listSessionCounters); err != nil {
 		return nil, fmt.Errorf("error preparing query ListSessionCounters: %w", err)
 	}
+	if q.listSessionOpenFailuresStmt, err = db.PrepareContext(ctx, listSessionOpenFailures); err != nil {
+		return nil, fmt.Errorf("error preparing query ListSessionOpenFailures: %w", err)
+	}
 	if q.listSessionReadFilesStmt, err = db.PrepareContext(ctx, listSessionReadFiles); err != nil {
 		return nil, fmt.Errorf("error preparing query ListSessionReadFiles: %w", err)
 	}
@@ -606,6 +609,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listSessionCountersStmt: %w", cerr)
 		}
 	}
+	if q.listSessionOpenFailuresStmt != nil {
+		if cerr := q.listSessionOpenFailuresStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listSessionOpenFailuresStmt: %w", cerr)
+		}
+	}
 	if q.listSessionReadFilesStmt != nil {
 		if cerr := q.listSessionReadFilesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listSessionReadFilesStmt: %w", cerr)
@@ -805,6 +813,7 @@ type Queries struct {
 	listProcessedSegmentsStmt            *sql.Stmt
 	listRecentCommandsStmt               *sql.Stmt
 	listSessionCountersStmt              *sql.Stmt
+	listSessionOpenFailuresStmt          *sql.Stmt
 	listSessionReadFilesStmt             *sql.Stmt
 	listSessionsStmt                     *sql.Stmt
 	listUserMessagesBySessionStmt        *sql.Stmt
@@ -895,6 +904,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listProcessedSegmentsStmt:            q.listProcessedSegmentsStmt,
 		listRecentCommandsStmt:               q.listRecentCommandsStmt,
 		listSessionCountersStmt:              q.listSessionCountersStmt,
+		listSessionOpenFailuresStmt:          q.listSessionOpenFailuresStmt,
 		listSessionReadFilesStmt:             q.listSessionReadFilesStmt,
 		listSessionsStmt:                     q.listSessionsStmt,
 		listUserMessagesBySessionStmt:        q.listUserMessagesBySessionStmt,

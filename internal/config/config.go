@@ -539,9 +539,10 @@ type Options struct {
 	// FailureMemory injects the <open_failures> tail — commands that
 	// failed in this workspace and have not passed since — independent
 	// of the turn_context tier so its contribution can be measured on
-	// its own. Recording is always on; this option gates injection.
+	// its own. Recording is always on; this option gates the read side
+	// (tail injection and the reconcile run-edge).
 	// Experimental; default off until the corpus arm justifies it.
-	FailureMemory *bool `json:"failure_memory,omitempty" jsonschema:"description=Inject unresolved command/failure memory at the request tail (the <open_failures> section). Recording happens regardless; this gates injection. Experimental.,default=false"`
+	FailureMemory *bool `json:"failure_memory,omitempty" jsonschema:"description=Read unresolved command/failure memory: inject the <open_failures> tail section and arm the reconcile run-edge (open failures the run observed still open block done-ness). Recording happens regardless; this gates the read side. Experimental.,default=false"`
 	// MemoryTelemetry opts in to local-only memory-usage logging:
 	// append-only JSONL records at data_directory/memory-telemetry.jsonl
 	// describing what memory did each turn — the prompt text, sections
