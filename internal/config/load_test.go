@@ -2556,7 +2556,8 @@ func TestNotebookOptions_Defaults(t *testing.T) {
 	// resolve them to their defaults.
 	c := &Config{}
 	c.NormalizeOptions()
-	require.True(t, c.Options.NotebookIsEnabled(), "notebook should default to enabled")
+	require.False(t, c.Options.NotebookIsEnabled(), "notebook should default to disabled (#205)")
+	require.False(t, c.Options.NotebookCheckpointEnabled(), "checkpoint should follow the notebook default")
 	require.False(t, c.Options.NotebookSyncMem0Enabled(), "mem0 sync should default to false")
 	require.False(t, c.Options.NotebookAutoInjectEnabled(), "auto-inject should default to false")
 	require.True(t, c.Options.NotebookHydrationEnabled(), "hydration should default to enabled")

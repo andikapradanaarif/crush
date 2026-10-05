@@ -617,10 +617,11 @@ func (c *Config) NormalizeOptions() {
 	if c.Options.TUI.ExitBanner == "" {
 		c.Options.TUI.ExitBanner = ExitBannerDefault
 	}
-	// Notebook is enabled by default. Users can opt out by setting
-	// notebook_enabled: false in their config.
+	// Notebook is disabled by default pending powered evidence that
+	// its token cost pays for itself (#205). Users opt in with
+	// notebook_enabled: true; eval arms set it explicitly.
 	if c.Options.NotebookEnabled == nil {
-		c.Options.NotebookEnabled = ptr(true)
+		c.Options.NotebookEnabled = ptr(false)
 	}
 	// mem0 sync and auto-inject default to false (opt-in).
 	if c.Options.NotebookSyncMem0 == nil {
