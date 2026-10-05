@@ -386,9 +386,14 @@ func TestE2E_TwoClientsReceiveSameMessage(t *testing.T) {
 	// release the pooled DB connection so Windows can clean up
 	// the temp data directory.
 	wsDataDir := ws.Cfg.Config().Options.DataDirectory
-	backend.SetWorkspaceShutdownFnForTest(ws, func() {
+	released := make(chan struct{})
+	// OnceFunc guards the close: teardown is single-fire today, but
+	// this fn must not panic if a backend lifecycle change ever makes
+	// it re-entrant.
+	backend.SetWorkspaceShutdownFnForTest(ws, sync.OnceFunc(func() {
 		_ = db.Release(wsDataDir)
-	})
+		close(released)
+	}))
 
 	evcA, cancelA := h.subscribeSSE(t, ctx, ws.ID, cidA)
 	t.Cleanup(cancelA)
@@ -422,6 +427,22 @@ func TestE2E_TwoClientsReceiveSameMessage(t *testing.T) {
 	})
 	require.True(t, okB, "client B must receive the same MessageEvent")
 	require.Equal(t, sessionID, gotB.Payload.SessionID)
+
+	// Detach both streams and wait out the detach grace so the
+	// overridden shutdown releases the pooled DB before t.TempDir
+	// cleanup runs — Windows cannot unlink an open crush.db. The
+	// t.Cleanup cancels stay registered but are no-ops now.
+	cancelA()
+	cancelB()
+	require.Eventually(t, func() bool {
+		return backend.WorkspaceLiveStreamCountForTest(ws) == 0
+	}, 3*time.Second, 10*time.Millisecond,
+		"both SSE streams must detach before release can fire")
+	select {
+	case <-released:
+	case <-time.After(10 * time.Second):
+		t.Fatal("workspace shutdown did not release the pooled DB")
+	}
 }
 
 // TestE2E_PermissionFlowCrossClient covers PLAN item 6 scenario 2:

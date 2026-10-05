@@ -51,6 +51,7 @@ func TestMapTool(t *testing.T) {
 	// Build finishes before queries — the tool path is non-blocking,
 	// the test warms it via the shared service.
 	svc := index.Shared(dataDir, root)
+	t.Cleanup(func() { index.ReleaseShared(dataDir, root) })
 	require.NoError(t, svc.EnsureIndexed(context.Background()))
 
 	skel := runMapTool(t, tool, MapParams{})

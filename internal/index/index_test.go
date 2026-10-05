@@ -426,7 +426,9 @@ func TestSubtree_PathHandling(t *testing.T) {
 	require.NoError(t, svc.EnsureIndexed(ctx))
 
 	// Absolute and escaping paths get guidance, not empty results.
-	out, err := svc.Subtree(ctx, "/etc", 500)
+	// A real TempDir keeps the absolute-path case absolute on Windows
+	// too — "/etc" is not filepath.IsAbs there.
+	out, err := svc.Subtree(ctx, t.TempDir(), 500)
 	require.NoError(t, err)
 	require.Contains(t, out, "absolute")
 	out, err = svc.Subtree(ctx, "../outside", 500)

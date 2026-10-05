@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -276,7 +277,7 @@ func TestPlanVerdicts(t *testing.T) {
 		verdicts := a.planVerdicts(t.Context(), sessionID)
 		require.Len(t, verdicts, 1)
 		require.Equal(t, planEvidenceBlocked, verdicts[0].state)
-		require.Contains(t, verdicts[0].reason, "pkg/f.go")
+		require.Contains(t, verdicts[0].reason, filepath.Join("pkg", "f.go"))
 	})
 
 	t.Run("write to a.go breaking b.go blocks the b.go binding", func(t *testing.T) {

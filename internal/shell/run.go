@@ -201,11 +201,29 @@ func RunAndCapturePTY(ctx context.Context, opts RunOptions) (CaptureResult, erro
 	return RunAndCapture(ctx, opts)
 }
 
+// syncWriter serializes Write calls behind a shared mutex so concurrent
+// subprocess output goroutines cannot race on an unguarded writer.
+type syncWriter struct {
+	mu *sync.Mutex
+	w  io.Writer
+}
+
+func (s syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
 // newRunner constructs an [interp.Runner] configured with the standard
 // Crush handler stack. Shared by the stateless [Run] entrypoint and the
 // stateful [Shell] so the two surfaces cannot drift.
 func newRunner(cwd string, env []string, stdin io.Reader, stdout, stderr io.Writer, blockFuncs []BlockFunc, components *componentLog) (*interp.Runner, error) {
 	env = withNonInteractiveEnv(env)
+	// Pipeline members share the runner's stderr, and each subprocess
+	// spawns its own copy goroutine — an unguarded buffer would race.
+	wmu := &sync.Mutex{}
+	stdout = syncWriter{mu: wmu, w: stdout}
+	stderr = syncWriter{mu: wmu, w: stderr}
 	return interp.New(
 		interp.StdIO(stdin, stdout, stderr),
 		interp.Interactive(false),

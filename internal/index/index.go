@@ -177,6 +177,22 @@ func Shared(dataDir, workingDir string) *Service {
 	return svc
 }
 
+// ReleaseShared closes and forgets the Shared service for the pair —
+// for tests, which must drop the handle so TempDir cleanup can unlink
+// index.db on Windows. Production code must not call this: Shared
+// hands out process-lifetime services. Test callers must not race it
+// against Shared calls for the same pair — a LoadOrStore landing
+// between the delete and the Close hands out a closed service that
+// never re-initializes. Note that Close forces init(), so releasing
+// a never-built service still creates and closes index.db.
+func ReleaseShared(dataDir, workingDir string) {
+	key := dataDir + "\x00" + workingDir
+	if v, ok := shared.LoadAndDelete(key); ok {
+		byWorkingDir.CompareAndDelete(workingDir, v)
+		_ = v.(*Service).Close()
+	}
+}
+
 // Open creates a standalone Service — for tests and one-off callers.
 // Production code should use Shared.
 func Open(dataDir, workingDir string) (*Service, error) {
