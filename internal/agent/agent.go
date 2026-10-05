@@ -1901,6 +1901,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		notebookCtx := context.WithoutCancel(ctx)
 		notebookSessionID := call.SessionID
 		notebookPreTurnCount := preTurnMsgCount
+		notebookRunStamp := call.RunStamp
 		// Capture the final assistant message ID now — by the time the
 		// goroutine lists messages a newer run may have appended, and
 		// the tail segment then belongs to that run, not this one.
@@ -1947,7 +1948,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				if regErr != nil {
 					slog.Warn("Failed to list processed segments for checkpoint", "session_id", notebookSessionID, "error", regErr)
 				} else {
-					a.generateRunEndCheckpoint(notebookCtx, notebookSessionID, allMsgs, notebookPreTurnCount, call.RunStamp, registry, lastAssistantID)
+					a.generateRunEndCheckpoint(notebookCtx, notebookSessionID, allMsgs, notebookPreTurnCount, notebookRunStamp, registry, lastAssistantID)
 				}
 			}
 		})

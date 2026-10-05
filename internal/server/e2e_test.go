@@ -387,10 +387,13 @@ func TestE2E_TwoClientsReceiveSameMessage(t *testing.T) {
 	// the temp data directory.
 	wsDataDir := ws.Cfg.Config().Options.DataDirectory
 	released := make(chan struct{})
-	backend.SetWorkspaceShutdownFnForTest(ws, func() {
+	// OnceFunc guards the close: teardown is single-fire today, but
+	// this fn must not panic if a backend lifecycle change ever makes
+	// it re-entrant.
+	backend.SetWorkspaceShutdownFnForTest(ws, sync.OnceFunc(func() {
 		_ = db.Release(wsDataDir)
 		close(released)
-	})
+	}))
 
 	evcA, cancelA := h.subscribeSSE(t, ctx, ws.ID, cidA)
 	t.Cleanup(cancelA)

@@ -180,7 +180,11 @@ func Shared(dataDir, workingDir string) *Service {
 // ReleaseShared closes and forgets the Shared service for the pair —
 // for tests, which must drop the handle so TempDir cleanup can unlink
 // index.db on Windows. Production code must not call this: Shared
-// handles are process-lifetime.
+// hands out process-lifetime services. Test callers must not race it
+// against Shared calls for the same pair — a LoadOrStore landing
+// between the delete and the Close hands out a closed service that
+// never re-initializes. Note that Close forces init(), so releasing
+// a never-built service still creates and closes index.db.
 func ReleaseShared(dataDir, workingDir string) {
 	key := dataDir + "\x00" + workingDir
 	if v, ok := shared.LoadAndDelete(key); ok {
