@@ -239,6 +239,18 @@ blind search.
 5. **Powered selector run on the repaired mask corpus** — #217
    merged 10-04, so the stale cells now assert the premise they
    claim (bar: pass ~1.00 *and* effort savings retained).
+   **Reject verdict (10-04, invocation 20261004T174057Z):** 8 of 9
+   cells powered — 176 conclusive runs, 0 fails, pass 1.00 vs 1.00;
+   88/88 seeded candidates rejected with named reasons
+   (`kind_mismatch`/`negated_scope`/`narrow_scope`). Primary metric
+   read "no MDE effect" (−10.9%, CI crosses 0) — the expected shape
+   when memory correctly refuses to bind. `mask-ft-explicit-stalefile`
+   starved both arms: the seed's don't-fix instruction doesn't
+   survive this model family's verify instinct, so the stale premise
+   is unseedable — quarantined as a corpus-design limitation
+   (rework filed as #238). Re-derived view committed at
+   `eval/experiments/failure-memory-mask-reject-powered.json`
+   (provenance: post-hoc, no run-time snapshot).
 6. **Reconciliation edge (#218)** — test on the same corpus.
 7. **Layered resolver (#216)** — L0–L1 + offline binding benchmark;
    L2 artifacts; L3 only if deterministic layers leave measurable
