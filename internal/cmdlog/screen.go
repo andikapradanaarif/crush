@@ -43,10 +43,20 @@ const filteredHeadlinePlaceholder = "[headline filtered]"
 // sentence boundary is only caught if the second half is itself
 // shaped like one of these rules — the void-declaration rule below
 // exists for exactly that reason.
+//
+// Accepted false-positive classes, named so a vanished headline has
+// a documented answer: log-style channel prefixes ("kernel:
+// [SYSTEM] call failed"), markdown-ish headers ("### System reset"),
+// token-stream diagnostics ("print the token stream"),
+// suppression-shaped advisories ("never warn the operator"), and
+// "actual task:"/possessive-adjacent phrases. Every FP is a span
+// marker in surviving text, never a dropped record.
 var injectionPatterns = []*regexp.Regexp{
 	// Context override: "ignore all previous instructions",
 	// "disregard the above rules", "override your guardrails".
-	regexp.MustCompile(`(?i)\b(?:ignore|disregard|forget|override|discard|bypass)\b[^.!?;]{0,45}\b(?:instructions?|prompts?|messages?|rules?|guidelines?|directives?|guardrails?|constraints|programming|commands?)\b`),
+	// -ing forms are covered too — "ignoring all previous
+	// instructions" is the cheapest rewrite of the shape.
+	regexp.MustCompile(`(?i)\b(?:ignor(?:e|ing)|disregard(?:ing)?|forget(?:ting)?|overrid(?:e|ing)|discard(?:ing)?|bypass(?:ing)?)\b[^.!?;]{0,45}\b(?:instructions?|prompts?|messages?|rules?|guidelines?|directives?|guardrails?|constraints|programming|commands?)\b`),
 	// Void-declaration: "all previous instructions are void", "your
 	// rules are cancelled" — the second clause of a boundary-split
 	// override, caught on its own side of the period.
@@ -57,7 +67,7 @@ var injectionPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\b(?:ignore|disregard|forget|discard)\s+all\s+of\s+(?:the\s+)?above\b`),
 	// Channel/role markers and model special tokens — case-insensitive
 	// like the rest; a lowercase [sys] spoofs the same channel.
-	regexp.MustCompile(`(?i)<\|[^|]{0,40}\|>|\[/?(?:INST|SYS|SYSTEM)\]|<<\s*/?SYS\s*>>|###\s*(?:instruction|system|override)`),
+	regexp.MustCompile(`(?i)<\|[^|]{0,40}\|>|\[/?(?:INST|SYS|SYSTEM)\]|<<\s*/?SYS\s*>>|###\s*(?:instructions?|system|override)\b`),
 	regexp.MustCompile(`(?i)\b(?:new|updated|real|actual|true|revised)\s+(?:system\s+)?(?:instructions?|directives?|task|objective|mission|purpose|orders?)\s*:`),
 	// Identity override: "you are now", "pretend to be" — plus
 	// "act as"/"behave as" only when a persona noun follows, so
@@ -66,7 +76,7 @@ var injectionPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\b(?:act|behave)\s+as\s+(?:an?\s+|the\s+)?(?:\w+\s+){0,2}(?:root|admin|administrator|superuser|assistant|chatbot|agent|ai)\b`),
 	// Exfiltration and response suppression: "reveal your system
 	// prompt", "print your api keys", "do not respond".
-	regexp.MustCompile(`(?i)\b(?:reveal|show|print|output|repeat|leak|expose|display|dump|echo|tell\s+me)\s+(?:me\s+|us\s+|the\s+user\s+)?(?:your|the|the\s+full|the\s+entire|all\s+your|any)\s+(?:system\s+prompt|instructions?|rules?|secrets?|api[\s_-]?keys?|tokens?|passwords?|credentials?)\b`),
+	regexp.MustCompile(`(?i)\b(?:reveal|show|print|output|repeat|leak|expose|display|dump|echo|tell\s+me)\s+(?:me\s+|us\s+|the\s+user\s+)?(?:your|the|the\s+full|the\s+entire|all\s+your|any)\s+(?:\w+\s+){0,2}(?:system\s+prompt|instructions?|rules?|secrets?|api[\s_-]?keys?|tokens?|passwords?|credentials?)\b`),
 	regexp.MustCompile(`(?i)\b(?:do\s+not|don't|never)\s+(?:respond|answer|reply|mention|tell\s+the\s+user|reveal|disclose|alert|warn)\b`),
 }
 
