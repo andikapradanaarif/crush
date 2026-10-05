@@ -265,10 +265,18 @@ blind search.
    the touch mtime (`row_older_than_touch: false`). `touch` removed
    the incentive to look, not the behavior. All three stale-file-seed
    cells reject at `seed_check`; the other cells starve on the
-   coverage gate. Eligible-subset guardrails also breach: treatment
-   pass 47/54 vs control 99/99, prompt tokens +69%. Next: fixture
-   redesign (seed the row without an inspectable file) or #244
-   `files_viewed` scoring before the reject corpus can certify L1.
+   coverage gate — runs pass every check but count inconclusive on
+   `coverage_key: max_tail.sections.open_failures`, plausibly because
+   an all-reject treatment run emits no `<open_failures>` section at
+   all (the coverage key may be mis-scoped for a reject corpus — a
+   correct all-reject run would starve itself). Eligible-subset
+   guardrails also breach: treatment pass 47/54 vs control 99/99,
+   prompt tokens +69%. Next: (1) verify the coverage-key hypothesis —
+   if confirmed, scope the key on candidates surviving selection;
+   (2) fixture-level seeding (write the stale row directly, agent
+   can't invalidate) — #244 `files_viewed` then becomes optional
+   detection rather than a blocker; (3) rerun to certify L1. Do not
+   rerun before both fixes — a third starved run only burns records.
    Full writeup:
    `docs/milestones/2026-10-06-exp-failure-memory-mask-reject-rerun.md`.
 6. **Reconciliation edge (#218)** — implemented; eval read recorded

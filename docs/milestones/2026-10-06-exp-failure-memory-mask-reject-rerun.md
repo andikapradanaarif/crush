@@ -25,7 +25,7 @@ Artifacts: `eval/results/failure-memory-mask-reject-powered/`.
 | Mechanism | Cells | Evidence |
 |---|---|---|
 | `seed_check` rejects | all 3 stale-file-seed cells | bb-ambig-stale 22/22, ft-ambig-stale 24/24, ft-explicit-stalefile 14/22 of inconclusives are seed rejects |
-| coverage/gate inconclusive | the rest | non-seed `check_detail` (e.g. `max_tail.decisions.admitted` coverage) |
+| coverage/gate inconclusive | the rest | runs pass every check (`all/root/decoy: pass`) but count inconclusive on `coverage_key: max_tail.sections.open_failures` — plausibly an all-reject run emits no `<open_failures>` section at all, so the coverage key may be mis-scoped for a reject corpus |
 
 ## Stalefile rework outcome — still unseedable under a powered driver
 
