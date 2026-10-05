@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -64,10 +65,15 @@ func hyperBuilder(model string) builderFunc {
 }
 
 func testEnv(t *testing.T) fakeEnv {
-	// os.TempDir keeps the fake root platform-absolute — a literal
-	// "/tmp" is not filepath.IsAbs on Windows, which silently drops
-	// every absoluteness check the tests exercise.
-	workingDir := filepath.Join(os.TempDir(), "crush-test", t.Name())
+	// POSIX keeps the literal "/tmp" — the string lands inside recorded
+	// system prompts, and os.TempDir() on macOS is /var/folders, which
+	// would diverge from the VCR cassettes. Windows needs a real
+	// absolute root — "/tmp" is not filepath.IsAbs there.
+	root := "/tmp"
+	if runtime.GOOS == "windows" {
+		root = os.TempDir()
+	}
+	workingDir := filepath.Join(root, "crush-test", t.Name())
 	os.RemoveAll(workingDir)
 
 	err := os.MkdirAll(workingDir, 0o755)
