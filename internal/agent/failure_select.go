@@ -1192,6 +1192,12 @@ var selectorPromptReplacer = strings.NewReplacer(
 //   - Prompts the English lexicon cannot parse report
 //     lang_unsupported instead of referent_none, so the coverage
 //     hole is measured rather than silent.
+//   - A mention whose polarity parses neither way neither binds nor
+//     vetoes — and today's record can't see it: the decision lands as
+//     referent_none/lang_unsupported like a prompt with no mention.
+//     If the L3 gate needs that count, a mention_unknown marker
+//     lands with it; the non-English case is already visible via
+//     lang_unsupported.
 //
 // renderLimit is the render stage's budget, applied after selection:
 // the freshest renderLimit bound rows render (input order is
@@ -1220,10 +1226,12 @@ func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string
 		kinds = referentKinds(prompt)
 	}
 	// L1: language-neutral identifier mentions — the same scan once,
-	// folded per candidate below. lone covers both bare-path and
-	// bare-identifier navigation.
+	// folded per candidate below. lone is bare-identifier navigation
+	// only: a prompt carrying an identifier site can never satisfy
+	// lonePathPrompt (the token survives its strips), so it adds
+	// nothing here.
 	identSites := promptIdentSites(prompt)
-	lone := lonePathPrompt(prompt) || loneIdentPrompt(prompt)
+	lone := loneIdentPrompt(prompt)
 
 	var admitted []cmdlog.Failure
 	decisions := make([]FailureDecision, 0, len(failures))

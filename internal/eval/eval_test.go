@@ -515,10 +515,10 @@ func TestArmCoverage_TailDecisions(t *testing.T) {
 
 	rec := &RunRecord{Tail: []TurnTail{
 		{Turn: 0, Decisions: []FailureDecision{
-			{Signature: "go test .@.", Cmd: "go test .", Admit: true, Reason: "admit"},
-			{Signature: "go test ./decoy@.", Cmd: "go test ./decoy", Admit: false, Reason: "narrow_scope"},
-			{Signature: "go test ./extra@.", Cmd: "go test ./extra", Admit: false, Reason: "render_capped"},
-			{Signature: "ls vendor@.", Cmd: "ls vendor", Admit: false, Reason: "kind_mismatch"},
+			{Signature: "go test .@.", Cmd: "go test .", Admit: true, Reason: "admit", SettledBy: "identifier"},
+			{Signature: "go test ./decoy@.", Cmd: "go test ./decoy", Admit: false, Reason: "narrow_scope", SettledBy: "lexicon"},
+			{Signature: "go test ./extra@.", Cmd: "go test ./extra", Admit: false, Reason: "render_capped", SettledBy: "lexicon"},
+			{Signature: "ls vendor@.", Cmd: "ls vendor", Admit: false, Reason: "kind_mismatch", SettledBy: "lexicon"},
 		}},
 	}}
 	met, err := ArmCoverageMet(Coverage{"min_tail.decisions.candidates": 4}, rec)
@@ -547,6 +547,21 @@ func TestArmCoverage_TailDecisions(t *testing.T) {
 	// A reason outside the closed vocabulary fails parse rather than
 	// starving silently.
 	_, err = ArmCoverageMet(Coverage{"min_tail.decisions.reasons.bogus": 1}, rec)
+	require.Error(t, err)
+
+	// settled.* counts the layer that produced each decision —
+	// identifier-layer admits are how non-English binding shows up
+	// in evals.
+	met, err = ArmCoverageMet(Coverage{"min_tail.decisions.settled.identifier": 1,
+		"min_tail.decisions.settled.lexicon": 3}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+	met, err = ArmCoverageMet(Coverage{"min_tail.decisions.settled.state": 1}, rec)
+	require.NoError(t, err)
+	require.False(t, met)
+
+	// A layer outside the closed vocabulary fails parse too.
+	_, err = ArmCoverageMet(Coverage{"min_tail.decisions.settled.bogus": 1}, rec)
 	require.Error(t, err)
 
 	// An audited-empty decision list satisfies max_ abstention —
@@ -765,6 +780,18 @@ func TestValidateExperiment_ArmCoverageStarvation(t *testing.T) {
 	exp.Arms[ArmTreatment] = Arm{
 		Config:   ArmConfig{Options: map[string]any{"failure_memory": true}},
 		Coverage: Coverage{"min_tail.decisions.reasons.render_capped": 1},
+	}
+	require.NoError(t, ValidateExperiment(exp))
+
+	// Layer-keyed counts (settled.*) ride the identical gate.
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"failure_memory": false}},
+		Coverage: Coverage{"min_tail.decisions.settled.identifier": 1},
+	}
+	require.Error(t, ValidateExperiment(exp))
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"failure_memory": true}},
+		Coverage: Coverage{"min_tail.decisions.settled.identifier": 1},
 	}
 	require.NoError(t, ValidateExperiment(exp))
 

@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -171,14 +172,16 @@ func TestBindingBenchmark(t *testing.T) {
 	// harm this resolver exists to bound.
 	t.Run("report", func(t *testing.T) {
 		for lang, st := range perLang {
-			precision, recall := 0.0, 0.0
+			// A 0 denominator is "nothing to measure", not failure —
+			// print n/a rather than a misleading 0.00.
+			precision, recall := "n/a", "n/a"
 			if st.gotAdmits > 0 {
-				precision = float64(st.truePositives) / float64(st.gotAdmits)
+				precision = fmt.Sprintf("%.2f", float64(st.truePositives)/float64(st.gotAdmits))
 			}
 			if st.expectAdmits > 0 {
-				recall = float64(st.truePositives) / float64(st.expectAdmits)
+				recall = fmt.Sprintf("%.2f", float64(st.truePositives)/float64(st.expectAdmits))
 			}
-			t.Logf("lang=%s cells=%d decisions=%d admit_p=%.2f admit_r=%.2f veto_violations=%d abstains=%d",
+			t.Logf("lang=%s cells=%d decisions=%d admit_p=%s admit_r=%s veto_violations=%d abstains=%d",
 				lang, st.cells, st.decisions, precision, recall, st.vetoViolations, st.abstains)
 			require.Zero(t, st.vetoViolations,
 				"lang %s: %d veto violations", lang, st.vetoViolations)

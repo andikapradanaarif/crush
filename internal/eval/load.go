@@ -631,7 +631,10 @@ func armStarvationRules(field string) []starvationRule {
 		// open_failures need failure_memory; the other envelopes need
 		// their own flags. Unknown tail fields get no rule — a future
 		// tail.* key must opt into a gate, not inherit the wrong one.
-		if strings.HasPrefix(field, "tail.decisions.reasons.") {
+		if strings.HasPrefix(field, "tail.decisions.") {
+			// The whole decisions family — candidates, admitted,
+			// reasons.*, settled.* — only exists under
+			// failure_memory.
 			return []starvationRule{boolOn("failure_memory")}
 		}
 		switch field {
@@ -639,8 +642,7 @@ func armStarvationRules(field string) []starvationRule {
 			return []starvationRule{modeIs("turn_context", "session")}
 		case "tail.sections.ambiguity_gate":
 			return []starvationRule{boolOn("ambiguity_clarification")}
-		case "tail.sections.open_failures",
-			"tail.decisions.candidates", "tail.decisions.admitted":
+		case "tail.sections.open_failures":
 			return []starvationRule{boolOn("failure_memory")}
 		}
 		return nil

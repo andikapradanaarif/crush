@@ -134,7 +134,9 @@ layers left open:
 
 ```
 L0 candidate-set structure ──→ resolve singleton/top-level, or escalate
-L1 language-neutral ids ─────→ paths, basenames, Test\w+ vs headline
+L1 language-neutral ids ─────→ paths, basenames, identifier-shaped
+                               tokens (interior capital or underscore)
+                               vs headline
 L2 artifact promotion ───────→ working set + cmd recency; promotes
                                unmentioned candidates only — never
                                resurrects a typed-but-unparseable token
@@ -152,10 +154,15 @@ precision/recall, veto violations (target 0), abstain rate.
 
 Landed: each decision carries `settled_by` (`identifier` / `lexicon` /
 `state`) so per-layer volume is countable via
-`tail.decisions.settled.*`; L1 binds headline identifiers
-(`Test\w+`-shaped tokens) whose mention span carries recognized
-signal, vetoes negated mentions, and leaves typed-but-unparseable
-mentions for L3/L4 — never binding them. The lexicon coverage hole is
+`tail.decisions.settled.*`; L1 binds headline identifiers whose
+mention span carries recognized signal, vetoes negated mentions,
+and leaves typed-but-unparseable mentions for L3/L4 — never binding
+them. The shape rule mints tokens carrying a lowercase letter plus
+an underscore or an uppercase letter past the first position
+(`TestAdd`, `test_add`, `AssertionError`); single capitalized words
+(`Test`, `Parser`), kebab-case, all-caps, and prose can't mint — on
+either side, so neither prompt nor headline conjures a vocabulary
+from English. The lexicon coverage hole is
 measured: `lang_unsupported` replaces `referent_none` when the prompt
 carries letters outside English. The offline benchmark is
 `internal/agent/testdata/failure_binding.jsonl` scored by
