@@ -733,3 +733,112 @@ func TestTurnContextBlob_OpenFailuresEnvelope(t *testing.T) {
 		require.Contains(t, blob, "(/open_failures) injected")
 	})
 }
+
+// reconcileRetryPrompt mimics the reconcile edge's retry text — it
+// literally names the rows it flags, so feeding it to the selector
+// would admit them via the identifier layer (#249).
+const reconcileRetryPrompt = reconcileRetryPrefix +
+	" — a run is not done while command(s) it ran still have open failure rows:" +
+	" `go test ./decoy` — --- FAIL: TestValue"
+
+// newTailAgent builds the tail test agent with the audit and
+// selection maps the production constructor allocates, plus one
+// seeded decoy failure whose headline names TestValue.
+func newTailAgent(t *testing.T) (*sessionAgent, string) {
+	t.Helper()
+	a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
+	a.tailAudit = csync.NewMap[string, TailAudit]()
+	a.turnSels = csync.NewMap[string, turnSelection]()
+	a.tailRuns = csync.NewMap[string, []TailAudit]()
+	a.failureMemory = true
+	env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+		SessionID: "prior", Command: "go test ./decoy",
+		CWD: env.workingDir, Stdout: "--- FAIL: TestValue", ExitCode: 1, Ran: true,
+	})
+	failures := listOpenFailures(t, env)
+	require.Len(t, failures, 1)
+	require.Contains(t, failures[0].Headline, "TestValue")
+	return a, sessionID
+}
+
+func admittedSigs(decisions []FailureDecision) []string {
+	var out []string
+	for _, d := range decisions {
+		if d.Admit {
+			out = append(out, d.Signature)
+		}
+	}
+	return out
+}
+
+func TestTurnTailMessages_SelectionOncePerUserTurn(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a retry Run reuses the user turn's selection", func(t *testing.T) {
+		t.Parallel()
+		a, sessionID := newTailAgent(t)
+		// The user turn's prompt names no identifier — the decoy row
+		// rejects on kind mismatch.
+		a.turnTailMessages(t.Context(), SessionAgentCall{
+			SessionID: sessionID, Prompt: "the build is broken — fix it", RunStamp: 1,
+		}, nil)
+		// The retry's prompt is the reconcile text — left to itself
+		// it would identifier-bind TestValue. The shared stamp must
+		// reuse the turn's verdict instead.
+		a.turnTailMessages(t.Context(), SessionAgentCall{
+			SessionID: sessionID, Prompt: reconcileRetryPrompt,
+			RunStamp: 1, RepairAttempts: 1,
+		}, nil)
+
+		audit, ok := a.tailAudit.Get(sessionID)
+		require.True(t, ok)
+		require.Empty(t, admittedSigs(audit.Decisions))
+
+		runs, ok := a.tailRuns.Get(sessionID)
+		require.True(t, ok)
+		require.Len(t, runs, 2)
+		require.Equal(t, uint64(1), runs[0].RunStamp)
+		require.Equal(t, 0, runs[0].RepairAttempts)
+		require.Equal(t, uint64(1), runs[1].RunStamp)
+		require.Equal(t, 1, runs[1].RepairAttempts)
+		require.Equal(t, runs[0].Decisions, runs[1].Decisions)
+	})
+
+	t.Run("a new user turn re-selects from its own prompt", func(t *testing.T) {
+		t.Parallel()
+		a, sessionID := newTailAgent(t)
+		a.turnTailMessages(t.Context(), SessionAgentCall{
+			SessionID: sessionID, Prompt: "the build is broken — fix it", RunStamp: 1,
+		}, nil)
+		audit, _ := a.tailAudit.Get(sessionID)
+		require.Empty(t, admittedSigs(audit.Decisions))
+
+		// A fresh user turn (new stamp) runs its own selection — the
+		// identifier in its prompt binds the seeded headline.
+		tail := a.turnTailMessages(t.Context(), SessionAgentCall{
+			SessionID: sessionID, Prompt: "fix TestValue", RunStamp: 2,
+		}, nil)
+		require.Len(t, tail, 1)
+		audit, _ = a.tailAudit.Get(sessionID)
+		require.NotEmpty(t, admittedSigs(audit.Decisions))
+	})
+
+	t.Run("a cache-missed retry binds nothing", func(t *testing.T) {
+		t.Parallel()
+		a, sessionID := newTailAgent(t)
+		// A retry whose stamp never selected (agent rebuilt
+		// mid-chain) has no user prompt — the retry text must not
+		// become one.
+		a.turnTailMessages(t.Context(), SessionAgentCall{
+			SessionID: sessionID, Prompt: reconcileRetryPrompt,
+			RunStamp: 9, RepairAttempts: 1,
+		}, nil)
+
+		audit, ok := a.tailAudit.Get(sessionID)
+		require.True(t, ok)
+		require.Empty(t, admittedSigs(audit.Decisions))
+		for _, d := range audit.Decisions {
+			require.NotEqual(t, settledIdentifier, d.SettledBy)
+		}
+	})
+}

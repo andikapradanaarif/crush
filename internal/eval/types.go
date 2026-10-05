@@ -429,6 +429,11 @@ type TurnTail struct {
 	// open-failure read itself failed, so an empty Decisions reads
 	// "couldn't evaluate" rather than "evaluated, none bound".
 	FetchError string `json:"fetch_error,omitempty"`
+	// RunStamp and RepairAttempts mirror TailAudit's Run attribution —
+	// which Run of the session rendered this audit, so tail_runs can
+	// decompose a turn's repair-chain renders (#249).
+	RunStamp       uint64 `json:"run_stamp,omitempty"`
+	RepairAttempts int    `json:"repair_attempts,omitempty"`
 }
 
 // FailureDecision is the eval-side mirror of agent.FailureDecision:

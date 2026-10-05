@@ -1053,3 +1053,24 @@ func TestSelectOpenFailures_IdentifierLayer(t *testing.T) {
 		})
 	}
 }
+
+func TestSelectOpenFailures_NonUserPrompt(t *testing.T) {
+	t.Parallel()
+	// The reconcile edge's retry prompt literally lists the open
+	// rows it complains about — command and headline identifiers
+	// included. Feeding it to the selector must not bind: the
+	// once-per-turn cache keeps retry text away, and this guard
+	// keeps the selector honest against future callers (#249).
+	failures := []cmdlog.Failure{
+		{Signature: "go test ./decoy@.", Cmd: "go test ./decoy", CWD: ".",
+			Headline: "--- FAIL: TestValue", LastSeen: time.Now()},
+	}
+	selected, decisions := selectOpenFailures(reconcileRetryPrompt, failures, ".", 0)
+	require.Empty(t, selected)
+	require.Len(t, decisions, len(failures))
+	for _, d := range decisions {
+		require.False(t, d.Admit)
+		require.Equal(t, failNonUserPrompt, d.Reason)
+		require.Equal(t, settledHarness, d.SettledBy)
+	}
+}

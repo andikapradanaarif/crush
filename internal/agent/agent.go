@@ -341,6 +341,12 @@ type sessionAgent struct {
 	// tolerance stands for the session; a resolve-and-reopen (new
 	// first_seen) flags fresh, and a new session flags fresh.
 	reconcileSeen sync.Map
+	// turnSels is the once-per-user-turn open_failures selection,
+	// session → {RunStamp, verdict}. Repair retries clone the caller
+	// and keep the stamp, so a retry Run reuses the selection the
+	// user prompt produced instead of re-binding its injected retry
+	// text — which literally names the rows it complains about.
+	turnSels *csync.Map[string, turnSelection]
 	// cmdlog is the project command/failure memory. May be nil.
 	cmdlog cmdlog.Service
 	// failureMemory injects the <open_failures> tail — cmdlog's
@@ -393,6 +399,12 @@ type sessionAgent struct {
 	// SessionTelemetry — the ephemeral tail's only durable trace.
 	// Shared across agent rebuilds. Nil allocates its own.
 	tailAudit *csync.Map[string, TailAudit]
+	// tailRuns is the per-session audit history — every Run's
+	// rendered tail in order, so a turn's repair-chain renders stay
+	// individually inspectable instead of last-write-wins (#249).
+	// Agent-local like reconcileSeen: a rebuild loses the history,
+	// not the tail the telemetry reads.
+	tailRuns *csync.Map[string, []TailAudit]
 	// detachedWork tracks spawned detached goroutines (segment,
 	// checkpoint, and digest generation, flagging, title) so a
 	// short-lived process can join them before exiting instead of
@@ -667,6 +679,8 @@ func NewSessionAgent(
 		reqStats:               cmp.Or(opts.RequestStats, csync.NewMap[string, requestStats]()),
 		usageLedger:            cmp.Or(opts.UsageLedger, csync.NewMap[string, ledgerUsage]()),
 		tailAudit:              cmp.Or(opts.TailAudit, csync.NewMap[string, TailAudit]()),
+		turnSels:               csync.NewMap[string, turnSelection](),
+		tailRuns:               csync.NewMap[string, []TailAudit](),
 		detachedWork:           cmp.Or(opts.DetachedWork, &sync.WaitGroup{}),
 		hydrateFetch:           notebook.FetchHydrationMemories,
 	}

@@ -153,23 +153,51 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		holdout = a.memoryTelemetry.holdoutOff(call.SessionID)
 	}
 	if a.failureMemory && a.cmdlog != nil && !a.isSubAgent {
-		var f []cmdlog.Failure
-		f, fetchErr = a.cmdlog.ListOpenFailures(ctx, turnContextOpenFailuresFetchLimit)
-		if fetchErr == nil {
-			var workDir string
-			if a.configStore != nil {
-				workDir = a.configStore.WorkingDir()
+		var selected []cmdlog.Failure
+		// Selection is once per user turn, keyed on RunStamp: repair
+		// retries keep the stamp but their call.Prompt is the retry
+		// text — which literally names the open rows — so re-binding
+		// it would admit every failure the edge is complaining about.
+		var cached *turnSelection
+		if a.turnSels != nil && call.RunStamp != 0 {
+			if sel, ok := a.turnSels.Get(call.SessionID); ok && sel.stamp == call.RunStamp {
+				cached = &sel
 			}
-			var selected []cmdlog.Failure
-			selected, failureDecisions = selectOpenFailures(call.Prompt, f, workDir,
-				turnContextOpenFailuresRenderLimit)
-			failureCandidates = f
-			if !holdout {
-				openFailures = selected
+		}
+		switch {
+		case cached != nil:
+			selected, failureDecisions, failureCandidates = cached.selected, cached.decisions, cached.candidates
+		default:
+			var f []cmdlog.Failure
+			f, fetchErr = a.cmdlog.ListOpenFailures(ctx, turnContextOpenFailuresFetchLimit)
+			if fetchErr == nil {
+				var workDir string
+				if a.configStore != nil {
+					workDir = a.configStore.WorkingDir()
+				}
+				selPrompt := call.Prompt
+				if call.RepairAttempts > 0 {
+					// A retry that missed the cache (agent rebuilt
+					// mid-chain) has no user prompt to bind — fail
+					// closed rather than mine harness retry text.
+					selPrompt = ""
+				}
+				selected, failureDecisions = selectOpenFailures(selPrompt, f, workDir,
+					turnContextOpenFailuresRenderLimit)
+				failureCandidates = f
+				if a.turnSels != nil && call.RunStamp != 0 {
+					a.turnSels.Set(call.SessionID, turnSelection{
+						stamp: call.RunStamp, selected: selected,
+						candidates: f, decisions: failureDecisions,
+					})
+				}
+			} else {
+				slog.Debug("Open-failure fetch failed; tail renders without memory",
+					"session_id", call.SessionID, "error", fetchErr)
 			}
-		} else {
-			slog.Debug("Open-failure fetch failed; tail renders without memory",
-				"session_id", call.SessionID, "error", fetchErr)
+		}
+		if !holdout {
+			openFailures = selected
 		}
 	}
 	sections := a.turnContextSections(ctx, call, openFailures)
@@ -188,9 +216,12 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		// predicate checkable. An unarmed agent still clears a stale
 		// audit from an earlier Run in the same process.
 		if a.tailArmed() {
-			a.recordTailAudit(call.SessionID, nil, "", failureDecisions, fetchErr)
+			a.recordTailAudit(call, nil, "", failureDecisions, fetchErr)
 		} else if a.tailAudit != nil {
 			a.tailAudit.Del(call.SessionID)
+			if a.tailRuns != nil {
+				a.tailRuns.Del(call.SessionID)
+			}
 		}
 		return nil
 	}
@@ -200,8 +231,16 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		"sections", len(sections),
 		"bytes", len(text),
 	)
-	a.recordTailAudit(call.SessionID, sections, text, failureDecisions, fetchErr)
+	a.recordTailAudit(call, sections, text, failureDecisions, fetchErr)
 	return []fantasy.Message{fantasy.NewUserMessage(text)}
+}
+
+// turnSelection caches one user turn's open_failures selection.
+type turnSelection struct {
+	stamp      uint64
+	selected   []cmdlog.Failure
+	candidates []cmdlog.Failure
+	decisions  []FailureDecision
 }
 
 // tailArmed reports whether any tail producer is enabled on this
@@ -249,6 +288,12 @@ type TailAudit struct {
 	// empty Decisions then mean "couldn't evaluate", which an eval
 	// must not read as "evaluated, none bound".
 	FetchError string `json:"fetch_error,omitempty"`
+	// RunStamp and RepairAttempts attribute the audit to the Run
+	// that rendered it. Repair retries share the user turn's stamp
+	// and count attempts, so tailRuns can decompose a turn's
+	// renders instead of flattening them (#249).
+	RunStamp       uint64 `json:"run_stamp"`
+	RepairAttempts int    `json:"repair_attempts"`
 }
 
 var tailSectionNameRe = regexp.MustCompile(`^<(\w+)>`)
@@ -263,18 +308,21 @@ func tailSectionName(s string) string {
 }
 
 // recordTailAudit snapshots the rendered tail for SessionTelemetry.
-// Last-write-wins per session: a process's later Run replaces the
-// audit, matching the telemetry emission's once-per-process shape.
-func (a *sessionAgent) recordTailAudit(sessionID string, sections []string, text string, decisions []FailureDecision, fetchErr error) {
-	if a.tailAudit == nil || sessionID == "" {
+// tailAudit is last-write-wins per session — the telemetry reads the
+// latest render — while tailRuns keeps every Run's audit so a
+// turn's repair-chain renders stay individually inspectable (#249).
+func (a *sessionAgent) recordTailAudit(call SessionAgentCall, sections []string, text string, decisions []FailureDecision, fetchErr error) {
+	if a.tailAudit == nil || call.SessionID == "" {
 		return
 	}
 	sum := sha256.Sum256([]byte(text))
 	audit := TailAudit{
-		Bytes:     len(text),
-		SHA256:    hex.EncodeToString(sum[:]),
-		Text:      text,
-		Decisions: decisions,
+		Bytes:          len(text),
+		SHA256:         hex.EncodeToString(sum[:]),
+		Text:           text,
+		Decisions:      decisions,
+		RunStamp:       call.RunStamp,
+		RepairAttempts: call.RepairAttempts,
 	}
 	if fetchErr != nil {
 		audit.FetchError = fetchErr.Error()
@@ -282,8 +330,22 @@ func (a *sessionAgent) recordTailAudit(sessionID string, sections []string, text
 	for _, s := range sections {
 		audit.Sections = append(audit.Sections, TailSection{Name: tailSectionName(s), Bytes: len(s)})
 	}
-	a.tailAudit.Set(sessionID, audit)
+	a.tailAudit.Set(call.SessionID, audit)
+	if a.tailRuns != nil {
+		a.tailRuns.Update(call.SessionID, func(v *[]TailAudit) {
+			*v = append(*v, audit)
+			if len(*v) > tailRunsHistoryMax {
+				*v = (*v)[len(*v)-tailRunsHistoryMax:]
+			}
+		})
+	}
 }
+
+// tailRunsHistoryMax bounds the per-session audit history — a turn's
+// repair chain is bounded by the repair budget, so a generous cap
+// still keeps long TUI sessions from accumulating unbounded tail
+// text.
+const tailRunsHistoryMax = 128
 
 // turnContextBlob renders the tail context sections joined for
 // display and tests. The tail and its audit need the per-envelope

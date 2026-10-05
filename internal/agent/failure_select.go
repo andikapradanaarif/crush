@@ -52,6 +52,11 @@ const (
 	failNarrowScope  = "narrow_scope"  // subpath-bound candidate under an ambiguous prompt
 	failPathGone     = "path_gone"     // every implicated path is absent from the workdir
 	failStaleSuspect = "stale_suspect" // an implicated path changed after last_seen
+	// failNonUserPrompt marks candidates rejected because the prompt
+	// was harness-authored retry text, not user intent — the
+	// reconcile edge's prompt literally lists open rows, so binding
+	// it would admit the very failures it complains about (#249).
+	failNonUserPrompt = "non_user_prompt"
 	// failLangUnsupported is referent_none when the prompt carries
 	// letters the English lexicon cannot parse — a coverage hole, not
 	// a clean "no referent". Keeping it a distinct reason makes the
@@ -80,6 +85,10 @@ const (
 	settledIdentifier = "identifier"
 	settledLexicon    = "lexicon"
 	settledState      = "state"
+	// settledHarness marks verdicts the run-boundary guard settled —
+	// the prompt itself was judged non-user text before any layer
+	// ran, so no binding layer owns the reason.
+	settledHarness = "harness"
 )
 
 // verificationKinds are the command kinds a failure referent can
@@ -1218,6 +1227,20 @@ func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string
 	renderLimit int) ([]cmdlog.Failure, []FailureDecision) {
 	if len(failures) == 0 {
 		return nil, nil
+	}
+	if strings.Contains(prompt, reconcileRetryPrefix) {
+		// The reconcile edge's retry prompt names the rows it flags.
+		// The once-per-turn cache in turnTailMessages keeps retry
+		// text away from selection; this guard keeps the selector
+		// honest if a future caller ever hands it harness text.
+		ds := make([]FailureDecision, 0, len(failures))
+		for _, f := range failures {
+			ds = append(ds, FailureDecision{
+				Signature: f.Signature, Cmd: f.Cmd,
+				Reason: failNonUserPrompt, SettledBy: settledHarness,
+			})
+		}
+		return nil, ds
 	}
 	if renderLimit <= 0 {
 		renderLimit = len(failures)
