@@ -254,9 +254,23 @@ blind search.
    `touch main_test.go` — mtime only, the seeded agent never opens
    the file — keeping the row genuinely stale for `anyPathNewer`
    while the bug stays out of view; cell restored to the powered
-   manifest, seedability to be confirmed on the next reject read). Re-derived view committed at
+   manifest, seedability to be confirmed on the next reject read).
+   Re-derived view committed at
    `eval/experiments/failure-memory-mask-reject-powered.json`
    (provenance: post-hoc, no run-time snapshot).
+   **Reject rerun (10-06, invocation `20261005T141152Z-7491`)** —
+   first powered read with L1 live: gate **FAIL**. Stalefile
+   seedability disconfirmed — 0/22 treatment runs seeded; the powered
+   seed agent opens the implicated file, refreshing `last_seen` past
+   the touch mtime (`row_older_than_touch: false`). `touch` removed
+   the incentive to look, not the behavior. All three stale-file-seed
+   cells reject at `seed_check`; the other cells starve on the
+   coverage gate. Eligible-subset guardrails also breach: treatment
+   pass 47/54 vs control 99/99, prompt tokens +69%. Next: fixture
+   redesign (seed the row without an inspectable file) or #244
+   `files_viewed` scoring before the reject corpus can certify L1.
+   Full writeup:
+   `docs/milestones/2026-10-06-exp-failure-memory-mask-reject-rerun.md`.
 6. **Reconciliation edge (#218)** — implemented; eval read recorded
    (10-05, invocation `20261005T115552Z`,
    `eval/experiments/failure-memory-reconcile.json`):
@@ -268,7 +282,10 @@ blind search.
 7. **Layered resolver (#216)** — L1 identifier layer + offline
    binding benchmark landed (`failure_binding.jsonl`,
    `settled_by`/`lang_unsupported` observability); L3 only if the
-   benchmark shows measurable recall unclaimed.
+   benchmark shows measurable recall unclaimed. First powered
+   exercise (10-06 reject rerun) is unreadable — the corpus starved
+   before L1's reject-side effect could be measured; rerun needed
+   after the stale-file seed fix (step 5).
 8. **#222 capacity → #220 provenance (+`project_key`/`param_version`)
    → #221 → #228 params substrate → #223 ladders.**
 9. **#224 sealed pool + #225 qwen + #226 SWE-bench + #227
