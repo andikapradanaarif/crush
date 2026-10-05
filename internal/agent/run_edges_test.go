@@ -858,7 +858,7 @@ func TestStallReplanHandoff(t *testing.T) {
 		require.True(t, queued)
 		q, _ := a.messageQueue.Get(sessionID)
 		require.Contains(t, q[0].Prompt, "Files written before the stall:")
-		require.Contains(t, q[0].Prompt, "internal/x.go")
+		require.Contains(t, q[0].Prompt, filepath.Join("internal", "x.go"))
 	})
 
 	t.Run("no writes renders no write set section", func(t *testing.T) {
@@ -962,7 +962,10 @@ func TestStallReplanHandoffCheckpoint(t *testing.T) {
 func TestRelTouchedDirs(t *testing.T) {
 	t.Parallel()
 
-	wd := "/repo"
+	// Real temp dirs keep the absoluteness checks platform-correct —
+	// a literal "/repo" is not filepath.IsAbs on Windows.
+	wd := t.TempDir()
+	outside := t.TempDir()
 	mk := func(tool, input string) fantasy.StepResult {
 		id := fmt.Sprintf("tc-%s", tool)
 		return stepWith(fantasy.FinishReasonToolCalls,
@@ -974,9 +977,9 @@ func TestRelTouchedDirs(t *testing.T) {
 		)
 	}
 	dirs := relTouchedDirs(wd, []fantasy.StepResult{
-		mk("edit", `{"file_path":"/repo/internal/x.go"}`),
+		mk("edit", fmt.Sprintf(`{"file_path":%q}`, filepath.Join(wd, "internal", "x.go"))),
 		mk("view", `{"file_path":"pkg/y.go"}`),
-		mk("view", `{"file_path":"/etc/passwd"}`),
+		mk("view", fmt.Sprintf(`{"file_path":%q}`, filepath.Join(outside, "passwd"))),
 		mk("bash", `{"command":"ls"}`),
 	})
 	require.Equal(t, []string{"internal", "pkg"}, dirs,
