@@ -16,6 +16,6 @@
 		"timeout_seconds": 300
 	},
 	"coverage": {"min_steps": 1, "min_warm_start.sessions": 1},
-	"requires": {"tools": ["go"]},
+	"requires": {"tools": ["go", "sqlite3"]},
 	"budget": {"run_timeout_seconds": 300, "max_steps": 15}
 }

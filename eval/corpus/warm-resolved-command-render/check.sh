@@ -6,7 +6,10 @@
 # command_memory reaching the tail — are arm coverage on the
 # experiment, not this script's job.
 cd "$EVAL_WORKDIR"
-if ! grep -qE 'func Reply' reply.go 2>/dev/null || [ ! -f reply_test.go ]; then
+# The test must ASSERT "ok", not merely exist — a placebo
+# `func TestReply(t *testing.T) {}` is the failure mode the
+# assertion's content pins against.
+if ! grep -qE 'func Reply' reply.go 2>/dev/null || [ ! -f reply_test.go ] || ! grep -q '"ok"' reply_test.go; then
 	echo "EVAL_JSON {\"named_work\":\"missing\"}"
 	exit 1
 fi

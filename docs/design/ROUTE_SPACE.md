@@ -127,6 +127,10 @@ they carry no headline or file hints, so the state checks
 (path_gone, stale_suspect) cannot fire on them, and their mention
 vocabulary is the command text itself.
 
+Downstream consumers read admitted rows across all three pools —
+the ambiguity gate's "memory resolved the referent" suppression
+counts any bound row, not only open warnings.
+
 ## Route space 2 — eval lifecycle (live)
 
 `internal/eval/runner.go` — fixed positions; **order is semantics**:
