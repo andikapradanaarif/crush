@@ -475,11 +475,11 @@ func (c *coordinator) watchSessionDeletions() {
 		if c.edgeStats != nil {
 			c.edgeStats.Del(ev.Payload.ID)
 		}
-		// reconcileSeen lives on the agent, not the coordinator —
-		// sweep every built agent's suppression marks.
+		// The agent's session-local caches live on the agent, not
+		// the coordinator — sweep every built agent.
 		for _, agent := range c.agents {
 			if sa, ok := agent.(*sessionAgent); ok {
-				sa.forgetReconcileSession(ev.Payload.ID)
+				sa.forgetSessionState(ev.Payload.ID)
 			}
 		}
 		// The DB cascade removes the rows; ForgetSession drops the

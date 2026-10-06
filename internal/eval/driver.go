@@ -64,6 +64,11 @@ type RunResult struct {
 	// rendered context envelopes with sizes, digest, and text, Turn
 	// stamped at fold time. Absent on turns where no tail rendered.
 	Tail []TurnTail
+	// TailRuns is the trajectory-wide per-Run tail audit history —
+	// every tail each turn's process rendered, Turn and Run
+	// attributed, so a turn's repair-chain renders stay
+	// individually inspectable (#249).
+	TailRuns []TurnTail
 	// Pressure carries the pressure gate's trajectory-wide state —
 	// summed engage transitions and the last turn's latch and
 	// estimate.
@@ -204,6 +209,10 @@ type runTelemetry struct {
 	// envelopes the model saw. Pointer-gated: nil when no tail
 	// rendered, so "no tail" doesn't alias "telemetry missing".
 	Tail *TurnTail `json:"tail,omitempty"`
+	// TailRuns is the process's per-Run tail audit history — every
+	// rendered tail in order, attributed by run_stamp and
+	// repair_attempts (#249).
+	TailRuns []TurnTail `json:"tail_runs,omitempty"`
 	// EdgeFirings splits run-boundary edge firing counts by edge and
 	// outcome — the per-turn delta of the session's edge_firings rows
 	// this process recorded (repair retries share the process).
@@ -397,6 +406,10 @@ func (res *RunResult) addTurnTelemetry(tel runTelemetry, turn int) {
 		t := *tel.Tail
 		t.Turn = turn
 		res.Tail = append(res.Tail, t)
+	}
+	for _, tr := range tel.TailRuns {
+		tr.Turn = turn
+		res.TailRuns = append(res.TailRuns, tr)
 	}
 	res.GeneratorTokens.Calls += tel.GeneratorTokens.Calls
 	res.GeneratorTokens.Input += tel.GeneratorTokens.Input

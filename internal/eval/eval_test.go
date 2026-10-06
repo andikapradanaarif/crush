@@ -564,6 +564,20 @@ func TestArmCoverage_TailDecisions(t *testing.T) {
 	_, err = ArmCoverageMet(Coverage{"min_tail.decisions.settled.bogus": 1}, rec)
 	require.Error(t, err)
 
+	// The boundary-guard pair is registered so a reconcile-enabled
+	// manifest can assert the tripwire: zero non_user_prompt means
+	// no harness-authored text reached the selector.
+	_, err = ArmCoverageMet(Coverage{"max_tail.decisions.reasons.non_user_prompt": 0}, rec)
+	require.NoError(t, err)
+	met, err = ArmCoverageMet(Coverage{"min_tail.decisions.settled.harness": 1}, rec)
+	require.NoError(t, err)
+	require.False(t, met)
+	rec.Tail[0].Decisions = append(rec.Tail[0].Decisions,
+		FailureDecision{Signature: "h1", Cmd: "go test .", Admit: false, Reason: "non_user_prompt", SettledBy: "harness"})
+	met, err = ArmCoverageMet(Coverage{"min_tail.decisions.settled.harness": 1}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+
 	// An audited-empty decision list satisfies max_ abstention —
 	// "evaluated, none bound" is evidence, not silence.
 	rec = &RunRecord{Tail: []TurnTail{{Turn: 0, Decisions: []FailureDecision{

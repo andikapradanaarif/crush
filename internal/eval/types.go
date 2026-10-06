@@ -353,6 +353,13 @@ type RunRecord struct {
 	// this record it is unobservable after the run. Informational
 	// only; never a predicate.
 	Tail []TurnTail `json:"tail,omitempty"`
+	// TailRuns is the per-Run tail audit history — every render in
+	// the session's retry chain, stamped with run_stamp and
+	// repair_attempts. Tail is last-write-wins per turn; this field
+	// is what makes a retry chain auditable — whether each retry
+	// actually rendered the turn's cached verdicts. Informational
+	// only; never a predicate.
+	TailRuns []TurnTail `json:"tail_runs,omitempty"`
 	// GeneratorTokens accounts the sidecar LLM calls that produced
 	// notebook entries — generation spend invisible in Tokens. Absent
 	// on arms where the notebook never generated.
@@ -431,6 +438,11 @@ type TurnTail struct {
 	// open-failure read itself failed, so an empty Decisions reads
 	// "couldn't evaluate" rather than "evaluated, none bound".
 	FetchError string `json:"fetch_error,omitempty"`
+	// RunStamp and RepairAttempts mirror TailAudit's Run attribution —
+	// which Run of the session rendered this audit, so tail_runs can
+	// decompose a turn's repair-chain renders (#249).
+	RunStamp       uint64 `json:"run_stamp,omitempty"`
+	RepairAttempts int    `json:"repair_attempts,omitempty"`
 }
 
 // FailureDecision is the eval-side mirror of agent.FailureDecision:
