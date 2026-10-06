@@ -196,7 +196,7 @@ blind search.
 
 | Work | Detail |
 |---|---|
-| **Capacity fix (#222)** | render `command_memory` + keep resolved-failure knowledge — else the ladder measures the cap |
+| **Capacity fix (#222)** | render `command_memory` + keep resolved-failure knowledge — else the ladder measures the cap. Implemented + smoke PASS; full rationale in `2026-10-07-exp-failure-memory-render-capacity.md` |
 | **Depth + distractor ladders + LOO ablation (#223)** | depth 0/1/2/4 relevant experience (quirk randomized per stage); distractors 0/5/20 (wrong-target actions, injected-row precision, abstention); all-K vs K−1 marginal value |
 | **#108 snapshot replay (narrow)** | settled snapshot → next task under alternative memory selections |
 | **#117 staged** | deterministic reconstruction → persistence pilot → powered interaction only if material |
