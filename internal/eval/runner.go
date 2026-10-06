@@ -267,7 +267,12 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	defer os.RemoveAll(workdir)
 	defer os.RemoveAll(DataDirFor(workdir))
 
-	if err := WriteArmConfig(workdir, exp, arm, manifest); err != nil {
+	// Seeds run under the fixed neutral config, not the arm's — arm
+	// options active during seeding (a reconcile edge nudging the
+	// seed agent, a tail injecting memory) make the arms' starting
+	// states differ before measurement begins. WriteArmConfig lands
+	// the arm delta only on the measured session below.
+	if err := WriteSeedConfig(workdir, exp, manifest); err != nil {
 		rec.Outcome = OutcomeError
 		rec.CheckDetail = map[string]any{"harness": err.Error()}
 		return rec, nil
@@ -285,10 +290,14 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	// measured session's starting state. A seed that errors or times
 	// out leaves a warm state other than the designed one — classify
 	// error rather than measure a degraded seeding.
+	//
+	// lastSeed/lastSeedTurns outlive the seed loop: a WriteArmConfig
+	// rejection after seeding is usually a seed agent's workdir
+	// mutation, and the preserved db needs seed-session identity.
+	var lastSeed RunResult
+	var lastSeedTurns []string
 	if len(traj.PriorSessions) > 0 {
 		warm := &WarmStart{}
-		var lastSeed RunResult
-		var lastSeedTurns []string
 		for i, ps := range traj.PriorSessions {
 			seedStart := r.now()
 			seed := drv.Run(ctx, workdir, ps.Turns, traj.Budget)
@@ -365,6 +374,20 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 				return rec, nil
 			}
 		}
+	}
+	// The measured session is where the arm's flag delta belongs.
+	if err := WriteArmConfig(workdir, exp, arm, manifest); err != nil {
+		// A rejection here is usually a seed session's workdir
+		// mutation — the record's WarmStart already promises seed
+		// session ids, so snapshot the db like the other
+		// post-seed failure paths do.
+		if len(traj.PriorSessions) > 0 {
+			rec.DurationS = r.now().Sub(rec.StartedAt).Seconds()
+			r.preserveArtifacts(ctx, &rec, exp.Name, traj.ID, armName, inv, attempt, workdir, lastSeed.SessionID, lastSeedTurns)
+		}
+		rec.Outcome = OutcomeError
+		rec.CheckDetail = map[string]any{"harness": err.Error()}
+		return rec, nil
 	}
 	res := drv.Run(ctx, workdir, traj.Task.Turns, traj.Budget)
 	rec.DurationS = r.now().Sub(rec.StartedAt).Seconds()

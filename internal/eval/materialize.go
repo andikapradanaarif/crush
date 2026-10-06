@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -203,10 +204,24 @@ func ApplyPatch(ctx context.Context, workdir, patchPath string) error {
 // with the arm options winning; crush.json is lower precedence than
 // .crush.json outright, so it never shadows.
 func WriteArmConfig(workdir string, exp *Experiment, arm Arm, manifest *FlagsManifest) error {
-	for _, name := range []string{".crushrc", "crushrc"} {
-		if fileExists(filepath.Join(workdir, name)) {
-			return fmt.Errorf("workdir already carries %s — a shell config shadows the .crush.json arm; fixtures must not ship crush shell config", name)
-		}
+	return writeRunConfig(workdir, exp, arm.Config.Options, manifest)
+}
+
+// WriteSeedConfig drops the fixed seed-time config into the workdir:
+// the shared .crushrc model pin plus the .crush.json harness
+// invariants, with NO arm options. prior_sessions must seed the same
+// starting state in every arm — an arm flag active during seeding
+// (e.g. failure_memory's reconcile edge nudging the seed agent) makes
+// arms differ before measurement begins. The memory write path is
+// unconditional, so seeds still produce cmdlog/failure rows. The
+// measured run's WriteArmConfig merges arm options over this file.
+func WriteSeedConfig(workdir string, exp *Experiment, manifest *FlagsManifest) error {
+	return writeRunConfig(workdir, exp, nil, manifest)
+}
+
+func writeRunConfig(workdir string, exp *Experiment, armOptions map[string]any, manifest *FlagsManifest) error {
+	if fileExists(filepath.Join(workdir, "crushrc")) {
+		return fmt.Errorf("workdir already carries crushrc — a shell config shadows the .crush.json arm; neither the fixture nor a seed session may ship crush shell config")
 	}
 
 	// .crushrc: model pin identical for every arm — options-only
@@ -219,7 +234,15 @@ func WriteArmConfig(workdir string, exp *Experiment, arm Arm, manifest *FlagsMan
 		}
 		rc.WriteString("\n")
 	}
-	if err := os.WriteFile(filepath.Join(workdir, ".crushrc"), []byte(rc.String()), 0o644); err != nil {
+	// A .crushrc is still a shell-config shadow — but the seed/arm
+	// writes are two passes of this same function, so an existing file
+	// carrying the identical pin is our own earlier write, not a
+	// fixture's. Any other content is the fixture trap.
+	rcPath := filepath.Join(workdir, ".crushrc")
+	if prev, err := os.ReadFile(rcPath); err == nil && string(prev) != rc.String() {
+		return fmt.Errorf("workdir already carries .crushrc — a shell config shadows the .crush.json arm; neither the fixture nor a seed session may ship crush shell config")
+	}
+	if err := os.WriteFile(rcPath, []byte(rc.String()), 0o644); err != nil {
 		return fmt.Errorf("write .crushrc: %w", err)
 	}
 
@@ -232,7 +255,7 @@ func WriteArmConfig(workdir string, exp *Experiment, arm Arm, manifest *FlagsMan
 		// it: check.sh sees the tree exactly as the agent left it.
 		"data_directory": DataDirFor(workdir),
 	}
-	for k, v := range arm.Config.Options {
+	for k, v := range armOptions {
 		// Harness invariants an arm must not override — data dir
 		// relocation breaks telemetry/session-DB paths and litters
 		// the tree checks observe; metrics/auto-update re-enable
@@ -258,7 +281,7 @@ func WriteArmConfig(workdir string, exp *Experiment, arm Arm, manifest *FlagsMan
 			// A corrupt fixture config must not be silently clobbered.
 			return fmt.Errorf("existing .crush.json does not parse: %w", err)
 		}
-		if err := rejectFixtureProviderKeys(existing, ".crush.json"); err != nil {
+		if err := rejectDivergentProviderKeys(existing, exp, ".crush.json"); err != nil {
 			return err
 		}
 		if opts, ok := existing["options"].(map[string]any); ok {
@@ -267,7 +290,7 @@ func WriteArmConfig(workdir string, exp *Experiment, arm Arm, manifest *FlagsMan
 			// lands in a cell the gate never reads.
 			for k := range opts {
 				if _, declared := manifest.Defaults[k]; declared {
-					return fmt.Errorf("existing .crush.json sets manifest flag %q — the fixture would pin a flag under test; remove it or drop the flag from flags.json", k)
+					return fmt.Errorf("existing .crush.json sets manifest flag %q — the workdir pins a flag under test (fixture start-state or a seed-session write); remove it or drop the flag from flags.json", k)
 				}
 			}
 			for k, v := range options {
@@ -306,7 +329,7 @@ func WriteArmConfig(workdir string, exp *Experiment, arm Arm, manifest *FlagsMan
 		if opts, ok := existing["options"].(map[string]any); ok {
 			for k := range opts {
 				if _, declared := manifest.Defaults[k]; declared {
-					return fmt.Errorf("existing crush.json sets manifest flag %q — the fixture would pin a flag under test; remove it or drop the flag from flags.json", k)
+					return fmt.Errorf("existing crush.json sets manifest flag %q — the workdir pins a flag under test (fixture start-state or a seed-session write); remove it or drop the flag from flags.json", k)
 				}
 			}
 		}
@@ -323,16 +346,49 @@ func WriteArmConfig(workdir string, exp *Experiment, arm Arm, manifest *FlagsMan
 
 // rejectFixtureProviderKeys enforces the ownership invariant the eval
 // preflight depends on: providers and credentials live on the
-// experiment, never the fixture. Preflight can't see fixture config, so
-// a fixture-declared provider would resolve in the child but be
-// invisible to the parent check — and fixture options like
-// disable_default_providers diverge the same way.
+// experiment, never the workdir. Preflight can't see workdir config,
+// so a workdir-declared provider would resolve in the child but be
+// invisible to the parent check — and options like
+// disable_default_providers diverge the same way. "Workdir" covers
+// both fixture start-state and seed-session writes: prior sessions
+// run in the same directory and can mutate these files.
 func rejectFixtureProviderKeys(existing map[string]any, name string) error {
 	for _, k := range []string{"providers", "env"} {
 		if _, ok := existing[k]; ok {
-			return fmt.Errorf("existing %s sets %q — providers and env belong on the experiment, not the fixture", name, k)
+			return fmt.Errorf("existing %s sets %q — providers and env belong on the experiment, not the workdir (fixture start-state or a seed-session write)", name, k)
 		}
 	}
+	return rejectFixtureProviderVisibility(existing, name)
+}
+
+// rejectDivergentProviderKeys applies the same invariant to
+// .crush.json with one carve-out: the arm pass re-reads the seed
+// pass's own write, so an existing providers block identical to the
+// experiment's declaration is harness content, not fixture content.
+// env and disable_default_providers are never harness-written — any
+// presence stays a rejection.
+func rejectDivergentProviderKeys(existing map[string]any, exp *Experiment, name string) error {
+	if v, ok := existing["providers"]; ok {
+		// Byte-compare via marshal: both sides decode to map[string]any
+		// and Marshal sorts keys, so semantically equal blocks compare
+		// equal. A fixture could only produce an identical block by
+		// copying the experiment's own declaration — which resolves
+		// identically anyway.
+		want, _ := json.Marshal(exp.Providers)
+		got, _ := json.Marshal(v)
+		if !bytes.Equal(got, want) {
+			return fmt.Errorf("existing %s sets %q — providers and env belong on the experiment, not the workdir (fixture start-state or a seed-session write)", name, "providers")
+		}
+	}
+	if _, ok := existing["env"]; ok {
+		return fmt.Errorf("existing %s sets %q — providers and env belong on the experiment, not the workdir (fixture start-state or a seed-session write)", name, "env")
+	}
+	return rejectFixtureProviderVisibility(existing, name)
+}
+
+// rejectFixtureProviderVisibility is the options half of the
+// provider-ownership check, shared by both file variants.
+func rejectFixtureProviderVisibility(existing map[string]any, name string) error {
 	if opts, ok := existing["options"].(map[string]any); ok {
 		if _, ok := opts["disable_default_providers"]; ok {
 			return fmt.Errorf("existing %s sets \"disable_default_providers\" — provider visibility belongs to the experiment", name)
