@@ -355,6 +355,36 @@ func TestClientWorkspaceListMCPPromptsServerError(t *testing.T) {
 	require.Contains(t, err.Error(), "status code 500")
 }
 
+// TestClientWorkspace_MCPGetStatesTimeout pins the probe deadline: a hung
+// server must not wedge MCPGetStates (and with it the UI's in-flight
+// refresh flag, freezing every later MCP refresh) forever. The fetch gives
+// up at mcpStatesTimeout and reports nil states.
+func TestClientWorkspace_MCPGetStatesTimeout(t *testing.T) {
+	t.Parallel()
+
+	// The handler never answers; it unblocks when the client's deadline
+	// cancels the request.
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	orig := mcpStatesTimeout
+	mcpStatesTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { mcpStatesTimeout = orig })
+
+	u, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+	c, err := client.NewClient(t.TempDir(), "tcp", u.Host)
+	require.NoError(t, err)
+	workspace := NewClientWorkspace(c, proto.Workspace{ID: "ws-1"})
+
+	start := time.Now()
+	require.Nil(t, workspace.MCPGetStates())
+	require.Less(t, time.Since(start), 5*time.Second,
+		"the probe must give up at its deadline instead of hanging")
+}
+
 // TestClientWorkspace_ReconnectsOnStreamDrop verifies that the event
 // subscription loop reconnects after the SSE stream drops instead of
 // leaving the TUI permanently orphaned (which surfaced as a stuck
