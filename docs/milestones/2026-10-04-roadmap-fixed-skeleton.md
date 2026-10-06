@@ -295,11 +295,18 @@ blind search.
    `reconcile.gated` 3/3, treatment `reconcile.fired` + `suppressed`
    per open epoch 3/3. Machinery/firing check at n=3/3, no primary
    metric; informational deltas were +14% prompt tokens and higher
-   discovery (4.3 vs 2.7 calls/run). Powered benefit read (10-06,
-   `failure-memory-reconcile-powered.json`, #256): edges-off vs
-   edges-on on `reconcile-open-failure` — the edge's fix-forward
-   conversion measured on `check_detail.suite`, steps/increase as
-   the pre-registered exposure signature.
+   discovery (4.3 vs 2.7 calls/run). Powered read (10-06, invocation
+   `20261006T111611Z-c5bc`, `failure-memory-reconcile-powered.json`):
+   gate PASS on the exposure signature — fired 21/21, steps +3.0%,
+   no MDE. The confirmatory conversion read was invalid by design
+   (suite-green on this cell requires disobeying the prompt).
+   Post-hoc: the merged retry's explain-escape held explicit-
+   constraint violations to 0/20 vs 6/20 under the bare verification
+   nudge (exploratory, p=.020 — wording effect, not reconcile
+   judgment). Verification-prompt bug filed as #259. Fix-forward
+   benefit still unmeasured — needs a legitimately-fixable cell,
+   paired with intentional-red. Writeup:
+   `docs/milestones/2026-10-06-exp-failure-memory-reconcile-powered.md`.
 7. **Layered resolver (#216)** — L1 identifier layer + offline
    binding benchmark landed (`failure_binding.jsonl`,
    `settled_by`/`lang_unsupported` observability); L3 only if the
