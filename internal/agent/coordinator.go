@@ -1241,6 +1241,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		CmdLog:                 c.cmdlog,
 		TurnContext:            c.cfg.Config().Options.TurnContextMode(),
 		FailureMemory:          c.cfg.Config().Options.FailureMemoryEnabled(),
+		FailureMemoryEdges:     c.cfg.Config().Options.FailureMemoryEdgesEnabled(),
 		MemoryTelemetry:        memTelemetry,
 		AgentID:                agent.ID,
 		AmbiguityClarification: c.cfg.Config().Options.AmbiguityClarificationEnabled(),

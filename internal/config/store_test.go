@@ -480,7 +480,12 @@ func TestSetConfigField_AutoReloadSkipsWhenNoWorkingDir(t *testing.T) {
 // TestAutoReloadDisabledDuringReload verifies that auto-reload is suppressed
 // during ReloadFromDisk to prevent re-entrant/nested reload calls.
 func TestAutoReloadDisabledDuringReload(t *testing.T) {
-	t.Parallel()
+	// No t.Parallel(): the anthropic OAuth fixture makes Load strip the
+	// provider through RemoveConfigField(ScopeGlobal) — a real write to
+	// GlobalConfigData — so this test redirects the global paths per-test
+	// instead of racing the shared TestMain isolation file (#253).
+	t.Setenv("CRUSH_GLOBAL_CONFIG", t.TempDir())
+	t.Setenv("CRUSH_GLOBAL_DATA", t.TempDir())
 
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "crush.json")
