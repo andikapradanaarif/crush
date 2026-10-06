@@ -164,6 +164,12 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 		if tel.Tail != nil {
 			doc["tail"] = tel.Tail
 		}
+		// The per-Run audit history — the retry chain's individual
+		// renders keyed by run_stamp/repair_attempts, which the
+		// last-write-wins tail field flattens (#249).
+		if len(tel.TailRuns) > 0 {
+			doc["tail_runs"] = tel.TailRuns
+		}
 	}
 	// Edge firings emit as a DELTA, not the cumulative snapshot — the
 	// driver sums per-turn telemetry files, so a process emitting

@@ -103,6 +103,38 @@ func TestEmitEvalTelemetry_LedgerFallback(t *testing.T) {
 	require.Equal(t, float64(7), doc["steps"])
 }
 
+// The per-Run audit history must reach the telemetry file — the
+// coordinator populates TailRuns but the emission stanza was missing,
+// so powered-run records carried `tail` but never `tail_runs` and a
+// retry chain's renders stayed flattened into last-write-wins.
+func TestEmitEvalTelemetry_TailRuns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tel.json")
+	t.Setenv(EvalTelemetryEnvVar, path)
+
+	app := telemetryApp(agent.SessionTelemetry{
+		Tail: &agent.TailAudit{Bytes: 10, RunStamp: 1},
+		TailRuns: []agent.TailAudit{
+			{Bytes: 10, RunStamp: 1},
+			{Bytes: 20, RunStamp: 1, RepairAttempts: 1},
+		},
+	})
+	app.emitEvalTelemetry("sess", nil, nil, 0)
+
+	doc := readTelemetryDoc(t, path)
+	runs, ok := doc["tail_runs"].([]any)
+	require.True(t, ok, "tail_runs missing from telemetry doc")
+	require.Len(t, runs, 2)
+	second, ok := runs[1].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, float64(1), second["repair_attempts"])
+
+	// Absent rather than null when no Runs rendered a tail.
+	path2 := filepath.Join(t.TempDir(), "tel2.json")
+	t.Setenv(EvalTelemetryEnvVar, path2)
+	telemetryApp(agent.SessionTelemetry{}).emitEvalTelemetry("sess", nil, nil, 0)
+	require.NotContains(t, readTelemetryDoc(t, path2), "tail_runs")
+}
+
 func TestClassifyRunError(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
