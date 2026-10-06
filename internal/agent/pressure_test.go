@@ -961,6 +961,10 @@ func TestRun_EnforceContextWindowCap(t *testing.T) {
 		_, err := a.Run(t.Context(), SessionAgentCall{SessionID: sessionID, Prompt: "turn two"})
 		require.ErrorIs(t, err, ErrContextWindowExceeded)
 		require.Empty(t, m.prompts, "the rejected request must never reach the model")
+		// Drain anything the run detached before teardown — a
+		// goroutine still inside the shared connection holds the
+		// data dir open on Windows past db.Release (#253).
+		a.detachedWork.Wait()
 	})
 
 	t.Run("treatment collapses under the cap and completes", func(t *testing.T) {
