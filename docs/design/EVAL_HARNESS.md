@@ -618,6 +618,15 @@ trajectory twice) is strictly worse.
 			"decisions": [{"signature": "9358f5e3380a03df", "cmd": "go test .", "admit": true, "reason": "admit"}]
 		}
 	],
+	"tail_runs": [
+		{
+			"turn": 0, "run_stamp": 3, "repair_attempts": 0,
+			"sections": [{"name": "open_failures", "bytes": 210}],
+			"bytes": 210, "sha256": "abc123...", "text": "<open_failures>...</open_failures>",
+			"decisions": [{"signature": "9358f5e3380a03df", "cmd": "go test .", "admit": true, "reason": "admit"}]
+		},
+		{"turn": 0, "run_stamp": 3, "repair_attempts": 1, "...": "same turn, first retry — decisions replayed from the turn's selection"}
+	],
 	"generator_tokens": {"calls": 12, "input": 41000, "output": 900, "cache_read": 0, "cache_write": 0},
 	"warm_start": {
 		"sessions": 2,

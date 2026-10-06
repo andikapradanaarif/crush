@@ -351,6 +351,13 @@ type RunRecord struct {
 	// this record it is unobservable after the run. Informational
 	// only; never a predicate.
 	Tail []TurnTail `json:"tail,omitempty"`
+	// TailRuns is the per-Run tail audit history — every render in
+	// the session's retry chain, stamped with run_stamp and
+	// repair_attempts. Tail is last-write-wins per turn; this field
+	// is what makes a retry chain auditable — whether each retry
+	// actually rendered the turn's cached verdicts. Informational
+	// only; never a predicate.
+	TailRuns []TurnTail `json:"tail_runs,omitempty"`
 	// GeneratorTokens accounts the sidecar LLM calls that produced
 	// notebook entries — generation spend invisible in Tokens. Absent
 	// on arms where the notebook never generated.
