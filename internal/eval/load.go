@@ -521,6 +521,21 @@ var priorTurnsRecallLive = starvationRule{
 	},
 }
 
+// reconcileGateOff passes when either layer of the reconcile gate —
+// failure_memory itself or the failure_memory_edges sub-flag —
+// resolves off, since gated rows record under either arm shape.
+// Only a both-on arm starves the outcome.
+var reconcileGateOff = starvationRule{
+	"failure_memory=false or failure_memory_edges=false",
+	func(resolve func(string) (any, bool)) bool {
+		fm, fmKnown := resolve("failure_memory")
+		fme, fmeKnown := resolve("failure_memory_edges")
+		fmOn, _ := fm.(bool)
+		fmeOn, _ := fme.(bool)
+		return !(fmKnown && fmOn && fmeKnown && fmeOn)
+	},
+}
+
 // edgeOutcomeTable enumerates the (edge, outcome) pairs the
 // scan/resolve/carrier machinery in run_edges.go can produce — a
 // pair not listed can never appear in edge_firings and starves
@@ -600,6 +615,9 @@ func armStarvationRules(field string) []starvationRule {
 		}
 		switch outcome {
 		case "gated":
+			if name == "reconcile" {
+				return []starvationRule{reconcileGateOff}
+			}
 			return []starvationRule{boolOff(flag)}
 		case "cancelled":
 			// Mid-scan ctx kills are flag-independent.
@@ -608,7 +626,11 @@ func armStarvationRules(field string) []starvationRule {
 			// Flag-off triggers take the gated short-circuit
 			// before resolve/contention — every other outcome
 			// needs the flag on.
-			return []starvationRule{boolOn(flag)}
+			rules := []starvationRule{boolOn(flag)}
+			if name == "reconcile" {
+				rules = append(rules, boolOn("failure_memory_edges"))
+			}
+			return rules
 		}
 	}
 	if strings.HasPrefix(field, "checkpoints.") {
@@ -725,6 +747,10 @@ var flagCodeDefaults = map[string]bool{
 	"ambiguity_clarification":  false,
 	"enforce_context_window":   false,
 	"disable_auto_summarize":   false,
+	// failure_memory_edges defaults on — without this entry an
+	// unnamed flag resolves nil=true (off) and reconcile's firing
+	// rules would wrongly starve arms that omit it.
+	"failure_memory_edges": true,
 }
 
 // ValidateArmCoverageResolved re-runs the starvation check against

@@ -1134,6 +1134,25 @@ func TestValidateExperiment_EdgeFiringsStarvation(t *testing.T) {
 	require.NoError(t, ValidateExperiment(mk(
 		map[string]any{"ambiguity_clarification": true},
 		Coverage{"min_edge_firings.burn-watch.suppressed": 1})))
+
+	// reconcile stacks failure_memory_edges under failure_memory:
+	// firing outcomes need both layers on, while gated rows exist
+	// under either-off — the ablation's signature arm shape.
+	require.Error(t, ValidateExperiment(mk(
+		map[string]any{"failure_memory": true, "failure_memory_edges": false},
+		Coverage{"min_edge_firings.reconcile.fired": 1})))
+	require.NoError(t, ValidateExperiment(mk(
+		map[string]any{"failure_memory": true, "failure_memory_edges": true},
+		Coverage{"min_edge_firings.reconcile.fired": 1})))
+	require.NoError(t, ValidateExperiment(mk(
+		map[string]any{"failure_memory": true, "failure_memory_edges": false},
+		Coverage{"min_edge_firings.reconcile.gated": 1})))
+	require.NoError(t, ValidateExperiment(mk(
+		map[string]any{"failure_memory": false},
+		Coverage{"min_edge_firings.reconcile.gated": 1})))
+	require.Error(t, ValidateExperiment(mk(
+		map[string]any{"failure_memory": true, "failure_memory_edges": true},
+		Coverage{"min_edge_firings.reconcile.gated": 1})))
 }
 
 func TestValidateExperiment_RecallDisabledStarvation(t *testing.T) {

@@ -608,8 +608,9 @@ this-run rows are unresolved at turn end.
   attempt(s)` — the terminal note lands on the final assistant
   message, which is what makes the mask signature visible in
   `crush run` output too.
-- **flag:** `options.failure_memory` gates acting, not measuring —
-  flag-off boundaries still evaluate the join and record `gated`.
+- **flag:** `options.failure_memory` and `options.failure_memory_edges`
+  gate acting, not measuring — a boundary with either off still
+  evaluates the join and records `gated`.
   The telemetry holdout is a stronger gate: a held-out session
   returns no trigger at all, because firing would re-inject the
   suppressed memory signal through the retry prompt and break the
