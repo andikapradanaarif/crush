@@ -296,10 +296,15 @@ blind search.
    per open epoch 3/3. Machinery/firing check at n=3/3, no primary
    metric; informational deltas were +14% prompt tokens and higher
    discovery (4.3 vs 2.7 calls/run). Powered benefit read (10-06,
-   `failure-memory-reconcile-powered.json`, #256): edges-off vs
-   edges-on on `reconcile-open-failure` — the edge's fix-forward
-   conversion measured on `check_detail.suite`, steps/increase as
-   the pre-registered exposure signature.
+   `failure-memory-reconcile-powered.json`, #256, invocation
+   `20261006T111611Z-c5bc`): gate PASS, fired 21/21 — but the
+   conversion read inverted: suite-green on this cell requires
+   disobeying the prompt, and the edge's "explain why it stays
+   open" escape instead held instruction-following 20/20 vs 14/19
+   under the verification nudge. Retry cost on this cell +0.15
+   steps/run. Fix-forward benefit still unmeasured — needs a cell
+   where fixing is the correct action. Writeup:
+   `docs/milestones/2026-10-06-exp-failure-memory-reconcile-powered.md`.
 7. **Layered resolver (#216)** — L1 identifier layer + offline
    binding benchmark landed (`failure_binding.jsonl`,
    `settled_by`/`lang_unsupported` observability); L3 only if the
