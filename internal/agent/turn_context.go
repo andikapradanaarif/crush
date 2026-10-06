@@ -247,6 +247,20 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 			openFailures = selected.open
 			resolvedFailures = selected.resolved
 			commands = selected.commands
+			// Rendered rows become suggestions: a later run of a
+			// command the tail showed is memory-informed, and its
+			// verdict must not feed back as independent evidence.
+			// Held-out turns never saw the rows, so nothing they
+			// run is suggested.
+			for _, f := range selected.open {
+				a.cmdlog.MarkSuggested(call.SessionID, f.Cmd)
+			}
+			for _, f := range selected.resolved {
+				a.cmdlog.MarkSuggested(call.SessionID, f.Cmd)
+			}
+			for _, c := range selected.commands {
+				a.cmdlog.MarkSuggested(call.SessionID, c.CmdNorm)
+			}
 		}
 	}
 	sections := a.turnContextSections(ctx, call, openFailures, resolvedFailures, commands)

@@ -134,6 +134,10 @@ func (failingCmdlog) ListSessionOpenFailures(context.Context, string) ([]cmdlog.
 	return nil, errors.New("cmdlog unavailable")
 }
 
+func (failingCmdlog) MarkSuggested(string, string) {}
+func (failingCmdlog) ProjectKey() string           { return "" }
+func (failingCmdlog) ParamVersion() string         { return "" }
+
 func userMsg(text string) message.Message {
 	return message.Message{
 		Role:  message.User,

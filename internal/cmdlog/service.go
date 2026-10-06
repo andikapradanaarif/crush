@@ -3,6 +3,14 @@
 // and which failures are still open. Project-scoped, not
 // session-scoped — the tables outlive the session that wrote them, so
 // "run the tests" and "fix the failing test" resolve across sessions.
+//
+// Every row carries per-observation provenance (#220): the session and
+// tool call that observed it, the repo state it was true of, whether
+// the action was memory-suggested (the contamination-screen flag), and
+// the partition it belongs to. project_key is the stable repo identity
+// — canonical git common-dir plus normalized remote URL — and reads
+// treat it as an admissibility clause, not a ranking signal: a row
+// from another partition is inadmissible before relevance runs.
 package cmdlog
 
 import (
@@ -13,9 +21,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/crush/internal/db"
@@ -75,12 +85,35 @@ type Service interface {
 	// row another session re-ran more recently drops out of this
 	// session's set even while the row stays open.
 	ListSessionOpenFailures(ctx context.Context, sessionID string) ([]Failure, error)
+
+	// MarkSuggested records that the session was shown cmdNorm in an
+	// injected memory section this turn. A later run of that command
+	// writes suggested=1 — the contamination-screen flag: an action
+	// the memory recommended must not feed back as independent
+	// evidence.
+	MarkSuggested(sessionID, cmdNorm string)
+
+	// ProjectKey is the stable partition identity of the project
+	// this store belongs to — the canonical git common-dir (linked
+	// worktrees fold into the owning repo) plus the normalized
+	// remote URL when one exists, or the workspace path outside a
+	// repository.
+	ProjectKey() string
+
+	// ParamVersion is the learned-params snapshot in force (#228)
+	// stamped on new rows. Empty until the params substrate exists.
+	ParamVersion() string
 }
 
 // Run is one completed command invocation.
 type Run struct {
 	SessionID string
-	Command   string
+	// ToolCallID is the call whose observation carried this verdict
+	// into the ledger — the originating call for synchronous runs,
+	// the polling/killing call for background completions. Empty
+	// where no tool call exists (user `!` commands, shell runs).
+	ToolCallID string
+	Command    string
 	// CWD is the directory the command's output paths resolve
 	// against — the shell's post-run directory, not the launch dir,
 	// so "cd x && go test" keys failures under x.
@@ -116,6 +149,14 @@ type Command struct {
 	OKCount       int64
 	FailCount     int64
 	LastSessionID string
+	// LastToolCallID, RepoState, and Suggested describe the run that
+	// produced the last real verdict — a verdictless run (interrupt,
+	// denial) never re-stamps them.
+	LastToolCallID string
+	RepoState      string
+	Suggested      bool
+	ProjectKey     string
+	ParamVersion   string
 }
 
 // Failure is one failure_memory row: a (command, cwd, headline)
@@ -129,14 +170,33 @@ type Failure struct {
 	FirstSeen  time.Time
 	LastSeen   time.Time
 	ResolvedIn string
+	// SessionID and ToolCallID identify the observation that opened
+	// the row; ResolvedCall names the call that closed it, where
+	// detectable.
+	SessionID    string
+	ToolCallID   string
+	RepoState    string
+	Suggested    bool
+	ProjectKey   string
+	ParamVersion string
+	ResolvedCall string
 }
 
 type service struct {
 	q          *db.Queries
 	workingDir string
+	// projectKey is the partition identity every row reads and
+	// writes under; paramVersion is the learned-params snapshot in
+	// force (#228), empty until the substrate exists.
+	projectKey   string
+	paramVersion string
 	// openFailureTTL is the read-side staleness bound for open
 	// failures; 0 disables the filter.
 	openFailureTTL time.Duration
+	// suggested is the per-session set of commands the model was
+	// shown in injected memory — a run of one writes suggested=1.
+	suggestedMu sync.Mutex
+	suggested   map[string]map[string]struct{}
 }
 
 // NewService creates the command/failure memory service rooted at
@@ -149,7 +209,28 @@ func NewService(q *db.Queries, workingDir string) Service {
 	if abs, err := filepath.Abs(workingDir); err == nil {
 		workingDir = filepathext.Canonical(abs)
 	}
-	return &service{q: q, workingDir: workingDir, openFailureTTL: defaultOpenFailureTTL}
+	s := &service{
+		q:              q,
+		workingDir:     workingDir,
+		openFailureTTL: defaultOpenFailureTTL,
+		projectKey:     computeProjectKey(workingDir),
+		// "pv0" marks rows written before the learned-params
+		// substrate (#228) exists — the unparameterized baseline,
+		// distinguishable from every future snapshot.
+		paramVersion: "pv0",
+		suggested:    map[string]map[string]struct{}{},
+	}
+	// Backfill: pre-provenance rows belong to this store's project,
+	// so empty keys claim into the current partition once.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := q.ClaimMemoryPartition(ctx, s.projectKey); err != nil {
+		slog.Warn("Failed to claim failure-memory partition", "error", err)
+	}
+	if err := q.ClaimCommandPartition(ctx, s.projectKey); err != nil {
+		slog.Warn("Failed to claim command-memory partition", "error", err)
+	}
+	return s
 }
 
 func (s *service) RecordRun(ctx context.Context, run Run) {
@@ -190,15 +271,25 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 	default:
 		fail = 1
 	}
+	suggested := int64(0)
+	if s.wasSuggested(ctx, run.SessionID, cmdNorm) {
+		suggested = 1
+	}
+	repoState := headSHA(ctx, s.workingDir)
 	if err := s.q.UpsertCommandRun(ctx, db.UpsertCommandRunParams{
-		CmdNorm:       cmdNorm,
-		Cwd:           cwd,
-		Kind:          toolclass.CommandKind(command),
-		LastExit:      lastExit,
-		LastAt:        time.Now().UnixMilli(),
-		OkCount:       ok,
-		FailCount:     fail,
-		LastSessionID: run.SessionID,
+		CmdNorm:        cmdNorm,
+		Cwd:            cwd,
+		Kind:           toolclass.CommandKind(command),
+		LastExit:       lastExit,
+		LastAt:         time.Now().UnixMilli(),
+		OkCount:        ok,
+		FailCount:      fail,
+		LastSessionID:  run.SessionID,
+		LastToolCallID: run.ToolCallID,
+		RepoState:      repoState,
+		Suggested:      suggested,
+		ProjectKey:     s.projectKey,
+		ParamVersion:   s.paramVersion,
 	}); err != nil {
 		slog.Error("Error recording command run", "error", err)
 		return
@@ -208,9 +299,11 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 	}
 	if realExit == 0 {
 		if err := s.q.ResolveFailuresForCommand(ctx, db.ResolveFailuresForCommandParams{
-			ResolvedIn: run.SessionID,
-			Cmd:        cmdNorm,
-			Cwd:        cwd,
+			ResolvedIn:   run.SessionID,
+			ResolvedCall: run.ToolCallID,
+			Cmd:          cmdNorm,
+			Cwd:          cwd,
+			ProjectKey:   s.projectKey,
 		}); err != nil {
 			slog.Error("Error resolving failures", "error", err)
 		}
@@ -219,13 +312,19 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 	headline := failureHeadline(run.Stderr, run.Stdout, run.Err)
 	now := time.Now().UnixMilli()
 	if err := s.q.UpsertFailure(ctx, db.UpsertFailureParams{
-		Signature: failureSignature(cmdNorm, cwd, headline),
-		Cmd:       cmdNorm,
-		Cwd:       cwd,
-		Headline:  headline,
-		Files:     s.failureFilesJSON(run.Stderr, run.Stdout, cwd),
-		FirstSeen: now,
-		LastSeen:  now,
+		Signature:    s.failureSignature(cmdNorm, cwd, headline),
+		Cmd:          cmdNorm,
+		Cwd:          cwd,
+		Headline:     headline,
+		Files:        s.failureFilesJSON(run.Stderr, run.Stdout, cwd),
+		FirstSeen:    now,
+		LastSeen:     now,
+		SessionID:    run.SessionID,
+		ToolCallID:   run.ToolCallID,
+		RepoState:    repoState,
+		Suggested:    suggested,
+		ProjectKey:   s.projectKey,
+		ParamVersion: s.paramVersion,
 	}); err != nil {
 		slog.Error("Error recording failure", "error", err)
 	}
@@ -235,21 +334,29 @@ func (s *service) ListCommands(ctx context.Context, limit int) ([]Command, error
 	if limit <= 0 {
 		limit = defaultListLimit
 	}
-	rows, err := s.q.ListRecentCommands(ctx, int64(limit))
+	rows, err := s.q.ListRecentCommands(ctx, db.ListRecentCommandsParams{
+		ProjectKey: s.projectKey,
+		RowLimit:   int64(limit),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("listing commands: %w", err)
 	}
 	out := make([]Command, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, Command{
-			CmdNorm:       r.CmdNorm,
-			CWD:           r.Cwd,
-			Kind:          r.Kind,
-			LastExit:      r.LastExit,
-			LastAt:        time.UnixMilli(r.LastAt),
-			OKCount:       r.OkCount,
-			FailCount:     r.FailCount,
-			LastSessionID: r.LastSessionID,
+			CmdNorm:        r.CmdNorm,
+			CWD:            r.Cwd,
+			Kind:           r.Kind,
+			LastExit:       r.LastExit,
+			LastAt:         time.UnixMilli(r.LastAt),
+			OKCount:        r.OkCount,
+			FailCount:      r.FailCount,
+			LastSessionID:  r.LastSessionID,
+			LastToolCallID: r.LastToolCallID,
+			RepoState:      r.RepoState,
+			Suggested:      r.Suggested != 0,
+			ProjectKey:     r.ProjectKey,
+			ParamVersion:   r.ParamVersion,
 		})
 	}
 	return out, nil
@@ -259,7 +366,10 @@ func (s *service) ListOpenFailures(ctx context.Context, limit int) ([]Failure, e
 	if limit <= 0 {
 		limit = defaultListLimit
 	}
-	rows, err := s.q.ListOpenFailures(ctx, int64(limit))
+	rows, err := s.q.ListOpenFailures(ctx, db.ListOpenFailuresParams{
+		ProjectKey: s.projectKey,
+		RowLimit:   int64(limit),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("listing open failures: %w", err)
 	}
@@ -275,7 +385,10 @@ func (s *service) ListResolvedFailures(ctx context.Context, limit int) ([]Failur
 	if limit <= 0 {
 		limit = defaultListLimit
 	}
-	rows, err := s.q.ListResolvedFailures(ctx, int64(limit))
+	rows, err := s.q.ListResolvedFailures(ctx, db.ListResolvedFailuresParams{
+		ProjectKey: s.projectKey,
+		RowLimit:   int64(limit),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("listing resolved failures: %w", err)
 	}
@@ -283,7 +396,10 @@ func (s *service) ListResolvedFailures(ctx context.Context, limit int) ([]Failur
 }
 
 func (s *service) ListSessionOpenFailures(ctx context.Context, sessionID string) ([]Failure, error) {
-	rows, err := s.q.ListSessionOpenFailures(ctx, sessionID)
+	rows, err := s.q.ListSessionOpenFailures(ctx, db.ListSessionOpenFailuresParams{
+		SessionID:  sessionID,
+		ProjectKey: s.projectKey,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("listing session open failures: %w", err)
 	}
@@ -301,15 +417,153 @@ func (s *service) failuresFromRows(rows []db.FailureMemory) []Failure {
 			break
 		}
 		out = append(out, Failure{
-			Signature:  r.Signature,
-			Cmd:        r.Cmd,
-			CWD:        r.Cwd,
-			Headline:   r.Headline,
-			Files:      parseFilesJSON(r.Files),
-			FirstSeen:  time.UnixMilli(r.FirstSeen),
-			LastSeen:   time.UnixMilli(r.LastSeen),
-			ResolvedIn: r.ResolvedIn,
+			Signature:    r.Signature,
+			Cmd:          r.Cmd,
+			CWD:          r.Cwd,
+			Headline:     r.Headline,
+			Files:        parseFilesJSON(r.Files),
+			FirstSeen:    time.UnixMilli(r.FirstSeen),
+			LastSeen:     time.UnixMilli(r.LastSeen),
+			ResolvedIn:   r.ResolvedIn,
+			SessionID:    r.SessionID,
+			ToolCallID:   r.ToolCallID,
+			RepoState:    r.RepoState,
+			Suggested:    r.Suggested != 0,
+			ProjectKey:   r.ProjectKey,
+			ParamVersion: r.ParamVersion,
+			ResolvedCall: r.ResolvedCall,
 		})
+	}
+	return out
+}
+
+// MarkSuggested records a command the model was shown in injected
+// memory this session — see the Service contract. The set is
+// deliberately over-inclusive (once seen, any later run of that
+// command could be memory-informed) because the flag feeds a
+// contamination screen, not a ranking signal.
+func (s *service) MarkSuggested(sessionID, cmdNorm string) {
+	if sessionID == "" || cmdNorm == "" {
+		return
+	}
+	s.suggestedMu.Lock()
+	defer s.suggestedMu.Unlock()
+	set, ok := s.suggested[sessionID]
+	if !ok {
+		set = map[string]struct{}{}
+		s.suggested[sessionID] = set
+	}
+	set[cmdNorm] = struct{}{}
+}
+
+// wasSuggested reports whether this session — or its parent, for
+// delegated runs — was previously shown cmdNorm in an injected
+// memory section. A child session's command can still be
+// memory-influenced because the parent saw the rows before
+// delegating; the flag is a contamination screen, so it errs
+// inclusive.
+func (s *service) wasSuggested(ctx context.Context, sessionID, cmdNorm string) bool {
+	if sessionID == "" {
+		return false
+	}
+	if s.suggestedFor(sessionID, cmdNorm) {
+		return true
+	}
+	sess, err := s.q.GetSessionByID(ctx, sessionID)
+	if err != nil || !sess.ParentSessionID.Valid {
+		return false
+	}
+	return s.suggestedFor(sess.ParentSessionID.String, cmdNorm)
+}
+
+func (s *service) suggestedFor(sessionID, cmdNorm string) bool {
+	s.suggestedMu.Lock()
+	defer s.suggestedMu.Unlock()
+	_, ok := s.suggested[sessionID][cmdNorm]
+	return ok
+}
+
+func (s *service) ProjectKey() string {
+	return s.projectKey
+}
+
+func (s *service) ParamVersion() string {
+	return s.paramVersion
+}
+
+// computeProjectKey derives the partition identity for this store:
+// the canonical git common-dir — which folds linked worktrees into
+// the owning repository so worktrees share one partition — plus the
+// normalized remote URL when one exists. Outside a repository the
+// workspace path stands in, so rows still partition per project
+// rather than leaking across a shared data directory.
+func computeProjectKey(workingDir string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	common, err := gitOut(ctx, workingDir, "rev-parse", "--git-common-dir")
+	if err != nil || common == "" {
+		return filepathext.Canonical(workingDir)
+	}
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(workingDir, common)
+	}
+	key := filepathext.Canonical(common)
+	if remote, err := gitOut(ctx, workingDir, "remote", "get-url", "origin"); err == nil && remote != "" {
+		key = normalizeRemote(remote) + "|" + key
+	}
+	return key
+}
+
+// normalizeRemote reduces a git remote URL to host/path form so
+// protocol and cosmetic spellings — https vs ssh, a trailing .git —
+// name the same repository.
+func normalizeRemote(remote string) string {
+	remote = strings.TrimSpace(remote)
+	// SCP-style ssh: git@host:org/repo.
+	if i := strings.Index(remote, "@"); i >= 0 && !strings.Contains(remote, "://") {
+		remote = remote[i+1:]
+		remote = strings.Replace(remote, ":", "/", 1)
+	} else if i := strings.Index(remote, "://"); i >= 0 {
+		remote = remote[i+3:]
+		// Drop any userinfo or port — the partition cares about the
+		// repository, not the credentials that reach it.
+		if j := strings.Index(remote, "/"); j >= 0 {
+			host := remote[:j]
+			if k := strings.Index(host, "@"); k >= 0 {
+				host = host[k+1:]
+			}
+			if k := strings.Index(host, ":"); k >= 0 {
+				host = host[:k]
+			}
+			remote = host + remote[j:]
+		}
+	}
+	remote = strings.TrimSuffix(strings.ToLower(remote), ".git")
+	return strings.Trim(remote, "/")
+}
+
+// gitOut runs one read-only git query, trimmed and best-effort —
+// empty on any failure (not a repo, git absent, timeout).
+func gitOut(ctx context.Context, dir string, args ...string) (string, error) {
+	full := append([]string{"-C", dir}, args...)
+	out, err := exec.CommandContext(ctx, "git", full...).Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// headSHA is the repo state anchor for a recorded run: HEAD at
+// observation time, best-effort — empty outside a repository or
+// when git is absent. Bounded: RecordRun's ctx is detached from
+// cancellation, so the lookup carries its own deadline rather than
+// inherit none.
+func headSHA(ctx context.Context, workDir string) string {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	out, err := gitOut(ctx, workDir, "rev-parse", "HEAD")
+	if err != nil {
+		return ""
 	}
 	return out
 }
@@ -445,17 +699,19 @@ func failureHeadline(stderr, stdout string, runErr error) string {
 	return truncateRunes(redact.Secrets(ScreenHeadline(headline)), maxHeadlineRunes)
 }
 
-// failureSignature is the dedupe key for a failure: normalized command
-// + directory + headline with positional noise stripped — line
-// references, durations, and hex addresses churn between runs of the
-// same failure — while digits that name the failure itself
-// (TestParse2 vs TestParse3) stay part of the identity. The same
-// command failing in a sibling directory is a distinct row.
-func failureSignature(cmdNorm, cwd, headline string) string {
+// failureSignature is the dedupe key for a failure: the partition +
+// normalized command + directory + headline with positional noise
+// stripped — line references, durations, and hex addresses churn
+// between runs of the same failure — while digits that name the
+// failure itself (TestParse2 vs TestParse3) stay part of the
+// identity. project_key is part of the hash so a shared store keeps
+// two projects' identical failures in separate rows rather than
+// upserting over each other's provenance.
+func (s *service) failureSignature(cmdNorm, cwd, headline string) string {
 	stable := lineRefPattern.ReplaceAllString(headline, "")
 	stable = durationPattern.ReplaceAllString(stable, "()")
 	stable = hexAddrPattern.ReplaceAllString(stable, "0x")
-	sum := sha256.Sum256([]byte(cmdNorm + "\x00" + cwd + "\x00" + stable))
+	sum := sha256.Sum256([]byte(s.projectKey + "\x00" + cmdNorm + "\x00" + cwd + "\x00" + stable))
 	return hex.EncodeToString(sum[:8])
 }
 

@@ -10,8 +10,18 @@ INSERT INTO command_memory (
     last_at,
     ok_count,
     fail_count,
-    last_session_id
+    last_session_id,
+    last_tool_call_id,
+    repo_state,
+    suggested,
+    project_key,
+    param_version
 ) VALUES (
+    ?,
+    ?,
+    ?,
+    ?,
+    ?,
     ?,
     ?,
     ?,
@@ -20,23 +30,33 @@ INSERT INTO command_memory (
     ?,
     ?,
     ?
-) ON CONFLICT(cmd_norm, cwd) DO UPDATE SET
+) ON CONFLICT(cmd_norm, cwd, project_key) DO UPDATE SET
     kind = CASE WHEN excluded.last_exit >= 0 THEN excluded.kind ELSE command_memory.kind END,
     -- Interrupted runs carry last_exit = -1: the run is noted but
     -- never overwrites the command's last real verdict -- nor the
     -- session stamp, which must stay with the last verdict's writer
     -- so a denied or killed re-run cannot disown the observing
-    -- session (or claim a failing verdict it never saw).
+    -- session (or claim a failing verdict it never saw). The
+    -- observation provenance rides the same guard: it describes the
+    -- last real verdict, so a verdictless run must not re-stamp it.
     last_exit = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_exit ELSE command_memory.last_exit END,
     last_at = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_at ELSE command_memory.last_at END,
     ok_count = command_memory.ok_count + excluded.ok_count,
     fail_count = command_memory.fail_count + excluded.fail_count,
-    last_session_id = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_session_id ELSE command_memory.last_session_id END;
+    last_session_id = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_session_id ELSE command_memory.last_session_id END,
+    last_tool_call_id = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_tool_call_id ELSE command_memory.last_tool_call_id END,
+    repo_state = CASE WHEN excluded.last_exit >= 0 THEN excluded.repo_state ELSE command_memory.repo_state END,
+    suggested = CASE WHEN excluded.last_exit >= 0 THEN excluded.suggested ELSE command_memory.suggested END,
+    -- Partition and params-in-force are not verdict properties: the
+    -- latest writer's are always authoritative.
+    project_key = excluded.project_key,
+    param_version = excluded.param_version;
 
 -- name: UpsertFailure :exec
 -- One row per (normalized command, directory, error headline)
--- signature. A re-fail refreshes the observation -- headline and
--- file hints move with the latest failure, not the first.
+-- signature. A re-fail refreshes the observation -- headline, file
+-- hints, and the observation's provenance all move with the latest
+-- failure, not the first.
 INSERT INTO failure_memory (
     signature,
     cmd,
@@ -44,8 +64,20 @@ INSERT INTO failure_memory (
     headline,
     files,
     first_seen,
-    last_seen
+    last_seen,
+    session_id,
+    tool_call_id,
+    repo_state,
+    suggested,
+    project_key,
+    param_version
 ) VALUES (
+    ?,
+    ?,
+    ?,
+    ?,
+    ?,
+    ?,
     ?,
     ?,
     ?,
@@ -61,23 +93,52 @@ INSERT INTO failure_memory (
     -- continuously-open re-fail keeps its first observation.
     first_seen = CASE WHEN failure_memory.resolved_in != '' THEN excluded.first_seen ELSE failure_memory.first_seen END,
     last_seen = excluded.last_seen,
-    resolved_in = '';
+    session_id = excluded.session_id,
+    tool_call_id = excluded.tool_call_id,
+    repo_state = excluded.repo_state,
+    suggested = excluded.suggested,
+    project_key = excluded.project_key,
+    param_version = excluded.param_version,
+    resolved_in = '',
+    -- A re-fail clears the old resolution lineage: the row's open
+    -- epoch is new, so who closed the previous epoch is history.
+    resolved_call = '';
 
 -- name: ResolveFailuresForCommand :exec
 -- A clean run of a normalized command resolves its open failure rows
 -- in the same directory -- "go test ./..." passing in packages/web
--- does not close packages/api's failure.
+-- does not close packages/api's failure. resolved_call names the
+-- call that carried the clean verdict, where detectable. The
+-- resolution is partition-scoped like every read: one project's
+-- green run cannot close another's observation.
 UPDATE failure_memory SET
-    resolved_in = ?
-WHERE cmd = ? AND cwd = ? AND resolved_in = '';
+    resolved_in = ?,
+    resolved_call = ?
+WHERE cmd = ? AND cwd = ? AND resolved_in = '' AND project_key = ?;
+
+-- name: ClaimMemoryPartition :exec
+-- Backfill policy for pre-provenance rows: a project-local store's
+-- legacy rows belong to this project's partition, so empty
+-- project_key claims on first open. Rows already stamped stay put
+-- -- a store genuinely shared across projects (an absolute
+-- data_directory) keeps its foreign rows foreign. OR REPLACE covers
+-- the rare collision of a claimed row meeting an already-partitioned
+-- twin: the partitioned row carries fresher provenance, so it wins.
+UPDATE OR REPLACE failure_memory SET project_key = ? WHERE project_key = '';
+
+-- name: ClaimCommandPartition :exec
+UPDATE OR REPLACE command_memory SET project_key = ? WHERE project_key = '';
 
 -- name: ListRecentCommands :many
 -- last_at is millisecond-granularity so re-runs order by recency;
 -- rowid settles ties for rows written in the same millisecond.
-SELECT * FROM command_memory ORDER BY last_at DESC, rowid DESC LIMIT ?;
+-- project_key is an admissibility clause, not a ranking signal: a
+-- candidate from another partition is inadmissible before relevance
+-- ever runs.
+SELECT * FROM command_memory WHERE project_key = sqlc.arg(project_key) ORDER BY last_at DESC, rowid DESC LIMIT sqlc.arg(row_limit);
 
 -- name: ListOpenFailures :many
-SELECT * FROM failure_memory WHERE resolved_in = '' ORDER BY last_seen DESC, rowid DESC LIMIT ?;
+SELECT * FROM failure_memory WHERE resolved_in = '' AND project_key = sqlc.arg(project_key) ORDER BY last_seen DESC, rowid DESC LIMIT sqlc.arg(row_limit);
 
 -- name: ListSessionOpenFailures :many
 -- Open failure rows whose commands the given session (or one of its
@@ -96,6 +157,8 @@ INNER JOIN command_memory c
     ON c.cmd_norm = f.cmd
     AND c.cwd = f.cwd
 WHERE f.resolved_in = ''
+    AND f.project_key = sqlc.arg(project_key)
+    AND c.project_key = sqlc.arg(project_key)
     AND c.last_session_id IN (
         SELECT id FROM sessions
         WHERE id = sqlc.arg(session_id) OR parent_session_id = sqlc.arg(session_id)
@@ -112,4 +175,4 @@ LIMIT 50;
 -- and when it last saw a clean run. Ordered by last_seen (the last
 -- failing observation), not resolution time -- the row's freshness
 -- is still about when the failure was last real.
-SELECT * FROM failure_memory WHERE resolved_in != '' ORDER BY last_seen DESC, rowid DESC LIMIT ?;
+SELECT * FROM failure_memory WHERE resolved_in != '' AND project_key = sqlc.arg(project_key) ORDER BY last_seen DESC, rowid DESC LIMIT sqlc.arg(row_limit);

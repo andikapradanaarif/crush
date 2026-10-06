@@ -370,10 +370,17 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 	// The usage logger is shared by every built agent — the holdout
 	// assignment and session_start records are session-keyed, which
 	// only holds if the same instance serves coder and plan alike.
+	var memoryProjectKey, memoryParamVersion string
+	if c.cmdlog != nil {
+		memoryProjectKey = c.cmdlog.ProjectKey()
+		memoryParamVersion = c.cmdlog.ParamVersion()
+	}
 	c.memoryTelemetry = newMemoryTelemetry(
 		c.cfg.Config().Options.MemoryTelemetryEnabled(),
 		c.cfg.Config().Options.DataDirectory,
 		c.cfg.WorkingDir(),
+		memoryProjectKey,
+		memoryParamVersion,
 	)
 
 	// reqStats exists regardless of the notebook gate, so the

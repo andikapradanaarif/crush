@@ -327,6 +327,10 @@ func (r *recordingCmdLog) ListSessionOpenFailures(context.Context, string) ([]cm
 	return nil, nil
 }
 
+func (r *recordingCmdLog) MarkSuggested(string, string) {}
+func (r *recordingCmdLog) ProjectKey() string           { return "" }
+func (r *recordingCmdLog) ParamVersion() string         { return "" }
+
 func TestBashTool_RecordsRunToCmdLog(t *testing.T) {
 	workingDir := t.TempDir()
 	perms := &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}

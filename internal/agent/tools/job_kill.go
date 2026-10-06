@@ -61,6 +61,7 @@ func NewJobKillTool(cmdLog cmdlog.Service) fantasy.AgentTool {
 				stdout, stderr, done, exitErr := bgShell.GetOutput()
 				run := cmdlog.Run{
 					SessionID:      GetSessionFromContext(ctx),
+					ToolCallID:     call.ID,
 					Command:        bgShell.Command,
 					CWD:            bgShell.Shell.GetWorkingDir(),
 					Stdout:         stdout,

@@ -282,6 +282,7 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 					if cmdLog != nil && bgShell.TakeRecorded() {
 						cmdLog.RecordRun(ctx, cmdlog.Run{
 							SessionID:      sessionID,
+							ToolCallID:     call.ID,
 							Command:        params.Command,
 							CWD:            bgShell.Shell.GetWorkingDir(),
 							Stdout:         stdout,
@@ -369,6 +370,7 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 						killOut, killErr, kDone, kErr := bgShell.GetOutput()
 						run := cmdlog.Run{
 							SessionID:      sessionID,
+							ToolCallID:     call.ID,
 							Command:        params.Command,
 							CWD:            bgShell.Shell.GetWorkingDir(),
 							Stdout:         killOut,
@@ -405,6 +407,7 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 				if cmdLog != nil && bgShell.TakeRecorded() {
 					cmdLog.RecordRun(ctx, cmdlog.Run{
 						SessionID:      sessionID,
+						ToolCallID:     call.ID,
 						Command:        params.Command,
 						CWD:            bgShell.Shell.GetWorkingDir(),
 						Stdout:         stdout,

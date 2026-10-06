@@ -16,14 +16,19 @@ type CollapsedTurn struct {
 }
 
 type CommandMemory struct {
-	CmdNorm       string `json:"cmd_norm"`
-	Cwd           string `json:"cwd"`
-	Kind          string `json:"kind"`
-	LastExit      int64  `json:"last_exit"`
-	LastAt        int64  `json:"last_at"`
-	OkCount       int64  `json:"ok_count"`
-	FailCount     int64  `json:"fail_count"`
-	LastSessionID string `json:"last_session_id"`
+	CmdNorm        string `json:"cmd_norm"`
+	Cwd            string `json:"cwd"`
+	Kind           string `json:"kind"`
+	LastExit       int64  `json:"last_exit"`
+	LastAt         int64  `json:"last_at"`
+	OkCount        int64  `json:"ok_count"`
+	FailCount      int64  `json:"fail_count"`
+	LastSessionID  string `json:"last_session_id"`
+	LastToolCallID string `json:"last_tool_call_id"`
+	RepoState      string `json:"repo_state"`
+	Suggested      int64  `json:"suggested"`
+	ProjectKey     string `json:"project_key"`
+	ParamVersion   string `json:"param_version"`
 }
 
 type EdgeFiring struct {
@@ -39,14 +44,21 @@ type EdgeFiring struct {
 }
 
 type FailureMemory struct {
-	Signature  string `json:"signature"`
-	Cmd        string `json:"cmd"`
-	Cwd        string `json:"cwd"`
-	Headline   string `json:"headline"`
-	Files      string `json:"files"`
-	FirstSeen  int64  `json:"first_seen"`
-	LastSeen   int64  `json:"last_seen"`
-	ResolvedIn string `json:"resolved_in"`
+	Signature    string `json:"signature"`
+	Cmd          string `json:"cmd"`
+	Cwd          string `json:"cwd"`
+	Headline     string `json:"headline"`
+	Files        string `json:"files"`
+	FirstSeen    int64  `json:"first_seen"`
+	LastSeen     int64  `json:"last_seen"`
+	ResolvedIn   string `json:"resolved_in"`
+	SessionID    string `json:"session_id"`
+	ToolCallID   string `json:"tool_call_id"`
+	RepoState    string `json:"repo_state"`
+	Suggested    int64  `json:"suggested"`
+	ProjectKey   string `json:"project_key"`
+	ParamVersion string `json:"param_version"`
+	ResolvedCall string `json:"resolved_call"`
 }
 
 type File struct {

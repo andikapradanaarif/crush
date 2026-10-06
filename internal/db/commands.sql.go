@@ -9,12 +9,42 @@ import (
 	"context"
 )
 
-const listOpenFailures = `-- name: ListOpenFailures :many
-SELECT signature, cmd, cwd, headline, files, first_seen, last_seen, resolved_in FROM failure_memory WHERE resolved_in = '' ORDER BY last_seen DESC, rowid DESC LIMIT ?
+const claimCommandPartition = `-- name: ClaimCommandPartition :exec
+UPDATE OR REPLACE command_memory SET project_key = ? WHERE project_key = ''
 `
 
-func (q *Queries) ListOpenFailures(ctx context.Context, limit int64) ([]FailureMemory, error) {
-	rows, err := q.query(ctx, q.listOpenFailuresStmt, listOpenFailures, limit)
+func (q *Queries) ClaimCommandPartition(ctx context.Context, projectKey string) error {
+	_, err := q.exec(ctx, q.claimCommandPartitionStmt, claimCommandPartition, projectKey)
+	return err
+}
+
+const claimMemoryPartition = `-- name: ClaimMemoryPartition :exec
+UPDATE OR REPLACE failure_memory SET project_key = ? WHERE project_key = ''
+`
+
+// Backfill policy for pre-provenance rows: a project-local store's
+// legacy rows belong to this project's partition, so empty
+// project_key claims on first open. Rows already stamped stay put
+// -- a store genuinely shared across projects (an absolute
+// data_directory) keeps its foreign rows foreign. OR REPLACE covers
+// the rare collision of a claimed row meeting an already-partitioned
+// twin: the partitioned row carries fresher provenance, so it wins.
+func (q *Queries) ClaimMemoryPartition(ctx context.Context, projectKey string) error {
+	_, err := q.exec(ctx, q.claimMemoryPartitionStmt, claimMemoryPartition, projectKey)
+	return err
+}
+
+const listOpenFailures = `-- name: ListOpenFailures :many
+SELECT signature, cmd, cwd, headline, files, first_seen, last_seen, resolved_in, session_id, tool_call_id, repo_state, suggested, project_key, param_version, resolved_call FROM failure_memory WHERE resolved_in = '' AND project_key = ?1 ORDER BY last_seen DESC, rowid DESC LIMIT ?2
+`
+
+type ListOpenFailuresParams struct {
+	ProjectKey string `json:"project_key"`
+	RowLimit   int64  `json:"row_limit"`
+}
+
+func (q *Queries) ListOpenFailures(ctx context.Context, arg ListOpenFailuresParams) ([]FailureMemory, error) {
+	rows, err := q.query(ctx, q.listOpenFailuresStmt, listOpenFailures, arg.ProjectKey, arg.RowLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -31,6 +61,13 @@ func (q *Queries) ListOpenFailures(ctx context.Context, limit int64) ([]FailureM
 			&i.FirstSeen,
 			&i.LastSeen,
 			&i.ResolvedIn,
+			&i.SessionID,
+			&i.ToolCallID,
+			&i.RepoState,
+			&i.Suggested,
+			&i.ProjectKey,
+			&i.ParamVersion,
+			&i.ResolvedCall,
 		); err != nil {
 			return nil, err
 		}
@@ -46,13 +83,21 @@ func (q *Queries) ListOpenFailures(ctx context.Context, limit int64) ([]FailureM
 }
 
 const listRecentCommands = `-- name: ListRecentCommands :many
-SELECT cmd_norm, cwd, kind, last_exit, last_at, ok_count, fail_count, last_session_id FROM command_memory ORDER BY last_at DESC, rowid DESC LIMIT ?
+SELECT cmd_norm, cwd, kind, last_exit, last_at, ok_count, fail_count, last_session_id, last_tool_call_id, repo_state, suggested, project_key, param_version FROM command_memory WHERE project_key = ?1 ORDER BY last_at DESC, rowid DESC LIMIT ?2
 `
+
+type ListRecentCommandsParams struct {
+	ProjectKey string `json:"project_key"`
+	RowLimit   int64  `json:"row_limit"`
+}
 
 // last_at is millisecond-granularity so re-runs order by recency;
 // rowid settles ties for rows written in the same millisecond.
-func (q *Queries) ListRecentCommands(ctx context.Context, limit int64) ([]CommandMemory, error) {
-	rows, err := q.query(ctx, q.listRecentCommandsStmt, listRecentCommands, limit)
+// project_key is an admissibility clause, not a ranking signal: a
+// candidate from another partition is inadmissible before relevance
+// ever runs.
+func (q *Queries) ListRecentCommands(ctx context.Context, arg ListRecentCommandsParams) ([]CommandMemory, error) {
+	rows, err := q.query(ctx, q.listRecentCommandsStmt, listRecentCommands, arg.ProjectKey, arg.RowLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -69,6 +114,11 @@ func (q *Queries) ListRecentCommands(ctx context.Context, limit int64) ([]Comman
 			&i.OkCount,
 			&i.FailCount,
 			&i.LastSessionID,
+			&i.LastToolCallID,
+			&i.RepoState,
+			&i.Suggested,
+			&i.ProjectKey,
+			&i.ParamVersion,
 		); err != nil {
 			return nil, err
 		}
@@ -84,15 +134,20 @@ func (q *Queries) ListRecentCommands(ctx context.Context, limit int64) ([]Comman
 }
 
 const listResolvedFailures = `-- name: ListResolvedFailures :many
-SELECT signature, cmd, cwd, headline, files, first_seen, last_seen, resolved_in FROM failure_memory WHERE resolved_in != '' ORDER BY last_seen DESC, rowid DESC LIMIT ?
+SELECT signature, cmd, cwd, headline, files, first_seen, last_seen, resolved_in, session_id, tool_call_id, repo_state, suggested, project_key, param_version, resolved_call FROM failure_memory WHERE resolved_in != '' AND project_key = ?1 ORDER BY last_seen DESC, rowid DESC LIMIT ?2
 `
+
+type ListResolvedFailuresParams struct {
+	ProjectKey string `json:"project_key"`
+	RowLimit   int64  `json:"row_limit"`
+}
 
 // Resolved rows are knowledge, not warnings: the failure signature
 // and when it last saw a clean run. Ordered by last_seen (the last
 // failing observation), not resolution time -- the row's freshness
 // is still about when the failure was last real.
-func (q *Queries) ListResolvedFailures(ctx context.Context, limit int64) ([]FailureMemory, error) {
-	rows, err := q.query(ctx, q.listResolvedFailuresStmt, listResolvedFailures, limit)
+func (q *Queries) ListResolvedFailures(ctx context.Context, arg ListResolvedFailuresParams) ([]FailureMemory, error) {
+	rows, err := q.query(ctx, q.listResolvedFailuresStmt, listResolvedFailures, arg.ProjectKey, arg.RowLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -109,6 +164,13 @@ func (q *Queries) ListResolvedFailures(ctx context.Context, limit int64) ([]Fail
 			&i.FirstSeen,
 			&i.LastSeen,
 			&i.ResolvedIn,
+			&i.SessionID,
+			&i.ToolCallID,
+			&i.RepoState,
+			&i.Suggested,
+			&i.ProjectKey,
+			&i.ParamVersion,
+			&i.ResolvedCall,
 		); err != nil {
 			return nil, err
 		}
@@ -124,20 +186,27 @@ func (q *Queries) ListResolvedFailures(ctx context.Context, limit int64) ([]Fail
 }
 
 const listSessionOpenFailures = `-- name: ListSessionOpenFailures :many
-SELECT f.signature, f.cmd, f.cwd, f.headline, f.files, f.first_seen, f.last_seen, f.resolved_in
+SELECT f.signature, f.cmd, f.cwd, f.headline, f.files, f.first_seen, f.last_seen, f.resolved_in, f.session_id, f.tool_call_id, f.repo_state, f.suggested, f.project_key, f.param_version, f.resolved_call
 FROM failure_memory f
 INNER JOIN command_memory c
     ON c.cmd_norm = f.cmd
     AND c.cwd = f.cwd
 WHERE f.resolved_in = ''
+    AND f.project_key = ?1
+    AND c.project_key = ?1
     AND c.last_session_id IN (
         SELECT id FROM sessions
-        WHERE id = ?1 OR parent_session_id = ?1
+        WHERE id = ?2 OR parent_session_id = ?2
     )
     AND c.last_exit > 0
 ORDER BY f.last_seen DESC, f.rowid DESC
 LIMIT 50
 `
+
+type ListSessionOpenFailuresParams struct {
+	ProjectKey string `json:"project_key"`
+	SessionID  string `json:"session_id"`
+}
 
 // Open failure rows whose commands the given session (or one of its
 // task-tool child sessions) last ran and last failed: the reconcile
@@ -152,8 +221,8 @@ LIMIT 50
 // Same bound as the tail's fetch pool -- a session can observe more
 // distinct commands than this only pathologically, and the retry
 // prompt renders at most ten.
-func (q *Queries) ListSessionOpenFailures(ctx context.Context, sessionID string) ([]FailureMemory, error) {
-	rows, err := q.query(ctx, q.listSessionOpenFailuresStmt, listSessionOpenFailures, sessionID)
+func (q *Queries) ListSessionOpenFailures(ctx context.Context, arg ListSessionOpenFailuresParams) ([]FailureMemory, error) {
+	rows, err := q.query(ctx, q.listSessionOpenFailuresStmt, listSessionOpenFailures, arg.ProjectKey, arg.SessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -170,6 +239,13 @@ func (q *Queries) ListSessionOpenFailures(ctx context.Context, sessionID string)
 			&i.FirstSeen,
 			&i.LastSeen,
 			&i.ResolvedIn,
+			&i.SessionID,
+			&i.ToolCallID,
+			&i.RepoState,
+			&i.Suggested,
+			&i.ProjectKey,
+			&i.ParamVersion,
+			&i.ResolvedCall,
 		); err != nil {
 			return nil, err
 		}
@@ -186,21 +262,33 @@ func (q *Queries) ListSessionOpenFailures(ctx context.Context, sessionID string)
 
 const resolveFailuresForCommand = `-- name: ResolveFailuresForCommand :exec
 UPDATE failure_memory SET
-    resolved_in = ?
-WHERE cmd = ? AND cwd = ? AND resolved_in = ''
+    resolved_in = ?,
+    resolved_call = ?
+WHERE cmd = ? AND cwd = ? AND resolved_in = '' AND project_key = ?
 `
 
 type ResolveFailuresForCommandParams struct {
-	ResolvedIn string `json:"resolved_in"`
-	Cmd        string `json:"cmd"`
-	Cwd        string `json:"cwd"`
+	ResolvedIn   string `json:"resolved_in"`
+	ResolvedCall string `json:"resolved_call"`
+	Cmd          string `json:"cmd"`
+	Cwd          string `json:"cwd"`
+	ProjectKey   string `json:"project_key"`
 }
 
 // A clean run of a normalized command resolves its open failure rows
 // in the same directory -- "go test ./..." passing in packages/web
-// does not close packages/api's failure.
+// does not close packages/api's failure. resolved_call names the
+// call that carried the clean verdict, where detectable. The
+// resolution is partition-scoped like every read: one project's
+// green run cannot close another's observation.
 func (q *Queries) ResolveFailuresForCommand(ctx context.Context, arg ResolveFailuresForCommandParams) error {
-	_, err := q.exec(ctx, q.resolveFailuresForCommandStmt, resolveFailuresForCommand, arg.ResolvedIn, arg.Cmd, arg.Cwd)
+	_, err := q.exec(ctx, q.resolveFailuresForCommandStmt, resolveFailuresForCommand,
+		arg.ResolvedIn,
+		arg.ResolvedCall,
+		arg.Cmd,
+		arg.Cwd,
+		arg.ProjectKey,
+	)
 	return err
 }
 
@@ -213,7 +301,12 @@ INSERT INTO command_memory (
     last_at,
     ok_count,
     fail_count,
-    last_session_id
+    last_session_id,
+    last_tool_call_id,
+    repo_state,
+    suggested,
+    project_key,
+    param_version
 ) VALUES (
     ?,
     ?,
@@ -222,30 +315,49 @@ INSERT INTO command_memory (
     ?,
     ?,
     ?,
+    ?,
+    ?,
+    ?,
+    ?,
+    ?,
     ?
-) ON CONFLICT(cmd_norm, cwd) DO UPDATE SET
+) ON CONFLICT(cmd_norm, cwd, project_key) DO UPDATE SET
     kind = CASE WHEN excluded.last_exit >= 0 THEN excluded.kind ELSE command_memory.kind END,
     -- Interrupted runs carry last_exit = -1: the run is noted but
     -- never overwrites the command's last real verdict -- nor the
     -- session stamp, which must stay with the last verdict's writer
     -- so a denied or killed re-run cannot disown the observing
-    -- session (or claim a failing verdict it never saw).
+    -- session (or claim a failing verdict it never saw). The
+    -- observation provenance rides the same guard: it describes the
+    -- last real verdict, so a verdictless run must not re-stamp it.
     last_exit = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_exit ELSE command_memory.last_exit END,
     last_at = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_at ELSE command_memory.last_at END,
     ok_count = command_memory.ok_count + excluded.ok_count,
     fail_count = command_memory.fail_count + excluded.fail_count,
-    last_session_id = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_session_id ELSE command_memory.last_session_id END
+    last_session_id = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_session_id ELSE command_memory.last_session_id END,
+    last_tool_call_id = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_tool_call_id ELSE command_memory.last_tool_call_id END,
+    repo_state = CASE WHEN excluded.last_exit >= 0 THEN excluded.repo_state ELSE command_memory.repo_state END,
+    suggested = CASE WHEN excluded.last_exit >= 0 THEN excluded.suggested ELSE command_memory.suggested END,
+    -- Partition and params-in-force are not verdict properties: the
+    -- latest writer's are always authoritative.
+    project_key = excluded.project_key,
+    param_version = excluded.param_version
 `
 
 type UpsertCommandRunParams struct {
-	CmdNorm       string `json:"cmd_norm"`
-	Cwd           string `json:"cwd"`
-	Kind          string `json:"kind"`
-	LastExit      int64  `json:"last_exit"`
-	LastAt        int64  `json:"last_at"`
-	OkCount       int64  `json:"ok_count"`
-	FailCount     int64  `json:"fail_count"`
-	LastSessionID string `json:"last_session_id"`
+	CmdNorm        string `json:"cmd_norm"`
+	Cwd            string `json:"cwd"`
+	Kind           string `json:"kind"`
+	LastExit       int64  `json:"last_exit"`
+	LastAt         int64  `json:"last_at"`
+	OkCount        int64  `json:"ok_count"`
+	FailCount      int64  `json:"fail_count"`
+	LastSessionID  string `json:"last_session_id"`
+	LastToolCallID string `json:"last_tool_call_id"`
+	RepoState      string `json:"repo_state"`
+	Suggested      int64  `json:"suggested"`
+	ProjectKey     string `json:"project_key"`
+	ParamVersion   string `json:"param_version"`
 }
 
 // Project-scoped command ledger: one row per normalized command,
@@ -261,6 +373,11 @@ func (q *Queries) UpsertCommandRun(ctx context.Context, arg UpsertCommandRunPara
 		arg.OkCount,
 		arg.FailCount,
 		arg.LastSessionID,
+		arg.LastToolCallID,
+		arg.RepoState,
+		arg.Suggested,
+		arg.ProjectKey,
+		arg.ParamVersion,
 	)
 	return err
 }
@@ -273,8 +390,20 @@ INSERT INTO failure_memory (
     headline,
     files,
     first_seen,
-    last_seen
+    last_seen,
+    session_id,
+    tool_call_id,
+    repo_state,
+    suggested,
+    project_key,
+    param_version
 ) VALUES (
+    ?,
+    ?,
+    ?,
+    ?,
+    ?,
+    ?,
     ?,
     ?,
     ?,
@@ -290,22 +419,38 @@ INSERT INTO failure_memory (
     -- continuously-open re-fail keeps its first observation.
     first_seen = CASE WHEN failure_memory.resolved_in != '' THEN excluded.first_seen ELSE failure_memory.first_seen END,
     last_seen = excluded.last_seen,
-    resolved_in = ''
+    session_id = excluded.session_id,
+    tool_call_id = excluded.tool_call_id,
+    repo_state = excluded.repo_state,
+    suggested = excluded.suggested,
+    project_key = excluded.project_key,
+    param_version = excluded.param_version,
+    resolved_in = '',
+    -- A re-fail clears the old resolution lineage: the row's open
+    -- epoch is new, so who closed the previous epoch is history.
+    resolved_call = ''
 `
 
 type UpsertFailureParams struct {
-	Signature string `json:"signature"`
-	Cmd       string `json:"cmd"`
-	Cwd       string `json:"cwd"`
-	Headline  string `json:"headline"`
-	Files     string `json:"files"`
-	FirstSeen int64  `json:"first_seen"`
-	LastSeen  int64  `json:"last_seen"`
+	Signature    string `json:"signature"`
+	Cmd          string `json:"cmd"`
+	Cwd          string `json:"cwd"`
+	Headline     string `json:"headline"`
+	Files        string `json:"files"`
+	FirstSeen    int64  `json:"first_seen"`
+	LastSeen     int64  `json:"last_seen"`
+	SessionID    string `json:"session_id"`
+	ToolCallID   string `json:"tool_call_id"`
+	RepoState    string `json:"repo_state"`
+	Suggested    int64  `json:"suggested"`
+	ProjectKey   string `json:"project_key"`
+	ParamVersion string `json:"param_version"`
 }
 
 // One row per (normalized command, directory, error headline)
-// signature. A re-fail refreshes the observation -- headline and
-// file hints move with the latest failure, not the first.
+// signature. A re-fail refreshes the observation -- headline, file
+// hints, and the observation's provenance all move with the latest
+// failure, not the first.
 func (q *Queries) UpsertFailure(ctx context.Context, arg UpsertFailureParams) error {
 	_, err := q.exec(ctx, q.upsertFailureStmt, upsertFailure,
 		arg.Signature,
@@ -315,6 +460,12 @@ func (q *Queries) UpsertFailure(ctx context.Context, arg UpsertFailureParams) er
 		arg.Files,
 		arg.FirstSeen,
 		arg.LastSeen,
+		arg.SessionID,
+		arg.ToolCallID,
+		arg.RepoState,
+		arg.Suggested,
+		arg.ProjectKey,
+		arg.ParamVersion,
 	)
 	return err
 }

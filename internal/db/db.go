@@ -27,6 +27,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.bumpSessionCounterStmt, err = db.PrepareContext(ctx, bumpSessionCounter); err != nil {
 		return nil, fmt.Errorf("error preparing query BumpSessionCounter: %w", err)
 	}
+	if q.claimCommandPartitionStmt, err = db.PrepareContext(ctx, claimCommandPartition); err != nil {
+		return nil, fmt.Errorf("error preparing query ClaimCommandPartition: %w", err)
+	}
+	if q.claimMemoryPartitionStmt, err = db.PrepareContext(ctx, claimMemoryPartition); err != nil {
+		return nil, fmt.Errorf("error preparing query ClaimMemoryPartition: %w", err)
+	}
 	if q.countUserMessagesBySessionStmt, err = db.PrepareContext(ctx, countUserMessagesBySession); err != nil {
 		return nil, fmt.Errorf("error preparing query CountUserMessagesBySession: %w", err)
 	}
@@ -290,6 +296,16 @@ func (q *Queries) Close() error {
 	if q.bumpSessionCounterStmt != nil {
 		if cerr := q.bumpSessionCounterStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing bumpSessionCounterStmt: %w", cerr)
+		}
+	}
+	if q.claimCommandPartitionStmt != nil {
+		if cerr := q.claimCommandPartitionStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing claimCommandPartitionStmt: %w", cerr)
+		}
+	}
+	if q.claimMemoryPartitionStmt != nil {
+		if cerr := q.claimMemoryPartitionStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing claimMemoryPartitionStmt: %w", cerr)
 		}
 	}
 	if q.countUserMessagesBySessionStmt != nil {
@@ -757,6 +773,8 @@ type Queries struct {
 	db                                   DBTX
 	tx                                   *sql.Tx
 	bumpSessionCounterStmt               *sql.Stmt
+	claimCommandPartitionStmt            *sql.Stmt
+	claimMemoryPartitionStmt             *sql.Stmt
 	countUserMessagesBySessionStmt       *sql.Stmt
 	createFileStmt                       *sql.Stmt
 	createMessageStmt                    *sql.Stmt
@@ -849,6 +867,8 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		db:                                   tx,
 		tx:                                   tx,
 		bumpSessionCounterStmt:               q.bumpSessionCounterStmt,
+		claimCommandPartitionStmt:            q.claimCommandPartitionStmt,
+		claimMemoryPartitionStmt:             q.claimMemoryPartitionStmt,
 		countUserMessagesBySessionStmt:       q.countUserMessagesBySessionStmt,
 		createFileStmt:                       q.createFileStmt,
 		createMessageStmt:                    q.createMessageStmt,
