@@ -186,7 +186,9 @@ type Experiment struct {
 	// under the child's sanitized HOME. Raw JSON matching the config
 	// providers schema; api_key should be an env ref ($VAR) — the
 	// eval environment's credentials pass through, secrets never
-	// enter the repo.
+	// enter the repo. The type is load-bearing:
+	// rejectDivergentProviderKeys byte-compares marshaled blocks —
+	// stable for maps (sorted keys) but not struct field order.
 	Providers map[string]any `json:"providers,omitempty"`
 	// ExpectedExclusion declares an arm's designed exclusion
 	// pattern — the experiment's hypothesis is that the arm cannot

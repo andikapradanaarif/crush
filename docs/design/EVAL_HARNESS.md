@@ -141,7 +141,13 @@ every characterization pass a diff to reviewed files.
   claim is invisible by construction. Pair with a deliberately vague
   `task.turns` — the seed should plant knowledge the vague prompt
   needs ("find the failing test, report the file — change nothing"),
-  then the measured prompt demands the fix. A seed that errors or
+  then the measured prompt demands the fix. Seeds run under a fixed
+  neutral config — the shared model/provider pin plus harness
+  invariants, never arm options (`WriteSeedConfig` before the seed
+  loop, `WriteArmConfig` only before the measured session): an arm
+  flag active during seeding would make the arms' starting states
+  differ before measurement begins, so a "flag-on during seeding"
+  cell is intentionally inexpressible. A seed that errors or
   times out aborts the run as `error` (`check_detail.prior_session`
   names the index): a half-seeded warm state is a different
   condition than the one designed. Seeding spend lands in the
@@ -1006,7 +1012,13 @@ baselines. Baseline keys bound non-signal variance only:
 `crush_sha` is deliberately absent — the cross-build delta is the
 thing being measured, and keying on it would darken the tier on
 every commit; the rolling window and the control arm carry
-build drift instead. Band assignment reads the key matching the
+build drift instead. The projection also excludes harness
+machinery outside `options`: the neutral-seed regime (seeds run a
+fixed config with no arm options — see `prior_sessions`) changed
+warm state without re-keying, so records written before and after
+that change pool under one baseline key — treat a seed-regime
+change as a regime break when reading pooled baselines. Band
+assignment reads the key matching the
 current default condition. Fisher needs integer cells, so
 `passes`/`n` are stored and `p̂` is derived. `content_hash` scopes samples to the corpus revision:
 p̂ is conditional on `check.sh`, the fixture, and the patches as

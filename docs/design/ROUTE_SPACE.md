@@ -112,8 +112,9 @@ reason vocabulary.
 `internal/eval/runner.go` — fixed positions; **order is semantics**:
 
 ```
-materialize → arm config → prior_sessions (seeds) → seed gate →
-measured run → preserve artifacts → check.sh → coverage/verdict
+materialize → seed config → prior_sessions (seeds) → seed gate →
+arm config → measured run → preserve artifacts → check.sh →
+coverage/verdict
 ```
 
 | Position | What may conclude there |

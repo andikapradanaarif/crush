@@ -615,6 +615,16 @@ func TestWriteSeedConfig_ThenArmConfig(t *testing.T) {
 	require.Error(t, WriteSeedConfig(wd4, exp, manifest))
 	require.Error(t, WriteArmConfig(wd4, exp, arm, manifest))
 
+	// A fixture shipping the experiment's own providers block
+	// byte-identically resolves the same way — tolerated. Pinned so
+	// the carve-out is a tested decision, not an accident.
+	wd5 := t.TempDir()
+	provDoc, err := json.Marshal(map[string]any{"providers": exp.Providers})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(wd5, ".crush.json"), provDoc, 0o644))
+	require.NoError(t, WriteSeedConfig(wd5, exp, manifest))
+	require.NoError(t, WriteArmConfig(wd5, exp, arm, manifest))
+
 	// A fixture .crushrc still collides — only the harness's own
 	// identical pin is tolerated.
 	wd2 := t.TempDir()

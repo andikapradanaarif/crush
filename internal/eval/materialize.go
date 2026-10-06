@@ -221,7 +221,7 @@ func WriteSeedConfig(workdir string, exp *Experiment, manifest *FlagsManifest) e
 
 func writeRunConfig(workdir string, exp *Experiment, armOptions map[string]any, manifest *FlagsManifest) error {
 	if fileExists(filepath.Join(workdir, "crushrc")) {
-		return fmt.Errorf("workdir already carries crushrc — a shell config shadows the .crush.json arm; fixtures must not ship crush shell config")
+		return fmt.Errorf("workdir already carries crushrc — a shell config shadows the .crush.json arm; neither the fixture nor a seed session may ship crush shell config")
 	}
 
 	// .crushrc: model pin identical for every arm — options-only
@@ -240,7 +240,7 @@ func writeRunConfig(workdir string, exp *Experiment, armOptions map[string]any, 
 	// fixture's. Any other content is the fixture trap.
 	rcPath := filepath.Join(workdir, ".crushrc")
 	if prev, err := os.ReadFile(rcPath); err == nil && string(prev) != rc.String() {
-		return fmt.Errorf("workdir already carries .crushrc — a shell config shadows the .crush.json arm; fixtures must not ship crush shell config")
+		return fmt.Errorf("workdir already carries .crushrc — a shell config shadows the .crush.json arm; neither the fixture nor a seed session may ship crush shell config")
 	}
 	if err := os.WriteFile(rcPath, []byte(rc.String()), 0o644); err != nil {
 		return fmt.Errorf("write .crushrc: %w", err)
@@ -290,7 +290,7 @@ func writeRunConfig(workdir string, exp *Experiment, armOptions map[string]any, 
 			// lands in a cell the gate never reads.
 			for k := range opts {
 				if _, declared := manifest.Defaults[k]; declared {
-					return fmt.Errorf("existing .crush.json sets manifest flag %q — the fixture would pin a flag under test; remove it or drop the flag from flags.json", k)
+					return fmt.Errorf("existing .crush.json sets manifest flag %q — the workdir pins a flag under test (fixture start-state or a seed-session write); remove it or drop the flag from flags.json", k)
 				}
 			}
 			for k, v := range options {
@@ -329,7 +329,7 @@ func writeRunConfig(workdir string, exp *Experiment, armOptions map[string]any, 
 		if opts, ok := existing["options"].(map[string]any); ok {
 			for k := range opts {
 				if _, declared := manifest.Defaults[k]; declared {
-					return fmt.Errorf("existing crush.json sets manifest flag %q — the fixture would pin a flag under test; remove it or drop the flag from flags.json", k)
+					return fmt.Errorf("existing crush.json sets manifest flag %q — the workdir pins a flag under test (fixture start-state or a seed-session write); remove it or drop the flag from flags.json", k)
 				}
 			}
 		}
@@ -346,14 +346,16 @@ func writeRunConfig(workdir string, exp *Experiment, armOptions map[string]any, 
 
 // rejectFixtureProviderKeys enforces the ownership invariant the eval
 // preflight depends on: providers and credentials live on the
-// experiment, never the fixture. Preflight can't see fixture config, so
-// a fixture-declared provider would resolve in the child but be
-// invisible to the parent check — and fixture options like
-// disable_default_providers diverge the same way.
+// experiment, never the workdir. Preflight can't see workdir config,
+// so a workdir-declared provider would resolve in the child but be
+// invisible to the parent check — and options like
+// disable_default_providers diverge the same way. "Workdir" covers
+// both fixture start-state and seed-session writes: prior sessions
+// run in the same directory and can mutate these files.
 func rejectFixtureProviderKeys(existing map[string]any, name string) error {
 	for _, k := range []string{"providers", "env"} {
 		if _, ok := existing[k]; ok {
-			return fmt.Errorf("existing %s sets %q — providers and env belong on the experiment, not the fixture", name, k)
+			return fmt.Errorf("existing %s sets %q — providers and env belong on the experiment, not the workdir (fixture start-state or a seed-session write)", name, k)
 		}
 	}
 	return rejectFixtureProviderVisibility(existing, name)
@@ -375,11 +377,11 @@ func rejectDivergentProviderKeys(existing map[string]any, exp *Experiment, name 
 		want, _ := json.Marshal(exp.Providers)
 		got, _ := json.Marshal(v)
 		if !bytes.Equal(got, want) {
-			return fmt.Errorf("existing %s sets %q — providers and env belong on the experiment, not the fixture", name, "providers")
+			return fmt.Errorf("existing %s sets %q — providers and env belong on the experiment, not the workdir (fixture start-state or a seed-session write)", name, "providers")
 		}
 	}
 	if _, ok := existing["env"]; ok {
-		return fmt.Errorf("existing %s sets %q — providers and env belong on the experiment, not the fixture", name, "env")
+		return fmt.Errorf("existing %s sets %q — providers and env belong on the experiment, not the workdir (fixture start-state or a seed-session write)", name, "env")
 	}
 	return rejectFixtureProviderVisibility(existing, name)
 }
