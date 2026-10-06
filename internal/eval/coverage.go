@@ -266,6 +266,7 @@ func tailDecisions(r *RunRecord, which string) float64 {
 // render-budget exit.
 var tailDecisionReasons = []string{
 	"admit",
+	"non_user_prompt",
 	"negated_scope",
 	"out_of_scope",
 	"referent_none",
@@ -282,8 +283,13 @@ var tailDecisionReasons = []string{
 // agent/failure_select.go — which resolver layer produced each
 // decision. Per-layer counts are how the #216 benchmark's language
 // coverage is read: identifier-layer admits mean the prompt bound
-// without the English lexicon.
-var tailDecisionLayers = []string{"identifier", "lexicon", "state"}
+// without the English lexicon. "harness" is the boundary guard's
+// layer — a reconcile-retry-shaped prompt settling non_user_prompt
+// counts here, so a manifest can assert the tripwire:
+// max_tail.decisions.reasons.non_user_prompt: 0 under a
+// reconcile-enabled flag means no harness-authored text reached
+// the selector.
+var tailDecisionLayers = []string{"identifier", "lexicon", "state", "harness"}
 
 // tailDecisionsByReason counts decision rows by their closed-vocabulary
 // Reason — the split candidates−admitted can't express: render_capped

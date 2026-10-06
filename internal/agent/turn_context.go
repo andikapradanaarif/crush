@@ -166,6 +166,12 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		}
 		switch {
 		case cached != nil:
+			// Deliberately a snapshot: a row resolved during retry 1
+			// still injects into retry 2's tail. Staleness is bounded by
+			// the repair budget, and identical verdicts across the chain
+			// is the auditable invariant — a live re-select would drop
+			// resolved rows but lose the "replayed verdicts are
+			// identical" property the per-Run audit pins.
 			selected, failureDecisions, failureCandidates = cached.selected, cached.decisions, cached.candidates
 		default:
 			var f []cmdlog.Failure
