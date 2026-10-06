@@ -272,10 +272,22 @@ blind search.
    reconcile retry prefix. Harness bugs filed as #248 (seeds run under
    arm config — need a fixed neutral seed config) and #249 (tail
    selects per `Run` incl. retries; select once per user turn from the
-   user prompt, per-Run audit). Next: land those, then an ablation
-   rerun (#218 off / L1 on, then #218 on + fixes) to certify L1. Full
-   writeup:
+   user prompt, per-Run audit). Full writeup:
    `docs/milestones/2026-10-06-exp-failure-memory-mask-reject-rerun.md`.
+   **Ablation verdict (10-06):** fixes merged (#248→#250 neutral
+   seeds, #249→#251 once-per-turn selection + `tail_runs` audit,
+   `failure_memory_edges` flag via #252, Windows flake fixes
+   #253/#254). `edgeoff` `20261006T064413Z-f3ec` **PASS**
+   (90/90 + 90/90); `edgeon` `20261006T033704Z-acea` **PASS**
+   (97p/2to treatment, 99/99 control) — reconcile `fired` 96×
+   with **zero admits** and zero identifier-layer settlements vs
+   `7491`'s 85. Stratified cost: fired runs 9.8 steps vs 6.4 on
+   edgeoff's matched gated set (~3.4 steps/retry; both timeouts on
+   fired runs). `ft-explicit-stalefile` reseeds
+   (`row_older_than_touch` 11/11 — #238 closed). Reject side of
+   L1 certified; the edge's *benefit* remains unmeasured (reject
+   corpus scores harm-avoidance only) — powered read in #256.
+   Writeup: `docs/milestones/2026-10-06-exp-failure-memory-mask-reject-ablation.md`.
 6. **Reconciliation edge (#218)** — implemented; eval read recorded
    (10-05, invocation `20261005T115552Z`,
    `eval/experiments/failure-memory-reconcile.json`):
@@ -283,15 +295,21 @@ blind search.
    `reconcile.gated` 3/3, treatment `reconcile.fired` + `suppressed`
    per open epoch 3/3. Machinery/firing check at n=3/3, no primary
    metric; informational deltas were +14% prompt tokens and higher
-   discovery (4.3 vs 2.7 calls/run).
+   discovery (4.3 vs 2.7 calls/run). Powered benefit read (10-06,
+   `failure-memory-reconcile-powered.json`, #256): edges-off vs
+   edges-on on `reconcile-open-failure` — the edge's fix-forward
+   conversion measured on `check_detail.suite`, steps/increase as
+   the pre-registered exposure signature.
 7. **Layered resolver (#216)** — L1 identifier layer + offline
    binding benchmark landed (`failure_binding.jsonl`,
    `settled_by`/`lang_unsupported` observability); L3 only if the
    benchmark shows measurable recall unclaimed. First powered
    exercise (10-06 reject rerun) is unreadable — the #218 edge's
    retry prompt fed L1 identifier-bearing text, so L1 bound decoy
-   rows (it behaved as designed on the input). Certify L1's reject
-   side after #248/#249 land, via the ablation rerun (step 5).
+   rows (it behaved as designed on the input). Reject side
+   **certified 10-06** by the ablation rerun (step 5): zero admits
+   on both arms, all 198 edgeon rejects carrying the designed
+   reason.
 8. **#222 capacity → #220 provenance (+`project_key`/`param_version`)
    → #221 → #228 params substrate → #223 ladders.**
 9. **#224 sealed pool + #225 qwen + #226 SWE-bench + #227
