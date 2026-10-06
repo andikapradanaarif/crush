@@ -528,11 +528,11 @@ var priorTurnsRecallLive = starvationRule{
 var reconcileGateOff = starvationRule{
 	"failure_memory=false or failure_memory_edges=false",
 	func(resolve func(string) (any, bool)) bool {
-		fm, fmKnown := resolve("failure_memory")
-		fme, fmeKnown := resolve("failure_memory_edges")
+		fm, _ := resolve("failure_memory")
+		fme, _ := resolve("failure_memory_edges")
 		fmOn, _ := fm.(bool)
 		fmeOn, _ := fme.(bool)
-		return !(fmKnown && fmOn && fmeKnown && fmeOn)
+		return !(fmOn && fmeOn)
 	},
 }
 

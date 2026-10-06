@@ -549,6 +549,9 @@ type Options struct {
 	// open rows never block done-ness. On by default so
 	// failure_memory alone keeps arming the edge; exists so the
 	// edge's contribution can be ablated apart from the tail (#249).
+	// The plural name is deliberate: this is the failure-memory edge
+	// family's shared gate — reconcile is its only member today, and
+	// future failure-memory edges inherit it by design.
 	FailureMemoryEdges *bool `json:"failure_memory_edges,omitempty" jsonschema:"description=Arm the reconcile run-edge under failure_memory (open failures the run observed still open block done-ness). When false the tail and selector still run; the edge records gated. Experimental.,default=true"`
 	// MemoryTelemetry opts in to local-only memory-usage logging:
 	// append-only JSONL records at data_directory/memory-telemetry.jsonl
