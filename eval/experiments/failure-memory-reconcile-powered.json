@@ -1,0 +1,58 @@
+{
+	"name": "failure-memory-reconcile-powered",
+	"model": "alibaba-tp/deepseek-v4.1-flash",
+	"temperature": 0,
+	"corpus": [
+		"reconcile-open-failure"
+	],
+	"runs_per_trajectory": {
+		"stable": 20,
+		"mid": 20,
+		"uncharacterized": 20
+	},
+	"primary": {
+		"metric": "steps",
+		"direction": "increase",
+		"mde": 0.15,
+		"max_pass_drop": 0.1
+	},
+	"arms": {
+		"control": {
+			"config": {
+				"options": {
+					"turn_context": "off",
+					"failure_memory": true,
+					"failure_memory_edges": false
+				}
+			},
+			"coverage": {
+				"min_edge_firings.reconcile.gated": 1
+			}
+		},
+		"treatment": {
+			"config": {
+				"options": {
+					"turn_context": "off",
+					"failure_memory": true,
+					"failure_memory_edges": true
+				}
+			}
+		}
+	},
+	"providers": {
+		"alibaba-tp": {
+			"name": "Alibaba Token Plan",
+			"type": "openai-compat",
+			"api_key": "$ALIBABA_TP_API_KEY",
+			"base_url": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+			"models": [
+				{
+					"id": "deepseek-v4.1-flash",
+					"name": "DeepSeek V4.1 Flash",
+					"context_window": 1000000,
+					"default_max_tokens": 384000
+				}
+			]
+		}
+	}
+}
