@@ -36,7 +36,7 @@
 			},
 			"coverage": {
 				"min_tail.sections.open_failures": 1,
-				"min_tail.decisions.admitted": 1
+				"min_tail.decisions.pool.open.admitted": 1
 			}
 		}
 	},

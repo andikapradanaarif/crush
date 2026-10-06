@@ -149,7 +149,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})
 		require.Empty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "fix the bug",
-		}, nil, nil))
+		}, nil, 0))
 	})
 
 	t.Run("headless variant degrades to state-assumptions", func(t *testing.T) {
@@ -158,7 +158,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		a.ambiguityClarification = true
 		d := a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "fix the bug",
-		}, nil, nil)
+		}, nil, 0)
 		require.Contains(t, d, "cannot ask")
 		require.NotContains(t, d, "question tool")
 	})
@@ -171,7 +171,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		a.tools = csync.NewSliceFrom([]fantasy.AgentTool{&fakeTool{name: tools.QuestionToolName}})
 		d := a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "fix the bug",
-		}, nil, nil)
+		}, nil, 0)
 		require.Contains(t, d, "question tool")
 	})
 
@@ -181,7 +181,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		a.ambiguityClarification = true
 		require.Empty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "fix the bug in internal/agent/agent.go",
-		}, nil, nil))
+		}, nil, 0))
 	})
 
 	t.Run("working set suppresses the gate", func(t *testing.T) {
@@ -191,7 +191,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		(*env.filetracker).RecordRead(t.Context(), sessionID, "main.go")
 		require.Empty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "fix the bug",
-		}, nil, nil))
+		}, nil, 0))
 	})
 
 	t.Run("prior-session heat suppresses the gate", func(t *testing.T) {
@@ -203,7 +203,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		(*env.filetracker).RecordRead(t.Context(), prior.ID, "auth.go")
 		require.Empty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "fix the bug",
-		}, nil, nil))
+		}, nil, 0))
 	})
 
 	t.Run("earlier user text suppresses the gate", func(t *testing.T) {
@@ -212,7 +212,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		a.ambiguityClarification = true
 		require.Empty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "fix it",
-		}, []message.Message{userMsg("auth.go panics on nil tokens")}, nil))
+		}, []message.Message{userMsg("auth.go panics on nil tokens")}, 0))
 	})
 
 	t.Run("an open failure suppresses the gate", func(t *testing.T) {
@@ -226,7 +226,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		})
 		require.Empty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "fix the failure",
-		}, nil, listOpenFailures(t, env)))
+		}, nil, len(listOpenFailures(t, env))))
 	})
 
 	t.Run("a non-failure referent keeps the gate armed", func(t *testing.T) {
@@ -246,7 +246,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		require.Empty(t, admitted)
 		require.NotEmpty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "update the config",
-		}, nil, admitted))
+		}, nil, len(admitted)))
 	})
 
 	t.Run("a bare anaphora suppresses the gate", func(t *testing.T) {
@@ -261,7 +261,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		// "it" has no noun — the open failure is a plausible referent.
 		require.Empty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "fix it",
-		}, nil, listOpenFailures(t, env)))
+		}, nil, len(listOpenFailures(t, env))))
 	})
 
 	t.Run("an attachment suppresses the gate", func(t *testing.T) {
@@ -272,7 +272,7 @@ func TestAmbiguityDirective(t *testing.T) {
 			SessionID:   sessionID,
 			Prompt:      "fix it",
 			Attachments: []message.Attachment{{FileName: "main.go"}},
-		}, nil, nil))
+		}, nil, 0))
 	})
 
 	t.Run("a bare greeting does not suppress the gate", func(t *testing.T) {
@@ -281,7 +281,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		a.ambiguityClarification = true
 		require.NotEmpty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "fix it",
-		}, []message.Message{userMsg("hi")}, nil))
+		}, []message.Message{userMsg("hi")}, 0))
 	})
 
 	t.Run("long prompt does not fire", func(t *testing.T) {
@@ -291,7 +291,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		require.Empty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID,
 			Prompt:    "the bug in the auth middleware returns a 500 when the token is expired; add a refresh path and a regression test",
-		}, nil, nil))
+		}, nil, 0))
 	})
 }
 

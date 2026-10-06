@@ -11,6 +11,7 @@
 	},
 	"check": {
 		"script": "check.sh",
+		"seed_script": "seed_check.sh",
 		"expect_start_state": "fail",
 		"timeout_seconds": 300
 	},

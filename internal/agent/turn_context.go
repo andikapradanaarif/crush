@@ -144,9 +144,10 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	var openFailures []cmdlog.Failure
 	var resolvedFailures []cmdlog.Failure
 	var commands []cmdlog.Command
-	var failureDecisions []FailureDecision
-	var failureCandidates []cmdlog.Failure
+	var memoryDecisions []FailureDecision
+	var memoryCandidates []cmdlog.Failure
 	var fetchErr error
+	var knowledgeFetchErr string
 	// The telemetry holdout suppresses injection for the session but
 	// not the fetch: the turn record still captures which candidates
 	// the suppressed arm would have rendered — the control group's
@@ -183,17 +184,29 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 			// is the auditable invariant — a live re-select would drop
 			// resolved rows but lose the "replayed verdicts are
 			// identical" property the per-Run audit pins.
-			selected, failureDecisions, failureCandidates = cached.selected, cached.decisions, cached.candidates
+			selected, memoryDecisions, memoryCandidates = cached.selected, cached.decisions, cached.candidates
 		default:
 			var pools memoryPools
 			pools.open, fetchErr = a.cmdlog.ListOpenFailures(ctx, turnContextOpenFailuresFetchLimit)
 			if fetchErr == nil {
 				// The knowledge pools fail soft: an open-failure fetch
 				// error still records fetchErr, while a resolved or
-				// command miss just shrinks that pool — the warning
-				// channel is the one whose absence must be visible.
-				pools.resolved, _ = a.cmdlog.ListResolvedFailures(ctx, turnContextOpenFailuresFetchLimit)
-				pools.commands, _ = a.cmdlog.ListCommands(ctx, turnContextOpenFailuresFetchLimit)
+				// command miss shrinks that pool — the warning channel
+				// is the one whose absence must be visible. The
+				// knowledge misses still land on the audit so an empty
+				// pool reads "fetch failed", not "nothing existed".
+				var knowledgeErrs []string
+				if r, err := a.cmdlog.ListResolvedFailures(ctx, turnContextOpenFailuresFetchLimit); err != nil {
+					knowledgeErrs = append(knowledgeErrs, "resolved: "+err.Error())
+				} else {
+					pools.resolved = r
+				}
+				if c, err := a.cmdlog.ListCommands(ctx, turnContextOpenFailuresFetchLimit); err != nil {
+					knowledgeErrs = append(knowledgeErrs, "command: "+err.Error())
+				} else {
+					pools.commands = c
+				}
+				knowledgeFetchErr = strings.Join(knowledgeErrs, "; ")
 				var workDir string
 				if a.configStore != nil {
 					workDir = a.configStore.WorkingDir()
@@ -205,17 +218,24 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 					// closed rather than mine harness retry text.
 					selPrompt = ""
 				}
-				selected, failureDecisions = selectMemory(selPrompt, pools, workDir,
+				selected, memoryDecisions = selectMemory(selPrompt, pools, workDir,
 					memoryRenderLimits{
 						open:     turnContextOpenFailuresRenderLimit,
 						resolved: turnContextResolvedRenderLimit,
 						command:  turnContextCommandsRenderLimit,
 					})
-				failureCandidates = pools.open
+				// Telemetry candidates span every evaluated row, all
+				// three pools — the count/ages mean "what the selector
+				// saw", and decisions alone undercounts the knowledge
+				// pools otherwise. Command rows wear a Failure-shaped
+				// view keyed on their LastAt observation.
+				memoryCandidates = append(append(
+					append([]cmdlog.Failure{}, pools.open...),
+					pools.resolved...), commandCandidateViews(pools.commands)...)
 				if a.turnSels != nil && call.RunStamp != 0 {
 					a.turnSels.Set(call.SessionID, turnSelection{
 						stamp: call.RunStamp, selected: selected,
-						candidates: pools.open, decisions: failureDecisions,
+						candidates: memoryCandidates, decisions: memoryDecisions,
 					})
 				}
 			} else {
@@ -230,12 +250,13 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		}
 	}
 	sections := a.turnContextSections(ctx, call, openFailures, resolvedFailures, commands)
-	if directive := a.ambiguityDirective(ctx, call, msgs, openFailures); directive != "" {
+	boundMemory := len(openFailures) + len(resolvedFailures) + len(commands)
+	if directive := a.ambiguityDirective(ctx, call, msgs, boundMemory); directive != "" {
 		sections = append(sections, directive)
 	}
 	if telemetryOn {
 		a.memoryTelemetry.recordTurn(call.SessionID, call.Prompt, sections,
-			failureCandidates, failureDecisions, a.agentID, armed, holdout, fetchErr)
+			memoryCandidates, memoryDecisions, a.agentID, armed, holdout, fetchErr)
 	}
 	if len(sections) == 0 {
 		// An armed tail that renders nothing still records an audit:
@@ -245,7 +266,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		// predicate checkable. An unarmed agent still clears a stale
 		// audit from an earlier Run in the same process.
 		if a.tailArmed() {
-			a.recordTailAudit(call, nil, "", failureDecisions, fetchErr)
+			a.recordTailAudit(call, nil, "", memoryDecisions, fetchErr, "")
 		} else if a.tailAudit != nil {
 			a.tailAudit.Del(call.SessionID)
 			if a.tailRuns != nil {
@@ -260,7 +281,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		"sections", len(sections),
 		"bytes", len(text),
 	)
-	a.recordTailAudit(call, sections, text, failureDecisions, fetchErr)
+	a.recordTailAudit(call, sections, text, memoryDecisions, fetchErr, knowledgeFetchErr)
 	return []fantasy.Message{fantasy.NewUserMessage(text)}
 }
 
@@ -319,6 +340,12 @@ type TailAudit struct {
 	// empty Decisions then mean "couldn't evaluate", which an eval
 	// must not read as "evaluated, none bound".
 	FetchError string `json:"fetch_error,omitempty"`
+	// KnowledgeFetchError records a resolved- or command-pool fetch
+	// miss ("resolved: <err>; command: <err>"). Those pools fail soft
+	// — an empty pool otherwise aliases "couldn't fetch" with
+	// "nothing existed", and starvation analysis can't tell them
+	// apart.
+	KnowledgeFetchError string `json:"knowledge_fetch_error,omitempty"`
 	// RunStamp and RepairAttempts attribute the audit to the Run
 	// that rendered it. Repair retries share the user turn's stamp
 	// and count attempts, so tailRuns can decompose a turn's
@@ -342,7 +369,7 @@ func tailSectionName(s string) string {
 // tailAudit is last-write-wins per session — the telemetry reads the
 // latest render — while tailRuns keeps every Run's audit so a
 // turn's repair-chain renders stay individually inspectable (#249).
-func (a *sessionAgent) recordTailAudit(call SessionAgentCall, sections []string, text string, decisions []FailureDecision, fetchErr error) {
+func (a *sessionAgent) recordTailAudit(call SessionAgentCall, sections []string, text string, decisions []FailureDecision, fetchErr error, knowledgeErr string) {
 	if a.tailAudit == nil || call.SessionID == "" {
 		return
 	}
@@ -358,6 +385,7 @@ func (a *sessionAgent) recordTailAudit(call SessionAgentCall, sections []string,
 	if fetchErr != nil {
 		audit.FetchError = fetchErr.Error()
 	}
+	audit.KnowledgeFetchError = knowledgeErr
 	for _, s := range sections {
 		audit.Sections = append(audit.Sections, TailSection{Name: tailSectionName(s), Bytes: len(s)})
 	}
@@ -452,9 +480,12 @@ func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgen
 				fmt.Fprintf(&b, ": %s", tailSafeText(truncateTailText(
 					cmdlog.ScreenHeadline(f.Headline), turnContextFailureHeadlineRunes)))
 			}
+			// last_seen freezes at the last FAILING observation —
+			// label it as such, not as resolution age (which cmdlog
+			// does not record).
 			b.WriteString(" — resolved")
 			if age := failureAge(f.LastSeen); age != "" {
-				fmt.Fprintf(&b, " %s", age)
+				fmt.Fprintf(&b, ", last failed %s", age)
 			}
 			b.WriteString("\n")
 		}
@@ -657,7 +688,7 @@ func (a *sessionAgent) relWorkdir(p string) string {
 // resolvable signal exists — a working set or earlier substantive user
 // text means the referent has candidates — and stays opt-in behind
 // options.ambiguity_clarification.
-func (a *sessionAgent) ambiguityDirective(ctx context.Context, call SessionAgentCall, msgs []message.Message, openFailures []cmdlog.Failure) string {
+func (a *sessionAgent) ambiguityDirective(ctx context.Context, call SessionAgentCall, msgs []message.Message, boundMemory int) string {
 	// An attached file is almost certainly the referent — "fix it"
 	// with a file dropped on the prompt needs no clarification.
 	if !a.ambiguityClarification || a.isSubAgent || len(call.Attachments) > 0 || !isVaguePrompt(call.Prompt) {
@@ -678,13 +709,13 @@ func (a *sessionAgent) ambiguityDirective(ctx context.Context, call SessionAgent
 			return ""
 		}
 	}
-	// An admitted open failure is itself the likely referent — the
-	// selector only admits candidates bound to a failure-shaped
-	// referent or an explicit path scope, so presence here already
+	// An admitted memory row is itself the likely referent — the
+	// selector only admits candidates bound to a referent or an
+	// explicit path scope, so presence here (any pool) already
 	// implies shape. An all-rejected set must NOT suppress: those
 	// candidates could not be bound, and the gate's declare-scope
 	// path is exactly what the prompt needs.
-	if a.failureMemory && len(openFailures) > 0 {
+	if a.failureMemory && boundMemory > 0 {
 		return ""
 	}
 	if a.interactive && a.hasTool(tools.QuestionToolName) {

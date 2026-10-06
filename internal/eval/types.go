@@ -438,6 +438,10 @@ type TurnTail struct {
 	// open-failure read itself failed, so an empty Decisions reads
 	// "couldn't evaluate" rather than "evaluated, none bound".
 	FetchError string `json:"fetch_error,omitempty"`
+	// KnowledgeFetchError mirrors TailAudit.KnowledgeFetchError — a
+	// resolved- or command-pool fetch miss, so an empty knowledge
+	// pool reads "couldn't fetch" rather than "nothing existed".
+	KnowledgeFetchError string `json:"knowledge_fetch_error,omitempty"`
 	// RunStamp and RepairAttempts mirror TailAudit's Run attribution —
 	// which Run of the session rendered this audit, so tail_runs can
 	// decompose a turn's repair-chain renders (#249).

@@ -730,7 +730,12 @@ admitted` for injection, `min candidates`+`max admitted:0` for
 rejection, `max candidates:0` for nothing-to-select —
 `tail.decisions.reasons.<reason>` and `.settled.<layer>` split by
 verdict cause and resolver layer, and `tail.decisions.pool.<pool>`
-(plus `.pool.<pool>.admitted`) splits by memory channel.
+(plus `.pool.<pool>.admitted`) splits by memory channel. The pooled
+`candidates`/`admitted` keys span ALL pools — a bound command-ledger
+row counts the same as a bound open failure — so manifests written
+for open-pool semantics (the mask corpus) assert
+`pool.open`/`pool.open.admitted` instead; the pooled keys are the
+"memory of any kind" predicates, reserved for cells that mean it.
 `pressure` is the notebook pressure gate's own coverage (#100):
 `activations` counts engage transitions — the "did the overflow
 machinery fire" predicate — and `engaged` is the per-session latch at

@@ -1246,6 +1246,11 @@ var selectorPromptReplacer = strings.NewReplacer(
 // recent-first), and every bound row beyond it keeps a decision with
 // render_capped — cut by budget, not by the prompt. renderLimit <= 0
 // renders everything that binds.
+//
+// selectOpenFailures is the test-facing open-pool-only wrapper over
+// selectMemory — production calls selectMemory directly so all three
+// pools share one prompt analysis. A new caller wanting open-only
+// verdicts should bind pools explicitly, not reach for this shape.
 func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string,
 	renderLimit int) ([]cmdlog.Failure, []FailureDecision) {
 	admitted, decisions := selectMemory(prompt,
@@ -1293,6 +1298,22 @@ type selCandidate struct {
 func commandCandidateID(c cmdlog.Command) string {
 	sum := sha256.Sum256([]byte(c.CmdNorm + "\x00" + c.CWD))
 	return hex.EncodeToString(sum[:8])
+}
+
+// commandCandidateViews maps ledger rows to the Failure-shaped view
+// telemetry counts candidates by — LastSeen carries the row's LastAt
+// observation so age stats stay in the same units as failure rows.
+func commandCandidateViews(commands []cmdlog.Command) []cmdlog.Failure {
+	out := make([]cmdlog.Failure, 0, len(commands))
+	for _, c := range commands {
+		out = append(out, cmdlog.Failure{
+			Signature: commandCandidateID(c),
+			Cmd:       c.CmdNorm,
+			CWD:       c.CWD,
+			LastSeen:  c.LastAt,
+		})
+	}
+	return out
 }
 
 // commandIdentifiers is a command row's mention vocabulary: the

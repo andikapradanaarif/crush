@@ -784,6 +784,27 @@ func TestValidateExperiment_ArmCoverageStarvation(t *testing.T) {
 	}
 	require.Error(t, ValidateExperiment(exp))
 
+	// The knowledge envelopes ride the same gate — they render only
+	// under failure_memory.
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"failure_memory": false}},
+		Coverage: Coverage{"min_tail.sections.resolved_failures": 1},
+	}
+	require.Error(t, ValidateExperiment(exp))
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"failure_memory": false}},
+		Coverage: Coverage{"min_tail.sections.command_memory": 1},
+	}
+	require.Error(t, ValidateExperiment(exp))
+	exp.Arms[ArmTreatment] = Arm{
+		Config: ArmConfig{Options: map[string]any{"failure_memory": true}},
+		Coverage: Coverage{
+			"min_tail.sections.resolved_failures": 1,
+			"min_tail.sections.command_memory":    1,
+		},
+	}
+	require.NoError(t, ValidateExperiment(exp))
+
 	// Reason-keyed decision counts ride the same gate — their rows
 	// only exist when the selector ran.
 	exp.Arms[ArmTreatment] = Arm{
