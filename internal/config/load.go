@@ -1072,7 +1072,7 @@ func loadFromConfigPaths(ctx context.Context, configPaths []string) (*Config, []
 		if path == "" {
 			continue
 		}
-		data, err := os.ReadFile(path)
+		data, err := readConfigFile(path)
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue

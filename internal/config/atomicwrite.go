@@ -38,23 +38,44 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
-// renameRetryBudget bounds how long renameFile keeps retrying transient
-// failures before giving up and returning the error.
-const renameRetryBudget = 2 * time.Second
+// transientRetryBudget bounds how long renameFile and readConfigFile
+// keep retrying transient failures before giving up and returning the
+// error.
+const transientRetryBudget = 2 * time.Second
 
 // renameFile renames tmp over path. On Windows the rename fails with
 // ERROR_ACCESS_DENIED or ERROR_SHARING_VIOLATION while another process
 // (antivirus, search indexer) or a concurrent reader briefly holds a
 // handle on the destination, so transient failures are retried with
-// backoff. On other platforms isTransientRenameError is always false
+// backoff. On other platforms isTransientFileError is always false
 // and this is a plain os.Rename.
 func renameFile(tmp, path string) error {
 	var slept time.Duration
 	delay := time.Millisecond
 	for {
 		err := os.Rename(tmp, path)
-		if err == nil || !isTransientRenameError(err) || slept >= renameRetryBudget {
+		if err == nil || !isTransientFileError(err) || slept >= transientRetryBudget {
 			return err
+		}
+		time.Sleep(delay)
+		slept += delay
+		delay = min(delay*2, 50*time.Millisecond)
+	}
+}
+
+// readConfigFile reads a config file. On Windows the open fails with
+// ERROR_SHARING_VIOLATION while a concurrent atomicWriteFile rename is
+// rebounding the name or a scanner briefly holds the file, so transient
+// failures are retried with the same backoff the write side uses. On
+// other platforms isTransientFileError is always false and this is a
+// plain os.ReadFile.
+func readConfigFile(path string) ([]byte, error) {
+	var slept time.Duration
+	delay := time.Millisecond
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil || !isTransientFileError(err) || slept >= transientRetryBudget {
+			return data, err
 		}
 		time.Sleep(delay)
 		slept += delay
