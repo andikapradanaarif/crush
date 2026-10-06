@@ -27,8 +27,8 @@
 				}
 			},
 			"coverage": {
-				"min_tail.decisions.candidates": 1,
-				"max_tail.decisions.admitted": 0,
+				"min_tail.decisions.pool.open": 1,
+				"max_tail.decisions.pool.open.admitted": 0,
 				"max_tail.sections.open_failures": 0
 			}
 		}

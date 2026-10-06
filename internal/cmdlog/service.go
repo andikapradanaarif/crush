@@ -63,6 +63,11 @@ type Service interface {
 	// most recently seen first, capped at limit.
 	ListOpenFailures(ctx context.Context, limit int) ([]Failure, error)
 
+	// ListResolvedFailures returns failures a later clean run
+	// resolved — knowledge of what passed again, not open
+	// warnings — most recently seen first, capped at limit.
+	ListResolvedFailures(ctx context.Context, limit int) ([]Failure, error)
+
 	// ListSessionOpenFailures returns the failure rows still open
 	// whose recorded command the given session last ran and last
 	// failed — the reconcile edge's "observed and left open" set.
@@ -257,6 +262,22 @@ func (s *service) ListOpenFailures(ctx context.Context, limit int) ([]Failure, e
 	rows, err := s.q.ListOpenFailures(ctx, int64(limit))
 	if err != nil {
 		return nil, fmt.Errorf("listing open failures: %w", err)
+	}
+	return s.failuresFromRows(rows), nil
+}
+
+// ListResolvedFailures reads resolved rows through the same staleness
+// bound as open ones: last_seen stops moving once a row resolves, so
+// resolved knowledge ages out on the same schedule it would have had
+// it stayed open — a fix remembered past that window is as suspect as
+// the failure itself would be.
+func (s *service) ListResolvedFailures(ctx context.Context, limit int) ([]Failure, error) {
+	if limit <= 0 {
+		limit = defaultListLimit
+	}
+	rows, err := s.q.ListResolvedFailures(ctx, int64(limit))
+	if err != nil {
+		return nil, fmt.Errorf("listing resolved failures: %w", err)
 	}
 	return s.failuresFromRows(rows), nil
 }

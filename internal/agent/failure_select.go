@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path"
 	"path/filepath"
@@ -14,8 +16,8 @@ import (
 	"github.com/charmbracelet/crush/internal/toolclass"
 )
 
-// FailureDecision is the task-binding selector's verdict on one open
-// failure candidate — whether it reached the prompt, and if not, why.
+// FailureDecision is the task-binding selector's verdict on one
+// memory candidate — whether it reached the prompt, and if not, why.
 // The decision list is recorded on the turn's TailAudit so an eval can
 // distinguish "the selector ran and rejected every candidate" from
 // "no candidates existed"; it is the audit contract issue #207 asks
@@ -23,6 +25,11 @@ import (
 type FailureDecision struct {
 	// Signature is the candidate's stable id from cmdlog.
 	Signature string `json:"signature"`
+	// Pool names the memory channel the candidate came from —
+	// "open", "resolved", or "command" — so evals can stratify
+	// admits and vetoes by the row's semantics, not just its text.
+	// Empty on records predating pools; read as "open".
+	Pool string `json:"pool,omitempty"`
 	// Cmd echoes the candidate command so the record reads without a
 	// signature lookup.
 	Cmd string `json:"cmd,omitempty"`
@@ -74,6 +81,22 @@ const (
 	// the render cap cut it. Admit stays false: the field means
 	// "rendered into the tail", and this row did not.
 	failRenderCapped = "render_capped"
+	// failShadowed rejects a command candidate whose (cmd, cwd) key
+	// has an open failure row — the warning envelope already names
+	// that command, so echoing its ledger twin would render the same
+	// knowledge twice. Recorded, not silent: "the command row exists
+	// but its open twin carries it" is auditable evidence.
+	failShadowed = "shadowed_by_open"
+)
+
+// Memory pools — the closed FailureDecision.Pool vocabulary. Open
+// failures are warnings; resolved failures and command rows are
+// knowledge. All three bind under the same rules; the pool tag is
+// what an eval reads to keep their evidence separate.
+const (
+	poolOpen     = "open"
+	poolResolved = "resolved"
+	poolCommand  = "command"
 )
 
 // Settled-by layers — the closed SettledBy vocabulary. "identifier"
@@ -1223,27 +1246,143 @@ var selectorPromptReplacer = strings.NewReplacer(
 // recent-first), and every bound row beyond it keeps a decision with
 // render_capped — cut by budget, not by the prompt. renderLimit <= 0
 // renders everything that binds.
+//
+// selectOpenFailures is the test-facing open-pool-only wrapper over
+// selectMemory — production calls selectMemory directly so all three
+// pools share one prompt analysis. A new caller wanting open-only
+// verdicts should bind pools explicitly, not reach for this shape.
 func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string,
 	renderLimit int) ([]cmdlog.Failure, []FailureDecision) {
-	if len(failures) == 0 {
-		return nil, nil
+	admitted, decisions := selectMemory(prompt,
+		memoryPools{open: failures}, workDir, memoryRenderLimits{open: renderLimit})
+	return admitted.open, decisions
+}
+
+// memoryPools groups the three memory channels the selector sees in
+// one pass — open failures, resolved failures, and the command
+// ledger. One prompt analysis binds all three, so a row cannot admit
+// under a reading its sibling rejected; the pool tag on each
+// decision keeps the channels' evidence separable downstream.
+type memoryPools struct {
+	open     []cmdlog.Failure
+	resolved []cmdlog.Failure
+	commands []cmdlog.Command
+}
+
+// memoryRenderLimits caps rendered rows per pool — the same
+// after-selection budget selectOpenFailures documents, applied
+// independently so each pool's render_capped verdicts are honest.
+// A non-positive limit renders everything that binds.
+type memoryRenderLimits struct {
+	open     int
+	resolved int
+	command  int
+}
+
+// selCandidate normalizes one memory row to the selector's view.
+// Command rows wear a Failure-shaped view (signature synthesized
+// from the row's key) so the shared binding rules apply unchanged;
+// the cmd pointer maps an admit back to the ledger row. shadowed
+// marks a command row whose key an open failure already carries.
+type selCandidate struct {
+	pool     string
+	f        cmdlog.Failure
+	cmd      *cmdlog.Command
+	ids      map[string]bool
+	shadowed bool
+}
+
+// commandCandidateID is a command row's stable id for decisions —
+// the row's primary key is (cmd_norm, cwd), so the digest of that
+// pair plays the role failure signatures play.
+func commandCandidateID(c cmdlog.Command) string {
+	sum := sha256.Sum256([]byte(c.CmdNorm + "\x00" + c.CWD))
+	return hex.EncodeToString(sum[:8])
+}
+
+// commandCandidateViews maps ledger rows to the Failure-shaped view
+// telemetry counts candidates by — LastSeen carries the row's LastAt
+// observation so age stats stay in the same units as failure rows.
+func commandCandidateViews(commands []cmdlog.Command) []cmdlog.Failure {
+	out := make([]cmdlog.Failure, 0, len(commands))
+	for _, c := range commands {
+		out = append(out, cmdlog.Failure{
+			Signature: commandCandidateID(c),
+			Cmd:       c.CmdNorm,
+			CWD:       c.CWD,
+			LastSeen:  c.LastAt,
+		})
+	}
+	return out
+}
+
+// commandIdentifiers is a command row's mention vocabulary: the
+// identifier-shaped tokens its recorded command carries. Unlike a
+// failure row — whose cmd is the invocation and whose headline is
+// the identity — a command row's content IS the command, so its
+// tokens are what a named mention can bind.
+func commandIdentifiers(c cmdlog.Command) map[string]bool {
+	ids := map[string]bool{}
+	for _, tok := range identRe.FindAllString(c.CmdNorm, -1) {
+		if isIdentifier(tok) {
+			ids[tok] = true
+		}
+	}
+	return ids
+}
+
+func selectMemory(prompt string, pools memoryPools, workDir string,
+	limits memoryRenderLimits) (memoryPools, []FailureDecision) {
+	var admitted memoryPools
+	total := len(pools.open) + len(pools.resolved) + len(pools.commands)
+	if total == 0 {
+		return admitted, nil
+	}
+	candidates := make([]selCandidate, 0, total)
+	openKeys := make(map[string]bool, len(pools.open))
+	for _, f := range pools.open {
+		candidates = append(candidates, selCandidate{pool: poolOpen, f: f})
+		openKeys[f.Cmd+"\x00"+strings.ReplaceAll(f.CWD, `\`, "/")] = true
+	}
+	for _, f := range pools.resolved {
+		candidates = append(candidates, selCandidate{pool: poolResolved, f: f})
+	}
+	for i := range pools.commands {
+		c := &pools.commands[i]
+		candidates = append(candidates, selCandidate{
+			pool: poolCommand, cmd: c,
+			f: cmdlog.Failure{
+				Signature: commandCandidateID(*c),
+				Cmd:       c.CmdNorm,
+				CWD:       c.CWD,
+			},
+			ids:      commandIdentifiers(*c),
+			shadowed: openKeys[c.CmdNorm+"\x00"+strings.ReplaceAll(c.CWD, `\`, "/")],
+		})
 	}
 	if strings.Contains(prompt, reconcileRetryPrefix) {
 		// The reconcile edge's retry prompt names the rows it flags.
 		// The once-per-turn cache in turnTailMessages keeps retry
 		// text away from selection; this guard keeps the selector
 		// honest if a future caller ever hands it harness text.
-		ds := make([]FailureDecision, 0, len(failures))
-		for _, f := range failures {
+		ds := make([]FailureDecision, 0, len(candidates))
+		for _, c := range candidates {
 			ds = append(ds, FailureDecision{
-				Signature: f.Signature, Cmd: f.Cmd,
+				Signature: c.f.Signature, Cmd: c.f.Cmd, Pool: c.pool,
 				Reason: failNonUserPrompt, SettledBy: settledHarness,
 			})
 		}
-		return nil, ds
+		return admitted, ds
 	}
-	if renderLimit <= 0 {
-		renderLimit = len(failures)
+	openLimit, resolvedLimit, commandLimit := limits.open, limits.resolved, limits.command
+	if openLimit <= 0 {
+		openLimit = len(pools.open)
+	}
+	if resolvedLimit <= 0 {
+		resolvedLimit = len(pools.resolved)
+	}
+	if commandLimit <= 0 {
+		commandLimit = len(pools.commands)
 	}
 	if m := interruptedRequestRe.FindStringSubmatch(prompt); m != nil {
 		prompt = m[1]
@@ -1266,9 +1405,9 @@ func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string
 	identSites := promptIdentSites(prompt)
 	lone := loneIdentPrompt(prompt)
 
-	var admitted []cmdlog.Failure
-	decisions := make([]FailureDecision, 0, len(failures))
-	for _, f := range failures {
+	decisions := make([]FailureDecision, 0, len(candidates))
+	for _, cand := range candidates {
+		f := cand.f
 		// Windows rows arrive OS-native — normalize to slashes so
 		// dir/prefix comparisons work in the separator the path
 		// helpers assume. Clone before rewriting in place: the
@@ -1278,13 +1417,25 @@ func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string
 		for i := range f.Files {
 			f.Files[i] = strings.ReplaceAll(f.Files[i], `\`, "/")
 		}
-		d := FailureDecision{Signature: f.Signature, Cmd: f.Cmd, SettledBy: settledLexicon}
+		d := FailureDecision{Signature: f.Signature, Cmd: f.Cmd, Pool: cand.pool,
+			SettledBy: settledLexicon}
 		reason := failAdmit
 		dirs := failureDirs(f, workDir)
 		kind := toolclass.CommandKind(f.Cmd)
-		mention := candidateMention(identSites, headlineIdentifiers(f), lone)
+		ids := cand.ids
+		if ids == nil {
+			ids = headlineIdentifiers(f)
+		}
+		mention := candidateMention(identSites, ids, lone)
 
 		switch {
+		case cand.shadowed:
+			// The shadow precedes every other check: the open twin's
+			// own decision carries the real verdict on this command,
+			// and this row's verdict is "subsumed", not rejected on
+			// the merits.
+			reason = failShadowed
+			d.SettledBy = settledState
 		case negatedByAny(dirs, f.Files, neg, pos):
 			reason = failNegatedScope
 		case mention == mentionVeto:
@@ -1353,7 +1504,23 @@ func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string
 			d.SettledBy = settledState
 		}
 		d.Admit = reason == failAdmit
-		if d.Admit && len(admitted) >= renderLimit {
+		limit := openLimit
+		switch cand.pool {
+		case poolResolved:
+			limit = resolvedLimit
+		case poolCommand:
+			limit = commandLimit
+		}
+		var poolCount int
+		switch cand.pool {
+		case poolResolved:
+			poolCount = len(admitted.resolved)
+		case poolCommand:
+			poolCount = len(admitted.commands)
+		default:
+			poolCount = len(admitted.open)
+		}
+		if d.Admit && poolCount >= limit {
 			d.Admit = false
 			d.Reason = failRenderCapped
 		} else {
@@ -1361,7 +1528,14 @@ func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string
 		}
 		decisions = append(decisions, d)
 		if d.Admit {
-			admitted = append(admitted, f)
+			switch cand.pool {
+			case poolResolved:
+				admitted.resolved = append(admitted.resolved, f)
+			case poolCommand:
+				admitted.commands = append(admitted.commands, *cand.cmd)
+			default:
+				admitted.open = append(admitted.open, f)
+			}
 		}
 	}
 	return admitted, decisions

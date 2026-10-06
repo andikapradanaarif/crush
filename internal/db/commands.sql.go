@@ -83,6 +83,46 @@ func (q *Queries) ListRecentCommands(ctx context.Context, limit int64) ([]Comman
 	return items, nil
 }
 
+const listResolvedFailures = `-- name: ListResolvedFailures :many
+SELECT signature, cmd, cwd, headline, files, first_seen, last_seen, resolved_in FROM failure_memory WHERE resolved_in != '' ORDER BY last_seen DESC, rowid DESC LIMIT ?
+`
+
+// Resolved rows are knowledge, not warnings: the failure signature
+// and when it last saw a clean run. Ordered by last_seen (the last
+// failing observation), not resolution time -- the row's freshness
+// is still about when the failure was last real.
+func (q *Queries) ListResolvedFailures(ctx context.Context, limit int64) ([]FailureMemory, error) {
+	rows, err := q.query(ctx, q.listResolvedFailuresStmt, listResolvedFailures, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []FailureMemory{}
+	for rows.Next() {
+		var i FailureMemory
+		if err := rows.Scan(
+			&i.Signature,
+			&i.Cmd,
+			&i.Cwd,
+			&i.Headline,
+			&i.Files,
+			&i.FirstSeen,
+			&i.LastSeen,
+			&i.ResolvedIn,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSessionOpenFailures = `-- name: ListSessionOpenFailures :many
 SELECT f.signature, f.cmd, f.cwd, f.headline, f.files, f.first_seen, f.last_seen, f.resolved_in
 FROM failure_memory f

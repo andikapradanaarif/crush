@@ -106,3 +106,10 @@ ORDER BY f.last_seen DESC, f.rowid DESC
 -- distinct commands than this only pathologically, and the retry
 -- prompt renders at most ten.
 LIMIT 50;
+
+-- name: ListResolvedFailures :many
+-- Resolved rows are knowledge, not warnings: the failure signature
+-- and when it last saw a clean run. Ordered by last_seen (the last
+-- failing observation), not resolution time -- the row's freshness
+-- is still about when the failure was last real.
+SELECT * FROM failure_memory WHERE resolved_in != '' ORDER BY last_seen DESC, rowid DESC LIMIT ?;

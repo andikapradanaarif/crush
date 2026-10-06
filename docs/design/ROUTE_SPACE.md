@@ -52,41 +52,57 @@ Five rules. All five are load-bearing for auditability:
 | Validated model layer — closed output schema + deterministic validation + abstain on failure | Allowed; the model picks among *enumerated* options and the guard checks its answer |
 | Learned scorer ranking arbitrary paths | Forbidden — no deterministic check can catch "the weights drifted wrong" |
 
-## Route space 1 — open-failure selection (live)
+## Route space 1 — memory selection (live)
 
-`internal/agent/failure_select.go` — per-candidate dispatch over the
-open-failure set, once per turn per row. The route forks once
-(explicit scope vs ambiguous prompt), then runs an ordered check list
-where the **first disqualifying check wins** and its reason is
-recorded:
+`internal/agent/failure_select.go` — per-candidate dispatch over
+three memory pools in one pass, once per turn per row: **open**
+failures (warnings), **resolved** failures and **command** ledger
+rows (knowledge, #222). One prompt analysis binds all three; each
+decision carries a `pool` tag so the channels' evidence stays
+separable. The route forks once (explicit scope vs ambiguous
+prompt), then runs an ordered check list where the **first
+disqualifying check wins** and its reason is recorded:
 
 ```
-fetch: ListOpenFailures(ctx, 50) ── candidate pool = freshest 50 rows
+fetch: ListOpenFailures(ctx, 50) + ListResolvedFailures(ctx, 50)
+     + ListCommands(ctx, 50) ── candidate pools, freshest-first
      (bounded for fetch cost; wide enough that a relevant row past
       the render cap still earns a decision record)
 
 prompt ──→ scope extraction ──┬── explicit scope ──────────┐
                               └── ambiguous (no scope) ────┤
 per candidate row:            │                            │
-  1. negatedByAny        → negated_scope   (veto — first,  │
-     outranks everything; unrecognized text defaults to    │
+  0. command row whose    → shadowed_by_open (pool dedupe —
+     (cmd,cwd) key has an     the open twin's own decision
+     open failure twin        carries the verdict)         │
+  1. negatedByAny        → negated_scope   (veto — first   │
+     among prompt checks; unrecognized text defaults to    │
      exclusion, not grant)                                 │
-  2. explicit && miss    → out_of_scope                    │
-  3. explicit && kind ∉  → kind_mismatch*                  │
+  2. mention veto        → negated_scope   (identifier     │
+     layer parity — settled_by=identifier)                 │
+  3. mention positive    → kind_mismatch / path_gone /     │
+     + failed check         stale_suspect / admit — the    │
+                            mention IS the scope           │
+  4. explicit && miss    → out_of_scope                    │
+  5. explicit && kind ∉  → kind_mismatch*                  │
      {test,build,lint,run}                                 │
-  4. ambiguous && no     → referent_none                   │
+  6. ambiguous && no     → referent_none                   │
      failure referent                                      │
-  5. ambiguous && kind   → kind_mismatch*                  │
+  7. ambiguous && kind   → kind_mismatch*                  │
      ∉ referent kinds                                      │
-  6. ambiguous && non-   → narrow_scope                    │
+  8. ambiguous && non-   → narrow_scope                    │
      top-level && ≠run                                     │
-  7. all paths absent    → path_gone                       │
-  8. implicated path     → stale_suspect                   │
+  9. all paths absent    → path_gone                       │
+ 10. implicated path     → stale_suspect                   │
      newer than last_seen                                  │
   else                   → admit                           │
 
-render cap (post-selection, recent-first order):
-  bound rows ≤ cap       → renders into <open_failures>
+render cap (post-selection, recent-first order, per pool):
+  bound rows ≤ cap       → renders into <open_failures> (cap 5),
+                           <resolved_failures> (cap 3), or
+                           <command_memory> (cap 3) — warnings
+                           before knowledge, each pool's cap
+                           independent
   bound rows beyond cap  → render_capped (admit=false —
                            cut by budget, not by the prompt)
 
@@ -104,8 +120,16 @@ stale-suspect window, scope lexicon entries. The check order and the
 exit set are topology — not params.
 
 Observability: every candidate's exit is in `tail.decisions`
-(`{signature, cmd, admit, reason}`); eval arm predicates group on the
-reason vocabulary.
+(`{signature, pool, cmd, admit, reason}`); eval arm predicates group
+on the reason vocabulary, and `tail.decisions.pool.<pool>` splits
+verdicts by memory channel. Command rows bind on scope and kind —
+they carry no headline or file hints, so the state checks
+(path_gone, stale_suspect) cannot fire on them, and their mention
+vocabulary is the command text itself.
+
+Downstream consumers read admitted rows across all three pools —
+the ambiguity gate's "memory resolved the referent" suppression
+counts any bound row, not only open warnings.
 
 ## Route space 2 — eval lifecycle (live)
 

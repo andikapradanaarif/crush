@@ -167,9 +167,11 @@ var armOnlyCoverageFields = map[string]func(*RunRecord) float64{
 	// The name set mirrors the renderer's envelope list — a new
 	// envelope registers here explicitly rather than starving or
 	// passing silently.
-	"tail.sections.open_failures":  func(r *RunRecord) float64 { return tailSectionTurns(r, "open_failures") },
-	"tail.sections.turn_context":   func(r *RunRecord) float64 { return tailSectionTurns(r, "turn_context") },
-	"tail.sections.ambiguity_gate": func(r *RunRecord) float64 { return tailSectionTurns(r, "ambiguity_gate") },
+	"tail.sections.open_failures":     func(r *RunRecord) float64 { return tailSectionTurns(r, "open_failures") },
+	"tail.sections.resolved_failures": func(r *RunRecord) float64 { return tailSectionTurns(r, "resolved_failures") },
+	"tail.sections.command_memory":    func(r *RunRecord) float64 { return tailSectionTurns(r, "command_memory") },
+	"tail.sections.turn_context":      func(r *RunRecord) float64 { return tailSectionTurns(r, "turn_context") },
+	"tail.sections.ambiguity_gate":    func(r *RunRecord) float64 { return tailSectionTurns(r, "ambiguity_gate") },
 	// tail.decisions.* counts the failure-memory selector's
 	// per-candidate verdicts across turns — candidates is every row
 	// the selector evaluated, admitted those it rendered. Together
@@ -267,6 +269,7 @@ func tailDecisions(r *RunRecord, which string) float64 {
 var tailDecisionReasons = []string{
 	"admit",
 	"non_user_prompt",
+	"shadowed_by_open",
 	"negated_scope",
 	"out_of_scope",
 	"referent_none",
@@ -301,6 +304,26 @@ func tailDecisionsByReason(r *RunRecord, reason string) float64 {
 			if d.Reason == reason {
 				n++
 			}
+		}
+	}
+	return float64(n)
+}
+
+// tailDecisionsByPool counts decision rows by their memory channel.
+// Records predating pools carry no pool field — an empty Pool reads
+// as "open", matching the mirror's documented default.
+func tailDecisionsByPool(r *RunRecord, pool string, admittedOnly bool) float64 {
+	n := 0
+	for _, t := range r.Tail {
+		for _, d := range t.Decisions {
+			p := d.Pool
+			if p == "" {
+				p = "open"
+			}
+			if p != pool || (admittedOnly && !d.Admit) {
+				continue
+			}
+			n++
 		}
 	}
 	return float64(n)
@@ -386,6 +409,18 @@ func init() {
 	for _, layer := range tailDecisionLayers {
 		armOnlyCoverageFields["tail.decisions.settled."+layer] = func(r *RunRecord) float64 {
 			return tailDecisionsByLayer(r, layer)
+		}
+	}
+	// Per-pool decision counts: tail.decisions.pool.<pool>[.admitted]
+	// — which memory channel each verdict came from, so a cell can
+	// assert "command rows rendered" or "resolved rows bound" without
+	// conflating them with the open-failure pool's warnings.
+	for _, pool := range []string{"open", "resolved", "command"} {
+		armOnlyCoverageFields["tail.decisions.pool."+pool] = func(r *RunRecord) float64 {
+			return tailDecisionsByPool(r, pool, false)
+		}
+		armOnlyCoverageFields["tail.decisions.pool."+pool+".admitted"] = func(r *RunRecord) float64 {
+			return tailDecisionsByPool(r, pool, true)
 		}
 	}
 	armFields = maps.Clone(coverageFields)

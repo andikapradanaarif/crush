@@ -99,6 +99,11 @@ type Querier interface {
 	// last_at is millisecond-granularity so re-runs order by recency;
 	// rowid settles ties for rows written in the same millisecond.
 	ListRecentCommands(ctx context.Context, limit int64) ([]CommandMemory, error)
+	// Resolved rows are knowledge, not warnings: the failure signature
+	// and when it last saw a clean run. Ordered by last_seen (the last
+	// failing observation), not resolution time -- the row's freshness
+	// is still about when the failure was last real.
+	ListResolvedFailures(ctx context.Context, limit int64) ([]FailureMemory, error)
 	ListSessionCounters(ctx context.Context) ([]ListSessionCountersRow, error)
 	// Open failure rows whose commands the given session (or one of its
 	// task-tool child sessions) last ran and last failed: the reconcile

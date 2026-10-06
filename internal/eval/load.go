@@ -664,7 +664,12 @@ func armStarvationRules(field string) []starvationRule {
 			return []starvationRule{modeIs("turn_context", "session")}
 		case "tail.sections.ambiguity_gate":
 			return []starvationRule{boolOn("ambiguity_clarification")}
-		case "tail.sections.open_failures":
+		case "tail.sections.open_failures",
+			"tail.sections.resolved_failures",
+			"tail.sections.command_memory":
+			// All three memory envelopes render only under
+			// failure_memory — a min_ on an fm-off arm starves
+			// structurally.
 			return []starvationRule{boolOn("failure_memory")}
 		}
 		return nil

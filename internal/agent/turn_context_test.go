@@ -126,6 +126,10 @@ func (failingCmdlog) ListOpenFailures(context.Context, int) ([]cmdlog.Failure, e
 	return nil, errors.New("cmdlog unavailable")
 }
 
+func (failingCmdlog) ListResolvedFailures(context.Context, int) ([]cmdlog.Failure, error) {
+	return nil, errors.New("cmdlog unavailable")
+}
+
 func (failingCmdlog) ListSessionOpenFailures(context.Context, string) ([]cmdlog.Failure, error) {
 	return nil, errors.New("cmdlog unavailable")
 }
@@ -145,7 +149,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		a, _, sessionID := newTurnCtxAgent(t, &config.Config{})
 		require.Empty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "fix the bug",
-		}, nil, nil))
+		}, nil, 0))
 	})
 
 	t.Run("headless variant degrades to state-assumptions", func(t *testing.T) {
@@ -154,7 +158,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		a.ambiguityClarification = true
 		d := a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "fix the bug",
-		}, nil, nil)
+		}, nil, 0)
 		require.Contains(t, d, "cannot ask")
 		require.NotContains(t, d, "question tool")
 	})
@@ -167,7 +171,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		a.tools = csync.NewSliceFrom([]fantasy.AgentTool{&fakeTool{name: tools.QuestionToolName}})
 		d := a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "fix the bug",
-		}, nil, nil)
+		}, nil, 0)
 		require.Contains(t, d, "question tool")
 	})
 
@@ -177,7 +181,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		a.ambiguityClarification = true
 		require.Empty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "fix the bug in internal/agent/agent.go",
-		}, nil, nil))
+		}, nil, 0))
 	})
 
 	t.Run("working set suppresses the gate", func(t *testing.T) {
@@ -187,7 +191,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		(*env.filetracker).RecordRead(t.Context(), sessionID, "main.go")
 		require.Empty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "fix the bug",
-		}, nil, nil))
+		}, nil, 0))
 	})
 
 	t.Run("prior-session heat suppresses the gate", func(t *testing.T) {
@@ -199,7 +203,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		(*env.filetracker).RecordRead(t.Context(), prior.ID, "auth.go")
 		require.Empty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "fix the bug",
-		}, nil, nil))
+		}, nil, 0))
 	})
 
 	t.Run("earlier user text suppresses the gate", func(t *testing.T) {
@@ -208,7 +212,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		a.ambiguityClarification = true
 		require.Empty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "fix it",
-		}, []message.Message{userMsg("auth.go panics on nil tokens")}, nil))
+		}, []message.Message{userMsg("auth.go panics on nil tokens")}, 0))
 	})
 
 	t.Run("an open failure suppresses the gate", func(t *testing.T) {
@@ -222,7 +226,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		})
 		require.Empty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "fix the failure",
-		}, nil, listOpenFailures(t, env)))
+		}, nil, len(listOpenFailures(t, env))))
 	})
 
 	t.Run("a non-failure referent keeps the gate armed", func(t *testing.T) {
@@ -242,7 +246,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		require.Empty(t, admitted)
 		require.NotEmpty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "update the config",
-		}, nil, admitted))
+		}, nil, len(admitted)))
 	})
 
 	t.Run("a bare anaphora suppresses the gate", func(t *testing.T) {
@@ -257,7 +261,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		// "it" has no noun — the open failure is a plausible referent.
 		require.Empty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "fix it",
-		}, nil, listOpenFailures(t, env)))
+		}, nil, len(listOpenFailures(t, env))))
 	})
 
 	t.Run("an attachment suppresses the gate", func(t *testing.T) {
@@ -268,7 +272,7 @@ func TestAmbiguityDirective(t *testing.T) {
 			SessionID:   sessionID,
 			Prompt:      "fix it",
 			Attachments: []message.Attachment{{FileName: "main.go"}},
-		}, nil, nil))
+		}, nil, 0))
 	})
 
 	t.Run("a bare greeting does not suppress the gate", func(t *testing.T) {
@@ -277,7 +281,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		a.ambiguityClarification = true
 		require.NotEmpty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "fix it",
-		}, []message.Message{userMsg("hi")}, nil))
+		}, []message.Message{userMsg("hi")}, 0))
 	})
 
 	t.Run("long prompt does not fire", func(t *testing.T) {
@@ -287,7 +291,7 @@ func TestAmbiguityDirective(t *testing.T) {
 		require.Empty(t, a.ambiguityDirective(t.Context(), SessionAgentCall{
 			SessionID: sessionID,
 			Prompt:    "the bug in the auth middleware returns a 500 when the token is expired; add a refresh path and a regression test",
-		}, nil, nil))
+		}, nil, 0))
 	})
 }
 
@@ -840,5 +844,80 @@ func TestTurnTailMessages_SelectionOncePerUserTurn(t *testing.T) {
 		for _, d := range audit.Decisions {
 			require.NotEqual(t, settledIdentifier, d.SettledBy)
 		}
+	})
+}
+
+func TestTurnContextSections_MemoryPools(t *testing.T) {
+	t.Parallel()
+
+	t.Run("resolved and command envelopes render under failure_memory", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.tailAudit = csync.NewMap[string, TailAudit]()
+		a.failureMemory = true
+		// A fail then a pass of the same command leaves one
+		// resolved failure row and one ledger row — the two
+		// knowledge pools in a single seed.
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: "prior", Command: "go test .",
+			CWD: env.workingDir, Stdout: "--- FAIL: TestAdd", ExitCode: 1, Ran: true,
+		})
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: "prior", Command: "go test .",
+			CWD: env.workingDir, Stdout: "ok", ExitCode: 0, Ran: true,
+		})
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: "prior", Command: "go test -count=1 .",
+			CWD: env.workingDir, Stdout: "ok", ExitCode: 0, Ran: true,
+		})
+		tail := a.turnTailMessages(t.Context(), SessionAgentCall{
+			SessionID: sessionID, Prompt: "the tests fail",
+		}, nil)
+		require.Len(t, tail, 1)
+		text := tail[0].Content[0].(fantasy.TextPart).Text
+		require.Contains(t, text, "<resolved_failures>")
+		require.Contains(t, text, "resolved")
+		require.Contains(t, text, "TestAdd")
+		require.Contains(t, text, "<command_memory>")
+		require.Contains(t, text, "go test -count=1 .")
+		require.NotContains(t, text, "<open_failures>")
+
+		audit, ok := a.tailAudit.Get(sessionID)
+		require.True(t, ok)
+		pools := map[string]int{}
+		for _, d := range audit.Decisions {
+			pools[d.Pool]++
+		}
+		require.Equal(t, 1, pools[poolResolved])
+		require.Equal(t, 2, pools[poolCommand])
+	})
+
+	t.Run("an open twin shadows its command row in the render", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.tailAudit = csync.NewMap[string, TailAudit]()
+		a.failureMemory = true
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: "prior", Command: "go test .",
+			CWD: env.workingDir, Stdout: "--- FAIL: TestAdd", ExitCode: 1, Ran: true,
+		})
+		tail := a.turnTailMessages(t.Context(), SessionAgentCall{
+			SessionID: sessionID, Prompt: "the tests fail",
+		}, nil)
+		require.Len(t, tail, 1)
+		text := tail[0].Content[0].(fantasy.TextPart).Text
+		require.Contains(t, text, "<open_failures>")
+		// One "go test ." mention — the open row — not a ledger echo.
+		require.NotContains(t, text, "<command_memory>")
+
+		audit, ok := a.tailAudit.Get(sessionID)
+		require.True(t, ok)
+		var shadowed bool
+		for _, d := range audit.Decisions {
+			if d.Pool == poolCommand && d.Reason == failShadowed {
+				shadowed = true
+			}
+		}
+		require.True(t, shadowed, "command twin records shadowed_by_open")
 	})
 }

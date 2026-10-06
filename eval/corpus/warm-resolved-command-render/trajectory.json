@@ -1,0 +1,21 @@
+{
+	"id": "warm-resolved-command-render",
+	"schema_version": 1,
+	"origin": {"kind": "synthetic"},
+	"start_state": {"kind": "fixture", "fixture_dir": "fixture"},
+	"prior_sessions": [
+		{"turns": ["run `go test .` as a single bare command — no pipes or wrappers — if it fails, fix the failure and re-run the same command — keep going until it passes"]}
+	],
+	"task": {
+		"turns": ["the tests must keep passing — add reply.go with a Reply function — Reply() returns the string \"ok\" — and reply_test.go with a TestReply asserting it — run `go test .` as a bare command to check"]
+	},
+	"check": {
+		"script": "check.sh",
+		"seed_script": "seed_check.sh",
+		"expect_start_state": "fail",
+		"timeout_seconds": 300
+	},
+	"coverage": {"min_steps": 1, "min_warm_start.sessions": 1},
+	"requires": {"tools": ["go", "sqlite3"]},
+	"budget": {"run_timeout_seconds": 300, "max_steps": 15}
+}
