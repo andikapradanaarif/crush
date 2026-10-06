@@ -41,12 +41,21 @@ const (
 	// turnContextOpenFailuresFetchLimit bounds the candidate pool the
 	// selector sees — bounded for fetch cost, wide enough that a
 	// relevant row past the render cap still earns a decision record
-	// instead of vanishing before selection.
+	// instead of vanishing before selection. The resolved and command
+	// pools fetch under the same bound: all three are selector
+	// candidates, and a row that never reaches the selector cannot
+	// leave a decision.
 	turnContextOpenFailuresFetchLimit = 50
 	// turnContextOpenFailuresRenderLimit bounds the failure-memory
 	// tail itself — recent-first, so the cap keeps the freshest bound
 	// rows; rows it cuts record render_capped, not silence.
 	turnContextOpenFailuresRenderLimit = 5
+	// Resolved and command knowledge is subordinate to open failures:
+	// the pressure regime showed injection quality degrades before
+	// capacity runs out, so the knowledge envelopes cap tighter than
+	// the warning envelope they supplement.
+	turnContextResolvedRenderLimit = 3
+	turnContextCommandsRenderLimit = 3
 	// turnContextFailureFileHints bounds file hints rendered per
 	// failure row.
 	turnContextFailureFileHints = 3
@@ -133,6 +142,8 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	// candidate's verdict so "rendered nothing" decomposes into "no
 	// candidates" versus "candidates rejected".
 	var openFailures []cmdlog.Failure
+	var resolvedFailures []cmdlog.Failure
+	var commands []cmdlog.Command
 	var failureDecisions []FailureDecision
 	var failureCandidates []cmdlog.Failure
 	var fetchErr error
@@ -153,7 +164,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		holdout = a.memoryTelemetry.holdoutOff(call.SessionID)
 	}
 	if a.failureMemory && a.cmdlog != nil && !a.isSubAgent {
-		var selected []cmdlog.Failure
+		var selected memoryPools
 		// Selection is once per user turn, keyed on RunStamp: repair
 		// retries keep the stamp but their call.Prompt is the retry
 		// text — which literally names the open rows — so re-binding
@@ -174,9 +185,15 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 			// identical" property the per-Run audit pins.
 			selected, failureDecisions, failureCandidates = cached.selected, cached.decisions, cached.candidates
 		default:
-			var f []cmdlog.Failure
-			f, fetchErr = a.cmdlog.ListOpenFailures(ctx, turnContextOpenFailuresFetchLimit)
+			var pools memoryPools
+			pools.open, fetchErr = a.cmdlog.ListOpenFailures(ctx, turnContextOpenFailuresFetchLimit)
 			if fetchErr == nil {
+				// The knowledge pools fail soft: an open-failure fetch
+				// error still records fetchErr, while a resolved or
+				// command miss just shrinks that pool — the warning
+				// channel is the one whose absence must be visible.
+				pools.resolved, _ = a.cmdlog.ListResolvedFailures(ctx, turnContextOpenFailuresFetchLimit)
+				pools.commands, _ = a.cmdlog.ListCommands(ctx, turnContextOpenFailuresFetchLimit)
 				var workDir string
 				if a.configStore != nil {
 					workDir = a.configStore.WorkingDir()
@@ -188,13 +205,17 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 					// closed rather than mine harness retry text.
 					selPrompt = ""
 				}
-				selected, failureDecisions = selectOpenFailures(selPrompt, f, workDir,
-					turnContextOpenFailuresRenderLimit)
-				failureCandidates = f
+				selected, failureDecisions = selectMemory(selPrompt, pools, workDir,
+					memoryRenderLimits{
+						open:     turnContextOpenFailuresRenderLimit,
+						resolved: turnContextResolvedRenderLimit,
+						command:  turnContextCommandsRenderLimit,
+					})
+				failureCandidates = pools.open
 				if a.turnSels != nil && call.RunStamp != 0 {
 					a.turnSels.Set(call.SessionID, turnSelection{
 						stamp: call.RunStamp, selected: selected,
-						candidates: f, decisions: failureDecisions,
+						candidates: pools.open, decisions: failureDecisions,
 					})
 				}
 			} else {
@@ -203,10 +224,12 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 			}
 		}
 		if !holdout {
-			openFailures = selected
+			openFailures = selected.open
+			resolvedFailures = selected.resolved
+			commands = selected.commands
 		}
 	}
-	sections := a.turnContextSections(ctx, call, openFailures)
+	sections := a.turnContextSections(ctx, call, openFailures, resolvedFailures, commands)
 	if directive := a.ambiguityDirective(ctx, call, msgs, openFailures); directive != "" {
 		sections = append(sections, directive)
 	}
@@ -241,10 +264,12 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	return []fantasy.Message{fantasy.NewUserMessage(text)}
 }
 
-// turnSelection caches one user turn's open_failures selection.
+// turnSelection caches one user turn's memory selection — all three
+// pools, one prompt analysis, replayed verbatim across the turn's
+// repair chain.
 type turnSelection struct {
 	stamp      uint64
-	selected   []cmdlog.Failure
+	selected   memoryPools
 	candidates []cmdlog.Failure
 	decisions  []FailureDecision
 }
@@ -357,17 +382,19 @@ const tailRunsHistoryMax = 128
 // display and tests. The tail and its audit need the per-envelope
 // split — see turnContextSections.
 func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCall, openFailures []cmdlog.Failure) string {
-	return strings.Join(a.turnContextSections(ctx, call, openFailures), "\n")
+	return strings.Join(a.turnContextSections(ctx, call, openFailures, nil, nil), "\n")
 }
 
 // turnContextSections renders the tail context sections — the session
 // signals wrapped in <turn_context> when that tier is on, and project
-// failure memory under its own <open_failures> envelope. The failure
-// section renders outside the tier's wrapper: with
-// turn_context=off + failure_memory=on an <open_failures> inside
-// <turn_context> would attribute its content to a disabled tier.
-// Returns nil for a sub-agent or when no enabled signal has content.
-func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgentCall, openFailures []cmdlog.Failure) []string {
+// memory under its own envelopes. The memory sections render outside
+// the tier's wrapper: with turn_context=off + failure_memory=on an
+// <open_failures> inside <turn_context> would attribute its content
+// to a disabled tier. Ordering encodes priority — warnings before
+// knowledge — so a reader weighting early content heavier reads the
+// subordinate envelopes last. Returns nil for a sub-agent or when no
+// enabled signal has content.
+func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgentCall, openFailures, resolvedFailures []cmdlog.Failure, commands []cmdlog.Command) []string {
 	if a.isSubAgent {
 		return nil
 	}
@@ -409,6 +436,45 @@ func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgen
 			b.WriteString("\n")
 		}
 		b.WriteString("</open_failures>\n")
+		sections = append(sections, b.String())
+	}
+
+	if a.failureMemory && len(resolvedFailures) > 0 {
+		var b strings.Builder
+		b.WriteString("<resolved_failures>\nCommands whose earlier failures later passed in this workspace — knowledge of what worked, not open warnings:\n")
+		for _, f := range resolvedFailures {
+			b.WriteString("- ")
+			b.WriteString(tailSafeText(truncateTailText(f.Cmd, turnContextFailureCmdRunes)))
+			if f.CWD != "" && f.CWD != "." {
+				fmt.Fprintf(&b, " (in %s)", tailSafeText(f.CWD))
+			}
+			if f.Headline != "" {
+				fmt.Fprintf(&b, ": %s", tailSafeText(truncateTailText(
+					cmdlog.ScreenHeadline(f.Headline), turnContextFailureHeadlineRunes)))
+			}
+			b.WriteString(" — resolved")
+			if age := failureAge(f.LastSeen); age != "" {
+				fmt.Fprintf(&b, " %s", age)
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString("</resolved_failures>\n")
+		sections = append(sections, b.String())
+	}
+
+	if a.failureMemory && len(commands) > 0 {
+		var b strings.Builder
+		b.WriteString("<command_memory>\nCommands run in this workspace with their track record — the likely entry points for \"run the tests\" or \"build it\":\n")
+		for _, c := range commands {
+			b.WriteString("- ")
+			b.WriteString(tailSafeText(truncateTailText(c.CmdNorm, turnContextFailureCmdRunes)))
+			if c.CWD != "" && c.CWD != "." {
+				fmt.Fprintf(&b, " (in %s)", tailSafeText(c.CWD))
+			}
+			fmt.Fprintf(&b, " — %s, %d ok / %d failed", tailSafeText(c.Kind), c.OKCount, c.FailCount)
+			b.WriteString("\n")
+		}
+		b.WriteString("</command_memory>\n")
 		sections = append(sections, b.String())
 	}
 

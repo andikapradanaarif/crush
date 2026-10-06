@@ -216,6 +216,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listRecentCommandsStmt, err = db.PrepareContext(ctx, listRecentCommands); err != nil {
 		return nil, fmt.Errorf("error preparing query ListRecentCommands: %w", err)
 	}
+	if q.listResolvedFailuresStmt, err = db.PrepareContext(ctx, listResolvedFailures); err != nil {
+		return nil, fmt.Errorf("error preparing query ListResolvedFailures: %w", err)
+	}
 	if q.listSessionCountersStmt, err = db.PrepareContext(ctx, listSessionCounters); err != nil {
 		return nil, fmt.Errorf("error preparing query ListSessionCounters: %w", err)
 	}
@@ -604,6 +607,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listRecentCommandsStmt: %w", cerr)
 		}
 	}
+	if q.listResolvedFailuresStmt != nil {
+		if cerr := q.listResolvedFailuresStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listResolvedFailuresStmt: %w", cerr)
+		}
+	}
 	if q.listSessionCountersStmt != nil {
 		if cerr := q.listSessionCountersStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listSessionCountersStmt: %w", cerr)
@@ -812,6 +820,7 @@ type Queries struct {
 	listOpenFailuresStmt                 *sql.Stmt
 	listProcessedSegmentsStmt            *sql.Stmt
 	listRecentCommandsStmt               *sql.Stmt
+	listResolvedFailuresStmt             *sql.Stmt
 	listSessionCountersStmt              *sql.Stmt
 	listSessionOpenFailuresStmt          *sql.Stmt
 	listSessionReadFilesStmt             *sql.Stmt
@@ -903,6 +912,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listOpenFailuresStmt:                 q.listOpenFailuresStmt,
 		listProcessedSegmentsStmt:            q.listProcessedSegmentsStmt,
 		listRecentCommandsStmt:               q.listRecentCommandsStmt,
+		listResolvedFailuresStmt:             q.listResolvedFailuresStmt,
 		listSessionCountersStmt:              q.listSessionCountersStmt,
 		listSessionOpenFailuresStmt:          q.listSessionOpenFailuresStmt,
 		listSessionReadFilesStmt:             q.listSessionReadFilesStmt,

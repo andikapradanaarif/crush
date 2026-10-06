@@ -453,6 +453,7 @@ type TurnTail struct {
 // "lexicon", "state") — #216's per-layer attribution.
 type FailureDecision struct {
 	Signature string `json:"signature"`
+	Pool      string `json:"pool,omitempty"`
 	Cmd       string `json:"cmd,omitempty"`
 	Admit     bool   `json:"admit"`
 	Reason    string `json:"reason"`

@@ -126,6 +126,10 @@ func (failingCmdlog) ListOpenFailures(context.Context, int) ([]cmdlog.Failure, e
 	return nil, errors.New("cmdlog unavailable")
 }
 
+func (failingCmdlog) ListResolvedFailures(context.Context, int) ([]cmdlog.Failure, error) {
+	return nil, errors.New("cmdlog unavailable")
+}
+
 func (failingCmdlog) ListSessionOpenFailures(context.Context, string) ([]cmdlog.Failure, error) {
 	return nil, errors.New("cmdlog unavailable")
 }
@@ -840,5 +844,80 @@ func TestTurnTailMessages_SelectionOncePerUserTurn(t *testing.T) {
 		for _, d := range audit.Decisions {
 			require.NotEqual(t, settledIdentifier, d.SettledBy)
 		}
+	})
+}
+
+func TestTurnContextSections_MemoryPools(t *testing.T) {
+	t.Parallel()
+
+	t.Run("resolved and command envelopes render under failure_memory", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.tailAudit = csync.NewMap[string, TailAudit]()
+		a.failureMemory = true
+		// A fail then a pass of the same command leaves one
+		// resolved failure row and one ledger row — the two
+		// knowledge pools in a single seed.
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: "prior", Command: "go test .",
+			CWD: env.workingDir, Stdout: "--- FAIL: TestAdd", ExitCode: 1, Ran: true,
+		})
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: "prior", Command: "go test .",
+			CWD: env.workingDir, Stdout: "ok", ExitCode: 0, Ran: true,
+		})
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: "prior", Command: "go test -count=1 .",
+			CWD: env.workingDir, Stdout: "ok", ExitCode: 0, Ran: true,
+		})
+		tail := a.turnTailMessages(t.Context(), SessionAgentCall{
+			SessionID: sessionID, Prompt: "the tests fail",
+		}, nil)
+		require.Len(t, tail, 1)
+		text := tail[0].Content[0].(fantasy.TextPart).Text
+		require.Contains(t, text, "<resolved_failures>")
+		require.Contains(t, text, "resolved")
+		require.Contains(t, text, "TestAdd")
+		require.Contains(t, text, "<command_memory>")
+		require.Contains(t, text, "go test -count=1 .")
+		require.NotContains(t, text, "<open_failures>")
+
+		audit, ok := a.tailAudit.Get(sessionID)
+		require.True(t, ok)
+		pools := map[string]int{}
+		for _, d := range audit.Decisions {
+			pools[d.Pool]++
+		}
+		require.Equal(t, 1, pools[poolResolved])
+		require.Equal(t, 2, pools[poolCommand])
+	})
+
+	t.Run("an open twin shadows its command row in the render", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.tailAudit = csync.NewMap[string, TailAudit]()
+		a.failureMemory = true
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: "prior", Command: "go test .",
+			CWD: env.workingDir, Stdout: "--- FAIL: TestAdd", ExitCode: 1, Ran: true,
+		})
+		tail := a.turnTailMessages(t.Context(), SessionAgentCall{
+			SessionID: sessionID, Prompt: "the tests fail",
+		}, nil)
+		require.Len(t, tail, 1)
+		text := tail[0].Content[0].(fantasy.TextPart).Text
+		require.Contains(t, text, "<open_failures>")
+		// One "go test ." mention — the open row — not a ledger echo.
+		require.NotContains(t, text, "<command_memory>")
+
+		audit, ok := a.tailAudit.Get(sessionID)
+		require.True(t, ok)
+		var shadowed bool
+		for _, d := range audit.Decisions {
+			if d.Pool == poolCommand && d.Reason == failShadowed {
+				shadowed = true
+			}
+		}
+		require.True(t, shadowed, "command twin records shadowed_by_open")
 	})
 }

@@ -1074,3 +1074,122 @@ func TestSelectOpenFailures_NonUserPrompt(t *testing.T) {
 		require.Equal(t, settledHarness, d.SettledBy)
 	}
 }
+
+func TestSelectMemory_Pools(t *testing.T) {
+	t.Parallel()
+
+	t.Run("each pool admits and tags its own decisions", func(t *testing.T) {
+		t.Parallel()
+		pools := memoryPools{
+			open:     []cmdlog.Failure{mkFailure("go test .", ".")},
+			resolved: []cmdlog.Failure{mkFailure("go build ./...", ".")},
+			commands: []cmdlog.Command{{
+				CmdNorm: "npm run lint", CWD: ".", Kind: "lint",
+				LastExit: 0, OKCount: 4, FailCount: 1,
+			}},
+		}
+		admitted, decisions := selectMemory("the tests fail", pools, "",
+			memoryRenderLimits{})
+		require.Len(t, admitted.open, 1)
+		// The ambiguous "the tests" referent binds test-kind rows
+		// only — the resolved build row and the lint command read
+		// as kind_mismatch, not silence.
+		require.Empty(t, admitted.resolved)
+		require.Empty(t, admitted.commands)
+		require.Len(t, decisions, 3)
+		poolsSeen := map[string]string{}
+		for _, d := range decisions {
+			poolsSeen[d.Pool] = d.Reason
+		}
+		require.Equal(t, failAdmit, poolsSeen[poolOpen])
+		require.Equal(t, failKindMismatch, poolsSeen[poolResolved])
+		require.Equal(t, failKindMismatch, poolsSeen[poolCommand])
+	})
+
+	t.Run("a command row's open failure twin shadows it", func(t *testing.T) {
+		t.Parallel()
+		pools := memoryPools{
+			open: []cmdlog.Failure{mkFailure("go test .", ".")},
+			commands: []cmdlog.Command{
+				{CmdNorm: "go test .", CWD: ".", Kind: "test", LastExit: 1, FailCount: 2},
+				{CmdNorm: "go vet .", CWD: ".", Kind: "lint", LastExit: 0, OKCount: 3},
+			},
+		}
+		_, decisions := selectMemory("the tests fail", pools, "",
+			memoryRenderLimits{})
+		var shadow, vet FailureDecision
+		for _, d := range decisions {
+			if d.Cmd == "go test ." && d.Pool == poolCommand {
+				shadow = d
+			}
+			if d.Cmd == "go vet ." {
+				vet = d
+			}
+		}
+		require.Equal(t, failShadowed, shadow.Reason)
+		require.Equal(t, settledState, shadow.SettledBy)
+		require.False(t, shadow.Admit)
+		// The unshadowed vet row still gets a real verdict — the
+		// shadow suppresses only the open row's literal twin.
+		require.Equal(t, failKindMismatch, vet.Reason)
+	})
+
+	t.Run("resolved rows bind like open ones and render resolved", func(t *testing.T) {
+		t.Parallel()
+		pools := memoryPools{
+			resolved: []cmdlog.Failure{
+				mkFailureHeadline("go test .", ".", "--- FAIL: TestAdd"),
+			},
+		}
+		admitted, decisions := selectMemory("the tests fail", pools, "",
+			memoryRenderLimits{})
+		require.Len(t, admitted.resolved, 1)
+		require.Equal(t, poolResolved, decisions[0].Pool)
+		require.True(t, decisions[0].Admit)
+	})
+
+	t.Run("command rows bind on scope and kind alone", func(t *testing.T) {
+		t.Parallel()
+		pools := memoryPools{
+			commands: []cmdlog.Command{
+				{CmdNorm: "go test .", CWD: ".", Kind: "test", LastExit: 0, OKCount: 9},
+				{CmdNorm: "ls", CWD: ".", Kind: "other", LastExit: 0, OKCount: 4},
+			},
+		}
+		// An explicit-scope prompt admits verdict-kind rows in the
+		// named dir — the same rule the failure pool plays by.
+		admitted, decisions := selectMemory("run the tests", pools, "",
+			memoryRenderLimits{})
+		require.Len(t, admitted.commands, 1)
+		require.Equal(t, "go test .", admitted.commands[0].CmdNorm)
+		// "run the tests" carries no referent kind gate for ls —
+		// other-kind rows mismatch under any prompt.
+		for _, d := range decisions {
+			if d.Cmd == "ls" {
+				require.Equal(t, failKindMismatch, d.Reason)
+			}
+		}
+	})
+
+	t.Run("render caps apply per pool", func(t *testing.T) {
+		t.Parallel()
+		var commands []cmdlog.Command
+		for _, cmd := range []string{"go test .", "go test -v .", "go test -race .", "go test -count=2 ."} {
+			commands = append(commands, cmdlog.Command{
+				CmdNorm: cmd, CWD: ".",
+				Kind: "test", LastExit: 0, OKCount: 1,
+			})
+		}
+		admitted, decisions := selectMemory("the tests fail",
+			memoryPools{commands: commands}, "",
+			memoryRenderLimits{command: 2})
+		require.Len(t, admitted.commands, 2)
+		capped := 0
+		for _, d := range decisions {
+			if d.Pool == poolCommand && d.Reason == failRenderCapped {
+				capped++
+			}
+		}
+		require.Equal(t, 2, capped)
+	})
+}
