@@ -114,9 +114,14 @@ type processEnv struct {
 
 func newProcessEnv(t *testing.T, gen notebook.Generator) (*processEnv, string) {
 	t.Helper()
-	conn, err := db.Connect(t.Context(), t.TempDir())
+	dataDir := t.TempDir()
+	conn, err := db.Connect(t.Context(), dataDir)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close() })
+	// Release through the pool — conn.Close() bypasses the refcount,
+	// and on Windows a detached goroutine still inside the single
+	// shared connection can outlive it, failing the TempDir unlink
+	// (#253). Release waits for in-flight queries to finish.
+	t.Cleanup(func() { _ = db.Release(dataDir) })
 
 	q := db.New(conn)
 	sessions := session.NewService(q, conn)

@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -24,6 +25,20 @@ import (
 
 func TestMain(m *testing.M) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	// Isolate every Load() in this package from the real user config
+	// paths (~/.config/crush, %LOCALAPPDATA%/crush): tests run in
+	// parallel, so another process or package holding the real file
+	// makes the read fail on Windows with EBUSY (#253). Tests that
+	// need a specific dir set it via t.Setenv, shadowing these.
+	isolated, err := os.MkdirTemp("", "crush-config-test")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(isolated)
+	os.Setenv("CRUSH_GLOBAL_CONFIG", isolated)
+	os.Setenv("CRUSH_GLOBAL_DATA", isolated)
 
 	exitVal := m.Run()
 	os.Exit(exitVal)
