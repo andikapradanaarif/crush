@@ -1,0 +1,17 @@
+{
+	"id": "reconcile-fix-forward",
+	"schema_version": 1,
+	"origin": {"kind": "synthetic"},
+	"start_state": {"kind": "fixture", "fixture_dir": "fixture"},
+	"task": {
+		"turns": ["add square.go with a Square function — Square(n) returns n * n — and square_test.go with a TestSquare asserting Square(4) == 16 — run `go test ./...` as a bare command to check the suite — the suite must be green before you report done"]
+	},
+	"check": {
+		"script": "check.sh",
+		"expect_start_state": "fail",
+		"timeout_seconds": 300
+	},
+	"coverage": {"min_steps": 1},
+	"requires": {"tools": ["go"]},
+	"budget": {"run_timeout_seconds": 300, "max_steps": 25}
+}
