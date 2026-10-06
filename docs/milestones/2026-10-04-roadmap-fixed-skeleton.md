@@ -307,6 +307,12 @@ blind search.
    benefit still unmeasured — needs a legitimately-fixable cell,
    paired with intentional-red. Writeup:
    `docs/milestones/2026-10-06-exp-failure-memory-reconcile-powered.md`.
+   **Paired read (10-07):** the #259 escape held violations at 0/20
+   on both arms (confirmatory for the exploratory 0-vs-6/20);
+   fix-forward converted 40/40 but `reconcile.fired` was 0/20 —
+   verification preempts the boundary whenever the task names the
+   check, so reconcile's marginal benefit stays unmeasurable on
+   such cells. `2026-10-07-exp-failure-memory-reconcile-paired.md`.
 7. **Layered resolver (#216)** — L1 identifier layer + offline
    binding benchmark landed (`failure_binding.jsonl`,
    `settled_by`/`lang_unsupported` observability); L3 only if the
