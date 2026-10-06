@@ -1,9 +1,9 @@
 {
-	"name": "failure-memory-reconcile-paired",
+	"name": "failure-memory-reconcile-fixforward",
 	"model": "alibaba-tp/deepseek-v4.1-flash",
 	"temperature": 0,
 	"corpus": [
-		"reconcile-open-failure"
+		"reconcile-fix-forward"
 	],
 	"runs_per_trajectory": {
 		"stable": 20,
@@ -24,9 +24,6 @@
 					"failure_memory": true,
 					"failure_memory_edges": false
 				}
-			},
-			"coverage": {
-				"min_edge_firings.reconcile.gated": 1
 			}
 		},
 		"treatment": {
