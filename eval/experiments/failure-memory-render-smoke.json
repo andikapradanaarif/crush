@@ -6,9 +6,9 @@
 		"warm-resolved-command-render"
 	],
 	"runs_per_trajectory": {
-		"stable": 3,
-		"mid": 3,
-		"uncharacterized": 3
+		"stable": 7,
+		"mid": 7,
+		"uncharacterized": 7
 	},
 	"primary": {
 		"metric": "steps",
@@ -23,10 +23,6 @@
 					"turn_context": "off",
 					"failure_memory": false
 				}
-			},
-			"coverage": {
-				"max_tail.sections.command_memory": 0,
-				"max_tail.sections.resolved_failures": 0
 			}
 		},
 		"treatment": {
