@@ -987,6 +987,18 @@ func (a *sessionAgent) verificationRetrySection(t *edgeTrigger) string {
 		b.WriteString(tools.TruncateOutput(out, spillDir))
 		b.WriteString("\n</check>\n")
 	}
+	// The escape valve (#259): without it the retry reads as an
+	// overriding authority — eval runs showed agents editing files
+	// the task forbade, or weakening the spec assertion, to satisfy
+	// the check. Verification is step-bound, so a reply that
+	// produces no new failed evidence never re-fires; the claim
+	// "does not re-prompt" is the mechanism, not a courtesy.
+	b.WriteString("\nIf a check's failure is the task's intent — the request asked for an " +
+		"intentionally failing state, or fixing would violate an explicit constraint in the " +
+		"request (e.g. \"do not modify X\") — explain why it stays failing instead of fixing. " +
+		"Explicit instructions in the user's request take precedence over these checks; an " +
+		"explained failure stays recorded but does not re-prompt, while re-running a " +
+		"still-failing check re-flags it.\n")
 	return b.String()
 }
 
