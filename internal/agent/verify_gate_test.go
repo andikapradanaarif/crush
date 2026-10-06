@@ -470,6 +470,11 @@ func TestRunVerificationGate(t *testing.T) {
 		q, _ := a.messageQueue.Get(sessionID)
 		require.Len(t, q, 2)
 		require.Contains(t, q[0].Prompt, "Verification failed", "retry is prepended")
+		// The explain-escape + precedence clause (#259): without it
+		// the retry reads as overriding authority and correct agents
+		// violate explicit user constraints to satisfy the check.
+		require.Contains(t, q[0].Prompt, "take precedence over these checks")
+		require.Contains(t, q[0].Prompt, "does not re-prompt")
 		require.Equal(t, "user follow-up", q[1].Prompt)
 	})
 
