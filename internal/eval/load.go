@@ -532,7 +532,7 @@ var reconcileGateOff = starvationRule{
 		fme, _ := resolve("failure_memory_edges")
 		fmOn, _ := fm.(bool)
 		fmeOn, _ := fme.(bool)
-		return !(fmOn && fmeOn)
+		return !fmOn || !fmeOn
 	},
 }
 

@@ -120,7 +120,7 @@ func NewRecallTool(svc notebook.Service, messages message.Service, cfg *config.C
 
 			var sb strings.Builder
 			for _, e := range entries {
-				sb.WriteString(fmt.Sprintf("## Turn %d.%d — %s\n", e.TurnNumber, e.EventNumber, e.Title))
+				fmt.Fprintf(&sb, "## Turn %d.%d — %s\n", e.TurnNumber, e.EventNumber, e.Title)
 				// Return the full uncompressed text when available,
 				// so recall always provides the original detail even
 				// after compaction has replaced entry_text.

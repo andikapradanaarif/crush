@@ -242,6 +242,7 @@ func TestPromptScope(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			pos, neg := promptScope(tc.prompt, "")
 			require.ElementsMatch(t, tc.wantPos, pos)
 			require.ElementsMatch(t, tc.wantNeg, neg)
@@ -1062,8 +1063,10 @@ func TestSelectOpenFailures_NonUserPrompt(t *testing.T) {
 	// once-per-turn cache keeps retry text away, and this guard
 	// keeps the selector honest against future callers (#249).
 	failures := []cmdlog.Failure{
-		{Signature: "go test ./decoy@.", Cmd: "go test ./decoy", CWD: ".",
-			Headline: "--- FAIL: TestValue", LastSeen: time.Now()},
+		{
+			Signature: "go test ./decoy@.", Cmd: "go test ./decoy", CWD: ".",
+			Headline: "--- FAIL: TestValue", LastSeen: time.Now(),
+		},
 	}
 	selected, decisions := selectOpenFailures(reconcileRetryPrompt, failures, ".", 0)
 	require.Empty(t, selected)

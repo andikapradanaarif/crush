@@ -1486,7 +1486,7 @@ func goCachePins(reserved map[string]bool) map[string]string {
 // — not the harness binary's runtime.Version(). Toolchain rot shows in
 // env diffs; the binary's own version never changes.
 func goToolchain() string {
-	if out, err := exec.Command("go", "version").Output(); err == nil {
+	if out, err := exec.CommandContext(context.Background(), "go", "version").Output(); err == nil {
 		return strings.TrimSpace(string(out))
 	}
 	return runtime.Version()

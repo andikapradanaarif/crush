@@ -457,7 +457,7 @@ func TestDetectSegments_BackfillsLegacyTurnWithoutRegenerating(t *testing.T) {
 
 	// Legacy turn-grain entries: written before the registry existed.
 	msgs := segBuildTurn(t, svc, sessionID, "work", 4, "step content")
-	require.NoError(t, nb.GenerateEntries(t.Context(), sessionID, 0, msgs))
+	require.NoError(t, nb.GenerateEntries(t.Context(), sessionID, 0, msgs)) //nolint:staticcheck // SA1019: pre-segment coverage is the simulation target
 
 	ctx := t.Context()
 	segs, _ := a.detectSegments(ctx, sessionID, msgs)
@@ -481,7 +481,7 @@ func TestDetectSegments_BackfillCoversLegacyOpenTail(t *testing.T) {
 	// tail — holding the final step — is still the open segment: it
 	// closes only when the next user message lands.
 	msgs := segBuildTurn(t, svc, sessionID, "work", 5, "step content")
-	require.NoError(t, nb.GenerateEntries(t.Context(), sessionID, 0, msgs))
+	require.NoError(t, nb.GenerateEntries(t.Context(), sessionID, 0, msgs)) //nolint:staticcheck // SA1019: pre-segment coverage is the simulation target
 	require.Equal(t, int64(1), gen.calls.Load())
 
 	segs := segmentBoundaries(msgs, a.segTokenBudget(), a.segMaxSteps())

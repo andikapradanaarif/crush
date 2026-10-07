@@ -192,6 +192,7 @@ func TestRunGateChecks(t *testing.T) {
 	}
 
 	t.Run("runs command and records exit code", func(t *testing.T) {
+		t.Parallel()
 		res := a.runGateChecks(t.Context(), "", dir, []gateCheckOutcome{
 			mkPending("verify:fail", "exit 3", 0),
 			mkPending("verify:pass", "echo ok", 0),
@@ -202,6 +203,7 @@ func TestRunGateChecks(t *testing.T) {
 	})
 
 	t.Run("dedups identical pending checks", func(t *testing.T) {
+		t.Parallel()
 		res := a.runGateChecks(t.Context(), "", dir, []gateCheckOutcome{
 			mkPending("verify:x", "echo hi", 0),
 			mkPending("verify:x", "echo hi", 1),
@@ -210,6 +212,7 @@ func TestRunGateChecks(t *testing.T) {
 	})
 
 	t.Run("observed bash run satisfies pending check", func(t *testing.T) {
+		t.Parallel()
 		res := a.runGateChecks(t.Context(), "", dir, []gateCheckOutcome{
 			mkPending("verify:test", "go test ./pkg", 0),
 		}, []observedBash{
@@ -219,6 +222,7 @@ func TestRunGateChecks(t *testing.T) {
 	})
 
 	t.Run("observed failure resolves pending as failed", func(t *testing.T) {
+		t.Parallel()
 		res := a.runGateChecks(t.Context(), "", dir, []gateCheckOutcome{
 			mkPending("verify:test", "go test ./pkg", 0),
 		}, []observedBash{
@@ -228,6 +232,7 @@ func TestRunGateChecks(t *testing.T) {
 	})
 
 	t.Run("observed run before the writes does not satisfy", func(t *testing.T) {
+		t.Parallel()
 		res := a.runGateChecks(t.Context(), "", dir, []gateCheckOutcome{
 			mkPending("verify:test", "echo ran", 5),
 		}, []observedBash{
@@ -240,6 +245,7 @@ func TestRunGateChecks(t *testing.T) {
 	})
 
 	t.Run("observed run between two writes does not satisfy", func(t *testing.T) {
+		t.Parallel()
 		// The same check pending on writes at steps 0 and 4 must not be
 		// satisfied by a matching bash run at step 2 — the step-4 write
 		// is not covered.
@@ -253,6 +259,7 @@ func TestRunGateChecks(t *testing.T) {
 	})
 
 	t.Run("prefix command does not match observed run", func(t *testing.T) {
+		t.Parallel()
 		res := a.runGateChecks(t.Context(), "", dir, []gateCheckOutcome{
 			mkPending("verify:test", "echo safe", 0),
 		}, []observedBash{
@@ -262,6 +269,7 @@ func TestRunGateChecks(t *testing.T) {
 	})
 
 	t.Run("hung check times out as failed", func(t *testing.T) {
+		t.Parallel()
 		res := a.runGateChecks(t.Context(), "", dir, []gateCheckOutcome{
 			{toolCallID: "tc-hang", stepIndex: 0, check: message.VerificationCheck{
 				Check: "verify:slow", State: message.VerificationPending,
@@ -273,6 +281,7 @@ func TestRunGateChecks(t *testing.T) {
 	})
 
 	t.Run("run cancel aborts remaining checks", func(t *testing.T) {
+		t.Parallel()
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel() // cancelled before the first check runs
 		res := a.runGateChecks(ctx, "", dir, []gateCheckOutcome{

@@ -82,8 +82,10 @@ func TestBuildPlanEntry(t *testing.T) {
 func TestBuildPlanEntryFallsBackToCallInput(t *testing.T) {
 	t.Parallel()
 	input := EntryInput{
-		ToolCall: &message.ToolCall{ID: "tc-t", Name: "todos",
-			Input: `{"todos":[{"content":"from input","status":"pending","key":"a","depends_on":[],"evidence_paths":["x.go"]}]}`, Finished: true},
+		ToolCall: &message.ToolCall{
+			ID: "tc-t", Name: "todos",
+			Input: `{"todos":[{"content":"from input","status":"pending","key":"a","depends_on":[],"evidence_paths":["x.go"]}]}`, Finished: true,
+		},
 		EventType: EventPlan,
 	}
 	entry := buildPlanEntry(input, "")

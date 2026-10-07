@@ -93,6 +93,7 @@ func (s *runCoordinator) ApprovePlan(_ context.Context, sessionID string) error 
 	s.approvedSession.Store(sessionID)
 	return s.approvePlanErr
 }
+
 func (s *runCoordinator) SetMainAgent(agentName string) error {
 	s.lastMainAgentSet.Store(agentName)
 	return s.setMainAgentErr

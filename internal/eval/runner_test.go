@@ -1877,7 +1877,7 @@ func (s *dbSeedRecorder) Run(ctx context.Context, workdir string, turns []string
 		return res
 	}
 	defer db.Close()
-	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS failure_memory (
+	_, _ = db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS failure_memory (
 		signature TEXT NOT NULL PRIMARY KEY, cmd TEXT NOT NULL,
 		cwd TEXT NOT NULL DEFAULT '', headline TEXT NOT NULL,
 		files TEXT NOT NULL DEFAULT '[]', first_seen INTEGER NOT NULL,
@@ -1886,11 +1886,11 @@ func (s *dbSeedRecorder) Run(ctx context.Context, workdir string, turns []string
 	if s.resolved {
 		resolvedIn = "sess-1"
 	}
-	_, _ = db.Exec(`INSERT INTO failure_memory
+	_, _ = db.ExecContext(ctx, `INSERT INTO failure_memory
 		(signature, cmd, cwd, headline, first_seen, last_seen, resolved_in)
 		VALUES ('sig1', 'go test -count=1 ./decoy', '.', 'FAIL', 1000, 1000, ?)`, resolvedIn)
 	if s.strayRow {
-		_, _ = db.Exec(`INSERT INTO failure_memory
+		_, _ = db.ExecContext(ctx, `INSERT INTO failure_memory
 			(signature, cmd, cwd, headline, first_seen, last_seen, resolved_in)
 			VALUES ('sig2', 'go test -count=1 .', '.', 'FAIL', 2000, 2000, '')`)
 	}

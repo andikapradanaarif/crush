@@ -31,6 +31,7 @@ func TestRedactSecrets(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			out := Secrets(tt.in)
 			if tt.wantGone != "" {
 				require.NotContains(t, out, tt.wantGone)

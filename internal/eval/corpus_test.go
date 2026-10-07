@@ -9,6 +9,7 @@ import (
 )
 
 func TestCorpus_QuarantineClean(t *testing.T) {
+	t.Parallel()
 	evalDir, err := filepath.Abs(filepath.Join("..", "..", "eval"))
 	require.NoError(t, err)
 	corpus, err := LoadCorpus(evalDir)

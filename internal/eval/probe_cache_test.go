@@ -187,7 +187,7 @@ func TestProbeCache_TransportFailure(t *testing.T) {
 	t.Parallel()
 	// A listener that accepts then immediately closes gives a fast
 	// transport-level failure (no HTTP response ever arrives).
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	require.NoError(t, ln.Close())
 

@@ -85,21 +85,30 @@ func (s *Service) Subtree(ctx context.Context, relPath string, maxTokens int) (s
 
 	// Refresh candidate paths BEFORE reading their symbols — re-tagging
 	// after the rows are materialized would render pre-refresh data.
-	pathRows, err := s.db.QueryContext(ctx,
-		`SELECT path FROM files WHERE `+where+` ORDER BY path`, args...)
+	// The rows must fully close before refreshPaths writes — the
+	// single-conn pool would otherwise hand it a conn still held by
+	// an open cursor.
+	loadPaths := func() ([]string, error) {
+		pathRows, err := s.db.QueryContext(ctx,
+			`SELECT path FROM files WHERE `+where+` ORDER BY path`, args...)
+		if err != nil {
+			return nil, err
+		}
+		defer pathRows.Close()
+		var paths []string
+		for pathRows.Next() {
+			var p string
+			if err := pathRows.Scan(&p); err != nil {
+				return nil, err
+			}
+			paths = append(paths, p)
+		}
+		return paths, pathRows.Err()
+	}
+	paths, err := loadPaths()
 	if err != nil {
 		return "", err
 	}
-	var paths []string
-	for pathRows.Next() {
-		var p string
-		if err := pathRows.Scan(&p); err != nil {
-			pathRows.Close()
-			return "", err
-		}
-		paths = append(paths, p)
-	}
-	pathRows.Close()
 	if len(paths) == 0 {
 		return fmt.Sprintf("No indexed files under %q.%s", relPath, s.indexingSuffix()), nil
 	}
@@ -180,21 +189,27 @@ func (s *Service) Symbol(ctx context.Context, name string, maxTokens int) (strin
 	// Referrers: files whose refs point at a defining file or its dir.
 	queryRefs := func() (map[string]bool, error) {
 		seen := map[string]bool{}
-		for _, d := range defs {
-			dir := filepath.ToSlash(filepath.Dir(d.path))
+		query := func(dst, dir string) error {
 			rows, err := s.db.QueryContext(ctx, `
 				SELECT DISTINCT src_path FROM refs
-				WHERE dst_path = ? OR dst_path = ?`, d.path, dir)
+				WHERE dst_path = ? OR dst_path = ?`, dst, dir)
 			if err != nil {
-				return nil, err
+				return err
 			}
+			defer rows.Close()
 			for rows.Next() {
 				var src string
 				if err := rows.Scan(&src); err == nil && !seen[src] {
 					seen[src] = true
 				}
 			}
-			rows.Close()
+			return rows.Err()
+		}
+		for _, d := range defs {
+			dir := filepath.ToSlash(filepath.Dir(d.path))
+			if err := query(d.path, dir); err != nil {
+				return nil, err
+			}
 		}
 		return seen, nil
 	}
@@ -233,21 +248,29 @@ func (s *Service) Symbol(ctx context.Context, name string, maxTokens int) (strin
 // refreshed before the rows are materialized — refreshing after the
 // select would render pre-refresh data.
 func (s *Service) symbolDefs(ctx context.Context, name string) ([]symDef, error) {
-	pathRows, err := s.db.QueryContext(ctx,
-		`SELECT DISTINCT path FROM symbols WHERE name = ?`, name)
+	// The rows must fully close before refreshPaths writes — the
+	// single-conn pool would otherwise hand it a conn still held by
+	// an open cursor.
+	cand, err := func() ([]string, error) {
+		pathRows, err := s.db.QueryContext(ctx,
+			`SELECT DISTINCT path FROM symbols WHERE name = ?`, name)
+		if err != nil {
+			return nil, err
+		}
+		defer pathRows.Close()
+		var cand []string
+		for pathRows.Next() {
+			var p string
+			if err := pathRows.Scan(&p); err != nil {
+				return nil, err
+			}
+			cand = append(cand, p)
+		}
+		return cand, pathRows.Err()
+	}()
 	if err != nil {
 		return nil, err
 	}
-	var cand []string
-	for pathRows.Next() {
-		var p string
-		if err := pathRows.Scan(&p); err != nil {
-			pathRows.Close()
-			return nil, err
-		}
-		cand = append(cand, p)
-	}
-	pathRows.Close()
 	s.refreshPaths(ctx, cand)
 
 	rows, err := s.db.QueryContext(ctx, `
@@ -312,45 +335,50 @@ func (s *Service) renderDirTree(ctx context.Context, b *strings.Builder, maxOut 
 // because expressing that join in SQL degenerates to a nested loop
 // of files × distinct ref targets with no usable index.
 func (s *Service) renderTopFiles(ctx context.Context, b *strings.Builder, limit int) error {
-	degRows, err := s.db.QueryContext(ctx,
-		`SELECT dst_path, COUNT(*) FROM refs GROUP BY dst_path`)
-	if err != nil {
-		return err
-	}
+	// Each read fully closes before the next query — the single-conn
+	// pool would otherwise hand the next query a conn still held by
+	// an open cursor.
 	refDeg := map[string]int{}
-	for degRows.Next() {
-		var dst string
-		var n int
-		if err := degRows.Scan(&dst, &n); err != nil {
-			degRows.Close()
+	err := func() error {
+		degRows, err := s.db.QueryContext(ctx,
+			`SELECT dst_path, COUNT(*) FROM refs GROUP BY dst_path`)
+		if err != nil {
 			return err
 		}
-		refDeg[dst] = n
-	}
-	if err := degRows.Err(); err != nil {
-		degRows.Close()
-		return err
-	}
-	degRows.Close()
-
-	fileRows, err := s.db.QueryContext(ctx, `SELECT path FROM files`)
+		defer degRows.Close()
+		for degRows.Next() {
+			var dst string
+			var n int
+			if err := degRows.Scan(&dst, &n); err != nil {
+				return err
+			}
+			refDeg[dst] = n
+		}
+		return degRows.Err()
+	}()
 	if err != nil {
 		return err
 	}
-	var paths []string
-	for fileRows.Next() {
-		var p string
-		if err := fileRows.Scan(&p); err != nil {
-			fileRows.Close()
-			return err
+
+	paths, err := func() ([]string, error) {
+		fileRows, err := s.db.QueryContext(ctx, `SELECT path FROM files`)
+		if err != nil {
+			return nil, err
 		}
-		paths = append(paths, p)
-	}
-	if err := fileRows.Err(); err != nil {
-		fileRows.Close()
+		defer fileRows.Close()
+		var paths []string
+		for fileRows.Next() {
+			var p string
+			if err := fileRows.Scan(&p); err != nil {
+				return nil, err
+			}
+			paths = append(paths, p)
+		}
+		return paths, fileRows.Err()
+	}()
+	if err != nil {
 		return err
 	}
-	fileRows.Close()
 	if len(paths) == 0 {
 		return nil
 	}
