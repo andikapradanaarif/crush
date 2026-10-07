@@ -10,7 +10,10 @@
 // an experiment exercise the same build under test.
 package eval
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Outcome is the per-run verdict.
 //
@@ -240,12 +243,37 @@ const (
 )
 
 // CostWeights converts discounted token classes into uncached-input
-// equivalents: weighted_cost = input + h·cache_read + o·output where
-// h = CacheRead, o = Output. Weights are relative prices, not dollars —
-// e.g. cache-read billed at 10% of input gives CacheRead 0.1.
+// equivalents: weighted_cost = input + h·cache_read + w·cache_write +
+// o·output where h = CacheRead, w = CacheWrite, o = Output. Weights are
+// relative prices, not dollars — e.g. cache-read billed at 10% of input
+// gives CacheRead 0.1. An unpinned class weight prices that class at 0
+// — read it as a claim that the endpoint does not bill it, not an
+// omission; pinned below cost understates spend by construction.
+// Generator overrides the class weights for generator_tokens (the
+// sidecar's spend), pricing it at its own model's rates — nil prices
+// the sidecar at main-model rates, which overstates when the sidecar
+// runs a cheaper tier.
 type CostWeights struct {
-	CacheRead float64 `json:"cache_read"`
-	Output    float64 `json:"output"`
+	CacheRead  float64      `json:"cache_read"`
+	CacheWrite float64      `json:"cache_write"`
+	Output     float64      `json:"output"`
+	Generator  *CostWeights `json:"generator,omitempty"`
+}
+
+// check validates the weight block — every pinned class must be
+// non-negative, and a generator tier can't nest its own tier.
+func (w *CostWeights) check(name string) error {
+	if w.CacheRead < 0 || w.CacheWrite < 0 || w.Output < 0 {
+		return fmt.Errorf("%s must be non-negative (cache_read=%g, cache_write=%g, output=%g)",
+			name, w.CacheRead, w.CacheWrite, w.Output)
+	}
+	if w.Generator != nil {
+		if w.Generator.Generator != nil {
+			return fmt.Errorf("%s.generator cannot declare its own generator tier", name)
+		}
+		return w.Generator.check(name + ".generator")
+	}
+	return nil
 }
 
 // Arm is a generated config fragment plus an optional arm-scoped

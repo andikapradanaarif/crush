@@ -981,6 +981,18 @@ func TestValidateExperiment_Primary(t *testing.T) {
 	exp = base()
 	exp.CostWeights = &CostWeights{CacheRead: -0.1}
 	require.ErrorContains(t, ValidateExperiment(exp), "cost_weights")
+
+	exp = base()
+	exp.CostWeights = &CostWeights{CacheWrite: -0.1}
+	require.ErrorContains(t, ValidateExperiment(exp), "cost_weights")
+
+	// The sidecar tier validates its own weights and can't nest.
+	exp = base()
+	exp.CostWeights = &CostWeights{Generator: &CostWeights{Output: -1}}
+	require.ErrorContains(t, ValidateExperiment(exp), "cost_weights.generator")
+	exp = base()
+	exp.CostWeights = &CostWeights{Generator: &CostWeights{Generator: &CostWeights{}}}
+	require.ErrorContains(t, ValidateExperiment(exp), "own generator tier")
 }
 
 func TestValidateExperiment_ExpectedExclusion(t *testing.T) {
@@ -1028,17 +1040,25 @@ func TestValidateExperiment_ExpectedExclusion(t *testing.T) {
 
 func TestPrimaryMetricFunc_WeightedCost(t *testing.T) {
 	t.Parallel()
-	exp := &Experiment{CostWeights: &CostWeights{CacheRead: 0.1, Output: 4}}
+	exp := &Experiment{CostWeights: &CostWeights{CacheRead: 0.1, CacheWrite: 1.25, Output: 4}}
 	f, err := primaryMetricFunc(exp, "weighted_cost")
 	require.NoError(t, err)
-	rec := &RunRecord{Tokens: TokenUsage{Input: 1000, CacheRead: 10000, Output: 500}}
-	// 1000 + 0.1*10000 + 4*500 = 4000.
-	require.InDelta(t, 4000, f(rec), 1e-9)
+	rec := &RunRecord{Tokens: TokenUsage{Input: 1000, CacheRead: 10000, CacheWrite: 800, Output: 500}}
+	// 1000 + 0.1*10000 + 1.25*800 + 4*500 = 5000.
+	require.InDelta(t, 5000, f(rec), 1e-9)
 
-	// Sidecar spend prices at the same class rates.
+	// Sidecar spend prices at the same class rates by default.
 	rec.GeneratorTokens = &GeneratorTokens{Input: 100, Output: 50, CacheRead: 200}
-	// 4000 + 100 + 0.1*200 + 4*50 = 4320.
-	require.InDelta(t, 4320, f(rec), 1e-9)
+	// 5000 + 100 + 0.1*200 + 4*50 = 5320.
+	require.InDelta(t, 5320, f(rec), 1e-9)
+
+	// A pinned generator tier reprices the sidecar at its own
+	// model's rates while the main tokens keep theirs.
+	exp.CostWeights.Generator = &CostWeights{CacheRead: 0.05, Output: 1}
+	f, err = primaryMetricFunc(exp, "weighted_cost")
+	require.NoError(t, err)
+	// 5000 + 100 + 0.05*200 + 1*50 = 5160.
+	require.InDelta(t, 5160, f(rec), 1e-9)
 
 	// The closed registry rejects ratios by construction — there is
 	// no grammar for "X/steps".
