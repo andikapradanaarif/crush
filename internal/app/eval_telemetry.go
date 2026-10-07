@@ -38,6 +38,12 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 	}
 	doc := map[string]any{
 		"session_id": sessionID,
+		// The resolved memory-parameter snapshot's identity — the
+		// field an eval cohort splits on to attribute outcomes to
+		// the parameter set that produced them (#228). Process-level
+		// and unconditional: even a run that errors early ran under
+		// this snapshot.
+		"param_version": app.memParams.OrDefault().Version(),
 	}
 	// The child reports what each manifest flag actually resolved to —
 	// arm intent can silently no-op on a renamed or shadowed option.

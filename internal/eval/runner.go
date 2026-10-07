@@ -413,6 +413,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 		rec.Pressure = &res.Pressure
 	}
 	rec.ErrorClass = res.ErrorClass
+	rec.ParamVersion = res.ParamVersion
 	if res.GeneratorTokens.Calls > 0 {
 		rec.GeneratorTokens = &res.GeneratorTokens
 	}

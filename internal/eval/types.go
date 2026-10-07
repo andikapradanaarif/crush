@@ -397,6 +397,13 @@ type RunRecord struct {
 	// the circuit breaker reads it instead of string-matching when
 	// present; absent means an older child, fall back to signatures.
 	ErrorClass string `json:"error_class,omitempty"`
+	// ParamVersion is the child's resolved memory-parameter snapshot
+	// identity (#228) — "pv1-<hash>" on substrate-aware children,
+	// absent on older ones. The field a cohort split attributes
+	// outcomes to: same version ⇒ same resolved parameter set (the
+	// snapshot, not necessarily the same effective behavior for a
+	// single pool — the version is whole-snapshot).
+	ParamVersion string `json:"param_version,omitempty"`
 	// Request carries the trajectory-final rendered request's byte
 	// composition and the run's peak prompt size — the "what fills
 	// the prompt" breakdown the 70%-tool-results claim reads.

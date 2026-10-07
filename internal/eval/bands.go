@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/charmbracelet/crush/internal/params"
 )
 
 // Characterization constants. The boundary positions belong to the
@@ -110,12 +112,24 @@ func (m *FlagsManifest) keyWith(armOptions map[string]any, extra map[string]any)
 
 // ValidateArmFlags enforces the declared-manifest rule: an option an
 // arm varies must be a manifest flag, otherwise flips would rotate
-// baselines without re-keying.
+// baselines without re-keying. Structured flags get resolved here too
+// — a memory_params typo that passed name-checking would otherwise
+// fail inside every run's app.New, turning a manifest error into an
+// inconclusive loop.
 func (m *FlagsManifest) ValidateArmFlags(e *Experiment) error {
 	for armName, arm := range e.Arms {
-		for k := range arm.Config.Options {
+		for k, v := range arm.Config.Options {
 			if _, ok := m.Defaults[k]; !ok {
 				return fmt.Errorf("arm %q sets option %q which is not in eval/flags.json — flags under test must be declared so baseline keys rotate correctly", armName, k)
+			}
+			if k == "memory_params" {
+				ov, ok := v.(map[string]any)
+				if !ok {
+					return fmt.Errorf("arm %q memory_params must be an object of param-name → value, got %T", armName, v)
+				}
+				if _, err := params.ResolveMemory(ov); err != nil {
+					return fmt.Errorf("arm %q memory_params: %w", armName, err)
+				}
 			}
 		}
 	}

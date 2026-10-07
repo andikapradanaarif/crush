@@ -57,6 +57,15 @@ correct: a new knob is a new snapshot semantics. `pv0` remains the
 marker on rows written before the substrate landed: same effective
 values, but written by a harness with no parameter mechanism.
 
+The version is whole-snapshot: `param_version` equality ⇒ same
+resolved set, *not* ⇒ same effective behavior for the pool under
+study — a `file_heat_limit` rotation splits a failure-memory cohort
+whose rendered tail is identical either way. Cohort reads that need
+behavioral equivalence must key on the fields their pool consumes
+(or live with conservative over-splitting). The version lands on
+the eval plane as `RunRecord.param_version` — the child's resolved
+snapshot identity, not the manifest's declared overlay.
+
 ## The override channel (what exists now)
 
 `options.memory_params` is a strict overlay onto
@@ -93,6 +102,13 @@ learned_params (
     PRIMARY KEY (project_key, name)
 )
 ```
+
+The store's load path overlays onto `DefaultMemory()` exactly like
+`ResolveMemory` does — a `Memory{}` constructed bare (or via the
+all-or-nothing `OrDefault`) would zero every field the row set
+didn't cover. `Validate()` runs at that load, not just inside
+`ResolveMemory`: bounds enforce on every construction path or the
+asymmetry contract is opt-in.
 
 Cold projects initialize from user-level priors (#229), which
 initialize from `DefaultMemory()`. Project evidence overrides the
