@@ -34,6 +34,7 @@ import (
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/notebook"
+	"github.com/charmbracelet/crush/internal/params"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/question"
@@ -105,6 +106,12 @@ type App struct {
 	// herdrClient reports agent state to herdr when running inside
 	// a herdr-managed pane. Nil when not in a herdr environment.
 	herdrClient *herdr.Client
+
+	// memParams is the resolved memory parameter set (#228) — the
+	// same snapshot cmdlog stamps under; the coordinator hands it
+	// to every built agent so the selector and the row versions
+	// never disagree about which parameters were in force.
+	memParams params.Memory
 }
 
 // New initializes a new application instance. skillsMgr carries the
@@ -123,6 +130,16 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		allowedTools = cfg.Permissions.AllowedTools
 	}
 
+	// The memory parameter set resolves once here — cmdlog stamps
+	// its version on rows and the selector reads its values, so
+	// both consumers must see the identical snapshot; a bad
+	// overlay (unknown key, out-of-bounds) fails startup rather
+	// than silently running undeclared parameters.
+	memParams, err := params.ResolveMemory(cfg.Options.MemoryParams)
+	if err != nil {
+		return nil, fmt.Errorf("options.memory_params: %w", err)
+	}
+
 	app := &App{
 		Sessions:    sessions,
 		Messages:    messages,
@@ -130,7 +147,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		Permissions: permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, allowedTools),
 		Questions:   question.NewService(),
 		FileTracker: filetracker.NewService(q, store.WorkingDir()),
-		CmdLog:      cmdlog.NewService(q, store.WorkingDir()),
+		CmdLog:      cmdlog.NewService(q, store.WorkingDir(), memParams),
 		LSPManager:  lsp.NewManager(store),
 		Skills:      skillsMgr,
 		queries:     q,
@@ -138,6 +155,8 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		globalCtx: ctx,
 
 		config: store,
+
+		memParams: memParams,
 
 		events:             pubsub.NewBroker[tea.Msg](),
 		serviceEventsWG:    &sync.WaitGroup{},
@@ -991,6 +1010,7 @@ func (app *App) initCoderAgent(ctx context.Context, interactive bool) error {
 		Notebook:              app.Notebook,
 		NotebookModelResolver: app.notebookModelResolver,
 		EdgeStore:             app.queries,
+		MemParams:             app.memParams,
 	})
 	if err != nil {
 		slog.Error("Failed to create coder agent", "err", err)

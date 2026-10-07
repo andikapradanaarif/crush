@@ -567,6 +567,16 @@ type Options struct {
 	// for the session so "memory helped" can be told apart from
 	// "memory was used". The log never leaves the machine; default off.
 	MemoryTelemetry *bool `json:"memory_telemetry,omitempty" jsonschema:"description=Opt in to local-only memory-usage telemetry: append-only JSONL at data_directory/memory-telemetry.jsonl recording per-turn memory behavior including the prompt text plus a per-session randomized injection holdout. Never transmitted. Experimental.,default=false"`
+	// MemoryParams overlays the memory subsystem's parameter set
+	// (params.Memory) — selector render/fetch caps, text bounds,
+	// the open-failure TTL — keyed by the params JSON field names.
+	// This is authored intent, not the learned-value store: unknown
+	// keys and out-of-bounds values fail config resolution rather
+	// than silently running a different parameter set than declared.
+	// The resolved snapshot's version stamps every memory row's
+	// param_version so eval cohorts attribute outcomes to the
+	// parameters that produced them (#228).
+	MemoryParams map[string]any `json:"memory_params,omitempty" jsonschema:"description=Overlay onto the memory subsystem's parameter set (selector caps / text bounds / open-failure TTL) keyed by params.Memory JSON field names — unknown keys and out-of-bounds values are errors. Experimental."`
 }
 
 // OptionKeys returns the Options struct's JSON field names — the set

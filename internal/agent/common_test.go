@@ -23,6 +23,7 @@ import (
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/params"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/stretchr/testify/require"
@@ -90,7 +91,7 @@ func testEnv(t *testing.T) fakeEnv {
 	permissions := permission.NewPermissionService(workingDir, true, []string{})
 	history := history.NewService(q, conn)
 	filetrackerService := filetracker.NewService(q, workingDir)
-	cmdlogService := cmdlog.NewService(q, workingDir)
+	cmdlogService := cmdlog.NewService(q, workingDir, params.DefaultMemory())
 	lspClients := csync.NewMap[string, *lsp.Client]()
 
 	// Release through the pool — conn.Close() bypasses the refcount

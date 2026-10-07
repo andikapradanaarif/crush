@@ -53,6 +53,7 @@ import (
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/notebook"
+	"github.com/charmbracelet/crush/internal/params"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/stringext"
@@ -371,6 +372,13 @@ type sessionAgent struct {
 	// turnContext selects the per-turn context augmentation tier
 	// (options.turn_context): "off" or "session".
 	turnContext string
+	// memParams is the resolved memory parameter set (#228) — the
+	// selector caps, text bounds, and TTL values this agent runs
+	// under; the same snapshot cmdlog stamps as param_version.
+	// Read through memoryParams(): fixtures that build the struct
+	// literally leave it zero, which must mean defaults, not
+	// all-zero caps.
+	memParams params.Memory
 	// ambiguityClarification enables the calibrated-autonomy gates:
 	// the turn-zero vagueness pre-filter and the first-write scope
 	// gate (options.ambiguity_clarification).
@@ -629,6 +637,10 @@ type SessionAgentOptions struct {
 	// goroutines — the coordinator drains it on process exit. When
 	// nil the agent allocates its own.
 	DetachedWork *sync.WaitGroup
+	// MemParams is the resolved memory parameter set (#228) the
+	// selector and tail renderer consult. Zero value falls back to
+	// the shipped defaults.
+	MemParams params.Memory
 }
 
 func NewSessionAgent(
@@ -680,6 +692,7 @@ func NewSessionAgent(
 		turnContext:            opts.TurnContext,
 		failureMemory:          opts.FailureMemory,
 		failureMemoryEdgesOff:  !opts.FailureMemoryEdges,
+		memParams:              opts.MemParams.OrDefault(),
 		memoryTelemetry:        opts.MemoryTelemetry,
 		agentID:                opts.AgentID,
 		ambiguityClarification: opts.AmbiguityClarification,

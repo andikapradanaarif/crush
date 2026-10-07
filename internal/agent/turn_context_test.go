@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/notebook"
+	"github.com/charmbracelet/crush/internal/params"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/stretchr/testify/require"
 )
@@ -57,7 +58,7 @@ func TestIsVaguePrompt(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.prompt, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tc.want, isVaguePrompt(tc.prompt))
+			require.Equal(t, tc.want, isVaguePrompt(tc.prompt, params.DefaultMemory().VaguePromptMaxWords))
 		})
 	}
 }
@@ -108,7 +109,7 @@ func newTurnCtxAgent(t *testing.T, cfg *config.Config) (*sessionAgent, fakeEnv, 
 
 func listOpenFailures(t *testing.T, env fakeEnv) []cmdlog.Failure {
 	t.Helper()
-	f, err := env.cmdlog.ListOpenFailures(t.Context(), turnContextOpenFailuresFetchLimit)
+	f, err := env.cmdlog.ListOpenFailures(t.Context(), params.DefaultMemory().FetchLimit)
 	require.NoError(t, err)
 	return f
 }
@@ -1318,4 +1319,47 @@ type cmdErrLog struct{ cmdlog.Service }
 
 func (cmdErrLog) ListCommands(context.Context, int) ([]cmdlog.Command, error) {
 	return nil, errors.New("commands unavailable")
+}
+
+// The resolved parameter set must reach the selector — a render cap
+// set on the agent bounds the tail, and the cut rows record
+// render_capped rather than silently vanishing.
+func TestMemoryParams_RenderCap(t *testing.T) {
+	t.Parallel()
+	a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
+	a.tailAudit = csync.NewMap[string, TailAudit]()
+	a.failureMemory = true
+	p := params.DefaultMemory()
+	p.OpenRenderLimit = 1
+	a.memParams = p
+	// Three distinct open rows bound identically — same command and
+	// scope, different failing test in the headline — so the cap,
+	// not the prompt, decides which render.
+	for i, headline := range []string{"FAIL TestAdd", "FAIL TestSub", "FAIL TestMul"} {
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: "prior", Command: "go test .",
+			CWD: env.workingDir, Stdout: headline, ExitCode: i + 1, Ran: true,
+		})
+	}
+	tail := a.turnTailMessages(t.Context(), SessionAgentCall{
+		SessionID: sessionID, Prompt: "the tests fail — fix them",
+	}, nil)
+	require.Len(t, tail, 1)
+
+	audit, ok := a.tailAudit.Get(sessionID)
+	require.True(t, ok)
+	var admitted, capped int
+	for _, d := range audit.Decisions {
+		if d.Pool != poolOpen {
+			continue
+		}
+		if d.Admit {
+			admitted++
+		}
+		if d.Reason == failRenderCapped {
+			capped++
+		}
+	}
+	require.Equal(t, 1, admitted, "the cap admits one open row")
+	require.Equal(t, 2, capped, "the cut rows are capped, not rejected")
 }

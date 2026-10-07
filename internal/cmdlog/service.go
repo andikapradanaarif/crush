@@ -32,6 +32,7 @@ import (
 
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/filepathext"
+	"github.com/charmbracelet/crush/internal/params"
 	"github.com/charmbracelet/crush/internal/redact"
 	"github.com/charmbracelet/crush/internal/toolclass"
 )
@@ -51,11 +52,12 @@ const (
 // the command's last real exit code.
 const interruptedExit = -1
 
-// defaultOpenFailureTTL bounds failure memory's reach: a row not
-// re-observed for this long stops rendering. Generous on purpose —
-// the cost asymmetry favors recall: a stale row costs the agent one
-// verification re-run, a missing row costs full rediscovery.
-const defaultOpenFailureTTL = 30 * 24 * time.Hour
+// The open-failure TTL defaults live in params.DefaultMemory: the
+// bound is a learned-parameter candidate (#228), so the value and
+// its versioning come from the resolved parameter set, not a local
+// constant. It stays generous on purpose — the cost asymmetry
+// favors recall: a stale row costs the agent one verification
+// re-run, a missing row costs full rediscovery.
 
 // Service defines the command/failure memory write and read path.
 type Service interface {
@@ -102,8 +104,10 @@ type Service interface {
 	// repository.
 	ProjectKey() string
 
-	// ParamVersion is the learned-params snapshot in force (#228)
-	// stamped on new rows. Empty until the params substrate exists.
+	// ParamVersion is the resolved learned-params snapshot's
+	// identity (#228) stamped on new rows — "pv1-<hash>" of the
+	// params.Memory in force; rows written before the substrate
+	// landed carry the "pv0" placeholder.
 	ParamVersion() string
 
 	// ForgetSession drops a deleted session's suggested-marks so the
@@ -222,27 +226,27 @@ type service struct {
 
 // NewService creates the command/failure memory service rooted at
 // workingDir, so failure rows key directories the way filetracker
-// keys files — workspace-relative, cwd-independent.
-func NewService(q *db.Queries, workingDir string) Service {
+// keys files — workspace-relative, cwd-independent. p is the
+// resolved parameter set: its open-failure TTL bounds the read
+// side and its Version stamps every new row's param_version.
+func NewService(q *db.Queries, workingDir string, p params.Memory) Service {
 	if workingDir == "" {
 		slog.Warn("Cmdlog got an empty workspace root; cwd keys will follow the process working directory")
 	}
 	if abs, err := filepath.Abs(workingDir); err == nil {
 		workingDir = filepathext.Canonical(abs)
 	}
+	p = p.OrDefault()
 	projectKey, commonDir, hasRepo := computeProjectKey(workingDir)
 	s := &service{
 		q:              q,
 		workingDir:     workingDir,
-		openFailureTTL: defaultOpenFailureTTL,
+		openFailureTTL: p.OpenFailureTTL,
 		projectKey:     projectKey,
 		commonDir:      commonDir,
 		hasRepo:        hasRepo,
-		// "pv0" marks rows written before the learned-params
-		// substrate (#228) exists — the unparameterized baseline,
-		// distinguishable from every future snapshot.
-		paramVersion: "pv0",
-		suggested:    map[string]map[string]struct{}{},
+		paramVersion:   p.Version(),
+		suggested:      map[string]map[string]struct{}{},
 	}
 	// Backfill: pre-provenance rows belong to this store's project,
 	// so empty keys claim into the current partition once. Failure

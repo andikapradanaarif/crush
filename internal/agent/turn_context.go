@@ -18,54 +18,17 @@ import (
 	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/notebook"
+	"github.com/charmbracelet/crush/internal/params"
 	"github.com/charmbracelet/crush/internal/redact"
 	"github.com/charmbracelet/crush/internal/session"
 )
 
-const (
-	// turnContextWorkingSetLimit bounds the working-set section of the
-	// per-turn blob. The read set is cumulative — unbounded it
-	// degenerates to "every file ever touched".
-	turnContextWorkingSetLimit = 10
-	// vaguePromptMaxWords bounds the vagueness pre-filter: prompts
-	// longer than this carry enough of their own context that a
-	// missing referent is unlikely.
-	vaguePromptMaxWords = 12
-	// turnContextIntentMaxBytes bounds the rendered intent record. A
-	// statement must never render truncated — a cut constraint reads
-	// as a different instruction — so the budget drops whole oldest
-	// items instead.
-	turnContextIntentMaxBytes = 4096
-	// turnContextFileHeatLimit bounds the cross-session heat section —
-	// a hint list, not working state, so it runs tighter than the
-	// working-set cap.
-	turnContextFileHeatLimit = 5
-	// turnContextOpenFailuresFetchLimit bounds the candidate pool the
-	// selector sees — bounded for fetch cost, wide enough that a
-	// relevant row past the render cap still earns a decision record
-	// instead of vanishing before selection. The resolved and command
-	// pools fetch under the same bound: all three are selector
-	// candidates, and a row that never reaches the selector cannot
-	// leave a decision.
-	turnContextOpenFailuresFetchLimit = 50
-	// turnContextOpenFailuresRenderLimit bounds the failure-memory
-	// tail itself — recent-first, so the cap keeps the freshest bound
-	// rows; rows it cuts record render_capped, not silence.
-	turnContextOpenFailuresRenderLimit = 5
-	// Resolved and command knowledge is subordinate to open failures:
-	// the pressure regime showed injection quality degrades before
-	// capacity runs out, so the knowledge envelopes cap tighter than
-	// the warning envelope they supplement.
-	turnContextResolvedRenderLimit = 3
-	turnContextCommandsRenderLimit = 3
-	// turnContextFailureFileHints bounds file hints rendered per
-	// failure row.
-	turnContextFailureFileHints = 3
-	// Render-side caps on echoed failure fields — write-side caps
-	// already bound them, these keep the tail bounded regardless.
-	turnContextFailureCmdRunes      = 200
-	turnContextFailureHeadlineRunes = 140
-)
+// memoryParams resolves the agent's parameter set — the zero
+// struct (direct test fixtures) means the shipped defaults, never
+// an all-caps-zero selector.
+func (a *sessionAgent) memoryParams() params.Memory {
+	return a.memParams.OrDefault()
+}
 
 // vagueReferentRe matches prompts that lean on a definite or anaphoric
 // referent whose target context must supply — "the bug", "it", "this
@@ -93,9 +56,9 @@ var theNounRe = regexp.MustCompile(`(?i)\bthe\s+(\w+)\b`)
 // underspecification in the user's own words. Fields-style word
 // counts stay: an unspaced script is "one word", which is already
 // the vague direction.
-func isVaguePrompt(prompt string) bool {
+func isVaguePrompt(prompt string, maxWords int) bool {
 	n := len(strings.Fields(prompt))
-	if n == 0 || n > vaguePromptMaxWords {
+	if n == 0 || n > maxWords {
 		return false
 	}
 	if len(extractExplicitFilePaths(prompt)) > 0 {
@@ -189,7 +152,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 			selected, memoryDecisions, memoryCandidates = cached.selected, cached.decisions, cached.candidates
 		default:
 			var pools memoryPools
-			pools.open, fetchErr = a.cmdlog.ListOpenFailures(ctx, turnContextOpenFailuresFetchLimit)
+			pools.open, fetchErr = a.cmdlog.ListOpenFailures(ctx, a.memoryParams().FetchLimit)
 			if fetchErr == nil {
 				// The knowledge pools fail soft: an open-failure fetch
 				// error still records fetchErr, while a resolved or
@@ -198,12 +161,12 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 				// knowledge misses still land on the audit so an empty
 				// pool reads "fetch failed", not "nothing existed".
 				var knowledgeErrs []string
-				if r, err := a.cmdlog.ListResolvedFailures(ctx, turnContextOpenFailuresFetchLimit); err != nil {
+				if r, err := a.cmdlog.ListResolvedFailures(ctx, a.memoryParams().FetchLimit); err != nil {
 					knowledgeErrs = append(knowledgeErrs, "resolved: "+err.Error())
 				} else {
 					pools.resolved = r
 				}
-				if c, err := a.cmdlog.ListCommands(ctx, turnContextOpenFailuresFetchLimit); err != nil {
+				if c, err := a.cmdlog.ListCommands(ctx, a.memoryParams().FetchLimit); err != nil {
 					knowledgeErrs = append(knowledgeErrs, "command: "+err.Error())
 				} else {
 					pools.commands = c
@@ -222,9 +185,9 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 				}
 				selected, memoryDecisions = selectMemory(selPrompt, pools, workDir,
 					memoryRenderLimits{
-						open:     turnContextOpenFailuresRenderLimit,
-						resolved: turnContextResolvedRenderLimit,
-						command:  turnContextCommandsRenderLimit,
+						open:     a.memoryParams().OpenRenderLimit,
+						resolved: a.memoryParams().ResolvedRenderLimit,
+						command:  a.memoryParams().CommandRenderLimit,
 					})
 				// Telemetry candidates span every evaluated row, all
 				// three pools — the count/ages mean "what the selector
@@ -792,7 +755,7 @@ func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgen
 		b.WriteString("<open_failures>\nCommands that failed in this workspace and have not passed since — the likely referents for \"the failing test\" or \"the build error\"; a clean re-run resolves one:\n")
 		for _, f := range openFailures {
 			b.WriteString("- ")
-			b.WriteString(tailSafeText(truncateTailText(f.Cmd, turnContextFailureCmdRunes)))
+			b.WriteString(tailSafeText(truncateTailText(f.Cmd, a.memoryParams().FailureCmdRunes)))
 			if f.CWD != "" && f.CWD != "." {
 				fmt.Fprintf(&b, " (in %s)", tailSafeText(f.CWD))
 			}
@@ -800,9 +763,9 @@ func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgen
 				// Screened at render too — rows persisted before the
 				// write-side screen existed are still covered.
 				fmt.Fprintf(&b, ": %s", tailSafeText(truncateTailText(
-					cmdlog.ScreenHeadline(f.Headline), turnContextFailureHeadlineRunes)))
+					cmdlog.ScreenHeadline(f.Headline), a.memoryParams().FailureHeadlineRunes)))
 			}
-			if n := min(len(f.Files), turnContextFailureFileHints); n > 0 {
+			if n := min(len(f.Files), a.memoryParams().FailureFileHints); n > 0 {
 				hints := make([]string, n)
 				for i := range hints {
 					hints[i] = tailSafeText(f.Files[i])
@@ -823,13 +786,13 @@ func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgen
 		b.WriteString("<resolved_failures>\nCommands whose earlier failures later passed in this workspace — knowledge of what worked, not open warnings:\n")
 		for _, f := range resolvedFailures {
 			b.WriteString("- ")
-			b.WriteString(tailSafeText(truncateTailText(f.Cmd, turnContextFailureCmdRunes)))
+			b.WriteString(tailSafeText(truncateTailText(f.Cmd, a.memoryParams().FailureCmdRunes)))
 			if f.CWD != "" && f.CWD != "." {
 				fmt.Fprintf(&b, " (in %s)", tailSafeText(f.CWD))
 			}
 			if f.Headline != "" {
 				fmt.Fprintf(&b, ": %s", tailSafeText(truncateTailText(
-					cmdlog.ScreenHeadline(f.Headline), turnContextFailureHeadlineRunes)))
+					cmdlog.ScreenHeadline(f.Headline), a.memoryParams().FailureHeadlineRunes)))
 			}
 			// last_seen freezes at the last FAILING observation —
 			// label it as such, not as resolution age (which cmdlog
@@ -849,7 +812,7 @@ func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgen
 		b.WriteString("<command_memory>\nCommands run in this workspace with their track record — the likely entry points for \"run the tests\" or \"build it\":\n")
 		for _, c := range commands {
 			b.WriteString("- ")
-			b.WriteString(tailSafeText(truncateTailText(c.CmdNorm, turnContextFailureCmdRunes)))
+			b.WriteString(tailSafeText(truncateTailText(c.CmdNorm, a.memoryParams().FailureCmdRunes)))
 			if c.CWD != "" && c.CWD != "." {
 				fmt.Fprintf(&b, " (in %s)", tailSafeText(c.CWD))
 			}
@@ -903,7 +866,7 @@ func (a *sessionAgent) renderSessionSignals(ctx context.Context, call SessionAge
 			size := 0
 			for i := len(entries) - 1; i >= 0; i-- {
 				line := intentLine(entries[i])
-				if size+len(line) > turnContextIntentMaxBytes && len(items) > 0 {
+				if size+len(line) > a.memoryParams().IntentMaxBytes && len(items) > 0 {
 					break
 				}
 				items = append([]string{line}, items...)
@@ -929,20 +892,20 @@ func (a *sessionAgent) renderSessionSignals(ctx context.Context, call SessionAge
 		read, _ := a.filetracker.ListRecentReadFiles(ctx, call.SessionID, 0)
 		if len(read) > 0 {
 			b.WriteString("<working_set>\nRecently read or edited files — the most likely referents for \"the file\", \"the bug\", and similar:\n")
-			for _, f := range read[:min(len(read), turnContextWorkingSetLimit)] {
+			for _, f := range read[:min(len(read), a.memoryParams().WorkingSetLimit)] {
 				fmt.Fprintf(b, "- %s\n", a.relWorkdir(f))
 			}
 			b.WriteString("</working_set>\n")
 		}
 		// Over-fetch so working-set overlap cannot starve the section.
-		if hot, err := a.filetracker.ListHotFiles(ctx, call.SessionID, turnContextFileHeatLimit*4); err == nil {
+		if hot, err := a.filetracker.ListHotFiles(ctx, call.SessionID, a.memoryParams().FileHeatLimit*4); err == nil {
 			wsSet := make(map[string]bool, len(read))
 			for _, f := range read {
 				wsSet[f] = true
 			}
 			var lines []string
 			for _, h := range hot {
-				if wsSet[h.Path] || len(lines) >= turnContextFileHeatLimit {
+				if wsSet[h.Path] || len(lines) >= a.memoryParams().FileHeatLimit {
 					continue
 				}
 				sessions := "sessions"
@@ -1042,7 +1005,7 @@ func (a *sessionAgent) relWorkdir(p string) string {
 func (a *sessionAgent) ambiguityDirective(ctx context.Context, call SessionAgentCall, msgs []message.Message, boundMemory int) string {
 	// An attached file is almost certainly the referent — "fix it"
 	// with a file dropped on the prompt needs no clarification.
-	if !a.ambiguityClarification || a.isSubAgent || len(call.Attachments) > 0 || !isVaguePrompt(call.Prompt) {
+	if !a.ambiguityClarification || a.isSubAgent || len(call.Attachments) > 0 || !isVaguePrompt(call.Prompt, a.memoryParams().VaguePromptMaxWords) {
 		return ""
 	}
 	// Earlier substantive user text can supply the referent — a bare
