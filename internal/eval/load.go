@@ -293,6 +293,27 @@ func ValidateExperiment(e *Experiment) error {
 		if e.Primary.MaxPassDrop < 0 || e.Primary.MaxPassDrop >= 1 {
 			return fmt.Errorf("primary.max_pass_drop must be an absolute pass-rate fraction in [0,1), got %g", e.Primary.MaxPassDrop)
 		}
+		// The #197 acceptance rule arms when any of its fields is
+		// pinned — floor is then required (it is the quality bound
+		// the cost rule defers to), and cost_weights must exist or
+		// ΔC is unpriceable and the rule can never run.
+		if p := e.Primary; p.Floor != nil || p.NoiseBand != nil || p.BaseCostAllowance != nil {
+			if p.Floor == nil {
+				return fmt.Errorf("primary.floor is required when the cost-acceptance rule is armed")
+			}
+			if *p.Floor <= 0 || *p.Floor > 1 {
+				return fmt.Errorf("primary.floor must be an absolute pass-rate bound in (0,1], got %g", *p.Floor)
+			}
+			if p.NoiseBand != nil && *p.NoiseBand < 0 {
+				return fmt.Errorf("primary.noise_band must be >= 0, got %g", *p.NoiseBand)
+			}
+			if p.BaseCostAllowance != nil && *p.BaseCostAllowance < 0 {
+				return fmt.Errorf("primary.base_cost_allowance must be >= 0, got %g", *p.BaseCostAllowance)
+			}
+			if e.CostWeights == nil {
+				return fmt.Errorf("cost-acceptance rule requires cost_weights — a ΔC the rule can't price is unbounded spend")
+			}
+		}
 		if _, err := primaryMetricFunc(e, e.Primary.Metric); err != nil {
 			return err
 		}

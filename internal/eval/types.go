@@ -231,6 +231,28 @@ type Primary struct {
 	// verdict to stand — a cheaper arm that fails more often isn't
 	// cheaper. 0 disables the check.
 	MaxPassDrop float64 `json:"max_pass_drop,omitempty"`
+	// Floor arms the #197 cost-justified acceptance rule: an
+	// absolute bound on each arm's conclusive pass rate — an arm
+	// below it fails regardless of cost, because token savings on a
+	// regressing arm are not savings (and a control below it means
+	// the corpus never produced the regime). Distinct from
+	// MaxPassDrop's *relative* t-vs-c bound: the floor holds even
+	// when both arms degrade together. Required when the rule's
+	// other fields are set; requires cost_weights so ΔC is priced.
+	Floor *float64 `json:"floor,omitempty"`
+	// NoiseBand δ bounds "indistinguishable from noise": within
+	// |ΔS| ≤ δ the rule permits only ΔC ≤ 0 (the feature may ship
+	// at non-positive cost, ties break on efficiency); beyond δ a
+	// real effect may carry bounded cost growth. 0/absent defaults
+	// to MDE.
+	NoiseBand *float64 `json:"noise_band,omitempty"`
+	// BaseCostAllowance β₀ is the flat relative cost growth a real
+	// effect may carry — deliberately not proportional to |ΔS|: a
+	// proportional allowance rewards cost-reduction with token
+	// growth, the circularity in the original RRSI-mirroring
+	// sketch. Absent defaults to 0.10; pin 0 to demand
+	// cost-neutrality even for real improvements.
+	BaseCostAllowance *float64 `json:"base_cost_allowance,omitempty"`
 }
 
 // PrimaryDirection enumerates the legal direction spellings.
@@ -238,6 +260,27 @@ const (
 	PrimaryIncrease = "increase"
 	PrimaryDecrease = "decrease"
 )
+
+// samePrimary reports whether two declarations match — the
+// pre-registration check. It can't be == : the acceptance-rule fields
+// are pointers, so struct equality would compare addresses and mark
+// identical manifests as drifted.
+func samePrimary(a, b *Primary) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	deref := func(p *float64) float64 {
+		if p == nil {
+			return -1 // Absent — never equal to a pinned value.
+		}
+		return *p
+	}
+	return a.Metric == b.Metric && a.Direction == b.Direction &&
+		a.MDE == b.MDE && a.MaxPassDrop == b.MaxPassDrop &&
+		deref(a.Floor) == deref(b.Floor) &&
+		deref(a.NoiseBand) == deref(b.NoiseBand) &&
+		deref(a.BaseCostAllowance) == deref(b.BaseCostAllowance)
+}
 
 // CostWeights converts discounted token classes into uncached-input
 // equivalents: weighted_cost = input + h·cache_read + o·output where

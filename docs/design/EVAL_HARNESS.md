@@ -1238,6 +1238,30 @@ decision metric per experiment:
   `guardrail: ok|violated|unevaluable`, and a violation suffixes the
   verdict itself (`— GUARDRAIL VIOLATED`) so the stop rule can't
   stand on cost alone; 0 disables the check.
+- **`floor`/`noise_band`/`base_cost_allowance` arm the
+  cost-justified acceptance rule** (#197): pinning any of them
+  requires `floor` and `cost_weights` at load — a ΔC the rule
+  can't price is unbounded spend. `floor` is an *absolute*
+  conclusive pass-rate bound on each arm (an arm below it fails
+  regardless of cost — token savings on a regressing arm are not
+  savings, and a control-side breach means the corpus never
+  produced the regime); `noise_band` δ bounds "indistinguishable
+  from noise" (absent defaults to `mde`); `base_cost_allowance`
+  β₀ is the *flat* cost growth a real effect may carry (absent
+  defaults to 0.10, pin 0 to demand cost-neutrality). The rule:
+  ΔS beyond δ in the declared direction → ΔC ≤ β₀; |ΔS| within δ
+  → ΔC ≤ 0, and a cheaper treatment is the efficiency
+  tie-break. β₀ is deliberately flat — a proportional allowance
+  rewards cost-reduction with token growth, the circularity in
+  the RRSI sketch this rule replaces. ΔC is the paired
+  `weighted_cost` estimand, which prices `generator_tokens` too —
+  spend outsourced to the sidecar can't hide. Compare stamps the
+  primary row `acceptance: ok|floor-violated|cost-unjustified`
+  (plus `cost-unmeasured` when the cost leg produced no row) and
+  suffixes the verdict `— FLOOR VIOLATED` / `— COST-UNJUSTIFIED`
+  in the alarm style; alarms also print as `ACCEPTANCE ALARM`
+  lines. When the primary *is* `weighted_cost` the cost leg is
+  degenerate (ΔC is ΔS) and only the floor checks.
 - **`cost_weights` prices the cost metric.** `weighted_cost =
   input + h·cache_read + o·output`, computed over the main-model
   tokens **and `generator_tokens`** (the sidecar prices at the same

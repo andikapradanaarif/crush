@@ -981,6 +981,31 @@ func TestValidateExperiment_Primary(t *testing.T) {
 	exp = base()
 	exp.CostWeights = &CostWeights{CacheRead: -0.1}
 	require.ErrorContains(t, ValidateExperiment(exp), "cost_weights")
+
+	// The #197 acceptance rule: arming any field requires the floor
+	// and a priced cost leg.
+	exp = base()
+	exp.Primary = &Primary{Metric: "steps", Direction: PrimaryDecrease, MDE: 0.1, NoiseBand: ptr(0.2)}
+	require.ErrorContains(t, ValidateExperiment(exp), "floor is required")
+	exp = base()
+	exp.Primary = &Primary{Metric: "steps", Direction: PrimaryDecrease, MDE: 0.1, Floor: ptr(0.0)}
+	require.ErrorContains(t, ValidateExperiment(exp), "primary.floor")
+	exp = base()
+	exp.Primary = &Primary{Metric: "steps", Direction: PrimaryDecrease, MDE: 0.1, Floor: ptr(1.2)}
+	require.ErrorContains(t, ValidateExperiment(exp), "primary.floor")
+	exp = base()
+	exp.Primary = &Primary{Metric: "steps", Direction: PrimaryDecrease, MDE: 0.1, Floor: ptr(0.9), NoiseBand: ptr(-0.1)}
+	require.ErrorContains(t, ValidateExperiment(exp), "noise_band")
+	exp = base()
+	exp.Primary = &Primary{Metric: "steps", Direction: PrimaryDecrease, MDE: 0.1, Floor: ptr(0.9), BaseCostAllowance: ptr(-0.1)}
+	require.ErrorContains(t, ValidateExperiment(exp), "base_cost_allowance")
+	// Armed without cost_weights — a ΔC the rule can't price is
+	// unbounded spend, so the manifest fails at load.
+	exp = base()
+	exp.Primary = &Primary{Metric: "steps", Direction: PrimaryDecrease, MDE: 0.1, Floor: ptr(0.9)}
+	require.ErrorContains(t, ValidateExperiment(exp), "requires cost_weights")
+	exp.CostWeights = &CostWeights{CacheRead: 0.1, Output: 4}
+	require.NoError(t, ValidateExperiment(exp))
 }
 
 func TestValidateExperiment_ExpectedExclusion(t *testing.T) {
