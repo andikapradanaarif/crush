@@ -1148,6 +1148,67 @@ func TestStampDecisionsPostRun(t *testing.T) {
 		require.Equal(t, outcomeFailed, cmdD.Outcome)
 	})
 
+	t.Run("a failed command read leaves outcomes unstamped", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newStampAgent(t)
+		// A second command row the run never touches — its
+		// unexercised stamp is action-derived, so it survives even
+		// with the ledger read broken.
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: "prior", Command: "npm run lint",
+			CWD: env.workingDir, ExitCode: 0, Ran: true,
+		})
+		render(t, a, sessionID, 1)
+
+		a.cmdlog = cmdErrLog{env.cmdlog}
+		a.stampDecisionsPostRun(t.Context(), sessionID, 1, []TailAction{
+			{Tool: tools.BashToolName, Target: "go test ./decoy"},
+		})
+		audit, _ := a.tailAudit.Get(sessionID)
+
+		// Engaged needs the verdict — an unreadable ledger leaves
+		// it empty, not a synthetic unexercised.
+		var engaged, idle FailureDecision
+		for _, d := range audit.Decisions {
+			if d.Pool == poolCommand && d.Cmd == "go test ./decoy" {
+				engaged = d
+			}
+			if d.Pool == poolCommand && d.Cmd == "npm run lint" {
+				idle = d
+			}
+		}
+		require.True(t, engaged.Engaged)
+		require.Empty(t, engaged.Outcome)
+		require.Equal(t, outcomeUnexercised, idle.Outcome)
+
+		// The failure side's read worked — its outcome still lands.
+		openD, _ := decisionByPool(audit.Decisions, poolOpen)
+		require.Equal(t, outcomeOpen, openD.Outcome)
+	})
+
+	t.Run("a failed re-read cannot downgrade a stamped outcome", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newStampAgent(t)
+		render(t, a, sessionID, 1)
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: sessionID, Command: "go test ./decoy",
+			CWD: env.workingDir, ExitCode: 0, Ran: true,
+		})
+		a.stampDecisionsPostRun(t.Context(), sessionID, 1, []TailAction{
+			{Tool: tools.BashToolName, Target: "go test ./decoy"},
+		})
+		audit, _ := a.tailAudit.Get(sessionID)
+		cmdD, _ := decisionByPool(audit.Decisions, poolCommand)
+		require.Equal(t, outcomePassed, cmdD.Outcome)
+
+		// A retry whose command read fails keeps the earlier stamp —
+		// "not stamped" must never overwrite a real verdict.
+		a.cmdlog = cmdErrLog{env.cmdlog}
+		a.stampDecisionsPostRun(t.Context(), sessionID, 1, nil)
+		cmdD, _ = decisionByPool(audit.Decisions, poolCommand)
+		require.Equal(t, outcomePassed, cmdD.Outcome)
+	})
+
 	t.Run("decisions carry the row's source provenance", func(t *testing.T) {
 		t.Parallel()
 		a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
@@ -1191,4 +1252,13 @@ func TestToolActionTarget(t *testing.T) {
 	} {
 		require.Equal(t, tc.want, toolActionTarget(tc.input), "input %s", tc.input)
 	}
+}
+
+// cmdErrLog wraps a live cmdlog but fails the command-pool read —
+// the stamp must leave command outcomes unstamped rather than
+// writing a synthetic unexercised over a ledger it never saw.
+type cmdErrLog struct{ cmdlog.Service }
+
+func (cmdErrLog) ListCommands(context.Context, int) ([]cmdlog.Command, error) {
+	return nil, errors.New("commands unavailable")
 }

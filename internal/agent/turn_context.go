@@ -492,6 +492,12 @@ func cmdTextMatch(a, b string) bool {
 // actionCmdMatch reports whether a run command names the candidate's
 // command — equal after whitespace normalization, a token-boundary
 // extension of it, or one pipeline/list segment of a composite.
+// Two known bounds, both acceptable for an evidence flag: splitting
+// isn't quote-aware, so echo "a | b" can match a `b` candidate it
+// only printed (over-inclusive); and glob coverage isn't modeled, so
+// "go test ./..." doesn't engage a "go test ./decoy" candidate it
+// actually exercised (under-inclusive — the ledger's outcome stamp
+// still lands correctly, so only the label misses).
 func actionCmdMatch(runCmd, candCmd string) bool {
 	a := normalizeCmdText(runCmd)
 	c := normalizeCmdText(candCmd)
@@ -569,6 +575,14 @@ func actionEngagesCandidate(act TailAction, cand cmdlog.Failure, workDir string)
 // the chain-final retry's post-run state wins. A failed ledger read
 // leaves Outcome empty rather than guessing — "" reads "not
 // stamped", which coverage counts apart from the explicit values.
+//
+// Two documented bounds: openSet is read through the same TTL the
+// selector uses, so a row crossing the staleness cutoff mid-run
+// stamps "resolved" while technically still open — a narrow window
+// (needs last_seen within run-duration of the boundary) on the
+// metric's direction of interest. And Engagement reads "the chain
+// touched the referent early": runActions caps at tailActionsMax,
+// so a re-run past the cap doesn't flip the flag.
 func (a *sessionAgent) stampDecisionsPostRun(ctx context.Context, sessionID string, runStamp uint64, actions []TailAction) {
 	if a.turnSels == nil || a.tailAudit == nil || sessionID == "" || runStamp == 0 {
 		return
@@ -644,9 +658,18 @@ func (a *sessionAgent) stampDecisionsPostRun(ctx context.Context, sessionID stri
 			// A command row's outcome is its last real verdict, and
 			// only counts when this chain exercised it — a row the
 			// tail showed but the agent never re-ran is unexercised
-			// no matter what an earlier turn's verdict says.
-			if !d.Engaged || cmdByKey == nil || !found {
+			// no matter what an earlier turn's verdict says. That
+			// negative comes from the action list, not the ledger,
+			// so it stamps even when the ledger read failed.
+			if !d.Engaged {
 				d.Outcome = outcomeUnexercised
+				break
+			}
+			// Engaged needs the ledger's verdict — a failed read or
+			// a vanished row leaves Outcome empty rather than
+			// stamping a synthetic negative that could also
+			// overwrite a real earlier stamp on re-stamp.
+			if cmdByKey == nil || !found {
 				break
 			}
 			key := cand.Cmd + "\x00" + strings.ReplaceAll(cand.CWD, `\`, "/")
