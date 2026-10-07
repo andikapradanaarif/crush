@@ -663,7 +663,7 @@
         "notebook_enabled": {
           "type": "boolean",
           "description": "Enable per-event context notebook for reducing token usage",
-          "default": true
+          "default": false
         },
         "notebook_raw_token_budget": {
           "type": "integer",
@@ -697,8 +697,8 @@
         },
         "notebook_checkpoint": {
           "type": "boolean",
-          "description": "Write a consolidated checkpoint entry (established facts vs open questions) at the write boundary and run end",
-          "default": true
+          "description": "Write a consolidated checkpoint entry (established facts vs open questions) at the write boundary and run end — defaults to the resolved notebook_enabled value",
+          "default": false
         },
         "notebook_stub_superseded": {
           "type": "boolean",
@@ -818,10 +818,19 @@
           "description": "Read unresolved command/failure memory: inject the \u003copen_failures\u003e tail section and arm the reconcile run-edge (open failures the run observed still open block done-ness). Recording happens regardless; this gates the read side. Experimental.",
           "default": false
         },
+        "failure_memory_edges": {
+          "type": "boolean",
+          "description": "Arm the reconcile run-edge under failure_memory (open failures the run observed still open block done-ness). When false the tail and selector still run; the edge records gated. Experimental.",
+          "default": true
+        },
         "memory_telemetry": {
           "type": "boolean",
           "description": "Opt in to local-only memory-usage telemetry: append-only JSONL at data_directory/memory-telemetry.jsonl recording per-turn memory behavior including the prompt text plus a per-session randomized injection holdout. Never transmitted. Experimental.",
           "default": false
+        },
+        "memory_params": {
+          "type": "object",
+          "description": "Overlay onto the memory subsystem's parameter set (selector caps / text bounds / open-failure TTL) keyed by params.Memory JSON field names — unknown keys and out-of-bounds values are errors. Experimental."
         }
       },
       "additionalProperties": false,

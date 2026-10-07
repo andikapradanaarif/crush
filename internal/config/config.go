@@ -576,7 +576,7 @@ type Options struct {
 	// The resolved snapshot's version stamps every memory row's
 	// param_version so eval cohorts attribute outcomes to the
 	// parameters that produced them (#228).
-	MemoryParams map[string]any `json:"memory_params,omitempty" jsonschema:"description=Overlay onto the memory subsystem's parameter set (selector caps, text bounds, open-failure TTL) keyed by params.Memory JSON field names; unknown keys and out-of-bounds values are errors. Experimental."`
+	MemoryParams map[string]any `json:"memory_params,omitempty" jsonschema:"description=Overlay onto the memory subsystem's parameter set (selector caps / text bounds / open-failure TTL) keyed by params.Memory JSON field names — unknown keys and out-of-bounds values are errors. Experimental."`
 }
 
 // OptionKeys returns the Options struct's JSON field names — the set
