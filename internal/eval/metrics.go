@@ -19,21 +19,27 @@ func primaryMetricFunc(e *Experiment, name string) (func(*RunRecord) float64, er
 	switch name {
 	case "weighted_cost":
 		if e.CostWeights == nil {
-			return nil, fmt.Errorf("primary metric %q requires cost_weights (h, o) pinned for the model", name)
+			return nil, fmt.Errorf("primary metric %q requires cost_weights (cache_read, cache_write, output) pinned for the model", name)
 		}
 		w := *e.CostWeights
+		// The sidecar prices at its own tier when the manifest pins
+		// cost_weights.generator; unpinned it inherits main-model
+		// rates — a documented overstatement when the sidecar is
+		// cheaper.
+		g := w
+		if w.Generator != nil {
+			g = *w.Generator
+		}
 		return func(r *RunRecord) float64 {
 			cost := float64(r.Tokens.Input) +
 				w.CacheRead*float64(r.Tokens.CacheRead) +
+				w.CacheWrite*float64(r.Tokens.CacheWrite) +
 				w.Output*float64(r.Tokens.Output)
-			// Sidecar generation spend prices at the same class
-			// rates — a deliberate overstatement when the generator
-			// runs a cheaper tier; a separate generator weight lands
-			// if a different-tier sidecar ships.
 			if r.GeneratorTokens != nil {
 				cost += float64(r.GeneratorTokens.Input) +
-					w.CacheRead*float64(r.GeneratorTokens.CacheRead) +
-					w.Output*float64(r.GeneratorTokens.Output)
+					g.CacheRead*float64(r.GeneratorTokens.CacheRead) +
+					g.CacheWrite*float64(r.GeneratorTokens.CacheWrite) +
+					g.Output*float64(r.GeneratorTokens.Output)
 			}
 			return cost
 		}, nil

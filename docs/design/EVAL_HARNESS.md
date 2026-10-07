@@ -1239,13 +1239,17 @@ decision metric per experiment:
   verdict itself (`— GUARDRAIL VIOLATED`) so the stop rule can't
   stand on cost alone; 0 disables the check.
 - **`cost_weights` prices the cost metric.** `weighted_cost =
-  input + h·cache_read + o·output`, computed over the main-model
-  tokens **and `generator_tokens`** (the sidecar prices at the same
-  class rates — an overstatement when the generator runs a cheaper
-  tier; a separate weight lands if one ships). `h`/`o` are pinned
-  per model in the experiment JSON — relative prices in
+  input + h·cache_read + w·cache_write + o·output`, computed over
+  the main-model tokens **and `generator_tokens`**. Weights are
+  pinned per model in the experiment JSON — relative prices in
   uncached-input units, so the metric is comparable across runs
-  without embedding a dollar table in the repo. Its CV can't
+  without embedding a dollar table in the repo. An unpinned class
+  prices at 0 — a claim the endpoint doesn't bill it, not an
+  omission. The sidecar inherits the main-model rates by default
+  (an overstatement when it runs a cheaper tier); a
+  `cost_weights.generator` block — same `{cache_read, cache_write,
+  output}` shape — prices `generator_tokens` at its own model's
+  rates for cross-tier comparisons. Its CV can't
   bootstrap itself: the power gate refuses before scheduling, so a
   `weighted_cost` primary must be hand-seeded in noise.json or
   measured by an `--aa` run on another `cost_weights`-bearing

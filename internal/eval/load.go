@@ -298,9 +298,8 @@ func ValidateExperiment(e *Experiment) error {
 		}
 	}
 	if e.CostWeights != nil {
-		if e.CostWeights.CacheRead < 0 || e.CostWeights.Output < 0 {
-			return fmt.Errorf("cost_weights must be non-negative (h=%g, o=%g)",
-				e.CostWeights.CacheRead, e.CostWeights.Output)
+		if err := e.CostWeights.check("cost_weights"); err != nil {
+			return err
 		}
 	}
 	if len(e.Corpus) == 0 {
