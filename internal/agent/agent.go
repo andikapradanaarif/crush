@@ -1333,6 +1333,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// and read after Stream returns, where sendChannelReply uses it to
 	// tell whether the model already replied on the originating channel.
 	completedToolCalls := make(map[string]struct{})
+	// runActions records the run's first tool calls — name plus
+	// extracted target — for the tail audit's "what the agent did
+	// after the tail rendered" evidence (#221). Written only from
+	// the sequential streaming callbacks and read after Stream
+	// returns, same as completedToolCalls.
+	var runActions []TailAction
 	// Don't send MaxOutputTokens if 0 — some providers (e.g. LM Studio) reject it
 	var maxOutputTokens *int64
 	if call.MaxOutputTokens > 0 {
@@ -1574,6 +1580,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			input, wasSanitized := sanitizeToolInput(tc.ToolName, tc.ToolCallID, tc.Input)
 			if wasSanitized {
 				sanitizedToolCalls[tc.ToolCallID] = true
+			}
+			if len(runActions) < tailActionsMax {
+				runActions = append(runActions, TailAction{
+					Tool:   tc.ToolName,
+					Target: toolActionTarget(input),
+				})
 			}
 			toolCall := message.ToolCall{
 				ID:               tc.ToolCallID,
@@ -1914,6 +1926,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		turnSeq:          turnSeq,
 		startedAt:        runStart,
 	})
+
+	// Post-run decision stamping (#221): with the run's verdicts
+	// landed in the ledger, fold this run's actions into the turn's
+	// shared decision rows — Engaged once any chain run touched the
+	// referent, Outcome re-stamped to the chain-final state.
+	a.stampDecisionsPostRun(genCtx, call.SessionID, call.RunStamp, runActions)
 
 	// Generate notebook entries asynchronously when notebook is
 	// enabled. This runs in the background so the user sees the

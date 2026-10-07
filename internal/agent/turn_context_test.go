@@ -926,3 +926,269 @@ func TestTurnContextSections_MemoryPools(t *testing.T) {
 		require.True(t, shadowed, "command twin records shadowed_by_open")
 	})
 }
+
+// newStampAgent is newTailAgent with the env exposed — the stamp
+// tests mutate the ledger between render and post-run stamping.
+func newStampAgent(t *testing.T) (*sessionAgent, fakeEnv, string) {
+	t.Helper()
+	a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
+	a.tailAudit = csync.NewMap[string, TailAudit]()
+	a.turnSels = csync.NewMap[string, turnSelection]()
+	a.tailRuns = csync.NewMap[string, []TailAudit]()
+	a.failureMemory = true
+	env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+		SessionID: "prior", Command: "go test ./decoy",
+		CWD: env.workingDir, Stdout: "--- FAIL: TestValue", ExitCode: 1, Ran: true,
+	})
+	return a, env, sessionID
+}
+
+// TestStampDecisionsPostRun covers the #221 post-run interpretation
+// layer: decisions rendered at turn start get stamped at run end with
+// engagement (did the chain's actions touch the referent) and outcome
+// (the ledger's state once the run's verdicts landed).
+func TestStampDecisionsPostRun(t *testing.T) {
+	t.Parallel()
+
+	render := func(t *testing.T, a *sessionAgent, sessionID string, stamp uint64) {
+		t.Helper()
+		a.turnTailMessages(t.Context(), SessionAgentCall{
+			SessionID: sessionID, Prompt: "fix TestValue", RunStamp: stamp,
+		}, nil)
+	}
+	decisionByPool := func(decisions []FailureDecision, pool string) (FailureDecision, bool) {
+		for _, d := range decisions {
+			p := d.Pool
+			if p == "" {
+				p = poolOpen
+			}
+			if p == pool {
+				return d, true
+			}
+		}
+		return FailureDecision{}, false
+	}
+
+	t.Run("a re-run stamps engaged with the ledger's end state", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newStampAgent(t)
+		render(t, a, sessionID, 1)
+
+		// The run re-ran the failing command and it passed — the
+		// open failure resolves and the command row's verdict flips.
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: sessionID, Command: "go test ./decoy",
+			CWD: env.workingDir, ExitCode: 0, Ran: true,
+		})
+		actions := []TailAction{{Tool: tools.BashToolName, Target: "go test ./decoy"}}
+		a.stampDecisionsPostRun(t.Context(), sessionID, 1, actions)
+
+		audit, ok := a.tailAudit.Get(sessionID)
+		require.True(t, ok)
+		require.Equal(t, actions, audit.Actions)
+
+		openD, ok := decisionByPool(audit.Decisions, poolOpen)
+		require.True(t, ok)
+		require.True(t, openD.Engaged)
+		require.Equal(t, outcomeResolved, openD.Outcome)
+		require.Equal(t, "prior", openD.SourceSession)
+
+		// The shadowed command twin shares the re-run — same
+		// referent, and its stamp reads the row's clean verdict.
+		cmdD, ok := decisionByPool(audit.Decisions, poolCommand)
+		require.True(t, ok)
+		require.True(t, cmdD.Engaged)
+		require.Equal(t, outcomePassed, cmdD.Outcome)
+		require.Equal(t, "prior", cmdD.SourceSession)
+
+		// The audit history shares the decisions backing — earlier
+		// renders of the chain read the chain-final stamp.
+		runs, ok := a.tailRuns.Get(sessionID)
+		require.True(t, ok)
+		require.Equal(t, audit.Decisions, runs[0].Decisions)
+		require.Equal(t, actions, runs[0].Actions)
+	})
+
+	t.Run("unacted candidates stay disengaged; outcomes still land", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newStampAgent(t)
+		render(t, a, sessionID, 1)
+
+		a.stampDecisionsPostRun(t.Context(), sessionID, 1, []TailAction{
+			{Tool: tools.ViewToolName, Target: filepath.Join(env.workingDir, "other.go")},
+		})
+
+		audit, _ := a.tailAudit.Get(sessionID)
+		openD, ok := decisionByPool(audit.Decisions, poolOpen)
+		require.True(t, ok)
+		require.False(t, openD.Engaged)
+		require.Equal(t, outcomeOpen, openD.Outcome)
+
+		cmdD, ok := decisionByPool(audit.Decisions, poolCommand)
+		require.True(t, ok)
+		require.False(t, cmdD.Engaged)
+		require.Equal(t, outcomeUnexercised, cmdD.Outcome)
+	})
+
+	t.Run("a file action engages an implicated path", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newStampAgent(t)
+		render(t, a, sessionID, 1)
+
+		// Fabricate the implicated-file list on the real candidate —
+		// the seeded row's signature stays, the stamp only reads
+		// Files for matching.
+		sel, ok := a.turnSels.Get(sessionID)
+		require.True(t, ok)
+		for i := range sel.candidates {
+			if sel.candidates[i].Cmd == "go test ./decoy" {
+				sel.candidates[i].Files = []string{"pkg/foo.go"}
+			}
+		}
+		a.turnSels.Set(sessionID, sel)
+
+		a.stampDecisionsPostRun(t.Context(), sessionID, 1, []TailAction{
+			{Tool: tools.EditToolName, Target: filepath.Join(env.workingDir, "pkg", "foo.go")},
+		})
+		audit, _ := a.tailAudit.Get(sessionID)
+		openD, _ := decisionByPool(audit.Decisions, poolOpen)
+		require.True(t, openD.Engaged)
+		require.Equal(t, outcomeOpen, openD.Outcome)
+	})
+
+	t.Run("a windows-separator path still matches", func(t *testing.T) {
+		t.Parallel()
+		a, _, sessionID := newStampAgent(t)
+		render(t, a, sessionID, 1)
+		sel, _ := a.turnSels.Get(sessionID)
+		for i := range sel.candidates {
+			sel.candidates[i].Files = []string{"pkg/foo.go"}
+		}
+		a.turnSels.Set(sessionID, sel)
+
+		a.stampDecisionsPostRun(t.Context(), sessionID, 1, []TailAction{
+			{Tool: tools.EditToolName, Target: `pkg\foo.go`},
+		})
+		audit, _ := a.tailAudit.Get(sessionID)
+		openD, _ := decisionByPool(audit.Decisions, poolOpen)
+		require.True(t, openD.Engaged)
+	})
+
+	t.Run("a composite command engages via its segment", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newStampAgent(t)
+		render(t, a, sessionID, 1)
+		a.stampDecisionsPostRun(t.Context(), sessionID, 1, []TailAction{
+			{Tool: tools.BashToolName, Target: "cd " + env.workingDir + " && go test ./decoy"},
+		})
+		audit, _ := a.tailAudit.Get(sessionID)
+		openD, _ := decisionByPool(audit.Decisions, poolOpen)
+		require.True(t, openD.Engaged)
+	})
+
+	t.Run("a re-stamp latches engaged and refreshes outcome", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newStampAgent(t)
+		render(t, a, sessionID, 1)
+
+		// First chain run engages; the failure stays open.
+		a.stampDecisionsPostRun(t.Context(), sessionID, 1, []TailAction{
+			{Tool: tools.BashToolName, Target: "go test ./decoy"},
+		})
+		audit, _ := a.tailAudit.Get(sessionID)
+		openD, _ := decisionByPool(audit.Decisions, poolOpen)
+		require.True(t, openD.Engaged)
+		require.Equal(t, outcomeOpen, openD.Outcome)
+
+		// The retry's run resolves the row but ignores it — engaged
+		// stays latched from the chain, outcome re-stamps to now.
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: sessionID, Command: "go test ./decoy",
+			CWD: env.workingDir, ExitCode: 0, Ran: true,
+		})
+		a.stampDecisionsPostRun(t.Context(), sessionID, 1, []TailAction{
+			{Tool: tools.ViewToolName, Target: filepath.Join(env.workingDir, "other.go")},
+		})
+		audit, _ = a.tailAudit.Get(sessionID)
+		openD, _ = decisionByPool(audit.Decisions, poolOpen)
+		require.True(t, openD.Engaged)
+		require.Equal(t, outcomeResolved, openD.Outcome)
+	})
+
+	t.Run("a mismatched stamp stamps nothing", func(t *testing.T) {
+		t.Parallel()
+		a, _, sessionID := newStampAgent(t)
+		render(t, a, sessionID, 1)
+		a.stampDecisionsPostRun(t.Context(), sessionID, 2, []TailAction{
+			{Tool: tools.BashToolName, Target: "go test ./decoy"},
+		})
+		audit, _ := a.tailAudit.Get(sessionID)
+		for _, d := range audit.Decisions {
+			require.False(t, d.Engaged)
+			require.Empty(t, d.Outcome)
+		}
+		require.Empty(t, audit.Actions)
+	})
+
+	t.Run("a failing re-run stamps failed on the command row", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newStampAgent(t)
+		render(t, a, sessionID, 1)
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: sessionID, Command: "go test ./decoy",
+			CWD: env.workingDir, ExitCode: 2, Ran: true,
+		})
+		a.stampDecisionsPostRun(t.Context(), sessionID, 1, []TailAction{
+			{Tool: tools.BashToolName, Target: "go test ./decoy"},
+		})
+		audit, _ := a.tailAudit.Get(sessionID)
+		cmdD, ok := decisionByPool(audit.Decisions, poolCommand)
+		require.True(t, ok)
+		require.True(t, cmdD.Engaged)
+		require.Equal(t, outcomeFailed, cmdD.Outcome)
+	})
+
+	t.Run("decisions carry the row's source provenance", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
+		a.tailAudit = csync.NewMap[string, TailAudit]()
+		a.turnSels = csync.NewMap[string, turnSelection]()
+		a.tailRuns = csync.NewMap[string, []TailAudit]()
+		a.failureMemory = true
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: "sess-9", ToolCallID: "call-42",
+			Command: "go test ./decoy", CWD: env.workingDir,
+			Stdout: "--- FAIL: TestValue", ExitCode: 1, Ran: true,
+		})
+		render(t, a, sessionID, 1)
+		audit, ok := a.tailAudit.Get(sessionID)
+		require.True(t, ok)
+		require.NotEmpty(t, audit.Decisions)
+		for _, d := range audit.Decisions {
+			require.Equal(t, "sess-9", d.SourceSession)
+			require.Equal(t, "call-42", d.SourceCall)
+		}
+	})
+}
+
+// TestToolActionTarget covers the audit's referent extraction —
+// which arg key names what a call acted on.
+func TestToolActionTarget(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		input string
+		want  string
+	}{
+		{`{"command":"go test ./..."}`, "go test ./..."},
+		{`{"file_path":"/x/y.go"}`, "/x/y.go"},
+		// A path outranks a pattern — grep/glob read as "searched
+		// here", not "looked for".
+		{`{"pattern":"foo","path":"src"}`, "src"},
+		{`{"pattern":"foo"}`, "foo"},
+		{`{}`, ""},
+		{`not json`, ""},
+		{`{"command":42}`, ""},
+	} {
+		require.Equal(t, tc.want, toolActionTarget(tc.input), "input %s", tc.input)
+	}
+}

@@ -46,6 +46,24 @@ type FailureDecision struct {
 	// (#216). render_capped rows keep the binding layer here; Reason
 	// already records the budget cut.
 	SettledBy string `json:"settled_by,omitempty"`
+	// SourceSession and SourceCall identify the observation that
+	// produced this candidate row — #220 provenance: the session and
+	// tool call whose run opened a failure row, or last verdicted a
+	// command row. Absent on pre-provenance rows.
+	SourceSession string `json:"source_session,omitempty"`
+	SourceCall    string `json:"source_call,omitempty"`
+	// Engaged reports that the turn's actions touched the candidate's
+	// referent — a file tool hit an implicated path, or a shell run
+	// re-ran the candidate command. Stamped at run end from the run's
+	// tool calls; false on records predating the stamp, and on rows
+	// whose turn never ran tools.
+	Engaged bool `json:"engaged,omitempty"`
+	// Outcome is the post-run verification of the row's claim — a
+	// closed vocabulary, stamped at run end: "resolved"/"open" for
+	// failure rows, "passed"/"failed"/"unexercised" for command rows.
+	// Empty on records predating the stamp or when the run ended
+	// before a verdict could be observed.
+	Outcome string `json:"outcome,omitempty"`
 }
 
 // Failure-selection reasons — a closed vocabulary so eval predicates
@@ -112,6 +130,18 @@ const (
 	// the prompt itself was judged non-user text before any layer
 	// ran, so no binding layer owns the reason.
 	settledHarness = "harness"
+)
+
+// Decision outcomes — the closed Outcome vocabulary, stamped at run
+// end (#221). Failure rows verify as resolved/open against the
+// post-run failure pool; command rows verify against the verdict the
+// run's actions left on the ledger.
+const (
+	outcomeResolved    = "resolved"    // failure row closed by run end
+	outcomeOpen        = "open"        // failure row still open at run end
+	outcomePassed      = "passed"      // command row verdicted clean this run
+	outcomeFailed      = "failed"      // command row verdicted failing this run
+	outcomeUnexercised = "unexercised" // command row saw no verdict this run
 )
 
 // verificationKinds are the command kinds a failure referent can
@@ -1293,6 +1323,17 @@ type selCandidate struct {
 	shadowed bool
 }
 
+// candProvenance is the candidate's source identity for the decision
+// record (#221): failure rows carry the session/tool call of the
+// opening observation; command rows carry the session/tool call of
+// their last verdict.
+func candProvenance(c selCandidate) (session, call string) {
+	if c.pool == poolCommand && c.cmd != nil {
+		return c.cmd.LastSessionID, c.cmd.LastToolCallID
+	}
+	return c.f.SessionID, c.f.ToolCallID
+}
+
 // commandCandidateID is a command row's stable id for decisions —
 // the row's primary key is (cmd_norm, cwd), so the digest of that
 // pair plays the role failure signatures play.
@@ -1369,10 +1410,12 @@ func selectMemory(prompt string, pools memoryPools, workDir string,
 		// honest if a future caller ever hands it harness text.
 		ds := make([]FailureDecision, 0, len(candidates))
 		for _, c := range candidates {
-			ds = append(ds, FailureDecision{
+			d := FailureDecision{
 				Signature: c.f.Signature, Cmd: c.f.Cmd, Pool: c.pool,
 				Reason: failNonUserPrompt, SettledBy: settledHarness,
-			})
+			}
+			d.SourceSession, d.SourceCall = candProvenance(c)
+			ds = append(ds, d)
 		}
 		return admitted, ds
 	}
@@ -1423,6 +1466,7 @@ func selectMemory(prompt string, pools memoryPools, workDir string,
 			Signature: f.Signature, Cmd: f.Cmd, Pool: cand.pool,
 			SettledBy: settledLexicon,
 		}
+		d.SourceSession, d.SourceCall = candProvenance(cand)
 		reason := failAdmit
 		dirs := failureDirs(f, workDir)
 		kind := toolclass.CommandKind(f.Cmd)

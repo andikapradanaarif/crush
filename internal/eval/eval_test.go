@@ -592,6 +592,65 @@ func TestArmCoverage_TailDecisions(t *testing.T) {
 	require.True(t, met)
 }
 
+// tail.decisions.engaged / .outcome.* count the #221 post-run
+// stamps — which shown candidates the chain's actions touched, and
+// the ledger's verdict for each decision once the run's runs landed.
+func TestArmCoverage_TailDecisionsPostRun(t *testing.T) {
+	t.Parallel()
+
+	rec := &RunRecord{Tail: []TurnTail{
+		{Turn: 0, Decisions: []FailureDecision{
+			{
+				Signature: "s1", Cmd: "go test .", Admit: true, Reason: "admit",
+				Engaged: true, Outcome: "resolved",
+			},
+			{
+				Signature: "s2", Cmd: "go vet .", Admit: true, Reason: "admit",
+				Engaged: true, Outcome: "failed",
+			},
+			{
+				Signature: "s3", Cmd: "npm run lint", Pool: "command", Admit: false,
+				Reason: "kind_mismatch", Outcome: "unexercised",
+			},
+			// An unstamped legacy row counts nowhere in the outcome
+			// vocabulary and reads un-engaged.
+			{Signature: "s4", Cmd: "make build", Admit: true, Reason: "admit"},
+		}},
+	}}
+
+	met, err := ArmCoverageMet(Coverage{"min_tail.decisions.engaged": 2}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+	met, err = ArmCoverageMet(Coverage{"min_tail.decisions.engaged.admitted": 2}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+	// The rejected row was unexercised and unengaged; admitted-only
+	// scopes out s3 either way.
+	met, err = ArmCoverageMet(Coverage{"max_tail.decisions.engaged.admitted": 2}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+
+	met, err = ArmCoverageMet(Coverage{
+		"min_tail.decisions.outcome.resolved":    1,
+		"min_tail.decisions.outcome.failed":      1,
+		"min_tail.decisions.outcome.unexercised": 1,
+	}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+	met, err = ArmCoverageMet(Coverage{"min_tail.decisions.outcome.passed": 1}, rec)
+	require.NoError(t, err)
+	require.False(t, met)
+	// Admitted scoping: unexercised's only row was rejected.
+	met, err = ArmCoverageMet(Coverage{"max_tail.decisions.outcome.unexercised.admitted": 0}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+
+	// An outcome outside the closed vocabulary fails parse rather
+	// than starving silently.
+	_, err = ArmCoverageMet(Coverage{"min_tail.decisions.outcome.bogus": 1}, rec)
+	require.Error(t, err)
+}
+
 // tail.sections.* is the arm-scoped firing assertion for context-
 // injection arms: the named envelope must appear in at least one
 // turn's rendered tail, or the run starves as inconclusive instead

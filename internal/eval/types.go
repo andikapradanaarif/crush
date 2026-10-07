@@ -447,6 +447,19 @@ type TurnTail struct {
 	// decompose a turn's repair-chain renders (#249).
 	RunStamp       uint64 `json:"run_stamp,omitempty"`
 	RepairAttempts int    `json:"repair_attempts,omitempty"`
+	// Actions mirrors TailAudit.Actions — the run's first tool calls,
+	// name plus extracted target, so a record reads "what the agent
+	// did after the tail rendered" without joining message storage
+	// (#221).
+	Actions []TailAction `json:"actions,omitempty"`
+}
+
+// TailAction is the eval-side mirror of agent.TailAction: one of a
+// run's first tool calls — the tool name plus the target it aimed at
+// (a path or a command).
+type TailAction struct {
+	Tool   string `json:"tool"`
+	Target string `json:"target,omitempty"`
 }
 
 // FailureDecision is the eval-side mirror of agent.FailureDecision:
@@ -462,6 +475,18 @@ type FailureDecision struct {
 	Admit     bool   `json:"admit"`
 	Reason    string `json:"reason"`
 	SettledBy string `json:"settled_by,omitempty"`
+	// SourceSession and SourceCall mirror the candidate's #220
+	// provenance — the session/tool call whose observation produced
+	// the row, empty on pre-provenance ledger rows.
+	SourceSession string `json:"source_session,omitempty"`
+	SourceCall    string `json:"source_call,omitempty"`
+	// Engaged and Outcome are the post-run stamps (#221): Engaged
+	// marks the run's actions touched the candidate's referent;
+	// Outcome is the closed vocabulary — resolved/open for failure
+	// rows, passed/failed/unexercised for command rows — empty when
+	// the record predates stamping or no verdict could be observed.
+	Engaged bool   `json:"engaged,omitempty"`
+	Outcome string `json:"outcome,omitempty"`
 }
 
 // RequestStats is the run's request-size snapshot: the last rendered
