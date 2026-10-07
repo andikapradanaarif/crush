@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/notebook"
+	"github.com/charmbracelet/crush/internal/params"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -1197,7 +1198,7 @@ func TestEdgeFiringDelta(t *testing.T) {
 // dir must be the workspace root the service was constructed with.
 func reconcileTestCmdLog(t *testing.T, conn *sql.DB, dir string) cmdlog.Service {
 	t.Helper()
-	return cmdlog.NewService(db.New(conn), dir)
+	return cmdlog.NewService(db.New(conn), dir, params.DefaultMemory())
 }
 
 // recordCmd writes one command verdict through the cmdlog write path —

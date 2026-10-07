@@ -43,6 +43,7 @@ import (
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	openaioauth "github.com/charmbracelet/crush/internal/oauth/openai"
+	"github.com/charmbracelet/crush/internal/params"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/question"
@@ -254,6 +255,11 @@ type coordinator struct {
 	// cannot strand the count.
 	detachedWork *sync.WaitGroup
 
+	// memParams is the resolved memory parameter set (#228) —
+	// handed to every built agent so the selector's caps and the
+	// param_version cmdlog stamps describe the same snapshot.
+	memParams params.Memory
+
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
 	activeSkills []*skills.Skill // Post-filter: active skills only.
@@ -299,6 +305,11 @@ type CoordinatorOptions struct {
 	// EdgeStore persists run-boundary edge firing rows — *db.Queries
 	// satisfies it. May be nil; the records then skip.
 	EdgeStore EdgeFiringStore
+	// MemParams is the resolved memory parameter set (#228) handed
+	// to every built agent. Zero value falls back to the shipped
+	// defaults; production callers pass the same snapshot cmdlog
+	// stamps row versions under so behavior and attribution agree.
+	MemParams params.Memory
 }
 
 func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, error) {
@@ -343,6 +354,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		usageLedger:           csync.NewMap[string, ledgerUsage](),
 		tailAudit:             csync.NewMap[string, TailAudit](),
 		detachedWork:          &sync.WaitGroup{},
+		memParams:             opts.MemParams.OrDefault(),
 	}
 
 	// Share per-session bookkeeping maps across all built agents and
@@ -1263,6 +1275,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		UsageLedger:            c.usageLedger,
 		TailAudit:              c.tailAudit,
 		DetachedWork:           c.detachedWork,
+		MemParams:              c.memParams,
 	})
 
 	// Warn only for main agents — sub-agent builds happen per run via

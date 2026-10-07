@@ -13,6 +13,7 @@ import (
 
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/filepathext"
+	"github.com/charmbracelet/crush/internal/params"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,7 +33,7 @@ func setupTest(t *testing.T) *testEnv {
 	workingDir := t.TempDir()
 	return &testEnv{
 		ctx:        t.Context(),
-		svc:        NewService(db.New(conn), workingDir),
+		svc:        NewService(db.New(conn), workingDir, params.DefaultMemory()),
 		workingDir: workingDir,
 	}
 }
@@ -169,7 +170,7 @@ func TestListOpenFailures_TTLFiltersStaleRows(t *testing.T) {
 	require.Len(t, open, 1)
 
 	// The default bound keeps a fresh row.
-	env.svc.(*service).openFailureTTL = defaultOpenFailureTTL
+	env.svc.(*service).openFailureTTL = params.DefaultMemory().OpenFailureTTL
 	open, err = env.svc.ListOpenFailures(env.ctx, 10)
 	require.NoError(t, err)
 	require.Len(t, open, 1)
@@ -881,7 +882,7 @@ func TestResolveFailures_ForeignPartitionStaysOpen(t *testing.T) {
 		LastSeen:   time.Now().UnixMilli(),
 		ProjectKey: "other-project",
 	}))
-	svc := NewService(q, workingDir)
+	svc := NewService(q, workingDir, params.DefaultMemory())
 	env := &testEnv{svc: svc, ctx: t.Context(), workingDir: workingDir}
 
 	run(env, "s1", "go test ./...", workingDir, "", "FAIL: mine", nil, 1)
@@ -955,14 +956,14 @@ func TestReclaim_RemoteAddedAfterRowsWritten(t *testing.T) {
 	touch(t, env, "foo_test.go")
 
 	// Era one: no remote, rows land under the bare common-dir key.
-	env.svc = NewService(q, env.workingDir)
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
 	run(env, "s1", "go test ./...", env.workingDir, "", "FAIL: TestFoo\n\tfoo_test.go:42: boom", nil, 1)
 	require.Equal(t, env.svc.(*service).commonDir, env.svc.ProjectKey())
 
 	// Adding a remote shifts the key; the next open re-claims the
 	// remoteless era's rows into the new partition (#266).
 	git("remote", "add", "origin", "git@github.com:org/repo.git")
-	env.svc = NewService(q, env.workingDir)
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
 	require.NotEqual(t, env.svc.(*service).commonDir, env.svc.ProjectKey())
 
 	cmds, err := env.svc.ListCommands(env.ctx, 10)
@@ -981,13 +982,13 @@ func TestReclaim_RemoteURLChanged(t *testing.T) {
 	q := db.New(conn)
 	git("remote", "add", "origin", "git@github.com:org/old.git")
 
-	env.svc = NewService(q, env.workingDir)
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
 	run(env, "s1", "go build ./...", env.workingDir, "", "", nil, 0)
 
 	// A re-point changes the remote prefix while the common-dir
 	// holds — the same-repo rows ride along to the new key.
 	git("remote", "set-url", "origin", "git@github.com:org/new.git")
-	env.svc = NewService(q, env.workingDir)
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
 
 	cmds, err := env.svc.ListCommands(env.ctx, 10)
 	require.NoError(t, err)
@@ -1002,7 +1003,7 @@ func TestReclaim_FailureSignatureRekeyed(t *testing.T) {
 	touch(t, env, "foo_test.go")
 	stderr := "FAIL: TestFoo\n\tfoo_test.go:42: boom"
 
-	env.svc = NewService(q, env.workingDir)
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
 	run(env, "s1", "go test ./...", env.workingDir, "", stderr, nil, 1)
 	oldSig := env.svc.(*service).failureSignature("go test ./...", ".", "FAIL: TestFoo")
 	oldKey := env.svc.ProjectKey()
@@ -1011,7 +1012,7 @@ func TestReclaim_FailureSignatureRekeyed(t *testing.T) {
 	// partitioned signature — a re-fail under the new key otherwise
 	// opens a duplicate.
 	git("remote", "set-url", "origin", "git@github.com:org/renamed.git")
-	env.svc = NewService(q, env.workingDir)
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
 	require.NotEqual(t, oldKey, env.svc.ProjectKey())
 
 	var sig, pk string
@@ -1031,7 +1032,7 @@ func TestReclaim_CommandCollisionKeepsNewerTwin(t *testing.T) {
 	env, conn, git := setupGitTest(t)
 	q := db.New(conn)
 	git("remote", "add", "origin", "git@github.com:org/new.git")
-	env.svc = NewService(q, env.workingDir)
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
 	svc := env.svc.(*service)
 	staleKey := "github.com/org/old|" + svc.commonDir
 
@@ -1049,7 +1050,7 @@ func TestReclaim_CommandCollisionKeepsNewerTwin(t *testing.T) {
 		RepoState: "abc123", ProjectKey: svc.ProjectKey(),
 	}))
 
-	env.svc = NewService(q, env.workingDir)
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
 	var n int
 	require.NoError(t, conn.QueryRowContext(env.ctx,
 		"SELECT COUNT(*) FROM command_memory WHERE cmd_norm = 'go build ./...'").Scan(&n))
@@ -1066,7 +1067,7 @@ func TestReclaim_ForeignCommonDirStaysForeign(t *testing.T) {
 	env, conn, git := setupGitTest(t)
 	q := db.New(conn)
 	git("remote", "add", "origin", "git@github.com:org/repo.git")
-	env.svc = NewService(q, env.workingDir)
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
 
 	// Same remote host but a different common-dir: a genuinely
 	// different repository, never a sibling — the re-claim must not
@@ -1077,7 +1078,7 @@ func TestReclaim_ForeignCommonDirStaysForeign(t *testing.T) {
 		LastSeen: time.Now().UnixMilli(), ProjectKey: "github.com/org/repo|/elsewhere/repo/.git",
 	}))
 
-	env.svc = NewService(q, env.workingDir)
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
 	var pk string
 	require.NoError(t, conn.QueryRowContext(env.ctx,
 		"SELECT project_key FROM failure_memory WHERE signature = 'foreign-repo'").Scan(&pk))
@@ -1131,7 +1132,7 @@ func TestNewService_ClaimsLegacyRows(t *testing.T) {
 		LastSeen:  time.Now().UnixMilli(),
 	}))
 
-	svc := NewService(q, workingDir)
+	svc := NewService(q, workingDir, params.DefaultMemory())
 	open, err := svc.ListOpenFailures(t.Context(), 10)
 	require.NoError(t, err)
 	require.Len(t, open, 1)
@@ -1162,7 +1163,7 @@ func TestNewService_ClaimedRowNoDuplicateOnRefail(t *testing.T) {
 		FirstSeen: time.Now().UnixMilli(),
 		LastSeen:  time.Now().UnixMilli(),
 	}))
-	svc := NewService(q, workingDir)
+	svc := NewService(q, workingDir, params.DefaultMemory())
 	env := &testEnv{svc: svc, ctx: t.Context(), workingDir: workingDir}
 
 	// The claimed row must sit under its partitioned signature —
@@ -1191,7 +1192,7 @@ func TestNewService_ClaimCollisionKeepsPartitionedTwin(t *testing.T) {
 	// The twin wins — it carries fuller provenance — while the
 	// claim inherits the failure's older first_seen onto it.
 	q := db.New(conn)
-	svc := NewService(q, workingDir)
+	svc := NewService(q, workingDir, params.DefaultMemory())
 	impl := svc.(*service)
 	newSig := impl.failureSignature("go test ./...", "", "FAIL: TestOld")
 	old := time.Now().Add(-48 * time.Hour).UnixMilli()
@@ -1213,9 +1214,58 @@ func TestNewService_ClaimCollisionKeepsPartitionedTwin(t *testing.T) {
 		LastSeen:  old,
 	}))
 
-	svc2 := NewService(q, workingDir)
+	svc2 := NewService(q, workingDir, params.DefaultMemory())
 	open, err := svc2.ListOpenFailures(t.Context(), 10)
 	require.NoError(t, err)
 	require.Len(t, open, 1)
 	require.Equal(t, old, open[0].FirstSeen.UnixMilli(), "twin inherits the older first_seen")
+}
+
+func TestParamVersion_StampsResolvedSnapshot(t *testing.T) {
+	t.Parallel()
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+
+	workingDir := t.TempDir()
+	p := params.DefaultMemory()
+	p.OpenRenderLimit = 8
+	svc := NewService(db.New(conn), workingDir, p)
+	require.Equal(t, p.Version(), svc.ParamVersion())
+
+	svc.RecordRun(t.Context(), Run{
+		SessionID: "s1", Command: "go test .", CWD: workingDir,
+		Stdout: "FAIL", ExitCode: 1, Ran: true,
+	})
+	rows, err := svc.ListOpenFailures(t.Context(), 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, p.Version(), rows[0].ParamVersion,
+		"the row carries the snapshot that produced it, not pv0")
+}
+
+func TestParamVersion_TTLOverrideBoundsReads(t *testing.T) {
+	t.Parallel()
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+
+	// A shortened TTL must actually bound the read — the parameter
+	// has to reach the filter, not just the version stamp.
+	workingDir := t.TempDir()
+	p := params.DefaultMemory()
+	p.OpenFailureTTL = 48 * time.Hour
+	env := &testEnv{ctx: t.Context(), workingDir: workingDir}
+	env.svc = NewService(db.New(conn), workingDir, p)
+	run(env, "s1", "go test .", workingDir, "FAIL", "", nil, 1)
+
+	// Age the row past the 48h override but inside the 30d default:
+	// only the override explains a disappearing read.
+	old := time.Now().Add(-72 * time.Hour)
+	_, err = conn.ExecContext(t.Context(),
+		`UPDATE failure_memory SET last_seen = ?`, old.UnixMilli())
+	require.NoError(t, err)
+	open, err := env.svc.ListOpenFailures(t.Context(), 10)
+	require.NoError(t, err)
+	require.Empty(t, open, "a 48h TTL override must bound the read")
 }
