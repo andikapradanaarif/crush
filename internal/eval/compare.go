@@ -81,6 +81,12 @@ type CompareReport struct {
 	// ArmTotals is the survivorship-free spend view — populated only
 	// when the experiment pins cost_weights.
 	ArmTotals []ArmTotal
+	// AcceptanceAlarms carries the compare-level refusals from the
+	// #197 cost-acceptance rule (floor-violated, cost-unjustified,
+	// cost-unmeasured) — distinct from OutcomeAlarms, which are the
+	// run snapshot's own. A clean list means the rule either passed
+	// or was never armed.
+	AcceptanceAlarms []string
 }
 
 // ArmTotal summarizes one arm's spend across every attempted run.
@@ -155,6 +161,11 @@ type MetricCompare struct {
 	// "ok", "violated (...)", or "unevaluable (...)" — empty when
 	// undeclared.
 	Guardrail string
+	// Acceptance carries the #197 cost-justified acceptance read on
+	// the primary row — the floor check plus the ΔS-band-routed ΔC
+	// bound, e.g. "ok (pass .97 ≥ .90; ΔS beyond δ; ΔC −22% ≤ β₀)".
+	// Empty when the rule is unarmed.
+	Acceptance string
 }
 
 // alarmSnapshot is the refusal/provenance record persisted as
@@ -313,7 +324,7 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		case snap.Primary == nil && exp.Primary != nil:
 			primaryTrusted = false
 			provNote = "primary declared after the invocation ran — verdict suppressed (post-hoc)"
-		case snap.Primary != nil && exp.Primary != nil && *snap.Primary != *exp.Primary:
+		case snap.Primary != nil && exp.Primary != nil && !samePrimary(snap.Primary, exp.Primary):
 			primaryTrusted = false
 			provNote = fmt.Sprintf("primary drifted since the invocation (ran with %s %s %.3g) — verdict suppressed",
 				snap.Primary.Metric, snap.Primary.Direction, snap.Primary.MDE)
@@ -536,6 +547,7 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		return nil, fmt.Errorf("compare: no metric had ≥%d measurable pairs", minComparePairs)
 	}
 	rep.SkippedMetrics = skippedMetrics
+	rep.applyAcceptance(exp, recs, primaryTrusted)
 	return rep, nil
 }
 
@@ -1009,12 +1021,10 @@ func armTotals(recs []RunRecord, costFn func(*RunRecord) float64) []ArmTotal {
 	return out
 }
 
-// passGuardrail evaluates the primary's max_pass_drop: treatment's
-// conclusive pass rate may trail control's by at most maxDrop.
-// Errors and inconclusives don't count as outcomes — the rate is
-// pass / conclusive on each side.
-func passGuardrail(recs []RunRecord, maxDrop float64) string {
-	var cPass, cConc, tPass, tConc int
+// conclusiveRates is the shared pass-rate read: pass/conclusive per
+// arm (errors and inconclusives are not outcomes).
+func conclusiveRates(recs []RunRecord) (cRate, tRate float64, cConc, tConc int) {
+	var cPass, tPass int
 	for _, rec := range recs {
 		if !rec.Outcome.Conclusive() {
 			continue
@@ -1032,14 +1042,151 @@ func passGuardrail(recs []RunRecord, maxDrop float64) string {
 			}
 		}
 	}
+	if cConc > 0 {
+		cRate = float64(cPass) / float64(cConc)
+	}
+	if tConc > 0 {
+		tRate = float64(tPass) / float64(tConc)
+	}
+	return cRate, tRate, cConc, tConc
+}
+
+// passGuardrail evaluates the primary's max_pass_drop: treatment's
+// conclusive pass rate may trail control's by at most maxDrop.
+// Errors and inconclusives don't count as outcomes — the rate is
+// pass / conclusive on each side.
+func passGuardrail(recs []RunRecord, maxDrop float64) string {
+	cRate, tRate, cConc, tConc := conclusiveRates(recs)
 	if cConc == 0 || tConc == 0 {
 		return fmt.Sprintf("unevaluable (control %d, treatment %d conclusive)", cConc, tConc)
 	}
-	cRate, tRate := float64(cPass)/float64(cConc), float64(tPass)/float64(tConc)
 	if drop := cRate - tRate; drop > maxDrop {
 		return fmt.Sprintf("violated (pass %.2f vs %.2f, drop %.2f > %.2f)", tRate, cRate, drop, maxDrop)
 	}
 	return fmt.Sprintf("ok (pass %.2f vs %.2f)", tRate, cRate)
+}
+
+// applyAcceptance runs the #197 cost-justified acceptance rule on the
+// primary row, after the metric loop has priced every registry entry.
+// Armed when primary pins any of floor/noise_band/base_cost_allowance
+// (floor then required, δ defaults to MDE, β₀ to 0.10 — enforced at
+// load). The rule, in order:
+//
+//  1. Floor — each arm's conclusive pass rate must clear it; a breach
+//     fails acceptance regardless of cost (token savings on a
+//     regressing arm are not savings, and a control-side breach means
+//     the corpus never produced the regime).
+//  2. ΔS beyond δ in the declared direction — a real effect may carry
+//     flat cost growth up to β₀ (not proportional: proportional
+//     allowance is the circular RRSI sketch).
+//  3. |ΔS| within δ — the effect is indistinguishable from noise, so
+//     the feature may only ship at ΔC ≤ 0; a cheaper treatment is the
+//     efficiency tie-break.
+//
+// ΔC is the paired weighted_cost estimand, which already prices every
+// token class incl. generator_tokens — a mechanism that outsources
+// spend to the sidecar can't hide it. A regression beyond δ needs no
+// cost read: the primary verdict already fails it.
+func (rep *CompareReport) applyAcceptance(exp *Experiment, recs []RunRecord, primaryTrusted bool) {
+	p := exp.Primary
+	if p == nil || (p.Floor == nil && p.NoiseBand == nil && p.BaseCostAllowance == nil) {
+		return
+	}
+	var pm, cm *MetricCompare
+	for i := range rep.Metrics {
+		switch rep.Metrics[i].Name {
+		case p.Metric:
+			pm = &rep.Metrics[i]
+		case "weighted_cost":
+			cm = &rep.Metrics[i]
+		}
+	}
+	if !primaryTrusted {
+		// The declared bounds may have drifted with the suppressed
+		// verdict — show the check's presence, not numbers the run
+		// wasn't committed to (the guardrail's drift handling).
+		if pm != nil {
+			pm.Acceptance = "unevaluable (provenance untrusted)"
+		}
+		return
+	}
+	floor := 0.0
+	if p.Floor != nil {
+		floor = *p.Floor
+	}
+	delta := p.MDE
+	if p.NoiseBand != nil {
+		delta = *p.NoiseBand
+	}
+	allow := 0.10
+	if p.BaseCostAllowance != nil {
+		allow = *p.BaseCostAllowance
+	}
+	stamp := func(m *MetricCompare, label, detail string) {
+		if m != nil {
+			m.Acceptance = detail
+			if label != "" && m.Verdict != "" {
+				m.Verdict += " — " + label
+			}
+		}
+		if label != "" {
+			rep.AcceptanceAlarms = append(rep.AcceptanceAlarms, detail)
+		}
+	}
+
+	// 1. Floor — the hard quality bound, cost-independent.
+	cRate, tRate, cConc, tConc := conclusiveRates(recs)
+	if tConc == 0 || cConc == 0 {
+		stamp(pm, "FLOOR VIOLATED", fmt.Sprintf("floor-violated (unevaluable pass rate — control %d, treatment %d conclusive)", cConc, tConc))
+		return
+	}
+	if tRate < floor {
+		stamp(pm, "FLOOR VIOLATED", fmt.Sprintf("floor-violated (treatment pass %.2f < floor %.2f)", tRate, floor))
+		return
+	}
+	if cRate < floor {
+		stamp(pm, "FLOOR VIOLATED", fmt.Sprintf("floor-violated (control pass %.2f < floor %.2f — baseline below the quality floor)", cRate, floor))
+		return
+	}
+	floorNote := fmt.Sprintf("pass %.2f ≥ floor %.2f", tRate, floor)
+
+	// 2/3. Cost leg — routed by where ΔS sits against δ.
+	if pm == nil {
+		rep.AcceptanceAlarms = append(rep.AcceptanceAlarms,
+			"cost rule unevaluable — primary metric had no measurable pairs")
+		return
+	}
+	if p.Metric == "weighted_cost" {
+		stamp(pm, "", floorNote+"; ΔC is ΔS — cost rule n/a when the primary is the cost metric")
+		return
+	}
+	if cm == nil {
+		rep.AcceptanceAlarms = append(rep.AcceptanceAlarms,
+			"cost-unmeasured (weighted_cost produced no row — unpriced spend can't be bounded)")
+		stamp(pm, "", floorNote+"; ΔC unmeasured — acceptance can't be granted on an unpriced cost leg")
+		return
+	}
+	dS := pm.Theta
+	if p.Direction == PrimaryDecrease {
+		dS = -dS // Positive dS is improvement in the declared direction.
+	}
+	dC := cm.Theta // Positive dC is cost growth.
+	switch {
+	case dS > delta:
+		if dC > allow {
+			stamp(pm, "COST-UNJUSTIFIED", fmt.Sprintf("cost-unjustified (ΔS %+.0f%% beyond δ %.0f%%; ΔC %+.0f%% > β₀ %.0f%%)", dS*100, delta*100, dC*100, allow*100))
+		} else {
+			stamp(pm, "", fmt.Sprintf("ok (%s; ΔS %+.0f%% beyond δ %.0f%%; ΔC %+.0f%% ≤ β₀ %.0f%%)", floorNote, dS*100, delta*100, dC*100, allow*100))
+		}
+	case dS < -delta:
+		stamp(pm, "", fmt.Sprintf("%s; ΔS %+.0f%% regresses beyond δ — no cost read rescues a quality loss", floorNote, dS*100))
+	default:
+		if dC > 0 {
+			stamp(pm, "COST-UNJUSTIFIED", fmt.Sprintf("cost-unjustified (ΔS %+.0f%% within δ ±%.0f%%; ΔC %+.0f%% > 0 — noise-level effects may only ship cost-neutral)", dS*100, delta*100, dC*100))
+		} else {
+			stamp(pm, "", fmt.Sprintf("ok (%s; ΔS %+.0f%% within δ ±%.0f%%; ΔC %+.0f%% ≤ 0 — efficiency tie-break favors treatment)", floorNote, dS*100, delta*100, dC*100))
+		}
+	}
 }
 
 func groupBy[S ~[]E, E any, K comparable](s S, key func(E) K) map[K]S {
@@ -1092,6 +1239,9 @@ func (rep *CompareReport) Summary() string {
 		if m.Guardrail != "" {
 			fmt.Fprintf(&b, "  %-32s guardrail: %s\n", "", m.Guardrail)
 		}
+		if m.Acceptance != "" {
+			fmt.Fprintf(&b, "  %-32s acceptance: %s\n", "", m.Acceptance)
+		}
 		if m.Verdict == "inconclusive" {
 			if m.Required > 0 {
 				fmt.Fprintf(&b, "  INCONCLUSIVE — CI spans the MDE boundary: %s needs n≈%d pairs to resolve (paired-variance estimate)\n", m.Name, m.Required)
@@ -1099,6 +1249,9 @@ func (rep *CompareReport) Summary() string {
 				fmt.Fprintf(&b, "  INCONCLUSIVE — CI spans the MDE boundary: %s; required n unknown (no recorded CV)\n", m.Name)
 			}
 		}
+	}
+	for _, a := range rep.AcceptanceAlarms {
+		fmt.Fprintf(&b, "  ACCEPTANCE ALARM: %s\n", a)
 	}
 	if len(rep.ArmTotals) > 0 {
 		fmt.Fprintf(&b, "  %-32s %6s %6s %12s %14s %14s\n", "arm", "runs", "passes", "wtd cost", "per attempt", "per pass")
