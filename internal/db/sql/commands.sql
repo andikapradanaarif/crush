@@ -125,6 +125,18 @@ WHERE cmd = ? AND cwd = ? AND resolved_in = '' AND project_key = ?;
 SELECT signature, cmd, cwd, headline, first_seen
 FROM failure_memory WHERE project_key = '';
 
+-- name: ListFailuresByKey :many
+-- Failure rows in one partition -- the remote-lifecycle re-claim
+-- (#266) moves them off a stale key onto the current one.
+SELECT signature, cmd, cwd, headline, first_seen
+FROM failure_memory WHERE project_key = ?;
+
+-- name: ListFailurePartitionKeys :many
+SELECT DISTINCT project_key FROM failure_memory WHERE project_key != '';
+
+-- name: ListCommandPartitionKeys :many
+SELECT DISTINCT project_key FROM command_memory WHERE project_key != '';
+
 -- name: GetFailureMeta :one
 SELECT signature, first_seen FROM failure_memory WHERE signature = ?;
 
@@ -141,20 +153,20 @@ UPDATE failure_memory SET first_seen = ? WHERE signature = ?;
 -- name: DeleteFailure :exec
 DELETE FROM failure_memory WHERE signature = ?;
 
--- name: DeleteLegacyCommandConflicts :exec
--- Claim collision on command_memory: project_key is PK material, so
--- claiming a legacy row whose (cmd_norm, cwd, project_key) twin
--- already exists conflicts. The partitioned twin wins -- fresher
--- provenance -- so the stale legacy row goes before the claim update.
-DELETE FROM command_memory WHERE project_key = '' AND EXISTS (
+-- name: DeleteCommandConflicts :exec
+-- Re-key collision on command_memory: project_key is PK material, so
+-- moving a row from source key to target key conflicts when the
+-- (cmd_norm, cwd, target) twin already exists. The target twin wins
+-- -- fresher provenance -- so the stale row goes before the re-key.
+DELETE FROM command_memory AS stale WHERE stale.project_key = ? AND EXISTS (
     SELECT 1 FROM command_memory twin
     WHERE twin.project_key = ?
-        AND twin.cmd_norm = command_memory.cmd_norm
-        AND twin.cwd = command_memory.cwd
+        AND twin.cmd_norm = stale.cmd_norm
+        AND twin.cwd = stale.cwd
 );
 
--- name: ClaimCommandPartition :exec
-UPDATE command_memory SET project_key = ? WHERE project_key = '';
+-- name: RekeyCommandPartition :exec
+UPDATE command_memory SET project_key = ? WHERE project_key = ?;
 
 -- name: ListRecentCommands :many
 -- last_at is millisecond-granularity so re-runs order by recency;

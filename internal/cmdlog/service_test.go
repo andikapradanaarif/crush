@@ -2,6 +2,7 @@ package cmdlog
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -915,7 +916,7 @@ func TestProjectKey_GitRepo(t *testing.T) {
 	git("remote", "add", "origin", "git@github.com:Org/My-Repo.git")
 
 	// Recompute after repo setup: the key folds remote + common-dir.
-	key, hasRepo := computeProjectKey(env.workingDir)
+	key, _, hasRepo := computeProjectKey(env.workingDir)
 	require.True(t, hasRepo)
 	require.Contains(t, key, "github.com/org/my-repo|")
 	require.Contains(t, key, ".git")
@@ -926,6 +927,165 @@ func TestNormalizeRemote(t *testing.T) {
 	require.Equal(t, "github.com/org/repo", normalizeRemote("https://github.com/org/repo.git"))
 	require.Equal(t, "github.com/org/repo", normalizeRemote("https://user@github.com:443/org/repo"))
 	require.Equal(t, "github.com/org/repo", normalizeRemote("ssh://git@github.com/org/repo.git"))
+}
+
+// setupGitTest builds a service env backed by a real repository so
+// remote-lifecycle transitions can be exercised end to end.
+func setupGitTest(t *testing.T) (*testEnv, *sql.DB, func(args ...string)) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+
+	workingDir := t.TempDir()
+	git := func(args ...string) {
+		full := append([]string{"-C", workingDir}, args...)
+		require.NoError(t, exec.CommandContext(t.Context(), "git", full...).Run())
+	}
+	git("init")
+	return &testEnv{ctx: t.Context(), workingDir: workingDir}, conn, git
+}
+
+func TestReclaim_RemoteAddedAfterRowsWritten(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	q := db.New(conn)
+	touch(t, env, "foo_test.go")
+
+	// Era one: no remote, rows land under the bare common-dir key.
+	env.svc = NewService(q, env.workingDir)
+	run(env, "s1", "go test ./...", env.workingDir, "", "FAIL: TestFoo\n\tfoo_test.go:42: boom", nil, 1)
+	require.Equal(t, env.svc.(*service).commonDir, env.svc.ProjectKey())
+
+	// Adding a remote shifts the key; the next open re-claims the
+	// remoteless era's rows into the new partition (#266).
+	git("remote", "add", "origin", "git@github.com:org/repo.git")
+	env.svc = NewService(q, env.workingDir)
+	require.NotEqual(t, env.svc.(*service).commonDir, env.svc.ProjectKey())
+
+	cmds, err := env.svc.ListCommands(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, cmds, 1)
+	require.Equal(t, "go test ./...", cmds[0].CmdNorm)
+
+	failures, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, failures, 1)
+	require.Equal(t, "FAIL: TestFoo", failures[0].Headline)
+}
+
+func TestReclaim_RemoteURLChanged(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	q := db.New(conn)
+	git("remote", "add", "origin", "git@github.com:org/old.git")
+
+	env.svc = NewService(q, env.workingDir)
+	run(env, "s1", "go build ./...", env.workingDir, "", "", nil, 0)
+
+	// A re-point changes the remote prefix while the common-dir
+	// holds — the same-repo rows ride along to the new key.
+	git("remote", "set-url", "origin", "git@github.com:org/new.git")
+	env.svc = NewService(q, env.workingDir)
+
+	cmds, err := env.svc.ListCommands(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, cmds, 1)
+	require.Equal(t, "go build ./...", cmds[0].CmdNorm)
+}
+
+func TestReclaim_FailureSignatureRekeyed(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	q := db.New(conn)
+	git("remote", "add", "origin", "git@github.com:org/repo.git")
+	touch(t, env, "foo_test.go")
+	stderr := "FAIL: TestFoo\n\tfoo_test.go:42: boom"
+
+	env.svc = NewService(q, env.workingDir)
+	run(env, "s1", "go test ./...", env.workingDir, "", stderr, nil, 1)
+	oldSig := env.svc.(*service).failureSignature("go test ./...", ".", "FAIL: TestFoo")
+	oldKey := env.svc.ProjectKey()
+
+	// Re-point the remote, reopen: the stale row must carry the new
+	// partitioned signature — a re-fail under the new key otherwise
+	// opens a duplicate.
+	git("remote", "set-url", "origin", "git@github.com:org/renamed.git")
+	env.svc = NewService(q, env.workingDir)
+	require.NotEqual(t, oldKey, env.svc.ProjectKey())
+
+	var sig, pk string
+	require.NoError(t, conn.QueryRowContext(env.ctx,
+		"SELECT signature, project_key FROM failure_memory WHERE cmd = 'go test ./...'").Scan(&sig, &pk))
+	require.Equal(t, env.svc.(*service).failureSignature("go test ./...", ".", "FAIL: TestFoo"), sig)
+	require.Equal(t, env.svc.ProjectKey(), pk)
+	require.NotEqual(t, oldSig, sig)
+
+	run(env, "s2", "go test ./...", env.workingDir, "", stderr, nil, 1)
+	failures, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, failures, 1)
+}
+
+func TestReclaim_CommandCollisionKeepsNewerTwin(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	q := db.New(conn)
+	git("remote", "add", "origin", "git@github.com:org/new.git")
+	env.svc = NewService(q, env.workingDir)
+	svc := env.svc.(*service)
+	staleKey := "github.com/org/old|" + svc.commonDir
+
+	// The same command under both the stale sibling key and the
+	// current key: the current row's fresher provenance survives the
+	// re-claim merge.
+	now := time.Now().UnixMilli()
+	require.NoError(t, q.UpsertCommandRun(env.ctx, db.UpsertCommandRunParams{
+		CmdNorm: "go build ./...", Cwd: ".", Kind: "build", LastExit: 1, LastAt: now - 1000,
+		OkCount: 3, FailCount: 7, LastSessionID: "old-session", ProjectKey: staleKey,
+	}))
+	require.NoError(t, q.UpsertCommandRun(env.ctx, db.UpsertCommandRunParams{
+		CmdNorm: "go build ./...", Cwd: ".", Kind: "build", LastExit: 0, LastAt: now,
+		OkCount: 9, LastSessionID: "fresh-session", LastToolCallID: "call-fresh",
+		RepoState: "abc123", ProjectKey: svc.ProjectKey(),
+	}))
+
+	env.svc = NewService(q, env.workingDir)
+	var n int
+	require.NoError(t, conn.QueryRowContext(env.ctx,
+		"SELECT COUNT(*) FROM command_memory WHERE cmd_norm = 'go build ./...'").Scan(&n))
+	require.Equal(t, 1, n)
+
+	cmds, err := env.svc.ListCommands(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, cmds, 1)
+	require.Equal(t, int64(9), cmds[0].OKCount)
+	require.Equal(t, "fresh-session", cmds[0].LastSessionID)
+}
+
+func TestReclaim_ForeignCommonDirStaysForeign(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	q := db.New(conn)
+	git("remote", "add", "origin", "git@github.com:org/repo.git")
+	env.svc = NewService(q, env.workingDir)
+
+	// Same remote host but a different common-dir: a genuinely
+	// different repository, never a sibling — the re-claim must not
+	// touch it.
+	require.NoError(t, q.UpsertFailure(env.ctx, db.UpsertFailureParams{
+		Signature: "foreign-repo", Cmd: "make check", Cwd: ".",
+		Headline: "FAIL: foreign", Files: "[]", FirstSeen: time.Now().UnixMilli(),
+		LastSeen: time.Now().UnixMilli(), ProjectKey: "github.com/org/repo|/elsewhere/repo/.git",
+	}))
+
+	env.svc = NewService(q, env.workingDir)
+	var pk string
+	require.NoError(t, conn.QueryRowContext(env.ctx,
+		"SELECT project_key FROM failure_memory WHERE signature = 'foreign-repo'").Scan(&pk))
+	require.Equal(t, "github.com/org/repo|/elsewhere/repo/.git", pk)
+
+	failures, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Empty(t, failures)
 }
 
 func TestListFailures_ForeignPartitionExcluded(t *testing.T) {
