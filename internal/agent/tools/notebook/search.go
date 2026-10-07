@@ -52,7 +52,7 @@ func NewSearchTool(svc notebook.Service) fantasy.AgentTool {
 
 			var sb strings.Builder
 			for _, e := range entries {
-				sb.WriteString(fmt.Sprintf("Turn %d.%d — %s", e.TurnNumber, e.EventNumber, e.Title))
+				fmt.Fprintf(&sb, "Turn %d.%d — %s", e.TurnNumber, e.EventNumber, e.Title)
 				if len(e.Tags) > 0 {
 					sb.WriteString(" ")
 					sb.WriteString(strings.Join(e.Tags, " "))

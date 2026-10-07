@@ -284,18 +284,18 @@ func TestPreparePrompt_EmptyCoverageDefersFreeze(t *testing.T) {
 	ctx := t.Context()
 
 	collapse := a.newTurnCollapse(1)
-	history, _ := a.preparePrompt(ctx, unclosed, false, collapse, false)
+	_, _ = a.preparePrompt(ctx, unclosed, false, collapse, false)
 	require.Nil(t, collapse.Set, "empty coverage must not freeze the set")
 
 	// The closing user message lands. This render fires turn 0's
 	// coverage but reads the registry pre-commit — still uncovered,
 	// still unfrozen.
-	history, _ = a.preparePrompt(ctx, msgs, false, collapse, false)
+	_, _ = a.preparePrompt(ctx, msgs, false, collapse, false)
 	require.Nil(t, collapse.Set)
 
 	// The next render observes the committed coverage — the same
 	// run's collapse set activates late rather than never.
-	history, _ = a.preparePrompt(ctx, msgs, false, collapse, false)
+	history, _ := a.preparePrompt(ctx, msgs, false, collapse, false)
 	require.NotNil(t, collapse.Set)
 	require.True(t, collapse.Set[0])
 	res := renderedResultText(t, history, "tc-bash")
@@ -851,20 +851,24 @@ func TestEnforceWindowCap(t *testing.T) {
 	small := []fantasy.Message{fantasy.NewUserMessage("hi")}
 
 	t.Run("flag off never rejects", func(t *testing.T) {
+		t.Parallel()
 		a := pressureTestAgent(64_000, 4_000)
 		require.NoError(t, a.enforceWindowCap(big, nil, 4_000))
 	})
 	t.Run("unknown window never rejects", func(t *testing.T) {
+		t.Parallel()
 		a := pressureTestAgent(0, 4_000)
 		a.enforceContextWindow = true
 		require.NoError(t, a.enforceWindowCap(big, nil, 4_000))
 	})
 	t.Run("under cap passes", func(t *testing.T) {
+		t.Parallel()
 		a := pressureTestAgent(64_000, 4_000)
 		a.enforceContextWindow = true
 		require.NoError(t, a.enforceWindowCap(small, nil, 4_000))
 	})
 	t.Run("over cap rejects with sentinel", func(t *testing.T) {
+		t.Parallel()
 		a := pressureTestAgent(64_000, 4_000)
 		a.enforceContextWindow = true
 		err := a.enforceWindowCap(big, nil, 4_000)
@@ -872,6 +876,7 @@ func TestEnforceWindowCap(t *testing.T) {
 		require.Contains(t, err.Error(), "declared window")
 	})
 	t.Run("output budget counts against the window", func(t *testing.T) {
+		t.Parallel()
 		// ~60K input fits a 64K window with a 4K completion but not
 		// with an 8K one — the provider contract is input + output.
 		a := pressureTestAgent(64_000, 4_000)
@@ -880,6 +885,7 @@ func TestEnforceWindowCap(t *testing.T) {
 		require.ErrorIs(t, a.enforceWindowCap(big, nil, 8_000), ErrContextWindowExceeded)
 	})
 	t.Run("unset output budget falls back to catalog default", func(t *testing.T) {
+		t.Parallel()
 		a := pressureTestAgent(64_000, 8_000)
 		a.enforceContextWindow = true
 		// ~60K input + 8K catalog default > 64K — the same failure
@@ -887,6 +893,7 @@ func TestEnforceWindowCap(t *testing.T) {
 		require.ErrorIs(t, a.enforceWindowCap(big, nil, 0), ErrContextWindowExceeded)
 	})
 	t.Run("tool schemas count against the window", func(t *testing.T) {
+		t.Parallel()
 		// ~60K input + 4K output fits 64K; a ~20K-token schema block
 		// (providers bill it on every request) pushes the same
 		// request over.
@@ -952,6 +959,7 @@ func TestRun_EnforceContextWindowCap(t *testing.T) {
 	}
 
 	t.Run("control dies at the cap like a real endpoint", func(t *testing.T) {
+		t.Parallel()
 		env, sessionID := newProcessEnv(t, &countingGen{})
 		seed(t, env, sessionID)
 
@@ -968,6 +976,7 @@ func TestRun_EnforceContextWindowCap(t *testing.T) {
 	})
 
 	t.Run("treatment collapses under the cap and completes", func(t *testing.T) {
+		t.Parallel()
 		env, sessionID := newProcessEnv(t, &countingGen{})
 		msgs := seed(t, env, sessionID)
 

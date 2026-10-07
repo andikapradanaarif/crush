@@ -308,7 +308,7 @@ func (s *Service) init() error {
 			s.initErr = err
 			return
 		}
-		if _, err := conn.Exec(schema); err != nil {
+		if _, err := conn.ExecContext(context.Background(), schema); err != nil {
 			conn.Close()
 			s.initErr = fmt.Errorf("failed to init index schema: %w", err)
 			return

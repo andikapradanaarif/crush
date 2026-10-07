@@ -245,8 +245,10 @@ func TestScopeGate(t *testing.T) {
 		})
 		ctx := gateCtx("s1", 1)
 		exploreN(t, ctx, shared[1], scopeGateMinExploration)
-		_, err := shared[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName,
-			Input: `{"todos":[{"content":"fix the gate","status":"pending","evidence_paths":["internal/agent/scope_gate.go"]}]}`})
+		_, err := shared[0].Run(ctx, fantasy.ToolCall{
+			ID: "t", Name: tools.TodosToolName,
+			Input: `{"todos":[{"content":"fix the gate","status":"pending","evidence_paths":["internal/agent/scope_gate.go"]}]}`,
+		})
 		require.NoError(t, err)
 		resp, err := shared[2].Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
 		require.NoError(t, err)
@@ -338,8 +340,10 @@ func TestScopeGate(t *testing.T) {
 		// count would make any seed a permanent gate bypass. The
 		// bookkeeping write is itself a non-validating declaration and
 		// bounces like one.
-		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName,
-			Input: `{"todos":[{"content":"existing","status":"in_progress"}]}`})
+		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{
+			ID: "t", Name: tools.TodosToolName,
+			Input: `{"todos":[{"content":"existing","status":"in_progress"}]}`,
+		})
 		require.NoError(t, err)
 		require.True(t, resp.IsError)
 		require.False(t, todosTool.called)
@@ -369,8 +373,10 @@ func TestScopeGate(t *testing.T) {
 		wrapped := newScopeGate(svc, true, sessions).wrap([]fantasy.AgentTool{todosTool, read, write})
 		ctx := gateCtx(sess.ID, 1)
 		exploreN(t, ctx, wrapped[1], scopeGateMinExploration)
-		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName,
-			Input: `{"todos":[{"content":"existing","status":"in_progress","evidence_paths":["internal/agent"]}]}`})
+		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{
+			ID: "t", Name: tools.TodosToolName,
+			Input: `{"todos":[{"content":"existing","status":"in_progress","evidence_paths":["internal/agent"]}]}`,
+		})
 		require.NoError(t, err)
 		require.False(t, resp.IsError, "a bookkeeping update on an evidence-bound plan is not a declaration")
 		require.True(t, todosTool.called)
@@ -429,8 +435,10 @@ func TestScopeGate(t *testing.T) {
 
 		// Armed, no plan stored: a bare list bounces (one Get), a
 		// bound list lands and resolves (second Get).
-		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t1", Name: tools.TodosToolName,
-			Input: `{"todos":[{"content":"bare","status":"pending"}]}`})
+		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{
+			ID: "t1", Name: tools.TodosToolName,
+			Input: `{"todos":[{"content":"bare","status":"pending"}]}`,
+		})
 		require.NoError(t, err)
 		require.True(t, resp.IsError)
 		resp, err = wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t2", Name: tools.TodosToolName, Input: boundPlan})
@@ -439,8 +447,10 @@ func TestScopeGate(t *testing.T) {
 		getsAfterResolve := sessions.gets
 
 		// Resolved: bookkeeping calls must not touch the session row.
-		resp, err = wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t3", Name: tools.TodosToolName,
-			Input: `{"todos":[{"content":"bare","status":"pending"}]}`})
+		resp, err = wrapped[0].Run(ctx, fantasy.ToolCall{
+			ID: "t3", Name: tools.TodosToolName,
+			Input: `{"todos":[{"content":"bare","status":"pending"}]}`,
+		})
 		require.NoError(t, err)
 		require.False(t, resp.IsError)
 		require.Equal(t, getsAfterResolve, sessions.gets, "a resolved gate must skip planDeclared")
@@ -456,8 +466,10 @@ func TestScopeGate(t *testing.T) {
 		ctx := gateCtx("s1", 1)
 		exploreN(t, ctx, wrapped[1], scopeGateMinExploration-1)
 		for i := 0; i < 5; i++ {
-			resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName,
-				Input: `{"todos":[{"content":"bare","status":"pending"}]}`})
+			resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{
+				ID: "t", Name: tools.TodosToolName,
+				Input: `{"todos":[{"content":"bare","status":"pending"}]}`,
+			})
 			require.NoError(t, err)
 			require.False(t, resp.IsError)
 		}

@@ -224,7 +224,7 @@ func TestStubRenderKeepsNotebookOriginal(t *testing.T) {
 	nbSession, err := session.NewService(q, conn).Create(ctx, "nb")
 	require.NoError(t, err)
 	nbSvc := notebook.NewService(q, echoEntryGen{}, notebook.Options{MaxEntryTokens: 10000})
-	require.NoError(t, nbSvc.GenerateEntries(ctx, nbSession.ID, 1, msgs[:3]))
+	require.NoError(t, nbSvc.GenerateEntries(ctx, nbSession.ID, 1, msgs[:3])) //nolint:staticcheck // SA1019: pre-segment coverage is the simulation target
 
 	entries, err := nbSvc.GetEntries(ctx, nbSession.ID)
 	require.NoError(t, err)
@@ -530,6 +530,7 @@ func TestStubSupersededRequiresNotebook(t *testing.T) {
 	}
 
 	t.Run("option without notebook keeps stubbing off", func(t *testing.T) {
+		t.Parallel()
 		coord := newSummaryTestCoordinator(t, crushJSON(`, "notebook_stub_superseded": true, "notebook_enabled": false`))
 		sa, ok := coord.currentAgent().(*sessionAgent)
 		require.True(t, ok)
@@ -537,6 +538,7 @@ func TestStubSupersededRequiresNotebook(t *testing.T) {
 	})
 
 	t.Run("option with notebook enables stubbing", func(t *testing.T) {
+		t.Parallel()
 		coord := newSummaryTestCoordinator(t, crushJSON(`, "notebook_stub_superseded": true, "notebook_enabled": true`))
 		sa, ok := coord.currentAgent().(*sessionAgent)
 		require.True(t, ok)
@@ -652,6 +654,7 @@ func TestFlagPrunableToolResults_ObservedModification(t *testing.T) {
 	}
 
 	t.Run("mtime change flags modified", func(t *testing.T) {
+		t.Parallel()
 		msgs := read("m.go")
 		path := filepath.Join(dir, "m.go")
 		// A bash redirection writes the file after the read.
@@ -668,6 +671,7 @@ func TestFlagPrunableToolResults_ObservedModification(t *testing.T) {
 	})
 
 	t.Run("deleted file flags deleted", func(t *testing.T) {
+		t.Parallel()
 		msgs := read("d.go")
 		require.NoError(t, os.Remove(filepath.Join(dir, "d.go")))
 
@@ -680,6 +684,7 @@ func TestFlagPrunableToolResults_ObservedModification(t *testing.T) {
 	})
 
 	t.Run("unchanged file is not flagged", func(t *testing.T) {
+		t.Parallel()
 		msgs := read("u.go")
 
 		a.flagPrunableToolResults(t.Context(), msgs)
@@ -689,6 +694,7 @@ func TestFlagPrunableToolResults_ObservedModification(t *testing.T) {
 	})
 
 	t.Run("unstamped reads are skipped", func(t *testing.T) {
+		t.Parallel()
 		msgs := read("n.go")
 		// Clear FileMtime — a result without the stamp can't tell a
 		// deleted file from a read that never hit the filesystem.

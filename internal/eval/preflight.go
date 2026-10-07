@@ -208,8 +208,8 @@ func dropHint(exp *Experiment, providerID string, known []catwalk.Provider, reso
 			}
 		}
 	}
-	switch {
-	case keyTemplate == "":
+	switch keyTemplate {
+	case "":
 		return " (no credential template found)"
 	default:
 		if v, err := resolver.ResolveValue(keyTemplate); err != nil || v == "" {

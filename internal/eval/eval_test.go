@@ -536,8 +536,10 @@ func TestArmCoverage_TailDecisions(t *testing.T) {
 	met, err = ArmCoverageMet(Coverage{"min_tail.decisions.reasons.render_capped": 1}, rec)
 	require.NoError(t, err)
 	require.True(t, met)
-	met, err = ArmCoverageMet(Coverage{"min_tail.decisions.reasons.kind_mismatch": 1,
-		"min_tail.decisions.reasons.narrow_scope": 1}, rec)
+	met, err = ArmCoverageMet(Coverage{
+		"min_tail.decisions.reasons.kind_mismatch": 1,
+		"min_tail.decisions.reasons.narrow_scope":  1,
+	}, rec)
 	require.NoError(t, err)
 	require.True(t, met)
 	met, err = ArmCoverageMet(Coverage{"min_tail.decisions.reasons.stale_suspect": 1}, rec)
@@ -552,8 +554,10 @@ func TestArmCoverage_TailDecisions(t *testing.T) {
 	// settled.* counts the layer that produced each decision —
 	// identifier-layer admits are how non-English binding shows up
 	// in evals.
-	met, err = ArmCoverageMet(Coverage{"min_tail.decisions.settled.identifier": 1,
-		"min_tail.decisions.settled.lexicon": 3}, rec)
+	met, err = ArmCoverageMet(Coverage{
+		"min_tail.decisions.settled.identifier": 1,
+		"min_tail.decisions.settled.lexicon":    3,
+	}, rec)
 	require.NoError(t, err)
 	require.True(t, met)
 	met, err = ArmCoverageMet(Coverage{"min_tail.decisions.settled.state": 1}, rec)
@@ -909,7 +913,8 @@ func TestValidateArmCoverageResolved(t *testing.T) {
 	require.NoError(t, ValidateArmCoverageResolved(exp, manifest))
 	exp.Arms[ArmTreatment] = Arm{
 		Config: ArmConfig{Options: map[string]any{
-			"failure_memory": true, "failure_memory_edges": true}},
+			"failure_memory": true, "failure_memory_edges": true,
+		}},
 		Coverage: Coverage{"min_edge_firings.reconcile.gated": 1},
 	}
 	require.Error(t, ValidateArmCoverageResolved(exp, manifest))

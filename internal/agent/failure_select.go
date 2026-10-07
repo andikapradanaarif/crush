@@ -356,7 +356,7 @@ func promptScope(prompt, workDir string) (pos, neg []string) {
 			// that names nothing harms nothing. Positive scope
 			// keeps the strict evidence bar.
 			if !isScopePath(tok, workDir) &&
-				!(negated && (strings.HasSuffix(tok, "/") || strings.HasSuffix(tok, "/."))) {
+				(!negated || (!strings.HasSuffix(tok, "/") && !strings.HasSuffix(tok, "/."))) {
 				continue
 			}
 			if negated {
@@ -1252,7 +1252,8 @@ var selectorPromptReplacer = strings.NewReplacer(
 // pools share one prompt analysis. A new caller wanting open-only
 // verdicts should bind pools explicitly, not reach for this shape.
 func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string,
-	renderLimit int) ([]cmdlog.Failure, []FailureDecision) {
+	renderLimit int,
+) ([]cmdlog.Failure, []FailureDecision) {
 	admitted, decisions := selectMemory(prompt,
 		memoryPools{open: failures}, workDir, memoryRenderLimits{open: renderLimit})
 	return admitted.open, decisions
@@ -1332,7 +1333,8 @@ func commandIdentifiers(c cmdlog.Command) map[string]bool {
 }
 
 func selectMemory(prompt string, pools memoryPools, workDir string,
-	limits memoryRenderLimits) (memoryPools, []FailureDecision) {
+	limits memoryRenderLimits,
+) (memoryPools, []FailureDecision) {
 	var admitted memoryPools
 	total := len(pools.open) + len(pools.resolved) + len(pools.commands)
 	if total == 0 {
@@ -1417,8 +1419,10 @@ func selectMemory(prompt string, pools memoryPools, workDir string,
 		for i := range f.Files {
 			f.Files[i] = strings.ReplaceAll(f.Files[i], `\`, "/")
 		}
-		d := FailureDecision{Signature: f.Signature, Cmd: f.Cmd, Pool: cand.pool,
-			SettledBy: settledLexicon}
+		d := FailureDecision{
+			Signature: f.Signature, Cmd: f.Cmd, Pool: cand.pool,
+			SettledBy: settledLexicon,
+		}
 		reason := failAdmit
 		dirs := failureDirs(f, workDir)
 		kind := toolclass.CommandKind(f.Cmd)

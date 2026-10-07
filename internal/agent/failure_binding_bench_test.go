@@ -54,8 +54,10 @@ type bindingCandidate struct {
 // precision/recall, veto violations, and abstentions, and hard-fails
 // on any veto violation or wrong verdict. Run it with -v to see the
 // language table; the dataset lives in testdata/failure_binding.jsonl.
+// Sequential by design: cell subtests accumulate into perLang and
+// the report subtest reads the totals — sibling parallelism would
+// both race the map and unbind the ordering.
 func TestBindingBenchmark(t *testing.T) {
-	t.Parallel()
 	f, err := os.Open("testdata/failure_binding.jsonl")
 	require.NoError(t, err)
 	defer f.Close()

@@ -1474,8 +1474,10 @@ func TestReconcileEdge(t *testing.T) {
 		// Burn-watch's escalation wins the slot outright; reconcile's
 		// session-state trigger rides the deferred carrier.
 		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
-			edgeInput{result: burnResult(burnWatchStepsThreshold+1, 0),
-				turnSeq: 1, startedAt: time.Now().Add(-time.Hour)})
+			edgeInput{
+				result:  burnResult(burnWatchStepsThreshold+1, 0),
+				turnSeq: 1, startedAt: time.Now().Add(-time.Hour),
+			})
 		require.True(t, queued)
 		q, _ := a.messageQueue.Get(sessionID)
 		require.Len(t, q, 1)

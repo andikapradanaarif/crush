@@ -66,17 +66,22 @@ func (s *Service) rebuildChurn(ctx context.Context, seen map[string]walkedFile) 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM churn`); err != nil {
 		return
 	}
-	st, err := tx.PrepareContext(ctx, `INSERT INTO churn (path, touches) VALUES (?, ?)`)
-	if err != nil {
-		return
-	}
-	for p, n := range touches {
-		if _, err := st.ExecContext(ctx, p, n); err != nil {
-			st.Close()
-			return
+	// The stmt must close before Commit — the tx's single conn stays
+	// held while a prepared statement is open.
+	insErr := func() error {
+		st, err := tx.PrepareContext(ctx, `INSERT INTO churn (path, touches) VALUES (?, ?)`)
+		if err != nil {
+			return err
 		}
-	}
-	if err := st.Close(); err != nil {
+		defer st.Close()
+		for p, n := range touches {
+			if _, err := st.ExecContext(ctx, p, n); err != nil {
+				return err
+			}
+		}
+		return nil
+	}()
+	if insErr != nil {
 		return
 	}
 	tx.Commit()
@@ -97,6 +102,9 @@ func (s *Service) churnCounts(ctx context.Context) map[string]int {
 			return nil
 		}
 		out[p] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil
 	}
 	return out
 }
