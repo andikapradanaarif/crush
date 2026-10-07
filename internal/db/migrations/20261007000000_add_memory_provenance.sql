@@ -75,14 +75,23 @@ CREATE TABLE command_memory_new (
     last_session_id TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (cmd_norm, cwd)
 );
+-- Collapse partitions deterministically: the newest observation per
+-- (cmd_norm, cwd) survives -- last_at then rowid break ties.
 INSERT INTO command_memory_new (
     cmd_norm, cwd, kind, last_exit, last_at,
     ok_count, fail_count, last_session_id
 )
 SELECT cmd_norm, cwd, kind, last_exit, last_at,
     ok_count, fail_count, last_session_id
-FROM command_memory
-GROUP BY cmd_norm, cwd;
+FROM (
+    SELECT cmd_norm, cwd, kind, last_exit, last_at,
+        ok_count, fail_count, last_session_id,
+        ROW_NUMBER() OVER (
+            PARTITION BY cmd_norm, cwd
+            ORDER BY last_at DESC, rowid DESC
+        ) AS rn
+    FROM command_memory
+) WHERE rn = 1;
 DROP TABLE command_memory;
 ALTER TABLE command_memory_new RENAME TO command_memory;
 -- +goose StatementEnd

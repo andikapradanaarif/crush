@@ -878,7 +878,8 @@ func TestProjectKey_GitRepo(t *testing.T) {
 	git("remote", "add", "origin", "git@github.com:Org/My-Repo.git")
 
 	// Recompute after repo setup: the key folds remote + common-dir.
-	key := computeProjectKey(env.workingDir)
+	key, hasRepo := computeProjectKey(env.workingDir)
+	require.True(t, hasRepo)
 	require.Contains(t, key, "github.com/org/my-repo|")
 	require.Contains(t, key, ".git")
 }
@@ -966,6 +967,14 @@ func TestNewService_ClaimedRowNoDuplicateOnRefail(t *testing.T) {
 	}))
 	svc := NewService(q, workingDir)
 	env := &testEnv{svc: svc, ctx: t.Context(), workingDir: workingDir}
+
+	// The claimed row must sit under its partitioned signature —
+	// the broken state is pk set while the old hash remains.
+	wantSig := svc.(*service).failureSignature("go test ./...", ".", "FAIL: TestOld")
+	var gotSig string
+	require.NoError(t, conn.QueryRowContext(t.Context(),
+		"SELECT signature FROM failure_memory").Scan(&gotSig))
+	require.Equal(t, wantSig, gotSig, "claim must re-key the signature")
 
 	run(env, "s2", "go test ./...", workingDir, "", "FAIL: TestOld", nil, 1)
 

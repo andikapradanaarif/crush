@@ -197,6 +197,11 @@ type service struct {
 	// force (#228), empty until the substrate exists.
 	projectKey   string
 	paramVersion string
+	// hasRepo caches "a repo exists at workingDir" from key
+	// derivation, so RecordRun's per-run repo_state lookup can skip
+	// the git exec entirely outside a repository — non-git dirs are
+	// where it would fail every time.
+	hasRepo bool
 	// openFailureTTL is the read-side staleness bound for open
 	// failures; 0 disables the filter.
 	openFailureTTL time.Duration
@@ -216,11 +221,13 @@ func NewService(q *db.Queries, workingDir string) Service {
 	if abs, err := filepath.Abs(workingDir); err == nil {
 		workingDir = filepathext.Canonical(abs)
 	}
+	projectKey, hasRepo := computeProjectKey(workingDir)
 	s := &service{
 		q:              q,
 		workingDir:     workingDir,
 		openFailureTTL: defaultOpenFailureTTL,
-		projectKey:     computeProjectKey(workingDir),
+		projectKey:     projectKey,
+		hasRepo:        hasRepo,
 		// "pv0" marks rows written before the learned-params
 		// substrate (#228) exists — the unparameterized baseline,
 		// distinguishable from every future snapshot.
@@ -327,7 +334,7 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 	if s.wasSuggested(ctx, run.SessionID, cmdNorm) {
 		suggested = 1
 	}
-	repoState := headSHA(ctx, s.workingDir)
+	repoState := s.headSHA(ctx)
 	if err := s.q.UpsertCommandRun(ctx, db.UpsertCommandRunParams{
 		CmdNorm:        cmdNorm,
 		Cwd:            cwd,
@@ -557,21 +564,21 @@ func (s *service) ParamVersion() string {
 // normalized remote URL when one exists. Outside a repository the
 // workspace path stands in, so rows still partition per project
 // rather than leaking across a shared data directory.
-func computeProjectKey(workingDir string) string {
+func computeProjectKey(workingDir string) (key string, hasRepo bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	common, err := gitOut(ctx, workingDir, "rev-parse", "--git-common-dir")
 	if err != nil || common == "" {
-		return filepathext.Canonical(workingDir)
+		return filepathext.Canonical(workingDir), false
 	}
 	if !filepath.IsAbs(common) {
 		common = filepath.Join(workingDir, common)
 	}
-	key := filepathext.Canonical(common)
+	key = filepathext.Canonical(common)
 	if remote, err := gitOut(ctx, workingDir, "remote", "get-url", "origin"); err == nil && remote != "" {
 		key = normalizeRemote(remote) + "|" + key
 	}
-	return key
+	return key, true
 }
 
 // normalizeRemote reduces a git remote URL to host/path form so
@@ -621,10 +628,13 @@ func gitOut(ctx context.Context, dir string, args ...string) (string, error) {
 // when git is absent. Bounded: RecordRun's ctx is detached from
 // cancellation, so the lookup carries its own deadline rather than
 // inherit none.
-func headSHA(ctx context.Context, workDir string) string {
+func (s *service) headSHA(ctx context.Context) string {
+	if !s.hasRepo {
+		return ""
+	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	out, err := gitOut(ctx, workDir, "rev-parse", "HEAD")
+	out, err := gitOut(ctx, s.workingDir, "rev-parse", "HEAD")
 	if err != nil {
 		return ""
 	}

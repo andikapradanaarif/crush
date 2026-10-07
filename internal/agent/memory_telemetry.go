@@ -150,15 +150,16 @@ func (t *memoryTelemetry) recordTurn(sessionID, prompt string, sections []string
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if !t.seen[sessionID] && t.append(map[string]any{
-		"type":         "session_start",
-		"ts":           time.Now().UnixMilli(),
-		"session_id":   sessionID,
-		"agent":        agent,
-		"workdir":      t.workDir,
-		"head_sha":     sha,
-		"project_key":  t.projectKey,
-		"prompt":       prompt,
-		"memory_armed": armed,
+		"type":          "session_start",
+		"ts":            time.Now().UnixMilli(),
+		"session_id":    sessionID,
+		"agent":         agent,
+		"workdir":       t.workDir,
+		"head_sha":      sha,
+		"project_key":   t.projectKey,
+		"param_version": t.paramVersion,
+		"prompt":        prompt,
+		"memory_armed":  armed,
 	}) {
 		t.seen[sessionID] = true
 	}
@@ -173,6 +174,7 @@ func (t *memoryTelemetry) recordTurn(sessionID, prompt string, sections []string
 		"holdout":       holdout,
 		"candidates":    len(candidates),
 		"admitted":      countAdmitted(decisions),
+		"project_key":   t.projectKey,
 		"param_version": t.paramVersion,
 	}
 	if reasons := rejectionReasons(decisions); len(reasons) > 0 {
