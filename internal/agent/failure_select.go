@@ -55,8 +55,12 @@ type FailureDecision struct {
 	// Engaged reports that the turn's actions touched the candidate's
 	// referent — a file tool hit an implicated path, or a shell run
 	// re-ran the candidate command. Stamped at run end from the run's
-	// tool calls; false on records predating the stamp, and on rows
-	// whose turn never ran tools.
+	// emitted tool calls, so it means attempted, not executed — a
+	// denied or never-run call still counts (Outcome reads the
+	// ledger, so engaged+failed stays coherent). A Task sub-agent's
+	// re-run does not engage the parent's rows; the child's own
+	// ledger rows carry that verdict. False on records predating the
+	// stamp, and on rows whose turn issued no target-bearing calls.
 	Engaged bool `json:"engaged,omitempty"`
 	// Outcome is the post-run verification of the row's claim — a
 	// closed vocabulary, stamped at run end: "resolved"/"open" for

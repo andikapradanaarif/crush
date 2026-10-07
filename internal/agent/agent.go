@@ -1333,11 +1333,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// and read after Stream returns, where sendChannelReply uses it to
 	// tell whether the model already replied on the originating channel.
 	completedToolCalls := make(map[string]struct{})
-	// runActions records the run's first tool calls — name plus
-	// extracted target — for the tail audit's "what the agent did
-	// after the tail rendered" evidence (#221). Written only from
-	// the sequential streaming callbacks and read after Stream
-	// returns, same as completedToolCalls.
+	// runActions records the run's first target-bearing tool calls —
+	// name plus extracted referent — for the tail audit's "what the
+	// agent acted on after the tail rendered" evidence (#221).
+	// Target-less calls never match a candidate, so they don't spend
+	// the cap. Written only from the sequential streaming callbacks
+	// and read after Stream returns, same as completedToolCalls.
 	var runActions []TailAction
 	// Don't send MaxOutputTokens if 0 — some providers (e.g. LM Studio) reject it
 	var maxOutputTokens *int64
@@ -1582,10 +1583,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				sanitizedToolCalls[tc.ToolCallID] = true
 			}
 			if len(runActions) < tailActionsMax {
-				runActions = append(runActions, TailAction{
-					Tool:   tc.ToolName,
-					Target: toolActionTarget(input),
-				})
+				if target := toolActionTarget(input); target != "" {
+					runActions = append(runActions, TailAction{
+						Tool:   tc.ToolName,
+						Target: target,
+					})
+				}
 			}
 			toolCall := message.ToolCall{
 				ID:               tc.ToolCallID,

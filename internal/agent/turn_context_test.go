@@ -1186,6 +1186,28 @@ func TestStampDecisionsPostRun(t *testing.T) {
 		require.Equal(t, outcomeOpen, openD.Outcome)
 	})
 
+	t.Run("a vanished command row stays unstamped", func(t *testing.T) {
+		t.Parallel()
+		a, _, sessionID := newStampAgent(t)
+		// A command decision whose row fell out of the lookup window
+		// (or was deleted) between selection and stamp — engaged but
+		// unverifiable reads empty, not unexercised.
+		ds := []FailureDecision{{
+			Signature: "gone", Cmd: "make release",
+			Pool: poolCommand, Admit: true, Reason: failAdmit,
+		}}
+		cands := []cmdlog.Failure{{Signature: "gone", Cmd: "make release"}}
+		a.turnSels.Set(sessionID, turnSelection{stamp: 1, candidates: cands, decisions: ds})
+		a.tailAudit.Set(sessionID, TailAudit{RunStamp: 1, Decisions: ds})
+		a.tailRuns.Set(sessionID, []TailAudit{{RunStamp: 1, Decisions: ds}})
+
+		a.stampDecisionsPostRun(t.Context(), sessionID, 1, []TailAction{
+			{Tool: tools.BashToolName, Target: "make release"},
+		})
+		require.True(t, ds[0].Engaged)
+		require.Empty(t, ds[0].Outcome)
+	})
+
 	t.Run("a failed re-read cannot downgrade a stamped outcome", func(t *testing.T) {
 		t.Parallel()
 		a, env, sessionID := newStampAgent(t)
@@ -1251,6 +1273,41 @@ func TestToolActionTarget(t *testing.T) {
 		{`{"command":42}`, ""},
 	} {
 		require.Equal(t, tc.want, toolActionTarget(tc.input), "input %s", tc.input)
+	}
+}
+
+// TestActionCmdMatch covers the engagement matcher's command side —
+// token-boundary prefixes both directions, composite segments on
+// either side, navigation scaffolding excluded.
+func TestActionCmdMatch(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		run, cand string
+		want      bool
+	}{
+		{"go test ./decoy", "go test ./decoy", true},
+		// Token boundary — a longer sibling name is not a match.
+		{"go test ./decoy", "go test ./decoyish", false},
+		{"cd /x && go test .", "go test .", true},
+		// A composite candidate engages on a segment re-run — the
+		// common repair move of re-running just the failing piece.
+		{"go test .", "cd decoy && go test .", true},
+		{"go test .", "go vet . && go test .", true},
+		// Navigation segments are scaffolding, never the referent.
+		{"cd decoy", "cd decoy && go test .", false},
+		{"cd decoy && go vet .", "cd decoy && go test .", false},
+		// Documented bounds: reverse-prefix matches (a root run
+		// plausibly covers the longer command); a quoted fragment
+		// keeps its quote bytes, so splitting can't falsely engage
+		// on text the action only printed.
+		{"go test", "go test -race ./decoy", true},
+		{`echo "a | go test ."`, "go test .", false},
+		// Glob coverage is unmodeled — ./... is a different command.
+		{"go test ./...", "go test ./decoy", false},
+		{"", "go test .", false},
+		{"go test .", "", false},
+	} {
+		require.Equal(t, tc.want, actionCmdMatch(tc.run, tc.cand), "%q vs %q", tc.run, tc.cand)
 	}
 }
 

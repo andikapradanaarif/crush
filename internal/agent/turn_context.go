@@ -329,11 +329,12 @@ type TailSection struct {
 	Bytes int    `json:"bytes"`
 }
 
-// TailAction is one of a run's first tool calls — the tool name plus
-// the target it aimed at (a path or command), so an eval can read
-// "what the agent did after the tail rendered" without joining
-// message storage. Bounded to the run's first actions; a nil list
-// means the run issued no tool calls, not that none were recorded.
+// TailAction is one of a run's first target-bearing tool calls —
+// the tool name plus the referent it aimed at (a path or command),
+// so an eval can read "what the agent acted on after the tail
+// rendered" without joining message storage. Calls with no
+// extractable target don't spend the tailActionsMax budget; a nil
+// list means the run issued no referent-touching calls.
 type TailAction struct {
 	Tool   string `json:"tool"`
 	Target string `json:"target,omitempty"`
@@ -378,10 +379,14 @@ type TailAudit struct {
 	// renders instead of flattening them (#249).
 	RunStamp       uint64 `json:"run_stamp"`
 	RepairAttempts int    `json:"repair_attempts"`
-	// Actions is the run's first tool calls — name plus target —
-	// stamped at run end (#221). Per-render: each retry's audit
-	// carries its own run's actions, while the decisions' Engaged
-	// flag folds the whole chain's actions together.
+	// Actions is the run's first target-bearing tool calls — name
+	// plus extracted referent — stamped at run end (#221).
+	// Per-render: each retry's audit carries its own run's actions,
+	// while the decisions' Engaged flag folds the whole chain's
+	// actions together. Actions stamp only when the turn has a
+	// selection-cache entry — an audit from an fm-unarmed render
+	// carries none; the field is decision evidence, not generic
+	// "what the run did" telemetry.
 	Actions []TailAction `json:"actions,omitempty"`
 }
 
@@ -489,28 +494,70 @@ func cmdTextMatch(a, b string) bool {
 	return a == b || strings.HasPrefix(a, b+" ") || strings.HasPrefix(b, a+" ")
 }
 
+// navCmd reports whether a command segment is pure navigation — a
+// cd/pushd/popd is scaffolding for the real invocation, and matching
+// one would call "went to the same directory" engagement.
+func navCmd(seg string) bool {
+	f := strings.Fields(seg)
+	if len(f) == 0 {
+		return true
+	}
+	switch f[0] {
+	case "cd", "pushd", "popd":
+		return true
+	}
+	return false
+}
+
+var actionCmdSeps = []string{"&&", "||", ";", "|"}
+
 // actionCmdMatch reports whether a run command names the candidate's
 // command — equal after whitespace normalization, a token-boundary
-// extension of it, or one pipeline/list segment of a composite.
-// Two known bounds, both acceptable for an evidence flag: splitting
-// isn't quote-aware, so echo "a | b" can match a `b` candidate it
-// only printed (over-inclusive); and glob coverage isn't modeled, so
-// "go test ./..." doesn't engage a "go test ./decoy" candidate it
-// actually exercised (under-inclusive — the ledger's outcome stamp
-// still lands correctly, so only the label misses).
+// extension of it, or one pipeline/list segment of a composite on
+// either side (a candidate "cd decoy && go test ." engages on a
+// plain "go test ." re-run — the common repair move of re-running
+// just the failing segment). Navigation segments never match.
+// Known bounds, all acceptable for an evidence flag: splitting
+// isn't quote-aware, and quoted fragments keep their quote bytes —
+// `echo "a | go test ."` segments as `go test ."` and matches
+// nothing, so quoting defeats the split rather than falsely
+// engaging (under-inclusive, the safe direction); glob coverage
+// isn't modeled, so "go test ./..." doesn't engage a "go test
+// ./decoy" candidate it actually exercised (under-inclusive — the
+// ledger's outcome stamp still lands correctly, so only the label
+// misses); and the reverse-prefix direction lets a bare "go test"
+// action engage a "go test -race ./decoy" candidate (defensible —
+// a root run plausibly covers it).
 func actionCmdMatch(runCmd, candCmd string) bool {
 	a := normalizeCmdText(runCmd)
 	c := normalizeCmdText(candCmd)
 	if a == "" || c == "" {
 		return false
 	}
-	if cmdTextMatch(a, c) {
+	// The whole-string comparison excludes navigation commands so a
+	// bare "cd decoy" can't prefix-match a composite's scaffolding.
+	if !navCmd(a) && !navCmd(c) && cmdTextMatch(a, c) {
 		return true
 	}
-	for _, sep := range []string{"&&", "||", ";", "|"} {
+	candSegs := []string{c}
+	for _, sep := range actionCmdSeps {
+		var next []string
+		for _, s := range candSegs {
+			next = append(next, strings.Split(s, sep)...)
+		}
+		candSegs = next
+	}
+	for _, sep := range actionCmdSeps {
 		for _, seg := range strings.Split(a, sep) {
-			if cmdTextMatch(normalizeCmdText(seg), c) {
-				return true
+			seg = normalizeCmdText(seg)
+			if seg == "" || navCmd(seg) {
+				continue
+			}
+			for _, cseg := range candSegs {
+				cseg = normalizeCmdText(cseg)
+				if cseg != "" && !navCmd(cseg) && cmdTextMatch(seg, cseg) {
+					return true
+				}
 			}
 		}
 	}
@@ -582,7 +629,13 @@ func actionEngagesCandidate(act TailAction, cand cmdlog.Failure, workDir string)
 // (needs last_seen within run-duration of the boundary) on the
 // metric's direction of interest. And Engagement reads "the chain
 // touched the referent early": runActions caps at tailActionsMax,
-// so a re-run past the cap doesn't flip the flag.
+// so a re-run past the cap doesn't flip the flag — and a Task
+// sub-agent's re-run never engages the parent's candidates (the
+// child's own ledger rows carry that verdict, so engaged
+// under-reports exactly where `suggested` over-reports). The stamp
+// mutates the shared decisions backing outside the map lock, so a
+// concurrent export can observe a half-stamped row — sequential
+// per-session runs make it cosmetic.
 func (a *sessionAgent) stampDecisionsPostRun(ctx context.Context, sessionID string, runStamp uint64, actions []TailAction) {
 	if a.turnSels == nil || a.tailAudit == nil || sessionID == "" || runStamp == 0 {
 		return
@@ -674,8 +727,11 @@ func (a *sessionAgent) stampDecisionsPostRun(ctx context.Context, sessionID stri
 			}
 			key := cand.Cmd + "\x00" + strings.ReplaceAll(cand.CWD, `\`, "/")
 			c, ok := cmdByKey[key]
+			if !ok {
+				break
+			}
 			switch {
-			case !ok || c.LastExit < 0:
+			case c.LastExit < 0:
 				d.Outcome = outcomeUnexercised
 			case c.LastExit == 0:
 				d.Outcome = outcomePassed
