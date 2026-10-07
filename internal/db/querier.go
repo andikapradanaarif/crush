@@ -10,7 +10,6 @@ import (
 
 type Querier interface {
 	BumpSessionCounter(ctx context.Context, arg BumpSessionCounterParams) error
-	ClaimCommandPartition(ctx context.Context, projectKey string) error
 	// Absolute user-turn ordinal source for edge_firings.turn_seq - the
 	// bounded prompt-history query above can't serve it (DESC LIMIT 200
 	// yields no ASC ordinal past 200 and same-second created_at ties are
@@ -21,13 +20,13 @@ type Querier interface {
 	CreateNotebookEntry(ctx context.Context, arg CreateNotebookEntryParams) (NotebookEntry, error)
 	CreateNotebookTag(ctx context.Context, arg CreateNotebookTagParams) error
 	CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error)
+	// Re-key collision on command_memory: project_key is PK material, so
+	// moving a row from source key to target key conflicts when the
+	// (cmd_norm, cwd, target) twin already exists. The target twin wins
+	// -- fresher provenance -- so the stale row goes before the re-key.
+	DeleteCommandConflicts(ctx context.Context, arg DeleteCommandConflictsParams) error
 	DeleteFailure(ctx context.Context, signature string) error
 	DeleteFile(ctx context.Context, id string) error
-	// Claim collision on command_memory: project_key is PK material, so
-	// claiming a legacy row whose (cmd_norm, cwd, project_key) twin
-	// already exists conflicts. The partitioned twin wins -- fresher
-	// provenance -- so the stale legacy row goes before the claim update.
-	DeleteLegacyCommandConflicts(ctx context.Context, projectKey string) error
 	DeleteMCPDisabledServer(ctx context.Context, name string) error
 	DeleteMCPEnabledServer(ctx context.Context, name string) error
 	DeleteMessage(ctx context.Context, id string) error
@@ -85,6 +84,11 @@ type Querier interface {
 	// Backs prompt history when no session is open. Needs
 	// idx_messages_role_created_at to seek rather than scan the table.
 	ListAllUserMessages(ctx context.Context) ([]Message, error)
+	ListCommandPartitionKeys(ctx context.Context) ([]string, error)
+	ListFailurePartitionKeys(ctx context.Context) ([]string, error)
+	// Failure rows in one partition -- the remote-lifecycle re-claim
+	// (#266) moves them off a stale key onto the current one.
+	ListFailuresByKey(ctx context.Context, projectKey string) ([]ListFailuresByKeyRow, error)
 	ListFilesByPath(ctx context.Context, path string) ([]File, error)
 	ListFilesBySession(ctx context.Context, sessionID string) ([]File, error)
 	// Project-wide file heat: files prior sessions in this workspace
@@ -152,6 +156,7 @@ type Querier interface {
 	RecordFileRead(ctx context.Context, arg RecordFileReadParams) error
 	RecordProcessedSegment(ctx context.Context, arg RecordProcessedSegmentParams) error
 	RecordSegmentAttempt(ctx context.Context, arg RecordSegmentAttemptParams) error
+	RekeyCommandPartition(ctx context.Context, arg RekeyCommandPartitionParams) error
 	// Claim one legacy row onto its partitioned signature.
 	RekeyFailurePartition(ctx context.Context, arg RekeyFailurePartitionParams) error
 	RenameSession(ctx context.Context, arg RenameSessionParams) error

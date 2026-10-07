@@ -27,9 +27,6 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.bumpSessionCounterStmt, err = db.PrepareContext(ctx, bumpSessionCounter); err != nil {
 		return nil, fmt.Errorf("error preparing query BumpSessionCounter: %w", err)
 	}
-	if q.claimCommandPartitionStmt, err = db.PrepareContext(ctx, claimCommandPartition); err != nil {
-		return nil, fmt.Errorf("error preparing query ClaimCommandPartition: %w", err)
-	}
 	if q.countUserMessagesBySessionStmt, err = db.PrepareContext(ctx, countUserMessagesBySession); err != nil {
 		return nil, fmt.Errorf("error preparing query CountUserMessagesBySession: %w", err)
 	}
@@ -48,14 +45,14 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.createSessionStmt, err = db.PrepareContext(ctx, createSession); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateSession: %w", err)
 	}
+	if q.deleteCommandConflictsStmt, err = db.PrepareContext(ctx, deleteCommandConflicts); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteCommandConflicts: %w", err)
+	}
 	if q.deleteFailureStmt, err = db.PrepareContext(ctx, deleteFailure); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteFailure: %w", err)
 	}
 	if q.deleteFileStmt, err = db.PrepareContext(ctx, deleteFile); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteFile: %w", err)
-	}
-	if q.deleteLegacyCommandConflictsStmt, err = db.PrepareContext(ctx, deleteLegacyCommandConflicts); err != nil {
-		return nil, fmt.Errorf("error preparing query DeleteLegacyCommandConflicts: %w", err)
 	}
 	if q.deleteMCPDisabledServerStmt, err = db.PrepareContext(ctx, deleteMCPDisabledServer); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteMCPDisabledServer: %w", err)
@@ -192,6 +189,15 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listAllUserMessagesStmt, err = db.PrepareContext(ctx, listAllUserMessages); err != nil {
 		return nil, fmt.Errorf("error preparing query ListAllUserMessages: %w", err)
 	}
+	if q.listCommandPartitionKeysStmt, err = db.PrepareContext(ctx, listCommandPartitionKeys); err != nil {
+		return nil, fmt.Errorf("error preparing query ListCommandPartitionKeys: %w", err)
+	}
+	if q.listFailurePartitionKeysStmt, err = db.PrepareContext(ctx, listFailurePartitionKeys); err != nil {
+		return nil, fmt.Errorf("error preparing query ListFailurePartitionKeys: %w", err)
+	}
+	if q.listFailuresByKeyStmt, err = db.PrepareContext(ctx, listFailuresByKey); err != nil {
+		return nil, fmt.Errorf("error preparing query ListFailuresByKey: %w", err)
+	}
 	if q.listFilesByPathStmt, err = db.PrepareContext(ctx, listFilesByPath); err != nil {
 		return nil, fmt.Errorf("error preparing query ListFilesByPath: %w", err)
 	}
@@ -267,6 +273,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.recordSegmentAttemptStmt, err = db.PrepareContext(ctx, recordSegmentAttempt); err != nil {
 		return nil, fmt.Errorf("error preparing query RecordSegmentAttempt: %w", err)
 	}
+	if q.rekeyCommandPartitionStmt, err = db.PrepareContext(ctx, rekeyCommandPartition); err != nil {
+		return nil, fmt.Errorf("error preparing query RekeyCommandPartition: %w", err)
+	}
 	if q.rekeyFailurePartitionStmt, err = db.PrepareContext(ctx, rekeyFailurePartition); err != nil {
 		return nil, fmt.Errorf("error preparing query RekeyFailurePartition: %w", err)
 	}
@@ -313,11 +322,6 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing bumpSessionCounterStmt: %w", cerr)
 		}
 	}
-	if q.claimCommandPartitionStmt != nil {
-		if cerr := q.claimCommandPartitionStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing claimCommandPartitionStmt: %w", cerr)
-		}
-	}
 	if q.countUserMessagesBySessionStmt != nil {
 		if cerr := q.countUserMessagesBySessionStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing countUserMessagesBySessionStmt: %w", cerr)
@@ -348,6 +352,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing createSessionStmt: %w", cerr)
 		}
 	}
+	if q.deleteCommandConflictsStmt != nil {
+		if cerr := q.deleteCommandConflictsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteCommandConflictsStmt: %w", cerr)
+		}
+	}
 	if q.deleteFailureStmt != nil {
 		if cerr := q.deleteFailureStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteFailureStmt: %w", cerr)
@@ -356,11 +365,6 @@ func (q *Queries) Close() error {
 	if q.deleteFileStmt != nil {
 		if cerr := q.deleteFileStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteFileStmt: %w", cerr)
-		}
-	}
-	if q.deleteLegacyCommandConflictsStmt != nil {
-		if cerr := q.deleteLegacyCommandConflictsStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing deleteLegacyCommandConflictsStmt: %w", cerr)
 		}
 	}
 	if q.deleteMCPDisabledServerStmt != nil {
@@ -588,6 +592,21 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listAllUserMessagesStmt: %w", cerr)
 		}
 	}
+	if q.listCommandPartitionKeysStmt != nil {
+		if cerr := q.listCommandPartitionKeysStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listCommandPartitionKeysStmt: %w", cerr)
+		}
+	}
+	if q.listFailurePartitionKeysStmt != nil {
+		if cerr := q.listFailurePartitionKeysStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listFailurePartitionKeysStmt: %w", cerr)
+		}
+	}
+	if q.listFailuresByKeyStmt != nil {
+		if cerr := q.listFailuresByKeyStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listFailuresByKeyStmt: %w", cerr)
+		}
+	}
 	if q.listFilesByPathStmt != nil {
 		if cerr := q.listFilesByPathStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listFilesByPathStmt: %w", cerr)
@@ -713,6 +732,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing recordSegmentAttemptStmt: %w", cerr)
 		}
 	}
+	if q.rekeyCommandPartitionStmt != nil {
+		if cerr := q.rekeyCommandPartitionStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing rekeyCommandPartitionStmt: %w", cerr)
+		}
+	}
 	if q.rekeyFailurePartitionStmt != nil {
 		if cerr := q.rekeyFailurePartitionStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing rekeyFailurePartitionStmt: %w", cerr)
@@ -813,16 +837,15 @@ type Queries struct {
 	db                                   DBTX
 	tx                                   *sql.Tx
 	bumpSessionCounterStmt               *sql.Stmt
-	claimCommandPartitionStmt            *sql.Stmt
 	countUserMessagesBySessionStmt       *sql.Stmt
 	createFileStmt                       *sql.Stmt
 	createMessageStmt                    *sql.Stmt
 	createNotebookEntryStmt              *sql.Stmt
 	createNotebookTagStmt                *sql.Stmt
 	createSessionStmt                    *sql.Stmt
+	deleteCommandConflictsStmt           *sql.Stmt
 	deleteFailureStmt                    *sql.Stmt
 	deleteFileStmt                       *sql.Stmt
-	deleteLegacyCommandConflictsStmt     *sql.Stmt
 	deleteMCPDisabledServerStmt          *sql.Stmt
 	deleteMCPEnabledServerStmt           *sql.Stmt
 	deleteMessageStmt                    *sql.Stmt
@@ -868,6 +891,9 @@ type Queries struct {
 	insertMCPDisabledServerStmt          *sql.Stmt
 	insertMCPEnabledServerStmt           *sql.Stmt
 	listAllUserMessagesStmt              *sql.Stmt
+	listCommandPartitionKeysStmt         *sql.Stmt
+	listFailurePartitionKeysStmt         *sql.Stmt
+	listFailuresByKeyStmt                *sql.Stmt
 	listFilesByPathStmt                  *sql.Stmt
 	listFilesBySessionStmt               *sql.Stmt
 	listHotReadFilesStmt                 *sql.Stmt
@@ -893,6 +919,7 @@ type Queries struct {
 	recordFileReadStmt                   *sql.Stmt
 	recordProcessedSegmentStmt           *sql.Stmt
 	recordSegmentAttemptStmt             *sql.Stmt
+	rekeyCommandPartitionStmt            *sql.Stmt
 	rekeyFailurePartitionStmt            *sql.Stmt
 	renameSessionStmt                    *sql.Stmt
 	resolveFailuresForCommandStmt        *sql.Stmt
@@ -912,16 +939,15 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		db:                                   tx,
 		tx:                                   tx,
 		bumpSessionCounterStmt:               q.bumpSessionCounterStmt,
-		claimCommandPartitionStmt:            q.claimCommandPartitionStmt,
 		countUserMessagesBySessionStmt:       q.countUserMessagesBySessionStmt,
 		createFileStmt:                       q.createFileStmt,
 		createMessageStmt:                    q.createMessageStmt,
 		createNotebookEntryStmt:              q.createNotebookEntryStmt,
 		createNotebookTagStmt:                q.createNotebookTagStmt,
 		createSessionStmt:                    q.createSessionStmt,
+		deleteCommandConflictsStmt:           q.deleteCommandConflictsStmt,
 		deleteFailureStmt:                    q.deleteFailureStmt,
 		deleteFileStmt:                       q.deleteFileStmt,
-		deleteLegacyCommandConflictsStmt:     q.deleteLegacyCommandConflictsStmt,
 		deleteMCPDisabledServerStmt:          q.deleteMCPDisabledServerStmt,
 		deleteMCPEnabledServerStmt:           q.deleteMCPEnabledServerStmt,
 		deleteMessageStmt:                    q.deleteMessageStmt,
@@ -967,6 +993,9 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		insertMCPDisabledServerStmt:          q.insertMCPDisabledServerStmt,
 		insertMCPEnabledServerStmt:           q.insertMCPEnabledServerStmt,
 		listAllUserMessagesStmt:              q.listAllUserMessagesStmt,
+		listCommandPartitionKeysStmt:         q.listCommandPartitionKeysStmt,
+		listFailurePartitionKeysStmt:         q.listFailurePartitionKeysStmt,
+		listFailuresByKeyStmt:                q.listFailuresByKeyStmt,
 		listFilesByPathStmt:                  q.listFilesByPathStmt,
 		listFilesBySessionStmt:               q.listFilesBySessionStmt,
 		listHotReadFilesStmt:                 q.listHotReadFilesStmt,
@@ -992,6 +1021,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		recordFileReadStmt:                   q.recordFileReadStmt,
 		recordProcessedSegmentStmt:           q.recordProcessedSegmentStmt,
 		recordSegmentAttemptStmt:             q.recordSegmentAttemptStmt,
+		rekeyCommandPartitionStmt:            q.rekeyCommandPartitionStmt,
 		rekeyFailurePartitionStmt:            q.rekeyFailurePartitionStmt,
 		renameSessionStmt:                    q.renameSessionStmt,
 		resolveFailuresForCommandStmt:        q.resolveFailuresForCommandStmt,

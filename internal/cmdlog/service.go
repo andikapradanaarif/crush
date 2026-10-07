@@ -202,6 +202,11 @@ type service struct {
 	// the git exec entirely outside a repository — non-git dirs are
 	// where it would fail every time.
 	hasRepo bool
+	// commonDir is the project key's repo component — the canonical
+	// git common-dir — kept separately so the sibling re-claim can
+	// recognize stale keys that differ only in remote prefix (#266).
+	// Empty outside a repository.
+	commonDir string
 	// openFailureTTL is the read-side staleness bound for open
 	// failures; 0 disables the filter.
 	openFailureTTL time.Duration
@@ -225,12 +230,13 @@ func NewService(q *db.Queries, workingDir string) Service {
 	if abs, err := filepath.Abs(workingDir); err == nil {
 		workingDir = filepathext.Canonical(abs)
 	}
-	projectKey, hasRepo := computeProjectKey(workingDir)
+	projectKey, commonDir, hasRepo := computeProjectKey(workingDir)
 	s := &service{
 		q:              q,
 		workingDir:     workingDir,
 		openFailureTTL: defaultOpenFailureTTL,
 		projectKey:     projectKey,
+		commonDir:      commonDir,
 		hasRepo:        hasRepo,
 		// "pv0" marks rows written before the learned-params
 		// substrate (#228) exists — the unparameterized baseline,
@@ -244,16 +250,16 @@ func NewService(q *db.Queries, workingDir string) Service {
 	// project_key, so a bare column UPDATE would orphan the row
 	// under its pre-partition PK and the next occurrence of the same
 	// failure would open a duplicate.
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := s.claimLegacyFailures(ctx); err != nil {
 		slog.Warn("Failed to claim failure-memory partition", "error", err)
 	}
-	if err := q.DeleteLegacyCommandConflicts(ctx, s.projectKey); err != nil {
-		slog.Warn("Failed to resolve command-memory claim conflicts", "error", err)
-	}
-	if err := q.ClaimCommandPartition(ctx, s.projectKey); err != nil {
+	if err := s.rekeyCommands(ctx, ""); err != nil {
 		slog.Warn("Failed to claim command-memory partition", "error", err)
+	}
+	if err := s.reclaimSiblingPartitions(ctx); err != nil {
+		slog.Warn("Failed to re-claim stale partitions", "error", err)
 	}
 	return s
 }
@@ -268,32 +274,105 @@ func (s *service) claimLegacyFailures(ctx context.Context) error {
 		return err
 	}
 	for _, r := range rows {
-		newSig := s.failureSignature(r.Cmd, r.Cwd, r.Headline)
-		meta, err := s.q.GetFailureMeta(ctx, newSig)
-		switch {
-		case err == nil:
-			if err := s.q.MergeFailureFirstSeen(ctx, db.MergeFailureFirstSeenParams{
-				FirstSeen: min(meta.FirstSeen, r.FirstSeen),
-				Signature: newSig,
-			}); err != nil {
-				return err
-			}
-			if err := s.q.DeleteFailure(ctx, r.Signature); err != nil {
-				return err
-			}
-		case errors.Is(err, sql.ErrNoRows):
-			if err := s.q.RekeyFailurePartition(ctx, db.RekeyFailurePartitionParams{
-				Signature:   newSig,
-				ProjectKey:  s.projectKey,
-				Signature_2: r.Signature,
-			}); err != nil {
-				return err
-			}
-		default:
+		if err := s.rekeyFailure(ctx, r.Signature, r.Cmd, r.Cwd, r.Headline, r.FirstSeen); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// reclaimSiblingPartitions re-keys rows whose partition shares this
+// repo's common-dir but carries a stale remote prefix — the remote
+// was added, re-pointed, renamed, or removed after the rows were
+// written, so they orphaned into a sibling partition (#266). A key
+// only matches when its common-dir component is byte-identical —
+// two repos can't share a .git path, so a foreign project's key can
+// never sibling-match. This also repairs mid-process remote changes
+// on next open: rows kept writing under the cached key until
+// restart, and the re-claim gathers them back.
+func (s *service) reclaimSiblingPartitions(ctx context.Context) error {
+	if s.commonDir == "" {
+		return nil
+	}
+	fKeys, err := s.q.ListFailurePartitionKeys(ctx)
+	if err != nil {
+		return err
+	}
+	cKeys, err := s.q.ListCommandPartitionKeys(ctx)
+	if err != nil {
+		return err
+	}
+	stale := map[string]struct{}{}
+	for _, k := range append(fKeys, cKeys...) {
+		if k != s.projectKey && s.siblingKey(k) {
+			stale[k] = struct{}{}
+		}
+	}
+	for k := range stale {
+		rows, err := s.q.ListFailuresByKey(ctx, k)
+		if err != nil {
+			return err
+		}
+		for _, r := range rows {
+			if err := s.rekeyFailure(ctx, r.Signature, r.Cmd, r.Cwd, r.Headline, r.FirstSeen); err != nil {
+				return err
+			}
+		}
+		if err := s.rekeyCommands(ctx, k); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// siblingKey reports whether pk names this repo under a different
+// remote prefix — bare common-dir (remoteless era) or any
+// remote|<same common-dir> form.
+func (s *service) siblingKey(pk string) bool {
+	return pk == s.commonDir || strings.HasSuffix(pk, "|"+s.commonDir)
+}
+
+// rekeyFailure moves one row onto its partitioned signature. An
+// already-partitioned twin wins — it carries fresher provenance —
+// inheriting only the older first_seen before the stale row goes.
+func (s *service) rekeyFailure(ctx context.Context, oldSig, cmd, cwd, headline string, firstSeen int64) error {
+	newSig := s.failureSignature(cmd, cwd, headline)
+	meta, err := s.q.GetFailureMeta(ctx, newSig)
+	switch {
+	case err == nil:
+		if err := s.q.MergeFailureFirstSeen(ctx, db.MergeFailureFirstSeenParams{
+			FirstSeen: min(meta.FirstSeen, firstSeen),
+			Signature: newSig,
+		}); err != nil {
+			return err
+		}
+		return s.q.DeleteFailure(ctx, oldSig)
+	case errors.Is(err, sql.ErrNoRows):
+		return s.q.RekeyFailurePartition(ctx, db.RekeyFailurePartitionParams{
+			Signature:   newSig,
+			ProjectKey:  s.projectKey,
+			Signature_2: oldSig,
+		})
+	default:
+		return err
+	}
+}
+
+// rekeyCommands moves command_memory rows off sourceKey onto the
+// current partition. project_key is PK material there, so a row
+// colliding with an existing twin goes first — the twin keeps its
+// fresher provenance.
+func (s *service) rekeyCommands(ctx context.Context, sourceKey string) error {
+	if err := s.q.DeleteCommandConflicts(ctx, db.DeleteCommandConflictsParams{
+		ProjectKey:   sourceKey,
+		ProjectKey_2: s.projectKey,
+	}); err != nil {
+		return err
+	}
+	return s.q.RekeyCommandPartition(ctx, db.RekeyCommandPartitionParams{
+		ProjectKey:   s.projectKey,
+		ProjectKey_2: sourceKey,
+	})
 }
 
 func (s *service) RecordRun(ctx context.Context, run Run) {
@@ -571,14 +650,18 @@ func (s *service) ParamVersion() string {
 //
 // The remote is identity material, not decoration: adding or
 // re-pointing it changes the key and orphans prior rows into a
-// foreign partition — fails closed, but silently. A common-dir-keyed
-// re-claim for prefix-only changes is tracked as #266.
-func computeProjectKey(workingDir string) (key string, hasRepo bool) {
+// sibling partition — the common-dir re-claim in NewService gathers
+// them back when only the remote prefix changed (#266).
+//
+// Also returns the common-dir component — the repo's anchor identity,
+// empty outside a repository — and whether a repo exists, so
+// RecordRun can skip the per-run rev-parse where it would fail.
+func computeProjectKey(workingDir string) (key, commonDir string, hasRepo bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	common, err := gitOut(ctx, workingDir, "rev-parse", "--git-common-dir")
 	if err != nil || common == "" {
-		return filepathext.Canonical(workingDir), false
+		return filepathext.Canonical(workingDir), "", false
 	}
 	if !filepath.IsAbs(common) {
 		common = filepath.Join(workingDir, common)
@@ -587,7 +670,7 @@ func computeProjectKey(workingDir string) (key string, hasRepo bool) {
 	if remote, err := gitOut(ctx, workingDir, "remote", "get-url", "origin"); err == nil && remote != "" {
 		key = normalizeRemote(remote) + "|" + key
 	}
-	return key, true
+	return key, filepathext.Canonical(common), true
 }
 
 // normalizeRemote reduces a git remote URL to host/path form so
