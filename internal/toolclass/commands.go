@@ -183,8 +183,8 @@ func isEnvAssignment(field string) bool {
 	}
 	for i := range idx {
 		c := field[i]
-		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' ||
-			'0' <= c && c <= '9' || c == '_') {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') &&
+			(c < '0' || c > '9') && c != '_' {
 			return false
 		}
 	}

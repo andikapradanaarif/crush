@@ -831,7 +831,7 @@ func TestPreparePrompt_SummarizeStraddledTurn(t *testing.T) {
 	// Four steps of ~1000-token messages: segments t0s0/t0s1 of two
 	// steps each (~4K tokens apiece), then the next turn's prompt.
 	big := strings.Repeat("step ", 800)
-	msgs := segBuildTurn(t, svc, sessionID, "work", 4, big)
+	segBuildTurn(t, svc, sessionID, "work", 4, big)
 	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "next prompt"})
 	msgs, err := svc.List(t.Context(), sessionID)
 	require.NoError(t, err)
@@ -881,6 +881,7 @@ func TestResolvePriorTurns_Gates(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			require.Equal(t, tc.want, resolvePriorTurns(tc.mode, tc.notebookOn, tc.recallOn))
 		})
 	}

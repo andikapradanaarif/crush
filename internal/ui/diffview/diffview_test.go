@@ -141,12 +141,12 @@ func TestDiffView(t *testing.T) {
 						t.Run(themeName, func(t *testing.T) {
 							t.Parallel()
 
-							dv := diffview.New()
-							dv = layoutFunc(dv)
-							dv = themeFunc(dv)
-							dv = behaviorFunc(dv)
-
-							output := dv.String()
+							output := renderStable(t, func() string {
+								dv := diffview.New()
+								dv = layoutFunc(dv)
+								dv = themeFunc(dv)
+								return behaviorFunc(dv).String()
+							})
 							golden.RequireEqual(t, []byte(output))
 
 							switch behaviorName {
@@ -170,14 +170,14 @@ func TestDiffViewTabs(t *testing.T) {
 		t.Run(layoutName, func(t *testing.T) {
 			t.Parallel()
 
-			dv := diffview.New().
-				Before("main.go", TestTabsBefore).
-				After("main.go", TestTabsAfter).
-				Style(diffview.DefaultLightStyle()).
-				ChromaStyle(styles.Get("catppuccin-latte"))
-			dv = layoutFunc(dv)
-
-			output := dv.String()
+			output := renderStable(t, func() string {
+				dv := diffview.New().
+					Before("main.go", TestTabsBefore).
+					After("main.go", TestTabsAfter).
+					Style(diffview.DefaultLightStyle()).
+					ChromaStyle(styles.Get("catppuccin-latte"))
+				return layoutFunc(dv).String()
+			})
 			golden.RequireEqual(t, []byte(output))
 		})
 	}
@@ -190,14 +190,14 @@ func TestDiffViewLineBreakIssue(t *testing.T) {
 		t.Run(layoutName, func(t *testing.T) {
 			t.Parallel()
 
-			dv := diffview.New().
-				Before("index.js", TestLineBreakIssueBefore).
-				After("index.js", TestLineBreakIssueAfter).
-				Style(diffview.DefaultLightStyle()).
-				ChromaStyle(styles.Get("catppuccin-latte"))
-			dv = layoutFunc(dv)
-
-			output := dv.String()
+			output := renderStable(t, func() string {
+				dv := diffview.New().
+					Before("index.js", TestLineBreakIssueBefore).
+					After("index.js", TestLineBreakIssueAfter).
+					Style(diffview.DefaultLightStyle()).
+					ChromaStyle(styles.Get("catppuccin-latte"))
+				return layoutFunc(dv).String()
+			})
 			golden.RequireEqual(t, []byte(output))
 		})
 	}
@@ -212,15 +212,15 @@ func TestDiffViewWidth(t *testing.T) {
 				}
 
 				t.Run(fmt.Sprintf("WidthOf%03d", width), func(t *testing.T) {
-					dv := diffview.New().
-						Before("main.go", TestMultipleHunksBefore).
-						After("main.go", TestMultipleHunksAfter).
-						Width(width).
-						Style(diffview.DefaultLightStyle()).
-						ChromaStyle(styles.Get("catppuccin-latte"))
-					dv = layoutFunc(dv)
-
-					output := dv.String()
+					output := renderStable(t, func() string {
+						dv := diffview.New().
+							Before("main.go", TestMultipleHunksBefore).
+							After("main.go", TestMultipleHunksAfter).
+							Width(width).
+							Style(diffview.DefaultLightStyle()).
+							ChromaStyle(styles.Get("catppuccin-latte"))
+						return layoutFunc(dv).String()
+					})
 					golden.RequireEqual(t, []byte(output))
 
 					assertLineWidth(t, width, output)
@@ -235,15 +235,15 @@ func TestDiffViewHeight(t *testing.T) {
 		t.Run(layoutName, func(t *testing.T) {
 			for height := 1; height <= 20; height++ {
 				t.Run(fmt.Sprintf("HeightOf%03d", height), func(t *testing.T) {
-					dv := diffview.New().
-						Before("main.go", TestMultipleHunksBefore).
-						After("main.go", TestMultipleHunksAfter).
-						Height(height).
-						Style(diffview.DefaultLightStyle()).
-						ChromaStyle(styles.Get("catppuccin-latte"))
-					dv = layoutFunc(dv)
-
-					output := dv.String()
+					output := renderStable(t, func() string {
+						dv := diffview.New().
+							Before("main.go", TestMultipleHunksBefore).
+							After("main.go", TestMultipleHunksAfter).
+							Height(height).
+							Style(diffview.DefaultLightStyle()).
+							ChromaStyle(styles.Get("catppuccin-latte"))
+						return layoutFunc(dv).String()
+					})
 					golden.RequireEqual(t, []byte(output))
 				})
 			}
@@ -256,16 +256,16 @@ func TestDiffViewXOffset(t *testing.T) {
 		t.Run(layoutName, func(t *testing.T) {
 			for xOffset := range 21 {
 				t.Run(fmt.Sprintf("XOffsetOf%02d", xOffset), func(t *testing.T) {
-					dv := diffview.New().
-						Before("main.go", TestDefaultBefore).
-						After("main.go", TestDefaultAfter).
-						Style(diffview.DefaultLightStyle()).
-						ChromaStyle(styles.Get("catppuccin-latte")).
-						Width(60).
-						XOffset(xOffset)
-					dv = layoutFunc(dv)
-
-					output := dv.String()
+					output := renderStable(t, func() string {
+						dv := diffview.New().
+							Before("main.go", TestDefaultBefore).
+							After("main.go", TestDefaultAfter).
+							Style(diffview.DefaultLightStyle()).
+							ChromaStyle(styles.Get("catppuccin-latte")).
+							Width(60).
+							XOffset(xOffset)
+						return layoutFunc(dv).String()
+					})
 					golden.RequireEqual(t, []byte(output))
 
 					assertLineWidth(t, 60, output)
@@ -280,16 +280,16 @@ func TestDiffViewYOffset(t *testing.T) {
 		t.Run(layoutName, func(t *testing.T) {
 			for yOffset := range 17 {
 				t.Run(fmt.Sprintf("YOffsetOf%02d", yOffset), func(t *testing.T) {
-					dv := diffview.New().
-						Before("main.go", TestMultipleHunksBefore).
-						After("main.go", TestMultipleHunksAfter).
-						Style(diffview.DefaultLightStyle()).
-						ChromaStyle(styles.Get("catppuccin-latte")).
-						Height(5).
-						YOffset(yOffset)
-					dv = layoutFunc(dv)
-
-					output := dv.String()
+					output := renderStable(t, func() string {
+						dv := diffview.New().
+							Before("main.go", TestMultipleHunksBefore).
+							After("main.go", TestMultipleHunksAfter).
+							Style(diffview.DefaultLightStyle()).
+							ChromaStyle(styles.Get("catppuccin-latte")).
+							Height(5).
+							YOffset(yOffset)
+						return layoutFunc(dv).String()
+					})
 					golden.RequireEqual(t, []byte(output))
 				})
 			}
@@ -302,22 +302,47 @@ func TestDiffViewYOffsetInfinite(t *testing.T) {
 		t.Run(layoutName, func(t *testing.T) {
 			for yOffset := range 17 {
 				t.Run(fmt.Sprintf("YOffsetOf%02d", yOffset), func(t *testing.T) {
-					dv := diffview.New().
-						Before("main.go", TestMultipleHunksBefore).
-						After("main.go", TestMultipleHunksAfter).
-						Style(diffview.DefaultLightStyle()).
-						ChromaStyle(styles.Get("catppuccin-latte")).
-						Height(5).
-						YOffset(yOffset).
-						InfiniteYScroll(true)
-					dv = layoutFunc(dv)
-
-					output := dv.String()
+					output := renderStable(t, func() string {
+						dv := diffview.New().
+							Before("main.go", TestMultipleHunksBefore).
+							After("main.go", TestMultipleHunksAfter).
+							Style(diffview.DefaultLightStyle()).
+							ChromaStyle(styles.Get("catppuccin-latte")).
+							Height(5).
+							YOffset(yOffset).
+							InfiniteYScroll(true)
+						return layoutFunc(dv).String()
+					})
 					golden.RequireEqual(t, []byte(output))
 				})
 			}
 		})
 	}
+}
+
+// renderStable re-renders until an output repeats (bounded), returning the
+// most frequent result. Chroma compiles every lexer rule with a hardcoded
+// 250ms regexp2 match timeout; under CI CPU contention a match can time
+// out and silently fall through to other rules, producing different
+// tokenisation for identical input (see 1bb945c8). Corrupt renders are
+// unstable — each timeout strikes a different rule — so the clean render
+// dominates and repeats quickly.
+func renderStable(t *testing.T, render func() string) string {
+	t.Helper()
+	const maxRenders = 10
+	counts := map[string]int{}
+	best := ""
+	for range maxRenders {
+		out := render()
+		counts[out]++
+		if counts[out] > counts[best] {
+			best = out
+		}
+		if counts[out] == 2 {
+			return out
+		}
+	}
+	return best
 }
 
 func assertLineWidth(t *testing.T, expected int, output string) {
