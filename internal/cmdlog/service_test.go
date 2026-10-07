@@ -872,7 +872,7 @@ func TestProjectKey_GitRepo(t *testing.T) {
 	}
 	git := func(args ...string) {
 		full := append([]string{"-C", env.workingDir}, args...)
-		require.NoError(t, exec.Command("git", full...).Run())
+		require.NoError(t, exec.CommandContext(t.Context(), "git", full...).Run())
 	}
 	git("init")
 	git("remote", "add", "origin", "git@github.com:Org/My-Repo.git")

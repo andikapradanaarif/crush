@@ -543,10 +543,13 @@ func normalizeRemote(remote string) string {
 }
 
 // gitOut runs one read-only git query, trimmed and best-effort —
-// empty on any failure (not a repo, git absent, timeout).
+// empty on any failure (not a repo, git absent, timeout). cmd.Dir,
+// not -C: argv stays all literals so nothing derived from
+// configuration reaches command construction.
 func gitOut(ctx context.Context, dir string, args ...string) (string, error) {
-	full := append([]string{"-C", dir}, args...)
-	out, err := exec.CommandContext(ctx, "git", full...).Output()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
 	if err != nil {
 		return "", err
 	}

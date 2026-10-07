@@ -266,7 +266,11 @@ func candidateAgesDays(candidates []cmdlog.Failure) []float64 {
 func headSHA(workDir string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "-C", workDir, "rev-parse", "HEAD").Output()
+	// cmd.Dir, not -C: argv stays all literals so nothing derived
+	// from configuration reaches command construction.
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	cmd.Dir = workDir
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
