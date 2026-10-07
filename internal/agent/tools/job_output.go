@@ -65,6 +65,7 @@ func NewJobOutputTool(spillDir string, cmdLog cmdlog.Service) fantasy.AgentTool 
 				interrupted := shell.IsInterrupt(err)
 				cmdLog.RecordRun(ctx, cmdlog.Run{
 					SessionID:      GetSessionFromContext(ctx),
+					ToolCallID:     call.ID,
 					Command:        bgShell.Command,
 					CWD:            bgShell.Shell.GetWorkingDir(),
 					Stdout:         stdout,

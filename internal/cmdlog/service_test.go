@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/charmbracelet/crush/internal/db"
+	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/stretchr/testify/require"
 )
 
@@ -779,4 +781,281 @@ func TestRecordRun_CamelCaseErrorHeadlines(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, open, 1)
 	require.Contains(t, open[0].Headline, "AssertionError")
+}
+
+// runCall simulates a run carrying tool-call provenance — the bash
+// tool passes its call.ID through; background polls pass theirs.
+func runCall(env *testEnv, sessionID, callID, command, cwd, stdout, stderr string, runErr error, exitCode int) {
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID:  sessionID,
+		ToolCallID: callID,
+		Command:    command,
+		CWD:        cwd,
+		Stdout:     stdout,
+		Stderr:     stderr,
+		Err:        runErr,
+		ExitCode:   exitCode,
+		Ran:        true,
+	})
+}
+
+func TestRecordRun_ProvenanceFields(t *testing.T) {
+	env := setupTest(t)
+
+	runCall(env, "s1", "call-9", "go test ./...", env.workingDir, "", "FAIL: TestX", nil, 1)
+
+	failures, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, failures, 1)
+	require.Equal(t, "s1", failures[0].SessionID)
+	require.Equal(t, "call-9", failures[0].ToolCallID)
+	require.Equal(t, env.svc.ProjectKey(), failures[0].ProjectKey)
+	require.Empty(t, failures[0].ResolvedCall)
+
+	// The resolving run stamps both lineage fields.
+	runCall(env, "s2", "call-10", "go test ./...", env.workingDir, "", "", nil, 0)
+	resolved, err := env.svc.ListResolvedFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, resolved, 1)
+	require.Equal(t, "s2", resolved[0].ResolvedIn)
+	require.Equal(t, "call-10", resolved[0].ResolvedCall)
+
+	cmds, err := env.svc.ListCommands(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, cmds, 1)
+	require.Equal(t, "s2", cmds[0].LastSessionID)
+	require.Equal(t, "call-10", cmds[0].LastToolCallID)
+	require.Equal(t, env.svc.ProjectKey(), cmds[0].ProjectKey)
+}
+
+func TestMarkSuggested_FlagsMemoryInformedRuns(t *testing.T) {
+	env := setupTest(t)
+
+	// A command rendered to the session is a suggestion; a run of
+	// it is memory-informed and must be screened out of evidence.
+	env.svc.MarkSuggested("s1", "go test ./...")
+	runCall(env, "s1", "c1", "go test ./...", env.workingDir, "", "FAIL: TestX", nil, 1)
+	runCall(env, "s2", "c2", "npm test", env.workingDir, "", "FAIL: TestY", nil, 1)
+
+	failures, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, failures, 2)
+	byCmd := map[string]Failure{}
+	for _, f := range failures {
+		byCmd[f.Cmd] = f
+	}
+	require.True(t, byCmd["go test ./..."].Suggested)
+	require.False(t, byCmd["npm test"].Suggested)
+
+	// A different session running the shown command is not
+	// suggested — suggestion is per-session evidence, not a global
+	// flag on the command.
+	runCall(env, "s3", "c3", "go test ./...", env.workingDir, "", "", nil, 0)
+	cmds, err := env.svc.ListCommands(env.ctx, 10)
+	require.NoError(t, err)
+	for _, c := range cmds {
+		if c.CmdNorm == "go test ./..." {
+			require.False(t, c.Suggested)
+		}
+	}
+}
+
+func TestResolveFailures_ForeignPartitionStaysOpen(t *testing.T) {
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+	workingDir := t.TempDir()
+
+	// A foreign-partition open row for the same command: our clean
+	// run resolves our partition's rows only — a foreign project
+	// keeps its own observation.
+	q := db.New(conn)
+	require.NoError(t, q.UpsertFailure(t.Context(), db.UpsertFailureParams{
+		Signature:  "foreign-open",
+		Cmd:        "go test ./...",
+		Cwd:        ".",
+		Headline:   "FAIL: foreign",
+		Files:      "[]",
+		FirstSeen:  time.Now().UnixMilli(),
+		LastSeen:   time.Now().UnixMilli(),
+		ProjectKey: "other-project",
+	}))
+	svc := NewService(q, workingDir)
+	env := &testEnv{svc: svc, ctx: t.Context(), workingDir: workingDir}
+
+	run(env, "s1", "go test ./...", workingDir, "", "FAIL: mine", nil, 1)
+	run(env, "s1", "go test ./...", workingDir, "", "", nil, 0)
+
+	// Ours resolved; the foreign row's resolved_in stays empty.
+	var resolvedIn string
+	require.NoError(t, conn.QueryRowContext(t.Context(),
+		"SELECT resolved_in FROM failure_memory WHERE signature = 'foreign-open'").Scan(&resolvedIn))
+	require.Empty(t, resolvedIn)
+	resolved, err := svc.ListResolvedFailures(t.Context(), 10)
+	require.NoError(t, err)
+	require.Len(t, resolved, 1)
+	require.Equal(t, "FAIL: mine", resolved[0].Headline)
+}
+
+func TestProjectKey_NonGitIsWorkdir(t *testing.T) {
+	env := setupTest(t)
+	require.Equal(t, filepathext.Canonical(env.workingDir), env.svc.ProjectKey())
+}
+
+func TestProjectKey_GitRepo(t *testing.T) {
+	env := setupTest(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	git := func(args ...string) {
+		full := append([]string{"-C", env.workingDir}, args...)
+		require.NoError(t, exec.CommandContext(t.Context(), "git", full...).Run())
+	}
+	git("init")
+	git("remote", "add", "origin", "git@github.com:Org/My-Repo.git")
+
+	// Recompute after repo setup: the key folds remote + common-dir.
+	key, hasRepo := computeProjectKey(env.workingDir)
+	require.True(t, hasRepo)
+	require.Contains(t, key, "github.com/org/my-repo|")
+	require.Contains(t, key, ".git")
+}
+
+func TestNormalizeRemote(t *testing.T) {
+	require.Equal(t, "github.com/org/repo", normalizeRemote("git@github.com:org/repo.git"))
+	require.Equal(t, "github.com/org/repo", normalizeRemote("https://github.com/org/repo.git"))
+	require.Equal(t, "github.com/org/repo", normalizeRemote("https://user@github.com:443/org/repo"))
+	require.Equal(t, "github.com/org/repo", normalizeRemote("ssh://git@github.com/org/repo.git"))
+}
+
+func TestListFailures_ForeignPartitionExcluded(t *testing.T) {
+	env := setupTest(t)
+
+	// A row written under another partition is inadmissible even in
+	// the same store — the join condition, not the selector, drops it.
+	svc := env.svc.(*service)
+	require.NoError(t, svc.q.UpsertFailure(env.ctx, db.UpsertFailureParams{
+		Signature:  "foreign",
+		Cmd:        "make check",
+		Cwd:        "",
+		Headline:   "FAIL: other project",
+		Files:      "[]",
+		FirstSeen:  time.Now().UnixMilli(),
+		LastSeen:   time.Now().UnixMilli(),
+		ProjectKey: "other-project",
+	}))
+	run(env, "s1", "make check", env.workingDir, "", "FAIL: mine", nil, 1)
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1)
+	require.Equal(t, "FAIL: mine", open[0].Headline)
+}
+
+func TestNewService_ClaimsLegacyRows(t *testing.T) {
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+	workingDir := t.TempDir()
+
+	// A pre-provenance row has no key: the store's first open
+	// claims it into the project partition rather than orphaning
+	// the project's accumulated memory.
+	q := db.New(conn)
+	require.NoError(t, q.UpsertFailure(t.Context(), db.UpsertFailureParams{
+		Signature: "legacy",
+		Cmd:       "go test ./...",
+		Headline:  "FAIL: TestOld",
+		Files:     "[]",
+		FirstSeen: time.Now().UnixMilli(),
+		LastSeen:  time.Now().UnixMilli(),
+	}))
+
+	svc := NewService(q, workingDir)
+	open, err := svc.ListOpenFailures(t.Context(), 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1)
+	require.Equal(t, "FAIL: TestOld", open[0].Headline)
+	require.Equal(t, svc.ProjectKey(), open[0].ProjectKey)
+}
+
+func TestNewService_ClaimedRowNoDuplicateOnRefail(t *testing.T) {
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+	workingDir := t.TempDir()
+
+	// A claimed legacy row must carry its partitioned signature:
+	// the signature hash folds project_key, so a row claimed by
+	// column-UPDATE alone would sit under its stale hash and the
+	// same failure re-occurring would open a second row — the
+	// duplicate-render window this test pins shut.
+	q := db.New(conn)
+	require.NoError(t, q.UpsertFailure(t.Context(), db.UpsertFailureParams{
+		Signature: "legacy-sig",
+		Cmd:       "go test ./...",
+		// RecordRun keys workspace-root runs under "." via relDir —
+		// the claim's re-key must land on exactly that signature.
+		Cwd:       ".",
+		Headline:  "FAIL: TestOld",
+		Files:     "[]",
+		FirstSeen: time.Now().UnixMilli(),
+		LastSeen:  time.Now().UnixMilli(),
+	}))
+	svc := NewService(q, workingDir)
+	env := &testEnv{svc: svc, ctx: t.Context(), workingDir: workingDir}
+
+	// The claimed row must sit under its partitioned signature —
+	// the broken state is pk set while the old hash remains.
+	wantSig := svc.(*service).failureSignature("go test ./...", ".", "FAIL: TestOld")
+	var gotSig string
+	require.NoError(t, conn.QueryRowContext(t.Context(),
+		"SELECT signature FROM failure_memory").Scan(&gotSig))
+	require.Equal(t, wantSig, gotSig, "claim must re-key the signature")
+
+	run(env, "s2", "go test ./...", workingDir, "", "FAIL: TestOld", nil, 1)
+
+	open, err := svc.ListOpenFailures(t.Context(), 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1, "claimed row re-keyed: re-fail must not duplicate it")
+}
+
+func TestNewService_ClaimCollisionKeepsPartitionedTwin(t *testing.T) {
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+	workingDir := t.TempDir()
+
+	// The failure re-occurred between the upgrade and first open:
+	// an already-partitioned row exists under the new signature.
+	// The twin wins — it carries fuller provenance — while the
+	// claim inherits the failure's older first_seen onto it.
+	q := db.New(conn)
+	svc := NewService(q, workingDir)
+	impl := svc.(*service)
+	newSig := impl.failureSignature("go test ./...", "", "FAIL: TestOld")
+	old := time.Now().Add(-48 * time.Hour).UnixMilli()
+	require.NoError(t, q.UpsertFailure(t.Context(), db.UpsertFailureParams{
+		Signature:  newSig,
+		Cmd:        "go test ./...",
+		Headline:   "FAIL: TestOld",
+		Files:      "[]",
+		FirstSeen:  time.Now().UnixMilli(),
+		LastSeen:   time.Now().UnixMilli(),
+		ProjectKey: svc.ProjectKey(),
+	}))
+	require.NoError(t, q.UpsertFailure(t.Context(), db.UpsertFailureParams{
+		Signature: "stale-sig",
+		Cmd:       "go test ./...",
+		Headline:  "FAIL: TestOld",
+		Files:     "[]",
+		FirstSeen: old,
+		LastSeen:  old,
+	}))
+
+	svc2 := NewService(q, workingDir)
+	open, err := svc2.ListOpenFailures(t.Context(), 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1)
+	require.Equal(t, old, open[0].FirstSeen.UnixMilli(), "twin inherits the older first_seen")
 }

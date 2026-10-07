@@ -827,6 +827,11 @@ func (r *gateRecordingCmdLog) ListSessionOpenFailures(context.Context, string) (
 	return nil, nil
 }
 
+func (r *gateRecordingCmdLog) MarkSuggested(string, string) {}
+func (r *gateRecordingCmdLog) ProjectKey() string           { return "" }
+func (r *gateRecordingCmdLog) ParamVersion() string         { return "" }
+func (r *gateRecordingCmdLog) ForgetSession(string)         {}
+
 func TestRunGateChecks_RecordsVerdictsToCmdLog(t *testing.T) {
 	dir := t.TempDir()
 	log := &gateRecordingCmdLog{}

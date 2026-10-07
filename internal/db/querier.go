@@ -10,6 +10,7 @@ import (
 
 type Querier interface {
 	BumpSessionCounter(ctx context.Context, arg BumpSessionCounterParams) error
+	ClaimCommandPartition(ctx context.Context, projectKey string) error
 	// Absolute user-turn ordinal source for edge_firings.turn_seq - the
 	// bounded prompt-history query above can't serve it (DESC LIMIT 200
 	// yields no ASC ordinal past 200 and same-second created_at ties are
@@ -20,7 +21,13 @@ type Querier interface {
 	CreateNotebookEntry(ctx context.Context, arg CreateNotebookEntryParams) (NotebookEntry, error)
 	CreateNotebookTag(ctx context.Context, arg CreateNotebookTagParams) error
 	CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error)
+	DeleteFailure(ctx context.Context, signature string) error
 	DeleteFile(ctx context.Context, id string) error
+	// Claim collision on command_memory: project_key is PK material, so
+	// claiming a legacy row whose (cmd_norm, cwd, project_key) twin
+	// already exists conflicts. The partitioned twin wins -- fresher
+	// provenance -- so the stale legacy row goes before the claim update.
+	DeleteLegacyCommandConflicts(ctx context.Context, projectKey string) error
 	DeleteMCPDisabledServer(ctx context.Context, name string) error
 	DeleteMCPEnabledServer(ctx context.Context, name string) error
 	DeleteMessage(ctx context.Context, id string) error
@@ -32,6 +39,7 @@ type Querier interface {
 	GetAverageResponseTime(ctx context.Context) (int64, error)
 	GetCollapsedTurnStats(ctx context.Context) (GetCollapsedTurnStatsRow, error)
 	GetEdgeFiringStats(ctx context.Context) ([]GetEdgeFiringStatsRow, error)
+	GetFailureMeta(ctx context.Context, signature string) (GetFailureMetaRow, error)
 	GetFile(ctx context.Context, id string) (File, error)
 	GetFileByPathAndSession(ctx context.Context, arg GetFileByPathAndSessionParams) (File, error)
 	GetFileRead(ctx context.Context, arg GetFileReadParams) (ReadFile, error)
@@ -94,16 +102,19 @@ type Querier interface {
 	// summary can come back too; the caller slices from the summary by ID.
 	ListMessagesBySessionFromSummary(ctx context.Context, arg ListMessagesBySessionFromSummaryParams) ([]Message, error)
 	ListNewFiles(ctx context.Context) ([]File, error)
-	ListOpenFailures(ctx context.Context, limit int64) ([]FailureMemory, error)
+	ListOpenFailures(ctx context.Context, arg ListOpenFailuresParams) ([]FailureMemory, error)
 	ListProcessedSegments(ctx context.Context, sessionID string) ([]ProcessedSegment, error)
 	// last_at is millisecond-granularity so re-runs order by recency;
 	// rowid settles ties for rows written in the same millisecond.
-	ListRecentCommands(ctx context.Context, limit int64) ([]CommandMemory, error)
+	// project_key is an admissibility clause, not a ranking signal: a
+	// candidate from another partition is inadmissible before relevance
+	// ever runs.
+	ListRecentCommands(ctx context.Context, arg ListRecentCommandsParams) ([]CommandMemory, error)
 	// Resolved rows are knowledge, not warnings: the failure signature
 	// and when it last saw a clean run. Ordered by last_seen (the last
 	// failing observation), not resolution time -- the row's freshness
 	// is still about when the failure was last real.
-	ListResolvedFailures(ctx context.Context, limit int64) ([]FailureMemory, error)
+	ListResolvedFailures(ctx context.Context, arg ListResolvedFailuresParams) ([]FailureMemory, error)
 	ListSessionCounters(ctx context.Context) ([]ListSessionCountersRow, error)
 	// Open failure rows whose commands the given session (or one of its
 	// task-tool child sessions) last ran and last failed: the reconcile
@@ -118,12 +129,22 @@ type Querier interface {
 	// Same bound as the tail's fetch pool -- a session can observe more
 	// distinct commands than this only pathologically, and the retry
 	// prompt renders at most ten.
-	ListSessionOpenFailures(ctx context.Context, sessionID string) ([]FailureMemory, error)
+	ListSessionOpenFailures(ctx context.Context, arg ListSessionOpenFailuresParams) ([]FailureMemory, error)
 	ListSessionReadFiles(ctx context.Context, sessionID string) ([]ReadFile, error)
 	ListSessions(ctx context.Context) ([]Session, error)
+	// Legacy failure rows awaiting a partition claim (pre-provenance
+	// writes). The claim re-keys them Go-side because the signature hash
+	// itself carries project_key -- a column UPDATE alone would leave a
+	// stale PK, and the next occurrence of the same failure would open a
+	// second row.
+	ListUnclaimedFailures(ctx context.Context) ([]ListUnclaimedFailuresRow, error)
 	// Backs prompt history, which steps back one entry at a time.
 	ListUserMessagesBySession(ctx context.Context, sessionID string) ([]Message, error)
 	MarkSegmentProcessed(ctx context.Context, arg MarkSegmentProcessedParams) error
+	// A claimed row colliding with an already-partitioned twin keeps the
+	// twin (fresher provenance) but the failure's true age survives --
+	// the caller passes min(twin.first_seen, legacy.first_seen).
+	MergeFailureFirstSeen(ctx context.Context, arg MergeFailureFirstSeenParams) error
 	// One row per collapsed prior turn; INSERT OR IGNORE makes the write
 	// idempotent across renders and across processes sharing the session
 	// DB, so callers count a turn only when this reports a new row.
@@ -131,10 +152,15 @@ type Querier interface {
 	RecordFileRead(ctx context.Context, arg RecordFileReadParams) error
 	RecordProcessedSegment(ctx context.Context, arg RecordProcessedSegmentParams) error
 	RecordSegmentAttempt(ctx context.Context, arg RecordSegmentAttemptParams) error
+	// Claim one legacy row onto its partitioned signature.
+	RekeyFailurePartition(ctx context.Context, arg RekeyFailurePartitionParams) error
 	RenameSession(ctx context.Context, arg RenameSessionParams) error
 	// A clean run of a normalized command resolves its open failure rows
 	// in the same directory -- "go test ./..." passing in packages/web
-	// does not close packages/api's failure.
+	// does not close packages/api's failure. resolved_call names the
+	// call that carried the clean verdict, where detectable. The
+	// resolution is partition-scoped like every read: one project's
+	// green run cannot close another's observation.
 	ResolveFailuresForCommand(ctx context.Context, arg ResolveFailuresForCommandParams) error
 	SearchNotebookByTag(ctx context.Context, arg SearchNotebookByTagParams) ([]NotebookEntry, error)
 	SearchNotebookByText(ctx context.Context, arg SearchNotebookByTextParams) ([]NotebookEntry, error)
@@ -148,8 +174,9 @@ type Querier interface {
 	// is the running tally, not a per-session sample.
 	UpsertCommandRun(ctx context.Context, arg UpsertCommandRunParams) error
 	// One row per (normalized command, directory, error headline)
-	// signature. A re-fail refreshes the observation -- headline and
-	// file hints move with the latest failure, not the first.
+	// signature. A re-fail refreshes the observation -- headline, file
+	// hints, and the observation's provenance all move with the latest
+	// failure, not the first.
 	UpsertFailure(ctx context.Context, arg UpsertFailureParams) error
 }
 

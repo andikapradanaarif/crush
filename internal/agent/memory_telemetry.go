@@ -39,6 +39,13 @@ const memoryTelemetryPromptRunes = 4096
 type memoryTelemetry struct {
 	dataDir string
 	workDir string
+	// projectKey partitions telemetry the way the store partitions
+	// rows (#220): the admissibility clause needs the same identity
+	// on both sides or a multi-project analysis can't say which
+	// partition a record measured. paramVersion is the learned-params
+	// snapshot in force (#228), empty until the substrate exists.
+	projectKey   string
+	paramVersion string
 
 	mu sync.Mutex
 	// f is the lazily opened log file; the first record creates it.
@@ -57,16 +64,18 @@ type memoryTelemetry struct {
 // newMemoryTelemetry returns the logger, or nil when the option is
 // off or the data dir is unknown — a nil logger is a valid disabled
 // state, so call sites never branch on the flag themselves.
-func newMemoryTelemetry(enabled bool, dataDir, workDir string) *memoryTelemetry {
+func newMemoryTelemetry(enabled bool, dataDir, workDir, projectKey, paramVersion string) *memoryTelemetry {
 	if !enabled || dataDir == "" {
 		return nil
 	}
 	return &memoryTelemetry{
-		dataDir: dataDir,
-		workDir: workDir,
-		seen:    map[string]bool{},
-		arms:    map[string]bool{},
-		roll:    holdoutRoll,
+		dataDir:      dataDir,
+		workDir:      workDir,
+		projectKey:   projectKey,
+		paramVersion: paramVersion,
+		seen:         map[string]bool{},
+		arms:         map[string]bool{},
+		roll:         holdoutRoll,
 	}
 }
 
@@ -141,28 +150,32 @@ func (t *memoryTelemetry) recordTurn(sessionID, prompt string, sections []string
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if !t.seen[sessionID] && t.append(map[string]any{
-		"type":         "session_start",
-		"ts":           time.Now().UnixMilli(),
-		"session_id":   sessionID,
-		"agent":        agent,
-		"workdir":      t.workDir,
-		"head_sha":     sha,
-		"prompt":       prompt,
-		"memory_armed": armed,
+		"type":          "session_start",
+		"ts":            time.Now().UnixMilli(),
+		"session_id":    sessionID,
+		"agent":         agent,
+		"workdir":       t.workDir,
+		"head_sha":      sha,
+		"project_key":   t.projectKey,
+		"param_version": t.paramVersion,
+		"prompt":        prompt,
+		"memory_armed":  armed,
 	}) {
 		t.seen[sessionID] = true
 	}
 	turn := map[string]any{
-		"type":         "turn",
-		"ts":           time.Now().UnixMilli(),
-		"session_id":   sessionID,
-		"agent":        agent,
-		"prompt":       prompt,
-		"sections":     telemetrySectionNames(sections),
-		"memory_armed": armed,
-		"holdout":      holdout,
-		"candidates":   len(candidates),
-		"admitted":     countAdmitted(decisions),
+		"type":          "turn",
+		"ts":            time.Now().UnixMilli(),
+		"session_id":    sessionID,
+		"agent":         agent,
+		"prompt":        prompt,
+		"sections":      telemetrySectionNames(sections),
+		"memory_armed":  armed,
+		"holdout":       holdout,
+		"candidates":    len(candidates),
+		"admitted":      countAdmitted(decisions),
+		"project_key":   t.projectKey,
+		"param_version": t.paramVersion,
 	}
 	if reasons := rejectionReasons(decisions); len(reasons) > 0 {
 		turn["rejections"] = reasons
@@ -255,7 +268,11 @@ func candidateAgesDays(candidates []cmdlog.Failure) []float64 {
 func headSHA(workDir string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "-C", workDir, "rev-parse", "HEAD").Output()
+	// cmd.Dir, not -C: argv stays all literals so nothing derived
+	// from configuration reaches command construction.
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	cmd.Dir = workDir
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}

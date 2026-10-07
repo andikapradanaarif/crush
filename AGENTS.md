@@ -98,7 +98,9 @@ internal/
   filetracker/                     Tracks files touched per session
   cmdlog/                          Project command/failure memory (write path;
                                    read consumers: failure selector, reconcile
-                                   edge)
+                                   edge). Rows carry per-observation provenance
+                                   (session, tool call, repo state, suggested
+                                   flag, project_key partition)
   redact/                          Shared secret redaction (leaf; used by
                                    cmdlog, notebook, mem0 sync)
   history/                         Prompt history

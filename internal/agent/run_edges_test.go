@@ -1415,7 +1415,7 @@ func TestReconcileEdge(t *testing.T) {
 	t.Run("telemetry holdout suppresses the edge entirely", func(t *testing.T) {
 		t.Parallel()
 		a, conn, svc, sessionID, dir := reconcileEdgeAgent(t)
-		a.memoryTelemetry = newMemoryTelemetry(true, t.TempDir(), dir)
+		a.memoryTelemetry = newMemoryTelemetry(true, t.TempDir(), dir, "pk", "pv")
 		a.memoryTelemetry.roll = func(string) float64 { return 0 }
 		recordCmd(t, svc, sessionID, dir, "go test ./x", 1)
 		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},

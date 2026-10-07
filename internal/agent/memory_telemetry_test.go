@@ -34,9 +34,9 @@ func readTelemetry(t *testing.T, dir string) []map[string]any {
 // option is off unless explicitly enabled.
 func TestNewMemoryTelemetry_Disabled(t *testing.T) {
 	t.Parallel()
-	require.Nil(t, newMemoryTelemetry(false, t.TempDir(), "/w"))
-	require.Nil(t, newMemoryTelemetry(true, "", "/w"))
-	require.NotNil(t, newMemoryTelemetry(true, t.TempDir(), "/w"))
+	require.Nil(t, newMemoryTelemetry(false, t.TempDir(), "/w", "pk", "pv"))
+	require.Nil(t, newMemoryTelemetry(true, "", "/w", "pk", "pv"))
+	require.NotNil(t, newMemoryTelemetry(true, t.TempDir(), "/w", "pk", "pv"))
 }
 
 // First call per session writes session_start (snapshot + holdout
@@ -45,7 +45,7 @@ func TestNewMemoryTelemetry_Disabled(t *testing.T) {
 func TestMemoryTelemetry_RecordTurn(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	mt := newMemoryTelemetry(true, dir, t.TempDir())
+	mt := newMemoryTelemetry(true, dir, t.TempDir(), "pk", "pv")
 	mt.roll = func(string) float64 { return 0.99 } // never hold out
 
 	old := cmdlog.Failure{Cmd: "go test ./decoy", LastSeen: time.Now().Add(-48 * time.Hour)}
@@ -95,7 +95,7 @@ func TestMemoryTelemetry_RecordTurn(t *testing.T) {
 // sticky — later calls must see the same arm.
 func TestMemoryTelemetry_HoldoutSticky(t *testing.T) {
 	t.Parallel()
-	mt := newMemoryTelemetry(true, t.TempDir(), "/w")
+	mt := newMemoryTelemetry(true, t.TempDir(), "/w", "pk", "pv")
 	mt.roll = func(string) float64 { return 0.05 } // under the 0.1 rate
 	require.True(t, mt.holdoutOff("a"))
 	require.True(t, mt.holdoutOff("a"), "assignment must be stable")
@@ -110,7 +110,7 @@ func TestMemoryTelemetry_HoldoutSticky(t *testing.T) {
 func TestMemoryTelemetry_AppendFailureSwallowed(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "nope")
-	mt := newMemoryTelemetry(true, dir, "/w")
+	mt := newMemoryTelemetry(true, dir, "/w", "pk", "pv")
 	blocked := filepath.Join(dir, "memory-telemetry.jsonl")
 	// A directory where the file should be makes OpenFile fail.
 	require.NoError(t, os.MkdirAll(blocked, 0o755))
@@ -125,7 +125,7 @@ func TestMemoryTelemetry_AppendFailureSwallowed(t *testing.T) {
 func TestMemoryTelemetry_SharedAcrossAgents(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	mt := newMemoryTelemetry(true, dir, t.TempDir())
+	mt := newMemoryTelemetry(true, dir, t.TempDir(), "pk", "pv")
 	mt.roll = func(string) float64 { return 0.05 } // held out
 
 	require.True(t, mt.holdoutOff("s"), "coder's coin")
@@ -144,7 +144,7 @@ func TestMemoryTelemetry_SharedAcrossAgents(t *testing.T) {
 // grow unboundedly in a long-lived process.
 func TestMemoryTelemetry_Forget(t *testing.T) {
 	t.Parallel()
-	mt := newMemoryTelemetry(true, t.TempDir(), "/w")
+	mt := newMemoryTelemetry(true, t.TempDir(), "/w", "pk", "pv")
 	mt.roll = func(string) float64 { return 0.99 }
 	require.False(t, mt.holdoutOff("s"))
 	mt.seen["s"] = true
@@ -161,7 +161,7 @@ func TestMemoryTelemetry_Forget(t *testing.T) {
 func TestMemoryTelemetry_EvalEnvSkipsHoldout(t *testing.T) {
 	// Not parallel — Setenv is process-global.
 	t.Setenv(EvalTelemetryEnvVar, "/tmp/run-telemetry.json")
-	mt := newMemoryTelemetry(true, t.TempDir(), "/w")
+	mt := newMemoryTelemetry(true, t.TempDir(), "/w", "pk", "pv")
 	mt.roll = func(string) float64 { return 0 } // would always hold out
 	require.False(t, mt.holdoutOff("s"))
 	require.False(t, mt.holdoutOff(""), "an empty key never arms")
@@ -176,8 +176,8 @@ func TestMemoryTelemetry_EvalEnvSkipsHoldout(t *testing.T) {
 // cannot re-flip a held-out session into the treatment arm.
 func TestMemoryTelemetry_HoldoutStableAcrossRestarts(t *testing.T) {
 	t.Parallel()
-	mt := newMemoryTelemetry(true, t.TempDir(), "/w")
-	mt2 := newMemoryTelemetry(true, t.TempDir(), "/w")
+	mt := newMemoryTelemetry(true, t.TempDir(), "/w", "pk", "pv")
+	mt2 := newMemoryTelemetry(true, t.TempDir(), "/w", "pk", "pv")
 	for _, id := range []string{"sess-a", "sess-b", "sess-c"} {
 		require.Equal(t, mt.holdoutOff(id), mt2.holdoutOff(id))
 	}
@@ -193,7 +193,7 @@ func TestMemoryTelemetry_HoldoutSuppressesInjection(t *testing.T) {
 	a.tailAudit = csync.NewMap[string, TailAudit]()
 	a.failureMemory = true
 	dir := t.TempDir()
-	mt := newMemoryTelemetry(true, dir, env.workingDir)
+	mt := newMemoryTelemetry(true, dir, env.workingDir, "pk", "pv")
 	mt.roll = func(string) float64 { return 0 } // always hold out
 	a.memoryTelemetry = mt
 	env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
@@ -231,7 +231,7 @@ func TestMemoryTelemetry_TreatmentArmStillRenders(t *testing.T) {
 	a.tailAudit = csync.NewMap[string, TailAudit]()
 	a.failureMemory = true
 	dir := t.TempDir()
-	mt := newMemoryTelemetry(true, dir, env.workingDir)
+	mt := newMemoryTelemetry(true, dir, env.workingDir, "pk", "pv")
 	mt.roll = func(string) float64 { return 0.99 } // never hold out
 	a.memoryTelemetry = mt
 	env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
@@ -257,7 +257,7 @@ func TestMemoryTelemetry_TreatmentArmStillRenders(t *testing.T) {
 func TestMemoryTelemetry_SessionStartHasNoArmLabel(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	mt := newMemoryTelemetry(true, dir, t.TempDir())
+	mt := newMemoryTelemetry(true, dir, t.TempDir(), "pk", "pv")
 	mt.roll = func(string) float64 { return 0 }
 
 	// Unarmed first turn — no coin exists yet. A later armed turn
@@ -278,7 +278,7 @@ func TestMemoryTelemetry_SessionStartHasNoArmLabel(t *testing.T) {
 func TestMemoryTelemetry_PromptRedactedAndCapped(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	mt := newMemoryTelemetry(true, dir, t.TempDir())
+	mt := newMemoryTelemetry(true, dir, t.TempDir(), "pk", "pv")
 	mt.roll = func(string) float64 { return 0.99 }
 
 	mt.recordTurn("s", "use ghp_0123456789abcdefTOKEN here", nil, nil, nil, "coder", false, false, nil)
