@@ -860,6 +860,43 @@ func TestMarkSuggested_FlagsMemoryInformedRuns(t *testing.T) {
 	}
 }
 
+func TestResolveFailures_ForeignPartitionStaysOpen(t *testing.T) {
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+	workingDir := t.TempDir()
+
+	// A foreign-partition open row for the same command: our clean
+	// run resolves our partition's rows only — a foreign project
+	// keeps its own observation.
+	q := db.New(conn)
+	require.NoError(t, q.UpsertFailure(t.Context(), db.UpsertFailureParams{
+		Signature:  "foreign-open",
+		Cmd:        "go test ./...",
+		Cwd:        ".",
+		Headline:   "FAIL: foreign",
+		Files:      "[]",
+		FirstSeen:  time.Now().UnixMilli(),
+		LastSeen:   time.Now().UnixMilli(),
+		ProjectKey: "other-project",
+	}))
+	svc := NewService(q, workingDir)
+	env := &testEnv{svc: svc, ctx: t.Context(), workingDir: workingDir}
+
+	run(env, "s1", "go test ./...", workingDir, "", "FAIL: mine", nil, 1)
+	run(env, "s1", "go test ./...", workingDir, "", "", nil, 0)
+
+	// Ours resolved; the foreign row's resolved_in stays empty.
+	var resolvedIn string
+	require.NoError(t, conn.QueryRowContext(t.Context(),
+		"SELECT resolved_in FROM failure_memory WHERE signature = 'foreign-open'").Scan(&resolvedIn))
+	require.Empty(t, resolvedIn)
+	resolved, err := svc.ListResolvedFailures(t.Context(), 10)
+	require.NoError(t, err)
+	require.Len(t, resolved, 1)
+	require.Equal(t, "FAIL: mine", resolved[0].Headline)
+}
+
 func TestProjectKey_NonGitIsWorkdir(t *testing.T) {
 	env := setupTest(t)
 	require.Equal(t, filepathext.Canonical(env.workingDir), env.svc.ProjectKey())

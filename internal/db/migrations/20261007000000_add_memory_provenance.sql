@@ -10,7 +10,9 @@
 -- candidate whose project_key differs from the current partition is
 -- inadmissible as a join condition, never a ranking signal.
 -- param_version reserves the learned-params snapshot field (#228);
--- rows carry it empty until the params substrate exists.
+-- new rows stamp 'pv0' — the unparameterized baseline — so
+-- pre-provenance '' rows stay distinguishable from post-#220 rows
+-- written before the substrate exists.
 
 ALTER TABLE failure_memory ADD COLUMN session_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE failure_memory ADD COLUMN tool_call_id TEXT NOT NULL DEFAULT '';

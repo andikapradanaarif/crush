@@ -207,6 +207,10 @@ type service struct {
 	openFailureTTL time.Duration
 	// suggested is the per-session set of commands the model was
 	// shown in injected memory — a run of one writes suggested=1.
+	// Process-local: the flag means "influence currently rendered in
+	// this process," and a mid-session restart loses marks until the
+	// next armed render re-marks — a bounded under-inclusive window
+	// the screen accepts.
 	suggestedMu sync.Mutex
 	suggested   map[string]map[string]struct{}
 }
@@ -564,6 +568,11 @@ func (s *service) ParamVersion() string {
 // normalized remote URL when one exists. Outside a repository the
 // workspace path stands in, so rows still partition per project
 // rather than leaking across a shared data directory.
+//
+// The remote is identity material, not decoration: adding or
+// re-pointing it changes the key and orphans prior rows into a
+// foreign partition — fails closed, but silently. A common-dir-keyed
+// re-claim for prefix-only changes is tracked as #266.
 func computeProjectKey(workingDir string) (key string, hasRepo bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
