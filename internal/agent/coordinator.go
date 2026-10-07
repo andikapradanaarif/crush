@@ -479,6 +479,9 @@ func (c *coordinator) watchSessionDeletions() {
 		if c.memoryTelemetry != nil {
 			c.memoryTelemetry.forget(ev.Payload.ID)
 		}
+		if c.cmdlog != nil {
+			c.cmdlog.ForgetSession(ev.Payload.ID)
+		}
 		if c.edgeStats != nil {
 			c.edgeStats.Del(ev.Payload.ID)
 		}

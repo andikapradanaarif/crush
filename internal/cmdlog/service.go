@@ -16,8 +16,10 @@ package cmdlog
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -103,6 +105,11 @@ type Service interface {
 	// ParamVersion is the learned-params snapshot in force (#228)
 	// stamped on new rows. Empty until the params substrate exists.
 	ParamVersion() string
+
+	// ForgetSession drops a deleted session's suggested-marks so the
+	// bookkeeping doesn't outlive it — same convention as the
+	// coordinator's per-session map sweeps.
+	ForgetSession(sessionID string)
 }
 
 // Run is one completed command invocation.
@@ -221,16 +228,61 @@ func NewService(q *db.Queries, workingDir string) Service {
 		suggested:    map[string]map[string]struct{}{},
 	}
 	// Backfill: pre-provenance rows belong to this store's project,
-	// so empty keys claim into the current partition once.
+	// so empty keys claim into the current partition once. Failure
+	// rows need a Go-side re-key — their signature hash carries
+	// project_key, so a bare column UPDATE would orphan the row
+	// under its pre-partition PK and the next occurrence of the same
+	// failure would open a duplicate.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := q.ClaimMemoryPartition(ctx, s.projectKey); err != nil {
+	if err := s.claimLegacyFailures(ctx); err != nil {
 		slog.Warn("Failed to claim failure-memory partition", "error", err)
+	}
+	if err := q.DeleteLegacyCommandConflicts(ctx, s.projectKey); err != nil {
+		slog.Warn("Failed to resolve command-memory claim conflicts", "error", err)
 	}
 	if err := q.ClaimCommandPartition(ctx, s.projectKey); err != nil {
 		slog.Warn("Failed to claim command-memory partition", "error", err)
 	}
 	return s
+}
+
+// claimLegacyFailures moves pre-provenance rows into this partition.
+// A re-occurrence post-upgrade already exists under the partitioned
+// signature — that twin carries fuller provenance, so it survives,
+// inheriting only the older first_seen, and the claimed row goes.
+func (s *service) claimLegacyFailures(ctx context.Context) error {
+	rows, err := s.q.ListUnclaimedFailures(ctx)
+	if err != nil {
+		return err
+	}
+	for _, r := range rows {
+		newSig := s.failureSignature(r.Cmd, r.Cwd, r.Headline)
+		meta, err := s.q.GetFailureMeta(ctx, newSig)
+		switch {
+		case err == nil:
+			if err := s.q.MergeFailureFirstSeen(ctx, db.MergeFailureFirstSeenParams{
+				FirstSeen: min(meta.FirstSeen, r.FirstSeen),
+				Signature: newSig,
+			}); err != nil {
+				return err
+			}
+			if err := s.q.DeleteFailure(ctx, r.Signature); err != nil {
+				return err
+			}
+		case errors.Is(err, sql.ErrNoRows):
+			if err := s.q.RekeyFailurePartition(ctx, db.RekeyFailurePartitionParams{
+				Signature:   newSig,
+				ProjectKey:  s.projectKey,
+				Signature_2: r.Signature,
+			}); err != nil {
+				return err
+			}
+		default:
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *service) RecordRun(ctx context.Context, run Run) {
@@ -461,7 +513,9 @@ func (s *service) MarkSuggested(sessionID, cmdNorm string) {
 // memory section. A child session's command can still be
 // memory-influenced because the parent saw the rows before
 // delegating; the flag is a contamination screen, so it errs
-// inclusive.
+// inclusive. One parent level only, matching the task tool's
+// nesting depth — only top-level agents render memory sections, so
+// a deeper chain cannot exist today.
 func (s *service) wasSuggested(ctx context.Context, sessionID, cmdNorm string) bool {
 	if sessionID == "" {
 		return false
@@ -481,6 +535,12 @@ func (s *service) suggestedFor(sessionID, cmdNorm string) bool {
 	defer s.suggestedMu.Unlock()
 	_, ok := s.suggested[sessionID][cmdNorm]
 	return ok
+}
+
+func (s *service) ForgetSession(sessionID string) {
+	s.suggestedMu.Lock()
+	defer s.suggestedMu.Unlock()
+	delete(s.suggested, sessionID)
 }
 
 func (s *service) ProjectKey() string {

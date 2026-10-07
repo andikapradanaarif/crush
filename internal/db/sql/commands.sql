@@ -116,18 +116,45 @@ UPDATE failure_memory SET
     resolved_call = ?
 WHERE cmd = ? AND cwd = ? AND resolved_in = '' AND project_key = ?;
 
--- name: ClaimMemoryPartition :exec
--- Backfill policy for pre-provenance rows: a project-local store's
--- legacy rows belong to this project's partition, so empty
--- project_key claims on first open. Rows already stamped stay put
--- -- a store genuinely shared across projects (an absolute
--- data_directory) keeps its foreign rows foreign. OR REPLACE covers
--- the rare collision of a claimed row meeting an already-partitioned
--- twin: the partitioned row carries fresher provenance, so it wins.
-UPDATE OR REPLACE failure_memory SET project_key = ? WHERE project_key = '';
+-- name: ListUnclaimedFailures :many
+-- Legacy failure rows awaiting a partition claim (pre-provenance
+-- writes). The claim re-keys them Go-side because the signature hash
+-- itself carries project_key -- a column UPDATE alone would leave a
+-- stale PK, and the next occurrence of the same failure would open a
+-- second row.
+SELECT signature, cmd, cwd, headline, first_seen
+FROM failure_memory WHERE project_key = '';
+
+-- name: GetFailureMeta :one
+SELECT signature, first_seen FROM failure_memory WHERE signature = ?;
+
+-- name: RekeyFailurePartition :exec
+-- Claim one legacy row onto its partitioned signature.
+UPDATE failure_memory SET signature = ?, project_key = ? WHERE signature = ?;
+
+-- name: MergeFailureFirstSeen :exec
+-- A claimed row colliding with an already-partitioned twin keeps the
+-- twin (fresher provenance) but the failure's true age survives --
+-- the caller passes min(twin.first_seen, legacy.first_seen).
+UPDATE failure_memory SET first_seen = ? WHERE signature = ?;
+
+-- name: DeleteFailure :exec
+DELETE FROM failure_memory WHERE signature = ?;
+
+-- name: DeleteLegacyCommandConflicts :exec
+-- Claim collision on command_memory: project_key is PK material, so
+-- claiming a legacy row whose (cmd_norm, cwd, project_key) twin
+-- already exists conflicts. The partitioned twin wins -- fresher
+-- provenance -- so the stale legacy row goes before the claim update.
+DELETE FROM command_memory WHERE project_key = '' AND EXISTS (
+    SELECT 1 FROM command_memory twin
+    WHERE twin.project_key = ?
+        AND twin.cmd_norm = command_memory.cmd_norm
+        AND twin.cwd = command_memory.cwd
+);
 
 -- name: ClaimCommandPartition :exec
-UPDATE OR REPLACE command_memory SET project_key = ? WHERE project_key = '';
+UPDATE command_memory SET project_key = ? WHERE project_key = '';
 
 -- name: ListRecentCommands :many
 -- last_at is millisecond-granularity so re-runs order by recency;

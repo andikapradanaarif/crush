@@ -330,6 +330,7 @@ func (r *recordingCmdLog) ListSessionOpenFailures(context.Context, string) ([]cm
 func (r *recordingCmdLog) MarkSuggested(string, string) {}
 func (r *recordingCmdLog) ProjectKey() string           { return "" }
 func (r *recordingCmdLog) ParamVersion() string         { return "" }
+func (r *recordingCmdLog) ForgetSession(string)         {}
 
 func TestBashTool_RecordsRunToCmdLog(t *testing.T) {
 	workingDir := t.TempDir()

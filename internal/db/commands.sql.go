@@ -10,7 +10,7 @@ import (
 )
 
 const claimCommandPartition = `-- name: ClaimCommandPartition :exec
-UPDATE OR REPLACE command_memory SET project_key = ? WHERE project_key = ''
+UPDATE command_memory SET project_key = ? WHERE project_key = ''
 `
 
 func (q *Queries) ClaimCommandPartition(ctx context.Context, projectKey string) error {
@@ -18,20 +18,47 @@ func (q *Queries) ClaimCommandPartition(ctx context.Context, projectKey string) 
 	return err
 }
 
-const claimMemoryPartition = `-- name: ClaimMemoryPartition :exec
-UPDATE OR REPLACE failure_memory SET project_key = ? WHERE project_key = ''
+const deleteFailure = `-- name: DeleteFailure :exec
+DELETE FROM failure_memory WHERE signature = ?
 `
 
-// Backfill policy for pre-provenance rows: a project-local store's
-// legacy rows belong to this project's partition, so empty
-// project_key claims on first open. Rows already stamped stay put
-// -- a store genuinely shared across projects (an absolute
-// data_directory) keeps its foreign rows foreign. OR REPLACE covers
-// the rare collision of a claimed row meeting an already-partitioned
-// twin: the partitioned row carries fresher provenance, so it wins.
-func (q *Queries) ClaimMemoryPartition(ctx context.Context, projectKey string) error {
-	_, err := q.exec(ctx, q.claimMemoryPartitionStmt, claimMemoryPartition, projectKey)
+func (q *Queries) DeleteFailure(ctx context.Context, signature string) error {
+	_, err := q.exec(ctx, q.deleteFailureStmt, deleteFailure, signature)
 	return err
+}
+
+const deleteLegacyCommandConflicts = `-- name: DeleteLegacyCommandConflicts :exec
+DELETE FROM command_memory WHERE project_key = '' AND EXISTS (
+    SELECT 1 FROM command_memory twin
+    WHERE twin.project_key = ?
+        AND twin.cmd_norm = command_memory.cmd_norm
+        AND twin.cwd = command_memory.cwd
+)
+`
+
+// Claim collision on command_memory: project_key is PK material, so
+// claiming a legacy row whose (cmd_norm, cwd, project_key) twin
+// already exists conflicts. The partitioned twin wins -- fresher
+// provenance -- so the stale legacy row goes before the claim update.
+func (q *Queries) DeleteLegacyCommandConflicts(ctx context.Context, projectKey string) error {
+	_, err := q.exec(ctx, q.deleteLegacyCommandConflictsStmt, deleteLegacyCommandConflicts, projectKey)
+	return err
+}
+
+const getFailureMeta = `-- name: GetFailureMeta :one
+SELECT signature, first_seen FROM failure_memory WHERE signature = ?
+`
+
+type GetFailureMetaRow struct {
+	Signature string `json:"signature"`
+	FirstSeen int64  `json:"first_seen"`
+}
+
+func (q *Queries) GetFailureMeta(ctx context.Context, signature string) (GetFailureMetaRow, error) {
+	row := q.queryRow(ctx, q.getFailureMetaStmt, getFailureMeta, signature)
+	var i GetFailureMetaRow
+	err := row.Scan(&i.Signature, &i.FirstSeen)
+	return i, err
 }
 
 const listOpenFailures = `-- name: ListOpenFailures :many
@@ -258,6 +285,86 @@ func (q *Queries) ListSessionOpenFailures(ctx context.Context, arg ListSessionOp
 		return nil, err
 	}
 	return items, nil
+}
+
+const listUnclaimedFailures = `-- name: ListUnclaimedFailures :many
+SELECT signature, cmd, cwd, headline, first_seen
+FROM failure_memory WHERE project_key = ''
+`
+
+type ListUnclaimedFailuresRow struct {
+	Signature string `json:"signature"`
+	Cmd       string `json:"cmd"`
+	Cwd       string `json:"cwd"`
+	Headline  string `json:"headline"`
+	FirstSeen int64  `json:"first_seen"`
+}
+
+// Legacy failure rows awaiting a partition claim (pre-provenance
+// writes). The claim re-keys them Go-side because the signature hash
+// itself carries project_key -- a column UPDATE alone would leave a
+// stale PK, and the next occurrence of the same failure would open a
+// second row.
+func (q *Queries) ListUnclaimedFailures(ctx context.Context) ([]ListUnclaimedFailuresRow, error) {
+	rows, err := q.query(ctx, q.listUnclaimedFailuresStmt, listUnclaimedFailures)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListUnclaimedFailuresRow{}
+	for rows.Next() {
+		var i ListUnclaimedFailuresRow
+		if err := rows.Scan(
+			&i.Signature,
+			&i.Cmd,
+			&i.Cwd,
+			&i.Headline,
+			&i.FirstSeen,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const mergeFailureFirstSeen = `-- name: MergeFailureFirstSeen :exec
+UPDATE failure_memory SET first_seen = ? WHERE signature = ?
+`
+
+type MergeFailureFirstSeenParams struct {
+	FirstSeen int64  `json:"first_seen"`
+	Signature string `json:"signature"`
+}
+
+// A claimed row colliding with an already-partitioned twin keeps the
+// twin (fresher provenance) but the failure's true age survives --
+// the caller passes min(twin.first_seen, legacy.first_seen).
+func (q *Queries) MergeFailureFirstSeen(ctx context.Context, arg MergeFailureFirstSeenParams) error {
+	_, err := q.exec(ctx, q.mergeFailureFirstSeenStmt, mergeFailureFirstSeen, arg.FirstSeen, arg.Signature)
+	return err
+}
+
+const rekeyFailurePartition = `-- name: RekeyFailurePartition :exec
+UPDATE failure_memory SET signature = ?, project_key = ? WHERE signature = ?
+`
+
+type RekeyFailurePartitionParams struct {
+	Signature   string `json:"signature"`
+	ProjectKey  string `json:"project_key"`
+	Signature_2 string `json:"signature_2"`
+}
+
+// Claim one legacy row onto its partitioned signature.
+func (q *Queries) RekeyFailurePartition(ctx context.Context, arg RekeyFailurePartitionParams) error {
+	_, err := q.exec(ctx, q.rekeyFailurePartitionStmt, rekeyFailurePartition, arg.Signature, arg.ProjectKey, arg.Signature_2)
+	return err
 }
 
 const resolveFailuresForCommand = `-- name: ResolveFailuresForCommand :exec

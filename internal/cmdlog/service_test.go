@@ -940,3 +940,76 @@ func TestNewService_ClaimsLegacyRows(t *testing.T) {
 	require.Equal(t, "FAIL: TestOld", open[0].Headline)
 	require.Equal(t, svc.ProjectKey(), open[0].ProjectKey)
 }
+
+func TestNewService_ClaimedRowNoDuplicateOnRefail(t *testing.T) {
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+	workingDir := t.TempDir()
+
+	// A claimed legacy row must carry its partitioned signature:
+	// the signature hash folds project_key, so a row claimed by
+	// column-UPDATE alone would sit under its stale hash and the
+	// same failure re-occurring would open a second row — the
+	// duplicate-render window this test pins shut.
+	q := db.New(conn)
+	require.NoError(t, q.UpsertFailure(t.Context(), db.UpsertFailureParams{
+		Signature: "legacy-sig",
+		Cmd:       "go test ./...",
+		// RecordRun keys workspace-root runs under "." via relDir —
+		// the claim's re-key must land on exactly that signature.
+		Cwd:       ".",
+		Headline:  "FAIL: TestOld",
+		Files:     "[]",
+		FirstSeen: time.Now().UnixMilli(),
+		LastSeen:  time.Now().UnixMilli(),
+	}))
+	svc := NewService(q, workingDir)
+	env := &testEnv{svc: svc, ctx: t.Context(), workingDir: workingDir}
+
+	run(env, "s2", "go test ./...", workingDir, "", "FAIL: TestOld", nil, 1)
+
+	open, err := svc.ListOpenFailures(t.Context(), 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1, "claimed row re-keyed: re-fail must not duplicate it")
+}
+
+func TestNewService_ClaimCollisionKeepsPartitionedTwin(t *testing.T) {
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+	workingDir := t.TempDir()
+
+	// The failure re-occurred between the upgrade and first open:
+	// an already-partitioned row exists under the new signature.
+	// The twin wins — it carries fuller provenance — while the
+	// claim inherits the failure's older first_seen onto it.
+	q := db.New(conn)
+	svc := NewService(q, workingDir)
+	impl := svc.(*service)
+	newSig := impl.failureSignature("go test ./...", "", "FAIL: TestOld")
+	old := time.Now().Add(-48 * time.Hour).UnixMilli()
+	require.NoError(t, q.UpsertFailure(t.Context(), db.UpsertFailureParams{
+		Signature:  newSig,
+		Cmd:        "go test ./...",
+		Headline:   "FAIL: TestOld",
+		Files:      "[]",
+		FirstSeen:  time.Now().UnixMilli(),
+		LastSeen:   time.Now().UnixMilli(),
+		ProjectKey: svc.ProjectKey(),
+	}))
+	require.NoError(t, q.UpsertFailure(t.Context(), db.UpsertFailureParams{
+		Signature: "stale-sig",
+		Cmd:       "go test ./...",
+		Headline:  "FAIL: TestOld",
+		Files:     "[]",
+		FirstSeen: old,
+		LastSeen:  old,
+	}))
+
+	svc2 := NewService(q, workingDir)
+	open, err := svc2.ListOpenFailures(t.Context(), 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1)
+	require.Equal(t, old, open[0].FirstSeen.UnixMilli(), "twin inherits the older first_seen")
+}

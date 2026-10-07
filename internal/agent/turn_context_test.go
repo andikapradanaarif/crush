@@ -137,6 +137,7 @@ func (failingCmdlog) ListSessionOpenFailures(context.Context, string) ([]cmdlog.
 func (failingCmdlog) MarkSuggested(string, string) {}
 func (failingCmdlog) ProjectKey() string           { return "" }
 func (failingCmdlog) ParamVersion() string         { return "" }
+func (failingCmdlog) ForgetSession(string)         {}
 
 func userMsg(text string) message.Message {
 	return message.Message{
