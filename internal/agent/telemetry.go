@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -113,14 +114,14 @@ type requestStats struct {
 	// miss's cause. Pending holds the PrepareStep-side attribution
 	// for the in-flight step; OnStepFinish folds it into Steps with
 	// the request's usage, and the run-error path folds it as a
-	// Failed row when the request dies mid-step. PrevHashes is the
-	// previous step's per-message content hashes — the diff input.
-	// Note it advances at PrepareStep, so after a failed request the
-	// next diff compares against a render the provider may never
-	// have accepted (see EVAL_HARNESS.md for the caveat).
-	Steps      []StepRecord
-	Pending    stepAttribution
-	PrevHashes []uint64
+	// Failed row when the request dies mid-step. PrevRequest is the
+	// previous step's component-segmented request fingerprint — the
+	// diff input. Note it advances at PrepareStep, so after a failed
+	// request the next diff compares against a render the provider
+	// may never have accepted (see EVAL_HARNESS.md for the caveat).
+	Steps       []StepRecord
+	Pending     stepAttribution
+	PrevRequest RequestVector
 	// Pressure-gate state: renderedMsgs is the count of stored
 	// messages the last render covered — the watermark the delta
 	// estimate reads; pressureEstimate is the last computed
@@ -155,6 +156,21 @@ type StepRecord struct {
 	PrefixHash        string `json:"prefix_hash,omitempty"`
 	FirstChanged      int    `json:"first_changed_index"`
 	FirstChangedCause string `json:"first_changed_cause,omitempty"`
+	// RequestHash fingerprints the whole request — system run,
+	// history, and tool schemas combined. Two steps with equal
+	// RequestHash sent identical content; a cache regression between
+	// them is provider-side by elimination (#115).
+	RequestHash string `json:"request_hash,omitempty"`
+	// PID + FirstOfProcess locate the request in process space —
+	// the restart boundary a turn-first step crosses. FirstOfProcess
+	// marks this process's first provider request for the session.
+	PID            int  `json:"pid,omitempty"`
+	FirstOfProcess bool `json:"first_of_process,omitempty"`
+	// CacheAnomaly is "provider-side" when the request is
+	// byte-identical to the previous render yet cache_read dropped
+	// — the miss isn't locally attributable, so the record says so
+	// instead of letting a caller fabricate a harness cause.
+	CacheAnomaly string `json:"cache_anomaly,omitempty"`
 	// PressureEstimate/PressureEngaged carry the gate's per-step
 	// state — the estimate-vs-reported audit and the activation
 	// signal the comfortable-regime experiment reads.
@@ -162,76 +178,200 @@ type StepRecord struct {
 	PressureEngaged  bool  `json:"pressure_engaged,omitempty"`
 }
 
+// RequestVector is one rendered request's component-segmented
+// fingerprint — the diff input that survives process restart via the
+// eval telemetry handoff (#115). Messages split into the leading
+// system run (with notebook positions marked) and history so a
+// removed notebook block can't masquerade as a history edit through
+// index shift. CacheRead carries the producing step's cache hits so
+// a restarted process can still flag an unexplained miss.
+type RequestVector struct {
+	SessionID string   `json:"session_id"`
+	System    []uint64 `json:"system,omitempty"`
+	Notebook  []int    `json:"notebook,omitempty"`
+	Tools     string   `json:"tools,omitempty"`
+	History   []uint64 `json:"history,omitempty"`
+	CacheRead int64    `json:"cache_read,omitempty"`
+}
+
+// Empty reports whether the vector carries a rendered request — a
+// session-id-only envelope never seeds a diff.
+func (v RequestVector) Empty() bool {
+	return len(v.System) == 0 && len(v.History) == 0 && v.Tools == ""
+}
+
 // stepAttribution is the PrepareStep-side half of a StepRecord — the
-// prompt-side state captured before the request flies.
+// prompt-side state captured before the request flies. prevDigest
+// and prevCacheRead are the vector it diffed against — the anomaly
+// check's baseline at fold time, when the vector has already
+// advanced past the request that produced it.
 type stepAttribution struct {
 	PrefixHash        string
+	RequestHash       string
 	FirstChanged      int
 	FirstChangedCause string
+	prevDigest        string
+	prevCacheRead     int64
 }
 
-// attributeStep hashes the rendered message list and diffs it against
-// the previous step's per-message hashes. prefixHash covers the
-// leading system-message run (system prompt + prompt prefix +
-// notebook block); firstChanged/cause name where the divergence
-// starts. Returns the attribution and the new hash vector.
-func attributeStep(messages []fantasy.Message, prev []uint64) (stepAttribution, []uint64) {
-	hashes := make([]uint64, len(messages))
-	prefixLen := 0
+// attributeStep fingerprints the rendered request per component and
+// diffs it against the previous step's vector. prefixHash covers the
+// leading system-message run; firstChanged/cause name the earliest
+// divergence in wire order — system run first, then history, with
+// tool-schema drift reported when the messages are identical.
+// Returns the attribution and the vector the next step diffs
+// against.
+func attributeStep(messages []fantasy.Message, tools []fantasy.AgentTool, prev RequestVector) (stepAttribution, RequestVector) {
+	cur := hashRequest(messages, tools)
+	attr := stepAttribution{
+		FirstChanged:  -1,
+		PrefixHash:    digestUint64s(cur.System),
+		RequestHash:   digestVector(cur),
+		prevCacheRead: prev.CacheRead,
+	}
+	if !prev.Empty() {
+		attr.prevDigest = digestVector(prev)
+	}
+	if prev.Empty() {
+		// Genuine cold start — no prior render exists to diff.
+		// A restart-seeded vector is never empty, so turn-first
+		// steps on resumed sessions land a real cause instead.
+		attr.FirstChanged = 0
+		attr.FirstChangedCause = "cold"
+		return attr, cur
+	}
+	if fc := diffIndex(cur.System, prev.System); fc >= 0 {
+		attr.FirstChanged = fc
+		if systemChangedIsNotebook(cur, prev, fc) {
+			attr.FirstChangedCause = "notebook-prefix"
+		} else {
+			attr.FirstChangedCause = "system-prompt"
+		}
+		return attr, cur
+	}
+	if fc := diffIndex(cur.History, prev.History); fc >= 0 {
+		attr.FirstChanged = len(cur.System) + fc
+		switch {
+		case fc >= len(prev.History):
+			attr.FirstChangedCause = "append"
+		case fc >= len(cur.History):
+			attr.FirstChangedCause = "shrink"
+		default:
+			attr.FirstChangedCause = "history"
+		}
+		return attr, cur
+	}
+	if cur.Tools != prev.Tools {
+		// No message position to point at — -1 plus the cause.
+		attr.FirstChangedCause = "tool-schemas"
+	}
+	return attr, cur
+}
+
+// diffIndex returns the first position where cur and prev differ:
+// an in-place mismatch, or the boundary where one side runs out
+// (append/shrink land the same index — the caller classifies which).
+// -1 means identical.
+func diffIndex(cur, prev []uint64) int {
+	for i := 0; i < min(len(cur), len(prev)); i++ {
+		if cur[i] != prev[i] {
+			return i
+		}
+	}
+	if len(cur) != len(prev) {
+		return min(len(cur), len(prev))
+	}
+	return -1
+}
+
+// systemChangedIsNotebook classifies a system-run divergence at fc:
+// the notebook label belongs to whichever side owns the changed or
+// boundary message — cur for edits and insertions, prev for drops.
+func systemChangedIsNotebook(cur, prev RequestVector, fc int) bool {
+	if fc < len(cur.System) {
+		return slices.Contains(cur.Notebook, fc)
+	}
+	return slices.Contains(prev.Notebook, fc)
+}
+
+// hashRequest fingerprints one rendered request per component: the
+// leading contiguous system run (notebook positions marked), the
+// non-system history, and the tool-schema digest.
+func hashRequest(messages []fantasy.Message, tools []fantasy.AgentTool) RequestVector {
+	var v RequestVector
 	for i, msg := range messages {
-		hashes[i] = hashMessage(msg)
-		if i == prefixLen && msg.Role == fantasy.MessageRoleSystem {
-			prefixLen++
+		h := hashMessage(msg)
+		if i == len(v.System) && msg.Role == fantasy.MessageRoleSystem {
+			if isNotebookMessage(msg) {
+				v.Notebook = append(v.Notebook, i)
+			}
+			v.System = append(v.System, h)
+			continue
 		}
+		v.History = append(v.History, h)
 	}
-	ph := fnv.New64a()
-	for _, h := range hashes[:prefixLen] {
-		var b [8]byte
-		for i := range b {
-			b[i] = byte(h >> (8 * i))
-		}
-		_, _ = ph.Write(b[:])
-	}
-	fc := -1
-	for i := 0; i < min(len(hashes), len(prev)); i++ {
-		if hashes[i] != prev[i] {
-			fc = i
-			break
-		}
-	}
-	if fc == -1 && len(hashes) != len(prev) {
-		fc = min(len(hashes), len(prev))
-	}
-	return stepAttribution{
-		PrefixHash:        fmt.Sprintf("%016x", ph.Sum64()),
-		FirstChanged:      fc,
-		FirstChangedCause: firstChangedCause(messages, fc, prefixLen, len(prev)),
-	}, hashes
+	v.Tools = hashTools(tools)
+	return v
 }
 
-// firstChangedCause names the component at the first-changed index:
-// cold for the run's first request, append for pure tail growth,
-// shrink for truncation, system-prompt/notebook-prefix inside the
-// leading system run, history for mid-conversation edits. Empty
-// when nothing changed.
-func firstChangedCause(messages []fantasy.Message, fc, prefixLen, prevLen int) string {
-	switch {
-	case prevLen == 0:
-		return "cold"
-	case fc < 0:
-		return ""
-	case fc >= len(messages):
-		return "shrink"
-	case fc >= prevLen:
-		return "append"
-	case fc < prefixLen:
-		if isNotebookMessage(messages[fc]) {
-			return "notebook-prefix"
+// digestUint64s compresses a hash slice into one hex digest.
+func digestUint64s(hashes []uint64) string {
+	h := fnv.New64a()
+	var b [8]byte
+	for _, x := range hashes {
+		for i := range b {
+			b[i] = byte(x >> (8 * i))
 		}
-		return "system-prompt"
-	default:
-		return "history"
+		_, _ = h.Write(b[:])
 	}
+	return fmt.Sprintf("%016x", h.Sum64())
+}
+
+// digestVector fingerprints the whole request for the identity
+// comparison — equal digests mean identical wire content.
+func digestVector(v RequestVector) string {
+	h := fnv.New64a()
+	var b [8]byte
+	put := func(x uint64) {
+		for i := range b {
+			b[i] = byte(x >> (8 * i))
+		}
+		_, _ = h.Write(b[:])
+	}
+	for _, x := range v.System {
+		put(x)
+	}
+	put(0)
+	for _, x := range v.History {
+		put(x)
+	}
+	_, _ = h.Write([]byte(v.Tools))
+	return fmt.Sprintf("%016x", h.Sum64())
+}
+
+// cacheAnomaly reports whether a step's request was byte-identical
+// to the previous render yet cache_read dropped — the miss has no
+// local cause, so the honest label is provider-side. prevDigest is
+// empty on cold starts and unseeded restarts; there is no regression
+// claim without a baseline.
+func cacheAnomaly(p stepAttribution, cacheRead int64) bool {
+	return p.prevDigest != "" && p.prevDigest == p.RequestHash &&
+		cacheRead < p.prevCacheRead
+}
+
+// hashTools digests the tool list's serialized schemas in wire order
+// — identical content in a different order is a different request.
+func hashTools(agentTools []fantasy.AgentTool) string {
+	h := fnv.New64a()
+	for _, t := range agentTools {
+		data, err := json.Marshal(t.Info())
+		if err != nil {
+			continue
+		}
+		_, _ = h.Write(data)
+		_, _ = h.Write([]byte{0})
+	}
+	return fmt.Sprintf("%016x", h.Sum64())
 }
 
 // isNotebookMessage reports whether msg is a system message carrying a

@@ -63,7 +63,7 @@ func TestEmitEvalTelemetry_PrefersLedger(t *testing.T) {
 		TotalUsage: fantasy.Usage{InputTokens: 100, OutputTokens: 10},
 		Steps:      make([]fantasy.StepResult, 3),
 	}
-	app.emitEvalTelemetry("sess", result, nil, 0)
+	app.emitEvalTelemetry("sess", result, nil, 0, drainReport{Attempted: true, Completed: true})
 
 	doc := readTelemetryDoc(t, path)
 	tokens, ok := doc["tokens"].(map[string]any)
@@ -86,7 +86,7 @@ func TestEmitEvalTelemetry_LedgerFallback(t *testing.T) {
 		TotalUsage: fantasy.Usage{InputTokens: 100, OutputTokens: 10},
 		Steps:      make([]fantasy.StepResult, 3),
 	}
-	app.emitEvalTelemetry("sess", result, nil, 7)
+	app.emitEvalTelemetry("sess", result, nil, 7, drainReport{Attempted: true, Completed: true})
 
 	doc := readTelemetryDoc(t, path)
 	tokens, ok := doc["tokens"].(map[string]any)
@@ -98,7 +98,7 @@ func TestEmitEvalTelemetry_LedgerFallback(t *testing.T) {
 	// assistant messages is the last resort.
 	path2 := filepath.Join(t.TempDir(), "tel2.json")
 	t.Setenv(EvalTelemetryEnvVar, path2)
-	app.emitEvalTelemetry("sess", nil, nil, 7)
+	app.emitEvalTelemetry("sess", nil, nil, 7, drainReport{Attempted: true, Completed: true})
 	doc = readTelemetryDoc(t, path2)
 	require.Equal(t, float64(7), doc["steps"])
 }
@@ -118,7 +118,7 @@ func TestEmitEvalTelemetry_TailRuns(t *testing.T) {
 			{Bytes: 20, RunStamp: 1, RepairAttempts: 1},
 		},
 	})
-	app.emitEvalTelemetry("sess", nil, nil, 0)
+	app.emitEvalTelemetry("sess", nil, nil, 0, drainReport{Attempted: true, Completed: true})
 
 	doc := readTelemetryDoc(t, path)
 	runs, ok := doc["tail_runs"].([]any)
@@ -131,8 +131,55 @@ func TestEmitEvalTelemetry_TailRuns(t *testing.T) {
 	// Absent rather than null when no Runs rendered a tail.
 	path2 := filepath.Join(t.TempDir(), "tel2.json")
 	t.Setenv(EvalTelemetryEnvVar, path2)
-	telemetryApp(agent.SessionTelemetry{}).emitEvalTelemetry("sess", nil, nil, 0)
+	telemetryApp(agent.SessionTelemetry{}).emitEvalTelemetry("sess", nil, nil, 0, drainReport{})
 	require.NotContains(t, readTelemetryDoc(t, path2), "tail_runs")
+}
+
+// The drain outcome and the restart handoff vector are lifecycle
+// evidence the eval driver reads — a timed-out drain must not
+// serialize as a clean one, and a non-empty request vector must
+// round-trip so the next turn's process can seed its diff (#115).
+func TestEmitEvalTelemetry_DrainAndVector(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tel.json")
+	t.Setenv(EvalTelemetryEnvVar, path)
+
+	app := telemetryApp(agent.SessionTelemetry{
+		PrevRequest: agent.RequestVector{
+			SessionID: "sess",
+			System:    []uint64{11, 22},
+			Notebook:  []int{1},
+			Tools:     "abc123",
+			History:   []uint64{33},
+			CacheRead: 4096,
+		},
+	})
+	app.emitEvalTelemetry("sess", nil, nil, 0,
+		drainReport{Attempted: true, Completed: false, TimeoutMs: 2000})
+
+	doc := readTelemetryDoc(t, path)
+	drain, ok := doc["drain"].(map[string]any)
+	require.True(t, ok, "drain missing from telemetry doc")
+	require.Equal(t, true, drain["attempted"])
+	require.Equal(t, false, drain["completed"])
+	require.Equal(t, float64(2000), drain["timeout_ms"])
+
+	vec, ok := doc["request_vector"].(map[string]any)
+	require.True(t, ok, "request_vector missing from telemetry doc")
+	require.Equal(t, "sess", vec["session_id"])
+	require.Equal(t, "abc123", vec["tools"])
+	require.Equal(t, float64(4096), vec["cache_read"])
+
+	// An empty vector emits nothing — a turn that never rendered a
+	// request can't seed the next process's diff.
+	path2 := filepath.Join(t.TempDir(), "tel2.json")
+	t.Setenv(EvalTelemetryEnvVar, path2)
+	telemetryApp(agent.SessionTelemetry{}).emitEvalTelemetry("sess", nil, nil, 0, drainReport{})
+	doc2 := readTelemetryDoc(t, path2)
+	require.NotContains(t, doc2, "request_vector")
+	// An unattempted drain still records — skipped is information.
+	drain2, ok := doc2["drain"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, false, drain2["attempted"])
 }
 
 func TestClassifyRunError(t *testing.T) {

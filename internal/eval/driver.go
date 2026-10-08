@@ -26,6 +26,14 @@ const EvalMaxStepsEnvVar = "CRUSH_EVAL_MAX_STEPS"
 // should report resolved values for.
 const EvalFlagsEnvVar = "CRUSH_EVAL_FLAGS"
 
+// EvalRequestVectorEnvVar hands the previous turn process's final
+// request fingerprint to the restarted turn's process — the diff
+// baseline that keeps a turn-first step's attribution honest
+// instead of cold (#115). Kept in sync with
+// agent.EvalRequestVectorEnvVar; the constant is duplicated so eval
+// doesn't import agent.
+const EvalRequestVectorEnvVar = "CRUSH_EVAL_REQUEST_VECTOR"
+
 // RunResult is what one trajectory run (all turns) produced.
 type RunResult struct {
 	Steps       int
@@ -60,6 +68,14 @@ type RunResult struct {
 	// ResolvedOptions is the child's report of what each manifest
 	// flag resolved to — the truth the baseline key hashes.
 	ResolvedOptions map[string]any
+	// RequestVector is the trajectory-final process's request
+	// fingerprint — forwarded verbatim to the next turn's process
+	// (#115). Raw because the driver never inspects the contents.
+	RequestVector json.RawMessage
+	// Drains is each turn's detached-work join outcome — the
+	// lifecycle evidence that a restart boundary settled cleanly,
+	// Turn stamped at fold.
+	Drains []DrainReport
 	// StepRecords is the trajectory-wide per-step table — every
 	// turn's steps with usage and prefix attribution, Turn stamped
 	// at fold time.
@@ -232,7 +248,17 @@ type runTelemetry struct {
 	// ResolvedOptions is the child's effective config projected onto
 	// the manifest flags — what actually ran, not what the arm asked.
 	ResolvedOptions map[string]any `json:"resolved_options"`
-	Error           string         `json:"error,omitempty"`
+	// RequestVector is the process's final request fingerprint —
+	// forwarded verbatim to the next turn's process via
+	// CRUSH_EVAL_REQUEST_VECTOR so restart attribution diffs
+	// against it instead of reporting cold (#115). Raw because the
+	// driver never inspects the contents — the agent package owns
+	// the schema.
+	RequestVector json.RawMessage `json:"request_vector,omitempty"`
+	// Drain is this process's detached-work join outcome — nil when
+	// the child predates #115 or died before emitting.
+	Drain *DrainReport `json:"drain,omitempty"`
+	Error string       `json:"error,omitempty"`
 	// ErrorClass is the child's typed classification of the terminal
 	// error — auth/provider_deterministic/provider_server/
 	// rate_limit/context_too_large/window_cap_enforced/
@@ -245,11 +271,14 @@ type runTelemetry struct {
 // TurnRunner is the counterfactual-replay contract (#108): execute a
 // single trajectory turn against the session state already in
 // workdir's crush.db. An empty sessionID starts a fresh session —
-// turn 0 of a recording pass or an unseeded fork. The returned string
-// is the session the turn ran under, for the caller's continuation
-// bookkeeping; RunResult carries just this turn's telemetry.
+// turn 0 of a recording pass or an unseeded fork. prevVector is the
+// previous turn process's request fingerprint (#115) — the diff
+// baseline the restarted process needs; nil means cold. The returned
+// string is the session the turn ran under, for the caller's
+// continuation bookkeeping; RunResult carries just this turn's
+// telemetry.
 type TurnRunner interface {
-	RunTurn(ctx context.Context, workdir, sessionID, prompt string, turnIdx, maxSteps int) (string, RunResult)
+	RunTurn(ctx context.Context, workdir, sessionID, prompt string, turnIdx, maxSteps int, prevVector json.RawMessage) (string, RunResult)
 }
 
 // turnOutcome is one `crush run` subprocess's classified result — the
@@ -291,7 +320,7 @@ func (c CrushRunner) Run(ctx context.Context, workdir string, turns []string, bu
 			res.TimedOut = true
 			return res
 		}
-		to := c.runTurnOnce(ctx, workdir, sessionID, turn, i, remainingSteps(budget, res.Steps))
+		to := c.runTurnOnce(ctx, workdir, sessionID, turn, i, remainingSteps(budget, res.Steps), res.RequestVector)
 		res.addTurnTelemetry(to.tel, i)
 		noteTurnFields(&res, to.tel)
 		if res.SessionID != "" {
@@ -315,10 +344,13 @@ func (c CrushRunner) Run(ctx context.Context, workdir string, turns []string, bu
 // subprocess may consume the budget's remainder plus one; reaching
 // the cap classifies timeout. turnIdx stamps StepRecords/TailRows and
 // names the telemetry file — replay passes the trajectory-space index
-// so per-step rows attribute to the replayed turn.
-func (c CrushRunner) RunTurn(ctx context.Context, workdir, sessionID, prompt string, turnIdx, stepCap int) (string, RunResult) {
+// so per-step rows attribute to the replayed turn. prevVector seeds
+// the child's restart attribution — a fork passes the recorded
+// boundary's vector so the replayed turn diffs against the prefix it
+// actually continues (#115).
+func (c CrushRunner) RunTurn(ctx context.Context, workdir, sessionID, prompt string, turnIdx, stepCap int, prevVector json.RawMessage) (string, RunResult) {
 	var res RunResult
-	to := c.runTurnOnce(ctx, workdir, sessionID, prompt, turnIdx, stepCap)
+	to := c.runTurnOnce(ctx, workdir, sessionID, prompt, turnIdx, stepCap, prevVector)
 	res.addTurnTelemetry(to.tel, turnIdx)
 	noteTurnFields(&res, to.tel)
 	res.Err = to.err
@@ -357,7 +389,7 @@ func noteTurnFields(res *RunResult, tel runTelemetry) {
 // — untracked harness litter could flip a globbing check. The
 // session/model bookkeeping fields land on res through
 // addTurnTelemetry and noteTurnFields.
-func (c CrushRunner) runTurnOnce(ctx context.Context, workdir, sessionID, prompt string, turnIdx, stepCap int) turnOutcome {
+func (c CrushRunner) runTurnOnce(ctx context.Context, workdir, sessionID, prompt string, turnIdx, stepCap int, prevVector json.RawMessage) turnOutcome {
 	tfile := filepath.Join(filepath.Dir(workdir), fmt.Sprintf(".eval-telemetry-%s-%d.json", filepath.Base(workdir), turnIdx))
 	args := []string{"run", "--quiet"}
 	if sessionID != "" {
@@ -382,7 +414,7 @@ func (c CrushRunner) runTurnOnce(ctx context.Context, workdir, sessionID, prompt
 	}
 	cmd.WaitDelay = 10 * time.Second
 	cmd.Dir = workdir
-	cmd.Env = c.subprocessEnv(tfile, stepCap)
+	cmd.Env = c.subprocessEnv(tfile, stepCap, prevVector)
 	out, err := cmd.CombinedOutput()
 
 	tel, telErr := readTelemetry(tfile)
@@ -475,6 +507,17 @@ func (res *RunResult) addTurnTelemetry(tel runTelemetry, turn int) {
 		s.Turn = turn
 		res.StepRecords = append(res.StepRecords, s)
 	}
+	// The process's final fingerprint rides forward — the next
+	// turn's restarted process diffs its first request against it
+	// (#115).
+	if len(tel.RequestVector) > 0 {
+		res.RequestVector = tel.RequestVector
+	}
+	if tel.Drain != nil {
+		d := *tel.Drain
+		d.Turn = turn
+		res.Drains = append(res.Drains, d)
+	}
 	if tel.Tail != nil {
 		t := *tel.Tail
 		t.Turn = turn
@@ -542,7 +585,7 @@ func isCancellation(e string) bool {
 // are stripped — a CRUSH_CLIENT_SERVER=1 left over in the operator's
 // env would take the client/server path where the telemetry hook
 // doesn't fire, silently breaking session continuation.
-func (c CrushRunner) subprocessEnv(telemetryFile string, maxSteps int) []string {
+func (c CrushRunner) subprocessEnv(telemetryFile string, maxSteps int, prevVector json.RawMessage) []string {
 	pinned := map[string]string{
 		"HOME":              c.Home,
 		"XDG_CONFIG_HOME":   filepath.Join(c.Home, ".config"),
@@ -552,6 +595,9 @@ func (c CrushRunner) subprocessEnv(telemetryFile string, maxSteps int) []string 
 	}
 	if maxSteps > 0 {
 		pinned[EvalMaxStepsEnvVar] = strconv.Itoa(maxSteps)
+	}
+	if len(prevVector) > 0 {
+		pinned[EvalRequestVectorEnvVar] = string(prevVector)
 	}
 	if len(c.FlagKeys) > 0 {
 		pinned[EvalFlagsEnvVar] = strings.Join(c.FlagKeys, ",")

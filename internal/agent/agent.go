@@ -1495,7 +1495,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				rs.HistoryBytes = comp.HistoryBytes
 				rs.ToolCallBytes = comp.ToolCallBytes
 				rs.ToolResultBytes = comp.ToolResultBytes
-				rs.Pending, rs.PrevHashes = attributeStep(prepared.Messages, rs.PrevHashes)
+				if rs.PrevRequest.Empty() && len(rs.Steps) == 0 {
+					// Restart boundary: a prior turn's process may
+					// have handed its final request fingerprint
+					// through the eval env — seeding it turns this
+					// step's diff from "cold" into a real cause.
+					rs.PrevRequest = restartVector(call.SessionID)
+				}
+				rs.Pending, rs.PrevRequest = attributeStep(prepared.Messages, prepared.Tools, rs.PrevRequest)
 				a.reqStats.Set(call.SessionID, rs)
 			}
 
@@ -1690,7 +1697,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				if rs.LastPromptTokens > rs.PeakPromptTokens {
 					rs.PeakPromptTokens = rs.LastPromptTokens
 				}
-				rs.Steps = append(rs.Steps, StepRecord{
+				row := StepRecord{
 					Step:              len(rs.Steps),
 					InputTokens:       usage.InputTokens,
 					OutputTokens:      usage.OutputTokens,
@@ -1700,9 +1707,20 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 					PrefixHash:        rs.Pending.PrefixHash,
 					FirstChanged:      rs.Pending.FirstChanged,
 					FirstChangedCause: rs.Pending.FirstChangedCause,
+					RequestHash:       rs.Pending.RequestHash,
+					PID:               os.Getpid(),
+					FirstOfProcess:    len(rs.Steps) == 0,
 					PressureEstimate:  rs.pressureEstimate,
 					PressureEngaged:   rs.pressureEngaged,
-				})
+				}
+				if cacheAnomaly(rs.Pending, usage.CacheReadTokens) {
+					row.CacheAnomaly = "provider-side"
+				}
+				rs.Steps = append(rs.Steps, row)
+				// The just-folded step's cache hits ride the vector
+				// so a restarted process can still flag an
+				// unexplained regression on its first step.
+				rs.PrevRequest.CacheRead = usage.CacheReadTokens
 				// Clear the folded attribution so a terminal error
 				// later in the turn can't re-fold a stale Pending —
 				// a non-empty Pending in the error path provably
@@ -1777,6 +1795,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 					PrefixHash:        rs.Pending.PrefixHash,
 					FirstChanged:      rs.Pending.FirstChanged,
 					FirstChangedCause: rs.Pending.FirstChangedCause,
+					RequestHash:       rs.Pending.RequestHash,
+					PID:               os.Getpid(),
+					FirstOfProcess:    len(rs.Steps) == 0,
 					PressureEstimate:  rs.pressureEstimate,
 					PressureEngaged:   rs.pressureEngaged,
 				})

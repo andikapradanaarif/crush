@@ -27,6 +27,9 @@ type replayCall struct {
 	opts      map[string]any
 	workHash  string
 	dbHash    string
+	// vectorIn is the request fingerprint the caller forwarded —
+	// the restart-attribution handoff under test (#115).
+	vectorIn string
 }
 
 // replayDriver fakes AgentRunner (for agent seeds) and TurnRunner (the
@@ -107,11 +110,11 @@ func touchDB(ctx context.Context, workdir, id string) error {
 	return err
 }
 
-func (d *replayDriver) RunTurn(ctx context.Context, workdir, sessionID, prompt string, turnIdx, _ int) (string, RunResult) {
+func (d *replayDriver) RunTurn(ctx context.Context, workdir, sessionID, prompt string, turnIdx, _ int, prevVector json.RawMessage) (string, RunResult) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	call := replayCall{turnIdx: turnIdx, sessionIn: sessionID, prompt: prompt}
+	call := replayCall{turnIdx: turnIdx, sessionIn: sessionID, prompt: prompt, vectorIn: string(prevVector)}
 	if raw, err := os.ReadFile(filepath.Join(workdir, ".crush.json")); err == nil {
 		var doc struct {
 			Options map[string]any `json:"options"`
@@ -144,6 +147,9 @@ func (d *replayDriver) RunTurn(ctx context.Context, workdir, sessionID, prompt s
 		Tokens:          TokenUsage{Input: 10, Output: 5},
 		ModelResolved:   "mock/m",
 		ResolvedOptions: map[string]any{},
+		// A canned fingerprint proves the vector handoff end-to-end:
+		// the next turn receives exactly what this turn emitted.
+		RequestVector: json.RawMessage(fmt.Sprintf(`{"session_id":%q,"v":%d}`, d.session, turnIdx)),
 	}
 	if d.boomKey != "" && call.opts[d.boomKey] == true {
 		res.Err = fmt.Errorf("boom: %s armed", d.boomKey)
@@ -229,9 +235,24 @@ func TestRunReplay_RecordsPairPerFork(t *testing.T) {
 	for _, c := range forkCalls {
 		if c.turnIdx == 0 {
 			require.Empty(t, c.sessionIn, "turn-0 fork has no session to resume")
+			require.Empty(t, c.vectorIn, "turn-0 fork has no prior fingerprint")
 		} else {
 			require.Equal(t, "rec-session", c.sessionIn)
+			// The recorded boundary's vector hands the forked
+			// process its diff baseline — restart attribution, not
+			// cold (#115).
+			require.JSONEq(t,
+				fmt.Sprintf(`{"session_id":"rec-session","v":%d}`, c.turnIdx-1),
+				c.vectorIn)
 		}
+	}
+	// The recording pass forwards turn-to-turn the same way the
+	// trajectory loop does — each turn's diff baseline is the
+	// previous process's final vector.
+	for i, c := range recCalls[1:] {
+		require.JSONEq(t,
+			fmt.Sprintf(`{"session_id":"rec-session","v":%d}`, i),
+			c.vectorIn)
 	}
 }
 

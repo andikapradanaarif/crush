@@ -469,6 +469,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	rec.EdgeFirings = res.EdgeFirings
 	rec.PromptTokensPerTurn = res.PromptTokensPerTurn
 	rec.StepRecords = res.StepRecords
+	rec.Drains = res.Drains
 	rec.Tail = res.Tail
 	rec.TailRuns = res.TailRuns
 	// Pressure is pointer-gated presence: a positive estimate means

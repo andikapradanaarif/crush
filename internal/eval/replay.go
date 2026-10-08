@@ -41,6 +41,11 @@ type replaySnapMeta struct {
 	SessionID  string     `json:"session_id,omitempty"`
 	StepsUsed  int        `json:"steps_used"`
 	TokensUsed TokenUsage `json:"tokens_used"`
+	// RequestVector is the boundary-preceding process's request
+	// fingerprint — a fork's restarted process diffs its first
+	// request against it so attribution survives the process gap
+	// (#115). Nil at boundary 0.
+	RequestVector json.RawMessage `json:"request_vector,omitempty"`
 }
 
 // replaySnapRoot locates a trajectory's boundary snapshots under the
@@ -169,8 +174,12 @@ func (r *Runner) recordReplayPrefix(ctx context.Context, exp *Experiment, traj *
 	var sessionID string
 	stepsUsed := 0
 	var tokensUsed TokenUsage
+	var prevVector json.RawMessage
 	record := func(turn int) {
-		meta := replaySnapMeta{Turn: turn, SessionID: sessionID, StepsUsed: stepsUsed, TokensUsed: tokensUsed}
+		meta := replaySnapMeta{
+			Turn: turn, SessionID: sessionID, StepsUsed: stepsUsed,
+			TokensUsed: tokensUsed, RequestVector: prevVector,
+		}
 		r.writeReplaySnapshot(ctx, snapRoot, turn, workdir, meta)
 		// Register only a boundary that verifiably landed — a torn
 		// write scheduling forks would burn attempts on restore
@@ -182,7 +191,7 @@ func (r *Runner) recordReplayPrefix(ctx context.Context, exp *Experiment, traj *
 	record(0)
 	var recErr error
 	for t, prompt := range traj.Task.Turns {
-		sid, res := tr.RunTurn(ctx, workdir, sessionID, prompt, t, remainingSteps(traj.Budget, stepsUsed))
+		sid, res := tr.RunTurn(ctx, workdir, sessionID, prompt, t, remainingSteps(traj.Budget, stepsUsed), prevVector)
 		if sid != "" {
 			sessionID = sid
 		}
@@ -191,6 +200,7 @@ func (r *Runner) recordReplayPrefix(ctx context.Context, exp *Experiment, traj *
 		tokensUsed.Output += res.Tokens.Output
 		tokensUsed.CacheRead += res.Tokens.CacheRead
 		tokensUsed.CacheWrite += res.Tokens.CacheWrite
+		prevVector = res.RequestVector
 		if res.Err != nil {
 			recErr = fmt.Errorf("record turn %d: %w", t+1, res.Err)
 			break
@@ -467,7 +477,8 @@ func (r *Runner) executeReplayRun(ctx context.Context, exp *Experiment, traj *Tr
 		return rec, nil
 	}
 
-	sid, res := tr.RunTurn(ctx, workdir, meta.SessionID, traj.Task.Turns[fork], fork, remainingSteps(traj.Budget, meta.StepsUsed))
+	sid, res := tr.RunTurn(ctx, workdir, meta.SessionID, traj.Task.Turns[fork], fork,
+		remainingSteps(traj.Budget, meta.StepsUsed), meta.RequestVector)
 	rec.DurationS = r.now().Sub(rec.StartedAt).Seconds()
 	rec.SessionID = sid
 	rec.Steps = res.Steps
@@ -481,6 +492,7 @@ func (r *Runner) executeReplayRun(ctx context.Context, exp *Experiment, traj *Tr
 	rec.EdgeFirings = res.EdgeFirings
 	rec.PromptTokensPerTurn = res.PromptTokensPerTurn
 	rec.StepRecords = res.StepRecords
+	rec.Drains = res.Drains
 	rec.Tail = res.Tail
 	rec.TailRuns = res.TailRuns
 	if res.Pressure.Estimate > 0 || res.Pressure.Engaged || res.Pressure.Activations > 0 {

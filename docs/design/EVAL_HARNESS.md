@@ -735,10 +735,13 @@ trajectory twice) is strictly worse.
 			"turn": 0, "step": 3,
 			"input_tokens": 41200, "output_tokens": 320,
 			"cache_read_tokens": 38000, "cache_write_tokens": 3100,
-			"prefix_hash": "0123abcd...", "first_changed_index": 1,
+			"prefix_hash": "0123abcd...", "request_hash": "89abcdef...",
+			"pid": 41733, "first_of_process": false,
+			"first_changed_index": 1,
 			"first_changed_cause": "notebook-prefix"
 		}
 	],
+	"drains": [{"turn": 0, "attempted": true, "completed": true, "timeout_ms": 30000}],
 	"tail": [
 		{
 			"turn": 0,
@@ -790,28 +793,54 @@ identical prompt and fold into a single `OnStepFinish`, so a row can
 cover several wire requests; a terminal mid-step failure still emits a
 row — `failed: true`, zero usage — so the request that broke the run
 keeps its attribution). `prefix_hash` fingerprints the leading
-system-message run (system prompt + notebook block) and
-`first_changed_index`/`first_changed_cause` name where the render
-diverged from the previous step's (`cold`/`append`/`shrink`/
-`system-prompt`/`notebook-prefix`/`history`, or empty with
-`first_changed_index: -1` when the render is byte-identical). Every
-cache miss gets a named cause — the mechanism question "did the
-prefix churn or the tail grow" stops being a correlation guess.
+system-message run (system prompt + notebook block),
+`request_hash` fingerprints the whole request (system run + history +
+tool schemas — tool-call IDs and names are inside the message
+hashes), and `first_changed_index`/`first_changed_cause` name where
+the render diverged from the previous step's (`cold`/`append`/
+`shrink`/`system-prompt`/`notebook-prefix`/`history`/`tool-schemas`,
+or empty with `first_changed_index: -1` when the render is
+byte-identical). `tool-schemas` has no message position to point at,
+so the index stays -1. Every cache miss gets a named cause — the
+mechanism question "did the prefix churn or the tail grow" stops
+being a correlation guess.
 
-Attribution caveats worth knowing before reading the column:
-`first_changed_cause` diffs against an **in-process** hash vector —
-under the eval driver's restart-per-turn regime each turn's first step
-reports `cold` (per-process cold, not provider-cache cold), so
-turn-boundary churn is invisible until cross-process hashes land.
-`PrevHashes` advances at `PrepareStep`, before the request flies, so
-after a failed step the next diff compares against a render the
-provider may never have accepted. The hash is content-scoped — cache
+Process identity rides each row: `pid` and `first_of_process` mark
+which `crush run` produced the request and whether it was that
+process's first — the restart boundary is visible in the table
+itself. `drains` records each turn's detached-work join outcome
+(`attempted`/`completed`/`timeout_ms`) — whether the process settled
+its detached notebook generation before exit, timed out, or never
+reached the drain (cancel fast-path). `cache_anomaly:
+"provider-side"` marks a byte-identical request whose `cache_read`
+regressed — no local component changed, so the record labels the
+miss provider-side instead of fabricating a harness cause.
+
+Attribution survives the restart boundary: each turn's telemetry
+exports its final request fingerprint (`request_vector` — per-
+component hashes: system-run vector with notebook positions marked,
+history vector, tool-schema digest, the producing step's cache_read),
+and the driver hands it to the next turn's process via
+`CRUSH_EVAL_REQUEST_VECTOR`. The resumed process seeds its first
+step's diff from it — a turn-boundary notebook edit reports
+`notebook-prefix`, not `cold`. The vector carries `session_id` and
+the child rejects a mismatched or malformed handoff, so fingerprints
+can never leak across sessions. `cold` now means a genuine cold
+start — a fresh session, or a handoff that never arrived.
+
+Attribution caveats worth knowing before reading the column: the
+vector advances at `PrepareStep`, before the request flies, so after
+a failed step the next diff compares against a render the provider
+may never have accepted. The hash is content-scoped — cache
 breakpoints (`ProviderOptions`), `ProviderExecuted`, and
-`ClientMetadata` are deliberately unhashed, and tool *schemas* aren't
-in the message hashes at all. `turnTailMessages` pins a message at
-the tail: with a non-empty tail, new step content inserts before it
-and the positional diff reports `history`, not `append` — default
-eval arms have empty tails, so the primary signal is clean.
+`ClientMetadata` are deliberately unhashed; volatile transport
+details live outside request identity. `turnTailMessages` pins a
+message at the tail: with a non-empty tail, new step content inserts
+before it and the positional diff reports `history`, not `append` —
+default eval arms have empty tails, so the primary signal is clean.
+Replay forks carry the recorded boundary's vector through the same
+handoff, so a replayed turn diffs against the prefix it actually
+continues.
 `tail` is the ephemeral turn tail's only durable trace — one row per
 turn that rendered tail context, with each envelope's name and byte
 size (`turn_context`, `open_failures`, `ambiguity_gate`), the joined

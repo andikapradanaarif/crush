@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"sync"
 	"testing"
 
@@ -23,23 +24,24 @@ func TestAttributeStep(t *testing.T) {
 	user := func(text string) fantasy.Message { return telemetryMsg(fantasy.MessageRoleUser, text) }
 	nb := func(text string) fantasy.Message { return sys("<notebook>\n" + text + "\n</notebook>") }
 
-	hashesOf := func(msgs []fantasy.Message) []uint64 {
-		_, prev := attributeStep(msgs, nil)
+	vectorOf := func(msgs []fantasy.Message, tools []fantasy.AgentTool) RequestVector {
+		_, prev := attributeStep(msgs, tools, RequestVector{})
 		return prev
 	}
 
 	t.Run("cold start", func(t *testing.T) {
 		t.Parallel()
-		attr, _ := attributeStep([]fantasy.Message{sys("s"), user("u")}, nil)
+		attr, _ := attributeStep([]fantasy.Message{sys("s"), user("u")}, nil, RequestVector{})
 		require.Equal(t, 0, attr.FirstChanged)
 		require.Equal(t, "cold", attr.FirstChangedCause)
 		require.NotEmpty(t, attr.PrefixHash)
+		require.NotEmpty(t, attr.RequestHash)
 	})
 
 	t.Run("identical render", func(t *testing.T) {
 		t.Parallel()
 		msgs := []fantasy.Message{sys("s"), user("u1")}
-		attr, _ := attributeStep(msgs, hashesOf(msgs))
+		attr, _ := attributeStep(msgs, nil, vectorOf(msgs, nil))
 		require.Equal(t, -1, attr.FirstChanged)
 		require.Empty(t, attr.FirstChangedCause)
 	})
@@ -48,7 +50,7 @@ func TestAttributeStep(t *testing.T) {
 		t.Parallel()
 		prev := []fantasy.Message{sys("s"), user("u1")}
 		cur := []fantasy.Message{sys("s"), user("u1"), user("u2")}
-		attr, _ := attributeStep(cur, hashesOf(prev))
+		attr, _ := attributeStep(cur, nil, vectorOf(prev, nil))
 		require.Equal(t, 2, attr.FirstChanged)
 		require.Equal(t, "append", attr.FirstChangedCause)
 	})
@@ -57,7 +59,7 @@ func TestAttributeStep(t *testing.T) {
 		t.Parallel()
 		prev := []fantasy.Message{sys("s"), user("u1"), user("u2")}
 		cur := []fantasy.Message{sys("s"), user("u1")}
-		attr, _ := attributeStep(cur, hashesOf(prev))
+		attr, _ := attributeStep(cur, nil, vectorOf(prev, nil))
 		require.Equal(t, 2, attr.FirstChanged)
 		require.Equal(t, "shrink", attr.FirstChangedCause)
 	})
@@ -66,8 +68,8 @@ func TestAttributeStep(t *testing.T) {
 		t.Parallel()
 		prev := []fantasy.Message{sys("s"), nb("v1"), user("u1")}
 		cur := []fantasy.Message{sys("s"), nb("v2"), user("u1")}
-		attrPrev, prevHashes := attributeStep(prev, nil)
-		attr, _ := attributeStep(cur, prevHashes)
+		attrPrev, prevVec := attributeStep(prev, nil, RequestVector{})
+		attr, _ := attributeStep(cur, nil, prevVec)
 		require.Equal(t, 1, attr.FirstChanged)
 		require.Equal(t, "notebook-prefix", attr.FirstChangedCause)
 		// The prefix hash covers the whole leading system run, so a
@@ -79,7 +81,7 @@ func TestAttributeStep(t *testing.T) {
 		t.Parallel()
 		prev := []fantasy.Message{sys("v1"), user("u1")}
 		cur := []fantasy.Message{sys("v2"), user("u1")}
-		attr, _ := attributeStep(cur, hashesOf(prev))
+		attr, _ := attributeStep(cur, nil, vectorOf(prev, nil))
 		require.Equal(t, 0, attr.FirstChanged)
 		require.Equal(t, "system-prompt", attr.FirstChangedCause)
 	})
@@ -88,7 +90,7 @@ func TestAttributeStep(t *testing.T) {
 		t.Parallel()
 		prev := []fantasy.Message{sys("s"), user("u1"), user("u2a")}
 		cur := []fantasy.Message{sys("s"), user("u1"), user("u2b")}
-		attr, _ := attributeStep(cur, hashesOf(prev))
+		attr, _ := attributeStep(cur, nil, vectorOf(prev, nil))
 		require.Equal(t, 2, attr.FirstChanged)
 		require.Equal(t, "history", attr.FirstChangedCause)
 	})
@@ -97,10 +99,74 @@ func TestAttributeStep(t *testing.T) {
 		t.Parallel()
 		a := []fantasy.Message{sys("s"), user("u1")}
 		b := []fantasy.Message{sys("s"), user("different tail")}
-		attrA, _ := attributeStep(a, nil)
-		attrB, _ := attributeStep(b, nil)
+		attrA, _ := attributeStep(a, nil, RequestVector{})
+		attrB, _ := attributeStep(b, nil, RequestVector{})
 		require.Equal(t, attrA.PrefixHash, attrB.PrefixHash)
 	})
+
+	// A notebook block INSERTED into the system run likewise shifts
+	// history — same notebook attribution.
+	t.Run("notebook block insertion", func(t *testing.T) {
+		t.Parallel()
+		prev := []fantasy.Message{sys("s"), user("u1")}
+		cur := []fantasy.Message{sys("s"), nb("v1"), user("u1")}
+		attr, _ := attributeStep(cur, nil, vectorOf(prev, nil))
+		require.Equal(t, 1, attr.FirstChanged)
+		require.Equal(t, "notebook-prefix", attr.FirstChangedCause)
+	})
+
+	// Tool schemas hash in wire order — same tools, different order,
+	// different request.
+	t.Run("tool order changes the digest", func(t *testing.T) {
+		t.Parallel()
+		a := []fantasy.AgentTool{&fakeTool{name: "view"}, &fakeTool{name: "bash"}}
+		b := []fantasy.AgentTool{&fakeTool{name: "bash"}, &fakeTool{name: "view"}}
+		require.NotEqual(t, hashTools(a), hashTools(b))
+	})
+
+	// A schema-body change on one tool lands as tool-schemas —
+	// no message index exists to point at, so the index stays -1.
+	t.Run("tool schema change", func(t *testing.T) {
+		t.Parallel()
+		msgs := []fantasy.Message{sys("s"), user("u1")}
+		before := []fantasy.AgentTool{&fakeTool{name: "bash", desc: "v1"}}
+		after := []fantasy.AgentTool{&fakeTool{name: "bash", desc: "v2"}}
+		attr, _ := attributeStep(msgs, after, vectorOf(msgs, before))
+		require.Equal(t, -1, attr.FirstChanged)
+		require.Equal(t, "tool-schemas", attr.FirstChangedCause)
+	})
+}
+
+// Removing a notebook system block shifts every later index — the
+// segmented vector keeps it a notebook cause, not history (#115).
+func TestReviewCacheNotebookRemoval(t *testing.T) {
+	t.Parallel()
+	sys := func(text string) fantasy.Message { return telemetryMsg(fantasy.MessageRoleSystem, text) }
+	user := func(text string) fantasy.Message { return telemetryMsg(fantasy.MessageRoleUser, text) }
+	nb := func(text string) fantasy.Message { return sys("<notebook>\n" + text + "\n</notebook>") }
+	prev := []fantasy.Message{sys("s"), nb("v1"), user("u1")}
+	cur := []fantasy.Message{sys("s"), user("u1")}
+	_, prevVec := attributeStep(prev, nil, RequestVector{})
+	attr, _ := attributeStep(cur, nil, prevVec)
+	require.Equal(t, 1, attr.FirstChanged)
+	require.Equal(t, "notebook-prefix", attr.FirstChangedCause)
+}
+
+// Tool-call identity lives inside the full-request fingerprint —
+// two requests differing only in ToolCallID hash differently (#115).
+func TestReviewCacheToolIDFidelity(t *testing.T) {
+	t.Parallel()
+	mk := func(id string) fantasy.Message {
+		return fantasy.Message{
+			Role: fantasy.MessageRoleAssistant,
+			Content: []fantasy.MessagePart{fantasy.ToolCallPart{
+				ToolCallID: id, ToolName: "bash", Input: "x",
+			}},
+		}
+	}
+	va := hashRequest([]fantasy.Message{mk("call_1")}, nil)
+	vb := hashRequest([]fantasy.Message{mk("call_9")}, nil)
+	require.NotEqual(t, digestVector(va), digestVector(vb))
 }
 
 func TestHashMessage_PartTypeAndIDs(t *testing.T) {
@@ -191,11 +257,91 @@ func TestHashMessage_PartTypeAndIDs(t *testing.T) {
 				fantasy.ToolCallPart{ToolCallID: "call_9", ToolName: "bash", Input: "x"},
 			}},
 		}
-		_, prevHashes := attributeStep(prev, nil)
-		attr, _ := attributeStep(cur, prevHashes)
+		_, prevVec := attributeStep(prev, nil, RequestVector{})
+		attr, _ := attributeStep(cur, nil, prevVec)
 		require.Equal(t, 1, attr.FirstChanged)
 		require.Equal(t, "history", attr.FirstChangedCause)
 	})
+}
+
+// The eval driver restarts the process per turn — the prior
+// process's final vector arrives via CRUSH_EVAL_REQUEST_VECTOR, so
+// a notebook change at a restart boundary attributes as
+// notebook-prefix, not cold (#115). No t.Parallel: t.Setenv.
+func TestReviewCacheRestartAttribution(t *testing.T) {
+	sys := func(text string) fantasy.Message { return telemetryMsg(fantasy.MessageRoleSystem, text) }
+	user := func(text string) fantasy.Message { return telemetryMsg(fantasy.MessageRoleUser, text) }
+	nb := func(text string) fantasy.Message { return sys("<notebook>\n" + text + "\n</notebook>") }
+	prev := []fantasy.Message{sys("s"), nb("v1"), user("u1")}
+	cur := []fantasy.Message{sys("s"), nb("v2"), user("u1")}
+	_, seed := attributeStep(prev, nil, RequestVector{})
+	seed.SessionID = "sess"
+	raw, err := json.Marshal(seed)
+	require.NoError(t, err)
+	t.Setenv(EvalRequestVectorEnvVar, string(raw))
+	// The restarted process's first step diffs against the handoff —
+	// a real cause, not cold.
+	attr, _ := attributeStep(cur, nil, restartVector("sess"))
+	require.Equal(t, 1, attr.FirstChanged)
+	require.Equal(t, "notebook-prefix", attr.FirstChangedCause)
+}
+
+// The restart handoff must never let one session's fingerprint seed
+// another's diff — a mismatched session ID or malformed payload
+// degrades to a genuine cold start, not a bogus attribution (#115).
+// No t.Parallel: t.Setenv.
+func TestRestartVector_ScopeGuards(t *testing.T) {
+	sys := telemetryMsg(fantasy.MessageRoleSystem, "s")
+	_, v := attributeStep([]fantasy.Message{sys, telemetryMsg(fantasy.MessageRoleUser, "u")}, nil, RequestVector{})
+	v.SessionID = "sess-a"
+	raw, err := json.Marshal(v)
+	require.NoError(t, err)
+
+	t.Run("matching session seeds the diff", func(t *testing.T) {
+		t.Setenv(EvalRequestVectorEnvVar, string(raw))
+		got := restartVector("sess-a")
+		require.False(t, got.Empty())
+		require.Equal(t, v.System, got.System)
+	})
+
+	t.Run("foreign session is ignored", func(t *testing.T) {
+		t.Setenv(EvalRequestVectorEnvVar, string(raw))
+		require.True(t, restartVector("sess-b").Empty())
+	})
+
+	t.Run("malformed payload is ignored", func(t *testing.T) {
+		t.Setenv(EvalRequestVectorEnvVar, "{not json")
+		require.True(t, restartVector("sess-a").Empty())
+	})
+
+	t.Run("absent env is cold", func(t *testing.T) {
+		require.True(t, restartVector("sess-a").Empty())
+	})
+}
+
+// An identical request with a cache_read regression carries no local
+// cause — the record labels it provider-side instead of inventing a
+// component (#115).
+func TestCacheAnomaly(t *testing.T) {
+	t.Parallel()
+	msgs := []fantasy.Message{
+		telemetryMsg(fantasy.MessageRoleSystem, "s"),
+		telemetryMsg(fantasy.MessageRoleUser, "u"),
+	}
+	_, prev := attributeStep(msgs, nil, RequestVector{})
+	prev.CacheRead = 4096 // The fold stamps the producing step's hits.
+	cur, _ := attributeStep(msgs, nil, prev)
+	// Identical render, cache dropped to zero — provider-side.
+	require.True(t, cacheAnomaly(cur, 0))
+	// Identical render, cache grew — a warm cache is not an anomaly.
+	require.False(t, cacheAnomaly(cur, 8192))
+	// A changed request never claims provider-side even at zero.
+	changed := []fantasy.Message{msgs[0], telemetryMsg(fantasy.MessageRoleUser, "u2")}
+	cur2, _ := attributeStep(changed, nil, prev)
+	require.False(t, cacheAnomaly(cur2, 0))
+	// No baseline — a cold start's zero cache can't be a regression.
+	cold, _ := attributeStep(msgs, nil, RequestVector{})
+	require.False(t, cacheAnomaly(cold, 0))
 }
 
 func TestNoteBoundaryAdvance_VerbatimArm(t *testing.T) {
