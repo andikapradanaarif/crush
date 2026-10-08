@@ -3,6 +3,7 @@ package eval
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -33,6 +34,13 @@ const EvalFlagsEnvVar = "CRUSH_EVAL_FLAGS"
 // agent.EvalRequestVectorEnvVar; the constant is duplicated so eval
 // doesn't import agent.
 const EvalRequestVectorEnvVar = "CRUSH_EVAL_REQUEST_VECTOR"
+
+// EvalTurnsFileEnvVar names the JSON prompt list the persistent-
+// process driver hands a single `crush run` subprocess (#117) — the
+// child loops the turns on one session instead of restarting per
+// turn. Kept in sync with app.EvalTurnsFileEnvVar; the constant is
+// duplicated so eval doesn't import app.
+const EvalTurnsFileEnvVar = "CRUSH_EVAL_TURNS_FILE"
 
 // RunResult is what one trajectory run (all turns) produced.
 type RunResult struct {
@@ -636,6 +644,108 @@ func (c CrushRunner) subprocessEnv(telemetryFile string, maxSteps int, prevVecto
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+// PersistentRunner is the persistent-process regime (#117): the whole
+// trajectory runs inside ONE `crush run` subprocess — production's
+// process model — so the in-memory state restart mode rebuilds each
+// turn (prefix cache, prev-request vector, notebook high-water)
+// survives the boundary, and detached work lives past its turn — the
+// measurement point, not a bug. The child reads the prompt list from
+// CRUSH_EVAL_TURNS_FILE and drops per-turn telemetry DELTAS at
+// <base>-<i> — same fold as restart mode on the driver side. The
+// child decrements CRUSH_EVAL_MAX_STEPS between turns, mirroring the
+// restart driver's remaining-budget cap; the post-hoc overrun check
+// below is the backstop for steps a dying turn never reported.
+type PersistentRunner struct{ CrushRunner }
+
+// Run executes all turns in one subprocess. Failure classification
+// mirrors runTurnOnce: a non-cancellation telemetry error fails the
+// run; a deadline or budget overrun marks TimedOut.
+func (p PersistentRunner) Run(ctx context.Context, workdir string, turns []string, budget Budget) RunResult {
+	var res RunResult
+	deadline := time.Now().Add(time.Duration(budget.RunTimeoutSeconds) * time.Second)
+	if budget.RunTimeoutSeconds <= 0 {
+		deadline = time.Now().Add(15 * time.Minute)
+	}
+	ctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+
+	dir := filepath.Dir(workdir)
+	base := filepath.Base(workdir)
+	turnsFile := filepath.Join(dir, fmt.Sprintf(".eval-turns-%s.json", base))
+	data, err := json.Marshal(turns)
+	if err != nil {
+		res.Err = fmt.Errorf("marshal turns file: %w", err)
+		return res
+	}
+	if err := os.WriteFile(turnsFile, data, 0o600); err != nil {
+		res.Err = fmt.Errorf("write turns file: %w", err)
+		return res
+	}
+	defer os.Remove(turnsFile)
+
+	// The child appends -<i> per turn; the base keeps the restart
+	// mode's file-naming convention.
+	telBase := filepath.Join(dir, fmt.Sprintf(".eval-telemetry-%s", base))
+	bin := p.Bin
+	if bin == "" {
+		bin, _ = os.Executable()
+	}
+	cmd := exec.CommandContext(ctx, bin, "run", "--quiet")
+	cmd.Cancel = func() error {
+		if err := cmd.Process.Signal(os.Interrupt); err != nil {
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	cmd.WaitDelay = 10 * time.Second
+	cmd.Dir = workdir
+	// Appended after pinned: the turns file is a harness invariant —
+	// an ExtraEnv entry must not shadow it.
+	cmd.Env = append(p.subprocessEnv(telBase, budget.MaxSteps, nil),
+		EvalTurnsFileEnvVar+"="+turnsFile)
+	out, runErr := cmd.CombinedOutput()
+
+	emitted := 0
+	for i := 0; ; i++ {
+		tfile := fmt.Sprintf("%s-%d", telBase, i)
+		tel, telErr := readTelemetry(tfile)
+		if telErr != nil {
+			if errors.Is(telErr, os.ErrNotExist) {
+				break
+			}
+			res.Err = fmt.Errorf("telemetry unreadable after turn %d: %w", i, telErr)
+			return res
+		}
+		_ = os.Remove(tfile)
+		emitted++
+		res.addTurnTelemetry(tel, i)
+		noteTurnFields(&res, tel)
+		if tel.Error != "" && !isCancellation(tel.Error) {
+			res.Err = fmt.Errorf("agent run failed: %s", tel.Error)
+			res.ErrorClass = tel.ErrorClass
+			return res
+		}
+	}
+	switch {
+	case ctx.Err() == context.DeadlineExceeded:
+		res.TimedOut = true
+	case ctx.Err() != nil:
+		res.Err = ctx.Err()
+	case runErr != nil:
+		res.Err = fmt.Errorf("crush run failed: %w: %s", runErr, tail(out, 4096))
+	case emitted < len(turns):
+		// Clean exit short of the turn list means the child stopped
+		// mid-trajectory without reporting — classify as a broken
+		// run, not a short trajectory.
+		res.Err = fmt.Errorf("persistent run emitted %d of %d turns without error", emitted, len(turns))
+	case budget.MaxSteps > 0 && res.Steps > budget.MaxSteps:
+		// The child's step cap is per-turn; the trajectory-wide
+		// budget enforces here.
+		res.TimedOut = true
+	}
+	return res
 }
 
 func readTelemetry(path string) (runTelemetry, error) {

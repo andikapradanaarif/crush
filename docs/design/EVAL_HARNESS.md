@@ -505,6 +505,7 @@ the quarantine pass, below.
 	"name": "stub-superseded-flip",
 	"model": "hyper/deepseek-v4-pro-0813",
 	"temperature": 0,
+	"process_model": "restart",
 	"corpus": ["*"],
 	"runs_per_trajectory": {"stable": 3, "mid": 15, "uncharacterized": 5},
 	"arms": {
@@ -1148,10 +1149,66 @@ validation requires it to name a declared arm, `fork_turns` rejects
 negatives and dupes, and replay on a driver without `TurnRunner`
 skips the trajectory rather than erroring the experiment.
 
+## Process model — restart vs persistent
+
+```json
+{"process_model": "restart" | "persistent"}
+```
+
+The harness's default execution shape — one `crush run` subprocess per
+trajectory turn — is *not* production's shape. A real TUI session keeps
+one process alive across turns, so prefix-cache state, the previous
+request vector, notebook high-water/read tracking, request statistics,
+and the detached-work lifecycle all survive turn boundaries in memory.
+`process_model: "persistent"` runs that shape: the driver writes the
+trajectory's prompts to a JSON turns file, spawns exactly one
+`crush run --quiet` subprocess with `CRUSH_EVAL_TURNS_FILE` pointing at
+it, and the child loops the prompts through `App.RunNonInteractive` on
+a single session. `""` or `"restart"` keeps the per-turn subprocess
+(default, unchanged). `persistent` + `replay` fails validation —
+forked boundaries are restart-shaped by construction.
+
+**Per-turn deltas.** `SessionTelemetry` counters are cumulative over
+the session, so in turns-file mode the child emits a *delta* per turn
+(`SessionTelemetryDelta`, mirroring `EdgeFiringDelta`'s emitted-state
+bookkeeping): counters subtract the previous emission, `steps`/
+`tail_runs` ship only newly appended entries, and snapshot fields
+(current tail, request vector, pressure state, prompt composition)
+pass through as emission-time state. Turn `i`'s telemetry lands at
+`<CRUSH_EVAL_TELEMETRY>-<i>.json`; `PersistentRunner` folds them in
+order through the same `addTurnTelemetry` path restart uses, so step/
+tail/drain rows keep their turn indices and cumulative totals don't
+double-count. The child also decrements `CRUSH_EVAL_MAX_STEPS` between
+turns using the telemetry it just wrote — the trajectory budget binds
+mid-flight, not only post-hoc.
+
+**Provenance.** Every record stamps `process_model` (resolved, not
+declared) before early exits, so even error records carry which regime
+produced them. `first_of_process` from request-identity telemetry (#115)
+is the audit hook — in persistent mode only the trajectory's first
+request may bear it; any later `first_of_process: true` means state
+didn't survive.
+
+**The read.** The 2×2 pairs one restart manifest with one persistent
+manifest over the same corpus and arms —
+`eval/experiments/process-model-{restart,persistent}.json`. `crush eval
+interaction <restart.json> <persistent.json>` reports per-trajectory
+cells `I = Δ_restart − Δ_persistent` (each Δ the treatment-minus-
+control metric mean), their mean, and a materiality verdict against
+10% of the restart-regime control mean. *Material* means restart's
+numbers can't be read as persistent-equivalent for that metric —
+publish per regime; *immaterial* means the restart regime's estimate
+generalizes to the production process shape on the sampled
+trajectories. Non-conclusive records never sample, and trajectories
+missing a cell are listed as `incomplete` rather than silently
+dropped.
+
 ## Lifecycle contract — when coverage commits
 
 Each `task.turns[i]` runs as its own `crush run` subprocess
-continuing the same session (`driver.go`). Consolidation work a turn
+continuing the same session (`driver.go`) — or, under
+`process_model: "persistent"`, as one turn inside a single
+long-lived subprocess (see *Process model*). Consolidation work a turn
 spawns joins before its process exits (the detached-work drain), so
 **a turn's coverage commits by the end of its own run** — the
 contract corpus authors write predicates against. Per mechanism:

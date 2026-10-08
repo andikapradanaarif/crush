@@ -224,10 +224,13 @@ type coordinator struct {
 	// accumulates the per-session counts SessionTelemetry reports —
 	// shared across agent rebuilds, nil store skips the records.
 	// edgeFiringEmitted snapshots the counts the last EdgeFiringDelta
-	// call reported, per session.
+	// call reported, per session. telemetryEmitted does the same for
+	// the whole SessionTelemetry snapshot — the persistent-process
+	// arm's per-turn delta basis (#117).
 	edgeStore         EdgeFiringStore
 	edgeStats         *csync.Map[string, map[string]int]
 	edgeFiringEmitted *csync.Map[string, map[string]int]
+	telemetryEmitted  *csync.Map[string, SessionTelemetry]
 	// reqStats accumulates per-session request-size telemetry
 	// (prompt growth curve, rendered composition) — always-on, two
 	// map writes per step.
@@ -350,6 +353,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		edgeStore:             opts.EdgeStore,
 		edgeStats:             csync.NewMap[string, map[string]int](),
 		edgeFiringEmitted:     csync.NewMap[string, map[string]int](),
+		telemetryEmitted:      csync.NewMap[string, SessionTelemetry](),
 		reqStats:              csync.NewMap[string, requestStats](),
 		usageLedger:           csync.NewMap[string, ledgerUsage](),
 		tailAudit:             csync.NewMap[string, TailAudit](),

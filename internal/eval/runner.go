@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -251,6 +252,9 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 		return rec, fmt.Errorf("content hash: %w", err)
 	}
 	rec.Env.ContentHash = contentHash
+	// The process regime is provenance: an early-exit record must
+	// still say which regime produced (or failed to produce) it.
+	rec.ProcessModel = cmp.Or(exp.ProcessModel, ProcessModelRestart)
 	// Temperature is a run condition — an unpinned temp and temp-0
 	// are different baselines, invisible unless hashed.
 	tempKey := temperatureKey(exp.Temperature)
@@ -278,6 +282,16 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	if cr, ok := drv.(CrushRunner); ok {
 		cr.FlagKeys = flagNames(manifest)
 		drv = cr
+	}
+	if exp.ProcessModel == ProcessModelPersistent {
+		// The regime wraps the crush-subprocess driver: same binary,
+		// env, and telemetry fold — one process for all turns
+		// (#117). A custom Driver is authoritative for its own
+		// semantics and stays unwrapped; the record says which
+		// regime the experiment declared either way.
+		if cr, ok := drv.(CrushRunner); ok {
+			drv = PersistentRunner{CrushRunner: cr}
+		}
 	}
 
 	// Seed sessions first: each drv.Run opens a NEW session on the

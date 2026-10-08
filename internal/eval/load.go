@@ -357,6 +357,18 @@ func ValidateExperiment(e *Experiment) error {
 			seen[f] = true
 		}
 	}
+	switch e.ProcessModel {
+	case "", ProcessModelRestart, ProcessModelPersistent:
+	default:
+		return fmt.Errorf("process_model must be %q or %q, got %q",
+			ProcessModelRestart, ProcessModelPersistent, e.ProcessModel)
+	}
+	if e.ProcessModel == ProcessModelPersistent && e.Replay != nil {
+		// A replay fork restores boundary state per turn — restart-
+		// shaped by construction. There is no persistent-regime
+		// semantics for it to mean.
+		return fmt.Errorf("process_model %q cannot combine with replay — forked boundaries restart per turn by construction", ProcessModelPersistent)
+	}
 	if len(e.Corpus) == 0 {
 		return fmt.Errorf("corpus selector is required")
 	}

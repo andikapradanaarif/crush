@@ -21,6 +21,7 @@ func TestEvalEnvVarConstantsAgree(t *testing.T) {
 	require.Equal(t, agent.EvalTelemetryEnvVar, eval.EvalTelemetryEnvVar)
 	require.Equal(t, agent.EvalFlagsEnvVar, eval.EvalFlagsEnvVar)
 	require.Equal(t, agent.EvalMaxStepsEnvVar, eval.EvalMaxStepsEnvVar)
+	require.Equal(t, app.EvalTurnsFileEnvVar, eval.EvalTurnsFileEnvVar)
 }
 
 // NormalizeOptions inlines 25000 for notebook_raw_token_budget because

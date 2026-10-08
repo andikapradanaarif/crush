@@ -352,6 +352,72 @@ with the required pair count when recorded noise allows.`,
 	},
 }
 
+var evalInteractionCmd = &cobra.Command{
+	Use:   "interaction <restart-exp.json> <persistent-exp.json>",
+	Short: "Process-model 2×2 — does restart-per-turn change the measured notebook effect (#117)",
+	Long: `Computes the regime interaction I = Δ_restart − Δ_persist where each Δ is
+the treatment-minus-control metric mean per trajectory. The two
+manifests must declare different process_model regimes over the same
+corpus and arms — records self-identify via their process_model field,
+so the function reads a mixed pool.
+
+When |I| clears 10% of the restart-regime control mean the report is
+"material": publish the per-regime cell estimates and never fold the
+regimes into one effect estimate. Below the bound the restart regime's
+estimates read as persistent-equivalent for this metric. The metric
+defaults to the restart experiment's declared primary.`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		restartExp, err := eval.LoadExperiment(args[0])
+		if err != nil {
+			return err
+		}
+		persistExp, err := eval.LoadExperiment(args[1])
+		if err != nil {
+			return err
+		}
+		regime := func(e *eval.Experiment) string {
+			if e.ProcessModel == "" {
+				return eval.ProcessModelRestart
+			}
+			return e.ProcessModel
+		}
+		if regime(restartExp) == regime(persistExp) {
+			return fmt.Errorf("both experiments declare process_model %q — the 2×2 needs one restart and one persistent manifest", regime(restartExp))
+		}
+		metric, _ := cmd.Flags().GetString("metric")
+		if metric == "" {
+			if restartExp.Primary == nil {
+				return fmt.Errorf("--metric required — %s declares no primary", restartExp.Name)
+			}
+			metric = restartExp.Primary.Metric
+		}
+		r, err := evalRunner(cmd)
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		recsA, err := r.LoadExperimentRecords(restartExp.Name)
+		if err != nil {
+			return err
+		}
+		recsB, err := r.LoadExperimentRecords(persistExp.Name)
+		if err != nil {
+			return err
+		}
+		rep, err := eval.ProcessModelInteraction(append(recsA, recsB...), restartExp, metric)
+		if err != nil {
+			return err
+		}
+		out, err := json.MarshalIndent(rep, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(out))
+		return nil
+	},
+}
+
 var evalAnalyzeCmd = &cobra.Command{
 	Use:   "analyze <session.db>",
 	Short: "Reconstruct per-call gate metrics from a session DB",
@@ -609,6 +675,7 @@ func init() {
 		c.Flags().String("goos", "", "OS whose path conventions produced the artifact (default: this machine)")
 	}
 	evalCompareCmd.Flags().String("invocation", "", "invocation ID to compare (required when records span several)")
+	evalInteractionCmd.Flags().String("metric", "", "record metric for the interaction (default: the restart experiment's primary.metric)")
 	evalGenCmd.Flags().Int("quirks", 4, "relevant memory rows about the target defect (depth dose M, 0-4)")
 	evalGenCmd.Flags().Int("distractors", 0, "wrong-referent memory rows (dose K)")
 	evalGenCmd.Flags().String("plausibility", "mid", "distractor nearness: low|mid|high")
@@ -628,5 +695,5 @@ func init() {
 	evalCurveCmd.Flags().Int64("seed", 1, "base RNG seed for the grid")
 	evalCurveCmd.Flags().String("memory-params", "", "JSON overlay for params.Memory")
 	evalCurveCmd.Flags().String("out", "curve.jsonl", "JSONL output path")
-	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd, evalProbeCmd, evalProbeCacheCmd, evalCompareCmd, evalGenCmd, evalSelectCmd, evalCurveCmd)
+	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd, evalProbeCmd, evalProbeCacheCmd, evalCompareCmd, evalGenCmd, evalSelectCmd, evalCurveCmd, evalInteractionCmd)
 }
