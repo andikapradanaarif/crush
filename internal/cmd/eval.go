@@ -235,6 +235,78 @@ repair-prompt fingerprinted.`,
 	},
 }
 
+var evalProbeCmd = &cobra.Command{
+	Use:   "probe <session.db> <probe-name|all>",
+	Short: "Offline mechanism probes over a preserved session DB (issue #109)",
+	Long: `Runs a named probe — a zero-API-cost mechanism check — over a
+preserved or live session DB. Probes consume the analyzer's labeled
+call sequence plus per-call inputs and result metadata, so ordering,
+turn segmentation, and normalization stay single-sourced.
+
+Known probes:
+
+  post-edit-window    for every view call, was its range inside the
+                      ±10-line window of the prior mutation on the
+                      same path? (the #98 served-class floor)
+  view-edit-same-file per-path mutations and post-edit view counts —
+                      the window-free servable superset
+  turn-start-reread   first view per (path,turn) of a file mutated in
+                      an earlier turn — the collapse re-open signature
+
+'all' runs every probe. Flags match 'eval analyze': --workdir,
+--session, --trajectory, --goos.`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evalDir, _ := cmd.Flags().GetString("eval-dir")
+		workdir, _ := cmd.Flags().GetString("workdir")
+		sessionID, _ := cmd.Flags().GetString("session")
+		trajID, _ := cmd.Flags().GetString("trajectory")
+
+		dbPath := args[0]
+		if !filepath.IsAbs(dbPath) {
+			if _, err := os.Stat(dbPath); err != nil {
+				// session_db paths in run records are eval-dir-relative.
+				dbPath = filepath.Join(evalDir, dbPath)
+			}
+		}
+
+		var turns []string
+		if trajID != "" {
+			traj, err := eval.LoadTrajectory(filepath.Join(evalDir, "corpus", trajID))
+			if err != nil {
+				return err
+			}
+			turns = traj.Task.Turns
+		}
+		if workdir == "" {
+			workdir, _ = os.Getwd()
+		}
+
+		goos, _ := cmd.Flags().GetString("goos")
+		opts := eval.AnalyzeOptions{
+			SessionID: sessionID,
+			Workdir:   workdir,
+			Turns:     turns,
+			GOOS:      goos,
+		}
+		names := []string{args[1]}
+		if args[1] == "all" {
+			names = eval.ProbeNames()
+		}
+		for i, name := range names {
+			rep, err := eval.RunProbe(cmd.Context(), dbPath, name, opts)
+			if err != nil {
+				return err
+			}
+			if i > 0 {
+				fmt.Println()
+			}
+			fmt.Print(rep.String())
+		}
+		return nil
+	},
+}
+
 var evalProbeCacheCmd = &cobra.Command{
 	Use:   "probe-cache",
 	Short: "Measure the serving endpoint's prompt-cache behavior (issue #116)",
@@ -356,10 +428,12 @@ func init() {
 	evalProbeCacheCmd.Flags().Int64("seed", time.Now().UnixNano(), "filler/schedule RNG seed")
 	evalProbeCacheCmd.Flags().Float64("delay-scale", 1.0, "multiplier on inter-request sleeps (spec timing = 1.0)")
 	evalProbeCacheCmd.Flags().Bool("dry-run", false, "print schedule and send estimate without sending")
-	evalAnalyzeCmd.Flags().String("workdir", "", "run working dir for normalizing relative call paths (default: CWD)")
-	evalAnalyzeCmd.Flags().String("session", "", "session ID to analyze (default: latest parent session)")
-	evalAnalyzeCmd.Flags().String("trajectory", "", "corpus trajectory ID — supplies turns for process-turn segmentation")
-	evalAnalyzeCmd.Flags().String("goos", "", "OS whose path conventions produced the artifact (default: this machine)")
+	for _, c := range []*cobra.Command{evalAnalyzeCmd, evalProbeCmd} {
+		c.Flags().String("workdir", "", "run working dir for normalizing relative call paths (default: CWD)")
+		c.Flags().String("session", "", "session ID to analyze (default: latest parent session)")
+		c.Flags().String("trajectory", "", "corpus trajectory ID — supplies turns for process-turn segmentation")
+		c.Flags().String("goos", "", "OS whose path conventions produced the artifact (default: this machine)")
+	}
 	evalCompareCmd.Flags().String("invocation", "", "invocation ID to compare (required when records span several)")
-	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd, evalProbeCacheCmd, evalCompareCmd)
+	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd, evalProbeCmd, evalProbeCacheCmd, evalCompareCmd)
 }
