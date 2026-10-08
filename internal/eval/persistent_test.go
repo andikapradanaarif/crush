@@ -79,7 +79,8 @@ func fakeEvalChild() int {
 			}
 			if strconv.Itoa(i) == failAt {
 				write(fmt.Sprintf("%s-%d", telBase, i), i, i == 0, map[string]any{
-					"model": "mock/m-persistent", "error": "boom", "error_class": "fixture"})
+					"model": "mock/m-persistent", "error": "boom", "error_class": "fixture",
+				})
 				return 1
 			}
 			write(fmt.Sprintf("%s-%d", telBase, i), i, i == 0, map[string]any{"model": "mock/m-persistent"})
@@ -284,8 +285,10 @@ func TestProcessModelInteraction(t *testing.T) {
 	t.Parallel()
 	exp := &Experiment{}
 	rec := func(traj, regime, arm string, steps int, o Outcome) RunRecord {
-		return RunRecord{TrajectoryID: traj, ProcessModel: regime,
-			Arm: arm, Steps: steps, Outcome: o}
+		return RunRecord{
+			TrajectoryID: traj, ProcessModel: regime,
+			Arm: arm, Steps: steps, Outcome: o,
+		}
 	}
 	recs := []RunRecord{
 		// t1: restart Δ = 8−10 = −2; persistent Δ = 9−10 = −1; I = −1.
@@ -324,8 +327,10 @@ func TestProcessModelInteraction_Material(t *testing.T) {
 	t.Parallel()
 	exp := &Experiment{}
 	rec := func(traj, regime, arm string, steps int) RunRecord {
-		return RunRecord{TrajectoryID: traj, ProcessModel: regime,
-			Arm: arm, Steps: steps, Outcome: OutcomePass}
+		return RunRecord{
+			TrajectoryID: traj, ProcessModel: regime,
+			Arm: arm, Steps: steps, Outcome: OutcomePass,
+		}
 	}
 	recs := []RunRecord{
 		// Restart measures a −4 effect; persistent measures −1 —

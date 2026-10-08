@@ -203,10 +203,14 @@ func TestEmitEvalTelemetry_DrainAndVector(t *testing.T) {
 // re-counts every prior turn's spend.
 func TestEmitEvalTelemetry_TurnsFileEmitsDelta(t *testing.T) {
 	coord := deltaTelemetryCoordinator{
-		snapshot: agent.SessionTelemetry{LedgerSteps: 9,
-			LedgerUsage: fantasy.Usage{InputTokens: 500}},
-		delta: agent.SessionTelemetry{LedgerSteps: 3,
-			LedgerUsage: fantasy.Usage{InputTokens: 40}},
+		snapshot: agent.SessionTelemetry{
+			LedgerSteps: 9,
+			LedgerUsage: fantasy.Usage{InputTokens: 500},
+		},
+		delta: agent.SessionTelemetry{
+			LedgerSteps: 3,
+			LedgerUsage: fantasy.Usage{InputTokens: 40},
+		},
 	}
 	app := &App{
 		AgentCoordinator: coord,

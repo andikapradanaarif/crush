@@ -120,7 +120,7 @@ func ProcessModelInteraction(records []RunRecord, exp *Experiment, metric string
 		c1, okC1 := mean(m[key{ProcessModelRestart, ArmTreatment}])
 		a2, okA2 := mean(m[key{ProcessModelPersistent, ArmControl}])
 		c2, okC2 := mean(m[key{ProcessModelPersistent, ArmTreatment}])
-		if !(okA1 && okC1 && okA2 && okC2) {
+		if !okA1 || !okC1 || !okA2 || !okC2 {
 			rep.Incomplete = append(rep.Incomplete, trajID)
 			continue
 		}
