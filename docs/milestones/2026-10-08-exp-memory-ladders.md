@@ -1,7 +1,8 @@
 # 2026-10-08 — #223 memory ladders: first paid results
 
-**Spend.** 216 conclusive runs, `alibaba-tp/deepseek-v4.1-flash`,
-temperature 0. Five invocations, all gates PASS, zero unmatched
+**Spend.** 240 conclusive runs (216 ladder + 24 realism), plus
+4 gate-rejected seeding attempts, `alibaba-tp/deepseek-v4.1-flash`,
+temperature 0. Six invocations, all gates PASS, zero unmatched
 pairs. Run records live in `eval/results/` (gitignored); the rows
 below are from `crush eval compare` on the clean invocations.
 
@@ -89,11 +90,34 @@ whether it crosses into net harm is under-powered at 12 pairs.
   a pilot's control passes reclassify the trajectory
   (uncharacterized → mid) and previously zeroed follow-on plans.
 
+## Agent-seeded realism arm (28 runs, `agentseeded-three-pool`)
+
+The `prior_sessions` twin of the pinned m4k0 cell — same fixture,
+check, and prompt; the two seed sessions are real agent turns
+("fix the ./tax test", "check ./quota without modifying files").
+
+**Seeding honesty holds.** The agent seeds produced the designed
+shape on every gated attempt: `resolved_rows=1` (tax),
+`open_quota=1` (target still broken — the tree gate
+`return 41` fires), `seed_sessions=2`. Two early attempts were
+rejected inconclusive on `cmd_rows=3 < 4` — the agent ran exactly
+the prompted commands, which dedupe to ~3 `(cmd,cwd)` rows; the
+floor was relaxed to ≥3 and the snapshot machinery correctly
+cached only gate-passing state.
+
+**Measured replication.** Under agent seeds: control 7.75 →
+treatment 7.67 steps (**-1.1%**, vs scripted twin's -6%); pass
+12/12 both arms; admits 2.0 (1 open + 1 command) vs scripted's
+3.0 — the seed agent ran `go test ./quota` once where the script
+ran it twice (`-run` variant + plain), so the rendered dose is
+leaner. Mechanism fingerprint identical: resolved row rejects
+`out_of_scope`, command twins shadowed by open. Verdict: **the
+scripted-seed machinery is an honest surrogate within this cell's
+resolution** — direction and mechanism replicate; magnitude
+differences trace to authored dose, not distortion.
+
 ## Still open
 
-- **Agent-seeded realism arm** — scripted `seed_commands` are now
-  API-unblocked; the `prior_sessions` arm keeps them honest. Needs
-  a fixture with agent-authored seeds.
 - **Combined cell** (M=4, j=1) — both manifest arms exist; the
   singles suggest j=1 sits inside the benefit regime.
 - **j>3 cells** — the cap saturates open renders at 5; higher wrong
