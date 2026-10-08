@@ -1,0 +1,20 @@
+{
+  "check": {
+    "expect_start_state": "fail",
+    "script": "check.sh"
+  },
+  "id": "gen-m0k0-mid-explicit-d0-s001-001",
+  "origin": {
+    "kind": "synthetic"
+  },
+  "schema_version": 1,
+  "start_state": {
+    "fixture_dir": "fixture",
+    "kind": "fixture"
+  },
+  "task": {
+    "turns": [
+      "Fix the failing test in ./quota so `go test ./...` passes — Contract() must return 42. Make the smallest change."
+    ]
+  }
+}

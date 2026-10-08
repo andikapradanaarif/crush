@@ -87,6 +87,10 @@ every characterization pass a diff to reviewed files.
 		{"turns": ["seed session 1 prompt"]},
 		{"turns": ["seed session 2 prompt", "follow-up"]}
 	],
+	"seed_commands": [
+		{"ago_seconds": 259200, "commands": ["go test ./calc", "...fix...", "go test ./calc"]},
+		{"ago_seconds": 86400, "commands": ["go build ./badpkg"]}
+	],
 	"check": {
 		"script": "check.sh",
 		"expect_start_state": "fail",
@@ -169,9 +173,88 @@ every characterization pass a diff to reviewed files.
   `check.seed_script` to catch it deterministically (below); for
   deeper forensics, audit the preserved db (`warm_start.session_ids`
   → the seed session's tool calls) or compare workdir diffs.
+- **`seed_commands`.** Scripted seed sessions — the dose-control tier
+  the memory ladders need. Each element is one session: a real
+  `sessions` row, each `commands` entry executed through the same
+  shell interpreter + `RecordRun` write path the bash tool feeds —
+  so `command_memory`, `failure_memory`, headline extraction,
+  component-exit laundering, and signature normalization are all
+  production code — under a controlled clock backdated by
+  `ago_seconds`. Sessions are free, so depth ladders scale row
+  counts without confounding session count (or the reverse: one
+  command per element = N sessions). Costs: tokens/steps are
+  honestly zero — `warm_start.sessions`/`session_ids` still count
+  the scripted ids for provenance, so cost-per-pass reads a real
+  zero rather than a dropped field. `check.seed_script` is the dose
+  gate: assert the row counts/kinds the cell was designed around
+  and a diverged seed rejects `inconclusive` before the measured
+  run is spent. A command reaching no verdict (unparseable)
+  aborts `error` — the authored state diverged. Trade-off: scripted
+  rows are cleaner than agent rows (no composite-command noise);
+  keep one agent-seeded arm in ladders to keep the selector honest.
+- **Seed snapshots (automatic).** Once a seeded trajectory's seeds
+  pass `seed_script`, the harness snapshots the workdir + a
+  WAL-checkpointed `crush.db` under `<work-parent>/.snapshots/
+  <trajectory>-<content-hash>/`. Every later attempt — and the
+  other arm — restores those bytes instead of re-seeding: seed
+  variance leaves the estimate entirely, and paid runs spend
+  nothing on seeding. The memory partition is pinned to
+  `options.project_key = "eval-<content-hash>"` (harness-managed —
+  arms cannot override it), so a db restored under a different
+  materialized path still reads the rows its seeds wrote. A
+  restored run's `warm_start` carries the seed `session_ids` for
+  provenance but zero spend — the seed cost was paid once, by the
+  attempt that wrote the snapshot. Restore failures fall back to
+  re-seeding; the seed spec, not the snapshot, is the source of
+  truth. Editing the trajectory changes the content hash, so a
+  seed-spec edit never replays a stale snapshot.
+- **`crush eval gen` — parametric instances.** The ladder cells come
+  from a generator (`internal/eval/gen.go`), not hand-written
+  fixtures: `--quirks` (relevant memory rows about the target, 0-4),
+  `--distractors` (wrong-referent rows), `--plausibility`
+  (low=benign commands / mid=stale-name failures / high=tag-hidden
+  failing tests the check can't see / in_scope=tag-hidden decoy
+  tests inside the target package — the only distractor class that
+  binds, so stored-K becomes rendered-j), `--prompt` (vague|explicit),
+  `--depth` (package nesting = discovery cost), `--seed`, `--count`
+  (replicates). Each instance draws quirk identity and placement
+  from the RNG, so a replicate never re-measures the same quirk —
+  and a sealed held-out pool (#224) is the same generator with the
+  pools held back. Emitted instances are plain trajectory dirs —
+  fixture, authored `seed_commands`, a dose gate asserting exact
+  pool counts, `check.sh` — so validation, content-hash, snapshot
+  replay, and the corpus sweep treat them identically to
+  hand-written cells. Snapshot replay composes per instance:
+  replicates are distinct dirs, never conflated.
+- **`crush eval select` — the free half of the ladders.** Each
+  stored-dose → rendered-dose question answers without a model
+  call: `select <traj-id>` materializes the trajectory once under
+  `<eval-dir>/genwork/<id>/` (scripted seeds run once; later
+  probes reuse the seeded dir), fetches the three memory pools
+  under `--memory-params` (a `params.Memory` JSON overlay —
+  `open_render_limit:0` suppresses the pool exactly as the live
+  fetch path does), and runs the production selector
+  (`agent.SimulateSelection`) over them. The report is every
+  candidate's verdict — pool, reason, settled-by — plus per-pool
+  seen/admitted/capped counts: the distractor curve's
+  P(wrong row rendered | K stored) and the depth curve's
+  P(relevant row rendered | N stored) are this table aggregated
+  over cells. One mechanism caveat it surfaces honestly:
+  suppressing the open pool un-shadows its command twins —
+  LOO ablation is never strictly row-removal.
+- **`crush eval curve` — the sweep driver.** Enumerates a dose
+  grid (`--quirks/--distractors/--plausibility/--prompt/--depth`
+  take comma lists, `--replicates` the per-cell draws), generates
+  each cell, probes it, and streams one JSONL row per instance to
+  `--out` — the published input to the ladder analysis before any
+  paid run is scheduled. The generator keeps every seeded row
+  inside the read-side `open_failure_ttl` — a distractor backdated
+  past the bound is dead state the fetch never delivers, so the
+  stagger compresses to six-hour steps at the K=50 top dose.
 - **`check.seed_script`.** Optional gate asserting the designed warm
-  state — runs once after the last prior session and before the
-  measured session, with the same contract as `check.sh` (cwd =
+  state — runs once after seeding (`prior_sessions` and/or
+  `seed_commands`) and before the measured session, with the same
+  contract as `check.sh` (cwd =
   workdir, `EVAL_*` env, shared `timeout_seconds`, `EVAL_JSON`
   detail). Its detail lands on the record as `seed_state` — the
   verifiable evidence of what the measured session started from —
@@ -180,10 +263,10 @@ every characterization pass a diff to reviewed files.
   resolved, the task is already done): the run is rejected as
   `inconclusive` before the measured session launches, never scored
   on the wrong premise. A gate that cannot execute or times out is
-  `error` — infra, not state. Valid only with `prior_sessions`;
-  quarantine does not run it (quarantine has no seeds). Gate output
-  lands in `check_detail` (`seed_check_*` keys on failure) — not
-  `check_stdout`, which is check.sh-only.
+  `error` — infra, not state. Valid with `prior_sessions` and/or
+  `seed_commands`; quarantine does not run it (quarantine has no
+  seeds). Gate output lands in `check_detail` (`seed_check_*` keys
+  on failure) — not `check_stdout`, which is check.sh-only.
   **Assert the memory state, not just the worktree.** The premise of
   a warm cell lives in crush.db, reachable from the gate at
   `$(dirname "$EVAL_WORKDIR")/$(basename "$EVAL_WORKDIR").crush-data/
@@ -196,11 +279,15 @@ every characterization pass a diff to reviewed files.
   the touched file) on the db — which is the difference between a
   stale row and a fresh one the vague prompt would happily fix
   again. Declare `sqlite3` in `requires.tools` for db-asserting
-  gates. Caution: a gate asserting an unreachable state inconcluses
-  every attempt at full seed cost — the same starvation exposure as
-  a coverage miss, and quarantine can't pre-flight it (no seeds
-  there), so the first signal is a trajectory landing
-  all-inconclusive with `seed_state` details to inspect.
+  gates. Gate SQL is TTL-blind — it counts stored rows whether or
+  not the read path would still deliver them, so an arm overlay
+  that shortens `open_failure_ttl` below the authored backdating
+  gate-passes then starves at fetch. Caution: a gate asserting an
+  unreachable state inconcluses every attempt at full seed cost —
+  the same starvation exposure as a coverage miss, and quarantine
+  can't pre-flight it (no seeds there), so the first signal is a
+  trajectory landing all-inconclusive with `seed_state` details to
+  inspect.
 - **`origin`.** `scrubbed` must be `true` — a value, not just a
   present field — when `kind` is `production`, and for `regression`
   whenever `source` is a real session or bug report — the same

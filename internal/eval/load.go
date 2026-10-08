@@ -123,8 +123,8 @@ func ValidateTrajectory(t *Trajectory, trajDir string) []string {
 		// trajectory seeds — the predicate would fail closed on
 		// every run of a cold trajectory: permanently inconclusive
 		// at load time, not a runtime surprise.
-		if strings.HasPrefix(field, "warm_start.") && len(t.PriorSessions) == 0 {
-			problems = append(problems, fmt.Sprintf("coverage %q: warm_start.* requires prior_sessions — a cold trajectory carries no seeding ledger", key))
+		if strings.HasPrefix(field, "warm_start.") && len(t.PriorSessions) == 0 && len(t.SeedCommands) == 0 {
+			problems = append(problems, fmt.Sprintf("coverage %q: warm_start.* requires seeding (prior_sessions or seed_commands) — a cold trajectory carries no seeding ledger", key))
 		}
 	}
 	if t.Requires.Network != nil && !*t.Requires.Network && t.StartState.Kind == "git" {
@@ -156,6 +156,21 @@ func ValidateTrajectory(t *Trajectory, trajDir string) []string {
 		}
 	}
 
+	for i, seed := range t.SeedCommands {
+		if seed.AgoSeconds < 0 {
+			problems = append(problems, fmt.Sprintf("seed_commands[%d].ago_seconds must be >= 0 — seeds model the past, not the future", i))
+		}
+		if len(seed.Commands) == 0 {
+			problems = append(problems, fmt.Sprintf("seed_commands[%d].commands must contain at least one command", i))
+			continue
+		}
+		for j, cmd := range seed.Commands {
+			if strings.TrimSpace(cmd) == "" {
+				problems = append(problems, fmt.Sprintf("seed_commands[%d].commands[%d] is empty", i, j))
+			}
+		}
+	}
+
 	if t.Check.Script == "" {
 		problems = append(problems, "check.script is required")
 	} else if _, err := os.Stat(filepath.Join(trajDir, t.Check.Script)); err != nil {
@@ -166,8 +181,8 @@ func ValidateTrajectory(t *Trajectory, trajDir string) []string {
 		// The gate exists to judge the state seeding left behind —
 		// on a cold trajectory it would assert a state nothing
 		// produces, which is a manifest bug, not a weaker check.
-		if len(t.PriorSessions) == 0 {
-			problems = append(problems, "check.seed_script requires prior_sessions — there is no seeded state to assert")
+		if len(t.PriorSessions) == 0 && len(t.SeedCommands) == 0 {
+			problems = append(problems, "check.seed_script requires seeding (prior_sessions or seed_commands) — there is no seeded state to assert")
 		}
 		if _, err := os.Stat(filepath.Join(trajDir, t.Check.SeedScript)); err != nil {
 			problems = append(problems, fmt.Sprintf("seed check script %q: %v", t.Check.SeedScript, err))
@@ -1000,8 +1015,8 @@ func ValidateArmCoverageVsCorpus(e *Experiment, trajs []*Trajectory) error {
 				if err != nil {
 					continue // Load-time validation reports the bad key.
 				}
-				if strings.HasPrefix(field, "warm_start.") && len(t.PriorSessions) == 0 {
-					problems = append(problems, fmt.Sprintf("arm %q coverage %q: warm_start.* requires prior_sessions on trajectory %q — a cold run carries no seeding ledger", name, key, t.ID))
+				if strings.HasPrefix(field, "warm_start.") && len(t.PriorSessions) == 0 && len(t.SeedCommands) == 0 {
+					problems = append(problems, fmt.Sprintf("arm %q coverage %q: warm_start.* requires seeding on trajectory %q — a cold run carries no seeding ledger", name, key, t.ID))
 					continue
 				}
 				if op != "min" {

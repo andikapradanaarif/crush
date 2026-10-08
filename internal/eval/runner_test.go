@@ -478,7 +478,7 @@ func TestWriteArmConfig_CollisionAndContent(t *testing.T) {
 	wd := t.TempDir()
 	exp := &Experiment{Model: "hyper/x", Temperature: ptr(0.0)}
 	arm := Arm{Config: ArmConfig{Options: map[string]any{"flag_a": true}}}
-	require.NoError(t, WriteArmConfig(wd, exp, arm, &FlagsManifest{Defaults: map[string]any{}}))
+	require.NoError(t, WriteArmConfig(wd, exp, arm, &FlagsManifest{Defaults: map[string]any{}}, "key"))
 
 	rc, err := os.ReadFile(filepath.Join(wd, ".crushrc"))
 	require.NoError(t, err)
@@ -493,7 +493,7 @@ func TestWriteArmConfig_CollisionAndContent(t *testing.T) {
 	// A pre-existing config is an error, not a silent override.
 	wd2 := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wd2, "crushrc"), []byte("x"), 0o644))
-	require.Error(t, WriteArmConfig(wd2, exp, arm, &FlagsManifest{Defaults: map[string]any{}}))
+	require.Error(t, WriteArmConfig(wd2, exp, arm, &FlagsManifest{Defaults: map[string]any{}}, "key"))
 }
 
 func ptr[T any](v T) *T { return &v }
@@ -560,7 +560,7 @@ func TestWriteArmConfig_MergesJSONConfig(t *testing.T) {
 	wd := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wd, ".crush.json"),
 		[]byte(`{"options":{"fixture_key":"keep","flag_a":false},"other":"x"}`), 0o644))
-	require.NoError(t, WriteArmConfig(wd, exp, arm, &FlagsManifest{Defaults: map[string]any{}}))
+	require.NoError(t, WriteArmConfig(wd, exp, arm, &FlagsManifest{Defaults: map[string]any{}}, "key"))
 	raw, err := os.ReadFile(filepath.Join(wd, ".crush.json"))
 	require.NoError(t, err)
 	require.Contains(t, string(raw), `"fixture_key": "keep"`)
@@ -570,7 +570,7 @@ func TestWriteArmConfig_MergesJSONConfig(t *testing.T) {
 	// crush.json is lower precedence than .crush.json — allowed.
 	wd2 := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wd2, "crush.json"), []byte(`{}`), 0o644))
-	require.NoError(t, WriteArmConfig(wd2, exp, arm, &FlagsManifest{Defaults: map[string]any{}}))
+	require.NoError(t, WriteArmConfig(wd2, exp, arm, &FlagsManifest{Defaults: map[string]any{}}, "key"))
 }
 
 // Seeds run under WriteSeedConfig — the shared model pin plus harness
@@ -585,14 +585,14 @@ func TestWriteSeedConfig_ThenArmConfig(t *testing.T) {
 	manifest := &FlagsManifest{Defaults: map[string]any{}}
 	arm := Arm{Config: ArmConfig{Options: map[string]any{"flag_a": true}}}
 
-	require.NoError(t, WriteSeedConfig(wd, exp, manifest))
+	require.NoError(t, WriteSeedConfig(wd, exp, manifest, "key"))
 	raw, err := os.ReadFile(filepath.Join(wd, ".crush.json"))
 	require.NoError(t, err)
 	require.Contains(t, string(raw), `"disable_metrics": true`)
 	require.Contains(t, string(raw), `"data_directory"`)
 	require.NotContains(t, string(raw), "flag_a")
 
-	require.NoError(t, WriteArmConfig(wd, exp, arm, manifest))
+	require.NoError(t, WriteArmConfig(wd, exp, arm, manifest, "key"))
 	raw, err = os.ReadFile(filepath.Join(wd, ".crush.json"))
 	require.NoError(t, err)
 	require.Contains(t, string(raw), `"flag_a": true`)
@@ -603,8 +603,8 @@ func TestWriteSeedConfig_ThenArmConfig(t *testing.T) {
 	// .crush.json with DIVERGENT providers still rejects.
 	exp.Providers = map[string]any{"tp": map[string]any{"type": "openai-compat", "api_key": "$KEY"}}
 	wd3 := t.TempDir()
-	require.NoError(t, WriteSeedConfig(wd3, exp, manifest))
-	require.NoError(t, WriteArmConfig(wd3, exp, arm, manifest))
+	require.NoError(t, WriteSeedConfig(wd3, exp, manifest, "key"))
+	require.NoError(t, WriteArmConfig(wd3, exp, arm, manifest, "key"))
 	raw, err = os.ReadFile(filepath.Join(wd3, ".crush.json"))
 	require.NoError(t, err)
 	require.Contains(t, string(raw), `"openai-compat"`)
@@ -612,8 +612,8 @@ func TestWriteSeedConfig_ThenArmConfig(t *testing.T) {
 	wd4 := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wd4, ".crush.json"),
 		[]byte(`{"providers":{"other":{"type":"anthropic"}}}`), 0o644))
-	require.Error(t, WriteSeedConfig(wd4, exp, manifest))
-	require.Error(t, WriteArmConfig(wd4, exp, arm, manifest))
+	require.Error(t, WriteSeedConfig(wd4, exp, manifest, "key"))
+	require.Error(t, WriteArmConfig(wd4, exp, arm, manifest, "key"))
 
 	// A fixture shipping the experiment's own providers block
 	// byte-identically resolves the same way — tolerated. Pinned so
@@ -622,15 +622,15 @@ func TestWriteSeedConfig_ThenArmConfig(t *testing.T) {
 	provDoc, err := json.Marshal(map[string]any{"providers": exp.Providers})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(wd5, ".crush.json"), provDoc, 0o644))
-	require.NoError(t, WriteSeedConfig(wd5, exp, manifest))
-	require.NoError(t, WriteArmConfig(wd5, exp, arm, manifest))
+	require.NoError(t, WriteSeedConfig(wd5, exp, manifest, "key"))
+	require.NoError(t, WriteArmConfig(wd5, exp, arm, manifest, "key"))
 
 	// A fixture .crushrc still collides — only the harness's own
 	// identical pin is tolerated.
 	wd2 := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wd2, ".crushrc"), []byte("model large other/y\n"), 0o644))
-	require.Error(t, WriteSeedConfig(wd2, exp, manifest))
-	require.Error(t, WriteArmConfig(wd2, exp, arm, manifest))
+	require.Error(t, WriteSeedConfig(wd2, exp, manifest, "key"))
+	require.Error(t, WriteArmConfig(wd2, exp, arm, manifest, "key"))
 }
 
 func TestBands_PinSpellingVsResolved(t *testing.T) {
@@ -890,9 +890,11 @@ func TestWriteArmConfig_RejectsHarnessInvariants(t *testing.T) {
 	wd := t.TempDir()
 	exp := &Experiment{Model: "hyper/x", Temperature: ptr(0.0)}
 	manifest := &FlagsManifest{Defaults: map[string]any{"data_directory": "/x"}}
-	err := WriteArmConfig(wd, exp, Arm{Config: ArmConfig{Options: map[string]any{"data_directory": "evil"}}}, manifest)
+	err := WriteArmConfig(wd, exp, Arm{Config: ArmConfig{Options: map[string]any{"data_directory": "evil"}}}, manifest, "key")
 	require.ErrorContains(t, err, "harness manages")
-	err = WriteArmConfig(t.TempDir(), exp, Arm{Config: ArmConfig{Options: map[string]any{"disable_metrics": false}}}, manifest)
+	err = WriteArmConfig(t.TempDir(), exp, Arm{Config: ArmConfig{Options: map[string]any{"disable_metrics": false}}}, manifest, "key")
+	require.ErrorContains(t, err, "harness manages")
+	err = WriteArmConfig(t.TempDir(), exp, Arm{Config: ArmConfig{Options: map[string]any{"project_key": "evil"}}}, manifest, "key")
 	require.ErrorContains(t, err, "harness manages")
 }
 
@@ -907,13 +909,13 @@ func TestWriteArmConfig_RejectsFixtureManifestFlags(t *testing.T) {
 	wd := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wd, ".crush.json"),
 		[]byte(`{"options":{"auto_lsp":false}}`), 0o644))
-	require.ErrorContains(t, WriteArmConfig(wd, exp, arm, manifest), "manifest flag")
+	require.ErrorContains(t, WriteArmConfig(wd, exp, arm, manifest, "key"), "manifest flag")
 
 	// crush.json too — lower precedence, same trap.
 	wd2 := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wd2, "crush.json"),
 		[]byte(`{"options":{"auto_lsp":false}}`), 0o644))
-	require.ErrorContains(t, WriteArmConfig(wd2, exp, arm, manifest), "manifest flag")
+	require.ErrorContains(t, WriteArmConfig(wd2, exp, arm, manifest, "key"), "manifest flag")
 }
 
 // Experiments must pin temperature — unpinned arms land in the

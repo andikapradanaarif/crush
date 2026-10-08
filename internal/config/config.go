@@ -577,6 +577,15 @@ type Options struct {
 	// param_version so eval cohorts attribute outcomes to the
 	// parameters that produced them (#228).
 	MemoryParams map[string]any `json:"memory_params,omitempty" jsonschema:"description=Overlay onto the memory subsystem's parameter set (selector caps / text bounds / open-failure TTL) keyed by params.Memory JSON field names — unknown keys and out-of-bounds values are errors. Experimental."`
+	// ProjectKey pins the command/failure memory partition identity
+	// instead of deriving it from the repo remote + common dir. The
+	// eval harness pins it so a snapshot-restored crush.db still
+	// reads under the key its rows were written with — restoring
+	// into a different workdir path would otherwise orphan every
+	// memory row behind a path-derived key. Pinning also merges
+	// memory across checkouts: two workspaces sharing a key share
+	// the partition, so it is a deliberate action, not a rename.
+	ProjectKey string `json:"project_key,omitempty" jsonschema:"description=Pin the command/failure memory partition identity instead of deriving it from the repo remote + common dir. Workspaces sharing a key share memory rows — for eval snapshots and deliberate cross-checkout sharing. Experimental."`
 }
 
 // OptionKeys returns the Options struct's JSON field names — the set
