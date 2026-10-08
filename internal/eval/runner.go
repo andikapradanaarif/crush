@@ -296,8 +296,33 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	// mutation, and the preserved db needs seed-session identity.
 	var lastSeed RunResult
 	var lastSeedTurns []string
+	seeded := len(traj.PriorSessions) > 0 || len(traj.SeedCommands) > 0
+	warm := &WarmStart{}
+	if len(traj.SeedCommands) > 0 {
+		// Scripted seeds are the authored-history tier: real
+		// RecordRun writes under a controlled clock, no agent, no
+		// tokens. They run before agent seeds — chronologically
+		// they model the older history anyway (ago_seconds).
+		seedStart := r.now()
+		seedIDs, err := r.runScriptedSeeds(ctx, workdir, traj.SeedCommands)
+		warm.Sessions += len(seedIDs)
+		warm.SessionIDs = append(warm.SessionIDs, seedIDs...)
+		warm.DurationS += r.now().Sub(seedStart).Seconds()
+		rec.WarmStart = warm
+		if err != nil {
+			rec.ErrorClass = "seed_script"
+			rec.DurationS = r.now().Sub(rec.StartedAt).Seconds()
+			var seedID string
+			if len(seedIDs) > 0 {
+				seedID = seedIDs[len(seedIDs)-1]
+			}
+			r.preserveArtifacts(ctx, &rec, exp.Name, traj.ID, armName, inv, attempt, workdir, seedID, nil)
+			rec.Outcome = OutcomeError
+			rec.CheckDetail = map[string]any{"seed_commands": err.Error()}
+			return rec, nil
+		}
+	}
 	if len(traj.PriorSessions) > 0 {
-		warm := &WarmStart{}
 		for i, ps := range traj.PriorSessions {
 			seedStart := r.now()
 			seed := drv.Run(ctx, workdir, ps.Turns, traj.Budget)
@@ -339,40 +364,44 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 				return rec, nil
 			}
 		}
+	}
 
-		// Seeds running cleanly is necessary but not sufficient:
-		// the designed warm state itself is asserted before the
-		// measured session launches. A seed can succeed yet leave
-		// the wrong state — the fix didn't land, or the confirming
-		// rerun resolved the memory row — and measuring anyway
-		// would answer a different question than the cell poses.
-		if traj.Check.SeedScript != "" {
-			schk := runCheckScript(ctx, traj.Check.SeedScript, trajDir, workdir, r.checkEnv(), checkTimeout(traj))
-			rec.SeedState = schk.Detail
-			if schk.Err != nil || schk.Exit != 0 {
-				rec.DurationS = r.now().Sub(rec.StartedAt).Seconds()
-				r.preserveArtifacts(ctx, &rec, exp.Name, traj.ID, armName, inv, attempt, workdir, lastSeed.SessionID, lastSeedTurns)
-				// Keep the script's output on both paths — a
-				// half-run gate's partial stdout/stderr is exactly
-				// the evidence its error record needs.
-				detail := map[string]any{
-					"seed_check_stdout": string(tail([]byte(schk.Stdout), 4096)),
-					"seed_check_stderr": string(tail([]byte(schk.Stderr), 4096)),
-				}
-				if schk.Err != nil {
-					// The gate itself broke — infra, not state.
-					rec.Outcome = OutcomeError
-					detail["seed_check_error"] = schk.Err.Error()
-				} else {
-					// Clean execution, wrong state: the seeding is
-					// invalid — reject like a coverage miss rather
-					// than fail the model for a state it never saw.
-					rec.Outcome = OutcomeInconclusive
-					detail["seed_check"] = fmt.Sprintf("seed state assertion failed (exit %d)", schk.Exit)
-				}
-				rec.CheckDetail = detail
-				return rec, nil
+	// Seeds running cleanly is necessary but not sufficient: the
+	// designed warm state itself is asserted before the measured
+	// session launches. A seed can succeed yet leave the wrong
+	// state — the fix didn't land, or the confirming rerun resolved
+	// the memory row — and measuring anyway would answer a different
+	// question than the cell poses.
+	if seeded && traj.Check.SeedScript != "" {
+		schk := runCheckScript(ctx, traj.Check.SeedScript, trajDir, workdir, r.checkEnv(), checkTimeout(traj))
+		rec.SeedState = schk.Detail
+		if schk.Err != nil || schk.Exit != 0 {
+			rec.DurationS = r.now().Sub(rec.StartedAt).Seconds()
+			seedID := lastSeed.SessionID
+			if seedID == "" && len(warm.SessionIDs) > 0 {
+				seedID = warm.SessionIDs[len(warm.SessionIDs)-1]
 			}
+			r.preserveArtifacts(ctx, &rec, exp.Name, traj.ID, armName, inv, attempt, workdir, seedID, lastSeedTurns)
+			// Keep the script's output on both paths — a
+			// half-run gate's partial stdout/stderr is exactly
+			// the evidence its error record needs.
+			detail := map[string]any{
+				"seed_check_stdout": string(tail([]byte(schk.Stdout), 4096)),
+				"seed_check_stderr": string(tail([]byte(schk.Stderr), 4096)),
+			}
+			if schk.Err != nil {
+				// The gate itself broke — infra, not state.
+				rec.Outcome = OutcomeError
+				detail["seed_check_error"] = schk.Err.Error()
+			} else {
+				// Clean execution, wrong state: the seeding is
+				// invalid — reject like a coverage miss rather
+				// than fail the model for a state it never saw.
+				rec.Outcome = OutcomeInconclusive
+				detail["seed_check"] = fmt.Sprintf("seed state assertion failed (exit %d)", schk.Exit)
+			}
+			rec.CheckDetail = detail
+			return rec, nil
 		}
 	}
 	// The measured session is where the arm's flag delta belongs.
@@ -381,9 +410,13 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 		// mutation — the record's WarmStart already promises seed
 		// session ids, so snapshot the db like the other
 		// post-seed failure paths do.
-		if len(traj.PriorSessions) > 0 {
+		if seeded {
 			rec.DurationS = r.now().Sub(rec.StartedAt).Seconds()
-			r.preserveArtifacts(ctx, &rec, exp.Name, traj.ID, armName, inv, attempt, workdir, lastSeed.SessionID, lastSeedTurns)
+			seedID := lastSeed.SessionID
+			if seedID == "" && len(warm.SessionIDs) > 0 {
+				seedID = warm.SessionIDs[len(warm.SessionIDs)-1]
+			}
+			r.preserveArtifacts(ctx, &rec, exp.Name, traj.ID, armName, inv, attempt, workdir, seedID, lastSeedTurns)
 		}
 		rec.Outcome = OutcomeError
 		rec.CheckDetail = map[string]any{"harness": err.Error()}

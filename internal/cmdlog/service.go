@@ -222,6 +222,27 @@ type service struct {
 	// the screen accepts.
 	suggestedMu sync.Mutex
 	suggested   map[string]map[string]struct{}
+	// now is the timestamp source for every stamp and cutoff the
+	// service computes. Production wiring leaves it nil (wall
+	// clock); eval seeding injects a controlled clock so scripted
+	// history can be backdated — last_seen ages and session spacing
+	// become authored inputs rather than wall-time artifacts.
+	now func() time.Time
+}
+
+// Option customizes the service at construction; production callers
+// use none.
+type Option func(*service)
+
+// WithClock replaces the service's timestamp source — eval-only
+// machinery for scripted seed runs that need authored last_seen
+// spacing. A nil clock is ignored.
+func WithClock(now func() time.Time) Option {
+	return func(s *service) {
+		if now != nil {
+			s.now = now
+		}
+	}
 }
 
 // NewService creates the command/failure memory service rooted at
@@ -229,7 +250,7 @@ type service struct {
 // keys files — workspace-relative, cwd-independent. p is the
 // resolved parameter set: its open-failure TTL bounds the read
 // side and its Version stamps every new row's param_version.
-func NewService(q *db.Queries, workingDir string, p params.Memory) Service {
+func NewService(q *db.Queries, workingDir string, p params.Memory, opts ...Option) Service {
 	if workingDir == "" {
 		slog.Warn("Cmdlog got an empty workspace root; cwd keys will follow the process working directory")
 	}
@@ -247,6 +268,10 @@ func NewService(q *db.Queries, workingDir string, p params.Memory) Service {
 		hasRepo:        hasRepo,
 		paramVersion:   p.Version(),
 		suggested:      map[string]map[string]struct{}{},
+		now:            time.Now,
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 	// Backfill: pre-provenance rows belong to this store's project,
 	// so empty keys claim into the current partition once. Failure
@@ -427,7 +452,7 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 		Cwd:            cwd,
 		Kind:           toolclass.CommandKind(command),
 		LastExit:       lastExit,
-		LastAt:         time.Now().UnixMilli(),
+		LastAt:         s.now().UnixMilli(),
 		OkCount:        ok,
 		FailCount:      fail,
 		LastSessionID:  run.SessionID,
@@ -456,7 +481,7 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 		return
 	}
 	headline := failureHeadline(run.Stderr, run.Stdout, run.Err)
-	now := time.Now().UnixMilli()
+	now := s.now().UnixMilli()
 	if err := s.q.UpsertFailure(ctx, db.UpsertFailureParams{
 		Signature:    s.failureSignature(cmdNorm, cwd, headline),
 		Cmd:          cmdNorm,
@@ -557,7 +582,7 @@ func (s *service) ListSessionOpenFailures(ctx context.Context, sessionID string)
 // a suffix in the freshest-first ordering, so the scan can stop.
 func (s *service) failuresFromRows(rows []db.FailureMemory) []Failure {
 	out := make([]Failure, 0, len(rows))
-	cutoff := time.Now().Add(-s.openFailureTTL).UnixMilli()
+	cutoff := s.now().Add(-s.openFailureTTL).UnixMilli()
 	for _, r := range rows {
 		if s.openFailureTTL != 0 && r.LastSeen < cutoff {
 			break

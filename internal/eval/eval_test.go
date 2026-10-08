@@ -90,7 +90,7 @@ func TestValidateTrajectory_SeedScriptRequiresPriorSessions(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "seed_check.sh"), []byte("#!/bin/bash\nexit 0\n"), 0o755))
 	_, err := LoadTrajectory(dir)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "seed_script requires prior_sessions")
+	require.Contains(t, err.Error(), "seed_script requires seeding")
 }
 
 func TestValidateTrajectory_SeedScriptMustExist(t *testing.T) {
@@ -175,7 +175,7 @@ func TestValidateTrajectory_WarmStartCoverageNeedsPriorSessions(t *testing.T) {
 	})
 	_, err := LoadTrajectory(dir)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "warm_start.* requires prior_sessions")
+	require.Contains(t, err.Error(), "warm_start.* requires seeding")
 
 	// Same predicate on a seeded trajectory loads clean.
 	dir = writeTrajectory(t, filepath.Join(root, "corpus"), "t2", map[string]any{

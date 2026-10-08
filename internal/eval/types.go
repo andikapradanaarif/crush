@@ -88,10 +88,15 @@ type Trajectory struct {
 	// PriorSessions seed the run — see the type doc. Warm-start
 	// trajectories pair them with a deliberately vague task prompt.
 	PriorSessions PriorSessions `json:"prior_sessions,omitempty"`
-	Check         Check         `json:"check"`
-	Coverage      Coverage      `json:"coverage,omitempty"`
-	Requires      Requires      `json:"requires,omitempty"`
-	Budget        Budget        `json:"budget,omitempty"`
+	// SeedCommands are scripted seed sessions — see the type doc.
+	// They run before prior_sessions and are the ladder tier's
+	// dose-control mechanism: row counts are authored, not left to
+	// an agent's seeding variance.
+	SeedCommands []ScriptedSeed `json:"seed_commands,omitempty"`
+	Check        Check          `json:"check"`
+	Coverage     Coverage       `json:"coverage,omitempty"`
+	Requires     Requires       `json:"requires,omitempty"`
+	Budget       Budget         `json:"budget,omitempty"`
 }
 
 // Origin records what a trajectory guards.
@@ -126,6 +131,28 @@ type Task struct {
 // degraded seeding would answer a different question than the one
 // the trajectory poses.
 type PriorSessions []Task
+
+// ScriptedSeed is one scripted seed session: a set of shell commands
+// executed through the same shell interpreter and RecordRun write
+// path the bash tool uses — command_memory and failure_memory rows
+// are real rows, not fixture SQL — but under a controlled clock so
+// last_seen ages and session spacing are authored inputs. Each
+// element materializes as a distinct session row, so depth ladders
+// can hold session count constant while scaling row counts, or the
+// reverse — the confound that prior_sessions bakes in (one session
+// per row, per paid run) becomes a free parameter.
+//
+// AgoSeconds backdates the session's recorded timestamps relative to
+// the run's clock. Commands execute in order against the materialized
+// workdir; a command that fails to reach a verdict (parse error)
+// aborts the seed as an error — a half-written seed state would
+// measure a different cell than the one the manifest poses. Exit
+// codes are verdicts: a failing command is how open failures are
+// seeded on purpose.
+type ScriptedSeed struct {
+	AgoSeconds float64  `json:"ago_seconds"`
+	Commands   []string `json:"commands"`
+}
 
 // Check is the scoring-function contract.
 type Check struct {

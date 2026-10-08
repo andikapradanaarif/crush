@@ -1,0 +1,34 @@
+{
+  "id": "seeded-three-pool",
+  "schema_version": 1,
+  "origin": {"kind": "synthetic"},
+  "start_state": {"kind": "fixture", "fixture_dir": "fixture"},
+  "seed_commands": [
+    {
+      "ago_seconds": 259200,
+      "commands": [
+        "go test ./calc",
+        "printf 'package calc\n\n// Add returns the sum of a and b.\nfunc Add(a, b int) int {\n\treturn a + b\n}\n' > calc/add.go",
+        "go test ./calc",
+        "go vet ./calc"
+      ]
+    },
+    {
+      "ago_seconds": 86400,
+      "commands": [
+        "go build ./badpkg",
+        "go test ./util"
+      ]
+    }
+  ],
+  "task": {
+    "turns": [
+      "Fix the badpkg package so `go build ./...` passes. Broken() should return 42. Make the smallest change."
+    ]
+  },
+  "check": {
+    "script": "check.sh",
+    "expect_start_state": "fail",
+    "seed_script": "seed_check.sh"
+  }
+}

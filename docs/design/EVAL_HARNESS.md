@@ -87,6 +87,10 @@ every characterization pass a diff to reviewed files.
 		{"turns": ["seed session 1 prompt"]},
 		{"turns": ["seed session 2 prompt", "follow-up"]}
 	],
+	"seed_commands": [
+		{"ago_seconds": 259200, "commands": ["go test ./calc", "...fix...", "go test ./calc"]},
+		{"ago_seconds": 86400, "commands": ["go build ./badpkg"]}
+	],
 	"check": {
 		"script": "check.sh",
 		"expect_start_state": "fail",
@@ -169,9 +173,29 @@ every characterization pass a diff to reviewed files.
   `check.seed_script` to catch it deterministically (below); for
   deeper forensics, audit the preserved db (`warm_start.session_ids`
   → the seed session's tool calls) or compare workdir diffs.
+- **`seed_commands`.** Scripted seed sessions — the dose-control tier
+  the memory ladders need. Each element is one session: a real
+  `sessions` row, each `commands` entry executed through the same
+  shell interpreter + `RecordRun` write path the bash tool feeds —
+  so `command_memory`, `failure_memory`, headline extraction,
+  component-exit laundering, and signature normalization are all
+  production code — under a controlled clock backdated by
+  `ago_seconds`. Sessions are free, so depth ladders scale row
+  counts without confounding session count (or the reverse: one
+  command per element = N sessions). Costs: tokens/steps are
+  honestly zero — `warm_start.sessions`/`session_ids` still count
+  the scripted ids for provenance, so cost-per-pass reads a real
+  zero rather than a dropped field. `check.seed_script` is the dose
+  gate: assert the row counts/kinds the cell was designed around
+  and a diverged seed rejects `inconclusive` before the measured
+  run is spent. A command reaching no verdict (unparseable)
+  aborts `error` — the authored state diverged. Trade-off: scripted
+  rows are cleaner than agent rows (no composite-command noise);
+  keep one agent-seeded arm in ladders to keep the selector honest.
 - **`check.seed_script`.** Optional gate asserting the designed warm
-  state — runs once after the last prior session and before the
-  measured session, with the same contract as `check.sh` (cwd =
+  state — runs once after seeding (`prior_sessions` and/or
+  `seed_commands`) and before the measured session, with the same
+  contract as `check.sh` (cwd =
   workdir, `EVAL_*` env, shared `timeout_seconds`, `EVAL_JSON`
   detail). Its detail lands on the record as `seed_state` — the
   verifiable evidence of what the measured session started from —
