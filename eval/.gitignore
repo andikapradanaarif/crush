@@ -2,6 +2,9 @@
 # workdirs (regenerated on demand); they are large and expendable.
 genwork/
 
+# Sweep logs are transient; the JSONL rows are the artifact.
+curves/*.log
+
 # Generated corpus instances are artifacts — `crush eval gen`
 # reproduces any cell deterministically. The exception: the s001
 # draws are the paid manifests' pinned corpus cells, tracked so the
