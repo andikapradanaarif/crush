@@ -1,0 +1,5 @@
+{
+  "note": "A noisy null must not satisfy a declared improvement — the CI spanning the bound is 'inconclusive', and nothing reads as an effect.",
+  "rule_result": "inconclusive",
+  "rule_note_contains": "CI spans"
+}

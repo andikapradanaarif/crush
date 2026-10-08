@@ -1,0 +1,20 @@
+{
+  "invocation": "i1",
+  "primary": {
+    "metric": "steps",
+    "direction": "decrease",
+    "mde": 0.15,
+    "floor": 0.5
+  },
+  "decision_rule": {
+    "hypothesis": "memory cuts input tokens by 10%",
+    "primary": {
+      "metric": "tokens.input",
+      "arm": "treatment",
+      "vs": "control",
+      "direction": "decrease",
+      "min_improvement": 0.1
+    }
+  },
+  "gate_verdict": "pass"
+}

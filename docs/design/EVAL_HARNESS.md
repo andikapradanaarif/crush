@@ -1296,6 +1296,16 @@ decision metric per experiment:
   acceptance fields: `floor`/`noise_band`/`base_cost_allowance`
   gate whether a treatment *may ship* at its measured cost;
   `decision_rule` is whether the run *answered its question*.
+  The machinery is calibrated by the decision corpus at
+  `internal/eval/testdata/decisions/` — one fixture dir per failure
+  class (noisy-null, known regression, lower-calls-worse-pass,
+  cost inflation, missing telemetry, valid abstention, floor
+  violations, sidecar-spend attribution, post-hoc suppression),
+  each a canned `results/` record set + alarm snapshot +
+  `expect.json` verdict. `TestDecisionCorpus` runs every cell
+  through `Compare`; `EVAL_GEN=1` regenerates the fixtures from
+  `decisionScenarios()` so the corpus is reproducible by
+  construction, and new failure classes land as data.
 - **`cost_weights` prices the cost metric.** `weighted_cost =
   input + h·cache_read + w·cache_write + o·output`, computed over
   the main-model tokens **and `generator_tokens`**. Weights are

@@ -1,0 +1,5 @@
+{
+  "note": "A rule declared after the run can't be read back as pre-committed — suppressed to inconclusive.",
+  "rule_result": "inconclusive",
+  "rule_note_contains": "post-hoc"
+}

@@ -1,0 +1,30 @@
+{
+  "name": "dec-floor-violated-control",
+  "model": "mock/model",
+  "temperature": 0,
+  "corpus": [
+    "*"
+  ],
+  "runs_per_trajectory": {
+    "stable": 4
+  },
+  "arms": {
+    "control": {
+      "config": {}
+    },
+    "treatment": {
+      "config": {}
+    }
+  },
+  "primary": {
+    "metric": "steps",
+    "direction": "decrease",
+    "mde": 0.15,
+    "floor": 0.95
+  },
+  "cost_weights": {
+    "cache_read": 0.1,
+    "cache_write": 0.25,
+    "output": 4
+  }
+}

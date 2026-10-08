@@ -1,0 +1,14 @@
+{
+  "invocation": "i1",
+  "decision_rule": {
+    "hypothesis": "memory cuts map calls by 10%",
+    "primary": {
+      "metric": "call_metrics.map_calls",
+      "arm": "treatment",
+      "vs": "control",
+      "direction": "decrease",
+      "min_improvement": 0.1
+    }
+  },
+  "gate_verdict": "pass"
+}

@@ -1,0 +1,14 @@
+{
+  "invocation": "i1",
+  "decision_rule": {
+    "hypothesis": "memory reduces cost per pass",
+    "primary": {
+      "metric": "tokens_to_done",
+      "arm": "treatment",
+      "vs": "control",
+      "direction": "decrease",
+      "min_improvement": 0
+    }
+  },
+  "gate_verdict": "pass"
+}
