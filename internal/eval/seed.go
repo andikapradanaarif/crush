@@ -157,39 +157,8 @@ func (r *Runner) restoreSnapshot(key, workdir string, warm *WarmStart) bool {
 		slog.Warn("Seed snapshot meta unreadable — re-seeding", "snapshot", dir, "error", err)
 		return false
 	}
-	dataDir := DataDirFor(workdir)
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return false
-	}
-	// Clear the materialized tree before the overlay — copyTree
-	// adds and overwrites but never deletes, so a file the seeds
-	// removed would resurrect from the fixture copy and the
-	// "byte-identical" claim would break.
-	entries, err := os.ReadDir(workdir)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if err := os.RemoveAll(filepath.Join(workdir, e.Name())); err != nil {
-			return false
-		}
-	}
-	if err := copyTree(filepath.Join(dir, "workdir"), workdir); err != nil {
-		slog.Warn("Seed snapshot workdir restore failed — re-seeding", "error", err)
-		return false
-	}
-	dbBytes, err := os.ReadFile(filepath.Join(dir, "crush.db"))
-	if err != nil {
-		slog.Warn("Seed snapshot db restore failed — re-seeding", "error", err)
-		return false
-	}
-	// Any WAL sidecar left over from this attempt's own db init
-	// would replay over the restored bytes — the snapshot's
-	// checkpointed file is the complete state.
-	for _, side := range []string{"crush.db-wal", "crush.db-shm"} {
-		_ = os.Remove(filepath.Join(dataDir, side))
-	}
-	if err := os.WriteFile(filepath.Join(dataDir, "crush.db"), dbBytes, 0o600); err != nil {
+	if err := overlaySnapshot(dir, workdir); err != nil {
+		slog.Warn("Seed snapshot restore failed — re-seeding", "error", err)
 		return false
 	}
 	// Provenance (session ids, count) carries — the seed rows in the
@@ -201,6 +170,65 @@ func (r *Runner) restoreSnapshot(key, workdir string, warm *WarmStart) bool {
 	warm.SessionIDs = meta.SessionIDs
 	warm.Sessions = meta.Sessions
 	return true
+}
+
+// overlaySnapshot lays a snapshot's workdir tree and crush.db over a
+// materialized workdir. The tree is cleared first — copyTree adds and
+// overwrites but never deletes, so a file absent at snapshot time
+// would resurrect from the fixture copy and break byte-identity.
+func overlaySnapshot(dir, workdir string) error {
+	dataDir := DataDirFor(workdir)
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(workdir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := os.RemoveAll(filepath.Join(workdir, e.Name())); err != nil {
+			return err
+		}
+	}
+	if err := copyTree(filepath.Join(dir, "workdir"), workdir); err != nil {
+		return err
+	}
+	dbBytes, err := os.ReadFile(filepath.Join(dir, "crush.db"))
+	if err != nil {
+		return err
+	}
+	// Any WAL sidecar left over from this attempt's own db init
+	// would replay over the restored bytes — the snapshot's
+	// checkpointed file is the complete state.
+	for _, side := range []string{"crush.db-wal", "crush.db-shm"} {
+		_ = os.Remove(filepath.Join(dataDir, side))
+	}
+	return os.WriteFile(filepath.Join(dataDir, "crush.db"), dbBytes, 0o600)
+}
+
+// captureDB returns a self-contained copy of the workdir's crush.db:
+// checkpointed when the db re-opens cleanly, raw bytes otherwise.
+// Re-opening a db the write path just used can fail on Windows
+// (SQLITE_NOTADB on a file that just proved valid) — the last conn
+// close already checkpointed the WAL, so the raw file is complete.
+// ok=false means no usable db exists at all.
+func captureDB(ctx context.Context, dataDir string) ([]byte, bool) {
+	conn, err := db.Connect(ctx, dataDir)
+	if err == nil {
+		// Checkpoint so the copy is self-contained — the bytes alone
+		// must carry every committed row.
+		_, _ = conn.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+		_ = db.Release(dataDir)
+	}
+	dbBytes, rerr := os.ReadFile(filepath.Join(dataDir, "crush.db"))
+	switch {
+	case rerr != nil:
+		slog.Warn("Snapshot db capture failed", "error", firstErr(err, rerr))
+		return nil, false
+	case err != nil:
+		slog.Warn("Snapshot checkpoint skipped — copying db raw", "error", err)
+	}
+	return dbBytes, true
 }
 
 // writeSnapshot captures the post-seed state for later attempts. The
@@ -216,25 +244,9 @@ func (r *Runner) writeSnapshot(ctx context.Context, key, workdir string, warm *W
 		return
 	}
 	dataDir := DataDirFor(workdir)
-	conn, err := db.Connect(ctx, dataDir)
-	if err == nil {
-		// Checkpoint so the snapshot's crush.db is self-contained —
-		// copied bytes alone must carry every seeded row.
-		_, _ = conn.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
-		_ = db.Release(dataDir)
-	}
-	dbBytes, rerr := os.ReadFile(filepath.Join(dataDir, "crush.db"))
-	switch {
-	case rerr != nil:
-		slog.Warn("Seed snapshot db capture failed", "error", firstErr(err, rerr))
+	dbBytes, ok := captureDB(ctx, dataDir)
+	if !ok {
 		return
-	case err != nil:
-		// Re-opening the seeded db can fail on Windows
-		// (SQLITE_NOTADB on a file the seed writes just proved
-		// valid) — the last conn close already checkpointed the
-		// WAL, so the raw file is complete. Copy it and let the
-		// restored-state gate prove it downstream.
-		slog.Warn("Seed snapshot checkpoint skipped — copying db raw", "error", err)
 	}
 	if err := os.WriteFile(filepath.Join(tmp, "crush.db"), dbBytes, 0o600); err != nil {
 		return

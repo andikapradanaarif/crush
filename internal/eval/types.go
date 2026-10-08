@@ -238,6 +238,47 @@ type Experiment struct {
 	// Primary's verdict. Optional: characterize runs carry no
 	// claim, and absence is itself reported.
 	DecisionRule *DecisionRule `json:"decision_rule,omitempty"`
+	// Replay switches the experiment to counterfactual-replay mode
+	// (#108): instead of running each arm over the whole trajectory,
+	// the runner records the trajectory once under SourceArm —
+	// snapshotting workdir + session DB at every turn boundary — then
+	// replays each turn under each arm from byte-identical state.
+	// runs_per_trajectory's n becomes replicates per fork, so an
+	// n-armed replay of a T-turn trajectory yields T×n paired samples
+	// at T + T×n×|arms| single-turn cost instead of full runs.
+	Replay *ReplaySpec `json:"replay,omitempty"`
+}
+
+// ReplaySpec pins the counterfactual-replay schedule. The recorded
+// prefix runs under one arm so every fork diverges from identical
+// bytes — which arm shapes the shared history is part of the
+// estimand, so it is declared, not hardcoded.
+type ReplaySpec struct {
+	// SourceArm names the arm whose config shapes the recorded
+	// prefix. Default "control". Must name a declared arm.
+	SourceArm string `json:"source_arm,omitempty"`
+	// ForkTurns restricts which turn indices fork — entry t replays
+	// turn t over the recorded state at boundary t (turn 0's prefix
+	// is the seeded start state). Default: every turn 0..T-1.
+	ForkTurns []int `json:"fork_turns,omitempty"`
+}
+
+// ReplayMeta marks a RunRecord as a counterfactual-replay fork and
+// carries the provenance the pairing and ledger need: which recorded
+// boundary the run forked from, which arm shaped that prefix, and
+// what the prefix cost (paid once by the recording pass — it is not
+// re-charged to the fork's token ledger).
+type ReplayMeta struct {
+	// ForkTurn is the replayed turn index — the fork restored the
+	// boundary-t snapshot, then ran trajectory turn t.
+	ForkTurn int `json:"fork_turn"`
+	// SourceArm shaped the recorded prefix every fork diverges from.
+	SourceArm string `json:"source_arm"`
+	// PrefixSteps/PrefixTokens are the recording pass's cumulative
+	// spend at boundary t — scaffolding cost shared by all forks,
+	// reported for ledger completeness, never summed into Tokens.
+	PrefixSteps  int        `json:"prefix_steps"`
+	PrefixTokens TokenUsage `json:"prefix_tokens"`
 }
 
 // DecisionRule pins the claim and its pass criteria. At least one
@@ -512,6 +553,11 @@ type RunRecord struct {
 	// populated between preserveSessionDB and record append so
 	// min_call_metrics.* predicates can read it during CoverageMet.
 	CallMetrics *CallMetrics `json:"call_metrics,omitempty"`
+	// Replay marks the record as a counterfactual-replay fork (#108):
+	// the run restored the recorded boundary and replayed one turn.
+	// Compare pairs on (trajectory, fork_turn, run_index); nil on
+	// normal runs, which pair on (trajectory, run_index) as before.
+	Replay *ReplayMeta `json:"replay,omitempty"`
 	// CallMetricsError records analyzer failure instead of silently
 	// absent metrics — inconclusive-by-absence and analyzer-broke are
 	// operationally different and must not conflate.

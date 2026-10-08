@@ -338,6 +338,25 @@ func ValidateExperiment(e *Experiment) error {
 			return err
 		}
 	}
+	if e.Replay != nil {
+		// The recorded prefix is shaped by one declared arm — an
+		// unknown name would fork from a config that never ran.
+		if src := e.Replay.SourceArm; src != "" {
+			if _, ok := e.Arms[src]; !ok {
+				return fmt.Errorf("replay.source_arm %q is not a declared arm (%v)", src, sortedKeys(e.Arms))
+			}
+		}
+		seen := map[int]bool{}
+		for _, f := range e.Replay.ForkTurns {
+			if f < 0 {
+				return fmt.Errorf("replay.fork_turns entries must be >= 0, got %d", f)
+			}
+			if seen[f] {
+				return fmt.Errorf("replay.fork_turns lists %d twice", f)
+			}
+			seen[f] = true
+		}
+	}
 	if len(e.Corpus) == 0 {
 		return fmt.Errorf("corpus selector is required")
 	}

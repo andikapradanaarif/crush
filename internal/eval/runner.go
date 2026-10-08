@@ -572,7 +572,13 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 // the anchor is the only way a post-hoc `eval analyze` can resolve
 // relative call paths correctly.
 func (r *Runner) preserveArtifacts(ctx context.Context, rec *RunRecord, expName, trajID, armName, inv string, runIndex int, workdir, sessionID string, turns []string) {
-	dst, walSafe, err := r.preserveSessionDB(ctx, expName, trajID, armName, inv, runIndex, workdir)
+	// Replay forks share (arm, run_index) across boundaries — the
+	// fork index keeps artifact names unique.
+	nameExtra := ""
+	if rec.Replay != nil {
+		nameExtra = fmt.Sprintf("-t%d", rec.Replay.ForkTurn)
+	}
+	dst, walSafe, err := r.preserveSessionDB(ctx, expName, trajID, armName, inv, runIndex, workdir, nameExtra)
 	rec.Workdir = workdir
 	if err != nil {
 		// Record why the metrics are absent — indistinguishable from
@@ -610,7 +616,7 @@ func (r *Runner) preserveArtifacts(ctx context.Context, rec *RunRecord, expName,
 // un-checkpointed commits; a raw copy is the last-resort fallback and
 // reports walSafe=false so the record can flag a possibly-truncated
 // artifact.
-func (r *Runner) preserveSessionDB(ctx context.Context, expName, trajID, arm, inv string, runIndex int, workdir string) (rel string, walSafe bool, err error) {
+func (r *Runner) preserveSessionDB(ctx context.Context, expName, trajID, arm, inv string, runIndex int, workdir string, nameExtra string) (rel string, walSafe bool, err error) {
 	src := filepath.Join(DataDirFor(workdir), "crush.db")
 	if !fileExists(src) {
 		return "", false, fmt.Errorf("no session db at %s", src)
@@ -619,7 +625,7 @@ func (r *Runner) preserveSessionDB(ctx context.Context, expName, trajID, arm, in
 	if err := os.MkdirAll(dstDir, 0o755); err != nil {
 		return "", false, err
 	}
-	dst := filepath.Join(dstDir, fmt.Sprintf("%s-%s-%s-%d.db", trajID, arm, inv, runIndex))
+	dst := filepath.Join(dstDir, fmt.Sprintf("%s-%s-%s-%d%s.db", trajID, arm, inv, runIndex, nameExtra))
 
 	conn, err := db.ConnectReadOnly(ctx, src)
 	if err == nil {
@@ -962,6 +968,9 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 		// not an error outcome masquerading as flakiness.
 		rep.Skipped = strings.Join(missing, ",")
 		return rep
+	}
+	if exp.Replay != nil {
+		return r.runReplay(ctx, exp, traj, trajDir, manifest, n, inv, configErrs)
 	}
 	armNames := []string{ArmControl, ArmTreatment}
 	if r.AA {
