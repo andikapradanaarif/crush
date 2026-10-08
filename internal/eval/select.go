@@ -177,3 +177,87 @@ func (r *SelectProbeReport) String() string {
 	}
 	return b.String()
 }
+
+// SelectSweepSpec is the dose grid the offline curves run over —
+// each combination × replicate becomes one generated instance plus
+// one selector probe. Kept as GenSpec fields so the grid is the
+// generator's parameter surface verbatim.
+type SelectSweepSpec struct {
+	Quirks       []int    `json:"quirks"`
+	Distractors  []int    `json:"distractors"`
+	Plausibility []string `json:"plausibility"`
+	Prompt       []string `json:"prompt"`
+	Depth        []int    `json:"depth"`
+	Replicates   int      `json:"replicates"`
+	Seed         int64    `json:"seed"`
+}
+
+// SelectSweepRow is one cell's measurement — the spec that produced
+// the instance plus its probe report, so the curve aggregation reads
+// dose → verdict straight off the row.
+type SelectSweepRow struct {
+	Cell   GenSpec            `json:"cell"`
+	Report *SelectProbeReport `json:"report"`
+	Error  string             `json:"error,omitempty"`
+}
+
+// RunSelectSweep enumerates the dose grid, generates each cell's
+// instances into corpusRoot, and probes each — the free half of the
+// memory ladders as one pass. Cells stream back in order; a failing
+// cell records its error and the sweep continues — one bad instance
+// must not void the rest of the curve.
+func (r *Runner) RunSelectSweep(ctx context.Context, corpusRoot string, spec SelectSweepSpec, overlay map[string]any, onRow func(SelectSweepRow)) error {
+	if len(spec.Quirks) == 0 {
+		spec.Quirks = []int{4}
+	}
+	if len(spec.Distractors) == 0 {
+		spec.Distractors = []int{0}
+	}
+	if len(spec.Plausibility) == 0 {
+		spec.Plausibility = []string{"mid"}
+	}
+	if len(spec.Prompt) == 0 {
+		spec.Prompt = []string{"vague"}
+	}
+	if len(spec.Depth) == 0 {
+		spec.Depth = []int{0}
+	}
+	if spec.Replicates <= 0 {
+		spec.Replicates = 1
+	}
+	for _, m := range spec.Quirks {
+		for _, k := range spec.Distractors {
+			for _, pl := range spec.Plausibility {
+				for _, pr := range spec.Prompt {
+					for _, dp := range spec.Depth {
+						for rep := range spec.Replicates {
+							cell := GenSpec{
+								Quirks: m, Distractors: k, Plausibility: pl,
+								Prompt: pr, Depth: dp, Seed: spec.Seed, Replicate: rep,
+							}
+							row := SelectSweepRow{Cell: cell}
+							dir, err := Generate(corpusRoot, cell)
+							if err == nil {
+								var traj *Trajectory
+								traj, err = LoadTrajectory(dir)
+								if err == nil {
+									row.Report, err = r.RunSelectProbe(ctx, traj, dir, "", overlay)
+								}
+							}
+							if err != nil {
+								row.Error = err.Error()
+							}
+							if onRow != nil {
+								onRow(row)
+							}
+							if ctx.Err() != nil {
+								return ctx.Err()
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}

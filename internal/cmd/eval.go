@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -182,6 +184,95 @@ var evalSelectCmd = &cobra.Command{
 		fmt.Print(rep.String())
 		return nil
 	},
+}
+
+// evalCurveCmd is the offline ladder sweep: it enumerates a dose
+// grid, generates each cell's instances, and probes every one —
+// the stored-dose → rendered-dose curves for both ladders in one
+// pass, JSONL-streamed so a long sweep's partial results survive.
+var evalCurveCmd = &cobra.Command{
+	Use:   "curve",
+	Short: "Offline selector curves over the generated dose grid",
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		evalDir, _ := cmd.Flags().GetString("eval-dir")
+		var spec eval.SelectSweepSpec
+		var err error
+		if spec.Quirks, err = flagIntList(cmd, "quirks"); err != nil {
+			return err
+		}
+		if spec.Distractors, err = flagIntList(cmd, "distractors"); err != nil {
+			return err
+		}
+		if spec.Depth, err = flagIntList(cmd, "depth"); err != nil {
+			return err
+		}
+		spec.Plausibility = flagStrList(cmd, "plausibility")
+		spec.Prompt = flagStrList(cmd, "prompt")
+		spec.Replicates, _ = cmd.Flags().GetInt("replicates")
+		spec.Seed, _ = cmd.Flags().GetInt64("seed")
+		var overlay map[string]any
+		if raw, _ := cmd.Flags().GetString("memory-params"); raw != "" {
+			if err := json.Unmarshal([]byte(raw), &overlay); err != nil {
+				return fmt.Errorf("memory-params: %w", err)
+			}
+		}
+		outPath := flagString(cmd, "out")
+		if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+			return err
+		}
+		out, err := os.Create(outPath)
+		if err != nil {
+			return err
+		}
+		defer out.Close()
+		r, err := evalRunner(cmd)
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		enc := json.NewEncoder(out)
+		return r.RunSelectSweep(cmd.Context(), filepath.Join(evalDir, "corpus"), spec, overlay,
+			func(row eval.SelectSweepRow) {
+				if row.Error != "" {
+					slog.Warn("Curve cell failed", "cell", row.Cell, "error", row.Error)
+				}
+				if err := enc.Encode(row); err != nil {
+					slog.Warn("Curve row encode failed", "cell", row.Cell, "error", err)
+				}
+			})
+	},
+}
+
+// flagIntList parses a comma-separated integer flag.
+func flagIntList(cmd *cobra.Command, name string) ([]int, error) {
+	raw := flagString(cmd, name)
+	if raw == "" {
+		return nil, nil
+	}
+	var out []int
+	for _, part := range strings.Split(raw, ",") {
+		n, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+// flagStrList parses a comma-separated string flag.
+func flagStrList(cmd *cobra.Command, name string) []string {
+	raw := flagString(cmd, name)
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 var evalRunCmd = &cobra.Command{
@@ -528,5 +619,14 @@ func init() {
 	evalSelectCmd.Flags().String("prompt", "", "prompt to bind against (default: the trajectory's first task turn)")
 	evalSelectCmd.Flags().String("memory-params", "", "JSON overlay for params.Memory (e.g. '{\"open_render_limit\":0}')")
 	evalSelectCmd.Flags().Bool("json", false, "print the full report as JSON")
-	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd, evalProbeCmd, evalProbeCacheCmd, evalCompareCmd, evalGenCmd, evalSelectCmd)
+	evalCurveCmd.Flags().String("quirks", "4", "comma-separated depth doses M (relevant rows)")
+	evalCurveCmd.Flags().String("distractors", "0", "comma-separated distractor doses K")
+	evalCurveCmd.Flags().String("plausibility", "mid", "comma-separated plausibility tiers")
+	evalCurveCmd.Flags().String("prompt", "vague", "comma-separated prompt styles")
+	evalCurveCmd.Flags().String("depth", "0", "comma-separated discovery-cost depths")
+	evalCurveCmd.Flags().Int("replicates", 1, "instances per cell")
+	evalCurveCmd.Flags().Int64("seed", 1, "base RNG seed for the grid")
+	evalCurveCmd.Flags().String("memory-params", "", "JSON overlay for params.Memory")
+	evalCurveCmd.Flags().String("out", "curve.jsonl", "JSONL output path")
+	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd, evalProbeCmd, evalProbeCacheCmd, evalCompareCmd, evalGenCmd, evalSelectCmd, evalCurveCmd)
 }

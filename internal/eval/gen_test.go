@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/charmbracelet/crush/internal/params"
 	"github.com/charmbracelet/crush/internal/shell"
 )
 
@@ -118,16 +119,35 @@ func TestGenerate_ReplicateVarianceAndDeterminism(t *testing.T) {
 // fail loudly rather than silently clamp to a different question.
 func TestGenSpec_Validate(t *testing.T) {
 	t.Parallel()
-	ok := GenSpec{Quirks: 4, Distractors: 16, Plausibility: "high", Prompt: "explicit", Depth: 4}
+	ok := GenSpec{Quirks: 4, Distractors: 50, Plausibility: "high", Prompt: "explicit", Depth: 4}
 	require.NoError(t, ok.Validate())
 	for _, bad := range []GenSpec{
 		{Quirks: 5, Distractors: 0, Plausibility: "low", Prompt: "vague"},
 		{Quirks: -1, Distractors: 0, Plausibility: "low", Prompt: "vague"},
-		{Quirks: 0, Distractors: 17, Plausibility: "low", Prompt: "vague"},
+		{Quirks: 0, Distractors: len(genDistractorNames) + 1, Plausibility: "low", Prompt: "vague"},
 		{Quirks: 0, Distractors: 0, Plausibility: "wild", Prompt: "vague"},
 		{Quirks: 0, Distractors: 0, Plausibility: "low", Prompt: "chatty"},
 		{Quirks: 0, Distractors: 0, Plausibility: "low", Prompt: "vague", Depth: 5},
 	} {
 		require.Error(t, bad.Validate(), "%+v should reject", bad)
+	}
+}
+
+func TestGenSpec_SeedAgesInsideTTL(t *testing.T) {
+	t.Parallel()
+	// A seed backdated past the read-side open-failure TTL is dead
+	// state — the fetch drops it before the selector sees it, so
+	// the stored dose silently collapses. Pin the whole authored
+	// arc inside the default bound at the ladder's top dose.
+	spec := GenSpec{
+		Quirks: 4, Distractors: len(genDistractorNames),
+		Plausibility: "high", Prompt: "explicit", Seed: 1,
+	}
+	seeds := spec.seedCommands(spec.draw())
+	require.NotEmpty(t, seeds)
+	ttl := params.DefaultMemory().OpenFailureTTL
+	for _, s := range seeds {
+		require.Less(t, s.AgoSeconds, ttl.Seconds(),
+			"seed %q exceeds open_failure_ttl", s.Commands)
 	}
 }

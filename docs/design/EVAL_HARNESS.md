@@ -240,6 +240,15 @@ every characterization pass a diff to reviewed files.
   over cells. One mechanism caveat it surfaces honestly:
   suppressing the open pool un-shadows its command twins —
   LOO ablation is never strictly row-removal.
+- **`crush eval curve` — the sweep driver.** Enumerates a dose
+  grid (`--quirks/--distractors/--plausibility/--prompt/--depth`
+  take comma lists, `--replicates` the per-cell draws), generates
+  each cell, probes it, and streams one JSONL row per instance to
+  `--out` — the published input to the ladder analysis before any
+  paid run is scheduled. The generator keeps every seeded row
+  inside the read-side `open_failure_ttl` — a distractor backdated
+  past the bound is dead state the fetch never delivers, so the
+  stagger compresses to six-hour steps at the K=50 top dose.
 - **`check.seed_script`.** Optional gate asserting the designed warm
   state — runs once after seeding (`prior_sessions` and/or
   `seed_commands`) and before the measured session, with the same

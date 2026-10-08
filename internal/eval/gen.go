@@ -101,10 +101,22 @@ var (
 	// Sibling packages carrying the resolved-fix evidence (M≥3).
 	genSiblingNames = []string{"fees", "tax", "credit", "rate"}
 	// Distractor referents — wrong names the memory can point at.
+	// The pool must cover the distractor ladder's top dose (K=50):
+	// each name becomes a fixture package or a stale-name command,
+	// so every entry is a valid Go package identifier.
 	genDistractorNames = []string{
 		"auth", "cache", "queue", "codec", "sync", "batch",
 		"index", "parse", "render", "watch", "relay", "store",
-		"emit", "guard", "probe", "trace",
+		"emit", "guard", "probe", "trace", "shard", "broker",
+		"ingest", "export", "notify", "audit", "quota", "token",
+		"cipher", "compress", "catalog", "ledger", "vector",
+		"matrix", "tensor", "kernel", "driver", "socket",
+		"router", "filter", "mapper", "reducer", "merger",
+		"spliter", "joiner", "fetcher", "pusher", "puller",
+		"tracker", "counter", "sampler", "batcher", "chainer",
+		"wrapper", "adapter", "bridge", "proxy", "gateway",
+		"ingress", "egress", "policy", "permit", "license",
+		"voucher", "invoice", "billing", "meter",
 	}
 )
 
@@ -332,7 +344,11 @@ func (s GenSpec) seedCommands(d genDraw) []ScriptedSeed {
 	var seeds []ScriptedSeed
 	ago := func(hours float64) float64 { return hours * 3600 }
 
-	// Distractors first — the oldest ambient rows.
+	// Distractors first — the oldest ambient rows. The stagger must
+	// keep every row inside the open-failure TTL: a distractor
+	// backdated past the read bound isn't a stored dose at all —
+	// the fetch drops it before the selector ever sees it. Six-hour
+	// steps hold K≤50 inside a fortnight.
 	for i, name := range d.distractor {
 		var cmd string
 		switch s.Plausibility {
@@ -348,7 +364,7 @@ func (s GenSpec) seedCommands(d genDraw) []ScriptedSeed {
 			cmd = "go test -tags private ./" + d.hidden[i]
 		}
 		seeds = append(seeds, ScriptedSeed{
-			AgoSeconds: ago(48 + float64(i)*24),
+			AgoSeconds: ago(48 + float64(i)*6),
 			Commands:   []string{cmd},
 		})
 	}
