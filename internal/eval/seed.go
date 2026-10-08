@@ -217,18 +217,24 @@ func (r *Runner) writeSnapshot(ctx context.Context, key, workdir string, warm *W
 	}
 	dataDir := DataDirFor(workdir)
 	conn, err := db.Connect(ctx, dataDir)
-	var dbBytes []byte
-	var rerr error
 	if err == nil {
 		// Checkpoint so the snapshot's crush.db is self-contained —
 		// copied bytes alone must carry every seeded row.
 		_, _ = conn.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
-		dbBytes, rerr = os.ReadFile(filepath.Join(dataDir, "crush.db"))
 		_ = db.Release(dataDir)
 	}
-	if rerr != nil || err != nil {
+	dbBytes, rerr := os.ReadFile(filepath.Join(dataDir, "crush.db"))
+	switch {
+	case rerr != nil:
 		slog.Warn("Seed snapshot db capture failed", "error", firstErr(err, rerr))
 		return
+	case err != nil:
+		// Re-opening the seeded db can fail on Windows
+		// (SQLITE_NOTADB on a file the seed writes just proved
+		// valid) — the last conn close already checkpointed the
+		// WAL, so the raw file is complete. Copy it and let the
+		// restored-state gate prove it downstream.
+		slog.Warn("Seed snapshot checkpoint skipped — copying db raw", "error", err)
 	}
 	if err := os.WriteFile(filepath.Join(tmp, "crush.db"), dbBytes, 0o600); err != nil {
 		return

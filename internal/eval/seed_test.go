@@ -104,6 +104,7 @@ func TestRunScriptedSeedsNoVerdict(t *testing.T) {
 // for provenance.
 func TestExecuteRun_ScriptedSeedsGatePasses(t *testing.T) {
 	t.Parallel()
+	requireSeedCheckTooling(t, "sqlite3")
 	root := newEvalDir(t)
 	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "t1", map[string]any{
 		"seed_commands": []any{
@@ -147,6 +148,7 @@ echo "EVAL_JSON {\"open_rows\":${open_rows:-0},\"seed_sessions\":${sessions:-0}}
 // the check expects — rejects inconclusive before the measured run.
 func TestExecuteRun_ScriptedSeedsGateFails(t *testing.T) {
 	t.Parallel()
+	requireSeedCheckTooling(t, "sqlite3")
 	root := newEvalDir(t)
 	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "t1", map[string]any{
 		"seed_commands": []any{
@@ -186,6 +188,7 @@ echo "EVAL_JSON {\"open_rows\":${open_rows:-0}}"
 // fields read zero (the seed was paid once).
 func TestExecuteRun_SeedSnapshotReplay(t *testing.T) {
 	t.Parallel()
+	requireSeedCheckTooling(t)
 	root := newEvalDir(t)
 	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "t1", map[string]any{
 		"seed_commands": []any{
