@@ -375,10 +375,21 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		rng = rand.New(rand.NewPCG(h.Sum64(), 0))
 	}
 
-	// Pair conclusive records on (trajectory, run_index).
+	// Pair conclusive records on (trajectory, run_index) — extended by
+	// fork_turn for replay records (#108): a counterfactual pair is
+	// same-boundary, same-replicate, so the pair key carries all three
+	// coordinates. Normal records normalize to fork=-1 and pair
+	// exactly as before.
 	type pairKey struct {
 		traj string
 		idx  int
+		fork int
+	}
+	forkOf := func(rec RunRecord) int {
+		if rec.Replay != nil {
+			return rec.Replay.ForkTurn
+		}
+		return -1
 	}
 	ctrl := map[pairKey]RunRecord{}
 	treat := map[pairKey]RunRecord{}
@@ -387,7 +398,7 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		if !rec.Outcome.Conclusive() {
 			continue
 		}
-		k := pairKey{rec.TrajectoryID, rec.RunIndex}
+		k := pairKey{rec.TrajectoryID, rec.RunIndex, forkOf(rec)}
 		switch rec.Arm {
 		case ArmControl:
 			ctrl[k] = rec
@@ -410,6 +421,9 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 	// diff positions, so identical data must build identical diffs.
 	pairKeys := slices.SortedFunc(maps.Keys(pairs), func(a, b pairKey) int {
 		if c := strings.Compare(a.traj, b.traj); c != 0 {
+			return c
+		}
+		if c := a.fork - b.fork; c != 0 {
 			return c
 		}
 		return a.idx - b.idx

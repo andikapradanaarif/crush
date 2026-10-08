@@ -1054,6 +1054,71 @@ it would be insensitive to one trajectory going all-inconclusive.
 (The arm-side differential is the counterpart of the
 trajectory-side coverage-starved alarm.)
 
+## Replay — counterfactual turn forking
+
+```json
+{
+	"replay": {
+		"source_arm": "control",
+		"fork_turns": [1, 2]
+	}
+}
+```
+
+Normal A/B runs resample trajectory noise on both arms: a 5% effect
+sits under MDE partly because each paired run redraws the model's
+sampling, the provider's mood, and the harness's own variance.
+`replay` attacks the variance term: record the trajectory **once**
+under `source_arm`, snapshot the workdir + `crush.db` at every turn
+boundary, then fork each boundary and replay that single turn under
+each arm on byte-identical history. One recorded prefix buys T×2×n
+paired single-turn samples — the per-pair cost drops to one turn, and
+the prefix noise that dominates full-run pairing vanishes entirely.
+
+**Boundary semantics.** Boundary `t` is the state immediately before
+`task.turns[t]`; boundary 0 is the seeded start. `recordReplayPrefix`
+runs the trajectory once under the source arm via `TurnRunner.RunTurn`
+(one subprocess per turn, `crush run --session <id>` continuing the
+recorded session), snapshotting after each turn. `fork_turns` selects
+which boundaries replay; omitted means every recorded boundary. A
+recording that dies mid-trajectory still yields the boundaries it
+completed — forks before the failure pair honestly, and the report
+marks the tail `partial` rather than fabricating it.
+
+**What a fork inherits vs. rebuilds.** The snapshot restores
+workdir bytes and `crush.db` bytes — file mutations, session rows,
+command-log entries, prior-turn messages. It does NOT restore
+`.crush.json`/`.crushrc`: each fork writes the neutral seed config
+then applies its own arm's merge, so a `control`-recorded prefix
+can't leak control options into a treatment fork — the pairing varies
+exactly the arm delta and nothing else. Artifacts carry the fork
+index (`<traj>-<arm>-<inv>-<rep>-t<k>.db`) so preserved session DBs
+never collide across boundaries.
+
+**What a fork does NOT inherit.** Provider-side state — the API's
+prompt cache, any server-side session affinity — is invisible to
+local snapshots; replay comparisons assume cache warmth is
+exchangeable across arms, the same assumption normal interleaving
+makes. `RunRecord.replay` carries `{fork_turn, source_arm,
+prefix_steps, prefix_tokens}`: prefix cost is provenance, never
+charged to the fork's per-turn metrics — `steps`, `tokens.*`, and
+checks measure the single replayed turn only. Compare pairs on
+`(trajectory, fork_turn, run_index)`, so a fork-1 control never
+joins a fork-0 treatment.
+
+**Honest scope.** Replay answers *conditional* mechanism questions —
+"given this exact history, does the arm change turn t's behavior?"
+(re-reads at turn start, memory rendering deltas on identical
+context) — not unconditional trajectory questions like "does the arm
+change whether turn 5 ever happens." The source arm shapes every
+fork's history: an arm-dependent prefix (e.g. control's memory
+off → different early context) is the estimand, not a bug, but it
+means replay effects are indexed by `source_arm` and shouldn't be
+pooled with full-run effects. `source_arm` defaults to `control`;
+validation requires it to name a declared arm, `fork_turns` rejects
+negatives and dupes, and replay on a driver without `TurnRunner`
+skips the trajectory rather than erroring the experiment.
+
 ## Lifecycle contract — when coverage commits
 
 Each `task.turns[i]` runs as its own `crush run` subprocess
