@@ -1196,3 +1196,70 @@ func TestSelectMemory_Pools(t *testing.T) {
 		require.Equal(t, 2, capped)
 	})
 }
+
+func TestSimulateSelection(t *testing.T) {
+	t.Parallel()
+
+	t.Run("exposes the production selector", func(t *testing.T) {
+		t.Parallel()
+		pools := MemoryPools{
+			Open:     []cmdlog.Failure{mkFailure("go test .", ".")},
+			Resolved: []cmdlog.Failure{mkFailureHeadline("go test -count=1 .", ".", "--- FAIL: TestOther")},
+			Commands: []cmdlog.Command{
+				// The open row's literal twin — shadowed.
+				{CmdNorm: "go test .", CWD: ".", Kind: "test", LastExit: 1, FailCount: 2},
+				{CmdNorm: "go vet .", CWD: ".", Kind: "lint", LastExit: 0, OKCount: 3},
+			},
+		}
+		admitted, decisions := SimulateSelection("the tests fail", pools, "",
+			MemoryRenderLimits{})
+		require.Len(t, decisions, 4)
+		require.Len(t, admitted.Open, 1)
+		require.Len(t, admitted.Resolved, 1)
+		require.Empty(t, admitted.Commands)
+		reasons := map[string]string{}
+		for _, d := range decisions {
+			require.NotEmpty(t, d.Pool)
+			require.NotEmpty(t, d.Reason)
+			reasons[d.Pool+"/"+d.Cmd] = d.Reason
+		}
+		require.Equal(t, failAdmit, reasons[poolOpen+"/go test ."])
+		require.Equal(t, failAdmit, reasons[poolResolved+"/go test -count=1 ."])
+		require.Equal(t, failShadowed, reasons[poolCommand+"/go test ."])
+		require.Equal(t, failKindMismatch, reasons[poolCommand+"/go vet ."])
+	})
+
+	t.Run("render caps produce render_capped verdicts", func(t *testing.T) {
+		t.Parallel()
+		pools := MemoryPools{
+			Open: []cmdlog.Failure{
+				mkFailure("go test .", "."),
+				mkFailureHeadline("go test -race .", ".", "--- FAIL: TestRace"),
+			},
+		}
+		admitted, decisions := SimulateSelection("the tests fail", pools, "",
+			MemoryRenderLimits{Open: 1})
+		require.Len(t, admitted.Open, 1)
+		var capped int
+		for _, d := range decisions {
+			if d.Reason == failRenderCapped {
+				capped++
+				require.False(t, d.Admit)
+			}
+		}
+		require.Equal(t, 1, capped)
+	})
+
+	t.Run("empty pools evaluate nothing", func(t *testing.T) {
+		t.Parallel()
+		// The live fetch path suppresses a zero-limit pool by not
+		// fetching it — the simulation sees the same empty input and
+		// must emit no candidates and no decisions for it.
+		admitted, decisions := SimulateSelection("the tests fail",
+			MemoryPools{}, "", MemoryRenderLimits{})
+		require.Empty(t, decisions)
+		require.Empty(t, admitted.Open)
+		require.Empty(t, admitted.Resolved)
+		require.Empty(t, admitted.Commands)
+	})
+}

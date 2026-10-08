@@ -138,6 +138,52 @@ func flagString(cmd *cobra.Command, name string) string {
 	return v
 }
 
+// evalSelectCmd runs the offline selector measurement (#223): the
+// trajectory's scripted seeds materialize once under
+// <eval-dir>/genwork/, then the production selector evaluates the
+// seeded pools under --memory-params. Every stored-dose →
+// rendered-dose question on the ladders answers here for free —
+// before any paid agent run is scheduled.
+var evalSelectCmd = &cobra.Command{
+	Use:   "select <trajectory-id>",
+	Short: "Offline selector simulation over a trajectory's seeded memory pools",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evalDir, _ := cmd.Flags().GetString("eval-dir")
+		prompt, _ := cmd.Flags().GetString("prompt")
+		var overlay map[string]any
+		if raw, _ := cmd.Flags().GetString("memory-params"); raw != "" {
+			if err := json.Unmarshal([]byte(raw), &overlay); err != nil {
+				return fmt.Errorf("memory-params: %w", err)
+			}
+		}
+		trajDir := filepath.Join(evalDir, "corpus", args[0])
+		traj, err := eval.LoadTrajectory(trajDir)
+		if err != nil {
+			return err
+		}
+		r, err := evalRunner(cmd)
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		rep, err := r.RunSelectProbe(cmd.Context(), traj, trajDir, prompt, overlay)
+		if err != nil {
+			return err
+		}
+		if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
+			out, err := json.MarshalIndent(rep, "", "  ")
+			if err != nil {
+				return err
+			}
+			fmt.Println(string(out))
+			return nil
+		}
+		fmt.Print(rep.String())
+		return nil
+	},
+}
+
 var evalRunCmd = &cobra.Command{
 	Use:   "run <experiment.json>",
 	Short: "Run a paired experiment and print the gate report",
@@ -479,5 +525,8 @@ func init() {
 	evalGenCmd.Flags().Int("depth", 0, "package nesting depth above the target (discovery cost)")
 	evalGenCmd.Flags().Int64("seed", 1, "RNG seed — quirk identity sampling")
 	evalGenCmd.Flags().Int("count", 1, "replicate instances to emit (each a distinct draw)")
-	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd, evalProbeCmd, evalProbeCacheCmd, evalCompareCmd, evalGenCmd)
+	evalSelectCmd.Flags().String("prompt", "", "prompt to bind against (default: the trajectory's first task turn)")
+	evalSelectCmd.Flags().String("memory-params", "", "JSON overlay for params.Memory (e.g. '{\"open_render_limit\":0}')")
+	evalSelectCmd.Flags().Bool("json", false, "print the full report as JSON")
+	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd, evalProbeCmd, evalProbeCacheCmd, evalCompareCmd, evalGenCmd, evalSelectCmd)
 }

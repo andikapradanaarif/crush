@@ -1293,6 +1293,50 @@ func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string
 	return admitted.open, decisions
 }
 
+// MemoryPools is the selector's candidate input for offline
+// simulation — the three channels exactly as the fetch layer
+// presents them to selectMemory.
+type MemoryPools struct {
+	Open     []cmdlog.Failure
+	Resolved []cmdlog.Failure
+	Commands []cmdlog.Command
+}
+
+// MemoryRenderLimits is the per-pool render budget for simulation.
+// Non-positive means render everything that binds — the selector's
+// internal convention; the memory_params zero-means-off contract is
+// enforced one layer up, at the fetch.
+type MemoryRenderLimits struct {
+	Open     int
+	Resolved int
+	Command  int
+}
+
+// SimulateSelection runs the production selector offline — the same
+// binding rules, render budgets, and decision records as the live
+// turn path, with no agent, model, or telemetry. The eval harness
+// uses it to measure the selector's half of the memory ladders for
+// free (#223): stored-dose vs rendered-dose questions resolve
+// without spending an agent run.
+func SimulateSelection(prompt string, pools MemoryPools, workDir string,
+	limits MemoryRenderLimits,
+) (MemoryPools, []FailureDecision) {
+	admitted, decisions := selectMemory(prompt, memoryPools{
+		open:     pools.Open,
+		resolved: pools.Resolved,
+		commands: pools.Commands,
+	}, workDir, memoryRenderLimits{
+		open:     limits.Open,
+		resolved: limits.Resolved,
+		command:  limits.Command,
+	})
+	return MemoryPools{
+		Open:     admitted.open,
+		Resolved: admitted.resolved,
+		Commands: admitted.commands,
+	}, decisions
+}
+
 // memoryPools groups the three memory channels the selector sees in
 // one pass — open failures, resolved failures, and the command
 // ledger. One prompt analysis binds all three, so a row cannot admit

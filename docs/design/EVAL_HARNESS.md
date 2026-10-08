@@ -224,6 +224,22 @@ every characterization pass a diff to reviewed files.
   replay, and the corpus sweep treat them identically to
   hand-written cells. Snapshot replay composes per instance:
   replicates are distinct dirs, never conflated.
+- **`crush eval select` — the free half of the ladders.** Each
+  stored-dose → rendered-dose question answers without a model
+  call: `select <traj-id>` materializes the trajectory once under
+  `<eval-dir>/genwork/<id>/` (scripted seeds run once; later
+  probes reuse the seeded dir), fetches the three memory pools
+  under `--memory-params` (a `params.Memory` JSON overlay —
+  `open_render_limit:0` suppresses the pool exactly as the live
+  fetch path does), and runs the production selector
+  (`agent.SimulateSelection`) over them. The report is every
+  candidate's verdict — pool, reason, settled-by — plus per-pool
+  seen/admitted/capped counts: the distractor curve's
+  P(wrong row rendered | K stored) and the depth curve's
+  P(relevant row rendered | N stored) are this table aggregated
+  over cells. One mechanism caveat it surfaces honestly:
+  suppressing the open pool un-shadows its command twins —
+  LOO ablation is never strictly row-removal.
 - **`check.seed_script`.** Optional gate asserting the designed warm
   state — runs once after seeding (`prior_sessions` and/or
   `seed_commands`) and before the measured session, with the same
