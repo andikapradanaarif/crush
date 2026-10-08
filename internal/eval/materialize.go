@@ -203,8 +203,8 @@ func ApplyPatch(ctx context.Context, workdir, patchPath string) error {
 // arm's same-named keys — an error. A start-state .crush.json merges
 // with the arm options winning; crush.json is lower precedence than
 // .crush.json outright, so it never shadows.
-func WriteArmConfig(workdir string, exp *Experiment, arm Arm, manifest *FlagsManifest) error {
-	return writeRunConfig(workdir, exp, arm.Config.Options, manifest)
+func WriteArmConfig(workdir string, exp *Experiment, arm Arm, manifest *FlagsManifest, seedKey string) error {
+	return writeRunConfig(workdir, exp, arm.Config.Options, manifest, seedKey)
 }
 
 // WriteSeedConfig drops the fixed seed-time config into the workdir:
@@ -215,11 +215,11 @@ func WriteArmConfig(workdir string, exp *Experiment, arm Arm, manifest *FlagsMan
 // arms differ before measurement begins. The memory write path is
 // unconditional, so seeds still produce cmdlog/failure rows. The
 // measured run's WriteArmConfig merges arm options over this file.
-func WriteSeedConfig(workdir string, exp *Experiment, manifest *FlagsManifest) error {
-	return writeRunConfig(workdir, exp, nil, manifest)
+func WriteSeedConfig(workdir string, exp *Experiment, manifest *FlagsManifest, seedKey string) error {
+	return writeRunConfig(workdir, exp, nil, manifest, seedKey)
 }
 
-func writeRunConfig(workdir string, exp *Experiment, armOptions map[string]any, manifest *FlagsManifest) error {
+func writeRunConfig(workdir string, exp *Experiment, armOptions map[string]any, manifest *FlagsManifest, seedKey string) error {
 	if fileExists(filepath.Join(workdir, "crushrc")) {
 		return fmt.Errorf("workdir already carries crushrc — a shell config shadows the .crush.json arm; neither the fixture nor a seed session may ship crush shell config")
 	}
@@ -254,14 +254,23 @@ func writeRunConfig(workdir string, exp *Experiment, armOptions map[string]any, 
 		// Harness state (crush.db, logs) beside the workdir, not in
 		// it: check.sh sees the tree exactly as the agent left it.
 		"data_directory": DataDirFor(workdir),
+		// The memory partition pins to the trajectory's seed key —
+		// the content hash the runner derives — not the
+		// materialized path: a snapshot-restored crush.db under a
+		// different workdir still resolves the key its rows were
+		// written with, and every run of the trajectory shares the
+		// partition the seeds wrote to.
+		"project_key": seedKey,
 	}
 	for k, v := range armOptions {
 		// Harness invariants an arm must not override — data dir
 		// relocation breaks telemetry/session-DB paths and litters
 		// the tree checks observe; metrics/auto-update re-enable
-		// nondeterministic side effects in measured runs.
+		// nondeterministic side effects in measured runs; a
+		// project_key divergence would partition the arms' memory
+		// under different identities before measurement begins.
 		switch k {
-		case "data_directory", "disable_metrics", "disable_provider_auto_update":
+		case "data_directory", "disable_metrics", "disable_provider_auto_update", "project_key":
 			return fmt.Errorf("arm sets %q which the harness manages — remove it from the experiment", k)
 		}
 		options[k] = v

@@ -245,6 +245,19 @@ func WithClock(now func() time.Time) Option {
 	}
 }
 
+// WithProjectKey pins the partition identity instead of deriving it
+// from the repo remote + common dir. options.project_key wires it —
+// the eval harness pins a per-trajectory key so a snapshot-restored
+// crush.db reads under the key its rows were written with. An empty
+// key is ignored.
+func WithProjectKey(key string) Option {
+	return func(s *service) {
+		if key != "" {
+			s.projectKey = key
+		}
+	}
+}
+
 // NewService creates the command/failure memory service rooted at
 // workingDir, so failure rows key directories the way filetracker
 // keys files — workspace-relative, cwd-independent. p is the

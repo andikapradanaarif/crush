@@ -3,8 +3,11 @@ package eval
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,9 +27,13 @@ import (
 // the designed history rather than whatever a seed agent happened to
 // leave.
 //
+// seedKey is the trajectory's pinned partition key — the seeded
+// rows must land under the key the measured run's project_key
+// option resolves, or the measured session reads an empty store.
+//
 // The returned ids are the seed session ids, in seed order — the
 // caller folds them into the warm-start ledger for provenance.
-func (r *Runner) runScriptedSeeds(ctx context.Context, workdir string, seeds []ScriptedSeed) ([]string, error) {
+func (r *Runner) runScriptedSeeds(ctx context.Context, workdir string, seeds []ScriptedSeed, seedKey string) ([]string, error) {
 	dataDir := DataDirFor(workdir)
 	conn, err := db.Connect(ctx, dataDir)
 	if err != nil {
@@ -41,7 +48,7 @@ func (r *Runner) runScriptedSeeds(ctx context.Context, workdir string, seeds []S
 
 	sessionIDs := make([]string, 0, len(seeds))
 	for i, seed := range seeds {
-		sessionID, err := r.runScriptedSeed(ctx, q, conn, workdir, seed, i)
+		sessionID, err := r.runScriptedSeed(ctx, q, conn, workdir, seed, i, seedKey)
 		if err != nil {
 			return sessionIDs, fmt.Errorf("seed_commands[%d]: %w", i, err)
 		}
@@ -53,7 +60,7 @@ func (r *Runner) runScriptedSeeds(ctx context.Context, workdir string, seeds []S
 // runScriptedSeed runs one seed session: a session row backdated to
 // the seed's clock, then each command through shell.RunAndCapture +
 // RecordRun under that clock.
-func (r *Runner) runScriptedSeed(ctx context.Context, q *db.Queries, conn *sql.DB, workdir string, seed ScriptedSeed, ord int) (string, error) {
+func (r *Runner) runScriptedSeed(ctx context.Context, q *db.Queries, conn *sql.DB, workdir string, seed ScriptedSeed, ord int, seedKey string) (string, error) {
 	sessionID := uuid.New().String()
 	// The session row is backdated like the command rows it owns —
 	// audit reading "seeded 3d ago" holds for the session too.
@@ -70,8 +77,9 @@ func (r *Runner) runScriptedSeed(ctx context.Context, q *db.Queries, conn *sql.D
 		return "", fmt.Errorf("backdate seed session: %w", err)
 	}
 
-	svc := cmdlog.NewService(q, workdir, params.DefaultMemory(), cmdlog.WithClock(
-		func() time.Time { return stamp }))
+	svc := cmdlog.NewService(q, workdir, params.DefaultMemory(),
+		cmdlog.WithClock(func() time.Time { return stamp }),
+		cmdlog.WithProjectKey(seedKey))
 	for j, command := range seed.Commands {
 		res, err := shell.RunAndCapture(ctx, shell.RunOptions{
 			Command: command,
@@ -102,4 +110,155 @@ func (r *Runner) runScriptedSeed(ctx context.Context, q *db.Queries, conn *sql.D
 		})
 	}
 	return sessionID, nil
+}
+
+// --- seed snapshots ---
+//
+// A seeded trajectory's warm state is deterministic enough to reuse:
+// once scripted seeds (and any agent seeds) have run and the gate
+// passed, the workdir + crush.db snapshot becomes the cell's starting
+// state for every later attempt and arm. Seed variance leaves the
+// measured estimate entirely — the replay restores bytes, so what
+// differs between two runs of a cell is only the measured session.
+// project_key is pinned (eval-<content hash>) rather than
+// path-derived, so a DB restored under a different workdir path still
+// resolves the partition its rows were written with.
+
+// seedSnapshotMeta is the warm ledger a replayed run reports — the
+// seeding cost and session provenance of the ORIGINAL seed, not the
+// restore's near-zero cost.
+type seedSnapshotMeta struct {
+	SessionIDs []string        `json:"session_ids"`
+	Sessions   int             `json:"sessions"`
+	DurationS  float64         `json:"duration_s"`
+	Steps      int             `json:"steps"`
+	Tokens     TokenUsage      `json:"tokens"`
+	Generator  GeneratorTokens `json:"generator_tokens"`
+}
+
+// snapshotDir locates the trajectory's seed snapshot beside the
+// materialized workdirs — same lifetime as the run's scratch space.
+func (r *Runner) snapshotDir(key string) string {
+	return filepath.Join(r.workParent(), ".snapshots", key)
+}
+
+// restoreSnapshot lays a prior seed snapshot over the materialized
+// workdir and returns its ledger. false means no snapshot exists —
+// the caller seeds fresh; a restore error falls back the same way
+// since the seeds, not the snapshot, are the source of truth.
+func (r *Runner) restoreSnapshot(key, workdir string, warm *WarmStart) bool {
+	dir := r.snapshotDir(key)
+	metaRaw, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+	if err != nil {
+		return false
+	}
+	var meta seedSnapshotMeta
+	if err := json.Unmarshal(metaRaw, &meta); err != nil {
+		slog.Warn("Seed snapshot meta unreadable — re-seeding", "snapshot", dir, "error", err)
+		return false
+	}
+	dataDir := DataDirFor(workdir)
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return false
+	}
+	// Clear the materialized tree before the overlay — copyTree
+	// adds and overwrites but never deletes, so a file the seeds
+	// removed would resurrect from the fixture copy and the
+	// "byte-identical" claim would break.
+	entries, err := os.ReadDir(workdir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if err := os.RemoveAll(filepath.Join(workdir, e.Name())); err != nil {
+			return false
+		}
+	}
+	if err := copyTree(filepath.Join(dir, "workdir"), workdir); err != nil {
+		slog.Warn("Seed snapshot workdir restore failed — re-seeding", "error", err)
+		return false
+	}
+	dbBytes, err := os.ReadFile(filepath.Join(dir, "crush.db"))
+	if err != nil {
+		slog.Warn("Seed snapshot db restore failed — re-seeding", "error", err)
+		return false
+	}
+	// Any WAL sidecar left over from this attempt's own db init
+	// would replay over the restored bytes — the snapshot's
+	// checkpointed file is the complete state.
+	for _, side := range []string{"crush.db-wal", "crush.db-shm"} {
+		_ = os.Remove(filepath.Join(dataDir, side))
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "crush.db"), dbBytes, 0o600); err != nil {
+		return false
+	}
+	// Provenance (session ids, count) carries — the seed rows in the
+	// restored db belong to those sessions. Spend does not: the
+	// seeding tokens/steps were paid once by the seeding attempt,
+	// and replaying the ledger into every run would price the seed
+	// N times over. A replayed warm_start reads zero cost with
+	// real session ids — "seeded once, measured N" in the ledger.
+	warm.SessionIDs = meta.SessionIDs
+	warm.Sessions = meta.Sessions
+	return true
+}
+
+// writeSnapshot captures the post-seed state for later attempts. The
+// db is checkpointed first so the file copy carries the WAL too.
+// Failures are logged, not fatal — snapshotting is a variance
+// optimization, the next attempt can always seed fresh.
+func (r *Runner) writeSnapshot(ctx context.Context, key, workdir string, warm *WarmStart) {
+	dir := r.snapshotDir(key)
+	tmp := dir + ".tmp-" + uuid.New().String()
+	defer os.RemoveAll(tmp)
+	if err := os.MkdirAll(filepath.Join(tmp, "workdir"), 0o755); err != nil {
+		slog.Warn("Seed snapshot mkdir failed", "error", err)
+		return
+	}
+	dataDir := DataDirFor(workdir)
+	conn, err := db.Connect(ctx, dataDir)
+	var dbBytes []byte
+	var rerr error
+	if err == nil {
+		// Checkpoint so the snapshot's crush.db is self-contained —
+		// copied bytes alone must carry every seeded row.
+		_, _ = conn.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+		dbBytes, rerr = os.ReadFile(filepath.Join(dataDir, "crush.db"))
+		_ = db.Release(dataDir)
+	}
+	if rerr != nil || err != nil {
+		slog.Warn("Seed snapshot db capture failed", "error", firstErr(err, rerr))
+		return
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "crush.db"), dbBytes, 0o600); err != nil {
+		return
+	}
+	if err := copyTree(workdir, filepath.Join(tmp, "workdir")); err != nil {
+		slog.Warn("Seed snapshot workdir capture failed", "error", err)
+		return
+	}
+	meta := seedSnapshotMeta{
+		SessionIDs: warm.SessionIDs,
+		Sessions:   warm.Sessions,
+		DurationS:  warm.DurationS,
+		Steps:      warm.Steps,
+		Tokens:     warm.Tokens,
+		Generator:  warm.GeneratorTokens,
+	}
+	if raw, err := json.Marshal(meta); err == nil {
+		_ = os.WriteFile(filepath.Join(tmp, "meta.json"), raw, 0o644)
+	}
+	// Atomic publish: a partial snapshot is never visible to a
+	// parallel attempt — rename is all-or-nothing per platform.
+	_ = os.RemoveAll(dir)
+	if err := os.Rename(tmp, dir); err != nil {
+		slog.Warn("Seed snapshot publish failed", "error", err)
+	}
+}
+
+func firstErr(a, b error) error {
+	if a != nil {
+		return a
+	}
+	return b
 }

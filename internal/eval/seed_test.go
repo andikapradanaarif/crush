@@ -26,7 +26,7 @@ func TestRunScriptedSeeds(t *testing.T) {
 		{AgoSeconds: 72 * 3600, Commands: []string{"ls missing-marker"}},
 		{AgoSeconds: 3600, Commands: []string{"touch missing-marker", "ls missing-marker", "true"}},
 	}
-	ids, err := r.runScriptedSeeds(context.Background(), workdir, seeds)
+	ids, err := r.runScriptedSeeds(context.Background(), workdir, seeds, "eval-test")
 	require.NoError(t, err)
 	require.Len(t, ids, 2)
 	require.NotEqual(t, ids[0], ids[1])
@@ -55,10 +55,15 @@ func TestRunScriptedSeeds(t *testing.T) {
 	// same backdated clock — last_at ~= now - ago, not wall time.
 	var cmdCount int
 	var lastAt, lastAtResolved int64
-	var lastSession string
+	var lastSession, projKey string
 	require.NoError(t, conn.QueryRowContext(context.Background(),
 		`SELECT count(*) FROM command_memory`).Scan(&cmdCount))
 	require.Equal(t, 3, cmdCount)
+	// The seed's partition is the pinned key — a measured run
+	// resolving the same project_key sees every seeded row.
+	require.NoError(t, conn.QueryRowContext(context.Background(),
+		`SELECT DISTINCT project_key FROM command_memory`).Scan(&projKey))
+	require.Equal(t, "eval-test", projKey)
 	require.NoError(t, conn.QueryRowContext(context.Background(),
 		`SELECT last_at, last_session_id FROM command_memory WHERE cmd_norm = 'ls missing-marker'`).
 		Scan(&lastAt, &lastSession))
@@ -87,7 +92,7 @@ func TestRunScriptedSeedsNoVerdict(t *testing.T) {
 	seeds := []ScriptedSeed{
 		{AgoSeconds: 60, Commands: []string{"if ;;; then"}},
 	}
-	ids, err := r.runScriptedSeeds(context.Background(), workdir, seeds)
+	ids, err := r.runScriptedSeeds(context.Background(), workdir, seeds, "eval-test")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no verdict")
 	require.Empty(t, ids)
@@ -175,6 +180,69 @@ echo "EVAL_JSON {\"open_rows\":${open_rows:-0}}"
 	require.Contains(t, fmt.Sprint(rec.CheckDetail), "seed state assertion failed")
 }
 
+// Snapshot replay: attempt 2 restores the seeded workdir + crush.db
+// byte-for-byte rather than re-seeding — the session rows stay at
+// the two the first attempt wrote, provenance carries, and spend
+// fields read zero (the seed was paid once).
+func TestExecuteRun_SeedSnapshotReplay(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "t1", map[string]any{
+		"seed_commands": []any{
+			map[string]any{"ago_seconds": 7200, "commands": []any{"ls missing-marker"}},
+			map[string]any{"ago_seconds": 60, "commands": []any{"touch from-seed", "rm hello.txt"}},
+		},
+		// hello.txt comes from the fixture — the seed deleted it.
+		// If restore overlaid onto the fresh materialize instead of
+		// replacing it, the file would resurrect and this check
+		// would fail on attempt 2.
+		"check_script_body": "#!/bin/bash\ntest -f fixed.marker && test ! -f hello.txt\n",
+	})
+	traj, err := LoadTrajectory(trajDir)
+	require.NoError(t, err)
+	exp := &Experiment{
+		Name: "e1", Model: "mock/m", Temperature: ptr(0.0),
+		Arms: map[string]Arm{ArmControl: {}},
+	}
+	// WorkParent must persist across attempts — snapshots live
+	// beside the materialized workdirs.
+	workParent := t.TempDir()
+	r := &Runner{EvalDir: root, Driver: noDBDriver{}, WorkParent: workParent}
+	manifest := &FlagsManifest{Defaults: map[string]any{}}
+
+	rec1, err := r.ExecuteRun(context.Background(), exp, traj, trajDir,
+		ArmControl, Arm{}, manifest, 1, "inv1")
+	require.NoError(t, err)
+	require.Equal(t, OutcomePass, rec1.Outcome)
+	require.Equal(t, 2, rec1.WarmStart.Sessions)
+	require.Len(t, rec1.WarmStart.SessionIDs, 2)
+	require.DirExists(t, r.snapshotDir(traj.ID+"-"+rec1.Env.ContentHash))
+
+	rec2, err := r.ExecuteRun(context.Background(), exp, traj, trajDir,
+		ArmControl, Arm{}, manifest, 2, "inv1")
+	require.NoError(t, err)
+	require.Equal(t, OutcomePass, rec2.Outcome)
+	// Provenance carries the original seed sessions; spend reads
+	// zero — the seed was paid by attempt 1.
+	require.Equal(t, rec1.WarmStart.SessionIDs, rec2.WarmStart.SessionIDs)
+	require.Equal(t, 2, rec2.WarmStart.Sessions)
+	require.Zero(t, rec2.WarmStart.Steps)
+	require.Zero(t, rec2.WarmStart.Tokens)
+
+	// The restored db carries the seeded rows under the pinned key.
+	conn, err := db.ConnectReadOnly(context.Background(),
+		filepath.Join(root, rec2.SessionDB))
+	require.NoError(t, err)
+	defer conn.Close()
+	var sessions, openRows int
+	require.NoError(t, conn.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM sessions WHERE title LIKE 'seed %'`).Scan(&sessions))
+	require.Equal(t, 2, sessions, "restore re-seeded — sessions doubled")
+	require.NoError(t, conn.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM failure_memory WHERE resolved_in = ''`).Scan(&openRows))
+	require.Equal(t, 1, openRows)
+}
+
 // The corpus host for the LOO ladder: its scripted seeds must
 // materialize all three memory pools — resolved, open, command —
 // and the seed_check gate must see exactly that state.
@@ -194,7 +262,7 @@ func TestSeededThreePoolFixture(t *testing.T) {
 		os.RemoveAll(DataDirFor(workdir))
 	}()
 
-	ids, err := r.runScriptedSeeds(context.Background(), workdir, traj.SeedCommands)
+	ids, err := r.runScriptedSeeds(context.Background(), workdir, traj.SeedCommands, "eval-test")
 	require.NoError(t, err)
 	require.Len(t, ids, 2)
 

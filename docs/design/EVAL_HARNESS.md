@@ -192,6 +192,22 @@ every characterization pass a diff to reviewed files.
   aborts `error` — the authored state diverged. Trade-off: scripted
   rows are cleaner than agent rows (no composite-command noise);
   keep one agent-seeded arm in ladders to keep the selector honest.
+- **Seed snapshots (automatic).** Once a seeded trajectory's seeds
+  pass `seed_script`, the harness snapshots the workdir + a
+  WAL-checkpointed `crush.db` under `<work-parent>/.snapshots/
+  <trajectory>-<content-hash>/`. Every later attempt — and the
+  other arm — restores those bytes instead of re-seeding: seed
+  variance leaves the estimate entirely, and paid runs spend
+  nothing on seeding. The memory partition is pinned to
+  `options.project_key = "eval-<content-hash>"` (harness-managed —
+  arms cannot override it), so a db restored under a different
+  materialized path still reads the rows its seeds wrote. A
+  restored run's `warm_start` carries the seed `session_ids` for
+  provenance but zero spend — the seed cost was paid once, by the
+  attempt that wrote the snapshot. Restore failures fall back to
+  re-seeding; the seed spec, not the snapshot, is the source of
+  truth. Editing the trajectory changes the content hash, so a
+  seed-spec edit never replays a stale snapshot.
 - **`check.seed_script`.** Optional gate asserting the designed warm
   state — runs once after seeding (`prior_sessions` and/or
   `seed_commands`) and before the measured session, with the same
@@ -204,10 +220,10 @@ every characterization pass a diff to reviewed files.
   resolved, the task is already done): the run is rejected as
   `inconclusive` before the measured session launches, never scored
   on the wrong premise. A gate that cannot execute or times out is
-  `error` — infra, not state. Valid only with `prior_sessions`;
-  quarantine does not run it (quarantine has no seeds). Gate output
-  lands in `check_detail` (`seed_check_*` keys on failure) — not
-  `check_stdout`, which is check.sh-only.
+  `error` — infra, not state. Valid with `prior_sessions` and/or
+  `seed_commands`; quarantine does not run it (quarantine has no
+  seeds). Gate output lands in `check_detail` (`seed_check_*` keys
+  on failure) — not `check_stdout`, which is check.sh-only.
   **Assert the memory state, not just the worktree.** The premise of
   a warm cell lives in crush.db, reachable from the gate at
   `$(dirname "$EVAL_WORKDIR")/$(basename "$EVAL_WORKDIR").crush-data/

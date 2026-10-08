@@ -267,16 +267,11 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	defer os.RemoveAll(workdir)
 	defer os.RemoveAll(DataDirFor(workdir))
 
-	// Seeds run under the fixed neutral config, not the arm's — arm
-	// options active during seeding (a reconcile edge nudging the
-	// seed agent, a tail injecting memory) make the arms' starting
-	// states differ before measurement begins. WriteArmConfig lands
-	// the arm delta only on the measured session below.
-	if err := WriteSeedConfig(workdir, exp, manifest); err != nil {
-		rec.Outcome = OutcomeError
-		rec.CheckDetail = map[string]any{"harness": err.Error()}
-		return rec, nil
-	}
+	// The seed key pins every writer/reader of this trajectory's
+	// memory to one partition — scripted seeds, agent seeds,
+	// measured runs, and snapshot replays all resolve the same
+	// project_key, independent of the materialized path.
+	seedKey := "eval-" + contentHash
 
 	rec.StartedAt = r.now()
 	drv := r.driver()
@@ -298,13 +293,39 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	var lastSeedTurns []string
 	seeded := len(traj.PriorSessions) > 0 || len(traj.SeedCommands) > 0
 	warm := &WarmStart{}
-	if len(traj.SeedCommands) > 0 {
+	// A seeded trajectory replays from its seed snapshot once the
+	// first attempt has written one: the measured sessions then
+	// start from byte-identical state — seed variance leaves the
+	// estimate, and paid runs spend nothing on re-seeding. The
+	// key covers the full trajectory content, so any seed-spec
+	// edit produces a different snapshot. Restore lands before the
+	// config writes — the snapshot's .crush.json carries a stale
+	// data_directory that only WriteSeedConfig rewrites.
+	snapKey := traj.ID + "-" + contentHash
+	restored := seeded && r.restoreSnapshot(snapKey, workdir, warm)
+	if restored {
+		rec.WarmStart = warm
+	}
+
+	// Seeds run under the fixed neutral config, not the arm's — arm
+	// options active during seeding (a reconcile edge nudging the
+	// seed agent, a tail injecting memory) make the arms' starting
+	// states differ before measurement begins. WriteArmConfig lands
+	// the arm delta only on the measured session below. On a
+	// restored workdir this same write refreshes the snapshot's
+	// stale path-keyed options.
+	if err := WriteSeedConfig(workdir, exp, manifest, seedKey); err != nil {
+		rec.Outcome = OutcomeError
+		rec.CheckDetail = map[string]any{"harness": err.Error()}
+		return rec, nil
+	}
+	if !restored && len(traj.SeedCommands) > 0 {
 		// Scripted seeds are the authored-history tier: real
 		// RecordRun writes under a controlled clock, no agent, no
 		// tokens. They run before agent seeds — chronologically
 		// they model the older history anyway (ago_seconds).
 		seedStart := r.now()
-		seedIDs, err := r.runScriptedSeeds(ctx, workdir, traj.SeedCommands)
+		seedIDs, err := r.runScriptedSeeds(ctx, workdir, traj.SeedCommands, seedKey)
 		warm.Sessions += len(seedIDs)
 		warm.SessionIDs = append(warm.SessionIDs, seedIDs...)
 		warm.DurationS += r.now().Sub(seedStart).Seconds()
@@ -322,7 +343,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 			return rec, nil
 		}
 	}
-	if len(traj.PriorSessions) > 0 {
+	if !restored && len(traj.PriorSessions) > 0 {
 		for i, ps := range traj.PriorSessions {
 			seedStart := r.now()
 			seed := drv.Run(ctx, workdir, ps.Turns, traj.Budget)
@@ -376,6 +397,13 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 		schk := runCheckScript(ctx, traj.Check.SeedScript, trajDir, workdir, r.checkEnv(), checkTimeout(traj))
 		rec.SeedState = schk.Detail
 		if schk.Err != nil || schk.Exit != 0 {
+			if restored {
+				// A restored snapshot that fails the gate is
+				// poison — drop it so the next attempt
+				// re-seeds rather than replaying a bad state
+				// forever.
+				_ = os.RemoveAll(r.snapshotDir(snapKey))
+			}
 			rec.DurationS = r.now().Sub(rec.StartedAt).Seconds()
 			seedID := lastSeed.SessionID
 			if seedID == "" && len(warm.SessionIDs) > 0 {
@@ -404,8 +432,13 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 			return rec, nil
 		}
 	}
+	// Gate passed: publish the seeded state so later attempts — and
+	// the other arm — replay it byte-for-byte instead of re-seeding.
+	if seeded && !restored {
+		r.writeSnapshot(ctx, snapKey, workdir, warm)
+	}
 	// The measured session is where the arm's flag delta belongs.
-	if err := WriteArmConfig(workdir, exp, arm, manifest); err != nil {
+	if err := WriteArmConfig(workdir, exp, arm, manifest, seedKey); err != nil {
 		// A rejection here is usually a seed session's workdir
 		// mutation — the record's WarmStart already promises seed
 		// session ids, so snapshot the db like the other
