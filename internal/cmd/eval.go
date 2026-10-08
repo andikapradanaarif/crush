@@ -293,11 +293,11 @@ Known probes:
 		if args[1] == "all" {
 			names = eval.ProbeNames()
 		}
-		for i, name := range names {
-			rep, err := eval.RunProbe(cmd.Context(), dbPath, name, opts)
-			if err != nil {
-				return err
-			}
+		reps, err := eval.RunProbes(cmd.Context(), dbPath, names, opts)
+		if err != nil {
+			return err
+		}
+		for i, rep := range reps {
 			if i > 0 {
 				fmt.Println()
 			}
