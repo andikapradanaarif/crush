@@ -261,6 +261,12 @@ type DecisionRule struct {
 // aggregate "tokens_to_done". Arm/Vs name declared arms — the
 // comparator only pairs control vs treatment, so Arm must be
 // "treatment" and Vs "control" until multi-arm compare lands.
+//
+// MinImprovement is the shipping threshold — the effect size the
+// hypothesis claims — while Primary.MDE is the planning bound that
+// sizes n and sets the CI decision boundary. MinImprovement below
+// MDE is conservative: an effect between the two resolves
+// inconclusive, never a false win.
 type RulePrimary struct {
 	Metric         string  `json:"metric"`
 	Arm            string  `json:"arm"`
@@ -331,6 +337,11 @@ type ExpectedExclusion struct {
 // the minimum detectable effect as a relative change (0.15 = 15%).
 // Direction selects a one-sided comparison: "decrease" claims the
 // treatment lowers the metric, "increase" that it raises it.
+// MDE is the planning bound — it sizes the required pair count and
+// sets the CI boundary for the primary verdict. The shipping claim
+// lives separately in DecisionRule.Primary.MinImprovement; the two
+// may differ (power 15%, accept 10%), and the gap resolves
+// inconclusive rather than favorable.
 type Primary struct {
 	Metric    string  `json:"metric"`
 	Direction string  `json:"direction"` // increase | decrease
