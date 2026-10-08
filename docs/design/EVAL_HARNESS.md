@@ -298,12 +298,50 @@ every characterization pass a diff to reviewed files.
   `view_directory_errors` and `discovery_calls_before_write`.
   `crush eval analyze <session_db>` runs the same pass standalone
   and backfills old artifacts; the record carries `workdir` so a
-  post-hoc analyze can anchor relative call paths. Known blind
-  spots, both bash-side: discovery through `cat`/`find`/`rg`/`go doc`
+  post-hoc analyze can anchor relative call paths.
+  `crush eval probe <session_db> <name>` runs the offline probe
+  tier — zero-API-cost mechanism checks over preserved session
+  DBs, gated behind nothing: probes exist to kill candidate features
+  before an experiment spends runs on them. Each probe consumes the
+  analyzer's labeled call sequence plus a per-call payload pass
+  (tool-call input + result metadata, where edit tools persist
+  `old_content`/`new_content`), so ordering, turn segmentation, and
+  placeholder labeling stay single-sourced. Registered probes:
+  `post-edit-window` (was each view's range inside the ±10-line
+  window of the prior mutation on the same path — the #98
+  served-class floor), `view-edit-same-file` (per-path mutations
+  and post-edit view counts, window-free), `turn-start-reread`
+  (first view per (path,turn) of a file mutated in an earlier
+  turn — the collapse re-open signature, rows are the per-file
+  heat map). Mutations classify through the canonical
+  `toolclass.IsMutatingCall` vocabulary — bash-carried writes
+  count: redirect targets bind a path (views land
+  `span_unknown`, the written range isn't recorded), and an
+  unbound mutation (`sed -i`, `tee` args) poisons every later
+  no-site view to `span_unknown` rather than `no_prior_edit`.
+  Edit spans prefer `old_string` sites in `old_content` — the
+  true locations, immune to coincidental `new_string`
+  duplicates — with `new_content` search as the multiedit
+  fallback; mutations whose span isn't recorded
+  (lsp_rename/lsp_replace_symbol/download, or pre-metadata
+  artifacts) classify `span_unknown` rather than guessing.
+  View ranges clamp to the fetched `content` length in the
+  result metadata — a `1-200` view on a 17-line file scores
+  what was delivered, not what was requested. Measured on the
+  preserved corpus, `servable` (strict in-window containment)
+  is ~0/run and `overlap` (partial coverage) ~3/run — the
+  post-edit region's served class was structurally empty. New
+  mechanism questions register in `internal/eval/probe.go`,
+  not by widening `CallMetrics`.
+  Known blind
+  spots: discovery through `cat`/`find`/`rg`/`go doc`
   is invisible to tool-name classification so
   `discovery_calls_before_write` undercounts systematically, and
-  mutations through `sed -i`/redirects/`download` are equally
-  invisible so a bash-only mutating run shows `first_write_index=-1`.
+  `first_write_index` deliberately tracks only the
+  `WriteToolNames` class (the stub-machinery write class the
+  gates assert on) so a bash-only mutating run shows -1 — the
+  probes carry the wider `IsMutatingCall` vocabulary, the
+  analyzer metric does not.
   `inconclusive` does not
   consume a `runs_per_trajectory` slot: the runner resamples to N
   conclusive runs with an attempts cap (~2N) before flagging the
