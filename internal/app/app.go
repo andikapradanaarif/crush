@@ -520,8 +520,9 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 			// `crush run` process must commit coverage (and let the
 			// telemetry/report reflect it) rather than killing the
 			// generators mid-flight.
-			app.drainDetachedWork(detachedDrainTimeout)
-			app.emitEvalTelemetry(sess.ID, result.result, result.err, 0)
+			attempted, completed := app.drainDetachedWork(detachedDrainTimeout)
+			app.emitEvalTelemetry(sess.ID, result.result, result.err, 0,
+				drainReport{Attempted: attempted, Completed: completed, TimeoutMs: detachedDrainTimeout.Milliseconds()})
 			if result.err != nil {
 				if errors.Is(result.err, context.Canceled) || errors.Is(result.err, agent.ErrRequestCancelled) {
 					slog.Debug("Non-interactive: agent processing cancelled", "session_id", sess.ID)
@@ -574,10 +575,11 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 				// Generations run on detached contexts and may still
 				// be in flight; give near-done ones a beat to commit
 				// coverage before the process dies.
-				app.drainDetachedWork(detachedCancelDrainTimeout)
+				attempted, completed := app.drainDetachedWork(detachedCancelDrainTimeout)
 				// An errored run may carry a nil result — still record
 				// the approximate step burn.
-				app.emitEvalTelemetry(sess.ID, result.result, result.err, len(messageReadBytes))
+				app.emitEvalTelemetry(sess.ID, result.result, result.err, len(messageReadBytes),
+					drainReport{Attempted: attempted, Completed: completed, TimeoutMs: detachedCancelDrainTimeout.Milliseconds()})
 				if result.err != nil &&
 					!errors.Is(result.err, context.Canceled) &&
 					!errors.Is(result.err, agent.ErrRequestCancelled) {
@@ -586,7 +588,10 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 			case <-time.After(2 * time.Second):
 				// len(messageReadBytes) approximates steps burned —
 				// distinct assistant messages seen before the kill.
-				app.emitEvalTelemetry(sess.ID, nil, ctx.Err(), len(messageReadBytes))
+				// The drain never ran — record that, not a fake
+				// completion.
+				app.emitEvalTelemetry(sess.ID, nil, ctx.Err(), len(messageReadBytes),
+					drainReport{Attempted: false})
 			}
 			return ctx.Err()
 		}
@@ -611,16 +616,18 @@ const detachedCancelDrainTimeout = 2 * time.Second
 // `crush run` kills coverage commits mid-flight and the next
 // turn's coverage gate starves. No-op on coordinators that don't
 // expose the join.
-func (app *App) drainDetachedWork(timeout time.Duration) {
+func (app *App) drainDetachedWork(timeout time.Duration) (attempted, completed bool) {
 	c, ok := app.AgentCoordinator.(interface {
 		WaitForDetachedWork(time.Duration) bool
 	})
 	if !ok {
-		return
+		return false, false
 	}
 	if !c.WaitForDetachedWork(timeout) {
 		slog.Warn("Timed out draining detached agent work", "timeout", timeout)
+		return true, false
 	}
+	return true, true
 }
 
 func (app *App) UpdateAgentModel(ctx context.Context) error {

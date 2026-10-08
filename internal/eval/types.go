@@ -582,6 +582,11 @@ type RunRecord struct {
 	// forensics: which component first differed and what the volatile
 	// prefix hashed to. Informational only; never a predicate.
 	StepRecords []StepRecord `json:"step_records,omitempty"`
+	// Drains is the per-turn detached-work join outcome — whether
+	// each turn's process drained detached work before exiting, or
+	// timed out / never attempted (#115). The lifecycle evidence
+	// that a restart boundary settled cleanly. Informational only.
+	Drains []DrainReport `json:"drains,omitempty"`
 	// Tail is the per-turn tail audit — which context envelopes the
 	// model actually saw each turn (section names, sizes, digest,
 	// verbatim text). The tail is ephemeral by design; absent from
@@ -784,10 +789,37 @@ type StepRecord struct {
 	PrefixHash        string `json:"prefix_hash,omitempty"`
 	FirstChanged      int    `json:"first_changed_index"`
 	FirstChangedCause string `json:"first_changed_cause,omitempty"`
+	// RequestHash fingerprints the whole request — system run,
+	// history, and tool schemas combined (#115). Two steps with
+	// equal RequestHash sent identical content, so a cache_read
+	// regression between them is provider-side by elimination.
+	RequestHash string `json:"request_hash,omitempty"`
+	// PID/FirstOfProcess locate the request in process space — the
+	// eval driver restarts `crush run` per turn, so a step's
+	// process identity is the evidence a cross-boundary diff is
+	// attribution, not a coincidence.
+	PID            int  `json:"pid,omitempty"`
+	FirstOfProcess bool `json:"first_of_process,omitempty"`
+	// CacheAnomaly is "provider-side" when the request was
+	// byte-identical to the previous render yet cache_read dropped
+	// — no local cause explains the miss, so the record says so
+	// instead of fabricating a harness cause (#115).
+	CacheAnomaly string `json:"cache_anomaly,omitempty"`
 	// PressureEstimate/PressureEngaged carry the gate's per-step
 	// state — the estimate-vs-reported audit pair.
 	PressureEstimate int64 `json:"pressure_estimate,omitempty"`
 	PressureEngaged  bool  `json:"pressure_engaged,omitempty"`
+}
+
+// DrainReport is one turn process's detached-work join outcome —
+// attempted distinguishes "the join ran" from "the cancel fast-path
+// skipped it" (or a coordinator without the join interface);
+// completed distinguishes a clean drain from a timeout (#115).
+type DrainReport struct {
+	Turn      int   `json:"turn"`
+	Attempted bool  `json:"attempted"`
+	Completed bool  `json:"completed"`
+	TimeoutMs int64 `json:"timeout_ms,omitempty"`
 }
 
 // GeneratorTokens accounts the notebook sidecar's generation spend —

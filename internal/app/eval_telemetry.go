@@ -28,10 +28,20 @@ const EvalTelemetryEnvVar = "CRUSH_EVAL_TELEMETRY"
 // with internal/eval.EvalFlagsEnvVar.
 const EvalFlagsEnvVar = "CRUSH_EVAL_FLAGS"
 
+// drainReport is what the pre-exit detached-work join actually did:
+// whether it ran at all and whether it finished inside its bound.
+// attempted=false covers both the cancel fast-path (no select arm
+// reached the drain) and coordinators with no join interface.
+type drainReport struct {
+	Attempted bool  `json:"attempted"`
+	Completed bool  `json:"completed"`
+	TimeoutMs int64 `json:"timeout_ms,omitempty"`
+}
+
 // emitEvalTelemetry writes the run's telemetry JSON when
 // CRUSH_EVAL_TELEMETRY is set. Best-effort: a write failure must never
 // fail the run itself.
-func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult, runErr error, approxSteps int) {
+func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult, runErr error, approxSteps int, drain drainReport) {
 	path := os.Getenv(EvalTelemetryEnvVar)
 	if path == "" || app.AgentCoordinator == nil {
 		return
@@ -44,6 +54,9 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 		// and unconditional: even a run that errors early ran under
 		// this snapshot.
 		"param_version": app.memParams.OrDefault().Version(),
+		// The detached-work join outcome — distinguishable as
+		// completed / timed out / never attempted (#115).
+		"drain": drain,
 	}
 	// The child reports what each manifest flag actually resolved to —
 	// arm intent can silently no-op on a renamed or shadowed option.
@@ -175,6 +188,12 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 		// last-write-wins tail field flattens (#249).
 		if len(tel.TailRuns) > 0 {
 			doc["tail_runs"] = tel.TailRuns
+		}
+		// The final request's fingerprint — the next turn's process
+		// seeds its diff from this so a turn-first step reports a
+		// real cause instead of cold (#115).
+		if !tel.PrevRequest.Empty() {
+			doc["request_vector"] = tel.PrevRequest
 		}
 	}
 	// Edge firings emit as a DELTA, not the cumulative snapshot — the

@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"encoding/json"
+	"log/slog"
 	"os"
 	"slices"
 	"strconv"
@@ -119,6 +121,11 @@ type SessionTelemetry struct {
 	// continuations and side-channel calls can't drop spend.
 	LedgerUsage fantasy.Usage `json:"ledger_usage"`
 	LedgerSteps int           `json:"ledger_steps"`
+	// PrevRequest is the session's last rendered request fingerprint
+	// plus that step's cache_read — the diff vector the next turn's
+	// process needs so its first step attributes a real cause
+	// instead of cold (#115).
+	PrevRequest RequestVector `json:"prev_request,omitempty"`
 }
 
 // SessionTelemetry returns the coordinator's per-session counters.
@@ -180,6 +187,10 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 			t.ReqToolCallBytes = r.ToolCallBytes
 			t.ReqToolResultBytes = r.ToolResultBytes
 			t.Steps = r.Steps
+			// The vector exports under the emitting session — the
+			// restart seed must match the session it resumes.
+			t.PrevRequest = r.PrevRequest
+			t.PrevRequest.SessionID = sessionID
 		}
 	}
 	if sa.edgeStats != nil {
@@ -316,6 +327,34 @@ const EvalFlagsEnvVar = "CRUSH_EVAL_FLAGS"
 // so its presence is the universal harness-driven marker. Kept in
 // sync with internal/eval.EvalTelemetryEnvVar.
 const EvalTelemetryEnvVar = "CRUSH_EVAL_TELEMETRY"
+
+// EvalRequestVectorEnvVar carries the previous turn's final request
+// fingerprint (JSON RequestVector) into the next turn's process —
+// the restart-attribution handoff: the resumed session's first step
+// diffs against what the prior process actually rendered instead of
+// reporting cold (#115). Kept in sync with
+// internal/eval.EvalRequestVectorEnvVar.
+const EvalRequestVectorEnvVar = "CRUSH_EVAL_REQUEST_VECTOR"
+
+// restartVector returns the request vector the eval harness handed
+// this process for sessionID, or the zero vector when none applies.
+// The session check is the leak guard — a vector from a different
+// session's last request must never seed this session's diff.
+func restartVector(sessionID string) RequestVector {
+	raw := os.Getenv(EvalRequestVectorEnvVar)
+	if raw == "" || sessionID == "" {
+		return RequestVector{}
+	}
+	var v RequestVector
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		slog.Warn("Eval request vector unreadable — turn diffs cold", "error", err)
+		return RequestVector{}
+	}
+	if v.SessionID != sessionID {
+		return RequestVector{}
+	}
+	return v
+}
 
 // evalStepCaps returns the eval step cap as a StopCondition, or nil
 // when the harness isn't driving this process.
