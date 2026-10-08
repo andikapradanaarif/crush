@@ -1,0 +1,53 @@
+{
+	"name": "process-model-persistent",
+	"model": "alibaba-tp/deepseek-v4.1-flash",
+	"temperature": 0,
+	"process_model": "persistent",
+	"corpus": [
+		"staged-pipeline-build"
+	],
+	"runs_per_trajectory": {
+		"stable": 3,
+		"mid": 3,
+		"uncharacterized": 3
+	},
+	"arms": {
+		"control": {
+			"config": {
+				"options": {
+					"notebook_enabled": false
+				}
+			}
+		},
+		"treatment": {
+			"config": {
+				"options": {
+					"notebook_enabled": true,
+					"notebook_pressure_gate": false
+				}
+			}
+		}
+	},
+	"providers": {
+		"alibaba-tp": {
+			"name": "Alibaba Token Plan",
+			"type": "openai-compat",
+			"api_key": "$ALIBABA_TP_API_KEY",
+			"base_url": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+			"models": [
+				{
+					"id": "deepseek-v4.1-flash",
+					"name": "DeepSeek V4.1 Flash",
+					"context_window": 1000000,
+					"default_max_tokens": 384000
+				}
+			]
+		}
+	},
+	"primary": {
+		"metric": "tokens.input",
+		"direction": "decrease",
+		"mde": 0.10
+	},
+	"hypothesis": "Process-model 2×2, persistent arm: one crush process runs the whole trajectory on one session — prefix cache, prior request vector, notebook high-water, and ledger state persist between turns exactly as in production TUI use. Paired with process-model-restart for the interaction read."
+}

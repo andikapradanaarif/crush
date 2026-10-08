@@ -28,6 +28,13 @@ const EvalTelemetryEnvVar = "CRUSH_EVAL_TELEMETRY"
 // with internal/eval.EvalFlagsEnvVar.
 const EvalFlagsEnvVar = "CRUSH_EVAL_FLAGS"
 
+// EvalTurnsFileEnvVar names the JSON prompt list a persistent-process
+// eval run loops over (#117) — when set, telemetry emits per-turn
+// deltas (one file per turn) instead of a once-per-process snapshot.
+// Kept in sync with internal/eval.EvalTurnsFileEnvVar; the constant
+// is duplicated so app doesn't import eval.
+const EvalTurnsFileEnvVar = "CRUSH_EVAL_TURNS_FILE"
+
 // drainReport is what the pre-exit detached-work join actually did:
 // whether it ran at all and whether it finished inside its bound.
 // attempted=false covers both the cancel fast-path (no select arm
@@ -68,20 +75,32 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 	// test stubs and alternate coordinators needn't implement it.
 	var tel agent.SessionTelemetry
 	haveTel := false
-	if c, ok := app.AgentCoordinator.(interface {
-		SessionTelemetry(string) agent.SessionTelemetry
-	}); ok {
-		tel = c.SessionTelemetry(sessionID)
-		haveTel = true
+	// A turns-file process emits once per turn against session-
+	// lifetime cumulative counters — take the delta so turn files
+	// don't double-count earlier spend (#117). The restart arm emits
+	// once per process, where delta == snapshot.
+	if os.Getenv(EvalTurnsFileEnvVar) != "" {
+		if c, ok := app.AgentCoordinator.(interface {
+			SessionTelemetryDelta(string) agent.SessionTelemetry
+		}); ok {
+			tel = c.SessionTelemetryDelta(sessionID)
+			haveTel = true
+		}
+	}
+	if !haveTel {
+		if c, ok := app.AgentCoordinator.(interface {
+			SessionTelemetry(string) agent.SessionTelemetry
+		}); ok {
+			tel = c.SessionTelemetry(sessionID)
+			haveTel = true
+		}
 	}
 	// The usage ledger is the authoritative spend: it counts every
 	// model invocation (main runs, queue continuations, summarize
 	// calls), while result.TotalUsage is whichever call returned last
 	// — continuations clobber earlier results and summarize never
-	// reaches it at all. Note the ledger is process-lifetime
-	// cumulative per session: correct today because telemetry emits
-	// once per `crush run` process, but a future emission path that
-	// serves multiple runs per session must emit a delta instead.
+	// reaches it at all. Turns-file mode emits the per-turn delta;
+	// single-shot mode emits the process-lifetime total.
 	lu := tel.LedgerUsage
 	ledgerUsed := haveTel && (lu.InputTokens != 0 || lu.OutputTokens != 0 ||
 		lu.CacheReadTokens != 0 || lu.CacheCreationTokens != 0)

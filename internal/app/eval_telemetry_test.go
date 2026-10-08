@@ -31,6 +31,22 @@ func (s stubTelemetryCoordinator) SessionTelemetry(string) agent.SessionTelemetr
 	return s.tel
 }
 
+// deltaTelemetryCoordinator exposes both telemetry reads so tests can
+// prove which one the emit path picked per mode (#117).
+type deltaTelemetryCoordinator struct {
+	agent.Coordinator
+	snapshot agent.SessionTelemetry
+	delta    agent.SessionTelemetry
+}
+
+func (s deltaTelemetryCoordinator) SessionTelemetry(string) agent.SessionTelemetry {
+	return s.snapshot
+}
+
+func (s deltaTelemetryCoordinator) SessionTelemetryDelta(string) agent.SessionTelemetry {
+	return s.delta
+}
+
 func telemetryApp(tel agent.SessionTelemetry) *App {
 	return &App{
 		AgentCoordinator: stubTelemetryCoordinator{tel: tel},
@@ -180,6 +196,45 @@ func TestEmitEvalTelemetry_DrainAndVector(t *testing.T) {
 	drain2, ok := doc2["drain"].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, false, drain2["attempted"])
+}
+
+// Turns-file mode (the persistent arm, #117) must emit the per-turn
+// delta, not the cumulative snapshot — otherwise each turn file
+// re-counts every prior turn's spend.
+func TestEmitEvalTelemetry_TurnsFileEmitsDelta(t *testing.T) {
+	coord := deltaTelemetryCoordinator{
+		snapshot: agent.SessionTelemetry{LedgerSteps: 9,
+			LedgerUsage: fantasy.Usage{InputTokens: 500}},
+		delta: agent.SessionTelemetry{LedgerSteps: 3,
+			LedgerUsage: fantasy.Usage{InputTokens: 40}},
+	}
+	app := &App{
+		AgentCoordinator: coord,
+		config:           config.NewTestStore(&config.Config{Options: &config.Options{}}),
+	}
+
+	path := filepath.Join(t.TempDir(), "tel.json")
+	t.Setenv(EvalTelemetryEnvVar, path)
+	t.Setenv(EvalTurnsFileEnvVar, "turns.json")
+	app.emitEvalTelemetry("sess", nil, nil, 0, drainReport{})
+
+	doc := readTelemetryDoc(t, path)
+	tokens, ok := doc["tokens"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, float64(40), tokens["input"],
+		"turns-file mode must emit the per-turn delta, not the cumulative ledger")
+	require.Equal(t, float64(3), doc["steps"])
+
+	// Single-shot mode keeps the cumulative read even when the
+	// coordinator offers the delta interface.
+	path2 := filepath.Join(t.TempDir(), "tel2.json")
+	t.Setenv(EvalTelemetryEnvVar, path2)
+	os.Unsetenv(EvalTurnsFileEnvVar)
+	app.emitEvalTelemetry("sess", nil, nil, 0, drainReport{})
+	doc2 := readTelemetryDoc(t, path2)
+	tokens2, ok := doc2["tokens"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, float64(500), tokens2["input"])
 }
 
 func TestClassifyRunError(t *testing.T) {

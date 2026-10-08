@@ -1,0 +1,53 @@
+{
+	"name": "process-model-restart",
+	"model": "alibaba-tp/deepseek-v4.1-flash",
+	"temperature": 0,
+	"process_model": "restart",
+	"corpus": [
+		"staged-pipeline-build"
+	],
+	"runs_per_trajectory": {
+		"stable": 3,
+		"mid": 3,
+		"uncharacterized": 3
+	},
+	"arms": {
+		"control": {
+			"config": {
+				"options": {
+					"notebook_enabled": false
+				}
+			}
+		},
+		"treatment": {
+			"config": {
+				"options": {
+					"notebook_enabled": true,
+					"notebook_pressure_gate": false
+				}
+			}
+		}
+	},
+	"providers": {
+		"alibaba-tp": {
+			"name": "Alibaba Token Plan",
+			"type": "openai-compat",
+			"api_key": "$ALIBABA_TP_API_KEY",
+			"base_url": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+			"models": [
+				{
+					"id": "deepseek-v4.1-flash",
+					"name": "DeepSeek V4.1 Flash",
+					"context_window": 1000000,
+					"default_max_tokens": 384000
+				}
+			]
+		}
+	},
+	"primary": {
+		"metric": "tokens.input",
+		"direction": "decrease",
+		"mde": 0.10
+	},
+	"hypothesis": "Process-model 2×2, restart arm: one crush process per trajectory turn. Paired with process-model-persistent, the interaction I = Δ_restart − Δ_persist asks whether restart-per-turn changes the measured notebook effect; if |I| clears 10% of the restart control mean, effects must publish per regime."
+}

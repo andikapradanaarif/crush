@@ -247,7 +247,24 @@ type Experiment struct {
 	// n-armed replay of a T-turn trajectory yields T×n paired samples
 	// at T + T×n×|arms| single-turn cost instead of full runs.
 	Replay *ReplaySpec `json:"replay,omitempty"`
+	// ProcessModel selects the regime under test (#117):
+	// "restart" (default — one `crush run` subprocess per turn) or
+	// "persistent" (one subprocess loops all turns on one session —
+	// production's process model, where in-memory request state
+	// survives the turn boundary). It is an experiment-level factor:
+	// the 2×2 comparison pairs one restart manifest with one
+	// persistent manifest over identical arms and corpus, never a
+	// per-arm mix. Replay experiments are restart-shaped by
+	// construction — the combination is rejected.
+	ProcessModel string `json:"process_model,omitempty"`
 }
+
+// Process-model regimes (#117). Empty means restart — the historical
+// default — so pre-#117 manifests and records interpret cleanly.
+const (
+	ProcessModelRestart    = "restart"
+	ProcessModelPersistent = "persistent"
+)
 
 // ReplaySpec pins the counterfactual-replay schedule. The recorded
 // prefix runs under one arm so every fork diverges from identical
@@ -558,6 +575,10 @@ type RunRecord struct {
 	// Compare pairs on (trajectory, fork_turn, run_index); nil on
 	// normal runs, which pair on (trajectory, run_index) as before.
 	Replay *ReplayMeta `json:"replay,omitempty"`
+	// ProcessModel records which regime produced the run —
+	// "restart" or "persistent" (#117). The 2×2 analysis groups on
+	// it; empty on pre-#117 records reads as restart.
+	ProcessModel string `json:"process_model,omitempty"`
 	// CallMetricsError records analyzer failure instead of silently
 	// absent metrics — inconclusive-by-absence and analyzer-broke are
 	// operationally different and must not conflate.
