@@ -11,9 +11,12 @@ package eval
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/cmdlog"
@@ -23,16 +26,33 @@ import (
 
 // EnsureSeeded materializes the trajectory under
 // <evaldir>/genwork/<id>/ and runs its scripted seeds — once; a
-// later call reuses the seeded dir. This is the offline tier's
-// equivalent of the paid path's snapshot: seeds are free, so the
-// seeded state persists rather than re-materializing per probe.
-// Returns the workdir and the trajectory's pinned project key.
-func (r *Runner) EnsureSeeded(ctx context.Context, traj *Trajectory, trajDir string) (workdir, seedKey string, err error) {
+// later call reuses the seeded dir while its rows are still fresh.
+// This is the offline tier's equivalent of the paid path's
+// snapshot: seeds are free, so the seeded state persists rather
+// than re-materializing per probe. freshTTL is the probe's
+// open-failure staleness bound — authored rows age on the wall
+// clock, so a dir old enough that its oldest row crossed the TTL
+// under-doses the probe silently and must re-seed. Returns the
+// workdir and the trajectory's pinned project key.
+func (r *Runner) EnsureSeeded(ctx context.Context, traj *Trajectory, trajDir string, freshTTL time.Duration) (workdir, seedKey string, err error) {
 	contentHash, err := ContentHash(trajDir, trajContentRefs(trajDir, traj)...)
 	if err != nil {
 		return "", "", fmt.Errorf("content hash: %w", err)
 	}
 	seedKey = "eval-" + contentHash
+
+	// The oldest authored row dies first: written at
+	// seedTime-maxAgo, it crosses the TTL when the dir itself is
+	// freshTTL-maxAgo old. A zero TTL disables the staleness bound
+	// entirely, matching the read path.
+	freshFor := time.Duration(math.MaxInt64)
+	if freshTTL > 0 {
+		var maxAgo float64
+		for _, s := range traj.SeedCommands {
+			maxAgo = max(maxAgo, s.AgoSeconds)
+		}
+		freshFor = freshTTL - time.Duration(maxAgo)*time.Second
+	}
 
 	parent := filepath.Join(r.EvalDir, "genwork", traj.ID)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
@@ -41,18 +61,27 @@ func (r *Runner) EnsureSeeded(ctx context.Context, traj *Trajectory, trajDir str
 	// Reuse a seeded workdir — the seeded.ok marker means the seeds
 	// finished, not merely started: a db mid-write would otherwise
 	// pass for seeded state and the probe would read torn rows.
-	// Anything unmarked is a torn attempt — wipe and re-materialize
-	// rather than trust a partial seed.
+	// A stale or unmarked dir is re-materialized below rather than
+	// trusted.
 	if entries, err := os.ReadDir(parent); err == nil {
 		for _, e := range entries {
 			cand := filepath.Join(parent, e.Name())
 			if !e.IsDir() {
 				continue
 			}
-			if marker, err := os.ReadFile(filepath.Join(cand, seedDoneMarker)); err == nil &&
-				strings.TrimSpace(string(marker)) == seedKey {
-				return cand, seedKey, nil
+			marker, err := os.ReadFile(filepath.Join(cand, seedDoneMarker))
+			if err != nil {
+				continue
 			}
+			lines := strings.Split(strings.TrimSpace(string(marker)), "\n")
+			if len(lines) != 2 || lines[0] != seedKey {
+				continue
+			}
+			seededAt, perr := strconv.ParseInt(strings.TrimSpace(lines[1]), 10, 64)
+			if perr != nil || r.now().Sub(time.Unix(seededAt, 0)) >= freshFor {
+				continue
+			}
+			return cand, seedKey, nil
 		}
 	}
 	workdir, err = Materialize(ctx, traj, trajDir, parent, r.checkEnv())
@@ -66,15 +95,17 @@ func (r *Runner) EnsureSeeded(ctx context.Context, traj *Trajectory, trajDir str
 			return "", "", fmt.Errorf("seed_commands: %w", err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(workdir, seedDoneMarker), []byte(seedKey+"\n"), 0o644); err != nil {
+	marker := fmt.Sprintf("%s\n%d\n", seedKey, r.now().Unix())
+	if err := os.WriteFile(filepath.Join(workdir, seedDoneMarker), []byte(marker), 0o644); err != nil {
 		return "", "", err
 	}
 	return workdir, seedKey, nil
 }
 
 // seedDoneMarker names the file EnsureSeeded writes after the last
-// seed command lands — the reuse check keys on it, never on the
-// db's mere existence.
+// seed command lands: the seed key plus the wall-clock seed time,
+// so reuse is bounded by the rows' remaining TTL rather than the
+// marker's mere existence.
 const seedDoneMarker = ".seeded.ok"
 
 // SelectProbeReport is one offline selector measurement: every
@@ -108,7 +139,7 @@ func (r *Runner) RunSelectProbe(ctx context.Context, traj *Trajectory, trajDir, 
 	if err != nil {
 		return nil, fmt.Errorf("memory params: %w", err)
 	}
-	workdir, seedKey, err := r.EnsureSeeded(ctx, traj, trajDir)
+	workdir, seedKey, err := r.EnsureSeeded(ctx, traj, trajDir, mp.OpenFailureTTL)
 	if err != nil {
 		return nil, err
 	}
@@ -133,10 +164,16 @@ func (r *Runner) RunSelectProbe(ctx context.Context, traj *Trajectory, trajDir, 
 		}
 	}
 	if mp.ResolvedRenderLimit > 0 {
-		pools.Resolved, _ = svc.ListResolvedFailures(ctx, mp.FetchLimit)
+		pools.Resolved, err = svc.ListResolvedFailures(ctx, mp.FetchLimit)
+		if err != nil {
+			return nil, fmt.Errorf("resolved pool: %w", err)
+		}
 	}
 	if mp.CommandRenderLimit > 0 {
-		pools.Commands, _ = svc.ListCommands(ctx, mp.FetchLimit)
+		pools.Commands, err = svc.ListCommands(ctx, mp.FetchLimit)
+		if err != nil {
+			return nil, fmt.Errorf("command pool: %w", err)
+		}
 	}
 
 	admitted, decisions := agent.SimulateSelection(prompt, pools, workdir,

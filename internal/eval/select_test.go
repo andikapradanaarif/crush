@@ -3,6 +3,7 @@ package eval
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -52,6 +53,46 @@ func TestRunSelectProbe(t *testing.T) {
 		require.NotEqual(t, "open", c.Pool)
 	}
 	require.Positive(t, repOff.Counts["resolved_seen"])
+}
+
+// The seeded.ok marker is bounded by the authored rows' remaining
+// TTL — they age on the wall clock, so a genwork dir old enough
+// that its oldest row crossed open_failure_ttl serves under-dosed
+// state silently. Reuse must stop at ttl-maxAgo, not at the
+// marker's existence.
+func TestEnsureSeeded_StaleMarkerReseeds(t *testing.T) {
+	t.Parallel()
+	corpus := t.TempDir()
+	spec := GenSpec{
+		Quirks: 1, Distractors: 0, Plausibility: "low",
+		Prompt: "explicit", Seed: 9,
+	}
+	dir, err := Generate(corpus, spec)
+	require.NoError(t, err)
+	traj, err := LoadTrajectory(dir)
+	require.NoError(t, err)
+
+	now := time.Now()
+	r := &Runner{EvalDir: t.TempDir(), Home: t.TempDir(), Now: func() time.Time { return now }}
+	ctx := context.Background()
+	const ttl = 720 * time.Hour
+
+	w1, _, err := r.EnsureSeeded(ctx, traj, dir, ttl)
+	require.NoError(t, err)
+	w2, _, err := r.EnsureSeeded(ctx, traj, dir, ttl)
+	require.NoError(t, err)
+	require.Equal(t, w1, w2, "fresh marker must reuse the seeded dir")
+
+	// Jump to the boundary: the oldest authored row is exactly at
+	// the TTL now — the dir must re-seed rather than reuse.
+	var maxAgo float64
+	for _, s := range traj.SeedCommands {
+		maxAgo = max(maxAgo, s.AgoSeconds)
+	}
+	now = now.Add(ttl - time.Duration(maxAgo)*time.Second)
+	w3, _, err := r.EnsureSeeded(ctx, traj, dir, ttl)
+	require.NoError(t, err)
+	require.NotEqual(t, w1, w3, "stale marker must re-materialize, not reuse")
 }
 
 func TestRunSelectSweep(t *testing.T) {
