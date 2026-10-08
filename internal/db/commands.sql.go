@@ -9,12 +9,26 @@ import (
 	"context"
 )
 
-const claimCommandPartition = `-- name: ClaimCommandPartition :exec
-UPDATE command_memory SET project_key = ? WHERE project_key = ''
+const deleteCommandConflicts = `-- name: DeleteCommandConflicts :exec
+DELETE FROM command_memory AS stale WHERE stale.project_key = ? AND EXISTS (
+    SELECT 1 FROM command_memory twin
+    WHERE twin.project_key = ?
+        AND twin.cmd_norm = stale.cmd_norm
+        AND twin.cwd = stale.cwd
+)
 `
 
-func (q *Queries) ClaimCommandPartition(ctx context.Context, projectKey string) error {
-	_, err := q.exec(ctx, q.claimCommandPartitionStmt, claimCommandPartition, projectKey)
+type DeleteCommandConflictsParams struct {
+	ProjectKey   string `json:"project_key"`
+	ProjectKey_2 string `json:"project_key_2"`
+}
+
+// Re-key collision on command_memory: project_key is PK material, so
+// moving a row from source key to target key conflicts when the
+// (cmd_norm, cwd, target) twin already exists. The target twin wins
+// -- fresher provenance -- so the stale row goes before the re-key.
+func (q *Queries) DeleteCommandConflicts(ctx context.Context, arg DeleteCommandConflictsParams) error {
+	_, err := q.exec(ctx, q.deleteCommandConflictsStmt, deleteCommandConflicts, arg.ProjectKey, arg.ProjectKey_2)
 	return err
 }
 
@@ -24,24 +38,6 @@ DELETE FROM failure_memory WHERE signature = ?
 
 func (q *Queries) DeleteFailure(ctx context.Context, signature string) error {
 	_, err := q.exec(ctx, q.deleteFailureStmt, deleteFailure, signature)
-	return err
-}
-
-const deleteLegacyCommandConflicts = `-- name: DeleteLegacyCommandConflicts :exec
-DELETE FROM command_memory WHERE project_key = '' AND EXISTS (
-    SELECT 1 FROM command_memory twin
-    WHERE twin.project_key = ?
-        AND twin.cmd_norm = command_memory.cmd_norm
-        AND twin.cwd = command_memory.cwd
-)
-`
-
-// Claim collision on command_memory: project_key is PK material, so
-// claiming a legacy row whose (cmd_norm, cwd, project_key) twin
-// already exists conflicts. The partitioned twin wins -- fresher
-// provenance -- so the stale legacy row goes before the claim update.
-func (q *Queries) DeleteLegacyCommandConflicts(ctx context.Context, projectKey string) error {
-	_, err := q.exec(ctx, q.deleteLegacyCommandConflictsStmt, deleteLegacyCommandConflicts, projectKey)
 	return err
 }
 
@@ -59,6 +55,104 @@ func (q *Queries) GetFailureMeta(ctx context.Context, signature string) (GetFail
 	var i GetFailureMetaRow
 	err := row.Scan(&i.Signature, &i.FirstSeen)
 	return i, err
+}
+
+const listCommandPartitionKeys = `-- name: ListCommandPartitionKeys :many
+SELECT DISTINCT project_key FROM command_memory WHERE project_key != ''
+`
+
+func (q *Queries) ListCommandPartitionKeys(ctx context.Context) ([]string, error) {
+	rows, err := q.query(ctx, q.listCommandPartitionKeysStmt, listCommandPartitionKeys)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var project_key string
+		if err := rows.Scan(&project_key); err != nil {
+			return nil, err
+		}
+		items = append(items, project_key)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listFailurePartitionKeys = `-- name: ListFailurePartitionKeys :many
+SELECT DISTINCT project_key FROM failure_memory WHERE project_key != ''
+`
+
+func (q *Queries) ListFailurePartitionKeys(ctx context.Context) ([]string, error) {
+	rows, err := q.query(ctx, q.listFailurePartitionKeysStmt, listFailurePartitionKeys)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var project_key string
+		if err := rows.Scan(&project_key); err != nil {
+			return nil, err
+		}
+		items = append(items, project_key)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listFailuresByKey = `-- name: ListFailuresByKey :many
+SELECT signature, cmd, cwd, headline, first_seen
+FROM failure_memory WHERE project_key = ?
+`
+
+type ListFailuresByKeyRow struct {
+	Signature string `json:"signature"`
+	Cmd       string `json:"cmd"`
+	Cwd       string `json:"cwd"`
+	Headline  string `json:"headline"`
+	FirstSeen int64  `json:"first_seen"`
+}
+
+// Failure rows in one partition -- the remote-lifecycle re-claim
+// (#266) moves them off a stale key onto the current one.
+func (q *Queries) ListFailuresByKey(ctx context.Context, projectKey string) ([]ListFailuresByKeyRow, error) {
+	rows, err := q.query(ctx, q.listFailuresByKeyStmt, listFailuresByKey, projectKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListFailuresByKeyRow{}
+	for rows.Next() {
+		var i ListFailuresByKeyRow
+		if err := rows.Scan(
+			&i.Signature,
+			&i.Cmd,
+			&i.Cwd,
+			&i.Headline,
+			&i.FirstSeen,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listOpenFailures = `-- name: ListOpenFailures :many
@@ -348,6 +442,20 @@ type MergeFailureFirstSeenParams struct {
 // the caller passes min(twin.first_seen, legacy.first_seen).
 func (q *Queries) MergeFailureFirstSeen(ctx context.Context, arg MergeFailureFirstSeenParams) error {
 	_, err := q.exec(ctx, q.mergeFailureFirstSeenStmt, mergeFailureFirstSeen, arg.FirstSeen, arg.Signature)
+	return err
+}
+
+const rekeyCommandPartition = `-- name: RekeyCommandPartition :exec
+UPDATE command_memory SET project_key = ? WHERE project_key = ?
+`
+
+type RekeyCommandPartitionParams struct {
+	ProjectKey   string `json:"project_key"`
+	ProjectKey_2 string `json:"project_key_2"`
+}
+
+func (q *Queries) RekeyCommandPartition(ctx context.Context, arg RekeyCommandPartitionParams) error {
+	_, err := q.exec(ctx, q.rekeyCommandPartitionStmt, rekeyCommandPartition, arg.ProjectKey, arg.ProjectKey_2)
 	return err
 }
 

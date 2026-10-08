@@ -28,16 +28,42 @@ const EvalTelemetryEnvVar = "CRUSH_EVAL_TELEMETRY"
 // with internal/eval.EvalFlagsEnvVar.
 const EvalFlagsEnvVar = "CRUSH_EVAL_FLAGS"
 
+// EvalTurnsFileEnvVar names the JSON prompt list a persistent-process
+// eval run loops over (#117) — when set, telemetry emits per-turn
+// deltas (one file per turn) instead of a once-per-process snapshot.
+// Kept in sync with internal/eval.EvalTurnsFileEnvVar; the constant
+// is duplicated so app doesn't import eval.
+const EvalTurnsFileEnvVar = "CRUSH_EVAL_TURNS_FILE"
+
+// drainReport is what the pre-exit detached-work join actually did:
+// whether it ran at all and whether it finished inside its bound.
+// attempted=false covers both the cancel fast-path (no select arm
+// reached the drain) and coordinators with no join interface.
+type drainReport struct {
+	Attempted bool  `json:"attempted"`
+	Completed bool  `json:"completed"`
+	TimeoutMs int64 `json:"timeout_ms,omitempty"`
+}
+
 // emitEvalTelemetry writes the run's telemetry JSON when
 // CRUSH_EVAL_TELEMETRY is set. Best-effort: a write failure must never
 // fail the run itself.
-func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult, runErr error, approxSteps int) {
+func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult, runErr error, approxSteps int, drain drainReport) {
 	path := os.Getenv(EvalTelemetryEnvVar)
 	if path == "" || app.AgentCoordinator == nil {
 		return
 	}
 	doc := map[string]any{
 		"session_id": sessionID,
+		// The resolved memory-parameter snapshot's identity — the
+		// field an eval cohort splits on to attribute outcomes to
+		// the parameter set that produced them (#228). Process-level
+		// and unconditional: even a run that errors early ran under
+		// this snapshot.
+		"param_version": app.memParams.OrDefault().Version(),
+		// The detached-work join outcome — distinguishable as
+		// completed / timed out / never attempted (#115).
+		"drain": drain,
 	}
 	// The child reports what each manifest flag actually resolved to —
 	// arm intent can silently no-op on a renamed or shadowed option.
@@ -49,20 +75,32 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 	// test stubs and alternate coordinators needn't implement it.
 	var tel agent.SessionTelemetry
 	haveTel := false
-	if c, ok := app.AgentCoordinator.(interface {
-		SessionTelemetry(string) agent.SessionTelemetry
-	}); ok {
-		tel = c.SessionTelemetry(sessionID)
-		haveTel = true
+	// A turns-file process emits once per turn against session-
+	// lifetime cumulative counters — take the delta so turn files
+	// don't double-count earlier spend (#117). The restart arm emits
+	// once per process, where delta == snapshot.
+	if os.Getenv(EvalTurnsFileEnvVar) != "" {
+		if c, ok := app.AgentCoordinator.(interface {
+			SessionTelemetryDelta(string) agent.SessionTelemetry
+		}); ok {
+			tel = c.SessionTelemetryDelta(sessionID)
+			haveTel = true
+		}
+	}
+	if !haveTel {
+		if c, ok := app.AgentCoordinator.(interface {
+			SessionTelemetry(string) agent.SessionTelemetry
+		}); ok {
+			tel = c.SessionTelemetry(sessionID)
+			haveTel = true
+		}
 	}
 	// The usage ledger is the authoritative spend: it counts every
 	// model invocation (main runs, queue continuations, summarize
 	// calls), while result.TotalUsage is whichever call returned last
 	// — continuations clobber earlier results and summarize never
-	// reaches it at all. Note the ledger is process-lifetime
-	// cumulative per session: correct today because telemetry emits
-	// once per `crush run` process, but a future emission path that
-	// serves multiple runs per session must emit a delta instead.
+	// reaches it at all. Turns-file mode emits the per-turn delta;
+	// single-shot mode emits the process-lifetime total.
 	lu := tel.LedgerUsage
 	ledgerUsed := haveTel && (lu.InputTokens != 0 || lu.OutputTokens != 0 ||
 		lu.CacheReadTokens != 0 || lu.CacheCreationTokens != 0)
@@ -169,6 +207,12 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 		// last-write-wins tail field flattens (#249).
 		if len(tel.TailRuns) > 0 {
 			doc["tail_runs"] = tel.TailRuns
+		}
+		// The final request's fingerprint — the next turn's process
+		// seeds its diff from this so a turn-first step reports a
+		// real cause instead of cold (#115).
+		if !tel.PrevRequest.Empty() {
+			doc["request_vector"] = tel.PrevRequest
 		}
 	}
 	// Edge firings emit as a DELTA, not the cumulative snapshot — the

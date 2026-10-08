@@ -53,6 +53,7 @@ import (
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/notebook"
+	"github.com/charmbracelet/crush/internal/params"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/stringext"
@@ -371,6 +372,13 @@ type sessionAgent struct {
 	// turnContext selects the per-turn context augmentation tier
 	// (options.turn_context): "off" or "session".
 	turnContext string
+	// memParams is the resolved memory parameter set (#228) — the
+	// selector caps, text bounds, and TTL values this agent runs
+	// under; the same snapshot cmdlog stamps as param_version.
+	// Read through memoryParams(): fixtures that build the struct
+	// literally leave it zero, which must mean defaults, not
+	// all-zero caps.
+	memParams params.Memory
 	// ambiguityClarification enables the calibrated-autonomy gates:
 	// the turn-zero vagueness pre-filter and the first-write scope
 	// gate (options.ambiguity_clarification).
@@ -629,6 +637,10 @@ type SessionAgentOptions struct {
 	// goroutines — the coordinator drains it on process exit. When
 	// nil the agent allocates its own.
 	DetachedWork *sync.WaitGroup
+	// MemParams is the resolved memory parameter set (#228) the
+	// selector and tail renderer consult. Zero value falls back to
+	// the shipped defaults.
+	MemParams params.Memory
 }
 
 func NewSessionAgent(
@@ -680,6 +692,7 @@ func NewSessionAgent(
 		turnContext:            opts.TurnContext,
 		failureMemory:          opts.FailureMemory,
 		failureMemoryEdgesOff:  !opts.FailureMemoryEdges,
+		memParams:              opts.MemParams.OrDefault(),
 		memoryTelemetry:        opts.MemoryTelemetry,
 		agentID:                opts.AgentID,
 		ambiguityClarification: opts.AmbiguityClarification,
@@ -1333,6 +1346,13 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// and read after Stream returns, where sendChannelReply uses it to
 	// tell whether the model already replied on the originating channel.
 	completedToolCalls := make(map[string]struct{})
+	// runActions records the run's first target-bearing tool calls —
+	// name plus extracted referent — for the tail audit's "what the
+	// agent acted on after the tail rendered" evidence (#221).
+	// Target-less calls never match a candidate, so they don't spend
+	// the cap. Written only from the sequential streaming callbacks
+	// and read after Stream returns, same as completedToolCalls.
+	var runActions []TailAction
 	// Don't send MaxOutputTokens if 0 — some providers (e.g. LM Studio) reject it
 	var maxOutputTokens *int64
 	if call.MaxOutputTokens > 0 {
@@ -1475,7 +1495,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				rs.HistoryBytes = comp.HistoryBytes
 				rs.ToolCallBytes = comp.ToolCallBytes
 				rs.ToolResultBytes = comp.ToolResultBytes
-				rs.Pending, rs.PrevHashes = attributeStep(prepared.Messages, rs.PrevHashes)
+				if rs.PrevRequest.Empty() && len(rs.Steps) == 0 {
+					// Restart boundary: a prior turn's process may
+					// have handed its final request fingerprint
+					// through the eval env — seeding it turns this
+					// step's diff from "cold" into a real cause.
+					rs.PrevRequest = restartVector(call.SessionID)
+				}
+				rs.Pending, rs.PrevRequest = attributeStep(prepared.Messages, prepared.Tools, rs.PrevRequest)
 				a.reqStats.Set(call.SessionID, rs)
 			}
 
@@ -1575,6 +1602,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			if wasSanitized {
 				sanitizedToolCalls[tc.ToolCallID] = true
 			}
+			if len(runActions) < tailActionsMax {
+				if target := toolActionTarget(input); target != "" {
+					runActions = append(runActions, TailAction{
+						Tool:   tc.ToolName,
+						Target: target,
+					})
+				}
+			}
 			toolCall := message.ToolCall{
 				ID:               tc.ToolCallID,
 				Name:             tc.ToolName,
@@ -1662,7 +1697,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				if rs.LastPromptTokens > rs.PeakPromptTokens {
 					rs.PeakPromptTokens = rs.LastPromptTokens
 				}
-				rs.Steps = append(rs.Steps, StepRecord{
+				row := StepRecord{
 					Step:              len(rs.Steps),
 					InputTokens:       usage.InputTokens,
 					OutputTokens:      usage.OutputTokens,
@@ -1672,9 +1707,20 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 					PrefixHash:        rs.Pending.PrefixHash,
 					FirstChanged:      rs.Pending.FirstChanged,
 					FirstChangedCause: rs.Pending.FirstChangedCause,
+					RequestHash:       rs.Pending.RequestHash,
+					PID:               os.Getpid(),
+					FirstOfProcess:    len(rs.Steps) == 0,
 					PressureEstimate:  rs.pressureEstimate,
 					PressureEngaged:   rs.pressureEngaged,
-				})
+				}
+				if cacheAnomaly(rs.Pending, usage.CacheReadTokens) {
+					row.CacheAnomaly = "provider-side"
+				}
+				rs.Steps = append(rs.Steps, row)
+				// The just-folded step's cache hits ride the vector
+				// so a restarted process can still flag an
+				// unexplained regression on its first step.
+				rs.PrevRequest.CacheRead = usage.CacheReadTokens
 				// Clear the folded attribution so a terminal error
 				// later in the turn can't re-fold a stale Pending —
 				// a non-empty Pending in the error path provably
@@ -1749,6 +1795,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 					PrefixHash:        rs.Pending.PrefixHash,
 					FirstChanged:      rs.Pending.FirstChanged,
 					FirstChangedCause: rs.Pending.FirstChangedCause,
+					RequestHash:       rs.Pending.RequestHash,
+					PID:               os.Getpid(),
+					FirstOfProcess:    len(rs.Steps) == 0,
 					PressureEstimate:  rs.pressureEstimate,
 					PressureEngaged:   rs.pressureEngaged,
 				})
@@ -1914,6 +1963,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		turnSeq:          turnSeq,
 		startedAt:        runStart,
 	})
+
+	// Post-run decision stamping (#221): with the run's verdicts
+	// landed in the ledger, fold this run's actions into the turn's
+	// shared decision rows — Engaged once any chain run touched the
+	// referent, Outcome re-stamped to the chain-final state.
+	a.stampDecisionsPostRun(genCtx, call.SessionID, call.RunStamp, runActions)
 
 	// Generate notebook entries asynchronously when notebook is
 	// enabled. This runs in the background so the user sees the

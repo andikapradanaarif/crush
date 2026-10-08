@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -210,7 +211,7 @@ func TestSubprocessEnv_PinsGoCaches(t *testing.T) {
 	cacheDir := filepath.Join(os.TempDir(), "eval-go")
 	t.Setenv(EvalGoCacheEnvVar, cacheDir)
 	c := CrushRunner{Home: t.TempDir()}
-	env := c.subprocessEnv("tel", 0)
+	env := c.subprocessEnv("tel", 0, nil)
 	mod, ok := envValue(env, "GOMODCACHE")
 	require.True(t, ok)
 	require.Equal(t, filepath.Join(cacheDir, "mod"), mod)
@@ -220,8 +221,24 @@ func TestSubprocessEnv_GoCacheYieldsToExtraEnv(t *testing.T) {
 	unsetEnv(t, "GOMODCACHE")
 	unsetEnv(t, "GOCACHE")
 	c := CrushRunner{Home: t.TempDir(), ExtraEnv: []string{"GOMODCACHE=/caller/mod"}}
-	env := c.subprocessEnv("tel", 0)
+	env := c.subprocessEnv("tel", 0, nil)
 	mod, ok := envValue(env, "GOMODCACHE")
 	require.True(t, ok)
 	require.Equal(t, "/caller/mod", mod)
+}
+
+// The previous turn's request fingerprint reaches the next turn's
+// process through the env — verbatim, only when present (#115).
+func TestSubprocessEnv_RequestVectorHandoff(t *testing.T) {
+	c := CrushRunner{Home: t.TempDir()}
+	vec := json.RawMessage(`{"session_id":"s1","system":[7]}`)
+
+	env := c.subprocessEnv("tel", 0, vec)
+	got, ok := envValue(env, EvalRequestVectorEnvVar)
+	require.True(t, ok)
+	require.JSONEq(t, `{"session_id":"s1","system":[7]}`, got)
+
+	env = c.subprocessEnv("tel", 0, nil)
+	_, ok = envValue(env, EvalRequestVectorEnvVar)
+	require.False(t, ok, "no vector must mean no env var — never an empty handoff")
 }

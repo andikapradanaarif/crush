@@ -43,6 +43,7 @@ import (
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	openaioauth "github.com/charmbracelet/crush/internal/oauth/openai"
+	"github.com/charmbracelet/crush/internal/params"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/question"
@@ -223,10 +224,13 @@ type coordinator struct {
 	// accumulates the per-session counts SessionTelemetry reports —
 	// shared across agent rebuilds, nil store skips the records.
 	// edgeFiringEmitted snapshots the counts the last EdgeFiringDelta
-	// call reported, per session.
+	// call reported, per session. telemetryEmitted does the same for
+	// the whole SessionTelemetry snapshot — the persistent-process
+	// arm's per-turn delta basis (#117).
 	edgeStore         EdgeFiringStore
 	edgeStats         *csync.Map[string, map[string]int]
 	edgeFiringEmitted *csync.Map[string, map[string]int]
+	telemetryEmitted  *csync.Map[string, SessionTelemetry]
 	// reqStats accumulates per-session request-size telemetry
 	// (prompt growth curve, rendered composition) — always-on, two
 	// map writes per step.
@@ -253,6 +257,11 @@ type coordinator struct {
 	// process exits. Coordinator-owned so a mid-drain agent rebuild
 	// cannot strand the count.
 	detachedWork *sync.WaitGroup
+
+	// memParams is the resolved memory parameter set (#228) —
+	// handed to every built agent so the selector's caps and the
+	// param_version cmdlog stamps describe the same snapshot.
+	memParams params.Memory
 
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
@@ -299,6 +308,11 @@ type CoordinatorOptions struct {
 	// EdgeStore persists run-boundary edge firing rows — *db.Queries
 	// satisfies it. May be nil; the records then skip.
 	EdgeStore EdgeFiringStore
+	// MemParams is the resolved memory parameter set (#228) handed
+	// to every built agent. Zero value falls back to the shipped
+	// defaults; production callers pass the same snapshot cmdlog
+	// stamps row versions under so behavior and attribution agree.
+	MemParams params.Memory
 }
 
 func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, error) {
@@ -339,10 +353,12 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		edgeStore:             opts.EdgeStore,
 		edgeStats:             csync.NewMap[string, map[string]int](),
 		edgeFiringEmitted:     csync.NewMap[string, map[string]int](),
+		telemetryEmitted:      csync.NewMap[string, SessionTelemetry](),
 		reqStats:              csync.NewMap[string, requestStats](),
 		usageLedger:           csync.NewMap[string, ledgerUsage](),
 		tailAudit:             csync.NewMap[string, TailAudit](),
 		detachedWork:          &sync.WaitGroup{},
+		memParams:             opts.MemParams.OrDefault(),
 	}
 
 	// Share per-session bookkeeping maps across all built agents and
@@ -1263,6 +1279,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		UsageLedger:            c.usageLedger,
 		TailAudit:              c.tailAudit,
 		DetachedWork:           c.detachedWork,
+		MemParams:              c.memParams,
 	})
 
 	// Warn only for main agents — sub-agent builds happen per run via

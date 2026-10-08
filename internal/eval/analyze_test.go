@@ -411,7 +411,7 @@ func TestPreserveSessionDB_CapturesWALTail(t *testing.T) {
 	insertMsg(t, conn, "m1", "s1", "assistant", `[`+tcPart("c1", "edit", `{"file_path":"/w/a.go"}`)+`]`, 1000, 0)
 
 	r := &Runner{EvalDir: t.TempDir()}
-	dst, walSafe, err := r.preserveSessionDB(context.Background(), "exp", "traj", "control", "inv", 0, workdir)
+	dst, walSafe, err := r.preserveSessionDB(context.Background(), "exp", "traj", "control", "inv", 0, workdir, "")
 	require.NoError(t, err)
 	require.True(t, walSafe)
 	require.NoError(t, db.Release(dataDir))
@@ -446,7 +446,7 @@ func TestPreserveSessionDB_IncompleteFlag(t *testing.T) {
 		filepath.Join(dstDir, "traj-control-inv-0.db"), []byte("exists"), 0o644))
 
 	dst, walSafe, err := r.preserveSessionDB(
-		context.Background(), "exp", "traj", "control", "inv", 0, workdir)
+		context.Background(), "exp", "traj", "control", "inv", 0, workdir, "")
 	require.NoError(t, err)
 	require.False(t, walSafe)
 	require.NotEmpty(t, dst)

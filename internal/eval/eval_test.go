@@ -90,7 +90,7 @@ func TestValidateTrajectory_SeedScriptRequiresPriorSessions(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "seed_check.sh"), []byte("#!/bin/bash\nexit 0\n"), 0o755))
 	_, err := LoadTrajectory(dir)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "seed_script requires prior_sessions")
+	require.Contains(t, err.Error(), "seed_script requires seeding")
 }
 
 func TestValidateTrajectory_SeedScriptMustExist(t *testing.T) {
@@ -175,7 +175,7 @@ func TestValidateTrajectory_WarmStartCoverageNeedsPriorSessions(t *testing.T) {
 	})
 	_, err := LoadTrajectory(dir)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "warm_start.* requires prior_sessions")
+	require.Contains(t, err.Error(), "warm_start.* requires seeding")
 
 	// Same predicate on a seeded trajectory loads clean.
 	dir = writeTrajectory(t, filepath.Join(root, "corpus"), "t2", map[string]any{
@@ -472,6 +472,52 @@ func TestRunTelemetry_PressureDecodeAndFold(t *testing.T) {
 	require.Equal(t, int64(61_000), res.Pressure.Estimate)
 }
 
+// The parameter-snapshot identity is process-constant — it lands on
+// the record once, from the first turn that reports it, so a cohort
+// split reads which parameter set produced the outcomes (#228).
+func TestRunTelemetry_ParamVersionFold(t *testing.T) {
+	t.Parallel()
+
+	var tel runTelemetry
+	require.NoError(t, json.Unmarshal([]byte(`{"param_version":"pv1-deadbeef"}`), &tel))
+	require.Equal(t, "pv1-deadbeef", tel.ParamVersion)
+
+	var res RunResult
+	res.addTurnTelemetry(tel, 0)
+	res.addTurnTelemetry(runTelemetry{}, 1) // Older/mid-run child: absent.
+	require.Equal(t, "pv1-deadbeef", res.ParamVersion)
+}
+
+// An arm's memory_params overlay resolves at manifest validation —
+// a typo'd key or out-of-bounds value is a load error, not a
+// per-run app.New crash loop inside the harness.
+func TestValidateArmFlags_MemoryParams(t *testing.T) {
+	t.Parallel()
+	manifest := &FlagsManifest{Defaults: map[string]any{"memory_params": nil}}
+	exp := &Experiment{Arms: map[string]Arm{
+		ArmControl: {},
+		ArmTreatment: {Config: ArmConfig{Options: map[string]any{
+			"memory_params": map[string]any{"open_render_limit": 8},
+		}}},
+	}}
+	require.NoError(t, manifest.ValidateArmFlags(exp))
+
+	exp.Arms[ArmTreatment] = Arm{Config: ArmConfig{Options: map[string]any{
+		"memory_params": map[string]any{"open_rennder_limit": 8},
+	}}}
+	require.ErrorContains(t, manifest.ValidateArmFlags(exp), "memory_params")
+
+	exp.Arms[ArmTreatment] = Arm{Config: ArmConfig{Options: map[string]any{
+		"memory_params": map[string]any{"open_failure_ttl": "2h"}, // Below the 24h skeleton floor.
+	}}}
+	require.ErrorContains(t, manifest.ValidateArmFlags(exp), "memory_params")
+
+	exp.Arms[ArmTreatment] = Arm{Config: ArmConfig{Options: map[string]any{
+		"memory_params": "open_render_limit=8",
+	}}}
+	require.ErrorContains(t, manifest.ValidateArmFlags(exp), "must be an object")
+}
+
 // The tail audit's wire contract: the child emits sections/bytes/
 // sha256/text without a turn index; the driver stamps Turn at fold
 // time and appends — a nil tail appends nothing so "no tail" and
@@ -590,6 +636,65 @@ func TestArmCoverage_TailDecisions(t *testing.T) {
 	met, err = ArmCoverageMet(Coverage{"max_tail.decisions.admitted": 0}, rec)
 	require.NoError(t, err)
 	require.True(t, met)
+}
+
+// tail.decisions.engaged / .outcome.* count the #221 post-run
+// stamps — which shown candidates the chain's actions touched, and
+// the ledger's verdict for each decision once the run's runs landed.
+func TestArmCoverage_TailDecisionsPostRun(t *testing.T) {
+	t.Parallel()
+
+	rec := &RunRecord{Tail: []TurnTail{
+		{Turn: 0, Decisions: []FailureDecision{
+			{
+				Signature: "s1", Cmd: "go test .", Admit: true, Reason: "admit",
+				Engaged: true, Outcome: "resolved",
+			},
+			{
+				Signature: "s2", Cmd: "go vet .", Admit: true, Reason: "admit",
+				Engaged: true, Outcome: "failed",
+			},
+			{
+				Signature: "s3", Cmd: "npm run lint", Pool: "command", Admit: false,
+				Reason: "kind_mismatch", Outcome: "unexercised",
+			},
+			// An unstamped legacy row counts nowhere in the outcome
+			// vocabulary and reads un-engaged.
+			{Signature: "s4", Cmd: "make build", Admit: true, Reason: "admit"},
+		}},
+	}}
+
+	met, err := ArmCoverageMet(Coverage{"min_tail.decisions.engaged": 2}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+	met, err = ArmCoverageMet(Coverage{"min_tail.decisions.engaged.admitted": 2}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+	// The rejected row was unexercised and unengaged; admitted-only
+	// scopes out s3 either way.
+	met, err = ArmCoverageMet(Coverage{"max_tail.decisions.engaged.admitted": 2}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+
+	met, err = ArmCoverageMet(Coverage{
+		"min_tail.decisions.outcome.resolved":    1,
+		"min_tail.decisions.outcome.failed":      1,
+		"min_tail.decisions.outcome.unexercised": 1,
+	}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+	met, err = ArmCoverageMet(Coverage{"min_tail.decisions.outcome.passed": 1}, rec)
+	require.NoError(t, err)
+	require.False(t, met)
+	// Admitted scoping: unexercised's only row was rejected.
+	met, err = ArmCoverageMet(Coverage{"max_tail.decisions.outcome.unexercised.admitted": 0}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+
+	// An outcome outside the closed vocabulary fails parse rather
+	// than starving silently.
+	_, err = ArmCoverageMet(Coverage{"min_tail.decisions.outcome.bogus": 1}, rec)
+	require.Error(t, err)
 }
 
 // tail.sections.* is the arm-scoped firing assertion for context-

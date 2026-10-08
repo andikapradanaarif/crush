@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"encoding/json"
+	"log/slog"
 	"os"
 	"slices"
 	"strconv"
@@ -119,6 +121,11 @@ type SessionTelemetry struct {
 	// continuations and side-channel calls can't drop spend.
 	LedgerUsage fantasy.Usage `json:"ledger_usage"`
 	LedgerSteps int           `json:"ledger_steps"`
+	// PrevRequest is the session's last rendered request fingerprint
+	// plus that step's cache_read — the diff vector the next turn's
+	// process needs so its first step attributes a real cause
+	// instead of cold (#115).
+	PrevRequest RequestVector `json:"prev_request,omitempty"`
 }
 
 // SessionTelemetry returns the coordinator's per-session counters.
@@ -180,6 +187,10 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 			t.ReqToolCallBytes = r.ToolCallBytes
 			t.ReqToolResultBytes = r.ToolResultBytes
 			t.Steps = r.Steps
+			// The vector exports under the emitting session — the
+			// restart seed must match the session it resumes.
+			t.PrevRequest = r.PrevRequest
+			t.PrevRequest.SessionID = sessionID
 		}
 	}
 	if sa.edgeStats != nil {
@@ -217,6 +228,83 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 		}
 	}
 	return t
+}
+
+// delta subtracts a previous SessionTelemetry snapshot — the per-turn
+// emission the persistent-process arm (#117) needs: every counter is
+// session-lifetime cumulative, so a process emitting once per turn
+// would double-count earlier turns without it. Slice fields emit their
+// new tail, map counters per-key deltas, latches report first-flip.
+// Snapshot fields pass through unchanged: Tail/TailRuns' last entry,
+// PrevRequest, prompt-token last/peak, request-byte composition, and
+// pressure engaged/estimate describe the state at emission time, not
+// a sum.
+func (t SessionTelemetry) delta(prev SessionTelemetry) SessionTelemetry {
+	d := t
+	d.StubInvalidations -= prev.StubInvalidations
+	d.StubResults -= prev.StubResults
+	d.StubSavedBytes -= prev.StubSavedBytes
+	d.BoundaryAdvances -= prev.BoundaryAdvances
+	d.TurnsCollapsed -= prev.TurnsCollapsed
+	d.EventsCollapsed -= prev.EventsCollapsed
+	d.ResultRecalls -= prev.ResultRecalls
+	d.EntryRecalls -= prev.EntryRecalls
+	d.EmptyRecalls -= prev.EmptyRecalls
+	d.CrossRecalls -= prev.CrossRecalls
+	d.PriorTurnResultRecalls -= prev.PriorTurnResultRecalls
+	d.CheckpointsWritten -= prev.CheckpointsWritten
+	d.CheckpointRenders -= prev.CheckpointRenders
+	d.DigestsWritten -= prev.DigestsWritten
+	d.DigestRenders -= prev.DigestRenders
+	d.HydrationSeeds -= prev.HydrationSeeds
+	d.HydrationPlanSeeds -= prev.HydrationPlanSeeds
+	d.HydrationRenders -= prev.HydrationRenders
+	d.GeneratorCalls -= prev.GeneratorCalls
+	d.GeneratorInputTokens -= prev.GeneratorInputTokens
+	d.GeneratorOutputTokens -= prev.GeneratorOutputTokens
+	d.GeneratorCacheReadTokens -= prev.GeneratorCacheReadTokens
+	d.GeneratorCacheWriteTokens -= prev.GeneratorCacheWriteTokens
+	d.PromptRequests -= prev.PromptRequests
+	d.PressureActivations -= prev.PressureActivations
+	d.LedgerSteps -= prev.LedgerSteps
+	d.LedgerUsage.InputTokens -= prev.LedgerUsage.InputTokens
+	d.LedgerUsage.OutputTokens -= prev.LedgerUsage.OutputTokens
+	d.LedgerUsage.ReasoningTokens -= prev.LedgerUsage.ReasoningTokens
+	d.LedgerUsage.CacheCreationTokens -= prev.LedgerUsage.CacheCreationTokens
+	d.LedgerUsage.CacheReadTokens -= prev.LedgerUsage.CacheReadTokens
+	d.SummaryFetchFailed = t.SummaryFetchFailed && !prev.SummaryFetchFailed
+	d.PrefixFetchFailed = t.PrefixFetchFailed && !prev.PrefixFetchFailed
+	if len(prev.Steps) <= len(t.Steps) {
+		d.Steps = t.Steps[len(prev.Steps):]
+	}
+	if len(prev.TailRuns) <= len(t.TailRuns) {
+		d.TailRuns = t.TailRuns[len(prev.TailRuns):]
+	}
+	if len(t.StubKinds) > 0 {
+		d.StubKinds = make(map[string]int, len(t.StubKinds))
+		for kind, n := range t.StubKinds {
+			if dd := n - prev.StubKinds[kind]; dd > 0 {
+				d.StubKinds[kind] = dd
+			}
+		}
+	}
+	// EdgeFirings is exported through EdgeFiringDelta — the field
+	// stays the cumulative snapshot for callers that read it.
+	return d
+}
+
+// SessionTelemetryDelta returns the session's counters minus what the
+// previous call reported, then snapshots — the eval harness folds one
+// telemetry file per turn, so a persistent process emitting per turn
+// must report deltas or later turns would double-count earlier spend
+// (#117). Deliberately not on the Coordinator interface — the emit
+// path type-asserts for it alongside SessionTelemetry and falls back
+// to the cumulative read for coordinators without it.
+func (c *coordinator) SessionTelemetryDelta(sessionID string) SessionTelemetry {
+	cur := c.SessionTelemetry(sessionID)
+	prev, _ := c.telemetryEmitted.Get(sessionID)
+	c.telemetryEmitted.Set(sessionID, cur)
+	return cur.delta(prev)
 }
 
 // RecordGeneratorUsage folds one notebook generation call's usage into
@@ -316,6 +404,34 @@ const EvalFlagsEnvVar = "CRUSH_EVAL_FLAGS"
 // so its presence is the universal harness-driven marker. Kept in
 // sync with internal/eval.EvalTelemetryEnvVar.
 const EvalTelemetryEnvVar = "CRUSH_EVAL_TELEMETRY"
+
+// EvalRequestVectorEnvVar carries the previous turn's final request
+// fingerprint (JSON RequestVector) into the next turn's process —
+// the restart-attribution handoff: the resumed session's first step
+// diffs against what the prior process actually rendered instead of
+// reporting cold (#115). Kept in sync with
+// internal/eval.EvalRequestVectorEnvVar.
+const EvalRequestVectorEnvVar = "CRUSH_EVAL_REQUEST_VECTOR"
+
+// restartVector returns the request vector the eval harness handed
+// this process for sessionID, or the zero vector when none applies.
+// The session check is the leak guard — a vector from a different
+// session's last request must never seed this session's diff.
+func restartVector(sessionID string) RequestVector {
+	raw := os.Getenv(EvalRequestVectorEnvVar)
+	if raw == "" || sessionID == "" {
+		return RequestVector{}
+	}
+	var v RequestVector
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		slog.Warn("Eval request vector unreadable — turn diffs cold", "error", err)
+		return RequestVector{}
+	}
+	if v.SessionID != sessionID {
+		return RequestVector{}
+	}
+	return v
+}
 
 // evalStepCaps returns the eval step cap as a StopCondition, or nil
 // when the harness isn't driving this process.

@@ -1,0 +1,29 @@
+{
+  "check": {
+    "expect_start_state": "fail",
+    "script": "check.sh",
+    "seed_script": "seed_check.sh"
+  },
+  "id": "gen-m1k0-mid-explicit-d0-s001-001",
+  "origin": {
+    "kind": "synthetic"
+  },
+  "schema_version": 1,
+  "seed_commands": [
+    {
+      "ago_seconds": 7200,
+      "commands": [
+        "go test ./quota"
+      ]
+    }
+  ],
+  "start_state": {
+    "fixture_dir": "fixture",
+    "kind": "fixture"
+  },
+  "task": {
+    "turns": [
+      "Fix the failing test in ./quota so `go test ./...` passes — Contract() must return 42. Make the smallest change."
+    ]
+  }
+}

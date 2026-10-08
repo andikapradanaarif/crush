@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -17,53 +18,17 @@ import (
 	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/notebook"
+	"github.com/charmbracelet/crush/internal/params"
+	"github.com/charmbracelet/crush/internal/redact"
 	"github.com/charmbracelet/crush/internal/session"
 )
 
-const (
-	// turnContextWorkingSetLimit bounds the working-set section of the
-	// per-turn blob. The read set is cumulative — unbounded it
-	// degenerates to "every file ever touched".
-	turnContextWorkingSetLimit = 10
-	// vaguePromptMaxWords bounds the vagueness pre-filter: prompts
-	// longer than this carry enough of their own context that a
-	// missing referent is unlikely.
-	vaguePromptMaxWords = 12
-	// turnContextIntentMaxBytes bounds the rendered intent record. A
-	// statement must never render truncated — a cut constraint reads
-	// as a different instruction — so the budget drops whole oldest
-	// items instead.
-	turnContextIntentMaxBytes = 4096
-	// turnContextFileHeatLimit bounds the cross-session heat section —
-	// a hint list, not working state, so it runs tighter than the
-	// working-set cap.
-	turnContextFileHeatLimit = 5
-	// turnContextOpenFailuresFetchLimit bounds the candidate pool the
-	// selector sees — bounded for fetch cost, wide enough that a
-	// relevant row past the render cap still earns a decision record
-	// instead of vanishing before selection. The resolved and command
-	// pools fetch under the same bound: all three are selector
-	// candidates, and a row that never reaches the selector cannot
-	// leave a decision.
-	turnContextOpenFailuresFetchLimit = 50
-	// turnContextOpenFailuresRenderLimit bounds the failure-memory
-	// tail itself — recent-first, so the cap keeps the freshest bound
-	// rows; rows it cuts record render_capped, not silence.
-	turnContextOpenFailuresRenderLimit = 5
-	// Resolved and command knowledge is subordinate to open failures:
-	// the pressure regime showed injection quality degrades before
-	// capacity runs out, so the knowledge envelopes cap tighter than
-	// the warning envelope they supplement.
-	turnContextResolvedRenderLimit = 3
-	turnContextCommandsRenderLimit = 3
-	// turnContextFailureFileHints bounds file hints rendered per
-	// failure row.
-	turnContextFailureFileHints = 3
-	// Render-side caps on echoed failure fields — write-side caps
-	// already bound them, these keep the tail bounded regardless.
-	turnContextFailureCmdRunes      = 200
-	turnContextFailureHeadlineRunes = 140
-)
+// memoryParams resolves the agent's parameter set — the zero
+// struct (direct test fixtures) means the shipped defaults, never
+// an all-caps-zero selector.
+func (a *sessionAgent) memoryParams() params.Memory {
+	return a.memParams.OrDefault()
+}
 
 // vagueReferentRe matches prompts that lean on a definite or anaphoric
 // referent whose target context must supply — "the bug", "it", "this
@@ -91,9 +56,9 @@ var theNounRe = regexp.MustCompile(`(?i)\bthe\s+(\w+)\b`)
 // underspecification in the user's own words. Fields-style word
 // counts stay: an unspaced script is "one word", which is already
 // the vague direction.
-func isVaguePrompt(prompt string) bool {
+func isVaguePrompt(prompt string, maxWords int) bool {
 	n := len(strings.Fields(prompt))
-	if n == 0 || n > vaguePromptMaxWords {
+	if n == 0 || n > maxWords {
 		return false
 	}
 	if len(extractExplicitFilePaths(prompt)) > 0 {
@@ -187,7 +152,16 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 			selected, memoryDecisions, memoryCandidates = cached.selected, cached.decisions, cached.candidates
 		default:
 			var pools memoryPools
-			pools.open, fetchErr = a.cmdlog.ListOpenFailures(ctx, turnContextOpenFailuresFetchLimit)
+			mp := a.memoryParams()
+			// A zero render limit suppresses the pool at the
+			// fetch — no candidates, no decisions, no section.
+			// That is the LOO ablation: the channel is absent,
+			// not "present but capped to nothing" (which would
+			// still record render_capped decisions and confound
+			// the pool-off cell with cap mechanics).
+			if mp.OpenRenderLimit > 0 {
+				pools.open, fetchErr = a.cmdlog.ListOpenFailures(ctx, mp.FetchLimit)
+			}
 			if fetchErr == nil {
 				// The knowledge pools fail soft: an open-failure fetch
 				// error still records fetchErr, while a resolved or
@@ -196,15 +170,19 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 				// knowledge misses still land on the audit so an empty
 				// pool reads "fetch failed", not "nothing existed".
 				var knowledgeErrs []string
-				if r, err := a.cmdlog.ListResolvedFailures(ctx, turnContextOpenFailuresFetchLimit); err != nil {
-					knowledgeErrs = append(knowledgeErrs, "resolved: "+err.Error())
-				} else {
-					pools.resolved = r
+				if mp.ResolvedRenderLimit > 0 {
+					if r, err := a.cmdlog.ListResolvedFailures(ctx, mp.FetchLimit); err != nil {
+						knowledgeErrs = append(knowledgeErrs, "resolved: "+err.Error())
+					} else {
+						pools.resolved = r
+					}
 				}
-				if c, err := a.cmdlog.ListCommands(ctx, turnContextOpenFailuresFetchLimit); err != nil {
-					knowledgeErrs = append(knowledgeErrs, "command: "+err.Error())
-				} else {
-					pools.commands = c
+				if mp.CommandRenderLimit > 0 {
+					if c, err := a.cmdlog.ListCommands(ctx, mp.FetchLimit); err != nil {
+						knowledgeErrs = append(knowledgeErrs, "command: "+err.Error())
+					} else {
+						pools.commands = c
+					}
 				}
 				knowledgeFetchErr = strings.Join(knowledgeErrs, "; ")
 				var workDir string
@@ -220,9 +198,9 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 				}
 				selected, memoryDecisions = selectMemory(selPrompt, pools, workDir,
 					memoryRenderLimits{
-						open:     turnContextOpenFailuresRenderLimit,
-						resolved: turnContextResolvedRenderLimit,
-						command:  turnContextCommandsRenderLimit,
+						open:     mp.OpenRenderLimit,
+						resolved: mp.ResolvedRenderLimit,
+						command:  mp.CommandRenderLimit,
 					})
 				// Telemetry candidates span every evaluated row, all
 				// three pools — the count/ages mean "what the selector
@@ -327,6 +305,17 @@ type TailSection struct {
 	Bytes int    `json:"bytes"`
 }
 
+// TailAction is one of a run's first target-bearing tool calls —
+// the tool name plus the referent it aimed at (a path or command),
+// so an eval can read "what the agent acted on after the tail
+// rendered" without joining message storage. Calls with no
+// extractable target don't spend the tailActionsMax budget; a nil
+// list means the run issued no referent-touching calls.
+type TailAction struct {
+	Tool   string `json:"tool"`
+	Target string `json:"target,omitempty"`
+}
+
 // TailAudit is the ephemeral per-turn tail's observable record:
 // which context envelopes rendered, their sizes, the joined text's
 // digest, and the verbatim text. The tail never persists to message
@@ -366,6 +355,15 @@ type TailAudit struct {
 	// renders instead of flattening them (#249).
 	RunStamp       uint64 `json:"run_stamp"`
 	RepairAttempts int    `json:"repair_attempts"`
+	// Actions is the run's first target-bearing tool calls — name
+	// plus extracted referent — stamped at run end (#221).
+	// Per-render: each retry's audit carries its own run's actions,
+	// while the decisions' Engaged flag folds the whole chain's
+	// actions together. Actions stamp only when the turn has a
+	// selection-cache entry — an audit from an fm-unarmed render
+	// carries none; the field is decision evidence, not generic
+	// "what the run did" telemetry.
+	Actions []TailAction `json:"actions,omitempty"`
 }
 
 var tailSectionNameRe = regexp.MustCompile(`^<(\w+)>`)
@@ -420,6 +418,321 @@ func (a *sessionAgent) recordTailAudit(call SessionAgentCall, sections []string,
 // text.
 const tailRunsHistoryMax = 128
 
+// tailActionsMax bounds a run's recorded first actions — enough to
+// name "what the agent did first" without dragging a whole run's
+// tool traffic into the audit.
+const tailActionsMax = 16
+
+// tailDecisionLookupLimit is the post-run verification read window —
+// the same pools the selector fetched from, wide enough a row it
+// saw can't slide out between render and stamp.
+const tailDecisionLookupLimit = 500
+
+// actionTargetKeys are the tool-arg keys that name what a call acts
+// on, in priority order — a command before a path before a pattern,
+// so grep/glob read as "searched here", not "looked for".
+var actionTargetKeys = []string{"command", "file_path", "path", "pattern"}
+
+// toolActionTarget extracts a tool call's referent from its JSON
+// args — the command for shell calls, the path for file tools. ""
+// means the call has no single nameable target. The target goes on
+// the durable audit, so it is redacted like a ledger command.
+func toolActionTarget(input string) string {
+	var args map[string]json.RawMessage
+	if json.Unmarshal([]byte(input), &args) != nil {
+		return ""
+	}
+	for _, k := range actionTargetKeys {
+		raw, ok := args[k]
+		if !ok {
+			continue
+		}
+		var s string
+		if json.Unmarshal(raw, &s) == nil && s != "" {
+			return redact.Secrets(s)
+		}
+	}
+	return ""
+}
+
+// normalizeCmdText mirrors the ledger's normalizeCommand shape —
+// fields-joined whitespace — so an action's command compares
+// cleanly against the stored cmd_norm.
+func normalizeCmdText(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// cmdTextMatch is the single-segment comparison: equal commands or
+// one a token-boundary prefix of the other — "go test" ↔ "go test
+// ./internal/..." in either direction, since the ledger's truncated
+// norm can also be the shorter side.
+func cmdTextMatch(a, b string) bool {
+	return a == b || strings.HasPrefix(a, b+" ") || strings.HasPrefix(b, a+" ")
+}
+
+// navCmd reports whether a command segment is pure navigation — a
+// cd/pushd/popd is scaffolding for the real invocation, and matching
+// one would call "went to the same directory" engagement.
+func navCmd(seg string) bool {
+	f := strings.Fields(seg)
+	if len(f) == 0 {
+		return true
+	}
+	switch f[0] {
+	case "cd", "pushd", "popd":
+		return true
+	}
+	return false
+}
+
+var actionCmdSeps = []string{"&&", "||", ";", "|"}
+
+// actionCmdMatch reports whether a run command names the candidate's
+// command — equal after whitespace normalization, a token-boundary
+// extension of it, or one pipeline/list segment of a composite on
+// either side (a candidate "cd decoy && go test ." engages on a
+// plain "go test ." re-run — the common repair move of re-running
+// just the failing segment). Navigation segments never match.
+// Known bounds, all acceptable for an evidence flag: splitting
+// isn't quote-aware, and quoted fragments keep their quote bytes —
+// `echo "a | go test ."` segments as `go test ."` and matches
+// nothing, so quoting defeats the split rather than falsely
+// engaging (under-inclusive, the safe direction); glob coverage
+// isn't modeled, so "go test ./..." doesn't engage a "go test
+// ./decoy" candidate it actually exercised (under-inclusive — the
+// ledger's outcome stamp still lands correctly, so only the label
+// misses); and the reverse-prefix direction lets a bare "go test"
+// action engage a "go test -race ./decoy" candidate (defensible —
+// a root run plausibly covers it).
+func actionCmdMatch(runCmd, candCmd string) bool {
+	a := normalizeCmdText(runCmd)
+	c := normalizeCmdText(candCmd)
+	if a == "" || c == "" {
+		return false
+	}
+	// The whole-string comparison excludes navigation commands so a
+	// bare "cd decoy" can't prefix-match a composite's scaffolding.
+	if !navCmd(a) && !navCmd(c) && cmdTextMatch(a, c) {
+		return true
+	}
+	candSegs := []string{c}
+	for _, sep := range actionCmdSeps {
+		var next []string
+		for _, s := range candSegs {
+			next = append(next, strings.Split(s, sep)...)
+		}
+		candSegs = next
+	}
+	for _, sep := range actionCmdSeps {
+		for _, seg := range strings.Split(a, sep) {
+			seg = normalizeCmdText(seg)
+			if seg == "" || navCmd(seg) {
+				continue
+			}
+			for _, cseg := range candSegs {
+				cseg = normalizeCmdText(cseg)
+				if cseg != "" && !navCmd(cseg) && cmdTextMatch(seg, cseg) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// normalizeActionPath brings a tool-action path into the shape the
+// ledger stores — workspace-relative, slash-separated — so a
+// view/edit target compares cleanly against implicated files.
+func normalizeActionPath(p, workDir string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	if filepath.IsAbs(p) && workDir != "" {
+		if rel, err := filepath.Rel(workDir, p); err == nil &&
+			rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			p = rel
+		}
+	}
+	// ReplaceAll on top of ToSlash: ToSlash is a no-op on POSIX, but
+	// a Windows-authored target ("pkg\foo.go") can land here on any
+	// platform and must still compare equal to the ledger's
+	// slash-normalized files.
+	p = filepath.ToSlash(p)
+	return strings.TrimPrefix(strings.ReplaceAll(p, `\`, "/"), "./")
+}
+
+// actionEngagesCandidate reports whether one tool action touched the
+// candidate's referent — a shell action re-running the candidate's
+// command, or a path action landing on an implicated file (or a
+// directory containing one).
+func actionEngagesCandidate(act TailAction, cand cmdlog.Failure, workDir string) bool {
+	if act.Target == "" {
+		return false
+	}
+	if act.Tool == tools.BashToolName {
+		return actionCmdMatch(act.Target, cand.Cmd)
+	}
+	target := normalizeActionPath(act.Target, workDir)
+	if target == "" {
+		return false
+	}
+	for _, f := range cand.Files {
+		f = strings.ReplaceAll(f, `\`, "/")
+		if f == target || strings.HasPrefix(f, target+"/") || strings.HasPrefix(target, f+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// stampDecisionsPostRun stamps the turn's shared decision rows with
+// the facts a render-time record can't carry (#221): Engaged — the
+// chain's actions touched the candidate's referent — and Outcome —
+// the row's state as the ledger records it once the run's verdicts
+// landed. The run's own first actions also land on its audit.
+//
+// The turn's decisions slice is shared — every retry's audit points
+// at the cached selection's backing array — so one stamp covers the
+// chain. Engaged latches once true; Outcome re-stamps every call so
+// the chain-final retry's post-run state wins. A failed ledger read
+// leaves Outcome empty rather than guessing — "" reads "not
+// stamped", which coverage counts apart from the explicit values.
+//
+// Two documented bounds: openSet is read through the same TTL the
+// selector uses, so a row crossing the staleness cutoff mid-run
+// stamps "resolved" while technically still open — a narrow window
+// (needs last_seen within run-duration of the boundary) on the
+// metric's direction of interest. And Engagement reads "the chain
+// touched the referent early": runActions caps at tailActionsMax,
+// so a re-run past the cap doesn't flip the flag — and a Task
+// sub-agent's re-run never engages the parent's candidates (the
+// child's own ledger rows carry that verdict, so engaged
+// under-reports exactly where `suggested` over-reports). The stamp
+// mutates the shared decisions backing outside the map lock, so a
+// concurrent export can observe a half-stamped row — sequential
+// per-session runs make it cosmetic.
+func (a *sessionAgent) stampDecisionsPostRun(ctx context.Context, sessionID string, runStamp uint64, actions []TailAction) {
+	if a.turnSels == nil || a.tailAudit == nil || sessionID == "" || runStamp == 0 {
+		return
+	}
+	sel, ok := a.turnSels.Get(sessionID)
+	if !ok || sel.stamp != runStamp {
+		return
+	}
+	// The run's own audit carries its own actions. tailRuns appends
+	// at render, so the last entry with this stamp is this run's.
+	if a.tailRuns != nil {
+		a.tailRuns.Update(sessionID, func(v *[]TailAudit) {
+			for i := len(*v) - 1; i >= 0; i-- {
+				if (*v)[i].RunStamp == runStamp {
+					(*v)[i].Actions = actions
+					break
+				}
+			}
+		})
+	}
+	a.tailAudit.Update(sessionID, func(v *TailAudit) {
+		if v.RunStamp == runStamp {
+			v.Actions = actions
+		}
+	})
+	if len(sel.decisions) == 0 {
+		return
+	}
+	// Post-run ledger reads are best-effort — a failed read leaves
+	// Outcome empty rather than stamping a guessed state.
+	var openSet map[string]bool
+	var cmdByKey map[string]cmdlog.Command
+	if a.cmdlog != nil {
+		listCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if open, err := a.cmdlog.ListOpenFailures(listCtx, tailDecisionLookupLimit); err == nil {
+			openSet = make(map[string]bool, len(open))
+			for _, f := range open {
+				openSet[f.Signature] = true
+			}
+		}
+		if cmds, err := a.cmdlog.ListCommands(listCtx, tailDecisionLookupLimit); err == nil {
+			cmdByKey = make(map[string]cmdlog.Command, len(cmds))
+			for _, c := range cmds {
+				cmdByKey[c.CmdNorm+"\x00"+strings.ReplaceAll(c.CWD, `\`, "/")] = c
+			}
+		}
+	}
+	// Candidates by signature for engagement matching — command
+	// candidates arrive as Failure-shaped views whose Cmd is the
+	// row's cmd_norm and whose Files is empty.
+	candBySig := make(map[string]cmdlog.Failure, len(sel.candidates))
+	for _, f := range sel.candidates {
+		candBySig[f.Signature] = f
+	}
+	workDir := ""
+	if a.configStore != nil {
+		workDir = a.configStore.WorkingDir()
+	}
+	for i := range sel.decisions {
+		d := &sel.decisions[i]
+		cand, found := candBySig[d.Signature]
+		if !d.Engaged && found {
+			for _, act := range actions {
+				if actionEngagesCandidate(act, cand, workDir) {
+					d.Engaged = true
+					break
+				}
+			}
+		}
+		switch d.Pool {
+		case poolCommand:
+			// A command row's outcome is its last real verdict, and
+			// only counts when this chain exercised it — a row the
+			// tail showed but the agent never re-ran is unexercised
+			// no matter what an earlier turn's verdict says. That
+			// negative comes from the action list, not the ledger,
+			// so it stamps even when the ledger read failed.
+			if !d.Engaged {
+				d.Outcome = outcomeUnexercised
+				break
+			}
+			// Engaged needs the ledger's verdict — a failed read or
+			// a vanished row leaves Outcome empty rather than
+			// stamping a synthetic negative that could also
+			// overwrite a real earlier stamp on re-stamp.
+			if cmdByKey == nil || !found {
+				break
+			}
+			key := cand.Cmd + "\x00" + strings.ReplaceAll(cand.CWD, `\`, "/")
+			c, ok := cmdByKey[key]
+			if !ok {
+				break
+			}
+			switch {
+			case c.LastExit < 0:
+				d.Outcome = outcomeUnexercised
+			case c.LastExit == 0:
+				d.Outcome = outcomePassed
+			default:
+				d.Outcome = outcomeFailed
+			}
+		default:
+			// Open and resolved pools both read open-list
+			// membership: a shown failure still open after the run
+			// is "open"; gone — resolved by the run or settled
+			// otherwise — is "resolved". An open-pool row that
+			// dropped out mid-chain and a resolved-pool row that
+			// re-failed both record what the ledger says now.
+			if openSet == nil || !found {
+				break
+			}
+			if openSet[d.Signature] {
+				d.Outcome = outcomeOpen
+			} else {
+				d.Outcome = outcomeResolved
+			}
+		}
+	}
+}
+
 // turnContextBlob renders the tail context sections joined for
 // display and tests. The tail and its audit need the per-envelope
 // split — see turnContextSections.
@@ -455,7 +768,7 @@ func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgen
 		b.WriteString("<open_failures>\nCommands that failed in this workspace and have not passed since — the likely referents for \"the failing test\" or \"the build error\"; a clean re-run resolves one:\n")
 		for _, f := range openFailures {
 			b.WriteString("- ")
-			b.WriteString(tailSafeText(truncateTailText(f.Cmd, turnContextFailureCmdRunes)))
+			b.WriteString(tailSafeText(truncateTailText(f.Cmd, a.memoryParams().FailureCmdRunes)))
 			if f.CWD != "" && f.CWD != "." {
 				fmt.Fprintf(&b, " (in %s)", tailSafeText(f.CWD))
 			}
@@ -463,9 +776,9 @@ func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgen
 				// Screened at render too — rows persisted before the
 				// write-side screen existed are still covered.
 				fmt.Fprintf(&b, ": %s", tailSafeText(truncateTailText(
-					cmdlog.ScreenHeadline(f.Headline), turnContextFailureHeadlineRunes)))
+					cmdlog.ScreenHeadline(f.Headline), a.memoryParams().FailureHeadlineRunes)))
 			}
-			if n := min(len(f.Files), turnContextFailureFileHints); n > 0 {
+			if n := min(len(f.Files), a.memoryParams().FailureFileHints); n > 0 {
 				hints := make([]string, n)
 				for i := range hints {
 					hints[i] = tailSafeText(f.Files[i])
@@ -486,13 +799,13 @@ func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgen
 		b.WriteString("<resolved_failures>\nCommands whose earlier failures later passed in this workspace — knowledge of what worked, not open warnings:\n")
 		for _, f := range resolvedFailures {
 			b.WriteString("- ")
-			b.WriteString(tailSafeText(truncateTailText(f.Cmd, turnContextFailureCmdRunes)))
+			b.WriteString(tailSafeText(truncateTailText(f.Cmd, a.memoryParams().FailureCmdRunes)))
 			if f.CWD != "" && f.CWD != "." {
 				fmt.Fprintf(&b, " (in %s)", tailSafeText(f.CWD))
 			}
 			if f.Headline != "" {
 				fmt.Fprintf(&b, ": %s", tailSafeText(truncateTailText(
-					cmdlog.ScreenHeadline(f.Headline), turnContextFailureHeadlineRunes)))
+					cmdlog.ScreenHeadline(f.Headline), a.memoryParams().FailureHeadlineRunes)))
 			}
 			// last_seen freezes at the last FAILING observation —
 			// label it as such, not as resolution age (which cmdlog
@@ -512,7 +825,7 @@ func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgen
 		b.WriteString("<command_memory>\nCommands run in this workspace with their track record — the likely entry points for \"run the tests\" or \"build it\":\n")
 		for _, c := range commands {
 			b.WriteString("- ")
-			b.WriteString(tailSafeText(truncateTailText(c.CmdNorm, turnContextFailureCmdRunes)))
+			b.WriteString(tailSafeText(truncateTailText(c.CmdNorm, a.memoryParams().FailureCmdRunes)))
 			if c.CWD != "" && c.CWD != "." {
 				fmt.Fprintf(&b, " (in %s)", tailSafeText(c.CWD))
 			}
@@ -566,7 +879,7 @@ func (a *sessionAgent) renderSessionSignals(ctx context.Context, call SessionAge
 			size := 0
 			for i := len(entries) - 1; i >= 0; i-- {
 				line := intentLine(entries[i])
-				if size+len(line) > turnContextIntentMaxBytes && len(items) > 0 {
+				if size+len(line) > a.memoryParams().IntentMaxBytes && len(items) > 0 {
 					break
 				}
 				items = append([]string{line}, items...)
@@ -592,20 +905,20 @@ func (a *sessionAgent) renderSessionSignals(ctx context.Context, call SessionAge
 		read, _ := a.filetracker.ListRecentReadFiles(ctx, call.SessionID, 0)
 		if len(read) > 0 {
 			b.WriteString("<working_set>\nRecently read or edited files — the most likely referents for \"the file\", \"the bug\", and similar:\n")
-			for _, f := range read[:min(len(read), turnContextWorkingSetLimit)] {
+			for _, f := range read[:min(len(read), a.memoryParams().WorkingSetLimit)] {
 				fmt.Fprintf(b, "- %s\n", a.relWorkdir(f))
 			}
 			b.WriteString("</working_set>\n")
 		}
 		// Over-fetch so working-set overlap cannot starve the section.
-		if hot, err := a.filetracker.ListHotFiles(ctx, call.SessionID, turnContextFileHeatLimit*4); err == nil {
+		if hot, err := a.filetracker.ListHotFiles(ctx, call.SessionID, a.memoryParams().FileHeatLimit*4); err == nil {
 			wsSet := make(map[string]bool, len(read))
 			for _, f := range read {
 				wsSet[f] = true
 			}
 			var lines []string
 			for _, h := range hot {
-				if wsSet[h.Path] || len(lines) >= turnContextFileHeatLimit {
+				if wsSet[h.Path] || len(lines) >= a.memoryParams().FileHeatLimit {
 					continue
 				}
 				sessions := "sessions"
@@ -705,7 +1018,7 @@ func (a *sessionAgent) relWorkdir(p string) string {
 func (a *sessionAgent) ambiguityDirective(ctx context.Context, call SessionAgentCall, msgs []message.Message, boundMemory int) string {
 	// An attached file is almost certainly the referent — "fix it"
 	// with a file dropped on the prompt needs no clarification.
-	if !a.ambiguityClarification || a.isSubAgent || len(call.Attachments) > 0 || !isVaguePrompt(call.Prompt) {
+	if !a.ambiguityClarification || a.isSubAgent || len(call.Attachments) > 0 || !isVaguePrompt(call.Prompt, a.memoryParams().VaguePromptMaxWords) {
 		return ""
 	}
 	// Earlier substantive user text can supply the referent — a bare

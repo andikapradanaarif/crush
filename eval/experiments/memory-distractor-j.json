@@ -1,0 +1,74 @@
+{
+	"name": "memory-distractor-j",
+	"model": "alibaba-tp/deepseek-v4.1-flash",
+	"temperature": 0,
+	"corpus": [
+		"gen-m4k*-in_scope-explicit-d0-s001-*"
+	],
+	"runs_per_trajectory": {
+		"stable": 12,
+		"mid": 12,
+		"uncharacterized": 12
+	},
+	"primary": {
+		"metric": "steps",
+		"direction": "increase",
+		"mde": 0.15,
+		"max_pass_drop": 0.1
+	},
+	"cost_weights": {
+		"cache_read": 0.25,
+		"cache_write": 0,
+		"output": 4
+	},
+	"arms": {
+		"control": {
+			"config": {
+				"options": {
+					"turn_context": "off",
+					"failure_memory": false,
+					"failure_memory_edges": false
+				}
+			}
+		},
+		"treatment": {
+			"config": {
+				"options": {
+					"turn_context": "off",
+					"failure_memory": true,
+					"failure_memory_edges": false
+				}
+			}
+		}
+	},
+	"decision_rule": {
+		"hypothesis": "Rendered in-scope wrong failure rows (decoy tests inside the target package) mislead the agent \u2014 the memory-on arm pays extra steps on the j>0 cells it renders that control never sees. The offline selector curve bounds the dose: only in_scope distractors bind, so K stored = j rendered. Verified dose on the pinned cells (pre-registered): in_scope K stored renders exactly j=K wrong rows at 0/1/3; the open cap saturates rendered-j at 3 for M4, so the corpus covers the whole realizable dose range.",
+		"primary": {
+			"metric": "steps",
+			"arm": "treatment",
+			"vs": "control",
+			"direction": "increase",
+			"min_improvement": 0.0
+		},
+		"guardrail": {
+			"metric": "pass_rate",
+			"min_delta": -0.1
+		}
+	},
+	"providers": {
+		"alibaba-tp": {
+			"name": "Alibaba Token Plan",
+			"type": "openai-compat",
+			"api_key": "$ALIBABA_TP_API_KEY",
+			"base_url": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+			"models": [
+				{
+					"id": "deepseek-v4.1-flash",
+					"name": "DeepSeek V4.1 Flash",
+					"context_window": 1000000,
+					"default_max_tokens": 384000
+				}
+			]
+		}
+	}
+}

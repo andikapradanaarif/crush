@@ -1,0 +1,8 @@
+{
+  "note": "A control under the floor means the corpus never produced the regime — reported as the baseline breach, not as treatment failure.",
+  "rule_result": "absent",
+  "acceptance_contains": "floor-violated",
+  "alarms_contain": [
+    "floor-violated"
+  ]
+}

@@ -48,10 +48,6 @@ type memoryTelemetry struct {
 	paramVersion string
 
 	mu sync.Mutex
-	// f is the lazily opened log file; the first record creates it.
-	// It is never closed — the logger lives for process lifetime on
-	// the coordinator, like the other process-scoped resources.
-	f *os.File
 	// seen marks sessions whose session_start record was written this
 	// process. arms is the per-session holdout assignment (true =
 	// injection suppressed). roll is the holdout coin — injectable so
@@ -199,22 +195,23 @@ func (t *memoryTelemetry) forget(sessionID string) {
 	delete(t.arms, sessionID)
 }
 
-// append encodes one record as a JSON line. Returns whether the
+// append encodes one record as a JSON line, opening and closing the
+// file per write — a per-turn write rate makes the extra syscall
+// trivial, and holding no handle means a TempDir teardown never
+// waits on GC to release the log on Windows. Returns whether the
 // write succeeded — session_start retries on a later turn after a
 // failure rather than being skipped forever.
 func (t *memoryTelemetry) append(rec map[string]any) bool {
-	if t.f == nil {
-		if err := os.MkdirAll(t.dataDir, 0o755); err != nil {
-			return false
-		}
-		f, err := os.OpenFile(filepath.Join(t.dataDir, "memory-telemetry.jsonl"),
-			os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-		if err != nil {
-			return false
-		}
-		t.f = f
+	if err := os.MkdirAll(t.dataDir, 0o755); err != nil {
+		return false
 	}
-	return json.NewEncoder(t.f).Encode(rec) == nil
+	f, err := os.OpenFile(filepath.Join(t.dataDir, "memory-telemetry.jsonl"),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	return json.NewEncoder(f).Encode(rec) == nil
 }
 
 // telemetrySectionNames reduces rendered tail blobs to their envelope

@@ -343,6 +343,47 @@ func tailDecisionsByLayer(r *RunRecord, layer string) float64 {
 	return float64(n)
 }
 
+// tailDecisionOutcomes mirrors the closed Outcome vocabulary in
+// agent/failure_select.go — the post-run stamp's per-pool results.
+// "unexercised" is the command pool's honest negative: a selected
+// command the chain never re-ran, or whose last run left no verdict
+// (interrupt, denial). Empty outcomes — pre-stamp records and failed
+// ledger reads — match no value here, which is the distinction:
+// "not stamped" is not "stamped negative".
+var tailDecisionOutcomes = []string{"resolved", "open", "passed", "failed", "unexercised"}
+
+// tailDecisionsEngaged counts decision rows whose candidate the
+// chain's actions touched — the post-run engagement stamp (#221).
+// Pre-stamp records carry no field and read as un-engaged; that
+// conflation is bounded because stamping is unconditional on an
+// armed turn's run end.
+func tailDecisionsEngaged(r *RunRecord, admittedOnly bool) float64 {
+	n := 0
+	for _, t := range r.Tail {
+		for _, d := range t.Decisions {
+			if d.Engaged && (!admittedOnly || d.Admit) {
+				n++
+			}
+		}
+	}
+	return float64(n)
+}
+
+// tailDecisionsByOutcome counts decision rows by their post-run
+// Outcome — the ledger-recorded state of each shown row once the
+// chain's verdicts landed.
+func tailDecisionsByOutcome(r *RunRecord, outcome string, admittedOnly bool) float64 {
+	n := 0
+	for _, t := range r.Tail {
+		for _, d := range t.Decisions {
+			if d.Outcome == outcome && (!admittedOnly || d.Admit) {
+				n++
+			}
+		}
+	}
+	return float64(n)
+}
+
 // warmStart dereferences the optional seeding ledger. coverageMet
 // short-circuits nil WarmStart before reaching field funcs — a cold
 // run must not satisfy a "did seeding happen" predicate by reading
@@ -421,6 +462,27 @@ func init() {
 		}
 		armOnlyCoverageFields["tail.decisions.pool."+pool+".admitted"] = func(r *RunRecord) float64 {
 			return tailDecisionsByPool(r, pool, true)
+		}
+	}
+	// Post-run decision stamps (#221): tail.decisions.engaged
+	// [.admitted] counts candidates the chain's actions touched —
+	// "shown and used" vs "shown and ignored" — and
+	// tail.decisions.outcome.<value>[.admitted] counts the ledger-
+	// recorded end state of each decision. Together they close the
+	// loop the selector opens: bound → rendered → acted on →
+	// resolved/passed or not.
+	armOnlyCoverageFields["tail.decisions.engaged"] = func(r *RunRecord) float64 {
+		return tailDecisionsEngaged(r, false)
+	}
+	armOnlyCoverageFields["tail.decisions.engaged.admitted"] = func(r *RunRecord) float64 {
+		return tailDecisionsEngaged(r, true)
+	}
+	for _, outcome := range tailDecisionOutcomes {
+		armOnlyCoverageFields["tail.decisions.outcome."+outcome] = func(r *RunRecord) float64 {
+			return tailDecisionsByOutcome(r, outcome, false)
+		}
+		armOnlyCoverageFields["tail.decisions.outcome."+outcome+".admitted"] = func(r *RunRecord) float64 {
+			return tailDecisionsByOutcome(r, outcome, true)
 		}
 	}
 	armFields = maps.Clone(coverageFields)

@@ -123,8 +123,8 @@ func ValidateTrajectory(t *Trajectory, trajDir string) []string {
 		// trajectory seeds — the predicate would fail closed on
 		// every run of a cold trajectory: permanently inconclusive
 		// at load time, not a runtime surprise.
-		if strings.HasPrefix(field, "warm_start.") && len(t.PriorSessions) == 0 {
-			problems = append(problems, fmt.Sprintf("coverage %q: warm_start.* requires prior_sessions — a cold trajectory carries no seeding ledger", key))
+		if strings.HasPrefix(field, "warm_start.") && len(t.PriorSessions) == 0 && len(t.SeedCommands) == 0 {
+			problems = append(problems, fmt.Sprintf("coverage %q: warm_start.* requires seeding (prior_sessions or seed_commands) — a cold trajectory carries no seeding ledger", key))
 		}
 	}
 	if t.Requires.Network != nil && !*t.Requires.Network && t.StartState.Kind == "git" {
@@ -156,6 +156,21 @@ func ValidateTrajectory(t *Trajectory, trajDir string) []string {
 		}
 	}
 
+	for i, seed := range t.SeedCommands {
+		if seed.AgoSeconds < 0 {
+			problems = append(problems, fmt.Sprintf("seed_commands[%d].ago_seconds must be >= 0 — seeds model the past, not the future", i))
+		}
+		if len(seed.Commands) == 0 {
+			problems = append(problems, fmt.Sprintf("seed_commands[%d].commands must contain at least one command", i))
+			continue
+		}
+		for j, cmd := range seed.Commands {
+			if strings.TrimSpace(cmd) == "" {
+				problems = append(problems, fmt.Sprintf("seed_commands[%d].commands[%d] is empty", i, j))
+			}
+		}
+	}
+
 	if t.Check.Script == "" {
 		problems = append(problems, "check.script is required")
 	} else if _, err := os.Stat(filepath.Join(trajDir, t.Check.Script)); err != nil {
@@ -166,8 +181,8 @@ func ValidateTrajectory(t *Trajectory, trajDir string) []string {
 		// The gate exists to judge the state seeding left behind —
 		// on a cold trajectory it would assert a state nothing
 		// produces, which is a manifest bug, not a weaker check.
-		if len(t.PriorSessions) == 0 {
-			problems = append(problems, "check.seed_script requires prior_sessions — there is no seeded state to assert")
+		if len(t.PriorSessions) == 0 && len(t.SeedCommands) == 0 {
+			problems = append(problems, "check.seed_script requires seeding (prior_sessions or seed_commands) — there is no seeded state to assert")
 		}
 		if _, err := os.Stat(filepath.Join(trajDir, t.Check.SeedScript)); err != nil {
 			problems = append(problems, fmt.Sprintf("seed check script %q: %v", t.Check.SeedScript, err))
@@ -293,15 +308,66 @@ func ValidateExperiment(e *Experiment) error {
 		if e.Primary.MaxPassDrop < 0 || e.Primary.MaxPassDrop >= 1 {
 			return fmt.Errorf("primary.max_pass_drop must be an absolute pass-rate fraction in [0,1), got %g", e.Primary.MaxPassDrop)
 		}
+		// The #197 acceptance rule arms when any of its fields is
+		// pinned — floor is then required (it is the quality bound
+		// the cost rule defers to), and cost_weights must exist or
+		// ΔC is unpriceable and the rule can never run.
+		if p := e.Primary; p.Floor != nil || p.NoiseBand != nil || p.BaseCostAllowance != nil {
+			if p.Floor == nil {
+				return fmt.Errorf("primary.floor is required when the cost-acceptance rule is armed")
+			}
+			if *p.Floor <= 0 || *p.Floor > 1 {
+				return fmt.Errorf("primary.floor must be an absolute pass-rate bound in (0,1], got %g", *p.Floor)
+			}
+			if p.NoiseBand != nil && *p.NoiseBand < 0 {
+				return fmt.Errorf("primary.noise_band must be >= 0, got %g", *p.NoiseBand)
+			}
+			if p.BaseCostAllowance != nil && *p.BaseCostAllowance < 0 {
+				return fmt.Errorf("primary.base_cost_allowance must be >= 0, got %g", *p.BaseCostAllowance)
+			}
+			if e.CostWeights == nil {
+				return fmt.Errorf("cost-acceptance rule requires cost_weights — a ΔC the rule can't price is unbounded spend")
+			}
+		}
 		if _, err := primaryMetricFunc(e, e.Primary.Metric); err != nil {
 			return err
 		}
 	}
 	if e.CostWeights != nil {
-		if e.CostWeights.CacheRead < 0 || e.CostWeights.Output < 0 {
-			return fmt.Errorf("cost_weights must be non-negative (h=%g, o=%g)",
-				e.CostWeights.CacheRead, e.CostWeights.Output)
+		if err := e.CostWeights.check("cost_weights"); err != nil {
+			return err
 		}
+	}
+	if e.Replay != nil {
+		// The recorded prefix is shaped by one declared arm — an
+		// unknown name would fork from a config that never ran.
+		if src := e.Replay.SourceArm; src != "" {
+			if _, ok := e.Arms[src]; !ok {
+				return fmt.Errorf("replay.source_arm %q is not a declared arm (%v)", src, sortedKeys(e.Arms))
+			}
+		}
+		seen := map[int]bool{}
+		for _, f := range e.Replay.ForkTurns {
+			if f < 0 {
+				return fmt.Errorf("replay.fork_turns entries must be >= 0, got %d", f)
+			}
+			if seen[f] {
+				return fmt.Errorf("replay.fork_turns lists %d twice", f)
+			}
+			seen[f] = true
+		}
+	}
+	switch e.ProcessModel {
+	case "", ProcessModelRestart, ProcessModelPersistent:
+	default:
+		return fmt.Errorf("process_model must be %q or %q, got %q",
+			ProcessModelRestart, ProcessModelPersistent, e.ProcessModel)
+	}
+	if e.ProcessModel == ProcessModelPersistent && e.Replay != nil {
+		// A replay fork restores boundary state per turn — restart-
+		// shaped by construction. There is no persistent-regime
+		// semantics for it to mean.
+		return fmt.Errorf("process_model %q cannot combine with replay — forked boundaries restart per turn by construction", ProcessModelPersistent)
 	}
 	if len(e.Corpus) == 0 {
 		return fmt.Errorf("corpus selector is required")
@@ -350,6 +416,9 @@ func ValidateExperiment(e *Experiment) error {
 				return fmt.Errorf("expected_exclusion %s/%s: the declared arm pins enforce_context_window=false — the class can never occur", d.Arm, d.ErrorClass)
 			}
 		}
+	}
+	if err := e.validateDecisionRule(); err != nil {
+		return err
 	}
 	for name, arm := range e.Arms {
 		if err := checkUnderPressureGate(name, armOptionResolver(arm)); err != nil {
@@ -689,6 +758,120 @@ func armStarvationRules(field string) []starvationRule {
 	return nil
 }
 
+// validateDecisionRule checks the #152 pre-committed stop rule:
+// every metric it names must resolve in the closed registry (or the
+// two arm-aggregate names), arms must name the compared pair, and
+// thresholds must be sane — a rule that can't evaluate is a rule
+// that can't stop post-hoc reading.
+func (e *Experiment) validateDecisionRule() error {
+	d := e.DecisionRule
+	if d == nil {
+		return nil
+	}
+	if strings.TrimSpace(d.Hypothesis) == "" {
+		return fmt.Errorf("decision_rule.hypothesis is required — the free-text claim is the thing the structured criteria falsify")
+	}
+	if d.Primary == nil && d.Guardrail == nil {
+		return fmt.Errorf("decision_rule requires a primary or guardrail criterion — a rule with no measurable claim is post-hoc freedom, not pre-registration")
+	}
+	checkArms := func(kind, arm, vs string) error {
+		if _, ok := e.Arms[arm]; !ok {
+			return fmt.Errorf("decision_rule.%s.arm %q names no arm in this experiment", kind, arm)
+		}
+		if _, ok := e.Arms[vs]; !ok {
+			return fmt.Errorf("decision_rule.%s.vs %q names no arm in this experiment", kind, vs)
+		}
+		if arm == vs {
+			return fmt.Errorf("decision_rule.%s compares arm %q against itself", kind, arm)
+		}
+		return nil
+	}
+	// ruleMetricKnown resolves the metric namespace: the paired
+	// registry plus the two arm-aggregate names — pass_rate (the
+	// conclusive-rate read) and tokens_to_done (the ArmTotals
+	// cost-per-pass). Aggregate metrics carry no paired interval;
+	// the docstrings carry that limit.
+	ruleMetricKnown := func(kind, metric string) error {
+		switch metric {
+		case "pass_rate":
+			return nil
+		case "tokens_to_done":
+			if e.CostWeights == nil {
+				return fmt.Errorf("decision_rule.%s.metric %q requires cost_weights — tokens-to-done is unpriceable without them", kind, metric)
+			}
+			return nil
+		}
+		if _, err := primaryMetricFunc(e, metric); err != nil {
+			return fmt.Errorf("decision_rule.%s.metric: %w", kind, err)
+		}
+		return nil
+	}
+	// ruleDirection resolves the claimed improvement direction —
+	// required on registry metrics (recalls.* and saved_bytes run
+	// either way), implied for the aggregate names: pass_rate is
+	// always "increase", tokens_to_done always "decrease". An
+	// explicit contradicting direction is rejected rather than
+	// silently reinterpreted.
+	ruleDirection := func(kind, metric, dir string) (string, error) {
+		implied := ""
+		switch metric {
+		case "pass_rate":
+			implied = PrimaryIncrease
+		case "tokens_to_done":
+			implied = PrimaryDecrease
+		}
+		if dir == "" {
+			if implied == "" {
+				return "", fmt.Errorf("decision_rule.%s.direction is required for registry metric %q — the claimed direction is the claim", kind, metric)
+			}
+			return implied, nil
+		}
+		if dir != PrimaryIncrease && dir != PrimaryDecrease {
+			return "", fmt.Errorf("decision_rule.%s.direction must be %q or %q, got %q", kind, PrimaryIncrease, PrimaryDecrease, dir)
+		}
+		if implied != "" && dir != implied {
+			return "", fmt.Errorf("decision_rule.%s.direction %q contradicts %q — %s improvement is always %s", kind, dir, metric, metric, implied)
+		}
+		return dir, nil
+	}
+	if p := d.Primary; p != nil {
+		if err := checkArms("primary", p.Arm, p.Vs); err != nil {
+			return err
+		}
+		if err := ruleMetricKnown("primary", p.Metric); err != nil {
+			return err
+		}
+		dir, err := ruleDirection("primary", p.Metric, p.Direction)
+		if err != nil {
+			return err
+		}
+		p.Direction = dir // Implied directions resolve once, at load.
+		if p.MinImprovement < 0 {
+			return fmt.Errorf("decision_rule.primary.min_improvement must be >= 0, got %g", p.MinImprovement)
+		}
+	}
+	if g := d.Guardrail; g != nil {
+		if g.Arm == "" {
+			g.Arm = ArmTreatment
+		}
+		if g.Vs == "" {
+			g.Vs = ArmControl
+		}
+		if err := checkArms("guardrail", g.Arm, g.Vs); err != nil {
+			return err
+		}
+		if err := ruleMetricKnown("guardrail", g.Metric); err != nil {
+			return err
+		}
+		dir, err := ruleDirection("guardrail", g.Metric, g.Direction)
+		if err != nil {
+			return err
+		}
+		g.Direction = dir
+	}
+	return nil
+}
+
 // armOptionResolver resolves only the arm's literal options — an
 // absent key reports unknown so load-time validation can't flag what
 // flags.json might enable.
@@ -863,8 +1046,8 @@ func ValidateArmCoverageVsCorpus(e *Experiment, trajs []*Trajectory) error {
 				if err != nil {
 					continue // Load-time validation reports the bad key.
 				}
-				if strings.HasPrefix(field, "warm_start.") && len(t.PriorSessions) == 0 {
-					problems = append(problems, fmt.Sprintf("arm %q coverage %q: warm_start.* requires prior_sessions on trajectory %q — a cold run carries no seeding ledger", name, key, t.ID))
+				if strings.HasPrefix(field, "warm_start.") && len(t.PriorSessions) == 0 && len(t.SeedCommands) == 0 {
+					problems = append(problems, fmt.Sprintf("arm %q coverage %q: warm_start.* requires seeding on trajectory %q — a cold run carries no seeding ledger", name, key, t.ID))
 					continue
 				}
 				if op != "min" {

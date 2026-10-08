@@ -1,0 +1,67 @@
+{
+  "check": {
+    "expect_start_state": "fail",
+    "script": "check.sh",
+    "seed_script": "seed_check.sh"
+  },
+  "id": "gen-m4k3-in_scope-explicit-d0-s001-001",
+  "origin": {
+    "kind": "synthetic"
+  },
+  "schema_version": 1,
+  "seed_commands": [
+    {
+      "ago_seconds": 172800,
+      "commands": [
+        "go test -tags private -run TestSampler ./quota"
+      ]
+    },
+    {
+      "ago_seconds": 194400,
+      "commands": [
+        "go test -tags private -run TestEmit ./quota"
+      ]
+    },
+    {
+      "ago_seconds": 216000,
+      "commands": [
+        "go test -tags private -run TestToken ./quota"
+      ]
+    },
+    {
+      "ago_seconds": 108000,
+      "commands": [
+        "go test ./tax",
+        "printf 'package tax\\n\\n// Fee returns the surcharge constant.\\nfunc Fee() int {\\n\\treturn 10\\n}\\n' \u003e tax/fee.go",
+        "go test ./tax"
+      ]
+    },
+    {
+      "ago_seconds": 28800,
+      "commands": [
+        "go test -run TestContract -v ./quota"
+      ]
+    },
+    {
+      "ago_seconds": 18000,
+      "commands": [
+        "go build ./quota"
+      ]
+    },
+    {
+      "ago_seconds": 7200,
+      "commands": [
+        "go test ./quota"
+      ]
+    }
+  ],
+  "start_state": {
+    "fixture_dir": "fixture",
+    "kind": "fixture"
+  },
+  "task": {
+    "turns": [
+      "Fix the failing test in ./quota so `go test ./...` passes — Contract() must return 42. Make the smallest change."
+    ]
+  }
+}

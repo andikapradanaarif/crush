@@ -167,13 +167,13 @@ blind search.
 | **Zero-safe estimator (#203)** | `(t−c)/μ_c` ratio-of-means; zero-side counted; bootstrap re-normalizes baseline; log-ratio secondary | done 10-01 |
 | **Coverage contract** | armed-but-empty renders record a zero-section `TailAudit` — "checked, nothing rendered" ≠ "never ran" (d2fcfee1, shipped inside #212) | done 10-02 |
 | **Stale-seed fidelity (#213)** | `check.seed_script` gate after last seed, before measured run; rejects wrong state → `inconclusive`; gates assert `failure_memory` row state via sqlite, not just worktree | merged 10-04 in #217 |
-| **Real-usage telemetry (#206)** | opt-in logging: tail fired? actions touched referents? failure age? user revised? — **plus** randomized on/off holdout + session-start snapshots, or it shows use, not cause | implemented in #231 (open) — lead time is the cost |
-| **Unified verdict fields (#152)** | `execution_validity`/`mechanism_exposure`/`quality_guardrail`/`benefit_estimate`/`cost_guardrail` → single `acceptance` | open |
-| **Planning-MDE vs shipping-MDE** | sizing ≠ minimum-worthwhile ≠ non-inferiority ≠ cost ceiling ≠ stopping rule; CI crossing bound = "inconclusive" | open |
-| **Tokens-to-done (#151)** | all token classes per attempt w/ CIs; unknown stays unknown; seed spend reported separately (marginal + amortized) | open |
-| **Offline decision tests** | synthetic/preserved records: noisy-null, known regression, lower-calls-worse-pass, cost inflation, missing telemetry, valid abstention (#159 folded) | open |
-| **CI (#138)** | zero runs ever; selector PRs went 5 review rounds ungated | open |
-| **Probe tier (#109)** | package the manual session-DB forensics as reusable probes | narrow scope |
+| **Real-usage telemetry (#206)** | opt-in logging: tail fired? actions touched referents? failure age? user revised? — **plus** randomized on/off holdout + session-start snapshots, or it shows use, not cause | merged 10-04 in #231 — lead time is the cost |
+| **Unified verdict fields (#152)** | `execution_validity`/`mechanism_exposure`/`quality_guardrail`/`benefit_estimate`/`cost_guardrail` → single `acceptance` | merged in #275 — `decision_rule` block pre-registers the stop rule; `satisfied`/`not satisfied`/`inconclusive` stamped on the verdict line, snapshotted for post-hoc drift |
+| **Planning-MDE vs shipping-MDE** | sizing ≠ minimum-worthwhile ≠ non-inferiority ≠ cost ceiling ≠ stopping rule; CI crossing bound = "inconclusive" | open — partially embodied in #197's δ-band (in-band = can't improve on cost) and #152's inconclusive verdicts; the full sizing taxonomy is still design work |
+| **Tokens-to-done (#151)** | all token classes per attempt w/ CIs; unknown stays unknown; seed spend reported separately (marginal + amortized) | merged in #272 — `cache_write` + generator-tier pricing closed the gap; Σ all classes ÷ attempted runs, bootstrap CIs, `requiredPairs` verdict |
+| **Offline decision tests** | synthetic/preserved records: noisy-null, known regression, lower-calls-worse-pass, cost inflation, missing telemetry, valid abstention (#159 folded) | landed in #275 — 11 calibration cells under `internal/eval/testdata/decisions/`, `EVAL_GEN=1` regenerates |
+| **CI (#138)** | zero runs ever; selector PRs went 5 review rounds ungated | closed — `go test ./...` runs in CI (build.yml) with flaky-pool reset + quarantine timeout |
+| **Probe tier (#109)** | package the manual session-DB forensics as reusable probes | in review #276 — `crush eval probe`, three read-classification probes, canonical `IsMutatingCall` vocab |
 | **#115 split** | decision-provenance/request-identity forward; cache attribution deferred | staged |
 
 ### Stage B — Make memory selective (with abstention)
@@ -189,7 +189,7 @@ blind search.
 | **Candidate-pool cap (#233)** | fetch pool (50) and render cap (5) are separate stages: bound rows beyond the cap record `render_capped`, so "admitted but not rendered" is a named exit, not silence | implemented; named exits assertable via `tail.decisions.reasons.*` (#235) |
 | **Injection screening (#219)** | `screenHeadline` at persist: ANSI/format-rune strip + phrase-level override/role/exfiltration scrub; cut spans leave `[filtered]` markers, all-payload lines persist as a placeholder | implemented |
 | **Provenance (#220)** | per-observation: session/tool call, repo state, expected-negative vs real failure, resolving observation, memory-suggested flag — **+ `project_key` (stable repo identity, 10-05) + `param_version`** | open — gates #165 |
-| **Decision observability (#221)** | shipped partially w/ selector (signatures, admit, reason); open: source session/tool call, action targets, post-run outcome | partial |
+| **Decision observability (#221)** | shipped partially w/ selector (signatures, admit, reason); open: source session/tool call, action targets, post-run outcome | issue closed — partial scope shipped; residual (post-run outcome) untracked |
 | **Heat-feedback caution** | `read_files` can't distinguish user interest from memory-suggested reads — attribution before heat informs ranking, or it reinforces itself | standing constraint |
 
 ### Stage C — Accumulation and interference, separately

@@ -1,0 +1,34 @@
+{
+	"id": "agentseeded-three-pool",
+	"origin": {
+		"kind": "synthetic",
+		"source": "agent-seeded twin of gen-m4k0-mid-explicit-d0-s001-001 — same fixture, check, and task prompt; prior_sessions replace seed_commands so the memory rows are agent-authored"
+	},
+	"schema_version": 1,
+	"start_state": {
+		"fixture_dir": "fixture",
+		"kind": "fixture"
+	},
+	"prior_sessions": [
+		{
+			"turns": [
+				"The ./tax package's test fails — Fee() should return 10. Run `go test ./tax` as a single bare command to see it fail, fix fee.go, then re-run `go test ./tax` as a single bare command to confirm it passes."
+			]
+		},
+		{
+			"turns": [
+				"Check the state of ./quota without changing anything: run `go test ./quota` and `go build ./quota` as single bare commands and report what fails. Do not modify any files."
+			]
+		}
+	],
+	"task": {
+		"turns": [
+			"Fix the failing test in ./quota so `go test ./...` passes — Contract() must return 42. Make the smallest change."
+		]
+	},
+	"check": {
+		"script": "check.sh",
+		"expect_start_state": "fail",
+		"seed_script": "seed_check.sh"
+	}
+}

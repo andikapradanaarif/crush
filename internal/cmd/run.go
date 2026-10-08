@@ -2,15 +2,19 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"time"
 
 	"charm.land/log/v2"
+	"github.com/charmbracelet/crush/internal/agent"
+	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/client"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/event"
@@ -88,7 +92,10 @@ crush run --continue "Follow up on your last response"
 			return err
 		}
 
-		if prompt == "" {
+		// The eval harness's persistent-process arm supplies prompts
+		// through a turns file instead of argv (#117).
+		turnsFile := os.Getenv(app.EvalTurnsFileEnvVar)
+		if prompt == "" && turnsFile == "" {
 			return fmt.Errorf("no prompt provided")
 		}
 
@@ -101,7 +108,10 @@ crush run --continue "Follow up on your last response"
 			event.SetContinueLastSession(true)
 		}
 
-		if useClientServer() {
+		// Turns-file mode is a local-app contract — a leftover
+		// CRUSH_CLIENT_SERVER must not reroute it into the one-shot
+		// client path.
+		if useClientServer() && turnsFile == "" {
 			c, ws, cleanup, err := connectToServer(cmd)
 			if err != nil {
 				return err
@@ -152,6 +162,10 @@ crush run --continue "Follow up on your last response"
 
 		appWs := ws.(*workspace.AppWorkspace)
 
+		if turnsFile != "" {
+			return runEvalTurns(ctx, appWs.App(), turnsFile, largeModel, smallModel, reasoningEffort, quiet || verbose)
+		}
+
 		if sessionID != "" {
 			sess, err := resolveSessionID(ctx, appWs.App().Sessions, sessionID)
 			if err != nil {
@@ -162,6 +176,64 @@ crush run --continue "Follow up on your last response"
 
 		return appWs.App().RunNonInteractive(ctx, os.Stdout, prompt, largeModel, smallModel, reasoningEffort, quiet || verbose, sessionID, useLast)
 	},
+}
+
+// runEvalTurns drives the eval harness's persistent-process arm (#117):
+// one process loops the trajectory's prompts through the same
+// RunNonInteractive path the restart arm runs per turn, on a single
+// session — production's process model, where in-memory request state
+// (prefix cache, prev-request vector, notebook stats) survives the turn
+// boundary. Per-turn telemetry lands as <CRUSH_EVAL_TELEMETRY>-<i>;
+// the emit path switches to per-turn deltas when the turns env is set.
+func runEvalTurns(
+	ctx context.Context,
+	a *app.App,
+	turnsFile, largeModel, smallModel, reasoningEffort string,
+	hideSpinner bool,
+) error {
+	data, err := os.ReadFile(turnsFile)
+	if err != nil {
+		return fmt.Errorf("failed to read turns file: %w", err)
+	}
+	var turns []string
+	if err := json.Unmarshal(data, &turns); err != nil {
+		return fmt.Errorf("failed to parse turns file: %w", err)
+	}
+	if len(turns) == 0 {
+		return fmt.Errorf("turns file lists no prompts")
+	}
+	sess, err := a.Sessions.Create(ctx, agent.DefaultSessionName)
+	if err != nil {
+		return fmt.Errorf("failed to create eval session: %w", err)
+	}
+	telBase := os.Getenv(app.EvalTelemetryEnvVar)
+	maxSteps, _ := strconv.Atoi(os.Getenv(agent.EvalMaxStepsEnvVar))
+	used := 0
+	for i, prompt := range turns {
+		if telBase != "" {
+			os.Setenv(app.EvalTelemetryEnvVar, fmt.Sprintf("%s-%d", telBase, i))
+		}
+		if err := a.RunNonInteractive(ctx, os.Stdout, prompt, largeModel, smallModel,
+			reasoningEffort, hideSpinner, sess.ID, false); err != nil {
+			return err
+		}
+		// Mirror the restart driver's remaining-budget cap: each
+		// turn may consume the trajectory remainder plus one, so a
+		// runaway turn stops at the same step boundary a fresh
+		// process would have been given.
+		if maxSteps > 0 && telBase != "" {
+			var doc struct {
+				Steps int `json:"steps"`
+			}
+			if data, err := os.ReadFile(fmt.Sprintf("%s-%d", telBase, i)); err == nil {
+				if json.Unmarshal(data, &doc) == nil {
+					used += doc.Steps
+				}
+			}
+			os.Setenv(agent.EvalMaxStepsEnvVar, strconv.Itoa(max(1, maxSteps-used+1)))
+		}
+	}
+	return nil
 }
 
 func init() {

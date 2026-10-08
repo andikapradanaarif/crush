@@ -478,7 +478,7 @@ func TestWriteArmConfig_CollisionAndContent(t *testing.T) {
 	wd := t.TempDir()
 	exp := &Experiment{Model: "hyper/x", Temperature: ptr(0.0)}
 	arm := Arm{Config: ArmConfig{Options: map[string]any{"flag_a": true}}}
-	require.NoError(t, WriteArmConfig(wd, exp, arm, &FlagsManifest{Defaults: map[string]any{}}))
+	require.NoError(t, WriteArmConfig(wd, exp, arm, &FlagsManifest{Defaults: map[string]any{}}, "key"))
 
 	rc, err := os.ReadFile(filepath.Join(wd, ".crushrc"))
 	require.NoError(t, err)
@@ -493,7 +493,7 @@ func TestWriteArmConfig_CollisionAndContent(t *testing.T) {
 	// A pre-existing config is an error, not a silent override.
 	wd2 := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wd2, "crushrc"), []byte("x"), 0o644))
-	require.Error(t, WriteArmConfig(wd2, exp, arm, &FlagsManifest{Defaults: map[string]any{}}))
+	require.Error(t, WriteArmConfig(wd2, exp, arm, &FlagsManifest{Defaults: map[string]any{}}, "key"))
 }
 
 func ptr[T any](v T) *T { return &v }
@@ -560,7 +560,7 @@ func TestWriteArmConfig_MergesJSONConfig(t *testing.T) {
 	wd := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wd, ".crush.json"),
 		[]byte(`{"options":{"fixture_key":"keep","flag_a":false},"other":"x"}`), 0o644))
-	require.NoError(t, WriteArmConfig(wd, exp, arm, &FlagsManifest{Defaults: map[string]any{}}))
+	require.NoError(t, WriteArmConfig(wd, exp, arm, &FlagsManifest{Defaults: map[string]any{}}, "key"))
 	raw, err := os.ReadFile(filepath.Join(wd, ".crush.json"))
 	require.NoError(t, err)
 	require.Contains(t, string(raw), `"fixture_key": "keep"`)
@@ -570,7 +570,7 @@ func TestWriteArmConfig_MergesJSONConfig(t *testing.T) {
 	// crush.json is lower precedence than .crush.json — allowed.
 	wd2 := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wd2, "crush.json"), []byte(`{}`), 0o644))
-	require.NoError(t, WriteArmConfig(wd2, exp, arm, &FlagsManifest{Defaults: map[string]any{}}))
+	require.NoError(t, WriteArmConfig(wd2, exp, arm, &FlagsManifest{Defaults: map[string]any{}}, "key"))
 }
 
 // Seeds run under WriteSeedConfig — the shared model pin plus harness
@@ -585,14 +585,14 @@ func TestWriteSeedConfig_ThenArmConfig(t *testing.T) {
 	manifest := &FlagsManifest{Defaults: map[string]any{}}
 	arm := Arm{Config: ArmConfig{Options: map[string]any{"flag_a": true}}}
 
-	require.NoError(t, WriteSeedConfig(wd, exp, manifest))
+	require.NoError(t, WriteSeedConfig(wd, exp, manifest, "key"))
 	raw, err := os.ReadFile(filepath.Join(wd, ".crush.json"))
 	require.NoError(t, err)
 	require.Contains(t, string(raw), `"disable_metrics": true`)
 	require.Contains(t, string(raw), `"data_directory"`)
 	require.NotContains(t, string(raw), "flag_a")
 
-	require.NoError(t, WriteArmConfig(wd, exp, arm, manifest))
+	require.NoError(t, WriteArmConfig(wd, exp, arm, manifest, "key"))
 	raw, err = os.ReadFile(filepath.Join(wd, ".crush.json"))
 	require.NoError(t, err)
 	require.Contains(t, string(raw), `"flag_a": true`)
@@ -603,8 +603,8 @@ func TestWriteSeedConfig_ThenArmConfig(t *testing.T) {
 	// .crush.json with DIVERGENT providers still rejects.
 	exp.Providers = map[string]any{"tp": map[string]any{"type": "openai-compat", "api_key": "$KEY"}}
 	wd3 := t.TempDir()
-	require.NoError(t, WriteSeedConfig(wd3, exp, manifest))
-	require.NoError(t, WriteArmConfig(wd3, exp, arm, manifest))
+	require.NoError(t, WriteSeedConfig(wd3, exp, manifest, "key"))
+	require.NoError(t, WriteArmConfig(wd3, exp, arm, manifest, "key"))
 	raw, err = os.ReadFile(filepath.Join(wd3, ".crush.json"))
 	require.NoError(t, err)
 	require.Contains(t, string(raw), `"openai-compat"`)
@@ -612,8 +612,8 @@ func TestWriteSeedConfig_ThenArmConfig(t *testing.T) {
 	wd4 := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wd4, ".crush.json"),
 		[]byte(`{"providers":{"other":{"type":"anthropic"}}}`), 0o644))
-	require.Error(t, WriteSeedConfig(wd4, exp, manifest))
-	require.Error(t, WriteArmConfig(wd4, exp, arm, manifest))
+	require.Error(t, WriteSeedConfig(wd4, exp, manifest, "key"))
+	require.Error(t, WriteArmConfig(wd4, exp, arm, manifest, "key"))
 
 	// A fixture shipping the experiment's own providers block
 	// byte-identically resolves the same way — tolerated. Pinned so
@@ -622,15 +622,15 @@ func TestWriteSeedConfig_ThenArmConfig(t *testing.T) {
 	provDoc, err := json.Marshal(map[string]any{"providers": exp.Providers})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(wd5, ".crush.json"), provDoc, 0o644))
-	require.NoError(t, WriteSeedConfig(wd5, exp, manifest))
-	require.NoError(t, WriteArmConfig(wd5, exp, arm, manifest))
+	require.NoError(t, WriteSeedConfig(wd5, exp, manifest, "key"))
+	require.NoError(t, WriteArmConfig(wd5, exp, arm, manifest, "key"))
 
 	// A fixture .crushrc still collides — only the harness's own
 	// identical pin is tolerated.
 	wd2 := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wd2, ".crushrc"), []byte("model large other/y\n"), 0o644))
-	require.Error(t, WriteSeedConfig(wd2, exp, manifest))
-	require.Error(t, WriteArmConfig(wd2, exp, arm, manifest))
+	require.Error(t, WriteSeedConfig(wd2, exp, manifest, "key"))
+	require.Error(t, WriteArmConfig(wd2, exp, arm, manifest, "key"))
 }
 
 func TestBands_PinSpellingVsResolved(t *testing.T) {
@@ -890,9 +890,11 @@ func TestWriteArmConfig_RejectsHarnessInvariants(t *testing.T) {
 	wd := t.TempDir()
 	exp := &Experiment{Model: "hyper/x", Temperature: ptr(0.0)}
 	manifest := &FlagsManifest{Defaults: map[string]any{"data_directory": "/x"}}
-	err := WriteArmConfig(wd, exp, Arm{Config: ArmConfig{Options: map[string]any{"data_directory": "evil"}}}, manifest)
+	err := WriteArmConfig(wd, exp, Arm{Config: ArmConfig{Options: map[string]any{"data_directory": "evil"}}}, manifest, "key")
 	require.ErrorContains(t, err, "harness manages")
-	err = WriteArmConfig(t.TempDir(), exp, Arm{Config: ArmConfig{Options: map[string]any{"disable_metrics": false}}}, manifest)
+	err = WriteArmConfig(t.TempDir(), exp, Arm{Config: ArmConfig{Options: map[string]any{"disable_metrics": false}}}, manifest, "key")
+	require.ErrorContains(t, err, "harness manages")
+	err = WriteArmConfig(t.TempDir(), exp, Arm{Config: ArmConfig{Options: map[string]any{"project_key": "evil"}}}, manifest, "key")
 	require.ErrorContains(t, err, "harness manages")
 }
 
@@ -907,13 +909,13 @@ func TestWriteArmConfig_RejectsFixtureManifestFlags(t *testing.T) {
 	wd := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wd, ".crush.json"),
 		[]byte(`{"options":{"auto_lsp":false}}`), 0o644))
-	require.ErrorContains(t, WriteArmConfig(wd, exp, arm, manifest), "manifest flag")
+	require.ErrorContains(t, WriteArmConfig(wd, exp, arm, manifest, "key"), "manifest flag")
 
 	// crush.json too — lower precedence, same trap.
 	wd2 := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wd2, "crush.json"),
 		[]byte(`{"options":{"auto_lsp":false}}`), 0o644))
-	require.ErrorContains(t, WriteArmConfig(wd2, exp, arm, manifest), "manifest flag")
+	require.ErrorContains(t, WriteArmConfig(wd2, exp, arm, manifest, "key"), "manifest flag")
 }
 
 // Experiments must pin temperature — unpinned arms land in the
@@ -981,6 +983,43 @@ func TestValidateExperiment_Primary(t *testing.T) {
 	exp = base()
 	exp.CostWeights = &CostWeights{CacheRead: -0.1}
 	require.ErrorContains(t, ValidateExperiment(exp), "cost_weights")
+
+	exp = base()
+	exp.CostWeights = &CostWeights{CacheWrite: -0.1}
+	require.ErrorContains(t, ValidateExperiment(exp), "cost_weights")
+
+	// The sidecar tier validates its own weights and can't nest.
+	exp = base()
+	exp.CostWeights = &CostWeights{Generator: &CostWeights{Output: -1}}
+	require.ErrorContains(t, ValidateExperiment(exp), "cost_weights.generator")
+	exp = base()
+	exp.CostWeights = &CostWeights{Generator: &CostWeights{Generator: &CostWeights{}}}
+	require.ErrorContains(t, ValidateExperiment(exp), "own generator tier")
+
+	// The #197 acceptance rule: arming any field requires the floor
+	// and a priced cost leg.
+	exp = base()
+	exp.Primary = &Primary{Metric: "steps", Direction: PrimaryDecrease, MDE: 0.1, NoiseBand: ptr(0.2)}
+	require.ErrorContains(t, ValidateExperiment(exp), "floor is required")
+	exp = base()
+	exp.Primary = &Primary{Metric: "steps", Direction: PrimaryDecrease, MDE: 0.1, Floor: ptr(0.0)}
+	require.ErrorContains(t, ValidateExperiment(exp), "primary.floor")
+	exp = base()
+	exp.Primary = &Primary{Metric: "steps", Direction: PrimaryDecrease, MDE: 0.1, Floor: ptr(1.2)}
+	require.ErrorContains(t, ValidateExperiment(exp), "primary.floor")
+	exp = base()
+	exp.Primary = &Primary{Metric: "steps", Direction: PrimaryDecrease, MDE: 0.1, Floor: ptr(0.9), NoiseBand: ptr(-0.1)}
+	require.ErrorContains(t, ValidateExperiment(exp), "noise_band")
+	exp = base()
+	exp.Primary = &Primary{Metric: "steps", Direction: PrimaryDecrease, MDE: 0.1, Floor: ptr(0.9), BaseCostAllowance: ptr(-0.1)}
+	require.ErrorContains(t, ValidateExperiment(exp), "base_cost_allowance")
+	// Armed without cost_weights — a ΔC the rule can't price is
+	// unbounded spend, so the manifest fails at load.
+	exp = base()
+	exp.Primary = &Primary{Metric: "steps", Direction: PrimaryDecrease, MDE: 0.1, Floor: ptr(0.9)}
+	require.ErrorContains(t, ValidateExperiment(exp), "requires cost_weights")
+	exp.CostWeights = &CostWeights{CacheRead: 0.1, Output: 4}
+	require.NoError(t, ValidateExperiment(exp))
 }
 
 func TestValidateExperiment_ExpectedExclusion(t *testing.T) {
@@ -1028,17 +1067,25 @@ func TestValidateExperiment_ExpectedExclusion(t *testing.T) {
 
 func TestPrimaryMetricFunc_WeightedCost(t *testing.T) {
 	t.Parallel()
-	exp := &Experiment{CostWeights: &CostWeights{CacheRead: 0.1, Output: 4}}
+	exp := &Experiment{CostWeights: &CostWeights{CacheRead: 0.1, CacheWrite: 1.25, Output: 4}}
 	f, err := primaryMetricFunc(exp, "weighted_cost")
 	require.NoError(t, err)
-	rec := &RunRecord{Tokens: TokenUsage{Input: 1000, CacheRead: 10000, Output: 500}}
-	// 1000 + 0.1*10000 + 4*500 = 4000.
-	require.InDelta(t, 4000, f(rec), 1e-9)
+	rec := &RunRecord{Tokens: TokenUsage{Input: 1000, CacheRead: 10000, CacheWrite: 800, Output: 500}}
+	// 1000 + 0.1*10000 + 1.25*800 + 4*500 = 5000.
+	require.InDelta(t, 5000, f(rec), 1e-9)
 
-	// Sidecar spend prices at the same class rates.
+	// Sidecar spend prices at the same class rates by default.
 	rec.GeneratorTokens = &GeneratorTokens{Input: 100, Output: 50, CacheRead: 200}
-	// 4000 + 100 + 0.1*200 + 4*50 = 4320.
-	require.InDelta(t, 4320, f(rec), 1e-9)
+	// 5000 + 100 + 0.1*200 + 4*50 = 5320.
+	require.InDelta(t, 5320, f(rec), 1e-9)
+
+	// A pinned generator tier reprices the sidecar at its own
+	// model's rates while the main tokens keep theirs.
+	exp.CostWeights.Generator = &CostWeights{CacheRead: 0.05, Output: 1}
+	f, err = primaryMetricFunc(exp, "weighted_cost")
+	require.NoError(t, err)
+	// 5000 + 100 + 0.05*200 + 1*50 = 5160.
+	require.InDelta(t, 5160, f(rec), 1e-9)
 
 	// The closed registry rejects ratios by construction — there is
 	// no grammar for "X/steps".
@@ -2001,4 +2048,111 @@ func TestExecuteRun_SeedCheckStrayRowStillRejects(t *testing.T) {
 		"a stray -count=1 row is live memory, not the designed stale row")
 	require.Len(t, drv.calls, 1, "measured session never launches")
 	require.Equal(t, map[string]any{"open_stale_rows": float64(0)}, rec.SeedState)
+}
+
+// The #152 decision_rule block: real metrics only, the compared arm
+// pair must exist, directions are explicit on ambiguous metrics, and
+// the aggregate names resolve their implied directions at load.
+func TestValidateExperiment_DecisionRule(t *testing.T) {
+	t.Parallel()
+	base := func() *Experiment {
+		return &Experiment{
+			Name: "x", Model: "mock/m", Temperature: ptr(0.0), Corpus: []string{"*"},
+			RunsPerTrajectory: map[Band]int{BandMid: 1},
+			Arms:              map[string]Arm{ArmControl: {}, ArmTreatment: {}},
+		}
+	}
+	rule := func() *DecisionRule {
+		return &DecisionRule{
+			Hypothesis: "treatment improves the metric",
+			Primary: &RulePrimary{
+				Metric: "tokens.input", Arm: ArmTreatment, Vs: ArmControl,
+				Direction: PrimaryDecrease, MinImprovement: 0.15,
+			},
+		}
+	}
+
+	// A minimal valid rule validates and normalizes.
+	exp := base()
+	exp.DecisionRule = rule()
+	require.NoError(t, ValidateExperiment(exp))
+
+	// Hypothesis is the claim — absent or blank is not a rule.
+	exp = base()
+	exp.DecisionRule = &DecisionRule{Primary: &RulePrimary{Metric: "steps", Arm: ArmTreatment, Vs: ArmControl, Direction: PrimaryDecrease}}
+	require.ErrorContains(t, ValidateExperiment(exp), "hypothesis")
+	exp = base()
+	exp.DecisionRule = &DecisionRule{Hypothesis: "  "}
+	require.ErrorContains(t, ValidateExperiment(exp), "hypothesis")
+
+	// A rule with no measurable criterion is post-hoc freedom.
+	exp = base()
+	exp.DecisionRule = &DecisionRule{Hypothesis: "vibes"}
+	require.ErrorContains(t, ValidateExperiment(exp), "primary or guardrail")
+
+	// Unknown metrics fail — the registry is closed.
+	exp = base()
+	exp.DecisionRule = rule()
+	exp.DecisionRule.Primary.Metric = "tokens.dreamed"
+	require.ErrorContains(t, ValidateExperiment(exp), "unknown primary metric")
+
+	// Direction is required on registry metrics — ambiguous either way.
+	exp = base()
+	exp.DecisionRule = rule()
+	exp.DecisionRule.Primary.Direction = ""
+	require.ErrorContains(t, ValidateExperiment(exp), "direction is required")
+	exp.DecisionRule.Primary.Direction = "sideways"
+	require.ErrorContains(t, ValidateExperiment(exp), "direction")
+
+	// The compared pair must name declared, distinct arms.
+	exp = base()
+	exp.DecisionRule = rule()
+	exp.DecisionRule.Primary.Arm = "treatment-plus"
+	require.ErrorContains(t, ValidateExperiment(exp), "no arm")
+	exp.DecisionRule.Primary.Arm = ArmControl
+	exp.DecisionRule.Primary.Vs = ArmTreatment // Reverse pair is legal.
+	require.NoError(t, ValidateExperiment(exp))
+	exp.DecisionRule.Primary.Vs = ArmControl
+	require.ErrorContains(t, ValidateExperiment(exp), "itself")
+
+	// tokens_to_done needs the pricing that makes it measurable, and
+	// implies direction=decrease at load.
+	exp = base()
+	exp.DecisionRule = rule()
+	exp.DecisionRule.Primary.Metric = "tokens_to_done"
+	exp.DecisionRule.Primary.Direction = ""
+	require.ErrorContains(t, ValidateExperiment(exp), "cost_weights")
+	exp.CostWeights = &CostWeights{CacheRead: 0.1, Output: 4}
+	require.NoError(t, ValidateExperiment(exp))
+	require.Equal(t, PrimaryDecrease, exp.DecisionRule.Primary.Direction)
+	exp.DecisionRule.Primary.Direction = PrimaryIncrease
+	require.ErrorContains(t, ValidateExperiment(exp), "contradicts")
+
+	// Thresholds stay sane.
+	exp = base()
+	exp.DecisionRule = rule()
+	exp.DecisionRule.Primary.MinImprovement = -0.1
+	require.ErrorContains(t, ValidateExperiment(exp), "min_improvement")
+
+	// The guardrail: pass_rate implies direction=increase; registry
+	// metrics need the direction declared; absent arm/vs default to
+	// treatment-vs-control.
+	exp = base()
+	exp.DecisionRule = &DecisionRule{
+		Hypothesis: "no regression",
+		Guardrail:  &RuleGuardrail{Metric: "pass_rate", MinDelta: 0},
+	}
+	require.NoError(t, ValidateExperiment(exp))
+	require.Equal(t, PrimaryIncrease, exp.DecisionRule.Guardrail.Direction)
+	require.Equal(t, ArmTreatment, exp.DecisionRule.Guardrail.Arm)
+	require.Equal(t, ArmControl, exp.DecisionRule.Guardrail.Vs)
+
+	exp = base()
+	exp.DecisionRule = &DecisionRule{
+		Hypothesis: "no token regression",
+		Guardrail:  &RuleGuardrail{Metric: "tokens.output", MinDelta: -0.10},
+	}
+	require.ErrorContains(t, ValidateExperiment(exp), "direction is required")
+	exp.DecisionRule.Guardrail.Direction = PrimaryDecrease
+	require.NoError(t, ValidateExperiment(exp))
 }

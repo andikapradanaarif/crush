@@ -1,0 +1,6 @@
+{
+  "note": "A pass rate under the floor fails acceptance regardless of cost — the claim clearing is not the same as the arm being shippable.",
+  "rule_result": "satisfied",
+  "primary_verdict_contains": "FLOOR VIOLATED",
+  "acceptance_contains": "floor-violated"
+}

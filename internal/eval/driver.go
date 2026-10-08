@@ -3,6 +3,7 @@ package eval
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -26,6 +27,21 @@ const EvalMaxStepsEnvVar = "CRUSH_EVAL_MAX_STEPS"
 // should report resolved values for.
 const EvalFlagsEnvVar = "CRUSH_EVAL_FLAGS"
 
+// EvalRequestVectorEnvVar hands the previous turn process's final
+// request fingerprint to the restarted turn's process — the diff
+// baseline that keeps a turn-first step's attribution honest
+// instead of cold (#115). Kept in sync with
+// agent.EvalRequestVectorEnvVar; the constant is duplicated so eval
+// doesn't import agent.
+const EvalRequestVectorEnvVar = "CRUSH_EVAL_REQUEST_VECTOR"
+
+// EvalTurnsFileEnvVar names the JSON prompt list the persistent-
+// process driver hands a single `crush run` subprocess (#117) — the
+// child loops the turns on one session instead of restarting per
+// turn. Kept in sync with app.EvalTurnsFileEnvVar; the constant is
+// duplicated so eval doesn't import app.
+const EvalTurnsFileEnvVar = "CRUSH_EVAL_TURNS_FILE"
+
 // RunResult is what one trajectory run (all turns) produced.
 type RunResult struct {
 	Steps       int
@@ -48,14 +64,26 @@ type RunResult struct {
 	// EdgeFirings is the trajectory-wide edge/outcome firing split —
 	// the summed per-turn deltas (each `crush run` process's counters
 	// are in-memory and reset on spawn).
-	EdgeFirings   map[string]map[string]int
-	SessionID     string
+	EdgeFirings map[string]map[string]int
+	SessionID   string
+	// ParamVersion is the child's resolved memory-parameter snapshot
+	// identity (#228) — identical across the run's turn processes;
+	// empty on children predating the substrate.
+	ParamVersion  string
 	ModelResolved string
 	ModelSmall    string
 	ModelSummary  string
 	// ResolvedOptions is the child's report of what each manifest
 	// flag resolved to — the truth the baseline key hashes.
 	ResolvedOptions map[string]any
+	// RequestVector is the trajectory-final process's request
+	// fingerprint — forwarded verbatim to the next turn's process
+	// (#115). Raw because the driver never inspects the contents.
+	RequestVector json.RawMessage
+	// Drains is each turn's detached-work join outcome — the
+	// lifecycle evidence that a restart boundary settled cleanly,
+	// Turn stamped at fold.
+	Drains []DrainReport
 	// StepRecords is the trajectory-wide per-step table — every
 	// turn's steps with usage and prefix attribution, Turn stamped
 	// at fold time.
@@ -117,8 +145,13 @@ type CrushRunner struct {
 // CRUSH_EVAL_TELEMETRY.
 type runTelemetry struct {
 	SessionID string `json:"session_id"`
-	Steps     int    `json:"steps"`
-	Tokens    struct {
+	// ParamVersion is the child's resolved memory-parameter snapshot
+	// identity (#228) — the field a cohort split attributes outcomes
+	// to. Constant per process; empty on children predating the
+	// substrate.
+	ParamVersion string `json:"param_version"`
+	Steps        int    `json:"steps"`
+	Tokens       struct {
 		Input      int64 `json:"input"`
 		Output     int64 `json:"output"`
 		CacheRead  int64 `json:"cache_read"`
@@ -223,7 +256,17 @@ type runTelemetry struct {
 	// ResolvedOptions is the child's effective config projected onto
 	// the manifest flags — what actually ran, not what the arm asked.
 	ResolvedOptions map[string]any `json:"resolved_options"`
-	Error           string         `json:"error,omitempty"`
+	// RequestVector is the process's final request fingerprint —
+	// forwarded verbatim to the next turn's process via
+	// CRUSH_EVAL_REQUEST_VECTOR so restart attribution diffs
+	// against it instead of reporting cold (#115). Raw because the
+	// driver never inspects the contents — the agent package owns
+	// the schema.
+	RequestVector json.RawMessage `json:"request_vector,omitempty"`
+	// Drain is this process's detached-work join outcome — nil when
+	// the child predates #115 or died before emitting.
+	Drain *DrainReport `json:"drain,omitempty"`
+	Error string       `json:"error,omitempty"`
 	// ErrorClass is the child's typed classification of the terminal
 	// error — auth/provider_deterministic/provider_server/
 	// rate_limit/context_too_large/window_cap_enforced/
@@ -231,6 +274,28 @@ type runTelemetry struct {
 	// circuit breaker reads it instead of string-matching when
 	// present.
 	ErrorClass string `json:"error_class,omitempty"`
+}
+
+// TurnRunner is the counterfactual-replay contract (#108): execute a
+// single trajectory turn against the session state already in
+// workdir's crush.db. An empty sessionID starts a fresh session —
+// turn 0 of a recording pass or an unseeded fork. prevVector is the
+// previous turn process's request fingerprint (#115) — the diff
+// baseline the restarted process needs; nil means cold. The returned
+// string is the session the turn ran under, for the caller's
+// continuation bookkeeping; RunResult carries just this turn's
+// telemetry.
+type TurnRunner interface {
+	RunTurn(ctx context.Context, workdir, sessionID, prompt string, turnIdx, maxSteps int, prevVector json.RawMessage) (string, RunResult)
+}
+
+// turnOutcome is one `crush run` subprocess's classified result — the
+// error/timeout split Run and replayed turns both apply.
+type turnOutcome struct {
+	tel      runTelemetry
+	err      error
+	errClass string
+	timedOut bool
 }
 
 // Run executes the trajectory's turns sequentially — each turn a
@@ -263,91 +328,134 @@ func (c CrushRunner) Run(ctx context.Context, workdir string, turns []string, bu
 			res.TimedOut = true
 			return res
 		}
-		// Telemetry lives beside the workdir, not inside it: check.sh
-		// must see the tree exactly as the agent left it — untracked
-		// harness litter could flip a globbing check.
-		tfile := filepath.Join(filepath.Dir(workdir), fmt.Sprintf(".eval-telemetry-%s-%d.json", filepath.Base(workdir), i))
-		args := []string{"run", "--quiet"}
-		if sessionID != "" {
-			args = append(args, "--session", sessionID)
+		to := c.runTurnOnce(ctx, workdir, sessionID, turn, i, remainingSteps(budget, res.Steps), res.RequestVector)
+		res.addTurnTelemetry(to.tel, i)
+		noteTurnFields(&res, to.tel)
+		if res.SessionID != "" {
+			sessionID = res.SessionID
 		}
-		args = append(args, "--", turn)
-
-		bin := c.Bin
-		if bin == "" {
-			bin, _ = os.Executable()
-		}
-		cmd := exec.CommandContext(ctx, bin, args...)
-		// SIGINT (not Kill) on deadline/cancel: `crush run` translates
-		// it into ctx cancellation, giving the child a beat to write
-		// telemetry for the timeout/error carve-out. WaitDelay bounds
-		// the grace before the hard kill.
-		cmd.Cancel = func() error {
-			if err := cmd.Process.Signal(os.Interrupt); err != nil {
-				return cmd.Process.Kill()
-			}
-			return nil
-		}
-		cmd.WaitDelay = 10 * time.Second
-		cmd.Dir = workdir
-		cmd.Env = c.subprocessEnv(tfile, remainingSteps(budget, res.Steps))
-		out, err := cmd.CombinedOutput()
-
-		tel, telErr := readTelemetry(tfile)
-		_ = os.Remove(tfile)
-		res.addTurnTelemetry(tel, i)
-		if tel.SessionID != "" {
-			sessionID = tel.SessionID
-			res.SessionID = sessionID
-		}
-		if tel.Model != "" {
-			res.ModelResolved = tel.Model
-		}
-		if tel.ModelSmall != "" {
-			res.ModelSmall = tel.ModelSmall
-		}
-		if tel.ModelSummary != "" {
-			res.ModelSummary = tel.ModelSummary
-		}
-		if len(tel.ResolvedOptions) > 0 {
-			res.ResolvedOptions = tel.ResolvedOptions
-		}
-
-		// Timeout/error carve-out: a run that hit the deadline while
-		// its API calls were already erroring classifies as `error`,
-		// not `timeout` — the child's graceful-cancel telemetry says
-		// which. A clean cancellation (our own signal) is a timeout.
-		if tel.Error != "" && !isCancellation(tel.Error) {
-			res.Err = fmt.Errorf("agent run failed: %s", tel.Error)
-			res.ErrorClass = tel.ErrorClass
+		if to.err != nil {
+			res.Err = to.err
+			res.ErrorClass = to.errClass
 			return res
 		}
-		if ctx.Err() == context.DeadlineExceeded || (budget.MaxSteps > 0 && res.Steps > budget.MaxSteps) {
+		if to.timedOut {
 			res.TimedOut = true
-			return res
-		}
-		if ctx.Err() != nil {
-			res.Err = ctx.Err()
-			return res
-		}
-		if err != nil {
-			res.Err = fmt.Errorf("crush run failed: %w: %s", err, tail(out, 4096))
-			return res
-		}
-		if telErr != nil {
-			// The child exited clean but the telemetry contract broke
-			// — zeroed stats would read as coverage-starved
-			// inconclusive instead of the error this is.
-			res.Err = fmt.Errorf("telemetry unreadable after clean run: %w", telErr)
-			return res
-		}
-		if tel.Error != "" {
-			res.Err = fmt.Errorf("agent run failed: %s", tel.Error)
-			res.ErrorClass = tel.ErrorClass
 			return res
 		}
 	}
 	return res
+}
+
+// RunTurn executes one trajectory turn — the counterfactual-replay
+// contract (#108). stepCap follows remainingSteps' convention: the
+// subprocess may consume the budget's remainder plus one; reaching
+// the cap classifies timeout. turnIdx stamps StepRecords/TailRows and
+// names the telemetry file — replay passes the trajectory-space index
+// so per-step rows attribute to the replayed turn. prevVector seeds
+// the child's restart attribution — a fork passes the recorded
+// boundary's vector so the replayed turn diffs against the prefix it
+// actually continues (#115).
+func (c CrushRunner) RunTurn(ctx context.Context, workdir, sessionID, prompt string, turnIdx, stepCap int, prevVector json.RawMessage) (string, RunResult) {
+	var res RunResult
+	to := c.runTurnOnce(ctx, workdir, sessionID, prompt, turnIdx, stepCap, prevVector)
+	res.addTurnTelemetry(to.tel, turnIdx)
+	noteTurnFields(&res, to.tel)
+	res.Err = to.err
+	res.ErrorClass = to.errClass
+	res.TimedOut = to.timedOut
+	if res.SessionID != "" {
+		return res.SessionID, res
+	}
+	return sessionID, res
+}
+
+// noteTurnFields carries a turn's identity fields — session, resolved
+// models, resolved flag values — onto the run result. Shared by the
+// trajectory loop and single-turn replay.
+func noteTurnFields(res *RunResult, tel runTelemetry) {
+	if tel.SessionID != "" {
+		res.SessionID = tel.SessionID
+	}
+	if tel.Model != "" {
+		res.ModelResolved = tel.Model
+	}
+	if tel.ModelSmall != "" {
+		res.ModelSmall = tel.ModelSmall
+	}
+	if tel.ModelSummary != "" {
+		res.ModelSummary = tel.ModelSummary
+	}
+	if len(tel.ResolvedOptions) > 0 {
+		res.ResolvedOptions = tel.ResolvedOptions
+	}
+}
+
+// runTurnOnce spawns one `crush run` subprocess for a single prompt
+// and classifies the result. Telemetry lives beside the workdir, not
+// inside it: check.sh must see the tree exactly as the agent left it
+// — untracked harness litter could flip a globbing check. The
+// session/model bookkeeping fields land on res through
+// addTurnTelemetry and noteTurnFields.
+func (c CrushRunner) runTurnOnce(ctx context.Context, workdir, sessionID, prompt string, turnIdx, stepCap int, prevVector json.RawMessage) turnOutcome {
+	tfile := filepath.Join(filepath.Dir(workdir), fmt.Sprintf(".eval-telemetry-%s-%d.json", filepath.Base(workdir), turnIdx))
+	args := []string{"run", "--quiet"}
+	if sessionID != "" {
+		args = append(args, "--session", sessionID)
+	}
+	args = append(args, "--", prompt)
+
+	bin := c.Bin
+	if bin == "" {
+		bin, _ = os.Executable()
+	}
+	cmd := exec.CommandContext(ctx, bin, args...)
+	// SIGINT (not Kill) on deadline/cancel: `crush run` translates
+	// it into ctx cancellation, giving the child a beat to write
+	// telemetry for the timeout/error carve-out. WaitDelay bounds
+	// the grace before the hard kill.
+	cmd.Cancel = func() error {
+		if err := cmd.Process.Signal(os.Interrupt); err != nil {
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	cmd.WaitDelay = 10 * time.Second
+	cmd.Dir = workdir
+	cmd.Env = c.subprocessEnv(tfile, stepCap, prevVector)
+	out, err := cmd.CombinedOutput()
+
+	tel, telErr := readTelemetry(tfile)
+	_ = os.Remove(tfile)
+	var to turnOutcome
+	to.tel = tel
+
+	// Timeout/error carve-out: a run that hit the deadline while
+	// its API calls were already erroring classifies as `error`,
+	// not `timeout` — the child's graceful-cancel telemetry says
+	// which. A clean cancellation (our own signal) is a timeout.
+	switch {
+	case tel.Error != "" && !isCancellation(tel.Error):
+		to.err = fmt.Errorf("agent run failed: %s", tel.Error)
+		to.errClass = tel.ErrorClass
+	case ctx.Err() == context.DeadlineExceeded || (stepCap > 0 && tel.Steps >= stepCap):
+		// The step cap is the trajectory remainder plus one — a
+		// turn that consumed it was stopped mid-flight.
+		to.timedOut = true
+	case ctx.Err() != nil:
+		to.err = ctx.Err()
+	case err != nil:
+		to.err = fmt.Errorf("crush run failed: %w: %s", err, tail(out, 4096))
+	case telErr != nil:
+		// The child exited clean but the telemetry contract broke
+		// — zeroed stats would read as coverage-starved
+		// inconclusive instead of the error this is.
+		to.err = fmt.Errorf("telemetry unreadable after clean run: %w", telErr)
+	case tel.Error != "":
+		to.err = fmt.Errorf("agent run failed: %s", tel.Error)
+		to.errClass = tel.ErrorClass
+	}
+	return to
 }
 
 // addTurnTelemetry folds one turn's telemetry counters into the run
@@ -359,6 +467,11 @@ func (c CrushRunner) Run(ctx context.Context, workdir string, turns []string, bu
 // so the table is ordered across process boundaries.
 func (res *RunResult) addTurnTelemetry(tel runTelemetry, turn int) {
 	res.Steps += tel.Steps
+	// Process-constant: the first turn to report it wins; later
+	// turns carry the same value.
+	if res.ParamVersion == "" {
+		res.ParamVersion = tel.ParamVersion
+	}
 	res.Tokens.Input += tel.Tokens.Input
 	res.Tokens.Output += tel.Tokens.Output
 	res.Tokens.CacheRead += tel.Tokens.CacheRead
@@ -401,6 +514,17 @@ func (res *RunResult) addTurnTelemetry(tel runTelemetry, turn int) {
 	for _, s := range tel.Request.Steps {
 		s.Turn = turn
 		res.StepRecords = append(res.StepRecords, s)
+	}
+	// The process's final fingerprint rides forward — the next
+	// turn's restarted process diffs its first request against it
+	// (#115).
+	if len(tel.RequestVector) > 0 {
+		res.RequestVector = tel.RequestVector
+	}
+	if tel.Drain != nil {
+		d := *tel.Drain
+		d.Turn = turn
+		res.Drains = append(res.Drains, d)
 	}
 	if tel.Tail != nil {
 		t := *tel.Tail
@@ -469,7 +593,7 @@ func isCancellation(e string) bool {
 // are stripped — a CRUSH_CLIENT_SERVER=1 left over in the operator's
 // env would take the client/server path where the telemetry hook
 // doesn't fire, silently breaking session continuation.
-func (c CrushRunner) subprocessEnv(telemetryFile string, maxSteps int) []string {
+func (c CrushRunner) subprocessEnv(telemetryFile string, maxSteps int, prevVector json.RawMessage) []string {
 	pinned := map[string]string{
 		"HOME":              c.Home,
 		"XDG_CONFIG_HOME":   filepath.Join(c.Home, ".config"),
@@ -479,6 +603,9 @@ func (c CrushRunner) subprocessEnv(telemetryFile string, maxSteps int) []string 
 	}
 	if maxSteps > 0 {
 		pinned[EvalMaxStepsEnvVar] = strconv.Itoa(maxSteps)
+	}
+	if len(prevVector) > 0 {
+		pinned[EvalRequestVectorEnvVar] = string(prevVector)
 	}
 	if len(c.FlagKeys) > 0 {
 		pinned[EvalFlagsEnvVar] = strings.Join(c.FlagKeys, ",")
@@ -517,6 +644,108 @@ func (c CrushRunner) subprocessEnv(telemetryFile string, maxSteps int) []string 
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+// PersistentRunner is the persistent-process regime (#117): the whole
+// trajectory runs inside ONE `crush run` subprocess — production's
+// process model — so the in-memory state restart mode rebuilds each
+// turn (prefix cache, prev-request vector, notebook high-water)
+// survives the boundary, and detached work lives past its turn — the
+// measurement point, not a bug. The child reads the prompt list from
+// CRUSH_EVAL_TURNS_FILE and drops per-turn telemetry DELTAS at
+// <base>-<i> — same fold as restart mode on the driver side. The
+// child decrements CRUSH_EVAL_MAX_STEPS between turns, mirroring the
+// restart driver's remaining-budget cap; the post-hoc overrun check
+// below is the backstop for steps a dying turn never reported.
+type PersistentRunner struct{ CrushRunner }
+
+// Run executes all turns in one subprocess. Failure classification
+// mirrors runTurnOnce: a non-cancellation telemetry error fails the
+// run; a deadline or budget overrun marks TimedOut.
+func (p PersistentRunner) Run(ctx context.Context, workdir string, turns []string, budget Budget) RunResult {
+	var res RunResult
+	deadline := time.Now().Add(time.Duration(budget.RunTimeoutSeconds) * time.Second)
+	if budget.RunTimeoutSeconds <= 0 {
+		deadline = time.Now().Add(15 * time.Minute)
+	}
+	ctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+
+	dir := filepath.Dir(workdir)
+	base := filepath.Base(workdir)
+	turnsFile := filepath.Join(dir, fmt.Sprintf(".eval-turns-%s.json", base))
+	data, err := json.Marshal(turns)
+	if err != nil {
+		res.Err = fmt.Errorf("marshal turns file: %w", err)
+		return res
+	}
+	if err := os.WriteFile(turnsFile, data, 0o600); err != nil {
+		res.Err = fmt.Errorf("write turns file: %w", err)
+		return res
+	}
+	defer os.Remove(turnsFile)
+
+	// The child appends -<i> per turn; the base keeps the restart
+	// mode's file-naming convention.
+	telBase := filepath.Join(dir, fmt.Sprintf(".eval-telemetry-%s", base))
+	bin := p.Bin
+	if bin == "" {
+		bin, _ = os.Executable()
+	}
+	cmd := exec.CommandContext(ctx, bin, "run", "--quiet")
+	cmd.Cancel = func() error {
+		if err := cmd.Process.Signal(os.Interrupt); err != nil {
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	cmd.WaitDelay = 10 * time.Second
+	cmd.Dir = workdir
+	// Appended after pinned: the turns file is a harness invariant —
+	// an ExtraEnv entry must not shadow it.
+	cmd.Env = append(p.subprocessEnv(telBase, budget.MaxSteps, nil),
+		EvalTurnsFileEnvVar+"="+turnsFile)
+	out, runErr := cmd.CombinedOutput()
+
+	emitted := 0
+	for i := 0; ; i++ {
+		tfile := fmt.Sprintf("%s-%d", telBase, i)
+		tel, telErr := readTelemetry(tfile)
+		if telErr != nil {
+			if errors.Is(telErr, os.ErrNotExist) {
+				break
+			}
+			res.Err = fmt.Errorf("telemetry unreadable after turn %d: %w", i, telErr)
+			return res
+		}
+		_ = os.Remove(tfile)
+		emitted++
+		res.addTurnTelemetry(tel, i)
+		noteTurnFields(&res, tel)
+		if tel.Error != "" && !isCancellation(tel.Error) {
+			res.Err = fmt.Errorf("agent run failed: %s", tel.Error)
+			res.ErrorClass = tel.ErrorClass
+			return res
+		}
+	}
+	switch {
+	case ctx.Err() == context.DeadlineExceeded:
+		res.TimedOut = true
+	case ctx.Err() != nil:
+		res.Err = ctx.Err()
+	case runErr != nil:
+		res.Err = fmt.Errorf("crush run failed: %w: %s", runErr, tail(out, 4096))
+	case emitted < len(turns):
+		// Clean exit short of the turn list means the child stopped
+		// mid-trajectory without reporting — classify as a broken
+		// run, not a short trajectory.
+		res.Err = fmt.Errorf("persistent run emitted %d of %d turns without error", emitted, len(turns))
+	case budget.MaxSteps > 0 && res.Steps > budget.MaxSteps:
+		// The child's step cap is per-turn; the trajectory-wide
+		// budget enforces here.
+		res.TimedOut = true
+	}
+	return res
 }
 
 func readTelemetry(path string) (runTelemetry, error) {

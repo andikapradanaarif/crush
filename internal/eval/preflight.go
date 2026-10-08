@@ -63,7 +63,7 @@ func (r *Runner) preflightExperiment(ctx context.Context, exp *Experiment) error
 		return nil
 	}
 	envMap := make(map[string]string)
-	for _, kv := range cr.subprocessEnv("", 0) {
+	for _, kv := range cr.subprocessEnv("", 0, nil) {
 		k, v, _ := strings.Cut(kv, "=")
 		envMap[k] = v
 	}

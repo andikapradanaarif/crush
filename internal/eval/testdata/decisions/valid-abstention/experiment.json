@@ -1,0 +1,34 @@
+{
+  "name": "dec-valid-abstention",
+  "model": "mock/model",
+  "temperature": 0,
+  "corpus": [
+    "*"
+  ],
+  "runs_per_trajectory": {
+    "stable": 4
+  },
+  "arms": {
+    "control": {
+      "config": {}
+    },
+    "treatment": {
+      "config": {}
+    }
+  },
+  "expected_exclusion": {
+    "arm": "treatment",
+    "error_class": "window_cap_enforced",
+    "min": 2
+  },
+  "decision_rule": {
+    "hypothesis": "memory cuts input tokens by 10%",
+    "primary": {
+      "metric": "tokens.input",
+      "arm": "treatment",
+      "vs": "control",
+      "direction": "decrease",
+      "min_improvement": 0.1
+    }
+  }
+}

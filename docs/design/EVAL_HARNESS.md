@@ -87,6 +87,10 @@ every characterization pass a diff to reviewed files.
 		{"turns": ["seed session 1 prompt"]},
 		{"turns": ["seed session 2 prompt", "follow-up"]}
 	],
+	"seed_commands": [
+		{"ago_seconds": 259200, "commands": ["go test ./calc", "...fix...", "go test ./calc"]},
+		{"ago_seconds": 86400, "commands": ["go build ./badpkg"]}
+	],
 	"check": {
 		"script": "check.sh",
 		"expect_start_state": "fail",
@@ -169,9 +173,88 @@ every characterization pass a diff to reviewed files.
   `check.seed_script` to catch it deterministically (below); for
   deeper forensics, audit the preserved db (`warm_start.session_ids`
   → the seed session's tool calls) or compare workdir diffs.
+- **`seed_commands`.** Scripted seed sessions — the dose-control tier
+  the memory ladders need. Each element is one session: a real
+  `sessions` row, each `commands` entry executed through the same
+  shell interpreter + `RecordRun` write path the bash tool feeds —
+  so `command_memory`, `failure_memory`, headline extraction,
+  component-exit laundering, and signature normalization are all
+  production code — under a controlled clock backdated by
+  `ago_seconds`. Sessions are free, so depth ladders scale row
+  counts without confounding session count (or the reverse: one
+  command per element = N sessions). Costs: tokens/steps are
+  honestly zero — `warm_start.sessions`/`session_ids` still count
+  the scripted ids for provenance, so cost-per-pass reads a real
+  zero rather than a dropped field. `check.seed_script` is the dose
+  gate: assert the row counts/kinds the cell was designed around
+  and a diverged seed rejects `inconclusive` before the measured
+  run is spent. A command reaching no verdict (unparseable)
+  aborts `error` — the authored state diverged. Trade-off: scripted
+  rows are cleaner than agent rows (no composite-command noise);
+  keep one agent-seeded arm in ladders to keep the selector honest.
+- **Seed snapshots (automatic).** Once a seeded trajectory's seeds
+  pass `seed_script`, the harness snapshots the workdir + a
+  WAL-checkpointed `crush.db` under `<work-parent>/.snapshots/
+  <trajectory>-<content-hash>/`. Every later attempt — and the
+  other arm — restores those bytes instead of re-seeding: seed
+  variance leaves the estimate entirely, and paid runs spend
+  nothing on seeding. The memory partition is pinned to
+  `options.project_key = "eval-<content-hash>"` (harness-managed —
+  arms cannot override it), so a db restored under a different
+  materialized path still reads the rows its seeds wrote. A
+  restored run's `warm_start` carries the seed `session_ids` for
+  provenance but zero spend — the seed cost was paid once, by the
+  attempt that wrote the snapshot. Restore failures fall back to
+  re-seeding; the seed spec, not the snapshot, is the source of
+  truth. Editing the trajectory changes the content hash, so a
+  seed-spec edit never replays a stale snapshot.
+- **`crush eval gen` — parametric instances.** The ladder cells come
+  from a generator (`internal/eval/gen.go`), not hand-written
+  fixtures: `--quirks` (relevant memory rows about the target, 0-4),
+  `--distractors` (wrong-referent rows), `--plausibility`
+  (low=benign commands / mid=stale-name failures / high=tag-hidden
+  failing tests the check can't see / in_scope=tag-hidden decoy
+  tests inside the target package — the only distractor class that
+  binds, so stored-K becomes rendered-j), `--prompt` (vague|explicit),
+  `--depth` (package nesting = discovery cost), `--seed`, `--count`
+  (replicates). Each instance draws quirk identity and placement
+  from the RNG, so a replicate never re-measures the same quirk —
+  and a sealed held-out pool (#224) is the same generator with the
+  pools held back. Emitted instances are plain trajectory dirs —
+  fixture, authored `seed_commands`, a dose gate asserting exact
+  pool counts, `check.sh` — so validation, content-hash, snapshot
+  replay, and the corpus sweep treat them identically to
+  hand-written cells. Snapshot replay composes per instance:
+  replicates are distinct dirs, never conflated.
+- **`crush eval select` — the free half of the ladders.** Each
+  stored-dose → rendered-dose question answers without a model
+  call: `select <traj-id>` materializes the trajectory once under
+  `<eval-dir>/genwork/<id>/` (scripted seeds run once; later
+  probes reuse the seeded dir), fetches the three memory pools
+  under `--memory-params` (a `params.Memory` JSON overlay —
+  `open_render_limit:0` suppresses the pool exactly as the live
+  fetch path does), and runs the production selector
+  (`agent.SimulateSelection`) over them. The report is every
+  candidate's verdict — pool, reason, settled-by — plus per-pool
+  seen/admitted/capped counts: the distractor curve's
+  P(wrong row rendered | K stored) and the depth curve's
+  P(relevant row rendered | N stored) are this table aggregated
+  over cells. One mechanism caveat it surfaces honestly:
+  suppressing the open pool un-shadows its command twins —
+  LOO ablation is never strictly row-removal.
+- **`crush eval curve` — the sweep driver.** Enumerates a dose
+  grid (`--quirks/--distractors/--plausibility/--prompt/--depth`
+  take comma lists, `--replicates` the per-cell draws), generates
+  each cell, probes it, and streams one JSONL row per instance to
+  `--out` — the published input to the ladder analysis before any
+  paid run is scheduled. The generator keeps every seeded row
+  inside the read-side `open_failure_ttl` — a distractor backdated
+  past the bound is dead state the fetch never delivers, so the
+  stagger compresses to six-hour steps at the K=50 top dose.
 - **`check.seed_script`.** Optional gate asserting the designed warm
-  state — runs once after the last prior session and before the
-  measured session, with the same contract as `check.sh` (cwd =
+  state — runs once after seeding (`prior_sessions` and/or
+  `seed_commands`) and before the measured session, with the same
+  contract as `check.sh` (cwd =
   workdir, `EVAL_*` env, shared `timeout_seconds`, `EVAL_JSON`
   detail). Its detail lands on the record as `seed_state` — the
   verifiable evidence of what the measured session started from —
@@ -180,10 +263,10 @@ every characterization pass a diff to reviewed files.
   resolved, the task is already done): the run is rejected as
   `inconclusive` before the measured session launches, never scored
   on the wrong premise. A gate that cannot execute or times out is
-  `error` — infra, not state. Valid only with `prior_sessions`;
-  quarantine does not run it (quarantine has no seeds). Gate output
-  lands in `check_detail` (`seed_check_*` keys on failure) — not
-  `check_stdout`, which is check.sh-only.
+  `error` — infra, not state. Valid with `prior_sessions` and/or
+  `seed_commands`; quarantine does not run it (quarantine has no
+  seeds). Gate output lands in `check_detail` (`seed_check_*` keys
+  on failure) — not `check_stdout`, which is check.sh-only.
   **Assert the memory state, not just the worktree.** The premise of
   a warm cell lives in crush.db, reachable from the gate at
   `$(dirname "$EVAL_WORKDIR")/$(basename "$EVAL_WORKDIR").crush-data/
@@ -196,11 +279,15 @@ every characterization pass a diff to reviewed files.
   the touched file) on the db — which is the difference between a
   stale row and a fresh one the vague prompt would happily fix
   again. Declare `sqlite3` in `requires.tools` for db-asserting
-  gates. Caution: a gate asserting an unreachable state inconcluses
-  every attempt at full seed cost — the same starvation exposure as
-  a coverage miss, and quarantine can't pre-flight it (no seeds
-  there), so the first signal is a trajectory landing
-  all-inconclusive with `seed_state` details to inspect.
+  gates. Gate SQL is TTL-blind — it counts stored rows whether or
+  not the read path would still deliver them, so an arm overlay
+  that shortens `open_failure_ttl` below the authored backdating
+  gate-passes then starves at fetch. Caution: a gate asserting an
+  unreachable state inconcluses every attempt at full seed cost —
+  the same starvation exposure as a coverage miss, and quarantine
+  can't pre-flight it (no seeds there), so the first signal is a
+  trajectory landing all-inconclusive with `seed_state` details to
+  inspect.
 - **`origin`.** `scrubbed` must be `true` — a value, not just a
   present field — when `kind` is `production`, and for `regression`
   whenever `source` is a real session or bug report — the same
@@ -298,12 +385,50 @@ every characterization pass a diff to reviewed files.
   `view_directory_errors` and `discovery_calls_before_write`.
   `crush eval analyze <session_db>` runs the same pass standalone
   and backfills old artifacts; the record carries `workdir` so a
-  post-hoc analyze can anchor relative call paths. Known blind
-  spots, both bash-side: discovery through `cat`/`find`/`rg`/`go doc`
+  post-hoc analyze can anchor relative call paths.
+  `crush eval probe <session_db> <name>` runs the offline probe
+  tier — zero-API-cost mechanism checks over preserved session
+  DBs, gated behind nothing: probes exist to kill candidate features
+  before an experiment spends runs on them. Each probe consumes the
+  analyzer's labeled call sequence plus a per-call payload pass
+  (tool-call input + result metadata, where edit tools persist
+  `old_content`/`new_content`), so ordering, turn segmentation, and
+  placeholder labeling stay single-sourced. Registered probes:
+  `post-edit-window` (was each view's range inside the ±10-line
+  window of the prior mutation on the same path — the #98
+  served-class floor), `view-edit-same-file` (per-path mutations
+  and post-edit view counts, window-free), `turn-start-reread`
+  (first view per (path,turn) of a file mutated in an earlier
+  turn — the collapse re-open signature, rows are the per-file
+  heat map). Mutations classify through the canonical
+  `toolclass.IsMutatingCall` vocabulary — bash-carried writes
+  count: redirect targets bind a path (views land
+  `span_unknown`, the written range isn't recorded), and an
+  unbound mutation (`sed -i`, `tee` args) poisons every later
+  no-site view to `span_unknown` rather than `no_prior_edit`.
+  Edit spans prefer `old_string` sites in `old_content` — the
+  true locations, immune to coincidental `new_string`
+  duplicates — with `new_content` search as the multiedit
+  fallback; mutations whose span isn't recorded
+  (lsp_rename/lsp_replace_symbol/download, or pre-metadata
+  artifacts) classify `span_unknown` rather than guessing.
+  View ranges clamp to the fetched `content` length in the
+  result metadata — a `1-200` view on a 17-line file scores
+  what was delivered, not what was requested. Measured on the
+  preserved corpus, `servable` (strict in-window containment)
+  is ~0/run and `overlap` (partial coverage) ~3/run — the
+  post-edit region's served class was structurally empty. New
+  mechanism questions register in `internal/eval/probe.go`,
+  not by widening `CallMetrics`.
+  Known blind
+  spots: discovery through `cat`/`find`/`rg`/`go doc`
   is invisible to tool-name classification so
   `discovery_calls_before_write` undercounts systematically, and
-  mutations through `sed -i`/redirects/`download` are equally
-  invisible so a bash-only mutating run shows `first_write_index=-1`.
+  `first_write_index` deliberately tracks only the
+  `WriteToolNames` class (the stub-machinery write class the
+  gates assert on) so a bash-only mutating run shows -1 — the
+  probes carry the wider `IsMutatingCall` vocabulary, the
+  analyzer metric does not.
   `inconclusive` does not
   consume a `runs_per_trajectory` slot: the runner resamples to N
   conclusive runs with an attempts cap (~2N) before flagging the
@@ -380,6 +505,7 @@ the quarantine pass, below.
 	"name": "stub-superseded-flip",
 	"model": "hyper/deepseek-v4-pro-0813",
 	"temperature": 0,
+	"process_model": "restart",
 	"corpus": ["*"],
 	"runs_per_trajectory": {"stable": 3, "mid": 15, "uncharacterized": 5},
 	"arms": {
@@ -610,10 +736,13 @@ trajectory twice) is strictly worse.
 			"turn": 0, "step": 3,
 			"input_tokens": 41200, "output_tokens": 320,
 			"cache_read_tokens": 38000, "cache_write_tokens": 3100,
-			"prefix_hash": "0123abcd...", "first_changed_index": 1,
+			"prefix_hash": "0123abcd...", "request_hash": "89abcdef...",
+			"pid": 41733, "first_of_process": false,
+			"first_changed_index": 1,
 			"first_changed_cause": "notebook-prefix"
 		}
 	],
+	"drains": [{"turn": 0, "attempted": true, "completed": true, "timeout_ms": 30000}],
 	"tail": [
 		{
 			"turn": 0,
@@ -665,28 +794,54 @@ identical prompt and fold into a single `OnStepFinish`, so a row can
 cover several wire requests; a terminal mid-step failure still emits a
 row — `failed: true`, zero usage — so the request that broke the run
 keeps its attribution). `prefix_hash` fingerprints the leading
-system-message run (system prompt + notebook block) and
-`first_changed_index`/`first_changed_cause` name where the render
-diverged from the previous step's (`cold`/`append`/`shrink`/
-`system-prompt`/`notebook-prefix`/`history`, or empty with
-`first_changed_index: -1` when the render is byte-identical). Every
-cache miss gets a named cause — the mechanism question "did the
-prefix churn or the tail grow" stops being a correlation guess.
+system-message run (system prompt + notebook block),
+`request_hash` fingerprints the whole request (system run + history +
+tool schemas — tool-call IDs and names are inside the message
+hashes), and `first_changed_index`/`first_changed_cause` name where
+the render diverged from the previous step's (`cold`/`append`/
+`shrink`/`system-prompt`/`notebook-prefix`/`history`/`tool-schemas`,
+or empty with `first_changed_index: -1` when the render is
+byte-identical). `tool-schemas` has no message position to point at,
+so the index stays -1. Every cache miss gets a named cause — the
+mechanism question "did the prefix churn or the tail grow" stops
+being a correlation guess.
 
-Attribution caveats worth knowing before reading the column:
-`first_changed_cause` diffs against an **in-process** hash vector —
-under the eval driver's restart-per-turn regime each turn's first step
-reports `cold` (per-process cold, not provider-cache cold), so
-turn-boundary churn is invisible until cross-process hashes land.
-`PrevHashes` advances at `PrepareStep`, before the request flies, so
-after a failed step the next diff compares against a render the
-provider may never have accepted. The hash is content-scoped — cache
+Process identity rides each row: `pid` and `first_of_process` mark
+which `crush run` produced the request and whether it was that
+process's first — the restart boundary is visible in the table
+itself. `drains` records each turn's detached-work join outcome
+(`attempted`/`completed`/`timeout_ms`) — whether the process settled
+its detached notebook generation before exit, timed out, or never
+reached the drain (cancel fast-path). `cache_anomaly:
+"provider-side"` marks a byte-identical request whose `cache_read`
+regressed — no local component changed, so the record labels the
+miss provider-side instead of fabricating a harness cause.
+
+Attribution survives the restart boundary: each turn's telemetry
+exports its final request fingerprint (`request_vector` — per-
+component hashes: system-run vector with notebook positions marked,
+history vector, tool-schema digest, the producing step's cache_read),
+and the driver hands it to the next turn's process via
+`CRUSH_EVAL_REQUEST_VECTOR`. The resumed process seeds its first
+step's diff from it — a turn-boundary notebook edit reports
+`notebook-prefix`, not `cold`. The vector carries `session_id` and
+the child rejects a mismatched or malformed handoff, so fingerprints
+can never leak across sessions. `cold` now means a genuine cold
+start — a fresh session, or a handoff that never arrived.
+
+Attribution caveats worth knowing before reading the column: the
+vector advances at `PrepareStep`, before the request flies, so after
+a failed step the next diff compares against a render the provider
+may never have accepted. The hash is content-scoped — cache
 breakpoints (`ProviderOptions`), `ProviderExecuted`, and
-`ClientMetadata` are deliberately unhashed, and tool *schemas* aren't
-in the message hashes at all. `turnTailMessages` pins a message at
-the tail: with a non-empty tail, new step content inserts before it
-and the positional diff reports `history`, not `append` — default
-eval arms have empty tails, so the primary signal is clean.
+`ClientMetadata` are deliberately unhashed; volatile transport
+details live outside request identity. `turnTailMessages` pins a
+message at the tail: with a non-empty tail, new step content inserts
+before it and the positional diff reports `history`, not `append` —
+default eval arms have empty tails, so the primary signal is clean.
+Replay forks carry the recorded boundary's vector through the same
+handoff, so a replayed turn diffs against the prefix it actually
+continues.
 `tail` is the ephemeral turn tail's only durable trace — one row per
 turn that rendered tail context, with each envelope's name and byte
 size (`turn_context`, `open_failures`, `ambiguity_gate`), the joined
@@ -929,10 +1084,131 @@ it would be insensitive to one trajectory going all-inconclusive.
 (The arm-side differential is the counterpart of the
 trajectory-side coverage-starved alarm.)
 
+## Replay — counterfactual turn forking
+
+```json
+{
+	"replay": {
+		"source_arm": "control",
+		"fork_turns": [1, 2]
+	}
+}
+```
+
+Normal A/B runs resample trajectory noise on both arms: a 5% effect
+sits under MDE partly because each paired run redraws the model's
+sampling, the provider's mood, and the harness's own variance.
+`replay` attacks the variance term: record the trajectory **once**
+under `source_arm`, snapshot the workdir + `crush.db` at every turn
+boundary, then fork each boundary and replay that single turn under
+each arm on byte-identical history. One recorded prefix buys T×2×n
+paired single-turn samples — the per-pair cost drops to one turn, and
+the prefix noise that dominates full-run pairing vanishes entirely.
+
+**Boundary semantics.** Boundary `t` is the state immediately before
+`task.turns[t]`; boundary 0 is the seeded start. `recordReplayPrefix`
+runs the trajectory once under the source arm via `TurnRunner.RunTurn`
+(one subprocess per turn, `crush run --session <id>` continuing the
+recorded session), snapshotting after each turn. `fork_turns` selects
+which boundaries replay; omitted means every recorded boundary. A
+recording that dies mid-trajectory still yields the boundaries it
+completed — forks before the failure pair honestly, and the report
+marks the tail `partial` rather than fabricating it.
+
+**What a fork inherits vs. rebuilds.** The snapshot restores
+workdir bytes and `crush.db` bytes — file mutations, session rows,
+command-log entries, prior-turn messages. It does NOT restore
+`.crush.json`/`.crushrc`: each fork writes the neutral seed config
+then applies its own arm's merge, so a `control`-recorded prefix
+can't leak control options into a treatment fork — the pairing varies
+exactly the arm delta and nothing else. Artifacts carry the fork
+index (`<traj>-<arm>-<inv>-<rep>-t<k>.db`) so preserved session DBs
+never collide across boundaries.
+
+**What a fork does NOT inherit.** Provider-side state — the API's
+prompt cache, any server-side session affinity — is invisible to
+local snapshots; replay comparisons assume cache warmth is
+exchangeable across arms, the same assumption normal interleaving
+makes. `RunRecord.replay` carries `{fork_turn, source_arm,
+prefix_steps, prefix_tokens}`: prefix cost is provenance, never
+charged to the fork's per-turn metrics — `steps`, `tokens.*`, and
+checks measure the single replayed turn only. Compare pairs on
+`(trajectory, fork_turn, run_index)`, so a fork-1 control never
+joins a fork-0 treatment.
+
+**Honest scope.** Replay answers *conditional* mechanism questions —
+"given this exact history, does the arm change turn t's behavior?"
+(re-reads at turn start, memory rendering deltas on identical
+context) — not unconditional trajectory questions like "does the arm
+change whether turn 5 ever happens." The source arm shapes every
+fork's history: an arm-dependent prefix (e.g. control's memory
+off → different early context) is the estimand, not a bug, but it
+means replay effects are indexed by `source_arm` and shouldn't be
+pooled with full-run effects. `source_arm` defaults to `control`;
+validation requires it to name a declared arm, `fork_turns` rejects
+negatives and dupes, and replay on a driver without `TurnRunner`
+skips the trajectory rather than erroring the experiment.
+
+## Process model — restart vs persistent
+
+```json
+{"process_model": "restart" | "persistent"}
+```
+
+The harness's default execution shape — one `crush run` subprocess per
+trajectory turn — is *not* production's shape. A real TUI session keeps
+one process alive across turns, so prefix-cache state, the previous
+request vector, notebook high-water/read tracking, request statistics,
+and the detached-work lifecycle all survive turn boundaries in memory.
+`process_model: "persistent"` runs that shape: the driver writes the
+trajectory's prompts to a JSON turns file, spawns exactly one
+`crush run --quiet` subprocess with `CRUSH_EVAL_TURNS_FILE` pointing at
+it, and the child loops the prompts through `App.RunNonInteractive` on
+a single session. `""` or `"restart"` keeps the per-turn subprocess
+(default, unchanged). `persistent` + `replay` fails validation —
+forked boundaries are restart-shaped by construction.
+
+**Per-turn deltas.** `SessionTelemetry` counters are cumulative over
+the session, so in turns-file mode the child emits a *delta* per turn
+(`SessionTelemetryDelta`, mirroring `EdgeFiringDelta`'s emitted-state
+bookkeeping): counters subtract the previous emission, `steps`/
+`tail_runs` ship only newly appended entries, and snapshot fields
+(current tail, request vector, pressure state, prompt composition)
+pass through as emission-time state. Turn `i`'s telemetry lands at
+`<CRUSH_EVAL_TELEMETRY>-<i>.json`; `PersistentRunner` folds them in
+order through the same `addTurnTelemetry` path restart uses, so step/
+tail/drain rows keep their turn indices and cumulative totals don't
+double-count. The child also decrements `CRUSH_EVAL_MAX_STEPS` between
+turns using the telemetry it just wrote — the trajectory budget binds
+mid-flight, not only post-hoc.
+
+**Provenance.** Every record stamps `process_model` (resolved, not
+declared) before early exits, so even error records carry which regime
+produced them. `first_of_process` from request-identity telemetry (#115)
+is the audit hook — in persistent mode only the trajectory's first
+request may bear it; any later `first_of_process: true` means state
+didn't survive.
+
+**The read.** The 2×2 pairs one restart manifest with one persistent
+manifest over the same corpus and arms —
+`eval/experiments/process-model-{restart,persistent}.json`. `crush eval
+interaction <restart.json> <persistent.json>` reports per-trajectory
+cells `I = Δ_restart − Δ_persistent` (each Δ the treatment-minus-
+control metric mean), their mean, and a materiality verdict against
+10% of the restart-regime control mean. *Material* means restart's
+numbers can't be read as persistent-equivalent for that metric —
+publish per regime; *immaterial* means the restart regime's estimate
+generalizes to the production process shape on the sampled
+trajectories. Non-conclusive records never sample, and trajectories
+missing a cell are listed as `incomplete` rather than silently
+dropped.
+
 ## Lifecycle contract — when coverage commits
 
 Each `task.turns[i]` runs as its own `crush run` subprocess
-continuing the same session (`driver.go`). Consolidation work a turn
+continuing the same session (`driver.go`) — or, under
+`process_model: "persistent"`, as one turn inside a single
+long-lived subprocess (see *Process model*). Consolidation work a turn
 spawns joins before its process exits (the detached-work drain), so
 **a turn's coverage commits by the end of its own run** — the
 contract corpus authors write predicates against. Per mechanism:
@@ -1238,14 +1514,86 @@ decision metric per experiment:
   `guardrail: ok|violated|unevaluable`, and a violation suffixes the
   verdict itself (`— GUARDRAIL VIOLATED`) so the stop rule can't
   stand on cost alone; 0 disables the check.
+- **`floor`/`noise_band`/`base_cost_allowance` arm the
+  cost-justified acceptance rule** (#197): pinning any of them
+  requires `floor` and `cost_weights` at load — a ΔC the rule
+  can't price is unbounded spend. `floor` is an *absolute*
+  conclusive pass-rate bound on each arm (an arm below it fails
+  regardless of cost — token savings on a regressing arm are not
+  savings, and a control-side breach means the corpus never
+  produced the regime); `noise_band` δ bounds "indistinguishable
+  from noise" (absent defaults to `mde`); `base_cost_allowance`
+  β₀ is the *flat* cost growth a real effect may carry (absent
+  defaults to 0.10, pin 0 to demand cost-neutrality). The rule:
+  ΔS beyond δ in the declared direction → ΔC ≤ β₀; |ΔS| within δ
+  → ΔC ≤ 0, and a cheaper treatment is the efficiency
+  tie-break. β₀ is deliberately flat — a proportional allowance
+  rewards cost-reduction with token growth, the circularity in
+  the RRSI sketch this rule replaces. ΔC is the paired
+  `weighted_cost` estimand, which prices `generator_tokens` too —
+  spend outsourced to the sidecar can't hide. Compare stamps the
+  primary row `acceptance: ok|floor-violated|cost-unjustified`
+  (plus `cost-unmeasured` when the cost leg produced no row) and
+  suffixes the verdict `— FLOOR VIOLATED` / `— COST-UNJUSTIFIED`
+  in the alarm style; alarms also print as `ACCEPTANCE ALARM`
+  lines. When the primary *is* `weighted_cost` the cost leg is
+  degenerate (ΔC is ΔS) and only the floor checks.
+- **`decision_rule` is the pre-committed stop rule** (#152): the
+  question the invocation exists to answer, written down before it
+  ran so the report ends in a verdict, not an interpretation. The
+  block is `{"hypothesis": <free-text claim>, "primary":
+  {"metric", "arm", "vs", "direction", "min_improvement"},
+  "guardrail": {"metric", "min_delta", optional "arm"/"vs"/
+  "direction"}}` — at least one criterion required, and the
+  hypothesis is never optional (the free-text claim is the thing
+  the structured criteria falsify). Metrics resolve against the
+  closed primary registry plus two arm-aggregate names:
+  `pass_rate` (the conclusive-rate read; deltas are absolute
+  fractions) and `tokens_to_done` (`ArmTotals` cost-per-pass;
+  requires `cost_weights`). `arm`/`vs` name the compared pair —
+  `treatment`-vs-`control` either direction; guardrail arm/vs
+  default to that pair. `direction` is the claimed improvement
+  direction — required on registry metrics, implied on the
+  aggregates (`pass_rate`→increase, `tokens_to_done`→decrease) and
+  rejected if contradicted. Compare stamps `decision rule:
+  satisfied|not satisfied|inconclusive` beside the gate line with
+  each criterion's read: a paired metric *satisfies* only when its
+  CI's conservative bound clears the threshold (the claim must be
+  proven, not merely undisproven), fails when the whole interval
+  sits below, and is inconclusive while spanning it; the aggregate
+  metrics carry no interval and read their measured delta,
+  inconclusive only when unmeasurable. Any conclusive criterion
+  failure falsifies the rule outright. Like `primary`, the block
+  is snapshotted into the invocation record and drift/post-hoc
+  addition suppresses the result to inconclusive — the rule is
+  the anti-post-hoc device, so a rewritten rule can't be read.
+  A manifest with no rule reports `decision rule: absent` —
+  characterize runs legitimately carry no claim. Distinct from the
+  acceptance fields: `floor`/`noise_band`/`base_cost_allowance`
+  gate whether a treatment *may ship* at its measured cost;
+  `decision_rule` is whether the run *answered its question*.
+  The machinery is calibrated by the decision corpus at
+  `internal/eval/testdata/decisions/` — one fixture dir per failure
+  class (noisy-null, known regression, lower-calls-worse-pass,
+  cost inflation, missing telemetry, valid abstention, floor
+  violations, sidecar-spend attribution, post-hoc suppression),
+  each a canned `results/` record set + alarm snapshot +
+  `expect.json` verdict. `TestDecisionCorpus` runs every cell
+  through `Compare`; `EVAL_GEN=1` regenerates the fixtures from
+  `decisionScenarios()` so the corpus is reproducible by
+  construction, and new failure classes land as data.
 - **`cost_weights` prices the cost metric.** `weighted_cost =
-  input + h·cache_read + o·output`, computed over the main-model
-  tokens **and `generator_tokens`** (the sidecar prices at the same
-  class rates — an overstatement when the generator runs a cheaper
-  tier; a separate weight lands if one ships). `h`/`o` are pinned
-  per model in the experiment JSON — relative prices in
+  input + h·cache_read + w·cache_write + o·output`, computed over
+  the main-model tokens **and `generator_tokens`**. Weights are
+  pinned per model in the experiment JSON — relative prices in
   uncached-input units, so the metric is comparable across runs
-  without embedding a dollar table in the repo. Its CV can't
+  without embedding a dollar table in the repo. An unpinned class
+  prices at 0 — a claim the endpoint doesn't bill it, not an
+  omission. The sidecar inherits the main-model rates by default
+  (an overstatement when it runs a cheaper tier); a
+  `cost_weights.generator` block — same `{cache_read, cache_write,
+  output}` shape — prices `generator_tokens` at its own model's
+  rates for cross-tier comparisons. Its CV can't
   bootstrap itself: the power gate refuses before scheduling, so a
   `weighted_cost` primary must be hand-seeded in noise.json or
   measured by an `--aa` run on another `cost_weights`-bearing

@@ -81,6 +81,19 @@ type CompareReport struct {
 	// ArmTotals is the survivorship-free spend view — populated only
 	// when the experiment pins cost_weights.
 	ArmTotals []ArmTotal
+	// AcceptanceAlarms carries the compare-level refusals from the
+	// #197 cost-acceptance rule (floor-violated, cost-unjustified,
+	// cost-unmeasured) — distinct from OutcomeAlarms, which are the
+	// run snapshot's own. A clean list means the rule either passed
+	// or was never armed.
+	AcceptanceAlarms []string
+	// RuleResult/RuleNote carry the #152 decision-rule verdict:
+	// "satisfied", "not satisfied", or "inconclusive" when the
+	// manifest pre-committed a rule, "absent" when it didn't — the
+	// issue's requirement that omission be reported, not silent.
+	// RuleNote echoes the hypothesis plus each criterion's read.
+	RuleResult string
+	RuleNote   string
 }
 
 // ArmTotal summarizes one arm's spend across every attempted run.
@@ -155,6 +168,11 @@ type MetricCompare struct {
 	// "ok", "violated (...)", or "unevaluable (...)" — empty when
 	// undeclared.
 	Guardrail string
+	// Acceptance carries the #197 cost-justified acceptance read on
+	// the primary row — the floor check plus the ΔS-band-routed ΔC
+	// bound, e.g. "ok (pass .97 ≥ .90; ΔS beyond δ; ΔC −22% ≤ β₀)".
+	// Empty when the rule is unarmed.
+	Acceptance string
 }
 
 // alarmSnapshot is the refusal/provenance record persisted as
@@ -170,6 +188,10 @@ type alarmSnapshot struct {
 	// suppresses the verdict when the loaded experiment's primary
 	// has drifted since, closing the post-hoc-MDE hole.
 	Primary *Primary `json:"primary,omitempty"`
+	// DecisionRule is the same pin for the #152 stop rule — the
+	// criteria are pre-committed exactly so they can't be rewritten
+	// to fit the numbers, so drift suppresses the result.
+	DecisionRule *DecisionRule `json:"decision_rule,omitempty"`
 	// GateVerdict/OutcomeAlarms are context, not refusals: a
 	// catastrophic-collapsed invocation's token table shouldn't read
 	// as a win without its gate result beside it.
@@ -187,13 +209,14 @@ type alarmSnapshot struct {
 // the run output); the snapshot is compare's refusal ground truth.
 func (r *Runner) persistAlarms(exp *Experiment, inv string, rep Report, retErr error) error {
 	snap := alarmSnapshot{
-		Invocation: inv,
-		Primary:    exp.Primary,
-		Starved:    rep.Starved,
-		Saturated:  rep.Saturated,
-		Tolerated:  rep.Tolerated,
-		Skipped:    rep.Skipped,
-		NoopFlags:  rep.NoopFlags,
+		Invocation:   inv,
+		Primary:      exp.Primary,
+		DecisionRule: exp.DecisionRule,
+		Starved:      rep.Starved,
+		Saturated:    rep.Saturated,
+		Tolerated:    rep.Tolerated,
+		Skipped:      rep.Skipped,
+		NoopFlags:    rep.NoopFlags,
 	}
 	if retErr != nil {
 		snap.Aborted = retErr.Error()
@@ -303,23 +326,43 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 	// matches what the invocation ran under.
 	primaryTrusted := true
 	var provNote string
+	ruleTrusted := true
+	var ruleProvNote string
 	if snap == nil {
 		// Legacy invocation — no snapshot to verify against.
 		if exp.Primary != nil {
 			provNote = "no alarm snapshot — primary provenance unverifiable"
+		}
+		if exp.DecisionRule != nil {
+			ruleTrusted = false
+			ruleProvNote = "no alarm snapshot — decision_rule provenance unverifiable"
 		}
 	} else {
 		switch {
 		case snap.Primary == nil && exp.Primary != nil:
 			primaryTrusted = false
 			provNote = "primary declared after the invocation ran — verdict suppressed (post-hoc)"
-		case snap.Primary != nil && exp.Primary != nil && *snap.Primary != *exp.Primary:
+		case snap.Primary != nil && exp.Primary != nil && !samePrimary(snap.Primary, exp.Primary):
 			primaryTrusted = false
 			provNote = fmt.Sprintf("primary drifted since the invocation (ran with %s %s %.3g) — verdict suppressed",
 				snap.Primary.Metric, snap.Primary.Direction, snap.Primary.MDE)
 		case snap.Primary != nil && exp.Primary == nil:
 			provNote = fmt.Sprintf("primary was declared at run time (%s %s %.3g) and has since been removed",
 				snap.Primary.Metric, snap.Primary.Direction, snap.Primary.MDE)
+		}
+		// Same pin for the #152 stop rule — its criteria are the
+		// pre-commitment, so drift suppresses the result to
+		// inconclusive rather than reading a rewritten rule back as
+		// if it had been committed.
+		switch {
+		case snap.DecisionRule == nil && exp.DecisionRule != nil:
+			ruleTrusted = false
+			ruleProvNote = "decision_rule declared after the invocation ran — result suppressed (post-hoc)"
+		case snap.DecisionRule != nil && exp.DecisionRule != nil && !sameDecisionRule(snap.DecisionRule, exp.DecisionRule):
+			ruleTrusted = false
+			ruleProvNote = "decision_rule drifted since the invocation — result suppressed"
+		case snap.DecisionRule != nil && exp.DecisionRule == nil:
+			ruleProvNote = "decision_rule was declared at run time and has since been removed"
 		}
 	}
 
@@ -332,10 +375,21 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		rng = rand.New(rand.NewPCG(h.Sum64(), 0))
 	}
 
-	// Pair conclusive records on (trajectory, run_index).
+	// Pair conclusive records on (trajectory, run_index) — extended by
+	// fork_turn for replay records (#108): a counterfactual pair is
+	// same-boundary, same-replicate, so the pair key carries all three
+	// coordinates. Normal records normalize to fork=-1 and pair
+	// exactly as before.
 	type pairKey struct {
 		traj string
 		idx  int
+		fork int
+	}
+	forkOf := func(rec RunRecord) int {
+		if rec.Replay != nil {
+			return rec.Replay.ForkTurn
+		}
+		return -1
 	}
 	ctrl := map[pairKey]RunRecord{}
 	treat := map[pairKey]RunRecord{}
@@ -344,7 +398,7 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		if !rec.Outcome.Conclusive() {
 			continue
 		}
-		k := pairKey{rec.TrajectoryID, rec.RunIndex}
+		k := pairKey{rec.TrajectoryID, rec.RunIndex, forkOf(rec)}
 		switch rec.Arm {
 		case ArmControl:
 			ctrl[k] = rec
@@ -367,6 +421,9 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 	// diff positions, so identical data must build identical diffs.
 	pairKeys := slices.SortedFunc(maps.Keys(pairs), func(a, b pairKey) int {
 		if c := strings.Compare(a.traj, b.traj); c != 0 {
+			return c
+		}
+		if c := a.fork - b.fork; c != 0 {
 			return c
 		}
 		return a.idx - b.idx
@@ -536,6 +593,16 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		return nil, fmt.Errorf("compare: no metric had ≥%d measurable pairs", minComparePairs)
 	}
 	rep.SkippedMetrics = skippedMetrics
+	rep.applyAcceptance(exp, recs, primaryTrusted)
+	// The rule to answer is the committed one: the snapshot's block
+	// when the manifest has since dropped it (removal doesn't erase
+	// the question), the manifest's otherwise. Drift between them is
+	// untrusted either way.
+	rule := exp.DecisionRule
+	if rule == nil && snap != nil {
+		rule = snap.DecisionRule
+	}
+	rep.evalDecisionRule(rule, recs, ruleTrusted, ruleProvNote)
 	return rep, nil
 }
 
@@ -1009,12 +1076,10 @@ func armTotals(recs []RunRecord, costFn func(*RunRecord) float64) []ArmTotal {
 	return out
 }
 
-// passGuardrail evaluates the primary's max_pass_drop: treatment's
-// conclusive pass rate may trail control's by at most maxDrop.
-// Errors and inconclusives don't count as outcomes — the rate is
-// pass / conclusive on each side.
-func passGuardrail(recs []RunRecord, maxDrop float64) string {
-	var cPass, cConc, tPass, tConc int
+// conclusiveRates is the shared pass-rate read: pass/conclusive per
+// arm (errors and inconclusives are not outcomes).
+func conclusiveRates(recs []RunRecord) (cRate, tRate float64, cConc, tConc int) {
+	var cPass, tPass int
 	for _, rec := range recs {
 		if !rec.Outcome.Conclusive() {
 			continue
@@ -1032,14 +1097,299 @@ func passGuardrail(recs []RunRecord, maxDrop float64) string {
 			}
 		}
 	}
+	if cConc > 0 {
+		cRate = float64(cPass) / float64(cConc)
+	}
+	if tConc > 0 {
+		tRate = float64(tPass) / float64(tConc)
+	}
+	return cRate, tRate, cConc, tConc
+}
+
+// passGuardrail evaluates the primary's max_pass_drop: treatment's
+// conclusive pass rate may trail control's by at most maxDrop.
+// Errors and inconclusives don't count as outcomes — the rate is
+// pass / conclusive on each side.
+func passGuardrail(recs []RunRecord, maxDrop float64) string {
+	cRate, tRate, cConc, tConc := conclusiveRates(recs)
 	if cConc == 0 || tConc == 0 {
 		return fmt.Sprintf("unevaluable (control %d, treatment %d conclusive)", cConc, tConc)
 	}
-	cRate, tRate := float64(cPass)/float64(cConc), float64(tPass)/float64(tConc)
 	if drop := cRate - tRate; drop > maxDrop {
 		return fmt.Sprintf("violated (pass %.2f vs %.2f, drop %.2f > %.2f)", tRate, cRate, drop, maxDrop)
 	}
 	return fmt.Sprintf("ok (pass %.2f vs %.2f)", tRate, cRate)
+}
+
+// applyAcceptance runs the #197 cost-justified acceptance rule on the
+// primary row, after the metric loop has priced every registry entry.
+// Armed when primary pins any of floor/noise_band/base_cost_allowance
+// (floor then required, δ defaults to MDE, β₀ to 0.10 — enforced at
+// load). The rule, in order:
+//
+//  1. Floor — each arm's conclusive pass rate must clear it; a breach
+//     fails acceptance regardless of cost (token savings on a
+//     regressing arm are not savings, and a control-side breach means
+//     the corpus never produced the regime).
+//  2. ΔS beyond δ in the declared direction — a real effect may carry
+//     flat cost growth up to β₀ (not proportional: proportional
+//     allowance is the circular RRSI sketch).
+//  3. |ΔS| within δ — the effect is indistinguishable from noise, so
+//     the feature may only ship at ΔC ≤ 0; a cheaper treatment is the
+//     efficiency tie-break.
+//
+// ΔC is the paired weighted_cost estimand, which already prices every
+// token class incl. generator_tokens — a mechanism that outsources
+// spend to the sidecar can't hide it. A regression beyond δ needs no
+// cost read: the primary verdict already fails it.
+func (rep *CompareReport) applyAcceptance(exp *Experiment, recs []RunRecord, primaryTrusted bool) {
+	p := exp.Primary
+	if p == nil || (p.Floor == nil && p.NoiseBand == nil && p.BaseCostAllowance == nil) {
+		return
+	}
+	var pm, cm *MetricCompare
+	for i := range rep.Metrics {
+		switch rep.Metrics[i].Name {
+		case p.Metric:
+			pm = &rep.Metrics[i]
+		case "weighted_cost":
+			cm = &rep.Metrics[i]
+		}
+	}
+	if !primaryTrusted {
+		// The declared bounds may have drifted with the suppressed
+		// verdict — show the check's presence, not numbers the run
+		// wasn't committed to (the guardrail's drift handling).
+		if pm != nil {
+			pm.Acceptance = "unevaluable (provenance untrusted)"
+		}
+		return
+	}
+	floor := 0.0
+	if p.Floor != nil {
+		floor = *p.Floor
+	}
+	delta := p.MDE
+	if p.NoiseBand != nil {
+		delta = *p.NoiseBand
+	}
+	allow := 0.10
+	if p.BaseCostAllowance != nil {
+		allow = *p.BaseCostAllowance
+	}
+	stamp := func(m *MetricCompare, label, detail string) {
+		if m != nil {
+			m.Acceptance = detail
+			if label != "" && m.Verdict != "" {
+				m.Verdict += " — " + label
+			}
+		}
+		if label != "" {
+			rep.AcceptanceAlarms = append(rep.AcceptanceAlarms, detail)
+		}
+	}
+
+	// 1. Floor — the hard quality bound, cost-independent.
+	cRate, tRate, cConc, tConc := conclusiveRates(recs)
+	if tConc == 0 || cConc == 0 {
+		stamp(pm, "FLOOR VIOLATED", fmt.Sprintf("floor-violated (unevaluable pass rate — control %d, treatment %d conclusive)", cConc, tConc))
+		return
+	}
+	if tRate < floor {
+		stamp(pm, "FLOOR VIOLATED", fmt.Sprintf("floor-violated (treatment pass %.2f < floor %.2f)", tRate, floor))
+		return
+	}
+	if cRate < floor {
+		stamp(pm, "FLOOR VIOLATED", fmt.Sprintf("floor-violated (control pass %.2f < floor %.2f — baseline below the quality floor)", cRate, floor))
+		return
+	}
+	floorNote := fmt.Sprintf("pass %.2f ≥ floor %.2f", tRate, floor)
+
+	// 2/3. Cost leg — routed by where ΔS sits against δ.
+	if pm == nil {
+		rep.AcceptanceAlarms = append(rep.AcceptanceAlarms,
+			"cost rule unevaluable — primary metric had no measurable pairs")
+		return
+	}
+	if p.Metric == "weighted_cost" {
+		stamp(pm, "", floorNote+"; ΔC is ΔS — cost rule n/a when the primary is the cost metric")
+		return
+	}
+	if cm == nil {
+		rep.AcceptanceAlarms = append(rep.AcceptanceAlarms,
+			"cost-unmeasured (weighted_cost produced no row — unpriced spend can't be bounded)")
+		stamp(pm, "", floorNote+"; ΔC unmeasured — acceptance can't be granted on an unpriced cost leg")
+		return
+	}
+	dS := pm.Theta
+	if p.Direction == PrimaryDecrease {
+		dS = -dS // Positive dS is improvement in the declared direction.
+	}
+	dC := cm.Theta // Positive dC is cost growth.
+	switch {
+	case dS > delta:
+		if dC > allow {
+			stamp(pm, "COST-UNJUSTIFIED", fmt.Sprintf("cost-unjustified (ΔS %+.0f%% beyond δ %.0f%%; ΔC %+.0f%% > β₀ %.0f%%)", dS*100, delta*100, dC*100, allow*100))
+		} else {
+			stamp(pm, "", fmt.Sprintf("ok (%s; ΔS %+.0f%% beyond δ %.0f%%; ΔC %+.0f%% ≤ β₀ %.0f%%)", floorNote, dS*100, delta*100, dC*100, allow*100))
+		}
+	case dS < -delta:
+		stamp(pm, "", fmt.Sprintf("%s; ΔS %+.0f%% regresses beyond δ — no cost read rescues a quality loss", floorNote, dS*100))
+	default:
+		if dC > 0 {
+			stamp(pm, "COST-UNJUSTIFIED", fmt.Sprintf("cost-unjustified (ΔS %+.0f%% within δ ±%.0f%%; ΔC %+.0f%% > 0 — noise-level effects may only ship cost-neutral)", dS*100, delta*100, dC*100))
+		} else {
+			stamp(pm, "", fmt.Sprintf("ok (%s; ΔS %+.0f%% within δ ±%.0f%%; ΔC %+.0f%% ≤ 0 — efficiency tie-break favors treatment)", floorNote, dS*100, delta*100, dC*100))
+		}
+	}
+}
+
+// evalDecisionRule stamps the #152 pre-committed stop rule onto the
+// report. Three-way by construction: every criterion conclusively
+// clearing its bound is "satisfied", any conclusive failure is "not
+// satisfied" (a falsified claim ends the run even with a sibling
+// still undecided), and anything unmeasurable or spanning its bound
+// is "inconclusive". An untrusted or unverifiable declaration is
+// inconclusive — the rule is the anti-post-hoc device, so reading
+// a drifted one defeats its purpose.
+func (rep *CompareReport) evalDecisionRule(rule *DecisionRule, recs []RunRecord, trusted bool, provNote string) {
+	if rule == nil {
+		rep.RuleResult = "absent"
+		rep.RuleNote = "no decision_rule declared — the run characterizes, it doesn't decide"
+		return
+	}
+	rep.RuleNote = rule.Hypothesis
+	if provNote != "" {
+		rep.RuleNote += " — " + provNote
+	}
+	if !trusted {
+		rep.RuleResult = "inconclusive"
+		return
+	}
+	var bits []string
+	failed, undecided := false, false
+	if p := rule.Primary; p != nil {
+		v, det := rep.ruleCriterion(p.Metric, p.Arm, p.Vs, p.Direction, p.MinImprovement, "primary", recs)
+		bits = append(bits, det)
+		switch v {
+		case "failed":
+			failed = true
+		case "inconclusive":
+			undecided = true
+		}
+	}
+	if g := rule.Guardrail; g != nil {
+		v, det := rep.ruleCriterion(g.Metric, g.Arm, g.Vs, g.Direction, g.MinDelta, "guardrail", recs)
+		bits = append(bits, det)
+		switch v {
+		case "failed":
+			failed = true
+		case "inconclusive":
+			undecided = true
+		}
+	}
+	switch {
+	case failed:
+		rep.RuleResult = "not satisfied"
+	case undecided:
+		rep.RuleResult = "inconclusive"
+	default:
+		rep.RuleResult = "satisfied"
+	}
+	rep.RuleNote += " — " + strings.Join(bits, "; ")
+}
+
+// ruleCriterion reads one declared criterion and returns its verdict
+// — "satisfied"/"failed"/"inconclusive" — plus a terse detail. The
+// delta is normalized so positive means the arm improved on `vs` in
+// the criterion's direction. Paired metrics carry CI bounds, so the
+// satisfied bar is the conservative bound clearing the threshold;
+// the two aggregate metrics (pass_rate, tokens_to_done) have no
+// interval and evaluate on the measured point — unmeasurable inputs,
+// not near-misses, are their inconclusive case.
+func (rep *CompareReport) ruleCriterion(metric, arm, vs, dir string, thresh float64, kind string, recs []RunRecord) (string, string) {
+	sign := 1.0
+	if dir == PrimaryDecrease {
+		sign = -1
+	}
+	// The paired estimand is always treatment-minus-control; an
+	// arm=control criterion reads it negated.
+	armSign := 1.0
+	if arm == ArmControl {
+		armSign = -1
+	}
+	var imp, lo, hi float64
+	bounded := false
+	unmeasurable := ""
+	switch metric {
+	case "pass_rate":
+		cRate, tRate, cConc, tConc := conclusiveRates(recs)
+		if cConc == 0 || tConc == 0 {
+			unmeasurable = fmt.Sprintf("conclusive runs missing (control %d, treatment %d)", cConc, tConc)
+			break
+		}
+		imp = armSign * (tRate - cRate) // Absolute — rates differ in fraction space.
+	case "tokens_to_done":
+		var armT, vsT *ArmTotal
+		for i := range rep.ArmTotals {
+			switch rep.ArmTotals[i].Arm {
+			case arm:
+				armT = &rep.ArmTotals[i]
+			case vs:
+				vsT = &rep.ArmTotals[i]
+			}
+		}
+		if armT == nil || vsT == nil || armT.Passes == 0 || vsT.Passes == 0 || vsT.CostPerPass <= 0 {
+			unmeasurable = "cost-per-pass unmeasurable (an arm passed nothing or produced no ArmTotal row)"
+			break
+		}
+		// The arm-total ratio is already arm-relative to `vs` —
+		// no armSign here; direction alone normalizes to improvement.
+		imp = sign * (armT.CostPerPass - vsT.CostPerPass) / vsT.CostPerPass
+	default:
+		var mc *MetricCompare
+		for i := range rep.Metrics {
+			if rep.Metrics[i].Name == metric {
+				mc = &rep.Metrics[i]
+				break
+			}
+		}
+		if mc == nil {
+			unmeasurable = "no measurable pairs (metric skipped)"
+			break
+		}
+		s := sign * armSign
+		imp = s * mc.Theta
+		if s > 0 {
+			lo, hi = mc.CILoPct/100, mc.CIHiPct/100
+		} else {
+			lo, hi = -mc.CIHiPct/100, -mc.CILoPct/100
+		}
+		bounded = true
+	}
+	label := func(v string) string {
+		if metric == "pass_rate" {
+			return fmt.Sprintf("%s %s: Δ %+.3f ≥ %+.3f → %s", kind, metric, imp, thresh, v)
+		}
+		return fmt.Sprintf("%s %s: imp %+.1f%% vs ≥ %+.1f%% → %s", kind, metric, imp*100, thresh*100, v)
+	}
+	if unmeasurable != "" {
+		return "inconclusive", label("inconclusive") + " (" + unmeasurable + ")"
+	}
+	if bounded {
+		switch {
+		case lo >= thresh:
+			return "satisfied", label("satisfied")
+		case hi < thresh:
+			return "failed", label("failed")
+		default:
+			return "inconclusive", label("inconclusive") + " (CI spans the bound)"
+		}
+	}
+	if imp >= thresh {
+		return "satisfied", label("satisfied")
+	}
+	return "failed", label("failed")
 }
 
 func groupBy[S ~[]E, E any, K comparable](s S, key func(E) K) map[K]S {
@@ -1069,6 +1419,13 @@ func (rep *CompareReport) Summary() string {
 	if rep.Provenance != "" {
 		fmt.Fprintf(&b, "  provenance: %s\n", rep.Provenance)
 	}
+	if rep.RuleResult != "" {
+		fmt.Fprintf(&b, "  decision rule: %s", rep.RuleResult)
+		if rep.RuleNote != "" {
+			fmt.Fprintf(&b, " — %s", rep.RuleNote)
+		}
+		fmt.Fprintln(&b)
+	}
 	fmt.Fprintf(&b, "  pairs: %d conclusive (unmatched: %d) across %d trajectories\n",
 		rep.Pairs, rep.Unmatched, len(rep.Trajectories))
 	fmt.Fprintln(&b, "  Δ% is the mean of per-trajectory normalized diffs — the ctrl≈/treat≈")
@@ -1092,6 +1449,9 @@ func (rep *CompareReport) Summary() string {
 		if m.Guardrail != "" {
 			fmt.Fprintf(&b, "  %-32s guardrail: %s\n", "", m.Guardrail)
 		}
+		if m.Acceptance != "" {
+			fmt.Fprintf(&b, "  %-32s acceptance: %s\n", "", m.Acceptance)
+		}
 		if m.Verdict == "inconclusive" {
 			if m.Required > 0 {
 				fmt.Fprintf(&b, "  INCONCLUSIVE — CI spans the MDE boundary: %s needs n≈%d pairs to resolve (paired-variance estimate)\n", m.Name, m.Required)
@@ -1099,6 +1459,9 @@ func (rep *CompareReport) Summary() string {
 				fmt.Fprintf(&b, "  INCONCLUSIVE — CI spans the MDE boundary: %s; required n unknown (no recorded CV)\n", m.Name)
 			}
 		}
+	}
+	for _, a := range rep.AcceptanceAlarms {
+		fmt.Fprintf(&b, "  ACCEPTANCE ALARM: %s\n", a)
 	}
 	if len(rep.ArmTotals) > 0 {
 		fmt.Fprintf(&b, "  %-32s %6s %6s %12s %14s %14s\n", "arm", "runs", "passes", "wtd cost", "per attempt", "per pass")

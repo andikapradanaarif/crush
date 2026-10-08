@@ -752,3 +752,373 @@ func TestCompare_GuardrailViolated(t *testing.T) {
 	// guardrail — the suffix is what the stop rule reads.
 	require.Contains(t, rep.Metrics[0].Verdict, "GUARDRAIL VIOLATED")
 }
+
+// TestCompare_CostAcceptance exercises the #197 rule — floor first,
+// then the δ-routed ΔC bound — including the issue's two retrospective
+// cases: the powered failure-memory shape (−30% steps, −20% cost) must
+// pass, and a +30%-cost feature riding a within-δ effect must fail.
+func TestCompare_CostAcceptance(t *testing.T) {
+	t.Parallel()
+	c := map[string]any{"f": "c"}
+	tr := map[string]any{"f": "t"}
+
+	build := func(t *testing.T, exp *Experiment, cSteps, tSteps, cIn, tIn []int, tFail []int) *CompareReport {
+		t.Helper()
+		dir := t.TempDir()
+		var recs []RunRecord
+		for i := range cSteps {
+			r := compareRecord("e", "t", ArmControl, "i1", i, cIn[i], c)
+			r.Steps = cSteps[i]
+			recs = append(recs, r)
+		}
+		for i := range tSteps {
+			r := compareRecord("e", "t", ArmTreatment, "i1", i, tIn[i], tr)
+			r.Steps = tSteps[i]
+			recs = append(recs, r)
+		}
+		for _, i := range tFail {
+			recs[len(cSteps)+i].Outcome = OutcomeFail
+		}
+		writeCompareRecords(t, dir, recs...)
+		rep, err := seededRunner(dir).Compare(exp, "")
+		require.NoError(t, err)
+		return rep
+	}
+	primaryRow := func(rep *CompareReport) MetricCompare {
+		for _, m := range rep.Metrics {
+			if m.Name == "steps" {
+				return m
+			}
+		}
+		return MetricCompare{}
+	}
+	exp := func() *Experiment {
+		return &Experiment{
+			Name:        "e",
+			Corpus:      []string{"t"},
+			CostWeights: &CostWeights{Output: 1}, // cost = input + 100
+			Primary: &Primary{
+				Metric: "steps", Direction: PrimaryDecrease,
+				MDE: 0.15, Floor: ptr(0.9),
+			},
+		}
+	}
+	// Six identical pairs keep every metric measurable; cost is
+	// input + 100 under these weights.
+	reps := func(cs, ts, ci, ti int) ([]int, []int, []int, []int) {
+		return slices.Repeat([]int{cs}, 6), slices.Repeat([]int{ts}, 6),
+			slices.Repeat([]int{ci}, 6), slices.Repeat([]int{ti}, 6)
+	}
+
+	t.Run("powered run passes: real effect within the flat allowance", func(t *testing.T) {
+		t.Parallel()
+		// The retrospective case: ΔS −30% (beyond δ=15%), ΔC −20%.
+		cs, ts, ci, ti := reps(10, 7, 1000, 780)
+		rep := build(t, exp(), cs, ts, ci, ti, nil)
+		row := primaryRow(rep)
+		require.Contains(t, row.Acceptance, "ok")
+		require.Contains(t, row.Acceptance, "β₀")
+		require.Empty(t, rep.AcceptanceAlarms)
+		require.NotContains(t, row.Verdict, "UNJUSTIFIED")
+	})
+
+	t.Run("noise-level effect may only ship cost-neutral", func(t *testing.T) {
+		t.Parallel()
+		// The hypothetical: −10% steps (within δ), +36% cost.
+		cs, ts, ci, ti := reps(10, 9, 1000, 1400)
+		rep := build(t, exp(), cs, ts, ci, ti, nil)
+		row := primaryRow(rep)
+		require.Contains(t, row.Acceptance, "cost-unjustified")
+		require.Contains(t, row.Verdict, "COST-UNJUSTIFIED")
+		require.Len(t, rep.AcceptanceAlarms, 1)
+	})
+
+	t.Run("efficiency tie-break on a cheaper noise-level effect", func(t *testing.T) {
+		t.Parallel()
+		cs, ts, ci, ti := reps(10, 9, 1000, 800) // ΔC ≈ −20%
+		rep := build(t, exp(), cs, ts, ci, ti, nil)
+		require.Contains(t, primaryRow(rep).Acceptance, "efficiency tie-break")
+		require.Empty(t, rep.AcceptanceAlarms)
+	})
+
+	t.Run("real effect exceeding the flat allowance", func(t *testing.T) {
+		t.Parallel()
+		cs, ts, ci, ti := reps(10, 7, 1000, 1500) // ΔC ≈ +36% > β₀ 10%
+		rep := build(t, exp(), cs, ts, ci, ti, nil)
+		require.Contains(t, primaryRow(rep).Acceptance, "cost-unjustified")
+	})
+
+	t.Run("floor fails regardless of cost", func(t *testing.T) {
+		t.Parallel()
+		cs, ts, ci, ti := reps(10, 7, 1000, 500) // cheap but failing
+		rep := build(t, exp(), cs, ts, ci, ti, []int{0, 1, 2, 3, 4})
+		row := primaryRow(rep)
+		require.Contains(t, row.Acceptance, "floor-violated")
+		require.Contains(t, row.Verdict, "FLOOR VIOLATED")
+		require.Len(t, rep.AcceptanceAlarms, 1)
+	})
+
+	t.Run("control below the floor means the corpus broke", func(t *testing.T) {
+		t.Parallel()
+		cs, ts, ci, ti := reps(10, 7, 1000, 780)
+		dir := t.TempDir()
+		var recs []RunRecord
+		for i := range cs {
+			r := compareRecord("e", "t", ArmControl, "i1", i, ci[i], c)
+			r.Steps = cs[i]
+			if i < 3 { // Control at 3/6 — a sub-floor baseline.
+				r.Outcome = OutcomeFail
+			}
+			recs = append(recs, r)
+		}
+		for i := range ts {
+			r := compareRecord("e", "t", ArmTreatment, "i1", i, ti[i], tr)
+			r.Steps = ts[i]
+			recs = append(recs, r)
+		}
+		writeCompareRecords(t, dir, recs...)
+		rep, err := seededRunner(dir).Compare(exp(), "")
+		require.NoError(t, err)
+		require.Contains(t, primaryRow(rep).Acceptance, "floor-violated")
+		require.Contains(t, rep.AcceptanceAlarms[0], "control")
+	})
+
+	t.Run("a regression beyond δ needs no cost read", func(t *testing.T) {
+		t.Parallel()
+		cs, ts, ci, ti := reps(10, 13, 1000, 500) // +30% steps, −55% cost
+		rep := build(t, exp(), cs, ts, ci, ti, nil)
+		require.Contains(t, primaryRow(rep).Acceptance, "regresses")
+		require.Empty(t, rep.AcceptanceAlarms)
+	})
+
+	t.Run("a cost primary makes the cost rule degenerate", func(t *testing.T) {
+		t.Parallel()
+		e := exp()
+		e.Primary.Metric = "weighted_cost"
+		cs, ts, ci, ti := reps(10, 7, 1000, 780)
+		rep := build(t, e, cs, ts, ci, ti, nil)
+		var row MetricCompare
+		for _, m := range rep.Metrics {
+			if m.Name == "weighted_cost" {
+				row = m
+			}
+		}
+		require.Contains(t, row.Acceptance, "cost rule n/a")
+		require.Empty(t, rep.AcceptanceAlarms)
+	})
+
+	t.Run("unpriced spend can't be bounded — fails closed", func(t *testing.T) {
+		t.Parallel()
+		// Armed rule without a measurable weighted_cost row —
+		// reachable when validation was bypassed or the cost row
+		// skipped: acceptance can't be granted on an unseen ΔC.
+		e := exp()
+		e.CostWeights = nil
+		cs, ts, ci, ti := reps(10, 7, 1000, 780)
+		rep := build(t, e, cs, ts, ci, ti, nil)
+		require.Contains(t, primaryRow(rep).Acceptance, "unmeasured")
+		require.Contains(t, rep.AcceptanceAlarms[0], "cost-unmeasured")
+	})
+
+	t.Run("unarmed primary stamps nothing", func(t *testing.T) {
+		t.Parallel()
+		e := exp()
+		e.Primary.Floor = nil
+		cs, ts, ci, ti := reps(10, 7, 1000, 780)
+		rep := build(t, e, cs, ts, ci, ti, nil)
+		require.Empty(t, primaryRow(rep).Acceptance)
+		require.Empty(t, rep.AcceptanceAlarms)
+	})
+}
+
+// The #152 pre-committed stop rule: the compare report answers the
+// declared question — satisfied / not satisfied / inconclusive — and
+// treats a drifted or post-hoc rule as unreadable.
+func TestCompare_DecisionRule(t *testing.T) {
+	t.Parallel()
+	c := map[string]any{"f": "c"}
+	tr := map[string]any{"f": "t"}
+
+	build := func(t *testing.T, exp *Experiment, cIn, tIn []int, snap *Experiment) *CompareReport {
+		t.Helper()
+		dir := t.TempDir()
+		var recs []RunRecord
+		for i := range cIn {
+			recs = append(recs, compareRecord("e", "t", ArmControl, "i1", i, cIn[i], c))
+		}
+		for i := range tIn {
+			recs = append(recs, compareRecord("e", "t", ArmTreatment, "i1", i, tIn[i], tr))
+		}
+		writeCompareRecords(t, dir, recs...)
+		r := seededRunner(dir)
+		// The snapshot always persists — that's what run time does.
+		// snap overrides it for provenance tests; otherwise the
+		// invocation snapshot mirrors the experiment's declaration.
+		snapExp := snap
+		if snapExp == nil {
+			snapExp = exp
+		}
+		require.NoError(t, r.persistAlarms(snapExp, "i1", Report{}, nil))
+		rep, err := r.Compare(exp, "i1")
+		require.NoError(t, err)
+		return rep
+	}
+	reps := func(ci, ti int) ([]int, []int) {
+		return slices.Repeat([]int{ci}, 8), slices.Repeat([]int{ti}, 8)
+	}
+	ruleOn := func(metric, dir string, minImp float64) *DecisionRule {
+		return &DecisionRule{
+			Hypothesis: "treatment improves " + metric,
+			Primary: &RulePrimary{
+				Metric: metric, Arm: ArmTreatment, Vs: ArmControl,
+				Direction: dir, MinImprovement: minImp,
+			},
+		}
+	}
+	expWith := func(rule *DecisionRule) *Experiment {
+		return &Experiment{
+			Name:         "e",
+			Corpus:       []string{"t"},
+			CostWeights:  &CostWeights{Output: 1}, // cost = input + 100.
+			DecisionRule: rule,
+		}
+	}
+
+	t.Run("satisfied: CI clears the pre-committed bound", func(t *testing.T) {
+		t.Parallel()
+		ci, ti := reps(1000, 750)
+		rep := build(t, expWith(ruleOn("tokens.input", PrimaryDecrease, 0.15)), ci, ti, nil)
+		require.Equal(t, "satisfied", rep.RuleResult)
+		require.Contains(t, rep.RuleNote, "treatment improves tokens.input")
+		require.Contains(t, rep.Summary(), "decision rule: satisfied")
+	})
+
+	t.Run("not satisfied: CI clears the bound on the wrong side", func(t *testing.T) {
+		t.Parallel()
+		// +25% tokens is a conclusive regression against a
+		// 15%-improvement claim — the data disproves the rule, which
+		// is not the same as the data failing to decide.
+		ci, ti := reps(1000, 1250)
+		rep := build(t, expWith(ruleOn("tokens.input", PrimaryDecrease, 0.15)), ci, ti, nil)
+		require.Equal(t, "not satisfied", rep.RuleResult)
+	})
+
+	t.Run("inconclusive: CI spans the bound", func(t *testing.T) {
+		t.Parallel()
+		// Alternating values put θ inside a wide interval.
+		var ci, ti []int
+		for i := range 8 {
+			ci = append(ci, 1000)
+			if i%2 == 0 {
+				ti = append(ti, 500)
+			} else {
+				ti = append(ti, 2000)
+			}
+		}
+		rep := build(t, expWith(ruleOn("tokens.input", PrimaryDecrease, 0.15)), ci, ti, nil)
+		require.Equal(t, "inconclusive", rep.RuleResult)
+		require.Contains(t, rep.RuleNote, "CI spans")
+	})
+
+	t.Run("inconclusive: metric unmeasurable", func(t *testing.T) {
+		t.Parallel()
+		// weighted_cost without cost_weights produces no row — the
+		// rule can't read it. (Load-time validation would reject the
+		// manifest; the eval-side read still fails closed.)
+		e := expWith(ruleOn("weighted_cost", PrimaryDecrease, 0.10))
+		e.CostWeights = nil
+		ci, ti := reps(1000, 750)
+		rep := build(t, e, ci, ti, nil)
+		require.Equal(t, "inconclusive", rep.RuleResult)
+		require.Contains(t, rep.RuleNote, "no measurable pairs")
+	})
+
+	t.Run("tokens_to_done primary: satisfied on cheaper cost-per-pass", func(t *testing.T) {
+		t.Parallel()
+		ci, ti := reps(1000, 600) // CostPerPass −40% vs the ≥15% bar.
+		rep := build(t, expWith(ruleOn("tokens_to_done", PrimaryDecrease, 0.15)), ci, ti, nil)
+		require.Equal(t, "satisfied", rep.RuleResult)
+		require.Contains(t, rep.RuleNote, "tokens_to_done")
+	})
+
+	t.Run("guardrail pass_rate violated", func(t *testing.T) {
+		t.Parallel()
+		// Pass-rate floor min_delta=0 with a treatment failure —
+		// the guardrail conclusively fails even though the primary
+		// isn't part of this rule.
+		rule := &DecisionRule{
+			Hypothesis: "no pass-rate regression",
+			Guardrail:  &RuleGuardrail{Metric: "pass_rate", MinDelta: 0},
+		}
+		dir := t.TempDir()
+		var recs []RunRecord
+		for i := range 8 {
+			recs = append(recs, compareRecord("e", "t", ArmControl, "i1", i, 1000, c))
+			r := compareRecord("e", "t", ArmTreatment, "i1", i, 900, tr)
+			if i >= 6 {
+				r.Outcome = OutcomeFail
+			}
+			recs = append(recs, r)
+		}
+		writeCompareRecords(t, dir, recs...)
+		exp := &Experiment{Name: "e", Corpus: []string{"t"}, DecisionRule: rule}
+		r := seededRunner(dir)
+		require.NoError(t, r.persistAlarms(exp, "i1", Report{}, nil))
+		rep, err := r.Compare(exp, "i1")
+		require.NoError(t, err)
+		require.Equal(t, "not satisfied", rep.RuleResult)
+		require.Contains(t, rep.RuleNote, "pass_rate")
+	})
+
+	t.Run("reversed pair: control-vs-treatment claim", func(t *testing.T) {
+		t.Parallel()
+		// arm=control claiming decrease asks whether CONTROL is the
+		// cheaper side — with treatment −25% tokens it conclusively
+		// isn't, so the claim fails rather than merely wobbling.
+		rule := ruleOn("tokens.input", PrimaryDecrease, 0.15)
+		rule.Primary.Arm, rule.Primary.Vs = ArmControl, ArmTreatment
+		ci, ti := reps(1000, 750)
+		rep := build(t, expWith(rule), ci, ti, nil)
+		require.Equal(t, "not satisfied", rep.RuleResult)
+	})
+
+	t.Run("post-hoc rule suppressed", func(t *testing.T) {
+		t.Parallel()
+		// The snapshot carries no rule; the manifest declares one
+		// now — post-hoc registration is inconclusive by design.
+		ci, ti := reps(1000, 750)
+		snap := &Experiment{Name: "e"}
+		rep := build(t, expWith(ruleOn("tokens.input", PrimaryDecrease, 0.15)), ci, ti, snap)
+		require.Equal(t, "inconclusive", rep.RuleResult)
+		require.Contains(t, rep.RuleNote, "post-hoc")
+	})
+
+	t.Run("drifted rule suppressed", func(t *testing.T) {
+		t.Parallel()
+		ci, ti := reps(1000, 750)
+		snap := expWith(ruleOn("tokens.input", PrimaryDecrease, 0.05)) // Ran with 5%, now claims 15%.
+		rep := build(t, expWith(ruleOn("tokens.input", PrimaryDecrease, 0.15)), ci, ti, snap)
+		require.Equal(t, "inconclusive", rep.RuleResult)
+		require.Contains(t, rep.RuleNote, "drifted")
+	})
+
+	t.Run("removed rule still answers the committed question", func(t *testing.T) {
+		t.Parallel()
+		// The invocation ran under a declared rule; dropping it from
+		// the manifest can't un-commit the question — the snapshot's
+		// rule evaluates and the removal is noted.
+		ci, ti := reps(1000, 750)
+		snap := expWith(ruleOn("tokens.input", PrimaryDecrease, 0.15))
+		rep := build(t, &Experiment{Name: "e", Corpus: []string{"t"}, CostWeights: &CostWeights{Output: 1}}, ci, ti, snap)
+		require.Equal(t, "satisfied", rep.RuleResult)
+		require.Contains(t, rep.RuleNote, "removed")
+	})
+
+	t.Run("absent rule reported", func(t *testing.T) {
+		t.Parallel()
+		ci, ti := reps(1000, 750)
+		rep := build(t, &Experiment{Name: "e", Corpus: []string{"t"}}, ci, ti, nil)
+		require.Equal(t, "absent", rep.RuleResult)
+		require.Contains(t, rep.Summary(), "decision rule: absent")
+	})
+}

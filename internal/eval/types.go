@@ -10,7 +10,10 @@
 // an experiment exercise the same build under test.
 package eval
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Outcome is the per-run verdict.
 //
@@ -85,10 +88,15 @@ type Trajectory struct {
 	// PriorSessions seed the run — see the type doc. Warm-start
 	// trajectories pair them with a deliberately vague task prompt.
 	PriorSessions PriorSessions `json:"prior_sessions,omitempty"`
-	Check         Check         `json:"check"`
-	Coverage      Coverage      `json:"coverage,omitempty"`
-	Requires      Requires      `json:"requires,omitempty"`
-	Budget        Budget        `json:"budget,omitempty"`
+	// SeedCommands are scripted seed sessions — see the type doc.
+	// They run before prior_sessions and are the ladder tier's
+	// dose-control mechanism: row counts are authored, not left to
+	// an agent's seeding variance.
+	SeedCommands []ScriptedSeed `json:"seed_commands,omitempty"`
+	Check        Check          `json:"check"`
+	Coverage     Coverage       `json:"coverage,omitempty"`
+	Requires     Requires       `json:"requires,omitempty"`
+	Budget       Budget         `json:"budget,omitempty"`
 }
 
 // Origin records what a trajectory guards.
@@ -123,6 +131,28 @@ type Task struct {
 // degraded seeding would answer a different question than the one
 // the trajectory poses.
 type PriorSessions []Task
+
+// ScriptedSeed is one scripted seed session: a set of shell commands
+// executed through the same shell interpreter and RecordRun write
+// path the bash tool uses — command_memory and failure_memory rows
+// are real rows, not fixture SQL — but under a controlled clock so
+// last_seen ages and session spacing are authored inputs. Each
+// element materializes as a distinct session row, so depth ladders
+// can hold session count constant while scaling row counts, or the
+// reverse — the confound that prior_sessions bakes in (one session
+// per row, per paid run) becomes a free parameter.
+//
+// AgoSeconds backdates the session's recorded timestamps relative to
+// the run's clock. Commands execute in order against the materialized
+// workdir; a command that fails to reach a verdict (parse error)
+// aborts the seed as an error — a half-written seed state would
+// measure a different cell than the one the manifest poses. Exit
+// codes are verdicts: a failing command is how open failures are
+// seeded on purpose.
+type ScriptedSeed struct {
+	AgoSeconds float64  `json:"ago_seconds"`
+	Commands   []string `json:"commands"`
+}
 
 // Check is the scoring-function contract.
 type Check struct {
@@ -200,6 +230,150 @@ type Experiment struct {
 	// the regime the experiment needs never engaged, so the run is
 	// vacuous where it should have been decisive.
 	ExpectedExclusion *ExpectedExclusion `json:"expected_exclusion,omitempty"`
+	// DecisionRule is the run's pre-committed question — the
+	// outcome criteria written down before the invocation ran, so
+	// the report answers a declared claim instead of producing
+	// numbers to interpret (#152). The block is snapshotted at
+	// invocation time and drift suppresses the result, same as
+	// Primary's verdict. Optional: characterize runs carry no
+	// claim, and absence is itself reported.
+	DecisionRule *DecisionRule `json:"decision_rule,omitempty"`
+	// Replay switches the experiment to counterfactual-replay mode
+	// (#108): instead of running each arm over the whole trajectory,
+	// the runner records the trajectory once under SourceArm —
+	// snapshotting workdir + session DB at every turn boundary — then
+	// replays each turn under each arm from byte-identical state.
+	// runs_per_trajectory's n becomes replicates per fork, so an
+	// n-armed replay of a T-turn trajectory yields T×n paired samples
+	// at T + T×n×|arms| single-turn cost instead of full runs.
+	Replay *ReplaySpec `json:"replay,omitempty"`
+	// ProcessModel selects the regime under test (#117):
+	// "restart" (default — one `crush run` subprocess per turn) or
+	// "persistent" (one subprocess loops all turns on one session —
+	// production's process model, where in-memory request state
+	// survives the turn boundary). It is an experiment-level factor:
+	// the 2×2 comparison pairs one restart manifest with one
+	// persistent manifest over identical arms and corpus, never a
+	// per-arm mix. Replay experiments are restart-shaped by
+	// construction — the combination is rejected.
+	ProcessModel string `json:"process_model,omitempty"`
+}
+
+// Process-model regimes (#117). Empty means restart — the historical
+// default — so pre-#117 manifests and records interpret cleanly.
+const (
+	ProcessModelRestart    = "restart"
+	ProcessModelPersistent = "persistent"
+)
+
+// ReplaySpec pins the counterfactual-replay schedule. The recorded
+// prefix runs under one arm so every fork diverges from identical
+// bytes — which arm shapes the shared history is part of the
+// estimand, so it is declared, not hardcoded.
+type ReplaySpec struct {
+	// SourceArm names the arm whose config shapes the recorded
+	// prefix. Default "control". Must name a declared arm.
+	SourceArm string `json:"source_arm,omitempty"`
+	// ForkTurns restricts which turn indices fork — entry t replays
+	// turn t over the recorded state at boundary t (turn 0's prefix
+	// is the seeded start state). Default: every turn 0..T-1.
+	ForkTurns []int `json:"fork_turns,omitempty"`
+}
+
+// ReplayMeta marks a RunRecord as a counterfactual-replay fork and
+// carries the provenance the pairing and ledger need: which recorded
+// boundary the run forked from, which arm shaped that prefix, and
+// what the prefix cost (paid once by the recording pass — it is not
+// re-charged to the fork's token ledger).
+type ReplayMeta struct {
+	// ForkTurn is the replayed turn index — the fork restored the
+	// boundary-t snapshot, then ran trajectory turn t.
+	ForkTurn int `json:"fork_turn"`
+	// SourceArm shaped the recorded prefix every fork diverges from.
+	SourceArm string `json:"source_arm"`
+	// PrefixSteps/PrefixTokens are the recording pass's cumulative
+	// spend at boundary t — scaffolding cost shared by all forks,
+	// reported for ledger completeness, never summed into Tokens.
+	PrefixSteps  int        `json:"prefix_steps"`
+	PrefixTokens TokenUsage `json:"prefix_tokens"`
+}
+
+// DecisionRule pins the claim and its pass criteria. At least one
+// of Primary/Guardrail must be present — a rule with no measurable
+// criterion is the post-hoc freedom the block exists to remove.
+// Compare stamps one of three results: "rule satisfied" when every
+// criterion clears its bound conclusively, "rule not satisfied"
+// when any criterion conclusively fails, "rule inconclusive" when
+// the data can't decide either way.
+type DecisionRule struct {
+	// Hypothesis is the free-text claim the run tests — the
+	// sentence a reader should be able to falsify with the result.
+	Hypothesis string         `json:"hypothesis"`
+	Primary    *RulePrimary   `json:"primary,omitempty"`
+	Guardrail  *RuleGuardrail `json:"guardrail,omitempty"`
+}
+
+// RulePrimary is the decisive criterion: Arm's Metric must improve
+// on Vs's by at least MinImprovement (relative; 0.15 = 15%) in the
+// claimed Direction. Metric is a registry name or the arm-total
+// aggregate "tokens_to_done". Arm/Vs name declared arms — the
+// comparator only pairs control vs treatment, so Arm must be
+// "treatment" and Vs "control" until multi-arm compare lands.
+//
+// MinImprovement is the shipping threshold — the effect size the
+// hypothesis claims — while Primary.MDE is the planning bound that
+// sizes n and sets the CI decision boundary. MinImprovement below
+// MDE is conservative: an effect between the two resolves
+// inconclusive, never a false win.
+type RulePrimary struct {
+	Metric         string  `json:"metric"`
+	Arm            string  `json:"arm"`
+	Vs             string  `json:"vs"`
+	Direction      string  `json:"direction"` // increase | decrease
+	MinImprovement float64 `json:"min_improvement"`
+}
+
+// RuleGuardrail is the accompanying constraint: the Arm-vs-Vs delta
+// on Metric, normalized so positive is improvement in Direction,
+// must be ≥ MinDelta — min_delta=0 claims non-inferiority,
+// min_delta=−0.10 tolerates up to a 10% regression. Metric is a
+// registry name (paired relative diff) or "pass_rate" (absolute
+// conclusive-rate difference). A paired metric clears only when its
+// CI's lower bound clears MinDelta — the guardrail claims
+// non-inferiority, so it must prove it, not merely fail to disprove
+// it. Direction is implied for the aggregate names and required for
+// registry metrics, same as RulePrimary.
+type RuleGuardrail struct {
+	Metric    string  `json:"metric"`
+	Arm       string  `json:"arm,omitempty"`
+	Vs        string  `json:"vs,omitempty"`
+	Direction string  `json:"direction,omitempty"`
+	MinDelta  float64 `json:"min_delta"`
+}
+
+// sameDecisionRule mirrors samePrimary — the pre-registration check
+// for the decision-rule block. All fields are values, but the
+// nested structs are pointers, so field-wise comparison is written
+// out rather than relying on ==.
+func sameDecisionRule(a, b *DecisionRule) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	samePrimaryRule := func(x, y *RulePrimary) bool {
+		if x == nil || y == nil {
+			return x == y
+		}
+		return *x == *y
+	}
+	sameGuardrail := func(x, y *RuleGuardrail) bool {
+		if x == nil || y == nil {
+			return x == y
+		}
+		return *x == *y
+	}
+	return a.Hypothesis == b.Hypothesis &&
+		samePrimaryRule(a.Primary, b.Primary) &&
+		sameGuardrail(a.Guardrail, b.Guardrail)
 }
 
 // ExpectedExclusion pins which arm is supposed to fail and how:
@@ -221,6 +395,11 @@ type ExpectedExclusion struct {
 // the minimum detectable effect as a relative change (0.15 = 15%).
 // Direction selects a one-sided comparison: "decrease" claims the
 // treatment lowers the metric, "increase" that it raises it.
+// MDE is the planning bound — it sizes the required pair count and
+// sets the CI boundary for the primary verdict. The shipping claim
+// lives separately in DecisionRule.Primary.MinImprovement; the two
+// may differ (power 15%, accept 10%), and the gap resolves
+// inconclusive rather than favorable.
 type Primary struct {
 	Metric    string  `json:"metric"`
 	Direction string  `json:"direction"` // increase | decrease
@@ -231,6 +410,28 @@ type Primary struct {
 	// verdict to stand — a cheaper arm that fails more often isn't
 	// cheaper. 0 disables the check.
 	MaxPassDrop float64 `json:"max_pass_drop,omitempty"`
+	// Floor arms the #197 cost-justified acceptance rule: an
+	// absolute bound on each arm's conclusive pass rate — an arm
+	// below it fails regardless of cost, because token savings on a
+	// regressing arm are not savings (and a control below it means
+	// the corpus never produced the regime). Distinct from
+	// MaxPassDrop's *relative* t-vs-c bound: the floor holds even
+	// when both arms degrade together. Required when the rule's
+	// other fields are set; requires cost_weights so ΔC is priced.
+	Floor *float64 `json:"floor,omitempty"`
+	// NoiseBand δ bounds "indistinguishable from noise": within
+	// |ΔS| ≤ δ the rule permits only ΔC ≤ 0 (the feature may ship
+	// at non-positive cost, ties break on efficiency); beyond δ a
+	// real effect may carry bounded cost growth. 0/absent defaults
+	// to MDE.
+	NoiseBand *float64 `json:"noise_band,omitempty"`
+	// BaseCostAllowance β₀ is the flat relative cost growth a real
+	// effect may carry — deliberately not proportional to |ΔS|: a
+	// proportional allowance rewards cost-reduction with token
+	// growth, the circularity in the original RRSI-mirroring
+	// sketch. Absent defaults to 0.10; pin 0 to demand
+	// cost-neutrality even for real improvements.
+	BaseCostAllowance *float64 `json:"base_cost_allowance,omitempty"`
 }
 
 // PrimaryDirection enumerates the legal direction spellings.
@@ -239,13 +440,59 @@ const (
 	PrimaryDecrease = "decrease"
 )
 
+// samePrimary reports whether two declarations match — the
+// pre-registration check. It can't be == : the acceptance-rule fields
+// are pointers, so struct equality would compare addresses and mark
+// identical manifests as drifted.
+func samePrimary(a, b *Primary) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	deref := func(p *float64) float64 {
+		if p == nil {
+			return -1 // Absent — never equal to a pinned value.
+		}
+		return *p
+	}
+	return a.Metric == b.Metric && a.Direction == b.Direction &&
+		a.MDE == b.MDE && a.MaxPassDrop == b.MaxPassDrop &&
+		deref(a.Floor) == deref(b.Floor) &&
+		deref(a.NoiseBand) == deref(b.NoiseBand) &&
+		deref(a.BaseCostAllowance) == deref(b.BaseCostAllowance)
+}
+
 // CostWeights converts discounted token classes into uncached-input
-// equivalents: weighted_cost = input + h·cache_read + o·output where
-// h = CacheRead, o = Output. Weights are relative prices, not dollars —
-// e.g. cache-read billed at 10% of input gives CacheRead 0.1.
+// equivalents: weighted_cost = input + h·cache_read + w·cache_write +
+// o·output where h = CacheRead, w = CacheWrite, o = Output. Weights are
+// relative prices, not dollars — e.g. cache-read billed at 10% of input
+// gives CacheRead 0.1. An unpinned class weight prices that class at 0
+// — read it as a claim that the endpoint does not bill it, not an
+// omission; pinned below cost understates spend by construction.
+// Generator overrides the class weights for generator_tokens (the
+// sidecar's spend), pricing it at its own model's rates — nil prices
+// the sidecar at main-model rates, which overstates when the sidecar
+// runs a cheaper tier.
 type CostWeights struct {
-	CacheRead float64 `json:"cache_read"`
-	Output    float64 `json:"output"`
+	CacheRead  float64      `json:"cache_read"`
+	CacheWrite float64      `json:"cache_write"`
+	Output     float64      `json:"output"`
+	Generator  *CostWeights `json:"generator,omitempty"`
+}
+
+// check validates the weight block — every pinned class must be
+// non-negative, and a generator tier can't nest its own tier.
+func (w *CostWeights) check(name string) error {
+	if w.CacheRead < 0 || w.CacheWrite < 0 || w.Output < 0 {
+		return fmt.Errorf("%s must be non-negative (cache_read=%g, cache_write=%g, output=%g)",
+			name, w.CacheRead, w.CacheWrite, w.Output)
+	}
+	if w.Generator != nil {
+		if w.Generator.Generator != nil {
+			return fmt.Errorf("%s.generator cannot declare its own generator tier", name)
+		}
+		return w.Generator.check(name + ".generator")
+	}
+	return nil
 }
 
 // Arm is a generated config fragment plus an optional arm-scoped
@@ -323,6 +570,15 @@ type RunRecord struct {
 	// populated between preserveSessionDB and record append so
 	// min_call_metrics.* predicates can read it during CoverageMet.
 	CallMetrics *CallMetrics `json:"call_metrics,omitempty"`
+	// Replay marks the record as a counterfactual-replay fork (#108):
+	// the run restored the recorded boundary and replayed one turn.
+	// Compare pairs on (trajectory, fork_turn, run_index); nil on
+	// normal runs, which pair on (trajectory, run_index) as before.
+	Replay *ReplayMeta `json:"replay,omitempty"`
+	// ProcessModel records which regime produced the run —
+	// "restart" or "persistent" (#117). The 2×2 analysis groups on
+	// it; empty on pre-#117 records reads as restart.
+	ProcessModel string `json:"process_model,omitempty"`
 	// CallMetricsError records analyzer failure instead of silently
 	// absent metrics — inconclusive-by-absence and analyzer-broke are
 	// operationally different and must not conflate.
@@ -347,6 +603,11 @@ type RunRecord struct {
 	// forensics: which component first differed and what the volatile
 	// prefix hashed to. Informational only; never a predicate.
 	StepRecords []StepRecord `json:"step_records,omitempty"`
+	// Drains is the per-turn detached-work join outcome — whether
+	// each turn's process drained detached work before exiting, or
+	// timed out / never attempted (#115). The lifecycle evidence
+	// that a restart boundary settled cleanly. Informational only.
+	Drains []DrainReport `json:"drains,omitempty"`
 	// Tail is the per-turn tail audit — which context envelopes the
 	// model actually saw each turn (section names, sizes, digest,
 	// verbatim text). The tail is ephemeral by design; absent from
@@ -369,6 +630,13 @@ type RunRecord struct {
 	// the circuit breaker reads it instead of string-matching when
 	// present; absent means an older child, fall back to signatures.
 	ErrorClass string `json:"error_class,omitempty"`
+	// ParamVersion is the child's resolved memory-parameter snapshot
+	// identity (#228) — "pv1-<hash>" on substrate-aware children,
+	// absent on older ones. The field a cohort split attributes
+	// outcomes to: same version ⇒ same resolved parameter set (the
+	// snapshot, not necessarily the same effective behavior for a
+	// single pool — the version is whole-snapshot).
+	ParamVersion string `json:"param_version,omitempty"`
 	// Request carries the trajectory-final rendered request's byte
 	// composition and the run's peak prompt size — the "what fills
 	// the prompt" breakdown the 70%-tool-results claim reads.
@@ -447,6 +715,19 @@ type TurnTail struct {
 	// decompose a turn's repair-chain renders (#249).
 	RunStamp       uint64 `json:"run_stamp,omitempty"`
 	RepairAttempts int    `json:"repair_attempts,omitempty"`
+	// Actions mirrors TailAudit.Actions — the run's first tool calls,
+	// name plus extracted target, so a record reads "what the agent
+	// did after the tail rendered" without joining message storage
+	// (#221).
+	Actions []TailAction `json:"actions,omitempty"`
+}
+
+// TailAction is the eval-side mirror of agent.TailAction: one of a
+// run's first tool calls — the tool name plus the target it aimed at
+// (a path or a command).
+type TailAction struct {
+	Tool   string `json:"tool"`
+	Target string `json:"target,omitempty"`
 }
 
 // FailureDecision is the eval-side mirror of agent.FailureDecision:
@@ -462,6 +743,18 @@ type FailureDecision struct {
 	Admit     bool   `json:"admit"`
 	Reason    string `json:"reason"`
 	SettledBy string `json:"settled_by,omitempty"`
+	// SourceSession and SourceCall mirror the candidate's #220
+	// provenance — the session/tool call whose observation produced
+	// the row, empty on pre-provenance ledger rows.
+	SourceSession string `json:"source_session,omitempty"`
+	SourceCall    string `json:"source_call,omitempty"`
+	// Engaged and Outcome are the post-run stamps (#221): Engaged
+	// marks the run's actions touched the candidate's referent;
+	// Outcome is the closed vocabulary — resolved/open for failure
+	// rows, passed/failed/unexercised for command rows — empty when
+	// the record predates stamping or no verdict could be observed.
+	Engaged bool   `json:"engaged,omitempty"`
+	Outcome string `json:"outcome,omitempty"`
 }
 
 // RequestStats is the run's request-size snapshot: the last rendered
@@ -517,10 +810,37 @@ type StepRecord struct {
 	PrefixHash        string `json:"prefix_hash,omitempty"`
 	FirstChanged      int    `json:"first_changed_index"`
 	FirstChangedCause string `json:"first_changed_cause,omitempty"`
+	// RequestHash fingerprints the whole request — system run,
+	// history, and tool schemas combined (#115). Two steps with
+	// equal RequestHash sent identical content, so a cache_read
+	// regression between them is provider-side by elimination.
+	RequestHash string `json:"request_hash,omitempty"`
+	// PID/FirstOfProcess locate the request in process space — the
+	// eval driver restarts `crush run` per turn, so a step's
+	// process identity is the evidence a cross-boundary diff is
+	// attribution, not a coincidence.
+	PID            int  `json:"pid,omitempty"`
+	FirstOfProcess bool `json:"first_of_process,omitempty"`
+	// CacheAnomaly is "provider-side" when the request was
+	// byte-identical to the previous render yet cache_read dropped
+	// — no local cause explains the miss, so the record says so
+	// instead of fabricating a harness cause (#115).
+	CacheAnomaly string `json:"cache_anomaly,omitempty"`
 	// PressureEstimate/PressureEngaged carry the gate's per-step
 	// state — the estimate-vs-reported audit pair.
 	PressureEstimate int64 `json:"pressure_estimate,omitempty"`
 	PressureEngaged  bool  `json:"pressure_engaged,omitempty"`
+}
+
+// DrainReport is one turn process's detached-work join outcome —
+// attempted distinguishes "the join ran" from "the cancel fast-path
+// skipped it" (or a coordinator without the join interface);
+// completed distinguishes a clean drain from a timeout (#115).
+type DrainReport struct {
+	Turn      int   `json:"turn"`
+	Attempted bool  `json:"attempted"`
+	Completed bool  `json:"completed"`
+	TimeoutMs int64 `json:"timeout_ms,omitempty"`
 }
 
 // GeneratorTokens accounts the notebook sidecar's generation spend —

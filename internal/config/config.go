@@ -567,6 +567,25 @@ type Options struct {
 	// for the session so "memory helped" can be told apart from
 	// "memory was used". The log never leaves the machine; default off.
 	MemoryTelemetry *bool `json:"memory_telemetry,omitempty" jsonschema:"description=Opt in to local-only memory-usage telemetry: append-only JSONL at data_directory/memory-telemetry.jsonl recording per-turn memory behavior including the prompt text plus a per-session randomized injection holdout. Never transmitted. Experimental.,default=false"`
+	// MemoryParams overlays the memory subsystem's parameter set
+	// (params.Memory) — selector render/fetch caps, text bounds,
+	// the open-failure TTL — keyed by the params JSON field names.
+	// This is authored intent, not the learned-value store: unknown
+	// keys and out-of-bounds values fail config resolution rather
+	// than silently running a different parameter set than declared.
+	// The resolved snapshot's version stamps every memory row's
+	// param_version so eval cohorts attribute outcomes to the
+	// parameters that produced them (#228).
+	MemoryParams map[string]any `json:"memory_params,omitempty" jsonschema:"description=Overlay onto the memory subsystem's parameter set (selector caps / text bounds / open-failure TTL) keyed by params.Memory JSON field names — unknown keys and out-of-bounds values are errors. Experimental."`
+	// ProjectKey pins the command/failure memory partition identity
+	// instead of deriving it from the repo remote + common dir. The
+	// eval harness pins it so a snapshot-restored crush.db still
+	// reads under the key its rows were written with — restoring
+	// into a different workdir path would otherwise orphan every
+	// memory row behind a path-derived key. Pinning also merges
+	// memory across checkouts: two workspaces sharing a key share
+	// the partition, so it is a deliberate action, not a rename.
+	ProjectKey string `json:"project_key,omitempty" jsonschema:"description=Pin the command/failure memory partition identity instead of deriving it from the repo remote + common dir. Workspaces sharing a key share memory rows — for eval snapshots and deliberate cross-checkout sharing. Experimental."`
 }
 
 // OptionKeys returns the Options struct's JSON field names — the set

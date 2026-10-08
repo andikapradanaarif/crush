@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -251,6 +252,9 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 		return rec, fmt.Errorf("content hash: %w", err)
 	}
 	rec.Env.ContentHash = contentHash
+	// The process regime is provenance: an early-exit record must
+	// still say which regime produced (or failed to produce) it.
+	rec.ProcessModel = cmp.Or(exp.ProcessModel, ProcessModelRestart)
 	// Temperature is a run condition — an unpinned temp and temp-0
 	// are different baselines, invisible unless hashed.
 	tempKey := temperatureKey(exp.Temperature)
@@ -267,22 +271,27 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	defer os.RemoveAll(workdir)
 	defer os.RemoveAll(DataDirFor(workdir))
 
-	// Seeds run under the fixed neutral config, not the arm's — arm
-	// options active during seeding (a reconcile edge nudging the
-	// seed agent, a tail injecting memory) make the arms' starting
-	// states differ before measurement begins. WriteArmConfig lands
-	// the arm delta only on the measured session below.
-	if err := WriteSeedConfig(workdir, exp, manifest); err != nil {
-		rec.Outcome = OutcomeError
-		rec.CheckDetail = map[string]any{"harness": err.Error()}
-		return rec, nil
-	}
+	// The seed key pins every writer/reader of this trajectory's
+	// memory to one partition — scripted seeds, agent seeds,
+	// measured runs, and snapshot replays all resolve the same
+	// project_key, independent of the materialized path.
+	seedKey := "eval-" + contentHash
 
 	rec.StartedAt = r.now()
 	drv := r.driver()
 	if cr, ok := drv.(CrushRunner); ok {
 		cr.FlagKeys = flagNames(manifest)
 		drv = cr
+	}
+	if exp.ProcessModel == ProcessModelPersistent {
+		// The regime wraps the crush-subprocess driver: same binary,
+		// env, and telemetry fold — one process for all turns
+		// (#117). A custom Driver is authoritative for its own
+		// semantics and stays unwrapped; the record says which
+		// regime the experiment declared either way.
+		if cr, ok := drv.(CrushRunner); ok {
+			drv = PersistentRunner{CrushRunner: cr}
+		}
 	}
 
 	// Seed sessions first: each drv.Run opens a NEW session on the
@@ -296,8 +305,59 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	// mutation, and the preserved db needs seed-session identity.
 	var lastSeed RunResult
 	var lastSeedTurns []string
-	if len(traj.PriorSessions) > 0 {
-		warm := &WarmStart{}
+	seeded := len(traj.PriorSessions) > 0 || len(traj.SeedCommands) > 0
+	warm := &WarmStart{}
+	// A seeded trajectory replays from its seed snapshot once the
+	// first attempt has written one: the measured sessions then
+	// start from byte-identical state — seed variance leaves the
+	// estimate, and paid runs spend nothing on re-seeding. The
+	// key covers the full trajectory content, so any seed-spec
+	// edit produces a different snapshot. Restore lands before the
+	// config writes — the snapshot's .crush.json carries a stale
+	// data_directory that only WriteSeedConfig rewrites.
+	snapKey := traj.ID + "-" + contentHash
+	restored := seeded && r.restoreSnapshot(snapKey, workdir, warm)
+	if restored {
+		rec.WarmStart = warm
+	}
+
+	// Seeds run under the fixed neutral config, not the arm's — arm
+	// options active during seeding (a reconcile edge nudging the
+	// seed agent, a tail injecting memory) make the arms' starting
+	// states differ before measurement begins. WriteArmConfig lands
+	// the arm delta only on the measured session below. On a
+	// restored workdir this same write refreshes the snapshot's
+	// stale path-keyed options.
+	if err := WriteSeedConfig(workdir, exp, manifest, seedKey); err != nil {
+		rec.Outcome = OutcomeError
+		rec.CheckDetail = map[string]any{"harness": err.Error()}
+		return rec, nil
+	}
+	if !restored && len(traj.SeedCommands) > 0 {
+		// Scripted seeds are the authored-history tier: real
+		// RecordRun writes under a controlled clock, no agent, no
+		// tokens. They run before agent seeds — chronologically
+		// they model the older history anyway (ago_seconds).
+		seedStart := r.now()
+		seedIDs, err := r.runScriptedSeeds(ctx, workdir, traj.SeedCommands, seedKey)
+		warm.Sessions += len(seedIDs)
+		warm.SessionIDs = append(warm.SessionIDs, seedIDs...)
+		warm.DurationS += r.now().Sub(seedStart).Seconds()
+		rec.WarmStart = warm
+		if err != nil {
+			rec.ErrorClass = "seed_script"
+			rec.DurationS = r.now().Sub(rec.StartedAt).Seconds()
+			var seedID string
+			if len(seedIDs) > 0 {
+				seedID = seedIDs[len(seedIDs)-1]
+			}
+			r.preserveArtifacts(ctx, &rec, exp.Name, traj.ID, armName, inv, attempt, workdir, seedID, nil)
+			rec.Outcome = OutcomeError
+			rec.CheckDetail = map[string]any{"seed_commands": err.Error()}
+			return rec, nil
+		}
+	}
+	if !restored && len(traj.PriorSessions) > 0 {
 		for i, ps := range traj.PriorSessions {
 			seedStart := r.now()
 			seed := drv.Run(ctx, workdir, ps.Turns, traj.Budget)
@@ -339,51 +399,71 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 				return rec, nil
 			}
 		}
+	}
 
-		// Seeds running cleanly is necessary but not sufficient:
-		// the designed warm state itself is asserted before the
-		// measured session launches. A seed can succeed yet leave
-		// the wrong state — the fix didn't land, or the confirming
-		// rerun resolved the memory row — and measuring anyway
-		// would answer a different question than the cell poses.
-		if traj.Check.SeedScript != "" {
-			schk := runCheckScript(ctx, traj.Check.SeedScript, trajDir, workdir, r.checkEnv(), checkTimeout(traj))
-			rec.SeedState = schk.Detail
-			if schk.Err != nil || schk.Exit != 0 {
-				rec.DurationS = r.now().Sub(rec.StartedAt).Seconds()
-				r.preserveArtifacts(ctx, &rec, exp.Name, traj.ID, armName, inv, attempt, workdir, lastSeed.SessionID, lastSeedTurns)
-				// Keep the script's output on both paths — a
-				// half-run gate's partial stdout/stderr is exactly
-				// the evidence its error record needs.
-				detail := map[string]any{
-					"seed_check_stdout": string(tail([]byte(schk.Stdout), 4096)),
-					"seed_check_stderr": string(tail([]byte(schk.Stderr), 4096)),
-				}
-				if schk.Err != nil {
-					// The gate itself broke — infra, not state.
-					rec.Outcome = OutcomeError
-					detail["seed_check_error"] = schk.Err.Error()
-				} else {
-					// Clean execution, wrong state: the seeding is
-					// invalid — reject like a coverage miss rather
-					// than fail the model for a state it never saw.
-					rec.Outcome = OutcomeInconclusive
-					detail["seed_check"] = fmt.Sprintf("seed state assertion failed (exit %d)", schk.Exit)
-				}
-				rec.CheckDetail = detail
-				return rec, nil
+	// Seeds running cleanly is necessary but not sufficient: the
+	// designed warm state itself is asserted before the measured
+	// session launches. A seed can succeed yet leave the wrong
+	// state — the fix didn't land, or the confirming rerun resolved
+	// the memory row — and measuring anyway would answer a different
+	// question than the cell poses.
+	if seeded && traj.Check.SeedScript != "" {
+		schk := runCheckScript(ctx, traj.Check.SeedScript, trajDir, workdir, r.checkEnv(), checkTimeout(traj))
+		rec.SeedState = schk.Detail
+		if schk.Err != nil || schk.Exit != 0 {
+			if restored {
+				// A restored snapshot that fails the gate is
+				// poison — drop it so the next attempt
+				// re-seeds rather than replaying a bad state
+				// forever.
+				_ = os.RemoveAll(r.snapshotDir(snapKey))
 			}
+			rec.DurationS = r.now().Sub(rec.StartedAt).Seconds()
+			seedID := lastSeed.SessionID
+			if seedID == "" && len(warm.SessionIDs) > 0 {
+				seedID = warm.SessionIDs[len(warm.SessionIDs)-1]
+			}
+			r.preserveArtifacts(ctx, &rec, exp.Name, traj.ID, armName, inv, attempt, workdir, seedID, lastSeedTurns)
+			// Keep the script's output on both paths — a
+			// half-run gate's partial stdout/stderr is exactly
+			// the evidence its error record needs.
+			detail := map[string]any{
+				"seed_check_stdout": string(tail([]byte(schk.Stdout), 4096)),
+				"seed_check_stderr": string(tail([]byte(schk.Stderr), 4096)),
+			}
+			if schk.Err != nil {
+				// The gate itself broke — infra, not state.
+				rec.Outcome = OutcomeError
+				detail["seed_check_error"] = schk.Err.Error()
+			} else {
+				// Clean execution, wrong state: the seeding is
+				// invalid — reject like a coverage miss rather
+				// than fail the model for a state it never saw.
+				rec.Outcome = OutcomeInconclusive
+				detail["seed_check"] = fmt.Sprintf("seed state assertion failed (exit %d)", schk.Exit)
+			}
+			rec.CheckDetail = detail
+			return rec, nil
 		}
 	}
+	// Gate passed: publish the seeded state so later attempts — and
+	// the other arm — replay it byte-for-byte instead of re-seeding.
+	if seeded && !restored {
+		r.writeSnapshot(ctx, snapKey, workdir, warm)
+	}
 	// The measured session is where the arm's flag delta belongs.
-	if err := WriteArmConfig(workdir, exp, arm, manifest); err != nil {
+	if err := WriteArmConfig(workdir, exp, arm, manifest, seedKey); err != nil {
 		// A rejection here is usually a seed session's workdir
 		// mutation — the record's WarmStart already promises seed
 		// session ids, so snapshot the db like the other
 		// post-seed failure paths do.
-		if len(traj.PriorSessions) > 0 {
+		if seeded {
 			rec.DurationS = r.now().Sub(rec.StartedAt).Seconds()
-			r.preserveArtifacts(ctx, &rec, exp.Name, traj.ID, armName, inv, attempt, workdir, lastSeed.SessionID, lastSeedTurns)
+			seedID := lastSeed.SessionID
+			if seedID == "" && len(warm.SessionIDs) > 0 {
+				seedID = warm.SessionIDs[len(warm.SessionIDs)-1]
+			}
+			r.preserveArtifacts(ctx, &rec, exp.Name, traj.ID, armName, inv, attempt, workdir, seedID, lastSeedTurns)
 		}
 		rec.Outcome = OutcomeError
 		rec.CheckDetail = map[string]any{"harness": err.Error()}
@@ -403,6 +483,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	rec.EdgeFirings = res.EdgeFirings
 	rec.PromptTokensPerTurn = res.PromptTokensPerTurn
 	rec.StepRecords = res.StepRecords
+	rec.Drains = res.Drains
 	rec.Tail = res.Tail
 	rec.TailRuns = res.TailRuns
 	// Pressure is pointer-gated presence: a positive estimate means
@@ -413,6 +494,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 		rec.Pressure = &res.Pressure
 	}
 	rec.ErrorClass = res.ErrorClass
+	rec.ParamVersion = res.ParamVersion
 	if res.GeneratorTokens.Calls > 0 {
 		rec.GeneratorTokens = &res.GeneratorTokens
 	}
@@ -505,7 +587,13 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 // the anchor is the only way a post-hoc `eval analyze` can resolve
 // relative call paths correctly.
 func (r *Runner) preserveArtifacts(ctx context.Context, rec *RunRecord, expName, trajID, armName, inv string, runIndex int, workdir, sessionID string, turns []string) {
-	dst, walSafe, err := r.preserveSessionDB(ctx, expName, trajID, armName, inv, runIndex, workdir)
+	// Replay forks share (arm, run_index) across boundaries — the
+	// fork index keeps artifact names unique.
+	nameExtra := ""
+	if rec.Replay != nil {
+		nameExtra = fmt.Sprintf("-t%d", rec.Replay.ForkTurn)
+	}
+	dst, walSafe, err := r.preserveSessionDB(ctx, expName, trajID, armName, inv, runIndex, workdir, nameExtra)
 	rec.Workdir = workdir
 	if err != nil {
 		// Record why the metrics are absent — indistinguishable from
@@ -543,7 +631,7 @@ func (r *Runner) preserveArtifacts(ctx context.Context, rec *RunRecord, expName,
 // un-checkpointed commits; a raw copy is the last-resort fallback and
 // reports walSafe=false so the record can flag a possibly-truncated
 // artifact.
-func (r *Runner) preserveSessionDB(ctx context.Context, expName, trajID, arm, inv string, runIndex int, workdir string) (rel string, walSafe bool, err error) {
+func (r *Runner) preserveSessionDB(ctx context.Context, expName, trajID, arm, inv string, runIndex int, workdir string, nameExtra string) (rel string, walSafe bool, err error) {
 	src := filepath.Join(DataDirFor(workdir), "crush.db")
 	if !fileExists(src) {
 		return "", false, fmt.Errorf("no session db at %s", src)
@@ -552,7 +640,7 @@ func (r *Runner) preserveSessionDB(ctx context.Context, expName, trajID, arm, in
 	if err := os.MkdirAll(dstDir, 0o755); err != nil {
 		return "", false, err
 	}
-	dst := filepath.Join(dstDir, fmt.Sprintf("%s-%s-%s-%d.db", trajID, arm, inv, runIndex))
+	dst := filepath.Join(dstDir, fmt.Sprintf("%s-%s-%s-%d%s.db", trajID, arm, inv, runIndex, nameExtra))
 
 	conn, err := db.ConnectReadOnly(ctx, src)
 	if err == nil {
@@ -895,6 +983,9 @@ func (r *Runner) runTrajectory(ctx context.Context, exp *Experiment, traj *Traje
 		// not an error outcome masquerading as flakiness.
 		rep.Skipped = strings.Join(missing, ",")
 		return rep
+	}
+	if exp.Replay != nil {
+		return r.runReplay(ctx, exp, traj, trajDir, manifest, n, inv, configErrs)
 	}
 	armNames := []string{ArmControl, ArmTreatment}
 	if r.AA {

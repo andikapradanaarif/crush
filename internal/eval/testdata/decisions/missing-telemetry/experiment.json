@@ -1,0 +1,29 @@
+{
+  "name": "dec-missing-telemetry",
+  "model": "mock/model",
+  "temperature": 0,
+  "corpus": [
+    "*"
+  ],
+  "runs_per_trajectory": {
+    "stable": 4
+  },
+  "arms": {
+    "control": {
+      "config": {}
+    },
+    "treatment": {
+      "config": {}
+    }
+  },
+  "decision_rule": {
+    "hypothesis": "memory cuts map calls by 10%",
+    "primary": {
+      "metric": "call_metrics.map_calls",
+      "arm": "treatment",
+      "vs": "control",
+      "direction": "decrease",
+      "min_improvement": 0.1
+    }
+  }
+}

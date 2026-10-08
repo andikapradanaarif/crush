@@ -46,6 +46,28 @@ type FailureDecision struct {
 	// (#216). render_capped rows keep the binding layer here; Reason
 	// already records the budget cut.
 	SettledBy string `json:"settled_by,omitempty"`
+	// SourceSession and SourceCall identify the observation that
+	// produced this candidate row — #220 provenance: the session and
+	// tool call whose run opened a failure row, or last verdicted a
+	// command row. Absent on pre-provenance rows.
+	SourceSession string `json:"source_session,omitempty"`
+	SourceCall    string `json:"source_call,omitempty"`
+	// Engaged reports that the turn's actions touched the candidate's
+	// referent — a file tool hit an implicated path, or a shell run
+	// re-ran the candidate command. Stamped at run end from the run's
+	// emitted tool calls, so it means attempted, not executed — a
+	// denied or never-run call still counts (Outcome reads the
+	// ledger, so engaged+failed stays coherent). A Task sub-agent's
+	// re-run does not engage the parent's rows; the child's own
+	// ledger rows carry that verdict. False on records predating the
+	// stamp, and on rows whose turn issued no target-bearing calls.
+	Engaged bool `json:"engaged,omitempty"`
+	// Outcome is the post-run verification of the row's claim — a
+	// closed vocabulary, stamped at run end: "resolved"/"open" for
+	// failure rows, "passed"/"failed"/"unexercised" for command rows.
+	// Empty on records predating the stamp or when the run ended
+	// before a verdict could be observed.
+	Outcome string `json:"outcome,omitempty"`
 }
 
 // Failure-selection reasons — a closed vocabulary so eval predicates
@@ -112,6 +134,18 @@ const (
 	// the prompt itself was judged non-user text before any layer
 	// ran, so no binding layer owns the reason.
 	settledHarness = "harness"
+)
+
+// Decision outcomes — the closed Outcome vocabulary, stamped at run
+// end (#221). Failure rows verify as resolved/open against the
+// post-run failure pool; command rows verify against the verdict the
+// run's actions left on the ledger.
+const (
+	outcomeResolved    = "resolved"    // failure row closed by run end
+	outcomeOpen        = "open"        // failure row still open at run end
+	outcomePassed      = "passed"      // command row verdicted clean this run
+	outcomeFailed      = "failed"      // command row verdicted failing this run
+	outcomeUnexercised = "unexercised" // command row saw no verdict this run
 )
 
 // verificationKinds are the command kinds a failure referent can
@@ -1259,6 +1293,50 @@ func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string
 	return admitted.open, decisions
 }
 
+// MemoryPools is the selector's candidate input for offline
+// simulation — the three channels exactly as the fetch layer
+// presents them to selectMemory.
+type MemoryPools struct {
+	Open     []cmdlog.Failure
+	Resolved []cmdlog.Failure
+	Commands []cmdlog.Command
+}
+
+// MemoryRenderLimits is the per-pool render budget for simulation.
+// Non-positive means render everything that binds — the selector's
+// internal convention; the memory_params zero-means-off contract is
+// enforced one layer up, at the fetch.
+type MemoryRenderLimits struct {
+	Open     int
+	Resolved int
+	Command  int
+}
+
+// SimulateSelection runs the production selector offline — the same
+// binding rules, render budgets, and decision records as the live
+// turn path, with no agent, model, or telemetry. The eval harness
+// uses it to measure the selector's half of the memory ladders for
+// free (#223): stored-dose vs rendered-dose questions resolve
+// without spending an agent run.
+func SimulateSelection(prompt string, pools MemoryPools, workDir string,
+	limits MemoryRenderLimits,
+) (MemoryPools, []FailureDecision) {
+	admitted, decisions := selectMemory(prompt, memoryPools{
+		open:     pools.Open,
+		resolved: pools.Resolved,
+		commands: pools.Commands,
+	}, workDir, memoryRenderLimits{
+		open:     limits.Open,
+		resolved: limits.Resolved,
+		command:  limits.Command,
+	})
+	return MemoryPools{
+		Open:     admitted.open,
+		Resolved: admitted.resolved,
+		Commands: admitted.commands,
+	}, decisions
+}
+
 // memoryPools groups the three memory channels the selector sees in
 // one pass — open failures, resolved failures, and the command
 // ledger. One prompt analysis binds all three, so a row cannot admit
@@ -1291,6 +1369,17 @@ type selCandidate struct {
 	cmd      *cmdlog.Command
 	ids      map[string]bool
 	shadowed bool
+}
+
+// candProvenance is the candidate's source identity for the decision
+// record (#221): failure rows carry the session/tool call of the
+// opening observation; command rows carry the session/tool call of
+// their last verdict.
+func candProvenance(c selCandidate) (session, call string) {
+	if c.pool == poolCommand && c.cmd != nil {
+		return c.cmd.LastSessionID, c.cmd.LastToolCallID
+	}
+	return c.f.SessionID, c.f.ToolCallID
 }
 
 // commandCandidateID is a command row's stable id for decisions —
@@ -1369,10 +1458,12 @@ func selectMemory(prompt string, pools memoryPools, workDir string,
 		// honest if a future caller ever hands it harness text.
 		ds := make([]FailureDecision, 0, len(candidates))
 		for _, c := range candidates {
-			ds = append(ds, FailureDecision{
+			d := FailureDecision{
 				Signature: c.f.Signature, Cmd: c.f.Cmd, Pool: c.pool,
 				Reason: failNonUserPrompt, SettledBy: settledHarness,
-			})
+			}
+			d.SourceSession, d.SourceCall = candProvenance(c)
+			ds = append(ds, d)
 		}
 		return admitted, ds
 	}
@@ -1423,6 +1514,7 @@ func selectMemory(prompt string, pools memoryPools, workDir string,
 			Signature: f.Signature, Cmd: f.Cmd, Pool: cand.pool,
 			SettledBy: settledLexicon,
 		}
+		d.SourceSession, d.SourceCall = candProvenance(cand)
 		reason := failAdmit
 		dirs := failureDirs(f, workDir)
 		kind := toolclass.CommandKind(f.Cmd)

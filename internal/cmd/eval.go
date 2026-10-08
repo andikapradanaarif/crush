@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -101,6 +103,178 @@ var evalCharacterizeCmd = &cobra.Command{
 	},
 }
 
+// evalGenCmd emits parametric trajectory instances under
+// <eval-dir>/corpus/ — the ladder cells' fixture+seed factory
+// (#223). Each replicate is a distinct quirk draw; the emitted
+// spec is a plain trajectory, so validation, hashing, and snapshot
+// replay treat generated cells exactly like hand-written ones.
+var evalGenCmd = &cobra.Command{
+	Use:   "gen",
+	Short: "Generate parametric corpus instances for the memory ladders",
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		evalDir, _ := cmd.Flags().GetString("eval-dir")
+		spec := eval.GenSpec{
+			Plausibility: flagString(cmd, "plausibility"),
+			Prompt:       flagString(cmd, "prompt"),
+		}
+		spec.Quirks, _ = cmd.Flags().GetInt("quirks")
+		spec.Distractors, _ = cmd.Flags().GetInt("distractors")
+		spec.Depth, _ = cmd.Flags().GetInt("depth")
+		spec.Seed, _ = cmd.Flags().GetInt64("seed")
+		count, _ := cmd.Flags().GetInt("count")
+		corpus := filepath.Join(evalDir, "corpus")
+		for i := range count {
+			spec.Replicate = i
+			dir, err := eval.Generate(corpus, spec)
+			if err != nil {
+				return err
+			}
+			fmt.Println(filepath.Base(dir))
+		}
+		return nil
+	},
+}
+
+func flagString(cmd *cobra.Command, name string) string {
+	v, _ := cmd.Flags().GetString(name)
+	return v
+}
+
+// evalSelectCmd runs the offline selector measurement (#223): the
+// trajectory's scripted seeds materialize once under
+// <eval-dir>/genwork/, then the production selector evaluates the
+// seeded pools under --memory-params. Every stored-dose →
+// rendered-dose question on the ladders answers here for free —
+// before any paid agent run is scheduled.
+var evalSelectCmd = &cobra.Command{
+	Use:   "select <trajectory-id>",
+	Short: "Offline selector simulation over a trajectory's seeded memory pools",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evalDir, _ := cmd.Flags().GetString("eval-dir")
+		prompt, _ := cmd.Flags().GetString("prompt")
+		var overlay map[string]any
+		if raw, _ := cmd.Flags().GetString("memory-params"); raw != "" {
+			if err := json.Unmarshal([]byte(raw), &overlay); err != nil {
+				return fmt.Errorf("memory-params: %w", err)
+			}
+		}
+		trajDir := filepath.Join(evalDir, "corpus", args[0])
+		traj, err := eval.LoadTrajectory(trajDir)
+		if err != nil {
+			return err
+		}
+		r, err := evalRunner(cmd)
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		rep, err := r.RunSelectProbe(cmd.Context(), traj, trajDir, prompt, overlay)
+		if err != nil {
+			return err
+		}
+		if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
+			out, err := json.MarshalIndent(rep, "", "  ")
+			if err != nil {
+				return err
+			}
+			fmt.Println(string(out))
+			return nil
+		}
+		fmt.Print(rep.String())
+		return nil
+	},
+}
+
+// evalCurveCmd is the offline ladder sweep: it enumerates a dose
+// grid, generates each cell's instances, and probes every one —
+// the stored-dose → rendered-dose curves for both ladders in one
+// pass, JSONL-streamed so a long sweep's partial results survive.
+var evalCurveCmd = &cobra.Command{
+	Use:   "curve",
+	Short: "Offline selector curves over the generated dose grid",
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		evalDir, _ := cmd.Flags().GetString("eval-dir")
+		var spec eval.SelectSweepSpec
+		var err error
+		if spec.Quirks, err = flagIntList(cmd, "quirks"); err != nil {
+			return err
+		}
+		if spec.Distractors, err = flagIntList(cmd, "distractors"); err != nil {
+			return err
+		}
+		if spec.Depth, err = flagIntList(cmd, "depth"); err != nil {
+			return err
+		}
+		spec.Plausibility = flagStrList(cmd, "plausibility")
+		spec.Prompt = flagStrList(cmd, "prompt")
+		spec.Replicates, _ = cmd.Flags().GetInt("replicates")
+		spec.Seed, _ = cmd.Flags().GetInt64("seed")
+		var overlay map[string]any
+		if raw, _ := cmd.Flags().GetString("memory-params"); raw != "" {
+			if err := json.Unmarshal([]byte(raw), &overlay); err != nil {
+				return fmt.Errorf("memory-params: %w", err)
+			}
+		}
+		outPath := flagString(cmd, "out")
+		if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+			return err
+		}
+		out, err := os.Create(outPath)
+		if err != nil {
+			return err
+		}
+		defer out.Close()
+		r, err := evalRunner(cmd)
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		enc := json.NewEncoder(out)
+		return r.RunSelectSweep(cmd.Context(), filepath.Join(evalDir, "corpus"), spec, overlay,
+			func(row eval.SelectSweepRow) {
+				if row.Error != "" {
+					slog.Warn("Curve cell failed", "cell", row.Cell, "error", row.Error)
+				}
+				if err := enc.Encode(row); err != nil {
+					slog.Warn("Curve row encode failed", "cell", row.Cell, "error", err)
+				}
+			})
+	},
+}
+
+// flagIntList parses a comma-separated integer flag.
+func flagIntList(cmd *cobra.Command, name string) ([]int, error) {
+	raw := flagString(cmd, name)
+	if raw == "" {
+		return nil, nil
+	}
+	var out []int
+	for _, part := range strings.Split(raw, ",") {
+		n, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+// flagStrList parses a comma-separated string flag.
+func flagStrList(cmd *cobra.Command, name string) []string {
+	raw := flagString(cmd, name)
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 var evalRunCmd = &cobra.Command{
 	Use:   "run <experiment.json>",
 	Short: "Run a paired experiment and print the gate report",
@@ -178,6 +352,72 @@ with the required pair count when recorded noise allows.`,
 	},
 }
 
+var evalInteractionCmd = &cobra.Command{
+	Use:   "interaction <restart-exp.json> <persistent-exp.json>",
+	Short: "Process-model 2×2 — does restart-per-turn change the measured notebook effect (#117)",
+	Long: `Computes the regime interaction I = Δ_restart − Δ_persist where each Δ is
+the treatment-minus-control metric mean per trajectory. The two
+manifests must declare different process_model regimes over the same
+corpus and arms — records self-identify via their process_model field,
+so the function reads a mixed pool.
+
+When |I| clears 10% of the restart-regime control mean the report is
+"material": publish the per-regime cell estimates and never fold the
+regimes into one effect estimate. Below the bound the restart regime's
+estimates read as persistent-equivalent for this metric. The metric
+defaults to the restart experiment's declared primary.`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		restartExp, err := eval.LoadExperiment(args[0])
+		if err != nil {
+			return err
+		}
+		persistExp, err := eval.LoadExperiment(args[1])
+		if err != nil {
+			return err
+		}
+		regime := func(e *eval.Experiment) string {
+			if e.ProcessModel == "" {
+				return eval.ProcessModelRestart
+			}
+			return e.ProcessModel
+		}
+		if regime(restartExp) == regime(persistExp) {
+			return fmt.Errorf("both experiments declare process_model %q — the 2×2 needs one restart and one persistent manifest", regime(restartExp))
+		}
+		metric, _ := cmd.Flags().GetString("metric")
+		if metric == "" {
+			if restartExp.Primary == nil {
+				return fmt.Errorf("--metric required — %s declares no primary", restartExp.Name)
+			}
+			metric = restartExp.Primary.Metric
+		}
+		r, err := evalRunner(cmd)
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		recsA, err := r.LoadExperimentRecords(restartExp.Name)
+		if err != nil {
+			return err
+		}
+		recsB, err := r.LoadExperimentRecords(persistExp.Name)
+		if err != nil {
+			return err
+		}
+		rep, err := eval.ProcessModelInteraction(append(recsA, recsB...), restartExp, metric)
+		if err != nil {
+			return err
+		}
+		out, err := json.MarshalIndent(rep, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(out))
+		return nil
+	},
+}
+
 var evalAnalyzeCmd = &cobra.Command{
 	Use:   "analyze <session.db>",
 	Short: "Reconstruct per-call gate metrics from a session DB",
@@ -231,6 +471,78 @@ repair-prompt fingerprinted.`,
 			return err
 		}
 		fmt.Println(string(out))
+		return nil
+	},
+}
+
+var evalProbeCmd = &cobra.Command{
+	Use:   "probe <session.db> <probe-name|all>",
+	Short: "Offline mechanism probes over a preserved session DB (issue #109)",
+	Long: `Runs a named probe — a zero-API-cost mechanism check — over a
+preserved or live session DB. Probes consume the analyzer's labeled
+call sequence plus per-call inputs and result metadata, so ordering,
+turn segmentation, and normalization stay single-sourced.
+
+Known probes:
+
+  post-edit-window    for every view call, was its range inside the
+                      ±10-line window of the prior mutation on the
+                      same path? (the #98 served-class floor)
+  view-edit-same-file per-path mutations and post-edit view counts —
+                      the window-free servable superset
+  turn-start-reread   first view per (path,turn) of a file mutated in
+                      an earlier turn — the collapse re-open signature
+
+'all' runs every probe. Flags match 'eval analyze': --workdir,
+--session, --trajectory, --goos.`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evalDir, _ := cmd.Flags().GetString("eval-dir")
+		workdir, _ := cmd.Flags().GetString("workdir")
+		sessionID, _ := cmd.Flags().GetString("session")
+		trajID, _ := cmd.Flags().GetString("trajectory")
+
+		dbPath := args[0]
+		if !filepath.IsAbs(dbPath) {
+			if _, err := os.Stat(dbPath); err != nil {
+				// session_db paths in run records are eval-dir-relative.
+				dbPath = filepath.Join(evalDir, dbPath)
+			}
+		}
+
+		var turns []string
+		if trajID != "" {
+			traj, err := eval.LoadTrajectory(filepath.Join(evalDir, "corpus", trajID))
+			if err != nil {
+				return err
+			}
+			turns = traj.Task.Turns
+		}
+		if workdir == "" {
+			workdir, _ = os.Getwd()
+		}
+
+		goos, _ := cmd.Flags().GetString("goos")
+		opts := eval.AnalyzeOptions{
+			SessionID: sessionID,
+			Workdir:   workdir,
+			Turns:     turns,
+			GOOS:      goos,
+		}
+		names := []string{args[1]}
+		if args[1] == "all" {
+			names = eval.ProbeNames()
+		}
+		reps, err := eval.RunProbes(cmd.Context(), dbPath, names, opts)
+		if err != nil {
+			return err
+		}
+		for i, rep := range reps {
+			if i > 0 {
+				fmt.Println()
+			}
+			fmt.Print(rep.String())
+		}
 		return nil
 	},
 }
@@ -356,10 +668,32 @@ func init() {
 	evalProbeCacheCmd.Flags().Int64("seed", time.Now().UnixNano(), "filler/schedule RNG seed")
 	evalProbeCacheCmd.Flags().Float64("delay-scale", 1.0, "multiplier on inter-request sleeps (spec timing = 1.0)")
 	evalProbeCacheCmd.Flags().Bool("dry-run", false, "print schedule and send estimate without sending")
-	evalAnalyzeCmd.Flags().String("workdir", "", "run working dir for normalizing relative call paths (default: CWD)")
-	evalAnalyzeCmd.Flags().String("session", "", "session ID to analyze (default: latest parent session)")
-	evalAnalyzeCmd.Flags().String("trajectory", "", "corpus trajectory ID — supplies turns for process-turn segmentation")
-	evalAnalyzeCmd.Flags().String("goos", "", "OS whose path conventions produced the artifact (default: this machine)")
+	for _, c := range []*cobra.Command{evalAnalyzeCmd, evalProbeCmd} {
+		c.Flags().String("workdir", "", "run working dir for normalizing relative call paths (default: CWD)")
+		c.Flags().String("session", "", "session ID to analyze (default: latest parent session)")
+		c.Flags().String("trajectory", "", "corpus trajectory ID — supplies turns for process-turn segmentation")
+		c.Flags().String("goos", "", "OS whose path conventions produced the artifact (default: this machine)")
+	}
 	evalCompareCmd.Flags().String("invocation", "", "invocation ID to compare (required when records span several)")
-	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd, evalProbeCacheCmd, evalCompareCmd)
+	evalInteractionCmd.Flags().String("metric", "", "record metric for the interaction (default: the restart experiment's primary.metric)")
+	evalGenCmd.Flags().Int("quirks", 4, "relevant memory rows about the target defect (depth dose M, 0-4)")
+	evalGenCmd.Flags().Int("distractors", 0, "wrong-referent memory rows (dose K)")
+	evalGenCmd.Flags().String("plausibility", "mid", "distractor nearness: low|mid|high")
+	evalGenCmd.Flags().String("prompt", "vague", "task prompt style: vague|explicit")
+	evalGenCmd.Flags().Int("depth", 0, "package nesting depth above the target (discovery cost)")
+	evalGenCmd.Flags().Int64("seed", 1, "RNG seed — quirk identity sampling")
+	evalGenCmd.Flags().Int("count", 1, "replicate instances to emit (each a distinct draw)")
+	evalSelectCmd.Flags().String("prompt", "", "prompt to bind against (default: the trajectory's first task turn)")
+	evalSelectCmd.Flags().String("memory-params", "", "JSON overlay for params.Memory (e.g. '{\"open_render_limit\":0}')")
+	evalSelectCmd.Flags().Bool("json", false, "print the full report as JSON")
+	evalCurveCmd.Flags().String("quirks", "4", "comma-separated depth doses M (relevant rows)")
+	evalCurveCmd.Flags().String("distractors", "0", "comma-separated distractor doses K")
+	evalCurveCmd.Flags().String("plausibility", "mid", "comma-separated plausibility tiers")
+	evalCurveCmd.Flags().String("prompt", "vague", "comma-separated prompt styles")
+	evalCurveCmd.Flags().String("depth", "0", "comma-separated discovery-cost depths")
+	evalCurveCmd.Flags().Int("replicates", 1, "instances per cell")
+	evalCurveCmd.Flags().Int64("seed", 1, "base RNG seed for the grid")
+	evalCurveCmd.Flags().String("memory-params", "", "JSON overlay for params.Memory")
+	evalCurveCmd.Flags().String("out", "curve.jsonl", "JSONL output path")
+	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd, evalProbeCmd, evalProbeCacheCmd, evalCompareCmd, evalGenCmd, evalSelectCmd, evalCurveCmd, evalInteractionCmd)
 }

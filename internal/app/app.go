@@ -34,6 +34,7 @@ import (
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/notebook"
+	"github.com/charmbracelet/crush/internal/params"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/question"
@@ -105,6 +106,12 @@ type App struct {
 	// herdrClient reports agent state to herdr when running inside
 	// a herdr-managed pane. Nil when not in a herdr environment.
 	herdrClient *herdr.Client
+
+	// memParams is the resolved memory parameter set (#228) — the
+	// same snapshot cmdlog stamps under; the coordinator hands it
+	// to every built agent so the selector and the row versions
+	// never disagree about which parameters were in force.
+	memParams params.Memory
 }
 
 // New initializes a new application instance. skillsMgr carries the
@@ -123,6 +130,16 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		allowedTools = cfg.Permissions.AllowedTools
 	}
 
+	// The memory parameter set resolves once here — cmdlog stamps
+	// its version on rows and the selector reads its values, so
+	// both consumers must see the identical snapshot; a bad
+	// overlay (unknown key, out-of-bounds) fails startup rather
+	// than silently running undeclared parameters.
+	memParams, err := params.ResolveMemory(cfg.Options.MemoryParams)
+	if err != nil {
+		return nil, fmt.Errorf("options.memory_params: %w", err)
+	}
+
 	app := &App{
 		Sessions:    sessions,
 		Messages:    messages,
@@ -130,7 +147,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		Permissions: permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, allowedTools),
 		Questions:   question.NewService(),
 		FileTracker: filetracker.NewService(q, store.WorkingDir()),
-		CmdLog:      cmdlog.NewService(q, store.WorkingDir()),
+		CmdLog:      cmdlog.NewService(q, store.WorkingDir(), memParams, cmdlog.WithProjectKey(cfg.Options.ProjectKey)),
 		LSPManager:  lsp.NewManager(store),
 		Skills:      skillsMgr,
 		queries:     q,
@@ -138,6 +155,8 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		globalCtx: ctx,
 
 		config: store,
+
+		memParams: memParams,
 
 		events:             pubsub.NewBroker[tea.Msg](),
 		serviceEventsWG:    &sync.WaitGroup{},
@@ -501,8 +520,9 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 			// `crush run` process must commit coverage (and let the
 			// telemetry/report reflect it) rather than killing the
 			// generators mid-flight.
-			app.drainDetachedWork(detachedDrainTimeout)
-			app.emitEvalTelemetry(sess.ID, result.result, result.err, 0)
+			attempted, completed := app.drainDetachedWork(detachedDrainTimeout)
+			app.emitEvalTelemetry(sess.ID, result.result, result.err, 0,
+				drainReport{Attempted: attempted, Completed: completed, TimeoutMs: detachedDrainTimeout.Milliseconds()})
 			if result.err != nil {
 				if errors.Is(result.err, context.Canceled) || errors.Is(result.err, agent.ErrRequestCancelled) {
 					slog.Debug("Non-interactive: agent processing cancelled", "session_id", sess.ID)
@@ -555,10 +575,11 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 				// Generations run on detached contexts and may still
 				// be in flight; give near-done ones a beat to commit
 				// coverage before the process dies.
-				app.drainDetachedWork(detachedCancelDrainTimeout)
+				attempted, completed := app.drainDetachedWork(detachedCancelDrainTimeout)
 				// An errored run may carry a nil result — still record
 				// the approximate step burn.
-				app.emitEvalTelemetry(sess.ID, result.result, result.err, len(messageReadBytes))
+				app.emitEvalTelemetry(sess.ID, result.result, result.err, len(messageReadBytes),
+					drainReport{Attempted: attempted, Completed: completed, TimeoutMs: detachedCancelDrainTimeout.Milliseconds()})
 				if result.err != nil &&
 					!errors.Is(result.err, context.Canceled) &&
 					!errors.Is(result.err, agent.ErrRequestCancelled) {
@@ -567,7 +588,10 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 			case <-time.After(2 * time.Second):
 				// len(messageReadBytes) approximates steps burned —
 				// distinct assistant messages seen before the kill.
-				app.emitEvalTelemetry(sess.ID, nil, ctx.Err(), len(messageReadBytes))
+				// The drain never ran — record that, not a fake
+				// completion.
+				app.emitEvalTelemetry(sess.ID, nil, ctx.Err(), len(messageReadBytes),
+					drainReport{Attempted: false})
 			}
 			return ctx.Err()
 		}
@@ -592,16 +616,18 @@ const detachedCancelDrainTimeout = 2 * time.Second
 // `crush run` kills coverage commits mid-flight and the next
 // turn's coverage gate starves. No-op on coordinators that don't
 // expose the join.
-func (app *App) drainDetachedWork(timeout time.Duration) {
+func (app *App) drainDetachedWork(timeout time.Duration) (attempted, completed bool) {
 	c, ok := app.AgentCoordinator.(interface {
 		WaitForDetachedWork(time.Duration) bool
 	})
 	if !ok {
-		return
+		return false, false
 	}
 	if !c.WaitForDetachedWork(timeout) {
 		slog.Warn("Timed out draining detached agent work", "timeout", timeout)
+		return true, false
 	}
+	return true, true
 }
 
 func (app *App) UpdateAgentModel(ctx context.Context) error {
@@ -991,6 +1017,7 @@ func (app *App) initCoderAgent(ctx context.Context, interactive bool) error {
 		Notebook:              app.Notebook,
 		NotebookModelResolver: app.notebookModelResolver,
 		EdgeStore:             app.queries,
+		MemParams:             app.memParams,
 	})
 	if err != nil {
 		slog.Error("Failed to create coder agent", "err", err)

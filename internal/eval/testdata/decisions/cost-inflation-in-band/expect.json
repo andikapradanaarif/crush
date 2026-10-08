@@ -1,0 +1,8 @@
+{
+  "note": "Within-band quality movement cannot justify token growth — noise-level effects may only ship cost-neutral.",
+  "rule_result": "not satisfied",
+  "acceptance_contains": "cost-unjustified",
+  "alarms_contain": [
+    "cost-unjustified"
+  ]
+}

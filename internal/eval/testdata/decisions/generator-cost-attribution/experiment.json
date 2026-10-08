@@ -1,0 +1,39 @@
+{
+  "name": "dec-generator-attribution",
+  "model": "mock/model",
+  "temperature": 0,
+  "corpus": [
+    "*"
+  ],
+  "runs_per_trajectory": {
+    "stable": 4
+  },
+  "arms": {
+    "control": {
+      "config": {}
+    },
+    "treatment": {
+      "config": {}
+    }
+  },
+  "cost_weights": {
+    "cache_read": 0.1,
+    "cache_write": 0.25,
+    "output": 4,
+    "generator": {
+      "cache_read": 0,
+      "cache_write": 0,
+      "output": 1
+    }
+  },
+  "decision_rule": {
+    "hypothesis": "memory reduces cost per pass",
+    "primary": {
+      "metric": "tokens_to_done",
+      "arm": "treatment",
+      "vs": "control",
+      "direction": "decrease",
+      "min_improvement": 0
+    }
+  }
+}
