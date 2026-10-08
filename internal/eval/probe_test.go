@@ -179,12 +179,13 @@ func TestProbeTurnStartReread(t *testing.T) {
 	// mutated in turn 0 — seqs are positional (the bash and multiedit
 	// calls shifted them). c18 is the second e.go view in the same
 	// turn and must not count; b2.go was bash-mutated in turn 0 but
-	// never re-viewed.
+	// never re-viewed. Paths are host-normalized — FromSlash keeps
+	// the assertion portable across separator conventions.
 	require.Equal(t, 3, rep.Counts["turn_start_rereads"])
 	require.Equal(t, 1, rep.Counts["unbound_mutations"])
 	require.Len(t, rep.Rows, 3)
-	require.Equal(t, []string{"1", "17", "/w/a.go", "0", "1"}, rep.Rows[0])
-	require.Equal(t, []string{"1", "19", "/w/e.go", "0", "3"}, rep.Rows[2])
+	require.Equal(t, []string{"1", "17", filepath.FromSlash("/w/a.go"), "0", "1"}, rep.Rows[0])
+	require.Equal(t, []string{"1", "19", filepath.FromSlash("/w/e.go"), "0", "3"}, rep.Rows[2])
 }
 
 func TestRunProbe_Unknown(t *testing.T) {
