@@ -1363,3 +1363,48 @@ func TestMemoryParams_RenderCap(t *testing.T) {
 	require.Equal(t, 1, admitted, "the cap admits one open row")
 	require.Equal(t, 2, capped, "the cut rows are capped, not rejected")
 }
+
+// A zero render limit suppresses the pool at the fetch — the LOO
+// ablation means the channel records no candidates, no decisions,
+// and no tail section, while the other pools still flow.
+func TestMemoryParams_PoolOff(t *testing.T) {
+	t.Parallel()
+	a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
+	a.tailAudit = csync.NewMap[string, TailAudit]()
+	a.failureMemory = true
+	p := params.DefaultMemory()
+	p.OpenRenderLimit = 0
+	a.memParams = p
+	// One open row, one resolved row, one bare command row — the
+	// off pool's two rows must produce zero decisions while the
+	// knowledge pools still evaluate.
+	env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+		SessionID: "prior", Command: "go test .",
+		CWD: env.workingDir, Stdout: "FAIL TestAdd", ExitCode: 1, Ran: true,
+	})
+	env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+		SessionID: "prior", Command: "make lint",
+		CWD: env.workingDir, Stdout: "lint failed", ExitCode: 2, Ran: true,
+	})
+	env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+		SessionID: "prior", Command: "make lint",
+		CWD: env.workingDir, Stdout: "ok", ExitCode: 0, Ran: true,
+	})
+	env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+		SessionID: "prior", Command: "git status",
+		CWD: env.workingDir, Stdout: "clean", ExitCode: 0, Ran: true,
+	})
+	a.turnTailMessages(t.Context(), SessionAgentCall{
+		SessionID: sessionID, Prompt: "the tests fail — fix them",
+	}, nil)
+
+	audit, ok := a.tailAudit.Get(sessionID)
+	require.True(t, ok)
+	counts := map[string]int{poolOpen: 0, poolResolved: 0, poolCommand: 0}
+	for _, d := range audit.Decisions {
+		counts[d.Pool]++
+	}
+	require.Zero(t, counts[poolOpen], "open pool is off — no row was even evaluated")
+	require.Greater(t, counts[poolResolved], 0, "resolved pool still flows")
+	require.Greater(t, counts[poolCommand], 0, "command pool still flows")
+}

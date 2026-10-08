@@ -152,7 +152,16 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 			selected, memoryDecisions, memoryCandidates = cached.selected, cached.decisions, cached.candidates
 		default:
 			var pools memoryPools
-			pools.open, fetchErr = a.cmdlog.ListOpenFailures(ctx, a.memoryParams().FetchLimit)
+			mp := a.memoryParams()
+			// A zero render limit suppresses the pool at the
+			// fetch — no candidates, no decisions, no section.
+			// That is the LOO ablation: the channel is absent,
+			// not "present but capped to nothing" (which would
+			// still record render_capped decisions and confound
+			// the pool-off cell with cap mechanics).
+			if mp.OpenRenderLimit > 0 {
+				pools.open, fetchErr = a.cmdlog.ListOpenFailures(ctx, mp.FetchLimit)
+			}
 			if fetchErr == nil {
 				// The knowledge pools fail soft: an open-failure fetch
 				// error still records fetchErr, while a resolved or
@@ -161,15 +170,19 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 				// knowledge misses still land on the audit so an empty
 				// pool reads "fetch failed", not "nothing existed".
 				var knowledgeErrs []string
-				if r, err := a.cmdlog.ListResolvedFailures(ctx, a.memoryParams().FetchLimit); err != nil {
-					knowledgeErrs = append(knowledgeErrs, "resolved: "+err.Error())
-				} else {
-					pools.resolved = r
+				if mp.ResolvedRenderLimit > 0 {
+					if r, err := a.cmdlog.ListResolvedFailures(ctx, mp.FetchLimit); err != nil {
+						knowledgeErrs = append(knowledgeErrs, "resolved: "+err.Error())
+					} else {
+						pools.resolved = r
+					}
 				}
-				if c, err := a.cmdlog.ListCommands(ctx, a.memoryParams().FetchLimit); err != nil {
-					knowledgeErrs = append(knowledgeErrs, "command: "+err.Error())
-				} else {
-					pools.commands = c
+				if mp.CommandRenderLimit > 0 {
+					if c, err := a.cmdlog.ListCommands(ctx, mp.FetchLimit); err != nil {
+						knowledgeErrs = append(knowledgeErrs, "command: "+err.Error())
+					} else {
+						pools.commands = c
+					}
 				}
 				knowledgeFetchErr = strings.Join(knowledgeErrs, "; ")
 				var workDir string
@@ -185,9 +198,9 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 				}
 				selected, memoryDecisions = selectMemory(selPrompt, pools, workDir,
 					memoryRenderLimits{
-						open:     a.memoryParams().OpenRenderLimit,
-						resolved: a.memoryParams().ResolvedRenderLimit,
-						command:  a.memoryParams().CommandRenderLimit,
+						open:     mp.OpenRenderLimit,
+						resolved: mp.ResolvedRenderLimit,
+						command:  mp.CommandRenderLimit,
 					})
 				// Telemetry candidates span every evaluated row, all
 				// three pools — the count/ages mean "what the selector

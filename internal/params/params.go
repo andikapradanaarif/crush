@@ -53,13 +53,16 @@ type Memory struct {
 	FetchLimit int `json:"fetch_limit"`
 	// OpenRenderLimit bounds the failure-memory tail itself —
 	// recent-first, so the cap keeps the freshest bound rows; rows
-	// it cuts record render_capped, not silence.
+	// it cuts record render_capped, not silence. Zero suppresses
+	// the pool at the fetch — the channel is absent entirely (the
+	// LOO ablation), not merely capped.
 	OpenRenderLimit int `json:"open_render_limit"`
 	// ResolvedRenderLimit and CommandRenderLimit bound the
 	// knowledge pools — subordinate to open failures: the pressure
 	// regime showed injection quality degrades before capacity runs
 	// out, so the knowledge envelopes cap tighter than the warning
-	// envelope they supplement.
+	// envelope they supplement. Zero suppresses the pool at the
+	// fetch, same as the open channel.
 	ResolvedRenderLimit int `json:"resolved_render_limit"`
 	CommandRenderLimit  int `json:"command_render_limit"`
 	// FailureFileHints bounds file hints rendered per failure row.
@@ -80,7 +83,9 @@ type Memory struct {
 
 // Skeleton bounds: the asymmetry contract — tightening is free,
 // relaxing is bounded. A learned or overridden value may tighten
-// any cap to 0 (suppress the section entirely); relax direction is
+// any cap to 0 — a zero render limit suppresses the pool at the
+// fetch, so the channel records no candidates or decisions at all;
+// relax direction is
 // unconstrained only where the skeleton hasn't fixed a bound.
 // OpenFailureTTL carries the one explicit skeleton bound so far:
 // longer than 30d reads stale memory, shorter than 1d barely
