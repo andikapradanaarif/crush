@@ -48,8 +48,12 @@ type RunResult struct {
 	// EdgeFirings is the trajectory-wide edge/outcome firing split —
 	// the summed per-turn deltas (each `crush run` process's counters
 	// are in-memory and reset on spawn).
-	EdgeFirings   map[string]map[string]int
-	SessionID     string
+	EdgeFirings map[string]map[string]int
+	SessionID   string
+	// ParamVersion is the child's resolved memory-parameter snapshot
+	// identity (#228) — identical across the run's turn processes;
+	// empty on children predating the substrate.
+	ParamVersion  string
 	ModelResolved string
 	ModelSmall    string
 	ModelSummary  string
@@ -117,8 +121,13 @@ type CrushRunner struct {
 // CRUSH_EVAL_TELEMETRY.
 type runTelemetry struct {
 	SessionID string `json:"session_id"`
-	Steps     int    `json:"steps"`
-	Tokens    struct {
+	// ParamVersion is the child's resolved memory-parameter snapshot
+	// identity (#228) — the field a cohort split attributes outcomes
+	// to. Constant per process; empty on children predating the
+	// substrate.
+	ParamVersion string `json:"param_version"`
+	Steps        int    `json:"steps"`
+	Tokens       struct {
 		Input      int64 `json:"input"`
 		Output     int64 `json:"output"`
 		CacheRead  int64 `json:"cache_read"`
@@ -359,6 +368,11 @@ func (c CrushRunner) Run(ctx context.Context, workdir string, turns []string, bu
 // so the table is ordered across process boundaries.
 func (res *RunResult) addTurnTelemetry(tel runTelemetry, turn int) {
 	res.Steps += tel.Steps
+	// Process-constant: the first turn to report it wins; later
+	// turns carry the same value.
+	if res.ParamVersion == "" {
+		res.ParamVersion = tel.ParamVersion
+	}
 	res.Tokens.Input += tel.Tokens.Input
 	res.Tokens.Output += tel.Tokens.Output
 	res.Tokens.CacheRead += tel.Tokens.CacheRead

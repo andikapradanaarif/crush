@@ -69,8 +69,11 @@ type Memory struct {
 	// them, these keep the tail bounded regardless.
 	FailureCmdRunes      int `json:"failure_cmd_runes"`
 	FailureHeadlineRunes int `json:"failure_headline_runes"`
-	// OpenFailureTTL is the read-side staleness bound for open
-	// failures; 0 disables the filter. Skeleton bound for a learned
+	// OpenFailureTTL is the read-side staleness bound for failure
+	// memory — the name under-sells the scope: ListResolvedFailures
+	// and session reads share the same failuresFromRows filter, so
+	// a tightening erases resolved knowledge too, not just open
+	// warnings. 0 disables the filter. Skeleton bound for a learned
 	// value: [24h, 720h].
 	OpenFailureTTL time.Duration `json:"open_failure_ttl"`
 }

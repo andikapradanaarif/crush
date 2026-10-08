@@ -472,6 +472,52 @@ func TestRunTelemetry_PressureDecodeAndFold(t *testing.T) {
 	require.Equal(t, int64(61_000), res.Pressure.Estimate)
 }
 
+// The parameter-snapshot identity is process-constant — it lands on
+// the record once, from the first turn that reports it, so a cohort
+// split reads which parameter set produced the outcomes (#228).
+func TestRunTelemetry_ParamVersionFold(t *testing.T) {
+	t.Parallel()
+
+	var tel runTelemetry
+	require.NoError(t, json.Unmarshal([]byte(`{"param_version":"pv1-deadbeef"}`), &tel))
+	require.Equal(t, "pv1-deadbeef", tel.ParamVersion)
+
+	var res RunResult
+	res.addTurnTelemetry(tel, 0)
+	res.addTurnTelemetry(runTelemetry{}, 1) // Older/mid-run child: absent.
+	require.Equal(t, "pv1-deadbeef", res.ParamVersion)
+}
+
+// An arm's memory_params overlay resolves at manifest validation —
+// a typo'd key or out-of-bounds value is a load error, not a
+// per-run app.New crash loop inside the harness.
+func TestValidateArmFlags_MemoryParams(t *testing.T) {
+	t.Parallel()
+	manifest := &FlagsManifest{Defaults: map[string]any{"memory_params": nil}}
+	exp := &Experiment{Arms: map[string]Arm{
+		ArmControl: {},
+		ArmTreatment: {Config: ArmConfig{Options: map[string]any{
+			"memory_params": map[string]any{"open_render_limit": 8},
+		}}},
+	}}
+	require.NoError(t, manifest.ValidateArmFlags(exp))
+
+	exp.Arms[ArmTreatment] = Arm{Config: ArmConfig{Options: map[string]any{
+		"memory_params": map[string]any{"open_rennder_limit": 8},
+	}}}
+	require.ErrorContains(t, manifest.ValidateArmFlags(exp), "memory_params")
+
+	exp.Arms[ArmTreatment] = Arm{Config: ArmConfig{Options: map[string]any{
+		"memory_params": map[string]any{"open_failure_ttl": "2h"}, // Below the 24h skeleton floor.
+	}}}
+	require.ErrorContains(t, manifest.ValidateArmFlags(exp), "memory_params")
+
+	exp.Arms[ArmTreatment] = Arm{Config: ArmConfig{Options: map[string]any{
+		"memory_params": "open_render_limit=8",
+	}}}
+	require.ErrorContains(t, manifest.ValidateArmFlags(exp), "must be an object")
+}
+
 // The tail audit's wire contract: the child emits sections/bytes/
 // sha256/text without a turn index; the driver stamps Turn at fold
 // time and appends — a nil tail appends nothing so "no tail" and
