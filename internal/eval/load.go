@@ -371,6 +371,9 @@ func ValidateExperiment(e *Experiment) error {
 			}
 		}
 	}
+	if err := e.validateDecisionRule(); err != nil {
+		return err
+	}
 	for name, arm := range e.Arms {
 		if err := checkUnderPressureGate(name, armOptionResolver(arm)); err != nil {
 			return err
@@ -705,6 +708,120 @@ func armStarvationRules(field string) []starvationRule {
 		// with the flag on — either off means the counter can never
 		// move, so a min_ asserts an impossibility.
 		return []starvationRule{boolOn("notebook_enabled"), boolOn("notebook_pressure_gate")}
+	}
+	return nil
+}
+
+// validateDecisionRule checks the #152 pre-committed stop rule:
+// every metric it names must resolve in the closed registry (or the
+// two arm-aggregate names), arms must name the compared pair, and
+// thresholds must be sane — a rule that can't evaluate is a rule
+// that can't stop post-hoc reading.
+func (e *Experiment) validateDecisionRule() error {
+	d := e.DecisionRule
+	if d == nil {
+		return nil
+	}
+	if strings.TrimSpace(d.Hypothesis) == "" {
+		return fmt.Errorf("decision_rule.hypothesis is required — the free-text claim is the thing the structured criteria falsify")
+	}
+	if d.Primary == nil && d.Guardrail == nil {
+		return fmt.Errorf("decision_rule requires a primary or guardrail criterion — a rule with no measurable claim is post-hoc freedom, not pre-registration")
+	}
+	checkArms := func(kind, arm, vs string) error {
+		if _, ok := e.Arms[arm]; !ok {
+			return fmt.Errorf("decision_rule.%s.arm %q names no arm in this experiment", kind, arm)
+		}
+		if _, ok := e.Arms[vs]; !ok {
+			return fmt.Errorf("decision_rule.%s.vs %q names no arm in this experiment", kind, vs)
+		}
+		if arm == vs {
+			return fmt.Errorf("decision_rule.%s compares arm %q against itself", kind, arm)
+		}
+		return nil
+	}
+	// ruleMetricKnown resolves the metric namespace: the paired
+	// registry plus the two arm-aggregate names — pass_rate (the
+	// conclusive-rate read) and tokens_to_done (the ArmTotals
+	// cost-per-pass). Aggregate metrics carry no paired interval;
+	// the docstrings carry that limit.
+	ruleMetricKnown := func(kind, metric string) error {
+		switch metric {
+		case "pass_rate":
+			return nil
+		case "tokens_to_done":
+			if e.CostWeights == nil {
+				return fmt.Errorf("decision_rule.%s.metric %q requires cost_weights — tokens-to-done is unpriceable without them", kind, metric)
+			}
+			return nil
+		}
+		if _, err := primaryMetricFunc(e, metric); err != nil {
+			return fmt.Errorf("decision_rule.%s.metric: %w", kind, err)
+		}
+		return nil
+	}
+	// ruleDirection resolves the claimed improvement direction —
+	// required on registry metrics (recalls.* and saved_bytes run
+	// either way), implied for the aggregate names: pass_rate is
+	// always "increase", tokens_to_done always "decrease". An
+	// explicit contradicting direction is rejected rather than
+	// silently reinterpreted.
+	ruleDirection := func(kind, metric, dir string) (string, error) {
+		implied := ""
+		switch metric {
+		case "pass_rate":
+			implied = PrimaryIncrease
+		case "tokens_to_done":
+			implied = PrimaryDecrease
+		}
+		if dir == "" {
+			if implied == "" {
+				return "", fmt.Errorf("decision_rule.%s.direction is required for registry metric %q — the claimed direction is the claim", kind, metric)
+			}
+			return implied, nil
+		}
+		if dir != PrimaryIncrease && dir != PrimaryDecrease {
+			return "", fmt.Errorf("decision_rule.%s.direction must be %q or %q, got %q", kind, PrimaryIncrease, PrimaryDecrease, dir)
+		}
+		if implied != "" && dir != implied {
+			return "", fmt.Errorf("decision_rule.%s.direction %q contradicts %q — %s improvement is always %s", kind, dir, metric, metric, implied)
+		}
+		return dir, nil
+	}
+	if p := d.Primary; p != nil {
+		if err := checkArms("primary", p.Arm, p.Vs); err != nil {
+			return err
+		}
+		if err := ruleMetricKnown("primary", p.Metric); err != nil {
+			return err
+		}
+		dir, err := ruleDirection("primary", p.Metric, p.Direction)
+		if err != nil {
+			return err
+		}
+		p.Direction = dir // Implied directions resolve once, at load.
+		if p.MinImprovement < 0 {
+			return fmt.Errorf("decision_rule.primary.min_improvement must be >= 0, got %g", p.MinImprovement)
+		}
+	}
+	if g := d.Guardrail; g != nil {
+		if g.Arm == "" {
+			g.Arm = ArmTreatment
+		}
+		if g.Vs == "" {
+			g.Vs = ArmControl
+		}
+		if err := checkArms("guardrail", g.Arm, g.Vs); err != nil {
+			return err
+		}
+		if err := ruleMetricKnown("guardrail", g.Metric); err != nil {
+			return err
+		}
+		dir, err := ruleDirection("guardrail", g.Metric, g.Direction)
+		if err != nil {
+			return err
+		}
+		g.Direction = dir
 	}
 	return nil
 }
