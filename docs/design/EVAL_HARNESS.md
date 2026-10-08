@@ -208,6 +208,22 @@ every characterization pass a diff to reviewed files.
   re-seeding; the seed spec, not the snapshot, is the source of
   truth. Editing the trajectory changes the content hash, so a
   seed-spec edit never replays a stale snapshot.
+- **`crush eval gen` — parametric instances.** The ladder cells come
+  from a generator (`internal/eval/gen.go`), not hand-written
+  fixtures: `--quirks` (relevant memory rows about the target, 0-4),
+  `--distractors` (wrong-referent rows), `--plausibility`
+  (low=benign commands / mid=stale-name failures / high=tag-hidden
+  failing tests the check can't see), `--prompt` (vague|explicit),
+  `--depth` (package nesting = discovery cost), `--seed`, `--count`
+  (replicates). Each instance draws quirk identity and placement
+  from the RNG, so a replicate never re-measures the same quirk —
+  and a sealed held-out pool (#224) is the same generator with the
+  pools held back. Emitted instances are plain trajectory dirs —
+  fixture, authored `seed_commands`, a dose gate asserting exact
+  pool counts, `check.sh` — so validation, content-hash, snapshot
+  replay, and the corpus sweep treat them identically to
+  hand-written cells. Snapshot replay composes per instance:
+  replicates are distinct dirs, never conflated.
 - **`check.seed_script`.** Optional gate asserting the designed warm
   state — runs once after seeding (`prior_sessions` and/or
   `seed_commands`) and before the measured session, with the same

@@ -101,6 +101,43 @@ var evalCharacterizeCmd = &cobra.Command{
 	},
 }
 
+// evalGenCmd emits parametric trajectory instances under
+// <eval-dir>/corpus/ — the ladder cells' fixture+seed factory
+// (#223). Each replicate is a distinct quirk draw; the emitted
+// spec is a plain trajectory, so validation, hashing, and snapshot
+// replay treat generated cells exactly like hand-written ones.
+var evalGenCmd = &cobra.Command{
+	Use:   "gen",
+	Short: "Generate parametric corpus instances for the memory ladders",
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		evalDir, _ := cmd.Flags().GetString("eval-dir")
+		spec := eval.GenSpec{
+			Plausibility: flagString(cmd, "plausibility"),
+			Prompt:       flagString(cmd, "prompt"),
+		}
+		spec.Quirks, _ = cmd.Flags().GetInt("quirks")
+		spec.Distractors, _ = cmd.Flags().GetInt("distractors")
+		spec.Depth, _ = cmd.Flags().GetInt("depth")
+		spec.Seed, _ = cmd.Flags().GetInt64("seed")
+		count, _ := cmd.Flags().GetInt("count")
+		corpus := filepath.Join(evalDir, "corpus")
+		for i := range count {
+			spec.Replicate = i
+			dir, err := eval.Generate(corpus, spec)
+			if err != nil {
+				return err
+			}
+			fmt.Println(filepath.Base(dir))
+		}
+		return nil
+	},
+}
+
+func flagString(cmd *cobra.Command, name string) string {
+	v, _ := cmd.Flags().GetString(name)
+	return v
+}
+
 var evalRunCmd = &cobra.Command{
 	Use:   "run <experiment.json>",
 	Short: "Run a paired experiment and print the gate report",
@@ -435,5 +472,12 @@ func init() {
 		c.Flags().String("goos", "", "OS whose path conventions produced the artifact (default: this machine)")
 	}
 	evalCompareCmd.Flags().String("invocation", "", "invocation ID to compare (required when records span several)")
-	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd, evalProbeCmd, evalProbeCacheCmd, evalCompareCmd)
+	evalGenCmd.Flags().Int("quirks", 4, "relevant memory rows about the target defect (depth dose M, 0-4)")
+	evalGenCmd.Flags().Int("distractors", 0, "wrong-referent memory rows (dose K)")
+	evalGenCmd.Flags().String("plausibility", "mid", "distractor nearness: low|mid|high")
+	evalGenCmd.Flags().String("prompt", "vague", "task prompt style: vague|explicit")
+	evalGenCmd.Flags().Int("depth", 0, "package nesting depth above the target (discovery cost)")
+	evalGenCmd.Flags().Int64("seed", 1, "RNG seed — quirk identity sampling")
+	evalGenCmd.Flags().Int("count", 1, "replicate instances to emit (each a distinct draw)")
+	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd, evalProbeCmd, evalProbeCacheCmd, evalCompareCmd, evalGenCmd)
 }
