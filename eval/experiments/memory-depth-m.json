@@ -35,7 +35,7 @@
 		}
 	},
 	"decision_rule": {
-		"hypothesis": "Relevant project memory saves discovery work: under an explicit-scope prompt the seeded rows bind and render, so the memory-on arm reaches the fix in fewer steps than memory-off. M=0 cells anchor the floor (nothing to recall — delta should be nil); the benefit should grow with M.",
+		"hypothesis": "Relevant project memory saves discovery work: under an explicit-scope prompt the seeded rows bind and render, so the memory-on arm reaches the fix in fewer steps than memory-off. M=0 cells anchor the floor (nothing to recall \u2014 delta should be nil); the benefit should grow with M. Realized rendered dose from the offline selector matrix (pre-registered): stored M=0/1/4 renders 0/1/3 relevant rows under explicit scope \u2014 the M4 cell's resolved-sibling row rejects out_of_scope and three command rows don't bind, so 'M4' reaches the agent as three rows (2 open + 1 command).",
 		"primary": {
 			"metric": "steps",
 			"arm": "treatment",

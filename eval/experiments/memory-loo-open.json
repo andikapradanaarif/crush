@@ -38,7 +38,7 @@
 		}
 	},
 	"decision_rule": {
-		"hypothesis": "The open pool is load-bearing: suppressing it at fetch (zero render limit \u2014 no candidates, no decisions, no rendered section) costs the agent the rows that point at the fix. A pool whose removal costs nothing is a candidate for the simplify list.",
+		"hypothesis": "The open pool is load-bearing: suppressing it at fetch (zero render limit \u2014 no candidates, no decisions, no rendered section) costs the agent the rows that point at the fix. A pool whose removal costs nothing is a candidate for the simplify list. Prediction from the offline selector matrix (pre-registered before spend): suppressing open is predicted NEAR-NULL, not a loss \u2014 the open rows' command-pool twins un-shadow and admit the same failing commands under the command envelope. What the arm measures is envelope/presentation, not information. If the measured effect diverges from near-null, either the twin-shadow mechanism or the agent's envelope-sensitivity is the story, not pool load-bearingness.",
 		"primary": {
 			"metric": "steps",
 			"arm": "treatment",

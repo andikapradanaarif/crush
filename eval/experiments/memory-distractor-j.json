@@ -35,7 +35,7 @@
 		}
 	},
 	"decision_rule": {
-		"hypothesis": "Rendered in-scope wrong failure rows (decoy tests inside the target package) mislead the agent — the memory-on arm pays extra steps on the j>0 cells it renders that control never sees. The offline selector curve bounds the dose: only in_scope distractors bind, so K stored = j rendered.",
+		"hypothesis": "Rendered in-scope wrong failure rows (decoy tests inside the target package) mislead the agent \u2014 the memory-on arm pays extra steps on the j>0 cells it renders that control never sees. The offline selector curve bounds the dose: only in_scope distractors bind, so K stored = j rendered. Verified dose on the pinned cells (pre-registered): in_scope K stored renders exactly j=K wrong rows at 0/1/3; the open cap saturates rendered-j at 3 for M4, so the corpus covers the whole realizable dose range.",
 		"primary": {
 			"metric": "steps",
 			"arm": "treatment",

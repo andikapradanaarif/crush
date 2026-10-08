@@ -38,7 +38,7 @@
 		}
 	},
 	"decision_rule": {
-		"hypothesis": "The command pool is load-bearing: suppressing it at fetch (zero render limit \u2014 no candidates, no decisions, no rendered section) costs the agent the rows that point at the fix. A pool whose removal costs nothing is a candidate for the simplify list.",
+		"hypothesis": "The command pool is load-bearing: suppressing it at fetch (zero render limit \u2014 no candidates, no decisions, no rendered section) costs the agent the rows that point at the fix. A pool whose removal costs nothing is a candidate for the simplify list. Prediction from the offline selector matrix (pre-registered before spend): suppressing command loses exactly the `go build` hint row (baseline renders 2 open + 1 command; arm renders 2 open). Small predicted cost \u2014 the arm measures whether the healthy-invocation knowledge actually steers discovery.",
 		"primary": {
 			"metric": "steps",
 			"arm": "treatment",
