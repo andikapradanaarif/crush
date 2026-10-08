@@ -1,0 +1,67 @@
+{
+	"name": "memory-depth-m",
+	"model": "alibaba-tp/deepseek-v4.1-flash",
+	"temperature": 0,
+	"corpus": [
+		"gen-m*k0-mid-explicit-d0-s001-*"
+	],
+	"runs_per_trajectory": {
+		"uncharacterized": 12
+	},
+	"primary": {
+		"metric": "steps",
+		"direction": "decrease",
+		"mde": 0.15,
+		"max_pass_drop": 0.1
+	},
+	"arms": {
+		"control": {
+			"config": {
+				"options": {
+					"turn_context": "off",
+					"failure_memory": false,
+					"failure_memory_edges": false
+				}
+			}
+		},
+		"treatment": {
+			"config": {
+				"options": {
+					"turn_context": "off",
+					"failure_memory": true,
+					"failure_memory_edges": false
+				}
+			}
+		}
+	},
+	"decision_rule": {
+		"hypothesis": "Relevant project memory saves discovery work: under an explicit-scope prompt the seeded rows bind and render, so the memory-on arm reaches the fix in fewer steps than memory-off. M=0 cells anchor the floor (nothing to recall — delta should be nil); the benefit should grow with M.",
+		"primary": {
+			"metric": "steps",
+			"arm": "treatment",
+			"vs": "control",
+			"direction": "decrease",
+			"min_improvement": 0.1
+		},
+		"guardrail": {
+			"metric": "pass_rate",
+			"min_delta": -0.05
+		}
+	},
+	"providers": {
+		"alibaba-tp": {
+			"name": "Alibaba Token Plan",
+			"type": "openai-compat",
+			"api_key": "$ALIBABA_TP_API_KEY",
+			"base_url": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+			"models": [
+				{
+					"id": "deepseek-v4.1-flash",
+					"name": "DeepSeek V4.1 Flash",
+					"context_window": 1000000,
+					"default_max_tokens": 384000
+				}
+			]
+		}
+	}
+}

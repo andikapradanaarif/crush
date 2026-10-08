@@ -1,0 +1,10 @@
+# Generated artifacts — genwork holds the offline probe's seeded
+# workdirs (regenerated on demand); they are large and expendable.
+genwork/
+
+# Generated corpus instances are artifacts — `crush eval gen`
+# reproduces any cell deterministically. The exception: the s001
+# draws are the paid manifests' pinned corpus cells, tracked so the
+# manifests' corpus globs resolve against committed content.
+corpus/gen-*
+!corpus/gen-*-s001-*

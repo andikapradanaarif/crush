@@ -38,13 +38,19 @@ func (r *Runner) EnsureSeeded(ctx context.Context, traj *Trajectory, trajDir str
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return "", "", err
 	}
-	// Reuse a seeded workdir — the presence of a crush.db means the
-	// seeds landed. A dir without one was a torn seed attempt;
-	// re-materialize rather than trust a partial state.
+	// Reuse a seeded workdir — the seeded.ok marker means the seeds
+	// finished, not merely started: a db mid-write would otherwise
+	// pass for seeded state and the probe would read torn rows.
+	// Anything unmarked is a torn attempt — wipe and re-materialize
+	// rather than trust a partial seed.
 	if entries, err := os.ReadDir(parent); err == nil {
 		for _, e := range entries {
 			cand := filepath.Join(parent, e.Name())
-			if e.IsDir() && fileExists(filepath.Join(DataDirFor(cand), "crush.db")) {
+			if !e.IsDir() {
+				continue
+			}
+			if marker, err := os.ReadFile(filepath.Join(cand, seedDoneMarker)); err == nil &&
+				strings.TrimSpace(string(marker)) == seedKey {
 				return cand, seedKey, nil
 			}
 		}
@@ -60,8 +66,16 @@ func (r *Runner) EnsureSeeded(ctx context.Context, traj *Trajectory, trajDir str
 			return "", "", fmt.Errorf("seed_commands: %w", err)
 		}
 	}
+	if err := os.WriteFile(filepath.Join(workdir, seedDoneMarker), []byte(seedKey+"\n"), 0o644); err != nil {
+		return "", "", err
+	}
 	return workdir, seedKey, nil
 }
+
+// seedDoneMarker names the file EnsureSeeded writes after the last
+// seed command lands — the reuse check keys on it, never on the
+// db's mere existence.
+const seedDoneMarker = ".seeded.ok"
 
 // SelectProbeReport is one offline selector measurement: every
 // evaluated candidate with its pool and verdict, plus the pool

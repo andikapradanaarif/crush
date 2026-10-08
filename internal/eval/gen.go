@@ -57,11 +57,12 @@ type GenSpec struct {
 	Replicate    int    `json:"replicate"`
 }
 
-// genID is the corpus identity — params in the name so a manifest
-// reads the cell from the trajectory id alone.
+// genID is the corpus identity — params plus the draw's seed in
+// the name so a manifest reads the cell from the trajectory id
+// alone and two draws of the same cell can't share a directory.
 func (s GenSpec) genID() string {
-	return fmt.Sprintf("gen-m%dk%d-%s-%s-d%d-%03d",
-		s.Quirks, s.Distractors, s.Plausibility, s.Prompt, s.Depth, s.Replicate+1)
+	return fmt.Sprintf("gen-m%dk%d-%s-%s-d%d-s%03d-%03d",
+		s.Quirks, s.Distractors, s.Plausibility, s.Prompt, s.Depth, s.Seed, s.Replicate+1)
 }
 
 // Validate rejects dimensions the generator cannot express
