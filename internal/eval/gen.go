@@ -71,8 +71,12 @@ func (s GenSpec) Validate() error {
 	if s.Quirks < 0 || s.Quirks > 4 {
 		return fmt.Errorf("quirks %d — the authored ladder is 0..4 relevant rows", s.Quirks)
 	}
-	if s.Distractors < 0 || s.Distractors > len(genDistractorNames) {
-		return fmt.Errorf("distractors %d — name pool holds %d", s.Distractors, len(genDistractorNames))
+	// Keep one undrawn name in reserve: a draw that collides with
+	// the target (quota, ledger live in both pools) swaps the
+	// colliding slot for a tail entry — an empty tail can't swap.
+	if s.Distractors < 0 || s.Distractors > len(genDistractorNames)-1 {
+		return fmt.Errorf("distractors %d — name pool holds %d, one reserved for collision repair",
+			s.Distractors, len(genDistractorNames))
 	}
 	switch s.Plausibility {
 	case "low", "mid", "high", "in_scope":
@@ -146,7 +150,25 @@ func (s GenSpec) draw() genDraw {
 	if s.Quirks >= 3 {
 		d.sibling = shuffle(genSiblingNames)[0]
 	}
-	d.distractor = shuffle(genDistractorNames)[:s.Distractors]
+	shuffled := shuffle(genDistractorNames)
+	d.distractor = shuffled[:s.Distractors]
+	// The pools share names (quota, ledger) so a draw can put the
+	// target in its own distractor set — a stale-name or healthy
+	// package that binds the target and contaminates the cell.
+	// Swap collisions for an undrawn pool name; the shuffle itself
+	// is untouched, so clean draws — every committed cell — keep
+	// their bytes and snapshot keys.
+	for i, name := range d.distractor {
+		if name != d.target {
+			continue
+		}
+		for _, spare := range shuffled[s.Distractors:] {
+			if spare != d.target {
+				d.distractor[i] = spare
+				break
+			}
+		}
+	}
 	switch s.Plausibility {
 	case "high":
 		// Near-miss referents: names adjacent to the target's —

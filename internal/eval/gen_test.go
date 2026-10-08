@@ -119,6 +119,26 @@ func TestGenerate_ReplicateVarianceAndDeterminism(t *testing.T) {
 		"same seed+replicate must reproduce byte-identical specs")
 }
 
+// The target and distractor pools share names (quota, ledger).
+// A draw that lands the target in its own distractor set builds
+// packages or stale-name commands that bind the measured scope —
+// contaminated memory, not a wrong referent. The draw swaps the
+// collision for an undrawn tail name; sweep the reachable dose.
+func TestGenDraw_DistractorNeverTargets(t *testing.T) {
+	t.Parallel()
+	for seed := int64(0); seed < 500; seed++ {
+		for rep := 0; rep < 3; rep++ {
+			spec := GenSpec{
+				Quirks: 1, Distractors: len(genDistractorNames) - 1,
+				Plausibility: "mid", Prompt: "explicit", Seed: seed, Replicate: rep,
+			}
+			d := spec.draw()
+			require.NotContains(t, d.distractor, d.target,
+				"seed %d replicate %d drew target %q as a distractor", seed, rep, d.target)
+		}
+	}
+}
+
 // Dimension validation: a cell that can't express its dose must
 // fail loudly rather than silently clamp to a different question.
 func TestGenSpec_Validate(t *testing.T) {
