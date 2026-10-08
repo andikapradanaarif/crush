@@ -340,9 +340,11 @@ func (r *Runner) runReplay(ctx context.Context, exp *Experiment, traj *Trajector
 				manifest, inv, snapRoot, neutralCfg, snaps[c.fork], c.fork, attempts[c], tr, srcName, seedKey, warm)
 			if err != nil {
 				slog.Warn("Replay run harness failed", "trajectory", traj.ID, "fork", c.fork, "arm", c.arm, "error", err)
-				rec = RunRecord{Experiment: exp.Name, TrajectoryID: traj.ID, Arm: c.arm, Invocation: inv,
+				rec = RunRecord{
+					Experiment: exp.Name, TrajectoryID: traj.ID, Arm: c.arm, Invocation: inv,
 					RunIndex: attempts[c], Outcome: OutcomeError,
-					Replay: &ReplayMeta{ForkTurn: c.fork, SourceArm: srcName}}
+					Replay: &ReplayMeta{ForkTurn: c.fork, SourceArm: srcName},
+				}
 			}
 			if err := r.appendRecord(rec); err != nil {
 				slog.Warn("Failed to append run record", "error", err)

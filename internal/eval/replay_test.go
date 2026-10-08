@@ -139,10 +139,12 @@ func (d *replayDriver) RunTurn(ctx context.Context, workdir, sessionID, prompt s
 	call.workHash = hashWorkdir(workdir)
 	d.calls = append(d.calls, call)
 
-	res := RunResult{Steps: d.steps, SessionID: d.session,
+	res := RunResult{
+		Steps: d.steps, SessionID: d.session,
 		Tokens:          TokenUsage{Input: 10, Output: 5},
 		ModelResolved:   "mock/m",
-		ResolvedOptions: map[string]any{}}
+		ResolvedOptions: map[string]any{},
+	}
 	if d.boomKey != "" && call.opts[d.boomKey] == true {
 		res.Err = fmt.Errorf("boom: %s armed", d.boomKey)
 		res.ErrorClass = "fixture_config"
@@ -186,8 +188,10 @@ func TestRunReplay_RecordsPairPerFork(t *testing.T) {
 	t.Parallel()
 	root, trajDir, traj := replayFixture(t, "alpha", "bravo", "czech")
 	drv := newReplayDriver()
-	r := &Runner{EvalDir: root, Driver: drv, WorkParent: t.TempDir(),
-		RNG: rand.New(rand.NewPCG(1, 2))}
+	r := &Runner{
+		EvalDir: root, Driver: drv, WorkParent: t.TempDir(),
+		RNG: rand.New(rand.NewPCG(1, 2)),
+	}
 	exp := replayExperiment("", nil)
 	manifest := &FlagsManifest{Defaults: map[string]any{"debug": false}}
 
@@ -238,8 +242,10 @@ func TestRunReplay_IdenticalHistoryAcrossArms(t *testing.T) {
 	t.Parallel()
 	root, trajDir, traj := replayFixture(t, "alpha", "bravo", "czech")
 	drv := newReplayDriver()
-	r := &Runner{EvalDir: root, Driver: drv, WorkParent: t.TempDir(),
-		RNG: rand.New(rand.NewPCG(3, 4))}
+	r := &Runner{
+		EvalDir: root, Driver: drv, WorkParent: t.TempDir(),
+		RNG: rand.New(rand.NewPCG(3, 4)),
+	}
 	exp := replayExperiment("", nil)
 	manifest := &FlagsManifest{Defaults: map[string]any{"debug": false}}
 
@@ -268,8 +274,10 @@ func TestRunReplay_ConfigIsolation(t *testing.T) {
 	t.Parallel()
 	root, trajDir, traj := replayFixture(t, "alpha", "bravo")
 	drv := newReplayDriver()
-	r := &Runner{EvalDir: root, Driver: drv, WorkParent: t.TempDir(),
-		RNG: rand.New(rand.NewPCG(5, 6))}
+	r := &Runner{
+		EvalDir: root, Driver: drv, WorkParent: t.TempDir(),
+		RNG: rand.New(rand.NewPCG(5, 6)),
+	}
 	exp := &Experiment{
 		Name: "replay-exp", Model: "mock/m", Temperature: ptr(0.0),
 		Arms: map[string]Arm{
@@ -306,8 +314,10 @@ func TestRunReplay_PartialRecording(t *testing.T) {
 	root, trajDir, traj := replayFixture(t, "alpha", "bravo", "czech", "delta")
 	drv := newReplayDriver()
 	drv.failTurn = 2
-	r := &Runner{EvalDir: root, Driver: drv, WorkParent: t.TempDir(),
-		RNG: rand.New(rand.NewPCG(7, 8))}
+	r := &Runner{
+		EvalDir: root, Driver: drv, WorkParent: t.TempDir(),
+		RNG: rand.New(rand.NewPCG(7, 8)),
+	}
 	exp := replayExperiment("", nil)
 	manifest := &FlagsManifest{Defaults: map[string]any{"debug": false}}
 
@@ -335,8 +345,10 @@ func TestRunReplay_ForkErrorIsArmData(t *testing.T) {
 	root, trajDir, traj := replayFixture(t, "alpha", "bravo")
 	drv := newReplayDriver()
 	drv.boomKey = "boom"
-	r := &Runner{EvalDir: root, Driver: drv, WorkParent: t.TempDir(),
-		RNG: rand.New(rand.NewPCG(9, 10))}
+	r := &Runner{
+		EvalDir: root, Driver: drv, WorkParent: t.TempDir(),
+		RNG: rand.New(rand.NewPCG(9, 10)),
+	}
 	exp := &Experiment{
 		Name: "replay-exp", Model: "mock/m", Temperature: ptr(0.0),
 		Arms: map[string]Arm{
@@ -375,8 +387,10 @@ func TestCompare_PairsWithinFork(t *testing.T) {
 	t.Parallel()
 	root := newEvalDir(t)
 	r := &Runner{EvalDir: root}
-	exp := &Experiment{Name: "pair-exp", Model: "mock/m", Temperature: ptr(0.0),
-		Arms: map[string]Arm{ArmControl: {}, ArmTreatment: {}}}
+	exp := &Experiment{
+		Name: "pair-exp", Model: "mock/m", Temperature: ptr(0.0),
+		Arms: map[string]Arm{ArmControl: {}, ArmTreatment: {}},
+	}
 	for _, fork := range []int{0, 1, 2} {
 		csteps := (fork + 1) * 10
 		tsteps := csteps * 3 / 2 // Uniform +50% — only correct pairing yields theta 0.5.
@@ -413,8 +427,10 @@ func TestRunReplay_ForkTurnsSubset(t *testing.T) {
 	t.Parallel()
 	root, trajDir, traj := replayFixture(t, "alpha", "bravo", "czech")
 	drv := newReplayDriver()
-	r := &Runner{EvalDir: root, Driver: drv, WorkParent: t.TempDir(),
-		RNG: rand.New(rand.NewPCG(11, 12))}
+	r := &Runner{
+		EvalDir: root, Driver: drv, WorkParent: t.TempDir(),
+		RNG: rand.New(rand.NewPCG(11, 12)),
+	}
 	exp := replayExperiment("", []int{2})
 	manifest := &FlagsManifest{Defaults: map[string]any{"debug": false}}
 
@@ -433,8 +449,10 @@ func TestRunReplay_ForkTurnsSubset(t *testing.T) {
 func TestRunReplay_DriverWithoutTurnRunner(t *testing.T) {
 	t.Parallel()
 	root, trajDir, traj := replayFixture(t, "a", "b")
-	r := &Runner{EvalDir: root, Driver: fakeRunner{}, WorkParent: t.TempDir(),
-		RNG: rand.New(rand.NewPCG(13, 14))}
+	r := &Runner{
+		EvalDir: root, Driver: fakeRunner{}, WorkParent: t.TempDir(),
+		RNG: rand.New(rand.NewPCG(13, 14)),
+	}
 	exp := replayExperiment("", nil)
 	manifest := &FlagsManifest{Defaults: map[string]any{}}
 	rep := r.runReplay(context.Background(), exp, traj, trajDir, manifest, 1, "inv1", &configErrorTracker{})
