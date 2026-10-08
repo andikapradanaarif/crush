@@ -74,9 +74,9 @@ func (s GenSpec) Validate() error {
 		return fmt.Errorf("distractors %d — name pool holds %d", s.Distractors, len(genDistractorNames))
 	}
 	switch s.Plausibility {
-	case "low", "mid", "high":
+	case "low", "mid", "high", "in_scope":
 	default:
-		return fmt.Errorf("plausibility %q is not low|mid|high", s.Plausibility)
+		return fmt.Errorf("plausibility %q is not low|mid|high|in_scope", s.Plausibility)
 	}
 	switch s.Prompt {
 	case "vague", "explicit":
@@ -159,6 +159,12 @@ func (s GenSpec) draw() genDraw {
 		for _, name := range d.distractor {
 			d.hidden = append(d.hidden, name+"x")
 		}
+	case "in_scope":
+		// The only distractor class that binds: a wrong failure
+		// inside the target's own scope — a tag-hidden decoy test
+		// named after the distractor — so scope binding can't
+		// reject it the way every cross-package referent is
+		// rejected. Rendered-j doses come from here.
 	case "low":
 		d.fine = d.distractor
 	}
@@ -332,7 +338,37 @@ func TestStub(t *testing.T) {
 		// mid-tier distractors need no fixture — the whole point is
 		// the referent doesn't exist on disk.
 	}
+	if s.Plausibility == "in_scope" {
+		for _, name := range d.distractor {
+			// The decoy lives in the target package behind the
+			// private tag: `go test ./...` never compiles it, but
+			// `go test -tags private -run Test<Name> ./<target>`
+			// is a real failure in the target's own scope — a
+			// stored wrong row that actually renders.
+			decoy := fmt.Sprintf(`//go:build private
+
+package %s
+
+import "testing"
+
+func Test%s(t *testing.T) {
+	if Contract() != 99 {
+		t.Fatalf("Contract() = %%d, want 99", Contract())
+	}
+}
+`, d.target, titleName(name))
+			if err := w("fixture/"+d.targetPath+"/decoy_"+name+"_private_test.go", decoy); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
+}
+
+// titleName upper-cases a package-name word into a Go test
+// identifier — "auth" → "Auth".
+func titleName(name string) string {
+	return strings.ToUpper(name[:1]) + name[1:]
 }
 
 // seedCommands authors the memory rows. Ages stagger so the
@@ -362,6 +398,11 @@ func (s GenSpec) seedCommands(d genDraw) []ScriptedSeed {
 		case "high":
 			// Near-miss failure, tag-hidden from the check.
 			cmd = "go test -tags private ./" + d.hidden[i]
+		case "in_scope":
+			// Wrong failure in the target's own scope — a hidden
+			// decoy test. Binds where every cross-package row
+			// rejects, so stored K becomes rendered j.
+			cmd = "go test -tags private -run Test" + titleName(name) + " ./" + d.targetPath
 		}
 		seeds = append(seeds, ScriptedSeed{
 			AgoSeconds: ago(48 + float64(i)*6),
@@ -497,7 +538,7 @@ func (s GenSpec) wantPoolCounts() (open, resolved, cmdMin int) {
 		open++ // go test -run TestContract -v ./<target>
 	}
 	if s.Plausibility != "low" {
-		open += s.Distractors // mid/high distractors are failures
+		open += s.Distractors // mid/high/in_scope distractors are failures
 	}
 	if s.Quirks >= 3 {
 		resolved++ // sibling: fail → printf fix → pass

@@ -28,6 +28,10 @@ func TestGenerate_EndToEndSeedsAndGate(t *testing.T) {
 		// Low-tier distractors are benign command rows — no
 		// failures among them, so open stays at the target count.
 		{Quirks: 1, Distractors: 3, Plausibility: "low", Prompt: "explicit", Depth: 0, Seed: 11, Replicate: 0},
+		// In-scope distractors are hidden decoy tests inside the
+		// target package — open rows that bind under explicit
+		// scope, the only wrong-memory class that renders.
+		{Quirks: 2, Distractors: 2, Plausibility: "in_scope", Prompt: "explicit", Depth: 0, Seed: 13, Replicate: 0},
 		// Bare cell: no memory at all — the M=0 arm's honest floor.
 		{Quirks: 0, Distractors: 0, Plausibility: "mid", Prompt: "vague", Depth: 1, Seed: 3, Replicate: 0},
 	} {

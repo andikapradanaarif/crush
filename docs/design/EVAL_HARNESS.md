@@ -213,7 +213,9 @@ every characterization pass a diff to reviewed files.
   fixtures: `--quirks` (relevant memory rows about the target, 0-4),
   `--distractors` (wrong-referent rows), `--plausibility`
   (low=benign commands / mid=stale-name failures / high=tag-hidden
-  failing tests the check can't see), `--prompt` (vague|explicit),
+  failing tests the check can't see / in_scope=tag-hidden decoy
+  tests inside the target package — the only distractor class that
+  binds, so stored-K becomes rendered-j), `--prompt` (vague|explicit),
   `--depth` (package nesting = discovery cost), `--seed`, `--count`
   (replicates). Each instance draws quirk identity and placement
   from the RNG, so a replicate never re-measures the same quirk —
