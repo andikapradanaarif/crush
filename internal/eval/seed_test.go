@@ -23,8 +23,8 @@ func TestRunScriptedSeeds(t *testing.T) {
 	workdir := t.TempDir()
 
 	seeds := []ScriptedSeed{
-		{AgoSeconds: 72 * 3600, Commands: []string{"ls missing-marker"}},
-		{AgoSeconds: 3600, Commands: []string{"touch missing-marker", "ls missing-marker", "true"}},
+		{AgoSeconds: 72 * 3600, Commands: []string{"cat missing-marker"}},
+		{AgoSeconds: 3600, Commands: []string{"touch missing-marker", "cat missing-marker", "true"}},
 	}
 	ids, err := r.runScriptedSeeds(context.Background(), workdir, seeds, "eval-test")
 	require.NoError(t, err)
@@ -65,7 +65,7 @@ func TestRunScriptedSeeds(t *testing.T) {
 		`SELECT DISTINCT project_key FROM command_memory`).Scan(&projKey))
 	require.Equal(t, "eval-test", projKey)
 	require.NoError(t, conn.QueryRowContext(context.Background(),
-		`SELECT last_at, last_session_id FROM command_memory WHERE cmd_norm = 'ls missing-marker'`).
+		`SELECT last_at, last_session_id FROM command_memory WHERE cmd_norm = 'cat missing-marker'`).
 		Scan(&lastAt, &lastSession))
 	require.Equal(t, ids[1], lastSession)
 	require.InDelta(t, now.Add(-time.Hour).UnixMilli(), lastAt, 60_000)
@@ -107,7 +107,7 @@ func TestExecuteRun_ScriptedSeedsGatePasses(t *testing.T) {
 	root := newEvalDir(t)
 	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "t1", map[string]any{
 		"seed_commands": []any{
-			map[string]any{"ago_seconds": 7200, "commands": []any{"ls missing-marker"}},
+			map[string]any{"ago_seconds": 7200, "commands": []any{"cat missing-marker"}},
 			map[string]any{"ago_seconds": 60, "commands": []any{"true"}},
 		},
 		"check": map[string]any{
@@ -189,7 +189,7 @@ func TestExecuteRun_SeedSnapshotReplay(t *testing.T) {
 	root := newEvalDir(t)
 	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "t1", map[string]any{
 		"seed_commands": []any{
-			map[string]any{"ago_seconds": 7200, "commands": []any{"ls missing-marker"}},
+			map[string]any{"ago_seconds": 7200, "commands": []any{"cat missing-marker"}},
 			map[string]any{"ago_seconds": 60, "commands": []any{"touch from-seed", "rm hello.txt"}},
 		},
 		// hello.txt comes from the fixture — the seed deleted it.
