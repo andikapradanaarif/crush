@@ -1,0 +1,10 @@
+{
+  "invocation": "i1",
+  "primary": {
+    "metric": "steps",
+    "direction": "decrease",
+    "mde": 0.15,
+    "floor": 0.95
+  },
+  "gate_verdict": "pass"
+}

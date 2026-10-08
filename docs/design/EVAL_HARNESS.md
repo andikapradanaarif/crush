@@ -1262,6 +1262,50 @@ decision metric per experiment:
   in the alarm style; alarms also print as `ACCEPTANCE ALARM`
   lines. When the primary *is* `weighted_cost` the cost leg is
   degenerate (ΔC is ΔS) and only the floor checks.
+- **`decision_rule` is the pre-committed stop rule** (#152): the
+  question the invocation exists to answer, written down before it
+  ran so the report ends in a verdict, not an interpretation. The
+  block is `{"hypothesis": <free-text claim>, "primary":
+  {"metric", "arm", "vs", "direction", "min_improvement"},
+  "guardrail": {"metric", "min_delta", optional "arm"/"vs"/
+  "direction"}}` — at least one criterion required, and the
+  hypothesis is never optional (the free-text claim is the thing
+  the structured criteria falsify). Metrics resolve against the
+  closed primary registry plus two arm-aggregate names:
+  `pass_rate` (the conclusive-rate read; deltas are absolute
+  fractions) and `tokens_to_done` (`ArmTotals` cost-per-pass;
+  requires `cost_weights`). `arm`/`vs` name the compared pair —
+  `treatment`-vs-`control` either direction; guardrail arm/vs
+  default to that pair. `direction` is the claimed improvement
+  direction — required on registry metrics, implied on the
+  aggregates (`pass_rate`→increase, `tokens_to_done`→decrease) and
+  rejected if contradicted. Compare stamps `decision rule:
+  satisfied|not satisfied|inconclusive` beside the gate line with
+  each criterion's read: a paired metric *satisfies* only when its
+  CI's conservative bound clears the threshold (the claim must be
+  proven, not merely undisproven), fails when the whole interval
+  sits below, and is inconclusive while spanning it; the aggregate
+  metrics carry no interval and read their measured delta,
+  inconclusive only when unmeasurable. Any conclusive criterion
+  failure falsifies the rule outright. Like `primary`, the block
+  is snapshotted into the invocation record and drift/post-hoc
+  addition suppresses the result to inconclusive — the rule is
+  the anti-post-hoc device, so a rewritten rule can't be read.
+  A manifest with no rule reports `decision rule: absent` —
+  characterize runs legitimately carry no claim. Distinct from the
+  acceptance fields: `floor`/`noise_band`/`base_cost_allowance`
+  gate whether a treatment *may ship* at its measured cost;
+  `decision_rule` is whether the run *answered its question*.
+  The machinery is calibrated by the decision corpus at
+  `internal/eval/testdata/decisions/` — one fixture dir per failure
+  class (noisy-null, known regression, lower-calls-worse-pass,
+  cost inflation, missing telemetry, valid abstention, floor
+  violations, sidecar-spend attribution, post-hoc suppression),
+  each a canned `results/` record set + alarm snapshot +
+  `expect.json` verdict. `TestDecisionCorpus` runs every cell
+  through `Compare`; `EVAL_GEN=1` regenerates the fixtures from
+  `decisionScenarios()` so the corpus is reproducible by
+  construction, and new failure classes land as data.
 - **`cost_weights` prices the cost metric.** `weighted_cost =
   input + h·cache_read + w·cache_write + o·output`, computed over
   the main-model tokens **and `generator_tokens`**. Weights are

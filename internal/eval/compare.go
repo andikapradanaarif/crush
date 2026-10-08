@@ -87,6 +87,13 @@ type CompareReport struct {
 	// run snapshot's own. A clean list means the rule either passed
 	// or was never armed.
 	AcceptanceAlarms []string
+	// RuleResult/RuleNote carry the #152 decision-rule verdict:
+	// "satisfied", "not satisfied", or "inconclusive" when the
+	// manifest pre-committed a rule, "absent" when it didn't — the
+	// issue's requirement that omission be reported, not silent.
+	// RuleNote echoes the hypothesis plus each criterion's read.
+	RuleResult string
+	RuleNote   string
 }
 
 // ArmTotal summarizes one arm's spend across every attempted run.
@@ -181,6 +188,10 @@ type alarmSnapshot struct {
 	// suppresses the verdict when the loaded experiment's primary
 	// has drifted since, closing the post-hoc-MDE hole.
 	Primary *Primary `json:"primary,omitempty"`
+	// DecisionRule is the same pin for the #152 stop rule — the
+	// criteria are pre-committed exactly so they can't be rewritten
+	// to fit the numbers, so drift suppresses the result.
+	DecisionRule *DecisionRule `json:"decision_rule,omitempty"`
 	// GateVerdict/OutcomeAlarms are context, not refusals: a
 	// catastrophic-collapsed invocation's token table shouldn't read
 	// as a win without its gate result beside it.
@@ -198,13 +209,14 @@ type alarmSnapshot struct {
 // the run output); the snapshot is compare's refusal ground truth.
 func (r *Runner) persistAlarms(exp *Experiment, inv string, rep Report, retErr error) error {
 	snap := alarmSnapshot{
-		Invocation: inv,
-		Primary:    exp.Primary,
-		Starved:    rep.Starved,
-		Saturated:  rep.Saturated,
-		Tolerated:  rep.Tolerated,
-		Skipped:    rep.Skipped,
-		NoopFlags:  rep.NoopFlags,
+		Invocation:   inv,
+		Primary:      exp.Primary,
+		DecisionRule: exp.DecisionRule,
+		Starved:      rep.Starved,
+		Saturated:    rep.Saturated,
+		Tolerated:    rep.Tolerated,
+		Skipped:      rep.Skipped,
+		NoopFlags:    rep.NoopFlags,
 	}
 	if retErr != nil {
 		snap.Aborted = retErr.Error()
@@ -314,10 +326,16 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 	// matches what the invocation ran under.
 	primaryTrusted := true
 	var provNote string
+	ruleTrusted := true
+	var ruleProvNote string
 	if snap == nil {
 		// Legacy invocation — no snapshot to verify against.
 		if exp.Primary != nil {
 			provNote = "no alarm snapshot — primary provenance unverifiable"
+		}
+		if exp.DecisionRule != nil {
+			ruleTrusted = false
+			ruleProvNote = "no alarm snapshot — decision_rule provenance unverifiable"
 		}
 	} else {
 		switch {
@@ -331,6 +349,20 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		case snap.Primary != nil && exp.Primary == nil:
 			provNote = fmt.Sprintf("primary was declared at run time (%s %s %.3g) and has since been removed",
 				snap.Primary.Metric, snap.Primary.Direction, snap.Primary.MDE)
+		}
+		// Same pin for the #152 stop rule — its criteria are the
+		// pre-commitment, so drift suppresses the result to
+		// inconclusive rather than reading a rewritten rule back as
+		// if it had been committed.
+		switch {
+		case snap.DecisionRule == nil && exp.DecisionRule != nil:
+			ruleTrusted = false
+			ruleProvNote = "decision_rule declared after the invocation ran — result suppressed (post-hoc)"
+		case snap.DecisionRule != nil && exp.DecisionRule != nil && !sameDecisionRule(snap.DecisionRule, exp.DecisionRule):
+			ruleTrusted = false
+			ruleProvNote = "decision_rule drifted since the invocation — result suppressed"
+		case snap.DecisionRule != nil && exp.DecisionRule == nil:
+			ruleProvNote = "decision_rule was declared at run time and has since been removed"
 		}
 	}
 
@@ -548,6 +580,15 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 	}
 	rep.SkippedMetrics = skippedMetrics
 	rep.applyAcceptance(exp, recs, primaryTrusted)
+	// The rule to answer is the committed one: the snapshot's block
+	// when the manifest has since dropped it (removal doesn't erase
+	// the question), the manifest's otherwise. Drift between them is
+	// untrusted either way.
+	rule := exp.DecisionRule
+	if rule == nil && snap != nil {
+		rule = snap.DecisionRule
+	}
+	rep.evalDecisionRule(rule, recs, ruleTrusted, ruleProvNote)
 	return rep, nil
 }
 
@@ -1189,6 +1230,154 @@ func (rep *CompareReport) applyAcceptance(exp *Experiment, recs []RunRecord, pri
 	}
 }
 
+// evalDecisionRule stamps the #152 pre-committed stop rule onto the
+// report. Three-way by construction: every criterion conclusively
+// clearing its bound is "satisfied", any conclusive failure is "not
+// satisfied" (a falsified claim ends the run even with a sibling
+// still undecided), and anything unmeasurable or spanning its bound
+// is "inconclusive". An untrusted or unverifiable declaration is
+// inconclusive — the rule is the anti-post-hoc device, so reading
+// a drifted one defeats its purpose.
+func (rep *CompareReport) evalDecisionRule(rule *DecisionRule, recs []RunRecord, trusted bool, provNote string) {
+	if rule == nil {
+		rep.RuleResult = "absent"
+		rep.RuleNote = "no decision_rule declared — the run characterizes, it doesn't decide"
+		return
+	}
+	rep.RuleNote = rule.Hypothesis
+	if provNote != "" {
+		rep.RuleNote += " — " + provNote
+	}
+	if !trusted {
+		rep.RuleResult = "inconclusive"
+		return
+	}
+	var bits []string
+	failed, undecided := false, false
+	if p := rule.Primary; p != nil {
+		v, det := rep.ruleCriterion(p.Metric, p.Arm, p.Vs, p.Direction, p.MinImprovement, "primary", recs)
+		bits = append(bits, det)
+		switch v {
+		case "failed":
+			failed = true
+		case "inconclusive":
+			undecided = true
+		}
+	}
+	if g := rule.Guardrail; g != nil {
+		v, det := rep.ruleCriterion(g.Metric, g.Arm, g.Vs, g.Direction, g.MinDelta, "guardrail", recs)
+		bits = append(bits, det)
+		switch v {
+		case "failed":
+			failed = true
+		case "inconclusive":
+			undecided = true
+		}
+	}
+	switch {
+	case failed:
+		rep.RuleResult = "not satisfied"
+	case undecided:
+		rep.RuleResult = "inconclusive"
+	default:
+		rep.RuleResult = "satisfied"
+	}
+	rep.RuleNote += " — " + strings.Join(bits, "; ")
+}
+
+// ruleCriterion reads one declared criterion and returns its verdict
+// — "satisfied"/"failed"/"inconclusive" — plus a terse detail. The
+// delta is normalized so positive means the arm improved on `vs` in
+// the criterion's direction. Paired metrics carry CI bounds, so the
+// satisfied bar is the conservative bound clearing the threshold;
+// the two aggregate metrics (pass_rate, tokens_to_done) have no
+// interval and evaluate on the measured point — unmeasurable inputs,
+// not near-misses, are their inconclusive case.
+func (rep *CompareReport) ruleCriterion(metric, arm, vs, dir string, thresh float64, kind string, recs []RunRecord) (string, string) {
+	sign := 1.0
+	if dir == PrimaryDecrease {
+		sign = -1
+	}
+	// The paired estimand is always treatment-minus-control; an
+	// arm=control criterion reads it negated.
+	armSign := 1.0
+	if arm == ArmControl {
+		armSign = -1
+	}
+	var imp, lo, hi float64
+	bounded := false
+	unmeasurable := ""
+	switch metric {
+	case "pass_rate":
+		cRate, tRate, cConc, tConc := conclusiveRates(recs)
+		if cConc == 0 || tConc == 0 {
+			unmeasurable = fmt.Sprintf("conclusive runs missing (control %d, treatment %d)", cConc, tConc)
+			break
+		}
+		imp = armSign * (tRate - cRate) // Absolute — rates differ in fraction space.
+	case "tokens_to_done":
+		var armT, vsT *ArmTotal
+		for i := range rep.ArmTotals {
+			switch rep.ArmTotals[i].Arm {
+			case arm:
+				armT = &rep.ArmTotals[i]
+			case vs:
+				vsT = &rep.ArmTotals[i]
+			}
+		}
+		if armT == nil || vsT == nil || armT.Passes == 0 || vsT.Passes == 0 || vsT.CostPerPass <= 0 {
+			unmeasurable = "cost-per-pass unmeasurable (an arm passed nothing or produced no ArmTotal row)"
+			break
+		}
+		// The arm-total ratio is already arm-relative to `vs` —
+		// no armSign here; direction alone normalizes to improvement.
+		imp = sign * (armT.CostPerPass - vsT.CostPerPass) / vsT.CostPerPass
+	default:
+		var mc *MetricCompare
+		for i := range rep.Metrics {
+			if rep.Metrics[i].Name == metric {
+				mc = &rep.Metrics[i]
+				break
+			}
+		}
+		if mc == nil {
+			unmeasurable = "no measurable pairs (metric skipped)"
+			break
+		}
+		s := sign * armSign
+		imp = s * mc.Theta
+		if s > 0 {
+			lo, hi = mc.CILoPct/100, mc.CIHiPct/100
+		} else {
+			lo, hi = -mc.CIHiPct/100, -mc.CILoPct/100
+		}
+		bounded = true
+	}
+	label := func(v string) string {
+		if metric == "pass_rate" {
+			return fmt.Sprintf("%s %s: Δ %+.3f ≥ %+.3f → %s", kind, metric, imp, thresh, v)
+		}
+		return fmt.Sprintf("%s %s: imp %+.1f%% vs ≥ %+.1f%% → %s", kind, metric, imp*100, thresh*100, v)
+	}
+	if unmeasurable != "" {
+		return "inconclusive", label("inconclusive") + " (" + unmeasurable + ")"
+	}
+	if bounded {
+		switch {
+		case lo >= thresh:
+			return "satisfied", label("satisfied")
+		case hi < thresh:
+			return "failed", label("failed")
+		default:
+			return "inconclusive", label("inconclusive") + " (CI spans the bound)"
+		}
+	}
+	if imp >= thresh {
+		return "satisfied", label("satisfied")
+	}
+	return "failed", label("failed")
+}
+
 func groupBy[S ~[]E, E any, K comparable](s S, key func(E) K) map[K]S {
 	out := map[K]S{}
 	for _, e := range s {
@@ -1215,6 +1404,13 @@ func (rep *CompareReport) Summary() string {
 	}
 	if rep.Provenance != "" {
 		fmt.Fprintf(&b, "  provenance: %s\n", rep.Provenance)
+	}
+	if rep.RuleResult != "" {
+		fmt.Fprintf(&b, "  decision rule: %s", rep.RuleResult)
+		if rep.RuleNote != "" {
+			fmt.Fprintf(&b, " — %s", rep.RuleNote)
+		}
+		fmt.Fprintln(&b)
 	}
 	fmt.Fprintf(&b, "  pairs: %d conclusive (unmatched: %d) across %d trajectories\n",
 		rep.Pairs, rep.Unmatched, len(rep.Trajectories))

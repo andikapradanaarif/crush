@@ -203,6 +203,86 @@ type Experiment struct {
 	// the regime the experiment needs never engaged, so the run is
 	// vacuous where it should have been decisive.
 	ExpectedExclusion *ExpectedExclusion `json:"expected_exclusion,omitempty"`
+	// DecisionRule is the run's pre-committed question — the
+	// outcome criteria written down before the invocation ran, so
+	// the report answers a declared claim instead of producing
+	// numbers to interpret (#152). The block is snapshotted at
+	// invocation time and drift suppresses the result, same as
+	// Primary's verdict. Optional: characterize runs carry no
+	// claim, and absence is itself reported.
+	DecisionRule *DecisionRule `json:"decision_rule,omitempty"`
+}
+
+// DecisionRule pins the claim and its pass criteria. At least one
+// of Primary/Guardrail must be present — a rule with no measurable
+// criterion is the post-hoc freedom the block exists to remove.
+// Compare stamps one of three results: "rule satisfied" when every
+// criterion clears its bound conclusively, "rule not satisfied"
+// when any criterion conclusively fails, "rule inconclusive" when
+// the data can't decide either way.
+type DecisionRule struct {
+	// Hypothesis is the free-text claim the run tests — the
+	// sentence a reader should be able to falsify with the result.
+	Hypothesis string         `json:"hypothesis"`
+	Primary    *RulePrimary   `json:"primary,omitempty"`
+	Guardrail  *RuleGuardrail `json:"guardrail,omitempty"`
+}
+
+// RulePrimary is the decisive criterion: Arm's Metric must improve
+// on Vs's by at least MinImprovement (relative; 0.15 = 15%) in the
+// claimed Direction. Metric is a registry name or the arm-total
+// aggregate "tokens_to_done". Arm/Vs name declared arms — the
+// comparator only pairs control vs treatment, so Arm must be
+// "treatment" and Vs "control" until multi-arm compare lands.
+type RulePrimary struct {
+	Metric         string  `json:"metric"`
+	Arm            string  `json:"arm"`
+	Vs             string  `json:"vs"`
+	Direction      string  `json:"direction"` // increase | decrease
+	MinImprovement float64 `json:"min_improvement"`
+}
+
+// RuleGuardrail is the accompanying constraint: the Arm-vs-Vs delta
+// on Metric, normalized so positive is improvement in Direction,
+// must be ≥ MinDelta — min_delta=0 claims non-inferiority,
+// min_delta=−0.10 tolerates up to a 10% regression. Metric is a
+// registry name (paired relative diff) or "pass_rate" (absolute
+// conclusive-rate difference). A paired metric clears only when its
+// CI's lower bound clears MinDelta — the guardrail claims
+// non-inferiority, so it must prove it, not merely fail to disprove
+// it. Direction is implied for the aggregate names and required for
+// registry metrics, same as RulePrimary.
+type RuleGuardrail struct {
+	Metric    string  `json:"metric"`
+	Arm       string  `json:"arm,omitempty"`
+	Vs        string  `json:"vs,omitempty"`
+	Direction string  `json:"direction,omitempty"`
+	MinDelta  float64 `json:"min_delta"`
+}
+
+// sameDecisionRule mirrors samePrimary — the pre-registration check
+// for the decision-rule block. All fields are values, but the
+// nested structs are pointers, so field-wise comparison is written
+// out rather than relying on ==.
+func sameDecisionRule(a, b *DecisionRule) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	samePrimaryRule := func(x, y *RulePrimary) bool {
+		if x == nil || y == nil {
+			return x == y
+		}
+		return *x == *y
+	}
+	sameGuardrail := func(x, y *RuleGuardrail) bool {
+		if x == nil || y == nil {
+			return x == y
+		}
+		return *x == *y
+	}
+	return a.Hypothesis == b.Hypothesis &&
+		samePrimaryRule(a.Primary, b.Primary) &&
+		sameGuardrail(a.Guardrail, b.Guardrail)
 }
 
 // ExpectedExclusion pins which arm is supposed to fail and how:

@@ -1,0 +1,17 @@
+{
+  "invocation": "i1",
+  "decision_rule": {
+    "hypothesis": "memory cuts input tokens by 10%",
+    "primary": {
+      "metric": "tokens.input",
+      "arm": "treatment",
+      "vs": "control",
+      "direction": "decrease",
+      "min_improvement": 0.1
+    }
+  },
+  "gate_verdict": "pass",
+  "outcome_alarms": [
+    "expected-exclusion met: t1 (2 window_cap_enforced)"
+  ]
+}

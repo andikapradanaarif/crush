@@ -1,0 +1,5 @@
+{
+  "note": "A metric whose source never emitted is unmeasurable — the rule is inconclusive, not zero.",
+  "rule_result": "inconclusive",
+  "rule_note_contains": "no measurable pairs"
+}

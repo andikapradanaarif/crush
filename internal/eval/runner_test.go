@@ -2047,3 +2047,110 @@ func TestExecuteRun_SeedCheckStrayRowStillRejects(t *testing.T) {
 	require.Len(t, drv.calls, 1, "measured session never launches")
 	require.Equal(t, map[string]any{"open_stale_rows": float64(0)}, rec.SeedState)
 }
+
+// The #152 decision_rule block: real metrics only, the compared arm
+// pair must exist, directions are explicit on ambiguous metrics, and
+// the aggregate names resolve their implied directions at load.
+func TestValidateExperiment_DecisionRule(t *testing.T) {
+	t.Parallel()
+	base := func() *Experiment {
+		return &Experiment{
+			Name: "x", Model: "mock/m", Temperature: ptr(0.0), Corpus: []string{"*"},
+			RunsPerTrajectory: map[Band]int{BandMid: 1},
+			Arms:              map[string]Arm{ArmControl: {}, ArmTreatment: {}},
+		}
+	}
+	rule := func() *DecisionRule {
+		return &DecisionRule{
+			Hypothesis: "treatment improves the metric",
+			Primary: &RulePrimary{
+				Metric: "tokens.input", Arm: ArmTreatment, Vs: ArmControl,
+				Direction: PrimaryDecrease, MinImprovement: 0.15,
+			},
+		}
+	}
+
+	// A minimal valid rule validates and normalizes.
+	exp := base()
+	exp.DecisionRule = rule()
+	require.NoError(t, ValidateExperiment(exp))
+
+	// Hypothesis is the claim — absent or blank is not a rule.
+	exp = base()
+	exp.DecisionRule = &DecisionRule{Primary: &RulePrimary{Metric: "steps", Arm: ArmTreatment, Vs: ArmControl, Direction: PrimaryDecrease}}
+	require.ErrorContains(t, ValidateExperiment(exp), "hypothesis")
+	exp = base()
+	exp.DecisionRule = &DecisionRule{Hypothesis: "  "}
+	require.ErrorContains(t, ValidateExperiment(exp), "hypothesis")
+
+	// A rule with no measurable criterion is post-hoc freedom.
+	exp = base()
+	exp.DecisionRule = &DecisionRule{Hypothesis: "vibes"}
+	require.ErrorContains(t, ValidateExperiment(exp), "primary or guardrail")
+
+	// Unknown metrics fail — the registry is closed.
+	exp = base()
+	exp.DecisionRule = rule()
+	exp.DecisionRule.Primary.Metric = "tokens.dreamed"
+	require.ErrorContains(t, ValidateExperiment(exp), "unknown primary metric")
+
+	// Direction is required on registry metrics — ambiguous either way.
+	exp = base()
+	exp.DecisionRule = rule()
+	exp.DecisionRule.Primary.Direction = ""
+	require.ErrorContains(t, ValidateExperiment(exp), "direction is required")
+	exp.DecisionRule.Primary.Direction = "sideways"
+	require.ErrorContains(t, ValidateExperiment(exp), "direction")
+
+	// The compared pair must name declared, distinct arms.
+	exp = base()
+	exp.DecisionRule = rule()
+	exp.DecisionRule.Primary.Arm = "treatment-plus"
+	require.ErrorContains(t, ValidateExperiment(exp), "no arm")
+	exp.DecisionRule.Primary.Arm = ArmControl
+	exp.DecisionRule.Primary.Vs = ArmTreatment // Reverse pair is legal.
+	require.NoError(t, ValidateExperiment(exp))
+	exp.DecisionRule.Primary.Vs = ArmControl
+	require.ErrorContains(t, ValidateExperiment(exp), "itself")
+
+	// tokens_to_done needs the pricing that makes it measurable, and
+	// implies direction=decrease at load.
+	exp = base()
+	exp.DecisionRule = rule()
+	exp.DecisionRule.Primary.Metric = "tokens_to_done"
+	exp.DecisionRule.Primary.Direction = ""
+	require.ErrorContains(t, ValidateExperiment(exp), "cost_weights")
+	exp.CostWeights = &CostWeights{CacheRead: 0.1, Output: 4}
+	require.NoError(t, ValidateExperiment(exp))
+	require.Equal(t, PrimaryDecrease, exp.DecisionRule.Primary.Direction)
+	exp.DecisionRule.Primary.Direction = PrimaryIncrease
+	require.ErrorContains(t, ValidateExperiment(exp), "contradicts")
+
+	// Thresholds stay sane.
+	exp = base()
+	exp.DecisionRule = rule()
+	exp.DecisionRule.Primary.MinImprovement = -0.1
+	require.ErrorContains(t, ValidateExperiment(exp), "min_improvement")
+
+	// The guardrail: pass_rate implies direction=increase; registry
+	// metrics need the direction declared; absent arm/vs default to
+	// treatment-vs-control.
+	exp = base()
+	exp.DecisionRule = &DecisionRule{
+		Hypothesis: "no regression",
+		Guardrail:  &RuleGuardrail{Metric: "pass_rate", MinDelta: 0},
+	}
+	require.NoError(t, ValidateExperiment(exp))
+	require.Equal(t, PrimaryIncrease, exp.DecisionRule.Guardrail.Direction)
+	require.Equal(t, ArmTreatment, exp.DecisionRule.Guardrail.Arm)
+	require.Equal(t, ArmControl, exp.DecisionRule.Guardrail.Vs)
+
+	exp = base()
+	exp.DecisionRule = &DecisionRule{
+		Hypothesis: "no token regression",
+		Guardrail:  &RuleGuardrail{Metric: "tokens.output", MinDelta: -0.10},
+	}
+	require.ErrorContains(t, ValidateExperiment(exp), "direction is required")
+	exp.DecisionRule.Guardrail.Direction = PrimaryDecrease
+	require.NoError(t, ValidateExperiment(exp))
+}
