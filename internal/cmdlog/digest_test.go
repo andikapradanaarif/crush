@@ -225,6 +225,49 @@ func TestRefreshSessionDigests_DropsOutOfWorkspacePaths(t *testing.T) {
 	require.NotContains(t, d.Files, "leak.go")
 }
 
+func TestRefreshSessionDigests_CoarsestCheckpointWins(t *testing.T) {
+	t.Parallel()
+	env := setupDigestTest(t)
+	seedSession(t, env, "s1", "work", 700)
+	// A session-grain checkpoint carries the consolidated position; a
+	// turn-grain one written later is a fragment — the digest keeps
+	// the position, not the newest sliver.
+	seedCheckpoint(t, env, "s1", 1, "Session checkpoint", "the whole position")
+	_, err := env.conn.ExecContext(env.ctx,
+		`INSERT INTO notebook_tags (entry_id, tag) VALUES ('s1-ck-1', 'granularity:session')`)
+	require.NoError(t, err)
+	seedCheckpoint(t, env, "s1", 2, "Turn checkpoint", "turn two only")
+	_, err = env.conn.ExecContext(env.ctx,
+		`INSERT INTO notebook_tags (entry_id, tag) VALUES ('s1-ck-2', 'granularity:turn')`)
+	require.NoError(t, err)
+
+	require.NoError(t, env.svc.RefreshSessionDigests(env.ctx, 10))
+	d, err := env.q.GetSessionDigest(env.ctx, "s1")
+	require.NoError(t, err)
+	require.Contains(t, d.Checkpoint, "the whole position")
+	require.NotContains(t, d.Checkpoint, "turn two only")
+}
+
+func TestRefreshSessionDigests_RenameRestales(t *testing.T) {
+	t.Parallel()
+	env := setupDigestTest(t)
+	seedSession(t, env, "s1", "old title", 700)
+	require.NoError(t, env.svc.RefreshSessionDigests(env.ctx, 10))
+
+	// A rename is an UPDATE — the sessions trigger bumps updated_at,
+	// which re-stales the digest so the new title re-materializes.
+	_, err := env.conn.ExecContext(env.ctx,
+		`UPDATE sessions SET title = 'login redesign' WHERE id = 's1'`)
+	require.NoError(t, err)
+	require.NoError(t, env.svc.RefreshSessionDigests(env.ctx, 10))
+	d, err := env.q.GetSessionDigest(env.ctx, "s1")
+	require.NoError(t, err)
+	require.Equal(t, "login redesign", d.Title)
+	hits, err := env.svc.SearchSessionDigests(env.ctx, "redesign", "other", 3)
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+}
+
 func TestRefreshSessionDigests_LimitBounds(t *testing.T) {
 	t.Parallel()
 	env := setupDigestTest(t)

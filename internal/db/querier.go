@@ -60,8 +60,11 @@ type Querier interface {
 	// use `body MATCH` --- equivalent here since body is the only indexed
 	// column. Explicit column lists everywhere: sqlc's `*` expansion
 	// re-parses badly against this schema.
-	// The session's most recent consolidated checkpoint --- the digest's
-	// narrative field where the notebook produced one.
+	// The session's consolidated position --- the digest's narrative
+	// field where the notebook produced one. Coarsest granularity wins
+	// before recency: a session- or boundary-grain checkpoint carries the
+	// whole position, so a turn-grain one written later must not displace
+	// it. Untagged checkpoints rank coarsest, matching granularityRank.
 	GetLatestCheckpointEntry(ctx context.Context, sessionID string) (GetLatestCheckpointEntryRow, error)
 	// Per-tool call count plus the number of distinct sessions that used
 	// it: the per-session split the GROUP BY aggregate loses. Counts

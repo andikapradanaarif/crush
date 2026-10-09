@@ -9,11 +9,24 @@
 -- re-parses badly against this schema.
 
 -- name: GetLatestCheckpointEntry :one
--- The session's most recent consolidated checkpoint --- the digest's
--- narrative field where the notebook produced one.
-SELECT title, entry_text FROM notebook_entries
-WHERE session_id = ? AND event_type = 'checkpoint'
-ORDER BY turn_number DESC, event_number DESC
+-- The session's consolidated position --- the digest's narrative
+-- field where the notebook produced one. Coarsest granularity wins
+-- before recency: a session- or boundary-grain checkpoint carries the
+-- whole position, so a turn-grain one written later must not displace
+-- it. Untagged checkpoints rank coarsest, matching granularityRank.
+SELECT e.title, e.entry_text FROM notebook_entries e
+LEFT JOIN notebook_tags t ON t.entry_id = e.id
+    AND t.tag LIKE 'granularity:%'
+WHERE e.session_id = ? AND e.event_type = 'checkpoint'
+ORDER BY
+    CASE t.tag
+        WHEN 'granularity:turn' THEN 0
+        WHEN 'granularity:boundary' THEN 1
+        WHEN 'granularity:session' THEN 2
+        ELSE 3
+    END DESC,
+    e.turn_number DESC,
+    e.event_number DESC
 LIMIT 1;
 
 -- name: ListStaleDigestSessions :many

@@ -87,7 +87,10 @@ var digestStopWords = map[string]bool{
 	"remember": true, "remind": true, "tell": true, "show": true,
 	// Development vocabulary indexes but cannot discriminate — "fix"
 	// and "test" appear in nearly every session's title or touched
-	// paths, so matching on them is recall noise.
+	// paths, so matching on them is recall noise. A deictic prompt
+	// built entirely of dev-vocab ("the test thing") yields no terms —
+	// it named a target the index can't resolve, and the no-guess rule
+	// applies.
 	"fix": true, "fixed": true, "fixes": true, "test": true,
 	"tests": true, "testing": true, "bug": true, "bugs": true,
 	"code": true, "file": true, "files": true, "src": true,
@@ -311,11 +314,13 @@ func (s *service) relPath(path string) string {
 		if p == ".." || strings.HasPrefix(p, ".."+string(filepath.Separator)) {
 			return ""
 		}
-		return p
+		return filepath.ToSlash(p)
 	}
 	rel, err := filepath.Rel(s.workingDir, filepathext.Canonical(p))
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return ""
 	}
-	return rel
+	// Slash-normalized like read_files rows — the digest is one shape
+	// on every platform, and suggested-mark lookups compare strings.
+	return filepath.ToSlash(rel)
 }

@@ -830,7 +830,7 @@
         },
         "session_memory": {
           "type": "boolean",
-          "description": "Read session memory: inject the \u003csession_memory\u003e tail section with pointers to prior sessions (title / date / touched files) matched by FTS5 over per-session digests for vague and continuation prompts. Digest indexing is lazy; this gates the read side. Experimental.",
+          "description": "Read session memory: inject the \u003csession_memory\u003e tail section with pointers to prior sessions (title / date / touched files) matched by FTS5 over per-session digests for vague and continuation prompts. Digest indexing is lazy — enabling starts cold and history materializes over subsequent turns; this gates the read side and its index build. Experimental.",
           "default": false
         },
         "memory_telemetry": {

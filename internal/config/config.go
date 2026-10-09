@@ -568,9 +568,11 @@ type Options struct {
 	// prior sessions in this workspace (title, date, touched files)
 	// resolved from vague and continuation prompts like "continue" or
 	// "the login thing" via a per-session digest + FTS5 index (#164).
-	// Digest materialization is lazy at retrieval time; this option
-	// gates the render side. Experimental; default off.
-	SessionMemory *bool `json:"session_memory,omitempty" jsonschema:"description=Read session memory: inject the <session_memory> tail section with pointers to prior sessions (title / date / touched files) matched by FTS5 over per-session digests for vague and continuation prompts. Digest indexing is lazy; this gates the read side. Experimental.,default=false"`
+	// Digest materialization is lazy at retrieval time — enabling
+	// starts cold and history materializes over subsequent turns;
+	// this option gates the read side and its index build.
+	// Experimental; default off.
+	SessionMemory *bool `json:"session_memory,omitempty" jsonschema:"description=Read session memory: inject the <session_memory> tail section with pointers to prior sessions (title / date / touched files) matched by FTS5 over per-session digests for vague and continuation prompts. Digest indexing is lazy — enabling starts cold and history materializes over subsequent turns; this gates the read side and its index build. Experimental.,default=false"`
 	// MemoryTelemetry opts in to local-only memory-usage logging:
 	// append-only JSONL records at data_directory/memory-telemetry.jsonl
 	// describing what memory did each turn — the prompt text, sections
