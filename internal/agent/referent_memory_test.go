@@ -90,6 +90,16 @@ func TestReferentJudgedVerdict(t *testing.T) {
 		{"revert that", cmdlog.ReferentRevised},
 		{"that's not what I meant", cmdlog.ReferentRevised},
 		{"oops, undo it", cmdlog.ReferentRevised},
+		// A follow-up the English cues cannot read is unknown —
+		// unparseable input fails closed, never mints acceptance.
+		{"改错了文件", cmdlog.ReferentUnknown},
+		{"修正してください", cmdlog.ReferentUnknown},
+		{"👍", cmdlog.ReferentUnknown},
+		{"!!!", cmdlog.ReferentUnknown},
+		{"", cmdlog.ReferentUnknown},
+		// Non-ASCII punctuation inside readable English still
+		// classifies — only letters outside ASCII mark unknown.
+		{"looks good — ship it", cmdlog.ReferentAccepted},
 	} {
 		t.Run(tc.prompt, func(t *testing.T) {
 			t.Parallel()

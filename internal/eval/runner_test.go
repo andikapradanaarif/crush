@@ -1398,8 +1398,14 @@ func TestValidateArmCoverageResolved_FlagGatedPrimary(t *testing.T) {
 	exp := &Experiment{
 		Primary: &Primary{Metric: "checkpoints.rendered", Direction: PrimaryIncrease, MDE: 0.5},
 		Arms: map[string]Arm{
-			ArmControl:   {Config: ArmConfig{Options: map[string]any{"notebook_checkpoint": false}}},
-			ArmTreatment: {Config: ArmConfig{Options: map[string]any{"notebook_checkpoint": true}}},
+			ArmControl: {Config: ArmConfig{Options: map[string]any{
+				"notebook_enabled":    true,
+				"notebook_checkpoint": false,
+			}}},
+			ArmTreatment: {Config: ArmConfig{Options: map[string]any{
+				"notebook_enabled":    true,
+				"notebook_checkpoint": true,
+			}}},
 		},
 	}
 	require.ErrorContains(t, ValidateArmCoverageResolved(exp, manifest), "structural zeros")

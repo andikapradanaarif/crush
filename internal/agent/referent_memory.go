@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/cmdlog"
@@ -85,13 +86,36 @@ func extractReferentPhrase(prompt string) string {
 
 // referentJudgedVerdict classifies the current user prompt's verdict
 // on the previous turn's edits — a correction cue marks the episode
-// revised; anything else is acceptance (weak feedback per the issue's
-// amendment: the user may have revised silently, which is why the
-// promotion floor counts distinct sessions and the render stays a
-// candidate).
+// revised. A follow-up the English cue regex cannot read is unknown,
+// not accepted: unparseable input must not mint promotion evidence
+// (learned labels fail closed, same asymmetry rule the substrate
+// applies elsewhere). ASCII-script text the regex reads cleanly
+// counts as acceptance — weak feedback per the issue's amendment:
+// the user may have revised silently, which is why the promotion
+// floor counts distinct sessions and the render stays a candidate.
+// Known residual: a Latin-script language the cues don't cover
+// (e.g. Indonesian "bukan itu") still slips — the artifact-based
+// acceptance signals are the real fix for that class.
 func referentJudgedVerdict(currentPrompt string) string {
 	if referentVerdictRe.MatchString(currentPrompt) {
 		return cmdlog.ReferentRevised
+	}
+	hasLetter := false
+	for _, r := range currentPrompt {
+		if unicode.IsLetter(r) {
+			hasLetter = true
+			if r > unicode.MaxASCII {
+				// A letter the English cue vocabulary can't
+				// read — the verdict may be a revision the
+				// regex doesn't know.
+				return cmdlog.ReferentUnknown
+			}
+		}
+	}
+	if !hasLetter {
+		// No lexical content at all (emoji, punctuation) — there
+		// is no cue to evaluate either way.
+		return cmdlog.ReferentUnknown
 	}
 	return cmdlog.ReferentAccepted
 }

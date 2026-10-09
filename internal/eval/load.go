@@ -938,11 +938,15 @@ func checkArmStarvation(armName, key, op, field string, resolve func(string) (an
 
 // flagCodeDefaults mirror the Options helper defaults for the flag-
 // gated coverage counters — the last resolution step when neither the
-// arm nor the flags manifest names the key.
+// arm nor the flags manifest names the key. Keep in sync with the
+// config defaults — the parity test asserts it (a shipped default
+// flip that misses this map silently mislabels baseline keys and
+// under-rejects gated predicates; the #205 notebook flip did both
+// until the 10-09 review caught the drift).
 var flagCodeDefaults = map[string]bool{
-	"notebook_enabled":         true,
+	"notebook_enabled":         false,
 	"notebook_stub_superseded": false,
-	"notebook_checkpoint":      true,
+	"notebook_checkpoint":      false,
 	"notebook_hydration":       true,
 	"notebook_pressure_gate":   true,
 	"project_index":            false,
