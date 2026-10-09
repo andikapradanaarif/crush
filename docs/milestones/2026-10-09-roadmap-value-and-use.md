@@ -97,6 +97,13 @@ certify before shipping, not ones that maximize an average.
 | **C — online choice** | Conservative Thompson sampling over 2–4 certified values; always-valid acceptance test | Which certified value serves | Propensity-logged traffic, few hundred events/arm, pooled | #297 |
 | **Gate over all three** | Seldonian-shaped: no certificate → keep default; sealed pool for relaxing changes | Whether a learned value ships | Held-out / sealed data | #152, #224 |
 
+Basis (verified 10-09): LTT — Angelopoulos et al., *Ann. Appl.
+Stat.* 2025; shrinkage — Efron & Morris 1975, discounted
+posteriors per Garivier & Moulines, ALT 2011; bandits — Wu et
+al., ICML 2016 + Chapelle & Li 2011 + Dudík et al., ICML 2011 +
+Johari et al. always-valid; gate — Thomas et al., *Science*
+2019. Full citations + headline numbers live on the issues.
+
 Design constraints settled in the 10-09 design pass:
 
 - **Binary harms first** — a wrong-referent admit or a stale row
