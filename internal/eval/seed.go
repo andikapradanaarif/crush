@@ -239,6 +239,35 @@ func (r *Runner) snapshotDir(key string) string {
 	return filepath.Join(r.workParent(), ".snapshots", key)
 }
 
+// analyzeSeedMetrics reconstructs each seed session's call sequence
+// from the workdir's crush.db and sums the behavioral counters into
+// the ledger (#244). Any session's analysis failing leaves
+// SeedMetrics nil — a seed we cannot reconstruct is unverified, not
+// "viewed nothing", and coverage predicates fail closed on the nil.
+func (r *Runner) analyzeSeedMetrics(ctx context.Context, workdir string, warm *WarmStart) {
+	if len(warm.SessionIDs) == 0 {
+		return
+	}
+	dbPath := filepath.Join(DataDirFor(workdir), "crush.db")
+	if !fileExists(dbPath) {
+		return
+	}
+	sum := &SeedMetrics{}
+	for _, sid := range warm.SessionIDs {
+		cm, err := AnalyzeSessionDB(ctx, dbPath, AnalyzeOptions{SessionID: sid})
+		if err != nil {
+			slog.Warn("Seed-session analysis failed — seed metrics stay unrecorded",
+				"session", sid, "error", err)
+			return
+		}
+		sum.Calls += cm.Calls
+		sum.FilesViewed += cm.FilesViewed
+		sum.ReadFilesRows += cm.ReadFilesRows
+		sum.DiscoveryCallsBeforeWrite += cm.DiscoveryCallsBeforeWrite
+	}
+	warm.SeedMetrics = sum
+}
+
 // restoreSnapshot lays a prior seed snapshot over the materialized
 // workdir and returns its ledger. false means no snapshot exists —
 // the caller seeds fresh; a restore error falls back the same way

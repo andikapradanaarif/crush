@@ -702,6 +702,34 @@ type WarmStart struct {
 	Tokens          TokenUsage      `json:"tokens"`
 	GeneratorTokens GeneratorTokens `json:"generator_tokens"`
 	DurationS       float64         `json:"duration_s"`
+	// SeedMetrics aggregates per-seed-session call analysis — the
+	// behavioral half of the ledger (#244): "the seed agent never
+	// looked" becomes a measured predicate rather than an incentive
+	// argument. Nil when seeds ran but the analysis could not run —
+	// coverage predicates fail closed on the nil, never reading an
+	// unverified silence as a satisfied "viewed nothing" assertion.
+	SeedMetrics *SeedMetrics `json:"seed_metrics,omitempty"`
+}
+
+// SeedMetrics is the summed per-seed-session call analysis — each
+// seed's AnalyzeSessionDB output accumulated over warm.SessionIDs.
+// Fields are plain sums across seeds: a seed session is a separate
+// agent, so its seen-set is its own — "no seed viewed anything" is
+// aggregate FilesViewed == 0.
+type SeedMetrics struct {
+	// Calls is the total real tool-call count across seed sessions.
+	Calls int `json:"calls"`
+	// FilesViewed sums each seed's reconstructed seen-set size —
+	// paths with at least one successful view/read. max_...: 0
+	// asserts no seed ever inspected file contents (the stalefile
+	// premise: touch bumps mtime without exposing the body).
+	FilesViewed int `json:"files_viewed"`
+	// ReadFilesRows sums the read_files table counts — the loose
+	// bound on FilesViewed (the tracker also records writes).
+	ReadFilesRows int `json:"read_files_rows"`
+	// DiscoveryCallsBeforeWrite sums pre-write discovery calls —
+	// how much looking the seeding phase did before acting.
+	DiscoveryCallsBeforeWrite int `json:"discovery_calls_before_write"`
 }
 
 // TailSection names one rendered tail envelope and its size — one

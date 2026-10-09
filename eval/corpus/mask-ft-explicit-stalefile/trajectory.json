@@ -16,7 +16,7 @@
 		"timeout_seconds": 300,
 		"seed_script": "seed_check.sh"
 	},
-	"coverage": {"min_steps": 1, "min_warm_start.sessions": 1},
+	"coverage": {"min_steps": 1, "min_warm_start.sessions": 1, "max_warm_start.seed.files_viewed": 0},
 	"requires": {"tools": ["go", "sqlite3"]},
 	"budget": {"run_timeout_seconds": 300, "max_steps": 15}
 }
