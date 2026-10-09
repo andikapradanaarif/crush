@@ -579,6 +579,21 @@ context budget ARE the condition — `ModelPin` keys the run records and
 noise characterization, and a different model is a different experiment
 cell by design.
 
+For iteration-cost runs where the model is operator infrastructure
+rather than the variable under test, `LLM_MODEL` overrides the
+manifest pin at `LoadExperiment`: a bare model id keeps the
+manifest's provider prefix (`LLM_MODEL=muse-spark-1.3-contributor` →
+`llm/muse-spark-1.3-contributor`), a `provider/model` value replaces
+the pin outright. When the resolved model isn't declared in the
+provider block's `models` array, the loader synthesizes an entry —
+metadata from the provider catalog when the id is known, else
+`LLM_CONTEXT_WINDOW` is required and `LLM_DEFAULT_MAX_TOKENS` is
+optional (default 8192). Both envs also override catalog metadata.
+The override happens before validation, so `ModelPin`, preflight,
+and the child's `.crushrc` all record what actually ran — a run
+under `LLM_MODEL` still keys to its own condition cell, distinct
+from manifest-pin records by design.
+
 Agent subprocesses inherit the operator's full credential environment
 (provider keys, `GITHUB_TOKEN`, `AWS_*`, `SSH_AUTH_SOCK`) — pinning is
 on `HOME`/`XDG` config, not on secrets. `origin.kind: production`

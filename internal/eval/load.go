@@ -272,6 +272,9 @@ func LoadExperiment(path string) (*Experiment, error) {
 	if err := json.Unmarshal(data, &e); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	if err := applyEnvModelOverride(&e); err != nil {
+		return nil, fmt.Errorf("experiment %s: %w", path, err)
+	}
 	if err := ValidateExperiment(&e); err != nil {
 		return nil, err
 	}
