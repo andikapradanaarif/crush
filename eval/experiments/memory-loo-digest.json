@@ -1,6 +1,6 @@
 {
  "name": "memory-loo-digest",
- "model": "alibaba-tp/deepseek-v4.1-flash",
+ "model": "llm/deepseek-v4.1-flash",
  "temperature": 0,
  "corpus": ["seeded-five-channel"],
  "runs_per_trajectory": {"stable": 12, "mid": 12, "uncharacterized": 12},
@@ -47,11 +47,11 @@
   "guardrail": {"metric": "pass_rate", "min_delta": -0.1}
  },
  "providers": {
-  "alibaba-tp": {
-   "name": "Alibaba Token Plan",
+  "llm": {
+   "name": "Eval LLM",
    "type": "openai-compat",
-   "api_key": "$ALIBABA_TP_API_KEY",
-   "base_url": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+   "api_key": "$LLM_API_KEY",
+   "base_url": "$LLM_BASE_URL",
    "models": [
     {"id": "deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash", "context_window": 1000000, "default_max_tokens": 384000}
    ]
