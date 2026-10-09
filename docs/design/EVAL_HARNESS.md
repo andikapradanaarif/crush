@@ -844,7 +844,8 @@ handoff, so a replayed turn diffs against the prefix it actually
 continues.
 `tail` is the ephemeral turn tail's only durable trace — one row per
 turn that rendered tail context, with each envelope's name and byte
-size (`turn_context`, `open_failures`, `ambiguity_gate`), the joined
+size (`turn_context`, `open_failures`, `resolved_failures`,
+`command_memory`, `referent_memory`, `ambiguity_gate`), the joined
 text's `sha256`, and the verbatim text. The tail is appended to the
 prompt at render and never persisted to message storage, so without
 this field "did the model actually see the injected context" is

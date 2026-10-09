@@ -823,6 +823,11 @@
           "description": "Arm the reconcile run-edge under failure_memory (open failures the run observed still open block done-ness). When false the tail and selector still run; the edge records gated. Experimental.",
           "default": true
         },
+        "referent_memory": {
+          "type": "boolean",
+          "description": "Read learned referent memory: inject the \u003creferent_memory\u003e tail section with phrase-to-target candidates promoted from accepted vague-prompt outcomes. Episode recording happens regardless; this gates the read side. Experimental.",
+          "default": false
+        },
         "memory_telemetry": {
           "type": "boolean",
           "description": "Opt in to local-only memory-usage telemetry: append-only JSONL at data_directory/memory-telemetry.jsonl recording per-turn memory behavior including the prompt text plus a per-session randomized injection holdout. Never transmitted. Experimental.",

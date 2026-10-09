@@ -558,6 +558,12 @@ type Options struct {
 	// family's shared gate — reconcile is its only member today, and
 	// future failure-memory edges inherit it by design.
 	FailureMemoryEdges *bool `json:"failure_memory_edges,omitempty" jsonschema:"description=Arm the reconcile run-edge under failure_memory (open failures the run observed still open block done-ness). When false the tail and selector still run; the edge records gated. Experimental.,default=true"`
+	// ReferentMemory injects the <referent_memory> tail — phrase→target
+	// mappings learned from accepted vague-prompt outcomes (#165),
+	// rendered as candidates ("usually means X"), never facts.
+	// Episode recording happens regardless under cmdlog; this option
+	// gates the read side only. Experimental; default off.
+	ReferentMemory *bool `json:"referent_memory,omitempty" jsonschema:"description=Read learned referent memory: inject the <referent_memory> tail section with phrase-to-target candidates promoted from accepted vague-prompt outcomes. Episode recording happens regardless; this gates the read side. Experimental.,default=false"`
 	// MemoryTelemetry opts in to local-only memory-usage logging:
 	// append-only JSONL records at data_directory/memory-telemetry.jsonl
 	// describing what memory did each turn — the prompt text, sections
@@ -1651,6 +1657,15 @@ func (o *Options) FailureMemoryEdgesEnabled() bool {
 		return true
 	}
 	return *o.FailureMemoryEdges
+}
+
+// ReferentMemoryEnabled returns the resolved referent-memory
+// injection flag — off unless explicitly enabled.
+func (o *Options) ReferentMemoryEnabled() bool {
+	if o.ReferentMemory == nil {
+		return false
+	}
+	return *o.ReferentMemory
 }
 
 // MemoryTelemetryEnabled returns the resolved local-only memory-usage

@@ -79,6 +79,15 @@ type Memory struct {
 	// warnings. 0 disables the filter. Skeleton bound for a learned
 	// value: [24h, 720h].
 	OpenFailureTTL time.Duration `json:"open_failure_ttl"`
+	// ReferentRenderLimit bounds the <referent_memory> section —
+	// promoted phrase→target candidates (#165). Zero suppresses the
+	// fetch, same contract as the other render limits.
+	ReferentRenderLimit int `json:"referent_render_limit"`
+	// ReferentPromoteHits is the promotion floor: a phrase→target
+	// mapping earns its referent_memory row after this many clean
+	// accepted episodes from DISTINCT sessions — same-session
+	// re-derivation is one observation repeated, not two.
+	ReferentPromoteHits int `json:"referent_promote_hits"`
 }
 
 // Skeleton bounds: the asymmetry contract — tightening is free,
@@ -112,6 +121,8 @@ func DefaultMemory() Memory {
 		FailureCmdRunes:      200,
 		FailureHeadlineRunes: 140,
 		OpenFailureTTL:       30 * 24 * time.Hour,
+		ReferentRenderLimit:  2,
+		ReferentPromoteHits:  2,
 	}
 }
 
@@ -176,6 +187,8 @@ func reflectValues(m Memory) map[string]int64 {
 		"failure_file_hints":     int64(m.FailureFileHints),
 		"failure_cmd_runes":      int64(m.FailureCmdRunes),
 		"failure_headline_runes": int64(m.FailureHeadlineRunes),
+		"referent_render_limit":  int64(m.ReferentRenderLimit),
+		"referent_promote_hits":  int64(m.ReferentPromoteHits),
 	}
 }
 

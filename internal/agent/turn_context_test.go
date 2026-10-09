@@ -135,10 +135,22 @@ func (failingCmdlog) ListSessionOpenFailures(context.Context, string) ([]cmdlog.
 	return nil, errors.New("cmdlog unavailable")
 }
 
-func (failingCmdlog) MarkSuggested(string, string) {}
-func (failingCmdlog) ProjectKey() string           { return "" }
-func (failingCmdlog) ParamVersion() string         { return "" }
-func (failingCmdlog) ForgetSession(string)         {}
+func (failingCmdlog) MarkSuggested(string, string)     {}
+func (failingCmdlog) MarkSuggestedFile(string, string) {}
+func (failingCmdlog) WasSuggestedFile(context.Context, string, string) bool {
+	return false
+}
+
+func (failingCmdlog) RecordReferentEpisode(context.Context, cmdlog.ReferentEpisode, int) error {
+	return nil
+}
+
+func (failingCmdlog) ListReferentCandidates(context.Context, []string, int) ([]cmdlog.Referent, error) {
+	return nil, errors.New("cmdlog unavailable")
+}
+func (failingCmdlog) ProjectKey() string   { return "" }
+func (failingCmdlog) ParamVersion() string { return "" }
+func (failingCmdlog) ForgetSession(string) {}
 
 func userMsg(text string) message.Message {
 	return message.Message{

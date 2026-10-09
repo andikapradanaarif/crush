@@ -131,6 +131,43 @@ Downstream consumers read admitted rows across all three pools —
 the ambiguity gate's "memory resolved the referent" suppression
 counts any bound row, not only open warnings.
 
+### Referent memory — a fourth channel with its own lifecycle (#165)
+
+`<referent_memory>` does not flow through the selector above. The
+three pools select among *records of what happened*; referents are
+*learned mappings* — "the config" → `internal/config/config.go` —
+that only exist after enough evidence promotes them. The lifecycle
+runs two turns deep:
+
+- **Observe** (turn N→N+1): when the last user message was a vague
+  prompt carrying exactly one definite-article noun ("fix the
+  test"), the agent inspects the edits the turn produced. The next
+  user turn judges them — a revision cue ("wrong file", "revert")
+  marks `revised`, anything else `accepted`. Each observed
+  phrase→target pair lands in `referent_episodes` with the #220
+  provenance pack (session, source message, mutating tool call,
+  repo state, project_key, param_version) and a `memory_suggested`
+  flag.
+- **Promote**: `accepted` episodes count toward promotion only when
+  clean (`memory_suggested = 0`) and only across **distinct
+  sessions** — a session re-deriving its own mapping is one
+  observation repeated, not two. `referent_promote_hits` (default
+  2) is the floor; crossing it writes the `referent_memory` row.
+- **Render**: a later vague prompt extracting the same phrase gets
+  the promoted targets as candidates — "usually means X", framed as
+  verifiable hints, never facts. Rendered targets are marked
+  suggested (`MarkSuggestedFile`), which is what keeps an edit of a
+  hinted file from feeding back as independent evidence — the
+  self-reinforcing-heat screen.
+
+Guards are the same shape as the selector's: recording is always on
+(episodes write whether or not `options.referent_memory` renders
+them), the holdout contract suppresses both fetch and mark on
+~10% of telemetry sessions, and a multi-referent prompt ("fix the
+config and the test") records nothing — an unattributable edit is
+worse than a missed observation. Pronouns ("fix it") are unlearnable
+by construction: no definite-article noun, no phrase key.
+
 ## Route space 2 — eval lifecycle (live)
 
 `internal/eval/runner.go` — fixed positions; **order is semantics**:

@@ -360,6 +360,11 @@ type sessionAgent struct {
 	// from the tail (#249). Inverted so the zero value stays armed,
 	// matching the flag's default-true semantics.
 	failureMemoryEdgesOff bool
+	// referentMemory injects the <referent_memory> tail — learned
+	// phrase→target candidates (#165, options.referent_memory).
+	// Episode recording is always on under cmdlog; this gates the
+	// read side only.
+	referentMemory bool
 	// memoryTelemetry is the opt-in local-only usage log (issue #206)
 	// — nil when disabled. agentID attributes its records in
 	// multi-agent sessions.
@@ -591,6 +596,11 @@ type SessionAgentOptions struct {
 	// (options.failure_memory_edges): off records the reconcile edge
 	// gated instead of firing. On by default.
 	FailureMemoryEdges bool
+	// ReferentMemory injects the <referent_memory> tail —
+	// promoted phrase→target candidates learned from accepted
+	// outcomes (#165, options.referent_memory). Recording of
+	// referent episodes happens regardless; this gates the read.
+	ReferentMemory bool
 	// MemoryTelemetry is the opt-in local-only usage log
 	// (options.memory_telemetry); nil when disabled. Shared across
 	// built agents so the holdout assignment is per-session, not
@@ -692,6 +702,7 @@ func NewSessionAgent(
 		turnContext:            opts.TurnContext,
 		failureMemory:          opts.FailureMemory,
 		failureMemoryEdgesOff:  !opts.FailureMemoryEdges,
+		referentMemory:         opts.ReferentMemory,
 		memParams:              opts.MemParams.OrDefault(),
 		memoryTelemetry:        opts.MemoryTelemetry,
 		agentID:                opts.AgentID,

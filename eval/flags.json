@@ -18,6 +18,7 @@
   "notebook_hydration": true,
   "enforce_context_window": false,
   "disable_auto_summarize": false,
-  "failure_memory_edges": true
+  "failure_memory_edges": true,
+  "referent_memory": false
  }
 }

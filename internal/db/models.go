@@ -137,6 +137,30 @@ type ReadFile struct {
 	ReadAt    int64  `json:"read_at"`
 }
 
+type ReferentEpisode struct {
+	ID              int64  `json:"id"`
+	Phrase          string `json:"phrase"`
+	Target          string `json:"target"`
+	SessionID       string `json:"session_id"`
+	SourceMessageID string `json:"source_message_id"`
+	ToolCallID      string `json:"tool_call_id"`
+	RepoState       string `json:"repo_state"`
+	MemorySuggested int64  `json:"memory_suggested"`
+	Verdict         string `json:"verdict"`
+	ProjectKey      string `json:"project_key"`
+	ParamVersion    string `json:"param_version"`
+	CreatedAt       int64  `json:"created_at"`
+}
+
+type ReferentMemory struct {
+	Phrase       string `json:"phrase"`
+	Target       string `json:"target"`
+	Hits         int64  `json:"hits"`
+	LastAt       int64  `json:"last_at"`
+	ProjectKey   string `json:"project_key"`
+	ParamVersion string `json:"param_version"`
+}
+
 type Session struct {
 	ID               string         `json:"id"`
 	ParentSessionID  sql.NullString `json:"parent_session_id"`
