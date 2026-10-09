@@ -44,6 +44,8 @@ drift apart.
 | `failure_cmd_runes` | 200 | ≥ 0 | Command text echoed per row |
 | `failure_headline_runes` | 140 | ≥ 0 | Headline text echoed per row |
 | `open_failure_ttl` | 720h | 0 or [24h, 720h] | Open-failure staleness window |
+| `referent_render_limit` | 2 | ≥ 0 | Referent-memory tail rows |
+| `referent_promote_hits` | 2 | ≥ 0 | Distinct-session acceptances before a phrase→target promotes |
 
 Zero on a cap means "suppress the section" — the tighten
 direction, always allowed. `open_failure_ttl` accepts a Go

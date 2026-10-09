@@ -109,6 +109,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	var openFailures []cmdlog.Failure
 	var resolvedFailures []cmdlog.Failure
 	var commands []cmdlog.Command
+	var referents []cmdlog.Referent
 	var memoryDecisions []FailureDecision
 	var memoryCandidates []cmdlog.Failure
 	var fetchErr error
@@ -122,10 +123,17 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	// "did memory help" (full effect, not render only).
 	holdout := false
 	telemetryOn := a.memoryTelemetry != nil && !a.isSubAgent
+	// Judgment pass for the PREVIOUS turn — episodes are write-side
+	// bookkeeping (recording regardless of injection flags, the same
+	// convention as command memory), gated only on a cmdlog store and
+	// a real user prompt to judge against (#165).
+	a.recordReferentEpisodes(ctx, call, msgs)
 	// armed is effective arming — flag on AND a store to read. A
 	// flag-on session with a nil cmdlog records memory_armed:false
-	// rather than coining a holdout that could never inject.
-	armed := a.failureMemory && a.cmdlog != nil
+	// rather than coining a holdout that could never inject. Any
+	// injecting channel counts — referent_memory alone still owes the
+	// lottery its control arm.
+	armed := (a.failureMemory || a.referentMemory) && a.cmdlog != nil
 	if telemetryOn && armed {
 		holdout = a.memoryTelemetry.holdoutOff(call.SessionID)
 	}
@@ -241,8 +249,18 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 			}
 		}
 	}
-	sections := a.turnContextSections(ctx, call, openFailures, resolvedFailures, commands)
-	boundMemory := len(openFailures) + len(resolvedFailures) + len(commands)
+	// Referent memory is its own option-gated channel (#165) but
+	// shares the holdout contract — a suppressed turn must not leak
+	// the channel through a different pool, and a rendered candidate
+	// marks its target so a later edit of it flags suggested.
+	if !holdout && a.cmdlog != nil {
+		referents = a.referentCandidates(ctx, call, a.memoryParams())
+		for _, r := range referents {
+			a.cmdlog.MarkSuggestedFile(call.SessionID, r.Target)
+		}
+	}
+	sections := a.turnContextSections(ctx, call, openFailures, resolvedFailures, commands, referents)
+	boundMemory := len(openFailures) + len(resolvedFailures) + len(commands) + len(referents)
 	if directive := a.ambiguityDirective(ctx, call, msgs, boundMemory); directive != "" {
 		sections = append(sections, directive)
 	}
@@ -295,7 +313,7 @@ type turnSelection struct {
 // absence.
 func (a *sessionAgent) tailArmed() bool {
 	return !a.isSubAgent &&
-		(a.failureMemory || a.turnContext == "session" || a.ambiguityClarification)
+		(a.failureMemory || a.referentMemory || a.turnContext == "session" || a.ambiguityClarification)
 }
 
 // TailSection names one rendered tail envelope and its size — one
@@ -737,7 +755,7 @@ func (a *sessionAgent) stampDecisionsPostRun(ctx context.Context, sessionID stri
 // display and tests. The tail and its audit need the per-envelope
 // split — see turnContextSections.
 func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCall, openFailures []cmdlog.Failure) string {
-	return strings.Join(a.turnContextSections(ctx, call, openFailures, nil, nil), "\n")
+	return strings.Join(a.turnContextSections(ctx, call, openFailures, nil, nil, nil), "\n")
 }
 
 // turnContextSections renders the tail context sections — the session
@@ -749,7 +767,7 @@ func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCal
 // knowledge — so a reader weighting early content heavier reads the
 // subordinate envelopes last. Returns nil for a sub-agent or when no
 // enabled signal has content.
-func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgentCall, openFailures, resolvedFailures []cmdlog.Failure, commands []cmdlog.Command) []string {
+func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgentCall, openFailures, resolvedFailures []cmdlog.Failure, commands []cmdlog.Command, referents []cmdlog.Referent) []string {
 	if a.isSubAgent {
 		return nil
 	}
@@ -833,6 +851,17 @@ func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgen
 			b.WriteString("\n")
 		}
 		b.WriteString("</command_memory>\n")
+		sections = append(sections, b.String())
+	}
+
+	if a.referentMemory && len(referents) > 0 {
+		var b strings.Builder
+		b.WriteString("<referent_memory>\nLearned phrase associations from accepted outcomes in this workspace — candidates to verify, not facts:\n")
+		for _, r := range referents {
+			fmt.Fprintf(&b, "- \"%s\" usually means `%s` (accepted %d×)\n",
+				tailSafeText(r.Phrase), tailSafeText(r.Target), r.Hits)
+		}
+		b.WriteString("</referent_memory>\n")
 		sections = append(sections, b.String())
 	}
 

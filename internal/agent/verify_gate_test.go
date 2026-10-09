@@ -827,10 +827,22 @@ func (r *gateRecordingCmdLog) ListSessionOpenFailures(context.Context, string) (
 	return nil, nil
 }
 
-func (r *gateRecordingCmdLog) MarkSuggested(string, string) {}
-func (r *gateRecordingCmdLog) ProjectKey() string           { return "" }
-func (r *gateRecordingCmdLog) ParamVersion() string         { return "" }
-func (r *gateRecordingCmdLog) ForgetSession(string)         {}
+func (r *gateRecordingCmdLog) MarkSuggested(string, string)     {}
+func (r *gateRecordingCmdLog) MarkSuggestedFile(string, string) {}
+func (r *gateRecordingCmdLog) WasSuggestedFile(context.Context, string, string) bool {
+	return false
+}
+
+func (r *gateRecordingCmdLog) RecordReferentEpisode(context.Context, cmdlog.ReferentEpisode, int) error {
+	return nil
+}
+
+func (r *gateRecordingCmdLog) ListReferentCandidates(context.Context, []string, int) ([]cmdlog.Referent, error) {
+	return nil, nil
+}
+func (r *gateRecordingCmdLog) ProjectKey() string   { return "" }
+func (r *gateRecordingCmdLog) ParamVersion() string { return "" }
+func (r *gateRecordingCmdLog) ForgetSession(string) {}
 
 func TestRunGateChecks_RecordsVerdictsToCmdLog(t *testing.T) {
 	dir := t.TempDir()

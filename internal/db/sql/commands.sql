@@ -215,3 +215,44 @@ LIMIT 50;
 -- failing observation), not resolution time -- the row's freshness
 -- is still about when the failure was last real.
 SELECT * FROM failure_memory WHERE resolved_in != '' AND project_key = sqlc.arg(project_key) ORDER BY last_seen DESC, rowid DESC LIMIT sqlc.arg(row_limit);
+
+-- name: InsertReferentEpisode :exec
+-- One judged vague-prompt observation (#165). INSERT OR IGNORE makes
+-- the (session_id, source_message_id, target) unique key the retry
+-- idempotency point: a repair-chain re-run of the turn-context pass
+-- re-derives the same episode and must not count twice.
+INSERT OR IGNORE INTO referent_episodes (
+    phrase, target, session_id, source_message_id, tool_call_id,
+    repo_state, memory_suggested, verdict, project_key, param_version,
+    created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+-- name: CountCleanReferentAcceptances :one
+-- Evidence for a phrase->target mapping: accepted episodes the memory
+-- tail did not suggest, counted by distinct session so a session
+-- re-deriving its own mapping cannot self-promote.
+SELECT COUNT(DISTINCT session_id) FROM referent_episodes
+WHERE project_key = ? AND phrase = ? AND target = ?
+    AND verdict = 'accepted' AND memory_suggested = 0;
+
+-- name: PromoteReferent :exec
+-- A mapping that cleared the acceptance floor earns its row; further
+-- clean acceptances keep scoring it (hits is evidence mass, not
+-- capped at the threshold).
+INSERT INTO referent_memory (phrase, target, hits, last_at, project_key, param_version)
+VALUES (?, ?, 1, ?, ?, ?)
+ON CONFLICT (phrase, target, project_key) DO UPDATE SET
+    hits = hits + 1,
+    last_at = excluded.last_at,
+    param_version = excluded.param_version;
+
+-- name: ListReferentsForPhrases :many
+-- Promoted candidates whose learned phrase appears among the turn's
+-- extracted phrases -- exact-match on the normalized phrase keeps the
+-- render honest (a fuzzy hit would be a guess, not learned evidence).
+-- Bare placeholders only: numbered ?N collides with the slice's
+-- variable-length expansion at bind time.
+SELECT * FROM referent_memory
+WHERE project_key = ? AND phrase IN (sqlc.slice('phrases'))
+ORDER BY hits DESC, last_at DESC
+LIMIT ?;

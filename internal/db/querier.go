@@ -10,6 +10,10 @@ import (
 
 type Querier interface {
 	BumpSessionCounter(ctx context.Context, arg BumpSessionCounterParams) error
+	// Evidence for a phrase->target mapping: accepted episodes the memory
+	// tail did not suggest, counted by distinct session so a session
+	// re-deriving its own mapping cannot self-promote.
+	CountCleanReferentAcceptances(ctx context.Context, arg CountCleanReferentAcceptancesParams) (int64, error)
 	// Absolute user-turn ordinal source for edge_firings.turn_seq - the
 	// bounded prompt-history query above can't serve it (DESC LIMIT 200
 	// yields no ASC ordinal past 200 and same-second created_at ties are
@@ -81,6 +85,11 @@ type Querier interface {
 	InsertEdgeFiring(ctx context.Context, arg InsertEdgeFiringParams) (int64, error)
 	InsertMCPDisabledServer(ctx context.Context, name string) error
 	InsertMCPEnabledServer(ctx context.Context, name string) error
+	// One judged vague-prompt observation (#165). INSERT OR IGNORE makes
+	// the (session_id, source_message_id, target) unique key the retry
+	// idempotency point: a repair-chain re-run of the turn-context pass
+	// re-derives the same episode and must not count twice.
+	InsertReferentEpisode(ctx context.Context, arg InsertReferentEpisodeParams) error
 	// Backs prompt history when no session is open. Needs
 	// idx_messages_role_created_at to seek rather than scan the table.
 	ListAllUserMessages(ctx context.Context) ([]Message, error)
@@ -114,6 +123,12 @@ type Querier interface {
 	// candidate from another partition is inadmissible before relevance
 	// ever runs.
 	ListRecentCommands(ctx context.Context, arg ListRecentCommandsParams) ([]CommandMemory, error)
+	// Promoted candidates whose learned phrase appears among the turn's
+	// extracted phrases -- exact-match on the normalized phrase keeps the
+	// render honest (a fuzzy hit would be a guess, not learned evidence).
+	// Bare placeholders only: numbered ?N collides with the slice's
+	// variable-length expansion at bind time.
+	ListReferentsForPhrases(ctx context.Context, arg ListReferentsForPhrasesParams) ([]ReferentMemory, error)
 	// Resolved rows are knowledge, not warnings: the failure signature
 	// and when it last saw a clean run. Ordered by last_seen (the last
 	// failing observation), not resolution time -- the row's freshness
@@ -149,6 +164,10 @@ type Querier interface {
 	// twin (fresher provenance) but the failure's true age survives --
 	// the caller passes min(twin.first_seen, legacy.first_seen).
 	MergeFailureFirstSeen(ctx context.Context, arg MergeFailureFirstSeenParams) error
+	// A mapping that cleared the acceptance floor earns its row; further
+	// clean acceptances keep scoring it (hits is evidence mass, not
+	// capped at the threshold).
+	PromoteReferent(ctx context.Context, arg PromoteReferentParams) error
 	// One row per collapsed prior turn; INSERT OR IGNORE makes the write
 	// idempotent across renders and across processes sharing the session
 	// DB, so callers count a turn only when this reports a new row.

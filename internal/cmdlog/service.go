@@ -97,6 +97,27 @@ type Service interface {
 	// evidence.
 	MarkSuggested(sessionID, cmdNorm string)
 
+	// MarkSuggestedFile records that the session was shown path as a
+	// rendered referent target this turn — the file channel of the
+	// same contamination screen (#165): an edit landing on a file the
+	// tail itself named is echo, not evidence.
+	MarkSuggestedFile(sessionID, path string)
+
+	// WasSuggestedFile reports whether this session — or its parent —
+	// was shown path in a rendered referent section. Errs inclusive.
+	WasSuggestedFile(ctx context.Context, sessionID, path string) bool
+
+	// RecordReferentEpisode stores one judged vague-prompt→edit
+	// observation and runs the promotion check: a mapping whose clean
+	// accepted count reaches promoteMin distinct sessions earns its
+	// referent_memory row (#165).
+	RecordReferentEpisode(ctx context.Context, ep ReferentEpisode, promoteMin int) error
+
+	// ListReferentCandidates returns promoted phrase→target mappings
+	// for the turn's extracted phrases — the referent injection pool,
+	// strongest evidence first.
+	ListReferentCandidates(ctx context.Context, phrases []string, limit int) ([]Referent, error)
+
 	// ProjectKey is the stable partition identity of the project
 	// this store belongs to — the canonical git common-dir (linked
 	// worktrees fold into the owning repo) plus the normalized

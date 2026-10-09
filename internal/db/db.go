@@ -27,6 +27,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.bumpSessionCounterStmt, err = db.PrepareContext(ctx, bumpSessionCounter); err != nil {
 		return nil, fmt.Errorf("error preparing query BumpSessionCounter: %w", err)
 	}
+	if q.countCleanReferentAcceptancesStmt, err = db.PrepareContext(ctx, countCleanReferentAcceptances); err != nil {
+		return nil, fmt.Errorf("error preparing query CountCleanReferentAcceptances: %w", err)
+	}
 	if q.countUserMessagesBySessionStmt, err = db.PrepareContext(ctx, countUserMessagesBySession); err != nil {
 		return nil, fmt.Errorf("error preparing query CountUserMessagesBySession: %w", err)
 	}
@@ -186,6 +189,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.insertMCPEnabledServerStmt, err = db.PrepareContext(ctx, insertMCPEnabledServer); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertMCPEnabledServer: %w", err)
 	}
+	if q.insertReferentEpisodeStmt, err = db.PrepareContext(ctx, insertReferentEpisode); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertReferentEpisode: %w", err)
+	}
 	if q.listAllUserMessagesStmt, err = db.PrepareContext(ctx, listAllUserMessages); err != nil {
 		return nil, fmt.Errorf("error preparing query ListAllUserMessages: %w", err)
 	}
@@ -234,6 +240,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listRecentCommandsStmt, err = db.PrepareContext(ctx, listRecentCommands); err != nil {
 		return nil, fmt.Errorf("error preparing query ListRecentCommands: %w", err)
 	}
+	if q.listReferentsForPhrasesStmt, err = db.PrepareContext(ctx, listReferentsForPhrases); err != nil {
+		return nil, fmt.Errorf("error preparing query ListReferentsForPhrases: %w", err)
+	}
 	if q.listResolvedFailuresStmt, err = db.PrepareContext(ctx, listResolvedFailures); err != nil {
 		return nil, fmt.Errorf("error preparing query ListResolvedFailures: %w", err)
 	}
@@ -260,6 +269,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.mergeFailureFirstSeenStmt, err = db.PrepareContext(ctx, mergeFailureFirstSeen); err != nil {
 		return nil, fmt.Errorf("error preparing query MergeFailureFirstSeen: %w", err)
+	}
+	if q.promoteReferentStmt, err = db.PrepareContext(ctx, promoteReferent); err != nil {
+		return nil, fmt.Errorf("error preparing query PromoteReferent: %w", err)
 	}
 	if q.recordCollapsedTurnStmt, err = db.PrepareContext(ctx, recordCollapsedTurn); err != nil {
 		return nil, fmt.Errorf("error preparing query RecordCollapsedTurn: %w", err)
@@ -320,6 +332,11 @@ func (q *Queries) Close() error {
 	if q.bumpSessionCounterStmt != nil {
 		if cerr := q.bumpSessionCounterStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing bumpSessionCounterStmt: %w", cerr)
+		}
+	}
+	if q.countCleanReferentAcceptancesStmt != nil {
+		if cerr := q.countCleanReferentAcceptancesStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing countCleanReferentAcceptancesStmt: %w", cerr)
 		}
 	}
 	if q.countUserMessagesBySessionStmt != nil {
@@ -587,6 +604,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing insertMCPEnabledServerStmt: %w", cerr)
 		}
 	}
+	if q.insertReferentEpisodeStmt != nil {
+		if cerr := q.insertReferentEpisodeStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertReferentEpisodeStmt: %w", cerr)
+		}
+	}
 	if q.listAllUserMessagesStmt != nil {
 		if cerr := q.listAllUserMessagesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listAllUserMessagesStmt: %w", cerr)
@@ -667,6 +689,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listRecentCommandsStmt: %w", cerr)
 		}
 	}
+	if q.listReferentsForPhrasesStmt != nil {
+		if cerr := q.listReferentsForPhrasesStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listReferentsForPhrasesStmt: %w", cerr)
+		}
+	}
 	if q.listResolvedFailuresStmt != nil {
 		if cerr := q.listResolvedFailuresStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listResolvedFailuresStmt: %w", cerr)
@@ -710,6 +737,11 @@ func (q *Queries) Close() error {
 	if q.mergeFailureFirstSeenStmt != nil {
 		if cerr := q.mergeFailureFirstSeenStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing mergeFailureFirstSeenStmt: %w", cerr)
+		}
+	}
+	if q.promoteReferentStmt != nil {
+		if cerr := q.promoteReferentStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing promoteReferentStmt: %w", cerr)
 		}
 	}
 	if q.recordCollapsedTurnStmt != nil {
@@ -837,6 +869,7 @@ type Queries struct {
 	db                                   DBTX
 	tx                                   *sql.Tx
 	bumpSessionCounterStmt               *sql.Stmt
+	countCleanReferentAcceptancesStmt    *sql.Stmt
 	countUserMessagesBySessionStmt       *sql.Stmt
 	createFileStmt                       *sql.Stmt
 	createMessageStmt                    *sql.Stmt
@@ -890,6 +923,7 @@ type Queries struct {
 	insertEdgeFiringStmt                 *sql.Stmt
 	insertMCPDisabledServerStmt          *sql.Stmt
 	insertMCPEnabledServerStmt           *sql.Stmt
+	insertReferentEpisodeStmt            *sql.Stmt
 	listAllUserMessagesStmt              *sql.Stmt
 	listCommandPartitionKeysStmt         *sql.Stmt
 	listFailurePartitionKeysStmt         *sql.Stmt
@@ -906,6 +940,7 @@ type Queries struct {
 	listOpenFailuresStmt                 *sql.Stmt
 	listProcessedSegmentsStmt            *sql.Stmt
 	listRecentCommandsStmt               *sql.Stmt
+	listReferentsForPhrasesStmt          *sql.Stmt
 	listResolvedFailuresStmt             *sql.Stmt
 	listSessionCountersStmt              *sql.Stmt
 	listSessionOpenFailuresStmt          *sql.Stmt
@@ -915,6 +950,7 @@ type Queries struct {
 	listUserMessagesBySessionStmt        *sql.Stmt
 	markSegmentProcessedStmt             *sql.Stmt
 	mergeFailureFirstSeenStmt            *sql.Stmt
+	promoteReferentStmt                  *sql.Stmt
 	recordCollapsedTurnStmt              *sql.Stmt
 	recordFileReadStmt                   *sql.Stmt
 	recordProcessedSegmentStmt           *sql.Stmt
@@ -939,6 +975,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		db:                                   tx,
 		tx:                                   tx,
 		bumpSessionCounterStmt:               q.bumpSessionCounterStmt,
+		countCleanReferentAcceptancesStmt:    q.countCleanReferentAcceptancesStmt,
 		countUserMessagesBySessionStmt:       q.countUserMessagesBySessionStmt,
 		createFileStmt:                       q.createFileStmt,
 		createMessageStmt:                    q.createMessageStmt,
@@ -992,6 +1029,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		insertEdgeFiringStmt:                 q.insertEdgeFiringStmt,
 		insertMCPDisabledServerStmt:          q.insertMCPDisabledServerStmt,
 		insertMCPEnabledServerStmt:           q.insertMCPEnabledServerStmt,
+		insertReferentEpisodeStmt:            q.insertReferentEpisodeStmt,
 		listAllUserMessagesStmt:              q.listAllUserMessagesStmt,
 		listCommandPartitionKeysStmt:         q.listCommandPartitionKeysStmt,
 		listFailurePartitionKeysStmt:         q.listFailurePartitionKeysStmt,
@@ -1008,6 +1046,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listOpenFailuresStmt:                 q.listOpenFailuresStmt,
 		listProcessedSegmentsStmt:            q.listProcessedSegmentsStmt,
 		listRecentCommandsStmt:               q.listRecentCommandsStmt,
+		listReferentsForPhrasesStmt:          q.listReferentsForPhrasesStmt,
 		listResolvedFailuresStmt:             q.listResolvedFailuresStmt,
 		listSessionCountersStmt:              q.listSessionCountersStmt,
 		listSessionOpenFailuresStmt:          q.listSessionOpenFailuresStmt,
@@ -1017,6 +1056,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listUserMessagesBySessionStmt:        q.listUserMessagesBySessionStmt,
 		markSegmentProcessedStmt:             q.markSegmentProcessedStmt,
 		mergeFailureFirstSeenStmt:            q.mergeFailureFirstSeenStmt,
+		promoteReferentStmt:                  q.promoteReferentStmt,
 		recordCollapsedTurnStmt:              q.recordCollapsedTurnStmt,
 		recordFileReadStmt:                   q.recordFileReadStmt,
 		recordProcessedSegmentStmt:           q.recordProcessedSegmentStmt,

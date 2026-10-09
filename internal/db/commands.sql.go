@@ -7,7 +7,30 @@ package db
 
 import (
 	"context"
+	"strings"
 )
+
+const countCleanReferentAcceptances = `-- name: CountCleanReferentAcceptances :one
+SELECT COUNT(DISTINCT session_id) FROM referent_episodes
+WHERE project_key = ? AND phrase = ? AND target = ?
+    AND verdict = 'accepted' AND memory_suggested = 0
+`
+
+type CountCleanReferentAcceptancesParams struct {
+	ProjectKey string `json:"project_key"`
+	Phrase     string `json:"phrase"`
+	Target     string `json:"target"`
+}
+
+// Evidence for a phrase->target mapping: accepted episodes the memory
+// tail did not suggest, counted by distinct session so a session
+// re-deriving its own mapping cannot self-promote.
+func (q *Queries) CountCleanReferentAcceptances(ctx context.Context, arg CountCleanReferentAcceptancesParams) (int64, error) {
+	row := q.queryRow(ctx, q.countCleanReferentAcceptancesStmt, countCleanReferentAcceptances, arg.ProjectKey, arg.Phrase, arg.Target)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
 
 const deleteCommandConflicts = `-- name: DeleteCommandConflicts :exec
 DELETE FROM command_memory AS stale WHERE stale.project_key = ? AND EXISTS (
@@ -55,6 +78,49 @@ func (q *Queries) GetFailureMeta(ctx context.Context, signature string) (GetFail
 	var i GetFailureMetaRow
 	err := row.Scan(&i.Signature, &i.FirstSeen)
 	return i, err
+}
+
+const insertReferentEpisode = `-- name: InsertReferentEpisode :exec
+INSERT OR IGNORE INTO referent_episodes (
+    phrase, target, session_id, source_message_id, tool_call_id,
+    repo_state, memory_suggested, verdict, project_key, param_version,
+    created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`
+
+type InsertReferentEpisodeParams struct {
+	Phrase          string `json:"phrase"`
+	Target          string `json:"target"`
+	SessionID       string `json:"session_id"`
+	SourceMessageID string `json:"source_message_id"`
+	ToolCallID      string `json:"tool_call_id"`
+	RepoState       string `json:"repo_state"`
+	MemorySuggested int64  `json:"memory_suggested"`
+	Verdict         string `json:"verdict"`
+	ProjectKey      string `json:"project_key"`
+	ParamVersion    string `json:"param_version"`
+	CreatedAt       int64  `json:"created_at"`
+}
+
+// One judged vague-prompt observation (#165). INSERT OR IGNORE makes
+// the (session_id, source_message_id, target) unique key the retry
+// idempotency point: a repair-chain re-run of the turn-context pass
+// re-derives the same episode and must not count twice.
+func (q *Queries) InsertReferentEpisode(ctx context.Context, arg InsertReferentEpisodeParams) error {
+	_, err := q.exec(ctx, q.insertReferentEpisodeStmt, insertReferentEpisode,
+		arg.Phrase,
+		arg.Target,
+		arg.SessionID,
+		arg.SourceMessageID,
+		arg.ToolCallID,
+		arg.RepoState,
+		arg.MemorySuggested,
+		arg.Verdict,
+		arg.ProjectKey,
+		arg.ParamVersion,
+		arg.CreatedAt,
+	)
+	return err
 }
 
 const listCommandPartitionKeys = `-- name: ListCommandPartitionKeys :many
@@ -238,6 +304,66 @@ func (q *Queries) ListRecentCommands(ctx context.Context, arg ListRecentCommands
 			&i.LastToolCallID,
 			&i.RepoState,
 			&i.Suggested,
+			&i.ProjectKey,
+			&i.ParamVersion,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReferentsForPhrases = `-- name: ListReferentsForPhrases :many
+SELECT phrase, target, hits, last_at, project_key, param_version FROM referent_memory
+WHERE project_key = ? AND phrase IN (/*SLICE:phrases*/?)
+ORDER BY hits DESC, last_at DESC
+LIMIT ?
+`
+
+type ListReferentsForPhrasesParams struct {
+	ProjectKey string   `json:"project_key"`
+	Phrases    []string `json:"phrases"`
+	Limit      int64    `json:"limit"`
+}
+
+// Promoted candidates whose learned phrase appears among the turn's
+// extracted phrases -- exact-match on the normalized phrase keeps the
+// render honest (a fuzzy hit would be a guess, not learned evidence).
+// Bare placeholders only: numbered ?N collides with the slice's
+// variable-length expansion at bind time.
+func (q *Queries) ListReferentsForPhrases(ctx context.Context, arg ListReferentsForPhrasesParams) ([]ReferentMemory, error) {
+	query := listReferentsForPhrases
+	var queryParams []interface{}
+	queryParams = append(queryParams, arg.ProjectKey)
+	if len(arg.Phrases) > 0 {
+		for _, v := range arg.Phrases {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:phrases*/?", strings.Repeat(",?", len(arg.Phrases))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:phrases*/?", "NULL", 1)
+	}
+	queryParams = append(queryParams, arg.Limit)
+	rows, err := q.query(ctx, nil, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ReferentMemory{}
+	for rows.Next() {
+		var i ReferentMemory
+		if err := rows.Scan(
+			&i.Phrase,
+			&i.Target,
+			&i.Hits,
+			&i.LastAt,
 			&i.ProjectKey,
 			&i.ParamVersion,
 		); err != nil {
@@ -442,6 +568,37 @@ type MergeFailureFirstSeenParams struct {
 // the caller passes min(twin.first_seen, legacy.first_seen).
 func (q *Queries) MergeFailureFirstSeen(ctx context.Context, arg MergeFailureFirstSeenParams) error {
 	_, err := q.exec(ctx, q.mergeFailureFirstSeenStmt, mergeFailureFirstSeen, arg.FirstSeen, arg.Signature)
+	return err
+}
+
+const promoteReferent = `-- name: PromoteReferent :exec
+INSERT INTO referent_memory (phrase, target, hits, last_at, project_key, param_version)
+VALUES (?, ?, 1, ?, ?, ?)
+ON CONFLICT (phrase, target, project_key) DO UPDATE SET
+    hits = hits + 1,
+    last_at = excluded.last_at,
+    param_version = excluded.param_version
+`
+
+type PromoteReferentParams struct {
+	Phrase       string `json:"phrase"`
+	Target       string `json:"target"`
+	LastAt       int64  `json:"last_at"`
+	ProjectKey   string `json:"project_key"`
+	ParamVersion string `json:"param_version"`
+}
+
+// A mapping that cleared the acceptance floor earns its row; further
+// clean acceptances keep scoring it (hits is evidence mass, not
+// capped at the threshold).
+func (q *Queries) PromoteReferent(ctx context.Context, arg PromoteReferentParams) error {
+	_, err := q.exec(ctx, q.promoteReferentStmt, promoteReferent,
+		arg.Phrase,
+		arg.Target,
+		arg.LastAt,
+		arg.ProjectKey,
+		arg.ParamVersion,
+	)
 	return err
 }
 
