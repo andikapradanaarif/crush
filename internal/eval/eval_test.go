@@ -444,6 +444,53 @@ func TestCoverage_PressureAbsentFailsClosed(t *testing.T) {
 	require.True(t, met)
 }
 
+func TestCoverage_SeedMetrics(t *testing.T) {
+	t.Parallel()
+
+	for _, f := range []string{
+		"calls", "files_viewed", "read_files_rows", "discovery_calls_before_write",
+	} {
+		_, _, err := ParseCoverageKey("min_warm_start.seed." + f)
+		require.NoError(t, err, "warm_start.seed.%s must be a coverage field", f)
+	}
+
+	// Ledger + analysis both present: the aggregated counts read
+	// through in both directions.
+	rec := &RunRecord{WarmStart: &WarmStart{
+		Sessions:    2,
+		SeedMetrics: &SeedMetrics{Calls: 4, FilesViewed: 2},
+	}}
+	met, err := CoverageMet(Coverage{"min_warm_start.seed.calls": 4}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+	met, err = CoverageMet(Coverage{"max_warm_start.seed.files_viewed": 0}, rec)
+	require.NoError(t, err)
+	require.False(t, met)
+	rec.WarmStart.SeedMetrics.FilesViewed = 0
+	met, err = CoverageMet(Coverage{"max_warm_start.seed.files_viewed": 0}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+
+	// Seeds ran but analysis never landed — nil SeedMetrics fails
+	// closed in BOTH directions. An unverified peek is not a zero.
+	rec.WarmStart.SeedMetrics = nil
+	met, err = CoverageMet(Coverage{"max_warm_start.seed.files_viewed": 0}, rec)
+	require.NoError(t, err)
+	require.False(t, met)
+	met, err = CoverageMet(Coverage{"min_warm_start.seed.calls": 0}, rec)
+	require.NoError(t, err)
+	require.False(t, met)
+	met, err = ArmCoverageMet(Coverage{"max_warm_start.seed.files_viewed": 0}, rec)
+	require.NoError(t, err)
+	require.False(t, met)
+
+	// Cold run: no seeding ledger at all — also fails closed.
+	bare := &RunRecord{}
+	met, err = CoverageMet(Coverage{"max_warm_start.seed.files_viewed": 0}, bare)
+	require.NoError(t, err)
+	require.False(t, met)
+}
+
 // The telemetry doc's pressure block decodes into runTelemetry and
 // folds across the trajectory's per-turn processes: activations sum
 // (each process latches independently), engaged ORs, and estimate

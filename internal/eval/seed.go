@@ -239,6 +239,71 @@ func (r *Runner) snapshotDir(key string) string {
 	return filepath.Join(r.workParent(), ".snapshots", key)
 }
 
+// analyzeSeedMetrics reconstructs each seed session's call sequence
+// from the workdir's crush.db and sums the behavioral counters into
+// the ledger (#244). warm.SessionIDs is ordered: the scripted ids
+// (seed_commands run first) form a prefix of length nScripted.
+//
+// Scripted sessions have no messages — authored state, not agent
+// behavior — so their call/view/discovery counters are true zeros
+// and only their authored read_files rows count. Agent sessions go
+// through AnalyzeSessionDB; any failure leaves SeedMetrics nil — a
+// seed we cannot reconstruct is unverified, not "viewed nothing",
+// and coverage predicates fail closed on the nil.
+func (r *Runner) analyzeSeedMetrics(ctx context.Context, workdir string, warm *WarmStart, nScripted int) {
+	if len(warm.SessionIDs) == 0 {
+		return
+	}
+	dbPath := filepath.Join(DataDirFor(workdir), "crush.db")
+	if !fileExists(dbPath) {
+		return
+	}
+	sum := &SeedMetrics{}
+	nScripted = min(nScripted, len(warm.SessionIDs))
+	if nScripted > 0 {
+		conn, err := db.Connect(ctx, DataDirFor(workdir))
+		if err != nil {
+			slog.Warn("Seed-metrics db open failed — seed metrics stay unrecorded",
+				"error", err)
+			return
+		}
+		defer func() {
+			if err := db.Release(DataDirFor(workdir)); err != nil {
+				slog.Warn("Failed to release seed-metrics db", "error", err)
+			}
+		}()
+		if hasColumn(ctx, conn, "read_files", "session_id") {
+			for _, sid := range warm.SessionIDs[:nScripted] {
+				var n int
+				if err := conn.QueryRowContext(ctx,
+					`SELECT COUNT(*) FROM read_files WHERE session_id = ?`, sid).
+					Scan(&n); err != nil {
+					slog.Warn("Seed read_files count failed — seed metrics stay unrecorded",
+						"session", sid, "error", err)
+					return
+				}
+				sum.ReadFilesRows += n
+			}
+		}
+	}
+	for _, sid := range warm.SessionIDs[nScripted:] {
+		cm, err := AnalyzeSessionDB(ctx, dbPath, AnalyzeOptions{SessionID: sid})
+		if err != nil {
+			slog.Warn("Seed-session analysis failed — seed metrics stay unrecorded",
+				"session", sid, "error", err)
+			return
+		}
+		sum.Calls += cm.Calls
+		sum.FilesViewed += cm.FilesViewed
+		// ReadFilesRows is -1 when the artifact predates the
+		// read_files table — a sentinel, not a count; clamp it out
+		// so it cannot satisfy a max_ predicate as a negative.
+		sum.ReadFilesRows += max(cm.ReadFilesRows, 0)
+		sum.DiscoveryCallsBeforeWrite += cm.DiscoveryCallsBeforeWrite
+	}
+	warm.SeedMetrics = sum
+}
+
 // restoreSnapshot lays a prior seed snapshot over the materialized
 // workdir and returns its ledger. false means no snapshot exists —
 // the caller seeds fresh; a restore error falls back the same way

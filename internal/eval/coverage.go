@@ -79,6 +79,25 @@ var coverageFields = map[string]func(*RunRecord) float64{
 	"warm_start.generator_tokens.cache_write": func(r *RunRecord) float64 {
 		return float64(warmStart(r).GeneratorTokens.CacheWrite)
 	},
+	// warm_start.seed.* is the seed phase's behavioral axis (#244):
+	// per-seed AnalyzeSessionDB results summed over the ledger's
+	// session ids. Flag-invariant (the ledger exists whenever the
+	// trajectory declares seeds) but separately nil-guarded in
+	// coverageMet — analysis failure leaves SeedMetrics nil, and a
+	// "viewed nothing" assertion must never pass on an
+	// unreconstructed seed.
+	"warm_start.seed.calls": func(r *RunRecord) float64 {
+		return float64(seedMetrics(r).Calls)
+	},
+	"warm_start.seed.files_viewed": func(r *RunRecord) float64 {
+		return float64(seedMetrics(r).FilesViewed)
+	},
+	"warm_start.seed.read_files_rows": func(r *RunRecord) float64 {
+		return float64(seedMetrics(r).ReadFilesRows)
+	},
+	"warm_start.seed.discovery_calls_before_write": func(r *RunRecord) float64 {
+		return float64(seedMetrics(r).DiscoveryCallsBeforeWrite)
+	},
 	// pressure.* is the gate's own coverage — activations counts
 	// engage transitions (the "did it fire" predicate), engaged the
 	// latch as 0/1. Flag-gated on notebook_pressure_gate (and
@@ -397,6 +416,18 @@ func warmStart(r *RunRecord) WarmStart {
 	return *r.WarmStart
 }
 
+// seedMetrics dereferences the nested behavioral block. Compare
+// invokes field funcs without coverageMet's nil guards, so the funcs
+// cannot deref nil SeedMetrics themselves — the empty value here is
+// display-only; coverageMet's warm_start.seed.* guard is what fails
+// predicates closed on an unreconstructed seed.
+func seedMetrics(r *RunRecord) SeedMetrics {
+	if r.WarmStart == nil || r.WarmStart.SeedMetrics == nil {
+		return SeedMetrics{}
+	}
+	return *r.WarmStart.SeedMetrics
+}
+
 func init() {
 	// Per-kind stub counts: stub_stats.kinds.<kind> for every
 	// message.StubKind, keyed by the kind's telemetry label — the
@@ -571,6 +602,12 @@ func coverageMet(cov Coverage, rec *RunRecord, fields map[string]func(*RunRecord
 		// And warm_start.*: a cold run carries no seeding ledger —
 		// absent must not satisfy a "did seeding happen" predicate.
 		if strings.HasPrefix(field, "warm_start.") && rec.WarmStart == nil {
+			return false, key, nil
+		}
+		// warm_start.seed.* narrows the same rule: seeds ran but the
+		// per-seed call analysis failed — "the seed never looked"
+		// cannot pass on a session we could not reconstruct.
+		if strings.HasPrefix(field, "warm_start.seed.") && rec.WarmStart.SeedMetrics == nil {
 			return false, key, nil
 		}
 		// And tail.*: an empty Tail means no turn rendered an

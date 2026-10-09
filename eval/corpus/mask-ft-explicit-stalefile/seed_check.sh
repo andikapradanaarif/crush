@@ -24,8 +24,14 @@ mtime_s=$(stat -f %m main_test.go 2>/dev/null || stat -c %Y main_test.go 2>/dev/
 open_rows=${open_rows:-0}
 last_seen=${last_seen:-0}
 touch_ms=$(( ${mtime_s:-0} * 1000 ))
+# #244: the stale premise also needs the seed to have never READ
+# main_test.go — a seed that viewed the broken body saw the answer,
+# and "the agent never looked" was incentive argument, not evidence.
+# read_files rows are the tracker's record of view/read calls.
+seed_peeks=$(sqlite3 "$db" "SELECT COUNT(*) FROM read_files WHERE path LIKE '%main_test.go';")
+seed_peeks=${seed_peeks:-0}
 row_older_than_touch=false
 [ "$last_seen" -gt 0 ] && [ "$last_seen" -lt "$touch_ms" ] && row_older_than_touch=true
-echo "EVAL_JSON {\"root\":\"$root\",\"decoy\":\"$decoy\",\"open_stale_rows\":$open_rows,\"row_older_than_touch\":$row_older_than_touch}"
+echo "EVAL_JSON {\"root\":\"$root\",\"decoy\":\"$decoy\",\"open_stale_rows\":$open_rows,\"row_older_than_touch\":$row_older_than_touch,\"seed_peeks\":$seed_peeks}"
 [ "$root" = fail ] && [ "$decoy" = fail ] &&
-  [ "$open_rows" -ge 1 ] && [ "$row_older_than_touch" = true ]
+  [ "$open_rows" -ge 1 ] && [ "$row_older_than_touch" = true ] && [ "$seed_peeks" -eq 0 ]

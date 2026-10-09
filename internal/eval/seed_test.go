@@ -439,3 +439,68 @@ func TestRunScriptedSeeds_MissingFileHintRejected(t *testing.T) {
 	require.Contains(t, err.Error(), `files[0] "missing.go"`)
 	require.Len(t, ids, 1, "the first seed completed before the divergence")
 }
+
+// Seed metrics aggregate the analyzer over every agent-seeded session
+// and fail closed — an unanalyzable agent seed leaves SeedMetrics nil
+// rather than satisfying a zero-count premise like "never opened the
+// stale file". Scripted seeds (no messages by construction) contribute
+// true zeros plus their authored read_files rows.
+func TestAnalyzeSeedMetrics(t *testing.T) {
+	r := &Runner{EvalDir: t.TempDir(), Home: t.TempDir()}
+	workdir := t.TempDir()
+	dataDir := DataDirFor(workdir)
+	conn, err := db.Connect(context.Background(), dataDir)
+	require.NoError(t, err)
+
+	insertSession(t, conn, "seed-scripted", "")
+	insertSession(t, conn, "seed-a", "")
+	insertSession(t, conn, "seed-b", "")
+	// seed-a viewed a file; seed-b ran only bash.
+	insertMsg(t, conn, "a1", "seed-a", "user", `[`+txtPart("seed a")+`]`, 1000, 0)
+	insertMsg(t, conn, "a2", "seed-a", "assistant", `[`+tcPart("ac1", "view", `{"file_path":"a.go"}`)+`]`, 1000, 0)
+	insertMsg(t, conn, "a3", "seed-a", "tool", `[`+trPart("ac1", "package a", false, "")+`]`, 1000, 0)
+	insertMsg(t, conn, "b1", "seed-b", "user", `[`+txtPart("seed b")+`]`, 1000, 0)
+	insertMsg(t, conn, "b2", "seed-b", "assistant", `[`+tcPart("bc1", "bash", `{"command":"go test"}`)+`]`, 1000, 0)
+	insertMsg(t, conn, "b3", "seed-b", "tool", `[`+trPart("bc1", "FAIL", false, "")+`]`, 1000, 0)
+	// The scripted seed's authored read hints are table rows, not
+	// tool behavior — counted, but files_viewed stays a true zero.
+	_, err = conn.ExecContext(t.Context(),
+		`INSERT INTO read_files (session_id, path, read_at) VALUES ('seed-scripted', 'stale.go', 900)`)
+	require.NoError(t, err)
+	_, err = conn.ExecContext(t.Context(),
+		`INSERT INTO read_files (session_id, path, read_at) VALUES ('seed-a', 'a.go', 1000)`)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Release(dataDir)) }()
+
+	// Mixed cell: the scripted id leads SessionIDs (seed_commands
+	// run first) — it contributes its authored row while the agent
+	// seeds analyze normally.
+	warm := &WarmStart{Sessions: 3, SessionIDs: []string{"seed-scripted", "seed-a", "seed-b"}}
+	r.analyzeSeedMetrics(context.Background(), workdir, warm, 1)
+	require.NotNil(t, warm.SeedMetrics)
+	require.Equal(t, 2, warm.SeedMetrics.Calls)
+	require.Equal(t, 1, warm.SeedMetrics.FilesViewed)
+	require.Equal(t, 2, warm.SeedMetrics.ReadFilesRows)
+	require.Equal(t, 1, warm.SeedMetrics.DiscoveryCallsBeforeWrite)
+
+	// Scripted-only: no agent seeds to reconstruct — true zeros plus
+	// the authored row, not a nil.
+	warm4 := &WarmStart{Sessions: 1, SessionIDs: []string{"seed-scripted"}}
+	r.analyzeSeedMetrics(context.Background(), workdir, warm4, 1)
+	require.NotNil(t, warm4.SeedMetrics)
+	require.Equal(t, 0, warm4.SeedMetrics.Calls)
+	require.Equal(t, 0, warm4.SeedMetrics.FilesViewed)
+	require.Equal(t, 1, warm4.SeedMetrics.ReadFilesRows)
+
+	// An agent session the analyzer cannot reconstruct leaves the
+	// pointer nil — coverage predicates on warm_start.seed.* fail
+	// closed.
+	warm2 := &WarmStart{Sessions: 1, SessionIDs: []string{"ghost"}}
+	r.analyzeSeedMetrics(context.Background(), workdir, warm2, 0)
+	require.Nil(t, warm2.SeedMetrics)
+
+	// No sessions recorded — analysis is a no-op, not a zero.
+	warm3 := &WarmStart{}
+	r.analyzeSeedMetrics(context.Background(), workdir, warm3, 0)
+	require.Nil(t, warm3.SeedMetrics)
+}

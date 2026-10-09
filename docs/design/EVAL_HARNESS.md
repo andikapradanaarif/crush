@@ -172,7 +172,21 @@ every characterization pass a diff to reviewed files.
   delta misattributes seed labor to memory benefit. Declare
   `check.seed_script` to catch it deterministically (below); for
   deeper forensics, audit the preserved db (`warm_start.session_ids`
-  → the seed session's tool calls) or compare workdir diffs.
+  → the seed session's tool calls) or compare workdir diffs. The
+  inverse premise — "the seed never looked" — is measured too: each
+  agent seed session is run through `AnalyzeSessionDB` and summed
+  into `warm_start.seed_metrics` (calls, files_viewed,
+  read_files_rows, discovery_calls_before_write), exposed as
+  `warm_start.seed.*` coverage fields. `max_warm_start.seed.files_viewed: 0`
+  on a stale-file cell asserts no seed inspected file contents; nil
+  analysis (an agent session that could not be reconstructed) fails
+  those predicates closed rather than reading as a satisfied zero.
+  Scripted seeds have no messages to reconstruct — they contribute
+  true zeros plus their authored `read_files` rows (the `files`
+  hints), so mixed cells keep the axis. `seed_check.sh` carries the
+  path-scoped form — a `read_files` query per target file — for
+  cells whose seeds legitimately view other files (e.g. a decoy
+  they must edit).
 - **`seed_commands`.** Scripted seed sessions — the dose-control tier
   the memory ladders need. Each element is one session: a real
   `sessions` row, each `commands` entry executed through the same
@@ -791,7 +805,8 @@ trajectory twice) is strictly worse.
 		"session_ids": ["<seed-session-id>", "..."],
 		"steps": 14,
 		"tokens": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
-		"duration_s": 96
+		"duration_s": 96,
+		"seed_metrics": {"calls": 5, "files_viewed": 0, "read_files_rows": 0, "discovery_calls_before_write": 0}
 	},
 	"error_class": "auth | rate_limit | context_too_large | window_cap_enforced | provider_* | cancelled | timeout",
 	"session_id": "<measured-session-id>",
