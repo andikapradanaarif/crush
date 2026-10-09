@@ -46,6 +46,6 @@
   "coverage": {
     "min_warm_start.sessions": 4
   },
-  "requires": {"tools": ["go"]},
+  "requires": {"tools": ["go", "sqlite3"]},
   "budget": {"run_timeout_seconds": 300, "max_steps": 30}
 }
