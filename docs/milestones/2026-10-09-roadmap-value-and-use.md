@@ -98,10 +98,11 @@ Ordered by what unlocks the most evidence per unit of work.
 with `failure_memory`, `failure_memory_edges`, `referent_memory`,
 `session_memory`, and memory telemetry on. (Enabled in the author's
 global config 10-09 — the reviewer's "zero real sessions" evidence
-predates that change by hours.) Two to four weeks of real prompts —
-including code-switched ones the resolver and referent learner have
-never seen — is the only way to get: data for #228, the ≥2-projects
-evidence bar for #229, and a replay corpus for P3.
+predates that change by hours.) A sustained stretch of real prompts
+— including code-switched ones the resolver and referent learner
+have never seen — is the only way to get: data for #228, the
+≥2-projects evidence bar for #229, and a replay corpus for P3. P1
+gates P3 — it ends when the replay corpus is there, not on a date.
 
 **P2 — Acceptance signals from artifacts, not words.** Judge accepted
 vs. revised by what happened to the code: did the edit survive to the
@@ -157,15 +158,16 @@ dispatch plus a minimal channel interface (select → render → record
 → verdict) so the next channel lands as a row in a table, not a
 ninth edit site in `internal/agent`.
 
-## Sequencing (4–6 weeks)
+## Sequencing
 
-- **W1**: defects 1–2 + this doc (this PR). Memory + telemetry on for
-  daily use. #290 (seed behavioral evidence) lands.
-- **W1–2**: P2 artifact acceptance signals; P9 dispatch/interface.
-- **W2–3**: #227 first slice (3–5 tasks), then one powered read on it.
-- **W3–4**: replay corpus from dogfooding data; first closed
+- **Step 1** — defects 1–2 + this doc; memory + telemetry on for
+  daily use. #290 (seed behavioral evidence) landed.
+- **Step 2** — P2 artifact acceptance signals; P9 dispatch/interface.
+- **Step 3** — #227 first slice (3–5 tasks), then one powered read on
+  it.
+- **Step 4** — replay corpus from dogfooding data; first closed
   parameter-learning cycle (P3) on one parameter.
-- **W4–6**: procedural-memory MVP behind a flag (P4); #225 qwen
+- **Step 5** — procedural-memory MVP behind a flag (P4); #225 qwen
   replication; sandbox phase D (P8).
 
 ## Standing rules carried forward
