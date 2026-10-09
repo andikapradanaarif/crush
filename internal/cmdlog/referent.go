@@ -8,10 +8,14 @@ import (
 )
 
 // Referent verdicts — the next user turn's judgment of the edit a
-// vague prompt produced (#165).
+// vague prompt produced (#165). ReferentUnknown marks a follow-up the
+// cue layer could not classify — recorded for provenance (and later
+// artifact-based relabeling) but never promotion evidence: learned
+// labels fail closed on unparseable input.
 const (
 	ReferentAccepted = "accepted"
 	ReferentRevised  = "revised"
+	ReferentUnknown  = "unknown"
 )
 
 // ReferentEpisode is one judged observation: the user asked with a
@@ -29,7 +33,7 @@ type ReferentEpisode struct {
 	ToolCallID      string // the mutating call that produced the edit
 	RepoState       string
 	Suggested       bool   // the rendered tail itself named this target
-	Verdict         string // ReferentAccepted or ReferentRevised
+	Verdict         string // ReferentAccepted, ReferentRevised, or ReferentUnknown
 }
 
 // Referent is a promoted phrase→target candidate — enough clean
@@ -80,7 +84,7 @@ func (s *service) RecordReferentEpisode(ctx context.Context, ep ReferentEpisode,
 	if ep.Phrase == "" || ep.Target == "" || ep.SessionID == "" || ep.SourceMessageID == "" {
 		return nil
 	}
-	if ep.Verdict != ReferentAccepted && ep.Verdict != ReferentRevised {
+	if ep.Verdict != ReferentAccepted && ep.Verdict != ReferentRevised && ep.Verdict != ReferentUnknown {
 		return nil
 	}
 	suggested := int64(0)

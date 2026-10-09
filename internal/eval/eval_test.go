@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/agent"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/stretchr/testify/require"
 )
@@ -1160,6 +1161,61 @@ func TestValidateArmCoverageResolved_NotebookGenerate(t *testing.T) {
 	manifest.Defaults["notebook_pressure_gate"] = false
 	exp.Arms[ArmTreatment] = Arm{}
 	require.Error(t, ValidateArmCoverageResolved(exp, manifest))
+}
+
+// flags.json and flagCodeDefaults both claim to mirror the code
+// defaults an unset option resolves to — a shipped default flip that
+// misses either silently mislabels baseline keys (EffectiveConfig)
+// and under-rejects gated predicates (ValidateArmCoverageResolved).
+// The #205 notebook flip drifted both until the 10-09 review caught
+// it; this parity check pins every declared key to the Options
+// resolver's real default so the next flip fails here, not in a
+// mislabeled run record.
+func TestFlagsDefaultsMatchCodeDefaults(t *testing.T) {
+	t.Parallel()
+
+	c := &config.Config{}
+	c.NormalizeOptions()
+	opts := c.Options
+	resolved := map[string]any{
+		"notebook_enabled":          opts.NotebookIsEnabled(),
+		"notebook_stub_superseded":  opts.NotebookStubSupersededEnabled(),
+		"notebook_auto_inject":      opts.NotebookAutoInjectEnabled(),
+		"notebook_sync_mem0":        opts.NotebookSyncMem0Enabled(),
+		"notebook_checkpoint":       opts.NotebookCheckpointEnabled(),
+		"notebook_raw_token_budget": float64(opts.NotebookRawTokenBudget),
+		"project_index":             opts.ProjectIndexEnabled(),
+		"auto_lsp":                  opts.AutoLSP == nil || *opts.AutoLSP,
+		"turn_context":              opts.TurnContextMode(),
+		"failure_memory":            opts.FailureMemoryEnabled(),
+		"memory_params":             map[string]any{},
+		"ambiguity_clarification":   opts.AmbiguityClarificationEnabled(),
+		"notebook_prior_turns":      opts.NotebookPriorTurnsMode(),
+		"notebook_pressure_gate":    opts.NotebookPressureGateEnabled(),
+		"notebook_generate":         opts.NotebookGenerateMode(),
+		"notebook_hydration":        opts.NotebookHydrationEnabled(),
+		"enforce_context_window":    opts.EnforceContextWindowEnabled(),
+		"disable_auto_summarize":    opts.DisableAutoSummarize,
+		"failure_memory_edges":      opts.FailureMemoryEdgesEnabled(),
+		"referent_memory":           opts.ReferentMemoryEnabled(),
+		"session_memory":            opts.SessionMemoryEnabled(),
+	}
+
+	m, err := LoadFlagsManifest("../../eval")
+	require.NoError(t, err)
+	for key, want := range m.Defaults {
+		got, ok := resolved[key]
+		require.True(t, ok,
+			"flags.json key %q has no resolver mapping — add its Options default above", key)
+		require.Equal(t, want, got,
+			"flags.json %q disagrees with the resolved code default", key)
+	}
+	for key, want := range flagCodeDefaults {
+		got, ok := resolved[key]
+		require.True(t, ok, "flagCodeDefaults key %q has no resolver mapping", key)
+		require.Equal(t, want, got.(bool),
+			"flagCodeDefaults %q disagrees with the resolved code default", key)
+	}
 }
 
 func TestValidateExperiment_PriorTurnsModeStarvation(t *testing.T) {

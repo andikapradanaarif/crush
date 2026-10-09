@@ -85,6 +85,31 @@ func TestRecordReferentEpisode_RevisedDoesNotPromote(t *testing.T) {
 	require.Empty(t, refs)
 }
 
+// An unclassifiable follow-up records the episode — the observation
+// happened and later artifact-based labeling can revisit it — but
+// unknown is not evidence: it must never count toward promotion.
+func TestRecordReferentEpisode_UnknownRecordsNotPromotes(t *testing.T) {
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+	svc := NewService(db.New(conn), t.TempDir(), params.DefaultMemory())
+	ctx := t.Context()
+
+	require.NoError(t, svc.RecordReferentEpisode(ctx,
+		referentEp("s1", "m1", "x.go", ReferentUnknown, false), 1))
+	require.NoError(t, svc.RecordReferentEpisode(ctx,
+		referentEp("s2", "m2", "x.go", ReferentUnknown, false), 1))
+
+	refs, err := svc.ListReferentCandidates(ctx, []string{"config"}, 5)
+	require.NoError(t, err)
+	require.Empty(t, refs)
+
+	var count int
+	require.NoError(t, conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM referent_episodes WHERE verdict = 'unknown'`).Scan(&count))
+	require.Equal(t, 2, count)
+}
+
 func TestRecordReferentEpisode_RetryIsIdempotent(t *testing.T) {
 	conn, err := db.Connect(t.Context(), t.TempDir())
 	require.NoError(t, err)
