@@ -1269,6 +1269,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		FailureMemory:          c.cfg.Config().Options.FailureMemoryEnabled(),
 		FailureMemoryEdges:     c.cfg.Config().Options.FailureMemoryEdgesEnabled(),
 		ReferentMemory:         c.cfg.Config().Options.ReferentMemoryEnabled(),
+		SessionMemory:          c.cfg.Config().Options.SessionMemoryEnabled(),
 		MemoryTelemetry:        memTelemetry,
 		AgentID:                agent.ID,
 		AmbiguityClarification: c.cfg.Config().Options.AmbiguityClarificationEnabled(),

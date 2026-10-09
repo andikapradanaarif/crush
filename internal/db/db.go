@@ -75,6 +75,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.deleteSessionStmt, err = db.PrepareContext(ctx, deleteSession); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteSession: %w", err)
 	}
+	if q.deleteSessionDigestStmt, err = db.PrepareContext(ctx, deleteSessionDigest); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteSessionDigest: %w", err)
+	}
+	if q.deleteSessionDigestIndexStmt, err = db.PrepareContext(ctx, deleteSessionDigestIndex); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteSessionDigestIndex: %w", err)
+	}
 	if q.deleteSessionFilesStmt, err = db.PrepareContext(ctx, deleteSessionFiles); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteSessionFiles: %w", err)
 	}
@@ -110,6 +116,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.getLastSessionStmt, err = db.PrepareContext(ctx, getLastSession); err != nil {
 		return nil, fmt.Errorf("error preparing query GetLastSession: %w", err)
+	}
+	if q.getLatestCheckpointEntryStmt, err = db.PrepareContext(ctx, getLatestCheckpointEntry); err != nil {
+		return nil, fmt.Errorf("error preparing query GetLatestCheckpointEntry: %w", err)
 	}
 	if q.getMapUsageStmt, err = db.PrepareContext(ctx, getMapUsage); err != nil {
 		return nil, fmt.Errorf("error preparing query GetMapUsage: %w", err)
@@ -162,6 +171,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getSessionCounterStmt, err = db.PrepareContext(ctx, getSessionCounter); err != nil {
 		return nil, fmt.Errorf("error preparing query GetSessionCounter: %w", err)
 	}
+	if q.getSessionDigestStmt, err = db.PrepareContext(ctx, getSessionDigest); err != nil {
+		return nil, fmt.Errorf("error preparing query GetSessionDigest: %w", err)
+	}
 	if q.getToolUsageStmt, err = db.PrepareContext(ctx, getToolUsage); err != nil {
 		return nil, fmt.Errorf("error preparing query GetToolUsage: %w", err)
 	}
@@ -179,6 +191,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.getUsageByModelStmt, err = db.PrepareContext(ctx, getUsageByModel); err != nil {
 		return nil, fmt.Errorf("error preparing query GetUsageByModel: %w", err)
+	}
+	if q.indexSessionDigestStmt, err = db.PrepareContext(ctx, indexSessionDigest); err != nil {
+		return nil, fmt.Errorf("error preparing query IndexSessionDigest: %w", err)
 	}
 	if q.insertEdgeFiringStmt, err = db.PrepareContext(ctx, insertEdgeFiring); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertEdgeFiring: %w", err)
@@ -240,6 +255,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listRecentCommandsStmt, err = db.PrepareContext(ctx, listRecentCommands); err != nil {
 		return nil, fmt.Errorf("error preparing query ListRecentCommands: %w", err)
 	}
+	if q.listRecentSessionDigestsStmt, err = db.PrepareContext(ctx, listRecentSessionDigests); err != nil {
+		return nil, fmt.Errorf("error preparing query ListRecentSessionDigests: %w", err)
+	}
 	if q.listReferentsForPhrasesStmt, err = db.PrepareContext(ctx, listReferentsForPhrases); err != nil {
 		return nil, fmt.Errorf("error preparing query ListReferentsForPhrases: %w", err)
 	}
@@ -255,8 +273,14 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listSessionReadFilesStmt, err = db.PrepareContext(ctx, listSessionReadFiles); err != nil {
 		return nil, fmt.Errorf("error preparing query ListSessionReadFiles: %w", err)
 	}
+	if q.listSessionTouchedPathsStmt, err = db.PrepareContext(ctx, listSessionTouchedPaths); err != nil {
+		return nil, fmt.Errorf("error preparing query ListSessionTouchedPaths: %w", err)
+	}
 	if q.listSessionsStmt, err = db.PrepareContext(ctx, listSessions); err != nil {
 		return nil, fmt.Errorf("error preparing query ListSessions: %w", err)
+	}
+	if q.listStaleDigestSessionsStmt, err = db.PrepareContext(ctx, listStaleDigestSessions); err != nil {
+		return nil, fmt.Errorf("error preparing query ListStaleDigestSessions: %w", err)
 	}
 	if q.listUnclaimedFailuresStmt, err = db.PrepareContext(ctx, listUnclaimedFailures); err != nil {
 		return nil, fmt.Errorf("error preparing query ListUnclaimedFailures: %w", err)
@@ -303,6 +327,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.searchNotebookByTextStmt, err = db.PrepareContext(ctx, searchNotebookByText); err != nil {
 		return nil, fmt.Errorf("error preparing query SearchNotebookByText: %w", err)
 	}
+	if q.searchSessionDigestsStmt, err = db.PrepareContext(ctx, searchSessionDigests); err != nil {
+		return nil, fmt.Errorf("error preparing query SearchSessionDigests: %w", err)
+	}
 	if q.setSessionChannelStmt, err = db.PrepareContext(ctx, setSessionChannel); err != nil {
 		return nil, fmt.Errorf("error preparing query SetSessionChannel: %w", err)
 	}
@@ -323,6 +350,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.upsertFailureStmt, err = db.PrepareContext(ctx, upsertFailure); err != nil {
 		return nil, fmt.Errorf("error preparing query UpsertFailure: %w", err)
+	}
+	if q.upsertSessionDigestStmt, err = db.PrepareContext(ctx, upsertSessionDigest); err != nil {
+		return nil, fmt.Errorf("error preparing query UpsertSessionDigest: %w", err)
 	}
 	return &q, nil
 }
@@ -414,6 +444,16 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing deleteSessionStmt: %w", cerr)
 		}
 	}
+	if q.deleteSessionDigestStmt != nil {
+		if cerr := q.deleteSessionDigestStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteSessionDigestStmt: %w", cerr)
+		}
+	}
+	if q.deleteSessionDigestIndexStmt != nil {
+		if cerr := q.deleteSessionDigestIndexStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteSessionDigestIndexStmt: %w", cerr)
+		}
+	}
 	if q.deleteSessionFilesStmt != nil {
 		if cerr := q.deleteSessionFilesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteSessionFilesStmt: %w", cerr)
@@ -472,6 +512,11 @@ func (q *Queries) Close() error {
 	if q.getLastSessionStmt != nil {
 		if cerr := q.getLastSessionStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getLastSessionStmt: %w", cerr)
+		}
+	}
+	if q.getLatestCheckpointEntryStmt != nil {
+		if cerr := q.getLatestCheckpointEntryStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getLatestCheckpointEntryStmt: %w", cerr)
 		}
 	}
 	if q.getMapUsageStmt != nil {
@@ -559,6 +604,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing getSessionCounterStmt: %w", cerr)
 		}
 	}
+	if q.getSessionDigestStmt != nil {
+		if cerr := q.getSessionDigestStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getSessionDigestStmt: %w", cerr)
+		}
+	}
 	if q.getToolUsageStmt != nil {
 		if cerr := q.getToolUsageStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getToolUsageStmt: %w", cerr)
@@ -587,6 +637,11 @@ func (q *Queries) Close() error {
 	if q.getUsageByModelStmt != nil {
 		if cerr := q.getUsageByModelStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getUsageByModelStmt: %w", cerr)
+		}
+	}
+	if q.indexSessionDigestStmt != nil {
+		if cerr := q.indexSessionDigestStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing indexSessionDigestStmt: %w", cerr)
 		}
 	}
 	if q.insertEdgeFiringStmt != nil {
@@ -689,6 +744,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listRecentCommandsStmt: %w", cerr)
 		}
 	}
+	if q.listRecentSessionDigestsStmt != nil {
+		if cerr := q.listRecentSessionDigestsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listRecentSessionDigestsStmt: %w", cerr)
+		}
+	}
 	if q.listReferentsForPhrasesStmt != nil {
 		if cerr := q.listReferentsForPhrasesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listReferentsForPhrasesStmt: %w", cerr)
@@ -714,9 +774,19 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listSessionReadFilesStmt: %w", cerr)
 		}
 	}
+	if q.listSessionTouchedPathsStmt != nil {
+		if cerr := q.listSessionTouchedPathsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listSessionTouchedPathsStmt: %w", cerr)
+		}
+	}
 	if q.listSessionsStmt != nil {
 		if cerr := q.listSessionsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listSessionsStmt: %w", cerr)
+		}
+	}
+	if q.listStaleDigestSessionsStmt != nil {
+		if cerr := q.listStaleDigestSessionsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listStaleDigestSessionsStmt: %w", cerr)
 		}
 	}
 	if q.listUnclaimedFailuresStmt != nil {
@@ -794,6 +864,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing searchNotebookByTextStmt: %w", cerr)
 		}
 	}
+	if q.searchSessionDigestsStmt != nil {
+		if cerr := q.searchSessionDigestsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing searchSessionDigestsStmt: %w", cerr)
+		}
+	}
 	if q.setSessionChannelStmt != nil {
 		if cerr := q.setSessionChannelStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing setSessionChannelStmt: %w", cerr)
@@ -827,6 +902,11 @@ func (q *Queries) Close() error {
 	if q.upsertFailureStmt != nil {
 		if cerr := q.upsertFailureStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing upsertFailureStmt: %w", cerr)
+		}
+	}
+	if q.upsertSessionDigestStmt != nil {
+		if cerr := q.upsertSessionDigestStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing upsertSessionDigestStmt: %w", cerr)
 		}
 	}
 	return err
@@ -885,6 +965,8 @@ type Queries struct {
 	deleteNotebookEntriesBySessionStmt   *sql.Stmt
 	deleteProcessedSegmentsBySessionStmt *sql.Stmt
 	deleteSessionStmt                    *sql.Stmt
+	deleteSessionDigestStmt              *sql.Stmt
+	deleteSessionDigestIndexStmt         *sql.Stmt
 	deleteSessionFilesStmt               *sql.Stmt
 	deleteSessionMessagesStmt            *sql.Stmt
 	getAverageResponseTimeStmt           *sql.Stmt
@@ -897,6 +979,7 @@ type Queries struct {
 	getHourDayHeatmapStmt                *sql.Stmt
 	getLastAssistantMessageBySessionStmt *sql.Stmt
 	getLastSessionStmt                   *sql.Stmt
+	getLatestCheckpointEntryStmt         *sql.Stmt
 	getMapUsageStmt                      *sql.Stmt
 	getMaxNotebookEventNumberStmt        *sql.Stmt
 	getMessageStmt                       *sql.Stmt
@@ -914,12 +997,14 @@ type Queries struct {
 	getRecentActivityStmt                *sql.Stmt
 	getSessionByIDStmt                   *sql.Stmt
 	getSessionCounterStmt                *sql.Stmt
+	getSessionDigestStmt                 *sql.Stmt
 	getToolUsageStmt                     *sql.Stmt
 	getTotalStatsStmt                    *sql.Stmt
 	getUsageByDayStmt                    *sql.Stmt
 	getUsageByDayOfWeekStmt              *sql.Stmt
 	getUsageByHourStmt                   *sql.Stmt
 	getUsageByModelStmt                  *sql.Stmt
+	indexSessionDigestStmt               *sql.Stmt
 	insertEdgeFiringStmt                 *sql.Stmt
 	insertMCPDisabledServerStmt          *sql.Stmt
 	insertMCPEnabledServerStmt           *sql.Stmt
@@ -940,12 +1025,15 @@ type Queries struct {
 	listOpenFailuresStmt                 *sql.Stmt
 	listProcessedSegmentsStmt            *sql.Stmt
 	listRecentCommandsStmt               *sql.Stmt
+	listRecentSessionDigestsStmt         *sql.Stmt
 	listReferentsForPhrasesStmt          *sql.Stmt
 	listResolvedFailuresStmt             *sql.Stmt
 	listSessionCountersStmt              *sql.Stmt
 	listSessionOpenFailuresStmt          *sql.Stmt
 	listSessionReadFilesStmt             *sql.Stmt
+	listSessionTouchedPathsStmt          *sql.Stmt
 	listSessionsStmt                     *sql.Stmt
+	listStaleDigestSessionsStmt          *sql.Stmt
 	listUnclaimedFailuresStmt            *sql.Stmt
 	listUserMessagesBySessionStmt        *sql.Stmt
 	markSegmentProcessedStmt             *sql.Stmt
@@ -961,6 +1049,7 @@ type Queries struct {
 	resolveFailuresForCommandStmt        *sql.Stmt
 	searchNotebookByTagStmt              *sql.Stmt
 	searchNotebookByTextStmt             *sql.Stmt
+	searchSessionDigestsStmt             *sql.Stmt
 	setSessionChannelStmt                *sql.Stmt
 	updateMessageStmt                    *sql.Stmt
 	updateNotebookCompressionStmt        *sql.Stmt
@@ -968,6 +1057,7 @@ type Queries struct {
 	updateSessionTitleAndUsageStmt       *sql.Stmt
 	upsertCommandRunStmt                 *sql.Stmt
 	upsertFailureStmt                    *sql.Stmt
+	upsertSessionDigestStmt              *sql.Stmt
 }
 
 func (q *Queries) WithTx(tx *sql.Tx) *Queries {
@@ -991,6 +1081,8 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		deleteNotebookEntriesBySessionStmt:   q.deleteNotebookEntriesBySessionStmt,
 		deleteProcessedSegmentsBySessionStmt: q.deleteProcessedSegmentsBySessionStmt,
 		deleteSessionStmt:                    q.deleteSessionStmt,
+		deleteSessionDigestStmt:              q.deleteSessionDigestStmt,
+		deleteSessionDigestIndexStmt:         q.deleteSessionDigestIndexStmt,
 		deleteSessionFilesStmt:               q.deleteSessionFilesStmt,
 		deleteSessionMessagesStmt:            q.deleteSessionMessagesStmt,
 		getAverageResponseTimeStmt:           q.getAverageResponseTimeStmt,
@@ -1003,6 +1095,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getHourDayHeatmapStmt:                q.getHourDayHeatmapStmt,
 		getLastAssistantMessageBySessionStmt: q.getLastAssistantMessageBySessionStmt,
 		getLastSessionStmt:                   q.getLastSessionStmt,
+		getLatestCheckpointEntryStmt:         q.getLatestCheckpointEntryStmt,
 		getMapUsageStmt:                      q.getMapUsageStmt,
 		getMaxNotebookEventNumberStmt:        q.getMaxNotebookEventNumberStmt,
 		getMessageStmt:                       q.getMessageStmt,
@@ -1020,12 +1113,14 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getRecentActivityStmt:                q.getRecentActivityStmt,
 		getSessionByIDStmt:                   q.getSessionByIDStmt,
 		getSessionCounterStmt:                q.getSessionCounterStmt,
+		getSessionDigestStmt:                 q.getSessionDigestStmt,
 		getToolUsageStmt:                     q.getToolUsageStmt,
 		getTotalStatsStmt:                    q.getTotalStatsStmt,
 		getUsageByDayStmt:                    q.getUsageByDayStmt,
 		getUsageByDayOfWeekStmt:              q.getUsageByDayOfWeekStmt,
 		getUsageByHourStmt:                   q.getUsageByHourStmt,
 		getUsageByModelStmt:                  q.getUsageByModelStmt,
+		indexSessionDigestStmt:               q.indexSessionDigestStmt,
 		insertEdgeFiringStmt:                 q.insertEdgeFiringStmt,
 		insertMCPDisabledServerStmt:          q.insertMCPDisabledServerStmt,
 		insertMCPEnabledServerStmt:           q.insertMCPEnabledServerStmt,
@@ -1046,12 +1141,15 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listOpenFailuresStmt:                 q.listOpenFailuresStmt,
 		listProcessedSegmentsStmt:            q.listProcessedSegmentsStmt,
 		listRecentCommandsStmt:               q.listRecentCommandsStmt,
+		listRecentSessionDigestsStmt:         q.listRecentSessionDigestsStmt,
 		listReferentsForPhrasesStmt:          q.listReferentsForPhrasesStmt,
 		listResolvedFailuresStmt:             q.listResolvedFailuresStmt,
 		listSessionCountersStmt:              q.listSessionCountersStmt,
 		listSessionOpenFailuresStmt:          q.listSessionOpenFailuresStmt,
 		listSessionReadFilesStmt:             q.listSessionReadFilesStmt,
+		listSessionTouchedPathsStmt:          q.listSessionTouchedPathsStmt,
 		listSessionsStmt:                     q.listSessionsStmt,
+		listStaleDigestSessionsStmt:          q.listStaleDigestSessionsStmt,
 		listUnclaimedFailuresStmt:            q.listUnclaimedFailuresStmt,
 		listUserMessagesBySessionStmt:        q.listUserMessagesBySessionStmt,
 		markSegmentProcessedStmt:             q.markSegmentProcessedStmt,
@@ -1067,6 +1165,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		resolveFailuresForCommandStmt:        q.resolveFailuresForCommandStmt,
 		searchNotebookByTagStmt:              q.searchNotebookByTagStmt,
 		searchNotebookByTextStmt:             q.searchNotebookByTextStmt,
+		searchSessionDigestsStmt:             q.searchSessionDigestsStmt,
 		setSessionChannelStmt:                q.setSessionChannelStmt,
 		updateMessageStmt:                    q.updateMessageStmt,
 		updateNotebookCompressionStmt:        q.updateNotebookCompressionStmt,
@@ -1074,5 +1173,6 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		updateSessionTitleAndUsageStmt:       q.updateSessionTitleAndUsageStmt,
 		upsertCommandRunStmt:                 q.upsertCommandRunStmt,
 		upsertFailureStmt:                    q.upsertFailureStmt,
+		upsertSessionDigestStmt:              q.upsertSessionDigestStmt,
 	}
 }

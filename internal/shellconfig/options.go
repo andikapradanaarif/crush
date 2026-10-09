@@ -217,6 +217,7 @@ var optionSpecs = map[string]optionSpec{
 	"failure-memory":           {jsonKey: "failure_memory", kind: optBool},
 	"failure-memory-edges":     {jsonKey: "failure_memory_edges", kind: optBool},
 	"referent-memory":          {jsonKey: "referent_memory", kind: optBool},
+	"session-memory":           {jsonKey: "session_memory", kind: optBool},
 	"memory-telemetry":         {jsonKey: "memory_telemetry", kind: optBool},
 	"notebook-enabled":         {jsonKey: "notebook_enabled", kind: optBool},
 	"notebook-sync-mem0":       {jsonKey: "notebook_sync_mem0", kind: optBool},

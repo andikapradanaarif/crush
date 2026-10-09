@@ -19,6 +19,7 @@
   "enforce_context_window": false,
   "disable_auto_summarize": false,
   "failure_memory_edges": true,
-  "referent_memory": false
+  "referent_memory": false,
+  "session_memory": false
  }
 }
