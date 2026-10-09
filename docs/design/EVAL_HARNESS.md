@@ -552,7 +552,16 @@ runner isolates the run from user-level config (pinned
 `HOME`/`XDG_CONFIG_HOME`): the global layers merge into every run
 (`load.go:946`) and would otherwise leak a dev laptop's
 options/MCPs/models into results. Credentials come from the eval
-environment, never the corpus.
+environment, never the corpus. Manifests declare an `llm`
+openai-compat provider whose `api_key`/`base_url` are the env refs
+`$LLM_API_KEY`/`$LLM_BASE_URL` — the serving endpoint is infrastructure,
+not part of the measured condition, so pointing the harness at a
+different OpenAI-compatible backend is an operator-env change, not a
+manifest edit. The model pin (`model: "llm/<id>"` plus the provider's
+declared `models` entry) stays literal: the model's identity and
+context budget ARE the condition — `ModelPin` keys the run records and
+noise characterization, and a different model is a different experiment
+cell by design.
 
 Agent subprocesses inherit the operator's full credential environment
 (provider keys, `GITHUB_TOKEN`, `AWS_*`, `SSH_AUTH_SOCK`) — pinning is

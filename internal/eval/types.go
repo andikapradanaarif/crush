@@ -239,9 +239,13 @@ type Experiment struct {
 	// resolves against — written into the generated .crush.json so
 	// non-builtin providers (e.g. an OpenAI-compatible endpoint) work
 	// under the child's sanitized HOME. Raw JSON matching the config
-	// providers schema; api_key should be an env ref ($VAR) — the
-	// eval environment's credentials pass through, secrets never
-	// enter the repo. The type is load-bearing:
+	// providers schema; api_key/base_url should be env refs ($VAR)
+	// — the eval environment's credentials pass through, secrets
+	// never enter the repo. Convention: manifests use a generic
+	// "llm" openai-compat provider reading $LLM_API_KEY/
+	// $LLM_BASE_URL so the endpoint is operator infrastructure, not
+	// a manifest-coupled vendor; the model pin stays literal since
+	// it IS the measured condition. The type is load-bearing:
 	// rejectDivergentProviderKeys byte-compares marshaled blocks —
 	// stable for maps (sorted keys) but not struct field order.
 	Providers map[string]any `json:"providers,omitempty"`

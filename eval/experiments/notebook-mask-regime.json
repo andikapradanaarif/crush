@@ -1,6 +1,6 @@
 {
 	"name": "notebook-mask-regime",
-	"model": "alibaba-tp/deepseek-v4.1-flash",
+	"model": "llm/deepseek-v4.1-flash",
 	"temperature": 0,
 	"corpus": [
 		"realrepo-*@min_turns>=4"
@@ -51,11 +51,11 @@
 		}
 	},
 	"providers": {
-		"alibaba-tp": {
-			"name": "Alibaba Token Plan",
+		"llm": {
+			"name": "Eval LLM",
 			"type": "openai-compat",
-			"api_key": "$ALIBABA_TP_API_KEY",
-			"base_url": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+			"api_key": "$LLM_API_KEY",
+			"base_url": "$LLM_BASE_URL",
 			"models": [
 				{
 					"id": "deepseek-v4.1-flash",
