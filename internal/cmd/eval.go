@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -35,7 +37,9 @@ The corpus lives under --eval-dir (default ./eval):
 
 Each agent run is a 'crush run' subprocess in a fresh materialized
 workdir with a pinned HOME/XDG — both arms provably run this build.
-Provider credentials come from the eval environment.`,
+Provider credentials come from the eval environment: manifests
+reference $LLM_API_KEY/$LLM_BASE_URL, so the serving endpoint is
+operator env, not checked-in config.`,
 }
 
 var evalQuarantineCmd = &cobra.Command{
@@ -559,9 +563,9 @@ bodies; prints the per-condition cache-hit table at the end.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		keyEnv, _ := cmd.Flags().GetString("api-key-env")
 		cfg := eval.ProbeCacheConfig{
-			BaseURL:      flagStr(cmd, "base-url"),
+			BaseURL:      cmp.Or(flagStr(cmd, "base-url"), os.Getenv("LLM_BASE_URL")),
 			APIKey:       os.Getenv(keyEnv),
-			Model:        flagStr(cmd, "model"),
+			Model:        cmp.Or(flagStr(cmd, "model"), os.Getenv("LLM_MODEL")),
 			TargetTokens: flagInt(cmd, "target-tokens"),
 			Repeats:      flagInt(cmd, "repeats"),
 			MaxRequests:  flagInt(cmd, "max-requests"),
@@ -570,6 +574,15 @@ bodies; prints the per-condition cache-hit table at the end.`,
 			Seed:         flagInt64(cmd, "seed"),
 			DelayScale:   flagFloat(cmd, "delay-scale"),
 			DryRun:       flagBool(cmd, "dry-run"),
+		}
+		if cfg.BaseURL == "" {
+			return errors.New("--base-url or LLM_BASE_URL is required")
+		}
+		if cfg.APIKey == "" {
+			return fmt.Errorf("env var %q is empty or unset (--api-key-env)", keyEnv)
+		}
+		if cfg.Model == "" {
+			return errors.New("--model or LLM_MODEL is required")
 		}
 		if cfg.OutPath == "" {
 			cfg.OutPath = fmt.Sprintf("probe-cache-%d.jsonl", time.Now().Unix())
@@ -657,9 +670,9 @@ func init() {
 	evalSmokeCmd.Flags().String("providers", "", "experiment file whose providers block supplies the child's provider config")
 	_ = evalCharacterizeCmd.MarkFlagRequired("model")
 	_ = evalSmokeCmd.MarkFlagRequired("model")
-	evalProbeCacheCmd.Flags().String("base-url", "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", "serving endpoint")
-	evalProbeCacheCmd.Flags().String("api-key-env", "ALIBABA_TP_API_KEY", "env var holding the API key")
-	evalProbeCacheCmd.Flags().String("model", "deepseek-v4.1-flash", "model ID")
+	evalProbeCacheCmd.Flags().String("base-url", "", "serving endpoint (default $LLM_BASE_URL)")
+	evalProbeCacheCmd.Flags().String("api-key-env", "LLM_API_KEY", "env var holding the API key")
+	evalProbeCacheCmd.Flags().String("model", "", "model ID (default $LLM_MODEL)")
 	evalProbeCacheCmd.Flags().Int("target-tokens", 50000, "approximate prompt size in tokens")
 	evalProbeCacheCmd.Flags().Int("repeats", 5, "measured repeats per condition")
 	evalProbeCacheCmd.Flags().Int("max-requests", 120, "hard spend cap on sends (one HTTP request each)")
