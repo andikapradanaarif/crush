@@ -115,6 +115,12 @@ Design constraints settled in the 10-09 design pass:
 
 ## Execution plan
 
+GitHub milestones mirror the phases one-to-one; the retired Stage
+A–D milestones were closed 10-09 and their leftover issues folded
+into the nearest phase. Rows marked *parked* are milestone-tracked
+legacy work, not phase commitments — nothing below is gated on
+them.
+
 ### Phase 1 — Real use and honest labels
 
 | Work | Detail | Status |
@@ -138,6 +144,8 @@ Design constraints settled in the 10-09 design pass:
 |---|---|---|
 | **Procedural memory (#298)** | mine accepted runs (verify gate passed, no revert, task shape repeats ≥2 sessions, cross-project signature) → induce SKILL.md (steps as pointers+commands, not narrative) → replay-verify (source-replay = sufficiency; held-out generalization needs ≥3 instances) → injection + leakage screen → stage for approval → retrieve ≤2, abstain → durable `skill_usage` lifecycle (decay, deprecate-on-fail, never auto-revise). Sibling tier: project conventions — inspection-gated, no replay cost | open — largest functional gap; substrate exists (`internal/skills`, verify gate, cmdlog, replay, screens) |
 | **Unified context budget (#299)** | one token budget channels compete for, allocated by LOO marginal values; fixes the distractor finding (fewer rows when relevance is weak); allocation is a learned variable under the asymmetry rule | open |
+| **Scope resolver L2–L4 (#216)** | L1 identifier binding + offline bench merged (#242); L2 artifact promotion, L3 small-model fallback, L4 interactive clarify remain — gated on binding-benchmark recall-gap evidence | parked — legacy tracker folded into this milestone, not a phase commitment |
+| **Map file_heat ranking (#166)** | map-skeleton ranking by file_heat ⊕ import in-degree; fuzzy `symbol=` fallback, parent/sig columns, `impact=` | parked — milestone-tracked |
 
 ### Phase 4 — Evidence where memory should matter
 
@@ -145,6 +153,8 @@ Design constraints settled in the 10-09 design pass:
 |---|---|---|
 | **#227 sub-ceiling corpus** | 30–100 steps, expensive discovery, control pass ~40–70% — the only class where "memory improves capability, not just speed" can be shown | open — ahead of any further ladder cells |
 | **#226 SWE-bench Verified** | repo-by-repo chronological order — natural staleness + public comparison point | open |
+| **#198 feature re-verification** | periodic powered re-run of each shipped mechanism's gate; removal-review trigger when the re-measured 95% CI excludes the original effect entirely — also named above as Phase-2 monitor machinery | open — standing evidence discipline |
+| **#223 ladder rerun** | first read closed inconclusive (depth −5.4% non-monotone; distractor harm shape at j=3); a rerun at powered scale is new work, superseded in the queue by #227 cell design | parked — milestone-tracked |
 
 ### Phase 5 — Ship and parity
 
