@@ -192,6 +192,18 @@ every characterization pass a diff to reviewed files.
   aborts `error` — the authored state diverged. Trade-off: scripted
   rows are cleaner than agent rows (no composite-command noise);
   keep one agent-seeded arm in ladders to keep the selector honest.
+  `title`, `files`, and `referents` seed the channels command rows
+  cannot reach: `title` lands on the session row (the digest's FTS
+  head), `files` writes `read_files` rows through filetracker (the
+  digest's file hints), and each `referents` entry records a judged
+  episode through `RecordReferentEpisode` — accepted verdicts in
+  distinct seed sessions compose toward the promotion floor the way
+  live usage does, so two seeds declaring the same `phrase`/`target`
+  earn the rendered `referent_memory` row. Session digests
+  materialize eagerly at seed end, so the snapshot carries the rows
+  and the lazy write path never fires inside a measured run. A seed
+  needs at least one of `commands`, `files`, `referents`, `title` —
+  a command-free element models an edit-only or read-only session.
 - **Seed snapshots (automatic).** Once a seeded trajectory's seeds
   pass `seed_script`, the harness snapshots the workdir + a
   WAL-checkpointed `crush.db` under `<work-parent>/.snapshots/

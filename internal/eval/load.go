@@ -160,13 +160,23 @@ func ValidateTrajectory(t *Trajectory, trajDir string) []string {
 		if seed.AgoSeconds < 0 {
 			problems = append(problems, fmt.Sprintf("seed_commands[%d].ago_seconds must be >= 0 — seeds model the past, not the future", i))
 		}
-		if len(seed.Commands) == 0 {
-			problems = append(problems, fmt.Sprintf("seed_commands[%d].commands must contain at least one command", i))
+		if len(seed.Commands) == 0 && len(seed.Files) == 0 && len(seed.Referents) == 0 && strings.TrimSpace(seed.Title) == "" {
+			problems = append(problems, fmt.Sprintf("seed_commands[%d] must carry at least one of commands, files, referents, or title — a contentless session seeds nothing", i))
 			continue
 		}
 		for j, cmd := range seed.Commands {
 			if strings.TrimSpace(cmd) == "" {
 				problems = append(problems, fmt.Sprintf("seed_commands[%d].commands[%d] is empty", i, j))
+			}
+		}
+		for j, f := range seed.Files {
+			if strings.TrimSpace(f) == "" {
+				problems = append(problems, fmt.Sprintf("seed_commands[%d].files[%d] is empty", i, j))
+			}
+		}
+		for j, ref := range seed.Referents {
+			if strings.TrimSpace(ref.Phrase) == "" || strings.TrimSpace(ref.Target) == "" {
+				problems = append(problems, fmt.Sprintf("seed_commands[%d].referents[%d] needs both phrase and target — a half-mapped episode cannot judge a binding", i, j))
 			}
 		}
 	}

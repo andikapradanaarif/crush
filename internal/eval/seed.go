@@ -14,6 +14,7 @@ import (
 
 	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/db"
+	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/params"
 	"github.com/charmbracelet/crush/internal/shell"
 )
@@ -54,7 +55,43 @@ func (r *Runner) runScriptedSeeds(ctx context.Context, workdir string, seeds []S
 		}
 		sessionIDs = append(sessionIDs, sessionID)
 	}
+	// Materialize session digests eagerly: the production write path
+	// is lazy (first retrieval turn), which would move a db write —
+	// and its nondeterminism — into the measured run and out of the
+	// snapshot. Refreshing here means the snapshot carries the digest
+	// rows and the gate can count them. The runner refreshes again
+	// after agent seeds so mixed trajectories land digests for every
+	// seed kind before the gate. A refresh failure is logged, not
+	// fatal — lazy materialization stays correct and the seed gate
+	// still enforces the designed state.
+	svc := cmdlog.NewService(q, workdir, params.DefaultMemory(),
+		cmdlog.WithProjectKey(seedKey))
+	if err := svc.RefreshSessionDigests(ctx, params.DefaultMemory().DigestRefreshLimit); err != nil {
+		slog.Warn("Seeded digest refresh failed — digests will materialize lazily",
+			"error", err)
+	}
 	return sessionIDs, nil
+}
+
+// materializeSeededDigests opens the run db and refreshes session
+// digest rows for every stale session — the runner calls it after
+// all seed kinds so agent-seeded sessions' digests land before the
+// gate and inside the snapshot, where runScriptedSeeds' own refresh
+// (scripted seeds only) already left the scripted rows materialized.
+func (r *Runner) materializeSeededDigests(ctx context.Context, workdir, seedKey string) error {
+	dataDir := DataDirFor(workdir)
+	conn, err := db.Connect(ctx, dataDir)
+	if err != nil {
+		return fmt.Errorf("digest refresh db: %w", err)
+	}
+	defer func() {
+		if err := db.Release(dataDir); err != nil {
+			slog.Warn("Failed to release digest refresh db", "error", err)
+		}
+	}()
+	svc := cmdlog.NewService(db.New(conn), workdir, params.DefaultMemory(),
+		cmdlog.WithProjectKey(seedKey))
+	return svc.RefreshSessionDigests(ctx, params.DefaultMemory().DigestRefreshLimit)
 }
 
 // runScriptedSeed runs one seed session: a session row backdated to
@@ -65,9 +102,13 @@ func (r *Runner) runScriptedSeed(ctx context.Context, q *db.Queries, conn *sql.D
 	// The session row is backdated like the command rows it owns —
 	// audit reading "seeded 3d ago" holds for the session too.
 	stamp := r.now().Add(-time.Duration(seed.AgoSeconds * float64(time.Second)))
+	title := seed.Title
+	if title == "" {
+		title = fmt.Sprintf("seed %d (scripted)", ord+1)
+	}
 	if _, err := q.CreateSession(ctx, db.CreateSessionParams{
 		ID:    sessionID,
-		Title: fmt.Sprintf("seed %d (scripted)", ord+1),
+		Title: title,
 	}); err != nil {
 		return "", fmt.Errorf("create seed session: %w", err)
 	}
@@ -108,6 +149,42 @@ func (r *Runner) runScriptedSeed(ctx context.Context, q *db.Queries, conn *sql.D
 			Ran:            res.Verdict,
 			ComponentExits: res.ComponentExits,
 		})
+	}
+	// Files seed the session's touched paths through the same
+	// filetracker write a view/edit call would take — they are what
+	// the session digest's file hints are built from. The rows'
+	// read_at is SQL-stamped at write time, so backdate it to the
+	// seed's clock like the session row above.
+	if len(seed.Files) > 0 {
+		ft := filetracker.NewService(q, workdir)
+		for _, f := range seed.Files {
+			ft.RecordRead(ctx, sessionID, f)
+		}
+		if _, err := conn.ExecContext(ctx,
+			`UPDATE read_files SET read_at = ? WHERE session_id = ?`,
+			stamp.Unix(), sessionID); err != nil {
+			return sessionID, fmt.Errorf("backdate seed file reads: %w", err)
+		}
+	}
+	// Referent episodes record through the real judged-episode write
+	// path under the seed's clock — created_at ages with the session.
+	// Accepted, unsuggested episodes from distinct seed sessions
+	// compose toward the promotion floor exactly like live usage.
+	for i, ref := range seed.Referents {
+		verdict := cmdlog.ReferentAccepted
+		if ref.Revised {
+			verdict = cmdlog.ReferentRevised
+		}
+		if err := svc.RecordReferentEpisode(ctx, cmdlog.ReferentEpisode{
+			Phrase:          ref.Phrase,
+			Target:          ref.Target,
+			SessionID:       sessionID,
+			SourceMessageID: fmt.Sprintf("seed-%d-ref-%d", ord, i),
+			ToolCallID:      fmt.Sprintf("seed-%d-refcall-%d", ord, i),
+			Verdict:         verdict,
+		}, params.DefaultMemory().ReferentPromoteHits); err != nil {
+			return sessionID, fmt.Errorf("referent %d (%q→%q): %w", i, ref.Phrase, ref.Target, err)
+		}
 	}
 	return sessionID, nil
 }

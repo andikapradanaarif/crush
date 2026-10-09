@@ -1,0 +1,51 @@
+{
+  "id": "seeded-five-channel",
+  "schema_version": 1,
+  "origin": {"kind": "synthetic"},
+  "start_state": {"kind": "fixture", "fixture_dir": "fixture"},
+  "seed_commands": [
+    {
+      "ago_seconds": 432000,
+      "title": "fixed the quota surcharge rounding",
+      "commands": [
+        "go test ./tax",
+        "printf 'package tax\n\n// Fee returns the surcharge constant.\nfunc Fee() int {\n\treturn 10\n}\n' > tax/tax.go",
+        "go test ./tax"
+      ],
+      "files": ["tax/tax.go", "tax/tax_test.go"]
+    },
+    {
+      "ago_seconds": 345600,
+      "title": "investigating the quota contract failure",
+      "commands": ["go test ./quota"],
+      "files": ["quota/quota_test.go"],
+      "referents": [{"phrase": "tests", "target": "quota/quota_test.go"}]
+    },
+    {
+      "ago_seconds": 259200,
+      "title": "quota regression triage",
+      "commands": ["go build ./...", "go vet ./..."],
+      "files": ["quota/quota.go"],
+      "referents": [{"phrase": "tests", "target": "quota/quota_test.go"}]
+    },
+    {
+      "ago_seconds": 86400,
+      "title": "quota surcharge rules review"
+    }
+  ],
+  "task": {
+    "turns": [
+      "the tests still fail on quota"
+    ]
+  },
+  "check": {
+    "script": "check.sh",
+    "expect_start_state": "fail",
+    "seed_script": "seed_check.sh"
+  },
+  "coverage": {
+    "min_warm_start.sessions": 4
+  },
+  "requires": {"tools": ["go"]},
+  "budget": {"run_timeout_seconds": 300, "max_steps": 30}
+}

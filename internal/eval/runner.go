@@ -401,6 +401,24 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 		}
 	}
 
+	// Materialize session digests after every seed kind — scripted
+	// seeds already refreshed theirs, so this is a no-op for
+	// scripted-only trajectories; agent-seeded sessions' digests
+	// land here instead of lazily inside the measured run (a write
+	// the snapshot and the seed gate both want done, not pending).
+	// Restored snapshots get the same pass: a refresh with nothing
+	// stale is a no-op, and it normalizes snapshots captured before
+	// eager materialization existed. A refresh failure is logged,
+	// not fatal — production's lazy refresh remains correct, and a
+	// cell that genuinely needs the rows still fails honestly at
+	// the seed gate below.
+	if seeded {
+		if err := r.materializeSeededDigests(ctx, workdir, seedKey); err != nil {
+			slog.Warn("Seeded digest refresh failed — digests will materialize lazily",
+				"traj", traj.ID, "error", err)
+		}
+	}
+
 	// Seeds running cleanly is necessary but not sufficient: the
 	// designed warm state itself is asserted before the measured
 	// session launches. A seed can succeed yet leave the wrong
