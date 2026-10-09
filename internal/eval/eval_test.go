@@ -742,6 +742,13 @@ func TestArmCoverage_TailSections(t *testing.T) {
 	require.Error(t, err)
 	_, _, err = ParseArmCoverageKey("min_tail.sections.open_failures")
 	require.NoError(t, err)
+
+	// Every rendered envelope registers as an arm field — an
+	// unregistered name fails parse rather than asserting.
+	_, _, err = ParseArmCoverageKey("min_tail.sections.referent_memory")
+	require.NoError(t, err)
+	_, _, err = ParseArmCoverageKey("min_tail.sections.session_memory")
+	require.NoError(t, err)
 }
 
 func TestWriteOnlyCoverageWarnings(t *testing.T) {

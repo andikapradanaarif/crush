@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -187,6 +188,43 @@ func TestRefreshSessionDigests_ReadWriteUnion(t *testing.T) {
 	require.Contains(t, d.Files, "internal/config/config.go")
 }
 
+func TestRefreshSessionDigests_DropsOutOfWorkspacePaths(t *testing.T) {
+	t.Parallel()
+	env := setupDigestTest(t)
+	seedSession(t, env, "s1", "edit the config", 700)
+	seedRead(t, env, "s1", "internal/config/load.go")
+	// An absolute path outside the workspace has no pointer value —
+	// it drops rather than leaking directory structure into the tail.
+	_, err := env.q.CreateFile(env.ctx, db.CreateFileParams{
+		ID:        "f1",
+		SessionID: "s1",
+		Path:      filepath.Join(t.TempDir(), "outside.go"),
+		Content:   "x",
+		Version:   1,
+	})
+	require.NoError(t, err)
+	// A traversal-relative path drops on the same grounds.
+	_, err = env.q.CreateFile(env.ctx, db.CreateFileParams{
+		ID:        "f2",
+		SessionID: "s1",
+		Path:      "../sibling/leak.go",
+		Content:   "x",
+		Version:   1,
+	})
+	require.NoError(t, err)
+	// "..foo" is a legitimate in-workspace name — the guard is for
+	// traversal, not the literal prefix.
+	seedRead(t, env, "s1", "..foo/keep.go")
+
+	require.NoError(t, env.svc.RefreshSessionDigests(env.ctx, 10))
+	d, err := env.q.GetSessionDigest(env.ctx, "s1")
+	require.NoError(t, err)
+	require.Contains(t, d.Files, "internal/config/load.go")
+	require.Contains(t, d.Files, "..foo/keep.go")
+	require.NotContains(t, d.Files, "outside.go")
+	require.NotContains(t, d.Files, "leak.go")
+}
+
 func TestRefreshSessionDigests_LimitBounds(t *testing.T) {
 	t.Parallel()
 	env := setupDigestTest(t)
@@ -306,7 +344,10 @@ func TestDigestTerms(t *testing.T) {
 		{"the login thing", `"login"`},
 		{"continue", ""},
 		{"what did we do yesterday", ""},
-		{"fix the broken test", `"fix" OR "broken" OR "test"`},
+		// Dev vocabulary cannot discriminate — it appears in nearly
+		// every session's paths, so a prompt carrying only it yields
+		// no terms.
+		{"fix the broken test", ""},
 		{"that session where we set up oauth; it broke", `"set" OR "oauth" OR "broke"`},
 	}
 	for _, tc := range cases {

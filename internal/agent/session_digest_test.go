@@ -151,6 +151,33 @@ func TestDigestCandidates_Gating(t *testing.T) {
 		}, mp)
 		require.Empty(t, got)
 	})
+
+	t.Run("zero render limit suppresses the fetch and the refresh", func(t *testing.T) {
+		t.Parallel()
+		a, env := digestAgent(t)
+		a.sessionMemory = true
+		// A stale prior session — no digest row yet, so refresh is
+		// the only thing that could materialize it.
+		_, err := env.sessions.Create(t.Context(), "fix login redirect")
+		require.NoError(t, err)
+
+		mp0 := params.DefaultMemory()
+		mp0.DigestRenderLimit = 0
+		got := a.digestCandidates(t.Context(), SessionAgentCall{
+			SessionID: "cur", Prompt: "the login thing",
+		}, mp0)
+		require.Empty(t, got)
+
+		// The refresh never ran — the session is still unindexed, and
+		// materializing it now is what makes it searchable.
+		hits, err := env.cmdlog.SearchSessionDigests(t.Context(), "login", "cur", 3)
+		require.NoError(t, err)
+		require.Empty(t, hits)
+		require.NoError(t, env.cmdlog.RefreshSessionDigests(t.Context(), 25))
+		hits, err = env.cmdlog.SearchSessionDigests(t.Context(), "login", "cur", 3)
+		require.NoError(t, err)
+		require.Len(t, hits, 1)
+	})
 }
 
 func TestDigestTail_MarksSuggestedFiles(t *testing.T) {
@@ -174,6 +201,38 @@ func TestDigestTail_MarksSuggestedFiles(t *testing.T) {
 	require.Len(t, tail, 1)
 	require.True(t, env.cmdlog.WasSuggestedFile(t.Context(), cur.ID, "internal/auth/login.go"))
 	require.False(t, env.cmdlog.WasSuggestedFile(t.Context(), cur.ID, "internal/auth/oauth.go"))
+}
+
+func TestDigestTail_MarksOnlyRenderedFileHints(t *testing.T) {
+	t.Parallel()
+	a, env := digestAgent(t)
+	a.sessionMemory = true
+
+	// Eight touched paths, six rendered hints — marks must cover only
+	// what the tail actually showed, or the contamination screen
+	// over-flags edits the memory never informed.
+	sess, err := env.sessions.Create(t.Context(), "fix login redirect")
+	require.NoError(t, err)
+	for _, p := range []string{"f0.go", "f1.go", "f2.go", "f3.go", "f4.go", "f5.go", "f6.go", "f7.go"} {
+		(*env.filetracker).RecordRead(t.Context(), sess.ID, p)
+	}
+
+	cur, err := env.sessions.Create(t.Context(), "current session")
+	require.NoError(t, err)
+	tail := a.turnTailMessages(t.Context(), SessionAgentCall{
+		SessionID: cur.ID, Prompt: "the login thing",
+	}, nil)
+	require.Len(t, tail, 1)
+
+	digests, err := env.cmdlog.SearchSessionDigests(t.Context(), "login", cur.ID, 3)
+	require.NoError(t, err)
+	require.Len(t, digests, 1)
+	require.Len(t, digests[0].Files, 8)
+	hints := a.memoryParams().DigestFileHints
+	for i, f := range digests[0].Files {
+		require.Equal(t, i < hints,
+			env.cmdlog.WasSuggestedFile(t.Context(), cur.ID, f), f)
+	}
 }
 
 func TestDigestTail_HoldoutSuppressesAndNeverMarks(t *testing.T) {
@@ -211,12 +270,14 @@ func TestTurnContextSections_SessionMemoryRender(t *testing.T) {
 		{
 			SessionID: "prior-1",
 			Title:     "fix login redirect",
-			EndedAt:   time.Date(2026, 10, 9, 0, 0, 0, 0, time.UTC),
-			Files:     []string{"internal/auth/login.go", "internal/auth/oauth.go"},
+			// Local-zone fixtures — the render formats .Local(), so a
+			// UTC midnight here could render the previous date.
+			EndedAt: time.Date(2026, 10, 9, 12, 0, 0, 0, time.Local),
+			Files:   []string{"internal/auth/login.go", "internal/auth/oauth.go"},
 		},
 		{
 			SessionID: "prior-2",
-			EndedAt:   time.Date(2026, 10, 8, 0, 0, 0, 0, time.UTC),
+			EndedAt:   time.Date(2026, 10, 8, 12, 0, 0, 0, time.Local),
 		},
 	}
 

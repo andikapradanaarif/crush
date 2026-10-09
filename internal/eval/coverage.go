@@ -172,6 +172,8 @@ var armOnlyCoverageFields = map[string]func(*RunRecord) float64{
 	"tail.sections.command_memory":    func(r *RunRecord) float64 { return tailSectionTurns(r, "command_memory") },
 	"tail.sections.turn_context":      func(r *RunRecord) float64 { return tailSectionTurns(r, "turn_context") },
 	"tail.sections.ambiguity_gate":    func(r *RunRecord) float64 { return tailSectionTurns(r, "ambiguity_gate") },
+	"tail.sections.referent_memory":   func(r *RunRecord) float64 { return tailSectionTurns(r, "referent_memory") },
+	"tail.sections.session_memory":    func(r *RunRecord) float64 { return tailSectionTurns(r, "session_memory") },
 	// tail.decisions.* counts the failure-memory selector's
 	// per-candidate verdicts across turns — candidates is every row
 	// the selector evaluated, admitted those it rendered. Together

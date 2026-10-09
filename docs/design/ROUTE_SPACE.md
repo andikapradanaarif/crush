@@ -206,6 +206,12 @@ fetch and mark on ~10% of sessions. Deleting a session removes both
 halves of its digest — a pointer to a session that no longer exists
 is a dead pointer, worse than none.
 
+Known thin spot: the channel has no per-candidate decision rows —
+the audit record shows only whether the envelope rendered, not which
+sessions were considered or why a winner beat a runner-up. Deliberate
+simplicity for the loosest channel, but recall-vs-miss questions are
+unanswerable from the record until that need arrives.
+
 ## Route space 2 — eval lifecycle (live)
 
 `internal/eval/runner.go` — fixed positions; **order is semantics**:

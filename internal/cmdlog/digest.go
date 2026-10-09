@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -84,6 +85,19 @@ var digestStopWords = map[string]bool{
 	"same": true, "first": true, "next": true, "after": true,
 	"unfinished": true, "finish": true, "finished": true,
 	"remember": true, "remind": true, "tell": true, "show": true,
+	// Development vocabulary indexes but cannot discriminate — "fix"
+	// and "test" appear in nearly every session's title or touched
+	// paths, so matching on them is recall noise.
+	"fix": true, "fixed": true, "fixes": true, "test": true,
+	"tests": true, "testing": true, "bug": true, "bugs": true,
+	"code": true, "file": true, "files": true, "src": true,
+	"change": true, "changes": true, "changed": true, "update": true,
+	"updates": true, "updated": true, "add": true, "added": true,
+	"make": true, "write": true, "wrote": true, "remove": true,
+	"removed": true, "delete": true, "deleted": true,
+	"implement": true, "implemented": true, "refactor": true,
+	"rename": true, "renamed": true, "broken": true, "error": true,
+	"errors": true, "issue": true, "issues": true,
 }
 
 // digestTerms reduces a free-text prompt to the FTS5 query string —
@@ -123,7 +137,10 @@ func (s *service) RefreshSessionDigests(ctx context.Context, limit int) error {
 	}
 	for _, sess := range stale {
 		if err := s.refreshDigest(ctx, sess.ID, sess.Title, sess.UpdatedAt); err != nil {
-			return err
+			// A session that fails to refresh stays stale and retries
+			// next turn — it must not starve every later session on
+			// every trigger.
+			slog.Warn("Session digest refresh failed", "session_id", sess.ID, "error", err)
 		}
 	}
 	return nil
@@ -159,27 +176,45 @@ func (s *service) refreshDigest(ctx context.Context, sessionID, title string, en
 		}
 	}
 	files := strings.Join(rel, "\n")
-	if err := s.q.UpsertSessionDigest(ctx, db.UpsertSessionDigestParams{
-		SessionID:    sessionID,
-		Title:        title,
-		Checkpoint:   checkpoint,
-		Files:        files,
-		EndedAt:      endedAt,
-		ProjectKey:   s.projectKey,
-		ParamVersion: s.paramVersion,
-	}); err != nil {
-		return err
-	}
-	// The FTS shadow is a plain table: a refresh is a keyed delete plus
-	// insert, no external-content 'delete' command required.
-	if err := s.q.DeleteSessionDigestIndex(ctx, sessionID); err != nil {
-		return err
-	}
 	body := strings.TrimSpace(title + "\n" + checkpoint + "\n" + files)
-	return s.q.IndexSessionDigest(ctx, db.IndexSessionDigestParams{
-		SessionID: sessionID,
-		Body:      body,
-	})
+	write := func(q db.Querier) error {
+		if err := q.UpsertSessionDigest(ctx, db.UpsertSessionDigestParams{
+			SessionID:    sessionID,
+			Title:        title,
+			Checkpoint:   checkpoint,
+			Files:        files,
+			EndedAt:      endedAt,
+			ProjectKey:   s.projectKey,
+			ParamVersion: s.paramVersion,
+		}); err != nil {
+			return err
+		}
+		// The FTS shadow is a plain table: a refresh is a keyed delete
+		// plus insert, no external-content 'delete' command required.
+		if err := q.DeleteSessionDigestIndex(ctx, sessionID); err != nil {
+			return err
+		}
+		return q.IndexSessionDigest(ctx, db.IndexSessionDigestParams{
+			SessionID: sessionID,
+			Body:      body,
+		})
+	}
+	// The row and its index write as one unit — a crash between the
+	// delete and the insert would leave the session unsearchable, and
+	// its ended_at would already mark it fresh so nothing re-stales it.
+	conn := s.q.DB()
+	if conn == nil {
+		return write(s.q)
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := write(s.q.WithTx(tx)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // SearchSessionDigests runs the FTS5 path: the prompt's content terms
@@ -264,16 +299,23 @@ func splitDigestFiles(files string) []string {
 
 // relPath normalizes a stored path to workspace-relative — read_files
 // already stores relative, but the files table keeps whatever the tool
-// passed, which can be absolute.
+// passed, which can be absolute. A path outside the workspace drops:
+// it has no pointer value and only leaks directory structure into the
+// rendered tail.
 func (s *service) relPath(path string) string {
 	if path == "" {
 		return ""
 	}
 	p := filepath.Clean(path)
-	if filepath.IsAbs(p) {
-		if rel, err := filepath.Rel(s.workingDir, filepathext.Canonical(p)); err == nil && !strings.HasPrefix(rel, "..") {
-			return rel
+	if !filepath.IsAbs(p) {
+		if p == ".." || strings.HasPrefix(p, ".."+string(filepath.Separator)) {
+			return ""
 		}
+		return p
 	}
-	return p
+	rel, err := filepath.Rel(s.workingDir, filepathext.Canonical(p))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return ""
+	}
+	return rel
 }

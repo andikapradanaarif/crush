@@ -265,13 +265,22 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		// evidence (#164).
 		digests = a.digestCandidates(ctx, call, a.memoryParams())
 		for _, d := range digests {
-			for _, f := range d.Files {
+			// Mark only what the render shows — an unshown file hint
+			// can't be echo, so flagging it would over-mark the
+			// contamination screen.
+			for _, f := range d.Files[:min(len(d.Files), a.memoryParams().DigestFileHints)] {
 				a.cmdlog.MarkSuggestedFile(call.SessionID, f)
 			}
 		}
 	}
 	sections := a.turnContextSections(ctx, call, openFailures, resolvedFailures, commands, referents, digests)
-	boundMemory := len(openFailures) + len(resolvedFailures) + len(commands) + len(referents) + len(digests)
+	boundMemory := len(openFailures) + len(resolvedFailures) + len(commands) + len(referents)
+	if continuationCueRe.MatchString(call.Prompt) || sessionReferentRe.MatchString(call.Prompt) {
+		// Digest hits suppress the clarify gate only when the prompt
+		// actually names prior work — a vague prompt's loose OR-match
+		// is retrieval noise, not evidence the ambiguity resolved.
+		boundMemory += len(digests)
+	}
 	if directive := a.ambiguityDirective(ctx, call, msgs, boundMemory); directive != "" {
 		sections = append(sections, directive)
 	}
@@ -886,7 +895,7 @@ func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgen
 			}
 			fmt.Fprintf(&b, "- \"%s\" (%s)",
 				tailSafeText(truncateTailText(title, a.memoryParams().FailureCmdRunes)),
-				d.EndedAt.Format("2006-01-02"))
+				d.EndedAt.Local().Format("2006-01-02"))
 			if n := min(len(d.Files), a.memoryParams().DigestFileHints); n > 0 {
 				hints := make([]string, n)
 				for i := range hints {

@@ -51,7 +51,11 @@ var sessionReferentRe = regexp.MustCompile(`(?i)\b(` +
 // a specific target; a wrong pointer is worse than none.
 func (a *sessionAgent) digestCandidates(ctx context.Context, call SessionAgentCall, mp params.Memory) []cmdlog.SessionDigest {
 	if !a.sessionMemory || a.cmdlog == nil || a.isSubAgent ||
-		call.RepairAttempts > 0 || call.Prompt == "" {
+		call.RepairAttempts > 0 || call.Prompt == "" ||
+		mp.DigestRenderLimit <= 0 {
+		// A zero render limit suppresses the whole channel, lazy
+		// refresh included — nothing spends a write for a tail that
+		// cannot render.
 		return nil
 	}
 	continuation := continuationCueRe.MatchString(call.Prompt)
