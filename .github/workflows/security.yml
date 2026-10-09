@@ -67,11 +67,12 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: stable
-          # Vulnerability scans must run on the actual latest toolchain —
-          # a cached "stable" alias can resolve to a release that has
-          # since accrued stdlib advisories (seen: http2 findings on
-          # 1.27.1 while 1.27.2 was already published).
+          # Vulnerability scans must run on a patched toolchain — the
+          # "stable" alias resolved to 1.27.1 while 1.27.2 (a security
+          # release fixing stdlib http2 advisories) was already
+          # published. Pinned until the alias tracks the fix; revisit on
+          # the next Go minor.
+          go-version: "1.27.2"
           check-latest: true
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
