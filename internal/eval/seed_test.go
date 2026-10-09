@@ -347,6 +347,10 @@ func TestRunScriptedSeeds_Channels(t *testing.T) {
 	now := time.Now()
 	r := &Runner{EvalDir: t.TempDir(), Home: t.TempDir(), Now: func() time.Time { return now }}
 	workdir := t.TempDir()
+	for _, f := range []string{"quota/quota.go", "quota/quota_test.go"} {
+		require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(workdir, f)), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(workdir, f), []byte("package quota\n"), 0o644))
+	}
 
 	seeds := []ScriptedSeed{
 		{
@@ -416,4 +420,22 @@ func TestRunScriptedSeeds_Channels(t *testing.T) {
 		`SELECT body FROM session_digests_fts WHERE session_id = ?`, ids[0]).Scan(&body))
 	require.Contains(t, body, "fixed the quota rounding")
 	require.Contains(t, body, "quota/quota.go")
+}
+
+// A files entry naming a file that isn't in the workdir would seed a
+// phantom read_files row — satisfying gate counts while feeding the
+// digest a bogus hint. The seed errors like any authored divergence.
+func TestRunScriptedSeeds_MissingFileHintRejected(t *testing.T) {
+	r := &Runner{EvalDir: t.TempDir(), Home: t.TempDir()}
+	workdir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(workdir, "exists.go"), []byte("package x"), 0o644))
+
+	seeds := []ScriptedSeed{
+		{AgoSeconds: 3600, Files: []string{"exists.go"}},
+		{AgoSeconds: 1800, Files: []string{"missing.go"}},
+	}
+	ids, err := r.runScriptedSeeds(context.Background(), workdir, seeds, "eval-test")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `files[0] "missing.go"`)
+	require.Len(t, ids, 1, "the first seed completed before the divergence")
 }

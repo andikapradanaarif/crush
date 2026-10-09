@@ -195,7 +195,9 @@ every characterization pass a diff to reviewed files.
   `title`, `files`, and `referents` seed the channels command rows
   cannot reach: `title` lands on the session row (the digest's FTS
   head), `files` writes `read_files` rows through filetracker (the
-  digest's file hints), and each `referents` entry records a judged
+  digest's file hints) after stat-ing each workspace-relative path —
+  a missing or escaping hint errors the seed like any authored
+  divergence — and each `referents` entry records a judged
   episode through `RecordReferentEpisode` — accepted verdicts in
   distinct seed sessions compose toward the promotion floor the way
   live usage does, so two seeds declaring the same `phrase`/`target`

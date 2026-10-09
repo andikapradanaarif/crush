@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -63,10 +64,15 @@ func (r *Runner) runScriptedSeeds(ctx context.Context, workdir string, seeds []S
 	// after agent seeds so mixed trajectories land digests for every
 	// seed kind before the gate. A refresh failure is logged, not
 	// fatal — lazy materialization stays correct and the seed gate
-	// still enforces the designed state.
+	// still enforces the designed state. The bound is the authored
+	// seed count raised to the production cap: a >25-seed trajectory
+	// materializes every authored digest rather than truncating into
+	// a gate failure, while the floor keeps room for sessions a seed
+	// command spawned that the count can't see.
 	svc := cmdlog.NewService(q, workdir, params.DefaultMemory(),
 		cmdlog.WithProjectKey(seedKey))
-	if err := svc.RefreshSessionDigests(ctx, params.DefaultMemory().DigestRefreshLimit); err != nil {
+	refreshBound := max(len(seeds), params.DefaultMemory().DigestRefreshLimit)
+	if err := svc.RefreshSessionDigests(ctx, refreshBound); err != nil {
 		slog.Warn("Seeded digest refresh failed — digests will materialize lazily",
 			"error", err)
 	}
@@ -78,7 +84,7 @@ func (r *Runner) runScriptedSeeds(ctx context.Context, workdir string, seeds []S
 // all seed kinds so agent-seeded sessions' digests land before the
 // gate and inside the snapshot, where runScriptedSeeds' own refresh
 // (scripted seeds only) already left the scripted rows materialized.
-func (r *Runner) materializeSeededDigests(ctx context.Context, workdir, seedKey string) error {
+func (r *Runner) materializeSeededDigests(ctx context.Context, workdir, seedKey string, seedCount int) error {
 	dataDir := DataDirFor(workdir)
 	conn, err := db.Connect(ctx, dataDir)
 	if err != nil {
@@ -91,7 +97,8 @@ func (r *Runner) materializeSeededDigests(ctx context.Context, workdir, seedKey 
 	}()
 	svc := cmdlog.NewService(db.New(conn), workdir, params.DefaultMemory(),
 		cmdlog.WithProjectKey(seedKey))
-	return svc.RefreshSessionDigests(ctx, params.DefaultMemory().DigestRefreshLimit)
+	bound := max(seedCount, params.DefaultMemory().DigestRefreshLimit)
+	return svc.RefreshSessionDigests(ctx, bound)
 }
 
 // runScriptedSeed runs one seed session: a session row backdated to
@@ -157,7 +164,20 @@ func (r *Runner) runScriptedSeed(ctx context.Context, q *db.Queries, conn *sql.D
 	// seed's clock like the session row above.
 	if len(seed.Files) > 0 {
 		ft := filetracker.NewService(q, workdir)
-		for _, f := range seed.Files {
+		for j, f := range seed.Files {
+			// A read hint for a file that doesn't exist would
+			// seed a phantom read_files row — satisfying the
+			// gate's count while feeding the digest a bogus
+			// hint. The check runs after commands, so a file
+			// the seed's own commands wrote still passes.
+			clean := filepath.Clean(f)
+			if filepath.IsAbs(clean) || clean == ".." ||
+				strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+				return sessionID, fmt.Errorf("files[%d] %q escapes the workdir — read hints are workspace-relative", j, f)
+			}
+			if _, err := os.Stat(filepath.Join(workdir, clean)); err != nil {
+				return sessionID, fmt.Errorf("files[%d] %q: %w", j, f, err)
+			}
 			ft.RecordRead(ctx, sessionID, f)
 		}
 		if _, err := conn.ExecContext(ctx,

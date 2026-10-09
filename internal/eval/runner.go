@@ -413,7 +413,8 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	// cell that genuinely needs the rows still fails honestly at
 	// the seed gate below.
 	if seeded {
-		if err := r.materializeSeededDigests(ctx, workdir, seedKey); err != nil {
+		seedCount := len(traj.SeedCommands) + len(traj.PriorSessions)
+		if err := r.materializeSeededDigests(ctx, workdir, seedKey, seedCount); err != nil {
 			slog.Warn("Seeded digest refresh failed — digests will materialize lazily",
 				"traj", traj.ID, "error", err)
 		}
