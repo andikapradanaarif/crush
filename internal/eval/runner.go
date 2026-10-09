@@ -418,6 +418,14 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 			slog.Warn("Seeded digest refresh failed — digests will materialize lazily",
 				"traj", traj.ID, "error", err)
 		}
+		// Behavioral scoring for the seed phase (#244): sum each
+		// seed session's reconstructed call metrics so coverage can
+		// assert "the seed agent never looked" as a measured premise.
+		// Restored snapshots re-derive from the preserved db —
+		// SessionIDs are the join either way (scripted ids prefix,
+		// matching the declared seed_commands count). warm is the
+		// shared ledger pointer the seeding branches put on rec.
+		r.analyzeSeedMetrics(ctx, workdir, warm, len(traj.SeedCommands))
 	}
 
 	// Seeds running cleanly is necessary but not sufficient: the
