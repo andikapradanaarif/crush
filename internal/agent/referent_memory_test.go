@@ -62,6 +62,7 @@ func TestExtractReferentPhrase(t *testing.T) {
 		{"rerun", ""},
 	} {
 		t.Run(tc.prompt, func(t *testing.T) {
+			t.Parallel()
 			require.Equal(t, tc.want, extractReferentPhrase(tc.prompt))
 		})
 	}
@@ -82,6 +83,7 @@ func TestReferentJudgedVerdict(t *testing.T) {
 		{"oops, undo it", cmdlog.ReferentRevised},
 	} {
 		t.Run(tc.prompt, func(t *testing.T) {
+			t.Parallel()
 			require.Equal(t, tc.want, referentJudgedVerdict(tc.prompt))
 		})
 	}
