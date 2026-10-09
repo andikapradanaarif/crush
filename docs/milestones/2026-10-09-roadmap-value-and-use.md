@@ -65,31 +65,6 @@ These are the things worth keeping — most harnesses can't claim them:
   verifies rather than trusts). Render fewer rows when relevance is
   weak — that feeds directly into P5.
 
-## Defects the review found — disposition
-
-1. **`eval/flags.json` and `flagCodeDefaults` disagreed with code
-   defaults** (stale pre-#205 `notebook_enabled`/`notebook_checkpoint`
-   `true` in both; the child resolves `false`). Mislabeled baseline
-   keys and under-rejected gated predicates. **Fixed** — values
-   synced; `TestFlagsDefaultsMatchCodeDefaults` pins every declared
-   key to the Options resolvers so the next default flip fails in CI.
-2. **Referent learning counted unparseable follow-ups as acceptance**
-   (`referentJudgedVerdict` = cue-miss → accepted). **Fixed** —
-   `ReferentUnknown` verdict for follow-ups the English cues cannot
-   read (non-ASCII letters or no lexical content); recorded for
-   provenance and future relabeling, never promotion evidence. Known
-   residual: Latin-script languages the cues don't cover still slip —
-   the real fix is P2's artifact signals.
-3. **Roadmap trailed the code** — fixed by this document.
-4. **10-08 writeup overstated** ("real dose-response" on a
-   non-monotone, n=12, multi-metric read) — fixed: reworded to
-   suggestive/non-monotone with an explicit multiplicity note.
-5. **Package concentration** (`agent.go` 3,897; `failure_select.go`
-   1,719; `run_edges.go` 1,799; `turn_context.go` 1,148 — every new
-   channel lands in `internal/agent`) — owned by #232 (table-driven
-   dispatch) plus a channel interface, sequenced before the next
-   channel lands.
-
 ## The phase plan
 
 Ordered by what unlocks the most evidence per unit of work.
@@ -109,7 +84,8 @@ vs. revised by what happened to the code: did the edit survive to the
 next session (hash unchanged), was it committed or reverted
 (`git log`/reflog), were the tests green at session end (cmdlog rows)?
 Language-neutral, hard to fool — the real labels for referents and
-#228, and the closing fix for defect 2's residual.
+#228, and the durable fix for follow-ups the cue layer can't
+classify.
 
 **P3 — Close the learning loop on real-session replay.** Snapshot
 real sessions at start (#206 already captures start SHA + prompt) →
@@ -160,8 +136,8 @@ ninth edit site in `internal/agent`.
 
 ## Sequencing
 
-- **Step 1** — defects 1–2 + this doc; memory + telemetry on for
-  daily use. #290 (seed behavioral evidence) landed.
+- **Step 1** — this doc; memory + telemetry on for daily use. #290
+  (seed behavioral evidence) landed.
 - **Step 2** — P2 artifact acceptance signals; P9 dispatch/interface.
 - **Step 3** — #227 first slice (3–5 tasks), then one powered read on
   it.
@@ -174,7 +150,7 @@ ninth edit site in `internal/agent`.
 
 - Pre-register the primary comparison and the decision rule before
   any powered spend; name the primary metric so multiplicity stays
-  visible (defect 4 is the cautionary tale).
+  visible.
 - Learned labels and learned parameters fail closed: unparseable
   evidence is `unknown`, never a positive; a gate that can't fire
   resolves as absent, not silent.
