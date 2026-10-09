@@ -138,18 +138,26 @@ type ReadFile struct {
 }
 
 type ReferentEpisode struct {
-	ID              int64  `json:"id"`
-	Phrase          string `json:"phrase"`
-	Target          string `json:"target"`
-	SessionID       string `json:"session_id"`
-	SourceMessageID string `json:"source_message_id"`
-	ToolCallID      string `json:"tool_call_id"`
-	RepoState       string `json:"repo_state"`
-	MemorySuggested int64  `json:"memory_suggested"`
-	Verdict         string `json:"verdict"`
-	ProjectKey      string `json:"project_key"`
-	ParamVersion    string `json:"param_version"`
-	CreatedAt       int64  `json:"created_at"`
+	ID               int64         `json:"id"`
+	Phrase           string        `json:"phrase"`
+	Target           string        `json:"target"`
+	SessionID        string        `json:"session_id"`
+	SourceMessageID  string        `json:"source_message_id"`
+	ToolCallID       string        `json:"tool_call_id"`
+	RepoState        string        `json:"repo_state"`
+	MemorySuggested  int64         `json:"memory_suggested"`
+	Verdict          string        `json:"verdict"`
+	ProjectKey       string        `json:"project_key"`
+	ParamVersion     string        `json:"param_version"`
+	CreatedAt        int64         `json:"created_at"`
+	LabelTargetHash  string        `json:"label_target_hash"`
+	LabelHashChanged sql.NullInt64 `json:"label_hash_changed"`
+	LabelCommitted   sql.NullInt64 `json:"label_committed"`
+	LabelTestsGreen  sql.NullInt64 `json:"label_tests_green"`
+	LabelWrongTarget int64         `json:"label_wrong_target"`
+	LabelSteps       int64         `json:"label_steps"`
+	LabelTokens      int64         `json:"label_tokens"`
+	LabeledAt        int64         `json:"labeled_at"`
 }
 
 type ReferentMemory struct {

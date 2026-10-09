@@ -173,6 +173,25 @@ func (t *memoryTelemetry) recordTurn(sessionID, prompt string, sections []string
 		"project_key":   t.projectKey,
 		"param_version": t.paramVersion,
 	}
+	if armed {
+		// Propensity is the logging-policy probability of the
+		// assigned arm (#294): the holdout coin assigns the 0.1/0.9
+		// split, and eval children are deterministically treated —
+		// holdoutOff forces them on — so their records carry 1.0
+		// rather than implying they randomized. Off-policy
+		// evaluation (#297's IPS/DR scoring) is only valid against
+		// propensities recorded at decision time; unarmed turns
+		// coined no arm at all and omit the field.
+		propensity := 1.0
+		if os.Getenv(EvalTelemetryEnvVar) == "" && os.Getenv(EvalFlagsEnvVar) == "" {
+			if holdout {
+				propensity = memoryTelemetryHoldoutRate
+			} else {
+				propensity = 1 - memoryTelemetryHoldoutRate
+			}
+		}
+		turn["propensity"] = propensity
+	}
 	if reasons := rejectionReasons(decisions); len(reasons) > 0 {
 		turn["rejections"] = reasons
 	}

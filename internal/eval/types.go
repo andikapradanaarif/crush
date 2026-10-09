@@ -809,6 +809,11 @@ type FailureDecision struct {
 	// the row, empty on pre-provenance ledger rows.
 	SourceSession string `json:"source_session,omitempty"`
 	SourceCall    string `json:"source_call,omitempty"`
+	// Propensity mirrors agent.FailureDecision.Propensity (#294):
+	// the logging-policy probability of this verdict — 1.0 while the
+	// selector is deterministic, the true selection probability once
+	// a randomized layer exists.
+	Propensity float64 `json:"propensity,omitempty"`
 	// Engaged and Outcome are the post-run stamps (#221): Engaged
 	// marks the run's actions touched the candidate's referent;
 	// Outcome is the closed vocabulary — resolved/open for failure

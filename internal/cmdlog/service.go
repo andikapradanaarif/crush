@@ -113,6 +113,18 @@ type Service interface {
 	// referent_memory row (#165).
 	RecordReferentEpisode(ctx context.Context, ep ReferentEpisode, promoteMin int) error
 
+	// LabelReferentEpisode stamps the artifact signals computable at
+	// episode-record time (#294): the target's post-edit hash
+	// baseline, the judged turn's cost, and the session-end test
+	// verdict. Idempotent on the episode unique key.
+	LabelReferentEpisode(ctx context.Context, ep ReferentEpisode, in ReferentEpisodeLabelInputs) error
+
+	// MatureReferentLabels re-checks the signals that only resolve
+	// over time — file still matches baseline (survival), commit
+	// landed since the episode — for pending episodes, oldest first,
+	// bounded per call so each turn's pass drains the backlog.
+	MatureReferentLabels(ctx context.Context, limit int) error
+
 	// ListReferentCandidates returns promoted phrase→target mappings
 	// for the turn's extracted phrases — the referent injection pool,
 	// strongest evidence first.

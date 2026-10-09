@@ -111,6 +111,13 @@ type Querier interface {
 	// idempotency point: a repair-chain re-run of the turn-context pass
 	// re-derives the same episode and must not count twice.
 	InsertReferentEpisode(ctx context.Context, arg InsertReferentEpisodeParams) error
+	// Stamp the artifact signals computable at episode-record time
+	// (#294): the file's post-edit hash baseline, the judged turn's cost,
+	// the session's test verdict, and the wrong-target count. The key
+	// clause is the episode unique key -- the same idempotency point
+	// the insert uses, so a repair-chain re-run re-stamps the same row
+	// instead of drifting.
+	LabelReferentEpisode(ctx context.Context, arg LabelReferentEpisodeParams) error
 	// Backs prompt history when no session is open. Needs
 	// idx_messages_role_created_at to seek rather than scan the table.
 	ListAllUserMessages(ctx context.Context) ([]Message, error)
@@ -137,6 +144,14 @@ type Querier interface {
 	ListMessagesBySessionFromSummary(ctx context.Context, arg ListMessagesBySessionFromSummaryParams) ([]Message, error)
 	ListNewFiles(ctx context.Context) ([]File, error)
 	ListOpenFailures(ctx context.Context, arg ListOpenFailuresParams) ([]FailureMemory, error)
+	// Episodes whose artifact labels still have a checkable signal
+	// (#294): committed once observed stays observed, and a hash that
+	// already diverged is terminal -- the pending set is "not yet
+	// committed OR file still matches baseline". Rows with no baseline
+	// hash (pre-label data, file gone at record time) are never
+	// checkable, so they stay out of the scan. Oldest first, bounded per
+	// pass -- every turn's pass nudges the backlog.
+	ListPendingReferentLabels(ctx context.Context, arg ListPendingReferentLabelsParams) ([]ListPendingReferentLabelsRow, error)
 	ListProcessedSegments(ctx context.Context, sessionID string) ([]ProcessedSegment, error)
 	// last_at is millisecond-granularity so re-runs order by recency;
 	// rowid settles ties for rows written in the same millisecond.
@@ -174,6 +189,13 @@ type Querier interface {
 	// prompt renders at most ten.
 	ListSessionOpenFailures(ctx context.Context, arg ListSessionOpenFailuresParams) ([]FailureMemory, error)
 	ListSessionReadFiles(ctx context.Context, sessionID string) ([]ReadFile, error)
+	// kind='test' ledger rows whose last real run belongs to this
+	// session (or a task-tool child) -- the session-end test evidence
+	// (#294). last_exit is the row's last verdict, not this run's, so a
+	// command the session ran only early counts toward session-end
+	// state the way the ledger models it. Matches the
+	// ListSessionOpenFailures session-with-children shape.
+	ListSessionTestVerdicts(ctx context.Context, arg ListSessionTestVerdictsParams) ([]ListSessionTestVerdictsRow, error)
 	// Read files are already workspace-relative; files rows store the
 	// path the tool passed, relativized service-side when needed.
 	ListSessionTouchedPaths(ctx context.Context, arg ListSessionTouchedPathsParams) ([]string, error)
@@ -230,6 +252,13 @@ type Querier interface {
 	SetSessionChannel(ctx context.Context, arg SetSessionChannelParams) (Session, error)
 	UpdateMessage(ctx context.Context, arg UpdateMessageParams) error
 	UpdateNotebookCompression(ctx context.Context, arg UpdateNotebookCompressionParams) error
+	// Re-stamp one episode's maturing signals (#294). hash_changed
+	// reflects the latest check -- a file restored to its baseline reads
+	// surviving again; committed only ever moves 0/NULL toward 1 (a
+	// landed commit can't un-happen). Callers keep that monotonicity by
+	// passing the previous value through unchanged when the check says
+	// "still not committed".
+	UpdateReferentEpisodeLabel(ctx context.Context, arg UpdateReferentEpisodeLabelParams) error
 	UpdateSession(ctx context.Context, arg UpdateSessionParams) (Session, error)
 	UpdateSessionTitleAndUsage(ctx context.Context, arg UpdateSessionTitleAndUsageParams) error
 	// Project-scoped command ledger: one row per normalized command,

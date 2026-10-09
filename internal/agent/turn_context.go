@@ -129,6 +129,19 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	// convention as command memory), gated only on a cmdlog store and
 	// a real user prompt to judge against (#165).
 	a.recordReferentEpisodes(ctx, call, msgs)
+	// The artifact-label maturity pass (#294) drains a bounded slice
+	// of pending episodes every turn — file-hash survival and commit
+	// checks resolve over time, so each turn nudges the backlog
+	// rather than a scheduler owning it. Detached: git and
+	// filesystem reads must not serialize into the request path.
+	if a.cmdlog != nil && !a.isSubAgent {
+		labelCtx := context.WithoutCancel(ctx)
+		a.spawnDetached(func() {
+			if err := a.cmdlog.MatureReferentLabels(labelCtx, referentLabelMatureLimit); err != nil {
+				slog.Warn("Referent label maturity pass failed", "error", err)
+			}
+		})
+	}
 	// armed is effective arming — flag on AND a store to read. A
 	// flag-on session with a nil cmdlog records memory_armed:false
 	// rather than coining a holdout that could never inject. Any

@@ -145,6 +145,14 @@ func (failingCmdlog) RecordReferentEpisode(context.Context, cmdlog.ReferentEpiso
 	return nil
 }
 
+func (failingCmdlog) LabelReferentEpisode(context.Context, cmdlog.ReferentEpisode, cmdlog.ReferentEpisodeLabelInputs) error {
+	return nil
+}
+
+func (failingCmdlog) MatureReferentLabels(context.Context, int) error {
+	return nil
+}
+
 func (failingCmdlog) ListReferentCandidates(context.Context, []string, int) ([]cmdlog.Referent, error) {
 	return nil, errors.New("cmdlog unavailable")
 }
