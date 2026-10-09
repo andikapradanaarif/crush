@@ -250,3 +250,11 @@ func initGoose() error {
 
 	return gooseInitErr
 }
+
+// DB returns the connection pool the Queries was built on, or nil when
+// it is bound to a transaction instead — callers that need to group
+// generated queries atomically (WithTx) reach the pool through here.
+func (q *Queries) DB() *sql.DB {
+	conn, _ := q.db.(*sql.DB)
+	return conn
+}

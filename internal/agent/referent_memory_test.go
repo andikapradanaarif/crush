@@ -279,7 +279,7 @@ func TestTurnContextSections_ReferentRender(t *testing.T) {
 	sections := a.turnContextSections(t.Context(), SessionAgentCall{SessionID: "s1"},
 		nil, nil, nil, []cmdlog.Referent{
 			{Phrase: "config", Target: "internal/config/config.go", Hits: 3},
-		})
+		}, nil)
 	require.Len(t, sections, 1)
 	require.Contains(t, sections[0], "<referent_memory>")
 	require.Contains(t, sections[0], `"config" usually means`)
@@ -290,6 +290,6 @@ func TestTurnContextSections_ReferentRender(t *testing.T) {
 	// Option off suppresses the section even with candidates.
 	a.referentMemory = false
 	sections = a.turnContextSections(t.Context(), SessionAgentCall{SessionID: "s1"},
-		nil, nil, nil, []cmdlog.Referent{{Phrase: "config", Target: "x.go", Hits: 3}})
+		nil, nil, nil, []cmdlog.Referent{{Phrase: "config", Target: "x.go", Hits: 3}}, nil)
 	require.Empty(t, sections)
 }

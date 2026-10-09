@@ -46,6 +46,9 @@ drift apart.
 | `open_failure_ttl` | 720h | 0 or [24h, 720h] | Open-failure staleness window |
 | `referent_render_limit` | 2 | ≥ 0 | Referent-memory tail rows |
 | `referent_promote_hits` | 2 | ≥ 0 | Distinct-session acceptances before a phrase→target promotes |
+| `digest_render_limit` | 3 | ≥ 0 | Session-memory tail rows |
+| `digest_refresh_limit` | 25 | ≥ 0 | Stale digests materialized per turn |
+| `digest_file_hints` | 6 | ≥ 0 | File hints per digest row |
 
 Zero on a cap means "suppress the section" — the tighten
 direction, always allowed. `open_failure_ttl` accepts a Go

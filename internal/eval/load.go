@@ -740,6 +740,10 @@ func armStarvationRules(field string) []starvationRule {
 			// failure_memory — a min_ on an fm-off arm starves
 			// structurally.
 			return []starvationRule{boolOn("failure_memory")}
+		case "tail.sections.referent_memory":
+			return []starvationRule{boolOn("referent_memory")}
+		case "tail.sections.session_memory":
+			return []starvationRule{boolOn("session_memory")}
 		}
 		return nil
 	}

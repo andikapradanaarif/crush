@@ -168,6 +168,50 @@ config and the test") records nothing — an unattributable edit is
 worse than a missed observation. Pronouns ("fix it") are unlearnable
 by construction: no definite-article noun, no phrase key.
 
+### Session digests — cross-session recall as pointers (#164)
+
+`<session_memory>` resolves continuation prompts — "continue", "the
+login thing", "what did we do yesterday" — to *pointers into prior
+sessions*: title, end date, a few touched paths. It is the read side
+of the `crush.db` ledger that made a session resumable at all.
+
+- **Materialize** (lazy): sessions never formally end, so the digest
+  is written at retrieval time — a vague or continuation prompt first
+  refreshes any session whose `updated_at` moved past its digest's
+  `ended_at`, bounded by `digest_refresh_limit` per turn so a long
+  history amortizes across turns instead of stalling one. The payload
+  is pointer-shaped by construction: title, latest consolidated
+  checkpoint text (title + touched paths when no checkpoint exists),
+  end timestamp, project_key, param_version.
+- **Search**: the prompt's content words — stop words and deictic
+  words stripped, each quoted so punctuation cannot smuggle FTS
+  syntax — `OR`-match an FTS5 shadow of title + checkpoint + paths.
+  `project_key` is an admissibility filter and the current session is
+  excluded — partitioning before ranking, never a signal.
+- **Fallback**: a continuation cue with no content terms (or an empty
+  match set) resolves to the freshest *other* sessions — the honest
+  answer to "continue" is "here is what you were doing". A deictic
+  prompt that names a target FTS cannot find gets no recency guess —
+  a wrong pointer is worse than none.
+- **Render**: pointers only — `"title" (YYYY-MM-DD) — file, file`,
+  bounded by `digest_render_limit` rows and `digest_file_hints`
+  paths, always framed as pointers to reopen, not facts. Rendered
+  paths mark `MarkSuggestedFile` so a later edit flags
+  memory-informed, the same screen referent targets get.
+
+Guards: `options.session_memory` opt-in, sub-agents never see the
+channel, repair attempts skip it (a repair turn answers a verifier,
+not the user's memory), and the telemetry holdout suppresses both
+fetch and mark on ~10% of sessions. Deleting a session removes both
+halves of its digest — a pointer to a session that no longer exists
+is a dead pointer, worse than none.
+
+Known thin spot: the channel has no per-candidate decision rows —
+the audit record shows only whether the envelope rendered, not which
+sessions were considered or why a winner beat a runner-up. Deliberate
+simplicity for the loosest channel, but recall-vs-miss questions are
+unanswerable from the record until that need arrives.
+
 ## Route space 2 — eval lifecycle (live)
 
 `internal/eval/runner.go` — fixed positions; **order is semantics**:

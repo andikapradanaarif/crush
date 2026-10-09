@@ -181,3 +181,18 @@ type SessionCounter struct {
 	Name      string `json:"name"`
 	Value     int64  `json:"value"`
 }
+
+type SessionDigest struct {
+	SessionID    string `json:"session_id"`
+	Title        string `json:"title"`
+	Checkpoint   string `json:"checkpoint"`
+	Files        string `json:"files"`
+	EndedAt      int64  `json:"ended_at"`
+	ProjectKey   string `json:"project_key"`
+	ParamVersion string `json:"param_version"`
+}
+
+type SessionDigestsFt struct {
+	SessionID string `json:"session_id"`
+	Body      string `json:"body"`
+}

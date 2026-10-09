@@ -88,6 +88,18 @@ type Memory struct {
 	// accepted episodes from DISTINCT sessions — same-session
 	// re-derivation is one observation repeated, not two.
 	ReferentPromoteHits int `json:"referent_promote_hits"`
+	// DigestRenderLimit bounds the <session_memory> section —
+	// session-digest pointers (#164). Zero suppresses the fetch,
+	// same contract as the other render limits.
+	DigestRenderLimit int `json:"digest_render_limit"`
+	// DigestRefreshLimit bounds the lazy materialization sweep —
+	// how many stale sessions get digests per retrieval turn. A long
+	// unindexed history amortizes across turns instead of stalling
+	// one.
+	DigestRefreshLimit int `json:"digest_refresh_limit"`
+	// DigestFileHints bounds file paths rendered per digest row —
+	// a pointer list, not an inventory.
+	DigestFileHints int `json:"digest_file_hints"`
 }
 
 // Skeleton bounds: the asymmetry contract — tightening is free,
@@ -123,6 +135,9 @@ func DefaultMemory() Memory {
 		OpenFailureTTL:       30 * 24 * time.Hour,
 		ReferentRenderLimit:  2,
 		ReferentPromoteHits:  2,
+		DigestRenderLimit:    3,
+		DigestRefreshLimit:   25,
+		DigestFileHints:      6,
 	}
 }
 
@@ -189,6 +204,9 @@ func reflectValues(m Memory) map[string]int64 {
 		"failure_headline_runes": int64(m.FailureHeadlineRunes),
 		"referent_render_limit":  int64(m.ReferentRenderLimit),
 		"referent_promote_hits":  int64(m.ReferentPromoteHits),
+		"digest_render_limit":    int64(m.DigestRenderLimit),
+		"digest_refresh_limit":   int64(m.DigestRefreshLimit),
+		"digest_file_hints":      int64(m.DigestFileHints),
 	}
 }
 

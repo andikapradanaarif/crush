@@ -118,6 +118,26 @@ type Service interface {
 	// strongest evidence first.
 	ListReferentCandidates(ctx context.Context, phrases []string, limit int) ([]Referent, error)
 
+	// RefreshSessionDigests materializes digests for sessions whose
+	// row is missing or stale — the lazy write path run at retrieval
+	// time, since sessions never formally end (#164). Bounded by
+	// limit per call so a long history amortizes across turns.
+	RefreshSessionDigests(ctx context.Context, limit int) error
+
+	// SearchSessionDigests runs the FTS5 path — the prompt's content
+	// terms match digest bodies project-scoped, current session
+	// excluded. A prompt with no content terms returns nil; the
+	// caller falls back to RecentSessionDigests.
+	SearchSessionDigests(ctx context.Context, prompt, currentSessionID string, limit int) ([]SessionDigest, error)
+
+	// RecentSessionDigests is the recency fallback for bare
+	// continuation prompts — freshest other sessions first.
+	RecentSessionDigests(ctx context.Context, currentSessionID string, limit int) ([]SessionDigest, error)
+
+	// DeleteSessionDigest drops a deleted session's digest row and
+	// FTS shadow — dead pointers are worse than none.
+	DeleteSessionDigest(ctx context.Context, sessionID string) error
+
 	// ProjectKey is the stable partition identity of the project
 	// this store belongs to — the canonical git common-dir (linked
 	// worktrees fold into the owning repo) plus the normalized

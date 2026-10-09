@@ -340,9 +340,21 @@ func (r *recordingCmdLog) RecordReferentEpisode(context.Context, cmdlog.Referent
 func (r *recordingCmdLog) ListReferentCandidates(context.Context, []string, int) ([]cmdlog.Referent, error) {
 	return nil, nil
 }
-func (r *recordingCmdLog) ProjectKey() string   { return "" }
-func (r *recordingCmdLog) ParamVersion() string { return "" }
-func (r *recordingCmdLog) ForgetSession(string) {}
+
+func (r *recordingCmdLog) RefreshSessionDigests(context.Context, int) error { return nil }
+
+func (r *recordingCmdLog) SearchSessionDigests(context.Context, string, string, int) ([]cmdlog.SessionDigest, error) {
+	return nil, nil
+}
+
+func (r *recordingCmdLog) RecentSessionDigests(context.Context, string, int) ([]cmdlog.SessionDigest, error) {
+	return nil, nil
+}
+
+func (r *recordingCmdLog) DeleteSessionDigest(context.Context, string) error { return nil }
+func (r *recordingCmdLog) ProjectKey() string                                { return "" }
+func (r *recordingCmdLog) ParamVersion() string                              { return "" }
+func (r *recordingCmdLog) ForgetSession(string)                              {}
 
 func TestBashTool_RecordsRunToCmdLog(t *testing.T) {
 	workingDir := t.TempDir()

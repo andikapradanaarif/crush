@@ -365,6 +365,10 @@ type sessionAgent struct {
 	// Episode recording is always on under cmdlog; this gates the
 	// read side only.
 	referentMemory bool
+	// sessionMemory injects the <session_memory> tail — pointers to
+	// prior sessions resolved from vague/continuation prompts via
+	// per-session digests + FTS5 (#164, options.session_memory).
+	sessionMemory bool
 	// memoryTelemetry is the opt-in local-only usage log (issue #206)
 	// — nil when disabled. agentID attributes its records in
 	// multi-agent sessions.
@@ -601,6 +605,12 @@ type SessionAgentOptions struct {
 	// outcomes (#165, options.referent_memory). Recording of
 	// referent episodes happens regardless; this gates the read.
 	ReferentMemory bool
+	// SessionMemory injects the <session_memory> tail — pointers to
+	// prior sessions (title, date, touched files) resolved from
+	// vague/continuation prompts via per-session digests + FTS5
+	// (#164, options.session_memory). Digest indexing is lazy; this
+	// gates the read side.
+	SessionMemory bool
 	// MemoryTelemetry is the opt-in local-only usage log
 	// (options.memory_telemetry); nil when disabled. Shared across
 	// built agents so the holdout assignment is per-session, not
@@ -703,6 +713,7 @@ func NewSessionAgent(
 		failureMemory:          opts.FailureMemory,
 		failureMemoryEdgesOff:  !opts.FailureMemoryEdges,
 		referentMemory:         opts.ReferentMemory,
+		sessionMemory:          opts.SessionMemory,
 		memParams:              opts.MemParams.OrDefault(),
 		memoryTelemetry:        opts.MemoryTelemetry,
 		agentID:                opts.AgentID,

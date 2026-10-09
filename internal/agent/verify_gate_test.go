@@ -840,6 +840,22 @@ func (r *gateRecordingCmdLog) RecordReferentEpisode(context.Context, cmdlog.Refe
 func (r *gateRecordingCmdLog) ListReferentCandidates(context.Context, []string, int) ([]cmdlog.Referent, error) {
 	return nil, nil
 }
+
+func (r *gateRecordingCmdLog) RefreshSessionDigests(context.Context, int) error {
+	return nil
+}
+
+func (r *gateRecordingCmdLog) SearchSessionDigests(context.Context, string, string, int) ([]cmdlog.SessionDigest, error) {
+	return nil, nil
+}
+
+func (r *gateRecordingCmdLog) RecentSessionDigests(context.Context, string, int) ([]cmdlog.SessionDigest, error) {
+	return nil, nil
+}
+
+func (r *gateRecordingCmdLog) DeleteSessionDigest(context.Context, string) error {
+	return nil
+}
 func (r *gateRecordingCmdLog) ProjectKey() string   { return "" }
 func (r *gateRecordingCmdLog) ParamVersion() string { return "" }
 func (r *gateRecordingCmdLog) ForgetSession(string) {}

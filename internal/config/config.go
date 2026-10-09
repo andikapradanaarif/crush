@@ -564,6 +564,15 @@ type Options struct {
 	// Episode recording happens regardless under cmdlog; this option
 	// gates the read side only. Experimental; default off.
 	ReferentMemory *bool `json:"referent_memory,omitempty" jsonschema:"description=Read learned referent memory: inject the <referent_memory> tail section with phrase-to-target candidates promoted from accepted vague-prompt outcomes. Episode recording happens regardless; this gates the read side. Experimental.,default=false"`
+	// SessionMemory injects the <session_memory> tail — pointers to
+	// prior sessions in this workspace (title, date, touched files)
+	// resolved from vague and continuation prompts like "continue" or
+	// "the login thing" via a per-session digest + FTS5 index (#164).
+	// Digest materialization is lazy at retrieval time — enabling
+	// starts cold and history materializes over subsequent turns;
+	// this option gates the read side and its index build.
+	// Experimental; default off.
+	SessionMemory *bool `json:"session_memory,omitempty" jsonschema:"description=Read session memory: inject the <session_memory> tail section with pointers to prior sessions (title / date / touched files) matched by FTS5 over per-session digests for vague and continuation prompts. Digest indexing is lazy — enabling starts cold and history materializes over subsequent turns; this gates the read side and its index build. Experimental.,default=false"`
 	// MemoryTelemetry opts in to local-only memory-usage logging:
 	// append-only JSONL records at data_directory/memory-telemetry.jsonl
 	// describing what memory did each turn — the prompt text, sections
@@ -1666,6 +1675,15 @@ func (o *Options) ReferentMemoryEnabled() bool {
 		return false
 	}
 	return *o.ReferentMemory
+}
+
+// SessionMemoryEnabled returns the resolved session-memory injection
+// flag — off unless explicitly enabled.
+func (o *Options) SessionMemoryEnabled() bool {
+	if o.SessionMemory == nil {
+		return false
+	}
+	return *o.SessionMemory
 }
 
 // MemoryTelemetryEnabled returns the resolved local-only memory-usage

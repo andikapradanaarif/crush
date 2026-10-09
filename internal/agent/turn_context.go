@@ -110,6 +110,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	var resolvedFailures []cmdlog.Failure
 	var commands []cmdlog.Command
 	var referents []cmdlog.Referent
+	var digests []cmdlog.SessionDigest
 	var memoryDecisions []FailureDecision
 	var memoryCandidates []cmdlog.Failure
 	var fetchErr error
@@ -133,7 +134,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	// rather than coining a holdout that could never inject. Any
 	// injecting channel counts — referent_memory alone still owes the
 	// lottery its control arm.
-	armed := (a.failureMemory || a.referentMemory) && a.cmdlog != nil
+	armed := (a.failureMemory || a.referentMemory || a.sessionMemory) && a.cmdlog != nil
 	if telemetryOn && armed {
 		holdout = a.memoryTelemetry.holdoutOff(call.SessionID)
 	}
@@ -258,9 +259,28 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		for _, r := range referents {
 			a.cmdlog.MarkSuggestedFile(call.SessionID, r.Target)
 		}
+		// Session digests share the referent channel's suggested-mark
+		// contract — a rendered digest names files, and an edit that
+		// lands on one of them is memory-informed, not independent
+		// evidence (#164).
+		digests = a.digestCandidates(ctx, call, a.memoryParams())
+		for _, d := range digests {
+			// Mark only what the render shows — an unshown file hint
+			// can't be echo, so flagging it would over-mark the
+			// contamination screen.
+			for _, f := range d.Files[:min(len(d.Files), a.memoryParams().DigestFileHints)] {
+				a.cmdlog.MarkSuggestedFile(call.SessionID, f)
+			}
+		}
 	}
-	sections := a.turnContextSections(ctx, call, openFailures, resolvedFailures, commands, referents)
+	sections := a.turnContextSections(ctx, call, openFailures, resolvedFailures, commands, referents, digests)
 	boundMemory := len(openFailures) + len(resolvedFailures) + len(commands) + len(referents)
+	if continuationCueRe.MatchString(call.Prompt) || sessionReferentRe.MatchString(call.Prompt) {
+		// Digest hits suppress the clarify gate only when the prompt
+		// actually names prior work — a vague prompt's loose OR-match
+		// is retrieval noise, not evidence the ambiguity resolved.
+		boundMemory += len(digests)
+	}
 	if directive := a.ambiguityDirective(ctx, call, msgs, boundMemory); directive != "" {
 		sections = append(sections, directive)
 	}
@@ -313,7 +333,7 @@ type turnSelection struct {
 // absence.
 func (a *sessionAgent) tailArmed() bool {
 	return !a.isSubAgent &&
-		(a.failureMemory || a.referentMemory || a.turnContext == "session" || a.ambiguityClarification)
+		(a.failureMemory || a.referentMemory || a.sessionMemory || a.turnContext == "session" || a.ambiguityClarification)
 }
 
 // TailSection names one rendered tail envelope and its size — one
@@ -755,7 +775,7 @@ func (a *sessionAgent) stampDecisionsPostRun(ctx context.Context, sessionID stri
 // display and tests. The tail and its audit need the per-envelope
 // split — see turnContextSections.
 func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCall, openFailures []cmdlog.Failure) string {
-	return strings.Join(a.turnContextSections(ctx, call, openFailures, nil, nil, nil), "\n")
+	return strings.Join(a.turnContextSections(ctx, call, openFailures, nil, nil, nil, nil), "\n")
 }
 
 // turnContextSections renders the tail context sections — the session
@@ -767,7 +787,7 @@ func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCal
 // knowledge — so a reader weighting early content heavier reads the
 // subordinate envelopes last. Returns nil for a sub-agent or when no
 // enabled signal has content.
-func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgentCall, openFailures, resolvedFailures []cmdlog.Failure, commands []cmdlog.Command, referents []cmdlog.Referent) []string {
+func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgentCall, openFailures, resolvedFailures []cmdlog.Failure, commands []cmdlog.Command, referents []cmdlog.Referent, digests []cmdlog.SessionDigest) []string {
 	if a.isSubAgent {
 		return nil
 	}
@@ -865,6 +885,30 @@ func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgen
 		sections = append(sections, b.String())
 	}
 
+	if a.sessionMemory && len(digests) > 0 {
+		var b strings.Builder
+		b.WriteString("<session_memory>\nEarlier sessions in this workspace this prompt may refer to — pointers (title, date, files) to reopen, not facts:\n")
+		for _, d := range digests {
+			title := d.Title
+			if title == "" {
+				title = "(untitled session)"
+			}
+			fmt.Fprintf(&b, "- \"%s\" (%s)",
+				tailSafeText(truncateTailText(title, a.memoryParams().FailureCmdRunes)),
+				d.EndedAt.Local().Format("2006-01-02"))
+			if n := min(len(d.Files), a.memoryParams().DigestFileHints); n > 0 {
+				hints := make([]string, n)
+				for i := range hints {
+					hints[i] = tailSafeText(d.Files[i])
+				}
+				fmt.Fprintf(&b, " — %s", strings.Join(hints, ", "))
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString("</session_memory>\n")
+		sections = append(sections, b.String())
+	}
+
 	return sections
 }
 
@@ -872,7 +916,11 @@ func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgen
 // tail — a stored headline like "</open_failures>" could otherwise
 // spoof a section boundary. Write-side caps bound length; the
 // render-side truncate below keeps that bound honest if they loosen.
-var tailSafeText = strings.NewReplacer("<", "(", ">", ")").Replace
+var tailSafeText = strings.NewReplacer("<", "(", ">", ")",
+	// Every render site is one line — a newline inside stored content
+	// (a command, a path, a title) must not break the envelope's line
+	// structure.
+	"\r\n", " ", "\n", " ", "\r", " ").Replace
 
 // failureAge is the staleness hint rendered on an open failure — a
 // failure last seen twenty days ago weighs differently than one seen

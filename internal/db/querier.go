@@ -37,6 +37,8 @@ type Querier interface {
 	DeleteNotebookEntriesBySession(ctx context.Context, sessionID string) error
 	DeleteProcessedSegmentsBySession(ctx context.Context, sessionID string) error
 	DeleteSession(ctx context.Context, id string) error
+	DeleteSessionDigest(ctx context.Context, sessionID string) error
+	DeleteSessionDigestIndex(ctx context.Context, sessionID string) error
 	DeleteSessionFiles(ctx context.Context, sessionID string) error
 	DeleteSessionMessages(ctx context.Context, sessionID string) error
 	GetAverageResponseTime(ctx context.Context) (int64, error)
@@ -49,6 +51,21 @@ type Querier interface {
 	GetHourDayHeatmap(ctx context.Context) ([]GetHourDayHeatmapRow, error)
 	GetLastAssistantMessageBySession(ctx context.Context, sessionID string) (Message, error)
 	GetLastSession(ctx context.Context) (Session, error)
+	// Session digests (#164): one resumable row per session + an FTS5
+	// shadow for paraphrased cross-session retrieval. Pointers only ---
+	// titles, paths, dates.
+	//
+	// FTS5 notes: sqlc catalogs the virtual table's columns but cannot
+	// resolve `session_digests_fts MATCH` (table-name MATCH), so queries
+	// use `body MATCH` --- equivalent here since body is the only indexed
+	// column. Explicit column lists everywhere: sqlc's `*` expansion
+	// re-parses badly against this schema.
+	// The session's consolidated position --- the digest's narrative
+	// field where the notebook produced one. Coarsest granularity wins
+	// before recency: a session- or boundary-grain checkpoint carries the
+	// whole position, so a turn-grain one written later must not displace
+	// it. Untagged checkpoints rank coarsest, matching granularityRank.
+	GetLatestCheckpointEntry(ctx context.Context, sessionID string) (GetLatestCheckpointEntryRow, error)
 	// Per-tool call count plus the number of distinct sessions that used
 	// it: the per-session split the GROUP BY aggregate loses. Counts
 	// attempted calls (tool-not-found results included), so flag-off
@@ -73,12 +90,16 @@ type Querier interface {
 	GetRecentActivity(ctx context.Context) ([]GetRecentActivityRow, error)
 	GetSessionByID(ctx context.Context, id string) (Session, error)
 	GetSessionCounter(ctx context.Context, arg GetSessionCounterParams) (int64, error)
+	GetSessionDigest(ctx context.Context, sessionID string) (SessionDigest, error)
 	GetToolUsage(ctx context.Context) ([]GetToolUsageRow, error)
 	GetTotalStats(ctx context.Context) (GetTotalStatsRow, error)
 	GetUsageByDay(ctx context.Context) ([]GetUsageByDayRow, error)
 	GetUsageByDayOfWeek(ctx context.Context) ([]GetUsageByDayOfWeekRow, error)
 	GetUsageByHour(ctx context.Context) ([]GetUsageByHourRow, error)
 	GetUsageByModel(ctx context.Context) ([]GetUsageByModelRow, error)
+	// The FTS shadow is a plain FTS5 table (not external-content) so a
+	// digest refresh is a keyed delete + insert.
+	IndexSessionDigest(ctx context.Context, arg IndexSessionDigestParams) error
 	// One row per edge per run boundary; INSERT OR IGNORE makes the write
 	// idempotent within a boundary, so callers count a firing only when
 	// this reports a new row.
@@ -123,6 +144,9 @@ type Querier interface {
 	// candidate from another partition is inadmissible before relevance
 	// ever runs.
 	ListRecentCommands(ctx context.Context, arg ListRecentCommandsParams) ([]CommandMemory, error)
+	// The recency fallback: "continue" carries no terms to match, so the
+	// tail offers the freshest other sessions instead.
+	ListRecentSessionDigests(ctx context.Context, arg ListRecentSessionDigestsParams) ([]SessionDigest, error)
 	// Promoted candidates whose learned phrase appears among the turn's
 	// extracted phrases -- exact-match on the normalized phrase keeps the
 	// render honest (a fuzzy hit would be a guess, not learned evidence).
@@ -150,7 +174,14 @@ type Querier interface {
 	// prompt renders at most ten.
 	ListSessionOpenFailures(ctx context.Context, arg ListSessionOpenFailuresParams) ([]FailureMemory, error)
 	ListSessionReadFiles(ctx context.Context, sessionID string) ([]ReadFile, error)
+	// Read files are already workspace-relative; files rows store the
+	// path the tool passed, relativized service-side when needed.
+	ListSessionTouchedPaths(ctx context.Context, arg ListSessionTouchedPathsParams) ([]string, error)
 	ListSessions(ctx context.Context) ([]Session, error)
+	// Sessions whose digest is missing or older than their last update ---
+	// the lazy-refresh worklist. Sub-agent sessions (parent_session_id
+	// set) are internal machinery, not user work, so they stay out.
+	ListStaleDigestSessions(ctx context.Context, limit int64) ([]ListStaleDigestSessionsRow, error)
 	// Legacy failure rows awaiting a partition claim (pre-provenance
 	// writes). The claim re-keys them Go-side because the signature hash
 	// itself carries project_key -- a column UPDATE alone would leave a
@@ -188,6 +219,12 @@ type Querier interface {
 	ResolveFailuresForCommand(ctx context.Context, arg ResolveFailuresForCommandParams) error
 	SearchNotebookByTag(ctx context.Context, arg SearchNotebookByTagParams) ([]NotebookEntry, error)
 	SearchNotebookByText(ctx context.Context, arg SearchNotebookByTextParams) ([]NotebookEntry, error)
+	// FTS5 match on the digest body (title + checkpoint + files) joined
+	// back to the pointer fields. `body MATCH` --- not
+	// `session_digests_fts MATCH` --- because sqlc resolves column MATCH
+	// but not table-name MATCH; body is the only indexed column so the
+	// two are equivalent here.
+	SearchSessionDigests(ctx context.Context, arg SearchSessionDigestsParams) ([]SessionDigest, error)
 	SetSessionChannel(ctx context.Context, arg SetSessionChannelParams) (Session, error)
 	UpdateMessage(ctx context.Context, arg UpdateMessageParams) error
 	UpdateNotebookCompression(ctx context.Context, arg UpdateNotebookCompressionParams) error
@@ -202,6 +239,11 @@ type Querier interface {
 	// hints, and the observation's provenance all move with the latest
 	// failure, not the first.
 	UpsertFailure(ctx context.Context, arg UpsertFailureParams) error
+	// The digest is a per-turn refresh of the session's resumable view:
+	// title + latest checkpoint + touched files. ended_at follows the
+	// session row's updated_at --- the closest thing to an end timestamp a
+	// session has (sessions never formally end).
+	UpsertSessionDigest(ctx context.Context, arg UpsertSessionDigestParams) error
 }
 
 var _ Querier = (*Queries)(nil)

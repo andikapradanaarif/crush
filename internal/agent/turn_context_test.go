@@ -148,6 +148,22 @@ func (failingCmdlog) RecordReferentEpisode(context.Context, cmdlog.ReferentEpiso
 func (failingCmdlog) ListReferentCandidates(context.Context, []string, int) ([]cmdlog.Referent, error) {
 	return nil, errors.New("cmdlog unavailable")
 }
+
+func (failingCmdlog) RefreshSessionDigests(context.Context, int) error {
+	return errors.New("cmdlog unavailable")
+}
+
+func (failingCmdlog) SearchSessionDigests(context.Context, string, string, int) ([]cmdlog.SessionDigest, error) {
+	return nil, errors.New("cmdlog unavailable")
+}
+
+func (failingCmdlog) RecentSessionDigests(context.Context, string, int) ([]cmdlog.SessionDigest, error) {
+	return nil, errors.New("cmdlog unavailable")
+}
+
+func (failingCmdlog) DeleteSessionDigest(context.Context, string) error {
+	return errors.New("cmdlog unavailable")
+}
 func (failingCmdlog) ProjectKey() string   { return "" }
 func (failingCmdlog) ParamVersion() string { return "" }
 func (failingCmdlog) ForgetSession(string) {}
