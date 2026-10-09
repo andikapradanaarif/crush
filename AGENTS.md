@@ -96,11 +96,12 @@ internal/
   event/                           Telemetry (PostHog)
   pubsub/                          Internal pub/sub for cross-component messaging
   filetracker/                     Tracks files touched per session
-  cmdlog/                          Project command/failure memory (write path;
-                                   read consumers: failure selector, reconcile
-                                   edge). Rows carry per-observation provenance
-                                   (session, tool call, repo state, suggested
-                                   flag, project_key partition)
+  cmdlog/                          Project command/failure/referent/session-digest
+                                   memory (write path; read consumers: failure
+                                   selector, reconcile edge, referent candidates,
+                                   digest FTS). Rows carry per-observation
+                                   provenance (session, tool call, repo state,
+                                   suggested flag, project_key partition)
   redact/                          Shared secret redaction (leaf; used by
                                    cmdlog, notebook, mem0 sync)
   params/                          Memory-subsystem parameter set (leaf):

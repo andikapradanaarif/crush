@@ -33,10 +33,10 @@ the corrected conclusions the plan depends on:
 - **The estimator dropped zero pairs** — and zeros were mostly
   *treatment wins*. Fixed in #203 (zero-safe normalized-diff, ratio
   of means); all powered reads were re-scored.
-- **Capacity bug:** only *open* failures render (resolved vanish),
-  `command_memory` is written but never read, tail caps at 5. Depth
-  ladders are untestable until #222 — a flat slope would measure the
-  cap, not learning.
+- **Capacity bug (fixed in #222):** only *open* failures render
+  (resolved vanish), `command_memory` is written but never read, tail
+  caps at 5. Depth ladders were untestable until the fix — a flat
+  slope would measure the cap, not learning.
 - **No harm observed on the tested positive corpus** — a general harm
   bound is unestablished.
 - **RRSI Table 6 is four hand-picked decisions**, not a convergence
@@ -119,12 +119,14 @@ guards, as a diffable document — is
 
 All of it hangs off two items:
 
-- **#228 learned-params substrate** — a design contract first, a store
-  when the first real parameter needs it (today `failure_select.go`
-  holds ~6 numeric constants and no tunable thresholds — there's
-  almost nothing to learn yet, and little data to learn it from).
-  Learned state never lives in user config (config is authored intent;
-  learned params are harness state). Decay is required — params
+- **#228 learned-params substrate** — the store landed: `params.Memory`
+  holds the tunable set (~17 fields: render limits, promote floors,
+  vague-prompt bounds, TTLs), `OrDefault` resolves sparse overlays,
+  and `param_version` stamps every memory row with the snapshot that
+  produced it. Still open: the *learning* loop — evidence → accepted
+  param update. Learned state never lives in user config (config is
+  authored intent; learned params are harness state). Decay is
+  required — params
   without decay become another stale-memory channel. And a param
   update is itself an evidence decision: updates travel the same
   noise-adjusted acceptance rule as mechanism changes — windowed
@@ -173,8 +175,8 @@ blind search.
 | **Tokens-to-done (#151)** | all token classes per attempt w/ CIs; unknown stays unknown; seed spend reported separately (marginal + amortized) | merged in #272 — `cache_write` + generator-tier pricing closed the gap; Σ all classes ÷ attempted runs, bootstrap CIs, `requiredPairs` verdict |
 | **Offline decision tests** | synthetic/preserved records: noisy-null, known regression, lower-calls-worse-pass, cost inflation, missing telemetry, valid abstention (#159 folded) | landed in #275 — 11 calibration cells under `internal/eval/testdata/decisions/`, `EVAL_GEN=1` regenerates |
 | **CI (#138)** | zero runs ever; selector PRs went 5 review rounds ungated | closed — `go test ./...` runs in CI (build.yml) with flaky-pool reset + quarantine timeout |
-| **Probe tier (#109)** | package the manual session-DB forensics as reusable probes | in review #276 — `crush eval probe`, three read-classification probes, canonical `IsMutatingCall` vocab |
-| **#115 split** | decision-provenance/request-identity forward; cache attribution deferred | staged |
+| **Probe tier (#109)** | package the manual session-DB forensics as reusable probes | merged in #276 — `crush eval probe`, three read-classification probes, canonical `IsMutatingCall` vocab |
+| **#115 split** | decision-provenance/request-identity forward; cache attribution deferred | landed — request-identity v2 merged in #279; cache attribution remains deferred |
 
 ### Stage B — Make memory selective (with abstention)
 
@@ -188,7 +190,7 @@ blind search.
 | **Reconciliation edge (#218)** | `reconcile` run-edge: open `failure_memory` rows joined on `command_memory.last_session_id` — the session (or its task-tool children) last ran and last failed → bounded retry names the resolving commands; `edge_firings` row is the decision record (`open=N introduced=M`). Accepted bound: last-writer session key — a concurrent session's re-run lifts the row | implemented |
 | **Candidate-pool cap (#233)** | fetch pool (50) and render cap (5) are separate stages: bound rows beyond the cap record `render_capped`, so "admitted but not rendered" is a named exit, not silence | implemented; named exits assertable via `tail.decisions.reasons.*` (#235) |
 | **Injection screening (#219)** | `screenHeadline` at persist: ANSI/format-rune strip + phrase-level override/role/exfiltration scrub; cut spans leave `[filtered]` markers, all-payload lines persist as a placeholder | implemented |
-| **Provenance (#220)** | per-observation: session/tool call, repo state, expected-negative vs real failure, resolving observation, memory-suggested flag — **+ `project_key` (stable repo identity, 10-05) + `param_version`** | open — gates #165 |
+| **Provenance (#220)** | per-observation: session/tool call, repo state, expected-negative vs real failure, resolving observation, memory-suggested flag — **+ `project_key` (stable repo identity, 10-05) + `param_version`** | merged in #281 — cleared the #165 gate it held |
 | **Decision observability (#221)** | shipped partially w/ selector (signatures, admit, reason); open: source session/tool call, action targets, post-run outcome | issue closed — partial scope shipped; residual (post-run outcome) untracked |
 | **Heat-feedback caution** | `read_files` can't distinguish user interest from memory-suggested reads — attribution before heat informs ranking, or it reinforces itself | standing constraint |
 
@@ -196,18 +198,18 @@ blind search.
 
 | Work | Detail |
 |---|---|
-| **Capacity fix (#222)** | render `command_memory` + keep resolved-failure knowledge — else the ladder measures the cap. Implemented + smoke PASS; full rationale in `2026-10-07-exp-failure-memory-render-capacity.md` |
-| **Depth + distractor ladders + LOO ablation (#223)** | depth 0/1/2/4 relevant experience (quirk randomized per stage); distractors 0/5/20 (wrong-target actions, injected-row precision, abstention); all-K vs K−1 marginal value |
-| **#108 snapshot replay (narrow)** | settled snapshot → next task under alternative memory selections |
-| **#117 staged** | deterministic reconstruction → persistence pilot → powered interaction only if material |
+| **Capacity fix (#222)** | render `command_memory` + keep resolved-failure knowledge — else the ladder measures the cap. Implemented + smoke PASS; full rationale in `2026-10-07-exp-failure-memory-render-capacity.md` — issue closed |
+| **Depth + distractor ladders + LOO ablation (#223)** | depth 0/1/2/4 relevant experience (quirk randomized per stage); distractors 0/5/20 (wrong-target actions, injected-row precision, abstention); all-K vs K−1 marginal value — **open; next item** |
+| **#108 snapshot replay (narrow)** | settled snapshot → next task under alternative memory selections — merged in #278 |
+| **#117 staged** | deterministic reconstruction → persistence pilot → powered interaction only if material — merged in #280 |
 
 ### Stage D — Broader memory types, evidence-gated
 
 | Item | Disposition |
 |---|---|
-| **#229 user-level memory** | The slow tier — starts earning promotion only once ≥2 projects of screened evidence exist |
-| **#165 referents** | Deferred until provenance + abstention exist; split: episodic storage / promotion / contamination screen |
-| **#164 digest + FTS5** | FTS5 is lexical not semantic — test structured cmd/pkg/path matching first |
+| **#229 user-level memory** | The slow tier — starts earning promotion only once ≥2 projects of screened evidence exist — open |
+| **#165 referents** | **Shipped** — merged in #282, hardened in #286 (post-merge review): episodic storage, distinct-session promotion with true-count `hits`, contamination screen, single-phrase *and* single-target abstention, repair-prompt skip, delegated-edit traversal. `options.referent_memory` |
+| **#164 digest + FTS5** | **Shipped** — merged in #283: pointer-only cross-session recall (title/date/≤6 file hints), lazy materialization on stale `updated_at`, `project_key`+`param_version` partition, per-candidate audit noted thin. `options.session_memory` |
 | **#166** | Map-skeleton ranking only (retitled; `memory` label dropped) |
 | **Notebook stack** | `parked`: #86/#90/#91/#153 dormant while default-off; #205 = the default-off decision itself |
 | **#110/#139/#107** | Same issues, second hat: parked *qua notebook mechanism*, but their context-economics content is schedulable by production impact independent of the notebook — not cross-session learning |
@@ -226,18 +228,20 @@ blind search.
 
 ## Next steps, in order
 
-1. **Notebook default-off (#205)** — implemented: `notebook_enabled`
+*Steps 1–7 are executed — kept below as the record of what landed and
+what the powered reads found. The live queue resumes at step 8.*
+
+1. **Notebook default-off (#205)** — done: `notebook_enabled`
    and `notebook_checkpoint` (which follows it) resolve false when
    unset; the resolved value is materialized into the options
    projection, so each invocation's effective default is recorded in
    the config the run reports.
-2. **Write-side injection screening (#219)** — persistent prompt
-   channel; security item, cheap.
-3. **Real-usage telemetry (#206)** — implemented in #231 (open):
-   randomized holdout + session-start snapshots. Lead time is the
-   cost, and #228's learning needs the data — merge lands the
-   collection path.
-4. **Trustworthy CI (#138)**.
+2. **Write-side injection screening (#219)** — done: persistent prompt
+   channel screened at persist (`screenHeadline`, `[filtered]` markers).
+3. **Real-usage telemetry (#206)** — done in #231: randomized holdout +
+   session-start snapshots. Lead time was the cost, and #228's learning
+   needs the data — merge landed the collection path.
+4. **Trustworthy CI (#138)** — done: `go test ./...` in build.yml.
 5. **Powered selector run on the repaired mask corpus** — #217
    merged 10-04, so the stale cells now assert the premise they
    claim (bar: pass ~1.00 *and* effort savings retained).
@@ -323,8 +327,13 @@ blind search.
    **certified 10-06** by the ablation rerun (step 5): zero admits
    on both arms, all 198 edgeon rejects carrying the designed
    reason.
-8. **#222 capacity → #220 provenance (+`project_key`/`param_version`)
-   → #221 → #228 params substrate → #223 ladders.**
+8. **#223 memory ladders — the live queue starts here.** The chain
+   `#222 capacity → #220 provenance (+project_key/param_version) →
+   #221 → #228 params substrate` is fully landed, and the channel set
+   itself grew: referents (#282/#286) and session digests (#283) are
+   two memory types the LOO ablation should now include in its
+   per-channel attribution. Order cells by information-per-run —
+   extremes first (depth 0 vs 4, distractors 0 vs 20), not the middle.
 9. **#224 sealed pool + #225 qwen + #226 SWE-bench + #227
    sub-ceiling corpus.**
 10. **#229 user-level memory** — Stage D; promotion starts only once
