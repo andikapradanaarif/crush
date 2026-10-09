@@ -1,0 +1,60 @@
+{
+ "name": "memory-loo-referent",
+ "model": "llm/deepseek-v4.1-flash",
+ "temperature": 0,
+ "corpus": ["seeded-five-channel"],
+ "runs_per_trajectory": {"stable": 12, "mid": 12, "uncharacterized": 12},
+ "primary": {"metric": "steps", "direction": "increase", "mde": 0.15, "max_pass_drop": 0.1},
+ "cost_weights": {"cache_read": 0.25, "cache_write": 0, "output": 4},
+ "arms": {
+  "control": {
+   "config": {
+    "options": {
+     "turn_context": "off",
+     "failure_memory": true,
+     "failure_memory_edges": false,
+     "referent_memory": true,
+     "session_memory": true
+    }
+   },
+   "coverage": {
+    "min_tail.sections.open_failures": 1,
+    "min_tail.sections.referent_memory": 1,
+    "min_tail.sections.session_memory": 1
+   }
+  },
+  "treatment": {
+   "config": {
+    "options": {
+     "turn_context": "off",
+     "failure_memory": true,
+     "failure_memory_edges": false,
+     "referent_memory": true,
+     "session_memory": true,
+     "memory_params": {"referent_render_limit": 0}
+    }
+   },
+   "coverage": {
+    "min_tail.sections.open_failures": 1,
+    "max_tail.sections.referent_memory": 0,
+    "min_tail.sections.session_memory": 1
+   }
+  }
+ },
+ "decision_rule": {
+  "hypothesis": "Referent memory is the phrase-level channel: the promoted mapping 'tests' → quota/quota_test.go (hits=2, seeded via two accepted episodes in distinct seed sessions) renders under the vague prompt and points the agent at the failing file without a package name. Prediction (pre-registered): near-null on steps — the open failure row 'go test ./quota' already names the package and the referent hint is largely redundant information; its marginal content is a file-level pointer. If removal measurably costs steps, the file-level pointer was doing work the failure envelope was not; if near-null, referent's contribution on this cell is presentation, not information — the channel's cost is then only its tail bytes.",
+  "primary": {"metric": "steps", "arm": "treatment", "vs": "control", "direction": "increase", "min_improvement": 0.0},
+  "guardrail": {"metric": "pass_rate", "min_delta": -0.1}
+ },
+ "providers": {
+  "llm": {
+   "name": "Eval LLM",
+   "type": "openai-compat",
+   "api_key": "$LLM_API_KEY",
+   "base_url": "$LLM_BASE_URL",
+   "models": [
+    {"id": "deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash", "context_window": 1000000, "default_max_tokens": 384000}
+   ]
+  }
+ }
+}

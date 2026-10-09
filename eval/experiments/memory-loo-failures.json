@@ -1,0 +1,63 @@
+{
+ "name": "memory-loo-failures",
+ "model": "llm/deepseek-v4.1-flash",
+ "temperature": 0,
+ "corpus": ["seeded-five-channel"],
+ "runs_per_trajectory": {"stable": 12, "mid": 12, "uncharacterized": 12},
+ "primary": {"metric": "steps", "direction": "increase", "mde": 0.15, "max_pass_drop": 0.1},
+ "cost_weights": {"cache_read": 0.25, "cache_write": 0, "output": 4},
+ "arms": {
+  "control": {
+   "config": {
+    "options": {
+     "turn_context": "off",
+     "failure_memory": true,
+     "failure_memory_edges": false,
+     "referent_memory": true,
+     "session_memory": true
+    }
+   },
+   "coverage": {
+    "min_tail.sections.open_failures": 1,
+    "min_tail.sections.command_memory": 1,
+    "min_tail.sections.referent_memory": 1,
+    "min_tail.sections.session_memory": 1
+   }
+  },
+  "treatment": {
+   "config": {
+    "options": {
+     "turn_context": "off",
+     "failure_memory": true,
+     "failure_memory_edges": false,
+     "referent_memory": true,
+     "session_memory": true,
+     "memory_params": {"open_render_limit": 0, "resolved_render_limit": 0, "command_render_limit": 0}
+    }
+   },
+   "coverage": {
+    "max_tail.sections.open_failures": 0,
+    "max_tail.sections.resolved_failures": 0,
+    "max_tail.sections.command_memory": 0,
+    "min_tail.sections.referent_memory": 1,
+    "min_tail.sections.session_memory": 1
+   }
+  }
+ },
+ "decision_rule": {
+  "hypothesis": "Failure memory is the original channel: the seeded open row ('go test ./quota'), resolved sibling, and five command rows are the dose the earlier pool-level LOOs ablated one at a time. Suppressing all three pools at once leaves only the grown channels — the referent mapping 'tests' → quota/quota_test.go and the four 'quota'-titled digests. Prediction (pre-registered): removal costs some steps but less than a full no-memory arm would, because the referent hint and digest file hints still name the failing package — the first read of whether the new channels carry the failure pools' core function alone. If steps rise past the single-pool LOOs, the pools were covering for each other as well as for the new channels; if near-null, file-level pointers suffice on this cell and the failure pools' marginal value is envelope, not content.",
+  "primary": {"metric": "steps", "arm": "treatment", "vs": "control", "direction": "increase", "min_improvement": 0.0},
+  "guardrail": {"metric": "pass_rate", "min_delta": -0.1}
+ },
+ "providers": {
+  "llm": {
+   "name": "Eval LLM",
+   "type": "openai-compat",
+   "api_key": "$LLM_API_KEY",
+   "base_url": "$LLM_BASE_URL",
+   "models": [
+    {"id": "deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash", "context_window": 1000000, "default_max_tokens": 384000}
+   ]
+  }
+ }
+}

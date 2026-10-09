@@ -149,9 +149,34 @@ type PriorSessions []Task
 // measure a different cell than the one the manifest poses. Exit
 // codes are verdicts: a failing command is how open failures are
 // seeded on purpose.
+//
+// Title, Files, and Referents seed the channels that command rows
+// cannot reach: the session digest's FTS body (title + touched
+// paths), and referent episodes whose distinct-session acceptances
+// promote a phrase→target row. A seed that only carries these
+// fields models a prior session that ran no commands — an edit-only
+// or read-only session — so commands may be empty when any of them
+// is set.
 type ScriptedSeed struct {
-	AgoSeconds float64  `json:"ago_seconds"`
-	Commands   []string `json:"commands"`
+	AgoSeconds float64        `json:"ago_seconds"`
+	Commands   []string       `json:"commands,omitempty"`
+	Title      string         `json:"title,omitempty"`
+	Files      []string       `json:"files,omitempty"`
+	Referents  []SeedReferent `json:"referents,omitempty"`
+}
+
+// SeedReferent is one authored referent episode attached to the seed
+// session: Phrase is the vague-prompt noun the episode maps, Target
+// the workspace-relative path the session's edit landed on. The
+// episode records through the real RecordReferentEpisode write path
+// with verdict accepted (or revised when Revised is set), so the
+// promotion floor — distinct clean-accepting sessions — composes
+// across seed sessions the way real usage does: two seeds declaring
+// the same phrase→target earn the rendered row.
+type SeedReferent struct {
+	Phrase  string `json:"phrase"`
+	Target  string `json:"target"`
+	Revised bool   `json:"revised,omitempty"`
 }
 
 // Check is the scoring-function contract.

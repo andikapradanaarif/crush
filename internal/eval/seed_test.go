@@ -304,7 +304,8 @@ func TestValidateTrajectory_SeedCommands(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ago_seconds must be >= 0")
 
-	// An empty command list is rejected.
+	// An empty command list is rejected when nothing else carries the
+	// seed — commands, files, referents, and title are all content.
 	dir = writeTrajectory(t, filepath.Join(root, "corpus"), "t-empty", map[string]any{
 		"seed_commands": []any{
 			map[string]any{"ago_seconds": 60, "commands": []any{}},
@@ -312,5 +313,129 @@ func TestValidateTrajectory_SeedCommands(t *testing.T) {
 	})
 	_, err = LoadTrajectory(dir)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "must contain at least one command")
+	require.Contains(t, err.Error(), "at least one of commands, files, referents, or title")
+
+	// A title-only seed is valid — it models a prior session that
+	// left nothing but its topic (a digest row, no artifacts).
+	dir = writeTrajectory(t, filepath.Join(root, "corpus"), "t-title", map[string]any{
+		"seed_commands": []any{
+			map[string]any{"ago_seconds": 60, "title": "discussed the quota rules"},
+		},
+	})
+	_, err = LoadTrajectory(dir)
+	require.NoError(t, err)
+
+	// A referent without a target is a half-mapped episode — rejected.
+	dir = writeTrajectory(t, filepath.Join(root, "corpus"), "t-halfref", map[string]any{
+		"seed_commands": []any{
+			map[string]any{"ago_seconds": 60, "referents": []any{
+				map[string]any{"phrase": "tests"},
+			}},
+		},
+	})
+	_, err = LoadTrajectory(dir)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "needs both phrase and target")
+}
+
+// Title, files, and referents seed the channels command rows cannot
+// reach: the digest's title+paths FTS body and referent episodes that
+// promote on distinct-session acceptance. Two seeds declaring the
+// same phrase→target mapping earn the rendered referent row, and the
+// eager refresh leaves materialized digests the gate can count.
+func TestRunScriptedSeeds_Channels(t *testing.T) {
+	now := time.Now()
+	r := &Runner{EvalDir: t.TempDir(), Home: t.TempDir(), Now: func() time.Time { return now }}
+	workdir := t.TempDir()
+	for _, f := range []string{"quota/quota.go", "quota/quota_test.go"} {
+		require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(workdir, f)), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(workdir, f), []byte("package quota\n"), 0o644))
+	}
+
+	seeds := []ScriptedSeed{
+		{
+			AgoSeconds: 48 * 3600,
+			Title:      "fixed the quota rounding",
+			Commands:   []string{"true"},
+			Files:      []string{"quota/quota.go"},
+			Referents:  []SeedReferent{{Phrase: "tests", Target: "quota/quota_test.go"}},
+		},
+		{
+			AgoSeconds: 24 * 3600,
+			Title:      "quota triage",
+			Referents: []SeedReferent{
+				{Phrase: "tests", Target: "quota/quota_test.go"},
+				{Phrase: "tests", Target: "tax/tax.go", Revised: true},
+			},
+		},
+	}
+	ids, err := r.runScriptedSeeds(context.Background(), workdir, seeds, "eval-test")
+	require.NoError(t, err)
+	require.Len(t, ids, 2)
+
+	dataDir := DataDirFor(workdir)
+	conn, err := db.Connect(context.Background(), dataDir)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Release(dataDir)) }()
+
+	// The authored title lands on the session row — generic titles
+	// would be FTS-invisible for a topical prompt.
+	var title string
+	require.NoError(t, conn.QueryRowContext(context.Background(),
+		`SELECT title FROM sessions WHERE id = ?`, ids[0]).Scan(&title))
+	require.Equal(t, "fixed the quota rounding", title)
+
+	// File reads land under the session and backdate to the seed's
+	// clock like the session row itself.
+	var readCount int
+	var readAt int64
+	require.NoError(t, conn.QueryRowContext(context.Background(),
+		`SELECT count(*), max(read_at) FROM read_files WHERE session_id = ?`, ids[0]).Scan(&readCount, &readAt))
+	require.Equal(t, 1, readCount)
+	require.InDelta(t, now.Add(-48*time.Hour).Unix(), readAt, 60)
+
+	// Two clean acceptances in distinct sessions promote the mapping;
+	// the revised episode records but does not count toward the floor.
+	var phrase, target string
+	var hits int64
+	require.NoError(t, conn.QueryRowContext(context.Background(),
+		`SELECT phrase, target, hits FROM referent_memory`).Scan(&phrase, &target, &hits))
+	require.Equal(t, "tests", phrase)
+	require.Equal(t, "quota/quota_test.go", target)
+	require.Equal(t, int64(2), hits)
+	var epCount, revisedCount int
+	require.NoError(t, conn.QueryRowContext(context.Background(),
+		`SELECT count(*), count(*) FILTER (WHERE verdict = 'revised') FROM referent_episodes`).Scan(&epCount, &revisedCount))
+	require.Equal(t, 3, epCount)
+	require.Equal(t, 1, revisedCount)
+
+	// Digests materialize eagerly at seed time — the snapshot carries
+	// the rows and the lazy write never reaches the measured run.
+	var digestCount int
+	require.NoError(t, conn.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_digests`).Scan(&digestCount))
+	require.Equal(t, 2, digestCount)
+	var body string
+	require.NoError(t, conn.QueryRowContext(context.Background(),
+		`SELECT body FROM session_digests_fts WHERE session_id = ?`, ids[0]).Scan(&body))
+	require.Contains(t, body, "fixed the quota rounding")
+	require.Contains(t, body, "quota/quota.go")
+}
+
+// A files entry naming a file that isn't in the workdir would seed a
+// phantom read_files row — satisfying gate counts while feeding the
+// digest a bogus hint. The seed errors like any authored divergence.
+func TestRunScriptedSeeds_MissingFileHintRejected(t *testing.T) {
+	r := &Runner{EvalDir: t.TempDir(), Home: t.TempDir()}
+	workdir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(workdir, "exists.go"), []byte("package x"), 0o644))
+
+	seeds := []ScriptedSeed{
+		{AgoSeconds: 3600, Files: []string{"exists.go"}},
+		{AgoSeconds: 1800, Files: []string{"missing.go"}},
+	}
+	ids, err := r.runScriptedSeeds(context.Background(), workdir, seeds, "eval-test")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `files[0] "missing.go"`)
+	require.Len(t, ids, 1, "the first seed completed before the divergence")
 }
