@@ -1081,8 +1081,28 @@ func ValidateCall(call SessionAgentCall) error {
 }
 
 func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *fantasy.AgentResult, retErr error) {
+	// Queued prompts fold back into this loop instead of a recursive
+	// Run call — each queued turn re-enters the dispatch path as a
+	// fresh iteration, so a burst of queued messages grows the
+	// queue, not the stack.
+	for {
+		var next *SessionAgentCall
+		result, next, retErr = a.runTurn(ctx, call)
+		if next == nil {
+			return result, retErr
+		}
+		call = *next
+	}
+}
+
+// runTurn executes one user turn: dispatch (cancel-on-entry, busy,
+// active), streaming, and the queued-handoff tail. A non-nil next
+// return hands the loop the dequeued prompt to run next; Run
+// returns the terminal iteration's result, matching the old
+// recursive handoff.
+func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (result *fantasy.AgentResult, next *SessionAgentCall, retErr error) {
 	if err := ValidateCall(call); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if call.Channel != "" && call.channelMeta == nil {
@@ -1132,10 +1152,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		if err := a.persistCanceledTurn(ctx, call, false); err != nil {
 			complete.Error = err.Error()
 			a.publishRunComplete(ctx, call, complete)
-			return nil, err
+			return nil, nil, err
 		}
 		a.publishRunComplete(ctx, call, complete)
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	if a.IsSessionBusy(call.SessionID) {
@@ -1155,7 +1175,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			call.Accepted.Close()
 		}
 		sessMu.Unlock()
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// Idle: become the active run. Register the cancel func before dropping
@@ -1225,12 +1245,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	sessionLock := sync.Mutex{}
 	currentSession, err := a.sessions.Get(ctx, call.SessionID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get session: %w", err)
+		return nil, nil, fmt.Errorf("failed to get session: %w", err)
 	}
 
 	msgs, err := a.getSessionMessages(ctx, currentSession)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get session messages: %w", err)
+		return nil, nil, fmt.Errorf("failed to get session messages: %w", err)
 	}
 
 	// Record the message count before the user message is created so
@@ -1253,7 +1273,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// Add the user message to the session.
 	_, err = a.createUserMessage(ctx, call)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	userMsgCreated = true
 
@@ -1270,9 +1290,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// cancel func were already created and registered under the dispatch
 	// mutex above for both the accepted and in-process paths.
 	ctx = context.WithValue(ctx, tools.SessionIDContextKey, call.SessionID)
-	// skipRunComplete is set just before the queued-recursion path so
-	// the outer Run doesn't publish a RunComplete that would race
-	// with — and be superseded by — the recursive call's own
+	// skipRunComplete is set just before the queued-handoff path so
+	// this iteration doesn't publish a RunComplete that would race
+	// with — and be superseded by — the next turn's own
 	// RunComplete (each queued user prompt is its own turn and
 	// publishes exactly one terminal event).
 	var skipRunComplete bool
@@ -1790,12 +1810,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		}, evalStepCaps()...),
 	})
 
-	// runResult is this Run invocation's own result — the named
-	// return gets clobbered by the queue-continuation recursion's
-	// return value, so snapshot it for the usage ledger before any
-	// handoff. Deferred so every exit path (errors included) counts
-	// this invocation exactly once, while each continuation records
-	// its own through the inner Run's defer.
+	// runResult is this turn's own result — the named return is nil'd
+	// by post-stream error exits and discarded at the queue handoff,
+	// so snapshot it for the usage ledger now. Deferred so every exit
+	// path (errors included) counts this turn exactly once, while each
+	// queued continuation records its own through its own defer.
 	runResult := result
 	defer func() {
 		a.recordUsage(call.SessionID, runResult)
@@ -1844,10 +1863,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			// record.
 			if isCancelErr {
 				if persistErr := a.persistCanceledTurn(ctx, call, userMsgCreated); persistErr != nil {
-					return nil, persistErr
+					return nil, nil, persistErr
 				}
 			}
-			return result, err
+			return result, nil, err
 		}
 		// Persist final state with a context detached from the run
 		// context. The run context (ctx) is derived from the
@@ -1864,7 +1883,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		// INFO: we use the cleanup context here because the genCtx has been cancelled.
 		msgs, createErr := a.messages.List(cleanupCtx, currentAssistant.SessionID)
 		if createErr != nil {
-			return nil, createErr
+			return nil, nil, createErr
 		}
 		for _, tc := range toolCalls {
 			if !tc.Finished {
@@ -1873,7 +1892,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				currentAssistant.AddToolCall(tc)
 				updateErr := a.messages.Update(cleanupCtx, *currentAssistant)
 				if updateErr != nil {
-					return nil, updateErr
+					return nil, nil, updateErr
 				}
 			}
 
@@ -1911,7 +1930,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				},
 			})
 			if createErr != nil {
-				return nil, createErr
+				return nil, nil, createErr
 			}
 		}
 		var fantasyErr *fantasy.Error
@@ -1951,7 +1970,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		// cancelled.
 		updateErr := a.messages.Update(cleanupCtx, *currentAssistant)
 		if updateErr != nil {
-			return nil, updateErr
+			return nil, nil, updateErr
 		}
 		// A channel-originated turn has no caller watching the error, so
 		// tell the channel side something went wrong instead of leaving
@@ -1962,7 +1981,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				"Something went wrong while handling your message. Please try again.",
 				completedToolCalls)
 		}
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Run-boundary edges: a run ending on a clean stop with failed or
@@ -2059,7 +2078,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	if shouldSummarize {
 		a.activeRequests.Del(call.SessionID)
 		if summarizeErr := a.Summarize(genCtx, call.SessionID, call.ProviderOptions, call.OnAuthRefresh); summarizeErr != nil {
-			return nil, summarizeErr
+			return nil, nil, summarizeErr
 		}
 		// If the agent wasn't done...
 		if len(currentAssistant.ToolCalls()) > 0 {
@@ -2109,11 +2128,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// which the session looks idle and a cancel becomes a no-op that
 	// fails to stop the queued prompt. Holding the lock lets us observe
 	// a pending cancel recorded against the session and drop the queue
-	// instead of running it, and (for the recursion) hand a fresh
-	// accept reservation to the dequeued call so acceptedRuns stays > 0
-	// across the recursive Run's own dispatch handoff — keeping the
-	// session observable to Cancel for the entire transition and
-	// closing the dequeue -> re-register window.
+	// instead of running it, and hand a fresh accept reservation to
+	// the dequeued call so acceptedRuns stays > 0 across the loop's
+	// next dispatch — keeping the session observable to Cancel for
+	// the entire transition and closing the dequeue -> re-register
+	// window.
 	mu := a.sessionMu(call.SessionID)
 	mu.Lock()
 	queuedMessages, _ := a.messageQueue.Get(call.SessionID)
@@ -2156,17 +2175,18 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			a.cancelMark.Del(call.SessionID)
 		}
 		mu.Unlock()
-		return result, err
+		return result, nil, err
 	}
-	// There are queued messages, restart the loop. Suppress the outer
-	// defer's emit: it would otherwise observe the recursive Run's retErr
-	// (named-return clobbering through the return below) against this
-	// turn's MessageID/Text and publish a mixed, racing event.
+	// There are queued messages: hand the first to the loop's next
+	// iteration. Suppress this turn's deferred emit — the queued turn
+	// publishes its own RunComplete in its iteration, and the deferred
+	// publish here would pair this turn's MessageID/Text with whatever
+	// retErr the loop finally returns, a mixed, racing event.
 	skipRunComplete = true
 	// Decide whether this turn still owes its own terminal RunComplete.
 	// Each submitted prompt with a RunID has its own lifecycle, so a turn
 	// that is finished and handing off to a *different* queued prompt must
-	// publish its own RunComplete here — leaving it to the recursive turn
+	// publish its own RunComplete here — leaving it to the next turn
 	// (which carries a different RunID) would hang a caller waiting on
 	// this turn's RunID. The exception is the summarize-continuation path,
 	// which re-queues this same call (same RunID) to resume after a
@@ -2184,11 +2204,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	firstQueuedMessage := queuedMessages[0]
 	a.messageQueue.Set(call.SessionID, queuedMessages[1:])
 	// Reserve a fresh accept for the dequeued prompt before dropping the
-	// lock so acceptedRuns > 0 across the handoff into the recursive
-	// Run. This closes the window between this dequeue and the recursive
-	// Run registering its activeRequests entry: a cancel arriving in
-	// that window now records a pending cancel (acceptedRuns > 0) that
-	// the recursive Run's accepted path observes as cancel-on-entry.
+	// lock so acceptedRuns > 0 across the handoff into the next
+	// iteration. This closes the window between this dequeue and the
+	// next turn registering its activeRequests entry: a cancel arriving
+	// in that window now records a pending cancel (acceptedRuns > 0) that
+	// the next turn's accepted path observes as cancel-on-entry.
 	firstQueuedMessage.Accepted = a.BeginAccepted(call.SessionID)
 	mu.Unlock()
 	if outerOwesRunComplete {
@@ -2202,7 +2222,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		}
 		a.publishRunComplete(ctx, call, complete)
 	}
-	return a.Run(ctx, firstQueuedMessage)
+	return result, &firstQueuedMessage, nil
 }
 
 func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fantasy.ProviderOptions, onAuthRefresh func(context.Context, *fantasy.ProviderError) error) error {
