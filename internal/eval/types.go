@@ -705,14 +705,18 @@ type WarmStart struct {
 	// SeedMetrics aggregates per-seed-session call analysis — the
 	// behavioral half of the ledger (#244): "the seed agent never
 	// looked" becomes a measured predicate rather than an incentive
-	// argument. Nil when seeds ran but the analysis could not run —
-	// coverage predicates fail closed on the nil, never reading an
-	// unverified silence as a satisfied "viewed nothing" assertion.
+	// argument. Scripted seeds contribute true zeros (no messages by
+	// construction) plus their authored read_files rows; agent seeds
+	// sum AnalyzeSessionDB output. Nil when an agent seed could not
+	// be reconstructed — coverage predicates fail closed on the nil,
+	// never reading an unverified silence as a satisfied "viewed
+	// nothing" assertion.
 	SeedMetrics *SeedMetrics `json:"seed_metrics,omitempty"`
 }
 
-// SeedMetrics is the summed per-seed-session call analysis — each
-// seed's AnalyzeSessionDB output accumulated over warm.SessionIDs.
+// SeedMetrics is the summed per-seed-session call analysis —
+// AnalyzeSessionDB output accumulated over warm.SessionIDs' agent
+// sessions, plus authored read_files rows from scripted seeds.
 // Fields are plain sums across seeds: a seed session is a separate
 // agent, so its seen-set is its own — "no seed viewed anything" is
 // aggregate FilesViewed == 0.

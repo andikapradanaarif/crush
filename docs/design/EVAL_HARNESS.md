@@ -174,16 +174,19 @@ every characterization pass a diff to reviewed files.
   deeper forensics, audit the preserved db (`warm_start.session_ids`
   → the seed session's tool calls) or compare workdir diffs. The
   inverse premise — "the seed never looked" — is measured too: each
-  seed session is run through `AnalyzeSessionDB` and summed into
-  `warm_start.seed_metrics` (calls, files_viewed, read_files_rows,
-  discovery_calls_before_write), exposed as `warm_start.seed.*`
-  coverage fields. `max_warm_start.seed.files_viewed: 0` on a
-  stale-file cell asserts no seed inspected file contents; nil
-  analysis (a session that could not be reconstructed) fails those
-  predicates closed rather than reading as a satisfied zero.
-  `seed_check.sh` carries the path-scoped form — a `read_files`
-  query per target file — for cells whose seeds legitimately view
-  other files (e.g. a decoy they must edit).
+  agent seed session is run through `AnalyzeSessionDB` and summed
+  into `warm_start.seed_metrics` (calls, files_viewed,
+  read_files_rows, discovery_calls_before_write), exposed as
+  `warm_start.seed.*` coverage fields. `max_warm_start.seed.files_viewed: 0`
+  on a stale-file cell asserts no seed inspected file contents; nil
+  analysis (an agent session that could not be reconstructed) fails
+  those predicates closed rather than reading as a satisfied zero.
+  Scripted seeds have no messages to reconstruct — they contribute
+  true zeros plus their authored `read_files` rows (the `files`
+  hints), so mixed cells keep the axis. `seed_check.sh` carries the
+  path-scoped form — a `read_files` query per target file — for
+  cells whose seeds legitimately view other files (e.g. a decoy
+  they must edit).
 - **`seed_commands`.** Scripted seed sessions — the dose-control tier
   the memory ladders need. Each element is one session: a real
   `sessions` row, each `commands` entry executed through the same
