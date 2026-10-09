@@ -1,9 +1,5 @@
 # 2026-10-04 — Roadmap: fixed skeleton, learned variables
 
-**Superseded by [2026-10-09-roadmap-value-and-use](2026-10-09-roadmap-value-and-use.md)**
-— kept as the dated record of the measurement era; statuses below
-trail the code (see the new doc's corrected record).
-
 **Plan of record.** Supersedes
 [2026-10-01-roadmap-after-mask](2026-10-01-roadmap-after-mask.md), which
 is kept as a dated log — its artifact archeology stays there for

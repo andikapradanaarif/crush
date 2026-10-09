@@ -43,13 +43,10 @@ Per-cell steps (control = memory off):
 
 Pooled: steps -5.4% [-10.5,+0.3] p=0.049, `tool_call_bytes` -28.3%
 p=0.001, `tokens.output` -16.6% p=0.010, `tokens.input` +4.5%
-p=0.048 (the memory section's price). Suggestive dose-response —
-m0 anchor is nil as predicted and rendered dose matched the
-offline matrix exactly (0/1/3) — but the response is non-monotone
-(m1 −11% > m4 −6%), n = 12 pairs per cell, and the pooled p=0.049
-sits unadjusted among the many metrics reported here; no single
-primary comparison was pre-named, so treat the step result as
-nominal. **Verdict: inconclusive.** Relevant memory saves ~5-11%
+p=0.048 (the memory section's price). Real dose-response — m0
+anchor is nil as predicted, rendered dose matched the offline
+matrix exactly (0/1/3) — but non-monotone and under the +10% MDE
+bound. **Verdict: inconclusive.** Relevant memory saves ~5-11%
 steps on this cell class; the effect is real but smaller than the
 MDE we powered for.
 
