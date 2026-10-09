@@ -141,18 +141,29 @@ runs two turns deep:
 
 - **Observe** (turn N→N+1): when the last user message was a vague
   prompt carrying exactly one definite-article noun ("fix the
-  test"), the agent inspects the edits the turn produced. The next
-  user turn judges them — a revision cue ("wrong file", "revert")
-  marks `revised`, anything else `accepted`. Each observed
-  phrase→target pair lands in `referent_episodes` with the #220
-  provenance pack (session, source message, mutating tool call,
-  repo state, project_key, param_version) and a `memory_suggested`
-  flag.
+  test"), the agent inspects the edits the turn produced —
+  including delegated ones: an `agent` tool call's mutations are
+  read from the child session's transcript through the
+  deterministic `messageID$$toolCallID` session ID. Harness repair
+  prompts persist as user rows, so the backward scan for the judged
+  turn skips `RepairPromptPrefixes` matches — the work a retry
+  drove attributes to the vague turn it repaired. The next user
+  turn judges the edits — a revision cue ("wrong file", "revert",
+  "nope", "try again") marks `revised`, anything else `accepted`.
+  Exactly one phrase *and* exactly one mutation target are
+  required: a turn that touched two files abstains, since which
+  edit the phrase meant is unknowable and a wrong attribution is
+  worse than a missed one. Each observed phrase→target pair lands
+  in `referent_episodes` with the #220 provenance pack (session,
+  source message, mutating tool call, repo state, project_key,
+  param_version) and a `memory_suggested` flag.
 - **Promote**: `accepted` episodes count toward promotion only when
   clean (`memory_suggested = 0`) and only across **distinct
   sessions** — a session re-deriving its own mapping is one
   observation repeated, not two. `referent_promote_hits` (default
-  2) is the floor; crossing it writes the `referent_memory` row.
+  2) is the floor; crossing it writes the `referent_memory` row
+  with `hits` seeded at the true acceptance count, and later clean
+  acceptances keep incrementing it.
 - **Render**: a later vague prompt extracting the same phrase gets
   the promoted targets as candidates — "usually means X", framed as
   verifiable hints, never facts. Rendered targets are marked
@@ -163,10 +174,12 @@ runs two turns deep:
 Guards are the same shape as the selector's: recording is always on
 (episodes write whether or not `options.referent_memory` renders
 them), the holdout contract suppresses both fetch and mark on
-~10% of telemetry sessions, and a multi-referent prompt ("fix the
-config and the test") records nothing — an unattributable edit is
-worse than a missed observation. Pronouns ("fix it") are unlearnable
-by construction: no definite-article noun, no phrase key.
+~10% of telemetry sessions, and unattributable shapes record
+nothing — a multi-referent prompt ("fix the config and the test"),
+a turn that mutated several files, or a junk noun ("the same
+thing") that can't name a target. Pronouns ("fix it") are
+unlearnable by construction: no definite-article noun, no phrase
+key.
 
 ### Session digests — cross-session recall as pointers (#164)
 

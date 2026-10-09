@@ -197,7 +197,9 @@ type Querier interface {
 	MergeFailureFirstSeen(ctx context.Context, arg MergeFailureFirstSeenParams) error
 	// A mapping that cleared the acceptance floor earns its row; further
 	// clean acceptances keep scoring it (hits is evidence mass, not
-	// capped at the threshold).
+	// capped at the threshold). The insert carries the true acceptance
+	// count that crossed the floor -- seeding 1 would understate the
+	// evidence that promoted it.
 	PromoteReferent(ctx context.Context, arg PromoteReferentParams) error
 	// One row per collapsed prior turn; INSERT OR IGNORE makes the write
 	// idempotent across renders and across processes sharing the session
