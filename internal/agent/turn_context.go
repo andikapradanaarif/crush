@@ -872,7 +872,11 @@ func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgen
 // tail — a stored headline like "</open_failures>" could otherwise
 // spoof a section boundary. Write-side caps bound length; the
 // render-side truncate below keeps that bound honest if they loosen.
-var tailSafeText = strings.NewReplacer("<", "(", ">", ")").Replace
+var tailSafeText = strings.NewReplacer("<", "(", ">", ")",
+	// Every render site is one line — a newline inside stored content
+	// (a command, a path, a title) must not break the envelope's line
+	// structure.
+	"\r\n", " ", "\n", " ", "\r", " ").Replace
 
 // failureAge is the staleness hint rendered on an open failure — a
 // failure last seen twenty days ago weighs differently than one seen

@@ -573,7 +573,7 @@ func (q *Queries) MergeFailureFirstSeen(ctx context.Context, arg MergeFailureFir
 
 const promoteReferent = `-- name: PromoteReferent :exec
 INSERT INTO referent_memory (phrase, target, hits, last_at, project_key, param_version)
-VALUES (?, ?, 1, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT (phrase, target, project_key) DO UPDATE SET
     hits = hits + 1,
     last_at = excluded.last_at,
@@ -583,6 +583,7 @@ ON CONFLICT (phrase, target, project_key) DO UPDATE SET
 type PromoteReferentParams struct {
 	Phrase       string `json:"phrase"`
 	Target       string `json:"target"`
+	Hits         int64  `json:"hits"`
 	LastAt       int64  `json:"last_at"`
 	ProjectKey   string `json:"project_key"`
 	ParamVersion string `json:"param_version"`
@@ -590,11 +591,14 @@ type PromoteReferentParams struct {
 
 // A mapping that cleared the acceptance floor earns its row; further
 // clean acceptances keep scoring it (hits is evidence mass, not
-// capped at the threshold).
+// capped at the threshold). The insert carries the true acceptance
+// count that crossed the floor -- seeding 1 would understate the
+// evidence that promoted it.
 func (q *Queries) PromoteReferent(ctx context.Context, arg PromoteReferentParams) error {
 	_, err := q.exec(ctx, q.promoteReferentStmt, promoteReferent,
 		arg.Phrase,
 		arg.Target,
+		arg.Hits,
 		arg.LastAt,
 		arg.ProjectKey,
 		arg.ParamVersion,

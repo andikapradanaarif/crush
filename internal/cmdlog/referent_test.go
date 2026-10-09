@@ -39,7 +39,9 @@ func TestRecordReferentEpisode_PromotesOnDistinctSessions(t *testing.T) {
 	require.Len(t, refs, 1)
 	require.Equal(t, "config", refs[0].Phrase)
 	require.Equal(t, "internal/config/config.go", refs[0].Target)
-	require.EqualValues(t, 1, refs[0].Hits)
+	// The row is born with the full clean-acceptance count that
+	// crossed the floor — two sessions promoted it, not one.
+	require.EqualValues(t, 2, refs[0].Hits)
 }
 
 func TestRecordReferentEpisode_SameSessionDoesNotPromote(t *testing.T) {

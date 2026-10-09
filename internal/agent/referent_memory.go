@@ -34,10 +34,12 @@ import (
 // follows a vague prompt's edits — the negative half of the
 // acceptance signal. Cue tokens only; mentioning the target's name
 // is not itself a revision ("also update config.go" extends, not
-// corrects).
+// corrects). Bare verdicts count too: "wrong.", "nope", "try again"
+// are all revision signals a session-grain read should catch.
 var referentVerdictRe = regexp.MustCompile(`(?i)\b(revert|undo|rollback|roll\s+back|` +
-	`wrong\s+(file|one|place|thing)|not\s+that|that'?s\s+not|i\s+meant|` +
-	`shouldn'?t\s+have|should\s+not\s+have|mistake|oops)\b`)
+	`wrong|incorrect|nope|try\s+again|redo|start\s+over|not\s+that|` +
+	`that'?s\s+not|i\s+meant|shouldn'?t\s+have|should\s+not\s+have|` +
+	`mistake|oops)\b`)
 
 // referentMutationTools are the calls whose file_path marks the
 // referent the agent committed to — edits, not reads: a view of the
@@ -46,6 +48,13 @@ var referentMutationTools = map[string]bool{
 	tools.EditToolName:      true,
 	tools.WriteToolName:     true,
 	tools.MultiEditToolName: true,
+}
+
+// referentJunkNouns can follow "the" but never name a target —
+// "the same thing" must not learn a mapping for "same".
+var referentJunkNouns = map[string]bool{
+	"same": true, "thing": true, "things": true, "stuff": true,
+	"one": true, "other": true, "another": true, "rest": true,
 }
 
 // extractReferentPhrase reduces a vague prompt to the learned
@@ -60,6 +69,9 @@ func extractReferentPhrase(prompt string) string {
 	var nouns []string
 	for _, m := range matches {
 		n := strings.ToLower(m[1])
+		if referentJunkNouns[n] {
+			continue
+		}
 		if _, ok := seen[n]; !ok {
 			seen[n] = struct{}{}
 			nouns = append(nouns, n)
@@ -88,7 +100,10 @@ func referentJudgedVerdict(currentPrompt string) string {
 // mutated after the judged message — the referent the turn committed
 // to. Order is first-edit order; duplicates collapse (the unique key
 // dedupes anyway, but the call ID should name the first edit).
-func (a *sessionAgent) referentTargets(msgs []message.Message, after int) []struct {
+// Delegated edits count too: an `agent` tool call's mutations live in
+// the child session's messages, reachable through the deterministic
+// messageID$$toolCallID session ID.
+func (a *sessionAgent) referentTargets(ctx context.Context, msgs []message.Message, after int) []struct {
 	path   string
 	callID string
 } {
@@ -97,47 +112,80 @@ func (a *sessionAgent) referentTargets(msgs []message.Message, after int) []stru
 		callID string
 	}
 	seen := map[string]struct{}{}
-	for _, m := range msgs[after:] {
-		if m.Role != message.Assistant {
-			continue
+	add := func(path, callID string) {
+		rel := a.relWorkdir(path)
+		if _, ok := seen[rel]; ok {
+			return
 		}
-		for _, tc := range m.ToolCalls() {
-			if !referentMutationTools[tc.Name] || tc.Input == "" {
+		seen[rel] = struct{}{}
+		out = append(out, struct {
+			path   string
+			callID string
+		}{rel, callID})
+	}
+	visited := map[string]struct{}{}
+	var scan func(ms []message.Message, after int)
+	scan = func(ms []message.Message, after int) {
+		for _, m := range ms[after:] {
+			if m.Role != message.Assistant {
 				continue
 			}
-			var in struct {
-				FilePath string `json:"file_path"`
+			for _, tc := range m.ToolCalls() {
+				if tc.Name == AgentToolName && a.sessions != nil && a.messages != nil {
+					childID := a.sessions.CreateAgentToolSessionID(m.ID, tc.ID)
+					if _, ok := visited[childID]; ok {
+						continue
+					}
+					visited[childID] = struct{}{}
+					if childMsgs, err := a.messages.List(ctx, childID); err == nil {
+						scan(childMsgs, 0)
+					}
+					continue
+				}
+				if !referentMutationTools[tc.Name] || tc.Input == "" {
+					continue
+				}
+				var in struct {
+					FilePath string `json:"file_path"`
+				}
+				if json.Unmarshal([]byte(tc.Input), &in) != nil || in.FilePath == "" {
+					continue
+				}
+				add(in.FilePath, tc.ID)
 			}
-			if json.Unmarshal([]byte(tc.Input), &in) != nil || in.FilePath == "" {
-				continue
-			}
-			rel := a.relWorkdir(in.FilePath)
-			if _, ok := seen[rel]; ok {
-				continue
-			}
-			seen[rel] = struct{}{}
-			out = append(out, struct {
-				path   string
-				callID string
-			}{rel, tc.ID})
 		}
 	}
+	scan(msgs, after)
 	return out
 }
 
+// isRepairPrompt reports whether a stored user message is
+// harness-authored — a repair retry persists its prompt as a real
+// user row, so the backward scan for the judged turn must skip it.
+func isRepairPrompt(text string) bool {
+	for _, p := range RepairPromptPrefixes {
+		if strings.HasPrefix(text, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // recordReferentEpisodes is the observation pass — runs once per Run
-// at turn-context build, before the pools select. The last user
+// at turn-context build, before the pools select. The last real user
 // message in msgs is the turn under judgment (msgs predates this
-// run's prompt); if it was vague and the turn produced edits, the
-// current prompt judges it and the episodes record with verdict and
-// contamination flag.
+// run's prompt); repair prompts are harness rows interposed between
+// the prompt and this turn, so the scan skips them — the work they
+// drove still attributes to the vague turn they were repairing. If it
+// was vague and the turn produced edits, the current prompt judges it
+// and the episodes record with verdict and contamination flag.
 func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionAgentCall, msgs []message.Message) {
 	if a.cmdlog == nil || a.isSubAgent || call.RepairAttempts > 0 || call.Prompt == "" {
 		return
 	}
 	lastUser := -1
 	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == message.User {
+		if msgs[i].Role == message.User && !isRepairPrompt(msgs[i].JoinedText()) {
 			lastUser = i
 			break
 		}
@@ -155,8 +203,13 @@ func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionA
 	if phrase == "" {
 		return
 	}
-	targets := a.referentTargets(msgs, lastUser+1)
-	if len(targets) == 0 {
+	targets := a.referentTargets(ctx, msgs, lastUser+1)
+	if len(targets) != 1 {
+		// Zero targets is nothing to judge; several is the
+		// multi-referent case the channel abstains from — which edit
+		// maps to the phrase is unknowable from the trace, and a
+		// collateral edit minting phrase→target evidence is the
+		// wrong-attribution failure this channel exists to avoid.
 		return
 	}
 	verdict := referentJudgedVerdict(call.Prompt)

@@ -35,7 +35,8 @@ func referentEditMsg(callID, tool, path string) message.Message {
 
 // referentAgent wires a sessionAgent with a real cmdlog service over a
 // real db — the end-to-end cases need episode rows to actually land.
-func referentAgent(t *testing.T) (*sessionAgent, cmdlog.Service, string) {
+// The fakeEnv comes back so tests can seed child-session messages.
+func referentAgent(t *testing.T) (*sessionAgent, fakeEnv) {
 	t.Helper()
 	env := testEnv(t)
 	a := &sessionAgent{
@@ -44,7 +45,7 @@ func referentAgent(t *testing.T) (*sessionAgent, cmdlog.Service, string) {
 		messages:    env.messages,
 		cmdlog:      env.cmdlog,
 	}
-	return a, env.cmdlog, env.workingDir
+	return a, env
 }
 
 func TestExtractReferentPhrase(t *testing.T) {
@@ -55,10 +56,12 @@ func TestExtractReferentPhrase(t *testing.T) {
 	}{
 		{"fix the test", "test"},
 		{"update the Config", "config"},
-		{"fix the test and the config", ""},            // two referents: unknowable mapping
-		{"fix the test twice, the test again", "test"}, // same noun repeated
-		{"fix it", ""},                                 // pronoun: no learnable phrase
-		{"do the thing", "thing"},
+		{"fix the test and the config", ""},                // two referents: unknowable mapping
+		{"fix the test twice, the test again", "test"},     // same noun repeated
+		{"fix it", ""},                                     // pronoun: no learnable phrase
+		{"do the thing", ""},                               // junk noun: no target to learn
+		{"fix the same thing", ""},                         // junk nouns never mint phrases
+		{"update the config and the same thing", "config"}, // junk filtered, real noun survives
 		{"rerun", ""},
 	} {
 		t.Run(tc.prompt, func(t *testing.T) {
@@ -78,6 +81,12 @@ func TestReferentJudgedVerdict(t *testing.T) {
 		{"now add a README", cmdlog.ReferentAccepted},
 		{"also update config.go", cmdlog.ReferentAccepted}, // names target, no revision cue
 		{"wrong file", cmdlog.ReferentRevised},
+		{"wrong.", cmdlog.ReferentRevised},
+		{"incorrect", cmdlog.ReferentRevised},
+		{"nope", cmdlog.ReferentRevised},
+		{"try again", cmdlog.ReferentRevised},
+		{"redo it", cmdlog.ReferentRevised},
+		{"start over", cmdlog.ReferentRevised},
 		{"revert that", cmdlog.ReferentRevised},
 		{"that's not what I meant", cmdlog.ReferentRevised},
 		{"oops, undo it", cmdlog.ReferentRevised},
@@ -91,8 +100,8 @@ func TestReferentJudgedVerdict(t *testing.T) {
 
 func TestReferentTargets(t *testing.T) {
 	t.Parallel()
-	a, _, dir := referentAgent(t)
-	abs := filepath.Join(dir, "internal", "cfg.go")
+	a, env := referentAgent(t)
+	abs := filepath.Join(env.workingDir, "internal", "cfg.go")
 
 	msgs := []message.Message{
 		referentUserMsg("u1", "fix the config"),
@@ -108,7 +117,7 @@ func TestReferentTargets(t *testing.T) {
 			ID: "tc-bad", Name: tools.EditToolName, Input: "not json", Finished: true,
 		}}},
 	}
-	targets := a.referentTargets(msgs, 1)
+	targets := a.referentTargets(t.Context(), msgs, 1)
 	require.Len(t, targets, 2)
 	require.Equal(t, filepath.Join("internal", "cfg.go"), targets[0].path)
 	require.Equal(t, "tc1", targets[0].callID)
@@ -121,8 +130,9 @@ func TestRecordReferentEpisodes(t *testing.T) {
 
 	t.Run("accepted vague turn records a clean episode", func(t *testing.T) {
 		t.Parallel()
-		a, svc, dir := referentAgent(t)
-		target := filepath.Join(dir, "x.go")
+		a, env := referentAgent(t)
+		svc := env.cmdlog
+		target := filepath.Join(env.workingDir, "x.go")
 		msgs := []message.Message{
 			referentUserMsg("u1", "fix the config"),
 			referentEditMsg("tc1", tools.EditToolName, target),
@@ -151,8 +161,9 @@ func TestRecordReferentEpisodes(t *testing.T) {
 
 	t.Run("revision cue records but does not promote", func(t *testing.T) {
 		t.Parallel()
-		a, svc, dir := referentAgent(t)
-		target := filepath.Join(dir, "x.go")
+		a, env := referentAgent(t)
+		svc := env.cmdlog
+		target := filepath.Join(env.workingDir, "x.go")
 		a.recordReferentEpisodes(t.Context(), SessionAgentCall{
 			SessionID: "s1", Prompt: "wrong file, revert it",
 		}, []message.Message{
@@ -174,8 +185,9 @@ func TestRecordReferentEpisodes(t *testing.T) {
 
 	t.Run("suggested target is contaminated evidence", func(t *testing.T) {
 		t.Parallel()
-		a, svc, dir := referentAgent(t)
-		target := filepath.Join(dir, "x.go")
+		a, env := referentAgent(t)
+		svc := env.cmdlog
+		target := filepath.Join(env.workingDir, "x.go")
 		// The tail rendered x.go as a referent target this session —
 		// an edit landing on it is echo, not evidence.
 		svc.MarkSuggestedFile("s1", "x.go")
@@ -195,8 +207,9 @@ func TestRecordReferentEpisodes(t *testing.T) {
 
 	t.Run("explicit-path prompt is not vague and records nothing", func(t *testing.T) {
 		t.Parallel()
-		a, svc, dir := referentAgent(t)
-		target := filepath.Join(dir, "x.go")
+		a, env := referentAgent(t)
+		svc := env.cmdlog
+		target := filepath.Join(env.workingDir, "x.go")
 		a.recordReferentEpisodes(t.Context(), SessionAgentCall{
 			SessionID: "s1", Prompt: "ok",
 		}, []message.Message{
@@ -210,8 +223,9 @@ func TestRecordReferentEpisodes(t *testing.T) {
 
 	t.Run("multi-referent prompt records nothing", func(t *testing.T) {
 		t.Parallel()
-		a, svc, dir := referentAgent(t)
-		target := filepath.Join(dir, "x.go")
+		a, env := referentAgent(t)
+		svc := env.cmdlog
+		target := filepath.Join(env.workingDir, "x.go")
 		a.recordReferentEpisodes(t.Context(), SessionAgentCall{
 			SessionID: "s1", Prompt: "ok",
 		}, []message.Message{
@@ -221,6 +235,88 @@ func TestRecordReferentEpisodes(t *testing.T) {
 		refs, err := svc.ListReferentCandidates(t.Context(), []string{"config", "test"}, 5)
 		require.NoError(t, err)
 		require.Empty(t, refs)
+	})
+
+	t.Run("multi-target turn abstains", func(t *testing.T) {
+		t.Parallel()
+		a, env := referentAgent(t)
+		// promoteMin 1 makes a single recorded episode promote —
+		// an empty result here proves nothing was recorded at all.
+		a.memParams = params.DefaultMemory()
+		a.memParams.ReferentPromoteHits = 1
+		a.recordReferentEpisodes(t.Context(), SessionAgentCall{
+			SessionID: "s1", Prompt: "ok",
+		}, []message.Message{
+			referentUserMsg("u1", "fix the config"),
+			referentEditMsg("tc1", tools.EditToolName, filepath.Join(env.workingDir, "x.go")),
+			// A collateral edit on a second file makes phrase→target
+			// attribution unknowable — record neither.
+			referentEditMsg("tc2", tools.EditToolName, filepath.Join(env.workingDir, "y.go")),
+		})
+		refs, err := env.cmdlog.ListReferentCandidates(t.Context(), []string{"config"}, 5)
+		require.NoError(t, err)
+		require.Empty(t, refs)
+	})
+
+	t.Run("repair prompt does not shadow the judged turn", func(t *testing.T) {
+		t.Parallel()
+		a, env := referentAgent(t)
+		a.memParams = params.DefaultMemory()
+		a.memParams.ReferentPromoteHits = 1
+		target := filepath.Join(env.workingDir, "x.go")
+		a.recordReferentEpisodes(t.Context(), SessionAgentCall{
+			SessionID: "s1", Prompt: "ok",
+		}, []message.Message{
+			referentUserMsg("u1", "fix the config"),
+			referentEditMsg("tc1", tools.EditToolName, target),
+			// A failed-verify retry persists its harness prompt as a
+			// user row between the vague turn and this judgment —
+			// the scan must skip it, not judge the repair prompt.
+			referentUserMsg("r1", "Verification failed. exit code 1"),
+			referentEditMsg("tc2", tools.EditToolName, target),
+		})
+		refs, err := env.cmdlog.ListReferentCandidates(t.Context(), []string{"config"}, 5)
+		require.NoError(t, err)
+		require.Len(t, refs, 1)
+		require.Equal(t, "x.go", refs[0].Target)
+	})
+
+	t.Run("delegated edit counts toward the judged turn", func(t *testing.T) {
+		t.Parallel()
+		a, env := referentAgent(t)
+		a.memParams = params.DefaultMemory()
+		a.memParams.ReferentPromoteHits = 1
+		target := filepath.Join(env.workingDir, "x.go")
+
+		// The edit lives in the child `agent` session's transcript —
+		// the parent messages carry only the agent tool call.
+		childID := env.sessions.CreateAgentToolSessionID("a1", "tc-agent")
+		_, err := env.sessions.CreateTaskSession(t.Context(), childID, "s1", "task")
+		require.NoError(t, err)
+		_, err = env.messages.Create(t.Context(), childID, message.CreateMessageParams{
+			Role: message.Assistant,
+			Parts: []message.ContentPart{message.ToolCall{
+				ID: "tc-child", Name: tools.EditToolName,
+				Input:    fmt.Sprintf(`{"file_path":%q}`, target),
+				Finished: true,
+			}},
+		})
+		require.NoError(t, err)
+
+		a.recordReferentEpisodes(t.Context(), SessionAgentCall{
+			SessionID: "s1", Prompt: "ok",
+		}, []message.Message{
+			referentUserMsg("u1", "fix the config"),
+			{ID: "a1", Role: message.Assistant, Parts: []message.ContentPart{message.ToolCall{
+				ID: "tc-agent", Name: AgentToolName,
+				Input:    `{"prompt":"fix the config"}`,
+				Finished: true,
+			}}},
+		})
+		refs, err := env.cmdlog.ListReferentCandidates(t.Context(), []string{"config"}, 5)
+		require.NoError(t, err)
+		require.Len(t, refs, 1)
+		require.Equal(t, "x.go", refs[0].Target)
 	})
 }
 
@@ -239,8 +335,8 @@ func TestReferentCandidates_Gating(t *testing.T) {
 
 	t.Run("option off fetches nothing", func(t *testing.T) {
 		t.Parallel()
-		a, svc, _ := referentAgent(t)
-		promote(t, svc, "x.go")
+		a, env := referentAgent(t)
+		promote(t, env.cmdlog, "x.go")
 		refs := a.referentCandidates(t.Context(), SessionAgentCall{
 			SessionID: "s3", Prompt: "fix the config",
 		}, params.DefaultMemory())
@@ -249,21 +345,22 @@ func TestReferentCandidates_Gating(t *testing.T) {
 
 	t.Run("promoted mapping surfaces on a matching vague prompt", func(t *testing.T) {
 		t.Parallel()
-		a, svc, _ := referentAgent(t)
+		a, env := referentAgent(t)
 		a.referentMemory = true
-		promote(t, svc, "x.go")
+		promote(t, env.cmdlog, "x.go")
 		refs := a.referentCandidates(t.Context(), SessionAgentCall{
 			SessionID: "s3", Prompt: "fix the config",
 		}, params.DefaultMemory())
 		require.Len(t, refs, 1)
 		require.Equal(t, "x.go", refs[0].Target)
+		require.EqualValues(t, 2, refs[0].Hits) // seeded with the crossing count, not 1
 	})
 
 	t.Run("non-vague prompt fetches nothing", func(t *testing.T) {
 		t.Parallel()
-		a, svc, _ := referentAgent(t)
+		a, env := referentAgent(t)
 		a.referentMemory = true
-		promote(t, svc, "x.go")
+		promote(t, env.cmdlog, "x.go")
 		refs := a.referentCandidates(t.Context(), SessionAgentCall{
 			SessionID: "s3", Prompt: "refactor internal/config/config.go to split the Options struct",
 		}, params.DefaultMemory())
@@ -273,7 +370,7 @@ func TestReferentCandidates_Gating(t *testing.T) {
 
 func TestTurnContextSections_ReferentRender(t *testing.T) {
 	t.Parallel()
-	a, _, _ := referentAgent(t)
+	a, _ := referentAgent(t)
 	a.referentMemory = true
 
 	sections := a.turnContextSections(t.Context(), SessionAgentCall{SessionID: "s1"},

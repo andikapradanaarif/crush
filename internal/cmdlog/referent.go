@@ -118,8 +118,12 @@ func (s *service) RecordReferentEpisode(ctx context.Context, ep ReferentEpisode,
 		return nil
 	}
 	return s.q.PromoteReferent(ctx, db.PromoteReferentParams{
-		Phrase:       ep.Phrase,
-		Target:       ep.Target,
+		Phrase: ep.Phrase,
+		Target: ep.Target,
+		// The row is born with the full clean-acceptance count that
+		// crossed the floor — seeding 1 would render "accepted 1×"
+		// while promoteMin sessions of evidence exist.
+		Hits:         acceptances,
 		LastAt:       now,
 		ProjectKey:   s.projectKey,
 		ParamVersion: s.paramVersion,
