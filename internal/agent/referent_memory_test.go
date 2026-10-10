@@ -375,9 +375,9 @@ func TestReferentCandidates_Gating(t *testing.T) {
 		a, env := referentAgent(t)
 		a.referentMemory = true
 		promote(t, env.cmdlog, "x.go")
-		// Two accepted episodes pool into prior Beta(3,1) — its
-		// q0.1 bound (0.464) is under the 0.6 floor, so a sparse
-		// project abstains (#296).
+		// Two accepted episodes sit in the ledger but the leave-
+		// one-out prior is still Beta(1,1) — q0.1 = 0.1, well under
+		// the 0.6 floor, so a sparse project abstains (#296).
 		refs := a.referentCandidates(t.Context(), SessionAgentCall{
 			SessionID: "s3", Prompt: "fix the config",
 		}, params.DefaultMemory())

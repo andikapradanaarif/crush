@@ -306,6 +306,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listUserMessagesBySessionStmt, err = db.PrepareContext(ctx, listUserMessagesBySession); err != nil {
 		return nil, fmt.Errorf("error preparing query ListUserMessagesBySession: %w", err)
 	}
+	if q.markReferentEventsFoldedStmt, err = db.PrepareContext(ctx, markReferentEventsFolded); err != nil {
+		return nil, fmt.Errorf("error preparing query MarkReferentEventsFolded: %w", err)
+	}
 	if q.markSegmentProcessedStmt, err = db.PrepareContext(ctx, markSegmentProcessed); err != nil {
 		return nil, fmt.Errorf("error preparing query MarkSegmentProcessed: %w", err)
 	}
@@ -853,6 +856,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listUserMessagesBySessionStmt: %w", cerr)
 		}
 	}
+	if q.markReferentEventsFoldedStmt != nil {
+		if cerr := q.markReferentEventsFoldedStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing markReferentEventsFoldedStmt: %w", cerr)
+		}
+	}
 	if q.markSegmentProcessedStmt != nil {
 		if cerr := q.markSegmentProcessedStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing markSegmentProcessedStmt: %w", cerr)
@@ -1106,6 +1114,7 @@ type Queries struct {
 	listStaleDigestSessionsStmt          *sql.Stmt
 	listUnclaimedFailuresStmt            *sql.Stmt
 	listUserMessagesBySessionStmt        *sql.Stmt
+	markReferentEventsFoldedStmt         *sql.Stmt
 	markSegmentProcessedStmt             *sql.Stmt
 	mergeFailureFirstSeenStmt            *sql.Stmt
 	promoteReferentStmt                  *sql.Stmt
@@ -1230,6 +1239,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listStaleDigestSessionsStmt:          q.listStaleDigestSessionsStmt,
 		listUnclaimedFailuresStmt:            q.listUnclaimedFailuresStmt,
 		listUserMessagesBySessionStmt:        q.listUserMessagesBySessionStmt,
+		markReferentEventsFoldedStmt:         q.markReferentEventsFoldedStmt,
 		markSegmentProcessedStmt:             q.markSegmentProcessedStmt,
 		mergeFailureFirstSeenStmt:            q.mergeFailureFirstSeenStmt,
 		promoteReferentStmt:                  q.promoteReferentStmt,

@@ -169,14 +169,19 @@ type Querier interface {
 	// The recency fallback: "continue" carries no terms to match, so the
 	// tail offers the freshest other sessions instead.
 	ListRecentSessionDigests(ctx context.Context, arg ListRecentSessionDigestsParams) ([]SessionDigest, error)
-	// Pooled outcome evidence for the empirical-Bayes prior (#296):
-	// every settled episode across every project, so a sparse project
-	// borrows the global rate rather than inventing its own.
-	ListReferentPriorEvents(ctx context.Context) ([]ListReferentPriorEventsRow, error)
-	// Settled referent episodes after the fold cursor (#296), oldest
-	// first. An episode is evidence when the cue verdict resolved or
-	// the artifact labels produced a read -- the outcome rule lives in
-	// Go so the prior pool and the fold share one definition.
+	// Pooled outcome evidence for the empirical-Bayes prior (#296) --
+	// LEAVE-ONE-OUT over every OTHER project: counting the querying
+	// project's own episodes in the prior and again as local mass
+	// roughly doubles their weight, which is least conservative
+	// exactly where data is scarcest (the single-project store).
+	ListReferentPriorEvents(ctx context.Context, projectKey string) ([]ListReferentPriorEventsRow, error)
+	// Settled, not-yet-folded referent episodes (#296), oldest first.
+	// Membership is the rate_folded mark, not an id watermark: an
+	// episode whose labels settle only after higher ids folded still
+	// counts when it matures. An episode is evidence when the cue
+	// verdict resolved or the artifact labels produced a read -- the
+	// outcome rule lives in Go so the prior pool and the fold share
+	// one definition.
 	ListReferentRateEvents(ctx context.Context, arg ListReferentRateEventsParams) ([]ListReferentRateEventsRow, error)
 	// Promoted candidates whose learned phrase appears among the turn's
 	// extracted phrases -- exact-match on the normalized phrase keeps the
@@ -228,6 +233,8 @@ type Querier interface {
 	ListUnclaimedFailures(ctx context.Context) ([]ListUnclaimedFailuresRow, error)
 	// Backs prompt history, which steps back one entry at a time.
 	ListUserMessagesBySession(ctx context.Context, sessionID string) ([]Message, error)
+	// Stamp the fold's membership mark on the ids this pass counted.
+	MarkReferentEventsFolded(ctx context.Context, ids []int64) error
 	MarkSegmentProcessed(ctx context.Context, arg MarkSegmentProcessedParams) error
 	// A claimed row colliding with an already-partitioned twin keeps the
 	// twin (fresher provenance) but the failure's true age survives --

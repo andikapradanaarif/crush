@@ -103,7 +103,10 @@ type Memory struct {
 	// candidates inject only when the posterior lower bound clears
 	// it (#296). Zero disables the gate (render as before); one is
 	// unreachable by any finite posterior and suppresses the
-	// channel entirely.
+	// channel entirely. The shipped default is nonzero: the
+	// channel's render path is evidence-gated out of the box, so a
+	// store with no earned outcomes abstains until the pooled
+	// prior — or its own folded mass — clears the floor.
 	ReferentRateFloor float64 `json:"referent_rate_floor"`
 	// DigestRenderLimit bounds the <session_memory> section —
 	// session-digest pointers (#164). Zero suppresses the fetch,
@@ -202,6 +205,19 @@ func (m Memory) Validate() error {
 		(m.OpenFailureTTL < openFailureTTLMin || m.OpenFailureTTL > openFailureTTLMax) {
 		return fmt.Errorf("memory param open_failure_ttl = %s — skeleton bound is 0 (disabled) or [%s, %s]",
 			m.OpenFailureTTL, openFailureTTLMin, openFailureTTLMax)
+	}
+	// The rate layer's floats can't ride the int sweep — a bad
+	// quantile silently corrupts the gate's bound (clamps to 0 or
+	// 1), which is exactly the "different experiment than declared"
+	// failure this contract exists to fail loud on (#296).
+	if m.RateDecay <= 0 || m.RateDecay >= 1 {
+		return fmt.Errorf("memory param rate_decay = %v — bound is (0, 1)", m.RateDecay)
+	}
+	if m.RateQuantile <= 0 || m.RateQuantile >= 1 {
+		return fmt.Errorf("memory param rate_quantile = %v — bound is (0, 1)", m.RateQuantile)
+	}
+	if m.ReferentRateFloor < 0 || m.ReferentRateFloor > 1 {
+		return fmt.Errorf("memory param referent_rate_floor = %v — bound is [0, 1]", m.ReferentRateFloor)
 	}
 	return nil
 }

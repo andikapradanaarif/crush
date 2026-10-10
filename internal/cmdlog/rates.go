@@ -71,7 +71,6 @@ func (s *service) UpdateProjectRates(ctx context.Context, gamma float64) error {
 	}
 	events, err := s.q.ListReferentRateEvents(ctx, db.ListReferentRateEventsParams{
 		ProjectKey: s.projectKey,
-		ID:         cursor,
 		Limit:      rateEventBatch,
 	})
 	if err != nil {
@@ -84,7 +83,10 @@ func (s *service) UpdateProjectRates(ctx context.Context, gamma float64) error {
 	// per distinct session — interleaved rows from concurrent
 	// sessions must not coin extra boundaries. A session spanning
 	// two fold calls re-matches lastSession and folds undiscounted
-	// the second time: it is still one session.
+	// the second time: it is still one session. (A session
+	// re-entering after ANOTHER session interleaved across three
+	// batches discounts twice — bounded over-discount the
+	// one-slot lastSession accepts rather than tracking a set.)
 	sessions := map[string][]db.ListReferentRateEventsRow{}
 	var order []string
 	for _, ev := range events {
@@ -93,6 +95,8 @@ func (s *service) UpdateProjectRates(ctx context.Context, gamma float64) error {
 		}
 		sessions[ev.SessionID] = append(sessions[ev.SessionID], ev)
 	}
+	var maxID int64
+	ids := make([]int64, 0, len(events))
 	for _, sid := range order {
 		// Discount once per evidence-bearing session boundary:
 		// sessions are the evidence unit, not episodes. Sessions
@@ -105,22 +109,39 @@ func (s *service) UpdateProjectRates(ctx context.Context, gamma float64) error {
 			lastSession = sid
 		}
 		for _, ev := range sessions[sid] {
+			// The outcome is read AT fold time — a cue-settled row
+			// whose labels later diverge keeps its folded verdict;
+			// the mark is one-time, so the evidence mix depends on
+			// how far maturity drained before this pass ran.
 			if referentEpisodeOutcome(ev.Verdict, ev.LabelCommitted, ev.LabelHashChanged) {
 				alpha++
 			} else {
 				beta++
 			}
+			ids = append(ids, ev.ID)
+			if ev.ID > maxID {
+				maxID = ev.ID
+			}
 		}
 	}
-	return s.q.UpsertProjectRate(ctx, db.UpsertProjectRateParams{
+	if maxID > cursor {
+		cursor = maxID
+	}
+	if err := s.q.UpsertProjectRate(ctx, db.UpsertProjectRateParams{
 		ProjectKey:    s.projectKey,
 		Signal:        rateSignalReferent,
 		Alpha:         alpha,
 		Beta:          beta,
-		LastEventID:   events[len(events)-1].ID,
+		LastEventID:   cursor,
 		LastSessionID: lastSession,
 		UpdatedAt:     s.now().Unix(),
-	})
+	}); err != nil {
+		return fmt.Errorf("upsert project rate: %w", err)
+	}
+	// Membership marks land AFTER the upsert: a crash between them
+	// re-folds this batch (a bounded double-count), while marking
+	// first would lose the evidence permanently.
+	return s.q.MarkReferentEventsFolded(ctx, ids)
 }
 
 // ReferentRateLowerBound returns the quantile-q lower bound of this
@@ -149,10 +170,18 @@ func (s *service) ReferentRateLowerBound(ctx context.Context, q float64) (float6
 }
 
 // referentPrior fits the global Beta(a0, b0) over pooled settled
-// episodes. A zero-evidence corpus yields Beta(1, 1) — uniform,
-// maximally uncertain — rather than fabricating optimism.
+// episodes, LEAVE-ONE-OUT: the querying project's own rows are
+// excluded — counting them in the prior and again as local mass
+// roughly doubles their weight, which is least conservative exactly
+// where data is scarcest (the single-project store). A corpus with
+// no other-project evidence yields Beta(1, 1) — uniform, maximally
+// uncertain — rather than fabricating optimism.
+//
+// The pool is an unbounded cross-project scan per call; it runs on
+// the gated render path only, and a `referent-global` rates row or
+// cached prior is the scaling seam if a shared store outgrows it.
 func (s *service) referentPrior(ctx context.Context) (a, b float64, err error) {
-	rows, err := s.q.ListReferentPriorEvents(ctx)
+	rows, err := s.q.ListReferentPriorEvents(ctx, s.projectKey)
 	if err != nil {
 		return 0, 0, fmt.Errorf("list prior events: %w", err)
 	}

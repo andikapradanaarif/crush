@@ -331,26 +331,37 @@ ON CONFLICT (project_key, signal) DO UPDATE SET
     updated_at = excluded.updated_at;
 
 -- name: ListReferentRateEvents :many
--- Settled referent episodes after the fold cursor (#296), oldest
--- first. An episode is evidence when the cue verdict resolved or
--- the artifact labels produced a read -- the outcome rule lives in
--- Go so the prior pool and the fold share one definition.
+-- Settled, not-yet-folded referent episodes (#296), oldest first.
+-- Membership is the rate_folded mark, not an id watermark: an
+-- episode whose labels settle only after higher ids folded still
+-- counts when it matures. An episode is evidence when the cue
+-- verdict resolved or the artifact labels produced a read -- the
+-- outcome rule lives in Go so the prior pool and the fold share
+-- one definition.
 SELECT id, session_id, verdict, label_committed, label_hash_changed
 FROM referent_episodes
 WHERE project_key = ?
-    AND id > ?
+    AND rate_folded = 0
     AND (verdict IN ('accepted', 'revised')
          OR label_hash_changed IS NOT NULL
          OR label_committed = 1)
 ORDER BY id ASC
 LIMIT ?;
 
+-- name: MarkReferentEventsFolded :exec
+-- Stamp the fold's membership mark on the ids this pass counted.
+UPDATE referent_episodes SET rate_folded = 1
+WHERE id IN (sqlc.slice('ids'));
+
 -- name: ListReferentPriorEvents :many
--- Pooled outcome evidence for the empirical-Bayes prior (#296):
--- every settled episode across every project, so a sparse project
--- borrows the global rate rather than inventing its own.
+-- Pooled outcome evidence for the empirical-Bayes prior (#296) --
+-- LEAVE-ONE-OUT over every OTHER project: counting the querying
+-- project's own episodes in the prior and again as local mass
+-- roughly doubles their weight, which is least conservative
+-- exactly where data is scarcest (the single-project store).
 SELECT verdict, label_committed, label_hash_changed
 FROM referent_episodes
-WHERE verdict IN ('accepted', 'revised')
-    OR label_hash_changed IS NOT NULL
-    OR label_committed = 1;
+WHERE project_key != ?
+    AND (verdict IN ('accepted', 'revised')
+         OR label_hash_changed IS NOT NULL
+         OR label_committed = 1);

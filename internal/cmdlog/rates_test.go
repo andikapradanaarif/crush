@@ -99,9 +99,10 @@ func TestUpdateProjectRates_TwentyEventsDeparture(t *testing.T) {
 	require.NoError(t, env.svc.UpdateProjectRates(t.Context(), 0.95))
 	bound, err := env.svc.ReferentRateLowerBound(t.Context(), 0.1)
 	require.NoError(t, err)
-	// Posterior Beta(41,1): pooled prior Beta(21,1) + local 20.
-	require.Greater(t, bound, 0.9)
-	require.InDelta(t, math.Pow(0.1, 1.0/41), bound, 1e-6)
+	// Leave-one-out prior Beta(1,1) + local 20 = posterior
+	// Beta(21,1), q0.1 = 0.1^(1/21).
+	require.Greater(t, bound, 0.8)
+	require.InDelta(t, math.Pow(0.1, 1.0/21), bound, 1e-6)
 }
 
 // Outcome direction: successes raise the bound, failures sink it.
@@ -127,8 +128,9 @@ func TestUpdateProjectRates_OutcomeDirections(t *testing.T) {
 	low := boundFor(0, 20)
 	require.Greater(t, high, mid)
 	require.Greater(t, mid, low)
-	// The mixed case lands near the symmetric Beta's lower tail.
-	require.InDelta(t, boundFor(10, 10), BetaQuantile(11+10, 11+10, 0.1), 1e-6)
+	// The mixed case lands on Beta(11,11)'s lower tail — the
+	// leave-one-out prior adds no mass of its own here.
+	require.InDelta(t, boundFor(10, 10), BetaQuantile(11, 11, 0.1), 1e-6)
 }
 
 // Decay lands once per distinct session — both within one fold and
@@ -219,26 +221,79 @@ func TestUpdateProjectRates_UnsettledSkipped(t *testing.T) {
 	require.Zero(t, n)
 }
 
-// Project isolation: local mass moves only its own posterior — the
-// pooled prior is the ONLY thing projects share.
+// Project isolation under leave-one-out: each project's prior
+// pools everyone ELSE, so synchronous posteriors coincide at the
+// pool total — divergence arrives only through decay. pa's 20
+// successes spread across two sessions fold as discounted mass
+// (15 at γ=0.5), while pb's prior sees all 20 undecayed: pa's own
+// stale evidence counts LESS for pa than it does for a borrower.
 func TestReferentRateLowerBound_ProjectIsolation(t *testing.T) {
 	t.Parallel()
 	env := setupRatesTest(t, "pa")
 	other := NewService(db.New(env.conn), t.TempDir(), params.DefaultMemory(),
 		WithProjectKey("pb"))
-	for i := range 20 {
-		seedRateEpisode(t, env, "pa", "s1", "m"+itoa(i), ReferentAccepted,
+	third := NewService(db.New(env.conn), t.TempDir(), params.DefaultMemory(),
+		WithProjectKey("pc"))
+	for i := range 10 {
+		seedRateEpisode(t, env, "pa", "s1", "a"+itoa(i), ReferentAccepted,
 			sql.NullInt64{}, sql.NullInt64{})
 	}
-	require.NoError(t, env.svc.UpdateProjectRates(t.Context(), 0.95))
-	require.NoError(t, other.UpdateProjectRates(t.Context(), 0.95))
+	for i := range 10 {
+		seedRateEpisode(t, env, "pa", "s2", "b"+itoa(i), ReferentAccepted,
+			sql.NullInt64{}, sql.NullInt64{})
+	}
+	for i := range 5 {
+		seedRateEpisode(t, env, "pc", "s1", "f"+itoa(i), ReferentRevised,
+			sql.NullInt64{}, sql.NullInt64{})
+	}
+	require.NoError(t, env.svc.UpdateProjectRates(t.Context(), 0.5))
+	require.NoError(t, other.UpdateProjectRates(t.Context(), 0.5))
+	require.NoError(t, third.UpdateProjectRates(t.Context(), 0.5))
 	paBound, err := env.svc.ReferentRateLowerBound(t.Context(), 0.1)
 	require.NoError(t, err)
 	pbBound, err := other.ReferentRateLowerBound(t.Context(), 0.1)
 	require.NoError(t, err)
-	// pb sees pa's evidence only through the pooled prior Beta(21,1).
-	require.InDelta(t, math.Pow(0.1, 1.0/21), pbBound, 1e-6)
-	require.Greater(t, paBound, pbBound)
+	pcBound, err := third.ReferentRateLowerBound(t.Context(), 0.1)
+	require.NoError(t, err)
+	// pa: LOO prior pools pc's 5 failures only → Beta(1,6); local
+	// mass is session-decayed: 10·0.5 + 10 = 15 → Beta(16,6).
+	require.InDelta(t, BetaQuantile(16, 6, 0.1), paBound, 1e-6)
+	// pb has no local mass: its prior is the whole pool Beta(21,6).
+	require.InDelta(t, BetaQuantile(21, 6, 0.1), pbBound, 1e-6)
+	// pc: LOO prior pools pa's 20 → Beta(21,1) + local 5 failures.
+	require.InDelta(t, BetaQuantile(21, 6, 0.1), pcBound, 1e-6)
+	// pa's decayed evidence pulls its own bound below the pooled
+	// view pb borrows — drift-tracking is the point of the layer.
+	require.Less(t, paBound, pbBound)
+}
+
+// The fold's membership is the rate_folded mark, not an id
+// watermark: a row whose labels settle AFTER higher ids folded
+// still counts when the maturity pass resolves it (#296 review —
+// the artifact-evidenced population can't be skipped).
+func TestUpdateProjectRates_LateSettlingRowFolds(t *testing.T) {
+	t.Parallel()
+	env := setupRatesTest(t, "pk")
+	// Unknown verdict, no labels yet — unsettled at fold time.
+	seedRateEpisode(t, env, "pk", "s1", "early", ReferentUnknown,
+		sql.NullInt64{}, sql.NullInt64{})
+	// A higher-id row that IS settled folds first.
+	seedRateEpisode(t, env, "pk", "s2", "late", ReferentAccepted,
+		sql.NullInt64{}, sql.NullInt64{})
+	require.NoError(t, env.svc.UpdateProjectRates(t.Context(), 0.95))
+	alpha, beta, _ := storedRate(t, env, "pk")
+	require.InDelta(t, 1, alpha, 1e-9)
+	require.Zero(t, beta)
+	// Maturity resolves the earlier row: hash still matches.
+	_, err := env.conn.ExecContext(t.Context(),
+		`UPDATE referent_episodes SET label_hash_changed = 0
+		 WHERE source_message_id = 'early'`)
+	require.NoError(t, err)
+	require.NoError(t, env.svc.UpdateProjectRates(t.Context(), 0.95))
+	alpha, _, _ = storedRate(t, env, "pk")
+	// The late-settled row folds — discounted once for being a new
+	// session: 1*0.95 + 1, not 2.
+	require.InDelta(t, 1.95, alpha, 1e-9)
 }
 
 func TestUpdateProjectRates_GammaBounds(t *testing.T) {

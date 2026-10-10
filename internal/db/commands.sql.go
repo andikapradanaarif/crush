@@ -457,9 +457,10 @@ func (q *Queries) ListRecentCommands(ctx context.Context, arg ListRecentCommands
 const listReferentPriorEvents = `-- name: ListReferentPriorEvents :many
 SELECT verdict, label_committed, label_hash_changed
 FROM referent_episodes
-WHERE verdict IN ('accepted', 'revised')
-    OR label_hash_changed IS NOT NULL
-    OR label_committed = 1
+WHERE project_key != ?
+    AND (verdict IN ('accepted', 'revised')
+         OR label_hash_changed IS NOT NULL
+         OR label_committed = 1)
 `
 
 type ListReferentPriorEventsRow struct {
@@ -468,11 +469,13 @@ type ListReferentPriorEventsRow struct {
 	LabelHashChanged sql.NullInt64 `json:"label_hash_changed"`
 }
 
-// Pooled outcome evidence for the empirical-Bayes prior (#296):
-// every settled episode across every project, so a sparse project
-// borrows the global rate rather than inventing its own.
-func (q *Queries) ListReferentPriorEvents(ctx context.Context) ([]ListReferentPriorEventsRow, error) {
-	rows, err := q.query(ctx, q.listReferentPriorEventsStmt, listReferentPriorEvents)
+// Pooled outcome evidence for the empirical-Bayes prior (#296) --
+// LEAVE-ONE-OUT over every OTHER project: counting the querying
+// project's own episodes in the prior and again as local mass
+// roughly doubles their weight, which is least conservative
+// exactly where data is scarcest (the single-project store).
+func (q *Queries) ListReferentPriorEvents(ctx context.Context, projectKey string) ([]ListReferentPriorEventsRow, error) {
+	rows, err := q.query(ctx, q.listReferentPriorEventsStmt, listReferentPriorEvents, projectKey)
 	if err != nil {
 		return nil, err
 	}
@@ -498,7 +501,7 @@ const listReferentRateEvents = `-- name: ListReferentRateEvents :many
 SELECT id, session_id, verdict, label_committed, label_hash_changed
 FROM referent_episodes
 WHERE project_key = ?
-    AND id > ?
+    AND rate_folded = 0
     AND (verdict IN ('accepted', 'revised')
          OR label_hash_changed IS NOT NULL
          OR label_committed = 1)
@@ -508,7 +511,6 @@ LIMIT ?
 
 type ListReferentRateEventsParams struct {
 	ProjectKey string `json:"project_key"`
-	ID         int64  `json:"id"`
 	Limit      int64  `json:"limit"`
 }
 
@@ -520,12 +522,15 @@ type ListReferentRateEventsRow struct {
 	LabelHashChanged sql.NullInt64 `json:"label_hash_changed"`
 }
 
-// Settled referent episodes after the fold cursor (#296), oldest
-// first. An episode is evidence when the cue verdict resolved or
-// the artifact labels produced a read -- the outcome rule lives in
-// Go so the prior pool and the fold share one definition.
+// Settled, not-yet-folded referent episodes (#296), oldest first.
+// Membership is the rate_folded mark, not an id watermark: an
+// episode whose labels settle only after higher ids folded still
+// counts when it matures. An episode is evidence when the cue
+// verdict resolved or the artifact labels produced a read -- the
+// outcome rule lives in Go so the prior pool and the fold share
+// one definition.
 func (q *Queries) ListReferentRateEvents(ctx context.Context, arg ListReferentRateEventsParams) ([]ListReferentRateEventsRow, error) {
-	rows, err := q.query(ctx, q.listReferentRateEventsStmt, listReferentRateEvents, arg.ProjectKey, arg.ID, arg.Limit)
+	rows, err := q.query(ctx, q.listReferentRateEventsStmt, listReferentRateEvents, arg.ProjectKey, arg.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -835,6 +840,27 @@ func (q *Queries) ListUnclaimedFailures(ctx context.Context) ([]ListUnclaimedFai
 		return nil, err
 	}
 	return items, nil
+}
+
+const markReferentEventsFolded = `-- name: MarkReferentEventsFolded :exec
+UPDATE referent_episodes SET rate_folded = 1
+WHERE id IN (/*SLICE:ids*/?)
+`
+
+// Stamp the fold's membership mark on the ids this pass counted.
+func (q *Queries) MarkReferentEventsFolded(ctx context.Context, ids []int64) error {
+	query := markReferentEventsFolded
+	var queryParams []interface{}
+	if len(ids) > 0 {
+		for _, v := range ids {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(ids))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
+	}
+	_, err := q.exec(ctx, nil, query, queryParams...)
+	return err
 }
 
 const mergeFailureFirstSeen = `-- name: MergeFailureFirstSeen :exec

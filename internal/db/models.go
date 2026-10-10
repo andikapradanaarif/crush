@@ -168,6 +168,7 @@ type ReferentEpisode struct {
 	LabelSteps       int64         `json:"label_steps"`
 	LabelTokens      int64         `json:"label_tokens"`
 	LabeledAt        int64         `json:"labeled_at"`
+	RateFolded       int64         `json:"rate_folded"`
 }
 
 type ReferentMemory struct {

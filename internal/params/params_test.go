@@ -106,6 +106,35 @@ func TestResolveMemory(t *testing.T) {
 		require.NoError(t, err, "upper bound is inclusive")
 	})
 
+	t.Run("rate param bounds", func(t *testing.T) {
+		t.Parallel()
+		// Out-of-range floats must fail at resolve time (#296):
+		// a clamped quantile would silently admit or suppress
+		// the whole channel — the declared-experiment contract.
+		for _, overlay := range []map[string]any{
+			{"rate_decay": 0},
+			{"rate_decay": 1},
+			{"rate_decay": 1.5},
+			{"rate_quantile": 0},
+			{"rate_quantile": 1.5},
+			{"rate_quantile": -0.1},
+			{"referent_rate_floor": -0.5},
+			{"referent_rate_floor": 1.01},
+		} {
+			_, err := ResolveMemory(overlay)
+			require.Error(t, err, "overlay %v outside bounds must fail", overlay)
+		}
+		for _, overlay := range []map[string]any{
+			{"rate_decay": 0.95},
+			{"rate_quantile": 0.1},
+			{"referent_rate_floor": 0},
+			{"referent_rate_floor": 1},
+		} {
+			_, err := ResolveMemory(overlay)
+			require.NoError(t, err, "overlay %v inside bounds must pass", overlay)
+		}
+	})
+
 	t.Run("negative caps fail", func(t *testing.T) {
 		t.Parallel()
 		_, err := ResolveMemory(map[string]any{"fetch_limit": -1})
