@@ -1949,6 +1949,48 @@ feature's implementation PR, where the evidence can't exist yet.
   can win every slice and still be a net tax on a mostly-short-task
   workload.
 
+## `crush eval calibrate` — LTT certification of learned params
+
+Learning Layer A (#295): the offline counterpart to the learned
+gates. Where a param's value controls a harm — the first instance is
+`referent_promote_hits` against the *wrong-referent admit rate* —
+this command certifies a value instead of trusting the authored
+default:
+
+```text
+crush eval calibrate --db .crush/crush.db \
+    --param referent_promote_hits --alpha 0.05 --delta 0.05 \
+    --grid 5,4,3,2,1 [--out cert.json]
+```
+
+- **Data source.** The project's settled `referent_episodes` —
+  same settled predicate as the rate fold — stratified to one draw
+  per session because within-session episodes are correlated draws.
+- **Risk unit.** A candidate floor's *admit population*: the
+  stratified episodes whose mapping would clear that floor (clean
+  acceptance sessions ≥ h, leave-one-out so an episode never admits
+  itself). An admit is harmful when the episode's shared outcome —
+  `cmdlog.ReferentEpisodeOutcome` — is bad, so what the gate is
+  certified on is literally what it gates on.
+- **The test.** Hoeffding–Bentkus p-values (exact binomial tail via
+  the beta identity, `e`-inflated, min'd against Hoeffding) against
+  the null "harm rate > α". Candidates run in a fixed sequence,
+  most-conservative → least, stopping at the first non-certification
+  — FWER holds at δ with no multiplicity correction.
+- **Output.** A certificate JSON: per-candidate admits/harms/
+  risk̂/p, the certified value (least conservative that rejected
+  the unsafe null), and a `param_version`-stamped `memory_params`
+  overlay that applies it. `certified_value: null` is a valid
+  outcome — **keep the default**; the command never silently ships
+  the loosest tested value.
+- **Data bar.** ~78 zero-harm admits are needed to certify α=5% at
+  δ=5% (the exact crossing the bound computes; "60" was the
+  back-of-envelope). Sparse corpora emit "no certification" — that
+  is the honest dormant path, not a failure.
+- **Scope.** The guarantee holds on the calibration distribution
+  only; the certificate says so. Efficiency harms (steps/tokens)
+  are confounded and stay out until bounded-loss treatment exists.
+
 ## Non-goals
 
 - **Model-path replay.** No VCR anywhere near the LLM calls —

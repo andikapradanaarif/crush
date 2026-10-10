@@ -30,14 +30,15 @@ const rateSignalReferent = "referent"
 // maturity pass.
 const rateEventBatch = 64
 
-// referentEpisodeOutcome maps one settled episode onto +1 success or
-// +1 failure of referent acceptance — the single definition both the
-// fold and the prior pool fold over. Artifact reads dominate: a
-// landed commit is acceptance regardless of the other signals (the
-// project took the work); hash divergence without a commit is the
-// failure; a surviving hash is the success; only with no artifact
-// baseline does the cue verdict carry the call.
-func referentEpisodeOutcome(verdict string, committed, hashChanged sql.NullInt64) (success bool) {
+// ReferentEpisodeOutcome maps one settled episode onto +1 success or
+// +1 failure of referent acceptance — the single definition the fold,
+// the prior pool, and the LTT calibrator's harm metric all share, so
+// what the gate is certified on is what it gates on. Artifact reads
+// dominate: a landed commit is acceptance regardless of the other
+// signals (the project took the work); hash divergence without a
+// commit is the failure; a surviving hash is the success; only with
+// no artifact baseline does the cue verdict carry the call.
+func ReferentEpisodeOutcome(verdict string, committed, hashChanged sql.NullInt64) (success bool) {
 	if committed.Valid && committed.Int64 == 1 {
 		return true
 	}
@@ -114,7 +115,7 @@ func (s *service) UpdateProjectRates(ctx context.Context, gamma float64) error {
 			// whose labels later diverge keeps its folded verdict;
 			// the mark is one-time, so the evidence mix depends on
 			// how far maturity drained before this pass ran.
-			if referentEpisodeOutcome(ev.Verdict, ev.LabelCommitted, ev.LabelHashChanged) {
+			if ReferentEpisodeOutcome(ev.Verdict, ev.LabelCommitted, ev.LabelHashChanged) {
 				alpha++
 			} else {
 				beta++
@@ -188,7 +189,7 @@ func (s *service) referentPrior(ctx context.Context) (a, b float64, err error) {
 	}
 	a, b = 1, 1
 	for _, r := range rows {
-		if referentEpisodeOutcome(r.Verdict, r.LabelCommitted, r.LabelHashChanged) {
+		if ReferentEpisodeOutcome(r.Verdict, r.LabelCommitted, r.LabelHashChanged) {
 			a++
 		} else {
 			b++
