@@ -275,6 +275,10 @@ type service struct {
 	// the screen accepts.
 	suggestedMu sync.Mutex
 	suggested   map[string]map[string]struct{}
+	// labelMu keeps the detached per-turn maturity pass from
+	// overlapping itself — two fast turns can race, and the second
+	// pass skips rather than duplicating the batch's work.
+	labelMu sync.Mutex
 	// now is the timestamp source for every stamp and cutoff the
 	// service computes. Production wiring leaves it nil (wall
 	// clock); eval seeding injects a controlled clock so scripted

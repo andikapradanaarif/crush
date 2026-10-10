@@ -48,8 +48,11 @@ type ReferentEpisodeLabelInputs struct {
 // cost, and the judged session's last-run test verdicts. The update
 // keys on the episode's (session, source message, target) unique
 // constraint — the same idempotency point the insert uses, so a
-// repair-chain re-derivation re-stamps rather than duplicates. A
-// file already unreadable at record time writes an empty baseline,
+// repair-chain re-derivation re-stamps rather than duplicates.
+// Re-stamping also moves the baseline: a re-recorded episode's
+// survival anchor retargets to the newest file state, which is
+// correct — the referent is the latest derivation, not the first.
+// A file already unreadable at record time writes an empty baseline,
 // which keeps the episode out of the maturity scan: no baseline, no
 // survival check — unknown, not failed.
 func (s *service) LabelReferentEpisode(ctx context.Context, ep ReferentEpisode, in ReferentEpisodeLabelInputs) error {
@@ -68,17 +71,27 @@ func (s *service) LabelReferentEpisode(ctx context.Context, ep ReferentEpisode, 
 
 // MatureReferentLabels re-checks the signals that only resolve over
 // time — whether the episode's file still matches its post-edit
-// baseline (survival) and whether a commit newer than the episode
-// has touched it. The pending set is "not yet committed OR file
-// still matches" — a committed-then-diverged row is terminal and
-// drops out of the scan. hash_changed re-derives every pass, so a
-// file restored to its baseline reads surviving again; committed is
-// monotone — once observed it stays observed, since a landed commit
-// can't un-happen. Bounded per call: every turn's pass drains the
-// oldest-pending rows, so the backlog amortizes across turns without
-// a scheduler. Outside a repository the commit check stays NULL —
-// honest absence rather than a fabricated 0.
+// baseline (survival), whether a commit newer than the episode has
+// touched it, and the judged session's latest test verdict. The
+// pending set is "not yet committed OR file still matches" — a
+// committed-then-diverged row is terminal and drops out of the
+// scan. hash_changed re-derives every pass, so a file restored to
+// its baseline reads surviving again; committed is monotone — once
+// observed it stays observed, since a landed commit can't
+// un-happen; tests_green refreshes each pass so an episode judged
+// mid-session still sees runs that land later — NULL persists only
+// while nothing test-shaped has run. Bounded per call: every turn's
+// pass drains the least-recently-checked rows, so the backlog
+// amortizes across turns without a scheduler. Outside a repository
+// the commit check stays NULL — honest absence rather than a
+// fabricated 0.
 func (s *service) MatureReferentLabels(ctx context.Context, limit int) error {
+	// The pass fires detached every turn; two fast turns may overlap.
+	// Writes are idempotent, so a skipped pass costs nothing.
+	if !s.labelMu.TryLock() {
+		return nil
+	}
+	defer s.labelMu.Unlock()
 	if limit <= 0 {
 		// LIMIT <= 0 in SQLite is unlimited — clamp, never unbound.
 		limit = defaultListLimit
@@ -93,11 +106,17 @@ func (s *service) MatureReferentLabels(ctx context.Context, limit int) error {
 	var commits map[string][]int64
 	if s.hasRepo {
 		// One log over the window covering the oldest pending
-		// episode — a single git call serves the whole batch.
-		since := time.UnixMilli(rows[0].CreatedAt).UTC().Format(time.RFC3339)
-		commits = s.commitsTouchingPaths(ctx, since)
+		// episode — a single git call serves the whole batch. With
+		// least-recently-checked ordering the first row need not be
+		// the oldest, so the window starts at the batch minimum.
+		since := rows[0].CreatedAt
+		for _, r := range rows[1:] {
+			since = min(since, r.CreatedAt)
+		}
+		commits = s.commitsTouchingPaths(ctx, time.UnixMilli(since).UTC().Format(time.RFC3339))
 	}
 	now := s.now().UnixMilli()
+	testsCache := map[string]sql.NullInt64{}
 	for _, r := range rows {
 		changed := int64(0)
 		if cur := s.fileHash(r.Target); cur == "" || cur != r.LabelTargetHash {
@@ -118,9 +137,15 @@ func (s *service) MatureReferentLabels(ctx context.Context, limit int) error {
 			}
 			committed = sql.NullInt64{Int64: v, Valid: true}
 		}
+		green, cached := testsCache[r.SessionID]
+		if !cached {
+			green = s.sessionTestsGreen(ctx, r.SessionID)
+			testsCache[r.SessionID] = green
+		}
 		if err := s.q.UpdateReferentEpisodeLabel(ctx, db.UpdateReferentEpisodeLabelParams{
 			LabelCommitted:   committed,
 			LabelHashChanged: sql.NullInt64{Int64: changed, Valid: true},
+			LabelTestsGreen:  green,
 			LabeledAt:        now,
 			ID:               r.ID,
 		}); err != nil {
@@ -178,15 +203,15 @@ func (s *service) sessionTestsGreen(ctx context.Context, sessionID string) sql.N
 
 // commitsTouchingPaths maps each path a commit in the window touched
 // to that commit's unix-second timestamps — one git call for the
-// whole pending batch. The "commit <sec>" header lines carry the
-// timestamp so a path that happens to be all digits can't be
-// misread as a commit boundary.
+// whole pending batch. Commit headers are NUL-prefixed
+// "\x00commit\t<sec>": filenames cannot contain NUL, so a path
+// literally named "commit <digits>" can never fake a boundary.
 func (s *service) commitsTouchingPaths(ctx context.Context, sinceRFC3339 string) map[string][]int64 {
 	out := map[string][]int64{}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	raw, err := gitOut(ctx, s.workingDir, "log",
-		"--since="+sinceRFC3339, "--format=commit %ct", "--name-only")
+		"--since="+sinceRFC3339, "--format=%x00commit%x09%ct", "--name-only")
 	if err != nil {
 		return out
 	}
@@ -194,8 +219,8 @@ func (s *service) commitsTouchingPaths(ctx context.Context, sinceRFC3339 string)
 	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
-		case strings.HasPrefix(line, "commit "):
-			if n, perr := strconv.ParseInt(strings.TrimPrefix(line, "commit "), 10, 64); perr == nil {
+		case strings.HasPrefix(line, "\x00commit\x09"):
+			if n, perr := strconv.ParseInt(strings.TrimPrefix(line, "\x00commit\x09"), 10, 64); perr == nil {
 				ct = n
 			} else {
 				ct = -1

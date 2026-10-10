@@ -289,21 +289,27 @@ WHERE c.project_key = ?
 -- already diverged is terminal -- the pending set is "not yet
 -- committed OR file still matches baseline". Rows with no baseline
 -- hash (pre-label data, file gone at record time) are never
--- checkable, so they stay out of the scan. Oldest first, bounded per
--- pass -- every turn's pass nudges the backlog.
+-- checkable, so they stay out of the scan. Least-recently-checked
+-- first: labeled_at defaults to 0, so never-matured rows sort ahead
+-- of re-checks and the backlog drains round-robin on the index's
+-- own sort column. No-repo rows keep committed NULL forever, so
+-- they never leave the pending set -- the amortized bound owns
+-- that floor: a growing backlog delays, never blocks, fresh rows.
 SELECT id, target, session_id, created_at, label_target_hash, label_committed
 FROM referent_episodes
 WHERE project_key = ?
     AND label_target_hash != ''
     AND (label_committed IS NULL OR label_committed = 0 OR label_hash_changed = 0)
-ORDER BY created_at ASC
+ORDER BY labeled_at ASC
 LIMIT ?;
 
 -- name: UpdateReferentEpisodeLabel :exec
 -- Re-stamp one episode's maturing signals (#294). hash_changed
 -- reflects the latest check -- a file restored to its baseline reads
 -- surviving again; committed only ever moves 0/NULL toward 1 (a
--- landed commit can't un-happen). Callers keep that monotonicity by
--- passing the previous value through unchanged when the check says
+-- landed commit can't un-happen); tests_green refreshes to the
+-- session's latest observed verdict (NULL persists only while no
+-- test has run). Callers keep committed's monotonicity by passing
+-- the previous value through unchanged when the check says
 -- "still not committed".
-UPDATE referent_episodes SET label_committed = ?, label_hash_changed = ?, labeled_at = ? WHERE id = ?;
+UPDATE referent_episodes SET label_committed = ?, label_hash_changed = ?, label_tests_green = ?, labeled_at = ? WHERE id = ?;

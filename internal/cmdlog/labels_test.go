@@ -202,6 +202,30 @@ func TestMatureReferentLabels_DeletedFile(t *testing.T) {
 	require.EqualValues(t, 1, c.hashChanged.Int64, "deleted is diverged — the edit did not survive")
 }
 
+// The maturity pass refreshes the session's test evidence — an
+// episode judged before the session's first test run picks up the
+// later verdict instead of staying record-time-frozen NULL.
+func TestMatureReferentLabels_TestsGreenRefresh(t *testing.T) {
+	env := setupLabelsTest(t)
+	seedLabelSession(t, env, "s1", "")
+	target := "x.go"
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, target), []byte("v1"), 0o644))
+
+	recordLabeledEpisode(t, env, "s1", "m1", target, ReferentEpisodeLabelInputs{})
+	c := readLabels(t, env, "s1", target)
+	require.False(t, c.testsGreen.Valid, "no test observed at record time — NULL")
+
+	env.svc.RecordRun(t.Context(), Run{
+		SessionID: "s1", Command: "go test ./...", CWD: env.workingDir,
+		Ran: true, ExitCode: 0,
+	})
+	require.NoError(t, env.svc.MatureReferentLabels(t.Context(), 10))
+	c = readLabels(t, env, "s1", target)
+	require.True(t, c.testsGreen.Valid)
+	require.EqualValues(t, 1, c.testsGreen.Int64,
+		"maturity re-derives the session verdict — NULL persists only while nothing test-shaped ran")
+}
+
 // Committed is the strongest survival signal — monotone once
 // observed, and NULL outside a repository.
 func TestMatureReferentLabels_Committed(t *testing.T) {

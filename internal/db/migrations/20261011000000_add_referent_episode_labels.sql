@@ -28,9 +28,11 @@ ALTER TABLE referent_episodes ADD COLUMN label_hash_changed INTEGER;
 -- observed. 0 while unobserved. NULL outside a repository.
 ALTER TABLE referent_episodes ADD COLUMN label_committed INTEGER;
 -- label_tests_green: the judged session's last-run kind='test'
--- command verdicts at label time — 1 when every observed test run
--- ended clean, 0 when any failed, NULL when the session ran no test
--- the ledger recognized (unobserved, not green).
+-- command verdicts as of the latest label pass — 1 when every
+-- observed test run ended clean, 0 when any failed, NULL when the
+-- session ran no test the ledger recognized (unobserved, not green).
+-- The maturity pass refreshes it, so an episode judged mid-session
+-- still sees test runs that land afterward.
 ALTER TABLE referent_episodes ADD COLUMN label_tests_green INTEGER;
 -- label_wrong_target: mutating edits in the judged turn that fell
 -- outside the episode's admitted referent. Always 0 today — the
