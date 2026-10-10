@@ -104,7 +104,7 @@ func (s *service) MatureReferentLabels(ctx context.Context, limit int) error {
 			changed = 1
 		}
 		committed := r.LabelCommitted
-		if s.hasRepo && !(committed.Valid && committed.Int64 == 1) {
+		if s.hasRepo && (!committed.Valid || committed.Int64 != 1) {
 			v := int64(0)
 			for _, ct := range commits[r.Target] {
 				// Git timestamps are seconds; the episode's

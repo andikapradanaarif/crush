@@ -305,7 +305,7 @@ func TestMemoryTelemetry_Propensity(t *testing.T) {
 	mt.recordTurn("unarmed-sess", "p", nil, nil, nil, "coder", false, false, nil)
 
 	recs := readTelemetry(t, dir)
-	var bySess map[string]map[string]any = map[string]map[string]any{}
+	bySess := map[string]map[string]any{}
 	for _, r := range recs {
 		if r["type"] == "turn" {
 			bySess[r["session_id"].(string)] = r
