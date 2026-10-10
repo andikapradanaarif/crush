@@ -207,6 +207,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.insertReferentEpisodeStmt, err = db.PrepareContext(ctx, insertReferentEpisode); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertReferentEpisode: %w", err)
 	}
+	if q.labelReferentEpisodeStmt, err = db.PrepareContext(ctx, labelReferentEpisode); err != nil {
+		return nil, fmt.Errorf("error preparing query LabelReferentEpisode: %w", err)
+	}
 	if q.listAllUserMessagesStmt, err = db.PrepareContext(ctx, listAllUserMessages); err != nil {
 		return nil, fmt.Errorf("error preparing query ListAllUserMessages: %w", err)
 	}
@@ -249,6 +252,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listOpenFailuresStmt, err = db.PrepareContext(ctx, listOpenFailures); err != nil {
 		return nil, fmt.Errorf("error preparing query ListOpenFailures: %w", err)
 	}
+	if q.listPendingReferentLabelsStmt, err = db.PrepareContext(ctx, listPendingReferentLabels); err != nil {
+		return nil, fmt.Errorf("error preparing query ListPendingReferentLabels: %w", err)
+	}
 	if q.listProcessedSegmentsStmt, err = db.PrepareContext(ctx, listProcessedSegments); err != nil {
 		return nil, fmt.Errorf("error preparing query ListProcessedSegments: %w", err)
 	}
@@ -272,6 +278,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.listSessionReadFilesStmt, err = db.PrepareContext(ctx, listSessionReadFiles); err != nil {
 		return nil, fmt.Errorf("error preparing query ListSessionReadFiles: %w", err)
+	}
+	if q.listSessionTestVerdictsStmt, err = db.PrepareContext(ctx, listSessionTestVerdicts); err != nil {
+		return nil, fmt.Errorf("error preparing query ListSessionTestVerdicts: %w", err)
 	}
 	if q.listSessionTouchedPathsStmt, err = db.PrepareContext(ctx, listSessionTouchedPaths); err != nil {
 		return nil, fmt.Errorf("error preparing query ListSessionTouchedPaths: %w", err)
@@ -338,6 +347,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.updateNotebookCompressionStmt, err = db.PrepareContext(ctx, updateNotebookCompression); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateNotebookCompression: %w", err)
+	}
+	if q.updateReferentEpisodeLabelStmt, err = db.PrepareContext(ctx, updateReferentEpisodeLabel); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateReferentEpisodeLabel: %w", err)
 	}
 	if q.updateSessionStmt, err = db.PrepareContext(ctx, updateSession); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateSession: %w", err)
@@ -664,6 +676,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing insertReferentEpisodeStmt: %w", cerr)
 		}
 	}
+	if q.labelReferentEpisodeStmt != nil {
+		if cerr := q.labelReferentEpisodeStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing labelReferentEpisodeStmt: %w", cerr)
+		}
+	}
 	if q.listAllUserMessagesStmt != nil {
 		if cerr := q.listAllUserMessagesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listAllUserMessagesStmt: %w", cerr)
@@ -734,6 +751,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listOpenFailuresStmt: %w", cerr)
 		}
 	}
+	if q.listPendingReferentLabelsStmt != nil {
+		if cerr := q.listPendingReferentLabelsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listPendingReferentLabelsStmt: %w", cerr)
+		}
+	}
 	if q.listProcessedSegmentsStmt != nil {
 		if cerr := q.listProcessedSegmentsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listProcessedSegmentsStmt: %w", cerr)
@@ -772,6 +794,11 @@ func (q *Queries) Close() error {
 	if q.listSessionReadFilesStmt != nil {
 		if cerr := q.listSessionReadFilesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listSessionReadFilesStmt: %w", cerr)
+		}
+	}
+	if q.listSessionTestVerdictsStmt != nil {
+		if cerr := q.listSessionTestVerdictsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listSessionTestVerdictsStmt: %w", cerr)
 		}
 	}
 	if q.listSessionTouchedPathsStmt != nil {
@@ -882,6 +909,11 @@ func (q *Queries) Close() error {
 	if q.updateNotebookCompressionStmt != nil {
 		if cerr := q.updateNotebookCompressionStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing updateNotebookCompressionStmt: %w", cerr)
+		}
+	}
+	if q.updateReferentEpisodeLabelStmt != nil {
+		if cerr := q.updateReferentEpisodeLabelStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateReferentEpisodeLabelStmt: %w", cerr)
 		}
 	}
 	if q.updateSessionStmt != nil {
@@ -1009,6 +1041,7 @@ type Queries struct {
 	insertMCPDisabledServerStmt          *sql.Stmt
 	insertMCPEnabledServerStmt           *sql.Stmt
 	insertReferentEpisodeStmt            *sql.Stmt
+	labelReferentEpisodeStmt             *sql.Stmt
 	listAllUserMessagesStmt              *sql.Stmt
 	listCommandPartitionKeysStmt         *sql.Stmt
 	listFailurePartitionKeysStmt         *sql.Stmt
@@ -1023,6 +1056,7 @@ type Queries struct {
 	listMessagesBySessionFromSummaryStmt *sql.Stmt
 	listNewFilesStmt                     *sql.Stmt
 	listOpenFailuresStmt                 *sql.Stmt
+	listPendingReferentLabelsStmt        *sql.Stmt
 	listProcessedSegmentsStmt            *sql.Stmt
 	listRecentCommandsStmt               *sql.Stmt
 	listRecentSessionDigestsStmt         *sql.Stmt
@@ -1031,6 +1065,7 @@ type Queries struct {
 	listSessionCountersStmt              *sql.Stmt
 	listSessionOpenFailuresStmt          *sql.Stmt
 	listSessionReadFilesStmt             *sql.Stmt
+	listSessionTestVerdictsStmt          *sql.Stmt
 	listSessionTouchedPathsStmt          *sql.Stmt
 	listSessionsStmt                     *sql.Stmt
 	listStaleDigestSessionsStmt          *sql.Stmt
@@ -1053,6 +1088,7 @@ type Queries struct {
 	setSessionChannelStmt                *sql.Stmt
 	updateMessageStmt                    *sql.Stmt
 	updateNotebookCompressionStmt        *sql.Stmt
+	updateReferentEpisodeLabelStmt       *sql.Stmt
 	updateSessionStmt                    *sql.Stmt
 	updateSessionTitleAndUsageStmt       *sql.Stmt
 	upsertCommandRunStmt                 *sql.Stmt
@@ -1125,6 +1161,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		insertMCPDisabledServerStmt:          q.insertMCPDisabledServerStmt,
 		insertMCPEnabledServerStmt:           q.insertMCPEnabledServerStmt,
 		insertReferentEpisodeStmt:            q.insertReferentEpisodeStmt,
+		labelReferentEpisodeStmt:             q.labelReferentEpisodeStmt,
 		listAllUserMessagesStmt:              q.listAllUserMessagesStmt,
 		listCommandPartitionKeysStmt:         q.listCommandPartitionKeysStmt,
 		listFailurePartitionKeysStmt:         q.listFailurePartitionKeysStmt,
@@ -1139,6 +1176,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listMessagesBySessionFromSummaryStmt: q.listMessagesBySessionFromSummaryStmt,
 		listNewFilesStmt:                     q.listNewFilesStmt,
 		listOpenFailuresStmt:                 q.listOpenFailuresStmt,
+		listPendingReferentLabelsStmt:        q.listPendingReferentLabelsStmt,
 		listProcessedSegmentsStmt:            q.listProcessedSegmentsStmt,
 		listRecentCommandsStmt:               q.listRecentCommandsStmt,
 		listRecentSessionDigestsStmt:         q.listRecentSessionDigestsStmt,
@@ -1147,6 +1185,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listSessionCountersStmt:              q.listSessionCountersStmt,
 		listSessionOpenFailuresStmt:          q.listSessionOpenFailuresStmt,
 		listSessionReadFilesStmt:             q.listSessionReadFilesStmt,
+		listSessionTestVerdictsStmt:          q.listSessionTestVerdictsStmt,
 		listSessionTouchedPathsStmt:          q.listSessionTouchedPathsStmt,
 		listSessionsStmt:                     q.listSessionsStmt,
 		listStaleDigestSessionsStmt:          q.listStaleDigestSessionsStmt,
@@ -1169,6 +1208,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		setSessionChannelStmt:                q.setSessionChannelStmt,
 		updateMessageStmt:                    q.updateMessageStmt,
 		updateNotebookCompressionStmt:        q.updateNotebookCompressionStmt,
+		updateReferentEpisodeLabelStmt:       q.updateReferentEpisodeLabelStmt,
 		updateSessionStmt:                    q.updateSessionStmt,
 		updateSessionTitleAndUsageStmt:       q.updateSessionTitleAndUsageStmt,
 		upsertCommandRunStmt:                 q.upsertCommandRunStmt,

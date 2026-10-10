@@ -258,3 +258,58 @@ SELECT * FROM referent_memory
 WHERE project_key = ? AND phrase IN (sqlc.slice('phrases'))
 ORDER BY hits DESC, last_at DESC
 LIMIT ?;
+
+-- name: LabelReferentEpisode :exec
+-- Stamp the artifact signals computable at episode-record time
+-- (#294): the file's post-edit hash baseline, the judged turn's cost,
+-- the session's test verdict, and the wrong-target count. The key
+-- clause is the episode unique key -- the same idempotency point
+-- the insert uses, so a repair-chain re-run re-stamps the same row
+-- instead of drifting.
+UPDATE referent_episodes SET label_target_hash = ?, label_wrong_target = ?, label_steps = ?, label_tokens = ?, label_tests_green = ?, labeled_at = ? WHERE session_id = ? AND source_message_id = ? AND target = ?;
+
+-- name: ListSessionTestVerdicts :many
+-- kind='test' ledger rows whose last real run belongs to this
+-- session (or a task-tool child) -- the session-end test evidence
+-- (#294). last_exit is the row's last verdict, not this run's, so a
+-- command the session ran only early counts toward session-end
+-- state the way the ledger models it. Matches the
+-- ListSessionOpenFailures session-with-children shape.
+SELECT c.cmd_norm, c.last_exit FROM command_memory c
+WHERE c.project_key = ?
+    AND c.kind = 'test'
+    AND c.last_exit >= 0
+    AND c.last_session_id IN (
+        SELECT id FROM sessions WHERE id = ? OR parent_session_id = ?
+    );
+
+-- name: ListPendingReferentLabels :many
+-- Episodes whose artifact labels still have a checkable signal
+-- (#294): committed once observed stays observed, and a hash that
+-- already diverged is terminal -- the pending set is "not yet
+-- committed OR file still matches baseline". Rows with no baseline
+-- hash (pre-label data, file gone at record time) are never
+-- checkable, so they stay out of the scan. Least-recently-checked
+-- first: labeled_at defaults to 0, so never-matured rows sort ahead
+-- of re-checks and the backlog drains round-robin on the index's
+-- own sort column. No-repo rows keep committed NULL forever, so
+-- they never leave the pending set -- the amortized bound owns
+-- that floor: a growing backlog delays, never blocks, fresh rows.
+SELECT id, target, session_id, created_at, label_target_hash, label_committed
+FROM referent_episodes
+WHERE project_key = ?
+    AND label_target_hash != ''
+    AND (label_committed IS NULL OR label_committed = 0 OR label_hash_changed = 0)
+ORDER BY labeled_at ASC
+LIMIT ?;
+
+-- name: UpdateReferentEpisodeLabel :exec
+-- Re-stamp one episode's maturing signals (#294). hash_changed
+-- reflects the latest check -- a file restored to its baseline reads
+-- surviving again; committed only ever moves 0/NULL toward 1 (a
+-- landed commit can't un-happen); tests_green refreshes to the
+-- session's latest observed verdict (NULL persists only while no
+-- test has run). Callers keep committed's monotonicity by passing
+-- the previous value through unchanged when the check says
+-- "still not committed".
+UPDATE referent_episodes SET label_committed = ?, label_hash_changed = ?, label_tests_green = ?, labeled_at = ? WHERE id = ?;

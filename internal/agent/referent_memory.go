@@ -84,6 +84,12 @@ func extractReferentPhrase(prompt string) string {
 	return nouns[0]
 }
 
+// referentLabelMatureLimit bounds the per-turn artifact-label
+// maturity pass (#294) — the oldest pending episodes re-check each
+// turn, so the backlog amortizes across turns instead of a
+// scheduler owning it.
+const referentLabelMatureLimit = 50
+
 // referentJudgedVerdict classifies the current user prompt's verdict
 // on the previous turn's edits — a correction cue marks the episode
 // revised. A follow-up the English cue regex cannot read is unknown,
@@ -237,8 +243,9 @@ func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionA
 		return
 	}
 	verdict := referentJudgedVerdict(call.Prompt)
+	steps, tokens := a.judgedTurnCost(msgs, lastUser+1, call.SessionID)
 	for _, t := range targets {
-		err := a.cmdlog.RecordReferentEpisode(ctx, cmdlog.ReferentEpisode{
+		ep := cmdlog.ReferentEpisode{
 			Phrase:          phrase,
 			Target:          t.path,
 			SessionID:       call.SessionID,
@@ -247,11 +254,51 @@ func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionA
 			RepoState:       a.referentRepoState(),
 			Suggested:       a.cmdlog.WasSuggestedFile(ctx, call.SessionID, t.path),
 			Verdict:         verdict,
-		}, mp.ReferentPromoteHits)
+		}
+		err := a.cmdlog.RecordReferentEpisode(ctx, ep, mp.ReferentPromoteHits)
 		if err != nil {
 			slog.Warn("Failed to record referent episode", "error", err)
+			continue
+		}
+		// Artifact labels (#294): the signals that decide acceptance
+		// from evidence rather than cue words. WrongTarget is
+		// definitionally zero — the single-target abstention above
+		// guarantees every recorded episode had exactly one
+		// mutation — and len(targets)-1 keeps that semantics visible
+		// if the abstention ever relaxes.
+		lerr := a.cmdlog.LabelReferentEpisode(ctx, ep, cmdlog.ReferentEpisodeLabelInputs{
+			Steps:       steps,
+			Tokens:      tokens,
+			WrongTarget: int64(len(targets) - 1),
+		})
+		if lerr != nil {
+			slog.Warn("Failed to label referent episode", "error", lerr)
 		}
 	}
+}
+
+// judgedTurnCost is the artifact-label cost pair for the turn that
+// produced the episode (#294): every tool call the judged slice
+// issued counts as a step — an agent-tool call counts once, the same
+// unit the user sees — and tokens is the session's accumulated
+// request usage through this pass from reqStats. Session-cumulative,
+// not per-turn: the honest bound "effort spent through the judged
+// turn plus the margin to judge it", and process-local, so a
+// restarted session undercounts rather than guesses.
+func (a *sessionAgent) judgedTurnCost(msgs []message.Message, after int, sessionID string) (steps, tokens int64) {
+	for _, m := range msgs[after:] {
+		if m.Role == message.Assistant {
+			steps += int64(len(m.ToolCalls()))
+		}
+	}
+	if a.reqStats != nil {
+		if rs, ok := a.reqStats.Get(sessionID); ok {
+			for _, s := range rs.Steps {
+				tokens += s.InputTokens + s.OutputTokens
+			}
+		}
+	}
+	return steps, tokens
 }
 
 // referentRepoState stamps the episode with the repo state the

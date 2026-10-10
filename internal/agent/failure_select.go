@@ -52,6 +52,14 @@ type FailureDecision struct {
 	// command row. Absent on pre-provenance rows.
 	SourceSession string `json:"source_session,omitempty"`
 	SourceCall    string `json:"source_call,omitempty"`
+	// Propensity is the logging-policy probability of this verdict
+	// under the arm that produced it (#294). Today's selector is
+	// deterministic — every candidate decision is 1.0 — and the
+	// field exists so a future randomized layer (#297's certified-
+	// value bandit) stamps the true selection probability instead of
+	// retrofitting the audit contract; off-policy evaluation is only
+	// valid against propensities recorded at decision time.
+	Propensity float64 `json:"propensity,omitempty"`
 	// Engaged reports that the turn's actions touched the candidate's
 	// referent — a file tool hit an implicated path, or a shell run
 	// re-ran the candidate command. Stamped at run end from the run's
@@ -1460,7 +1468,7 @@ func selectMemory(prompt string, pools memoryPools, workDir string,
 		for _, c := range candidates {
 			d := FailureDecision{
 				Signature: c.f.Signature, Cmd: c.f.Cmd, Pool: c.pool,
-				Reason: failNonUserPrompt, SettledBy: settledHarness,
+				Reason: failNonUserPrompt, SettledBy: settledHarness, Propensity: 1.0,
 			}
 			d.SourceSession, d.SourceCall = candProvenance(c)
 			ds = append(ds, d)
@@ -1512,7 +1520,7 @@ func selectMemory(prompt string, pools memoryPools, workDir string,
 		}
 		d := FailureDecision{
 			Signature: f.Signature, Cmd: f.Cmd, Pool: cand.pool,
-			SettledBy: settledLexicon,
+			SettledBy: settledLexicon, Propensity: 1.0,
 		}
 		d.SourceSession, d.SourceCall = candProvenance(cand)
 		reason := failAdmit

@@ -289,3 +289,47 @@ func TestMemoryTelemetry_PromptRedactedAndCapped(t *testing.T) {
 		require.Contains(t, rec["prompt"], "[REDACTED]")
 	}
 }
+
+// Propensity is the logged selection probability of the assigned arm
+// (#294) — the denominator off-policy evaluation needs. The holdout
+// coin assigns 0.1/0.9; eval children are deterministically treated
+// and must record 1.0 rather than imply they randomized; unarmed
+// turns coined no arm at all and omit the field.
+func TestMemoryTelemetry_Propensity(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	mt := newMemoryTelemetry(true, dir, t.TempDir(), "pk", "pv")
+
+	mt.recordTurn("holdout-sess", "p", nil, nil, nil, "coder", true, true, nil)
+	mt.recordTurn("treated-sess", "p", nil, nil, nil, "coder", true, false, nil)
+	mt.recordTurn("unarmed-sess", "p", nil, nil, nil, "coder", false, false, nil)
+
+	recs := readTelemetry(t, dir)
+	bySess := map[string]map[string]any{}
+	for _, r := range recs {
+		if r["type"] == "turn" {
+			bySess[r["session_id"].(string)] = r
+		}
+	}
+	require.Equal(t, 0.1, bySess["holdout-sess"]["propensity"])
+	require.Equal(t, 0.9, bySess["treated-sess"]["propensity"])
+	require.NotContains(t, bySess["unarmed-sess"], "propensity",
+		"no arm was coined — recording one would fabricate a decision")
+}
+
+// Eval children are forced into the treatment arm — their records
+// must carry propensity 1.0, honest "deterministically treated",
+// not a fabricated 0.9 that implies the coin ran.
+func TestMemoryTelemetry_PropensityEvalForced(t *testing.T) {
+	// Not parallel — Setenv is process-global.
+	t.Setenv(EvalTelemetryEnvVar, "/tmp/run-telemetry.json")
+	dir := t.TempDir()
+	mt := newMemoryTelemetry(true, dir, t.TempDir(), "pk", "pv")
+	mt.roll = func(string) float64 { return 0 } // would always hold out
+
+	mt.recordTurn("eval-sess", "p", nil, nil, nil, "coder", true, false, nil)
+
+	recs := readTelemetry(t, dir)
+	require.Len(t, recs, 2)
+	require.Equal(t, 1.0, recs[1]["propensity"])
+}

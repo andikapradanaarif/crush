@@ -7,6 +7,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 )
 
@@ -119,6 +120,43 @@ func (q *Queries) InsertReferentEpisode(ctx context.Context, arg InsertReferentE
 		arg.ProjectKey,
 		arg.ParamVersion,
 		arg.CreatedAt,
+	)
+	return err
+}
+
+const labelReferentEpisode = `-- name: LabelReferentEpisode :exec
+UPDATE referent_episodes SET label_target_hash = ?, label_wrong_target = ?, label_steps = ?, label_tokens = ?, label_tests_green = ?, labeled_at = ? WHERE session_id = ? AND source_message_id = ? AND target = ?
+`
+
+type LabelReferentEpisodeParams struct {
+	LabelTargetHash  string        `json:"label_target_hash"`
+	LabelWrongTarget int64         `json:"label_wrong_target"`
+	LabelSteps       int64         `json:"label_steps"`
+	LabelTokens      int64         `json:"label_tokens"`
+	LabelTestsGreen  sql.NullInt64 `json:"label_tests_green"`
+	LabeledAt        int64         `json:"labeled_at"`
+	SessionID        string        `json:"session_id"`
+	SourceMessageID  string        `json:"source_message_id"`
+	Target           string        `json:"target"`
+}
+
+// Stamp the artifact signals computable at episode-record time
+// (#294): the file's post-edit hash baseline, the judged turn's cost,
+// the session's test verdict, and the wrong-target count. The key
+// clause is the episode unique key -- the same idempotency point
+// the insert uses, so a repair-chain re-run re-stamps the same row
+// instead of drifting.
+func (q *Queries) LabelReferentEpisode(ctx context.Context, arg LabelReferentEpisodeParams) error {
+	_, err := q.exec(ctx, q.labelReferentEpisodeStmt, labelReferentEpisode,
+		arg.LabelTargetHash,
+		arg.LabelWrongTarget,
+		arg.LabelSteps,
+		arg.LabelTokens,
+		arg.LabelTestsGreen,
+		arg.LabeledAt,
+		arg.SessionID,
+		arg.SourceMessageID,
+		arg.Target,
 	)
 	return err
 }
@@ -255,6 +293,71 @@ func (q *Queries) ListOpenFailures(ctx context.Context, arg ListOpenFailuresPara
 			&i.ProjectKey,
 			&i.ParamVersion,
 			&i.ResolvedCall,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPendingReferentLabels = `-- name: ListPendingReferentLabels :many
+SELECT id, target, session_id, created_at, label_target_hash, label_committed
+FROM referent_episodes
+WHERE project_key = ?
+    AND label_target_hash != ''
+    AND (label_committed IS NULL OR label_committed = 0 OR label_hash_changed = 0)
+ORDER BY labeled_at ASC
+LIMIT ?
+`
+
+type ListPendingReferentLabelsParams struct {
+	ProjectKey string `json:"project_key"`
+	Limit      int64  `json:"limit"`
+}
+
+type ListPendingReferentLabelsRow struct {
+	ID              int64         `json:"id"`
+	Target          string        `json:"target"`
+	SessionID       string        `json:"session_id"`
+	CreatedAt       int64         `json:"created_at"`
+	LabelTargetHash string        `json:"label_target_hash"`
+	LabelCommitted  sql.NullInt64 `json:"label_committed"`
+}
+
+// Episodes whose artifact labels still have a checkable signal
+// (#294): committed once observed stays observed, and a hash that
+// already diverged is terminal -- the pending set is "not yet
+// committed OR file still matches baseline". Rows with no baseline
+// hash (pre-label data, file gone at record time) are never
+// checkable, so they stay out of the scan. Least-recently-checked
+// first: labeled_at defaults to 0, so never-matured rows sort ahead
+// of re-checks and the backlog drains round-robin on the index's
+// own sort column. No-repo rows keep committed NULL forever, so
+// they never leave the pending set -- the amortized bound owns
+// that floor: a growing backlog delays, never blocks, fresh rows.
+func (q *Queries) ListPendingReferentLabels(ctx context.Context, arg ListPendingReferentLabelsParams) ([]ListPendingReferentLabelsRow, error) {
+	rows, err := q.query(ctx, q.listPendingReferentLabelsStmt, listPendingReferentLabels, arg.ProjectKey, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPendingReferentLabelsRow{}
+	for rows.Next() {
+		var i ListPendingReferentLabelsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Target,
+			&i.SessionID,
+			&i.CreatedAt,
+			&i.LabelTargetHash,
+			&i.LabelCommitted,
 		); err != nil {
 			return nil, err
 		}
@@ -507,6 +610,56 @@ func (q *Queries) ListSessionOpenFailures(ctx context.Context, arg ListSessionOp
 	return items, nil
 }
 
+const listSessionTestVerdicts = `-- name: ListSessionTestVerdicts :many
+SELECT c.cmd_norm, c.last_exit FROM command_memory c
+WHERE c.project_key = ?
+    AND c.kind = 'test'
+    AND c.last_exit >= 0
+    AND c.last_session_id IN (
+        SELECT id FROM sessions WHERE id = ? OR parent_session_id = ?
+    )
+`
+
+type ListSessionTestVerdictsParams struct {
+	ProjectKey      string         `json:"project_key"`
+	ID              string         `json:"id"`
+	ParentSessionID sql.NullString `json:"parent_session_id"`
+}
+
+type ListSessionTestVerdictsRow struct {
+	CmdNorm  string `json:"cmd_norm"`
+	LastExit int64  `json:"last_exit"`
+}
+
+// kind='test' ledger rows whose last real run belongs to this
+// session (or a task-tool child) -- the session-end test evidence
+// (#294). last_exit is the row's last verdict, not this run's, so a
+// command the session ran only early counts toward session-end
+// state the way the ledger models it. Matches the
+// ListSessionOpenFailures session-with-children shape.
+func (q *Queries) ListSessionTestVerdicts(ctx context.Context, arg ListSessionTestVerdictsParams) ([]ListSessionTestVerdictsRow, error) {
+	rows, err := q.query(ctx, q.listSessionTestVerdictsStmt, listSessionTestVerdicts, arg.ProjectKey, arg.ID, arg.ParentSessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSessionTestVerdictsRow{}
+	for rows.Next() {
+		var i ListSessionTestVerdictsRow
+		if err := rows.Scan(&i.CmdNorm, &i.LastExit); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUnclaimedFailures = `-- name: ListUnclaimedFailures :many
 SELECT signature, cmd, cwd, headline, first_seen
 FROM failure_memory WHERE project_key = ''
@@ -664,6 +817,37 @@ func (q *Queries) ResolveFailuresForCommand(ctx context.Context, arg ResolveFail
 		arg.Cmd,
 		arg.Cwd,
 		arg.ProjectKey,
+	)
+	return err
+}
+
+const updateReferentEpisodeLabel = `-- name: UpdateReferentEpisodeLabel :exec
+UPDATE referent_episodes SET label_committed = ?, label_hash_changed = ?, label_tests_green = ?, labeled_at = ? WHERE id = ?
+`
+
+type UpdateReferentEpisodeLabelParams struct {
+	LabelCommitted   sql.NullInt64 `json:"label_committed"`
+	LabelHashChanged sql.NullInt64 `json:"label_hash_changed"`
+	LabelTestsGreen  sql.NullInt64 `json:"label_tests_green"`
+	LabeledAt        int64         `json:"labeled_at"`
+	ID               int64         `json:"id"`
+}
+
+// Re-stamp one episode's maturing signals (#294). hash_changed
+// reflects the latest check -- a file restored to its baseline reads
+// surviving again; committed only ever moves 0/NULL toward 1 (a
+// landed commit can't un-happen); tests_green refreshes to the
+// session's latest observed verdict (NULL persists only while no
+// test has run). Callers keep committed's monotonicity by passing
+// the previous value through unchanged when the check says
+// "still not committed".
+func (q *Queries) UpdateReferentEpisodeLabel(ctx context.Context, arg UpdateReferentEpisodeLabelParams) error {
+	_, err := q.exec(ctx, q.updateReferentEpisodeLabelStmt, updateReferentEpisodeLabel,
+		arg.LabelCommitted,
+		arg.LabelHashChanged,
+		arg.LabelTestsGreen,
+		arg.LabeledAt,
+		arg.ID,
 	)
 	return err
 }
