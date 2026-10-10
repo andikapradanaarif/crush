@@ -81,6 +81,37 @@ func (q *Queries) GetFailureMeta(ctx context.Context, signature string) (GetFail
 	return i, err
 }
 
+const getProjectRate = `-- name: GetProjectRate :one
+SELECT alpha, beta, last_event_id, last_session_id FROM project_rates
+WHERE project_key = ? AND signal = ?
+`
+
+type GetProjectRateParams struct {
+	ProjectKey string `json:"project_key"`
+	Signal     string `json:"signal"`
+}
+
+type GetProjectRateRow struct {
+	Alpha         float64 `json:"alpha"`
+	Beta          float64 `json:"beta"`
+	LastEventID   int64   `json:"last_event_id"`
+	LastSessionID string  `json:"last_session_id"`
+}
+
+// The stored posterior mass for one (project, signal) pair (#296)
+// plus the fold cursor -- absent row means no evidence yet counted.
+func (q *Queries) GetProjectRate(ctx context.Context, arg GetProjectRateParams) (GetProjectRateRow, error) {
+	row := q.queryRow(ctx, q.getProjectRateStmt, getProjectRate, arg.ProjectKey, arg.Signal)
+	var i GetProjectRateRow
+	err := row.Scan(
+		&i.Alpha,
+		&i.Beta,
+		&i.LastEventID,
+		&i.LastSessionID,
+	)
+	return i, err
+}
+
 const insertReferentEpisode = `-- name: InsertReferentEpisode :exec
 INSERT OR IGNORE INTO referent_episodes (
     phrase, target, session_id, source_message_id, tool_call_id,
@@ -409,6 +440,105 @@ func (q *Queries) ListRecentCommands(ctx context.Context, arg ListRecentCommands
 			&i.Suggested,
 			&i.ProjectKey,
 			&i.ParamVersion,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReferentPriorEvents = `-- name: ListReferentPriorEvents :many
+SELECT verdict, label_committed, label_hash_changed
+FROM referent_episodes
+WHERE verdict IN ('accepted', 'revised')
+    OR label_hash_changed IS NOT NULL
+    OR label_committed = 1
+`
+
+type ListReferentPriorEventsRow struct {
+	Verdict          string        `json:"verdict"`
+	LabelCommitted   sql.NullInt64 `json:"label_committed"`
+	LabelHashChanged sql.NullInt64 `json:"label_hash_changed"`
+}
+
+// Pooled outcome evidence for the empirical-Bayes prior (#296):
+// every settled episode across every project, so a sparse project
+// borrows the global rate rather than inventing its own.
+func (q *Queries) ListReferentPriorEvents(ctx context.Context) ([]ListReferentPriorEventsRow, error) {
+	rows, err := q.query(ctx, q.listReferentPriorEventsStmt, listReferentPriorEvents)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListReferentPriorEventsRow{}
+	for rows.Next() {
+		var i ListReferentPriorEventsRow
+		if err := rows.Scan(&i.Verdict, &i.LabelCommitted, &i.LabelHashChanged); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReferentRateEvents = `-- name: ListReferentRateEvents :many
+SELECT id, session_id, verdict, label_committed, label_hash_changed
+FROM referent_episodes
+WHERE project_key = ?
+    AND id > ?
+    AND (verdict IN ('accepted', 'revised')
+         OR label_hash_changed IS NOT NULL
+         OR label_committed = 1)
+ORDER BY id ASC
+LIMIT ?
+`
+
+type ListReferentRateEventsParams struct {
+	ProjectKey string `json:"project_key"`
+	ID         int64  `json:"id"`
+	Limit      int64  `json:"limit"`
+}
+
+type ListReferentRateEventsRow struct {
+	ID               int64         `json:"id"`
+	SessionID        string        `json:"session_id"`
+	Verdict          string        `json:"verdict"`
+	LabelCommitted   sql.NullInt64 `json:"label_committed"`
+	LabelHashChanged sql.NullInt64 `json:"label_hash_changed"`
+}
+
+// Settled referent episodes after the fold cursor (#296), oldest
+// first. An episode is evidence when the cue verdict resolved or
+// the artifact labels produced a read -- the outcome rule lives in
+// Go so the prior pool and the fold share one definition.
+func (q *Queries) ListReferentRateEvents(ctx context.Context, arg ListReferentRateEventsParams) ([]ListReferentRateEventsRow, error) {
+	rows, err := q.query(ctx, q.listReferentRateEventsStmt, listReferentRateEvents, arg.ProjectKey, arg.ID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListReferentRateEventsRow{}
+	for rows.Next() {
+		var i ListReferentRateEventsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SessionID,
+			&i.Verdict,
+			&i.LabelCommitted,
+			&i.LabelHashChanged,
 		); err != nil {
 			return nil, err
 		}
@@ -1026,6 +1156,40 @@ func (q *Queries) UpsertFailure(ctx context.Context, arg UpsertFailureParams) er
 		arg.Suggested,
 		arg.ProjectKey,
 		arg.ParamVersion,
+	)
+	return err
+}
+
+const upsertProjectRate = `-- name: UpsertProjectRate :exec
+INSERT INTO project_rates (project_key, signal, alpha, beta, last_event_id, last_session_id, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (project_key, signal) DO UPDATE SET
+    alpha = excluded.alpha,
+    beta = excluded.beta,
+    last_event_id = excluded.last_event_id,
+    last_session_id = excluded.last_session_id,
+    updated_at = excluded.updated_at
+`
+
+type UpsertProjectRateParams struct {
+	ProjectKey    string  `json:"project_key"`
+	Signal        string  `json:"signal"`
+	Alpha         float64 `json:"alpha"`
+	Beta          float64 `json:"beta"`
+	LastEventID   int64   `json:"last_event_id"`
+	LastSessionID string  `json:"last_session_id"`
+	UpdatedAt     int64   `json:"updated_at"`
+}
+
+func (q *Queries) UpsertProjectRate(ctx context.Context, arg UpsertProjectRateParams) error {
+	_, err := q.exec(ctx, q.upsertProjectRateStmt, upsertProjectRate,
+		arg.ProjectKey,
+		arg.Signal,
+		arg.Alpha,
+		arg.Beta,
+		arg.LastEventID,
+		arg.LastSessionID,
+		arg.UpdatedAt,
 	)
 	return err
 }

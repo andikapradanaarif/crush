@@ -358,12 +358,51 @@ func TestReferentCandidates_Gating(t *testing.T) {
 		a, env := referentAgent(t)
 		a.referentMemory = true
 		promote(t, env.cmdlog, "x.go")
+		// The promotion floor is this test's subject — the rate
+		// gate (#296) gets its own subtests below.
+		mp := params.DefaultMemory()
+		mp.ReferentRateFloor = 0
 		refs := a.referentCandidates(t.Context(), SessionAgentCall{
 			SessionID: "s3", Prompt: "fix the config",
-		}, params.DefaultMemory())
+		}, mp)
 		require.Len(t, refs, 1)
 		require.Equal(t, "x.go", refs[0].Target)
 		require.EqualValues(t, 2, refs[0].Hits) // seeded with the crossing count, not 1
+	})
+
+	t.Run("rate gate suppresses a sparse posterior", func(t *testing.T) {
+		t.Parallel()
+		a, env := referentAgent(t)
+		a.referentMemory = true
+		promote(t, env.cmdlog, "x.go")
+		// Two accepted episodes pool into prior Beta(3,1) — its
+		// q0.1 bound (0.464) is under the 0.6 floor, so a sparse
+		// project abstains (#296).
+		refs := a.referentCandidates(t.Context(), SessionAgentCall{
+			SessionID: "s3", Prompt: "fix the config",
+		}, params.DefaultMemory())
+		require.Empty(t, refs)
+	})
+
+	t.Run("rate gate admits once the bound clears", func(t *testing.T) {
+		t.Parallel()
+		a, env := referentAgent(t)
+		a.referentMemory = true
+		promote(t, env.cmdlog, "x.go")
+		for _, sess := range []string{"s4", "s5"} {
+			require.NoError(t, env.cmdlog.RecordReferentEpisode(t.Context(), cmdlog.ReferentEpisode{
+				Phrase: "other", Target: "y.go", SessionID: sess,
+				SourceMessageID: "m-" + sess, Verdict: cmdlog.ReferentAccepted,
+			}, params.DefaultMemory().ReferentPromoteHits))
+		}
+		// Fold the settled episodes, then the decayed posterior
+		// clears the floor and the mapping renders.
+		require.NoError(t, env.cmdlog.UpdateProjectRates(t.Context(), params.DefaultMemory().RateDecay))
+		refs := a.referentCandidates(t.Context(), SessionAgentCall{
+			SessionID: "s6", Prompt: "fix the config",
+		}, params.DefaultMemory())
+		require.Len(t, refs, 1)
+		require.Equal(t, "x.go", refs[0].Target)
 	})
 
 	t.Run("non-vague prompt fetches nothing", func(t *testing.T) {

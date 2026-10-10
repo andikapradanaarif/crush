@@ -140,6 +140,12 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 			if err := a.cmdlog.MatureReferentLabels(labelCtx, referentLabelMatureLimit); err != nil {
 				slog.Warn("Referent label maturity pass failed", "error", err)
 			}
+			// The rate fold (#296) rides the same detached slot —
+			// settled episodes become decayed posterior mass a turn
+			// late, which is the schedule every learned layer uses.
+			if err := a.cmdlog.UpdateProjectRates(labelCtx, a.memoryParams().RateDecay); err != nil {
+				slog.Warn("Project rate fold failed", "error", err)
+			}
 		})
 	}
 	// armed is effective arming — flag on AND a store to read. A

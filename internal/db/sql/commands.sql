@@ -313,3 +313,44 @@ LIMIT ?;
 -- the previous value through unchanged when the check says
 -- "still not committed".
 UPDATE referent_episodes SET label_committed = ?, label_hash_changed = ?, label_tests_green = ?, labeled_at = ? WHERE id = ?;
+
+-- name: GetProjectRate :one
+-- The stored posterior mass for one (project, signal) pair (#296)
+-- plus the fold cursor -- absent row means no evidence yet counted.
+SELECT alpha, beta, last_event_id, last_session_id FROM project_rates
+WHERE project_key = ? AND signal = ?;
+
+-- name: UpsertProjectRate :exec
+INSERT INTO project_rates (project_key, signal, alpha, beta, last_event_id, last_session_id, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (project_key, signal) DO UPDATE SET
+    alpha = excluded.alpha,
+    beta = excluded.beta,
+    last_event_id = excluded.last_event_id,
+    last_session_id = excluded.last_session_id,
+    updated_at = excluded.updated_at;
+
+-- name: ListReferentRateEvents :many
+-- Settled referent episodes after the fold cursor (#296), oldest
+-- first. An episode is evidence when the cue verdict resolved or
+-- the artifact labels produced a read -- the outcome rule lives in
+-- Go so the prior pool and the fold share one definition.
+SELECT id, session_id, verdict, label_committed, label_hash_changed
+FROM referent_episodes
+WHERE project_key = ?
+    AND id > ?
+    AND (verdict IN ('accepted', 'revised')
+         OR label_hash_changed IS NOT NULL
+         OR label_committed = 1)
+ORDER BY id ASC
+LIMIT ?;
+
+-- name: ListReferentPriorEvents :many
+-- Pooled outcome evidence for the empirical-Bayes prior (#296):
+-- every settled episode across every project, so a sparse project
+-- borrows the global rate rather than inventing its own.
+SELECT verdict, label_committed, label_hash_changed
+FROM referent_episodes
+WHERE verdict IN ('accepted', 'revised')
+    OR label_hash_changed IS NOT NULL
+    OR label_committed = 1;

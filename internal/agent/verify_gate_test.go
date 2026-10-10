@@ -849,6 +849,12 @@ func (r *gateRecordingCmdLog) ListReferentCandidates(context.Context, []string, 
 	return nil, nil
 }
 
+func (r *gateRecordingCmdLog) UpdateProjectRates(context.Context, float64) error { return nil }
+
+func (r *gateRecordingCmdLog) ReferentRateLowerBound(context.Context, float64) (float64, error) {
+	return 1, nil
+}
+
 func (r *gateRecordingCmdLog) RefreshSessionDigests(context.Context, int) error {
 	return nil
 }

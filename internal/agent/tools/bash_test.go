@@ -347,6 +347,12 @@ func (r *recordingCmdLog) ListReferentCandidates(context.Context, []string, int)
 	return nil, nil
 }
 
+func (r *recordingCmdLog) UpdateProjectRates(context.Context, float64) error { return nil }
+
+func (r *recordingCmdLog) ReferentRateLowerBound(context.Context, float64) (float64, error) {
+	return 1, nil
+}
+
 func (r *recordingCmdLog) RefreshSessionDigests(context.Context, int) error { return nil }
 
 func (r *recordingCmdLog) SearchSessionDigests(context.Context, string, string, int) ([]cmdlog.SessionDigest, error) {

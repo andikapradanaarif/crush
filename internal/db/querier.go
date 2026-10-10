@@ -83,6 +83,9 @@ type Querier interface {
 	GetNotebookTurnsWithEntries(ctx context.Context, arg GetNotebookTurnsWithEntriesParams) ([]int64, error)
 	GetOldestNotebookEntries(ctx context.Context, arg GetOldestNotebookEntriesParams) ([]NotebookEntry, error)
 	GetProcessedSegment(ctx context.Context, arg GetProcessedSegmentParams) (ProcessedSegment, error)
+	// The stored posterior mass for one (project, signal) pair (#296)
+	// plus the fold cursor -- absent row means no evidence yet counted.
+	GetProjectRate(ctx context.Context, arg GetProjectRateParams) (GetProjectRateRow, error)
 	// One row per tool result that renders as a stub (applied superseded
 	// mark). content_head carries the first 1024 chars so callers can
 	// recompute exact stub text for prefix-bearing stub kinds.
@@ -166,6 +169,15 @@ type Querier interface {
 	// The recency fallback: "continue" carries no terms to match, so the
 	// tail offers the freshest other sessions instead.
 	ListRecentSessionDigests(ctx context.Context, arg ListRecentSessionDigestsParams) ([]SessionDigest, error)
+	// Pooled outcome evidence for the empirical-Bayes prior (#296):
+	// every settled episode across every project, so a sparse project
+	// borrows the global rate rather than inventing its own.
+	ListReferentPriorEvents(ctx context.Context) ([]ListReferentPriorEventsRow, error)
+	// Settled referent episodes after the fold cursor (#296), oldest
+	// first. An episode is evidence when the cue verdict resolved or
+	// the artifact labels produced a read -- the outcome rule lives in
+	// Go so the prior pool and the fold share one definition.
+	ListReferentRateEvents(ctx context.Context, arg ListReferentRateEventsParams) ([]ListReferentRateEventsRow, error)
 	// Promoted candidates whose learned phrase appears among the turn's
 	// extracted phrases -- exact-match on the normalized phrase keeps the
 	// render honest (a fuzzy hit would be a guess, not learned evidence).
@@ -276,6 +288,7 @@ type Querier interface {
 	// hints, and the observation's provenance all move with the latest
 	// failure, not the first.
 	UpsertFailure(ctx context.Context, arg UpsertFailureParams) error
+	UpsertProjectRate(ctx context.Context, arg UpsertProjectRateParams) error
 	// The digest is a per-turn refresh of the session's resumable view:
 	// title + latest checkpoint + touched files. ended_at follows the
 	// session row's updated_at --- the closest thing to an end timestamp a

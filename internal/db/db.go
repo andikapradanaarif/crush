@@ -159,6 +159,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getProcessedSegmentStmt, err = db.PrepareContext(ctx, getProcessedSegment); err != nil {
 		return nil, fmt.Errorf("error preparing query GetProcessedSegment: %w", err)
 	}
+	if q.getProjectRateStmt, err = db.PrepareContext(ctx, getProjectRate); err != nil {
+		return nil, fmt.Errorf("error preparing query GetProjectRate: %w", err)
+	}
 	if q.getPruningStatsStmt, err = db.PrepareContext(ctx, getPruningStats); err != nil {
 		return nil, fmt.Errorf("error preparing query GetPruningStats: %w", err)
 	}
@@ -264,6 +267,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listRecentSessionDigestsStmt, err = db.PrepareContext(ctx, listRecentSessionDigests); err != nil {
 		return nil, fmt.Errorf("error preparing query ListRecentSessionDigests: %w", err)
 	}
+	if q.listReferentPriorEventsStmt, err = db.PrepareContext(ctx, listReferentPriorEvents); err != nil {
+		return nil, fmt.Errorf("error preparing query ListReferentPriorEvents: %w", err)
+	}
+	if q.listReferentRateEventsStmt, err = db.PrepareContext(ctx, listReferentRateEvents); err != nil {
+		return nil, fmt.Errorf("error preparing query ListReferentRateEvents: %w", err)
+	}
 	if q.listReferentsForPhrasesStmt, err = db.PrepareContext(ctx, listReferentsForPhrases); err != nil {
 		return nil, fmt.Errorf("error preparing query ListReferentsForPhrases: %w", err)
 	}
@@ -362,6 +371,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.upsertFailureStmt, err = db.PrepareContext(ctx, upsertFailure); err != nil {
 		return nil, fmt.Errorf("error preparing query UpsertFailure: %w", err)
+	}
+	if q.upsertProjectRateStmt, err = db.PrepareContext(ctx, upsertProjectRate); err != nil {
+		return nil, fmt.Errorf("error preparing query UpsertProjectRate: %w", err)
 	}
 	if q.upsertSessionDigestStmt, err = db.PrepareContext(ctx, upsertSessionDigest); err != nil {
 		return nil, fmt.Errorf("error preparing query UpsertSessionDigest: %w", err)
@@ -596,6 +608,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing getProcessedSegmentStmt: %w", cerr)
 		}
 	}
+	if q.getProjectRateStmt != nil {
+		if cerr := q.getProjectRateStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getProjectRateStmt: %w", cerr)
+		}
+	}
 	if q.getPruningStatsStmt != nil {
 		if cerr := q.getPruningStatsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getPruningStatsStmt: %w", cerr)
@@ -771,6 +788,16 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listRecentSessionDigestsStmt: %w", cerr)
 		}
 	}
+	if q.listReferentPriorEventsStmt != nil {
+		if cerr := q.listReferentPriorEventsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listReferentPriorEventsStmt: %w", cerr)
+		}
+	}
+	if q.listReferentRateEventsStmt != nil {
+		if cerr := q.listReferentRateEventsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listReferentRateEventsStmt: %w", cerr)
+		}
+	}
 	if q.listReferentsForPhrasesStmt != nil {
 		if cerr := q.listReferentsForPhrasesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listReferentsForPhrasesStmt: %w", cerr)
@@ -936,6 +963,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing upsertFailureStmt: %w", cerr)
 		}
 	}
+	if q.upsertProjectRateStmt != nil {
+		if cerr := q.upsertProjectRateStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing upsertProjectRateStmt: %w", cerr)
+		}
+	}
 	if q.upsertSessionDigestStmt != nil {
 		if cerr := q.upsertSessionDigestStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing upsertSessionDigestStmt: %w", cerr)
@@ -1025,6 +1057,7 @@ type Queries struct {
 	getNotebookTurnsWithEntriesStmt      *sql.Stmt
 	getOldestNotebookEntriesStmt         *sql.Stmt
 	getProcessedSegmentStmt              *sql.Stmt
+	getProjectRateStmt                   *sql.Stmt
 	getPruningStatsStmt                  *sql.Stmt
 	getRecentActivityStmt                *sql.Stmt
 	getSessionByIDStmt                   *sql.Stmt
@@ -1060,6 +1093,8 @@ type Queries struct {
 	listProcessedSegmentsStmt            *sql.Stmt
 	listRecentCommandsStmt               *sql.Stmt
 	listRecentSessionDigestsStmt         *sql.Stmt
+	listReferentPriorEventsStmt          *sql.Stmt
+	listReferentRateEventsStmt           *sql.Stmt
 	listReferentsForPhrasesStmt          *sql.Stmt
 	listResolvedFailuresStmt             *sql.Stmt
 	listSessionCountersStmt              *sql.Stmt
@@ -1093,6 +1128,7 @@ type Queries struct {
 	updateSessionTitleAndUsageStmt       *sql.Stmt
 	upsertCommandRunStmt                 *sql.Stmt
 	upsertFailureStmt                    *sql.Stmt
+	upsertProjectRateStmt                *sql.Stmt
 	upsertSessionDigestStmt              *sql.Stmt
 }
 
@@ -1145,6 +1181,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getNotebookTurnsWithEntriesStmt:      q.getNotebookTurnsWithEntriesStmt,
 		getOldestNotebookEntriesStmt:         q.getOldestNotebookEntriesStmt,
 		getProcessedSegmentStmt:              q.getProcessedSegmentStmt,
+		getProjectRateStmt:                   q.getProjectRateStmt,
 		getPruningStatsStmt:                  q.getPruningStatsStmt,
 		getRecentActivityStmt:                q.getRecentActivityStmt,
 		getSessionByIDStmt:                   q.getSessionByIDStmt,
@@ -1180,6 +1217,8 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listProcessedSegmentsStmt:            q.listProcessedSegmentsStmt,
 		listRecentCommandsStmt:               q.listRecentCommandsStmt,
 		listRecentSessionDigestsStmt:         q.listRecentSessionDigestsStmt,
+		listReferentPriorEventsStmt:          q.listReferentPriorEventsStmt,
+		listReferentRateEventsStmt:           q.listReferentRateEventsStmt,
 		listReferentsForPhrasesStmt:          q.listReferentsForPhrasesStmt,
 		listResolvedFailuresStmt:             q.listResolvedFailuresStmt,
 		listSessionCountersStmt:              q.listSessionCountersStmt,
@@ -1213,6 +1252,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		updateSessionTitleAndUsageStmt:       q.updateSessionTitleAndUsageStmt,
 		upsertCommandRunStmt:                 q.upsertCommandRunStmt,
 		upsertFailureStmt:                    q.upsertFailureStmt,
+		upsertProjectRateStmt:                q.upsertProjectRateStmt,
 		upsertSessionDigestStmt:              q.upsertSessionDigestStmt,
 	}
 }

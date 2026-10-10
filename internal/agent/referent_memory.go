@@ -325,6 +325,22 @@ func (a *sessionAgent) referentCandidates(ctx context.Context, call SessionAgent
 	if phrase == "" {
 		return nil
 	}
+	if mp.ReferentRateFloor > 0 {
+		// The learned rate gate (#296): render only when the
+		// posterior lower bound clears the floor — decide on the
+		// bound, not the mean, so sparse projects stay honest. A
+		// computation error keeps the incumbent fetch: an
+		// undecidable gate must not invent abstention.
+		bound, err := a.cmdlog.ReferentRateLowerBound(ctx, mp.RateQuantile)
+		switch {
+		case err != nil:
+			slog.Warn("Referent rate bound unavailable", "error", err)
+		case bound < mp.ReferentRateFloor:
+			slog.Info("Referent render gated by rate posterior",
+				"bound", bound, "floor", mp.ReferentRateFloor)
+			return nil
+		}
+	}
 	refs, err := a.cmdlog.ListReferentCandidates(ctx, []string{phrase}, mp.ReferentRenderLimit)
 	if err != nil {
 		slog.Warn("Referent candidate fetch failed", "error", err)

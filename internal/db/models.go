@@ -131,6 +131,16 @@ type ProcessedSegment struct {
 	CreatedAt     int64         `json:"created_at"`
 }
 
+type ProjectRate struct {
+	ProjectKey    string  `json:"project_key"`
+	Signal        string  `json:"signal"`
+	Alpha         float64 `json:"alpha"`
+	Beta          float64 `json:"beta"`
+	LastEventID   int64   `json:"last_event_id"`
+	LastSessionID string  `json:"last_session_id"`
+	UpdatedAt     int64   `json:"updated_at"`
+}
+
 type ReadFile struct {
 	SessionID string `json:"session_id"`
 	Path      string `json:"path"`
