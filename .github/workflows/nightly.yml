@@ -8,6 +8,10 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    permissions:
+      # gh run list needs actions:read; checkout needs contents:read.
+      actions: read
+      contents: read
     outputs:
       should_run: ${{ steps.check.outputs.should_run }}
     steps:

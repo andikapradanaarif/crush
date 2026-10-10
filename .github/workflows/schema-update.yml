@@ -8,6 +8,10 @@ on:
       - "internal/agent/hyper/**"
   workflow_dispatch:
 
+# Writes go through PERSONAL_ACCESS_TOKEN; GITHUB_TOKEN only reads.
+permissions:
+  contents: read
+
 jobs:
   update-schema:
     runs-on: ubuntu-latest

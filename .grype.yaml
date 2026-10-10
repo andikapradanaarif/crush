@@ -1,0 +1,18 @@
+# Grype scanner configuration — findings suppressed at the source so
+# SARIF uploads stop re-minting alerts whose only disposition is
+# "unreachable by design". Entries name the package to stay tight.
+ignore:
+  # CVE-2023-36308 — crafted-TIFF panic in the decode path; low
+  # severity and no patched version exists (all releases <= 1.6.2
+  # affected). The only call site is imaging.Fit in
+  # internal/ui/image — pure resampling on an already-decoded image;
+  # the vulnerable TIFF scan path is never reached.
+  - vulnerability: GHSA-q7pp-wcgr-pffx
+    package:
+      name: github.com/disintegration/imaging
+  # GO-2026-5932 — openpgp deprecation flags every version of
+  # x/crypto; `go list -deps ./...` shows no openpgp package is
+  # imported anywhere in the compiled graph.
+  - vulnerability: GO-2026-5932
+    package:
+      name: golang.org/x/crypto
