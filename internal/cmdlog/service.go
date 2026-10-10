@@ -133,7 +133,9 @@ type Service interface {
 	// UpdateProjectRates folds newly settled referent episodes into
 	// the project's decayed Beta-Binomial mass (#296): each new
 	// evidence-bearing session discounts stored mass by gamma before
-	// its outcomes count. Idempotent on the fold cursor.
+	// its outcomes count. Idempotent on the rate_folded mark; a
+	// sibling pass racing between upsert and mark can double-count
+	// one batch at most.
 	UpdateProjectRates(ctx context.Context, gamma float64) error
 
 	// ReferentRateLowerBound returns the quantile-q lower bound of

@@ -5,8 +5,9 @@
 -- DECAYED, not raw: a session boundary multiplies both by γ before
 -- folding that session's outcomes, so the stored pair is an
 -- effective sample size that fades ~5% per evidence-bearing session.
--- last_event_id is the fold cursor — rows the outcome stream
--- produced after it are uncounted evidence.
+-- last_event_id is the fold's high-water audit metadata —
+-- membership lives on referent_episodes.rate_folded, not on an
+-- id watermark.
 CREATE TABLE project_rates (
     project_key   TEXT NOT NULL,
     signal        TEXT NOT NULL,

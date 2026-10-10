@@ -54,8 +54,8 @@ func TestMemoryTelemetry_RecordTurn(t *testing.T) {
 		{Signature: "s2", Admit: false, Reason: "stale_suspect"},
 		{Signature: "s3", Admit: false, Reason: "stale_suspect"},
 	}
-	mt.recordTurn("sess-1", "fix the test", []string{"<open_failures>x</open_failures>"}, []cmdlog.Failure{old}, decisions, "coder", true, false, nil)
-	mt.recordTurn("sess-1", "again", nil, nil, nil, "coder", true, false, errors.New("cmdlog unavailable"))
+	mt.recordTurn("sess-1", "fix the test", []string{"<open_failures>x</open_failures>"}, []cmdlog.Failure{old}, decisions, "coder", true, false, nil, nil)
+	mt.recordTurn("sess-1", "again", nil, nil, nil, "coder", true, false, errors.New("cmdlog unavailable"), nil)
 
 	recs := readTelemetry(t, dir)
 	require.Len(t, recs, 3, "one session_start + two turn records")
@@ -87,8 +87,36 @@ func TestMemoryTelemetry_RecordTurn(t *testing.T) {
 	require.Equal(t, float64(0), quiet["candidates"])
 	require.Equal(t, float64(0), quiet["admitted"])
 	require.NotContains(t, quiet, "rejections")
+	require.NotContains(t, quiet, "referent_gate")
 	require.Equal(t, "cmdlog unavailable", quiet["fetch_error"],
 		"a fetch failure is recorded as couldn't-evaluate, not silence")
+}
+
+// The learned gate's audit record lands on the turn (#296): a
+// decided gate carries bound+floor+gated, an errored one carries
+// the error — so "no candidates" and "the gate suppressed a row"
+// stay distinguishable in the record.
+func TestMemoryTelemetry_ReferentGateRecord(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	mt := newMemoryTelemetry(true, dir, t.TempDir(), "pk", "pv")
+
+	mt.recordTurn("s", "p", nil, nil, nil, "coder", true, false, nil,
+		&rateGateDecision{bound: 0.3, floor: 0.6, gated: true})
+	mt.recordTurn("s", "p2", nil, nil, nil, "coder", true, false, nil,
+		&rateGateDecision{floor: 0.6, err: errors.New("db gone")})
+
+	recs := readTelemetry(t, dir)
+	require.Len(t, recs, 3)
+	veto, ok := recs[1]["referent_gate"].(map[string]any)
+	require.True(t, ok, "decided gate records bound+floor+gated")
+	require.Equal(t, 0.3, veto["bound"])
+	require.Equal(t, 0.6, veto["floor"])
+	require.Equal(t, true, veto["gated"])
+	errored, ok := recs[2]["referent_gate"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "db gone", errored["error"])
+	require.NotContains(t, errored, "bound")
 }
 
 // The holdout coin flips once per session and the assignment is
@@ -114,7 +142,7 @@ func TestMemoryTelemetry_AppendFailureSwallowed(t *testing.T) {
 	blocked := filepath.Join(dir, "memory-telemetry.jsonl")
 	// A directory where the file should be makes OpenFile fail.
 	require.NoError(t, os.MkdirAll(blocked, 0o755))
-	mt.recordTurn("s", "p", nil, nil, nil, "coder", false, false, nil) // must not panic
+	mt.recordTurn("s", "p", nil, nil, nil, "coder", false, false, nil, nil) // must not panic
 	require.False(t, mt.seen["s"], "session_start stays unwritten after a failed append")
 }
 
@@ -131,8 +159,8 @@ func TestMemoryTelemetry_SharedAcrossAgents(t *testing.T) {
 	require.True(t, mt.holdoutOff("s"), "coder's coin")
 	require.True(t, mt.holdoutOff("s"), "plan sees the same arm — one session, one coin")
 
-	mt.recordTurn("s", "p", nil, nil, nil, "coder", true, true, nil)
-	mt.recordTurn("s", "p", nil, nil, nil, "plan", true, true, nil)
+	mt.recordTurn("s", "p", nil, nil, nil, "coder", true, true, nil, nil)
+	mt.recordTurn("s", "p", nil, nil, nil, "plan", true, true, nil, nil)
 	recs := readTelemetry(t, dir)
 	require.Len(t, recs, 3, "one session_start + two turn records — not two session_starts")
 	require.Equal(t, "session_start", recs[0]["type"])
@@ -262,8 +290,8 @@ func TestMemoryTelemetry_SessionStartHasNoArmLabel(t *testing.T) {
 
 	// Unarmed first turn — no coin exists yet. A later armed turn
 	// coins the session's real arm.
-	mt.recordTurn("s", "p1", nil, nil, nil, "coder", false, false, nil)
-	mt.recordTurn("s", "p2", nil, nil, nil, "coder", true, true, nil)
+	mt.recordTurn("s", "p1", nil, nil, nil, "coder", false, false, nil, nil)
+	mt.recordTurn("s", "p2", nil, nil, nil, "coder", true, true, nil, nil)
 
 	recs := readTelemetry(t, dir)
 	require.NotContains(t, recs[0], "holdout")
@@ -281,7 +309,7 @@ func TestMemoryTelemetry_PromptRedactedAndCapped(t *testing.T) {
 	mt := newMemoryTelemetry(true, dir, t.TempDir(), "pk", "pv")
 	mt.roll = func(string) float64 { return 0.99 }
 
-	mt.recordTurn("s", "use ghp_0123456789abcdefTOKEN here", nil, nil, nil, "coder", false, false, nil)
+	mt.recordTurn("s", "use ghp_0123456789abcdefTOKEN here", nil, nil, nil, "coder", false, false, nil, nil)
 
 	recs := readTelemetry(t, dir)
 	for _, rec := range recs {
@@ -300,9 +328,9 @@ func TestMemoryTelemetry_Propensity(t *testing.T) {
 	dir := t.TempDir()
 	mt := newMemoryTelemetry(true, dir, t.TempDir(), "pk", "pv")
 
-	mt.recordTurn("holdout-sess", "p", nil, nil, nil, "coder", true, true, nil)
-	mt.recordTurn("treated-sess", "p", nil, nil, nil, "coder", true, false, nil)
-	mt.recordTurn("unarmed-sess", "p", nil, nil, nil, "coder", false, false, nil)
+	mt.recordTurn("holdout-sess", "p", nil, nil, nil, "coder", true, true, nil, nil)
+	mt.recordTurn("treated-sess", "p", nil, nil, nil, "coder", true, false, nil, nil)
+	mt.recordTurn("unarmed-sess", "p", nil, nil, nil, "coder", false, false, nil, nil)
 
 	recs := readTelemetry(t, dir)
 	bySess := map[string]map[string]any{}
@@ -327,7 +355,7 @@ func TestMemoryTelemetry_PropensityEvalForced(t *testing.T) {
 	mt := newMemoryTelemetry(true, dir, t.TempDir(), "pk", "pv")
 	mt.roll = func(string) float64 { return 0 } // would always hold out
 
-	mt.recordTurn("eval-sess", "p", nil, nil, nil, "coder", true, false, nil)
+	mt.recordTurn("eval-sess", "p", nil, nil, nil, "coder", true, false, nil, nil)
 
 	recs := readTelemetry(t, dir)
 	require.Len(t, recs, 2)

@@ -48,9 +48,10 @@ func referentEpisodeOutcome(verdict string, committed, hashChanged sql.NullInt64
 }
 
 // UpdateProjectRates folds settled referent episodes into the
-// project's decayed posterior mass and advances the fold cursor.
-// Called from the detached per-turn pass — idempotent by cursor, so
-// an overlapping call just sees no new events. gamma is the
+// project's decayed posterior mass and marks them folded.
+// Called from the detached per-turn pass — idempotent on the
+// rate_folded mark: a sibling pass racing between this pass's
+// upsert and its mark can re-fold one batch at most. gamma is the
 // per-session discount; gamma <= 0 or >= 1 is rejected so a config
 // slip can't silently freeze (gamma=1) or zero (gamma=0) memory.
 func (s *service) UpdateProjectRates(ctx context.Context, gamma float64) error {
