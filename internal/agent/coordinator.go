@@ -47,6 +47,7 @@ import (
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/question"
+	"github.com/charmbracelet/crush/internal/redact"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
 	"golang.org/x/sync/errgroup"
@@ -2278,7 +2279,10 @@ func (c *coordinator) refreshOAuth2Token(ctx context.Context, providerCfg config
 func (c *coordinator) refreshApiKeyTemplate(ctx context.Context, providerCfg config.ProviderConfig) error {
 	newAPIKey, err := c.cfg.Resolve(providerCfg.APIKeyTemplate)
 	if err != nil {
-		slog.Error("Failed to re-resolve API key after 401 error", "provider", providerCfg.ID, "error", err)
+		// The resolver already scrubs the resolved value, but the error
+		// still echoes the user-written template — strip credential-shaped
+		// material before it reaches the log.
+		slog.Error("Failed to re-resolve API key after 401 error", "provider", providerCfg.ID, "error", redact.Secrets(err.Error()))
 		return err
 	}
 
