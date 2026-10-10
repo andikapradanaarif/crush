@@ -1,0 +1,14 @@
+# CodeQL configuration for this repository.
+#
+# go/path-injection is excluded: every flagged sink is a file op on a
+# path that is by design user/tool/config-designated in a local CLI
+# agent — tool parameters (permission-gated), config/XDG paths,
+# workspace walks, .git reads. There is no privilege boundary for a
+# local agent to defend at the path layer; the permission system is
+# the boundary. Line shifts re-minted the same findings as new alerts,
+# so per-alert dismissal cannot keep up — the query is filtered here
+# instead. All other queries in the default suite still run.
+name: crush-codeql
+query-filters:
+  - exclude:
+      id: go/path-injection
