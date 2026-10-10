@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/charmbracelet/crush/internal/cmdlog"
+	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/eval"
 	"github.com/spf13/cobra"
 )
@@ -637,6 +639,106 @@ var evalSmokeCmd = &cobra.Command{
 	},
 }
 
+var evalCalibrateCmd = &cobra.Command{
+	Use:   "calibrate",
+	Short: "Learn-then-Test offline certification of memory params",
+	Long: `Offline certification for learned memory parameters (#295).
+
+Reads the settled referent episodes in a project crush.db, estimates
+the harm rate of each candidate parameter value, and tests the fixed
+sequence most-conservative → least with Hoeffding–Bentkus p-values.
+The emitted certificate is reproducible from the episode set plus
+the stated bound; a run that certifies nothing keeps the default.
+
+The guarantee holds on the calibration distribution only — episodes
+are stratified to one per session because within-session draws are
+correlated. ~60+ clean labeled episodes are needed before α=5% can
+certify at all.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+
+		param, _ := cmd.Flags().GetString("param")
+		dbPath, _ := cmd.Flags().GetString("db")
+		workdir, _ := cmd.Flags().GetString("workdir")
+		alpha, _ := cmd.Flags().GetFloat64("alpha")
+		delta, _ := cmd.Flags().GetFloat64("delta")
+		gridStr, _ := cmd.Flags().GetString("grid")
+		out, _ := cmd.Flags().GetString("out")
+
+		if workdir == "" {
+			var err error
+			workdir, err = os.Getwd()
+			if err != nil {
+				return err
+			}
+		}
+		var grid []int
+		for _, s := range strings.Split(gridStr, ",") {
+			v, err := strconv.Atoi(strings.TrimSpace(s))
+			if err != nil || v <= 0 {
+				return fmt.Errorf("bad --grid value %q", s)
+			}
+			grid = append(grid, v)
+		}
+
+		conn, err := db.ConnectReadOnly(ctx, dbPath)
+		if err != nil {
+			return fmt.Errorf("open %s: %w", dbPath, err)
+		}
+		defer conn.Close()
+		rows, err := db.New(conn).ListReferentCalibrationEpisodes(ctx, cmdlog.ProjectKeyForDir(workdir))
+		if err != nil {
+			// A DB written before the referent schema landed has no
+			// episodes — that is an empty calibration set ("no
+			// certification"), not an error worth dying on.
+			if !strings.Contains(err.Error(), "no such table: referent_episodes") {
+				return fmt.Errorf("list calibration episodes: %w", err)
+			}
+			rows = nil
+		}
+		eps := make([]eval.CalibrationEpisode, 0, len(rows))
+		for _, r := range rows {
+			eps = append(eps, eval.CalibrationEpisode{
+				ID:          r.ID,
+				Phrase:      r.Phrase,
+				Target:      r.Target,
+				SessionID:   r.SessionID,
+				Verdict:     r.Verdict,
+				Committed:   r.LabelCommitted,
+				HashChanged: r.LabelHashChanged,
+				Suggested:   r.MemorySuggested != 0,
+			})
+		}
+
+		var cert eval.Certificate
+		switch param {
+		case eval.CalibrateParamPromoteHits:
+			cert, err = eval.CalibratePromoteHits(eps, grid, alpha, delta)
+		default:
+			err = fmt.Errorf("unknown --param %q (have %q)", param, eval.CalibrateParamPromoteHits)
+		}
+		if err != nil {
+			return err
+		}
+
+		data, err := json.MarshalIndent(cert, "", "  ")
+		if err != nil {
+			return err
+		}
+		if out != "" {
+			if err := os.WriteFile(out, append(data, '\n'), 0o644); err != nil {
+				return err
+			}
+		}
+		fmt.Println(string(data))
+		if cert.CertifiedValue == nil {
+			fmt.Println("calibrate: no certification — keeping the default")
+		}
+		return nil
+	},
+}
+
 func evalRunner(cmd *cobra.Command) (*eval.Runner, error) {
 	dir, _ := cmd.Flags().GetString("eval-dir")
 	return &eval.Runner{EvalDir: dir}, nil
@@ -708,5 +810,12 @@ func init() {
 	evalCurveCmd.Flags().Int64("seed", 1, "base RNG seed for the grid")
 	evalCurveCmd.Flags().String("memory-params", "", "JSON overlay for params.Memory")
 	evalCurveCmd.Flags().String("out", "curve.jsonl", "JSONL output path")
-	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd, evalProbeCmd, evalProbeCacheCmd, evalCompareCmd, evalGenCmd, evalSelectCmd, evalCurveCmd, evalInteractionCmd)
+	evalCalibrateCmd.Flags().String("param", eval.CalibrateParamPromoteHits, "parameter to certify")
+	evalCalibrateCmd.Flags().String("db", ".crush/crush.db", "project crush.db to read episodes from")
+	evalCalibrateCmd.Flags().String("workdir", "", "project dir for project_key derivation (default: CWD)")
+	evalCalibrateCmd.Flags().Float64("alpha", 0.05, "certified harm-rate bound")
+	evalCalibrateCmd.Flags().Float64("delta", 0.05, "family-wise error level")
+	evalCalibrateCmd.Flags().String("grid", "5,4,3,2,1", "candidate values, any order — tested most-conservative first")
+	evalCalibrateCmd.Flags().String("out", "", "write the certificate JSON here (also printed)")
+	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd, evalProbeCmd, evalProbeCacheCmd, evalCompareCmd, evalGenCmd, evalSelectCmd, evalCurveCmd, evalInteractionCmd, evalCalibrateCmd)
 }

@@ -169,6 +169,14 @@ type Querier interface {
 	// The recency fallback: "continue" carries no terms to match, so the
 	// tail offers the freshest other sessions instead.
 	ListRecentSessionDigests(ctx context.Context, arg ListRecentSessionDigestsParams) ([]SessionDigest, error)
+	// Settled referent episodes in calibration form (#295): the same
+	// settled predicate as the rate fold — cue verdict resolved or an
+	// artifact read — plus the mapping context (phrase/target) and the
+	// suggestion flag, so the calibrator derives renderability under
+	// each candidate floor and stratifies one draw per session. Oldest
+	// first: per-session stratification picks the earliest episode and
+	// must be deterministic.
+	ListReferentCalibrationEpisodes(ctx context.Context, projectKey string) ([]ListReferentCalibrationEpisodesRow, error)
 	// Pooled outcome evidence for the empirical-Bayes prior (#296) --
 	// LEAVE-ONE-OUT over every OTHER project: counting the querying
 	// project's own episodes in the prior and again as local mass
