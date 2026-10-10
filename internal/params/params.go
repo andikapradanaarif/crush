@@ -88,6 +88,26 @@ type Memory struct {
 	// accepted episodes from DISTINCT sessions — same-session
 	// re-derivation is one observation repeated, not two.
 	ReferentPromoteHits int `json:"referent_promote_hits"`
+	// RateDecay is the per-session discount γ applied to stored
+	// Beta-Binomial mass before a new session's outcomes fold in
+	// (#296). 0.95 halves evidence roughly every 13 sessions so a
+	// drifting project isn't hostage to its oldest sessions.
+	// Valid range is (0, 1).
+	RateDecay float64 `json:"rate_decay"`
+	// RateQuantile is the posterior lower tail the rate gate
+	// decides on — decide on the quantile bound, not the mean, so
+	// a sparse project stays conservative until evidence accrues.
+	// Valid range is (0, 1).
+	RateQuantile float64 `json:"rate_quantile"`
+	// ReferentRateFloor is the render threshold: referent
+	// candidates inject only when the posterior lower bound clears
+	// it (#296). Zero disables the gate (render as before); one is
+	// unreachable by any finite posterior and suppresses the
+	// channel entirely. The shipped default is nonzero: the
+	// channel's render path is evidence-gated out of the box, so a
+	// store with no earned outcomes abstains until the pooled
+	// prior — or its own folded mass — clears the floor.
+	ReferentRateFloor float64 `json:"referent_rate_floor"`
 	// DigestRenderLimit bounds the <session_memory> section —
 	// session-digest pointers (#164). Zero suppresses the fetch,
 	// same contract as the other render limits.
@@ -135,6 +155,9 @@ func DefaultMemory() Memory {
 		OpenFailureTTL:       30 * 24 * time.Hour,
 		ReferentRenderLimit:  2,
 		ReferentPromoteHits:  2,
+		RateDecay:            0.95,
+		RateQuantile:         0.10,
+		ReferentRateFloor:    0.6,
 		DigestRenderLimit:    3,
 		DigestRefreshLimit:   25,
 		DigestFileHints:      6,
@@ -182,6 +205,19 @@ func (m Memory) Validate() error {
 		(m.OpenFailureTTL < openFailureTTLMin || m.OpenFailureTTL > openFailureTTLMax) {
 		return fmt.Errorf("memory param open_failure_ttl = %s — skeleton bound is 0 (disabled) or [%s, %s]",
 			m.OpenFailureTTL, openFailureTTLMin, openFailureTTLMax)
+	}
+	// The rate layer's floats can't ride the int sweep — a bad
+	// quantile silently corrupts the gate's bound (clamps to 0 or
+	// 1), which is exactly the "different experiment than declared"
+	// failure this contract exists to fail loud on (#296).
+	if m.RateDecay <= 0 || m.RateDecay >= 1 {
+		return fmt.Errorf("memory param rate_decay = %v — bound is (0, 1)", m.RateDecay)
+	}
+	if m.RateQuantile <= 0 || m.RateQuantile >= 1 {
+		return fmt.Errorf("memory param rate_quantile = %v — bound is (0, 1)", m.RateQuantile)
+	}
+	if m.ReferentRateFloor < 0 || m.ReferentRateFloor > 1 {
+		return fmt.Errorf("memory param referent_rate_floor = %v — bound is [0, 1]", m.ReferentRateFloor)
 	}
 	return nil
 }

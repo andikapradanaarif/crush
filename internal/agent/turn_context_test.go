@@ -157,6 +157,14 @@ func (failingCmdlog) ListReferentCandidates(context.Context, []string, int) ([]c
 	return nil, errors.New("cmdlog unavailable")
 }
 
+func (failingCmdlog) UpdateProjectRates(context.Context, float64) error {
+	return errors.New("cmdlog unavailable")
+}
+
+func (failingCmdlog) ReferentRateLowerBound(context.Context, float64) (float64, error) {
+	return 0, errors.New("cmdlog unavailable")
+}
+
 func (failingCmdlog) RefreshSessionDigests(context.Context, int) error {
 	return errors.New("cmdlog unavailable")
 }

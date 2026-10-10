@@ -124,7 +124,7 @@ func holdoutRoll(sessionID string) float64 {
 // session-level label there could mislabel the eventual arm. Logging
 // failures are swallowed — telemetry is observability, never a
 // reason to disturb a run.
-func (t *memoryTelemetry) recordTurn(sessionID, prompt string, sections []string, candidates []cmdlog.Failure, decisions []FailureDecision, agent string, armed, holdout bool, fetchErr error) {
+func (t *memoryTelemetry) recordTurn(sessionID, prompt string, sections []string, candidates []cmdlog.Failure, decisions []FailureDecision, agent string, armed, holdout bool, fetchErr error, rateGate *rateGateDecision) {
 	if sessionID == "" {
 		return
 	}
@@ -191,6 +191,21 @@ func (t *memoryTelemetry) recordTurn(sessionID, prompt string, sections []string
 			}
 		}
 		turn["propensity"] = propensity
+	}
+	if rateGate != nil {
+		// The learned gate's audit record (#296): both admit and
+		// veto land — the bound at decision time is what later
+		// calibration needs, and an errored gate is recorded as
+		// such rather than mistaken for a decided one.
+		g := map[string]any{}
+		if rateGate.err != nil {
+			g["error"] = rateGate.err.Error()
+		} else {
+			g["bound"] = rateGate.bound
+			g["floor"] = rateGate.floor
+			g["gated"] = rateGate.gated
+		}
+		turn["referent_gate"] = g
 	}
 	if reasons := rejectionReasons(decisions); len(reasons) > 0 {
 		turn["rejections"] = reasons

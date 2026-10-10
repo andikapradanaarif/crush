@@ -81,6 +81,37 @@ func (q *Queries) GetFailureMeta(ctx context.Context, signature string) (GetFail
 	return i, err
 }
 
+const getProjectRate = `-- name: GetProjectRate :one
+SELECT alpha, beta, last_event_id, last_session_id FROM project_rates
+WHERE project_key = ? AND signal = ?
+`
+
+type GetProjectRateParams struct {
+	ProjectKey string `json:"project_key"`
+	Signal     string `json:"signal"`
+}
+
+type GetProjectRateRow struct {
+	Alpha         float64 `json:"alpha"`
+	Beta          float64 `json:"beta"`
+	LastEventID   int64   `json:"last_event_id"`
+	LastSessionID string  `json:"last_session_id"`
+}
+
+// The stored posterior mass for one (project, signal) pair (#296)
+// plus the fold cursor -- absent row means no evidence yet counted.
+func (q *Queries) GetProjectRate(ctx context.Context, arg GetProjectRateParams) (GetProjectRateRow, error) {
+	row := q.queryRow(ctx, q.getProjectRateStmt, getProjectRate, arg.ProjectKey, arg.Signal)
+	var i GetProjectRateRow
+	err := row.Scan(
+		&i.Alpha,
+		&i.Beta,
+		&i.LastEventID,
+		&i.LastSessionID,
+	)
+	return i, err
+}
+
 const insertReferentEpisode = `-- name: InsertReferentEpisode :exec
 INSERT OR IGNORE INTO referent_episodes (
     phrase, target, session_id, source_message_id, tool_call_id,
@@ -423,6 +454,110 @@ func (q *Queries) ListRecentCommands(ctx context.Context, arg ListRecentCommands
 	return items, nil
 }
 
+const listReferentPriorEvents = `-- name: ListReferentPriorEvents :many
+SELECT verdict, label_committed, label_hash_changed
+FROM referent_episodes
+WHERE project_key != ?
+    AND (verdict IN ('accepted', 'revised')
+         OR label_hash_changed IS NOT NULL
+         OR label_committed = 1)
+`
+
+type ListReferentPriorEventsRow struct {
+	Verdict          string        `json:"verdict"`
+	LabelCommitted   sql.NullInt64 `json:"label_committed"`
+	LabelHashChanged sql.NullInt64 `json:"label_hash_changed"`
+}
+
+// Pooled outcome evidence for the empirical-Bayes prior (#296) --
+// LEAVE-ONE-OUT over every OTHER project: counting the querying
+// project's own episodes in the prior and again as local mass
+// roughly doubles their weight, which is least conservative
+// exactly where data is scarcest (the single-project store).
+func (q *Queries) ListReferentPriorEvents(ctx context.Context, projectKey string) ([]ListReferentPriorEventsRow, error) {
+	rows, err := q.query(ctx, q.listReferentPriorEventsStmt, listReferentPriorEvents, projectKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListReferentPriorEventsRow{}
+	for rows.Next() {
+		var i ListReferentPriorEventsRow
+		if err := rows.Scan(&i.Verdict, &i.LabelCommitted, &i.LabelHashChanged); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReferentRateEvents = `-- name: ListReferentRateEvents :many
+SELECT id, session_id, verdict, label_committed, label_hash_changed
+FROM referent_episodes
+WHERE project_key = ?
+    AND rate_folded = 0
+    AND (verdict IN ('accepted', 'revised')
+         OR label_hash_changed IS NOT NULL
+         OR label_committed = 1)
+ORDER BY id ASC
+LIMIT ?
+`
+
+type ListReferentRateEventsParams struct {
+	ProjectKey string `json:"project_key"`
+	Limit      int64  `json:"limit"`
+}
+
+type ListReferentRateEventsRow struct {
+	ID               int64         `json:"id"`
+	SessionID        string        `json:"session_id"`
+	Verdict          string        `json:"verdict"`
+	LabelCommitted   sql.NullInt64 `json:"label_committed"`
+	LabelHashChanged sql.NullInt64 `json:"label_hash_changed"`
+}
+
+// Settled, not-yet-folded referent episodes (#296), oldest first.
+// Membership is the rate_folded mark, not an id watermark: an
+// episode whose labels settle only after higher ids folded still
+// counts when it matures. An episode is evidence when the cue
+// verdict resolved or the artifact labels produced a read -- the
+// outcome rule lives in Go so the prior pool and the fold share
+// one definition.
+func (q *Queries) ListReferentRateEvents(ctx context.Context, arg ListReferentRateEventsParams) ([]ListReferentRateEventsRow, error) {
+	rows, err := q.query(ctx, q.listReferentRateEventsStmt, listReferentRateEvents, arg.ProjectKey, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListReferentRateEventsRow{}
+	for rows.Next() {
+		var i ListReferentRateEventsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SessionID,
+			&i.Verdict,
+			&i.LabelCommitted,
+			&i.LabelHashChanged,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listReferentsForPhrases = `-- name: ListReferentsForPhrases :many
 SELECT phrase, target, hits, last_at, project_key, param_version FROM referent_memory
 WHERE project_key = ? AND phrase IN (/*SLICE:phrases*/?)
@@ -705,6 +840,27 @@ func (q *Queries) ListUnclaimedFailures(ctx context.Context) ([]ListUnclaimedFai
 		return nil, err
 	}
 	return items, nil
+}
+
+const markReferentEventsFolded = `-- name: MarkReferentEventsFolded :exec
+UPDATE referent_episodes SET rate_folded = 1
+WHERE id IN (/*SLICE:ids*/?)
+`
+
+// Stamp the fold's membership mark on the ids this pass counted.
+func (q *Queries) MarkReferentEventsFolded(ctx context.Context, ids []int64) error {
+	query := markReferentEventsFolded
+	var queryParams []interface{}
+	if len(ids) > 0 {
+		for _, v := range ids {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(ids))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
+	}
+	_, err := q.exec(ctx, nil, query, queryParams...)
+	return err
 }
 
 const mergeFailureFirstSeen = `-- name: MergeFailureFirstSeen :exec
@@ -1026,6 +1182,40 @@ func (q *Queries) UpsertFailure(ctx context.Context, arg UpsertFailureParams) er
 		arg.Suggested,
 		arg.ProjectKey,
 		arg.ParamVersion,
+	)
+	return err
+}
+
+const upsertProjectRate = `-- name: UpsertProjectRate :exec
+INSERT INTO project_rates (project_key, signal, alpha, beta, last_event_id, last_session_id, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (project_key, signal) DO UPDATE SET
+    alpha = excluded.alpha,
+    beta = excluded.beta,
+    last_event_id = excluded.last_event_id,
+    last_session_id = excluded.last_session_id,
+    updated_at = excluded.updated_at
+`
+
+type UpsertProjectRateParams struct {
+	ProjectKey    string  `json:"project_key"`
+	Signal        string  `json:"signal"`
+	Alpha         float64 `json:"alpha"`
+	Beta          float64 `json:"beta"`
+	LastEventID   int64   `json:"last_event_id"`
+	LastSessionID string  `json:"last_session_id"`
+	UpdatedAt     int64   `json:"updated_at"`
+}
+
+func (q *Queries) UpsertProjectRate(ctx context.Context, arg UpsertProjectRateParams) error {
+	_, err := q.exec(ctx, q.upsertProjectRateStmt, upsertProjectRate,
+		arg.ProjectKey,
+		arg.Signal,
+		arg.Alpha,
+		arg.Beta,
+		arg.LastEventID,
+		arg.LastSessionID,
+		arg.UpdatedAt,
 	)
 	return err
 }

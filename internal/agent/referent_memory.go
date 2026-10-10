@@ -311,24 +311,64 @@ func (a *sessionAgent) referentRepoState() string {
 	return headSHA(a.configStore.WorkingDir())
 }
 
+// rateGateDecision is the learned gate's audit record (#296): the
+// skeleton's enumerable-exits contract extends to learned vetoes —
+// a turn where the gate decided carries its bound and floor, so a
+// session-DB probe can tell "no candidates existed" from "the gate
+// suppressed a promoted row." Nil means the gate never decided
+// (floor disabled, or a pre-gate exit).
+type rateGateDecision struct {
+	bound float64
+	floor float64
+	// gated marks the veto: bound computed and below floor.
+	gated bool
+	// err marks an uncomputable bound — the incumbent fetch ran,
+	// so nothing was vetoed.
+	err error
+}
+
 // referentCandidates fetches promoted mappings for the turn's phrase
 // — the injection pool. A vague prompt is the only shape that carries
 // a referent phrase worth rendering, so the fetch gates on the same
-// vagueness test the learner used.
-func (a *sessionAgent) referentCandidates(ctx context.Context, call SessionAgentCall, mp params.Memory) []cmdlog.Referent {
+// vagueness test the learner used. The returned decision is the rate
+// gate's audit record when it ran (#296).
+func (a *sessionAgent) referentCandidates(ctx context.Context, call SessionAgentCall, mp params.Memory) ([]cmdlog.Referent, *rateGateDecision) {
 	if !a.referentMemory || a.cmdlog == nil || a.isSubAgent ||
 		call.RepairAttempts > 0 || call.Prompt == "" ||
 		!isVaguePrompt(call.Prompt, mp.VaguePromptMaxWords) {
-		return nil
+		return nil, nil
 	}
 	phrase := extractReferentPhrase(call.Prompt)
 	if phrase == "" {
-		return nil
+		return nil, nil
+	}
+	var gate *rateGateDecision
+	if mp.ReferentRateFloor > 0 {
+		// The learned rate gate (#296): render only when the
+		// posterior lower bound clears the floor — decide on the
+		// bound, not the mean, so sparse projects stay honest. A
+		// computation error keeps the incumbent fetch: an
+		// undecidable gate must not invent abstention.
+		gate = &rateGateDecision{floor: mp.ReferentRateFloor}
+		bound, err := a.cmdlog.ReferentRateLowerBound(ctx, mp.RateQuantile)
+		switch {
+		case err != nil:
+			gate.err = err
+			slog.Warn("Referent rate bound unavailable", "error", err)
+		case bound < mp.ReferentRateFloor:
+			gate.bound = bound
+			gate.gated = true
+			slog.Info("Referent render gated by rate posterior",
+				"bound", bound, "floor", mp.ReferentRateFloor)
+			return nil, gate
+		default:
+			gate.bound = bound
+		}
 	}
 	refs, err := a.cmdlog.ListReferentCandidates(ctx, []string{phrase}, mp.ReferentRenderLimit)
 	if err != nil {
 		slog.Warn("Referent candidate fetch failed", "error", err)
-		return nil
+		return nil, gate
 	}
-	return refs
+	return refs, gate
 }

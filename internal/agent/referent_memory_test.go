@@ -347,7 +347,7 @@ func TestReferentCandidates_Gating(t *testing.T) {
 		t.Parallel()
 		a, env := referentAgent(t)
 		promote(t, env.cmdlog, "x.go")
-		refs := a.referentCandidates(t.Context(), SessionAgentCall{
+		refs, _ := a.referentCandidates(t.Context(), SessionAgentCall{
 			SessionID: "s3", Prompt: "fix the config",
 		}, params.DefaultMemory())
 		require.Empty(t, refs)
@@ -358,12 +358,58 @@ func TestReferentCandidates_Gating(t *testing.T) {
 		a, env := referentAgent(t)
 		a.referentMemory = true
 		promote(t, env.cmdlog, "x.go")
-		refs := a.referentCandidates(t.Context(), SessionAgentCall{
+		// The promotion floor is this test's subject — the rate
+		// gate (#296) gets its own subtests below.
+		mp := params.DefaultMemory()
+		mp.ReferentRateFloor = 0
+		refs, _ := a.referentCandidates(t.Context(), SessionAgentCall{
 			SessionID: "s3", Prompt: "fix the config",
-		}, params.DefaultMemory())
+		}, mp)
 		require.Len(t, refs, 1)
 		require.Equal(t, "x.go", refs[0].Target)
 		require.EqualValues(t, 2, refs[0].Hits) // seeded with the crossing count, not 1
+	})
+
+	t.Run("rate gate suppresses a sparse posterior", func(t *testing.T) {
+		t.Parallel()
+		a, env := referentAgent(t)
+		a.referentMemory = true
+		promote(t, env.cmdlog, "x.go")
+		// Two accepted episodes sit in the ledger but the leave-
+		// one-out prior is still Beta(1,1) — q0.1 = 0.1, well under
+		// the 0.6 floor, so a sparse project abstains (#296).
+		refs, gate := a.referentCandidates(t.Context(), SessionAgentCall{
+			SessionID: "s3", Prompt: "fix the config",
+		}, params.DefaultMemory())
+		require.Empty(t, refs)
+		require.NotNil(t, gate, "a decided gate owes the turn its audit record")
+		require.True(t, gate.gated)
+		require.InDelta(t, 0.1, gate.bound, 1e-9)
+		require.Equal(t, params.DefaultMemory().ReferentRateFloor, gate.floor)
+	})
+
+	t.Run("rate gate admits once the bound clears", func(t *testing.T) {
+		t.Parallel()
+		a, env := referentAgent(t)
+		a.referentMemory = true
+		promote(t, env.cmdlog, "x.go")
+		for _, sess := range []string{"s4", "s5"} {
+			require.NoError(t, env.cmdlog.RecordReferentEpisode(t.Context(), cmdlog.ReferentEpisode{
+				Phrase: "other", Target: "y.go", SessionID: sess,
+				SourceMessageID: "m-" + sess, Verdict: cmdlog.ReferentAccepted,
+			}, params.DefaultMemory().ReferentPromoteHits))
+		}
+		// Fold the settled episodes, then the decayed posterior
+		// clears the floor and the mapping renders.
+		require.NoError(t, env.cmdlog.UpdateProjectRates(t.Context(), params.DefaultMemory().RateDecay))
+		refs, gate := a.referentCandidates(t.Context(), SessionAgentCall{
+			SessionID: "s6", Prompt: "fix the config",
+		}, params.DefaultMemory())
+		require.Len(t, refs, 1)
+		require.Equal(t, "x.go", refs[0].Target)
+		require.NotNil(t, gate)
+		require.False(t, gate.gated)
+		require.Greater(t, gate.bound, gate.floor)
 	})
 
 	t.Run("non-vague prompt fetches nothing", func(t *testing.T) {
@@ -371,7 +417,7 @@ func TestReferentCandidates_Gating(t *testing.T) {
 		a, env := referentAgent(t)
 		a.referentMemory = true
 		promote(t, env.cmdlog, "x.go")
-		refs := a.referentCandidates(t.Context(), SessionAgentCall{
+		refs, _ := a.referentCandidates(t.Context(), SessionAgentCall{
 			SessionID: "s3", Prompt: "refactor internal/config/config.go to split the Options struct",
 		}, params.DefaultMemory())
 		require.Empty(t, refs)

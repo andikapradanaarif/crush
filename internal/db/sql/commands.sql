@@ -313,3 +313,55 @@ LIMIT ?;
 -- the previous value through unchanged when the check says
 -- "still not committed".
 UPDATE referent_episodes SET label_committed = ?, label_hash_changed = ?, label_tests_green = ?, labeled_at = ? WHERE id = ?;
+
+-- name: GetProjectRate :one
+-- The stored posterior mass for one (project, signal) pair (#296)
+-- plus the fold cursor -- absent row means no evidence yet counted.
+SELECT alpha, beta, last_event_id, last_session_id FROM project_rates
+WHERE project_key = ? AND signal = ?;
+
+-- name: UpsertProjectRate :exec
+INSERT INTO project_rates (project_key, signal, alpha, beta, last_event_id, last_session_id, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (project_key, signal) DO UPDATE SET
+    alpha = excluded.alpha,
+    beta = excluded.beta,
+    last_event_id = excluded.last_event_id,
+    last_session_id = excluded.last_session_id,
+    updated_at = excluded.updated_at;
+
+-- name: ListReferentRateEvents :many
+-- Settled, not-yet-folded referent episodes (#296), oldest first.
+-- Membership is the rate_folded mark, not an id watermark: an
+-- episode whose labels settle only after higher ids folded still
+-- counts when it matures. An episode is evidence when the cue
+-- verdict resolved or the artifact labels produced a read -- the
+-- outcome rule lives in Go so the prior pool and the fold share
+-- one definition.
+SELECT id, session_id, verdict, label_committed, label_hash_changed
+FROM referent_episodes
+WHERE project_key = ?
+    AND rate_folded = 0
+    AND (verdict IN ('accepted', 'revised')
+         OR label_hash_changed IS NOT NULL
+         OR label_committed = 1)
+ORDER BY id ASC
+LIMIT ?;
+
+-- name: MarkReferentEventsFolded :exec
+-- Stamp the fold's membership mark on the ids this pass counted.
+UPDATE referent_episodes SET rate_folded = 1
+WHERE id IN (sqlc.slice('ids'));
+
+-- name: ListReferentPriorEvents :many
+-- Pooled outcome evidence for the empirical-Bayes prior (#296) --
+-- LEAVE-ONE-OUT over every OTHER project: counting the querying
+-- project's own episodes in the prior and again as local mass
+-- roughly doubles their weight, which is least conservative
+-- exactly where data is scarcest (the single-project store).
+SELECT verdict, label_committed, label_hash_changed
+FROM referent_episodes
+WHERE project_key != ?
+    AND (verdict IN ('accepted', 'revised')
+         OR label_hash_changed IS NOT NULL
+         OR label_committed = 1);

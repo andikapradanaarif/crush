@@ -130,6 +130,21 @@ type Service interface {
 	// strongest evidence first.
 	ListReferentCandidates(ctx context.Context, phrases []string, limit int) ([]Referent, error)
 
+	// UpdateProjectRates folds newly settled referent episodes into
+	// the project's decayed Beta-Binomial mass (#296): each new
+	// evidence-bearing session discounts stored mass by gamma before
+	// its outcomes count. Idempotent on the rate_folded mark; a
+	// sibling pass racing between upsert and mark can double-count
+	// one batch at most.
+	UpdateProjectRates(ctx context.Context, gamma float64) error
+
+	// ReferentRateLowerBound returns the quantile-q lower bound of
+	// the project's referent-acceptance posterior — decayed local
+	// mass shrunk onto the pooled global prior. Zero local evidence
+	// returns the prior's own bound; an error means the gate can't
+	// compute and callers keep incumbent behavior.
+	ReferentRateLowerBound(ctx context.Context, q float64) (float64, error)
+
 	// RefreshSessionDigests materializes digests for sessions whose
 	// row is missing or stale — the lazy write path run at retrieval
 	// time, since sessions never formally end (#164). Bounded by

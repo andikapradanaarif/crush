@@ -140,6 +140,12 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 			if err := a.cmdlog.MatureReferentLabels(labelCtx, referentLabelMatureLimit); err != nil {
 				slog.Warn("Referent label maturity pass failed", "error", err)
 			}
+			// The rate fold (#296) rides the same detached slot —
+			// settled episodes become decayed posterior mass a turn
+			// late, which is the schedule every learned layer uses.
+			if err := a.cmdlog.UpdateProjectRates(labelCtx, a.memoryParams().RateDecay); err != nil {
+				slog.Warn("Project rate fold failed", "error", err)
+			}
 		})
 	}
 	// armed is effective arming — flag on AND a store to read. A
@@ -267,8 +273,9 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	// shares the holdout contract — a suppressed turn must not leak
 	// the channel through a different pool, and a rendered candidate
 	// marks its target so a later edit of it flags suggested.
+	var rateGate *rateGateDecision
 	if !holdout && a.cmdlog != nil {
-		referents = a.referentCandidates(ctx, call, a.memoryParams())
+		referents, rateGate = a.referentCandidates(ctx, call, a.memoryParams())
 		for _, r := range referents {
 			a.cmdlog.MarkSuggestedFile(call.SessionID, r.Target)
 		}
@@ -299,7 +306,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	}
 	if telemetryOn {
 		a.memoryTelemetry.recordTurn(call.SessionID, call.Prompt, sections,
-			memoryCandidates, memoryDecisions, a.agentID, armed, holdout, fetchErr)
+			memoryCandidates, memoryDecisions, a.agentID, armed, holdout, fetchErr, rateGate)
 	}
 	if len(sections) == 0 {
 		// An armed tail that renders nothing still records an audit:

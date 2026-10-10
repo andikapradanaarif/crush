@@ -83,6 +83,9 @@ type Querier interface {
 	GetNotebookTurnsWithEntries(ctx context.Context, arg GetNotebookTurnsWithEntriesParams) ([]int64, error)
 	GetOldestNotebookEntries(ctx context.Context, arg GetOldestNotebookEntriesParams) ([]NotebookEntry, error)
 	GetProcessedSegment(ctx context.Context, arg GetProcessedSegmentParams) (ProcessedSegment, error)
+	// The stored posterior mass for one (project, signal) pair (#296)
+	// plus the fold cursor -- absent row means no evidence yet counted.
+	GetProjectRate(ctx context.Context, arg GetProjectRateParams) (GetProjectRateRow, error)
 	// One row per tool result that renders as a stub (applied superseded
 	// mark). content_head carries the first 1024 chars so callers can
 	// recompute exact stub text for prefix-bearing stub kinds.
@@ -166,6 +169,20 @@ type Querier interface {
 	// The recency fallback: "continue" carries no terms to match, so the
 	// tail offers the freshest other sessions instead.
 	ListRecentSessionDigests(ctx context.Context, arg ListRecentSessionDigestsParams) ([]SessionDigest, error)
+	// Pooled outcome evidence for the empirical-Bayes prior (#296) --
+	// LEAVE-ONE-OUT over every OTHER project: counting the querying
+	// project's own episodes in the prior and again as local mass
+	// roughly doubles their weight, which is least conservative
+	// exactly where data is scarcest (the single-project store).
+	ListReferentPriorEvents(ctx context.Context, projectKey string) ([]ListReferentPriorEventsRow, error)
+	// Settled, not-yet-folded referent episodes (#296), oldest first.
+	// Membership is the rate_folded mark, not an id watermark: an
+	// episode whose labels settle only after higher ids folded still
+	// counts when it matures. An episode is evidence when the cue
+	// verdict resolved or the artifact labels produced a read -- the
+	// outcome rule lives in Go so the prior pool and the fold share
+	// one definition.
+	ListReferentRateEvents(ctx context.Context, arg ListReferentRateEventsParams) ([]ListReferentRateEventsRow, error)
 	// Promoted candidates whose learned phrase appears among the turn's
 	// extracted phrases -- exact-match on the normalized phrase keeps the
 	// render honest (a fuzzy hit would be a guess, not learned evidence).
@@ -216,6 +233,8 @@ type Querier interface {
 	ListUnclaimedFailures(ctx context.Context) ([]ListUnclaimedFailuresRow, error)
 	// Backs prompt history, which steps back one entry at a time.
 	ListUserMessagesBySession(ctx context.Context, sessionID string) ([]Message, error)
+	// Stamp the fold's membership mark on the ids this pass counted.
+	MarkReferentEventsFolded(ctx context.Context, ids []int64) error
 	MarkSegmentProcessed(ctx context.Context, arg MarkSegmentProcessedParams) error
 	// A claimed row colliding with an already-partitioned twin keeps the
 	// twin (fresher provenance) but the failure's true age survives --
@@ -276,6 +295,7 @@ type Querier interface {
 	// hints, and the observation's provenance all move with the latest
 	// failure, not the first.
 	UpsertFailure(ctx context.Context, arg UpsertFailureParams) error
+	UpsertProjectRate(ctx context.Context, arg UpsertProjectRateParams) error
 	// The digest is a per-turn refresh of the session's resumable view:
 	// title + latest checkpoint + touched files. ended_at follows the
 	// session row's updated_at --- the closest thing to an end timestamp a
