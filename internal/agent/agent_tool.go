@@ -4,6 +4,8 @@ import (
 	"context"
 	_ "embed"
 	"errors"
+	"fmt"
+	"sync"
 
 	"charm.land/fantasy"
 
@@ -33,10 +35,36 @@ func (c *coordinator) agentTool(ctx context.Context) (fantasy.AgentTool, error) 
 		return nil, err
 	}
 
-	agent, err := c.buildAgent(ctx, prompt, agentCfg, true)
-	if err != nil {
-		return nil, err
+	// The task sub-agent is built lazily on first use: its configured
+	// model slot may reference a provider that failed to configure, and
+	// a stale secondary selection must not brick the parent agent's
+	// readiness. A build failure surfaces at call time as a tool error
+	// naming the provider/model, and rebuilds retry on later calls so a
+	// config reload can fix it without restarting.
+	var (
+		buildMu  sync.Mutex
+		subAgent SessionAgent
+	)
+	build := func() error {
+		built, err := c.buildAgent(ctx, prompt, agentCfg, true)
+		if err != nil {
+			return fmt.Errorf("task agent unavailable: %w", err)
+		}
+		subAgent = built
+		return nil
 	}
+	ensureAgent := func() (SessionAgent, error) {
+		buildMu.Lock()
+		defer buildMu.Unlock()
+		if subAgent != nil {
+			return subAgent, nil
+		}
+		if err := build(); err != nil {
+			return nil, err
+		}
+		return subAgent, nil
+	}
+
 	return fantasy.NewParallelAgentTool(
 		AgentToolName,
 		agentToolDescription,
@@ -55,8 +83,13 @@ func (c *coordinator) agentTool(ctx context.Context) (fantasy.AgentTool, error) 
 				return fantasy.ToolResponse{}, errors.New("agent message id missing from context")
 			}
 
+			subAgent, err := ensureAgent()
+			if err != nil {
+				return fantasy.NewTextErrorResponse(err.Error()), nil
+			}
+
 			return c.runSubAgent(ctx, subAgentParams{
-				Agent:          agent,
+				Agent:          subAgent,
 				SessionID:      sessionID,
 				AgentMessageID: agentMessageID,
 				ToolCallID:     call.ID,

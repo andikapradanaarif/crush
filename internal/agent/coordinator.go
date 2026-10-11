@@ -1562,7 +1562,8 @@ func (c *coordinator) buildSelectedModel(
 
 	providerCfg, ok := cfg.Providers.Get(sel.Provider)
 	if !ok {
-		return Model{}, errModelProviderNotConfigured
+		return Model{}, fmt.Errorf("provider %q for model %q: %w",
+			sel.Provider, sel.Model, errModelProviderNotConfigured)
 	}
 
 	provider, err := c.buildProvider(providerCfg, sel, isSubAgent)
@@ -1626,22 +1627,32 @@ func (c *coordinator) buildAgentModels(ctx context.Context, agent config.Agent, 
 
 	large, err := c.buildSelectedModel(ctx, largeModelCfg, isSubAgent)
 	if err != nil {
-		// Translate generic helper errors back to large sentinels.
+		// Translate generic helper errors back to sentinels while
+		// keeping the provider/model detail that identifies the real
+		// culprit. agent.Model can name any slot — when it isn't the
+		// large slot, say so instead of mislabeling it "large".
+		slot := cmp.Or(string(agent.Model), string(config.SelectedModelTypeLarge))
 		if errors.Is(err, errModelProviderNotConfigured) {
-			return Model{}, Model{}, errLargeModelProviderNotConfigured
+			if slot == string(config.SelectedModelTypeLarge) {
+				return Model{}, Model{}, fmt.Errorf("%w: %w", errLargeModelProviderNotConfigured, err)
+			}
+			return Model{}, Model{}, fmt.Errorf("agent %s model slot %q: %w", agent.ID, slot, err)
 		}
 		if errors.Is(err, errModelNotFoundInProvider) {
-			return Model{}, Model{}, errLargeModelNotFound
+			if slot == string(config.SelectedModelTypeLarge) {
+				return Model{}, Model{}, fmt.Errorf("%w: %w", errLargeModelNotFound, err)
+			}
+			return Model{}, Model{}, fmt.Errorf("agent %s model slot %q: %w", agent.ID, slot, err)
 		}
 		return Model{}, Model{}, err
 	}
 	small, err := c.buildSelectedModel(ctx, smallModelCfg, true)
 	if err != nil {
 		if errors.Is(err, errModelProviderNotConfigured) {
-			return Model{}, Model{}, errSmallModelProviderNotConfigured
+			return Model{}, Model{}, fmt.Errorf("%w: %w", errSmallModelProviderNotConfigured, err)
 		}
 		if errors.Is(err, errModelNotFoundInProvider) {
-			return Model{}, Model{}, errSmallModelNotFound
+			return Model{}, Model{}, fmt.Errorf("%w: %w", errSmallModelNotFound, err)
 		}
 		return Model{}, Model{}, err
 	}
