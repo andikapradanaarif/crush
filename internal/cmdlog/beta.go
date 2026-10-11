@@ -82,6 +82,20 @@ func betaCDF(a, b, x float64) float64 {
 	return 1 - front*betacf(b, a, 1-x)/b
 }
 
+// BinomialTailLE is the exact left tail P(Bin(n, p) ≤ k), evaluated
+// through the binomial–beta identity P(X ≤ k) = I_{1-p}(n-k, k+1) so
+// the LTT calibrator (#295) gets exact Bentkus tails from the same
+// beta primitive the rate gate uses.
+func BinomialTailLE(k, n int, p float64) float64 {
+	if k < 0 {
+		return 0
+	}
+	if k >= n {
+		return 1
+	}
+	return betaCDF(float64(n-k), float64(k+1), 1-p)
+}
+
 // BetaQuantile returns x such that P(Beta(a,b) ≤ x) ≈ q, found by
 // bisection on the monotone CDF. The rate gate asks for a lower-tail
 // bound, so precision past ~1e-6 buys nothing — 60 bisection steps

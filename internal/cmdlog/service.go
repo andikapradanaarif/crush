@@ -787,6 +787,15 @@ func computeProjectKey(workingDir string) (key, commonDir string, hasRepo bool) 
 	return key, filepathext.Canonical(common), true
 }
 
+// ProjectKeyForDir derives the partition identity a DB opened under
+// workingDir would use — the same derivation NewService performs —
+// so offline readers (the LTT calibrator, #295) can query a project's
+// rows without constructing a service.
+func ProjectKeyForDir(workingDir string) string {
+	key, _, _ := computeProjectKey(workingDir)
+	return key
+}
+
 // normalizeRemote reduces a git remote URL to host/path form so
 // protocol and cosmetic spellings — https vs ssh, a trailing .git —
 // name the same repository.

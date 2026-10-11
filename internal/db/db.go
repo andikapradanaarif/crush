@@ -267,6 +267,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listRecentSessionDigestsStmt, err = db.PrepareContext(ctx, listRecentSessionDigests); err != nil {
 		return nil, fmt.Errorf("error preparing query ListRecentSessionDigests: %w", err)
 	}
+	if q.listReferentCalibrationEpisodesStmt, err = db.PrepareContext(ctx, listReferentCalibrationEpisodes); err != nil {
+		return nil, fmt.Errorf("error preparing query ListReferentCalibrationEpisodes: %w", err)
+	}
 	if q.listReferentPriorEventsStmt, err = db.PrepareContext(ctx, listReferentPriorEvents); err != nil {
 		return nil, fmt.Errorf("error preparing query ListReferentPriorEvents: %w", err)
 	}
@@ -791,6 +794,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listRecentSessionDigestsStmt: %w", cerr)
 		}
 	}
+	if q.listReferentCalibrationEpisodesStmt != nil {
+		if cerr := q.listReferentCalibrationEpisodesStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listReferentCalibrationEpisodesStmt: %w", cerr)
+		}
+	}
 	if q.listReferentPriorEventsStmt != nil {
 		if cerr := q.listReferentPriorEventsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listReferentPriorEventsStmt: %w", cerr)
@@ -1101,6 +1109,7 @@ type Queries struct {
 	listProcessedSegmentsStmt            *sql.Stmt
 	listRecentCommandsStmt               *sql.Stmt
 	listRecentSessionDigestsStmt         *sql.Stmt
+	listReferentCalibrationEpisodesStmt  *sql.Stmt
 	listReferentPriorEventsStmt          *sql.Stmt
 	listReferentRateEventsStmt           *sql.Stmt
 	listReferentsForPhrasesStmt          *sql.Stmt
@@ -1226,6 +1235,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listProcessedSegmentsStmt:            q.listProcessedSegmentsStmt,
 		listRecentCommandsStmt:               q.listRecentCommandsStmt,
 		listRecentSessionDigestsStmt:         q.listRecentSessionDigestsStmt,
+		listReferentCalibrationEpisodesStmt:  q.listReferentCalibrationEpisodesStmt,
 		listReferentPriorEventsStmt:          q.listReferentPriorEventsStmt,
 		listReferentRateEventsStmt:           q.listReferentRateEventsStmt,
 		listReferentsForPhrasesStmt:          q.listReferentsForPhrasesStmt,

@@ -203,7 +203,7 @@ func TestReferentEpisodeOutcome(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, c.want, referentEpisodeOutcome(c.verdict, c.committed, c.changed))
+			require.Equal(t, c.want, ReferentEpisodeOutcome(c.verdict, c.committed, c.changed))
 		})
 	}
 }

@@ -365,3 +365,19 @@ WHERE project_key != ?
     AND (verdict IN ('accepted', 'revised')
          OR label_hash_changed IS NOT NULL
          OR label_committed = 1);
+-- name: ListReferentCalibrationEpisodes :many
+-- Settled referent episodes in calibration form (#295): the same
+-- settled predicate as the rate fold — cue verdict resolved or an
+-- artifact read — plus the mapping context (phrase/target) and the
+-- suggestion flag, so the calibrator derives renderability under
+-- each candidate floor and stratifies one draw per session. Oldest
+-- first: per-session stratification picks the earliest episode and
+-- must be deterministic.
+SELECT id, phrase, target, session_id, verdict, label_committed,
+    label_hash_changed, memory_suggested
+FROM referent_episodes
+WHERE project_key = ?
+    AND (verdict IN ('accepted', 'revised')
+         OR label_hash_changed IS NOT NULL
+         OR label_committed = 1)
+ORDER BY id ASC;

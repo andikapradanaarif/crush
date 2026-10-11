@@ -454,6 +454,67 @@ func (q *Queries) ListRecentCommands(ctx context.Context, arg ListRecentCommands
 	return items, nil
 }
 
+const listReferentCalibrationEpisodes = `-- name: ListReferentCalibrationEpisodes :many
+SELECT id, phrase, target, session_id, verdict, label_committed,
+    label_hash_changed, memory_suggested
+FROM referent_episodes
+WHERE project_key = ?
+    AND (verdict IN ('accepted', 'revised')
+         OR label_hash_changed IS NOT NULL
+         OR label_committed = 1)
+ORDER BY id
+`
+
+type ListReferentCalibrationEpisodesRow struct {
+	ID               int64         `json:"id"`
+	Phrase           string        `json:"phrase"`
+	Target           string        `json:"target"`
+	SessionID        string        `json:"session_id"`
+	Verdict          string        `json:"verdict"`
+	LabelCommitted   sql.NullInt64 `json:"label_committed"`
+	LabelHashChanged sql.NullInt64 `json:"label_hash_changed"`
+	MemorySuggested  int64         `json:"memory_suggested"`
+}
+
+// Settled referent episodes in calibration form (#295): the same
+// settled predicate as the rate fold — cue verdict resolved or an
+// artifact read — plus the mapping context (phrase/target) and the
+// suggestion flag, so the calibrator derives renderability under
+// each candidate floor and stratifies one draw per session. Oldest
+// first: per-session stratification picks the earliest episode and
+// must be deterministic.
+func (q *Queries) ListReferentCalibrationEpisodes(ctx context.Context, projectKey string) ([]ListReferentCalibrationEpisodesRow, error) {
+	rows, err := q.query(ctx, q.listReferentCalibrationEpisodesStmt, listReferentCalibrationEpisodes, projectKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListReferentCalibrationEpisodesRow{}
+	for rows.Next() {
+		var i ListReferentCalibrationEpisodesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Phrase,
+			&i.Target,
+			&i.SessionID,
+			&i.Verdict,
+			&i.LabelCommitted,
+			&i.LabelHashChanged,
+			&i.MemorySuggested,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listReferentPriorEvents = `-- name: ListReferentPriorEvents :many
 SELECT verdict, label_committed, label_hash_changed
 FROM referent_episodes
