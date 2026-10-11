@@ -130,13 +130,31 @@ func TestCalibratePromoteHits_LeaveOneOutRenderability(t *testing.T) {
 
 	// The mapping's only clean evidence is the episode's own session:
 	// at h=1 the episode must NOT count its own acceptance toward
-	// rendering itself — deployment-time renderability is evidence
-	// that existed before the episode was judged.
+	// rendering itself — the draw-level LOO removes its sole
+	// contribution to the floor.
 	eps := []CalibrationEpisode{acceptedEp(1, "s1", "fix config", "config.go")}
 	cert, err := CalibratePromoteHits(eps, []int{1}, 0.9, 0.05)
 	require.NoError(t, err)
 	require.Nil(t, cert.CertifiedValue)
 	require.Equal(t, 0, cert.Candidates[0].Admits)
+}
+
+func TestCalibratePromoteHits_SiblingSessionEvidence(t *testing.T) {
+	t.Parallel()
+
+	// Draw-level, not session-level, LOO: when the draw's session
+	// holds a second clean episode on the same mapping, the session
+	// still counts — its evidence isn't solely the draw's own. The
+	// stratified draw (id 1) renders at h=1 on the sibling's share.
+	eps := []CalibrationEpisode{
+		acceptedEp(1, "s1", "fix config", "config.go"),
+		acceptedEp(2, "s1", "fix config", "config.go"), // stratified out as a draw, still evidence
+	}
+	cert, err := CalibratePromoteHits(eps, []int{1}, 0.9, 0.05)
+	require.NoError(t, err)
+	require.Equal(t, 1, cert.Candidates[0].Admits)
+	require.Len(t, eps, 2, "stratification does not mutate its input")
+	require.Equal(t, 1, cert.Draws)
 }
 
 func TestCalibratePromoteHits_HarmUsesSharedOutcome(t *testing.T) {

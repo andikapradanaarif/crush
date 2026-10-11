@@ -1978,18 +1978,27 @@ crush eval calibrate --db .crush/crush.db \
   most-conservative → least, stopping at the first non-certification
   — FWER holds at δ with no multiplicity correction.
 - **Output.** A certificate JSON: per-candidate admits/harms/
-  risk̂/p, the certified value (least conservative that rejected
-  the unsafe null), and a `param_version`-stamped `memory_params`
-  overlay that applies it. `certified_value: null` is a valid
-  outcome — **keep the default**; the command never silently ships
-  the loosest tested value.
+  risk̂/p (plus `suggested_admits`/`suggested_harms` — the only
+  draws with true admit-outcomes), the certified value (least
+  conservative that rejected the unsafe null), and a
+  `param_version`-stamped `memory_params` overlay that applies it.
+  `certified_value: null` is a valid outcome — **keep the
+  default**; the command never silently ships the loosest tested
+  value, and `guarantee` is emitted only when something certified.
+- **Scope, stated in the output.** Three caveats travel in the
+  certificate's `caveats` field: the risk covers the promotion
+  layer only (the learned rate gate composes on top); admit
+  outcomes are mostly counterfactual (non-suggested admits never
+  saw the render, so harm-under-admit assumes observed ≈ admit
+  outcome); the guarantee holds on the calibration distribution
+  only. Efficiency harms (steps/tokens) are confounded and stay
+  out until bounded-loss treatment exists.
 - **Data bar.** ~78 zero-harm admits are needed to certify α=5% at
   δ=5% (the exact crossing the bound computes; "60" was the
-  back-of-envelope). Sparse corpora emit "no certification" — that
-  is the honest dormant path, not a failure.
-- **Scope.** The guarantee holds on the calibration distribution
-  only; the certificate says so. Efficiency harms (steps/tokens)
-  are confounded and stay out until bounded-loss treatment exists.
+  back-of-envelope — the e· Bentkus factor is the ~30% overhead,
+  kept per the cited recipe rather than a bespoke bound). Sparse
+  corpora emit "no certification" — that is the honest dormant
+  path, not a failure.
 
 ## Non-goals
 

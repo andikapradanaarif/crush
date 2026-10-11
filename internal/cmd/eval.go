@@ -3,6 +3,7 @@ package cmd
 import (
 	"cmp"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -652,8 +653,8 @@ the stated bound; a run that certifies nothing keeps the default.
 
 The guarantee holds on the calibration distribution only — episodes
 are stratified to one per session because within-session draws are
-correlated. ~60+ clean labeled episodes are needed before α=5% can
-certify at all.`,
+correlated. ~78 admit draws are needed before α=5% can certify at
+all.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
@@ -673,6 +674,9 @@ certify at all.`,
 				return err
 			}
 		}
+		if param != eval.CalibrateParamPromoteHits {
+			return fmt.Errorf("unknown --param %q (have %q)", param, eval.CalibrateParamPromoteHits)
+		}
 		var grid []int
 		for _, s := range strings.Split(gridStr, ",") {
 			v, err := strconv.Atoi(strings.TrimSpace(s))
@@ -687,16 +691,21 @@ certify at all.`,
 			return fmt.Errorf("open %s: %w", dbPath, err)
 		}
 		defer conn.Close()
-		rows, err := db.New(conn).ListReferentCalibrationEpisodes(ctx, cmdlog.ProjectKeyForDir(workdir))
+		var rows []db.ListReferentCalibrationEpisodesRow
+		ready, err := referentSchemaReady(ctx, conn)
 		if err != nil {
-			// A DB written before the referent schema landed has no
-			// episodes — that is an empty calibration set ("no
-			// certification"), not an error worth dying on.
-			if !strings.Contains(err.Error(), "no such table: referent_episodes") {
+			return fmt.Errorf("check referent schema: %w", err)
+		}
+		if ready {
+			rows, err = db.New(conn).ListReferentCalibrationEpisodes(ctx, cmdlog.ProjectKeyForDir(workdir))
+			if err != nil {
 				return fmt.Errorf("list calibration episodes: %w", err)
 			}
-			rows = nil
 		}
+		// A DB written before the referent schema — or before the #294
+		// label columns — has no calibratable episodes: that is an empty
+		// calibration set ("no certification"), not an error worth
+		// dying on.
 		eps := make([]eval.CalibrationEpisode, 0, len(rows))
 		for _, r := range rows {
 			eps = append(eps, eval.CalibrationEpisode{
@@ -711,13 +720,7 @@ certify at all.`,
 			})
 		}
 
-		var cert eval.Certificate
-		switch param {
-		case eval.CalibrateParamPromoteHits:
-			cert, err = eval.CalibratePromoteHits(eps, grid, alpha, delta)
-		default:
-			err = fmt.Errorf("unknown --param %q (have %q)", param, eval.CalibrateParamPromoteHits)
-		}
+		cert, err := eval.CalibratePromoteHits(eps, grid, alpha, delta)
 		if err != nil {
 			return err
 		}
@@ -737,6 +740,42 @@ certify at all.`,
 		}
 		return nil
 	},
+}
+
+// referentSchemaReady reports whether a crush.db carries the referent
+// schema the calibrator reads — the episodes table plus the #294 label
+// columns the settled predicate and outcome rule depend on. Project
+// DBs in the wild sit at three schema ages (pre-referent, pre-labels,
+// current), and only the third can answer the query.
+func referentSchemaReady(ctx context.Context, conn *sql.DB) (bool, error) {
+	rows, err := conn.QueryContext(ctx, "PRAGMA table_info(referent_episodes)")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		cols[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	for _, want := range []string{
+		"id", "phrase", "target", "session_id", "verdict",
+		"label_committed", "label_hash_changed", "memory_suggested",
+	} {
+		if !cols[want] {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func evalRunner(cmd *cobra.Command) (*eval.Runner, error) {
