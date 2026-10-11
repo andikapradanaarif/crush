@@ -526,6 +526,52 @@ start state + `reference.patch`. For `"pass"` trajectories with a
 fail on start + counterexample. Both runs are agent-free — this is
 the quarantine pass, below.
 
+### The `expdisc` family — an expensive-discovery tier
+
+The mask cells sit near ceiling: a one-line prompt and a small
+fixture let any competent model jump straight to the fix, so the
+only signal left is efficiency. The `expdisc-*` cells aim below that
+ceiling — a control arm that must *earn* its pass rate is where a
+capability claim (memory changes the outcome, not just the cost)
+becomes measurable. `expdisc-shop` is the shared base: an
+~18-package Go shop generated deterministically by `genfixture.py`,
+green end-to-end, with plausible decoy packages (tax, discount,
+currency) around the guilty ones. Every corpus dir must be a
+trajectory, so `expdisc-shop` itself is a pass-start sanity cell
+that keeps the fixture honest — the defect can only come from an
+overlay.
+
+Two defect families ride that fixture. Each lives as a patch overlay
+under `.defects/{ft,bb}` inside the fixture; `start_state.setup`
+copies the overlay in and removes `.defects`, so the start state is
+defective but the answer never ships in the workdir:
+
+- `expdisc-ft-*` — the orders total test fails; the root cause is a
+  `LineTotal` rounding change in `internal/pricing`, a package the
+  test never names. The surface is `internal/orders`, the fix is
+  elsewhere — cross-package tracing among decoys.
+- `expdisc-bb-*` — `internal/reports`' *test file* won't compile
+  (`Generate` gained no ctx param while a call site passes one).
+  `go build ./...` stays green: the defect lives only on the
+  test-compile surface, the discovery path `go build` can't reveal.
+
+The `ambig-none` cells seed nothing — they are the cold baseline and
+where the 40–70% control band is measured. `ambig-correct` warms
+`prior_sessions` with a truthful discovery (which test fails, where
+the symbol lives); `ambig-decoy` warms a wrong-suspect session (tax
+touched, confirmed green) so retrieval has a plausible lie to serve.
+Checks are SHA-256-guarded: `check-ft` requires the orders suite and
+full suite green *and* the orders files byte-identical to the
+shipped state, so "fixing" the test or the innocent caller scores
+fail; `check-bb` likewise pins the innocent `reports.go`.
+
+The band is a per-model property, not a fixture property — a model
+that solves `*-none` cold at 5/5 leaves no capability headroom
+(first deepseek characterization: 5/5 both cells, ~30 s, ≤11
+discovery calls; the fixture still measures the efficiency claim
+there, but not the capability one). Characterize under the pinned
+model before reading arm differences.
+
 ## experiment.json — the arm structure
 
 ```json

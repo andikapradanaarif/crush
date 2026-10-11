@@ -1,0 +1,11 @@
+diff --git a/internal/tax/tax.go b/internal/tax/tax.go
+index 0000000..0000000 100644
+--- a/internal/tax/tax.go
++++ b/internal/tax/tax.go
+@@ -15,5 +15,5 @@ func Rate(zone string) int { return basisPoints[zone] }
+ 
+ // Tax returns the cents owed on subtotalCents in zone.
+ func Tax(subtotalCents int, zone string) int {
+-	return subtotalCents * basisPoints[zone] / 10000
++	return subtotalCents * basisPoints[zone] / 1000
+ }

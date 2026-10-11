@@ -1,0 +1,25 @@
+{
+	"id": "expdisc-bb-ambig-correct",
+	"schema_version": 1,
+	"origin": {"kind": "synthetic"},
+	"start_state": {
+		"kind": "fixture",
+		"fixture_dir": "../expdisc-shop/fixture",
+		"setup": ["cp -R .defects/bb/internal . && rm -rf .defects"]
+	},
+	"prior_sessions": [{"turns": [
+		"run `go build ./...` as a single bare command — no pipes or wrappers — and report whether it succeeds — do not modify any files",
+		"run `go test ./...` as a single bare command — no pipes or wrappers — and report where the compile error is — do not modify any files"
+	]}],
+	"task": {
+		"turns": ["the build is broken — fix it"]
+	},
+	"check": {
+		"script": "../expdisc-shop/check-bb.sh",
+		"expect_start_state": "fail",
+		"timeout_seconds": 300
+	},
+	"coverage": {"min_steps": 1, "min_warm_start.sessions": 1},
+	"requires": {"tools": ["go"]},
+	"budget": {"run_timeout_seconds": 600, "max_steps": 30}
+}

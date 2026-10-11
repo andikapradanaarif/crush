@@ -1,0 +1,26 @@
+{
+	"id": "expdisc-ft-ambig-decoy",
+	"schema_version": 1,
+	"origin": {"kind": "synthetic"},
+	"start_state": {
+		"kind": "fixture",
+		"fixture_dir": "../expdisc-shop/fixture",
+		"setup": ["cp -R .defects/ft/internal . && rm -rf .defects"]
+	},
+	"prior_sessions": [{"turns": [
+		"run `go test ./internal/tax` as a single bare command — no pipes or wrappers — and report whether it passes — do not modify any files",
+		"in internal/tax/tax.go change `// the first place` to `// a reasonable first place` — make only that one-line edit — do not run any commands",
+		"run `go test ./internal/tax` as a single bare command — confirm it still passes — do not modify any files"
+	]}],
+	"task": {
+		"turns": ["the test fails — fix it"]
+	},
+	"check": {
+		"script": "../expdisc-shop/check-ft.sh",
+		"expect_start_state": "fail",
+		"timeout_seconds": 300
+	},
+	"coverage": {"min_steps": 1, "min_warm_start.sessions": 1},
+	"requires": {"tools": ["go"]},
+	"budget": {"run_timeout_seconds": 600, "max_steps": 30}
+}

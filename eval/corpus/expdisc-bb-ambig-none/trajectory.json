@@ -1,0 +1,21 @@
+{
+	"id": "expdisc-bb-ambig-none",
+	"schema_version": 1,
+	"origin": {"kind": "synthetic"},
+	"start_state": {
+		"kind": "fixture",
+		"fixture_dir": "../expdisc-shop/fixture",
+		"setup": ["cp -R .defects/bb/internal . && rm -rf .defects"]
+	},
+	"task": {
+		"turns": ["the build is broken — fix it"]
+	},
+	"check": {
+		"script": "../expdisc-shop/check-bb.sh",
+		"expect_start_state": "fail",
+		"timeout_seconds": 300
+	},
+	"coverage": {"min_steps": 1},
+	"requires": {"tools": ["go"]},
+	"budget": {"run_timeout_seconds": 600, "max_steps": 30}
+}
