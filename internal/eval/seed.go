@@ -103,6 +103,31 @@ func (r *Runner) materializeSeededDigests(ctx context.Context, workdir, seedKey 
 	return svc.RefreshSessionDigests(ctx, bound)
 }
 
+// foldSeededRates runs one UpdateProjectRates pass over the seeded
+// db. The production fold lands a turn late on the detached slot and
+// scripted seeds never run a turn, so without an explicit pass the
+// snapshot's project_rates stays empty and the referent gate vetoes
+// a warm state whose episodes are already settled — the seeded
+// verdicts count as evidence exactly like live ones. Idempotent on
+// the rate_folded mark: restored snapshots re-fold only what arrived
+// unmarked (nothing), same normalize-on-restore pattern as the
+// digest refresh above.
+func (r *Runner) foldSeededRates(ctx context.Context, workdir, seedKey string) error {
+	dataDir := DataDirFor(workdir)
+	conn, err := db.Connect(ctx, dataDir)
+	if err != nil {
+		return fmt.Errorf("rate fold db: %w", err)
+	}
+	defer func() {
+		if err := db.Release(dataDir); err != nil {
+			slog.Warn("Failed to release rate fold db", "error", err)
+		}
+	}()
+	svc := cmdlog.NewService(db.New(conn), workdir, params.DefaultMemory(),
+		cmdlog.WithProjectKey(seedKey))
+	return svc.UpdateProjectRates(ctx, params.DefaultMemory().RateDecay)
+}
+
 // runScriptedSeed runs one seed session: a session row backdated to
 // the seed's clock, then each command through shell.RunAndCapture +
 // RecordRun under that clock.

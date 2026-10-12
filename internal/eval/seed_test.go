@@ -316,6 +316,57 @@ func TestExecuteRun_SeedSnapshotModelPinIsolation(t *testing.T) {
 		"same-pin/different-providers run restored the m1 snapshot")
 }
 
+// Scripted seeds carry settled referent episodes but never run a
+// turn, so the production fold (a turn late, on the detached slot)
+// can't see them — without the seed-time pass the snapshot's
+// project_rates stays empty and the referent gate abstains on a warm
+// state that earned its mass. Asserts the fold lands inside the run
+// db the snapshot preserves.
+func TestExecuteRun_SeedReferentRateFold(t *testing.T) {
+	t.Parallel()
+	requireSeedCheckTooling(t)
+	root := newEvalDir(t)
+	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "t1", map[string]any{
+		"seed_commands": []any{
+			map[string]any{
+				"ago_seconds": 60,
+				"commands":    []any{"true"},
+				"referents": []any{
+					map[string]any{"phrase": "tests", "target": "quota/quota_test.go"},
+					map[string]any{"phrase": "tests", "target": "quota/quota_test.go"},
+				},
+			},
+		},
+		"check_script_body": "#!/bin/bash\ntrue\n",
+	})
+	traj, err := LoadTrajectory(trajDir)
+	require.NoError(t, err)
+	exp := &Experiment{
+		Name: "e1", Model: "mock/m", Temperature: ptr(0.0),
+		Arms: map[string]Arm{ArmControl: {}},
+	}
+	workParent := t.TempDir()
+	r := &Runner{EvalDir: root, Driver: noDBDriver{}, WorkParent: workParent}
+	manifest := &FlagsManifest{Defaults: map[string]any{}}
+
+	rec, err := r.ExecuteRun(context.Background(), exp, traj, trajDir,
+		ArmControl, Arm{}, manifest, 1, "inv1")
+	require.NoError(t, err)
+	require.Equal(t, OutcomePass, rec.Outcome)
+
+	conn, err := db.ConnectReadOnly(context.Background(),
+		filepath.Join(root, rec.SessionDB))
+	require.NoError(t, err)
+	defer conn.Close()
+	var rateRows, foldedEps int
+	require.NoError(t, conn.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM project_rates WHERE signal = 'referent'`).Scan(&rateRows))
+	require.Equal(t, 1, rateRows, "seed-time fold wrote no project rate")
+	require.NoError(t, conn.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM referent_episodes WHERE rate_folded = 1`).Scan(&foldedEps))
+	require.Equal(t, 2, foldedEps, "episodes written but not folded")
+}
+
 // The corpus host for the LOO ladder: its scripted seeds must
 // materialize all three memory pools — resolved, open, command —
 // and the seed_check gate must see exactly that state.

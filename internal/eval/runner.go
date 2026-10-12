@@ -418,6 +418,15 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 			slog.Warn("Seeded digest refresh failed — digests will materialize lazily",
 				"traj", traj.ID, "error", err)
 		}
+		// The learned-rate fold: scripted seeds never run a turn, so
+		// without this pass the snapshot's project_rates stays empty
+		// and the referent gate vetoes a warm state whose episodes
+		// are settled. Normalizes restored snapshots the same way the
+		// digest refresh does — idempotent on the folded mark.
+		if err := r.foldSeededRates(ctx, workdir, seedKey); err != nil {
+			slog.Warn("Seeded rate fold failed — referent gate sees pre-fold state",
+				"traj", traj.ID, "error", err)
+		}
 		// Behavioral scoring for the seed phase (#244): sum each
 		// seed session's reconstructed call metrics so coverage can
 		// assert "the seed agent never looked" as a measured premise.
