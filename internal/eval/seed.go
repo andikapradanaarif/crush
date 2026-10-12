@@ -2,7 +2,9 @@ package eval
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -237,6 +239,19 @@ type seedSnapshotMeta struct {
 // materialized workdirs — same lifetime as the run's scratch space.
 func (r *Runner) snapshotDir(key string) string {
 	return filepath.Join(r.workParent(), ".snapshots", key)
+}
+
+// seedSnapKey keys a trajectory's seed snapshot by trajectory content
+// AND the seed-time model pin. The pin is baked into the snapshot's
+// .crushrc at materialization, and prior_sessions content is
+// model-generated — a snapshot seeded under one pin must never
+// restore under another, or the run's WriteSeedConfig errors on the
+// foreign pin (or worse: a same-named provider would silently replay
+// the wrong model's seed content). Model-less pins hash the empty
+// string so the suffix stays uniform.
+func seedSnapKey(trajID, contentHash string, exp *Experiment) string {
+	sum := sha256.Sum256([]byte(modelPinLine(exp)))
+	return fmt.Sprintf("%s-%s-%s", trajID, contentHash, hex.EncodeToString(sum[:])[:8])
 }
 
 // analyzeSeedMetrics reconstructs each seed session's call sequence

@@ -219,7 +219,7 @@ func TestExecuteRun_SeedSnapshotReplay(t *testing.T) {
 	require.Equal(t, OutcomePass, rec1.Outcome)
 	require.Equal(t, 2, rec1.WarmStart.Sessions)
 	require.Len(t, rec1.WarmStart.SessionIDs, 2)
-	require.DirExists(t, r.snapshotDir(traj.ID+"-"+rec1.Env.ContentHash))
+	require.DirExists(t, r.snapshotDir(seedSnapKey(traj.ID, rec1.Env.ContentHash, exp)))
 
 	rec2, err := r.ExecuteRun(context.Background(), exp, traj, trajDir,
 		ArmControl, Arm{}, manifest, 2, "inv1")
@@ -244,6 +244,57 @@ func TestExecuteRun_SeedSnapshotReplay(t *testing.T) {
 	require.NoError(t, conn.QueryRowContext(context.Background(),
 		`SELECT count(*) FROM failure_memory WHERE resolved_in = ''`).Scan(&openRows))
 	require.Equal(t, 1, openRows)
+}
+
+// Snapshot keys cover the seed-time model pin: a snapshot
+// materialized under one pin bakes the .crushrc's `model large`
+// line, so a second invocation under a different pin must re-seed
+// rather than restore — the foreign pin would trip WriteSeedConfig's
+// shadow guard, and agent-seeded content is model-specific anyway.
+func TestExecuteRun_SeedSnapshotModelPinIsolation(t *testing.T) {
+	t.Parallel()
+	requireSeedCheckTooling(t)
+	root := newEvalDir(t)
+	trajDir := writeTrajectory(t, filepath.Join(root, "corpus"), "t1", map[string]any{
+		"seed_commands": []any{
+			map[string]any{"ago_seconds": 60, "commands": []any{"touch from-seed"}},
+		},
+		"check_script_body": "#!/bin/bash\ntest -f from-seed\n",
+	})
+	traj, err := LoadTrajectory(trajDir)
+	require.NoError(t, err)
+	workParent := t.TempDir()
+	r := &Runner{EvalDir: root, Driver: noDBDriver{}, WorkParent: workParent}
+	manifest := &FlagsManifest{Defaults: map[string]any{}}
+
+	exp1 := &Experiment{Name: "e1", Model: "mock/m1", Temperature: ptr(0.0),
+		Arms: map[string]Arm{ArmControl: {}}}
+	rec1, err := r.ExecuteRun(context.Background(), exp1, traj, trajDir,
+		ArmControl, Arm{}, manifest, 1, "inv1")
+	require.NoError(t, err)
+	require.Equal(t, OutcomePass, rec1.Outcome)
+	require.DirExists(t, r.snapshotDir(seedSnapKey(traj.ID, rec1.Env.ContentHash, exp1)))
+
+	// Different model pin — same trajectory content. The old key
+	// would restore the m1 snapshot and WriteSeedConfig would fail
+	// on the foreign .crushrc; the keyed one re-seeds under m2.
+	exp2 := &Experiment{Name: "e1", Model: "mock/m2", Temperature: ptr(0.0),
+		Arms: map[string]Arm{ArmControl: {}}}
+	rec2, err := r.ExecuteRun(context.Background(), exp2, traj, trajDir,
+		ArmControl, Arm{}, manifest, 1, "inv2")
+	require.NoError(t, err)
+	require.Equal(t, OutcomePass, rec2.Outcome)
+	require.NotEqual(t, rec1.WarmStart.SessionIDs, rec2.WarmStart.SessionIDs,
+		"m2 run restored the m1 snapshot instead of re-seeding")
+	require.DirExists(t, r.snapshotDir(seedSnapKey(traj.ID, rec1.Env.ContentHash, exp2)))
+
+	// And the m1 snapshot still replays for m1 — isolation, not
+	// invalidation.
+	rec3, err := r.ExecuteRun(context.Background(), exp1, traj, trajDir,
+		ArmControl, Arm{}, manifest, 2, "inv1")
+	require.NoError(t, err)
+	require.Equal(t, OutcomePass, rec3.Outcome)
+	require.Equal(t, rec1.WarmStart.SessionIDs, rec3.WarmStart.SessionIDs)
 }
 
 // The corpus host for the LOO ladder: its scripted seeds must

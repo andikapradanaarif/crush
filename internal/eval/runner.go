@@ -315,7 +315,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	// edit produces a different snapshot. Restore lands before the
 	// config writes — the snapshot's .crush.json carries a stale
 	// data_directory that only WriteSeedConfig rewrites.
-	snapKey := traj.ID + "-" + contentHash
+	snapKey := seedSnapKey(traj.ID, contentHash, exp)
 	restored := seeded && r.restoreSnapshot(snapKey, workdir, warm)
 	if restored {
 		rec.WarmStart = warm

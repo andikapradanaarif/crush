@@ -111,7 +111,7 @@ func (r *Runner) recordReplayPrefix(ctx context.Context, exp *Experiment, traj *
 	// same neutral seed config, same gate. The prefix's warm state
 	// is what every fork diverges from.
 	contentHash := strings.TrimPrefix(seedKey, "eval-")
-	snapKey := traj.ID + "-" + contentHash
+	snapKey := seedSnapKey(traj.ID, contentHash, exp)
 	seeded := len(traj.PriorSessions) > 0 || len(traj.SeedCommands) > 0
 	warm := &WarmStart{}
 	restored := seeded && r.restoreSnapshot(snapKey, workdir, warm)
