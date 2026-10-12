@@ -242,15 +242,20 @@ func (r *Runner) snapshotDir(key string) string {
 }
 
 // seedSnapKey keys a trajectory's seed snapshot by trajectory content
-// AND the seed-time model pin. The pin is baked into the snapshot's
-// .crushrc at materialization, and prior_sessions content is
-// model-generated — a snapshot seeded under one pin must never
-// restore under another, or the run's WriteSeedConfig errors on the
-// foreign pin (or worse: a same-named provider would silently replay
-// the wrong model's seed content). Model-less pins hash the empty
-// string so the suffix stays uniform.
+// AND the seed-time model identity: the .crushrc model pin plus the
+// providers block — both are baked into seed config at
+// materialization, and prior_sessions content is generated through
+// them. A snapshot seeded under one declaration must never restore
+// under another, or the run's WriteSeedConfig errors on the foreign
+// pin (or worse: a same-named provider would silently replay the
+// wrong model's seed content). Marshal sorts map keys so equal
+// declarations hash equal; api_key values are env refs, never
+// secrets. The harness build itself is deliberately NOT keyed —
+// every commit would nuke the cache; the seed_script gate and
+// poison-drop are the integrity bounds there.
 func seedSnapKey(trajID, contentHash string, exp *Experiment) string {
-	sum := sha256.Sum256([]byte(modelPinLine(exp)))
+	providers, _ := json.Marshal(exp.Providers)
+	sum := sha256.Sum256(append([]byte(modelPinLine(exp)+"\x00"), providers...))
 	return fmt.Sprintf("%s-%s-%s", trajID, contentHash, hex.EncodeToString(sum[:])[:8])
 }
 

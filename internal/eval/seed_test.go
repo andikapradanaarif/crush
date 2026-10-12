@@ -299,6 +299,21 @@ func TestExecuteRun_SeedSnapshotModelPinIsolation(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, OutcomePass, rec3.Outcome)
 	require.Equal(t, rec1.WarmStart.SessionIDs, rec3.WarmStart.SessionIDs)
+
+	// Same pin, different providers block — the providers ride the
+	// seed .crush.json just like the pin rides .crushrc, so a
+	// same-model endpoint swap must re-seed too.
+	exp4 := &Experiment{
+		Name: "e1", Model: "mock/m1", Temperature: ptr(0.0),
+		Arms:      map[string]Arm{ArmControl: {}},
+		Providers: map[string]any{"mock": map[string]any{"base_url": "http://other"}},
+	}
+	rec4, err := r.ExecuteRun(context.Background(), exp4, traj, trajDir,
+		ArmControl, Arm{}, manifest, 1, "inv3")
+	require.NoError(t, err)
+	require.Equal(t, OutcomePass, rec4.Outcome)
+	require.NotEqual(t, rec1.WarmStart.SessionIDs, rec4.WarmStart.SessionIDs,
+		"same-pin/different-providers run restored the m1 snapshot")
 }
 
 // The corpus host for the LOO ladder: its scripted seeds must
