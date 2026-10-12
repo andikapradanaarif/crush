@@ -95,8 +95,11 @@ func (c *eventCollector) reset() {
 func TestUpdate_DebouncesTextDeltas(t *testing.T) {
 	t.Parallel()
 
-	// Long-enough debounce that we can verify nothing flushes prematurely.
-	svc, sessionID := newTestService(t, WithDebounce(50*time.Millisecond))
+	// Long-enough debounce that we can verify nothing flushes
+	// prematurely. The timer starts on the first Update and never
+	// resets, so the margin has to cover the whole loop below — on a
+	// loaded runner under -race those updates can take well over 50ms.
+	svc, sessionID := newTestService(t, WithDebounce(500*time.Millisecond))
 
 	subCtx, cancelSub := context.WithCancel(t.Context())
 	defer cancelSub()
@@ -118,13 +121,13 @@ func TestUpdate_DebouncesTextDeltas(t *testing.T) {
 	}
 
 	// Before the debounce expires no UpdatedEvent should have landed.
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(30 * time.Millisecond)
 	require.Empty(t, collector.snapshot(), "no events should land before debounce window expires")
 
 	// Wait for the debounce timer to fire.
 	require.Eventually(t, func() bool {
 		return len(collector.snapshot()) >= 1
-	}, time.Second, 5*time.Millisecond)
+	}, 3*time.Second, 10*time.Millisecond)
 	events := collector.snapshot()
 	require.Len(t, events, 1, "5 deltas should coalesce into 1 UpdatedEvent")
 	require.Equal(t, pubsub.UpdatedEvent, events[0].Type)
