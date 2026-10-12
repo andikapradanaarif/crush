@@ -533,13 +533,13 @@ fixture let any competent model jump straight to the fix, so the
 only signal left is efficiency. The `expdisc-*` cells aim below that
 ceiling — a control arm that must *earn* its pass rate is where a
 capability claim (memory changes the outcome, not just the cost)
-becomes measurable. `expdisc-shop` is the shared base: an
-~18-package Go shop generated deterministically by `genfixture.py`,
-green end-to-end, with plausible decoy packages (tax, discount,
-currency) around the guilty ones. Every corpus dir must be a
-trajectory, so `expdisc-shop` itself is a pass-start sanity cell
-that keeps the fixture honest — the defect can only come from an
-overlay.
+becomes measurable. `expdisc-shop` is the shared base: a Go shop of
+19 `internal/` packages plus `cmd/shop`, generated deterministically
+by `genfixture.py`, green end-to-end, with plausible decoy packages
+(tax, discount, currency) around the guilty ones. Every corpus dir
+must be a trajectory, so `expdisc-shop` itself is a pass-start
+sanity cell that keeps the fixture honest — the defect can only
+come from an overlay.
 
 Two defect families ride that fixture. Each lives as a patch overlay
 under `.defects/{ft,bb}` inside the fixture; `start_state.setup`
@@ -554,16 +554,40 @@ defective but the answer never ships in the workdir:
   (`Generate` gained no ctx param while a call site passes one).
   `go build ./...` stays green: the defect lives only on the
   test-compile surface, the discovery path `go build` can't reveal.
+  The prompt's "the build is broken" is deliberate tension with a
+  green `go build` — a model that verifies build-green and stops
+  scores fail on arguably-correct behavior. That pedantry-vs-suite
+  disagreement is the capability signal, not a check bug.
 
 The `ambig-none` cells seed nothing — they are the cold baseline and
 where the 40–70% control band is measured. `ambig-correct` warms
 `prior_sessions` with a truthful discovery (which test fails, where
 the symbol lives); `ambig-decoy` warms a wrong-suspect session (tax
 touched, confirmed green) so retrieval has a plausible lie to serve.
-Checks are SHA-256-guarded: `check-ft` requires the orders suite and
-full suite green *and* the orders files byte-identical to the
-shipped state, so "fixing" the test or the innocent caller scores
-fail; `check-bb` likewise pins the innocent `reports.go`.
+There is no `bb-ambig-decoy`: "tax touched" is not a plausible lie
+for a compile break in `internal/reports`, so the decoy arm is ft-
+only — the arm matrix is asymmetric by design, not by omission. The
+`-none` cells stay characterization-only (no warm state for the
+treatment to differ on), and the `expdisc-memory` experiment runs 3
+of the 6 cells.
+
+Checks are SHA-256-guarded and hardened against degenerate fixes.
+`check-ft` requires the orders suite and full suite green *and* the
+orders files and `catalog.go` byte-identical to the shipped state —
+"fixing" the test, the innocent caller, or inflating a SKU price
+until the wrong math lands right all score fail. `check-bb` pins
+the innocent `reports.go` and requires `report_test.go` to differ
+from its broken baseline while still carrying a `TestGenerate` that
+calls `Generate` and asserts — and a `-run` probe must see that test
+execute, so gutting the body or excluding it with a build tag fails
+instead of passing vacuously. Both scripts clear `GOFLAGS` and pin
+`-count=1`: a `go env -w` write by the agent persists under the
+shared pinned HOME and would otherwise turn every `go test` into
+"ok [no tests to run]". Warm cells also carry a `seed_script` gate
+asserting the exact defect still stands after seeding — a seed
+session that fixes the target makes the measured run trivially
+pass, and replayed byte-identically it would contaminate every run
+deterministically.
 
 The band is a per-model property, not a fixture property — a model
 that solves `*-none` cold at 5/5 leaves no capability headroom

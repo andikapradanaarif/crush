@@ -18,6 +18,7 @@
 	"check": {
 		"script": "../expdisc-shop/check-ft.sh",
 		"expect_start_state": "fail",
+		"seed_script": "../expdisc-shop/seed-ft.sh",
 		"timeout_seconds": 300
 	},
 	"coverage": {"min_steps": 1, "min_warm_start.sessions": 1},
