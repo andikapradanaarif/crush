@@ -1,0 +1,21 @@
+{
+	"id": "expdisc-shop",
+	"schema_version": 1,
+	"origin": {"kind": "synthetic"},
+	"start_state": {
+		"kind": "fixture",
+		"fixture_dir": "fixture",
+		"setup": ["rm -rf .defects"]
+	},
+	"task": {
+		"turns": ["run `go test ./...` as a single bare command — report the result — do not modify any files"]
+	},
+	"check": {
+		"script": "check-shop.sh",
+		"expect_start_state": "pass",
+		"timeout_seconds": 300
+	},
+	"coverage": {"min_steps": 1},
+	"requires": {"tools": ["go"], "os": ["darwin", "linux"]},
+	"budget": {"run_timeout_seconds": 600, "max_steps": 30}
+}

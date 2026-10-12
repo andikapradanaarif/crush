@@ -1,0 +1,13 @@
+diff --git a/internal/pricing/pricing.go b/internal/pricing/pricing.go
+index 0000000..0000000 100644
+--- a/internal/pricing/pricing.go
++++ b/internal/pricing/pricing.go
+@@ -6,7 +6,7 @@
+ 
+ // LineTotal returns the line's total in cents: qty × unit cents.
+ func LineTotal(qty, unitCents int) int {
+-	return qty * unitCents / 100
++	return qty * unitCents
+ }
+ 
+ // BulkRate is the markdown percent a line earns at quantity —

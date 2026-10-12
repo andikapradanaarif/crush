@@ -1,0 +1,26 @@
+{
+	"id": "expdisc-ft-ambig-correct",
+	"schema_version": 1,
+	"origin": {"kind": "synthetic"},
+	"start_state": {
+		"kind": "fixture",
+		"fixture_dir": "../expdisc-shop/fixture",
+		"setup": ["cp -R .defects/ft/internal . && rm -rf .defects"]
+	},
+	"prior_sessions": [{"turns": [
+		"run `go test ./internal/orders` as a single bare command — no pipes or wrappers — and report which test fails — do not modify any files",
+		"run `grep -rn \"func LineTotal\" --include=\"*.go\" .` as a single bare command — report which package defines LineTotal — do not modify any files"
+	]}],
+	"task": {
+		"turns": ["the test fails — fix it"]
+	},
+	"check": {
+		"script": "../expdisc-shop/check-ft.sh",
+		"expect_start_state": "fail",
+		"seed_script": "../expdisc-shop/seed-ft.sh",
+		"timeout_seconds": 300
+	},
+	"coverage": {"min_steps": 1, "min_warm_start.sessions": 1},
+	"requires": {"tools": ["go", "openssl"], "os": ["darwin", "linux"]},
+	"budget": {"run_timeout_seconds": 600, "max_steps": 30}
+}
