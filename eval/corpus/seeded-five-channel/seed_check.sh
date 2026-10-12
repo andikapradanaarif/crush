@@ -4,8 +4,9 @@
 # resolved failure, the command rows, a promoted referent mapping
 # (two clean accepted "tests" episodes), enough accepted referent
 # mass for the learned rate gate's lower bound to clear its floor
-# (six episodes across the four sessions — the posterior quantile
-# needs ~4.5 effective), digest file hints, and materialized session
+# (six accepted episodes across the four sessions — only accepted
+# verdicts fold to alpha, so the count filters the verdict column),
+# digest file hints, and materialized session
 # digests. A seed that diverged starves a channel and the measured
 # run would answer a different question than the cell poses.
 cd "$EVAL_WORKDIR"
@@ -14,7 +15,7 @@ open_rows=$(sqlite3 "$db" "SELECT COUNT(*) FROM failure_memory WHERE resolved_in
 resolved_rows=$(sqlite3 "$db" "SELECT COUNT(*) FROM failure_memory WHERE resolved_in != '';")
 cmd_rows=$(sqlite3 "$db" "SELECT COUNT(*) FROM command_memory;")
 referent_rows=$(sqlite3 "$db" "SELECT COUNT(*) FROM referent_memory;")
-referent_eps=$(sqlite3 "$db" "SELECT COUNT(*) FROM referent_episodes;")
+referent_eps=$(sqlite3 "$db" "SELECT COUNT(*) FROM referent_episodes WHERE verdict = 'accepted';")
 rate_rows=$(sqlite3 "$db" "SELECT COUNT(*) FROM project_rates WHERE signal = 'referent';")
 read_files=$(sqlite3 "$db" "SELECT COUNT(*) FROM read_files;")
 digest_rows=$(sqlite3 "$db" "SELECT COUNT(*) FROM session_digests;")

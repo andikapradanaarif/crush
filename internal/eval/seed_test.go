@@ -367,6 +367,61 @@ func TestExecuteRun_SeedReferentRateFold(t *testing.T) {
 	require.Equal(t, 2, foldedEps, "episodes written but not folded")
 }
 
+// The real seeded-five-channel cell is the LOO ladder's only
+// corpus host — its seed_check.sh asserts derived learned state
+// (project_rates after the seed-time fold, the promoted mapping,
+// digest materialization), not just raw seed rows. Runs the real
+// trajectory end-to-end so a corpus edit that starves a channel —
+// or a seed-pipeline change that stops producing the state the gate
+// names — fails here instead of surfacing as inconclusive powered
+// runs. The mock driver's measured turn fails the cell's defect
+// check as designed; the assertions read the gate's EVAL_JSON off
+// the record, which is written before the measured run.
+func TestCorpus_SeedGateClean(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("runs the real fixture's go toolchain")
+	}
+	requireSeedCheckTooling(t, "sqlite3", "go")
+	evalDir, err := filepath.Abs(filepath.Join("..", "..", "eval"))
+	require.NoError(t, err)
+	trajDir := filepath.Join(evalDir, "corpus", "seeded-five-channel")
+	traj, err := LoadTrajectory(trajDir)
+	require.NoError(t, err)
+	exp := &Experiment{
+		Name: "corpus-gate", Model: "mock/m", Temperature: ptr(0.0),
+		Arms: map[string]Arm{ArmControl: {}},
+	}
+	root := newEvalDir(t)
+	r := &Runner{EvalDir: root, Driver: noDBDriver{}, WorkParent: t.TempDir()}
+	manifest := &FlagsManifest{Defaults: map[string]any{}}
+
+	rec, err := r.ExecuteRun(context.Background(), exp, traj, trajDir,
+		ArmControl, Arm{}, manifest, 1, "inv1")
+	require.NoError(t, err)
+	require.NotContains(t, rec.CheckDetail, "seed_check",
+		"corpus seed gate rejected the seeded state: %v", rec.CheckDetail)
+	require.NotNil(t, rec.SeedState, "seed gate emitted no EVAL_JSON")
+
+	want := map[string]float64{
+		"open_rows":     1,
+		"resolved_rows": 1,
+		"referent_rows": 1,
+		"referent_eps":  6,
+		"read_files":    4,
+		"digest_rows":   4,
+		"seed_sessions": 4,
+	}
+	for key, w := range want {
+		got, _ := rec.SeedState[key].(float64)
+		require.Equal(t, w, got, "seed gate %s", key)
+	}
+	for _, key := range []string{"cmd_rows", "rate_rows"} {
+		got, _ := rec.SeedState[key].(float64)
+		require.GreaterOrEqual(t, got, float64(1), "seed gate %s", key)
+	}
+}
+
 // The corpus host for the LOO ladder: its scripted seeds must
 // materialize all three memory pools — resolved, open, command —
 // and the seed_check gate must see exactly that state.

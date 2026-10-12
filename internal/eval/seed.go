@@ -103,15 +103,22 @@ func (r *Runner) materializeSeededDigests(ctx context.Context, workdir, seedKey 
 	return svc.RefreshSessionDigests(ctx, bound)
 }
 
-// foldSeededRates runs one UpdateProjectRates pass over the seeded
+// foldSeededRates drains UpdateProjectRates passes over the seeded
 // db. The production fold lands a turn late on the detached slot and
 // scripted seeds never run a turn, so without an explicit pass the
 // snapshot's project_rates stays empty and the referent gate vetoes
 // a warm state whose episodes are already settled — the seeded
 // verdicts count as evidence exactly like live ones. Idempotent on
-// the rate_folded mark: restored snapshots re-fold only what arrived
-// unmarked (nothing), same normalize-on-restore pattern as the
-// digest refresh above.
+// the rate_folded mark: a pre-fold snapshot re-seeding under a new
+// key folds its unmarked rows deterministically on first restore,
+// same normalize-on-restore pattern as the digest refresh above.
+//
+// Seed-time derived state is built under params.DefaultMemory():
+// arms may overlay memory_params (rate_decay, referent_promote_hits)
+// at measure time, but the seeded episodes, fold, and promoted set
+// are default-param artifacts — a history the arm's params could
+// differ on. No arm ablates those keys today; if one does, the seed
+// pipeline needs the arm's overlay threaded through here.
 func (r *Runner) foldSeededRates(ctx context.Context, workdir, seedKey string) error {
 	dataDir := DataDirFor(workdir)
 	conn, err := db.Connect(ctx, dataDir)
@@ -123,9 +130,30 @@ func (r *Runner) foldSeededRates(ctx context.Context, workdir, seedKey string) e
 			slog.Warn("Failed to release rate fold db", "error", err)
 		}
 	}()
-	svc := cmdlog.NewService(db.New(conn), workdir, params.DefaultMemory(),
+	q := db.New(conn)
+	svc := cmdlog.NewService(q, workdir, params.DefaultMemory(),
 		cmdlog.WithProjectKey(seedKey))
-	return svc.UpdateProjectRates(ctx, params.DefaultMemory().RateDecay)
+	gamma := params.DefaultMemory().RateDecay
+	// UpdateProjectRates folds at most one rateEventBatch per call;
+	// live history drains across turns, so the seed pass loops to the
+	// same steady state. Each pass marks its batch rate_folded —
+	// termination is guaranteed unless the mark stops landing.
+	for i := 0; i < 64; i++ {
+		events, err := q.ListReferentRateEvents(ctx, db.ListReferentRateEventsParams{
+			ProjectKey: seedKey,
+			Limit:      1,
+		})
+		if err != nil {
+			return fmt.Errorf("rate fold events: %w", err)
+		}
+		if len(events) == 0 {
+			return nil
+		}
+		if err := svc.UpdateProjectRates(ctx, gamma); err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("rate fold did not drain after 64 passes")
 }
 
 // runScriptedSeed runs one seed session: a session row backdated to
