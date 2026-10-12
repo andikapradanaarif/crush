@@ -227,13 +227,7 @@ func writeRunConfig(workdir string, exp *Experiment, armOptions map[string]any, 
 	// .crushrc: model pin identical for every arm — options-only
 	// constrains what may *differ* between arms, not what may be set.
 	var rc strings.Builder
-	if exp.Model != "" {
-		fmt.Fprintf(&rc, "model large %s", exp.Model)
-		if exp.Temperature != nil {
-			fmt.Fprintf(&rc, " --temperature %v", *exp.Temperature)
-		}
-		rc.WriteString("\n")
-	}
+	rc.WriteString(modelPinLine(exp))
 	// A .crushrc is still a shell-config shadow — but the seed/arm
 	// writes are two passes of this same function, so an existing file
 	// carrying the identical pin is our own earlier write, not a
@@ -351,6 +345,21 @@ func writeRunConfig(workdir string, exp *Experiment, armOptions map[string]any, 
 		return fmt.Errorf("write .crush.json: %w", err)
 	}
 	return nil
+}
+
+// modelPinLine renders the .crushrc model pin — the file's entire
+// content. Seed snapshots key on this string: a snapshot materialized
+// under one pin bakes it in, and prior_sessions are model-generated
+// content, so a different pin must never share the snapshot.
+func modelPinLine(exp *Experiment) string {
+	if exp.Model == "" {
+		return ""
+	}
+	pin := fmt.Sprintf("model large %s", exp.Model)
+	if exp.Temperature != nil {
+		pin += fmt.Sprintf(" --temperature %v", *exp.Temperature)
+	}
+	return pin + "\n"
 }
 
 // rejectFixtureProviderKeys enforces the ownership invariant the eval
