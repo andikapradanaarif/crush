@@ -267,8 +267,10 @@ func TestExecuteRun_SeedSnapshotModelPinIsolation(t *testing.T) {
 	r := &Runner{EvalDir: root, Driver: noDBDriver{}, WorkParent: workParent}
 	manifest := &FlagsManifest{Defaults: map[string]any{}}
 
-	exp1 := &Experiment{Name: "e1", Model: "mock/m1", Temperature: ptr(0.0),
-		Arms: map[string]Arm{ArmControl: {}}}
+	exp1 := &Experiment{
+		Name: "e1", Model: "mock/m1", Temperature: ptr(0.0),
+		Arms: map[string]Arm{ArmControl: {}},
+	}
 	rec1, err := r.ExecuteRun(context.Background(), exp1, traj, trajDir,
 		ArmControl, Arm{}, manifest, 1, "inv1")
 	require.NoError(t, err)
@@ -278,8 +280,10 @@ func TestExecuteRun_SeedSnapshotModelPinIsolation(t *testing.T) {
 	// Different model pin — same trajectory content. The old key
 	// would restore the m1 snapshot and WriteSeedConfig would fail
 	// on the foreign .crushrc; the keyed one re-seeds under m2.
-	exp2 := &Experiment{Name: "e1", Model: "mock/m2", Temperature: ptr(0.0),
-		Arms: map[string]Arm{ArmControl: {}}}
+	exp2 := &Experiment{
+		Name: "e1", Model: "mock/m2", Temperature: ptr(0.0),
+		Arms: map[string]Arm{ArmControl: {}},
+	}
 	rec2, err := r.ExecuteRun(context.Background(), exp2, traj, trajDir,
 		ArmControl, Arm{}, manifest, 1, "inv2")
 	require.NoError(t, err)
