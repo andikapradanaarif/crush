@@ -87,6 +87,13 @@ const (
 	failReferentNone = "referent_none" // ambiguous prompt has no failure-shaped referent
 	failKindMismatch = "kind_mismatch" // referent kind (test/build/lint) ≠ command kind
 	failNarrowScope  = "narrow_scope"  // subpath-bound candidate under an ambiguous prompt
+	// admitUniqueScope is an admission, not a rejection: under an
+	// ambiguous prompt a kind-bound subpath row is the "the X"
+	// referent by elimination when it is the ONLY open failure of
+	// its kind in the ledger — uniqueness resolves what scope alone
+	// could not (#321). A distinct reason keeps the rescue
+	// measurable in decision telemetry.
+	admitUniqueScope = "admit_unique_scope"
 	failPathGone     = "path_gone"     // every implicated path is absent from the workdir
 	failStaleSuspect = "stale_suspect" // an implicated path changed after last_seen
 	// failNonUserPrompt marks candidates rejected because the prompt
@@ -1506,6 +1513,32 @@ func selectMemory(prompt string, pools memoryPools, workDir string,
 	identSites := promptIdentSites(prompt)
 	lone := loneIdentPrompt(prompt)
 
+	// Uniqueness pre-pass for the narrow_scope rescue (#321): under
+	// an ambiguous prompt, an open failure whose kind the referent
+	// bound is the "the X" referent by elimination when it is the
+	// ONLY open row of its kind — a lone package-scoped failure is
+	// evidence, while several narrow rows keep the referent genuinely
+	// underdetermined and stay silent. Open pool only: a passing
+	// narrow command is a scope suggestion, not disambiguating
+	// evidence, so command rows never qualify.
+	uniqueOpenByKind := map[string]bool{}
+	if !explicit && len(kinds) > 0 {
+		bound := map[string]int{}
+		for _, c := range candidates {
+			if c.pool != poolOpen {
+				continue
+			}
+			k := toolclass.CommandKind(c.f.Cmd)
+			if !slices.Contains(kinds, k) {
+				continue
+			}
+			bound[k]++
+		}
+		for k, n := range bound {
+			uniqueOpenByKind[k] = n == 1
+		}
+	}
+
 	decisions := make([]FailureDecision, 0, len(candidates))
 	for _, cand := range candidates {
 		f := cand.f
@@ -1526,6 +1559,7 @@ func selectMemory(prompt string, pools memoryPools, workDir string,
 		reason := failAdmit
 		dirs := failureDirs(f, workDir)
 		kind := toolclass.CommandKind(f.Cmd)
+		topLevel := failureTopLevel(f, workDir)
 		ids := cand.ids
 		if ids == nil {
 			ids = headlineIdentifiers(f)
@@ -1594,11 +1628,14 @@ func selectMemory(prompt string, pools memoryPools, workDir string,
 			}
 		case !explicit && !slices.Contains(kinds, kind):
 			reason = failKindMismatch
-		case !explicit && kind != "run" && !failureTopLevel(f, workDir):
+		case !explicit && kind != "run" && !topLevel &&
+			!(cand.pool == poolOpen && uniqueOpenByKind[kind]):
 			// A run row's subdir target names the binary's package,
 			// not the failure's scope — the panic can live anywhere
 			// in its call graph — so narrow_scope is a verification-
-			// kind rule only.
+			// kind rule only. Uniqueness rescues it: a lone kind-bound
+			// open failure is the referent by elimination (#321); the
+			// remaining checks (path_gone, stale_suspect) still apply.
 			reason = failNarrowScope
 		case allPathsGone(f, workDir):
 			reason = failPathGone
@@ -1608,6 +1645,14 @@ func selectMemory(prompt string, pools memoryPools, workDir string,
 			d.SettledBy = settledState
 		}
 		d.Admit = reason == failAdmit
+		if d.Admit && cand.pool == poolOpen && !explicit && mention != mentionPositive &&
+			kind != "run" && !topLevel && uniqueOpenByKind[kind] {
+			// This row only admitted because uniqueness rescued the
+			// narrow gate — mark the rescue so decision telemetry can
+			// count it apart from a scope-clean admit. Mention-bound
+			// rows keep their identifier-layer admission reason.
+			reason = admitUniqueScope
+		}
 		limit := openLimit
 		switch cand.pool {
 		case poolResolved:
