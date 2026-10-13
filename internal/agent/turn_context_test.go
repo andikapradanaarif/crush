@@ -800,6 +800,14 @@ const reconcileRetryPrompt = reconcileRetryPrefix +
 // seeded decoy failure whose headline names TestValue.
 func newTailAgent(t *testing.T) (*sessionAgent, string) {
 	t.Helper()
+	a, _, sessionID := newTailAgentEnv(t)
+	return a, sessionID
+}
+
+// newTailAgentEnv is newTailAgent with the fake environment kept —
+// staleness tests resolve the seeded row mid-scenario.
+func newTailAgentEnv(t *testing.T) (*sessionAgent, fakeEnv, string) {
+	t.Helper()
 	a, env, sessionID := newTurnCtxAgent(t, &config.Config{})
 	a.tailAudit = csync.NewMap[string, TailAudit]()
 	a.turnSels = csync.NewMap[string, turnSelection]()
@@ -812,7 +820,7 @@ func newTailAgent(t *testing.T) (*sessionAgent, string) {
 	failures := listOpenFailures(t, env)
 	require.Len(t, failures, 1)
 	require.Contains(t, failures[0].Headline, "TestValue")
-	return a, sessionID
+	return a, env, sessionID
 }
 
 func admittedSigs(decisions []FailureDecision) []string {
@@ -894,6 +902,76 @@ func TestTurnTailMessages_SelectionOncePerUserTurn(t *testing.T) {
 		for _, d := range audit.Decisions {
 			require.NotEqual(t, settledIdentifier, d.SettledBy)
 		}
+	})
+}
+
+// The tail's "have not passed since" claim is only true at render —
+// a mid-turn resolution must drop the row at the next step or the
+// model loops re-running the recorded command to clear it (#325).
+func TestRefreshOpenFailuresTail(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a mid-turn resolution drops the section", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newTailAgentEnv(t)
+		call := SessionAgentCall{
+			SessionID: sessionID, Prompt: "fix TestValue", RunStamp: 1,
+		}
+		tail := a.turnTailMessages(t.Context(), call, nil)
+		require.Len(t, tail, 1)
+		require.Contains(t, tail[0].Content[0].(fantasy.TextPart).Text, "<open_failures>")
+
+		// The fix lands: the recorded command passes and its row
+		// resolves while the turn is still stepping.
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: sessionID, Command: "go test ./decoy",
+			CWD: env.workingDir, Stdout: "ok", ExitCode: 0, Ran: true,
+		})
+
+		for _, m := range a.refreshOpenFailuresTail(t.Context(), call, tail) {
+			require.NotContains(t, m.Content[0].(fantasy.TextPart).Text, "open_failures")
+		}
+	})
+
+	t.Run("still-open rows keep the byte-stable tail", func(t *testing.T) {
+		t.Parallel()
+		a, _, sessionID := newTailAgentEnv(t)
+		call := SessionAgentCall{
+			SessionID: sessionID, Prompt: "fix TestValue", RunStamp: 1,
+		}
+		tail := a.turnTailMessages(t.Context(), call, nil)
+		require.Len(t, tail, 1)
+		require.Equal(t, tail, a.refreshOpenFailuresTail(t.Context(), call, tail))
+	})
+
+	t.Run("partial resolution re-renders the survivor", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newTailAgentEnv(t)
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: "prior", Command: "go build .",
+			CWD: env.workingDir, Stdout: "boom", ExitCode: 1, Ran: true,
+		})
+		opens := listOpenFailures(t, env)
+		require.Len(t, opens, 2)
+		sections := []string{a.renderOpenFailuresSection(opens)}
+		a.turnSels.Set(sessionID, turnSelection{
+			stamp:    1,
+			selected: memoryPools{open: opens},
+			sections: sections,
+		})
+		tail := []fantasy.Message{fantasy.NewUserMessage(strings.Join(sections, "\n\n"))}
+		call := SessionAgentCall{SessionID: sessionID, RunStamp: 1}
+
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: sessionID, Command: "go test ./decoy",
+			CWD: env.workingDir, Stdout: "ok", ExitCode: 0, Ran: true,
+		})
+
+		refreshed := a.refreshOpenFailuresTail(t.Context(), call, tail)
+		require.Len(t, refreshed, 1)
+		text := refreshed[0].Content[0].(fantasy.TextPart).Text
+		require.Contains(t, text, "go build .")
+		require.NotContains(t, text, "go test ./decoy")
 	})
 }
 
