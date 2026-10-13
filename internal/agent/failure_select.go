@@ -1629,7 +1629,7 @@ func selectMemory(prompt string, pools memoryPools, workDir string,
 		case !explicit && !slices.Contains(kinds, kind):
 			reason = failKindMismatch
 		case !explicit && kind != "run" && !topLevel &&
-			!(cand.pool == poolOpen && uniqueOpenByKind[kind]):
+			(cand.pool != poolOpen || !uniqueOpenByKind[kind]):
 			// A run row's subdir target names the binary's package,
 			// not the failure's scope — the panic can live anywhere
 			// in its call graph — so narrow_scope is a verification-
