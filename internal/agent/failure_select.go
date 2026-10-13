@@ -195,39 +195,52 @@ type selRoute struct {
 // referent-kind-mismatch — sharing the closed reason vocabulary
 // while Route distinguishes the check that fired.
 var failureRoutes = []selRoute{
-	{id: "shadowed", settled: settledState,
+	{
+		id: "shadowed", settled: settledState,
 		// The shadow precedes every other check: the open twin's own
 		// decision carries the real verdict on this command, and this
 		// row's verdict is "subsumed", not rejected on the merits.
 		eval: func(c *selCtx) (string, bool) {
 			return failShadowed, c.cand.shadowed
-		}},
-	{id: "negated-scope", settled: settledLexicon,
+		},
+	},
+	{
+		id: "negated-scope", settled: settledLexicon,
 		eval: func(c *selCtx) (string, bool) {
 			return failNegatedScope, negatedByAny(c.dirs, c.f.Files, c.neg, c.pos)
-		}},
-	{id: "ident-veto", settled: settledIdentifier,
+		},
+	},
+	{
+		id: "ident-veto", settled: settledIdentifier,
 		// A named identifier inside a negated span vetoes its own
 		// row — path-veto parity at the mention layer.
 		eval: func(c *selCtx) (string, bool) {
 			return failNegatedScope, c.mention == mentionVeto
-		}},
-	{id: "ident-kind-gate", settled: settledIdentifier,
+		},
+	},
+	{
+		id: "ident-kind-gate", settled: settledIdentifier,
 		// A named identifier binds a row the way explicit scope does
 		// — and still requires a verdict-flavored row: a failed ls
 		// whose headline happens to carry the token must not inject.
 		eval: func(c *selCtx) (string, bool) {
 			return failKindMismatch, c.mention == mentionPositive && !slices.Contains(verificationKinds, c.kind)
-		}},
-	{id: "ident-path-gone", settled: settledState,
+		},
+	},
+	{
+		id: "ident-path-gone", settled: settledState,
 		eval: func(c *selCtx) (string, bool) {
 			return failPathGone, c.mention == mentionPositive && allPathsGone(c.f, c.workDir)
-		}},
-	{id: "ident-stale", settled: settledState,
+		},
+	},
+	{
+		id: "ident-stale", settled: settledState,
 		eval: func(c *selCtx) (string, bool) {
 			return failStaleSuspect, c.mention == mentionPositive && anyPathNewer(c.f, c.workDir)
-		}},
-	{id: "ident-admit", settled: settledIdentifier,
+		},
+	},
+	{
+		id: "ident-admit", settled: settledIdentifier,
 		// A positively-mentioned identifier binds regardless of dir
 		// scope or top-levelness — the mention IS the scope. Polarity
 		// was resolved language-neutrally (cue, verb, or lone), so
@@ -235,40 +248,54 @@ var failureRoutes = []selRoute{
 		// English signal is genuinely present.
 		eval: func(c *selCtx) (string, bool) {
 			return failAdmit, c.mention == mentionPositive
-		}},
-	{id: "explicit-out-of-scope", settled: settledLexicon,
+		},
+	},
+	{
+		id: "explicit-out-of-scope", settled: settledLexicon,
 		eval: func(c *selCtx) (string, bool) {
 			return failOutOfScope, c.explicit && !overlapsAny(c.dirs, c.pos)
-		}},
-	{id: "explicit-kind-gate", settled: settledLexicon,
+		},
+	},
+	{
+		id: "explicit-kind-gate", settled: settledLexicon,
 		// Explicit scope still requires a verdict-flavored row — a
 		// failed ls/git/curl at root must not inject into an
 		// unrelated "fix main.go".
 		eval: func(c *selCtx) (string, bool) {
 			return failKindMismatch, c.explicit && !slices.Contains(verificationKinds, c.kind)
-		}},
-	{id: "lang-unsupported", settled: settledLexicon,
+		},
+	},
+	{
+		id: "lang-unsupported", settled: settledLexicon,
 		// The lexicon could not parse the prompt — a measured
 		// coverage hole, not a clean referent absence.
 		eval: func(c *selCtx) (string, bool) {
 			return failLangUnsupported, !c.explicit && c.kinds == nil && nonASCIILetter(c.prompt)
-		}},
-	{id: "mention-unknown", settled: settledIdentifier,
+		},
+	},
+	{
+		id: "mention-unknown", settled: settledIdentifier,
 		// An identifier was named but its polarity parsed neither
 		// way. Nothing else bound, so the record marks the
 		// unresolvable mention rather than a bare referent absence.
 		eval: func(c *selCtx) (string, bool) {
 			return failMentionUnknown, !c.explicit && c.kinds == nil && c.mention == mentionUnknown
-		}},
-	{id: "referent-none", settled: settledLexicon,
+		},
+	},
+	{
+		id: "referent-none", settled: settledLexicon,
 		eval: func(c *selCtx) (string, bool) {
 			return failReferentNone, !c.explicit && c.kinds == nil
-		}},
-	{id: "referent-kind-mismatch", settled: settledLexicon,
+		},
+	},
+	{
+		id: "referent-kind-mismatch", settled: settledLexicon,
 		eval: func(c *selCtx) (string, bool) {
 			return failKindMismatch, !c.explicit && !slices.Contains(c.kinds, c.kind)
-		}},
-	{id: "narrow-scope", settled: settledLexicon,
+		},
+	},
+	{
+		id: "narrow-scope", settled: settledLexicon,
 		// A run row's subdir target names the binary's package, not
 		// the failure's scope — the panic can live anywhere in its
 		// call graph — so narrow_scope is a verification-kind rule
@@ -278,21 +305,28 @@ var failureRoutes = []selRoute{
 		eval: func(c *selCtx) (string, bool) {
 			return failNarrowScope, !c.explicit && c.kind != "run" && !c.topLevel &&
 				(c.cand.pool != poolOpen || !c.uniqueOpenByKind[c.kind])
-		}},
-	{id: "path-gone", settled: settledState,
+		},
+	},
+	{
+		id: "path-gone", settled: settledState,
 		eval: func(c *selCtx) (string, bool) {
 			return failPathGone, allPathsGone(c.f, c.workDir)
-		}},
-	{id: "stale-suspect", settled: settledState,
+		},
+	},
+	{
+		id: "stale-suspect", settled: settledState,
 		eval: func(c *selCtx) (string, bool) {
 			return failStaleSuspect, anyPathNewer(c.f, c.workDir)
-		}},
-	{id: "default-admit", settled: settledLexicon,
+		},
+	},
+	{
+		id: "default-admit", settled: settledLexicon,
 		// The terminal route — a candidate no earlier gate rejected
 		// binds under the prompt analysis that ran the table.
 		eval: func(*selCtx) (string, bool) {
 			return failAdmit, true
-		}},
+		},
+	},
 }
 
 // Decision outcomes — the closed Outcome vocabulary, stamped at run

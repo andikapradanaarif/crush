@@ -1525,8 +1525,10 @@ func TestFailureRoutes_KindMismatchAttribution(t *testing.T) {
 
 	// Identifier mention on a non-verification row → ident-kind-gate.
 	_, ds = selectOpenFailures("fix TestValue",
-		[]cmdlog.Failure{{Signature: "s", Cmd: "ls -la", CWD: ".",
-			Headline: "TestValue error", Files: []string{"x.go"}}}, dir, 0)
+		[]cmdlog.Failure{{
+			Signature: "s", Cmd: "ls -la", CWD: ".",
+			Headline: "TestValue error", Files: []string{"x.go"},
+		}}, dir, 0)
 	require.Len(t, ds, 1)
 	require.Equal(t, failKindMismatch, ds[0].Reason)
 	require.Equal(t, "ident-kind-gate", ds[0].Route)
