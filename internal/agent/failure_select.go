@@ -46,6 +46,13 @@ type FailureDecision struct {
 	// (#216). render_capped rows keep the binding layer here; Reason
 	// already records the budget cut.
 	SettledBy string `json:"settled_by,omitempty"`
+	// Route is the dispatch-table entry that produced Reason — one
+	// of failureRoutes' ids, so shared reasons stay attributable:
+	// kind_mismatch fires from ident-kind-gate, explicit-kind-gate,
+	// or referent-kind-mismatch (#232). render_capped and
+	// admit_unique_scope keep the binding route — Reason already
+	// records the post-selection rewrite.
+	Route string `json:"route,omitempty"`
 	// SourceSession and SourceCall identify the observation that
 	// produced this candidate row — #220 provenance: the session and
 	// tool call whose run opened a failure row, or last verdicted a
@@ -150,6 +157,143 @@ const (
 	// ran, so no binding layer owns the reason.
 	settledHarness = "harness"
 )
+
+// selCtx carries one candidate's evaluation state through the route
+// table — the turn-level prompt analysis (scope, referents, mention
+// polarity) computed once, plus the per-candidate derivations each
+// check needs.
+type selCtx struct {
+	prompt           string
+	workDir          string
+	pos, neg         []string
+	explicit         bool
+	kinds            []string
+	uniqueOpenByKind map[string]bool
+	cand             selCandidate
+	f                cmdlog.Failure
+	dirs             []string
+	kind             string
+	topLevel         bool
+	mention          mentionPolarity
+}
+
+// selRoute is one ordered dispatch-table row — id is the route's
+// stable name recorded on the decision, settled the resolver layer
+// that owns its reason, eval the check itself. Table order IS the
+// precedence order: the first route whose eval fires produces the
+// verdict, so a route's guard may assume every earlier route missed.
+// A check that exists in code but not here cannot exist — the table
+// is the enumerable spec ROUTE_SPACE.md describes (#232).
+type selRoute struct {
+	id      string
+	settled string
+	eval    func(c *selCtx) (reason string, fired bool)
+}
+
+// failureRoutes is the candidate dispatch table. Three kind_mismatch
+// emitters exist — ident-kind-gate, explicit-kind-gate, and
+// referent-kind-mismatch — sharing the closed reason vocabulary
+// while Route distinguishes the check that fired.
+var failureRoutes = []selRoute{
+	{id: "shadowed", settled: settledState,
+		// The shadow precedes every other check: the open twin's own
+		// decision carries the real verdict on this command, and this
+		// row's verdict is "subsumed", not rejected on the merits.
+		eval: func(c *selCtx) (string, bool) {
+			return failShadowed, c.cand.shadowed
+		}},
+	{id: "negated-scope", settled: settledLexicon,
+		eval: func(c *selCtx) (string, bool) {
+			return failNegatedScope, negatedByAny(c.dirs, c.f.Files, c.neg, c.pos)
+		}},
+	{id: "ident-veto", settled: settledIdentifier,
+		// A named identifier inside a negated span vetoes its own
+		// row — path-veto parity at the mention layer.
+		eval: func(c *selCtx) (string, bool) {
+			return failNegatedScope, c.mention == mentionVeto
+		}},
+	{id: "ident-kind-gate", settled: settledIdentifier,
+		// A named identifier binds a row the way explicit scope does
+		// — and still requires a verdict-flavored row: a failed ls
+		// whose headline happens to carry the token must not inject.
+		eval: func(c *selCtx) (string, bool) {
+			return failKindMismatch, c.mention == mentionPositive && !slices.Contains(verificationKinds, c.kind)
+		}},
+	{id: "ident-path-gone", settled: settledState,
+		eval: func(c *selCtx) (string, bool) {
+			return failPathGone, c.mention == mentionPositive && allPathsGone(c.f, c.workDir)
+		}},
+	{id: "ident-stale", settled: settledState,
+		eval: func(c *selCtx) (string, bool) {
+			return failStaleSuspect, c.mention == mentionPositive && anyPathNewer(c.f, c.workDir)
+		}},
+	{id: "ident-admit", settled: settledIdentifier,
+		// A positively-mentioned identifier binds regardless of dir
+		// scope or top-levelness — the mention IS the scope. Polarity
+		// was resolved language-neutrally (cue, verb, or lone), so
+		// non-English positive prompts only bind here when the
+		// English signal is genuinely present.
+		eval: func(c *selCtx) (string, bool) {
+			return failAdmit, c.mention == mentionPositive
+		}},
+	{id: "explicit-out-of-scope", settled: settledLexicon,
+		eval: func(c *selCtx) (string, bool) {
+			return failOutOfScope, c.explicit && !overlapsAny(c.dirs, c.pos)
+		}},
+	{id: "explicit-kind-gate", settled: settledLexicon,
+		// Explicit scope still requires a verdict-flavored row — a
+		// failed ls/git/curl at root must not inject into an
+		// unrelated "fix main.go".
+		eval: func(c *selCtx) (string, bool) {
+			return failKindMismatch, c.explicit && !slices.Contains(verificationKinds, c.kind)
+		}},
+	{id: "lang-unsupported", settled: settledLexicon,
+		// The lexicon could not parse the prompt — a measured
+		// coverage hole, not a clean referent absence.
+		eval: func(c *selCtx) (string, bool) {
+			return failLangUnsupported, !c.explicit && c.kinds == nil && nonASCIILetter(c.prompt)
+		}},
+	{id: "mention-unknown", settled: settledIdentifier,
+		// An identifier was named but its polarity parsed neither
+		// way. Nothing else bound, so the record marks the
+		// unresolvable mention rather than a bare referent absence.
+		eval: func(c *selCtx) (string, bool) {
+			return failMentionUnknown, !c.explicit && c.kinds == nil && c.mention == mentionUnknown
+		}},
+	{id: "referent-none", settled: settledLexicon,
+		eval: func(c *selCtx) (string, bool) {
+			return failReferentNone, !c.explicit && c.kinds == nil
+		}},
+	{id: "referent-kind-mismatch", settled: settledLexicon,
+		eval: func(c *selCtx) (string, bool) {
+			return failKindMismatch, !c.explicit && !slices.Contains(c.kinds, c.kind)
+		}},
+	{id: "narrow-scope", settled: settledLexicon,
+		// A run row's subdir target names the binary's package, not
+		// the failure's scope — the panic can live anywhere in its
+		// call graph — so narrow_scope is a verification-kind rule
+		// only. Uniqueness rescues it: a lone kind-bound open failure
+		// is the referent by elimination (#321); the remaining checks
+		// (path_gone, stale_suspect) still apply.
+		eval: func(c *selCtx) (string, bool) {
+			return failNarrowScope, !c.explicit && c.kind != "run" && !c.topLevel &&
+				(c.cand.pool != poolOpen || !c.uniqueOpenByKind[c.kind])
+		}},
+	{id: "path-gone", settled: settledState,
+		eval: func(c *selCtx) (string, bool) {
+			return failPathGone, allPathsGone(c.f, c.workDir)
+		}},
+	{id: "stale-suspect", settled: settledState,
+		eval: func(c *selCtx) (string, bool) {
+			return failStaleSuspect, anyPathNewer(c.f, c.workDir)
+		}},
+	{id: "default-admit", settled: settledLexicon,
+		// The terminal route — a candidate no earlier gate rejected
+		// binds under the prompt analysis that ran the table.
+		eval: func(*selCtx) (string, bool) {
+			return failAdmit, true
+		}},
+}
 
 // Decision outcomes — the closed Outcome vocabulary, stamped at run
 // end (#221). Failure rows verify as resolved/open against the
@@ -1566,83 +1710,25 @@ func selectMemory(prompt string, pools memoryPools, workDir string,
 		}
 		mention := candidateMention(identSites, ids, lone)
 
-		switch {
-		case cand.shadowed:
-			// The shadow precedes every other check: the open twin's
-			// own decision carries the real verdict on this command,
-			// and this row's verdict is "subsumed", not rejected on
-			// the merits.
-			reason = failShadowed
-			d.SettledBy = settledState
-		case negatedByAny(dirs, f.Files, neg, pos):
-			reason = failNegatedScope
-		case mention == mentionVeto:
-			// A named identifier inside a negated span vetoes its
-			// own row — path-veto parity at the mention layer.
-			reason = failNegatedScope
-			d.SettledBy = settledIdentifier
-		case mention == mentionPositive && !slices.Contains(verificationKinds, kind):
-			// A named identifier binds a row the way explicit scope
-			// does — and still requires a verdict-flavored row: a
-			// failed ls whose headline happens to carry the token
-			// must not inject.
-			reason = failKindMismatch
-			d.SettledBy = settledIdentifier
-		case mention == mentionPositive && allPathsGone(f, workDir):
-			reason = failPathGone
-			d.SettledBy = settledState
-		case mention == mentionPositive && anyPathNewer(f, workDir):
-			reason = failStaleSuspect
-			d.SettledBy = settledState
-		case mention == mentionPositive:
-			// A positively-mentioned identifier binds regardless of
-			// dir scope or top-levelness — the mention IS the
-			// scope. Polarity was resolved language-neutrally (cue,
-			// verb, or lone), so non-English positive prompts only
-			// bind here when the English signal is genuinely
-			// present.
-			d.SettledBy = settledIdentifier
-		case explicit && !overlapsAny(dirs, pos):
-			reason = failOutOfScope
-		case explicit && !slices.Contains(verificationKinds, kind):
-			// Explicit scope still requires a verdict-flavored row —
-			// a failed ls/git/curl at root must not inject into an
-			// unrelated "fix main.go".
-			reason = failKindMismatch
-		case !explicit && kinds == nil:
-			switch {
-			case nonASCIILetter(prompt):
-				// The lexicon could not parse the prompt — a
-				// measured coverage hole, not a clean referent
-				// absence.
-				reason = failLangUnsupported
-			case mention == mentionUnknown:
-				// An identifier was named but its polarity parsed
-				// neither way. Nothing else bound, so the record
-				// marks the unresolvable mention rather than a
-				// bare referent absence.
-				reason = failMentionUnknown
-				d.SettledBy = settledIdentifier
-			default:
-				reason = failReferentNone
+		// Dispatch through the route table — the first fired route
+		// produces the verdict and its id lands on the decision, so
+		// the three kind_mismatch emitters stay distinguishable
+		// (#232). Table order is precedence; a route's guard may
+		// assume every earlier route missed.
+		sc := selCtx{
+			prompt: prompt, workDir: workDir,
+			pos: pos, neg: neg, explicit: explicit, kinds: kinds,
+			uniqueOpenByKind: uniqueOpenByKind,
+			cand:             cand, f: f, dirs: dirs, kind: kind,
+			topLevel: topLevel, mention: mention,
+		}
+		for _, r := range failureRoutes {
+			if rr, fired := r.eval(&sc); fired {
+				reason = rr
+				d.SettledBy = r.settled
+				d.Route = r.id
+				break
 			}
-		case !explicit && !slices.Contains(kinds, kind):
-			reason = failKindMismatch
-		case !explicit && kind != "run" && !topLevel &&
-			(cand.pool != poolOpen || !uniqueOpenByKind[kind]):
-			// A run row's subdir target names the binary's package,
-			// not the failure's scope — the panic can live anywhere
-			// in its call graph — so narrow_scope is a verification-
-			// kind rule only. Uniqueness rescues it: a lone kind-bound
-			// open failure is the referent by elimination (#321); the
-			// remaining checks (path_gone, stale_suspect) still apply.
-			reason = failNarrowScope
-		case allPathsGone(f, workDir):
-			reason = failPathGone
-			d.SettledBy = settledState
-		case anyPathNewer(f, workDir):
-			reason = failStaleSuspect
-			d.SettledBy = settledState
 		}
 		d.Admit = reason == failAdmit
 		if d.Admit && cand.pool == poolOpen && !explicit && mention != mentionPositive &&

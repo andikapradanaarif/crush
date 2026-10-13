@@ -127,6 +127,7 @@ type SelectCandidate struct {
 	Admit   bool   `json:"admit"`
 	Reason  string `json:"reason"`
 	Settled string `json:"settled_by,omitempty"`
+	Route   string `json:"route,omitempty"`
 }
 
 // RunSelectProbe executes the offline selector measurement: ensure
@@ -197,6 +198,7 @@ func (r *Runner) RunSelectProbe(ctx context.Context, traj *Trajectory, trajDir, 
 	for _, d := range decisions {
 		rep.Candidates = append(rep.Candidates, SelectCandidate{
 			Pool: d.Pool, Cmd: d.Cmd, Admit: d.Admit, Reason: d.Reason, Settled: d.SettledBy,
+			Route: d.Route,
 		})
 		key := d.Pool + "_seen"
 		rep.Counts[key]++
