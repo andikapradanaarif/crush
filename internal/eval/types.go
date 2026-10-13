@@ -781,6 +781,12 @@ type TurnTail struct {
 	// did after the tail rendered" without joining message storage
 	// (#221).
 	Actions []TailAction `json:"actions,omitempty"`
+	// DroppedSignatures mirrors TailAudit.DroppedSignatures — rows
+	// rendered at turn start but dropped from later steps after
+	// resolving mid-turn (#325). Reads: "admitted per decisions,
+	// absent from the last steps" is explained staleness removal,
+	// not selector drift.
+	DroppedSignatures []string `json:"dropped_signatures,omitempty"`
 }
 
 // TailAction is the eval-side mirror of agent.TailAction: one of a

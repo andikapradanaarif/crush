@@ -1481,8 +1481,11 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 			// clarify directive ride in the moving tail — the history
 			// prefix still cache-reads, and the same byte-stable
 			// messages re-append every step so the notebook rebuild
-			// cannot drop them.
-			prepared.Messages = append(prepared.Messages, tailMessages...)
+			// cannot drop them. One exception to byte-stability: a
+			// rendered open failure that resolved mid-turn is dropped
+			// — the section's "have not passed since" claim would
+			// otherwise go false and loop the agent (#325).
+			prepared.Messages = append(prepared.Messages, a.refreshOpenFailuresTail(callContext, call, tailMessages)...)
 
 			// Anthropic allows at most 4 cache breakpoints per request.
 			// With MCP tools present, Run adds a second tool breakpoint

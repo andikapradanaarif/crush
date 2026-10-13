@@ -309,6 +309,15 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	if directive := a.ambiguityDirective(ctx, call, msgs, boundMemory); directive != "" {
 		sections = append(sections, directive)
 	}
+	if a.turnSels != nil && call.RunStamp != 0 {
+		// The selection was cached before the sections rendered —
+		// second write carries the rendered form the staleness
+		// refresh re-splices from.
+		if sel, ok := a.turnSels.Get(call.SessionID); ok && sel.stamp == call.RunStamp {
+			sel.sections = sections
+			a.turnSels.Set(call.SessionID, sel)
+		}
+	}
 	if telemetryOn {
 		a.memoryTelemetry.recordTurn(call.SessionID, call.Prompt, sections,
 			memoryCandidates, memoryDecisions, a.agentID, armed, holdout, fetchErr, rateGate)
@@ -340,6 +349,124 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	return []fantasy.Message{fantasy.NewUserMessage(text)}
 }
 
+// staleOpenCheckLimit bounds the live open-failure fetch the per-step
+// refresh runs. Rows rendered this turn cannot fall outside it in
+// practice — a turn's own new failures would have to outnumber it
+// first — and a row that did would read as resolved, which fails in
+// the safe direction (the tail stops asserting, never lies).
+const staleOpenCheckLimit = 256
+
+// refreshOpenFailuresTail re-checks the rows the frozen tail renders
+// against live open state and re-splices the <open_failures> section
+// when any have resolved since the turn started (#325). The frozen
+// snapshot exists for prompt-cache byte-stability and audit-replay —
+// but its text asserts "have not passed since", which goes false the
+// moment a fix lands mid-turn, and a model reading the stale claim
+// loops re-running the recorded command to clear it. Selection and
+// decisions stay frozen; only the rendered claim is refreshed. A
+// fetch failure keeps the frozen render — a tail that might be stale
+// is safer than a tail that silently vanishes.
+//
+// Symmetric blind spot, acknowledged: a row rendered under
+// <resolved_failures> that re-fails mid-turn cannot re-enter the
+// warning section — it was never in selected.open, and frozen
+// selection admits no new rows. Its resolved claim stays true (it
+// did later pass), so nothing lies; the model just loses the
+// "failing again" signal until next turn.
+func (a *sessionAgent) refreshOpenFailuresTail(ctx context.Context, call SessionAgentCall, tail []fantasy.Message) []fantasy.Message {
+	if len(tail) == 0 || a.cmdlog == nil || a.turnSels == nil || call.RunStamp == 0 {
+		return tail
+	}
+	sel, ok := a.turnSels.Get(call.SessionID)
+	if !ok || sel.stamp != call.RunStamp || len(sel.selected.open) == 0 || len(sel.sections) == 0 {
+		return tail
+	}
+	hasOpenSection := false
+	for _, s := range sel.sections {
+		if tailSectionName(s) == "open_failures" {
+			hasOpenSection = true
+			break
+		}
+	}
+	if !hasOpenSection {
+		return tail
+	}
+	live, err := a.cmdlog.ListOpenFailures(ctx, staleOpenCheckLimit)
+	if err != nil {
+		return tail
+	}
+	openSigs := make(map[string]bool, len(live))
+	for _, f := range live {
+		openSigs[f.Signature] = true
+	}
+	var still []cmdlog.Failure
+	var dropped []string
+	for _, f := range sel.selected.open {
+		if openSigs[f.Signature] {
+			still = append(still, f)
+		} else {
+			dropped = append(dropped, f.Signature)
+		}
+	}
+	if len(dropped) == 0 {
+		return tail
+	}
+	slog.Debug("Open failure resolved mid-turn; refreshing tail",
+		"session_id", call.SessionID,
+		"resolved_rows", len(dropped),
+		"still_open", len(still),
+	)
+	a.recordTailDrops(call, dropped)
+	sections := make([]string, 0, len(sel.sections))
+	for _, s := range sel.sections {
+		if tailSectionName(s) != "open_failures" {
+			sections = append(sections, s)
+			continue
+		}
+		if len(still) > 0 {
+			sections = append(sections, a.renderOpenFailuresSection(still))
+		}
+	}
+	if len(sections) == 0 {
+		return nil
+	}
+	return []fantasy.Message{fantasy.NewUserMessage(strings.Join(sections, "\n\n"))}
+}
+
+// recordTailDrops marks the turn's audits with the signatures a
+// mid-turn refresh dropped — the selection-time record stays frozen,
+// so without this "admitted per decisions but absent from later
+// steps" is explainable only by reconstructing step_records (#325).
+func (a *sessionAgent) recordTailDrops(call SessionAgentCall, dropped []string) {
+	merge := func(audit TailAudit) TailAudit {
+		seen := make(map[string]bool, len(audit.DroppedSignatures))
+		for _, s := range audit.DroppedSignatures {
+			seen[s] = true
+		}
+		for _, s := range dropped {
+			if !seen[s] {
+				audit.DroppedSignatures = append(audit.DroppedSignatures, s)
+			}
+		}
+		return audit
+	}
+	if a.tailAudit != nil {
+		if audit, ok := a.tailAudit.Get(call.SessionID); ok && audit.RunStamp == call.RunStamp {
+			a.tailAudit.Set(call.SessionID, merge(audit))
+		}
+	}
+	if a.tailRuns != nil {
+		if runs, ok := a.tailRuns.Get(call.SessionID); ok {
+			for i := range runs {
+				if runs[i].RunStamp == call.RunStamp {
+					runs[i] = merge(runs[i])
+				}
+			}
+			a.tailRuns.Set(call.SessionID, runs)
+		}
+	}
+}
+
 // turnSelection caches one user turn's memory selection — all three
 // pools, one prompt analysis, replayed verbatim across the turn's
 // repair chain.
@@ -348,6 +475,11 @@ type turnSelection struct {
 	selected   memoryPools
 	candidates []cmdlog.Failure
 	decisions  []FailureDecision
+	// sections is the rendered tail — stored so the per-step
+	// staleness refresh can re-splice the open_failures envelope
+	// when a rendered row resolves mid-turn (#325). Everything else
+	// stays byte-stable across steps.
+	sections []string
 }
 
 // tailArmed reports whether any tail producer is enabled on this
@@ -427,6 +559,13 @@ type TailAudit struct {
 	// carries none; the field is decision evidence, not generic
 	// "what the run did" telemetry.
 	Actions []TailAction `json:"actions,omitempty"`
+	// DroppedSignatures lists open_failures rows that rendered at
+	// turn start but were dropped from later steps after resolving
+	// mid-turn (#325). The audit records the selection-time render;
+	// this field marks the divergence between "admitted per
+	// decisions" and "still present at the last step's request" —
+	// a replay-vs-live diff is not a drift bug when this explains it.
+	DroppedSignatures []string `json:"dropped_signatures,omitempty"`
 }
 
 var tailSectionNameRe = regexp.MustCompile(`^<(\w+)>`)
@@ -803,6 +942,40 @@ func (a *sessionAgent) turnContextBlob(ctx context.Context, call SessionAgentCal
 	return strings.Join(a.turnContextSections(ctx, call, openFailures, nil, nil, nil, nil), "\n")
 }
 
+// renderOpenFailuresSection renders one <open_failures> envelope —
+// extracted so the per-step staleness refresh (#325) can re-render
+// just this section when a rendered row resolves mid-turn.
+func (a *sessionAgent) renderOpenFailuresSection(openFailures []cmdlog.Failure) string {
+	var b strings.Builder
+	b.WriteString("<open_failures>\nCommands that failed in this workspace and have not passed since — the likely referents for \"the failing test\" or \"the build error\"; a clean re-run resolves one:\n")
+	for _, f := range openFailures {
+		b.WriteString("- ")
+		b.WriteString(tailSafeText(truncateTailText(f.Cmd, a.memoryParams().FailureCmdRunes)))
+		if f.CWD != "" && f.CWD != "." {
+			fmt.Fprintf(&b, " (in %s)", tailSafeText(f.CWD))
+		}
+		if f.Headline != "" {
+			// Screened at render too — rows persisted before the
+			// write-side screen existed are still covered.
+			fmt.Fprintf(&b, ": %s", tailSafeText(truncateTailText(
+				cmdlog.ScreenHeadline(f.Headline), a.memoryParams().FailureHeadlineRunes)))
+		}
+		if n := min(len(f.Files), a.memoryParams().FailureFileHints); n > 0 {
+			hints := make([]string, n)
+			for i := range hints {
+				hints[i] = tailSafeText(f.Files[i])
+			}
+			fmt.Fprintf(&b, " [%s]", strings.Join(hints, ", "))
+		}
+		if age := failureAge(f.LastSeen); age != "" {
+			fmt.Fprintf(&b, " — %s", age)
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("</open_failures>\n")
+	return b.String()
+}
+
 // turnContextSections renders the tail context sections — the session
 // signals wrapped in <turn_context> when that tier is on, and project
 // memory under its own envelopes. The memory sections render outside
@@ -827,34 +1000,7 @@ func (a *sessionAgent) turnContextSections(ctx context.Context, call SessionAgen
 	}
 
 	if a.failureMemory && len(openFailures) > 0 {
-		var b strings.Builder
-		b.WriteString("<open_failures>\nCommands that failed in this workspace and have not passed since — the likely referents for \"the failing test\" or \"the build error\"; a clean re-run resolves one:\n")
-		for _, f := range openFailures {
-			b.WriteString("- ")
-			b.WriteString(tailSafeText(truncateTailText(f.Cmd, a.memoryParams().FailureCmdRunes)))
-			if f.CWD != "" && f.CWD != "." {
-				fmt.Fprintf(&b, " (in %s)", tailSafeText(f.CWD))
-			}
-			if f.Headline != "" {
-				// Screened at render too — rows persisted before the
-				// write-side screen existed are still covered.
-				fmt.Fprintf(&b, ": %s", tailSafeText(truncateTailText(
-					cmdlog.ScreenHeadline(f.Headline), a.memoryParams().FailureHeadlineRunes)))
-			}
-			if n := min(len(f.Files), a.memoryParams().FailureFileHints); n > 0 {
-				hints := make([]string, n)
-				for i := range hints {
-					hints[i] = tailSafeText(f.Files[i])
-				}
-				fmt.Fprintf(&b, " [%s]", strings.Join(hints, ", "))
-			}
-			if age := failureAge(f.LastSeen); age != "" {
-				fmt.Fprintf(&b, " — %s", age)
-			}
-			b.WriteString("\n")
-		}
-		b.WriteString("</open_failures>\n")
-		sections = append(sections, b.String())
+		sections = append(sections, a.renderOpenFailuresSection(openFailures))
 	}
 
 	if a.failureMemory && len(resolvedFailures) > 0 {
