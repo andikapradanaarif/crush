@@ -12,7 +12,8 @@
         "printf 'package tax\n\n// Fee returns the surcharge constant.\nfunc Fee() int {\n\treturn 10\n}\n' > tax/tax.go",
         "go test ./tax"
       ],
-      "files": ["tax/tax.go", "tax/tax_test.go"]
+      "files": ["tax/tax.go", "tax/tax_test.go"],
+      "referents": [{"phrase": "surcharge", "target": "tax/tax.go"}]
     },
     {
       "ago_seconds": 345600,
@@ -26,11 +27,12 @@
       "title": "quota regression triage",
       "commands": ["go build ./...", "go vet ./..."],
       "files": ["quota/quota.go"],
-      "referents": [{"phrase": "tests", "target": "quota/quota_test.go"}]
+      "referents": [{"phrase": "tests", "target": "quota/quota_test.go"}, {"phrase": "contract", "target": "quota/quota.go"}]
     },
     {
       "ago_seconds": 86400,
-      "title": "quota surcharge rules review"
+      "title": "quota surcharge rules review",
+      "referents": [{"phrase": "rules", "target": "tax/tax.go"}, {"phrase": "review", "target": "quota/quota.go"}]
     }
   ],
   "task": {

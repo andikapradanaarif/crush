@@ -150,6 +150,16 @@ func (r *Runner) recordReplayPrefix(ctx context.Context, exp *Experiment, traj *
 			}
 		}
 	}
+	if seeded {
+		// Same learned-state materialization as ExecuteRun: the
+		// production rate fold lands a turn late and scripted seeds
+		// run none, so the snapshot's project_rates would stay empty
+		// without this pass. Idempotent on the folded mark.
+		if err := r.foldSeededRates(ctx, workdir, seedKey); err != nil {
+			slog.Warn("Seeded rate fold failed — referent gate sees pre-fold state",
+				"traj", traj.ID, "error", err)
+		}
+	}
 	if seeded && traj.Check.SeedScript != "" {
 		schk := runCheckScript(ctx, traj.Check.SeedScript, trajDir, workdir, r.checkEnv(), checkTimeout(traj))
 		if schk.Err != nil || schk.Exit != 0 {
