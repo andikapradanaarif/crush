@@ -1559,7 +1559,20 @@ func TestReconcileRetrySection(t *testing.T) {
 	t.Run("exhaust note counts the open rows", func(t *testing.T) {
 		t.Parallel()
 		tg := &edgeTrigger{openFailures: []cmdlog.Failure{{Cmd: "go test"}, {Cmd: "make"}}}
-		require.Equal(t, "2 observed failure(s) still open after 2 attempt(s).",
+		require.Equal(t, "2 observed failure(s) still open after 2 attempt(s). The retry budget is spent — they remain flagged but no longer block finishing: state them in your summary and finish.",
 			reconcileExhaustNote(tg, 2))
+	})
+
+	t.Run("exhaust note discharges the don't-finish directive", func(t *testing.T) {
+		t.Parallel()
+		// #319: the earlier retry prompt told the agent not to
+		// report finished while rows stay open — an exhausted note
+		// that only stopped re-firing left that directive live and
+		// trapped compliant models in verify loops. The note must
+		// explicitly lift it.
+		tg := &edgeTrigger{openFailures: []cmdlog.Failure{{Cmd: "go test"}}}
+		note := reconcileExhaustNote(tg, 3)
+		require.Contains(t, note, "no longer block finishing")
+		require.Contains(t, note, "finish")
 	})
 }

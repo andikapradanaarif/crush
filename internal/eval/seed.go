@@ -202,14 +202,14 @@ func (r *Runner) runScriptedSeed(ctx context.Context, q *db.Queries, conn *sql.D
 		// on Stdout — failureHeadline scans stdout after stderr,
 		// so verdict lines still surface as headlines.
 		svc.RecordRun(ctx, cmdlog.Run{
-			SessionID:      sessionID,
-			ToolCallID:     fmt.Sprintf("seed-%d-%d", ord, j),
-			Command:        command,
-			CWD:            workdir,
-			Stdout:         res.Output,
-			ExitCode:       res.ExitCode,
-			Ran:            res.Verdict,
-			ComponentExits: res.ComponentExits,
+			SessionID:  sessionID,
+			ToolCallID: fmt.Sprintf("seed-%d-%d", ord, j),
+			Command:    command,
+			CWD:        workdir,
+			Stdout:     res.Output,
+			ExitCode:   res.ExitCode,
+			Ran:        res.Verdict,
+			Components: res.Components,
 		})
 	}
 	// Files seed the session's touched paths through the same

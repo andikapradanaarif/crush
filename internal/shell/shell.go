@@ -279,8 +279,7 @@ func (s *Shell) execCommon(ctx context.Context, command string, stdout, stderr i
 
 	// Callers (Exec/ExecStream) already hold s.mu for the whole run,
 	// so this store is serialized without locking again — and
-	// TakeComponentExits under the same mutex can't observe it
-	// mid-exec.
+	// TakeComponents under the same mutex can't observe it mid-exec.
 	s.components = &componentLog{}
 	runner, err = s.newInterp(nil, stdout, stderr)
 	if err != nil {
@@ -303,13 +302,14 @@ func (s *Shell) execStream(ctx context.Context, command string, stdout, stderr i
 	return s.execCommon(ctx, command, stdout, stderr)
 }
 
-// TakeComponentExits returns the exit status of every call the
-// interpreter dispatched during the last Exec — one entry per call
-// that reached the exec-handler chain, in completion order. The bash
-// tool reads it so a composite command's clean final code ("cmd |
-// head", "cmd; echo $?") can't launder a real component failure out
-// of command memory.
-func (s *Shell) TakeComponentExits() []int {
+// TakeComponents returns the argv, dispatch-time directory, and exit
+// status of every call the interpreter dispatched during the last
+// Exec — one entry per call that reached the exec-handler chain, in
+// completion order. The bash tool reads it so a composite command's
+// clean final code ("cmd | head", "cmd; echo $?") can't launder a
+// real component failure out of command memory, and so command
+// memory can resolve rows on the component that actually passed.
+func (s *Shell) TakeComponents() []ComponentCall {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.components == nil {

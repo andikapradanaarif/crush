@@ -64,17 +64,17 @@ func NewJobOutputTool(spillDir string, cmdLog cmdlog.Service) fantasy.AgentTool 
 			if done && cmdLog != nil && bgShell.TakeRecorded() {
 				interrupted := shell.IsInterrupt(err)
 				cmdLog.RecordRun(ctx, cmdlog.Run{
-					SessionID:      GetSessionFromContext(ctx),
-					ToolCallID:     call.ID,
-					Command:        bgShell.Command,
-					CWD:            bgShell.Shell.GetWorkingDir(),
-					Stdout:         stdout,
-					Stderr:         stderr,
-					Err:            err,
-					ExitCode:       shell.ExitCode(err),
-					Ran:            shell.IsExitStatus(err),
-					Interrupted:    interrupted,
-					ComponentExits: bgShell.Shell.TakeComponentExits(),
+					SessionID:   GetSessionFromContext(ctx),
+					ToolCallID:  call.ID,
+					Command:     bgShell.Command,
+					CWD:         bgShell.Shell.GetWorkingDir(),
+					Stdout:      stdout,
+					Stderr:      stderr,
+					Err:         err,
+					ExitCode:    shell.ExitCode(err),
+					Ran:         shell.IsExitStatus(err),
+					Interrupted: interrupted,
+					Components:  bgShell.Shell.TakeComponents(),
 				})
 			}
 

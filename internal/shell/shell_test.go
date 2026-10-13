@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // Benchmark to measure CPU efficiency
@@ -98,7 +100,7 @@ func TestRunContinuity(t *testing.T) {
 	}
 }
 
-func TestComponentExits(t *testing.T) {
+func TestComponents(t *testing.T) {
 	shell := NewShell(&Options{WorkingDir: t.TempDir()})
 
 	// A pipeline whose head fails plus a trailing clean call: the
@@ -108,14 +110,23 @@ func TestComponentExits(t *testing.T) {
 	if _, _, err := shell.Exec(t.Context(), `sh -c 'exit 3' | cat; sh -c 'exit 0'`); err != nil {
 		t.Fatalf("composite exec failed: %v", err)
 	}
-	got := shell.TakeComponentExits()
+	got := shell.TakeComponents()
 	counts := map[int]int{}
-	for _, code := range got {
-		counts[code]++
+	for _, c := range got {
+		counts[c.Exit]++
 	}
 	if len(got) != 3 || counts[3] != 1 || counts[0] != 2 {
 		t.Fatalf("component exits = %v, want one 3 and two 0s", got)
 	}
+	var shCall *ComponentCall
+	for i := range got {
+		if len(got[i].Args) > 0 && got[i].Args[0] == "sh" && got[i].Exit == 3 {
+			shCall = &got[i]
+		}
+	}
+	require.NotNil(t, shCall, "a dispatched call must carry its argv")
+	require.Equal(t, []string{"sh", "-c", "exit 3"}, shCall.Args)
+	require.NotEmpty(t, shCall.Dir, "a dispatched call carries its dir")
 
 	// interp builtins (echo, true) never reach the exec-handler
 	// chain — the issue's "cmd; echo $?" shape still surfaces the
@@ -123,7 +134,7 @@ func TestComponentExits(t *testing.T) {
 	if _, _, err := shell.Exec(t.Context(), `sh -c 'exit 2'; echo $?`); err != nil {
 		t.Fatalf("semicolon exec failed: %v", err)
 	}
-	if got := shell.TakeComponentExits(); len(got) != 1 || got[0] != 2 {
+	if got := shell.TakeComponents(); len(got) != 1 || got[0].Exit != 2 {
 		t.Fatalf("component exits = %v, want [2]", got)
 	}
 
@@ -131,7 +142,7 @@ func TestComponentExits(t *testing.T) {
 	if _, _, err := shell.Exec(t.Context(), "echo hi; true"); err != nil {
 		t.Fatalf("builtin exec failed: %v", err)
 	}
-	if got := shell.TakeComponentExits(); len(got) != 0 {
+	if got := shell.TakeComponents(); len(got) != 0 {
 		t.Fatalf("component exits = %v, want empty", got)
 	}
 
@@ -140,7 +151,7 @@ func TestComponentExits(t *testing.T) {
 	if _, _, err := shell.Exec(t.Context(), `echo '{"a":1}' | jq .a`); err != nil {
 		t.Fatalf("jq exec failed: %v", err)
 	}
-	if got := shell.TakeComponentExits(); len(got) != 1 || got[0] != 0 {
+	if got := shell.TakeComponents(); len(got) != 1 || got[0].Exit != 0 {
 		t.Fatalf("component exits = %v, want [0]", got)
 	}
 }

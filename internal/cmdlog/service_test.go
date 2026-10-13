@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/params"
+	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/stretchr/testify/require"
 )
 
@@ -182,13 +183,16 @@ func TestRecordRun_LaunderedPipeStillFails(t *testing.T) {
 	// "go test | head" exits 0 on head's clean close — but the test
 	// binary failed and the component log knows it.
 	env.svc.RecordRun(env.ctx, Run{
-		SessionID:      "s1",
-		Command:        "go test ./... | head -5",
-		CWD:            env.workingDir,
-		Stdout:         "--- FAIL: TestParse",
-		ExitCode:       0,
-		Ran:            true,
-		ComponentExits: []int{1, 0},
+		SessionID: "s1",
+		Command:   "go test ./... | head -5",
+		CWD:       env.workingDir,
+		Stdout:    "--- FAIL: TestParse",
+		ExitCode:  0,
+		Ran:       true,
+		Components: []shell.ComponentCall{
+			{Args: []string{"go", "test", "./..."}, Dir: env.workingDir, Exit: 1},
+			{Args: []string{"head", "-5"}, Dir: env.workingDir, Exit: 0},
+		},
 	})
 
 	open, err := env.svc.ListOpenFailures(env.ctx, 10)
@@ -213,13 +217,15 @@ func TestRecordRun_LaunderedSemicolonStillFails(t *testing.T) {
 	// survives in the component log (echo is an interp builtin and
 	// never reaches the handler, so only the test's status lands).
 	env.svc.RecordRun(env.ctx, Run{
-		SessionID:      "s1",
-		Command:        "go test; echo $?",
-		CWD:            env.workingDir,
-		Stdout:         "--- FAIL: TestParse",
-		ExitCode:       0,
-		Ran:            true,
-		ComponentExits: []int{1},
+		SessionID: "s1",
+		Command:   "go test; echo $?",
+		CWD:       env.workingDir,
+		Stdout:    "--- FAIL: TestParse",
+		ExitCode:  0,
+		Ran:       true,
+		Components: []shell.ComponentCall{
+			{Args: []string{"go", "test"}, Dir: env.workingDir, Exit: 1},
+		},
 	})
 
 	open, err := env.svc.ListOpenFailures(env.ctx, 10)
@@ -235,13 +241,16 @@ func TestRecordRun_SigpipeTruncationIsNoVerdict(t *testing.T) {
 	// the command's open failure, count a pass, or mint a failure.
 	run(env, "s1", "go test | head -5", env.workingDir, "", "FAIL: TestParse", nil, 1)
 	env.svc.RecordRun(env.ctx, Run{
-		SessionID:      "s2",
-		Command:        "go test | head -5",
-		CWD:            env.workingDir,
-		Stdout:         "partial",
-		ExitCode:       0,
-		Ran:            true,
-		ComponentExits: []int{sigpipeExit, 0},
+		SessionID: "s2",
+		Command:   "go test | head -5",
+		CWD:       env.workingDir,
+		Stdout:    "partial",
+		ExitCode:  0,
+		Ran:       true,
+		Components: []shell.ComponentCall{
+			{Args: []string{"go", "test"}, Dir: env.workingDir, Exit: sigpipeExit},
+			{Args: []string{"head", "-5"}, Dir: env.workingDir, Exit: 0},
+		},
 	})
 
 	open, err := env.svc.ListOpenFailures(env.ctx, 10)
@@ -263,12 +272,14 @@ func TestRecordRun_InterruptedComponentIsNoVerdict(t *testing.T) {
 	// composite must not resolve the real open row.
 	run(env, "s1", "go test; echo done", env.workingDir, "", "FAIL", nil, 1)
 	env.svc.RecordRun(env.ctx, Run{
-		SessionID:      "s2",
-		Command:        "go test; echo done",
-		CWD:            env.workingDir,
-		ExitCode:       0,
-		Ran:            true,
-		ComponentExits: []int{sigintExit},
+		SessionID: "s2",
+		Command:   "go test; echo done",
+		CWD:       env.workingDir,
+		ExitCode:  0,
+		Ran:       true,
+		Components: []shell.ComponentCall{
+			{Args: []string{"timeout", "-s", "INT", "5", "go", "test"}, Dir: env.workingDir, Exit: sigintExit},
+		},
 	})
 
 	open, err := env.svc.ListOpenFailures(env.ctx, 10)
@@ -282,23 +293,28 @@ func TestRecordRun_LaunderedNewlineAndAmpersand(t *testing.T) {
 	// Multiline commands launder like ';' — the second statement's
 	// clean exit hid the first's failure.
 	env.svc.RecordRun(env.ctx, Run{
-		SessionID:      "s1",
-		Command:        "go test\necho done",
-		CWD:            env.workingDir,
-		Stdout:         "FAIL\n done",
-		ExitCode:       0,
-		Ran:            true,
-		ComponentExits: []int{1},
+		SessionID: "s1",
+		Command:   "go test\necho done",
+		CWD:       env.workingDir,
+		Stdout:    "FAIL\n done",
+		ExitCode:  0,
+		Ran:       true,
+		Components: []shell.ComponentCall{
+			{Args: []string{"go", "test"}, Dir: env.workingDir, Exit: 1},
+		},
 	})
 	// A backgrounded element's failure hides behind "&" too —
 	// "cmd & wait" where wait succeeded but cmd did not.
 	env.svc.RecordRun(env.ctx, Run{
-		SessionID:      "s1",
-		Command:        "go build & wait",
-		CWD:            env.workingDir,
-		ExitCode:       0,
-		Ran:            true,
-		ComponentExits: []int{2, 0},
+		SessionID: "s1",
+		Command:   "go build & wait",
+		CWD:       env.workingDir,
+		ExitCode:  0,
+		Ran:       true,
+		Components: []shell.ComponentCall{
+			{Args: []string{"go", "build"}, Dir: env.workingDir, Exit: 2},
+			{Args: []string{"wait"}, Dir: env.workingDir, Exit: 0},
+		},
 	})
 
 	open, err := env.svc.ListOpenFailures(env.ctx, 10)
@@ -312,31 +328,39 @@ func TestRecordRun_LaunderedCommandSubstitution(t *testing.T) {
 	// A substitution's failure inside a succeeding call launders
 	// identically: "echo \"$(go test)\"" reports echo's 0.
 	env.svc.RecordRun(env.ctx, Run{
-		SessionID:      "s1",
-		Command:        `echo "$(go test)"`,
-		CWD:            env.workingDir,
-		Stdout:         "FAIL",
-		ExitCode:       0,
-		Ran:            true,
-		ComponentExits: []int{1, 0},
+		SessionID: "s1",
+		Command:   `echo "$(go test)"`,
+		CWD:       env.workingDir,
+		Stdout:    "FAIL",
+		ExitCode:  0,
+		Ran:       true,
+		Components: []shell.ComponentCall{
+			{Args: []string{"go", "test"}, Dir: env.workingDir, Exit: 1},
+			{Args: []string{"echo"}, Dir: env.workingDir, Exit: 0},
+		},
 	})
 	// Backtick form, same hole.
 	env.svc.RecordRun(env.ctx, Run{
-		SessionID:      "s1",
-		Command:        "echo `go build`",
-		CWD:            env.workingDir,
-		ExitCode:       0,
-		Ran:            true,
-		ComponentExits: []int{2, 0},
+		SessionID: "s1",
+		Command:   "echo `go build`",
+		CWD:       env.workingDir,
+		ExitCode:  0,
+		Ran:       true,
+		Components: []shell.ComponentCall{
+			{Args: []string{"go", "build"}, Dir: env.workingDir, Exit: 2},
+			{Args: []string{"echo"}, Dir: env.workingDir, Exit: 0},
+		},
 	})
 	// A bare variable is not suspicious — "echo $OUT" scans nothing.
 	env.svc.RecordRun(env.ctx, Run{
-		SessionID:      "s1",
-		Command:        "echo $OUT",
-		CWD:            env.workingDir,
-		ExitCode:       0,
-		Ran:            true,
-		ComponentExits: []int{9},
+		SessionID: "s1",
+		Command:   "echo $OUT",
+		CWD:       env.workingDir,
+		ExitCode:  0,
+		Ran:       true,
+		Components: []shell.ComponentCall{
+			{Args: []string{"printenv"}, Dir: env.workingDir, Exit: 9},
+		},
 	})
 
 	open, err := env.svc.ListOpenFailures(env.ctx, 10)
@@ -351,13 +375,17 @@ func TestRecordRun_RealFailureBeatsSignalKill(t *testing.T) {
 	// failure records the failure — signal kills only mean
 	// "unknown" when nothing else failed.
 	env.svc.RecordRun(env.ctx, Run{
-		SessionID:      "s1",
-		Command:        "yes | go test | head",
-		CWD:            env.workingDir,
-		Stdout:         "FAIL",
-		ExitCode:       0,
-		Ran:            true,
-		ComponentExits: []int{sigpipeExit, 1, 0},
+		SessionID: "s1",
+		Command:   "yes | go test | head",
+		CWD:       env.workingDir,
+		Stdout:    "FAIL",
+		ExitCode:  0,
+		Ran:       true,
+		Components: []shell.ComponentCall{
+			{Args: []string{"yes"}, Dir: env.workingDir, Exit: sigpipeExit},
+			{Args: []string{"go", "test"}, Dir: env.workingDir, Exit: 1},
+			{Args: []string{"head"}, Dir: env.workingDir, Exit: 0},
+		},
 	})
 
 	open, err := env.svc.ListOpenFailures(env.ctx, 10)
@@ -372,13 +400,16 @@ func TestRecordRun_LaunderedZeroDoesNotResolve(t *testing.T) {
 	// it re-observes the same signature instead.
 	run(env, "s1", "go test | head -3", env.workingDir, "", "FAIL", nil, 1)
 	env.svc.RecordRun(env.ctx, Run{
-		SessionID:      "s2",
-		Command:        "go test | head -3",
-		CWD:            env.workingDir,
-		Stdout:         "FAIL",
-		ExitCode:       0,
-		Ran:            true,
-		ComponentExits: []int{2, 0},
+		SessionID: "s2",
+		Command:   "go test | head -3",
+		CWD:       env.workingDir,
+		Stdout:    "FAIL",
+		ExitCode:  0,
+		Ran:       true,
+		Components: []shell.ComponentCall{
+			{Args: []string{"go", "test"}, Dir: env.workingDir, Exit: 2},
+			{Args: []string{"head", "-3"}, Dir: env.workingDir, Exit: 0},
+		},
 	})
 
 	open, err := env.svc.ListOpenFailures(env.ctx, 10)
@@ -392,12 +423,14 @@ func TestRecordRun_BareCommandIgnoresComponents(t *testing.T) {
 	// A bare command's exit code is the whole verdict — stray
 	// component data can't manufacture a failure.
 	env.svc.RecordRun(env.ctx, Run{
-		SessionID:      "s1",
-		Command:        "go test ./...",
-		CWD:            env.workingDir,
-		ExitCode:       0,
-		Ran:            true,
-		ComponentExits: []int{1},
+		SessionID: "s1",
+		Command:   "go test ./...",
+		CWD:       env.workingDir,
+		ExitCode:  0,
+		Ran:       true,
+		Components: []shell.ComponentCall{
+			{Args: []string{"stray"}, Dir: env.workingDir, Exit: 1},
+		},
 	})
 
 	open, err := env.svc.ListOpenFailures(env.ctx, 10)
@@ -1268,4 +1301,177 @@ func TestParamVersion_TTLOverrideBoundsReads(t *testing.T) {
 	open, err := env.svc.ListOpenFailures(t.Context(), 10)
 	require.NoError(t, err)
 	require.Empty(t, open, "a 48h TTL override must bound the read")
+}
+
+func TestRecordRun_ComponentPassResolvesInnerRow(t *testing.T) {
+	env := setupTest(t)
+
+	// #319's trap: "go test ./..." failed and its row is open. The
+	// model's natural re-run decorates the command — "2>&1; echo"
+	// — so the composite spelling never equals the row's. The inner
+	// call provably exited 0 and the row must close.
+	run(env, "s1", "go test ./...", env.workingDir, "", "FAIL: TestParse", nil, 1)
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID: "s2",
+		Command:   "go test ./... 2>&1; echo done",
+		CWD:       env.workingDir,
+		ExitCode:  0,
+		Ran:       true,
+		Components: []shell.ComponentCall{
+			{Args: []string{"go", "test", "./..."}, Dir: env.workingDir, Exit: 0},
+			{Args: []string{"echo", "done"}, Dir: env.workingDir, Exit: 0},
+		},
+	})
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Empty(t, open, "a clean inner component closes the row its command opened")
+}
+
+func TestRecordRun_ComponentPassResolvesDecoratedRerun(t *testing.T) {
+	env := setupTest(t)
+
+	// Flag decoration is the commonest re-run shape: the flag-
+	// insensitive core ("go test ./...") matches the open row even
+	// though "-count=1" makes the spellings differ.
+	run(env, "s1", "go test ./...", env.workingDir, "", "FAIL: TestParse", nil, 1)
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID: "s2",
+		Command:   "go test -count=1 ./...",
+		CWD:       env.workingDir,
+		ExitCode:  0,
+		Ran:       true,
+		Components: []shell.ComponentCall{
+			{Args: []string{"go", "test", "-count=1", "./..."}, Dir: env.workingDir, Exit: 0},
+		},
+	})
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Empty(t, open, "a flag-decorated pass resolves the same core's row")
+}
+
+func TestRecordRun_ComponentPassIsDirectoryScoped(t *testing.T) {
+	env := setupTest(t)
+	sub := filepath.Join(env.workingDir, "pkg")
+	require.NoError(t, os.MkdirAll(sub, 0o755))
+
+	// The row opened inside pkg/: a passing "go test" at the root
+	// is a different scope and must leave it open...
+	run(env, "s1", "go test", sub, "", "FAIL", nil, 1)
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID: "s2",
+		Command:   "go test",
+		CWD:       env.workingDir,
+		ExitCode:  0,
+		Ran:       true,
+		Components: []shell.ComponentCall{
+			{Args: []string{"go", "test"}, Dir: env.workingDir, Exit: 0},
+		},
+	})
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1, "a pass in another directory must not close this row")
+
+	// ...while the same component dispatched under pkg/ closes it.
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID: "s3",
+		Command:   "cd pkg && go test; echo done",
+		CWD:       env.workingDir,
+		ExitCode:  0,
+		Ran:       true,
+		Components: []shell.ComponentCall{
+			{Args: []string{"go", "test"}, Dir: sub, Exit: 0},
+			{Args: []string{"echo", "done"}, Dir: env.workingDir, Exit: 0},
+		},
+	})
+	open, err = env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Empty(t, open, "a pass in the row's own directory resolves it")
+}
+
+func TestRecordRun_ComponentPassNeedsCleanExitAndMatchingCore(t *testing.T) {
+	env := setupTest(t)
+	run(env, "s1", "go test ./...", env.workingDir, "", "FAIL", nil, 1)
+
+	// A failed component is no pass evidence; neither is a signal
+	// kill (the verdict never arrived). Both leave the row open.
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID:   "s2",
+		Command:     "go test | tail",
+		CWD:         env.workingDir,
+		Interrupted: true,
+		Ran:         true,
+		Components: []shell.ComponentCall{
+			{Args: []string{"go", "test", "./..."}, Dir: env.workingDir, Exit: 1},
+			{Args: []string{"tail"}, Dir: env.workingDir, Exit: sigpipeExit},
+		},
+	})
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1)
+
+	// A clean pass of a different positional core ("go test" vs the
+	// row's "go test ./...") is a different target — still open.
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID: "s3",
+		Command:   "go test",
+		CWD:       env.workingDir,
+		ExitCode:  0,
+		Ran:       true,
+		Components: []shell.ComponentCall{
+			{Args: []string{"go", "test"}, Dir: env.workingDir, Exit: 0},
+		},
+	})
+	open, err = env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1, "a different positional core is a different target")
+}
+
+func TestRecordRun_ComponentPassSurvivesInterruptedComposite(t *testing.T) {
+	env := setupTest(t)
+
+	// The composite died mid-run (SIGINT'd tail), but its inner
+	// component already provably exited 0 — component evidence is
+	// independent of the composite verdict gate.
+	run(env, "s1", "go test ./...", env.workingDir, "", "FAIL", nil, 1)
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID:   "s2",
+		Command:     "go test ./... | tail",
+		CWD:         env.workingDir,
+		Interrupted: true,
+		Ran:         true,
+		Components: []shell.ComponentCall{
+			{Args: []string{"go", "test", "./..."}, Dir: env.workingDir, Exit: 0},
+			{Args: []string{"tail"}, Dir: env.workingDir, Exit: sigintExit},
+		},
+	})
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Empty(t, open, "a provably-clean component resolves even when the composite never reached a verdict")
+}
+
+func TestRecordRun_ComponentPassLeavesCompositeRow(t *testing.T) {
+	env := setupTest(t)
+
+	// Rows are keyed by the spelling that failed. A composite row
+	// ("go test | head -3") can only close on a matching composite
+	// pass — "|" can't appear in argv, so no inner component's core
+	// ever equals it.
+	run(env, "s1", "go test | head -3", env.workingDir, "", "FAIL", nil, 1)
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID: "s2",
+		Command:   "go test",
+		CWD:       env.workingDir,
+		ExitCode:  0,
+		Ran:       true,
+		Components: []shell.ComponentCall{
+			{Args: []string{"go", "test"}, Dir: env.workingDir, Exit: 0},
+		},
+	})
+
+	open, err := env.svc.ListOpenFailures(env.ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, open, 1, "an inner pass must not launder a composite-spelled row")
 }

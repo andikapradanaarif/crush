@@ -47,9 +47,9 @@ func RunAndCaptureStream(ctx context.Context, opts RunOptions, onProgress func(s
 	}
 
 	return CaptureResult{
-		Output:         buf.buf.String(),
-		ExitCode:       exitCode,
-		Verdict:        IsExitStatus(runErr),
-		ComponentExits: components.take(),
+		Output:     buf.buf.String(),
+		ExitCode:   exitCode,
+		Verdict:    IsExitStatus(runErr),
+		Components: components.take(),
 	}, nil
 }

@@ -34,6 +34,7 @@ import (
 	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/params"
 	"github.com/charmbracelet/crush/internal/redact"
+	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/toolclass"
 )
 
@@ -45,6 +46,10 @@ const (
 	maxFilesRecorded = 5
 	failureScanLines = 40
 	defaultListLimit = 20
+	// resolveScanLimit bounds the open rows a component pass scans —
+	// generous against any realistic open set; the list is per-project
+	// and ordered most-recent.
+	resolveScanLimit = 256
 )
 
 // interruptedExit is the sentinel passed for runs whose verdict never
@@ -206,12 +211,14 @@ type Run struct {
 	// context kill is not a project failure — it never ran.
 	Ran         bool
 	Interrupted bool
-	// ComponentExits carries the exit status of each call the
-	// interpreter dispatched during the run — pipeline and list
-	// elements included — so a composite like "go test | head" or
-	// "go test; echo $?" can't launder a real failure behind its
-	// clean final status.
-	ComponentExits []int
+	// Components carries each call the interpreter dispatched during
+	// the run — argv, dispatch-time directory, and exit status,
+	// pipeline and list elements included — so a composite like
+	// "go test | head" or "go test; echo $?" can't launder a real
+	// failure behind its clean final status, and a passing component
+	// can resolve the failure row its own command opened even when
+	// the composite spelling differs (#319).
+	Components []shell.ComponentCall
 }
 
 // Command is one command_memory row: a normalized command in a
@@ -512,7 +519,7 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 	realExit := run.ExitCode
 	unknownVerdict := false
 	if realExit == 0 {
-		realExit, unknownVerdict = launderedComponentExit(command, run.ComponentExits)
+		realExit, unknownVerdict = launderedComponentExit(command, run.Components)
 	}
 	ok, fail := int64(0), int64(0)
 	lastExit := int64(realExit)
@@ -550,6 +557,12 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 		slog.Error("Error recording command run", "error", err)
 		return
 	}
+	// Each clean component is its own pass evidence — a decorated or
+	// composite re-run resolves the row its inner command opened even
+	// when the composite spelling never matches it. Runs before the
+	// composite verdict gate: an interrupted composite can still
+	// carry components that provably exited 0.
+	s.resolveComponentFailures(ctx, run)
 	if !verdict || unknownVerdict {
 		return
 	}
@@ -921,16 +934,78 @@ const (
 //   - (0, false) — nothing hid: bare commands never suspect (their
 //     exit is the whole verdict), and clean composites pass through.
 //
+// resolveComponentFailures resolves open failure rows on the
+// components that exited 0 — the composite's spelling ("go test |
+// tail") never matches the row its inner command opened ("go test"),
+// and decoration is how models actually re-run things (#319: a row
+// no decorated re-run could close trapped sessions in reconcile
+// loops). A row matches a component in its own directory by exact
+// normalized argv or by flag-insensitive core — argv[0] plus
+// non-dash tokens — so "-count=1" and "-v" reruns close the same
+// target's row. The core can over-resolve a narrowing rerun
+// ("-run=TestX" shares its positional core); a stale open row costs
+// an unbounded reconcile loop while an over-resolved row only loses
+// a reminder, so the trade favors closing.
+func (s *service) resolveComponentFailures(ctx context.Context, run Run) {
+	if len(run.Components) == 0 {
+		return
+	}
+	opens, err := s.ListOpenFailures(ctx, resolveScanLimit)
+	if err != nil {
+		slog.Error("Error listing open failures for component resolve", "error", err)
+		return
+	}
+	if len(opens) == 0 {
+		return
+	}
+	for _, c := range run.Components {
+		if c.Exit != 0 || len(c.Args) == 0 {
+			continue
+		}
+		compCmd := normalizeCommand(strings.Join(c.Args, " "))
+		if compCmd == "" {
+			continue
+		}
+		dir := s.relDir(c.Dir)
+		core := commandCore(compCmd)
+		for _, f := range opens {
+			if f.CWD != dir {
+				continue
+			}
+			if f.Cmd != compCmd && (core == "" || commandCore(f.Cmd) != core) {
+				continue
+			}
+			if err := s.q.ResolveFailuresForCommand(ctx, db.ResolveFailuresForCommandParams{
+				ResolvedIn:   run.SessionID,
+				ResolvedCall: run.ToolCallID,
+				Cmd:          f.Cmd,
+				Cwd:          f.CWD,
+				ProjectKey:   s.projectKey,
+			}); err != nil {
+				slog.Error("Error resolving failure on component pass", "error", err)
+			}
+		}
+	}
+}
+
+// commandCore is a command's positional skeleton — argv[0] and the
+// non-dash tokens — for matching a re-run that differs only in flag
+// decoration against the row it resolves.
+func commandCore(cmd string) string {
+	fields := strings.Fields(cmd)
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if !strings.HasPrefix(f, "-") {
+			out = append(out, f)
+		}
+	}
+	return strings.Join(out, " ")
+}
+
 // Control-flow masking ("a || true") still records — the failure is
 // fact even if the caller shrugged, and missed failures are
 // invisible while extra ones are visible noise.
-//
-// Known residual: a recovered row keys on the composite spelling —
-// "go test | head -5" and bare "go test" are different commands, so
-// a clean bare re-run can't resolve the composite's row. Keying on
-// the failing segment needs argv recorded per component, which the
-// log doesn't carry yet.
-func launderedComponentExit(command string, exits []int) (int, bool) {
+func launderedComponentExit(command string, comps []shell.ComponentCall) (int, bool) {
 	// "|;&\n" covers pipes, lists, and background elements; "$(" and
 	// backticks cover a substitution's failure inside a succeeding
 	// call ("echo \"$(go test)\""). A bare "x=$(cmd)" needs no scan —
@@ -939,7 +1014,8 @@ func launderedComponentExit(command string, exits []int) (int, bool) {
 		return 0, false
 	}
 	sawKill := false
-	for _, code := range exits {
+	for _, c := range comps {
+		code := c.Exit
 		switch code {
 		case 0:
 		case sigintExit, sigpipeExit:
