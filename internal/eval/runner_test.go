@@ -473,6 +473,72 @@ func TestRunExperiment_UnpoweredIsInconclusive(t *testing.T) {
 	require.Contains(t, rep.Summary(0.05), "verdict: INCONCLUSIVE")
 }
 
+// The same stable-cell report is powered the moment the experiment
+// declares a primary: the declared metric's achieved per-arm sample
+// is itself an evidence tier. Without it the run above reads
+// INCONCLUSIVE on a fresh baseline even though its steps question was
+// adequately resolved — the gap #316 names.
+func TestRunExperiment_PrimaryPoweredOnStableCell(t *testing.T) {
+	t.Parallel()
+	root := newEvalDir(t)
+	flag := "debug"
+	r := &Runner{
+		EvalDir:        root,
+		Driver:         fakeRunner{flag: flag},
+		WorkParent:     t.TempDir(),
+		PermReplicates: 500,
+		RNG:            rand.New(rand.NewPCG(9, 10)),
+	}
+	writeTrajectory(t, filepath.Join(root, "corpus"), "stable-t", nil)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "flags.json"),
+		[]byte(fmt.Sprintf(`{"flag_defaults":{%q:false}}`, flag)), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "noise.json"),
+		[]byte(`{"cv":{"steps":0.05}}`), 0o644))
+	bands := &Bands{SchemaVersion: 1, Entries: map[string]BandEntry{
+		"stable-t": {Band: BandStable, ContentHash: mustHash(t, filepath.Join(root, "corpus", "stable-t"))},
+	}}
+	require.NoError(t, bands.Save(root))
+
+	// cv 0.05 / mde 0.15 → RequiredSamples ⌈12.38·(1/3)²⌉ = 2/arm;
+	// 3 planned + 3 achieved per arm clears it.
+	exp := &Experiment{
+		Name: "expp", Model: "mock/m", Temperature: ptr(0.0),
+		Corpus:            []string{"*"},
+		RunsPerTrajectory: map[Band]int{BandStable: 3},
+		Arms: map[string]Arm{
+			"control":   {Config: ArmConfig{Options: map[string]any{flag: false}}},
+			"treatment": {Config: ArmConfig{Options: map[string]any{flag: false}}},
+		},
+		Primary: &Primary{Metric: "steps", Direction: PrimaryDecrease, MDE: 0.15},
+	}
+	rep, err := r.RunExperiment(context.Background(), exp)
+	require.NoError(t, err)
+	require.False(t, rep.Fired(0.05))
+	require.NotNil(t, rep.Primary)
+	require.Equal(t, 3, rep.Primary.Control.N)
+	require.Equal(t, 3, rep.Primary.Treatment.N)
+	require.True(t, rep.Powered())
+	require.Contains(t, rep.Summary(0.05), "verdict: PASS")
+}
+
+// The primary tier credits achieved power, not planned power — a run
+// that lost half its sample to inconclusive outcomes still reports
+// unpowered even though scheduling planned enough.
+func TestReport_PrimaryUnderAchievedStaysUnpowered(t *testing.T) {
+	t.Parallel()
+	rep := Report{
+		DiffuseP: 1,
+		Primary: &PrimaryResult{
+			Metric:         "steps",
+			RequiredPerArm: 4,
+			Control:        metricSample{N: 2},
+			Treatment:      metricSample{N: 4},
+		},
+	}
+	require.False(t, rep.Powered())
+	require.Contains(t, rep.Summary(0.05), "primary 2/4 + 4/4 conclusive")
+}
+
 func TestWriteArmConfig_CollisionAndContent(t *testing.T) {
 	t.Parallel()
 	wd := t.TempDir()
