@@ -1590,10 +1590,17 @@ p̂_treat − p̂_ctrl`, paired permutation test over `{d_t}`.
   baseline Fisher — smoke must work where baselines are thin.
 - **A quiet run is only a pass when some tier could have spoken.**
   The report is *powered* iff at least one catastrophic-eligible
-  trajectory exists or at least one diffuse arm-pair fed the
-  permutation test. A quiet report with no powered tier reads
+  trajectory exists, at least one diffuse arm-pair fed the
+  permutation test, or a declared primary's conclusive per-arm
+  sample met the floor the power gate scheduled against. The
+  primary tier is what lets continuous-metric experiments gate on
+  stable cells: stable bands feed catastrophic only (the diffuse
+  pool is deliberately the baseline-free tier), so a steps-primary
+  experiment with adequate conclusive samples would otherwise read
+  "no powered tier" despite having answered its declared question.
+  A quiet report with no powered tier reads
   `verdict: INCONCLUSIVE`, not PASS — "no alarm fired" is "no
-  evidence" when neither tier was populated (a mechanism that never
+  evidence" when no tier was populated (a mechanism that never
   rendered, a corpus with no eligible trajectories), and `eval run`
   exits non-zero so an unpowered experiment cannot green a gate.
   Alarms still produce FAIL on an unpowered report — INCONCLUSIVE

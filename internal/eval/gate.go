@@ -317,21 +317,37 @@ func (r Report) Fired(alpha float64) bool {
 }
 
 // Powered reports whether at least one evidence tier could have
-// produced a verdict: a catastrophic-eligible trajectory or a diffuse
-// arm-pair. When neither exists the evidence tiers are empty and a
-// quiet run means "no evidence", not "no regression" — the verdict
-// reads INCONCLUSIVE rather than PASS so a mechanism-never-fired or
-// baseline-starved experiment cannot masquerade as a clean bill. The
-// collapse-pattern alarms (smoke, noop, excluded-differential, ...)
-// still fire on an unpowered report; INCONCLUSIVE only describes the
-// quiet case.
+// produced a verdict: a catastrophic-eligible trajectory, a diffuse
+// arm-pair, or a declared primary whose conclusive per-arm sample met
+// the floor the power gate scheduled against. When none exists the
+// evidence tiers are empty and a quiet run means "no evidence", not
+// "no regression" — the verdict reads INCONCLUSIVE rather than PASS
+// so a mechanism-never-fired or baseline-starved experiment cannot
+// masquerade as a clean bill. The collapse-pattern alarms (smoke,
+// noop, excluded-differential, ...) still fire on an unpowered
+// report; INCONCLUSIVE only describes the quiet case.
+//
+// The primary tier is what lets continuous-metric experiments gate on
+// stable cells: stable bands feed the catastrophic tier only (the
+// diffuse pool is deliberately the baseline-free tier), so a
+// steps-primary experiment with adequate conclusive samples would
+// otherwise report "no powered tier" despite having answered its
+// declared question. The floor it credits is the same RequiredSamples
+// bound checkPower enforced before scheduling — power the run was
+// planned to have, verified against what it actually collected.
 func (r Report) Powered() bool {
 	for _, ok := range r.CatastrophicEligible {
 		if ok {
 			return true
 		}
 	}
-	return r.DiffusePairs > 0
+	if r.DiffusePairs > 0 {
+		return true
+	}
+	if p := r.Primary; p != nil && p.RequiredPerArm > 0 {
+		return p.Control.N >= p.RequiredPerArm && p.Treatment.N >= p.RequiredPerArm
+	}
+	return false
 }
 
 // Summary renders the report for the CLI.
@@ -460,8 +476,13 @@ func (r Report) Summary(alpha float64) string {
 	case r.Fired(alpha):
 		b.WriteString("  verdict: FAIL\n")
 	case !r.Powered():
-		fmt.Fprintf(&b, "  verdict: INCONCLUSIVE (no powered tier: 0/%d catastrophic-eligible, %d diffuse pairs)\n",
-			len(r.CatastrophicEligible), r.DiffusePairs)
+		primary := ""
+		if p := r.Primary; p != nil {
+			primary = fmt.Sprintf(", primary %d/%d + %d/%d conclusive",
+				p.Control.N, p.RequiredPerArm, p.Treatment.N, p.RequiredPerArm)
+		}
+		fmt.Fprintf(&b, "  verdict: INCONCLUSIVE (no powered tier: 0/%d catastrophic-eligible, %d diffuse pairs%s)\n",
+			len(r.CatastrophicEligible), r.DiffusePairs, primary)
 	default:
 		b.WriteString("  verdict: PASS\n")
 	}
