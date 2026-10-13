@@ -6,6 +6,8 @@
 		"gen-m4k0-mid-explicit-d0-s001-*"
 	],
 	"runs_per_trajectory": {
+		"stable": 12,
+		"mid": 12,
 		"uncharacterized": 12
 	},
 	"primary": {
