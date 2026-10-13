@@ -31,7 +31,6 @@
 				"options": {
 					"turn_context": "off",
 					"failure_memory": true,
-					"failure_memory_edges": false,
 					"referent_memory": true,
 					"session_memory": true
 				}
