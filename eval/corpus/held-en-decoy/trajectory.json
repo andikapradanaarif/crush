@@ -1,0 +1,51 @@
+{
+	"id": "held-en-decoy",
+	"schema_version": 1,
+	"origin": {
+		"kind": "synthetic",
+		"source": "held-out corpus #224 — blind-authored warm cell, decoy shape; isolates distraction resistance, not ambiguity — the prominent passing slot row is a narrow command row and stays tail-invisible under the vague prompt, so only the open invoice row can render"
+	},
+	"start_state": {
+		"kind": "fixture",
+		"fixture_dir": "../held-mix-cs-ambig/fixture",
+		"setup": ["cp -R .defects/invoice-round/internal . && rm -rf .defects"]
+	},
+	"seed_commands": [
+		{
+			"ago_seconds": 172800,
+			"title": "slot suite verification run",
+			"commands": [
+				"go test -v ./internal/slot",
+				"go build ./..."
+			]
+		},
+		{
+			"ago_seconds": 3600,
+			"title": "invoice test fails on the studio fixture",
+			"files": ["internal/invoice/invoice_test.go"],
+			"commands": ["go test ./internal/invoice"]
+		}
+	],
+	"task": {
+		"turns": ["the test fails — fix it"]
+	},
+	"check": {
+		"script": "../held-mix-cs-ambig/check-invoice-round.sh",
+		"expect_start_state": "fail",
+		"seed_script": "seed_check.sh",
+		"timeout_seconds": 300
+	},
+	"coverage": {
+		"min_steps": 1,
+		"min_warm_start.sessions": 2
+	},
+	"requires": {
+		"network": false,
+		"tools": ["go", "sqlite3", "openssl"],
+		"os": ["darwin", "linux"]
+	},
+	"budget": {
+		"run_timeout_seconds": 600,
+		"max_steps": 30
+	}
+}

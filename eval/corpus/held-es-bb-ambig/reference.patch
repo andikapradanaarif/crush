@@ -1,0 +1,12 @@
+diff --git a/internal/ledger/ledger.go b/internal/ledger/ledger.go
+index 9a228d6..edde8ad 100644
+--- a/internal/ledger/ledger.go
++++ b/internal/ledger/ledger.go
+@@ -17,6 +17,7 @@ func (l *Ledger) Add(e Entry) { l.entries = append(l.entries, e) }
+ 
+ // Balance sums every entry's cents.
+ func (l *Ledger) Balance() int {
++	total := 0
+ 	for _, e := range l.entries {
+ 		total += e.Cents
+ 	}

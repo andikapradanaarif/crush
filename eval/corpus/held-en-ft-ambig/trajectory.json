@@ -1,0 +1,79 @@
+{
+	"id": "held-en-ft-ambig",
+	"schema_version": 1,
+	"origin": {
+		"kind": "synthetic",
+		"source": "held-out corpus #224 — blind-authored warm cell, en"
+	},
+	"start_state": {
+		"kind": "fixture",
+		"fixture_dir": "fixture",
+		"setup": ["cp -R .defects/bill-tip/internal . && rm -rf .defects"]
+	},
+	"seed_commands": [
+		{
+			"ago_seconds": 302400,
+			"title": "the bill test fails — service charge math suspect",
+			"files": ["internal/bill/bill_test.go", "internal/bill/bill.go"],
+			"commands": [
+				"go test ./internal/bill",
+				"go test ./internal/menu"
+			],
+			"referents": [{"phrase": "test", "target": "internal/bill/bill.go"}]
+		},
+		{
+			"ago_seconds": 216000,
+			"title": "the bill test fails again after a menu tweak",
+			"files": ["internal/bill/bill_test.go"],
+			"commands": [
+				"go test ./internal/bill",
+				"go build ./..."
+			],
+			"referents": [{"phrase": "test", "target": "internal/bill/bill.go"}]
+		},
+		{
+			"ago_seconds": 86400,
+			"title": "menu wording and order totals pass cleanly",
+			"files": ["internal/menu/menu.go", "internal/order/order_test.go"],
+			"commands": [
+				"go test ./internal/menu",
+				"go test ./internal/order",
+				"go build ./..."
+			],
+			"referents": [
+				{"phrase": "test", "target": "internal/menu/menu_test.go"},
+				{"phrase": "price", "target": "internal/menu/menu.go"},
+				{"phrase": "order", "target": "internal/order/order_test.go"}
+			]
+		},
+		{
+			"ago_seconds": 3600,
+			"title": "the bill test fails on the counter fixture",
+			"files": ["internal/bill/bill_test.go"],
+			"commands": ["go test ./internal/bill"],
+			"referents": [{"phrase": "test", "target": "internal/bill/bill.go"}]
+		}
+	],
+	"task": {
+		"turns": ["the test fails — fix it"]
+	},
+	"check": {
+		"script": "check-bill-tip.sh",
+		"expect_start_state": "fail",
+		"seed_script": "seed_check.sh",
+		"timeout_seconds": 300
+	},
+	"coverage": {
+		"min_steps": 1,
+		"min_warm_start.sessions": 4
+	},
+	"requires": {
+		"network": false,
+		"tools": ["go", "sqlite3", "openssl"],
+		"os": ["darwin", "linux"]
+	},
+	"budget": {
+		"run_timeout_seconds": 600,
+		"max_steps": 30
+	}
+}

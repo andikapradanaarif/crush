@@ -1,0 +1,12 @@
+diff --git a/internal/invoice/invoice.go b/internal/invoice/invoice.go
+index 52f8aa2..5921cbd 100644
+--- a/internal/invoice/invoice.go
++++ b/internal/invoice/invoice.go
+@@ -4,5 +4,6 @@ package invoice
+ // Total bills minutes at a per-hour rate in cents — any started
+ // hour counts as a full hour.
+ func Total(minutes, rateCents int) int {
+-	return minutes / 60 * rateCents
++	hours := (minutes + 59) / 60
++	return hours * rateCents
+ }

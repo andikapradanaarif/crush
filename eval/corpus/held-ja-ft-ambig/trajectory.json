@@ -1,0 +1,52 @@
+{
+	"id": "held-ja-ft-ambig",
+	"schema_version": 1,
+	"origin": {
+		"kind": "synthetic",
+		"source": "held-out corpus #224 — blind-authored warm cell, ja"
+	},
+	"start_state": {
+		"kind": "fixture",
+		"fixture_dir": "fixture",
+		"setup": ["cp -R .defects/stamp-page/internal . && rm -rf .defects"]
+	},
+	"seed_commands": [
+		{
+			"ago_seconds": 172800,
+			"title": "スタンプのテストが落ちる",
+			"files": ["internal/stamp/stamp_test.go"],
+			"commands": [
+				"go test ./internal/stamp",
+				"go test ./internal/doc",
+				"go build ./..."
+			]
+		},
+		{
+			"ago_seconds": 3600,
+			"title": "スタンプのテストが落ちる",
+			"commands": ["go test ./internal/stamp"]
+		}
+	],
+	"task": {
+		"turns": ["テストが落ちる — 直して"]
+	},
+	"check": {
+		"script": "check-stamp-page.sh",
+		"expect_start_state": "fail",
+		"seed_script": "seed_check.sh",
+		"timeout_seconds": 300
+	},
+	"coverage": {
+		"min_steps": 1,
+		"min_warm_start.sessions": 2
+	},
+	"requires": {
+		"network": false,
+		"tools": ["go", "sqlite3", "openssl"],
+		"os": ["darwin", "linux"]
+	},
+	"budget": {
+		"run_timeout_seconds": 600,
+		"max_steps": 30
+	}
+}

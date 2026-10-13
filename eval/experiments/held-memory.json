@@ -1,0 +1,43 @@
+{
+	"name": "held-memory",
+	"model": "opencode-go/muse-spark-1.3-contributor",
+	"temperature": 0,
+	"corpus": [
+		"held-en-ft-ambig",
+		"held-id-ft-ambig",
+		"held-en-bb-ambig",
+		"held-ja-ft-ambig",
+		"held-es-bb-ambig",
+		"held-mix-cs-ambig",
+		"held-en-veto",
+		"held-en-decoy"
+	],
+	"runs_per_trajectory": {
+		"stable": 3,
+		"mid": 10,
+		"uncharacterized": 11
+	},
+	"primary": {
+		"metric": "call_metrics.discovery_calls_before_write",
+		"direction": "decrease",
+		"mde": 0.35,
+		"max_pass_drop": 0.1
+	},
+	"arms": {
+		"control": {
+			"config": {"options": {"turn_context": "off"}}
+		},
+		"treatment": {
+			"config": {
+				"options": {
+					"turn_context": "off",
+					"failure_memory": true,
+					"referent_memory": true,
+					"session_memory": true
+				}
+			},
+			"coverage": {"min_tail.decisions.candidates": 1}
+		}
+	},
+	"providers": {}
+}

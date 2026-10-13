@@ -1,0 +1,13 @@
+diff --git a/internal/booking/booking.go b/internal/booking/booking.go
+index 80be20a..a510809 100644
+--- a/internal/booking/booking.go
++++ b/internal/booking/booking.go
+@@ -14,7 +14,7 @@ type Book struct {
+ func Confirm(taken []Book, who string, s slot.Slot) ([]Book, bool) {
+ 	for _, b := range taken {
+ 		if slot.Overlaps(b.Slot, s) {
+-			continue
++			return taken, false
+ 		}
+ 	}
+ 	return append(taken, Book{Who: who, Slot: s}), true
