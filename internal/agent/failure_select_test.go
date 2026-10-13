@@ -301,10 +301,53 @@ func TestSelectOpenFailures(t *testing.T) {
 			wantAdmit: []string{"go test .@."},
 		},
 		{
-			name:       "ambiguous narrow row rejected",
-			prompt:     promptAmbigTest,
-			failures:   []cmdlog.Failure{mkFailure("go test -count=1 ./decoy", ".", "decoy/decoy_test.go")},
-			wantReason: map[string]string{"go test -count=1 ./decoy@.": failNarrowScope},
+			// A lone kind-bound narrow row is the referent by
+			// elimination — uniqueness rescues the narrow gate (#321).
+			name:      "unique narrow row admitted by elimination",
+			prompt:    promptAmbigTest,
+			failures:  []cmdlog.Failure{mkFailure("go test -count=1 ./decoy", ".", "decoy/decoy_test.go")},
+			wantAdmit: []string{"go test -count=1 ./decoy@."},
+			wantReason: map[string]string{
+				"go test -count=1 ./decoy@.": admitUniqueScope,
+			},
+		},
+		{
+			// Two same-kind narrow rows leave the referent
+			// underdetermined — uniqueness fails, both stay silent.
+			name:   "two same-kind narrow rows stay silent",
+			prompt: promptAmbigTest,
+			failures: []cmdlog.Failure{
+				mkFailure("go test ./decoy", "."),
+				mkFailure("go test ./other", "."),
+			},
+			wantReason: map[string]string{
+				"go test ./decoy@.": failNarrowScope,
+				"go test ./other@.": failNarrowScope,
+			},
+		},
+		{
+			// Uniqueness counts per bound kind — a build row beside
+			// a lone test row does not dilute the test rescue.
+			name:   "kind-mismatched twin does not dilute uniqueness",
+			prompt: promptAmbigTest,
+			failures: []cmdlog.Failure{
+				mkFailure("go test ./decoy", "."),
+				mkFailure("go build ./other", "."),
+			},
+			wantAdmit: []string{"go test ./decoy@."},
+			wantReason: map[string]string{
+				"go test ./decoy@.":  admitUniqueScope,
+				"go build ./other@.": failKindMismatch,
+			},
+		},
+		{
+			// The negation check precedes the narrow gate — a vetoed
+			// row stays rejected even when it would be the unique
+			// kind-bound candidate (#321).
+			name:       "negated unique narrow row stays rejected",
+			prompt:     "don't touch decoy/decoy_test.go — the test fails",
+			failures:   []cmdlog.Failure{mkFailure("go test ./decoy", ".", "decoy/decoy_test.go")},
+			wantReason: map[string]string{"go test ./decoy@.": failNegatedScope},
 		},
 		{
 			name:       "ambiguous off-domain row rejected",
@@ -363,19 +406,25 @@ func TestSelectOpenFailures(t *testing.T) {
 			},
 		},
 		{
-			name:       "cwd mismatch is narrow under ambiguity",
-			prompt:     promptAmbigTest,
-			failures:   []cmdlog.Failure{mkFailure("go test", "sub/pkg")},
-			wantReason: map[string]string{"go test@sub/pkg": failNarrowScope},
+			name:      "cwd mismatch resolves to subpath scope — rescued by uniqueness",
+			prompt:    promptAmbigTest,
+			failures:  []cmdlog.Failure{mkFailure("go test", "sub/pkg")},
+			wantAdmit: []string{"go test@sub/pkg"},
+			wantReason: map[string]string{
+				"go test@sub/pkg": admitUniqueScope,
+			},
 		},
 		{
 			// A "." target resolves against the row's CWD, not the
 			// repo root — "cd decoy && go test ." (or working_dir)
 			// records cwd=decoy and must not read as top-level.
-			name:       "dot target under subdir cwd is narrow under ambiguity",
-			prompt:     promptAmbigTest,
-			failures:   []cmdlog.Failure{mkFailure("go test .", "decoy", "decoy/decoy_test.go")},
-			wantReason: map[string]string{"go test .@decoy": failNarrowScope},
+			name:      "dot target under subdir cwd is subpath scope — rescued by uniqueness",
+			prompt:    promptAmbigTest,
+			failures:  []cmdlog.Failure{mkFailure("go test .", "decoy", "decoy/decoy_test.go")},
+			wantAdmit: []string{"go test .@decoy"},
+			wantReason: map[string]string{
+				"go test .@decoy": admitUniqueScope,
+			},
 		},
 		{
 			name:       "dot target under subdir cwd misses explicit root scope",
@@ -386,10 +435,13 @@ func TestSelectOpenFailures(t *testing.T) {
 		{
 			// "...-style spread under a subdir CWD is still subdir
 			// scope — "./..." means every package under the CWD.
-			name:       "dotdotdot under subdir cwd is narrow under ambiguity",
-			prompt:     promptAmbigTest,
-			failures:   []cmdlog.Failure{mkFailure("go test ./...", "decoy")},
-			wantReason: map[string]string{"go test ./...@decoy": failNarrowScope},
+			name:      "dotdotdot under subdir cwd is subpath scope — rescued by uniqueness",
+			prompt:    promptAmbigTest,
+			failures:  []cmdlog.Failure{mkFailure("go test ./...", "decoy")},
+			wantAdmit: []string{"go test ./...@decoy"},
+			wantReason: map[string]string{
+				"go test ./...@decoy": admitUniqueScope,
+			},
 		},
 		{
 			// A relative target joins the recorded CWD: "cd decoy &&
@@ -455,10 +507,13 @@ func TestSelectOpenFailures(t *testing.T) {
 			// `cd decoy && go test .` folds to cwd=decoy — "." is the
 			// command's dir, not repo root. Under ambiguity that is
 			// a subpath-bound row: the mask-anchoring shape itself.
-			name:       "dot target under a folded cwd is subpath scope",
-			prompt:     promptAmbigTest,
-			failures:   []cmdlog.Failure{mkFailure("go test .", "decoy")},
-			wantReason: map[string]string{"go test .@decoy": failNarrowScope},
+			name:      "dot target under a folded cwd is subpath scope — rescued by uniqueness",
+			prompt:    promptAmbigTest,
+			failures:  []cmdlog.Failure{mkFailure("go test .", "decoy")},
+			wantAdmit: []string{"go test .@decoy"},
+			wantReason: map[string]string{
+				"go test .@decoy": admitUniqueScope,
+			},
 		},
 		{
 			name:       "dot target under a folded cwd misses explicit root scope",
@@ -520,10 +575,13 @@ func TestSelectOpenFailures(t *testing.T) {
 			wantAdmit: []string{"go test ./decoy/...@."},
 		},
 		{
-			name:       "recursive pattern row is still narrow under ambiguity",
-			prompt:     promptAmbigTest,
-			failures:   []cmdlog.Failure{mkFailure("go test ./decoy/...", ".")},
-			wantReason: map[string]string{"go test ./decoy/...@.": failNarrowScope},
+			name:      "recursive pattern row is subpath scope — rescued by uniqueness",
+			prompt:    promptAmbigTest,
+			failures:  []cmdlog.Failure{mkFailure("go test ./decoy/...", ".")},
+			wantAdmit: []string{"go test ./decoy/...@."},
+			wantReason: map[string]string{
+				"go test ./decoy/...@.": admitUniqueScope,
+			},
 		},
 		{
 			// "-o ./bin/t" is a flag value, not a target — it must
@@ -619,10 +677,13 @@ func TestSelectOpenFailures(t *testing.T) {
 			// A quoted target binds like its unquoted twin — the
 			// row must not fall back to cwd scope and read as
 			// top-level.
-			name:       "quoted path target binds the real scope",
-			prompt:     promptAmbigTest,
-			failures:   []cmdlog.Failure{mkFailure(`go test "./decoy"`, ".")},
-			wantReason: map[string]string{`go test "./decoy"@.`: failNarrowScope},
+			name:      "quoted path target binds the real scope — rescued by uniqueness",
+			prompt:    promptAmbigTest,
+			failures:  []cmdlog.Failure{mkFailure(`go test "./decoy"`, ".")},
+			wantAdmit: []string{`go test "./decoy"@.`},
+			wantReason: map[string]string{
+				`go test "./decoy"@.`: admitUniqueScope,
+			},
 		},
 		{
 			name:       "plural non-failure noun rejects",
@@ -644,12 +705,15 @@ func TestSelectOpenFailures(t *testing.T) {
 		},
 		{
 			// "w/" minted explicit scope before the disk/segment
-			// gate — under ambiguity the decoy row should read
-			// narrow_scope, not out_of_scope.
-			name:       "w/ idiom does not flip to explicit scope",
-			prompt:     "check w/ the team — the test is failing",
-			failures:   []cmdlog.Failure{mkFailure("go test ./decoy", ".")},
-			wantReason: map[string]string{"go test ./decoy@.": failNarrowScope},
+			// gate — under ambiguity the decoy row reads
+			// subpath-scope (uniqueness rescue), not out_of_scope.
+			name:      "w/ idiom does not flip to explicit scope — uniqueness rescues",
+			prompt:    "check w/ the team — the test is failing",
+			failures:  []cmdlog.Failure{mkFailure("go test ./decoy", ".")},
+			wantAdmit: []string{"go test ./decoy@."},
+			wantReason: map[string]string{
+				"go test ./decoy@.": admitUniqueScope,
+			},
 		},
 		{
 			// The exact decoy-anchoring case: an adverb between
@@ -690,10 +754,13 @@ func TestSelectOpenFailures(t *testing.T) {
 			// A dir-flag value is the command's scope — "make -C
 			// decoy" ran in decoy, not at root, so ambiguity
 			// reads it as narrow, not top-level.
-			name:       "dir flag binds the real working dir",
-			prompt:     "the build fails — fix it",
-			failures:   []cmdlog.Failure{mkFailure("make -C decoy", ".")},
-			wantReason: map[string]string{"make -C decoy@.": failNarrowScope},
+			name:      "dir flag binds the real working dir — rescued by uniqueness",
+			prompt:    "the build fails — fix it",
+			failures:  []cmdlog.Failure{mkFailure("make -C decoy", ".")},
+			wantAdmit: []string{"make -C decoy@."},
+			wantReason: map[string]string{
+				"make -C decoy@.": admitUniqueScope,
+			},
 		},
 		{
 			name:      "dir flag row admits under its own scope",
@@ -713,10 +780,13 @@ func TestSelectOpenFailures(t *testing.T) {
 		{
 			// The space form worked; the = spelling must too —
 			// make --directory=decoy ran in decoy, not at root.
-			name:       "dir flag equals spelling binds its dir",
-			prompt:     "the build fails — fix it",
-			failures:   []cmdlog.Failure{mkFailure("make --directory=decoy", ".")},
-			wantReason: map[string]string{"make --directory=decoy@.": failNarrowScope},
+			name:      "dir flag equals spelling binds its dir — rescued by uniqueness",
+			prompt:    "the build fails — fix it",
+			failures:  []cmdlog.Failure{mkFailure("make --directory=decoy", ".")},
+			wantAdmit: []string{"make --directory=decoy@."},
+			wantReason: map[string]string{
+				"make --directory=decoy@.": admitUniqueScope,
+			},
 		},
 		{
 			name:      "dir flag equals spelling admits under scope",
@@ -726,26 +796,35 @@ func TestSelectOpenFailures(t *testing.T) {
 		},
 		{
 			// -Cdecoy — joined short-flag spelling (make, git).
-			name:       "joined short dir flag binds its dir",
-			prompt:     "the build fails — fix it",
-			failures:   []cmdlog.Failure{mkFailure("make -Cdecoy", ".")},
-			wantReason: map[string]string{"make -Cdecoy@.": failNarrowScope},
+			name:      "joined short dir flag binds its dir — rescued by uniqueness",
+			prompt:    "the build fails — fix it",
+			failures:  []cmdlog.Failure{mkFailure("make -Cdecoy", ".")},
+			wantAdmit: []string{"make -Cdecoy@."},
+			wantReason: map[string]string{
+				"make -Cdecoy@.": admitUniqueScope,
+			},
 		},
 		{
 			// The dir flag is the effective CWD: "make -C decoy ."
 			// runs in decoy, so the "." target joins it — not root.
-			name:       "dir flag is effective cwd for later targets",
-			prompt:     "the build fails — fix it",
-			failures:   []cmdlog.Failure{mkFailure("make -C decoy .", ".")},
-			wantReason: map[string]string{"make -C decoy .@.": failNarrowScope},
+			name:      "dir flag is effective cwd for later targets — rescued by uniqueness",
+			prompt:    "the build fails — fix it",
+			failures:  []cmdlog.Failure{mkFailure("make -C decoy .", ".")},
+			wantAdmit: []string{"make -C decoy .@."},
+			wantReason: map[string]string{
+				"make -C decoy .@.": admitUniqueScope,
+			},
 		},
 		{
 			// -args ends the target scan for its own segment only —
 			// the next composite segment still mints scope.
-			name:       "args does not eat the next segment",
-			prompt:     "the test fails — fix it",
-			failures:   []cmdlog.Failure{mkFailure("go test -args -v && go test ./decoy", ".")},
-			wantReason: map[string]string{"go test -args -v && go test ./decoy@.": failNarrowScope},
+			name:      "args does not eat the next segment — rescued by uniqueness",
+			prompt:    "the test fails — fix it",
+			failures:  []cmdlog.Failure{mkFailure("go test -args -v && go test ./decoy", ".")},
+			wantAdmit: []string{"go test -args -v && go test ./decoy@."},
+			wantReason: map[string]string{
+				"go test -args -v && go test ./decoy@.": admitUniqueScope,
+			},
 		},
 		{
 			// A file-form veto at root binds the implicated file —
@@ -788,10 +867,44 @@ func TestSelectOpenFailures(t *testing.T) {
 					want = failAdmit
 				}
 				require.Equal(t, want, d.Reason, "signature %s", d.Signature)
-				require.Equal(t, d.Admit, d.Reason == failAdmit)
+				require.Equal(t, d.Admit, d.Reason == failAdmit || d.Reason == admitUniqueScope)
 			}
 		})
 	}
+}
+
+// The uniqueness count in the narrow_scope rescue reads the open
+// failure pool only — a resolved row or a passing command row is a
+// scope suggestion, not disambiguating failure evidence (#321).
+// This is the decoy-cell shape: a passing narrow command beside a
+// lone open narrow failure leaves the open row rescued while the
+// non-open rows stay silent.
+func TestSelectMemory_UniqueScopeCountsOpenPoolOnly(t *testing.T) {
+	t.Parallel()
+	prompt := "the test fails — fix it"
+	admitted, decisions := SimulateSelection(prompt, MemoryPools{
+		Open:     []cmdlog.Failure{mkFailure("go test ./decoy", ".")},
+		Resolved: []cmdlog.Failure{mkFailure("go test ./third", ".")},
+		Commands: []cmdlog.Command{
+			{CmdNorm: "go test ./other", CWD: ".", Kind: "test", LastExit: 0},
+		},
+	}, "", MemoryRenderLimits{})
+
+	var gotAdmit []string
+	for _, f := range admitted.Open {
+		gotAdmit = append(gotAdmit, f.Signature)
+	}
+	require.Equal(t, []string{"go test ./decoy@."}, gotAdmit)
+
+	reasons := map[string]string{}
+	for _, d := range decisions {
+		reasons[d.Cmd] = d.Reason
+	}
+	require.Equal(t, admitUniqueScope, reasons["go test ./decoy"])
+	require.Equal(t, failNarrowScope, reasons["go test ./third"],
+		"resolved rows keep the narrow gate")
+	require.Equal(t, failNarrowScope, reasons["go test ./other"],
+		"command rows keep the narrow gate")
 }
 
 func TestSelectOpenFailures_Validity(t *testing.T) {
@@ -823,6 +936,25 @@ func TestSelectOpenFailures_Validity(t *testing.T) {
 		"fix the failing test in decoy/deleted_test.go",
 		[]cmdlog.Failure{gone}, dir, 0)
 	require.Equal(t, failPathGone, decisions[0].Reason)
+
+	// The uniqueness rescue only bypasses the narrow gate — under an
+	// ambiguous prompt a lone narrow row is still answered by the
+	// state checks: touched after last_seen → stale_suspect, every
+	// implicated path absent → path_gone (#321).
+	_, decisions = selectOpenFailures(
+		"the test fails — fix it", []cmdlog.Failure{stale}, dir, 0)
+	require.Equal(t, failStaleSuspect, decisions[0].Reason,
+		"uniqueness does not rescue a stale record")
+	_, decisions = selectOpenFailures(
+		"the test fails — fix it", []cmdlog.Failure{gone}, dir, 0)
+	require.Equal(t, failPathGone, decisions[0].Reason,
+		"uniqueness does not rescue a gone record")
+
+	// A dir-form veto on a disk-backed dir precedes the rescue too.
+	_, decisions = selectOpenFailures(
+		"the test fails — don't touch decoy", []cmdlog.Failure{fresh}, dir, 0)
+	require.Equal(t, failNegatedScope, decisions[0].Reason,
+		"uniqueness does not rescue a vetoed row")
 }
 
 func TestSelectOpenFailures_DiskScope(t *testing.T) {
@@ -1046,7 +1178,7 @@ func TestSelectOpenFailures_IdentifierLayer(t *testing.T) {
 					want = failAdmit
 				}
 				require.Equal(t, want, d.Reason, "signature %s", d.Signature)
-				require.Equal(t, d.Admit, d.Reason == failAdmit)
+				require.Equal(t, d.Admit, d.Reason == failAdmit || d.Reason == admitUniqueScope)
 				if want, ok := tc.wantSettled[d.Signature]; ok {
 					require.Equal(t, want, d.SettledBy, "signature %s", d.Signature)
 				}

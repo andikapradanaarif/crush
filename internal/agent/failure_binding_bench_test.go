@@ -138,7 +138,7 @@ func TestBindingBenchmark(t *testing.T) {
 			for _, d := range decisions {
 				st.decisions++
 				want := cell.Expect[d.Signature]
-				wantAdmit := want == failAdmit
+				wantAdmit := want == failAdmit || want == admitUniqueScope
 				if wantAdmit {
 					st.expectAdmits++
 				}
@@ -153,7 +153,7 @@ func TestBindingBenchmark(t *testing.T) {
 				if wantAdmit {
 					require.True(t, d.Admit,
 						"cell %s sig %s: expected admit, got %s", cell.Name, d.Signature, d.Reason)
-					require.Equal(t, failAdmit, d.Reason)
+					require.Equal(t, want, d.Reason)
 				} else {
 					require.False(t, d.Admit,
 						"cell %s sig %s: veto violation — admitted, expected %s",
