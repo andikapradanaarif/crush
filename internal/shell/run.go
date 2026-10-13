@@ -110,11 +110,24 @@ type CaptureResult struct {
 	// policy denial, parse error, or context kill surfaces as
 	// ExitCode 1 with Verdict false, and is not a project failure.
 	Verdict bool
-	// ComponentExits is the per-call exit log — one entry per call
-	// the interpreter dispatched, in completion order — so a
-	// composite's clean final code can't launder a real failure out
-	// of command memory.
-	ComponentExits []int
+	// Components is the per-call dispatch log — argv, effective
+	// directory, and exit status of each call the interpreter
+	// dispatched, in completion order — so a composite's clean final
+	// code can't launder a real failure out of command memory, and a
+	// passing component can resolve the failure row its own command
+	// opened even when the composite spelling differs.
+	Components []ComponentCall
+}
+
+// ComponentCall records one call the interpreter dispatched: the
+// argv it ran, the directory in effect at dispatch, and its exit
+// status. Redirects are not argv — "go test ./... 2>&1" arrives as
+// "go test ./..." — so a decorated re-run matches the command a
+// failure row recorded.
+type ComponentCall struct {
+	Args []string
+	Dir  string
+	Exit int
 }
 
 // PersistFunc is a callback that persists a shell command result.
@@ -168,10 +181,10 @@ func RunAndCapture(ctx context.Context, opts RunOptions) (CaptureResult, error) 
 	}
 
 	return CaptureResult{
-		Output:         output,
-		ExitCode:       exitCode,
-		Verdict:        IsExitStatus(runErr),
-		ComponentExits: components.take(),
+		Output:     output,
+		ExitCode:   exitCode,
+		Verdict:    IsExitStatus(runErr),
+		Components: components.take(),
 	}, nil
 }
 
@@ -339,27 +352,32 @@ type execMiddleware = func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc
 // final code.
 type componentLog struct {
 	mu    sync.Mutex
-	codes []int
+	calls []ComponentCall
 }
 
-func (l *componentLog) record(code int) {
+func (l *componentLog) record(ctx context.Context, args []string, code int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.codes = append(l.codes, code)
+	l.calls = append(l.calls, ComponentCall{
+		Args: slices.Clone(args),
+		Dir:  interp.HandlerCtx(ctx).Dir,
+		Exit: code,
+	})
 }
 
-func (l *componentLog) take() []int {
+func (l *componentLog) take() []ComponentCall {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	codes := l.codes
-	l.codes = nil
-	return codes
+	calls := l.calls
+	l.calls = nil
+	return calls
 }
 
 // componentStatusHandler returns middleware that records each call's
-// real exit status into log. A nil log is a no-op — the stateless
-// [Run] surface and nested runners don't collect. Non-status errors
-// (policy denials, handler faults) carry no verdict and are skipped.
+// argv, dispatch-time directory, and real exit status into log. A
+// nil log is a no-op — the stateless [Run] surface and nested runners
+// don't collect. Non-status errors (policy denials, handler faults)
+// carry no verdict and are skipped.
 func componentStatusHandler(log *componentLog) execMiddleware {
 	return func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 		return func(ctx context.Context, args []string) error {
@@ -368,9 +386,9 @@ func componentStatusHandler(log *componentLog) execMiddleware {
 				return err
 			}
 			if err == nil {
-				log.record(0)
+				log.record(ctx, args, 0)
 			} else if status, ok := errors.AsType[interp.ExitStatus](err); ok {
-				log.record(int(status))
+				log.record(ctx, args, int(status))
 			}
 			return err
 		}

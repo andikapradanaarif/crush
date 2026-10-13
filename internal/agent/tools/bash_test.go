@@ -393,7 +393,7 @@ func TestBashTool_RecordsRunToCmdLog(t *testing.T) {
 	require.Contains(t, run.Stdout, "FAIL: TestX")
 }
 
-func TestBashTool_RecordsComponentExits(t *testing.T) {
+func TestBashTool_RecordsComponents(t *testing.T) {
 	workingDir := t.TempDir()
 	perms := &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
 	attribution := &config.Attribution{TrailerStyle: config.TrailerStyleNone}
@@ -414,8 +414,19 @@ func TestBashTool_RecordsComponentExits(t *testing.T) {
 	run := log.runs[0]
 	require.Equal(t, 0, run.ExitCode, "the composite's final code is head's clean close")
 	require.True(t, run.Ran)
-	require.Contains(t, run.ComponentExits, 3,
+	var exits []int
+	var shCall *shell.ComponentCall
+	for i := range run.Components {
+		exits = append(exits, run.Components[i].Exit)
+		if len(run.Components[i].Args) > 0 && run.Components[i].Args[0] == "sh" {
+			shCall = &run.Components[i]
+		}
+	}
+	require.Contains(t, exits, 3,
 		"the component log must carry the failed element's real verdict")
+	require.NotNil(t, shCall)
+	require.Equal(t, []string{"sh", "-c", "exit 3"}, shCall.Args)
+	require.NotEmpty(t, shCall.Dir)
 }
 
 func TestBashTool_BlockedCommandNotAProjectFailure(t *testing.T) {

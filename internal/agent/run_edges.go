@@ -1789,11 +1789,15 @@ func reconcileRetrySection(t *edgeTrigger) string {
 }
 
 // reconcileExhaustNote renders the budget-exhausted line for observed
-// failures still open.
+// failures still open. The line lands inside the final assistant
+// message — the last text the model reads — so it must actively
+// discharge the retry prompt's "do not report finished" directive,
+// not merely stop re-firing: without the lift, the residue anchors a
+// compliant model into an unbounded re-verify loop (#319).
 func reconcileExhaustNote(t *edgeTrigger, attempts int) string {
 	if len(t.openFailures) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%d observed failure(s) still open after %d attempt(s).",
+	return fmt.Sprintf("%d observed failure(s) still open after %d attempt(s). The retry budget is spent — they remain flagged but no longer block finishing: state them in your summary and finish.",
 		len(t.openFailures), attempts)
 }
