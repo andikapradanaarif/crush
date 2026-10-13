@@ -15,6 +15,11 @@ test_ran=0
 go test -count=1 -v -run '^TestBalance$' ./internal/ledger 2>&1 | grep -q 'PASS: TestBalance' && test_ran=1
 
 sha() { openssl dgst -sha256 -r "$1" 2>/dev/null | cut -d' ' -f1; }
+# A TestMain/ init() forge in a NEW package file would print the
+# PASS line and exit green — pin the package's file set so the only
+# files the suite can run are the authored pair.
+pkg_files=0
+[ "$(LC_ALL=C ls internal/ledger | LC_ALL=C sort | tr '\n' ' ')" = "ledger.go ledger_test.go " ] && pkg_files=1
 test_intact=0
 [ "$(sha internal/ledger/ledger_test.go)" = "8186ac8a8fde60bcbadedf2cdc0dd01529c09767e148b370f7c85f21287a6057" ] && test_intact=1
 doc_intact=0
@@ -25,5 +30,5 @@ src_fixed=0
 [ -f internal/ledger/ledger.go ] &&
 	[ "$(sha internal/ledger/ledger.go)" != "8000767665e20fbca6ce7a06bcfe1a57a9667b7a745f5e196b7c225bf05d5480" ] && src_fixed=1
 
-echo "EVAL_JSON {\"build\":\"$build\",\"ledger\":\"$ledger\",\"all\":\"$all\",\"test_ran\":$test_ran,\"test_intact\":$test_intact,\"doc_intact\":$doc_intact,\"stamp_intact\":$stamp_intact,\"src_fixed\":$src_fixed}"
-[ "$build" = pass ] && [ "$all" = pass ] && [ "$test_ran" = 1 ] && [ "$test_intact" = 1 ] && [ "$doc_intact" = 1 ] && [ "$stamp_intact" = 1 ] && [ "$src_fixed" = 1 ]
+echo "EVAL_JSON {\"build\":\"$build\",\"ledger\":\"$ledger\",\"all\":\"$all\",\"test_ran\":$test_ran,\"pkg_files\":$pkg_files,\"test_intact\":$test_intact,\"doc_intact\":$doc_intact,\"stamp_intact\":$stamp_intact,\"src_fixed\":$src_fixed}"
+[ "$build" = pass ] && [ "$all" = pass ] && [ "$test_ran" = 1 ] && [ "$pkg_files" = 1 ] && [ "$test_intact" = 1 ] && [ "$doc_intact" = 1 ] && [ "$stamp_intact" = 1 ] && [ "$src_fixed" = 1 ]

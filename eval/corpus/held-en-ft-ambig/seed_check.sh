@@ -1,7 +1,9 @@
 #!/bin/bash
 # Dose gate: the scripted seeds must have produced exactly the
 # one-open-row state this cell was authored around — a lone failing
-# narrow test row plus passing command rows.
+# narrow test row, passing command rows, and promoted referent mass
+# ("test"→bill.go across 3 sessions + filler episodes over the rate
+# floor) — the live channel this cell measures.
 cd "$EVAL_WORKDIR"
 db="$(dirname "$EVAL_WORKDIR")/$(basename "$EVAL_WORKDIR").crush-data/crush.db"
 open_rows=$(sqlite3 "$db" "SELECT COUNT(*) FROM failure_memory WHERE resolved_in = '';")
@@ -10,5 +12,7 @@ seed_sessions=$(sqlite3 "$db" "SELECT COUNT(*) FROM sessions;")
 open_rows=${open_rows:-0}
 cmd_rows=${cmd_rows:-0}
 seed_sessions=${seed_sessions:-0}
-echo "EVAL_JSON {\"open_rows\":$open_rows,\"cmd_rows\":$cmd_rows,\"seed_sessions\":$seed_sessions}"
-[ "$open_rows" -eq 1 ] && [ "$cmd_rows" -ge 3 ] && [ "$seed_sessions" -eq 2 ]
+ref_rows=$(sqlite3 "$db" "SELECT COUNT(*) FROM referent_memory WHERE phrase = 'test' AND target = 'internal/bill/bill.go';")
+ref_rows=${ref_rows:-0}
+echo "EVAL_JSON {\"open_rows\":$open_rows,\"cmd_rows\":$cmd_rows,\"seed_sessions\":$seed_sessions,\"promoted_test_ref\":$ref_rows}"
+[ "$open_rows" -eq 1 ] && [ "$cmd_rows" -ge 4 ] && [ "$seed_sessions" -eq 4 ] && [ "$ref_rows" -eq 1 ]

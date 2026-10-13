@@ -19,14 +19,12 @@
 				"go test ./internal/booking",
 				"go test ./internal/slot",
 				"go test ./internal/invoice"
-			],
-			"referents": [{"phrase": "the booking test", "target": "internal/booking"}]
+			]
 		},
 		{
 			"ago_seconds": 3600,
 			"title": "booking overlap test fails",
-			"commands": ["go test ./internal/booking"],
-			"referents": [{"phrase": "the booking test", "target": "internal/booking"}]
+			"commands": ["go test ./internal/booking"]
 		}
 	],
 	"task": {

@@ -12,21 +12,46 @@
 	},
 	"seed_commands": [
 		{
-			"ago_seconds": 172800,
-			"title": "bill test fails on the counter fixture",
+			"ago_seconds": 302400,
+			"title": "the bill test fails — service charge math suspect",
+			"files": ["internal/bill/bill_test.go", "internal/bill/bill.go"],
+			"commands": [
+				"go test ./internal/bill",
+				"go test ./internal/menu"
+			],
+			"referents": [{"phrase": "test", "target": "internal/bill/bill.go"}]
+		},
+		{
+			"ago_seconds": 216000,
+			"title": "the bill test fails again after a menu tweak",
 			"files": ["internal/bill/bill_test.go"],
 			"commands": [
 				"go test ./internal/bill",
-				"go test ./internal/menu",
 				"go build ./..."
 			],
-			"referents": [{"phrase": "the bill test", "target": "internal/bill"}]
+			"referents": [{"phrase": "test", "target": "internal/bill/bill.go"}]
+		},
+		{
+			"ago_seconds": 86400,
+			"title": "menu wording and order totals pass cleanly",
+			"files": ["internal/menu/menu.go", "internal/order/order_test.go"],
+			"commands": [
+				"go test ./internal/menu",
+				"go test ./internal/order",
+				"go build ./..."
+			],
+			"referents": [
+				{"phrase": "test", "target": "internal/menu/menu_test.go"},
+				{"phrase": "price", "target": "internal/menu/menu.go"},
+				{"phrase": "order", "target": "internal/order/order_test.go"}
+			]
 		},
 		{
 			"ago_seconds": 3600,
-			"title": "bill test fails on the counter fixture",
+			"title": "the bill test fails on the counter fixture",
+			"files": ["internal/bill/bill_test.go"],
 			"commands": ["go test ./internal/bill"],
-			"referents": [{"phrase": "the bill test", "target": "internal/bill"}]
+			"referents": [{"phrase": "test", "target": "internal/bill/bill.go"}]
 		}
 	],
 	"task": {
@@ -40,7 +65,7 @@
 	},
 	"coverage": {
 		"min_steps": 1,
-		"min_warm_start.sessions": 2
+		"min_warm_start.sessions": 4
 	},
 	"requires": {
 		"network": false,

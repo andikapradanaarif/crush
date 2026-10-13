@@ -19,14 +19,12 @@
 				"go test ./internal/menu",
 				"go test ./internal/bill",
 				"go build ./..."
-			],
-			"referents": [{"phrase": "the menu test", "target": "internal/menu"}]
+			]
 		},
 		{
 			"ago_seconds": 3600,
 			"title": "tes menu gagal — cek duplikasi nama",
-			"commands": ["go test ./internal/menu"],
-			"referents": [{"phrase": "the menu test", "target": "internal/menu"}]
+			"commands": ["go test ./internal/menu"]
 		}
 	],
 	"task": {

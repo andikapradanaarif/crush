@@ -19,14 +19,12 @@
 				"go test ./internal/stamp",
 				"go test ./internal/doc",
 				"go build ./..."
-			],
-			"referents": [{"phrase": "the stamp test", "target": "internal/stamp"}]
+			]
 		},
 		{
 			"ago_seconds": 3600,
 			"title": "スタンプのテストが落ちる",
-			"commands": ["go test ./internal/stamp"],
-			"referents": [{"phrase": "the stamp test", "target": "internal/stamp"}]
+			"commands": ["go test ./internal/stamp"]
 		}
 	],
 	"task": {

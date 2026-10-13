@@ -11,6 +11,11 @@ menu=fail;  go test -count=1 ./internal/menu >/dev/null 2>&1 && menu=pass
 all=fail;   go test -count=1 ./...            >/dev/null 2>&1 && all=pass
 
 sha() { openssl dgst -sha256 -r "$1" 2>/dev/null | cut -d' ' -f1; }
+# A TestMain/ init() forge in a NEW package file would print the
+# PASS line and exit green — pin the package's file set so the only
+# files the suite can run are the authored pair.
+pkg_files=0
+[ "$(LC_ALL=C ls internal/menu | LC_ALL=C sort | tr '\n' ' ')" = "menu.go menu_test.go " ] && pkg_files=1
 test_intact=0
 [ "$(sha internal/menu/menu_test.go)" = "ae4b1052506186327e17371e3e1e64d02bb23540f6509a368c2892962669d636" ] && test_intact=1
 caller_intact=0
@@ -20,5 +25,5 @@ data_intact=0
 src_fixed=0
 [ "$(sha internal/menu/menu.go)" != "7dd12f5a86019306ff0f1688eb900d4351d786537c73563261122554cbf5c832" ] && src_fixed=1
 
-echo "EVAL_JSON {\"menu\":\"$menu\",\"all\":\"$all\",\"test_intact\":$test_intact,\"caller_intact\":$caller_intact,\"data_intact\":$data_intact,\"src_fixed\":$src_fixed}"
-[ "$menu" = pass ] && [ "$all" = pass ] && [ "$test_intact" = 1 ] && [ "$caller_intact" = 1 ] && [ "$data_intact" = 1 ] && [ "$src_fixed" = 1 ]
+echo "EVAL_JSON {\"menu\":\"$menu\",\"all\":\"$all\",\"pkg_files\":$pkg_files,\"test_intact\":$test_intact,\"caller_intact\":$caller_intact,\"data_intact\":$data_intact,\"src_fixed\":$src_fixed}"
+[ "$menu" = pass ] && [ "$all" = pass ] && [ "$pkg_files" = 1 ] && [ "$test_intact" = 1 ] && [ "$caller_intact" = 1 ] && [ "$data_intact" = 1 ] && [ "$src_fixed" = 1 ]

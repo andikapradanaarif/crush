@@ -596,6 +596,22 @@ discovery calls; the fixture still measures the efficiency claim
 there, but not the capability one). Characterize under the pinned
 model before reading arm differences.
 
+### The `held-*` family — the sealed held-out tier (#224)
+
+`held-*` cells are the sealed corpus: blind-authored against this
+spec, never run under an experiment until sealed by review, and
+never tuned against selector internals afterward — divergences get
+attributed in analysis (via `decisions.reasons`), not patched away.
+Three shared fixtures (`held-bistro`, `held-papertrail`,
+`held-studio` file trees inside the host cells) back 8 cells across
+en/id/es/ja plus a code-switched prompt, a veto shape, and a decoy
+shape; cells cross-reference their host's `fixture/` and `check-*.sh`
+by relative path, so editing one overlay or check re-keys every
+sibling snapshot. Coverage asserts machinery engagement
+(`min_warm_start.sessions`, `decisions.candidates`), never a
+rendered section — channel silence is a legitimate outcome, not a
+coverage miss.
+
 ## experiment.json — the arm structure
 
 ```json
