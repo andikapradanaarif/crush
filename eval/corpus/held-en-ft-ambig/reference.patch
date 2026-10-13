@@ -1,0 +1,11 @@
+diff --git a/internal/bill/bill.go b/internal/bill/bill.go
+index 48e5926..0d97aef 100644
+--- a/internal/bill/bill.go
++++ b/internal/bill/bill.go
+@@ -10,5 +10,5 @@ func LineTotal(qty, unitCents int) int {
+ // subtotal — subtotal*pct/100 with the product taken first so the
+ // division keeps its remainder.
+ func ServiceCharge(subtotalCents, pct int) int {
+-	return subtotalCents / 100 * pct
++	return subtotalCents * pct / 100
+ }

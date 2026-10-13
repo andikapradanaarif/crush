@@ -1,0 +1,13 @@
+diff --git a/internal/stamp/stamp.go b/internal/stamp/stamp.go
+index 86229a0..977ddbf 100644
+--- a/internal/stamp/stamp.go
++++ b/internal/stamp/stamp.go
+@@ -15,7 +15,7 @@ func Footer(page, total int) string {
+ // StampAll returns a footer for every page in the document.
+ func StampAll(d *doc.Doc) []string {
+ 	out := make([]string, 0, d.PageCount())
+-	for i := 0; i < d.PageCount(); i++ {
++	for i := 1; i <= d.PageCount(); i++ {
+ 		out = append(out, Footer(i, d.PageCount()))
+ 	}
+ 	return out

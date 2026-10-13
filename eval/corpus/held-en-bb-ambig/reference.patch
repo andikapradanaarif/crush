@@ -1,0 +1,17 @@
+diff --git a/internal/order/order.go b/internal/order/order.go
+index b65bf06..206e6d4 100644
+--- a/internal/order/order.go
++++ b/internal/order/order.go
+@@ -21,7 +21,11 @@ type Order struct {
+ func Total(m *menu.Menu, o Order) (int, bool) {
+ 	total := 0
+ 	for _, l := range o.Lines {
+-		total += bill.LineTotal(l.Qty, m.Price(l.Dish))
++		cents, ok := m.Price(l.Dish)
++		if !ok {
++			return 0, false
++		}
++		total += bill.LineTotal(l.Qty, cents)
+ 	}
+ 	return total, true
+ }

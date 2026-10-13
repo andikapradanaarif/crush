@@ -1,0 +1,16 @@
+diff --git a/internal/menu/menu.go b/internal/menu/menu.go
+index a38c070..f6e8a0e 100644
+--- a/internal/menu/menu.go
++++ b/internal/menu/menu.go
+@@ -15,6 +15,11 @@ type Menu struct {
+ // Add registers a dish; a duplicate name is rejected and the
+ // menu is left unchanged.
+ func (m *Menu) Add(d Dish) bool {
++	for _, e := range m.dishes {
++		if e.Name == d.Name {
++			return false
++		}
++	}
+ 	m.dishes = append(m.dishes, d)
+ 	return true
+ }
