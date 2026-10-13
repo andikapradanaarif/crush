@@ -810,6 +810,10 @@ type FailureDecision struct {
 	Admit     bool   `json:"admit"`
 	Reason    string `json:"reason"`
 	SettledBy string `json:"settled_by,omitempty"`
+	// Route mirrors agent.FailureDecision.Route — the dispatch-table
+	// id that produced Reason (#232), so the three kind_mismatch
+	// emitters stay distinguishable.
+	Route string `json:"route,omitempty"`
 	// SourceSession and SourceCall mirror the candidate's #220
 	// provenance — the session/tool call whose observation produced
 	// the row, empty on pre-provenance ledger rows.

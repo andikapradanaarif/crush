@@ -1395,3 +1395,179 @@ func TestSimulateSelection(t *testing.T) {
 		require.Empty(t, admitted.Commands)
 	})
 }
+
+// The route table is the enumerable spec: every route must be
+// reachable, table order must be the dispatch order, and every
+// emitted reason must belong to the closed vocabulary (#232). Each
+// fixture builds the minimal selCtx where the target route is the
+// FIRST to fire — asserting the loop lands on it proves the earlier
+// routes all missed.
+func TestFailureRoutes_Coverage(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	newerFile := filepath.Join(dir, "new.go")
+	require.NoError(t, os.WriteFile(newerFile, []byte("x"), 0o644))
+	newer := mkFailure("go test .", ".", "new.go")
+	newer.LastSeen = time.Now().Add(-time.Hour)
+
+	fixtures := map[string]selCtx{
+		"shadowed": {
+			cand: selCandidate{shadowed: true},
+		},
+		"negated-scope": {
+			neg: []string{"decoy"}, dirs: []string{"decoy"},
+		},
+		"ident-veto": {
+			mention: mentionVeto,
+		},
+		"ident-kind-gate": {
+			mention: mentionPositive, kind: "read",
+		},
+		"ident-path-gone": {
+			mention: mentionPositive, kind: "test", workDir: dir,
+			f: mkFailure("go test .", ".", "gone.go"),
+		},
+		"ident-stale": {
+			mention: mentionPositive, kind: "test", workDir: dir,
+			f: newer,
+		},
+		"ident-admit": {
+			mention: mentionPositive, kind: "test",
+		},
+		"explicit-out-of-scope": {
+			explicit: true, dirs: []string{"other"}, pos: []string{"realdir"},
+		},
+		"explicit-kind-gate": {
+			explicit: true, dirs: []string{"."}, pos: []string{"."}, kind: "read",
+		},
+		"lang-unsupported": {
+			prompt: "テストが落ちてる",
+		},
+		"mention-unknown": {
+			prompt: "arregla TestAdd", mention: mentionUnknown,
+		},
+		"referent-none": {
+			prompt: "el test falla",
+		},
+		"referent-kind-mismatch": {
+			kinds: []string{"test"}, kind: "build", topLevel: true,
+		},
+		"narrow-scope": {
+			kinds: []string{"test"}, kind: "test",
+			cand: selCandidate{pool: poolOpen},
+		},
+		"path-gone": {
+			kinds: []string{"test"}, kind: "test", topLevel: true,
+			workDir: dir, f: mkFailure("go test .", ".", "gone.go"),
+		},
+		"stale-suspect": {
+			kinds: []string{"test"}, kind: "test", topLevel: true,
+			workDir: dir, f: newer,
+		},
+		"default-admit": {
+			kinds: []string{"test"}, kind: "test", topLevel: true,
+		},
+	}
+
+	reasons := map[string]bool{
+		failAdmit: true, failNegatedScope: true, failOutOfScope: true,
+		failReferentNone: true, failKindMismatch: true, failNarrowScope: true,
+		admitUniqueScope: true, failPathGone: true, failStaleSuspect: true,
+		failNonUserPrompt: true, failLangUnsupported: true,
+		failMentionUnknown: true, failRenderCapped: true, failShadowed: true,
+	}
+	settles := map[string]bool{
+		settledState: true, settledLexicon: true,
+		settledIdentifier: true, settledHarness: true,
+	}
+
+	// The precedence contract itself is pinned: the table's id order
+	// is the dispatch order, so an accidental reorder fails here even
+	// where no fixture could distinguish the swapped pair.
+	wantIDs := []string{
+		"shadowed", "negated-scope", "ident-veto", "ident-kind-gate",
+		"ident-path-gone", "ident-stale", "ident-admit",
+		"explicit-out-of-scope", "explicit-kind-gate",
+		"lang-unsupported", "mention-unknown", "referent-none",
+		"referent-kind-mismatch", "narrow-scope",
+		"path-gone", "stale-suspect", "default-admit",
+	}
+	require.Len(t, failureRoutes, len(wantIDs))
+	for i, id := range wantIDs {
+		require.Equal(t, id, failureRoutes[i].id, "route %d reordered", i)
+		require.True(t, settles[failureRoutes[i].settled],
+			"route %s settles %q outside the closed vocabulary",
+			id, failureRoutes[i].settled)
+	}
+
+	seen := map[string]bool{}
+	for _, want := range failureRoutes {
+		require.False(t, seen[want.id], "duplicate route id %s", want.id)
+		seen[want.id] = true
+		fixture, ok := fixtures[want.id]
+		require.True(t, ok, "route %s has no fixture", want.id)
+		var got string
+		for _, r := range failureRoutes {
+			if reason, fired := r.eval(fixture); fired {
+				got = r.id
+				require.True(t, reasons[reason],
+					"route %s emits %s outside the closed vocabulary", r.id, reason)
+				break
+			}
+		}
+		require.Equal(t, want.id, got,
+			"fixture for %s fired %s instead — order or guard drifted", want.id, got)
+	}
+	for id := range fixtures {
+		require.True(t, seen[id], "fixture %s names no route", id)
+	}
+
+	// A boundary the per-route fixtures cannot see: a non-ASCII
+	// prompt carrying an unresolvable identifier mention satisfies
+	// both lang-unsupported and mention-unknown. The nested switch
+	// this replaced checked the language gap first, so the table
+	// must too.
+	boundary := selCtx{prompt: "TestFooが壊れた", mention: mentionUnknown}
+	var first string
+	for _, r := range failureRoutes {
+		if _, fired := r.eval(boundary); fired {
+			first = r.id
+			break
+		}
+	}
+	require.Equal(t, "lang-unsupported", first)
+}
+
+// The three kind_mismatch emitters record which fired — the route id
+// disambiguates what the shared reason cannot (#232).
+func TestFailureRoutes_KindMismatchAttribution(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	// Ambiguous prompt binding "test" referents against a build-kind
+	// row → referent-kind-mismatch.
+	_, ds := selectOpenFailures("the test fails",
+		[]cmdlog.Failure{mkFailure("go build .", ".")}, dir, 0)
+	require.Len(t, ds, 1)
+	require.Equal(t, failKindMismatch, ds[0].Reason)
+	require.Equal(t, "referent-kind-mismatch", ds[0].Route)
+
+	// Explicit scope against a non-verification row → explicit-kind-gate.
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "decoy"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "decoy", "x.go"), []byte("x"), 0o644))
+	_, ds = selectOpenFailures("fix decoy/x.go",
+		[]cmdlog.Failure{mkFailure("ls decoy", "decoy")}, dir, 0)
+	require.Len(t, ds, 1)
+	require.Equal(t, failKindMismatch, ds[0].Reason)
+	require.Equal(t, "explicit-kind-gate", ds[0].Route)
+
+	// Identifier mention on a non-verification row → ident-kind-gate.
+	_, ds = selectOpenFailures("fix TestValue",
+		[]cmdlog.Failure{{
+			Signature: "s", Cmd: "ls -la", CWD: ".",
+			Headline: "TestValue error", Files: []string{"x.go"},
+		}}, dir, 0)
+	require.Len(t, ds, 1)
+	require.Equal(t, failKindMismatch, ds[0].Reason)
+	require.Equal(t, "ident-kind-gate", ds[0].Route)
+}
