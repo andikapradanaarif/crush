@@ -366,6 +366,13 @@ const staleOpenCheckLimit = 256
 // decisions stay frozen; only the rendered claim is refreshed. A
 // fetch failure keeps the frozen render — a tail that might be stale
 // is safer than a tail that silently vanishes.
+//
+// Symmetric blind spot, acknowledged: a row rendered under
+// <resolved_failures> that re-fails mid-turn cannot re-enter the
+// warning section — it was never in selected.open, and frozen
+// selection admits no new rows. Its resolved claim stays true (it
+// did later pass), so nothing lies; the model just loses the
+// "failing again" signal until next turn.
 func (a *sessionAgent) refreshOpenFailuresTail(ctx context.Context, call SessionAgentCall, tail []fantasy.Message) []fantasy.Message {
 	if len(tail) == 0 || a.cmdlog == nil || a.turnSels == nil || call.RunStamp == 0 {
 		return tail
@@ -393,19 +400,23 @@ func (a *sessionAgent) refreshOpenFailuresTail(ctx context.Context, call Session
 		openSigs[f.Signature] = true
 	}
 	var still []cmdlog.Failure
+	var dropped []string
 	for _, f := range sel.selected.open {
 		if openSigs[f.Signature] {
 			still = append(still, f)
+		} else {
+			dropped = append(dropped, f.Signature)
 		}
 	}
-	if len(still) == len(sel.selected.open) {
+	if len(dropped) == 0 {
 		return tail
 	}
 	slog.Debug("Open failure resolved mid-turn; refreshing tail",
 		"session_id", call.SessionID,
-		"resolved_rows", len(sel.selected.open)-len(still),
+		"resolved_rows", len(dropped),
 		"still_open", len(still),
 	)
+	a.recordTailDrops(call, dropped)
 	sections := make([]string, 0, len(sel.sections))
 	for _, s := range sel.sections {
 		if tailSectionName(s) != "open_failures" {
@@ -420,6 +431,40 @@ func (a *sessionAgent) refreshOpenFailuresTail(ctx context.Context, call Session
 		return nil
 	}
 	return []fantasy.Message{fantasy.NewUserMessage(strings.Join(sections, "\n\n"))}
+}
+
+// recordTailDrops marks the turn's audits with the signatures a
+// mid-turn refresh dropped — the selection-time record stays frozen,
+// so without this "admitted per decisions but absent from later
+// steps" is explainable only by reconstructing step_records (#325).
+func (a *sessionAgent) recordTailDrops(call SessionAgentCall, dropped []string) {
+	merge := func(audit TailAudit) TailAudit {
+		seen := make(map[string]bool, len(audit.DroppedSignatures))
+		for _, s := range audit.DroppedSignatures {
+			seen[s] = true
+		}
+		for _, s := range dropped {
+			if !seen[s] {
+				audit.DroppedSignatures = append(audit.DroppedSignatures, s)
+			}
+		}
+		return audit
+	}
+	if a.tailAudit != nil {
+		if audit, ok := a.tailAudit.Get(call.SessionID); ok && audit.RunStamp == call.RunStamp {
+			a.tailAudit.Set(call.SessionID, merge(audit))
+		}
+	}
+	if a.tailRuns != nil {
+		if runs, ok := a.tailRuns.Get(call.SessionID); ok {
+			for i := range runs {
+				if runs[i].RunStamp == call.RunStamp {
+					runs[i] = merge(runs[i])
+				}
+			}
+			a.tailRuns.Set(call.SessionID, runs)
+		}
+	}
 }
 
 // turnSelection caches one user turn's memory selection — all three
@@ -514,6 +559,13 @@ type TailAudit struct {
 	// carries none; the field is decision evidence, not generic
 	// "what the run did" telemetry.
 	Actions []TailAction `json:"actions,omitempty"`
+	// DroppedSignatures lists open_failures rows that rendered at
+	// turn start but were dropped from later steps after resolving
+	// mid-turn (#325). The audit records the selection-time render;
+	// this field marks the divergence between "admitted per
+	// decisions" and "still present at the last step's request" —
+	// a replay-vs-live diff is not a drift bug when this explains it.
+	DroppedSignatures []string `json:"dropped_signatures,omitempty"`
 }
 
 var tailSectionNameRe = regexp.MustCompile(`^<(\w+)>`)

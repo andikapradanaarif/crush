@@ -931,6 +931,9 @@ func TestRefreshOpenFailuresTail(t *testing.T) {
 		for _, m := range a.refreshOpenFailuresTail(t.Context(), call, tail) {
 			require.NotContains(t, m.Content[0].(fantasy.TextPart).Text, "open_failures")
 		}
+		audit, ok := a.tailAudit.Get(sessionID)
+		require.True(t, ok)
+		require.Len(t, audit.DroppedSignatures, 1)
 	})
 
 	t.Run("still-open rows keep the byte-stable tail", func(t *testing.T) {
@@ -953,7 +956,8 @@ func TestRefreshOpenFailuresTail(t *testing.T) {
 		})
 		opens := listOpenFailures(t, env)
 		require.Len(t, opens, 2)
-		sections := []string{a.renderOpenFailuresSection(opens)}
+		marker := "<turn_context>\nmarker section — survives the splice verbatim\n</turn_context>"
+		sections := []string{a.renderOpenFailuresSection(opens), marker}
 		a.turnSels.Set(sessionID, turnSelection{
 			stamp:    1,
 			selected: memoryPools{open: opens},
@@ -961,17 +965,51 @@ func TestRefreshOpenFailuresTail(t *testing.T) {
 		})
 		tail := []fantasy.Message{fantasy.NewUserMessage(strings.Join(sections, "\n\n"))}
 		call := SessionAgentCall{SessionID: sessionID, RunStamp: 1}
+		a.tailAudit.Set(sessionID, TailAudit{RunStamp: 1})
+		a.tailRuns.Set(sessionID, []TailAudit{{RunStamp: 1}})
 
 		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
 			SessionID: sessionID, Command: "go test ./decoy",
 			CWD: env.workingDir, Stdout: "ok", ExitCode: 0, Ran: true,
 		})
 
+		var decoySig string
+		var survivor []cmdlog.Failure
+		for _, f := range opens {
+			if f.Cmd == "go build ." {
+				survivor = append(survivor, f)
+			} else {
+				decoySig = f.Signature
+			}
+		}
+
 		refreshed := a.refreshOpenFailuresTail(t.Context(), call, tail)
 		require.Len(t, refreshed, 1)
-		text := refreshed[0].Content[0].(fantasy.TextPart).Text
-		require.Contains(t, text, "go build .")
-		require.NotContains(t, text, "go test ./decoy")
+		require.Len(t, survivor, 1)
+		want := strings.Join([]string{a.renderOpenFailuresSection(survivor), marker}, "\n\n")
+		require.Equal(t, want, refreshed[0].Content[0].(fantasy.TextPart).Text)
+
+		audit, ok := a.tailAudit.Get(sessionID)
+		require.True(t, ok)
+		require.Equal(t, []string{decoySig}, audit.DroppedSignatures)
+		runs, _ := a.tailRuns.Get(sessionID)
+		require.Equal(t, []string{decoySig}, runs[0].DroppedSignatures)
+	})
+
+	t.Run("a fetch failure keeps the frozen render", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newTailAgentEnv(t)
+		call := SessionAgentCall{
+			SessionID: sessionID, Prompt: "fix TestValue", RunStamp: 1,
+		}
+		tail := a.turnTailMessages(t.Context(), call, nil)
+		require.Len(t, tail, 1)
+		env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+			SessionID: sessionID, Command: "go test ./decoy",
+			CWD: env.workingDir, Stdout: "ok", ExitCode: 0, Ran: true,
+		})
+		a.cmdlog = failingCmdlog{}
+		require.Equal(t, tail, a.refreshOpenFailuresTail(t.Context(), call, tail))
 	})
 }
 
