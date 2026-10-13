@@ -289,6 +289,7 @@ func tailDecisions(r *RunRecord, which string) float64 {
 // render-budget exit.
 var tailDecisionReasons = []string{
 	"admit",
+	"admit_unique_scope",
 	"non_user_prompt",
 	"shadowed_by_open",
 	"negated_scope",
