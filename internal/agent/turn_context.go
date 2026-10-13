@@ -136,14 +136,19 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	// filesystem reads must not serialize into the request path.
 	if a.cmdlog != nil && !a.isSubAgent {
 		labelCtx := context.WithoutCancel(ctx)
+		// Read the agent fields on this goroutine — production sets
+		// them at construction, but tests re-stamp mid-flight and the
+		// detached slot must not read them off-goroutine.
+		cmdlogSvc := a.cmdlog
+		rateDecay := a.memoryParams().RateDecay
 		a.spawnDetached(func() {
-			if err := a.cmdlog.MatureReferentLabels(labelCtx, referentLabelMatureLimit); err != nil {
+			if err := cmdlogSvc.MatureReferentLabels(labelCtx, referentLabelMatureLimit); err != nil {
 				slog.Warn("Referent label maturity pass failed", "error", err)
 			}
 			// The rate fold (#296) rides the same detached slot —
 			// settled episodes become decayed posterior mass a turn
 			// late, which is the schedule every learned layer uses.
-			if err := a.cmdlog.UpdateProjectRates(labelCtx, a.memoryParams().RateDecay); err != nil {
+			if err := cmdlogSvc.UpdateProjectRates(labelCtx, rateDecay); err != nil {
 				slog.Warn("Project rate fold failed", "error", err)
 			}
 		})
