@@ -31,12 +31,13 @@
 				"options": {
 					"turn_context": "off",
 					"failure_memory": true,
+					"failure_memory_edges": false,
 					"referent_memory": true,
 					"session_memory": true
 				}
 			},
 			"coverage": {
-				"min_tail.sections.session_memory": 1
+				"min_tail.decisions.candidates": 1
 			}
 		}
 	},
