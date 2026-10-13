@@ -183,15 +183,17 @@ type selCtx struct {
 // precedence order: the first route whose eval fires produces the
 // verdict, so a route's guard may assume every earlier route missed.
 // A check that exists in code but not here cannot exist — the table
-// is the enumerable spec ROUTE_SPACE.md describes (#232).
+// is the enumerable spec ROUTE_SPACE.md describes (#232). The ctx
+// passes by value, so a route cannot poison a later guard's inputs.
 type selRoute struct {
 	id      string
 	settled string
-	eval    func(c *selCtx) (reason string, fired bool)
+	eval    func(c selCtx) (reason string, fired bool)
 }
 
-// failureRoutes is the candidate dispatch table. Three kind_mismatch
-// emitters exist — ident-kind-gate, explicit-kind-gate, and
+// failureRoutes is the candidate dispatch table — read-only after
+// init, its order is the audit contract. Three kind_mismatch emitters
+// exist — ident-kind-gate, explicit-kind-gate, and
 // referent-kind-mismatch — sharing the closed reason vocabulary
 // while Route distinguishes the check that fired.
 var failureRoutes = []selRoute{
@@ -200,13 +202,13 @@ var failureRoutes = []selRoute{
 		// The shadow precedes every other check: the open twin's own
 		// decision carries the real verdict on this command, and this
 		// row's verdict is "subsumed", not rejected on the merits.
-		eval: func(c *selCtx) (string, bool) {
+		eval: func(c selCtx) (string, bool) {
 			return failShadowed, c.cand.shadowed
 		},
 	},
 	{
 		id: "negated-scope", settled: settledLexicon,
-		eval: func(c *selCtx) (string, bool) {
+		eval: func(c selCtx) (string, bool) {
 			return failNegatedScope, negatedByAny(c.dirs, c.f.Files, c.neg, c.pos)
 		},
 	},
@@ -214,7 +216,7 @@ var failureRoutes = []selRoute{
 		id: "ident-veto", settled: settledIdentifier,
 		// A named identifier inside a negated span vetoes its own
 		// row — path-veto parity at the mention layer.
-		eval: func(c *selCtx) (string, bool) {
+		eval: func(c selCtx) (string, bool) {
 			return failNegatedScope, c.mention == mentionVeto
 		},
 	},
@@ -223,19 +225,19 @@ var failureRoutes = []selRoute{
 		// A named identifier binds a row the way explicit scope does
 		// — and still requires a verdict-flavored row: a failed ls
 		// whose headline happens to carry the token must not inject.
-		eval: func(c *selCtx) (string, bool) {
+		eval: func(c selCtx) (string, bool) {
 			return failKindMismatch, c.mention == mentionPositive && !slices.Contains(verificationKinds, c.kind)
 		},
 	},
 	{
 		id: "ident-path-gone", settled: settledState,
-		eval: func(c *selCtx) (string, bool) {
+		eval: func(c selCtx) (string, bool) {
 			return failPathGone, c.mention == mentionPositive && allPathsGone(c.f, c.workDir)
 		},
 	},
 	{
 		id: "ident-stale", settled: settledState,
-		eval: func(c *selCtx) (string, bool) {
+		eval: func(c selCtx) (string, bool) {
 			return failStaleSuspect, c.mention == mentionPositive && anyPathNewer(c.f, c.workDir)
 		},
 	},
@@ -246,13 +248,13 @@ var failureRoutes = []selRoute{
 		// was resolved language-neutrally (cue, verb, or lone), so
 		// non-English positive prompts only bind here when the
 		// English signal is genuinely present.
-		eval: func(c *selCtx) (string, bool) {
+		eval: func(c selCtx) (string, bool) {
 			return failAdmit, c.mention == mentionPositive
 		},
 	},
 	{
 		id: "explicit-out-of-scope", settled: settledLexicon,
-		eval: func(c *selCtx) (string, bool) {
+		eval: func(c selCtx) (string, bool) {
 			return failOutOfScope, c.explicit && !overlapsAny(c.dirs, c.pos)
 		},
 	},
@@ -261,7 +263,7 @@ var failureRoutes = []selRoute{
 		// Explicit scope still requires a verdict-flavored row — a
 		// failed ls/git/curl at root must not inject into an
 		// unrelated "fix main.go".
-		eval: func(c *selCtx) (string, bool) {
+		eval: func(c selCtx) (string, bool) {
 			return failKindMismatch, c.explicit && !slices.Contains(verificationKinds, c.kind)
 		},
 	},
@@ -269,7 +271,7 @@ var failureRoutes = []selRoute{
 		id: "lang-unsupported", settled: settledLexicon,
 		// The lexicon could not parse the prompt — a measured
 		// coverage hole, not a clean referent absence.
-		eval: func(c *selCtx) (string, bool) {
+		eval: func(c selCtx) (string, bool) {
 			return failLangUnsupported, !c.explicit && c.kinds == nil && nonASCIILetter(c.prompt)
 		},
 	},
@@ -278,19 +280,19 @@ var failureRoutes = []selRoute{
 		// An identifier was named but its polarity parsed neither
 		// way. Nothing else bound, so the record marks the
 		// unresolvable mention rather than a bare referent absence.
-		eval: func(c *selCtx) (string, bool) {
+		eval: func(c selCtx) (string, bool) {
 			return failMentionUnknown, !c.explicit && c.kinds == nil && c.mention == mentionUnknown
 		},
 	},
 	{
 		id: "referent-none", settled: settledLexicon,
-		eval: func(c *selCtx) (string, bool) {
+		eval: func(c selCtx) (string, bool) {
 			return failReferentNone, !c.explicit && c.kinds == nil
 		},
 	},
 	{
 		id: "referent-kind-mismatch", settled: settledLexicon,
-		eval: func(c *selCtx) (string, bool) {
+		eval: func(c selCtx) (string, bool) {
 			return failKindMismatch, !c.explicit && !slices.Contains(c.kinds, c.kind)
 		},
 	},
@@ -302,20 +304,20 @@ var failureRoutes = []selRoute{
 		// only. Uniqueness rescues it: a lone kind-bound open failure
 		// is the referent by elimination (#321); the remaining checks
 		// (path_gone, stale_suspect) still apply.
-		eval: func(c *selCtx) (string, bool) {
+		eval: func(c selCtx) (string, bool) {
 			return failNarrowScope, !c.explicit && c.kind != "run" && !c.topLevel &&
 				(c.cand.pool != poolOpen || !c.uniqueOpenByKind[c.kind])
 		},
 	},
 	{
 		id: "path-gone", settled: settledState,
-		eval: func(c *selCtx) (string, bool) {
+		eval: func(c selCtx) (string, bool) {
 			return failPathGone, allPathsGone(c.f, c.workDir)
 		},
 	},
 	{
 		id: "stale-suspect", settled: settledState,
-		eval: func(c *selCtx) (string, bool) {
+		eval: func(c selCtx) (string, bool) {
 			return failStaleSuspect, anyPathNewer(c.f, c.workDir)
 		},
 	},
@@ -323,7 +325,7 @@ var failureRoutes = []selRoute{
 		id: "default-admit", settled: settledLexicon,
 		// The terminal route — a candidate no earlier gate rejected
 		// binds under the prompt analysis that ran the table.
-		eval: func(*selCtx) (string, bool) {
+		eval: func(selCtx) (string, bool) {
 			return failAdmit, true
 		},
 	},
@@ -1757,7 +1759,7 @@ func selectMemory(prompt string, pools memoryPools, workDir string,
 			topLevel: topLevel, mention: mention,
 		}
 		for _, r := range failureRoutes {
-			if rr, fired := r.eval(&sc); fired {
+			if rr, fired := r.eval(sc); fired {
 				reason = rr
 				d.SettledBy = r.settled
 				d.Route = r.id

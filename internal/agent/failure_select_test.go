@@ -1476,19 +1476,42 @@ func TestFailureRoutes_Coverage(t *testing.T) {
 		failNonUserPrompt: true, failLangUnsupported: true,
 		failMentionUnknown: true, failRenderCapped: true, failShadowed: true,
 	}
+	settles := map[string]bool{
+		settledState: true, settledLexicon: true,
+		settledIdentifier: true, settledHarness: true,
+	}
+
+	// The precedence contract itself is pinned: the table's id order
+	// is the dispatch order, so an accidental reorder fails here even
+	// where no fixture could distinguish the swapped pair.
+	wantIDs := []string{
+		"shadowed", "negated-scope", "ident-veto", "ident-kind-gate",
+		"ident-path-gone", "ident-stale", "ident-admit",
+		"explicit-out-of-scope", "explicit-kind-gate",
+		"lang-unsupported", "mention-unknown", "referent-none",
+		"referent-kind-mismatch", "narrow-scope",
+		"path-gone", "stale-suspect", "default-admit",
+	}
+	require.Len(t, failureRoutes, len(wantIDs))
+	for i, id := range wantIDs {
+		require.Equal(t, id, failureRoutes[i].id, "route %d reordered", i)
+		require.True(t, settles[failureRoutes[i].settled],
+			"route %s settles %q outside the closed vocabulary",
+			id, failureRoutes[i].settled)
+	}
 
 	seen := map[string]bool{}
 	for _, want := range failureRoutes {
+		require.False(t, seen[want.id], "duplicate route id %s", want.id)
 		seen[want.id] = true
 		fixture, ok := fixtures[want.id]
 		require.True(t, ok, "route %s has no fixture", want.id)
 		var got string
 		for _, r := range failureRoutes {
-			if reason, fired := r.eval(&fixture); fired {
+			if reason, fired := r.eval(fixture); fired {
 				got = r.id
 				require.True(t, reasons[reason],
 					"route %s emits %s outside the closed vocabulary", r.id, reason)
-				require.Equal(t, r.settled, r.settled) // settled is a route property
 				break
 			}
 		}
@@ -1498,6 +1521,21 @@ func TestFailureRoutes_Coverage(t *testing.T) {
 	for id := range fixtures {
 		require.True(t, seen[id], "fixture %s names no route", id)
 	}
+
+	// A boundary the per-route fixtures cannot see: a non-ASCII
+	// prompt carrying an unresolvable identifier mention satisfies
+	// both lang-unsupported and mention-unknown. The nested switch
+	// this replaced checked the language gap first, so the table
+	// must too.
+	boundary := selCtx{prompt: "TestFooが壊れた", mention: mentionUnknown}
+	var first string
+	for _, r := range failureRoutes {
+		if _, fired := r.eval(boundary); fired {
+			first = r.id
+			break
+		}
+	}
+	require.Equal(t, "lang-unsupported", first)
 }
 
 // The three kind_mismatch emitters record which fired — the route id
