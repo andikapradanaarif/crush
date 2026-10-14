@@ -328,15 +328,24 @@ _wrote_ — the write is what arms the loop.
 - **scan:** fires on `in.verifyLoop` — the same summarize-mask
   fallback as stall re-scans the steps when the context-pressure
   StopWhen short-circuited the detector (`verifyLoop` unset but a
-  mid-tool-chain ending carries the signature). `in.stalled` claims
-  the boundary first: a streak of _identical_ calls satisfies both
-  detectors and stall is the more specific diagnosis — and the mask
-  path honors the same precedence, re-scanning only when
-  `repeatedToolSignature` is empty, so one boundary can't record two
-  firings.
-- **resolve:** replan branch pulls the stall edge's handoff payload
-  — latest checkpoint + touched-dir map slice — via
-  `pullStallHandoff`; the headless-degrade path lands the blocker
+  mid-tool-chain ending carries the signature). The mask path
+  applies the _full_ predicate — `hasPostWriteVerifyStreak`,
+  sawWrite conjunct included — so a write-less run ended mid-chain
+  by summarize or the step cap stays burn-watch-shaped and can't be
+  claimed. `in.stalled` claims the boundary first: a streak of
+  _identical_ calls satisfies both detectors and stall is the more
+  specific diagnosis — and the mask path honors the same precedence,
+  re-scanning only when `repeatedToolSignature` is empty, so one
+  boundary can't record two firings. **Re-trip gap, stated:**
+  `in.result.Steps` is fresh per turn, so re-tripping requires the
+  repair turn to write again _and_ streak — a replan turn that goes
+  back to re-verifying the already-written fix without a new write
+  never satisfies sawWrite and falls to burn-watch's floors (>S
+  steps or >T tokens), meaning an 8–30 step write-less re-verify
+  under the token arm escapes both edges until the cap.
+- **resolve:** replan branch pulls the shared replan payload —
+  latest checkpoint + touched-dir map slice — via
+  `pullReplanHandoff`; the headless-degrade path lands the blocker
   report (`verifyLoopReport`: streak length + the tools that kept
   running) on the final assistant message.
 - **prompt:** replan names the mechanism, not the symptom — "the

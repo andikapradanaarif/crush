@@ -586,6 +586,36 @@ func TestVerifyLoopEdge(t *testing.T) {
 			"a dual-signature masked boundary can't record two firings")
 	})
 
+	t.Run("masked write-less run is burn-watch-shaped, not verify-loop", func(t *testing.T) {
+		t.Parallel()
+		a, conn, sessionID := interactiveEdgeAgent(t)
+		// A write-less run the summarize StopWhen (or the step cap)
+		// ended mid-tool-chain: long trailing streak, no mutating
+		// call anywhere. The mask fallback keeps the sawWrite
+		// conjunct — a run that never wrote cannot trip, and under
+		// burn-watch's floors nothing fires at all.
+		result := &fantasy.AgentResult{}
+		for i := 0; i < verifyLoopMinSteps+2; i++ {
+			// Varying inputs keep the identical-signature detector
+			// quiet — this run must stay nobody's boundary, not
+			// stall's.
+			result.Steps = append(result.Steps, stepWith(fantasy.FinishReasonToolCalls,
+				fantasy.ToolCallContent{
+					ToolCallID: "tc-v", ToolName: "view",
+					Input: fmt.Sprintf(`{"file_path":"f%d.go"}`, i),
+				},
+				fantasy.ToolResultContent{
+					ToolCallID: "tc-v", ToolName: "view",
+					Result: fantasy.ToolResultOutputContentText{Text: "package main"},
+				},
+			))
+		}
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: result})
+		require.False(t, queued)
+		require.Empty(t, firingOutcome(t, conn, sessionID, "verify-loop"))
+	})
+
 	t.Run("clean stop after a streak is not a trip", func(t *testing.T) {
 		t.Parallel()
 		a, conn, sessionID := interactiveEdgeAgent(t)

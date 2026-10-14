@@ -1211,7 +1211,7 @@ func (a *sessionAgent) scanStallEdge(_ context.Context, call SessionAgentCall, i
 // for `crush run` — instead of a retry nobody can answer.
 func (a *sessionAgent) resolveStallEdge(ctx context.Context, call SessionAgentCall, t *edgeTrigger) {
 	if t.variant == "replan" && t.fire {
-		a.pullStallHandoff(ctx, call, t)
+		a.pullReplanHandoff(ctx, call, t)
 		return
 	}
 	if t.fire || t.assistant == nil || t.report == "" {
@@ -1229,12 +1229,12 @@ func (a *sessionAgent) resolveStallEdge(ctx context.Context, call SessionAgentCa
 	}
 }
 
-// pullStallHandoff loads the replan turn's re-orientation payload.
+// pullReplanHandoff loads the replan turn's re-orientation payload.
 // The run-end checkpoint generates asynchronously after runEdges, so
 // the latest committed checkpoint is always the previous turn's (or a
 // mid-run) one — never this run's. Every pull is best-effort: a
 // notebook-off or index-off session degrades to evidence-only.
-func (a *sessionAgent) pullStallHandoff(ctx context.Context, call SessionAgentCall, t *edgeTrigger) {
+func (a *sessionAgent) pullReplanHandoff(ctx context.Context, call SessionAgentCall, t *edgeTrigger) {
 	if a.notebook != nil {
 		if entries, err := a.notebook.GetEntries(ctx, call.SessionID); err == nil {
 			latest := map[string]bool{}
@@ -1500,11 +1500,14 @@ func (a *sessionAgent) scanVerifyLoopEdge(_ context.Context, call SessionAgentCa
 		// Same context-pressure mask as stall: the summarize
 		// StopWhen runs first and can end the run mid-tool-chain
 		// before the streak detector evaluates — re-scan the steps
-		// for the signature the flag would have carried. A
-		// question-tool StopTurn is an escalation in progress and a
-		// stop/error ending evaluated the detector on its last step
-		// already — neither is verify-loop evidence.
-		if streak < verifyLoopMinSteps || endedOnStopTurn(in.result) ||
+		// for the signature the flag would have carried. The full
+		// predicate applies, sawWrite included — a write-less
+		// mid-chain ending (summarize mask, step-cap cut) is
+		// burn-watch-shaped, not verify-loop. A question-tool
+		// StopTurn is an escalation in progress and a stop/error
+		// ending evaluated the detector on its last step already —
+		// neither is verify-loop evidence.
+		if !hasPostWriteVerifyStreak(in.result.Steps) || endedOnStopTurn(in.result) ||
 			in.result.Steps[len(in.result.Steps)-1].FinishReason != fantasy.FinishReasonToolCalls {
 			return nil
 		}
@@ -1556,7 +1559,7 @@ func (a *sessionAgent) scanVerifyLoopEdge(_ context.Context, call SessionAgentCa
 // `crush run` — instead of a retry nobody can answer.
 func (a *sessionAgent) resolveVerifyLoopEdge(ctx context.Context, call SessionAgentCall, t *edgeTrigger) {
 	if t.variant == "replan" && t.fire {
-		a.pullStallHandoff(ctx, call, t)
+		a.pullReplanHandoff(ctx, call, t)
 		return
 	}
 	if t.fire || t.assistant == nil || t.report == "" {
