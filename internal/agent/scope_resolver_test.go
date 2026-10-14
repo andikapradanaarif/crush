@@ -13,6 +13,7 @@ import (
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/cmdlog"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/stretchr/testify/require"
 )
@@ -454,6 +455,33 @@ func TestLLMScopeResolver_Timeout(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, res)
 	require.Less(t, time.Since(start), 2*time.Second)
+}
+
+func TestLLMScopeResolver_FallsBackToLarge(t *testing.T) {
+	t.Parallel()
+	// A configured-but-broken small provider (bad key, zero credit
+	// balance — the #333 eval abstain) must not pin the layer off:
+	// the consult retries on the large model, matching the title
+	// generator's "trying next" order.
+	small := &fakeLanguageModel{stream: func(yield func(fantasy.StreamPart) bool) {
+		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeError,
+			Error: errors.New("400 credit balance too low")})
+	}}
+	var largeCalls atomic.Int32
+	large := textModelStreams(`{"about_failure":false}`, &largeCalls)
+	a := &sessionAgent{
+		smallModel: csync.NewValue(Model{Model: small,
+			ModelCfg: config.SelectedModel{Provider: "anthropic", Model: "haiku"}}),
+		largeModel: csync.NewValue(Model{Model: large,
+			ModelCfg: config.SelectedModel{Provider: "opencode-go", Model: "muse"}}),
+		resolverStates: csync.NewMap[string, *resolverState](),
+	}
+	r := resolverForSession(a, "", 8)
+	res, err := r.ResolveScope(context.Background(), jaPrompt,
+		[]ResolverCandidate{{Pool: poolOpen, Cmd: "go test .", CWD: "."}})
+	require.NoError(t, err)
+	require.False(t, res.About)
+	require.Equal(t, int32(1), largeCalls.Load())
 }
 
 func TestLLMScopeResolver_NoModel(t *testing.T) {
