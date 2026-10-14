@@ -22,8 +22,13 @@ import (
 
 // scopeResolverTimeout bounds one L3 round-trip — the call is
 // synchronous inside selectMemory's prompt analysis, so a hung model
-// must not stall the turn.
-const scopeResolverTimeout = 10 * time.Second
+// must not stall the turn. The wall must cover reasoning latency:
+// the resolver falls back to the large model when no small model is
+// configured, and a reasoning consult runs ~20s (observed 19.9s /
+// 2143 reasoning tokens on muse-spark, #333) — a 10s wall abstained
+// on 100% of consults. Cached verdicts mean the headroom is paid
+// once per (prompt, candidates), not per turn.
+const scopeResolverTimeout = 60 * time.Second
 
 // scopeResolverMaxCandidates bounds how many rows the resolver prompt
 // lists. The candidate set is prompt context, not an inventory — a
