@@ -297,13 +297,18 @@ output never names a row; it overlays the selector's scope inputs and
 the route table applies unchanged. Validation is deterministic and
 fail-closed: paths must normalize, stay inside the workdir, and
 exist; `kind` must be a verification kind; `about_failure=false`
-rejects every row as `resolver_no_failure` (the `resolver-no-failure`
-route, second after `shadowed`); anything malformed, errored,
-truncated, or timed out abstains — the L0–L2 path owns the turn.
-Scope-consuming routes then stamp `settled_by=resolver`. Calls are
-bounded per session by `resolver_calls` (0 = layer off, the shipped
-default), keyed-cached on normalized prompt + candidate content, and
-skipped for sub-agents and non-user prompts.
+rejects every row the L1 layer could not affirm as
+`resolver_no_failure` (the `resolver-no-failure` route sits after
+`ident-admit` — a positively-named identifier is direct lexical
+evidence and outranks a model's relevance judgment); anything
+malformed, errored, truncated, or timed out abstains — the L0–L2 path
+owns the turn. Scope-consuming routes then stamp
+`settled_by=resolver`. Calls are bounded per session by
+`resolver_calls` (0 = layer off, the shipped default), keyed-cached
+on normalized prompt + candidate content, and skipped for
+sub-agents, non-user prompts, and empty/whitespace prompts — the
+repair-retry sentinel is deliberately unboundable, not a resolver
+question.
 
 ## Route space 4 — run edges (control flow)
 

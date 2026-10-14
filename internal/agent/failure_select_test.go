@@ -1491,9 +1491,10 @@ func TestFailureRoutes_Coverage(t *testing.T) {
 	// is the dispatch order, so an accidental reorder fails here even
 	// where no fixture could distinguish the swapped pair.
 	wantIDs := []string{
-		"shadowed", "resolver-no-failure", "negated-scope",
+		"shadowed", "negated-scope",
 		"ident-veto", "ident-kind-gate",
 		"ident-path-gone", "ident-stale", "ident-admit",
+		"resolver-no-failure",
 		"explicit-out-of-scope", "explicit-kind-gate",
 		"lang-unsupported", "mention-unknown", "referent-none",
 		"referent-kind-mismatch", "narrow-scope",

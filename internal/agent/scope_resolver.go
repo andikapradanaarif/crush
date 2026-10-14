@@ -35,6 +35,10 @@ const scopeResolverMaxCandidates = 12
 // be long; the model needs a pointer, not the row.
 const scopeResolverFieldRunes = 120
 
+// scopeResolverPromptRunes bounds the user prompt as rendered into
+// the resolver's context — the same hygiene the candidate fields get.
+const scopeResolverPromptRunes = 2048
+
 // scopeResolverSystemPrompt is the L3 layer's closed-output contract
 // (#216): the model answers a prompt-level scope question — never
 // names a row — and the deterministic validator below decides whether
@@ -105,12 +109,15 @@ func (a *sessionAgent) scopeResolverFor(workDir, sessionID string, mp params.Mem
 }
 
 func (r *llmScopeResolver) ResolveScope(ctx context.Context, prompt string, cands []ResolverCandidate) (*ScopeResolution, error) {
-	if r.budget <= 0 || int(r.state.callsUsed.Load()) >= r.budget {
-		return nil, errors.New("scope resolver: call budget exhausted")
-	}
+	// Cache first: a warm verdict costs no round-trip, so it serves
+	// even after the budget trips — the budget bounds model calls,
+	// not reads of what they already resolved.
 	key := scopeResolverCacheKey(prompt, cands)
 	if res, ok := r.state.cache.Get(key); ok {
 		return res, nil
+	}
+	if r.budget <= 0 || int(r.state.callsUsed.Load()) >= r.budget {
+		return nil, errors.New("scope resolver: call budget exhausted")
 	}
 	// Claim the call before spending it — a parse failure still
 	// burned the model round-trip, so it counts against the budget.
@@ -183,7 +190,7 @@ func scopeResolverUserPrompt(prompt string, cands []ResolverCandidate) string {
 			truncateRunes(strings.Join(c.Files, ","), scopeResolverFieldRunes))
 	}
 	b.WriteString("\nUser request:\n")
-	b.WriteString(prompt)
+	b.WriteString(truncateRunes(prompt, scopeResolverPromptRunes))
 	return b.String()
 }
 

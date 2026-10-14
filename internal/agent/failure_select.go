@@ -252,7 +252,9 @@ type selRoute struct {
 	// the L3 resolver can supply (pos/neg/kinds/explicit). When a
 	// valid resolution is present, these routes stamp settledResolver
 	// — the check is theirs, the analysis that fed it is the
-	// resolver's.
+	// resolver's. Over-inclusive by design (same bias as
+	// memory_suggested): a lexicon-parsed veto firing beside a
+	// resolution still counts as resolver-settled.
 	resScoped bool
 	eval      func(c selCtx) (reason string, fired bool)
 }
@@ -270,16 +272,6 @@ var failureRoutes = []selRoute{
 		// row's verdict is "subsumed", not rejected on the merits.
 		eval: func(c selCtx) (string, bool) {
 			return failShadowed, c.cand.shadowed
-		},
-	},
-	{
-		id: "resolver-no-failure", settled: settledResolver,
-		// The resolver read the prompt and ruled it not about a
-		// failure — a relevance verdict, fail-closed on every row.
-		// Shadowed keeps precedence: "subsumed by the open twin" is a
-		// state fact that stays true regardless of relevance.
-		eval: func(c selCtx) (string, bool) {
-			return failResolverNoFailure, c.res != nil && !c.res.About
 		},
 	},
 	{
@@ -326,6 +318,20 @@ var failureRoutes = []selRoute{
 		// English signal is genuinely present.
 		eval: func(c selCtx) (string, bool) {
 			return failAdmit, c.mention == mentionPositive
+		},
+	},
+	{
+		id: "resolver-no-failure", settled: settledResolver,
+		// The resolver read the prompt and ruled it not about a
+		// failure — a relevance verdict, fail-closed on every row.
+		// It sits after the ident block deliberately: a positively-
+		// named identifier is direct lexical evidence the prompt
+		// binds that failure, and direct evidence outranks a model's
+		// relevance judgment. The verdict still mass-rejects every
+		// row the L1 layer could not affirm — shadowed and the
+		// negation/ident vetoes still precede it.
+		eval: func(c selCtx) (string, bool) {
+			return failResolverNoFailure, c.res != nil && !c.res.About
 		},
 	},
 	{
@@ -1799,8 +1805,12 @@ func selectMemory(ctx context.Context, prompt string, pools memoryPools, workDir
 	// itself a resolution — every row drops resolver_no_failure.
 	// Absent/errored/invalid/timeout resolvers all abstain
 	// identically: res stays nil and the L0–L2 path owns the turn.
+	// The prompt must carry user text — the empty sentinel means "no
+	// prompt to bind" (a repair retry that missed the turn cache),
+	// and a candidate list with no question is maximally biased
+	// model input: everything visible is a failure.
 	var res *ScopeResolution
-	if resolver != nil && !explicit && kinds == nil && len(pools.open) > 0 {
+	if resolver != nil && strings.TrimSpace(prompt) != "" && !explicit && kinds == nil && len(pools.open) > 0 {
 		if r, err := resolver.ResolveScope(ctx, prompt, resolverCandidates(candidates)); err == nil && r != nil {
 			res = r
 			if res.About {

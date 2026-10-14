@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -70,6 +71,23 @@ func TestSelectResolver_Gating(t *testing.T) {
 			name:    "empty open pool skips the resolver",
 			prompt:  jaPrompt,
 			open:    nil,
+			workDir: dir,
+			want:    0,
+		},
+		{
+			// The repair-retry sentinel: a mid-chain rebuild empties
+			// the prompt so nothing binds — the resolver must not see
+			// a candidate list with no question attached.
+			name:    "empty prompt skips the resolver",
+			prompt:  "",
+			open:    []cmdlog.Failure{mkFailure("go test .", ".")},
+			workDir: dir,
+			want:    0,
+		},
+		{
+			name:    "whitespace-only prompt skips the resolver",
+			prompt:  "   \n\t",
+			open:    []cmdlog.Failure{mkFailure("go test .", ".")},
 			workDir: dir,
 			want:    0,
 		},
@@ -237,7 +255,24 @@ func TestSelectResolver_ShadowedKeepsPrecedence(t *testing.T) {
 	require.Equal(t, settledState, cmdDec.SettledBy)
 }
 
-func TestSelectResolver_CandidateProjectionIsBounded(t *testing.T) {
+// A positively-named identifier is direct evidence — it outranks the
+// resolver's about=false verdict. resolver-no-failure sits after the
+// ident block so model judgment fills gaps rather than overturning
+// L1 bindings.
+func TestSelectResolver_IdentBeatsAboutFalse(t *testing.T) {
+	t.Parallel()
+	stub := &stubResolver{res: &ScopeResolution{About: false}}
+	row := mkFailureHeadline("go test .", ".", "--- FAIL: TestFoo")
+	admitted, decisions := selectOpenFailuresResolver(context.Background(),
+		"fix TestFoo please", []cmdlog.Failure{row}, "", 5, stub)
+	require.Equal(t, 1, stub.calls)
+	require.Len(t, admitted, 1)
+	require.Equal(t, failAdmit, decisions[0].Reason)
+	require.Equal(t, "ident-admit", decisions[0].Route)
+	require.Equal(t, settledIdentifier, decisions[0].SettledBy)
+}
+
+func TestSelectResolver_CandidateProjectionIsReadOnly(t *testing.T) {
 	t.Parallel()
 	stub := &stubResolver{res: &ScopeResolution{About: false}}
 	var open []cmdlog.Failure
@@ -250,6 +285,11 @@ func TestSelectResolver_CandidateProjectionIsBounded(t *testing.T) {
 		require.Equal(t, poolOpen, c.Pool)
 		require.Equal(t, "go test .", c.Cmd)
 	}
+	// The rendered prompt caps the listing — the projection carries
+	// every row, the model sees the bounded head.
+	rendered := scopeResolverUserPrompt(jaPrompt, stub.cands)
+	require.Equal(t, scopeResolverMaxCandidates,
+		strings.Count(rendered, "- pool="), "resolver prompt must cap the candidate listing")
 }
 
 // --- llmScopeResolver: the model-backed layer end to end ---
@@ -366,6 +406,13 @@ func TestLLMScopeResolver_Budget(t *testing.T) {
 	_, err = r.ResolveScope(context.Background(), "prompt two", cands)
 	require.Error(t, err)
 	require.Equal(t, int32(1), calls.Load(), "the second call spent a model call past budget")
+
+	// A cached verdict is not a model call — it still serves after
+	// the budget trips.
+	res, err := r.ResolveScope(context.Background(), "prompt one", cands)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.Equal(t, int32(1), calls.Load())
 }
 
 func TestLLMScopeResolver_Cache(t *testing.T) {
