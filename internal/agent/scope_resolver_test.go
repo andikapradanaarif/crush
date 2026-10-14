@@ -464,8 +464,10 @@ func TestLLMScopeResolver_FallsBackToLarge(t *testing.T) {
 	// the consult retries on the large model, matching the title
 	// generator's "trying next" order.
 	small := &fakeLanguageModel{stream: func(yield func(fantasy.StreamPart) bool) {
-		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeError,
-			Error: errors.New("400 credit balance too low")})
+		yield(fantasy.StreamPart{
+			Type:  fantasy.StreamPartTypeError,
+			Error: errors.New("400 credit balance too low"),
+		})
 	}}
 	var largeCalls atomic.Int32
 	large := textModelStreams(`{"about_failure":false}`, &largeCalls)
