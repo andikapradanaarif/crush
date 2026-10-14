@@ -472,10 +472,14 @@ func TestLLMScopeResolver_FallsBackToLarge(t *testing.T) {
 	var largeCalls atomic.Int32
 	large := textModelStreams(`{"about_failure":false}`, &largeCalls)
 	a := &sessionAgent{
-		smallModel: csync.NewValue(Model{Model: small,
-			ModelCfg: config.SelectedModel{Provider: "anthropic", Model: "haiku"}}),
-		largeModel: csync.NewValue(Model{Model: large,
-			ModelCfg: config.SelectedModel{Provider: "opencode-go", Model: "muse"}}),
+		smallModel: csync.NewValue(Model{
+			Model:    small,
+			ModelCfg: config.SelectedModel{Provider: "anthropic", Model: "haiku"},
+		}),
+		largeModel: csync.NewValue(Model{
+			Model:    large,
+			ModelCfg: config.SelectedModel{Provider: "opencode-go", Model: "muse"},
+		}),
 		resolverStates: csync.NewMap[string, *resolverState](),
 	}
 	r := resolverForSession(a, "", 8)
