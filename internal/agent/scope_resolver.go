@@ -77,6 +77,40 @@ type resolverState struct {
 	callsUsed atomic.Int32
 }
 
+// Resolver engagement outcomes — the turn-level closed vocabulary
+// stamped on TailAudit.Resolver so a silent layer is measurable:
+// a verdict (about true OR false) settles rows with settled_resolver
+// in the decision stream, but an abstention leaves no trace there —
+// without this stamp "the gate never opened" and "the layer was
+// consulted and produced nothing" are indistinguishable on records.
+const (
+	// resolverResolved: the call produced a valid verdict — the
+	// decision stream carries the stamps.
+	resolverResolved = "resolved"
+	// resolverAbstain: the gate fired and the call produced no usable
+	// verdict — error, invalid, empty, truncated, or timed out.
+	resolverAbstain = "abstain"
+)
+
+// outcomeResolver wraps a ScopeResolver to record whether the call
+// produced a verdict — telemetry only, it changes no behavior. The
+// gate never firing reads as "" (the zero value), which stays
+// distinguishable from abstain: consulted-and-failed vs never-asked.
+type outcomeResolver struct {
+	inner ScopeResolver
+	out   *string
+}
+
+func (o outcomeResolver) ResolveScope(ctx context.Context, prompt string, cands []ResolverCandidate) (*ScopeResolution, error) {
+	res, err := o.inner.ResolveScope(ctx, prompt, cands)
+	if err == nil && res != nil {
+		*o.out = resolverResolved
+	} else {
+		*o.out = resolverAbstain
+	}
+	return res, err
+}
+
 // llmScopeResolver is the production ScopeResolver — one bounded
 // small-model call per (prompt, candidates) content hash, validated
 // against the closed contract before any of it steers selection.
@@ -148,9 +182,16 @@ func (r *llmScopeResolver) call(ctx context.Context, prompt string, cands []Reso
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	tok := int64(120)
+	// 1024 is a floor, not a target: reasoning models spend output
+	// tokens on reasoning_content before any content text — a 120
+	// cap truncated every call with an empty body (observed on
+	// deepseek-flash: reasoning_tokens=120, finish_reason=length).
+	// /no_think is best-effort — endpoints may not honor it — so the
+	// budget must survive a reasoning preamble plus the small JSON
+	// verdict.
+	tok := int64(1024)
 	if model.CatwalkCfg.CanReason {
-		tok = model.CatwalkCfg.DefaultMaxTokens
+		tok = max(tok, model.CatwalkCfg.DefaultMaxTokens)
 	}
 	resAgent := fantasy.NewAgent(
 		model.Model,

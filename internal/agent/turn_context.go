@@ -112,6 +112,12 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	var referents []cmdlog.Referent
 	var digests []cmdlog.SessionDigest
 	var memoryDecisions []FailureDecision
+	// resolverOutcome records the L3 layer's engagement for the tail
+	// audit — "resolved"/"abstain", or "" when the gate never opened
+	// or the layer is off. Turn-level evidence: an abstain leaves no
+	// mark in the decision stream, so without it a dead layer reads
+	// identically to a never-engaged one.
+	var resolverOutcome string
 	var memoryCandidates []cmdlog.Failure
 	var fetchErr error
 	var knowledgeFetchErr string
@@ -183,6 +189,10 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 			// resolved rows but lose the "replayed verdicts are
 			// identical" property the per-Run audit pins.
 			selected, memoryDecisions, memoryCandidates = cached.selected, cached.decisions, cached.candidates
+			// The outcome replays with the cached selection — this
+			// turn's audit inherits whatever the original resolution
+			// produced, since the resolver is not re-consulted.
+			resolverOutcome = cached.resolverOutcome
 		default:
 			var pools memoryPools
 			mp := a.memoryParams()
@@ -229,12 +239,21 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 					// closed rather than mine harness retry text.
 					selPrompt = ""
 				}
+				// Selection runs even for held-out turns: the
+				// decisions are the arm's evidence and the resolver
+				// consult spends budget on them — deliberate, so a
+				// control arm's engagement stays measurable rather
+				// than reading as layer-off.
+				resolver := a.scopeResolverFor(workDir, call.SessionID, mp)
+				if resolver != nil {
+					resolver = outcomeResolver{inner: resolver, out: &resolverOutcome}
+				}
 				selected, memoryDecisions = selectMemory(ctx, selPrompt, pools, workDir,
 					memoryRenderLimits{
 						open:     mp.OpenRenderLimit,
 						resolved: mp.ResolvedRenderLimit,
 						command:  mp.CommandRenderLimit,
-					}, a.scopeResolverFor(workDir, call.SessionID, mp))
+					}, resolver)
 				// Telemetry candidates span every evaluated row, all
 				// three pools — the count/ages mean "what the selector
 				// saw", and decisions alone undercounts the knowledge
@@ -247,6 +266,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 					a.turnSels.Set(call.SessionID, turnSelection{
 						stamp: call.RunStamp, selected: selected,
 						candidates: memoryCandidates, decisions: memoryDecisions,
+						resolverOutcome: resolverOutcome,
 					})
 				}
 			} else {
@@ -330,7 +350,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		// predicate checkable. An unarmed agent still clears a stale
 		// audit from an earlier Run in the same process.
 		if a.tailArmed() {
-			a.recordTailAudit(call, nil, "", memoryDecisions, fetchErr, "")
+			a.recordTailAudit(call, nil, "", memoryDecisions, fetchErr, "", resolverOutcome)
 		} else if a.tailAudit != nil {
 			a.tailAudit.Del(call.SessionID)
 			if a.tailRuns != nil {
@@ -345,7 +365,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		"sections", len(sections),
 		"bytes", len(text),
 	)
-	a.recordTailAudit(call, sections, text, memoryDecisions, fetchErr, knowledgeFetchErr)
+	a.recordTailAudit(call, sections, text, memoryDecisions, fetchErr, knowledgeFetchErr, resolverOutcome)
 	return []fantasy.Message{fantasy.NewUserMessage(text)}
 }
 
@@ -475,6 +495,11 @@ type turnSelection struct {
 	selected   memoryPools
 	candidates []cmdlog.Failure
 	decisions  []FailureDecision
+	// resolverOutcome replays the turn's L3 engagement outcome to
+	// audits on retry-cache hits — the resolver is consulted once per
+	// (prompt, candidates), so later renders of the same selection
+	// inherit its verdict rather than re-asking.
+	resolverOutcome string
 	// sections is the rendered tail — stored so the per-step
 	// staleness refresh can re-splice the open_failures envelope
 	// when a rendered row resolves mid-turn (#325). Everything else
@@ -566,6 +591,14 @@ type TailAudit struct {
 	// decisions" and "still present at the last step's request" —
 	// a replay-vs-live diff is not a drift bug when this explains it.
 	DroppedSignatures []string `json:"dropped_signatures,omitempty"`
+	// Resolver is the L3 layer's engagement outcome for this turn —
+	// "resolved" when a valid verdict was produced, "abstain" when
+	// the gate fired but the call yielded none (error, invalid,
+	// empty, timeout), empty when the layer never ran. A verdict's
+	// trace already lives on the decisions (settled_by=resolver);
+	// this field exists for the case decisions can't show: the layer
+	// was consulted and produced nothing.
+	Resolver string `json:"resolver,omitempty"`
 }
 
 var tailSectionNameRe = regexp.MustCompile(`^<(\w+)>`)
@@ -583,7 +616,7 @@ func tailSectionName(s string) string {
 // tailAudit is last-write-wins per session — the telemetry reads the
 // latest render — while tailRuns keeps every Run's audit so a
 // turn's repair-chain renders stay individually inspectable (#249).
-func (a *sessionAgent) recordTailAudit(call SessionAgentCall, sections []string, text string, decisions []FailureDecision, fetchErr error, knowledgeErr string) {
+func (a *sessionAgent) recordTailAudit(call SessionAgentCall, sections []string, text string, decisions []FailureDecision, fetchErr error, knowledgeErr string, resolverOutcome string) {
 	if a.tailAudit == nil || call.SessionID == "" {
 		return
 	}
@@ -595,6 +628,7 @@ func (a *sessionAgent) recordTailAudit(call SessionAgentCall, sections []string,
 		Decisions:      decisions,
 		RunStamp:       call.RunStamp,
 		RepairAttempts: call.RepairAttempts,
+		Resolver:       resolverOutcome,
 	}
 	if fetchErr != nil {
 		audit.FetchError = fetchErr.Error()

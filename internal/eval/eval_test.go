@@ -686,6 +686,37 @@ func TestArmCoverage_TailDecisions(t *testing.T) {
 	require.True(t, met)
 }
 
+// tail.resolver.* counts the turn-level L3 engagement stamp on the
+// audit — resolved consults versus abstains, so a dead layer shows
+// as abstain volume instead of reading as never-engaged.
+func TestArmCoverage_TailResolver(t *testing.T) {
+	t.Parallel()
+
+	rec := &RunRecord{
+		// Tail must be non-empty for tail.* keys to evaluate —
+		// silence fails closed, which is the point: a dead layer's
+		// abstains are distinguishable only while envelopes emit.
+		Tail: []TurnTail{{Turn: 1}},
+		TailRuns: []TurnTail{
+			{Turn: 0, Resolver: "resolved"},
+			{Turn: 0, Resolver: "abstain"},
+			{Turn: 1},
+		},
+	}
+	met, err := ArmCoverageMet(Coverage{"min_tail.resolver.resolved": 1}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+	met, err = ArmCoverageMet(Coverage{"min_tail.resolver.abstain": 1}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+	met, err = ArmCoverageMet(Coverage{"min_tail.resolver.abstain": 2}, rec)
+	require.NoError(t, err)
+	require.False(t, met)
+	// An outcome outside the closed pair fails parse.
+	_, err = ArmCoverageMet(Coverage{"min_tail.resolver.bogus": 1}, rec)
+	require.Error(t, err)
+}
+
 // tail.decisions.engaged / .outcome.* count the #221 post-run
 // stamps — which shown candidates the chain's actions touched, and
 // the ledger's verdict for each decision once the run's runs landed.
