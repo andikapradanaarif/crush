@@ -543,6 +543,49 @@ func TestVerifyLoopEdge(t *testing.T) {
 		require.Equal(t, "fired", firingOutcome(t, conn, sessionID, "verify-loop"))
 	})
 
+	t.Run("masked boundary with a repeated signature stays stall's", func(t *testing.T) {
+		t.Parallel()
+		a, conn, sessionID := interactiveEdgeAgent(t)
+		// One write, then a trailing run of the SAME call — the
+		// streak and the repeated signature both hold (the signature
+		// detector needs its 10-step window filled, so the suffix is
+		// that long). The stall edge claims it; verify-loop's mask
+		// fallback must not double-fire.
+		result := &fantasy.AgentResult{Steps: []fantasy.StepResult{
+			stepWith(fantasy.FinishReasonToolCalls,
+				fantasy.ToolCallContent{
+					ToolCallID: "tc-e", ToolName: "edit",
+					Input: `{"file_path":"main.go","old_string":"a","new_string":"b"}`,
+				},
+				fantasy.ToolResultContent{
+					ToolCallID: "tc-e", ToolName: "edit",
+					Result: fantasy.ToolResultOutputContentText{Text: "edited"},
+				},
+			),
+		}}
+		for i := 0; i < loopDetectionWindowSize; i++ {
+			result.Steps = append(result.Steps, stepWith(fantasy.FinishReasonToolCalls,
+				fantasy.ToolCallContent{
+					ToolCallID: "tc-s", ToolName: "bash",
+					Input: `{"command":"go test ./..."}`,
+				},
+				fantasy.ToolResultContent{
+					ToolCallID: "tc-s", ToolName: "bash",
+					Result: fantasy.ToolResultOutputContentText{Text: "FAIL"},
+				},
+			))
+		}
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: result})
+		require.True(t, queued)
+		q, _ := a.messageQueue.Get(sessionID)
+		require.Len(t, q, 1, "one boundary gets one repair turn")
+		require.True(t, strings.HasPrefix(q[0].Prompt, stallReplanPrefix))
+		require.Equal(t, "fired", firingOutcome(t, conn, sessionID, "stall"))
+		require.Empty(t, firingOutcome(t, conn, sessionID, "verify-loop"),
+			"a dual-signature masked boundary can't record two firings")
+	})
+
 	t.Run("clean stop after a streak is not a trip", func(t *testing.T) {
 		t.Parallel()
 		a, conn, sessionID := interactiveEdgeAgent(t)

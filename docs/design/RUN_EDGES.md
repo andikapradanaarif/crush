@@ -316,13 +316,24 @@ _wrote_ — the write is what arms the loop.
   `bash > f` counts) and trips at `verifyLoopMinSteps = 8`. Healthy
   edit→test→edit cycles run 2-4 steps between writes; the observed
   harm ran 25+. A run that never wrote cannot trip — write-less
-  spend stays burn-watch's domain.
+  spend stays burn-watch's domain. **Precision ceiling, stated:**
+  the signature is "no write in 8 trailing steps," not verification
+  per se — a long legitimate diagnosis run (reads and greps while a
+  check stays red) trips identically, and the replan then asserts
+  "the check keeps reporting the same failure" about a state it
+  can't verify. The cost is bounded — the first trip is an advisory
+  replan, not a halt — and the rate itself is the calibration read:
+  `verify-loop rate` in `crush stats` and `edge_firings.verify-loop
+  .fired` vs `.gated` in eval cells show whether 8 is too tight.
 - **scan:** fires on `in.verifyLoop` — the same summarize-mask
   fallback as stall re-scans the steps when the context-pressure
   StopWhen short-circuited the detector (`verifyLoop` unset but a
   mid-tool-chain ending carries the signature). `in.stalled` claims
   the boundary first: a streak of _identical_ calls satisfies both
-  detectors and stall is the more specific diagnosis.
+  detectors and stall is the more specific diagnosis — and the mask
+  path honors the same precedence, re-scanning only when
+  `repeatedToolSignature` is empty, so one boundary can't record two
+  firings.
 - **resolve:** replan branch pulls the stall edge's handoff payload
   — latest checkpoint + touched-dir map slice — via
   `pullStallHandoff`; the headless-degrade path lands the blocker

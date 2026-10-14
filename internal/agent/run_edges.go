@@ -1508,6 +1508,13 @@ func (a *sessionAgent) scanVerifyLoopEdge(_ context.Context, call SessionAgentCa
 			in.result.Steps[len(in.result.Steps)-1].FinishReason != fantasy.FinishReasonToolCalls {
 			return nil
 		}
+		// The mask can hide a boundary the stall fallback would also
+		// claim — repeated signatures inside the streak stay stall's,
+		// symmetric to the in.stalled guard above.
+		if sig, _, _ := repeatedToolSignature(in.result.Steps,
+			loopDetectionWindowSize, loopDetectionMaxRepeats); sig != "" {
+			return nil
+		}
 	}
 	t := &edgeTrigger{
 		assistant: in.currentAssistant,
