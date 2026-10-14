@@ -219,6 +219,9 @@ func TestDeriveEdgeSignals(t *testing.T) {
 	rows := []EdgeFiringStat{
 		{Edge: "stall", Variant: "replan", Outcome: "fired", Firings: 6, Sessions: 4},
 		{Edge: "stall", Variant: "escalate", Outcome: "fired", Firings: 2, Sessions: 2},
+		{Edge: "verify-loop", Variant: "replan", Outcome: "fired", Firings: 3, Sessions: 3},
+		{Edge: "verify-loop", Variant: "escalate", Outcome: "fired", Firings: 1, Sessions: 1},
+		{Edge: "verify-loop", Outcome: "deferred", Firings: 1, Sessions: 1},
 		{Edge: "burn-watch", Outcome: "fired", Firings: 1, Sessions: 1},
 		{Edge: "burn-watch", Outcome: "suppressed", Firings: 24, Sessions: 10},
 		{Edge: "burn-watch", Outcome: "gated", Firings: 5, Sessions: 3},
@@ -235,10 +238,12 @@ func TestDeriveEdgeSignals(t *testing.T) {
 	require.Equal(t, "25%", byName["replan → escalate"].Value)
 	// Burn-watch: 1/30 = 3.3%.
 	require.Equal(t, "3.3%", byName["burn-watch rate"].Value)
-	// Escalations/session: (2+1)/10 = 0.30.
-	require.Equal(t, "0.30", byName["escalations / session"].Value)
-	// Gated share: 5/50 = 10%.
-	require.Equal(t, "10%", byName["gated share"].Value)
+	// Verify-loop: (3+1)/5 = 80%.
+	require.Equal(t, "80.0%", byName["verify-loop rate"].Value)
+	// Escalations/session: (2+1+1)/10 = 0.40.
+	require.Equal(t, "0.40", byName["escalations / session"].Value)
+	// Gated share: 5/55 = 9%.
+	require.Equal(t, "9%", byName["gated share"].Value)
 	// Todos never fired — the dead-edge signal names it.
 	require.Equal(t, "todos", byName["edges never fired"].Value)
 }

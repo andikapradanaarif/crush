@@ -6,12 +6,67 @@ import (
 	"io"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/toolclass"
 )
 
 const (
 	loopDetectionWindowSize = 10
 	loopDetectionMaxRepeats = 5
+
+	// verifyLoopMinSteps is the post-write streak length that trips
+	// the verify-loop detector: that many consecutive steps after the
+	// last mutating call carried no writes. A healthy edit→test→edit
+	// cycle runs 2-4 steps between writes; the observed harm runs
+	// (#329) verified one early fix for 25+ steps without a second
+	// edit — the floor sits well past legitimate checking and far
+	// below the burn.
+	verifyLoopMinSteps = 8
 )
+
+// hasPostWriteVerifyStreak reports whether the run wrote at least
+// once and then spent verifyLoopMinSteps consecutive trailing steps
+// without another mutating call — the verify-loop signature the
+// identical-signature detector misses: the calls vary (test, view,
+// ls), so no signature repeats, but no new edit ever lands. A run
+// that never wrote returns false — write-less spend is burn-watch's
+// domain, not this one's.
+func hasPostWriteVerifyStreak(steps []fantasy.StepResult) bool {
+	sawWrite := false
+	streak := 0
+	for i := len(steps) - 1; i >= 0; i-- {
+		if stepHasMutatingCall(steps[i]) {
+			sawWrite = true
+			break
+		}
+		streak++
+	}
+	return sawWrite && streak >= verifyLoopMinSteps
+}
+
+// postWriteStreakLen returns the trailing run of steps since the last
+// mutating call — the evidence the verify-loop edge reports.
+func postWriteStreakLen(steps []fantasy.StepResult) int {
+	streak := 0
+	for i := len(steps) - 1; i >= 0; i-- {
+		if stepHasMutatingCall(steps[i]) {
+			break
+		}
+		streak++
+	}
+	return streak
+}
+
+// stepHasMutatingCall reports whether one step made a mutating call —
+// the write boundary's shared vocabulary, so a `bash > f` write
+// counts the same as an edit call.
+func stepHasMutatingCall(step fantasy.StepResult) bool {
+	for _, tc := range step.Content.ToolCalls() {
+		if toolclass.IsMutatingCall(tc.ToolName, tc.Input) {
+			return true
+		}
+	}
+	return false
+}
 
 // hasRepeatedToolCalls checks whether the agent is stuck in a loop by looking
 // at recent steps. It examines the last windowSize steps and returns true if

@@ -850,7 +850,7 @@ func gatherStats(ctx context.Context, conn *sql.DB) (*Stats, error) {
 func deriveEdgeSignals(rows []EdgeFiringStat, sessions int64) []EdgeSignal {
 	fired := map[string]int64{}
 	total := map[string]int64{}
-	var replanFired, escalateFired, burnWatchFired, gated, allRows int64
+	var replanFired, escalateFired, burnWatchFired, verifyLoopFired, verifyLoopEscalateFired, gated, allRows int64
 	for _, r := range rows {
 		total[r.Edge] += r.Firings
 		allRows += r.Firings
@@ -868,6 +868,10 @@ func deriveEdgeSignals(rows []EdgeFiringStat, sessions int64) []EdgeSignal {
 			escalateFired += r.Firings
 		case r.Edge == "burn-watch":
 			burnWatchFired += r.Firings
+		case r.Edge == "verify-loop" && r.Variant == "escalate":
+			verifyLoopEscalateFired += r.Firings
+		case r.Edge == "verify-loop":
+			verifyLoopFired += r.Firings
 		}
 	}
 
@@ -886,10 +890,17 @@ func deriveEdgeSignals(rows []EdgeFiringStat, sessions int64) []EdgeSignal {
 			Note:  "tripwire firing share of evaluated boundaries — expect <5%; higher means thresholds are miscalibrated",
 		})
 	}
+	if n := total["verify-loop"]; n > 0 {
+		signals = append(signals, EdgeSignal{
+			Name:  "verify-loop rate",
+			Value: fmt.Sprintf("%.1f%%", 100*float64(verifyLoopFired+verifyLoopEscalateFired)/float64(n)),
+			Note:  "post-write streak firings share of evaluated boundaries — expect ~0% on healthy runs; higher means fixes land unverified-broken or models commit too early",
+		})
+	}
 	if sessions > 0 {
 		signals = append(signals, EdgeSignal{
 			Name:  "escalations / session",
-			Value: fmt.Sprintf("%.2f", float64(escalateFired+burnWatchFired)/float64(sessions)),
+			Value: fmt.Sprintf("%.2f", float64(escalateFired+burnWatchFired+verifyLoopEscalateFired)/float64(sessions)),
 			Note:  "human asks per session — the nag detector; healthy is well under 1.0",
 		})
 	}

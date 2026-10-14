@@ -1332,6 +1332,12 @@ func TestValidateExperiment_EdgeFiringsStarvation(t *testing.T) {
 	require.NoError(t, ValidateExperiment(mk(
 		map[string]any{"ambiguity_clarification": true},
 		Coverage{"min_edge_firings.burn-watch.exhausted": 1})))
+	require.NoError(t, ValidateExperiment(mk(
+		map[string]any{"ambiguity_clarification": true},
+		Coverage{"min_edge_firings.verify-loop.fired": 1})))
+	require.NoError(t, ValidateExperiment(mk(
+		map[string]any{"ambiguity_clarification": false},
+		Coverage{"min_edge_firings.verify-loop.gated": 1})))
 
 	// "gated" rows only exist in the flag-off arm — asserting them on
 	// a flag-on arm starves.
@@ -1357,6 +1363,8 @@ func TestValidateExperiment_EdgeFiringsStarvation(t *testing.T) {
 	for _, field := range []string{
 		"min_edge_firings.stall.suppressed",
 		"min_edge_firings.stall.cleared",
+		"min_edge_firings.verify-loop.suppressed",
+		"min_edge_firings.verify-loop.cleared",
 		"min_edge_firings.burn-watch.cleared",
 		"min_edge_firings.verification.gated",
 		"min_edge_firings.verification.suppressed",

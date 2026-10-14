@@ -629,19 +629,20 @@ var reconcileGateOff = starvationRule{
 //   - cancelled: mid-scan ctx kill — every edge, flag-independent.
 //   - deferred/exhausted: contention loser or spent repair budget —
 //     needs a firing trigger, so flag-on for stall/burn-watch.
-//   - gated/suppressed/headless-degraded: stall/burn-watch hints —
-//     verification/todos never set hints. Reconcile sets gated under
-//     failure_memory=off, suppressed when every qualifying row was
-//     already flagged this session; cleared is its sessionState
-//     carrier ride.
+//   - gated/suppressed/headless-degraded: stall/verify-loop/
+//     burn-watch hints — verification/todos never set hints.
+//     Reconcile sets gated under failure_memory=off, suppressed when
+//     every qualifying row was already flagged this session; cleared
+//     is its sessionState carrier ride.
 //   - cleared: a !fire trigger with no hint (verification resolving
 //     clean), or a sessionState carrier ride (todos, reconcile) —
-//     stall and burn-watch are step-bound and always fire-or-hint,
-//     so they never clear.
+//     stall, verify-loop, and burn-watch are step-bound and always
+//     fire-or-hint, so they never clear.
 var edgeOutcomeTable = map[string]map[string]bool{
 	"verification": {"fired": true, "cleared": true, "cancelled": true, "deferred": true, "exhausted": true},
 	"todos":        {"fired": true, "cleared": true, "cancelled": true, "deferred": true, "exhausted": true},
 	"stall":        {"fired": true, "gated": true, "headless-degraded": true, "cancelled": true, "deferred": true, "exhausted": true},
+	"verify-loop":  {"fired": true, "gated": true, "headless-degraded": true, "cancelled": true, "deferred": true, "exhausted": true},
 	"burn-watch":   {"fired": true, "gated": true, "suppressed": true, "headless-degraded": true, "cancelled": true, "deferred": true, "exhausted": true},
 	"reconcile":    {"fired": true, "gated": true, "suppressed": true, "cleared": true, "cancelled": true, "deferred": true, "exhausted": true},
 }
@@ -685,12 +686,12 @@ func armStarvationRules(field string) []starvationRule {
 				func(func(string) (any, bool)) bool { return false },
 			}}
 		}
-		if name != "stall" && name != "burn-watch" && name != "reconcile" {
+		if name != "stall" && name != "verify-loop" && name != "burn-watch" && name != "reconcile" {
 			// verification/todos never consult the flag.
 			return nil
 		}
-		// Stall and burn-watch ride ambiguity_clarification;
-		// reconcile rides failure_memory.
+		// Stall, verify-loop, and burn-watch ride
+		// ambiguity_clarification; reconcile rides failure_memory.
 		flag := "ambiguity_clarification"
 		if name == "reconcile" {
 			flag = "failure_memory"
