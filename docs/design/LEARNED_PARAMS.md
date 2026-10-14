@@ -49,6 +49,7 @@ drift apart.
 | `digest_render_limit` | 3 | ≥ 0 | Session-memory tail rows |
 | `digest_refresh_limit` | 25 | ≥ 0 | Stale digests materialized per turn |
 | `digest_file_hints` | 6 | ≥ 0 | File hints per digest row |
+| `resolver_calls` | 0 | ≥ 0 | L3 scope-resolver model calls per session — 0 disables the layer (#216) |
 
 Zero on a cap means "suppress the section" — the tighten
 direction, always allowed. `open_failure_ttl` accepts a Go

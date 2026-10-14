@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -114,6 +115,11 @@ const (
 	// hole measurable (#216) instead of invisible inside
 	// referent_none.
 	failLangUnsupported = "lang_unsupported"
+	// failResolverNoFailure is referent_none by the L3 resolver's
+	// verdict: the model read the prompt and judged it not about a
+	// failure. Distinct from the lexicon's referent_none so resolver
+	// verdicts stay attributable in coverage tallies (#216).
+	failResolverNoFailure = "resolver_no_failure"
 	// failMentionUnknown is referent_none when an identifier was
 	// named but its polarity parsed neither way — typed-but-
 	// unparseable text. The count is the L3 gate's key quantity:
@@ -152,11 +158,60 @@ const (
 	settledIdentifier = "identifier"
 	settledLexicon    = "lexicon"
 	settledState      = "state"
+	// settledResolver marks verdicts whose scope inputs the L3
+	// small-model resolver supplied (#216): the route that fired is
+	// unchanged — the resolver only provided the prompt analysis the
+	// lexicon couldn't.
+	settledResolver = "resolver"
 	// settledHarness marks verdicts the run-boundary guard settled —
 	// the prompt itself was judged non-user text before any layer
 	// ran, so no binding layer owns the reason.
 	settledHarness = "harness"
 )
+
+// ScopeResolution is the L3 resolver's closed output (#216) — a
+// prompt-level verdict feeding the route table's scope inputs. The
+// resolver never names a row: it answers whether the prompt is about
+// a failure at all, which paths the prompt intends, which it
+// excludes, and which verification kind the referent carries — the
+// same surface the lexicon produces, so downstream routes apply
+// unchanged.
+type ScopeResolution struct {
+	// About reports the prompt is about a failure. False is a valid
+	// resolution — everything drops resolver_no_failure — not an
+	// abstain.
+	About bool
+	// Include and Exclude are path scopes: include behaves like the
+	// prompt's positive scope, exclude is a hard veto. Both are
+	// validated to exist on disk during resolution.
+	Include []string
+	Exclude []string
+	// Kind is the referent kind when the prompt bound one — a
+	// verificationKinds member.
+	Kind string
+}
+
+// ResolverCandidate is the read-only candidate view a ScopeResolver
+// sees — enough to describe the row without exposing selector
+// internals.
+type ResolverCandidate struct {
+	Pool     string
+	Cmd      string
+	CWD      string
+	Headline string
+	Files    []string
+}
+
+// ScopeResolver resolves one ambiguous prompt against a candidate
+// set — the L3 small-model layer (#216). Implementations cache by
+// prompt+candidate content hash; a nil resolver, an error, an
+// invalid response, or a timeout all abstain identically, leaving
+// the L0–L2 fail-closed path in charge. The interface is the bench's
+// +L3 arm seam: SimulateSelection takes a stub the same way the live
+// turn takes the model-backed resolver.
+type ScopeResolver interface {
+	ResolveScope(ctx context.Context, prompt string, cands []ResolverCandidate) (*ScopeResolution, error)
+}
 
 // selCtx carries one candidate's evaluation state through the route
 // table — the turn-level prompt analysis (scope, referents, mention
@@ -175,6 +230,11 @@ type selCtx struct {
 	kind             string
 	topLevel         bool
 	mention          mentionPolarity
+	// res is non-nil only when the L3 resolver produced a valid
+	// resolution — the pos/neg/kinds/explicit fields then already
+	// carry the resolver-supplied overlay, and scope-consuming
+	// routes stamp resolver-settled instead of their default layer.
+	res *ScopeResolution
 }
 
 // selRoute is one ordered dispatch-table row — id is the route's
@@ -188,7 +248,15 @@ type selCtx struct {
 type selRoute struct {
 	id      string
 	settled string
-	eval    func(c selCtx) (reason string, fired bool)
+	// resScoped marks routes whose verdict reads the scope inputs
+	// the L3 resolver can supply (pos/neg/kinds/explicit). When a
+	// valid resolution is present, these routes stamp settledResolver
+	// — the check is theirs, the analysis that fed it is the
+	// resolver's. Over-inclusive by design (same bias as
+	// memory_suggested): a lexicon-parsed veto firing beside a
+	// resolution still counts as resolver-settled.
+	resScoped bool
+	eval      func(c selCtx) (reason string, fired bool)
 }
 
 // failureRoutes is the candidate dispatch table — read-only after
@@ -207,7 +275,7 @@ var failureRoutes = []selRoute{
 		},
 	},
 	{
-		id: "negated-scope", settled: settledLexicon,
+		id: "negated-scope", settled: settledLexicon, resScoped: true,
 		eval: func(c selCtx) (string, bool) {
 			return failNegatedScope, negatedByAny(c.dirs, c.f.Files, c.neg, c.pos)
 		},
@@ -253,13 +321,27 @@ var failureRoutes = []selRoute{
 		},
 	},
 	{
-		id: "explicit-out-of-scope", settled: settledLexicon,
+		id: "resolver-no-failure", settled: settledResolver,
+		// The resolver read the prompt and ruled it not about a
+		// failure — a relevance verdict, fail-closed on every row.
+		// It sits after the ident block deliberately: a positively-
+		// named identifier is direct lexical evidence the prompt
+		// binds that failure, and direct evidence outranks a model's
+		// relevance judgment. The verdict still mass-rejects every
+		// row the L1 layer could not affirm — shadowed and the
+		// negation/ident vetoes still precede it.
+		eval: func(c selCtx) (string, bool) {
+			return failResolverNoFailure, c.res != nil && !c.res.About
+		},
+	},
+	{
+		id: "explicit-out-of-scope", settled: settledLexicon, resScoped: true,
 		eval: func(c selCtx) (string, bool) {
 			return failOutOfScope, c.explicit && !overlapsAny(c.dirs, c.pos)
 		},
 	},
 	{
-		id: "explicit-kind-gate", settled: settledLexicon,
+		id: "explicit-kind-gate", settled: settledLexicon, resScoped: true,
 		// Explicit scope still requires a verdict-flavored row — a
 		// failed ls/git/curl at root must not inject into an
 		// unrelated "fix main.go".
@@ -291,13 +373,13 @@ var failureRoutes = []selRoute{
 		},
 	},
 	{
-		id: "referent-kind-mismatch", settled: settledLexicon,
+		id: "referent-kind-mismatch", settled: settledLexicon, resScoped: true,
 		eval: func(c selCtx) (string, bool) {
 			return failKindMismatch, !c.explicit && !slices.Contains(c.kinds, c.kind)
 		},
 	},
 	{
-		id: "narrow-scope", settled: settledLexicon,
+		id: "narrow-scope", settled: settledLexicon, resScoped: true,
 		// A run row's subdir target names the binary's package, not
 		// the failure's scope — the panic can live anywhere in its
 		// call graph — so narrow_scope is a verification-kind rule
@@ -322,7 +404,7 @@ var failureRoutes = []selRoute{
 		},
 	},
 	{
-		id: "default-admit", settled: settledLexicon,
+		id: "default-admit", settled: settledLexicon, resScoped: true,
 		// The terminal route — a candidate no earlier gate rejected
 		// binds under the prompt analysis that ran the table.
 		eval: func(selCtx) (string, bool) {
@@ -1483,8 +1565,18 @@ var selectorPromptReplacer = strings.NewReplacer(
 func selectOpenFailures(prompt string, failures []cmdlog.Failure, workDir string,
 	renderLimit int,
 ) ([]cmdlog.Failure, []FailureDecision) {
-	admitted, decisions := selectMemory(prompt,
-		memoryPools{open: failures}, workDir, memoryRenderLimits{open: renderLimit})
+	admitted, decisions := selectMemory(context.Background(), prompt,
+		memoryPools{open: failures}, workDir, memoryRenderLimits{open: renderLimit}, nil)
+	return admitted.open, decisions
+}
+
+// selectOpenFailuresResolver is the same wrapper with an L3 resolver
+// injected — the bench and resolver tests drive it with stubs.
+func selectOpenFailuresResolver(ctx context.Context, prompt string,
+	failures []cmdlog.Failure, workDir string, renderLimit int, resolver ScopeResolver,
+) ([]cmdlog.Failure, []FailureDecision) {
+	admitted, decisions := selectMemory(ctx, prompt,
+		memoryPools{open: failures}, workDir, memoryRenderLimits{open: renderLimit}, resolver)
 	return admitted.open, decisions
 }
 
@@ -1512,11 +1604,13 @@ type MemoryRenderLimits struct {
 // turn path, with no agent, model, or telemetry. The eval harness
 // uses it to measure the selector's half of the memory ladders for
 // free (#223): stored-dose vs rendered-dose questions resolve
-// without spending an agent run.
+// without spending an agent run. resolver is the L3 arm's seam —
+// pass a stub to measure what the small-model layer would add, nil
+// for the deterministic-only arm (#216).
 func SimulateSelection(prompt string, pools MemoryPools, workDir string,
-	limits MemoryRenderLimits,
+	limits MemoryRenderLimits, resolver ScopeResolver,
 ) (MemoryPools, []FailureDecision) {
-	admitted, decisions := selectMemory(prompt, memoryPools{
+	admitted, decisions := selectMemory(context.Background(), prompt, memoryPools{
 		open:     pools.Open,
 		resolved: pools.Resolved,
 		commands: pools.Commands,
@@ -1524,7 +1618,7 @@ func SimulateSelection(prompt string, pools MemoryPools, workDir string,
 		open:     limits.Open,
 		resolved: limits.Resolved,
 		command:  limits.Command,
-	})
+	}, resolver)
 	return MemoryPools{
 		Open:     admitted.open,
 		Resolved: admitted.resolved,
@@ -1616,8 +1710,24 @@ func commandIdentifiers(c cmdlog.Command) map[string]bool {
 	return ids
 }
 
-func selectMemory(prompt string, pools memoryPools, workDir string,
-	limits memoryRenderLimits,
+// resolverCandidates projects the candidate set into the read-only
+// view the L3 resolver sees.
+func resolverCandidates(cands []selCandidate) []ResolverCandidate {
+	out := make([]ResolverCandidate, 0, len(cands))
+	for _, c := range cands {
+		out = append(out, ResolverCandidate{
+			Pool:     c.pool,
+			Cmd:      c.f.Cmd,
+			CWD:      c.f.CWD,
+			Headline: c.f.Headline,
+			Files:    c.f.Files,
+		})
+	}
+	return out
+}
+
+func selectMemory(ctx context.Context, prompt string, pools memoryPools, workDir string,
+	limits memoryRenderLimits, resolver ScopeResolver,
 ) (memoryPools, []FailureDecision) {
 	var admitted memoryPools
 	total := len(pools.open) + len(pools.resolved) + len(pools.commands)
@@ -1685,6 +1795,35 @@ func selectMemory(prompt string, pools memoryPools, workDir string,
 	if !explicit {
 		kinds = referentKinds(prompt)
 	}
+
+	// L3 (#216): the deterministic layers leave the prompt
+	// unresolved — no explicit scope, no referent kind — but open
+	// failures exist. The resolver gets one bounded shot at the
+	// prompt-level question. A valid resolution overlays the scope
+	// fields (include → pos, exclude → neg, kind → kinds) so the
+	// route table below applies unchanged; an about=false verdict is
+	// itself a resolution — every row drops resolver_no_failure.
+	// Absent/errored/invalid/timeout resolvers all abstain
+	// identically: res stays nil and the L0–L2 path owns the turn.
+	// The prompt must carry user text — the empty sentinel means "no
+	// prompt to bind" (a repair retry that missed the turn cache),
+	// and a candidate list with no question is maximally biased
+	// model input: everything visible is a failure.
+	var res *ScopeResolution
+	if resolver != nil && strings.TrimSpace(prompt) != "" && !explicit && kinds == nil && len(pools.open) > 0 {
+		if r, err := resolver.ResolveScope(ctx, prompt, resolverCandidates(candidates)); err == nil && r != nil {
+			res = r
+			if res.About {
+				pos = append(pos, res.Include...)
+				neg = append(neg, res.Exclude...)
+				if res.Kind != "" {
+					kinds = []string{res.Kind}
+				}
+				explicit = len(pos) > 0
+			}
+		}
+	}
+
 	// L1: language-neutral identifier mentions — the same scan once,
 	// folded per candidate below. lone is bare-identifier navigation
 	// only: a prompt carrying an identifier site can never satisfy
@@ -1756,12 +1895,18 @@ func selectMemory(prompt string, pools memoryPools, workDir string,
 			pos: pos, neg: neg, explicit: explicit, kinds: kinds,
 			uniqueOpenByKind: uniqueOpenByKind,
 			cand:             cand, f: f, dirs: dirs, kind: kind,
-			topLevel: topLevel, mention: mention,
+			topLevel: topLevel, mention: mention, res: res,
 		}
 		for _, r := range failureRoutes {
 			if rr, fired := r.eval(sc); fired {
 				reason = rr
 				d.SettledBy = r.settled
+				// Scope-consuming routes settled by resolver-supplied
+				// analysis when a resolution exists — the check is the
+				// route's, the scope is the resolver's (#216).
+				if res != nil && r.resScoped {
+					d.SettledBy = settledResolver
+				}
 				d.Route = r.id
 				break
 			}

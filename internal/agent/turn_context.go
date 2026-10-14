@@ -229,12 +229,12 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 					// closed rather than mine harness retry text.
 					selPrompt = ""
 				}
-				selected, memoryDecisions = selectMemory(selPrompt, pools, workDir,
+				selected, memoryDecisions = selectMemory(ctx, selPrompt, pools, workDir,
 					memoryRenderLimits{
 						open:     mp.OpenRenderLimit,
 						resolved: mp.ResolvedRenderLimit,
 						command:  mp.CommandRenderLimit,
-					})
+					}, a.scopeResolverFor(workDir, call.SessionID, mp))
 				// Telemetry candidates span every evaluated row, all
 				// three pools — the count/ages mean "what the selector
 				// saw", and decisions alone undercounts the knowledge

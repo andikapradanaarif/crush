@@ -177,12 +177,15 @@ func (r *Runner) RunSelectProbe(ctx context.Context, traj *Trajectory, trajDir, 
 		}
 	}
 
+	// The probe runs the deterministic arm — the L3 resolver seam is
+	// SimulateSelection's last parameter for experiments that want
+	// the +L3 arm (#216); a nil resolver is the L0–L2 baseline.
 	admitted, decisions := agent.SimulateSelection(prompt, pools, workdir,
 		agent.MemoryRenderLimits{
 			Open:     mp.OpenRenderLimit,
 			Resolved: mp.ResolvedRenderLimit,
 			Command:  mp.CommandRenderLimit,
-		})
+		}, nil)
 
 	rep := &SelectProbeReport{
 		Trajectory: traj.ID,

@@ -246,6 +246,10 @@ type coordinator struct {
 	// depend on which AgentResult returned last. Always-on like
 	// reqStats.
 	usageLedger *csync.Map[string, ledgerUsage]
+	// resolverStates maps session → the L3 scope resolver's cache and
+	// call-budget counter (#216) — shared across agent rebuilds so a
+	// rebuild does not reset spend or warm cache.
+	resolverStates *csync.Map[string, *resolverState]
 	// tailAudit snapshots each session's last rendered turn tail —
 	// the ephemeral tail's only durable trace, exported through
 	// SessionTelemetry so eval records can audit what the model saw.
@@ -361,6 +365,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		telemetryEmitted:      csync.NewMap[string, SessionTelemetry](),
 		reqStats:              csync.NewMap[string, requestStats](),
 		usageLedger:           csync.NewMap[string, ledgerUsage](),
+		resolverStates:        csync.NewMap[string, *resolverState](),
 		tailAudit:             csync.NewMap[string, TailAudit](),
 		detachedWork:          &sync.WaitGroup{},
 		memParams:             opts.MemParams.OrDefault(),
@@ -496,6 +501,9 @@ func (c *coordinator) watchSessionDeletions() {
 		}
 		if c.usageLedger != nil {
 			c.usageLedger.Del(ev.Payload.ID)
+		}
+		if c.resolverStates != nil {
+			c.resolverStates.Del(ev.Payload.ID)
 		}
 		if c.memoryTelemetry != nil {
 			c.memoryTelemetry.forget(ev.Payload.ID)
@@ -1284,6 +1292,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		EdgeStats:              c.edgeStats,
 		RequestStats:           c.reqStats,
 		UsageLedger:            c.usageLedger,
+		ResolverStates:         c.resolverStates,
 		TailAudit:              c.tailAudit,
 		DetachedWork:           c.detachedWork,
 		MemParams:              c.memParams,

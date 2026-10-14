@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -888,7 +889,7 @@ func TestSelectMemory_UniqueScopeCountsOpenPoolOnly(t *testing.T) {
 		Commands: []cmdlog.Command{
 			{CmdNorm: "go test ./other", CWD: ".", Kind: "test", LastExit: 0},
 		},
-	}, "", MemoryRenderLimits{})
+	}, "", MemoryRenderLimits{}, nil)
 
 	var gotAdmit []string
 	for _, f := range admitted.Open {
@@ -1223,8 +1224,8 @@ func TestSelectMemory_Pools(t *testing.T) {
 				LastExit: 0, OKCount: 4, FailCount: 1,
 			}},
 		}
-		admitted, decisions := selectMemory("the tests fail", pools, "",
-			memoryRenderLimits{})
+		admitted, decisions := selectMemory(context.Background(), "the tests fail", pools, "",
+			memoryRenderLimits{}, nil)
 		require.Len(t, admitted.open, 1)
 		// The ambiguous "the tests" referent binds test-kind rows
 		// only — the resolved build row and the lint command read
@@ -1250,8 +1251,8 @@ func TestSelectMemory_Pools(t *testing.T) {
 				{CmdNorm: "go vet .", CWD: ".", Kind: "lint", LastExit: 0, OKCount: 3},
 			},
 		}
-		_, decisions := selectMemory("the tests fail", pools, "",
-			memoryRenderLimits{})
+		_, decisions := selectMemory(context.Background(), "the tests fail", pools, "",
+			memoryRenderLimits{}, nil)
 		var shadow, vet FailureDecision
 		for _, d := range decisions {
 			if d.Cmd == "go test ." && d.Pool == poolCommand {
@@ -1276,8 +1277,8 @@ func TestSelectMemory_Pools(t *testing.T) {
 				mkFailureHeadline("go test .", ".", "--- FAIL: TestAdd"),
 			},
 		}
-		admitted, decisions := selectMemory("the tests fail", pools, "",
-			memoryRenderLimits{})
+		admitted, decisions := selectMemory(context.Background(), "the tests fail", pools, "",
+			memoryRenderLimits{}, nil)
 		require.Len(t, admitted.resolved, 1)
 		require.Equal(t, poolResolved, decisions[0].Pool)
 		require.True(t, decisions[0].Admit)
@@ -1293,8 +1294,8 @@ func TestSelectMemory_Pools(t *testing.T) {
 		}
 		// An explicit-scope prompt admits verdict-kind rows in the
 		// named dir — the same rule the failure pool plays by.
-		admitted, decisions := selectMemory("run the tests", pools, "",
-			memoryRenderLimits{})
+		admitted, decisions := selectMemory(context.Background(), "run the tests", pools, "",
+			memoryRenderLimits{}, nil)
 		require.Len(t, admitted.commands, 1)
 		require.Equal(t, "go test .", admitted.commands[0].CmdNorm)
 		// "run the tests" carries no referent kind gate for ls —
@@ -1315,9 +1316,9 @@ func TestSelectMemory_Pools(t *testing.T) {
 				Kind: "test", LastExit: 0, OKCount: 1,
 			})
 		}
-		admitted, decisions := selectMemory("the tests fail",
+		admitted, decisions := selectMemory(context.Background(), "the tests fail",
 			memoryPools{commands: commands}, "",
-			memoryRenderLimits{command: 2})
+			memoryRenderLimits{command: 2}, nil)
 		require.Len(t, admitted.commands, 2)
 		capped := 0
 		for _, d := range decisions {
@@ -1344,7 +1345,7 @@ func TestSimulateSelection(t *testing.T) {
 			},
 		}
 		admitted, decisions := SimulateSelection("the tests fail", pools, "",
-			MemoryRenderLimits{})
+			MemoryRenderLimits{}, nil)
 		require.Len(t, decisions, 4)
 		require.Len(t, admitted.Open, 1)
 		require.Len(t, admitted.Resolved, 1)
@@ -1370,7 +1371,7 @@ func TestSimulateSelection(t *testing.T) {
 			},
 		}
 		admitted, decisions := SimulateSelection("the tests fail", pools, "",
-			MemoryRenderLimits{Open: 1})
+			MemoryRenderLimits{Open: 1}, nil)
 		require.Len(t, admitted.Open, 1)
 		var capped int
 		for _, d := range decisions {
@@ -1388,7 +1389,7 @@ func TestSimulateSelection(t *testing.T) {
 		// fetching it — the simulation sees the same empty input and
 		// must emit no candidates and no decisions for it.
 		admitted, decisions := SimulateSelection("the tests fail",
-			MemoryPools{}, "", MemoryRenderLimits{})
+			MemoryPools{}, "", MemoryRenderLimits{}, nil)
 		require.Empty(t, decisions)
 		require.Empty(t, admitted.Open)
 		require.Empty(t, admitted.Resolved)
@@ -1413,6 +1414,9 @@ func TestFailureRoutes_Coverage(t *testing.T) {
 	fixtures := map[string]selCtx{
 		"shadowed": {
 			cand: selCandidate{shadowed: true},
+		},
+		"resolver-no-failure": {
+			res: &ScopeResolution{About: false},
 		},
 		"negated-scope": {
 			neg: []string{"decoy"}, dirs: []string{"decoy"},
@@ -1475,18 +1479,22 @@ func TestFailureRoutes_Coverage(t *testing.T) {
 		admitUniqueScope: true, failPathGone: true, failStaleSuspect: true,
 		failNonUserPrompt: true, failLangUnsupported: true,
 		failMentionUnknown: true, failRenderCapped: true, failShadowed: true,
+		failResolverNoFailure: true,
 	}
 	settles := map[string]bool{
 		settledState: true, settledLexicon: true,
 		settledIdentifier: true, settledHarness: true,
+		settledResolver: true,
 	}
 
 	// The precedence contract itself is pinned: the table's id order
 	// is the dispatch order, so an accidental reorder fails here even
 	// where no fixture could distinguish the swapped pair.
 	wantIDs := []string{
-		"shadowed", "negated-scope", "ident-veto", "ident-kind-gate",
+		"shadowed", "negated-scope",
+		"ident-veto", "ident-kind-gate",
 		"ident-path-gone", "ident-stale", "ident-admit",
+		"resolver-no-failure",
 		"explicit-out-of-scope", "explicit-kind-gate",
 		"lang-unsupported", "mention-unknown", "referent-none",
 		"referent-kind-mismatch", "narrow-scope",
