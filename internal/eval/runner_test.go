@@ -542,7 +542,7 @@ func TestReport_PrimaryUnderAchievedStaysUnpowered(t *testing.T) {
 func TestWriteArmConfig_CollisionAndContent(t *testing.T) {
 	t.Parallel()
 	wd := t.TempDir()
-	exp := &Experiment{Model: "hyper/x", Temperature: ptr(0.0)}
+	exp := &Experiment{Model: "hyper/x", SmallModel: "hyper/s", Temperature: ptr(0.0)}
 	arm := Arm{Config: ArmConfig{Options: map[string]any{"flag_a": true}}}
 	require.NoError(t, WriteArmConfig(wd, exp, arm, &FlagsManifest{Defaults: map[string]any{}}, "key"))
 
@@ -550,6 +550,9 @@ func TestWriteArmConfig_CollisionAndContent(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(rc), "model large hyper/x")
 	require.Contains(t, string(rc), "--temperature 0")
+	// The aux slot pins too — ambient provider keys must not pick
+	// the resolver's model (#333).
+	require.Contains(t, string(rc), "model small hyper/s")
 
 	js, err := os.ReadFile(filepath.Join(wd, ".crush.json"))
 	require.NoError(t, err)

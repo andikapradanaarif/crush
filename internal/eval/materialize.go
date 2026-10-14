@@ -359,6 +359,9 @@ func modelPinLine(exp *Experiment) string {
 	if exp.Temperature != nil {
 		pin += fmt.Sprintf(" --temperature %v", *exp.Temperature)
 	}
+	if exp.SmallModel != "" {
+		pin += fmt.Sprintf("\nmodel small %s", exp.SmallModel)
+	}
 	return pin + "\n"
 }
 
