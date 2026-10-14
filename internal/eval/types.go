@@ -219,8 +219,14 @@ type Budget struct {
 
 // Experiment is a paired comparison: arms × corpus slice.
 type Experiment struct {
-	Name              string         `json:"name"`
-	Model             string         `json:"model"` // provider/model, e.g. "hyper/deepseek-v4-pro-0813"
+	Name  string `json:"name"`
+	Model string `json:"model"` // provider/model, e.g. "hyper/deepseek-v4-pro-0813"
+	// SmallModel pins the child's aux-model slot (`model small`) —
+	// title generation, the L3 scope resolver. Absent, the slot
+	// resolves from ambient provider keys, which makes consult
+	// outcomes depend on the operator's environment (#333). Pin it
+	// wherever a feature flag arms a small-model consumer.
+	SmallModel        string         `json:"small_model,omitempty"`
 	Temperature       *float64       `json:"temperature,omitempty"`
 	Corpus            []string       `json:"corpus"` // globs or "band:<name>"
 	RunsPerTrajectory map[Band]int   `json:"runs_per_trajectory"`
