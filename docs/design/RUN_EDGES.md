@@ -63,6 +63,7 @@ here because the list must have exactly one home.
 | verification       | failed/pending checks                              | implemented (the extraction source)                          |
 | todos-reconcile    | open plan items at clean stop                      | implemented (same site)                                      |
 | stall-replan       | loop-detector / no-progress                        | implemented — replan before escalation, budget-branched         |
+| verify-loop        | post-write verify streak ≥N steps, no new write    | implemented (#329) — the fix-verify loop breaker                |
 | escalate-human     | loop-detector stop                                 | implemented (#43) — question turn                            |
 | phase-confirm      | first write-class call after ≥N exploration events | implemented (#43) — plan gate                                |
 | join-subagents     | outstanding dispatch ledger                        | lives in `BACKGROUND_SUBAGENTS.md` (local-only — untracked; issue #3) |
@@ -298,6 +299,66 @@ the edge's prompt branches on budget, not a second edge.
   it extends — a retry turn on every loop stop changes behavior
   for everyone, so the default-on flip is a separate
   evidence-gated decision (#38/#54), not part of this row.
+
+### verify-loop
+
+The #329 failure shape: an early write lands — usually a
+memory-steered fix committed too fast — and then the model
+re-verifies the same failing check until the step cap. Both shipped
+tripwires miss it: the identical-signature detector needs one call
+repeated verbatim while the loop varies (`bash`/`view`/`ls`
+interleaved), and burn-watch requires zero writes while this run
+_wrote_ — the write is what arms the loop.
+
+- **detect:** a mid-run `StopWhen` — `hasPostWriteVerifyStreak` in
+  `loop_detection.go` counts trailing steps after the last mutating
+  call (`toolclass.IsMutatingCall`, the shared write vocabulary —
+  `bash > f` counts) and trips at `verifyLoopMinSteps = 8`. Healthy
+  edit→test→edit cycles run 2-4 steps between writes; the observed
+  harm ran 25+. A run that never wrote cannot trip — write-less
+  spend stays burn-watch's domain. **Precision ceiling, stated:**
+  the signature is "no write in 8 trailing steps," not verification
+  per se — a long legitimate diagnosis run (reads and greps while a
+  check stays red) trips identically, and the replan then asserts
+  "the check keeps reporting the same failure" about a state it
+  can't verify. The cost is bounded — the first trip is an advisory
+  replan, not a halt — and the rate itself is the calibration read:
+  `verify-loop rate` in `crush stats` and `edge_firings.verify-loop
+  .fired` vs `.gated` in eval cells show whether 8 is too tight.
+- **scan:** fires on `in.verifyLoop` — the same summarize-mask
+  fallback as stall re-scans the steps when the context-pressure
+  StopWhen short-circuited the detector (`verifyLoop` unset but a
+  mid-tool-chain ending carries the signature). The mask path
+  applies the _full_ predicate — `hasPostWriteVerifyStreak`,
+  sawWrite conjunct included — so a write-less run ended mid-chain
+  by summarize or the step cap stays burn-watch-shaped and can't be
+  claimed. `in.stalled` claims the boundary first: a streak of
+  _identical_ calls satisfies both detectors and stall is the more
+  specific diagnosis — and the mask path honors the same precedence,
+  re-scanning only when `repeatedToolSignature` is empty, so one
+  boundary can't record two firings. **Re-trip gap, stated:**
+  `in.result.Steps` is fresh per turn, so re-tripping requires the
+  repair turn to write again _and_ streak — a replan turn that goes
+  back to re-verifying the already-written fix without a new write
+  never satisfies sawWrite and falls to burn-watch's floors (>S
+  steps or >T tokens), meaning an 8–30 step write-less re-verify
+  under the token arm escapes both edges until the cap.
+- **resolve:** replan branch pulls the shared replan payload —
+  latest checkpoint + touched-dir map slice — via
+  `pullReplanHandoff`; the headless-degrade path lands the blocker
+  report (`verifyLoopReport`: streak length + the tools that kept
+  running) on the final assistant message.
+- **prompt:** replan names the mechanism, not the symptom — "the
+  check keeps reporting the same failure; re-verifying cannot move
+  the work forward — state what the failure proves about the
+  diagnosis and act on it." Escalate branch (second trip, repair
+  turn) asks one single_choice question; headless degrades to the
+  report like stall. Prefixes `verifyLoopReplanPrefix` /
+  `verifyLoopEscalatePrefix` are registered in
+  `RepairPromptPrefixes` for the eval analyzer's turn segmentation.
+- **Gating:** rides `ambiguity_clarification` with stall and
+  burn-watch — a forced replan on every post-write streak changes
+  behavior for everyone, so it ships behind the same opt-in.
 
 ### burn-watch
 

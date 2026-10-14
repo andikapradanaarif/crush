@@ -104,6 +104,11 @@ type edgeInput struct {
 	// StopWhen fired — the signature repetition signal the edge layer
 	// turns into a replan/escalation turn instead of a silent stop.
 	stalled bool
+	// verifyLoop records that the run ended because the post-write
+	// verify-streak detector's StopWhen fired — the write-then-
+	// reverifying-forever signature (#329) that the identical-call
+	// detector and the write-less burn-watch both miss.
+	verifyLoop bool
 	// turnSeq is the absolute ordinal of the run's initiating user
 	// message among all user messages — the edge_firings key column.
 	// Repair retries persist their prompts as user messages, so each
@@ -209,8 +214,9 @@ type runEdge struct {
 
 // runEdgeSet is the evaluated order: verification and todos are the
 // original gate halves; stall converts a loop-detector stop into a
-// replan-or-escalate turn; burn-watch is the write-less spend
-// tripwire; reconcile flags failure rows the run observed still open.
+// replan-or-escalate turn; verify-loop does the same for a post-write
+// verify-streak stop; burn-watch is the write-less spend tripwire;
+// reconcile flags failure rows the run observed still open.
 // All firing retry-family edges merge into ONE retry prompt — two edges
 // each enqueueing a turn would double every repair. Escalation-family
 // triggers win the slot outright and the rest defer.
@@ -244,6 +250,13 @@ func (a *sessionAgent) runEdgeSet() []runEdge {
 			resolve: a.resolveStallEdge,
 			prompt:  stallPromptSection,
 			note:    stallExhaustNote,
+		},
+		{
+			name:    "verify-loop",
+			scan:    a.scanVerifyLoopEdge,
+			resolve: a.resolveVerifyLoopEdge,
+			prompt:  verifyLoopPromptSection,
+			note:    verifyLoopExhaustNote,
 		},
 		{
 			name:    "burn-watch",
@@ -912,6 +925,11 @@ const (
 	// stall edge's replan/escalate variants.
 	stallReplanPrefix = "The previous attempt stalled"
 	burnWatchPrefix   = "This run spent"
+	// The verify-loop prefixes must stay distinct from the stall and
+	// burn-watch literals — the eval analyzer fingerprints the leading
+	// text to attribute the repair turn.
+	verifyLoopReplanPrefix   = "The previous attempt kept verifying the same fix"
+	verifyLoopEscalatePrefix = "This run kept verifying the same fix without converging"
 )
 
 // RepairPromptPrefixes is every repair-prompt leading literal — the
@@ -923,6 +941,8 @@ var RepairPromptPrefixes = []string{
 	stallRetryPrefix,
 	stallReplanPrefix,
 	burnWatchPrefix,
+	verifyLoopReplanPrefix,
+	verifyLoopEscalatePrefix,
 }
 
 // failedCheckGroups merges failed entries minted by one write into a
@@ -1191,7 +1211,7 @@ func (a *sessionAgent) scanStallEdge(_ context.Context, call SessionAgentCall, i
 // for `crush run` — instead of a retry nobody can answer.
 func (a *sessionAgent) resolveStallEdge(ctx context.Context, call SessionAgentCall, t *edgeTrigger) {
 	if t.variant == "replan" && t.fire {
-		a.pullStallHandoff(ctx, call, t)
+		a.pullReplanHandoff(ctx, call, t)
 		return
 	}
 	if t.fire || t.assistant == nil || t.report == "" {
@@ -1209,12 +1229,12 @@ func (a *sessionAgent) resolveStallEdge(ctx context.Context, call SessionAgentCa
 	}
 }
 
-// pullStallHandoff loads the replan turn's re-orientation payload.
+// pullReplanHandoff loads the replan turn's re-orientation payload.
 // The run-end checkpoint generates asynchronously after runEdges, so
 // the latest committed checkpoint is always the previous turn's (or a
 // mid-run) one — never this run's. Every pull is best-effort: a
 // notebook-off or index-off session degrades to evidence-only.
-func (a *sessionAgent) pullStallHandoff(ctx context.Context, call SessionAgentCall, t *edgeTrigger) {
+func (a *sessionAgent) pullReplanHandoff(ctx context.Context, call SessionAgentCall, t *edgeTrigger) {
 	if a.notebook != nil {
 		if entries, err := a.notebook.GetEntries(ctx, call.SessionID); err == nil {
 			latest := map[string]bool{}
@@ -1454,6 +1474,202 @@ func stallRetrySection(_ *edgeTrigger) string {
 // stalled again after its repair turns.
 func stallExhaustNote(_ *edgeTrigger, attempts int) string {
 	return fmt.Sprintf("Stopped after repeating identical tool calls; %d repair attempt(s) exhausted.", attempts)
+}
+
+// --- verify-loop edge ---
+
+// scanVerifyLoopEdge fires when the post-write verify-streak detector
+// stopped the run — an early write followed by converging-free
+// re-verification is the fix-verify loop (#329) that the identical-
+// signature detector misses (the calls vary) and burn-watch never sees
+// (a write exists). The prompt branches on the shared repair budget
+// like stall's: the first trip gets a model-directed replan turn, a
+// re-trip on the repair turn escalates to the interactive question,
+// degrading to the blocker report when the run can't ask. Opt-in via
+// options.ambiguity_clarification — flag-off records a gated row but
+// does not act.
+func (a *sessionAgent) scanVerifyLoopEdge(_ context.Context, call SessionAgentCall, in edgeInput) *edgeTrigger {
+	// A boundary the identical-signature detector also claimed stays
+	// with the stall edge — a streak of identical calls satisfies both
+	// signatures and stall is the more specific diagnosis.
+	if in.stalled {
+		return nil
+	}
+	streak := postWriteStreakLen(in.result.Steps)
+	if !in.verifyLoop {
+		// Same context-pressure mask as stall: the summarize
+		// StopWhen runs first and can end the run mid-tool-chain
+		// before the streak detector evaluates — re-scan the steps
+		// for the signature the flag would have carried. The full
+		// predicate applies, sawWrite included — a write-less
+		// mid-chain ending (summarize mask, step-cap cut) is
+		// burn-watch-shaped, not verify-loop. A question-tool
+		// StopTurn is an escalation in progress and a stop/error
+		// ending evaluated the detector on its last step already —
+		// neither is verify-loop evidence.
+		if !hasPostWriteVerifyStreak(in.result.Steps) || endedOnStopTurn(in.result) ||
+			in.result.Steps[len(in.result.Steps)-1].FinishReason != fantasy.FinishReasonToolCalls {
+			return nil
+		}
+		// The mask can hide a boundary the stall fallback would also
+		// claim — repeated signatures inside the streak stay stall's,
+		// symmetric to the in.stalled guard above.
+		if sig, _, _ := repeatedToolSignature(in.result.Steps,
+			loopDetectionWindowSize, loopDetectionMaxRepeats); sig != "" {
+			return nil
+		}
+	}
+	t := &edgeTrigger{
+		assistant: in.currentAssistant,
+		report:    verifyLoopReport(streak, in.result.Steps),
+		detail: fmt.Sprintf("post_write_streak=%d tools=%s",
+			streak, strings.Join(postWriteStreakTools(in.result.Steps), ",")),
+		steps:    in.result.Steps,
+		writeSet: stepWriteSet(in.result.Steps),
+	}
+	if call.RepairAttempts == 0 {
+		// First trip — the cheap model-directed replan. "First" means
+		// first repair slot, not first streak ever.
+		t.variant = "replan"
+		t.family = edgeFamilyRetry
+	} else {
+		t.variant = "escalate"
+		t.family = edgeFamilyEscalate
+	}
+	if !a.ambiguityClarification {
+		t.hint = edgeOutcomeGated
+		return t
+	}
+	if t.variant == "replan" {
+		t.fire = true
+		return t
+	}
+	t.fire = a.interactive && !call.NonInteractive && a.hasTool(tools.QuestionToolName)
+	if !t.fire {
+		t.hint = edgeOutcomeDegraded
+	}
+	return t
+}
+
+// resolveVerifyLoopEdge mirrors the stall edge's resolve: the firing
+// replan branch pulls the re-orientation payload (latest checkpoint,
+// touched-dir map slice) so the forced turn re-orients at zero model
+// cost; the headless degrade lands the structured blocker report on
+// the final assistant message — it reaches RunComplete.Text for
+// `crush run` — instead of a retry nobody can answer.
+func (a *sessionAgent) resolveVerifyLoopEdge(ctx context.Context, call SessionAgentCall, t *edgeTrigger) {
+	if t.variant == "replan" && t.fire {
+		a.pullReplanHandoff(ctx, call, t)
+		return
+	}
+	if t.fire || t.assistant == nil || t.report == "" {
+		return
+	}
+	t.assistant.AppendContent("\n\n" + t.report)
+	// Detached like the firing rows — the blocker report is terminal
+	// evidence and must land even on a dead run context.
+	wctx, cancel := detachedWriteCtx(ctx)
+	defer cancel()
+	if err := a.messages.Update(wctx, *t.assistant); err != nil {
+		slog.Error("Failed to record verify-loop blocker report", "error", err, "session_id", call.SessionID)
+	} else if err := a.messages.FlushAll(wctx); err != nil {
+		slog.Error("Failed to flush verify-loop blocker report", "error", err, "session_id", call.SessionID)
+	}
+}
+
+// postWriteStreakTools collects the distinct tool names called in the
+// trailing post-write streak — "what kept running" evidence for the
+// firing record's detail column.
+func postWriteStreakTools(steps []fantasy.StepResult) []string {
+	n := postWriteStreakLen(steps)
+	if n == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for i := len(steps) - n; i < len(steps); i++ {
+		for _, tc := range steps[i].Content.ToolCalls() {
+			if !seen[tc.ToolName] {
+				seen[tc.ToolName] = true
+				out = append(out, tc.ToolName)
+			}
+		}
+	}
+	return out
+}
+
+// verifyLoopReport builds the structured blocker report for a
+// verify-loop-stopped run: what kept running, what's blocking, and
+// the minimal way forward.
+func verifyLoopReport(streak int, steps []fantasy.StepResult) string {
+	tools := ""
+	if names := postWriteStreakTools(steps); len(names) > 0 {
+		tools = fmt.Sprintf(" (%s)", strings.Join(names, ", "))
+	}
+	return fmt.Sprintf("Stopped: %d consecutive verification step(s)%s after the last write produced no new edit. "+
+		"What's blocking: the check keeps reporting the same failure, so verifying again cannot change the outcome. "+
+		"Ways forward: state what the failed check proves about the current diagnosis and change the fix, "+
+		"test a different hypothesis, or name the missing piece if the task is genuinely blocked.",
+		streak, tools)
+}
+
+// verifyLoopPromptSection dispatches the verify-loop edge's prompt on
+// the trigger's variant: replan is a model-directed retry, escalate
+// is the interactive question turn.
+func verifyLoopPromptSection(t *edgeTrigger) string {
+	if t.variant == "replan" {
+		return verifyLoopReplanSection(t)
+	}
+	return verifyLoopEscalateSection(t)
+}
+
+// verifyLoopReplanSection renders the model-directed replan prompt —
+// the blocker report's evidence feeds the prompt and the handoff
+// payload re-orients the forced turn at zero model cost. The closing
+// instruction targets the mechanism directly: verification of an
+// already-known failure is not progress.
+func verifyLoopReplanSection(t *edgeTrigger) string {
+	var b strings.Builder
+	b.WriteString(verifyLoopReplanPrefix + " — consecutive post-write steps went to " +
+		"checking without a new edit, and the check still reports the same failure.\n\n")
+	if t.report != "" {
+		b.WriteString(t.report + "\n\n")
+	}
+	if len(t.writeSet) > 0 {
+		b.WriteString("Files written before the loop:\n")
+		for _, p := range t.writeSet {
+			b.WriteString("- " + p + "\n")
+		}
+		b.WriteString("\n")
+	}
+	if t.checkpoint != "" {
+		b.WriteString("Latest session checkpoint:\n" + t.checkpoint + "\n\n")
+	}
+	if t.mapSlice != "" {
+		b.WriteString("Project map over the touched directories:\n" + t.mapSlice + "\n\n")
+	}
+	b.WriteString("Re-running the same check confirms what is already known — the fix did not take; it cannot " +
+		"move the work forward. State in one line what the failed check proves about the current diagnosis, " +
+		"then act on it: change the fix, test a different hypothesis, or name what is missing if the task is " +
+		"genuinely blocked. Do not spend another step verifying an outcome that is already known.")
+	return b.String()
+}
+
+// verifyLoopEscalateSection renders the escalation prompt for a
+// verify-loop-stopped interactive run — what kept failing, plus
+// options with tradeoffs via the question tool's single_choice.
+func verifyLoopEscalateSection(_ *edgeTrigger) string {
+	return verifyLoopEscalatePrefix + ": the check keeps producing the same failure after the write. " +
+		"Do not re-run the same check. Escalate with ONE question-tool call — a single_choice question " +
+		"naming what you fixed and what keeps failing, with each choice describing the tradeoff of that " +
+		"way forward. If the user cannot answer, proceed with your stated-best option."
+}
+
+// verifyLoopExhaustNote renders the budget-exhausted line for a run
+// that verify-looped again after its repair turns.
+func verifyLoopExhaustNote(t *edgeTrigger, attempts int) string {
+	return fmt.Sprintf("Stopped after %d consecutive post-write verification step(s) without a new edit; %d repair attempt(s) exhausted.",
+		postWriteStreakLen(t.steps), attempts)
 }
 
 // --- burn-watch edge ---

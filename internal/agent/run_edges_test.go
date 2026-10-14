@@ -57,6 +57,45 @@ func stallResult() *fantasy.AgentResult {
 	return &fantasy.AgentResult{Steps: steps}
 }
 
+// verifyLoopResult builds a verify-loop-stopped run — one write, then
+// a varied non-mutating streak at the detector threshold, ending
+// mid-tool-chain where the StopWhen tripped. The calls vary on
+// purpose: the identical-signature detector cannot see this shape.
+func verifyLoopResult() *fantasy.AgentResult {
+	steps := []fantasy.StepResult{
+		stepWith(fantasy.FinishReasonToolCalls,
+			fantasy.ToolCallContent{
+				ToolCallID: "tc-e", ToolName: "edit",
+				Input: `{"file_path":"main.go","old_string":"a","new_string":"b"}`,
+			},
+			fantasy.ToolResultContent{
+				ToolCallID: "tc-e", ToolName: "edit",
+				Result: fantasy.ToolResultOutputContentText{Text: "edited"},
+			},
+		),
+	}
+	tools := []string{"bash", "view", "ls"}
+	inputs := map[string]string{
+		"bash": `{"command":"go test ./..."}`,
+		"view": `{"file_path":"main.go"}`,
+		"ls":   `{"path":"."}`,
+	}
+	for i := 0; i < verifyLoopMinSteps; i++ {
+		name := tools[i%len(tools)]
+		steps = append(steps, stepWith(fantasy.FinishReasonToolCalls,
+			fantasy.ToolCallContent{
+				ToolCallID: fmt.Sprintf("tc-s%d", i), ToolName: name,
+				Input: inputs[name],
+			},
+			fantasy.ToolResultContent{
+				ToolCallID: fmt.Sprintf("tc-s%d", i), ToolName: name,
+				Result: fantasy.ToolResultOutputContentText{Text: "still failing"},
+			},
+		))
+	}
+	return &fantasy.AgentResult{Steps: steps}
+}
+
 // cleanResult builds a run that neither stalled nor repeated — the
 // plain "no edge applies" fixture.
 func cleanResult() *fantasy.AgentResult {
@@ -401,6 +440,208 @@ func interactiveEdgeAgent(t *testing.T) (*sessionAgent, *sql.DB, string) {
 	return a, conn, sessionID
 }
 
+func TestVerifyLoopEdge(t *testing.T) {
+	t.Parallel()
+
+	t.Run("first trip queues a replan retry", func(t *testing.T) {
+		t.Parallel()
+		a, conn, sessionID := interactiveEdgeAgent(t)
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID, RunID: "r"},
+			edgeInput{result: verifyLoopResult(), verifyLoop: true})
+		require.True(t, queued)
+		q, _ := a.messageQueue.Get(sessionID)
+		require.Len(t, q, 1)
+		require.Equal(t, 1, q[0].RepairAttempts)
+		require.True(t, strings.HasPrefix(q[0].Prompt, verifyLoopReplanPrefix))
+		require.Contains(t, q[0].Prompt, "What's blocking:")
+		require.Contains(t, q[0].Prompt, "main.go", "the write-set evidence lands in the prompt")
+		require.NotContains(t, q[0].Prompt, "question-tool")
+		require.Equal(t, "fired", firingOutcome(t, conn, sessionID, "verify-loop"))
+	})
+
+	t.Run("a streak on the repair turn escalates", func(t *testing.T) {
+		t.Parallel()
+		a, conn, sessionID := interactiveEdgeAgent(t)
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID, RepairAttempts: 1},
+			edgeInput{result: verifyLoopResult(), verifyLoop: true})
+		require.True(t, queued)
+		q, _ := a.messageQueue.Get(sessionID)
+		require.Len(t, q, 1)
+		require.Equal(t, 2, q[0].RepairAttempts)
+		require.True(t, strings.HasPrefix(q[0].Prompt, verifyLoopEscalatePrefix))
+		require.Contains(t, q[0].Prompt, "question")
+		require.Equal(t, "fired", firingOutcome(t, conn, sessionID, "verify-loop"))
+	})
+
+	t.Run("headless first trip still enqueues the replan", func(t *testing.T) {
+		t.Parallel()
+		a, _, sessionID := newEdgeTestAgent(t, &config.Config{})
+		a.ambiguityClarification = true
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID, NonInteractive: true},
+			edgeInput{result: verifyLoopResult(), verifyLoop: true})
+		require.True(t, queued, "the replan branch is a model retry — it fires headless")
+		q, _ := a.messageQueue.Get(sessionID)
+		require.True(t, strings.HasPrefix(q[0].Prompt, verifyLoopReplanPrefix))
+	})
+
+	t.Run("headless escalate lands the blocker report", func(t *testing.T) {
+		t.Parallel()
+		a, conn, sessionID := newEdgeTestAgent(t, &config.Config{})
+		a.ambiguityClarification = true
+		asst := &message.Message{Role: message.Assistant}
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID, NonInteractive: true, RepairAttempts: 1},
+			edgeInput{result: verifyLoopResult(), verifyLoop: true, currentAssistant: asst})
+		require.False(t, queued)
+		require.Equal(t, "headless-degraded", firingOutcome(t, conn, sessionID, "verify-loop"))
+		require.Contains(t, asst.Content().Text, "Stopped:")
+		require.Contains(t, asst.Content().Text, "What's blocking:")
+	})
+
+	t.Run("flag off records gated, queues nothing", func(t *testing.T) {
+		t.Parallel()
+		a, conn, sessionID := newEdgeTestAgent(t, &config.Config{})
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: verifyLoopResult(), verifyLoop: true})
+		require.False(t, queued)
+		require.Equal(t, "gated", firingOutcome(t, conn, sessionID, "verify-loop"))
+	})
+
+	t.Run("a stalled boundary stays with the stall edge", func(t *testing.T) {
+		t.Parallel()
+		a, conn, sessionID := interactiveEdgeAgent(t)
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: stallResult(), stalled: true, verifyLoop: true})
+		require.True(t, queued, "the stall edge still owns the boundary")
+		q, _ := a.messageQueue.Get(sessionID)
+		require.True(t, strings.HasPrefix(q[0].Prompt, stallReplanPrefix))
+		require.Empty(t, firingOutcome(t, conn, sessionID, "verify-loop"),
+			"verify-loop never scans a stalled boundary")
+	})
+
+	t.Run("detector-quiet runs produce no trigger", func(t *testing.T) {
+		t.Parallel()
+		a, conn, sessionID := interactiveEdgeAgent(t)
+		// A clean stop after a short verify run — verifyLoop unset
+		// and the fallback's FinishReason check rejects it.
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: cleanResult()})
+		require.False(t, queued)
+		require.Empty(t, firingOutcome(t, conn, sessionID, "verify-loop"))
+	})
+
+	t.Run("masked streak still scans without the flag", func(t *testing.T) {
+		t.Parallel()
+		a, conn, sessionID := interactiveEdgeAgent(t)
+		// The summarize StopWhen ended the run mid-tool-chain before
+		// the streak detector evaluated — verifyLoop is unset but the
+		// step signature is present.
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: verifyLoopResult()})
+		require.True(t, queued)
+		q, _ := a.messageQueue.Get(sessionID)
+		require.True(t, strings.HasPrefix(q[0].Prompt, verifyLoopReplanPrefix))
+		require.Equal(t, "fired", firingOutcome(t, conn, sessionID, "verify-loop"))
+	})
+
+	t.Run("masked boundary with a repeated signature stays stall's", func(t *testing.T) {
+		t.Parallel()
+		a, conn, sessionID := interactiveEdgeAgent(t)
+		// One write, then a trailing run of the SAME call — the
+		// streak and the repeated signature both hold (the signature
+		// detector needs its 10-step window filled, so the suffix is
+		// that long). The stall edge claims it; verify-loop's mask
+		// fallback must not double-fire.
+		result := &fantasy.AgentResult{Steps: []fantasy.StepResult{
+			stepWith(fantasy.FinishReasonToolCalls,
+				fantasy.ToolCallContent{
+					ToolCallID: "tc-e", ToolName: "edit",
+					Input: `{"file_path":"main.go","old_string":"a","new_string":"b"}`,
+				},
+				fantasy.ToolResultContent{
+					ToolCallID: "tc-e", ToolName: "edit",
+					Result: fantasy.ToolResultOutputContentText{Text: "edited"},
+				},
+			),
+		}}
+		for i := 0; i < loopDetectionWindowSize; i++ {
+			result.Steps = append(result.Steps, stepWith(fantasy.FinishReasonToolCalls,
+				fantasy.ToolCallContent{
+					ToolCallID: "tc-s", ToolName: "bash",
+					Input: `{"command":"go test ./..."}`,
+				},
+				fantasy.ToolResultContent{
+					ToolCallID: "tc-s", ToolName: "bash",
+					Result: fantasy.ToolResultOutputContentText{Text: "FAIL"},
+				},
+			))
+		}
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: result})
+		require.True(t, queued)
+		q, _ := a.messageQueue.Get(sessionID)
+		require.Len(t, q, 1, "one boundary gets one repair turn")
+		require.True(t, strings.HasPrefix(q[0].Prompt, stallReplanPrefix))
+		require.Equal(t, "fired", firingOutcome(t, conn, sessionID, "stall"))
+		require.Empty(t, firingOutcome(t, conn, sessionID, "verify-loop"),
+			"a dual-signature masked boundary can't record two firings")
+	})
+
+	t.Run("masked write-less run is burn-watch-shaped, not verify-loop", func(t *testing.T) {
+		t.Parallel()
+		a, conn, sessionID := interactiveEdgeAgent(t)
+		// A write-less run the summarize StopWhen (or the step cap)
+		// ended mid-tool-chain: long trailing streak, no mutating
+		// call anywhere. The mask fallback keeps the sawWrite
+		// conjunct — a run that never wrote cannot trip, and under
+		// burn-watch's floors nothing fires at all.
+		result := &fantasy.AgentResult{}
+		for i := 0; i < verifyLoopMinSteps+2; i++ {
+			// Varying inputs keep the identical-signature detector
+			// quiet — this run must stay nobody's boundary, not
+			// stall's.
+			result.Steps = append(result.Steps, stepWith(fantasy.FinishReasonToolCalls,
+				fantasy.ToolCallContent{
+					ToolCallID: "tc-v", ToolName: "view",
+					Input: fmt.Sprintf(`{"file_path":"f%d.go"}`, i),
+				},
+				fantasy.ToolResultContent{
+					ToolCallID: "tc-v", ToolName: "view",
+					Result: fantasy.ToolResultOutputContentText{Text: "package main"},
+				},
+			))
+		}
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: result})
+		require.False(t, queued)
+		require.Empty(t, firingOutcome(t, conn, sessionID, "verify-loop"))
+	})
+
+	t.Run("clean stop after a streak is not a trip", func(t *testing.T) {
+		t.Parallel()
+		a, conn, sessionID := interactiveEdgeAgent(t)
+		// A run that wrote, verified long, then stopped cleanly on its
+		// own — the detector evaluated the last step and declined; the
+		// fallback's FinishReason check keeps the edge quiet.
+		result := verifyLoopResult()
+		result.Steps = append(result.Steps, stepWith(fantasy.FinishReasonStop,
+			fantasy.TextContent{Text: "done"}))
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: result})
+		require.False(t, queued)
+		require.Empty(t, firingOutcome(t, conn, sessionID, "verify-loop"))
+	})
+
+	t.Run("budget exhaustion records exhausted", func(t *testing.T) {
+		t.Parallel()
+		a, conn, sessionID := interactiveEdgeAgent(t)
+		asst := &message.Message{Role: message.Assistant}
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID, RepairAttempts: maxRepairAttempts},
+			edgeInput{result: verifyLoopResult(), verifyLoop: true, currentAssistant: asst})
+		require.False(t, queued)
+		require.Equal(t, "exhausted", firingOutcome(t, conn, sessionID, "verify-loop"))
+	})
+}
+
 func TestBurnWatchEdge(t *testing.T) {
 	t.Parallel()
 
@@ -616,7 +857,7 @@ func TestEdgeFiringRecords(t *testing.T) {
 		}
 		// The cancelled boundary leaves no clean reads: every edge in
 		// the set gets a cancelled row.
-		for _, edge := range []string{"verification", "todos", "stall", "burn-watch"} {
+		for _, edge := range []string{"verification", "todos", "stall", "verify-loop", "burn-watch", "reconcile"} {
 			require.Equal(t, "cancelled", outcomes[edge], "edge %s", edge)
 		}
 	})

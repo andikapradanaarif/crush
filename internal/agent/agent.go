@@ -1388,6 +1388,12 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 	// loopStopped records that the loop detector's StopWhen ended the
 	// run — the stall edge's trigger at the run boundary.
 	var loopStopped bool
+	// verifyLoopStopped records that the post-write verify-streak
+	// detector's StopWhen ended the run — the verify-loop edge's
+	// trigger (#329). Distinct from loopStopped: the signature is a
+	// write followed by converging-free checking, not one repeated
+	// call, so the stall edge must not claim it.
+	var verifyLoopStopped bool
 
 	var stepMessages []fantasy.Message
 	var shouldSummarize bool
@@ -1819,6 +1825,13 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 				}
 				return false
 			},
+			func(steps []fantasy.StepResult) bool {
+				if hasPostWriteVerifyStreak(steps) {
+					verifyLoopStopped = true
+					return true
+				}
+				return false
+			},
 		}, evalStepCaps()...),
 	})
 
@@ -2013,6 +2026,7 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 		result:           result,
 		currentAssistant: currentAssistant,
 		stalled:          loopStopped,
+		verifyLoop:       verifyLoopStopped,
 		turnSeq:          turnSeq,
 		startedAt:        runStart,
 	})

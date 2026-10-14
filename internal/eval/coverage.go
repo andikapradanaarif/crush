@@ -463,12 +463,12 @@ func init() {
 	// fails parse in either scope rather than starving silently.
 	// Verification and todos are flag-invariant — their predicates
 	// don't gate on the flag (rows still only exist when a trigger
-	// evaluated, not every boundary); stall and burn-watch ride
-	// ambiguity_clarification and reconcile rides failure_memory
-	// (their fired rows only exist when the flag is on), so their
-	// fields are arm-scoped. Gated rows only ever appear in the
-	// flag-off arm — arm coverage is also where "would have fired"
-	// volume is measured.
+	// evaluated, not every boundary); stall, verify-loop, and
+	// burn-watch ride ambiguity_clarification and reconcile rides
+	// failure_memory (their fired rows only exist when the flag is
+	// on), so their fields are arm-scoped. Gated rows only ever
+	// appear in the flag-off arm — arm coverage is also where
+	// "would have fired" volume is measured.
 	for _, edge := range []string{"verification", "todos"} {
 		for outcome := range edgeOutcomeTable[edge] {
 			coverageFields["edge_firings."+edge+"."+outcome] = func(r *RunRecord) float64 {
@@ -476,7 +476,7 @@ func init() {
 			}
 		}
 	}
-	for _, edge := range []string{"stall", "burn-watch", "reconcile"} {
+	for _, edge := range []string{"stall", "verify-loop", "burn-watch", "reconcile"} {
 		for outcome := range edgeOutcomeTable[edge] {
 			armOnlyCoverageFields["edge_firings."+edge+"."+outcome] = func(r *RunRecord) float64 {
 				return float64(r.EdgeFirings[edge][outcome])

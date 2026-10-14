@@ -203,3 +203,86 @@ func TestGetToolInteractionSignature(t *testing.T) {
 		}
 	})
 }
+
+func TestHasPostWriteVerifyStreak(t *testing.T) {
+	t.Parallel()
+
+	verifySteps := func(n int) []fantasy.StepResult {
+		// Varied read/command calls — the identical-signature
+		// detector cannot see this shape, which is the point.
+		tools := []string{"bash", "view", "ls"}
+		inputs := map[string]string{
+			"bash": `{"command":"go test ./..."}`,
+			"view": `{"file_path":"main.go"}`,
+			"ls":   `{"path":"."}`,
+		}
+		steps := make([]fantasy.StepResult, 0, n)
+		for i := 0; i < n; i++ {
+			name := tools[i%len(tools)]
+			steps = append(steps, makeToolStep(name, inputs[name], "still failing"))
+		}
+		return steps
+	}
+	editStep := makeToolStep("edit", `{"file_path":"main.go","old_string":"a","new_string":"b"}`, "edited")
+
+	t.Run("write then long verification streak trips", func(t *testing.T) {
+		t.Parallel()
+		steps := append([]fantasy.StepResult{editStep}, verifySteps(verifyLoopMinSteps)...)
+		if !hasPostWriteVerifyStreak(steps) {
+			t.Error("expected a trip on a post-write streak at the threshold")
+		}
+	})
+
+	t.Run("below the threshold does not trip", func(t *testing.T) {
+		t.Parallel()
+		steps := append([]fantasy.StepResult{editStep}, verifySteps(verifyLoopMinSteps-1)...)
+		if hasPostWriteVerifyStreak(steps) {
+			t.Error("short post-write verification is a healthy check, not a loop")
+		}
+	})
+
+	t.Run("a write-less run never trips", func(t *testing.T) {
+		t.Parallel()
+		if hasPostWriteVerifyStreak(verifySteps(3 * verifyLoopMinSteps)) {
+			t.Error("write-less spend is burn-watch's domain, not this edge's")
+		}
+	})
+
+	t.Run("a mid-streak write resets the count", func(t *testing.T) {
+		t.Parallel()
+		steps := append([]fantasy.StepResult{editStep}, verifySteps(verifyLoopMinSteps)...)
+		steps = append(steps, editStep)
+		steps = append(steps, verifySteps(verifyLoopMinSteps-1)...)
+		if hasPostWriteVerifyStreak(steps) {
+			t.Error("the last write restarted the streak below the threshold")
+		}
+	})
+
+	t.Run("a second write inside the suffix bounds the streak", func(t *testing.T) {
+		t.Parallel()
+		steps := append([]fantasy.StepResult{editStep}, verifySteps(2*verifyLoopMinSteps)...)
+		steps = append(steps, editStep, makeToolStep("view", `{"file_path":"x.go"}`, "x"))
+		if hasPostWriteVerifyStreak(steps) {
+			t.Error("the streak counts from the LAST write, not the first")
+		}
+	})
+
+	t.Run("bash redirect writes count as writes", func(t *testing.T) {
+		t.Parallel()
+		steps := []fantasy.StepResult{
+			makeToolStep("bash", `{"command":"echo x > out.txt"}`, ""),
+		}
+		steps = append(steps, verifySteps(verifyLoopMinSteps)...)
+		if !hasPostWriteVerifyStreak(steps) {
+			t.Error("a bash > f write is the same boundary the write-set scan uses")
+		}
+	})
+
+	t.Run("postWriteStreakLen reports the trailing run", func(t *testing.T) {
+		t.Parallel()
+		steps := append([]fantasy.StepResult{editStep}, verifySteps(verifyLoopMinSteps+3)...)
+		if got := postWriteStreakLen(steps); got != verifyLoopMinSteps+3 {
+			t.Errorf("streak = %d, want %d", got, verifyLoopMinSteps+3)
+		}
+	})
+}
