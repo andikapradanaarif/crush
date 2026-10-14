@@ -787,6 +787,13 @@ type TurnTail struct {
 	// absent from the last steps" is explained staleness removal,
 	// not selector drift.
 	DroppedSignatures []string `json:"dropped_signatures,omitempty"`
+	// Resolver mirrors TailAudit.Resolver — the L3 layer's engagement
+	// outcome for the turn: "resolved" (a verdict was produced — the
+	// decisions carry settled_by=resolver), "abstain" (the gate fired
+	// but the call yielded no usable verdict), or empty (the layer
+	// never ran). Without it a dead resolver is indistinguishable
+	// from a never-engaged one on records.
+	Resolver string `json:"resolver,omitempty"`
 }
 
 // TailAction is the eval-side mirror of agent.TailAction: one of a

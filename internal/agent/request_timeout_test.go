@@ -18,6 +18,7 @@ import (
 type fakeLanguageModel struct {
 	generateCtx context.Context
 	streamCtx   context.Context
+	streamCall  *fantasy.Call
 	stream      func(yield func(fantasy.StreamPart) bool)
 }
 
@@ -26,8 +27,9 @@ func (f *fakeLanguageModel) Generate(ctx context.Context, _ fantasy.Call) (*fant
 	return &fantasy.Response{}, nil
 }
 
-func (f *fakeLanguageModel) Stream(ctx context.Context, _ fantasy.Call) (fantasy.StreamResponse, error) {
+func (f *fakeLanguageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
 	f.streamCtx = ctx
+	f.streamCall = &call
 	if f.stream == nil {
 		return func(yield func(fantasy.StreamPart) bool) {
 			yield(fantasy.StreamPart{})

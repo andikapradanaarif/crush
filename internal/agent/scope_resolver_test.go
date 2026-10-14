@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/csync"
@@ -462,4 +463,81 @@ func TestLLMScopeResolver_NoModel(t *testing.T) {
 	res, err := r.ResolveScope(context.Background(), jaPrompt, nil)
 	require.Error(t, err)
 	require.Nil(t, res)
+}
+
+// The audit outcome must reflect what the layer actually produced —
+// "resolved" only when a verdict (including the no-failure reject)
+// came back, "abstain" for every failed or empty consult, and empty
+// when the gate never opened so a dead resolver is visible in eval
+// records instead of reading as never-engaged.
+func TestOutcomeResolver(t *testing.T) {
+	t.Parallel()
+
+	verdict := &ScopeResolution{About: true}
+	for _, tc := range []struct {
+		name   string
+		inner  *stubResolver
+		invoke bool
+		want   string
+	}{
+		{"verdict stamps resolved", &stubResolver{res: verdict}, true, resolverResolved},
+		{"no-failure reject stamps resolved", &stubResolver{res: &ScopeResolution{About: false}}, true, resolverResolved},
+		{"error stamps abstain", &stubResolver{err: errors.New("boom")}, true, resolverAbstain},
+		{"nil verdict stamps abstain", &stubResolver{}, true, resolverAbstain},
+		{"never invoked stays empty", &stubResolver{res: verdict}, false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			out := ""
+			r := outcomeResolver{inner: tc.inner, out: &out}
+			if tc.invoke {
+				res, err := r.ResolveScope(context.Background(), "p", nil)
+				require.Equal(t, tc.inner.res, res)
+				require.Equal(t, tc.inner.err, err)
+			}
+			require.Equal(t, tc.want, out)
+		})
+	}
+}
+
+// The output budget must survive a reasoning preamble: endpoints may
+// spend output tokens on reasoning_content before the JSON verdict
+// even when catwalk says CanReason=false and /no_think is attached,
+// so the floor is 1024 for every model and the configured default
+// when it is larger.
+func TestLLMScopeResolver_TokenFloor(t *testing.T) {
+	t.Parallel()
+
+	jaCands := []ResolverCandidate{{Pool: poolOpen, Cmd: "go test .", CWD: "."}}
+	run := func(t *testing.T, cfg catwalk.Model) int64 {
+		t.Helper()
+		lm := textModelStreams(`{"about_failure":true}`, nil)
+		a := resolverTestAgent(lm)
+		a.smallModel = csync.NewValue(Model{Model: lm, CatwalkCfg: cfg})
+		r := resolverForSession(a, "", 8)
+		_, err := r.ResolveScope(context.Background(), jaPrompt, jaCands)
+		require.NoError(t, err)
+		require.NotNil(t, lm.streamCall)
+		require.NotNil(t, lm.streamCall.MaxOutputTokens)
+		return *lm.streamCall.MaxOutputTokens
+	}
+
+	t.Run("non-reasoning model gets the floor", func(t *testing.T) {
+		t.Parallel()
+		require.Equal(t, int64(1024), run(t, catwalk.Model{}))
+	})
+	t.Run("reasoning model keeps its larger default", func(t *testing.T) {
+		t.Parallel()
+		require.Equal(t, int64(8192), run(t, catwalk.Model{
+			CanReason:        true,
+			DefaultMaxTokens: 8192,
+		}))
+	})
+	t.Run("reasoning model with a small default gets the floor", func(t *testing.T) {
+		t.Parallel()
+		require.Equal(t, int64(1024), run(t, catwalk.Model{
+			CanReason:        true,
+			DefaultMaxTokens: 64,
+		}))
+	})
 }
