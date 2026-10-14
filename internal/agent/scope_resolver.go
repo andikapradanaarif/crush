@@ -174,19 +174,45 @@ func (r *llmScopeResolver) ResolveScope(ctx context.Context, prompt string, cand
 }
 
 func (r *llmScopeResolver) call(ctx context.Context, prompt string, cands []ResolverCandidate) (*ScopeResolution, error) {
-	model := r.a.smallModel.Get()
-	if model.Model == nil {
-		model = r.a.largeModel.Get()
-	}
-	if model.Model == nil {
-		return nil, errors.New("scope resolver: no model configured")
+	// Attempt order mirrors GenerateTitle: small first, large as the
+	// fallback. A configured-but-broken small provider (bad key,
+	// zero credits) must not pin the layer off — a single abstain
+	// outcome per consult, but the consult should still be tried on
+	// the model that demonstrably works in this session.
+	models := []Model{r.a.smallModel.Get()}
+	if large := r.a.largeModel.Get(); large.Model != nil &&
+		(models[0].Model == nil ||
+			large.ModelCfg.Provider != models[0].ModelCfg.Provider ||
+			large.ModelCfg.Model != models[0].ModelCfg.Model) {
+		models = append(models, large)
 	}
 	timeout := r.timeout
 	if timeout <= 0 {
 		timeout = scopeResolverTimeout
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	var lastErr error
+	for i, model := range models {
+		if model.Model == nil {
+			continue
+		}
+		callCtx, cancel := context.WithTimeout(ctx, timeout)
+		res, err := r.consult(callCtx, model, prompt, cands)
+		cancel()
+		if err == nil {
+			return res, nil
+		}
+		lastErr = err
+		if i+1 < len(models) {
+			slog.Debug("Scope resolver consult failed; trying next model", "err", err)
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("scope resolver: no model configured")
+	}
+	return nil, lastErr
+}
+
+func (r *llmScopeResolver) consult(ctx context.Context, model Model, prompt string, cands []ResolverCandidate) (*ScopeResolution, error) {
 	// 1024 is a floor, not a target: reasoning models spend output
 	// tokens on reasoning_content before any content text — a 120
 	// cap truncated every call with an empty body (observed on
