@@ -86,12 +86,6 @@ func (c *eventCollector) snapshot() []pubsub.Event[Message] {
 	return out
 }
 
-func (c *eventCollector) reset() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.events = nil
-}
-
 func TestUpdate_DebouncesTextDeltas(t *testing.T) {
 	t.Parallel()
 
@@ -101,18 +95,18 @@ func TestUpdate_DebouncesTextDeltas(t *testing.T) {
 	// loaded runner under -race those updates can take well over 50ms.
 	svc, sessionID := newTestService(t, WithDebounce(500*time.Millisecond))
 
-	subCtx, cancelSub := context.WithCancel(t.Context())
-	defer cancelSub()
-	sub := svc.Subscribe(subCtx)
-	collector := collect(subCtx, sub)
-
+	// Create before subscribing: the CreatedEvent publishes to zero
+	// subscribers, so nothing needs draining — a reset after the fact
+	// races the collector goroutine on a loaded runner.
 	msg, err := svc.Create(t.Context(), sessionID, CreateMessageParams{
 		Role: Assistant,
 	})
 	require.NoError(t, err)
-	// Drop the CreatedEvent emitted by Create.
-	time.Sleep(5 * time.Millisecond)
-	collector.reset()
+
+	subCtx, cancelSub := context.WithCancel(t.Context())
+	defer cancelSub()
+	sub := svc.Subscribe(subCtx)
+	collector := collect(subCtx, sub)
 
 	// Push 5 deltas inside a single debounce window.
 	for i := 0; i < 5; i++ {
@@ -144,15 +138,15 @@ func TestUpdate_TerminalUpdatesFlushSynchronously(t *testing.T) {
 
 	svc, sessionID := newTestService(t, WithDebounce(time.Hour))
 
+	// Create before subscribing — the CreatedEvent publishes to zero
+	// subscribers, so nothing needs draining.
+	msg, err := svc.Create(t.Context(), sessionID, CreateMessageParams{Role: Assistant})
+	require.NoError(t, err)
+
 	subCtx, cancelSub := context.WithCancel(t.Context())
 	defer cancelSub()
 	sub := svc.Subscribe(subCtx)
 	collector := collect(subCtx, sub)
-
-	msg, err := svc.Create(t.Context(), sessionID, CreateMessageParams{Role: Assistant})
-	require.NoError(t, err)
-	time.Sleep(5 * time.Millisecond)
-	collector.reset()
 
 	// AddFinish makes the message terminal; Update must flush
 	// synchronously even with a 1-hour debounce.
