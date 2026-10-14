@@ -623,6 +623,39 @@ func TestTurnTailAudit(t *testing.T) {
 		require.Equal(t, len(text), audit.Sections[0].Bytes)
 	})
 
+	t.Run("the resolver outcome replays with a cached selection", func(t *testing.T) {
+		t.Parallel()
+		a, env, sessionID := newTailAgentEnv(t)
+		// The cached selection stands in for the repair chain's
+		// first turn: the resolver is not re-consulted on retries,
+		// so the audit must carry the original consult's outcome.
+		a.turnSels.Set(sessionID, turnSelection{
+			stamp:           1,
+			selected:        memoryPools{open: listOpenFailures(t, env)},
+			resolverOutcome: resolverAbstain,
+		})
+		tail := a.turnTailMessages(t.Context(), SessionAgentCall{
+			SessionID: sessionID, Prompt: "（retry）", RunStamp: 1,
+		}, nil)
+		require.NotEmpty(t, tail)
+
+		audit, ok := a.tailAudit.Get(sessionID)
+		require.True(t, ok)
+		require.Equal(t, resolverAbstain, audit.Resolver)
+	})
+
+	t.Run("no resolver consult leaves the outcome empty", func(t *testing.T) {
+		t.Parallel()
+		a, _, sessionID := newTailAgentEnv(t)
+		tail := a.turnTailMessages(t.Context(), SessionAgentCall{
+			SessionID: sessionID, Prompt: "fix TestValue", RunStamp: 1,
+		}, nil)
+		require.NotEmpty(t, tail)
+		audit, ok := a.tailAudit.Get(sessionID)
+		require.True(t, ok)
+		require.Empty(t, audit.Resolver)
+	})
+
 	t.Run("each envelope audits as its own row", func(t *testing.T) {
 		t.Parallel()
 		a, env, sessionID := newTurnCtxAgent(t, &config.Config{})

@@ -303,7 +303,12 @@ rejects every row the L1 layer could not affirm as
 evidence and outranks a model's relevance judgment); anything
 malformed, errored, truncated, or timed out abstains — the L0–L2 path
 owns the turn. Scope-consuming routes then stamp
-`settled_by=resolver`. Calls are bounded per session by
+`settled_by=resolver`. Engagement itself is a turn-level stamp —
+`tail.resolver` on the audit is `resolved` when a verdict landed,
+`abstain` when the gate opened but the consult failed or returned
+nothing usable, and absent when the layer never ran — so a dead or
+exhausted resolver is countable via `tail.resolver.abstain` instead
+of reading as never-engaged. Calls are bounded per session by
 `resolver_calls` (0 = layer off, the shipped default), keyed-cached
 on normalized prompt + candidate content, and skipped for
 sub-agents, non-user prompts, and empty/whitespace prompts — the

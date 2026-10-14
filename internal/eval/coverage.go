@@ -366,6 +366,21 @@ func tailDecisionsByLayer(r *RunRecord, layer string) float64 {
 	return float64(n)
 }
 
+// tailResolverRenders counts tail_runs entries carrying the given L3
+// engagement outcome — "resolved" or "abstain". Entries, not
+// decisions: the outcome is a turn-level fact stamped on the audit,
+// so a repair chain's replays each count (the cache-hit renders
+// replay the original consult's outcome by design).
+func tailResolverRenders(r *RunRecord, outcome string) float64 {
+	n := 0
+	for _, t := range r.TailRuns {
+		if t.Resolver == outcome {
+			n++
+		}
+	}
+	return float64(n)
+}
+
 // tailDecisionOutcomes mirrors the closed Outcome vocabulary in
 // agent/failure_select.go — the post-run stamp's per-pool results.
 // "unexercised" is the command pool's honest negative: a selected
@@ -485,6 +500,19 @@ func init() {
 	for _, layer := range tailDecisionLayers {
 		armOnlyCoverageFields["tail.decisions.settled."+layer] = func(r *RunRecord) float64 {
 			return tailDecisionsByLayer(r, layer)
+		}
+	}
+	// Turn-level L3 engagement counts: tail.resolver.<outcome> —
+	// "resolved" turns produced a verdict (decisions carry the
+	// stamps), "abstain" turns consulted the layer and got nothing
+	// usable. The abstain count is what makes a dead resolver
+	// visible: a silent layer otherwise reads as never-engaged.
+	// Renders, not distinct consults: each tail_runs entry counts —
+	// one consult plus its two repair-chain replays is 3 — so a key
+	// reads "renders where a resolution was in force".
+	for _, outcome := range []string{"resolved", "abstain"} {
+		armOnlyCoverageFields["tail.resolver."+outcome] = func(r *RunRecord) float64 {
+			return tailResolverRenders(r, outcome)
 		}
 	}
 	// Per-pool decision counts: tail.decisions.pool.<pool>[.admitted]
