@@ -192,7 +192,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 			// The outcome replays with the cached selection — this
 			// turn's audit inherits whatever the original resolution
 			// produced, since the resolver is not re-consulted.
-			resolverOutcome = cached.resolver
+			resolverOutcome = cached.resolverOutcome
 		default:
 			var pools memoryPools
 			mp := a.memoryParams()
@@ -239,6 +239,11 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 					// closed rather than mine harness retry text.
 					selPrompt = ""
 				}
+				// Selection runs even for held-out turns: the
+				// decisions are the arm's evidence and the resolver
+				// consult spends budget on them — deliberate, so a
+				// control arm's engagement stays measurable rather
+				// than reading as layer-off.
 				resolver := a.scopeResolverFor(workDir, call.SessionID, mp)
 				if resolver != nil {
 					resolver = outcomeResolver{inner: resolver, out: &resolverOutcome}
@@ -261,7 +266,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 					a.turnSels.Set(call.SessionID, turnSelection{
 						stamp: call.RunStamp, selected: selected,
 						candidates: memoryCandidates, decisions: memoryDecisions,
-						resolver: resolverOutcome,
+						resolverOutcome: resolverOutcome,
 					})
 				}
 			} else {
@@ -490,11 +495,11 @@ type turnSelection struct {
 	selected   memoryPools
 	candidates []cmdlog.Failure
 	decisions  []FailureDecision
-	// resolver replays the turn's L3 engagement outcome to audits on
-	// retry-cache hits — the resolver is consulted once per
+	// resolverOutcome replays the turn's L3 engagement outcome to
+	// audits on retry-cache hits — the resolver is consulted once per
 	// (prompt, candidates), so later renders of the same selection
 	// inherit its verdict rather than re-asking.
-	resolver string
+	resolverOutcome string
 	// sections is the rendered tail — stored so the per-step
 	// staleness refresh can re-splice the open_failures envelope
 	// when a rendered row resolves mid-turn (#325). Everything else

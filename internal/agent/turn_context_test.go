@@ -630,9 +630,9 @@ func TestTurnTailAudit(t *testing.T) {
 		// first turn: the resolver is not re-consulted on retries,
 		// so the audit must carry the original consult's outcome.
 		a.turnSels.Set(sessionID, turnSelection{
-			stamp:    1,
-			selected: memoryPools{open: listOpenFailures(t, env)},
-			resolver: resolverAbstain,
+			stamp:           1,
+			selected:        memoryPools{open: listOpenFailures(t, env)},
+			resolverOutcome: resolverAbstain,
 		})
 		tail := a.turnTailMessages(t.Context(), SessionAgentCall{
 			SessionID: sessionID, Prompt: "（retry）", RunStamp: 1,
