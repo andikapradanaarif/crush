@@ -388,6 +388,10 @@ type sessionAgent struct {
 	// literally leave it zero, which must mean defaults, not
 	// all-zero caps.
 	memParams params.Memory
+	// resolverStates maps session → the L3 resolver's cache + call
+	// budget counter (#216). Coordinator-owned and shared across
+	// agent rebuilds, like usageLedger; nil allocates its own.
+	resolverStates *csync.Map[string, *resolverState]
 	// ambiguityClarification enables the calibrated-autonomy gates:
 	// the turn-zero vagueness pre-filter and the first-write scope
 	// gate (options.ambiguity_clarification).
@@ -650,6 +654,10 @@ type SessionAgentOptions struct {
 	// don't depend on which AgentResult returned last. When nil the
 	// agent allocates its own.
 	UsageLedger *csync.Map[string, ledgerUsage]
+	// ResolverStates shares the L3 scope resolver's per-session cache
+	// and call-budget counter across agent rebuilds (#216). When nil
+	// the agent allocates its own.
+	ResolverStates *csync.Map[string, *resolverState]
 	// TailAudit shares the per-session tail audit across agent
 	// rebuilds. When nil the agent allocates its own.
 	TailAudit *csync.Map[string, TailAudit]
@@ -724,6 +732,7 @@ func NewSessionAgent(
 		edgeStats:              cmp.Or(opts.EdgeStats, csync.NewMap[string, map[string]int]()),
 		reqStats:               cmp.Or(opts.RequestStats, csync.NewMap[string, requestStats]()),
 		usageLedger:            cmp.Or(opts.UsageLedger, csync.NewMap[string, ledgerUsage]()),
+		resolverStates:         cmp.Or(opts.ResolverStates, csync.NewMap[string, *resolverState]()),
 		tailAudit:              cmp.Or(opts.TailAudit, csync.NewMap[string, TailAudit]()),
 		turnSels:               csync.NewMap[string, turnSelection](),
 		tailRuns:               csync.NewMap[string, []TailAudit](),

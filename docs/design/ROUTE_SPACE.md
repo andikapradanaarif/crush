@@ -272,7 +272,7 @@ abstain-on-failure. The binding benchmark scores per-layer: admit
 precision/recall, veto violations (target 0), abstain rate.
 
 Landed: each decision carries `settled_by` (`identifier` / `lexicon` /
-`state`) so per-layer volume is countable via
+`state` / `harness` / `resolver`) so per-layer volume is countable via
 `tail.decisions.settled.*`; L1 binds headline identifiers whose
 mention span carries recognized signal, vetoes negated mentions,
 and leaves typed-but-unparseable mentions for L3/L4 — never binding
@@ -288,6 +288,22 @@ identifier whose polarity parsed neither way — the L3-gate count. The offline 
 `internal/agent/testdata/failure_binding.jsonl` scored by
 `TestBindingBenchmark` — per-language admit precision/recall, veto
 violations hard-gated at 0.
+
+L3 landed (#216): when the deterministic layers leave a prompt
+unresolved — no explicit scope, no referent kind — and open failures
+exist, `llmScopeResolver` asks the small-model slot for a closed
+`{about_failure, include_paths, exclude_paths, kind}` verdict. The
+output never names a row; it overlays the selector's scope inputs and
+the route table applies unchanged. Validation is deterministic and
+fail-closed: paths must normalize, stay inside the workdir, and
+exist; `kind` must be a verification kind; `about_failure=false`
+rejects every row as `resolver_no_failure` (the `resolver-no-failure`
+route, second after `shadowed`); anything malformed, errored,
+truncated, or timed out abstains — the L0–L2 path owns the turn.
+Scope-consuming routes then stamp `settled_by=resolver`. Calls are
+bounded per session by `resolver_calls` (0 = layer off, the shipped
+default), keyed-cached on normalized prompt + candidate content, and
+skipped for sub-agents and non-user prompts.
 
 ## Route space 4 — run edges (control flow)
 

@@ -120,6 +120,12 @@ type Memory struct {
 	// DigestFileHints bounds file paths rendered per digest row —
 	// a pointer list, not an inventory.
 	DigestFileHints int `json:"digest_file_hints"`
+	// ResolverCalls bounds the L3 scope resolver's model calls per
+	// session (#216) — the small-model layer that fires only when
+	// the deterministic layers leave a prompt unscoped. Zero is the
+	// shipped default and disables the layer outright: the selector
+	// stays deterministic-only.
+	ResolverCalls int `json:"resolver_calls"`
 }
 
 // Skeleton bounds: the asymmetry contract — tightening is free,
@@ -243,6 +249,7 @@ func reflectValues(m Memory) map[string]int64 {
 		"digest_render_limit":    int64(m.DigestRenderLimit),
 		"digest_refresh_limit":   int64(m.DigestRefreshLimit),
 		"digest_file_hints":      int64(m.DigestFileHints),
+		"resolver_calls":         int64(m.ResolverCalls),
 	}
 }
 

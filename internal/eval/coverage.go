@@ -292,6 +292,7 @@ var tailDecisionReasons = []string{
 	"admit_unique_scope",
 	"non_user_prompt",
 	"shadowed_by_open",
+	"resolver_no_failure",
 	"negated_scope",
 	"out_of_scope",
 	"referent_none",
@@ -314,7 +315,7 @@ var tailDecisionReasons = []string{
 // max_tail.decisions.reasons.non_user_prompt: 0 under a
 // reconcile-enabled flag means no harness-authored text reached
 // the selector.
-var tailDecisionLayers = []string{"identifier", "lexicon", "state", "harness"}
+var tailDecisionLayers = []string{"identifier", "lexicon", "state", "harness", "resolver"}
 
 // tailDecisionsByReason counts decision rows by their closed-vocabulary
 // Reason — the split candidates−admitted can't express: render_capped
