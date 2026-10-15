@@ -193,7 +193,11 @@ func (a *sessionAgent) referentTargets(ctx context.Context, msgs []message.Messa
 // user role, not a harness repair prompt, and not the summary message
 // — getSessionMessages rewrites a compaction summary's role to User
 // for the model, and treating it as a turn would mint a phantom turn
-// that swallows the whole post-compaction span.
+// that swallows the whole post-compaction span. Hidden user
+// continuations (TextContent.Hidden — programmatic runs via the API
+// or UI hidden AgentRun) DO count as boundaries: they are real
+// instructions that drove work, distinct from a retry of the same
+// turn.
 func isRealUserMsg(m message.Message) bool {
 	return m.Role == message.User && !m.IsSummaryMessage && !isRepairPrompt(m.JoinedText())
 }

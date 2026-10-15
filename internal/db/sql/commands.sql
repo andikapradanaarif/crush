@@ -320,10 +320,16 @@ WHERE created_at * 1000 > ? AND id != ? AND parent_session_id IS NULL;
 -- count as external acceptance evidence. cmd_norm keeps the whole
 -- invocation, so every distinct commit message is its own row; the
 -- known limit is that re-running an identical message keeps only the
--- latest last_at.
+-- latest last_at. Compound shell forms count too -- a commit chained
+-- after &&, ;, or ||, or invoked as git -C dir commit -- while flag
+-- orderings beyond -C stay a documented miss.
 SELECT last_at FROM command_memory
 WHERE project_key = ?
-    AND cmd_norm LIKE 'git commit%'
+    AND (cmd_norm LIKE 'git commit%'
+         OR cmd_norm LIKE '%&& git commit%'
+         OR cmd_norm LIKE '%; git commit%'
+         OR cmd_norm LIKE '%|| git commit%'
+         OR cmd_norm LIKE 'git -C % commit%')
     AND last_at >= ? AND last_at <= ?;
 
 -- name: SettleReferentEpisode :exec

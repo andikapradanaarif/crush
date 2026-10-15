@@ -161,15 +161,13 @@ func (a *sessionAgent) extractTurnOutcome(ctx context.Context, sessionID string,
 	pathSet := map[string]struct{}{}
 	var scan func(ms []message.Message, from int)
 	visited := map[string]struct{}{}
+	// scan walks one message list for evidence. It never checks turn
+	// boundaries: the caller pre-slices the parent's span, and inside
+	// a child session a user-role message is delegation text, not a
+	// prompt — boundary-checking child slices would return on the
+	// delegation prompt itself and drop every delegated edit.
 	scan = func(ms []message.Message, from int) {
 		for _, m := range ms[from:] {
-			if isRealUserMsg(m) {
-				// The next real prompt ends the turn — a summary
-				// message inside the span is a compaction artifact,
-				// not a boundary: the turn's later work still
-				// belongs to this row.
-				return
-			}
 			if m.Role != message.Assistant {
 				continue
 			}
@@ -203,7 +201,17 @@ func (a *sessionAgent) extractTurnOutcome(ctx context.Context, sessionID string,
 			}
 		}
 	}
-	scan(msgs, userIdx+1)
+	// The turn's span ends at the next real user prompt — summary
+	// and repair messages inside it stay part of the span (a
+	// compaction artifact or a retry still belongs to this turn).
+	end := len(msgs)
+	for i := userIdx + 1; i < len(msgs); i++ {
+		if isRealUserMsg(msgs[i]) {
+			end = i
+			break
+		}
+	}
+	scan(msgs[userIdx+1:end], 0)
 	return o
 }
 

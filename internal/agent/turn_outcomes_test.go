@@ -236,3 +236,55 @@ func TestRecordTurnOutcome_PostCompactionTail(t *testing.T) {
 	require.True(t, has,
 		"the pre-summary judged turn records with this prompt as its verdict")
 }
+
+// A delegated turn's evidence lives in the child session's
+// transcript — whose first stored message is the delegation prompt
+// (Role=User). Boundary-checking the child slice would return on
+// that prompt and record an empty turn; user-role messages inside a
+// child are delegation text, not boundaries.
+func TestExtractTurnOutcome_DelegatedEdits(t *testing.T) {
+	t.Parallel()
+	a, env := referentAgent(t)
+	abs := filepath.Join(env.workingDir, "delegated.go")
+
+	// Parent transcript: user prompt + an agent tool call.
+	msgs := []message.Message{
+		referentUserMsg("u1", "delegate the fix"),
+		{ID: "a1", Role: message.Assistant, Parts: []message.ContentPart{message.ToolCall{
+			ID: "tc-agent", Name: AgentToolName,
+			Input:    `{"prompt":"fix delegated.go"}`,
+			Finished: true,
+		}}},
+	}
+
+	// Child session transcript as the agent tool actually writes it:
+	// delegation prompt first, then the assistant's edit and bash.
+	childID := env.sessions.CreateAgentToolSessionID("a1", "tc-agent")
+	_, err := env.sessions.CreateTaskSession(t.Context(), childID, "s1", "task")
+	require.NoError(t, err)
+	for _, m := range []message.CreateMessageParams{
+		{Role: message.User, Parts: []message.ContentPart{
+			message.TextContent{Text: "fix delegated.go"},
+		}},
+		{Role: message.Assistant, Parts: []message.ContentPart{
+			message.ToolCall{
+				ID: "tc-edit", Name: tools.EditToolName, Finished: true,
+				Input: fmt.Sprintf(`{"file_path":%q,"new_string":"new"}`, abs),
+			},
+			message.ToolCall{
+				ID: "tc-bash", Name: tools.BashToolName, Finished: true,
+				Input: `{"command":"go build ./..."}`,
+			},
+		}},
+	} {
+		_, err := env.messages.Create(t.Context(), childID, m)
+		require.NoError(t, err)
+	}
+
+	o := a.extractTurnOutcome(t.Context(), "s1", msgs, 0)
+	require.Equal(t, "u1", o.TurnID)
+	require.Equal(t, []string{"delegated.go"}, o.EditedPaths,
+		"the delegation prompt inside the child is not a boundary")
+	require.Equal(t, []string{"new"}, o.EditHunks["delegated.go"])
+	require.Equal(t, []string{"go build ./..."}, o.Commands)
+}

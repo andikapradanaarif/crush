@@ -111,6 +111,12 @@ func (s *service) HasTurnOutcome(ctx context.Context, sessionID, turnID string) 
 // closed — same dual trigger as episode settlement, same frozen-once
 // contract. Bounded per call; runs detached off the hot path.
 func (s *service) SettleTurnOutcomes(ctx context.Context, limit int) error {
+	// Same guard as the episode pass: writes are idempotent, so a
+	// skipped pass under contention costs nothing.
+	if !s.labelMu.TryLock() {
+		return nil
+	}
+	defer s.labelMu.Unlock()
 	if limit <= 0 {
 		limit = defaultListLimit
 	}

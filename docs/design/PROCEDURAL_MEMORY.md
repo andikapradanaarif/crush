@@ -334,7 +334,10 @@ CREATE TABLE turn_outcomes (
 -- outranks commit evidence; and survival is conjunctive over
 -- readable fingerprints — a path without a fingerprint abstains
 -- rather than vetoing, so acceptance can rest on the paths the
--- turn provably added.
+-- turn provably added. Turn boundaries are real user messages:
+-- repair prompts and compaction summaries are not, hidden
+-- continuations (programmatic runs) are — they drove work like any
+-- other prompt.
 
 -- One row per (signature, version) mined candidate.
 CREATE TABLE skills (

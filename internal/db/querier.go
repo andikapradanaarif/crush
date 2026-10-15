@@ -143,7 +143,9 @@ type Querier interface {
 	// count as external acceptance evidence. cmd_norm keeps the whole
 	// invocation, so every distinct commit message is its own row; the
 	// known limit is that re-running an identical message keeps only the
-	// latest last_at.
+	// latest last_at. Compound shell forms count too -- a commit chained
+	// after &&, ;, or ||, or invoked as git -C dir commit -- while flag
+	// orderings beyond -C stay a documented miss.
 	ListCrushCommitRuns(ctx context.Context, arg ListCrushCommitRunsParams) ([]int64, error)
 	ListFailurePartitionKeys(ctx context.Context) ([]string, error)
 	// Failure rows in one partition -- the remote-lifecycle re-claim
