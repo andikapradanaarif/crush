@@ -91,5 +91,6 @@ record the plan that followed from it.
 | 2026-10-01 | roadmap | [Roadmap after the mask verdict](2026-10-01-roadmap-after-mask.md) — log only; superseded 10-04 |
 | 2026-10-04 | roadmap | [Fixed skeleton, learned variables](2026-10-04-roadmap-fixed-skeleton.md) — **plan of record**: four-tier memory, per-project learned params, user-level priors |
 | 2026-10-08 | exp | [Memory ladders](2026-10-08-exp-memory-ladders.md) — LOO ablations held; depth ladder inconclusive (distractor harm at j=3) |
-| 2026-10-09 | roadmap | [Value and use](2026-10-09-roadmap-value-and-use.md) — **plan of record**: phases mirror milestones; memory off-instrument-building onto real use |
+| 2026-10-09 | roadmap | [Value and use](2026-10-09-roadmap-value-and-use.md) — superseded 10-15: phases mirror milestones; memory off-instrument-building onto real use |
 | 2026-10-15 | exp | [Verify-loop + resolver chain](2026-10-15-exp-verify-loop-and-resolver.md) — edge validated (86/88 vs 78/88), resolver made live, engagement-conditional coverage |
+| 2026-10-15 | roadmap | [Honest evidence before new capability](2026-10-15-roadmap-honest-evidence.md) — **plan of record**: two reviews found label instability + in-sample claims; integrity work (#340–#348) precedes procedural Phase A |
