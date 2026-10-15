@@ -14,7 +14,13 @@ import (
 const countCleanReferentAcceptances = `-- name: CountCleanReferentAcceptances :one
 SELECT COUNT(DISTINCT session_id) FROM referent_episodes
 WHERE project_key = ? AND phrase = ? AND target = ?
-    AND verdict = 'accepted' AND memory_suggested = 0
+    AND memory_suggested = 0
+    AND settled_at IS NOT NULL
+    AND (label_hash_changed = 0
+         OR (label_hash_changed IS NULL AND label_committed = 1)
+         OR (label_hash_changed IS NULL
+             AND (label_committed IS NULL OR label_committed <> 1)
+             AND verdict = 'accepted'))
 `
 
 type CountCleanReferentAcceptancesParams struct {
@@ -26,6 +32,10 @@ type CountCleanReferentAcceptancesParams struct {
 // Evidence for a phrase->target mapping: accepted episodes the memory
 // tail did not suggest, counted by distinct session so a session
 // re-deriving its own mapping cannot self-promote.
+// #340: promotion consumes settled outcomes, not raw cues -- the
+// predicate is ReferentEpisodeOutcome's success arm in SQL (survival
+// read decides; absent it a commit on the target, else the cue), so
+// an episode that settled diverged can't promote a mapping.
 func (q *Queries) CountCleanReferentAcceptances(ctx context.Context, arg CountCleanReferentAcceptancesParams) (int64, error) {
 	row := q.queryRow(ctx, q.countCleanReferentAcceptancesStmt, countCleanReferentAcceptances, arg.ProjectKey, arg.Phrase, arg.Target)
 	var count int64
@@ -184,7 +194,7 @@ ON CONFLICT(session_id, turn_id) DO UPDATE SET
     edit_hunks    = excluded.edit_hunks,
     commands      = excluded.commands
 WHERE turn_outcomes.settled_at IS NULL
-    AND turn_outcomes.next_verdict IN ('', 'unknown')
+    AND turn_outcomes.next_verdict = ''
 `
 
 type InsertTurnOutcomeParams struct {
@@ -209,9 +219,11 @@ type InsertTurnOutcomeParams struct {
 // The conflict arm repairs placeholder rows: a backfill can record
 // a still-running concurrent session's in-flight turn with an empty
 // verdict and a partial evidence span. While the row is unsettled
-// AND still un-judged (next_verdict ” or 'unknown'), the live
+// AND carries no judgment at all (next_verdict = ”), the live
 // path's record refreshes evidence and stamps the real judgment.
-// A judged verdict ('accepted'/'revised') is never rewritten.
+// A judged unknown keeps its evidence -- unknown is a resolved cue
+// verdict, not a placeholder -- and accepted/revised/frozen rows
+// are likewise never rewritten.
 func (q *Queries) InsertTurnOutcome(ctx context.Context, arg InsertTurnOutcomeParams) error {
 	_, err := q.exec(ctx, q.insertTurnOutcomeStmt, insertTurnOutcome,
 		arg.SessionID,
@@ -229,7 +241,7 @@ func (q *Queries) InsertTurnOutcome(ctx context.Context, arg InsertTurnOutcomePa
 }
 
 const labelReferentEpisode = `-- name: LabelReferentEpisode :exec
-UPDATE referent_episodes SET label_target_hash = ?, label_wrong_target = ?, label_steps = ?, label_tokens = ?, label_tests_green = ?, labeled_at = ?, label_added_lines = ?, settle_at = ? WHERE session_id = ? AND source_message_id = ? AND target = ?
+UPDATE referent_episodes SET label_target_hash = ?, label_wrong_target = ?, label_steps = ?, label_tokens = ?, label_tests_green = ?, labeled_at = ?, label_added_lines = ?, settle_at = ? WHERE session_id = ? AND source_message_id = ? AND target = ? AND settled_at IS NULL
 `
 
 type LabelReferentEpisodeParams struct {
@@ -252,7 +264,8 @@ type LabelReferentEpisodeParams struct {
 // test verdict, and the observation window's +24h edge. The key
 // clause is the episode unique key -- the same idempotency point
 // the insert uses, so a repair-chain re-run re-stamps the same row
-// instead of drifting.
+// instead of drifting. settled_at IS NULL keeps the write-once
+// contract: a frozen row's label fields never re-stamp.
 func (q *Queries) LabelReferentEpisode(ctx context.Context, arg LabelReferentEpisodeParams) error {
 	_, err := q.exec(ctx, q.labelReferentEpisodeStmt, labelReferentEpisode,
 		arg.LabelTargetHash,
@@ -1055,7 +1068,8 @@ func (q *Queries) ListUnclaimedFailures(ctx context.Context) ([]ListUnclaimedFai
 }
 
 const listUnsettledReferentLabels = `-- name: ListUnsettledReferentLabels :many
-SELECT id, target, session_id, created_at, settle_at, label_added_lines
+SELECT id, phrase, target, session_id, verdict, memory_suggested,
+    created_at, settle_at, label_added_lines
 FROM referent_episodes
 WHERE referent_episodes.project_key = ?
     AND referent_episodes.settled_at IS NULL
@@ -1088,8 +1102,11 @@ type ListUnsettledReferentLabelsParams struct {
 
 type ListUnsettledReferentLabelsRow struct {
 	ID              int64  `json:"id"`
+	Phrase          string `json:"phrase"`
 	Target          string `json:"target"`
 	SessionID       string `json:"session_id"`
+	Verdict         string `json:"verdict"`
+	MemorySuggested int64  `json:"memory_suggested"`
 	CreatedAt       int64  `json:"created_at"`
 	SettleAt        int64  `json:"settle_at"`
 	LabelAddedLines string `json:"label_added_lines"`
@@ -1118,8 +1135,11 @@ func (q *Queries) ListUnsettledReferentLabels(ctx context.Context, arg ListUnset
 		var i ListUnsettledReferentLabelsRow
 		if err := rows.Scan(
 			&i.ID,
+			&i.Phrase,
 			&i.Target,
 			&i.SessionID,
+			&i.Verdict,
+			&i.MemorySuggested,
 			&i.CreatedAt,
 			&i.SettleAt,
 			&i.LabelAddedLines,
@@ -1303,7 +1323,7 @@ const promoteReferent = `-- name: PromoteReferent :exec
 INSERT INTO referent_memory (phrase, target, hits, last_at, project_key, param_version)
 VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT (phrase, target, project_key) DO UPDATE SET
-    hits = hits + 1,
+    hits = excluded.hits,
     last_at = excluded.last_at,
     param_version = excluded.param_version
 `
@@ -1317,11 +1337,12 @@ type PromoteReferentParams struct {
 	ParamVersion string `json:"param_version"`
 }
 
-// A mapping that cleared the acceptance floor earns its row; further
-// clean acceptances keep scoring it (hits is evidence mass, not
-// capped at the threshold). The insert carries the true acceptance
-// count that crossed the floor -- seeding 1 would understate the
-// evidence that promoted it.
+// A mapping that crossed the acceptance floor earns its row. hits
+// carries the true clean-acceptance count at promotion time --
+// seeding 1 would understate the evidence that promoted it. The
+// count is recomputed on every trigger (record-time and settle-
+// time), so the stored value always equals observed evidence --
+// never a drifted increment.
 func (q *Queries) PromoteReferent(ctx context.Context, arg PromoteReferentParams) error {
 	_, err := q.exec(ctx, q.promoteReferentStmt, promoteReferent,
 		arg.Phrase,
@@ -1409,6 +1430,8 @@ type SettleReferentEpisodeParams struct {
 	ID               int64         `json:"id"`
 }
 
+// labeled_at re-stamps to the settle time: it is the last label
+// computation, so it intentionally converges with settled_at.
 // Freeze one episode's label (#340): the write happens once, at
 // settlement -- committed counts only external commits inside the
 // window, hash_changed means the recorded added-lines diverged, and

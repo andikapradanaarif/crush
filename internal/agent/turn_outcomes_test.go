@@ -3,11 +3,13 @@ package agent
 import (
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/cmdlog"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/stretchr/testify/require"
 )
@@ -86,7 +88,7 @@ func TestExtractTurnOutcome(t *testing.T) {
 		referentUserMsg("u2", "next turn starts"),
 	}
 
-	o := a.extractTurnOutcome(t.Context(), "s1", msgs, 2)
+	o := extractTurnOutcome(t.Context(), a.turnOutcomeDeps(), "s1", msgs, 2)
 	require.Equal(t, "u1", o.TurnID, "the turn keys on its boundary message")
 	require.ElementsMatch(t,
 		[]string{filepath.Join("x.go"), "y.go"}, o.EditedPaths)
@@ -110,14 +112,14 @@ func TestRecordTurnOutcome(t *testing.T) {
 		}}},
 	}
 	call := SessionAgentCall{SessionID: "s1", Prompt: "thanks"}
-	a.recordTurnOutcome(t.Context(), call, msgs)
+	recordTurnOutcome(t.Context(), a.turnOutcomeDeps(), call, msgs)
 
 	has, err := a.cmdlog.HasTurnOutcome(t.Context(), "s1", "u1")
 	require.NoError(t, err)
 	require.True(t, has)
 
 	// Repair retries and sub-agents record nothing.
-	a.recordTurnOutcome(t.Context(), SessionAgentCall{
+	recordTurnOutcome(t.Context(), a.turnOutcomeDeps(), SessionAgentCall{
 		SessionID: "s1", Prompt: "retry", RepairAttempts: 1,
 	}, msgs)
 }
@@ -160,7 +162,7 @@ func TestBackfillTurnOutcomes(t *testing.T) {
 
 	// First turn of the new session: no prior user message, so the
 	// record path becomes the (detached) backfill — poll for it.
-	a.recordTurnOutcome(t.Context(),
+	recordTurnOutcome(t.Context(), a.turnOutcomeDeps(),
 		SessionAgentCall{SessionID: "s-new", Prompt: "hello"}, nil)
 
 	require.Eventually(t, func() bool {
@@ -200,7 +202,7 @@ func TestExtractTurnOutcome_SummaryIsNotBoundary(t *testing.T) {
 		}}},
 	}
 
-	o := a.extractTurnOutcome(t.Context(), "s1", msgs, 0)
+	o := extractTurnOutcome(t.Context(), a.turnOutcomeDeps(), "s1", msgs, 0)
 	require.Equal(t, "u0", o.TurnID)
 	require.ElementsMatch(t, []string{"x.go", "y.go"}, o.EditedPaths,
 		"work on both sides of a compaction belongs to the same turn")
@@ -243,7 +245,7 @@ func TestRecordTurnOutcome_PostCompactionTail(t *testing.T) {
 		Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "looks right"}},
 	})
 	require.NoError(t, err)
-	a.recordTurnOutcome(t.Context(), SessionAgentCall{
+	recordTurnOutcome(t.Context(), a.turnOutcomeDeps(), SessionAgentCall{
 		SessionID: sess.ID, Prompt: "looks right", currentUserMsgID: inflight.ID,
 	}, tail)
 
@@ -272,7 +274,7 @@ func TestRecordTurnOutcome_InFlightPromptExcluded(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	a.recordTurnOutcome(t.Context(), SessionAgentCall{
+	recordTurnOutcome(t.Context(), a.turnOutcomeDeps(), SessionAgentCall{
 		SessionID: sess.ID, Prompt: "first prompt", currentUserMsgID: inflight.ID,
 	}, nil)
 
@@ -326,10 +328,46 @@ func TestExtractTurnOutcome_DelegatedEdits(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	o := a.extractTurnOutcome(t.Context(), "s1", msgs, 0)
+	o := extractTurnOutcome(t.Context(), a.turnOutcomeDeps(), "s1", msgs, 0)
 	require.Equal(t, "u1", o.TurnID)
 	require.Equal(t, []string{"delegated.go"}, o.EditedPaths,
 		"the delegation prompt inside the child is not a boundary")
 	require.Equal(t, []string{"new"}, o.EditHunks["delegated.go"])
 	require.Equal(t, []string{"go build ./..."}, o.Commands)
+}
+
+// The detached record pass must snapshot every agent field it needs
+// on the caller's goroutine, before spawn — tests re-stamp fields
+// mid-flight and a detached read of a.messages/a.sessions/a.cmdlog/
+// a.configStore races the re-stamp (the sibling settle pass guards
+// the same way). This pins the contract: re-stamp while passes are
+// in flight; under -race a leaked field read flags immediately.
+func TestRecordTurnOutcomeDetachedFieldSnapshot(t *testing.T) {
+	t.Parallel()
+	a, env := referentAgent(t)
+	a.detachedWork = &sync.WaitGroup{}
+
+	msgs := []message.Message{
+		referentUserMsg("u1", "do the thing"),
+		{Role: message.Assistant, Parts: []message.ContentPart{message.ToolCall{
+			ID: "tc1", Name: tools.WriteToolName, Finished: true,
+			Input: `{"file_path":"x.go","content":"v1"}`,
+		}}},
+	}
+	call := SessionAgentCall{SessionID: "s1", Prompt: "next turn"}
+	for range 50 {
+		a.recordTurnOutcome(t.Context(), call, msgs)
+		// Re-stamp the fields the detached pass used to read —
+		// nil first so a late read would also panic, then restore
+		// so the next iteration's guard passes.
+		a.messages = nil
+		a.sessions = nil
+		a.cmdlog = nil
+		a.configStore = nil
+		a.messages = env.messages
+		a.sessions = env.sessions
+		a.cmdlog = env.cmdlog
+		a.configStore = config.NewTestStoreWithDir(&config.Config{}, env.workingDir)
+	}
+	a.detachedWork.Wait()
 }

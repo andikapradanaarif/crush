@@ -21,6 +21,7 @@ import (
 type testEnv struct {
 	ctx        context.Context
 	svc        Service
+	conn       *sql.DB
 	workingDir string
 }
 
@@ -35,6 +36,7 @@ func setupTest(t *testing.T) *testEnv {
 	return &testEnv{
 		ctx:        t.Context(),
 		svc:        NewService(db.New(conn), workingDir, params.DefaultMemory()),
+		conn:       conn,
 		workingDir: workingDir,
 	}
 }

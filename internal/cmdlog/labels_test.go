@@ -189,6 +189,38 @@ func TestSettleReferentLabels_NewerSessionSettlesOnce(t *testing.T) {
 	require.EqualValues(t, 0, c.hashChanged.Int64, "settled labels freeze — divergence after freeze cannot rewrite them")
 }
 
+// A frozen row is write-once across the board: LabelReferentEpisode's
+// settled_at IS NULL guard means a late re-label (repair-chain retry,
+// duplicate stamp) cannot re-stamp fingerprint or window fields.
+func TestLabelReferentEpisode_SettledRowImmutable(t *testing.T) {
+	env := setupLabelsTest(t)
+	target := "x.go"
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, target), []byte("v1"), 0o644))
+
+	recordLabeledEpisode(t, env, "s1", "m1", target,
+		ReferentEpisodeLabelInputs{AddedLines: []string{"v1"}})
+	before := readLabels(t, env, "s1", target)
+
+	dueViaNewerSession(t, env, "s2")
+	require.NoError(t, env.svc.SettleReferentLabels(t.Context(), 10))
+	settled := readLabels(t, env, "s1", target)
+	require.True(t, settled.settledAt.Valid)
+
+	ep := ReferentEpisode{
+		Phrase: "config", Target: target, SessionID: "s1",
+		SourceMessageID: "m1", ToolCallID: "call-m1",
+		Verdict: ReferentAccepted,
+	}
+	require.NoError(t, env.svc.LabelReferentEpisode(t.Context(), ep,
+		ReferentEpisodeLabelInputs{Steps: 99, Tokens: 99999, AddedLines: []string{"other"}}))
+
+	after := readLabels(t, env, "s1", target)
+	require.Equal(t, settled.addedLines, after.addedLines,
+		"a settled row's fingerprint never re-stamps")
+	require.Equal(t, settled.settleAt, after.settleAt)
+	require.EqualValues(t, before.steps, after.steps)
+}
+
 // The +24h cap is the second trigger: no newer session needed once
 // the window's outer edge passes.
 func TestSettleReferentLabels_CapSettles(t *testing.T) {

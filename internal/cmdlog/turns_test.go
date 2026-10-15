@@ -106,6 +106,28 @@ func TestRecordTurnOutcome_PlaceholderRepair(t *testing.T) {
 	require.JSONEq(t, `["x.go"]`, c.editedPaths)
 }
 
+// 'unknown' is a judged cue verdict, not a placeholder: a row that
+// resolved to unknown with full evidence is never clobbered by a
+// sparser re-record.
+func TestRecordTurnOutcome_JudgedUnknownKeepsEvidence(t *testing.T) {
+	env := setupLabelsTest(t)
+
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		Commands:    []string{"go test ./..."},
+		NextVerdict: ReferentUnknown,
+	}))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID: "s1", TurnID: "t0",
+	}))
+	c := readTurn(t, env, "s1", "t0")
+	require.Equal(t, ReferentUnknown, c.nextVerdict)
+	require.JSONEq(t, `["x.go"]`, c.editedPaths,
+		"a judged-unknown row keeps its evidence")
+}
+
 // A frozen row refuses even the placeholder-repair arm.
 func TestRecordTurnOutcome_FrozenImmutable(t *testing.T) {
 	env := setupLabelsTest(t)

@@ -55,10 +55,24 @@ CREATE TABLE turn_outcomes (
 );
 CREATE INDEX turn_outcomes_settle
     ON turn_outcomes (project_key, settled_at);
+
+-- Session-membership probes (#340): the settle triggers and the
+-- backfill corpus run correlated EXISTS over these columns once per
+-- candidate session — without indexes a mature ledger scans tables
+-- per probe.
+CREATE INDEX IF NOT EXISTS idx_command_memory_last_session
+    ON command_memory (last_session_id);
+CREATE INDEX IF NOT EXISTS idx_failure_memory_session
+    ON failure_memory (session_id);
+CREATE INDEX IF NOT EXISTS idx_referent_episodes_session
+    ON referent_episodes (session_id);
 -- +goose StatementEnd
 
 -- +goose Down
 -- +goose StatementBegin
+DROP INDEX IF EXISTS idx_referent_episodes_session;
+DROP INDEX IF EXISTS idx_failure_memory_session;
+DROP INDEX IF EXISTS idx_command_memory_last_session;
 DROP INDEX turn_outcomes_settle;
 DROP TABLE turn_outcomes;
 ALTER TABLE referent_episodes DROP COLUMN settled_at;

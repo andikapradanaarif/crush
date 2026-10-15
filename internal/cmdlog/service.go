@@ -316,6 +316,11 @@ type service struct {
 	// openFailureTTL is the read-side staleness bound for open
 	// failures; 0 disables the filter.
 	openFailureTTL time.Duration
+	// referentPromoteHits is the promotion floor the settle-time
+	// trigger uses — promotion consumes settled outcomes now, so the
+	// check can fire when a clean acceptance freezes, not only when
+	// the next accepted episode records.
+	referentPromoteHits int
 	// suggested is the per-session set of commands the model was
 	// shown in injected memory — a run of one writes suggested=1.
 	// Process-local: the flag means "influence currently rendered in
@@ -379,16 +384,17 @@ func NewService(q *db.Queries, workingDir string, p params.Memory, opts ...Optio
 	p = p.OrDefault()
 	projectKey, commonDir, repoPrefix, hasRepo := computeProjectKey(workingDir)
 	s := &service{
-		q:              q,
-		workingDir:     workingDir,
-		openFailureTTL: p.OpenFailureTTL,
-		projectKey:     projectKey,
-		commonDir:      commonDir,
-		repoPrefix:     repoPrefix,
-		hasRepo:        hasRepo,
-		paramVersion:   p.Version(),
-		suggested:      map[string]map[string]struct{}{},
-		now:            time.Now,
+		q:                   q,
+		workingDir:          workingDir,
+		openFailureTTL:      p.OpenFailureTTL,
+		referentPromoteHits: p.ReferentPromoteHits,
+		projectKey:          projectKey,
+		commonDir:           commonDir,
+		repoPrefix:          repoPrefix,
+		hasRepo:             hasRepo,
+		paramVersion:        p.Version(),
+		suggested:           map[string]map[string]struct{}{},
+		now:                 time.Now,
 	}
 	for _, opt := range opts {
 		opt(s)

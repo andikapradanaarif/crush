@@ -57,11 +57,12 @@ type TurnOutcome struct {
 // RecordTurnOutcome opens one turn's row on (session_id, turn_id).
 // settle_at is the +24h cap off the turn's own timestamp; the
 // newer-session trigger is evaluated at settle time. A conflict on
-// an unsettled, still-unjudged row (next_verdict ” or 'unknown')
-// refreshes verdict and evidence — the backfill can mint a
+// an unsettled, still-unjudged placeholder row (next_verdict = ”)
+// refreshes verdict and evidence — a backfill can mint a
 // placeholder for a concurrent session's in-flight turn, and the
-// real prompt's record must repair it. A judged verdict or a frozen
-// row is never rewritten.
+// real prompt's record must repair it. 'unknown' is a judged cue
+// verdict, not a placeholder: a judged verdict or a frozen row is
+// never rewritten.
 func (s *service) RecordTurnOutcome(ctx context.Context, o TurnOutcome) error {
 	if o.SessionID == "" || o.TurnID == "" {
 		return nil

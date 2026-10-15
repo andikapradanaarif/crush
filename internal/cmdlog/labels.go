@@ -33,9 +33,10 @@ const (
 	// (b) created_at + 24h — the label is computed once, then frozen.
 	settleWindowMillis = int64(24 * 60 * 60 * 1000)
 	// commitSkewMillis bounds agent-commit attribution: a commit
-	// whose author time lands within this skew of a harness-run
-	// `git commit`'s recorded last_at counts as agent-made and is
-	// excluded from acceptance evidence.
+	// whose committer time (%ct — the right clock for evidence
+	// windows; author time can backdate) lands within this skew of a
+	// harness-run `git commit`'s recorded last_at counts as
+	// agent-made and is excluded from acceptance evidence.
 	commitSkewMillis = int64(5000)
 	// survivalMajority is the divergence cut: an edit counts as
 	// diverged when strictly fewer than this fraction of its recorded
@@ -211,7 +212,11 @@ func (s *service) prefetchCommitEvidence(ctx context.Context, winLo, winHi int64
 // millis — all comparisons happen in millis.
 func (ev commitEvidence) inWindow(paths []string, createdAt, winEnd int64) bool {
 	for _, p := range paths {
-		for _, ct := range ev.commits[p] {
+		// Stored targets are slash-normalized at record time; the
+		// ToSlash here covers rows written before that (Windows
+		// filepath.Rel emitted backslashes) — git paths are always
+		// slash-separated.
+		for _, ct := range ev.commits[filepath.ToSlash(p)] {
 			ms := ct * 1000
 			// Fail closed on edges: a commit we cannot prove
 			// landed inside the window is not evidence, and a
@@ -240,14 +245,26 @@ func (s *service) settleReferent(ctx context.Context, r db.ListUnsettledReferent
 	}
 	changed := s.hunkDiverged(r.Target, r.LabelAddedLines)
 	green := s.sessionTestsGreen(ctx, r.SessionID)
-	return s.q.SettleReferentEpisode(ctx, db.SettleReferentEpisodeParams{
+	if err := s.q.SettleReferentEpisode(ctx, db.SettleReferentEpisodeParams{
 		LabelCommitted:   committed,
 		LabelHashChanged: changed,
 		LabelTestsGreen:  green,
 		SettledAt:        sql.NullInt64{Int64: now, Valid: true},
 		LabeledAt:        now,
 		ID:               r.ID,
-	})
+	}); err != nil {
+		return err
+	}
+	// Promotion consumes settled outcomes (#340): this row's success
+	// freezing may be the crossing observation for its mapping, so
+	// the floor check runs here too — the record path can't count the
+	// episode it just inserted. Suggested rows are echo, not
+	// evidence; zero/negative floor disables the channel.
+	if s.referentPromoteHits > 0 && r.MemorySuggested == 0 &&
+		ReferentEpisodeOutcome(r.Verdict, committed, changed) {
+		return s.maybePromoteReferent(ctx, r.Phrase, r.Target, s.referentPromoteHits)
+	}
+	return nil
 }
 
 // isHarnessCommit reports whether commit ms (unix millis) sits within

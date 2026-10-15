@@ -31,6 +31,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/session"
 )
 
 // turnOutcomeBackfillLimit bounds how many past sessions a session's
@@ -39,15 +40,55 @@ import (
 // session's first turn drains another slice of history.
 const turnOutcomeBackfillLimit = 25
 
-// recordTurnOutcome opens the outcome row for the judged turn — the
-// last real user message before this run's prompt. Repair retries
-// carry harness text, not a verdict, so the row waits for the next
-// real prompt. A session with no prior real user message is in its
-// first turn — the backfill trigger.
+// turnOutcomeDeps snapshots every agent field the outcome pass
+// touches, captured on the caller's goroutine before the detached
+// slot spawns — tests re-stamp agent fields mid-flight, and a
+// detached read races them (the same hazard the settle pass
+// documents at its spawn site). workdir is relWorkdir's basis,
+// resolved now because configStore lives on the agent.
+type turnOutcomeDeps struct {
+	messages message.Service
+	sessions session.Service
+	cmdlog   cmdlog.Service
+	workdir  string
+}
+
+// turnOutcomeDeps snapshots the fields on the caller's goroutine —
+// the detached slot's copy.
+func (a *sessionAgent) turnOutcomeDeps() turnOutcomeDeps {
+	d := turnOutcomeDeps{
+		messages: a.messages,
+		sessions: a.sessions,
+		cmdlog:   a.cmdlog,
+	}
+	if a.configStore != nil {
+		d.workdir = a.configStore.WorkingDir()
+	}
+	return d
+}
+
+// recordTurnOutcome schedules the judged-turn record + corpus
+// backfill on a detached slot — none of it feeds the render, and
+// settlement tolerates late-arriving rows, so the transcript lists
+// and ledger writes must not serialize into the prompt path. The
+// guard and the field snapshot run on this goroutine; the detached
+// closure reads only its parameters.
 func (a *sessionAgent) recordTurnOutcome(ctx context.Context, call SessionAgentCall, msgs []message.Message) {
 	if a.cmdlog == nil || a.isSubAgent || call.RepairAttempts > 0 || call.Prompt == "" {
 		return
 	}
+	deps := a.turnOutcomeDeps()
+	detachedCtx := context.WithoutCancel(ctx)
+	a.spawnDetached(func() {
+		recordTurnOutcome(detachedCtx, deps, call, msgs)
+	})
+}
+
+// recordTurnOutcome is the synchronous core — the judged turn is
+// the last real user message before this run's prompt; the arriving
+// prompt is its next-turn verdict. A session with no prior real
+// user message is in its first turn — the backfill trigger.
+func recordTurnOutcome(ctx context.Context, d turnOutcomeDeps, call SessionAgentCall, msgs []message.Message) {
 	lastUser := lastRealUserIdx(msgs, call.currentUserMsgID)
 	if lastUser < 0 {
 		// Two distinct shapes land here. A genuinely new session's
@@ -60,28 +101,25 @@ func (a *sessionAgent) recordTurnOutcome(ctx context.Context, call SessionAgentC
 		// sliced — so it must be excluded by ID: landing on it would
 		// mint a phantom row keyed to this turn's own message, and
 		// the unique key would then block the real evidence row.
-		if a.messages != nil {
-			if full, err := a.messages.List(ctx, call.SessionID); err == nil {
+		if d.messages != nil {
+			if full, err := d.messages.List(ctx, call.SessionID); err == nil {
 				if idx := lastRealUserIdx(full, call.currentUserMsgID); idx >= 0 {
-					o := a.extractTurnOutcome(ctx, call.SessionID, full, idx)
+					o := extractTurnOutcome(ctx, d, call.SessionID, full, idx)
 					o.NextVerdict = referentJudgedVerdict(call.Prompt)
-					if err := a.cmdlog.RecordTurnOutcome(ctx, o); err != nil {
+					if err := d.cmdlog.RecordTurnOutcome(ctx, o); err != nil {
 						slog.Warn("Failed to record turn outcome", "error", err)
 					}
 				}
 			}
 		}
 		// The corpus scan does up to backfillLimit message-list
-		// reads — detached, off the prompt path.
-		backfillCtx := context.WithoutCancel(ctx)
-		a.spawnDetached(func() {
-			a.backfillTurnOutcomes(backfillCtx, call)
-		})
+		// reads — the caller already runs detached.
+		backfillTurnOutcomes(ctx, d, call)
 		return
 	}
-	o := a.extractTurnOutcome(ctx, call.SessionID, msgs, lastUser)
+	o := extractTurnOutcome(ctx, d, call.SessionID, msgs, lastUser)
 	o.NextVerdict = referentJudgedVerdict(call.Prompt)
-	if err := a.cmdlog.RecordTurnOutcome(ctx, o); err != nil {
+	if err := d.cmdlog.RecordTurnOutcome(ctx, o); err != nil {
 		slog.Warn("Failed to record turn outcome", "error", err)
 	}
 }
@@ -109,20 +147,20 @@ func lastRealUserIdx(ms []message.Message, excludeID string) int {
 // final turn, plus every turn predating this channel. Bounded per
 // call; already-present rows skip, so the corpus converges across
 // sessions instead of one pass owning all of history.
-func (a *sessionAgent) backfillTurnOutcomes(ctx context.Context, call SessionAgentCall) {
-	if a.messages == nil {
+func backfillTurnOutcomes(ctx context.Context, d turnOutcomeDeps, call SessionAgentCall) {
+	if d.messages == nil {
 		return
 	}
-	sessions, err := a.cmdlog.ListRecentSessionIDs(ctx, call.SessionID, turnOutcomeBackfillLimit)
+	sessions, err := d.cmdlog.ListRecentSessionIDs(ctx, call.SessionID, turnOutcomeBackfillLimit)
 	if err != nil || len(sessions) == 0 {
 		return
 	}
 	for _, sess := range sessions {
-		msgs, err := a.messages.List(ctx, sess.ID)
+		msgs, err := d.messages.List(ctx, sess.ID)
 		if err != nil || len(msgs) == 0 {
 			continue
 		}
-		a.backfillSession(ctx, sess.ID, msgs)
+		backfillSession(ctx, d, sess.ID, msgs)
 	}
 }
 
@@ -132,7 +170,7 @@ func (a *sessionAgent) backfillTurnOutcomes(ctx context.Context, call SessionAge
 // path's post-summary tail. Mid-session turns read their verdict off
 // the following stored prompt — the same cue judgment the live path
 // stamps; a final turn carries "".
-func (a *sessionAgent) backfillSession(ctx context.Context, sessionID string, msgs []message.Message) {
+func backfillSession(ctx context.Context, d turnOutcomeDeps, sessionID string, msgs []message.Message) {
 	var segs []int
 	for i, m := range msgs {
 		if isRealUserMsg(m) {
@@ -140,17 +178,17 @@ func (a *sessionAgent) backfillSession(ctx context.Context, sessionID string, ms
 		}
 	}
 	for i, start := range segs {
-		has, err := a.cmdlog.HasTurnOutcome(ctx, sessionID, msgs[start].ID)
+		has, err := d.cmdlog.HasTurnOutcome(ctx, sessionID, msgs[start].ID)
 		if err != nil || has {
 			continue
 		}
-		o := a.extractTurnOutcome(ctx, sessionID, msgs, start)
+		o := extractTurnOutcome(ctx, d, sessionID, msgs, start)
 		if i+1 < len(segs) {
 			// The verdict is the next stored user prompt's cue
 			// judgment — identical to what the live path stamps.
 			o.NextVerdict = referentJudgedVerdict(msgs[segs[i+1]].JoinedText())
 		}
-		if err := a.cmdlog.RecordTurnOutcome(ctx, o); err != nil {
+		if err := d.cmdlog.RecordTurnOutcome(ctx, o); err != nil {
 			slog.Warn("Failed to backfill turn outcome", "error", err)
 		}
 	}
@@ -163,7 +201,7 @@ func (a *sessionAgent) backfillSession(ctx context.Context, sessionID string, ms
 // so the tail and the full transcript agree on which turn a row
 // names. Child sessions' mutations attribute to the parent turn
 // through the same delegation walk the referent channel uses.
-func (a *sessionAgent) extractTurnOutcome(ctx context.Context, sessionID string, msgs []message.Message, userIdx int) cmdlog.TurnOutcome {
+func extractTurnOutcome(ctx context.Context, d turnOutcomeDeps, sessionID string, msgs []message.Message, userIdx int) cmdlog.TurnOutcome {
 	o := cmdlog.TurnOutcome{
 		SessionID: sessionID,
 		TurnID:    msgs[userIdx].ID,
@@ -188,13 +226,13 @@ func (a *sessionAgent) extractTurnOutcome(ctx context.Context, sessionID string,
 			}
 			for _, tc := range m.ToolCalls() {
 				switch {
-				case tc.Name == AgentToolName && a.sessions != nil && a.messages != nil:
-					childID := a.sessions.CreateAgentToolSessionID(m.ID, tc.ID)
+				case tc.Name == AgentToolName && d.sessions != nil && d.messages != nil:
+					childID := d.sessions.CreateAgentToolSessionID(m.ID, tc.ID)
 					if _, ok := visited[childID]; ok {
 						continue
 					}
 					visited[childID] = struct{}{}
-					if childMsgs, err := a.messages.List(ctx, childID); err == nil {
+					if childMsgs, err := d.messages.List(ctx, childID); err == nil {
 						scan(childMsgs, 0)
 					}
 				case referentMutationTools[tc.Name]:
@@ -202,7 +240,7 @@ func (a *sessionAgent) extractTurnOutcome(ctx context.Context, sessionID string,
 					if path == "" {
 						continue
 					}
-					rel := a.relWorkdir(path)
+					rel := relWorkdir(d.workdir, path)
 					o.EditHunks[rel] = append(o.EditHunks[rel], added...)
 					if _, ok := pathSet[rel]; !ok {
 						pathSet[rel] = struct{}{}

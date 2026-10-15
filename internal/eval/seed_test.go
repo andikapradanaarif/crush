@@ -549,6 +549,11 @@ func TestRunScriptedSeeds_Channels(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, ids, 2)
 
+	// Promotion consumes settled outcomes (#340) — the pipeline's
+	// fold pass is what freezes seeded episodes and fires the
+	// crossing, so the test mirrors runner order: seed then fold.
+	require.NoError(t, r.foldSeededRates(context.Background(), workdir, "eval-test"))
+
 	dataDir := DataDirFor(workdir)
 	conn, err := db.Connect(context.Background(), dataDir)
 	require.NoError(t, err)

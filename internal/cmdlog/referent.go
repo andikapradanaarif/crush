@@ -110,10 +110,25 @@ func (s *service) RecordReferentEpisode(ctx context.Context, ep ReferentEpisode,
 	if ep.Verdict != ReferentAccepted || ep.Suggested || promoteMin <= 0 {
 		return nil
 	}
+	// The new episode is unsettled so it cannot count itself — the
+	// count is over frozen evidence only (#340). The trigger matters
+	// when older settled acceptances already clear the floor; the
+	// episode's own contribution promotes at its settlement instead
+	// (settleReferent re-runs this same check).
+	return s.maybePromoteReferent(ctx, ep.Phrase, ep.Target, promoteMin)
+}
+
+// maybePromoteReferent counts the mapping's clean acceptances —
+// settled, outcome-successful, never-suggested episodes over
+// distinct sessions — and writes the referent_memory row when the
+// floor is met. Called from the record path (a fresh clean verdict
+// may cross on older settled evidence) and from settlement (the
+// row's own success freezing may be the crossing observation).
+func (s *service) maybePromoteReferent(ctx context.Context, phrase, target string, promoteMin int) error {
 	acceptances, err := s.q.CountCleanReferentAcceptances(ctx, db.CountCleanReferentAcceptancesParams{
 		ProjectKey: s.projectKey,
-		Phrase:     ep.Phrase,
-		Target:     ep.Target,
+		Phrase:     phrase,
+		Target:     target,
 	})
 	if err != nil {
 		return err
@@ -122,13 +137,13 @@ func (s *service) RecordReferentEpisode(ctx context.Context, ep ReferentEpisode,
 		return nil
 	}
 	return s.q.PromoteReferent(ctx, db.PromoteReferentParams{
-		Phrase: ep.Phrase,
-		Target: ep.Target,
+		Phrase: phrase,
+		Target: target,
 		// The row is born with the full clean-acceptance count that
 		// crossed the floor — seeding 1 would render "accepted 1×"
 		// while promoteMin sessions of evidence exist.
 		Hits:         acceptances,
-		LastAt:       now,
+		LastAt:       s.now().UnixMilli(),
 		ProjectKey:   s.projectKey,
 		ParamVersion: s.paramVersion,
 	})

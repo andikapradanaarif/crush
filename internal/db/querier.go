@@ -13,6 +13,10 @@ type Querier interface {
 	// Evidence for a phrase->target mapping: accepted episodes the memory
 	// tail did not suggest, counted by distinct session so a session
 	// re-deriving its own mapping cannot self-promote.
+	// #340: promotion consumes settled outcomes, not raw cues -- the
+	// predicate is ReferentEpisodeOutcome's success arm in SQL (survival
+	// read decides; absent it a commit on the target, else the cue), so
+	// an episode that settled diverged can't promote a mapping.
 	CountCleanReferentAcceptances(ctx context.Context, arg CountCleanReferentAcceptancesParams) (int64, error)
 	// Absolute user-turn ordinal source for edge_firings.turn_seq - the
 	// bounded prompt-history query above can't serve it (DESC LIMIT 200
@@ -126,9 +130,11 @@ type Querier interface {
 	// The conflict arm repairs placeholder rows: a backfill can record
 	// a still-running concurrent session's in-flight turn with an empty
 	// verdict and a partial evidence span. While the row is unsettled
-	// AND still un-judged (next_verdict '' or 'unknown'), the live
+	// AND carries no judgment at all (next_verdict = ''), the live
 	// path's record refreshes evidence and stamps the real judgment.
-	// A judged verdict ('accepted'/'revised') is never rewritten.
+	// A judged unknown keeps its evidence -- unknown is a resolved cue
+	// verdict, not a placeholder -- and accepted/revised/frozen rows
+	// are likewise never rewritten.
 	InsertTurnOutcome(ctx context.Context, arg InsertTurnOutcomeParams) error
 	// Stamp the artifact signals computable at episode-record time
 	// (#294/#340): the file's post-edit hash (diagnostic), the added-
@@ -136,7 +142,8 @@ type Querier interface {
 	// test verdict, and the observation window's +24h edge. The key
 	// clause is the episode unique key -- the same idempotency point
 	// the insert uses, so a repair-chain re-run re-stamps the same row
-	// instead of drifting.
+	// instead of drifting. settled_at IS NULL keeps the write-once
+	// contract: a frozen row's label fields never re-stamp.
 	LabelReferentEpisode(ctx context.Context, arg LabelReferentEpisodeParams) error
 	// Backs prompt history when no session is open. Needs
 	// idx_messages_role_created_at to seek rather than scan the table.
@@ -312,11 +319,12 @@ type Querier interface {
 	// same ledger proof the due trigger uses -- a foreign session must
 	// not close this project's window.
 	NextSessionStartMillis(ctx context.Context, arg NextSessionStartMillisParams) (int64, error)
-	// A mapping that cleared the acceptance floor earns its row; further
-	// clean acceptances keep scoring it (hits is evidence mass, not
-	// capped at the threshold). The insert carries the true acceptance
-	// count that crossed the floor -- seeding 1 would understate the
-	// evidence that promoted it.
+	// A mapping that crossed the acceptance floor earns its row. hits
+	// carries the true clean-acceptance count at promotion time --
+	// seeding 1 would understate the evidence that promoted it. The
+	// count is recomputed on every trigger (record-time and settle-
+	// time), so the stored value always equals observed evidence --
+	// never a drifted increment.
 	PromoteReferent(ctx context.Context, arg PromoteReferentParams) error
 	// One row per collapsed prior turn; INSERT OR IGNORE makes the write
 	// idempotent across renders and across processes sharing the session
@@ -345,6 +353,8 @@ type Querier interface {
 	// two are equivalent here.
 	SearchSessionDigests(ctx context.Context, arg SearchSessionDigestsParams) ([]SessionDigest, error)
 	SetSessionChannel(ctx context.Context, arg SetSessionChannelParams) (Session, error)
+	// labeled_at re-stamps to the settle time: it is the last label
+	// computation, so it intentionally converges with settled_at.
 	// Freeze one episode's label (#340): the write happens once, at
 	// settlement -- committed counts only external commits inside the
 	// window, hash_changed means the recorded added-lines diverged, and

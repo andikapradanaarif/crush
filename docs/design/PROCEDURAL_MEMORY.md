@@ -88,7 +88,13 @@ rarely takes. Mining needs a label at the unit it clusters:
   no window; a session with no rows yet delays, never corrupts.
   After settlement the verdict never re-derives — fold and
   calibration read only settled rows (fixes the label-drift defect
-  from the loop review).
+  from the loop review). Referent promotion is settlement-driven
+  the same way: `CountCleanReferentAcceptances` counts frozen rows
+  under the artifact-first outcome rule, so a phrase→target earns
+  `referent_memory` only when its Nth clean acceptance *freezes* —
+  fired from `settleReferent` on the crossing row, and from the
+  record path when older settled evidence already clears the floor
+  (a fresh episode can never count itself).
 - **Survival per hunk:** the diff hunks the turn's edits produced,
   checked line-presence at settlement — unrelated edits elsewhere in
   the same file do not count as divergence. Both sides normalize to
@@ -113,12 +119,20 @@ rarely takes. Mining needs a label at the unit it clusters:
   its ID and skips it — otherwise the in-flight prompt mints a
   phantom turn whose unique key blocks its own evidence row.
 - **Backfill placeholders repair:** a concurrent session's in-flight
-  final turn backfills with an empty verdict; the insert's conflict
-  arm refreshes evidence and judgment while the row is unsettled and
-  unjudged (`next_verdict` `''`/`'unknown'`). A judged or frozen row
-  is never rewritten. The corpus itself is convergent: only sessions
+  final turn backfills with an empty verdict; a separate guarded
+  repair update refreshes evidence and judgment while the row is
+  unsettled and unjudged (`next_verdict = ''` only — `'unknown'` is
+  a resolved cue, not a placeholder). A judged or frozen row is
+  never rewritten. The corpus itself is convergent: only sessions
   with some unrecorded real user turn are scanned, so fully covered
   history drains instead of re-sliding over the newest slice.
+- **Detached record pass:** the whole turn-outcome record — tail
+  extraction, full-transcript fallback, and corpus backfill — runs
+  on a detached slot off the prompt path; none of it feeds the
+  render and settlement tolerates late rows. Every agent field the
+  pass touches (`messages`, `sessions`, `cmdlog`, `configStore`'s
+  working dir) is snapshotted on the request goroutine before the
+  spawn, the same contract the settle pass uses.
 
 Mining keeps only `accepted` turns (v1; `failed`/`revised` traces are
 logged for a later ReasoningBank-style pass). This is the label the

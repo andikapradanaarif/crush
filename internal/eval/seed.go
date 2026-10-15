@@ -139,6 +139,10 @@ func (r *Runner) foldSeededRates(ctx context.Context, workdir, seedKey string) e
 		cmdlog.WithProjectKey(seedKey))
 	// Settlement runs through the same bounded drain as the fold —
 	// seeded rows are due by default, so a few passes close them all.
+	// Mirror the fold loop's contract: a backlog deeper than
+	// 64×limit must surface, not silently fold a partially-settled
+	// corpus into a colder snapshot than intended.
+	drained := false
 	for i := 0; i < 64; i++ {
 		if err := svc.SettleReferentLabels(ctx, 50); err != nil {
 			return fmt.Errorf("seed label settlement: %w", err)
@@ -152,8 +156,12 @@ func (r *Runner) foldSeededRates(ctx context.Context, workdir, seedKey string) e
 			return fmt.Errorf("seed settle scan: %w", err)
 		}
 		if len(done) == 0 {
+			drained = true
 			break
 		}
+	}
+	if !drained {
+		return fmt.Errorf("seed label settlement did not drain after 64 passes")
 	}
 	gamma := params.DefaultMemory().RateDecay
 	// UpdateProjectRates folds at most one rateEventBatch per call;

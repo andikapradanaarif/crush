@@ -1319,13 +1319,25 @@ func (a *sessionAgent) hasTool(name string) bool {
 }
 
 // relWorkdir renders p relative to the working directory when possible,
-// keeping the blob short and prompt-portable.
+// keeping the blob short and prompt-portable. The result is slash-
+// normalized: stored ledger paths must match `git log --name-only`
+// output, which emits forward slashes on every platform — a Windows
+// filepath.Rel backslash would silently blind commit evidence.
 func (a *sessionAgent) relWorkdir(p string) string {
 	if a.configStore == nil {
 		return p
 	}
-	if rel, err := filepath.Rel(a.configStore.WorkingDir(), p); err == nil && rel != "" && !strings.HasPrefix(rel, "..") {
-		return rel
+	return relWorkdir(a.configStore.WorkingDir(), p)
+}
+
+// relWorkdir is the path-only form — the detached turn-outcome pass
+// carries the resolved workdir, not the config store.
+func relWorkdir(workdir, p string) string {
+	if workdir == "" {
+		return p
+	}
+	if rel, err := filepath.Rel(workdir, p); err == nil && rel != "" && !strings.HasPrefix(rel, "..") {
+		return filepath.ToSlash(rel)
 	}
 	return p
 }

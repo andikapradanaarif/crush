@@ -1,6 +1,7 @@
 package cmdlog
 
 import (
+	"database/sql"
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/db"
@@ -21,18 +22,39 @@ func referentEp(session, msg, target, verdict string, suggested bool) ReferentEp
 	}
 }
 
+// seedSettledReferent inserts one referent_episodes row already
+// frozen as a clean success — the shape promotion counts, since
+// #340 gates evidence on settled outcomes rather than raw cues.
+func seedSettledReferent(t *testing.T, conn *sql.DB, projectKey, session, msg, phrase, target string) {
+	t.Helper()
+	_, err := conn.ExecContext(t.Context(),
+		`INSERT INTO referent_episodes
+		 (phrase, target, session_id, source_message_id, tool_call_id,
+		  repo_state, memory_suggested, verdict, project_key,
+		  param_version, created_at, label_committed, label_hash_changed,
+		  settled_at)
+		 VALUES (?, ?, ?, ?, 'c', '', 0, 'accepted', ?, '', 1, 1, NULL, 1)`,
+		phrase, target, session, msg, projectKey)
+	require.NoError(t, err)
+}
+
 func TestRecordReferentEpisode_PromotesOnDistinctSessions(t *testing.T) {
 	env := setupTest(t)
 
+	// A fresh episode is unsettled and cannot count itself: one
+	// frozen acceptance stays below the floor when observed.
+	seedSettledReferent(t, env.conn, env.svc.(*service).projectKey, "s1", "m1", "config", "internal/config/config.go")
 	require.NoError(t, env.svc.RecordReferentEpisode(env.ctx,
-		referentEp("s1", "m1", "internal/config/config.go", ReferentAccepted, false), 2))
-	// One clean session is below the floor — nothing to render yet.
+		referentEp("s2", "m2", "internal/config/config.go", ReferentAccepted, false), 2))
 	refs, err := env.svc.ListReferentCandidates(env.ctx, []string{"config"}, 5)
 	require.NoError(t, err)
 	require.Empty(t, refs)
 
+	// A second frozen session's evidence crosses the floor — the
+	// record path sees it and promotes immediately.
+	seedSettledReferent(t, env.conn, env.svc.(*service).projectKey, "s3", "m3", "config", "internal/config/config.go")
 	require.NoError(t, env.svc.RecordReferentEpisode(env.ctx,
-		referentEp("s2", "m2", "internal/config/config.go", ReferentAccepted, false), 2))
+		referentEp("s4", "m4", "internal/config/config.go", ReferentAccepted, false), 2))
 
 	refs, err = env.svc.ListReferentCandidates(env.ctx, []string{"config"}, 5)
 	require.NoError(t, err)
@@ -40,8 +62,49 @@ func TestRecordReferentEpisode_PromotesOnDistinctSessions(t *testing.T) {
 	require.Equal(t, "config", refs[0].Phrase)
 	require.Equal(t, "internal/config/config.go", refs[0].Target)
 	// The row is born with the full clean-acceptance count that
-	// crossed the floor — two sessions promoted it, not one.
+	// crossed the floor — two settled sessions promoted it.
 	require.EqualValues(t, 2, refs[0].Hits)
+}
+
+// The crossing observation can also be the settling row itself: an
+// episode whose success freezes at settlement promotes the mapping
+// even though the record path could not count it.
+func TestSettleReferentLabels_PromotesOnFrozenOutcome(t *testing.T) {
+	env := setupTest(t)
+
+	seedSettledReferent(t, env.conn, env.svc.(*service).projectKey, "s1", "m1", "config", "internal/config/config.go")
+	require.NoError(t, env.svc.RecordReferentEpisode(env.ctx,
+		referentEp("s2", "m2", "internal/config/config.go", ReferentAccepted, false), 2))
+
+	// Not yet: the new row is unsettled, so evidence sits at 1.
+	refs, err := env.svc.ListReferentCandidates(env.ctx, []string{"config"}, 5)
+	require.NoError(t, err)
+	require.Empty(t, refs)
+
+	// settle_at defaults to 0 — due immediately; with no git or
+	// fingerprints the settled outcome falls back to the accepted cue.
+	require.NoError(t, env.svc.SettleReferentLabels(env.ctx, 50))
+
+	refs, err = env.svc.ListReferentCandidates(env.ctx, []string{"config"}, 5)
+	require.NoError(t, err)
+	require.Len(t, refs, 1)
+	require.EqualValues(t, 2, refs[0].Hits)
+}
+
+// A settled failure outcome cannot promote — the frozen revised cue
+// (or diverged artifact) is evidence against, not for.
+func TestSettleReferentLabels_FailedOutcomeDoesNotPromote(t *testing.T) {
+	env := setupTest(t)
+
+	seedSettledReferent(t, env.conn, env.svc.(*service).projectKey, "s1", "m1", "config", "x.go")
+	require.NoError(t, env.svc.RecordReferentEpisode(env.ctx,
+		referentEp("s2", "m2", "x.go", ReferentRevised, false), 2))
+
+	require.NoError(t, env.svc.SettleReferentLabels(env.ctx, 50))
+
+	refs, err := env.svc.ListReferentCandidates(env.ctx, []string{"config"}, 5)
+	require.NoError(t, err)
+	require.Empty(t, refs)
 }
 
 func TestRecordReferentEpisode_SameSessionDoesNotPromote(t *testing.T) {
@@ -144,8 +207,11 @@ func TestRecordReferentEpisode_ProjectPartition(t *testing.T) {
 	svcA := NewService(q, dir, params.DefaultMemory(), WithProjectKey("proj-a"))
 	svcB := NewService(q, dir, params.DefaultMemory(), WithProjectKey("proj-b"))
 
+	// One frozen clean acceptance under proj-a; the record observes
+	// it and promotes (floor 1) inside that partition only.
+	seedSettledReferent(t, conn, "proj-a", "s1", "m1", "config", "x.go")
 	require.NoError(t, svcA.RecordReferentEpisode(t.Context(),
-		referentEp("s1", "m1", "x.go", ReferentAccepted, false), 1))
+		referentEp("s2", "m2", "x.go", ReferentAccepted, false), 1))
 
 	// The mapping promoted under proj-a — proj-b sees nothing.
 	refsA, err := svcA.ListReferentCandidates(t.Context(), []string{"config"}, 5)
@@ -161,7 +227,8 @@ func TestRecordReferentEpisode_ProjectPartition(t *testing.T) {
 func TestListReferentCandidates_LimitAndOrder(t *testing.T) {
 	env := setupTest(t)
 
-	// Promote two targets under different phrases with different mass.
+	// Promote two targets under different phrases with different mass —
+	// settled evidence only, so seeds carry the frozen-success shape.
 	for _, tc := range []struct {
 		phrase  string
 		target  string
@@ -171,7 +238,9 @@ func TestListReferentCandidates_LimitAndOrder(t *testing.T) {
 		{"test", "b_test.go", "s2"},
 		{"test", "b_test.go", "s3"},
 	} {
-		ep := referentEp(tc.session, "m-"+tc.session, tc.target, ReferentAccepted, false)
+		seedSettledReferent(t, env.conn, env.svc.(*service).projectKey,
+			tc.session, "m-"+tc.session, tc.phrase, tc.target)
+		ep := referentEp(tc.session+"-live", "m-"+tc.session+"-live", tc.target, ReferentAccepted, false)
 		ep.Phrase = tc.phrase
 		require.NoError(t, env.svc.RecordReferentEpisode(env.ctx, ep, 1))
 	}

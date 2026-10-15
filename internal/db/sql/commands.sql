@@ -231,20 +231,31 @@ INSERT OR IGNORE INTO referent_episodes (
 -- Evidence for a phrase->target mapping: accepted episodes the memory
 -- tail did not suggest, counted by distinct session so a session
 -- re-deriving its own mapping cannot self-promote.
+-- #340: promotion consumes settled outcomes, not raw cues -- the
+-- predicate is ReferentEpisodeOutcome's success arm in SQL (survival
+-- read decides; absent it a commit on the target, else the cue), so
+-- an episode that settled diverged can't promote a mapping.
 SELECT COUNT(DISTINCT session_id) FROM referent_episodes
 WHERE project_key = ? AND phrase = ? AND target = ?
-    AND verdict = 'accepted' AND memory_suggested = 0;
+    AND memory_suggested = 0
+    AND settled_at IS NOT NULL
+    AND (label_hash_changed = 0
+         OR (label_hash_changed IS NULL AND label_committed = 1)
+         OR (label_hash_changed IS NULL
+             AND (label_committed IS NULL OR label_committed <> 1)
+             AND verdict = 'accepted'));
 
 -- name: PromoteReferent :exec
--- A mapping that cleared the acceptance floor earns its row; further
--- clean acceptances keep scoring it (hits is evidence mass, not
--- capped at the threshold). The insert carries the true acceptance
--- count that crossed the floor -- seeding 1 would understate the
--- evidence that promoted it.
+-- A mapping that crossed the acceptance floor earns its row. hits
+-- carries the true clean-acceptance count at promotion time --
+-- seeding 1 would understate the evidence that promoted it. The
+-- count is recomputed on every trigger (record-time and settle-
+-- time), so the stored value always equals observed evidence --
+-- never a drifted increment.
 INSERT INTO referent_memory (phrase, target, hits, last_at, project_key, param_version)
 VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT (phrase, target, project_key) DO UPDATE SET
-    hits = hits + 1,
+    hits = excluded.hits,
     last_at = excluded.last_at,
     param_version = excluded.param_version;
 
@@ -266,8 +277,9 @@ LIMIT ?;
 -- test verdict, and the observation window's +24h edge. The key
 -- clause is the episode unique key -- the same idempotency point
 -- the insert uses, so a repair-chain re-run re-stamps the same row
--- instead of drifting.
-UPDATE referent_episodes SET label_target_hash = ?, label_wrong_target = ?, label_steps = ?, label_tokens = ?, label_tests_green = ?, labeled_at = ?, label_added_lines = ?, settle_at = ? WHERE session_id = ? AND source_message_id = ? AND target = ?;
+-- instead of drifting. settled_at IS NULL keeps the write-once
+-- contract: a frozen row's label fields never re-stamp.
+UPDATE referent_episodes SET label_target_hash = ?, label_wrong_target = ?, label_steps = ?, label_tokens = ?, label_tests_green = ?, labeled_at = ?, label_added_lines = ?, settle_at = ? WHERE session_id = ? AND source_message_id = ? AND target = ? AND settled_at IS NULL;
 
 -- name: ListSessionTestVerdicts :many
 -- kind='test' ledger rows whose last real run belongs to this
@@ -297,7 +309,8 @@ WHERE c.project_key = ?
 -- project's windows early. A session proves membership by having
 -- written a project-keyed ledger row; a session with none is not a
 -- boundary (the window stays open -- delayed, never wrong).
-SELECT id, target, session_id, created_at, settle_at, label_added_lines
+SELECT id, phrase, target, session_id, verdict, memory_suggested,
+    created_at, settle_at, label_added_lines
 FROM referent_episodes
 WHERE referent_episodes.project_key = ?
     AND referent_episodes.settled_at IS NULL
@@ -365,6 +378,8 @@ WHERE project_key = ?
     AND last_at >= ? AND last_at <= ?;
 
 -- name: SettleReferentEpisode :exec
+-- labeled_at re-stamps to the settle time: it is the last label
+-- computation, so it intentionally converges with settled_at.
 -- Freeze one episode's label (#340): the write happens once, at
 -- settlement -- committed counts only external commits inside the
 -- window, hash_changed means the recorded added-lines diverged, and
@@ -453,9 +468,11 @@ ORDER BY id ASC;
 -- The conflict arm repairs placeholder rows: a backfill can record
 -- a still-running concurrent session's in-flight turn with an empty
 -- verdict and a partial evidence span. While the row is unsettled
--- AND still un-judged (next_verdict '' or 'unknown'), the live
+-- AND carries no judgment at all (next_verdict = ''), the live
 -- path's record refreshes evidence and stamps the real judgment.
--- A judged verdict ('accepted'/'revised') is never rewritten.
+-- A judged unknown keeps its evidence -- unknown is a resolved cue
+-- verdict, not a placeholder -- and accepted/revised/frozen rows
+-- are likewise never rewritten.
 INSERT INTO turn_outcomes
     (session_id, turn_id, project_key, edited_paths, edit_hunks,
      commands, next_verdict, settle_at, param_version, created_at)
@@ -466,7 +483,7 @@ ON CONFLICT(session_id, turn_id) DO UPDATE SET
     edit_hunks    = excluded.edit_hunks,
     commands      = excluded.commands
 WHERE turn_outcomes.settled_at IS NULL
-    AND turn_outcomes.next_verdict IN ('', 'unknown');
+    AND turn_outcomes.next_verdict = '';
 
 -- name: ListUnsettledTurnOutcomes :many
 -- Turn rows whose window closed without settling (#340): the same
