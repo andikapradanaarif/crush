@@ -20,26 +20,26 @@ type turnCols struct {
 	settleAt  int64
 }
 
-func readTurn(t *testing.T, env *labelEnv, sessionID string, turnIdx int) turnCols {
+func readTurn(t *testing.T, env *labelEnv, sessionID, turnID string) turnCols {
 	t.Helper()
 	var c turnCols
 	require.NoError(t, env.conn.QueryRowContext(t.Context(),
 		`SELECT verdict, settled_at, settle_at FROM turn_outcomes
-		 WHERE session_id = ? AND turn_idx = ?`, sessionID, turnIdx).
+		 WHERE session_id = ? AND turn_id = ?`, sessionID, turnID).
 		Scan(&c.verdict, &c.settledAt, &c.settleAt))
 	return c
 }
 
-func settleTurnRow(t *testing.T, env *labelEnv, sessionID string, turnIdx int) turnCols {
+func settleTurnRow(t *testing.T, env *labelEnv, sessionID, turnID string) turnCols {
 	t.Helper()
 	require.NoError(t, env.svc.SettleTurnOutcomes(t.Context(), 10))
-	return readTurn(t, env, sessionID, turnIdx)
+	return readTurn(t, env, sessionID, turnID)
 }
 
 func TestRecordTurnOutcome_Idempotent(t *testing.T) {
 	env := setupLabelsTest(t)
 	o := TurnOutcome{
-		SessionID: "s1", TurnIdx: 0,
+		SessionID: "s1", TurnID: "t0",
 		EditedPaths: []string{"x.go"},
 		EditHunks:   map[string][]string{"x.go": {"v1"}},
 		Commands:    []string{"go test ./..."},
@@ -49,10 +49,10 @@ func TestRecordTurnOutcome_Idempotent(t *testing.T) {
 	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), o),
 		"INSERT OR IGNORE — a re-derivation re-records nothing")
 
-	has, err := env.svc.HasTurnOutcome(t.Context(), "s1", 0)
+	has, err := env.svc.HasTurnOutcome(t.Context(), "s1", "t0")
 	require.NoError(t, err)
 	require.True(t, has)
-	has, err = env.svc.HasTurnOutcome(t.Context(), "s1", 1)
+	has, err = env.svc.HasTurnOutcome(t.Context(), "s1", "t1")
 	require.NoError(t, err)
 	require.False(t, has)
 
@@ -61,7 +61,7 @@ func TestRecordTurnOutcome_Idempotent(t *testing.T) {
 		`SELECT COUNT(*) FROM turn_outcomes`).Scan(&n))
 	require.EqualValues(t, 1, n)
 
-	c := readTurn(t, env, "s1", 0)
+	c := readTurn(t, env, "s1", "t0")
 	require.False(t, c.settledAt.Valid, "a fresh row opens unsettled")
 	require.False(t, c.verdict.Valid, "the verdict is the settlement's to write")
 }
@@ -69,10 +69,10 @@ func TestRecordTurnOutcome_Idempotent(t *testing.T) {
 func TestSettleTurnOutcomes_NotDue(t *testing.T) {
 	env := setupLabelsTest(t)
 	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
-		SessionID: "s1", TurnIdx: 0, Commands: []string{"ls"},
+		SessionID: "s1", TurnID: "t0", Commands: []string{"ls"},
 	}))
 	require.NoError(t, env.svc.SettleTurnOutcomes(t.Context(), 10))
-	c := readTurn(t, env, "s1", 0)
+	c := readTurn(t, env, "s1", "t0")
 	require.False(t, c.settledAt.Valid, "window open — no settlement")
 }
 
@@ -92,23 +92,23 @@ func TestSettleTurnOutcomes_VerdictMatrix(t *testing.T) {
 	require.NoError(t, os.Remove(filepath.Join(dir, "gone.go")))
 
 	rows := []TurnOutcome{
-		{SessionID: "s1", TurnIdx: 0}, // nothing produced — unknown
+		{SessionID: "s1", TurnID: "t0"}, // nothing produced — unknown
 		{
-			SessionID: "s1", TurnIdx: 1, // revision cue beats survival
+			SessionID: "s1", TurnID: "t1", // revision cue beats survival
 			EditedPaths: []string{"kept.go"}, EditHunks: map[string][]string{"kept.go": {"v1"}},
 			NextVerdict: ReferentRevised,
 		},
 		{
-			SessionID: "s1", TurnIdx: 2, // surviving edit accepts
+			SessionID: "s1", TurnID: "t2", // surviving edit accepts
 			EditedPaths: []string{"kept.go"}, EditHunks: map[string][]string{"kept.go": {"v1"}},
 			NextVerdict: ReferentAccepted,
 		},
 		{
-			SessionID: "s1", TurnIdx: 3, // diverged edit revises
+			SessionID: "s1", TurnID: "t3", // diverged edit revises
 			EditedPaths: []string{"gone.go"}, EditHunks: map[string][]string{"gone.go": {"v1"}},
 			NextVerdict: ReferentAccepted,
 		},
-		{SessionID: "s1", TurnIdx: 4, // command-only in a green session
+		{SessionID: "s1", TurnID: "t4", // command-only in a green session
 			Commands: []string{"go build ./..."}, NextVerdict: ReferentAccepted},
 	}
 	for _, o := range rows {
@@ -123,13 +123,13 @@ func TestSettleTurnOutcomes_VerdictMatrix(t *testing.T) {
 	})
 
 	dueViaNewerSession(t, env, "s2")
-	want := map[int]string{
-		0: TurnUnknown, 1: TurnRevised, 2: TurnAccepted,
-		3: TurnRevised, 4: TurnAccepted,
+	want := map[string]string{
+		"t0": TurnUnknown, "t1": TurnRevised, "t2": TurnAccepted,
+		"t3": TurnRevised, "t4": TurnAccepted,
 	}
-	for idx, v := range want {
-		require.Equal(t, v, settleTurnRow(t, env, "s1", idx).verdict.String,
-			"turn %d", idx)
+	for id, v := range want {
+		require.Equal(t, v, settleTurnRow(t, env, "s1", id).verdict.String,
+			"turn %s", id)
 	}
 }
 
@@ -143,12 +143,12 @@ func TestSettleTurnOutcomes_RedTestsFail(t *testing.T) {
 		Ran: true, ExitCode: 1, Stderr: "FAIL",
 	})
 	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
-		SessionID: "s1", TurnIdx: 0,
+		SessionID: "s1", TurnID: "t0",
 		EditedPaths: []string{"x.go"}, EditHunks: map[string][]string{"x.go": {"v1"}},
 		NextVerdict: ReferentAccepted,
 	}))
 	dueViaNewerSession(t, env, "s2")
-	require.Equal(t, TurnFailed, settleTurnRow(t, env, "s1", 0).verdict.String,
+	require.Equal(t, TurnFailed, settleTurnRow(t, env, "s1", "t0").verdict.String,
 		"survived edits in a red session are failed, not accepted")
 }
 
@@ -159,15 +159,15 @@ func TestSettleTurnOutcomes_Frozen(t *testing.T) {
 	path := filepath.Join(env.workingDir, "x.go")
 	require.NoError(t, os.WriteFile(path, []byte("v1"), 0o644))
 	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
-		SessionID: "s1", TurnIdx: 0,
+		SessionID: "s1", TurnID: "t0",
 		EditedPaths: []string{"x.go"}, EditHunks: map[string][]string{"x.go": {"v1"}},
 	}))
 	dueViaNewerSession(t, env, "s2")
-	require.Equal(t, TurnAccepted, settleTurnRow(t, env, "s1", 0).verdict.String)
+	require.Equal(t, TurnAccepted, settleTurnRow(t, env, "s1", "t0").verdict.String)
 
 	require.NoError(t, os.Remove(path))
 	require.NoError(t, env.svc.SettleTurnOutcomes(t.Context(), 10))
-	require.Equal(t, TurnAccepted, readTurn(t, env, "s1", 0).verdict.String,
+	require.Equal(t, TurnAccepted, readTurn(t, env, "s1", "t0").verdict.String,
 		"a settled verdict is frozen — deletion after the window cannot rewrite it")
 }
 
@@ -202,7 +202,7 @@ func TestSettleTurnOutcomes_RealTimestampWindow(t *testing.T) {
 	require.NoError(t, cmd.Run())
 
 	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
-		SessionID: "s1", TurnIdx: 0,
+		SessionID: "s1", TurnID: "t0",
 		EditedPaths: []string{"x.go"},
 		// No fingerprint — survival cannot run, so commit evidence
 		// alone decides; without the real window this settles unknown.
@@ -210,7 +210,7 @@ func TestSettleTurnOutcomes_RealTimestampWindow(t *testing.T) {
 		NextVerdict: ReferentAccepted,
 	}))
 	dueViaNewerSession(t, env, "s2")
-	require.Equal(t, TurnAccepted, settleTurnRow(t, env, "s1", 0).verdict.String,
+	require.Equal(t, TurnAccepted, settleTurnRow(t, env, "s1", "t0").verdict.String,
 		"the real turn timestamp keeps historical commit evidence reachable")
 }
 
@@ -218,13 +218,30 @@ func TestSettleTurnOutcomes_RealTimestampWindow(t *testing.T) {
 func TestSettleTurnOutcomes_CapSettles(t *testing.T) {
 	env := setupLabelsTest(t)
 	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
-		SessionID: "s1", TurnIdx: 0, Commands: []string{"ls"},
+		SessionID: "s1", TurnID: "t0", Commands: []string{"ls"},
 	}))
 	now := time.Now()
 	env.svc = NewService(db.New(env.conn), env.workingDir, params.DefaultMemory(),
 		WithClock(func() time.Time { return now.Add(25 * time.Hour) }))
-	c := settleTurnRow(t, env, "s1", 0)
+	c := settleTurnRow(t, env, "s1", "t0")
 	require.True(t, c.settledAt.Valid)
 	require.Equal(t, TurnUnknown, c.verdict.String,
 		"a command-only turn with no test evidence is unknown, not accepted by default")
+}
+
+// A sub-agent child session is not a settlement boundary for turns
+// either — same predicate, same consequence.
+func TestSettleTurnOutcomes_ChildSessionDoesNotSettle(t *testing.T) {
+	env := setupLabelsTest(t)
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID: "s1", TurnID: "t0", Commands: []string{"ls"},
+	}))
+	seedLabelSessionAt(t, env, "child", "s1", time.Now().Unix()+60)
+	require.NoError(t, env.svc.SettleTurnOutcomes(t.Context(), 10))
+	require.False(t, readTurn(t, env, "s1", "t0").settledAt.Valid,
+		"a delegated child is not a session boundary")
+
+	seedLabelSessionAt(t, env, "s2", "", time.Now().Unix()+60)
+	require.NoError(t, env.svc.SettleTurnOutcomes(t.Context(), 10))
+	require.True(t, readTurn(t, env, "s1", "t0").settledAt.Valid)
 }

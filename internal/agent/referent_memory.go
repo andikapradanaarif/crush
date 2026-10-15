@@ -189,6 +189,15 @@ func (a *sessionAgent) referentTargets(ctx context.Context, msgs []message.Messa
 	return out
 }
 
+// isRealUserMsg reports whether a stored message is a turn boundary:
+// user role, not a harness repair prompt, and not the summary message
+// — getSessionMessages rewrites a compaction summary's role to User
+// for the model, and treating it as a turn would mint a phantom turn
+// that swallows the whole post-compaction span.
+func isRealUserMsg(m message.Message) bool {
+	return m.Role == message.User && !m.IsSummaryMessage && !isRepairPrompt(m.JoinedText())
+}
+
 // isRepairPrompt reports whether a stored user message is
 // harness-authored — a repair retry persists its prompt as a real
 // user row, so the backward scan for the judged turn must skip it.
@@ -215,7 +224,7 @@ func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionA
 	}
 	lastUser := -1
 	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == message.User && !isRepairPrompt(msgs[i].JoinedText()) {
+		if isRealUserMsg(msgs[i]) {
 			lastUser = i
 			break
 		}

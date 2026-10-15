@@ -298,6 +298,7 @@ WHERE project_key = ?
     AND (settle_at <= ?
          OR EXISTS (SELECT 1 FROM sessions s
                     WHERE s.id != referent_episodes.session_id
+                      AND s.parent_session_id IS NULL
                       AND s.created_at * 1000 > referent_episodes.created_at))
 ORDER BY created_at ASC
 LIMIT ?;
@@ -306,9 +307,11 @@ LIMIT ?;
 -- The next session's start after a given episode -- the inner edge of
 -- the settlement window (#340). Sessions stamp created_at in seconds;
 -- episodes use millis. NULL when no newer session exists (the 24h cap
--- alone bounds the window then).
+-- alone bounds the window then). parent_session_id IS NULL keeps
+-- sub-agent child sessions out: a delegated task is work inside the
+-- parent turn, not a session boundary.
 SELECT MIN(created_at) * 1000 FROM sessions
-WHERE created_at * 1000 > ? AND id != ?;
+WHERE created_at * 1000 > ? AND id != ? AND parent_session_id IS NULL;
 
 -- name: ListCrushCommitRuns :many
 -- Timestamps (millis) of git-commit commands this project ran through
@@ -395,12 +398,14 @@ ORDER BY id ASC;
 
 -- name: InsertTurnOutcome :exec
 -- Open one turn's outcome row (#340), idempotent on the
--- (session_id, turn_idx) unique key -- a repair-chain re-derivation
--- or a backfill racing a live write re-inserts nothing. verdict
--- stays NULL until settlement; next_verdict captures the cue-word
--- judgment the following user prompt carried at record time.
+-- (session_id, turn_id) unique key -- turn_id is the turn's
+-- user-message ID, stable under compaction where an ordinal would
+-- shift; a repair-chain re-derivation or a backfill racing a live
+-- write re-inserts nothing. verdict stays NULL until settlement;
+-- next_verdict captures the cue-word judgment the following user
+-- prompt carried at record time.
 INSERT OR IGNORE INTO turn_outcomes
-    (session_id, turn_idx, project_key, edited_paths, edit_hunks,
+    (session_id, turn_id, project_key, edited_paths, edit_hunks,
      commands, next_verdict, settle_at, param_version, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
@@ -408,7 +413,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 -- Turn rows whose window closed without settling (#340): the same
 -- dual trigger as episodes -- the +24h cap elapsed or a newer session
 -- exists. Oldest first.
-SELECT id, session_id, turn_idx, edited_paths, edit_hunks, commands,
+SELECT id, session_id, turn_id, edited_paths, edit_hunks, commands,
     next_verdict, settle_at, created_at
 FROM turn_outcomes
 WHERE project_key = ?
@@ -416,6 +421,7 @@ WHERE project_key = ?
     AND (settle_at <= ?
          OR EXISTS (SELECT 1 FROM sessions s
                     WHERE s.id != turn_outcomes.session_id
+                      AND s.parent_session_id IS NULL
                       AND s.created_at * 1000 > turn_outcomes.created_at))
 ORDER BY created_at ASC
 LIMIT ?;
@@ -428,13 +434,14 @@ UPDATE turn_outcomes SET verdict = ?, settled_at = ? WHERE id = ?;
 -- name: ListRecentSessions :many
 -- Sessions other than the live one, newest first -- the backfill
 -- corpus for turn outcomes (#340). Sessions stamp created_at in
--- seconds.
+-- seconds. parent_session_id IS NULL keeps sub-agent sessions out:
+-- their "user prompts" are delegation text, not user verdicts.
 SELECT id, created_at FROM sessions
-WHERE id != ?
+WHERE id != ? AND parent_session_id IS NULL
 ORDER BY created_at DESC
 LIMIT ?;
 
 -- name: HasTurnOutcome :one
--- Whether a (session, turn_idx) row already exists -- the backfill's
+-- Whether a (session, turn_id) row already exists -- the backfill's
 -- skip check before parsing a turn's messages.
-SELECT COUNT(*) FROM turn_outcomes WHERE session_id = ? AND turn_idx = ?;
+SELECT COUNT(*) FROM turn_outcomes WHERE session_id = ? AND turn_id = ?;

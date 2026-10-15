@@ -222,7 +222,7 @@ type SessionDigestsFt struct {
 type TurnOutcome struct {
 	ID           int64          `json:"id"`
 	SessionID    string         `json:"session_id"`
-	TurnIdx      int64          `json:"turn_idx"`
+	TurnID       string         `json:"turn_id"`
 	ProjectKey   string         `json:"project_key"`
 	EditedPaths  string         `json:"edited_paths"`
 	EditHunks    string         `json:"edit_hunks"`

@@ -38,7 +38,7 @@ ALTER TABLE referent_episodes ADD COLUMN settled_at INTEGER;
 CREATE TABLE turn_outcomes (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id    TEXT NOT NULL,
-    turn_idx      INTEGER NOT NULL,
+    turn_id       TEXT NOT NULL,
     project_key   TEXT NOT NULL,
     edited_paths  TEXT NOT NULL DEFAULT '[]',
     edit_hunks    TEXT NOT NULL DEFAULT '{}',
@@ -49,7 +49,7 @@ CREATE TABLE turn_outcomes (
     settled_at    INTEGER,
     param_version TEXT NOT NULL DEFAULT '',
     created_at    INTEGER NOT NULL,
-    UNIQUE(session_id, turn_idx)
+    UNIQUE(session_id, turn_id)
 );
 CREATE INDEX turn_outcomes_settle
     ON turn_outcomes (project_key, settled_at);

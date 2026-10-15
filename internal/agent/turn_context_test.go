@@ -158,7 +158,7 @@ func (failingCmdlog) RecordTurnOutcome(context.Context, cmdlog.TurnOutcome) erro
 	return nil
 }
 
-func (failingCmdlog) HasTurnOutcome(context.Context, string, int) (bool, error) {
+func (failingCmdlog) HasTurnOutcome(context.Context, string, string) (bool, error) {
 	return false, nil
 }
 

@@ -6,7 +6,8 @@
 // that exists.
 //
 // Two record paths share one segmentation rule — a turn is the span
-// after a non-harness user message up to the next one:
+// after a real user message (not a repair prompt, not the rewritten
+// summary message) up to the next one, keyed by that message's ID:
 //   - live: the turn under judgment is the last real user message in
 //     msgs (msgs predates this run's prompt); the arriving prompt is
 //     its next-turn verdict.
@@ -43,16 +44,27 @@ func (a *sessionAgent) recordTurnOutcome(ctx context.Context, call SessionAgentC
 	if a.cmdlog == nil || a.isSubAgent || call.RepairAttempts > 0 || call.Prompt == "" {
 		return
 	}
-	lastUser := -1
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == message.User && !isRepairPrompt(msgs[i].JoinedText()) {
-			lastUser = i
-			break
-		}
-	}
+	lastUser := lastRealUserIdx(msgs)
 	if lastUser < 0 {
-		// First turn: the corpus scan does up to backfillLimit
-		// message-list reads — detached, off the prompt path.
+		// Two distinct shapes land here. A genuinely new session's
+		// first turn triggers the corpus backfill. A compacted
+		// session's first post-summary turn has no real user message
+		// left in the tail — the judged turn lives before the
+		// summary, so the full transcript locates it and this prompt
+		// still supplies its verdict.
+		if a.messages != nil {
+			if full, err := a.messages.List(ctx, call.SessionID); err == nil {
+				if idx := lastRealUserIdx(full); idx >= 0 {
+					o := a.extractTurnOutcome(ctx, call.SessionID, full, idx)
+					o.NextVerdict = referentJudgedVerdict(call.Prompt)
+					if err := a.cmdlog.RecordTurnOutcome(ctx, o); err != nil {
+						slog.Warn("Failed to record turn outcome", "error", err)
+					}
+				}
+			}
+		}
+		// The corpus scan does up to backfillLimit message-list
+		// reads — detached, off the prompt path.
 		backfillCtx := context.WithoutCancel(ctx)
 		a.spawnDetached(func() {
 			a.backfillTurnOutcomes(backfillCtx, call)
@@ -64,6 +76,17 @@ func (a *sessionAgent) recordTurnOutcome(ctx context.Context, call SessionAgentC
 	if err := a.cmdlog.RecordTurnOutcome(ctx, o); err != nil {
 		slog.Warn("Failed to record turn outcome", "error", err)
 	}
+}
+
+// lastRealUserIdx returns the index of the last turn boundary in ms
+// — repair prompts and the rewritten summary message don't count.
+func lastRealUserIdx(ms []message.Message) int {
+	for i := len(ms) - 1; i >= 0; i-- {
+		if isRealUserMsg(ms[i]) {
+			return i
+		}
+	}
+	return -1
 }
 
 // backfillTurnOutcomes scans recent sessions' stored messages and
@@ -89,30 +112,28 @@ func (a *sessionAgent) backfillTurnOutcomes(ctx context.Context, call SessionAge
 }
 
 // backfillSession segments one stored session into turns and records
-// each missing row. Mid-session turns read their verdict off the
-// following stored prompt — the same cue judgment the live path
+// each missing row. Turn identity is the boundary message's ID — an
+// ordinal would shift between this full transcript and the live
+// path's post-summary tail. Mid-session turns read their verdict off
+// the following stored prompt — the same cue judgment the live path
 // stamps; a final turn carries "".
 func (a *sessionAgent) backfillSession(ctx context.Context, sessionID string, msgs []message.Message) {
-	type seg struct {
-		idx   int // ordinal among non-repair user turns
-		start int // index of the segment's user message
-	}
-	var segs []seg
+	var segs []int
 	for i, m := range msgs {
-		if m.Role == message.User && !isRepairPrompt(m.JoinedText()) {
-			segs = append(segs, seg{idx: len(segs), start: i})
+		if isRealUserMsg(m) {
+			segs = append(segs, i)
 		}
 	}
-	for i, sg := range segs {
-		has, err := a.cmdlog.HasTurnOutcome(ctx, sessionID, sg.idx)
+	for i, start := range segs {
+		has, err := a.cmdlog.HasTurnOutcome(ctx, sessionID, msgs[start].ID)
 		if err != nil || has {
 			continue
 		}
-		o := a.extractTurnOutcome(ctx, sessionID, msgs, sg.start)
+		o := a.extractTurnOutcome(ctx, sessionID, msgs, start)
 		if i+1 < len(segs) {
 			// The verdict is the next stored user prompt's cue
 			// judgment — identical to what the live path stamps.
-			o.NextVerdict = referentJudgedVerdict(msgs[segs[i+1].start].JoinedText())
+			o.NextVerdict = referentJudgedVerdict(msgs[segs[i+1]].JoinedText())
 		}
 		if err := a.cmdlog.RecordTurnOutcome(ctx, o); err != nil {
 			slog.Warn("Failed to backfill turn outcome", "error", err)
@@ -123,28 +144,30 @@ func (a *sessionAgent) backfillSession(ctx context.Context, sessionID string, ms
 // extractTurnOutcome builds the evidence columns for the turn
 // starting at msgs[userIdx]: the files it mutated with their
 // added-line fingerprints, and the bash commands it ran in
-// ledger-normal form. turn_idx counts the non-repair user messages
-// before this one — the ordinal the unique key and both record paths
-// agree on. Child sessions' mutations attribute to the parent turn
+// ledger-normal form. Turn identity is the boundary message's ID,
+// so the tail and the full transcript agree on which turn a row
+// names. Child sessions' mutations attribute to the parent turn
 // through the same delegation walk the referent channel uses.
 func (a *sessionAgent) extractTurnOutcome(ctx context.Context, sessionID string, msgs []message.Message, userIdx int) cmdlog.TurnOutcome {
-	o := cmdlog.TurnOutcome{SessionID: sessionID, EditHunks: map[string][]string{}}
+	o := cmdlog.TurnOutcome{
+		SessionID: sessionID,
+		TurnID:    msgs[userIdx].ID,
+		EditHunks: map[string][]string{},
+	}
 	if msgs[userIdx].CreatedAt > 0 {
 		// Messages stamp seconds; the store's clocks are millis.
 		o.CreatedAt = msgs[userIdx].CreatedAt * 1000
-	}
-	for i := 0; i < userIdx; i++ {
-		if msgs[i].Role == message.User && !isRepairPrompt(msgs[i].JoinedText()) {
-			o.TurnIdx++
-		}
 	}
 	pathSet := map[string]struct{}{}
 	var scan func(ms []message.Message, from int)
 	visited := map[string]struct{}{}
 	scan = func(ms []message.Message, from int) {
 		for _, m := range ms[from:] {
-			if m.Role == message.User && !isRepairPrompt(m.JoinedText()) {
-				// The next real prompt ends the turn.
+			if isRealUserMsg(m) {
+				// The next real prompt ends the turn — a summary
+				// message inside the span is a compaction artifact,
+				// not a boundary: the turn's later work still
+				// belongs to this row.
 				return
 			}
 			if m.Role != message.Assistant {

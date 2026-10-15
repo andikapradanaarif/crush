@@ -113,18 +113,18 @@ func (q *Queries) GetProjectRate(ctx context.Context, arg GetProjectRateParams) 
 }
 
 const hasTurnOutcome = `-- name: HasTurnOutcome :one
-SELECT COUNT(*) FROM turn_outcomes WHERE session_id = ? AND turn_idx = ?
+SELECT COUNT(*) FROM turn_outcomes WHERE session_id = ? AND turn_id = ?
 `
 
 type HasTurnOutcomeParams struct {
 	SessionID string `json:"session_id"`
-	TurnIdx   int64  `json:"turn_idx"`
+	TurnID    string `json:"turn_id"`
 }
 
-// Whether a (session, turn_idx) row already exists -- the backfill's
+// Whether a (session, turn_id) row already exists -- the backfill's
 // skip check before parsing a turn's messages.
 func (q *Queries) HasTurnOutcome(ctx context.Context, arg HasTurnOutcomeParams) (int64, error) {
-	row := q.queryRow(ctx, q.hasTurnOutcomeStmt, hasTurnOutcome, arg.SessionID, arg.TurnIdx)
+	row := q.queryRow(ctx, q.hasTurnOutcomeStmt, hasTurnOutcome, arg.SessionID, arg.TurnID)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -175,14 +175,14 @@ func (q *Queries) InsertReferentEpisode(ctx context.Context, arg InsertReferentE
 
 const insertTurnOutcome = `-- name: InsertTurnOutcome :exec
 INSERT OR IGNORE INTO turn_outcomes
-    (session_id, turn_idx, project_key, edited_paths, edit_hunks,
+    (session_id, turn_id, project_key, edited_paths, edit_hunks,
      commands, next_verdict, settle_at, param_version, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertTurnOutcomeParams struct {
 	SessionID    string `json:"session_id"`
-	TurnIdx      int64  `json:"turn_idx"`
+	TurnID       string `json:"turn_id"`
 	ProjectKey   string `json:"project_key"`
 	EditedPaths  string `json:"edited_paths"`
 	EditHunks    string `json:"edit_hunks"`
@@ -194,14 +194,16 @@ type InsertTurnOutcomeParams struct {
 }
 
 // Open one turn's outcome row (#340), idempotent on the
-// (session_id, turn_idx) unique key -- a repair-chain re-derivation
-// or a backfill racing a live write re-inserts nothing. verdict
-// stays NULL until settlement; next_verdict captures the cue-word
-// judgment the following user prompt carried at record time.
+// (session_id, turn_id) unique key -- turn_id is the turn's
+// user-message ID, stable under compaction where an ordinal would
+// shift; a repair-chain re-derivation or a backfill racing a live
+// write re-inserts nothing. verdict stays NULL until settlement;
+// next_verdict captures the cue-word judgment the following user
+// prompt carried at record time.
 func (q *Queries) InsertTurnOutcome(ctx context.Context, arg InsertTurnOutcomeParams) error {
 	_, err := q.exec(ctx, q.insertTurnOutcomeStmt, insertTurnOutcome,
 		arg.SessionID,
-		arg.TurnIdx,
+		arg.TurnID,
 		arg.ProjectKey,
 		arg.EditedPaths,
 		arg.EditHunks,
@@ -498,7 +500,7 @@ func (q *Queries) ListRecentCommands(ctx context.Context, arg ListRecentCommands
 
 const listRecentSessions = `-- name: ListRecentSessions :many
 SELECT id, created_at FROM sessions
-WHERE id != ?
+WHERE id != ? AND parent_session_id IS NULL
 ORDER BY created_at DESC
 LIMIT ?
 `
@@ -515,7 +517,8 @@ type ListRecentSessionsRow struct {
 
 // Sessions other than the live one, newest first -- the backfill
 // corpus for turn outcomes (#340). Sessions stamp created_at in
-// seconds.
+// seconds. parent_session_id IS NULL keeps sub-agent sessions out:
+// their "user prompts" are delegation text, not user verdicts.
 func (q *Queries) ListRecentSessions(ctx context.Context, arg ListRecentSessionsParams) ([]ListRecentSessionsRow, error) {
 	rows, err := q.query(ctx, q.listRecentSessionsStmt, listRecentSessions, arg.ID, arg.Limit)
 	if err != nil {
@@ -990,6 +993,7 @@ WHERE project_key = ?
     AND (settle_at <= ?
          OR EXISTS (SELECT 1 FROM sessions s
                     WHERE s.id != referent_episodes.session_id
+                      AND s.parent_session_id IS NULL
                       AND s.created_at * 1000 > referent_episodes.created_at))
 ORDER BY created_at ASC
 LIMIT ?
@@ -1047,7 +1051,7 @@ func (q *Queries) ListUnsettledReferentLabels(ctx context.Context, arg ListUnset
 }
 
 const listUnsettledTurnOutcomes = `-- name: ListUnsettledTurnOutcomes :many
-SELECT id, session_id, turn_idx, edited_paths, edit_hunks, commands,
+SELECT id, session_id, turn_id, edited_paths, edit_hunks, commands,
     next_verdict, settle_at, created_at
 FROM turn_outcomes
 WHERE project_key = ?
@@ -1055,6 +1059,7 @@ WHERE project_key = ?
     AND (settle_at <= ?
          OR EXISTS (SELECT 1 FROM sessions s
                     WHERE s.id != turn_outcomes.session_id
+                      AND s.parent_session_id IS NULL
                       AND s.created_at * 1000 > turn_outcomes.created_at))
 ORDER BY created_at ASC
 LIMIT ?
@@ -1069,7 +1074,7 @@ type ListUnsettledTurnOutcomesParams struct {
 type ListUnsettledTurnOutcomesRow struct {
 	ID          int64  `json:"id"`
 	SessionID   string `json:"session_id"`
-	TurnIdx     int64  `json:"turn_idx"`
+	TurnID      string `json:"turn_id"`
 	EditedPaths string `json:"edited_paths"`
 	EditHunks   string `json:"edit_hunks"`
 	Commands    string `json:"commands"`
@@ -1093,7 +1098,7 @@ func (q *Queries) ListUnsettledTurnOutcomes(ctx context.Context, arg ListUnsettl
 		if err := rows.Scan(
 			&i.ID,
 			&i.SessionID,
-			&i.TurnIdx,
+			&i.TurnID,
 			&i.EditedPaths,
 			&i.EditHunks,
 			&i.Commands,
@@ -1154,7 +1159,7 @@ func (q *Queries) MergeFailureFirstSeen(ctx context.Context, arg MergeFailureFir
 
 const nextSessionStartMillis = `-- name: NextSessionStartMillis :one
 SELECT MIN(created_at) * 1000 FROM sessions
-WHERE created_at * 1000 > ? AND id != ?
+WHERE created_at * 1000 > ? AND id != ? AND parent_session_id IS NULL
 `
 
 type NextSessionStartMillisParams struct {
@@ -1165,7 +1170,9 @@ type NextSessionStartMillisParams struct {
 // The next session's start after a given episode -- the inner edge of
 // the settlement window (#340). Sessions stamp created_at in seconds;
 // episodes use millis. NULL when no newer session exists (the 24h cap
-// alone bounds the window then).
+// alone bounds the window then). parent_session_id IS NULL keeps
+// sub-agent child sessions out: a delegated task is work inside the
+// parent turn, not a session boundary.
 func (q *Queries) NextSessionStartMillis(ctx context.Context, arg NextSessionStartMillisParams) (int64, error) {
 	row := q.queryRow(ctx, q.nextSessionStartMillisStmt, nextSessionStartMillis, arg.CreatedAt, arg.ID)
 	var column_1 int64

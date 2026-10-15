@@ -348,7 +348,7 @@ func (r *recordingCmdLog) RecordTurnOutcome(context.Context, cmdlog.TurnOutcome)
 	return nil
 }
 
-func (r *recordingCmdLog) HasTurnOutcome(context.Context, string, int) (bool, error) {
+func (r *recordingCmdLog) HasTurnOutcome(context.Context, string, string) (bool, error) {
 	return false, nil
 }
 

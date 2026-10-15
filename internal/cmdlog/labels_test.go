@@ -479,3 +479,26 @@ func TestSettleReferentLabels_ProjectPartition(t *testing.T) {
 	require.True(t, settledA.Valid)
 	require.False(t, settledB.Valid, "proj-b's due row is not proj-a's backlog")
 }
+
+// A sub-agent child session is work inside the parent's turn, not a
+// session boundary — it must not close the observation window.
+func TestSettleReferentLabels_ChildSessionDoesNotSettle(t *testing.T) {
+	env := setupLabelsTest(t)
+	target := "x.go"
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, target), []byte("v1"), 0o644))
+	recordLabeledEpisode(t, env, "s1", "m1", target,
+		ReferentEpisodeLabelInputs{AddedLines: []string{"v1"}})
+	// A child session starting after the episode — the agent-tool
+	// spawn mid-session. parent_session_id keeps it out of the
+	// newer-session trigger.
+	seedLabelSessionAt(t, env, "child", "s1", time.Now().Unix()+60)
+	require.NoError(t, env.svc.SettleReferentLabels(t.Context(), 10))
+	c := readLabels(t, env, "s1", target)
+	require.False(t, c.settledAt.Valid,
+		"a delegated child is not a session boundary — the window stays open")
+
+	// A real sibling session still closes it.
+	seedLabelSessionAt(t, env, "s2", "", time.Now().Unix()+60)
+	require.NoError(t, env.svc.SettleReferentLabels(t.Context(), 10))
+	require.True(t, readLabels(t, env, "s1", target).settledAt.Valid)
+}

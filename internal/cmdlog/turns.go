@@ -31,10 +31,10 @@ const (
 // backfill); the store owns settlement.
 type TurnOutcome struct {
 	SessionID string
-	// TurnIdx is the turn's ordinal among the session's non-harness
-	// user prompts — stable across the live record and the backfill
-	// paths because both count the same boundary set.
-	TurnIdx int
+	// TurnID is the turn's user-message ID — the row's identity.
+	// Stable under compaction, where a slice-relative ordinal would
+	// shift between the live tail and the full-transcript backfill.
+	TurnID string
 	// EditedPaths are the workspace-relative files the turn mutated.
 	EditedPaths []string
 	// EditHunks maps each edited path to the normalized added lines
@@ -55,11 +55,11 @@ type TurnOutcome struct {
 }
 
 // RecordTurnOutcome opens one turn's row, idempotent on
-// (session_id, turn_idx). settle_at is the +24h cap off the turn's
+// (session_id, turn_id). settle_at is the +24h cap off the turn's
 // own timestamp; the newer-session trigger is evaluated at settle
 // time.
 func (s *service) RecordTurnOutcome(ctx context.Context, o TurnOutcome) error {
-	if o.SessionID == "" || o.TurnIdx < 0 {
+	if o.SessionID == "" || o.TurnID == "" {
 		return nil
 	}
 	paths, _ := json.Marshal(o.EditedPaths)
@@ -72,7 +72,7 @@ func (s *service) RecordTurnOutcome(ctx context.Context, o TurnOutcome) error {
 	}
 	return s.q.InsertTurnOutcome(ctx, db.InsertTurnOutcomeParams{
 		SessionID:    o.SessionID,
-		TurnIdx:      int64(o.TurnIdx),
+		TurnID:       o.TurnID,
 		ProjectKey:   s.projectKey,
 		EditedPaths:  string(paths),
 		EditHunks:    string(hunks),
@@ -99,10 +99,10 @@ func (s *service) ListRecentSessionIDs(ctx context.Context, excludeID string, li
 
 // HasTurnOutcome reports whether a (session, turn) row exists — the
 // backfill's skip check so already-recorded turns cost no parse.
-func (s *service) HasTurnOutcome(ctx context.Context, sessionID string, turnIdx int) (bool, error) {
+func (s *service) HasTurnOutcome(ctx context.Context, sessionID, turnID string) (bool, error) {
 	n, err := s.q.HasTurnOutcome(ctx, db.HasTurnOutcomeParams{
 		SessionID: sessionID,
-		TurnIdx:   int64(turnIdx),
+		TurnID:    turnID,
 	})
 	return n > 0, err
 }

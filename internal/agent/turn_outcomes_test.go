@@ -86,7 +86,7 @@ func TestExtractTurnOutcome(t *testing.T) {
 	}
 
 	o := a.extractTurnOutcome(t.Context(), "s1", msgs, 2)
-	require.Equal(t, 1, o.TurnIdx, "u1 is the second non-repair user turn")
+	require.Equal(t, "u1", o.TurnID, "the turn keys on its boundary message")
 	require.ElementsMatch(t,
 		[]string{filepath.Join("x.go"), "y.go"}, o.EditedPaths)
 	require.Equal(t, []string{"new line"}, o.EditHunks["x.go"],
@@ -111,7 +111,7 @@ func TestRecordTurnOutcome(t *testing.T) {
 	call := SessionAgentCall{SessionID: "s1", Prompt: "thanks"}
 	a.recordTurnOutcome(t.Context(), call, msgs)
 
-	has, err := a.cmdlog.HasTurnOutcome(t.Context(), "s1", 0)
+	has, err := a.cmdlog.HasTurnOutcome(t.Context(), "s1", "u1")
 	require.NoError(t, err)
 	require.True(t, has)
 
@@ -130,6 +130,7 @@ func TestBackfillTurnOutcomes(t *testing.T) {
 
 	old, err := env.sessions.Create(t.Context(), "old")
 	require.NoError(t, err)
+	var turnIDs []string
 	for _, m := range []message.CreateMessageParams{
 		{Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "add file"}}},
 		{Role: message.Assistant, Parts: []message.ContentPart{message.ToolCall{
@@ -142,8 +143,11 @@ func TestBackfillTurnOutcomes(t *testing.T) {
 			Input: `{"file_path":"b.go","content":"b"}`,
 		}}},
 	} {
-		_, err := env.messages.Create(t.Context(), old.ID, m)
+		created, err := env.messages.Create(t.Context(), old.ID, m)
 		require.NoError(t, err)
+		if m.Role == message.User {
+			turnIDs = append(turnIDs, created.ID)
+		}
 	}
 
 	// First turn of the new session: no prior user message, so the
@@ -152,11 +156,83 @@ func TestBackfillTurnOutcomes(t *testing.T) {
 		SessionAgentCall{SessionID: "s-new", Prompt: "hello"}, nil)
 
 	require.Eventually(t, func() bool {
-		has, err := a.cmdlog.HasTurnOutcome(t.Context(), old.ID, 0)
+		has, err := a.cmdlog.HasTurnOutcome(t.Context(), old.ID, turnIDs[0])
 		return err == nil && has
 	}, 5*time.Second, 10*time.Millisecond, "the old session's first turn backfills")
 	require.Eventually(t, func() bool {
-		has, err := a.cmdlog.HasTurnOutcome(t.Context(), old.ID, 1)
+		has, err := a.cmdlog.HasTurnOutcome(t.Context(), old.ID, turnIDs[1])
 		return err == nil && has
 	}, 5*time.Second, 10*time.Millisecond, "the session-final turn backfills too")
+}
+
+// The rewritten summary message (Role=User after getSessionMessages
+// rewrites it) is not a turn boundary: extraction keys on the real
+// user message's ID, and a summary inside a turn's span doesn't
+// truncate its work attribution.
+func TestExtractTurnOutcome_SummaryIsNotBoundary(t *testing.T) {
+	t.Parallel()
+	a, env := referentAgent(t)
+	abs := filepath.Join(env.workingDir, "x.go")
+
+	msgs := []message.Message{
+		referentUserMsg("u0", "do work"),
+		{Role: message.Assistant, Parts: []message.ContentPart{message.ToolCall{
+			ID: "tc-before", Name: tools.EditToolName, Finished: true,
+			Input: fmt.Sprintf(`{"file_path":%q,"new_string":"a"}`, abs),
+		}}},
+		// Mid-span compaction — the summary record sits inside the
+		// turn, not before the next real prompt.
+		{
+			ID: "sum", Role: message.User, IsSummaryMessage: true,
+			Parts: []message.ContentPart{message.TextContent{Text: "session so far"}},
+		},
+		{Role: message.Assistant, Parts: []message.ContentPart{message.ToolCall{
+			ID: "tc-after", Name: tools.EditToolName, Finished: true,
+			Input: fmt.Sprintf(`{"file_path":%q,"new_string":"b"}`, "y.go"),
+		}}},
+	}
+
+	o := a.extractTurnOutcome(t.Context(), "s1", msgs, 0)
+	require.Equal(t, "u0", o.TurnID)
+	require.ElementsMatch(t, []string{"x.go", "y.go"}, o.EditedPaths,
+		"work on both sides of a compaction belongs to the same turn")
+}
+
+// A post-compaction first turn: the tail carries only the summary
+// message, so the judged turn lives in the full transcript — the
+// live path lists it and still records the row with this prompt's
+// verdict.
+func TestRecordTurnOutcome_PostCompactionTail(t *testing.T) {
+	t.Parallel()
+	a, env := referentAgent(t)
+
+	sess, err := env.sessions.Create(t.Context(), "s1")
+	require.NoError(t, err)
+	var userID string
+	for _, m := range []message.CreateMessageParams{
+		{Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "fix the bug"}}},
+		{Role: message.Assistant, Parts: []message.ContentPart{message.ToolCall{
+			ID: "tc1", Name: tools.WriteToolName, Finished: true,
+			Input: `{"file_path":"x.go","content":"v1"}`,
+		}}},
+	} {
+		created, err := env.messages.Create(t.Context(), sess.ID, m)
+		require.NoError(t, err)
+		if m.Role == message.User {
+			userID = created.ID
+		}
+	}
+
+	// The tail the live path receives: summary only, role rewritten.
+	tail := []message.Message{{
+		ID: "sum", Role: message.User, IsSummaryMessage: true,
+		Parts: []message.ContentPart{message.TextContent{Text: "summary"}},
+	}}
+	a.recordTurnOutcome(t.Context(),
+		SessionAgentCall{SessionID: sess.ID, Prompt: "looks right"}, tail)
+
+	has, err := a.cmdlog.HasTurnOutcome(t.Context(), sess.ID, userID)
+	require.NoError(t, err)
+	require.True(t, has,
+		"the pre-summary judged turn records with this prompt as its verdict")
 }

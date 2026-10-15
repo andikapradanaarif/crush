@@ -100,7 +100,7 @@ type Querier interface {
 	GetUsageByDayOfWeek(ctx context.Context) ([]GetUsageByDayOfWeekRow, error)
 	GetUsageByHour(ctx context.Context) ([]GetUsageByHourRow, error)
 	GetUsageByModel(ctx context.Context) ([]GetUsageByModelRow, error)
-	// Whether a (session, turn_idx) row already exists -- the backfill's
+	// Whether a (session, turn_id) row already exists -- the backfill's
 	// skip check before parsing a turn's messages.
 	HasTurnOutcome(ctx context.Context, arg HasTurnOutcomeParams) (int64, error)
 	// The FTS shadow is a plain FTS5 table (not external-content) so a
@@ -118,10 +118,12 @@ type Querier interface {
 	// re-derives the same episode and must not count twice.
 	InsertReferentEpisode(ctx context.Context, arg InsertReferentEpisodeParams) error
 	// Open one turn's outcome row (#340), idempotent on the
-	// (session_id, turn_idx) unique key -- a repair-chain re-derivation
-	// or a backfill racing a live write re-inserts nothing. verdict
-	// stays NULL until settlement; next_verdict captures the cue-word
-	// judgment the following user prompt carried at record time.
+	// (session_id, turn_id) unique key -- turn_id is the turn's
+	// user-message ID, stable under compaction where an ordinal would
+	// shift; a repair-chain re-derivation or a backfill racing a live
+	// write re-inserts nothing. verdict stays NULL until settlement;
+	// next_verdict captures the cue-word judgment the following user
+	// prompt carried at record time.
 	InsertTurnOutcome(ctx context.Context, arg InsertTurnOutcomeParams) error
 	// Stamp the artifact signals computable at episode-record time
 	// (#294/#340): the file's post-edit hash (diagnostic), the added-
@@ -177,7 +179,8 @@ type Querier interface {
 	ListRecentSessionDigests(ctx context.Context, arg ListRecentSessionDigestsParams) ([]SessionDigest, error)
 	// Sessions other than the live one, newest first -- the backfill
 	// corpus for turn outcomes (#340). Sessions stamp created_at in
-	// seconds.
+	// seconds. parent_session_id IS NULL keeps sub-agent sessions out:
+	// their "user prompts" are delegation text, not user verdicts.
 	ListRecentSessions(ctx context.Context, arg ListRecentSessionsParams) ([]ListRecentSessionsRow, error)
 	// Settled referent episodes in calibration form (#295/#340):
 	// settlement is the evidence predicate -- one fixed observation per
@@ -272,7 +275,9 @@ type Querier interface {
 	// The next session's start after a given episode -- the inner edge of
 	// the settlement window (#340). Sessions stamp created_at in seconds;
 	// episodes use millis. NULL when no newer session exists (the 24h cap
-	// alone bounds the window then).
+	// alone bounds the window then). parent_session_id IS NULL keeps
+	// sub-agent child sessions out: a delegated task is work inside the
+	// parent turn, not a session boundary.
 	NextSessionStartMillis(ctx context.Context, arg NextSessionStartMillisParams) (int64, error)
 	// A mapping that cleared the acceptance floor earns its row; further
 	// clean acceptances keep scoring it (hits is evidence mass, not

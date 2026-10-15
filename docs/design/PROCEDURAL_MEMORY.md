@@ -305,7 +305,7 @@ commits the fallback measurement**:
 CREATE TABLE turn_outcomes (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id   TEXT NOT NULL,
-  turn_idx     INTEGER NOT NULL,
+  turn_id      TEXT NOT NULL,               -- the turn's user-message ID
   project_key  TEXT NOT NULL,
   edited_paths TEXT NOT NULL DEFAULT '[]',  -- JSON repo-relpaths
   edit_hunks   TEXT NOT NULL DEFAULT '{}',  -- JSON path→added-lines map
@@ -317,8 +317,24 @@ CREATE TABLE turn_outcomes (
   settled_at   INTEGER,
   param_version TEXT NOT NULL,
   created_at   INTEGER NOT NULL,
-  UNIQUE(session_id, turn_idx)
+  UNIQUE(session_id, turn_id)
 );
+
+-- turn_id is the boundary message's ID, not an ordinal: a
+-- slice-relative index shifts between the live post-summary tail
+-- and the full-transcript backfill, which would let a compacted
+-- session's rows collide under the unique key. Settlement
+-- boundaries count only parent_session_id IS NULL sessions — a
+-- delegated child is work inside the parent turn, not a new
+-- session, and it must not close the window early.
+--
+-- Two evidence-scope choices, recorded: sessionTestsGreen is
+-- session-scoped by design (the ledger has no per-turn last-exit),
+-- so a red session end marks every edited turn in it failed and
+-- outranks commit evidence; and survival is conjunctive over
+-- readable fingerprints — a path without a fingerprint abstains
+-- rather than vetoing, so acceptance can rest on the paths the
+-- turn provably added.
 
 -- One row per (signature, version) mined candidate.
 CREATE TABLE skills (

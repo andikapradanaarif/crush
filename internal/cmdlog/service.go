@@ -134,12 +134,12 @@ type Service interface {
 
 	// RecordTurnOutcome opens one (session, turn) outcome row —
 	// the per-user-turn acceptance unit procedural memory mines
-	// (#340). Idempotent on (session_id, turn_idx).
+	// (#340). Idempotent on (session_id, turn_id).
 	RecordTurnOutcome(ctx context.Context, o TurnOutcome) error
 
 	// HasTurnOutcome reports whether a (session, turn) outcome row
 	// exists — the backfill's skip check.
-	HasTurnOutcome(ctx context.Context, sessionID string, turnIdx int) (bool, error)
+	HasTurnOutcome(ctx context.Context, sessionID, turnID string) (bool, error)
 
 	// ListRecentSessionIDs lists sessions in the store, newest
 	// first, excluding the live one — the backfill scan set.

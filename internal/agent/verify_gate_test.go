@@ -849,7 +849,7 @@ func (r *gateRecordingCmdLog) RecordTurnOutcome(context.Context, cmdlog.TurnOutc
 	return nil
 }
 
-func (r *gateRecordingCmdLog) HasTurnOutcome(context.Context, string, int) (bool, error) {
+func (r *gateRecordingCmdLog) HasTurnOutcome(context.Context, string, string) (bool, error) {
 	return false, nil
 }
 
