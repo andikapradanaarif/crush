@@ -308,9 +308,13 @@ owns the turn. Scope-consuming routes then stamp
 `abstain` when the gate opened but the consult failed or returned
 nothing usable, and absent when the layer never ran — so a dead or
 exhausted resolver is countable via `tail.resolver.abstain` instead
-of reading as never-engaged. Calls are bounded per session by
-`resolver_calls` (0 = layer off, the shipped default), keyed-cached
-on normalized prompt + candidate content, and skipped for
+of reading as never-engaged. For coverage, `tail.resolver.dead` is
+the engagement-conditional check: a run is dead only when the layer
+rendered and never resolved, so `max_tail.resolver.dead: 0` catches
+a broken consult path without starving cells whose prompts resolve
+deterministically and never open the gate. Calls are bounded per
+session by `resolver_calls` (0 = layer off, the shipped default),
+keyed-cached on normalized prompt + candidate content, and skipped for
 sub-agents, non-user prompts, and empty/whitespace prompts — the
 repair-retry sentinel is deliberately unboundable, not a resolver
 question.
