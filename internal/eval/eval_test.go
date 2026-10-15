@@ -715,6 +715,33 @@ func TestArmCoverage_TailResolver(t *testing.T) {
 	// An outcome outside the closed pair fails parse.
 	_, err = ArmCoverageMet(Coverage{"min_tail.resolver.bogus": 1}, rec)
 	require.Error(t, err)
+
+	// tail.resolver.dead: engaged-but-never-resolved. The fixture
+	// resolved once → not dead.
+	met, err = ArmCoverageMet(Coverage{"max_tail.resolver.dead": 0}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+	// All abstains, no resolution — the resolver is dead.
+	dead := &RunRecord{
+		Tail:     []TurnTail{{Turn: 1}},
+		TailRuns: []TurnTail{{Turn: 0, Resolver: "abstain"}, {Turn: 1, Resolver: "abstain"}},
+	}
+	met, err = ArmCoverageMet(Coverage{"max_tail.resolver.dead": 0}, dead)
+	require.NoError(t, err)
+	require.False(t, met)
+	// Never engaged (no renders) — a cell that resolves at L0–L2
+	// must not starve on the health check.
+	quiet := &RunRecord{
+		Tail:     []TurnTail{{Turn: 1}},
+		TailRuns: []TurnTail{{Turn: 0}, {Turn: 1}},
+	}
+	met, err = ArmCoverageMet(Coverage{"max_tail.resolver.dead": 0}, quiet)
+	require.NoError(t, err)
+	require.True(t, met)
+	// No envelopes at all still fails closed.
+	met, err = ArmCoverageMet(Coverage{"max_tail.resolver.dead": 0}, &RunRecord{})
+	require.NoError(t, err)
+	require.False(t, met)
 }
 
 // tail.decisions.engaged / .outcome.* count the #221 post-run
@@ -978,6 +1005,22 @@ func TestValidateExperiment_ArmCoverageStarvation(t *testing.T) {
 		Coverage: Coverage{"min_tail.sections.open_failures": 1},
 	}
 	require.Error(t, ValidateExperiment(exp))
+
+	// tail.resolver.* needs the L3 consult budget — an arm without
+	// memory_params.resolver_calls>0 can never emit a stamp.
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"failure_memory": true}},
+		Coverage: Coverage{"min_tail.resolver.resolved": 1},
+	}
+	require.Error(t, ValidateExperiment(exp))
+	exp.Arms[ArmTreatment] = Arm{
+		Config: ArmConfig{Options: map[string]any{
+			"failure_memory": true,
+			"memory_params":  map[string]any{"resolver_calls": 4},
+		}},
+		Coverage: Coverage{"min_tail.resolver.resolved": 1},
+	}
+	require.NoError(t, ValidateExperiment(exp))
 
 	// The knowledge envelopes ride the same gate — they render only
 	// under failure_memory.

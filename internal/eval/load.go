@@ -603,6 +603,28 @@ var priorTurnsRecallLive = starvationRule{
 	},
 }
 
+// resolverCallsLive requires the L3 consult budget — memory_params
+// is a nested options map; absent or resolver_calls=0 means the
+// resolver gate never opens and no render can carry a stamp.
+var resolverCallsLive = starvationRule{
+	"memory_params.resolver_calls > 0",
+	func(resolve func(string) (any, bool)) bool {
+		mp, known := resolve("memory_params")
+		if !known {
+			return false
+		}
+		m, _ := mp.(map[string]any)
+		// JSON-decoded manifests land as float64; Go fixtures as int.
+		switch n := m["resolver_calls"].(type) {
+		case int:
+			return n > 0
+		case float64:
+			return n > 0
+		}
+		return false
+	},
+}
+
 // reconcileGateOff passes when either layer of the reconcile gate —
 // failure_memory itself or the failure_memory_edges sub-flag —
 // resolves off, since gated rows record under either arm shape.
@@ -741,6 +763,9 @@ func armStarvationRules(field string) []starvationRule {
 			// reasons.*, settled.* — only exists under
 			// failure_memory.
 			return []starvationRule{boolOn("failure_memory")}
+		}
+		if strings.HasPrefix(field, "tail.resolver.") {
+			return []starvationRule{resolverCallsLive}
 		}
 		switch field {
 		case "tail.sections.turn_context":

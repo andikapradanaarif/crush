@@ -515,6 +515,19 @@ func init() {
 			return tailResolverRenders(r, outcome)
 		}
 	}
+	// tail.resolver.dead is the engagement-conditional health check:
+	// 1 iff the run's resolver engaged (any render) and never
+	// resolved — every consult abstained. A run whose prompts all
+	// resolve at L0–L2 is not dead; asserting resolved per-record
+	// would starve cells that legitimately never open the gate
+	// (held-memory-l3's mix-cs-ambig). Coverage reads
+	// "max_tail.resolver.dead: 0" — the layer worked when consulted.
+	armOnlyCoverageFields["tail.resolver.dead"] = func(r *RunRecord) float64 {
+		if tailResolverRenders(r, "resolved") > 0 || tailResolverRenders(r, "abstain") == 0 {
+			return 0
+		}
+		return 1
+	}
 	// Per-pool decision counts: tail.decisions.pool.<pool>[.admitted]
 	// — which memory channel each verdict came from, so a cell can
 	// assert "command rows rendered" or "resolved rows bound" without
