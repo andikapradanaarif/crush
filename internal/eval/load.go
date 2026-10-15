@@ -603,6 +603,29 @@ var priorTurnsRecallLive = starvationRule{
 	},
 }
 
+// referentFloorLive passes unless memory_params explicitly zeroes
+// referent_rate_floor — the shipped default (0.6) keeps the gate
+// live, so an absent overlay means "armed", while floor=0 disables
+// the gate outright and no render can carry a verdict (#341).
+var referentFloorLive = starvationRule{
+	"memory_params.referent_rate_floor absent or > 0",
+	func(resolve func(string) (any, bool)) bool {
+		mp, known := resolve("memory_params")
+		if !known {
+			return true
+		}
+		m, _ := mp.(map[string]any)
+		switch n := m["referent_rate_floor"].(type) {
+		case int:
+			return n > 0
+		case float64:
+			return n > 0
+		}
+		// Key absent inside a present overlay = default floor.
+		return true
+	},
+}
+
 // resolverCallsLive requires the L3 consult budget — memory_params
 // is a nested options map; absent or resolver_calls=0 means the
 // resolver gate never opens and no render can carry a stamp.
@@ -766,6 +789,14 @@ func armStarvationRules(field string) []starvationRule {
 		}
 		if strings.HasPrefix(field, "tail.resolver.") {
 			return []starvationRule{resolverCallsLive}
+		}
+		if strings.HasPrefix(field, "tail.referent_gate.") {
+			// The #296 rate gate only stamps when the referent
+			// channel is armed AND its floor is nonzero — a
+			// referent_memory-off arm or an explicit floor=0
+			// produces no verdicts, so min_ would starve by
+			// construction.
+			return []starvationRule{boolOn("referent_memory"), referentFloorLive}
 		}
 		switch field {
 		case "tail.sections.turn_context":

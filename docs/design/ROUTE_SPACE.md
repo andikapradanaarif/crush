@@ -181,6 +181,18 @@ thing") that can't name a target. Pronouns ("fix it") are
 unlearnable by construction: no definite-article noun, no phrase
 key.
 
+The rate gate's verdict is itself a decision record (#341): each
+turn the gate evaluates stamps `tail.referent_gate` on the audit —
+`reason` one of `admit` (bound cleared the floor), `rate_below_floor`
+(the veto), `gate_error` (bound uncomputable, incumbent ran — not a
+veto, but the degraded gate stays countable) — plus the bound, the
+floor, and propensity (1.0 while the gate is deterministic; the field
+is the contract slot #297's randomized layer will fill). A turn the
+gate never evaluated carries no stamp, keeping "gate suppressed"
+distinct from "gate never ran" — and eval coverage reads
+`tail.referent_gate.<verdict>` counters, starvation-gated on
+`options.referent_memory` and a nonzero `referent_rate_floor`.
+
 ### Session digests — cross-session recall as pointers (#164)
 
 `<session_memory>` resolves continuation prompts — "continue", "the

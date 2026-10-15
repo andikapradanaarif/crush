@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -445,4 +446,30 @@ func TestTurnContextSections_ReferentRender(t *testing.T) {
 	sections = a.turnContextSections(t.Context(), SessionAgentCall{SessionID: "s1"},
 		nil, nil, nil, []cmdlog.Referent{{Phrase: "config", Target: "x.go", Hits: 3}}, nil)
 	require.Empty(t, sections)
+}
+
+// tailStamp projects the gate decision onto the tail audit (#341):
+// nil stays nil (gate never ran — absent stays distinct), the veto
+// records rate_below_floor with its bound, an uncomputable bound
+// records gate_error with no bound, and a cleared floor admits.
+func TestRateGateTailStamp(t *testing.T) {
+	t.Parallel()
+
+	var nilGate *rateGateDecision
+	require.Nil(t, nilGate.tailStamp())
+
+	admit := (&rateGateDecision{bound: 0.71, floor: 0.6}).tailStamp()
+	require.Equal(t, "admit", admit.Reason)
+	require.InDelta(t, 0.71, admit.Bound, 1e-9)
+	require.InDelta(t, 0.6, admit.Floor, 1e-9)
+	require.InDelta(t, 1.0, admit.Propensity, 1e-9)
+
+	veto := (&rateGateDecision{bound: 0.4, floor: 0.6, gated: true}).tailStamp()
+	require.Equal(t, "rate_below_floor", veto.Reason)
+	require.InDelta(t, 0.4, veto.Bound, 1e-9)
+
+	broken := (&rateGateDecision{floor: 0.6, err: errors.New("bound uncomputable")}).tailStamp()
+	require.Equal(t, "gate_error", broken.Reason)
+	require.Zero(t, broken.Bound)
+	require.InDelta(t, 0.6, broken.Floor, 1e-9)
 }

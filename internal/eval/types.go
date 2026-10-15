@@ -800,6 +800,23 @@ type TurnTail struct {
 	// never ran). Without it a dead resolver is indistinguishable
 	// from a never-engaged one on records.
 	Resolver string `json:"resolver,omitempty"`
+	// ReferentGate mirrors TailAudit.ReferentGate — the #296 rate
+	// gate's decision for the turn (#341): the closed-vocabulary
+	// verdict ("admit", "rate_below_floor", "gate_error"), the bound
+	// computed, the floor in force, and propensity. Nil when the
+	// gate never ran — floor disabled, non-vague prompt, or no
+	// referent phrase — so "gated" is never aliased with "gate
+	// never evaluated".
+	ReferentGate *TailReferentGate `json:"referent_gate,omitempty"`
+}
+
+// TailReferentGate is the eval-side mirror of agent.TailReferentGate
+// — the referent rate gate's per-turn verdict record (#341).
+type TailReferentGate struct {
+	Reason     string  `json:"reason"`
+	Bound      float64 `json:"bound,omitempty"`
+	Floor      float64 `json:"floor"`
+	Propensity float64 `json:"propensity"`
 }
 
 // TailAction is the eval-side mirror of agent.TailAction: one of a
