@@ -112,6 +112,24 @@ func (q *Queries) GetProjectRate(ctx context.Context, arg GetProjectRateParams) 
 	return i, err
 }
 
+const hasTurnOutcome = `-- name: HasTurnOutcome :one
+SELECT COUNT(*) FROM turn_outcomes WHERE session_id = ? AND turn_idx = ?
+`
+
+type HasTurnOutcomeParams struct {
+	SessionID string `json:"session_id"`
+	TurnIdx   int64  `json:"turn_idx"`
+}
+
+// Whether a (session, turn_idx) row already exists -- the backfill's
+// skip check before parsing a turn's messages.
+func (q *Queries) HasTurnOutcome(ctx context.Context, arg HasTurnOutcomeParams) (int64, error) {
+	row := q.queryRow(ctx, q.hasTurnOutcomeStmt, hasTurnOutcome, arg.SessionID, arg.TurnIdx)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const insertReferentEpisode = `-- name: InsertReferentEpisode :exec
 INSERT OR IGNORE INTO referent_episodes (
     phrase, target, session_id, source_message_id, tool_call_id,
@@ -155,8 +173,49 @@ func (q *Queries) InsertReferentEpisode(ctx context.Context, arg InsertReferentE
 	return err
 }
 
+const insertTurnOutcome = `-- name: InsertTurnOutcome :exec
+INSERT OR IGNORE INTO turn_outcomes
+    (session_id, turn_idx, project_key, edited_paths, edit_hunks,
+     commands, next_verdict, settle_at, param_version, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`
+
+type InsertTurnOutcomeParams struct {
+	SessionID    string `json:"session_id"`
+	TurnIdx      int64  `json:"turn_idx"`
+	ProjectKey   string `json:"project_key"`
+	EditedPaths  string `json:"edited_paths"`
+	EditHunks    string `json:"edit_hunks"`
+	Commands     string `json:"commands"`
+	NextVerdict  string `json:"next_verdict"`
+	SettleAt     int64  `json:"settle_at"`
+	ParamVersion string `json:"param_version"`
+	CreatedAt    int64  `json:"created_at"`
+}
+
+// Open one turn's outcome row (#340), idempotent on the
+// (session_id, turn_idx) unique key -- a repair-chain re-derivation
+// or a backfill racing a live write re-inserts nothing. verdict
+// stays NULL until settlement; next_verdict captures the cue-word
+// judgment the following user prompt carried at record time.
+func (q *Queries) InsertTurnOutcome(ctx context.Context, arg InsertTurnOutcomeParams) error {
+	_, err := q.exec(ctx, q.insertTurnOutcomeStmt, insertTurnOutcome,
+		arg.SessionID,
+		arg.TurnIdx,
+		arg.ProjectKey,
+		arg.EditedPaths,
+		arg.EditHunks,
+		arg.Commands,
+		arg.NextVerdict,
+		arg.SettleAt,
+		arg.ParamVersion,
+		arg.CreatedAt,
+	)
+	return err
+}
+
 const labelReferentEpisode = `-- name: LabelReferentEpisode :exec
-UPDATE referent_episodes SET label_target_hash = ?, label_wrong_target = ?, label_steps = ?, label_tokens = ?, label_tests_green = ?, labeled_at = ? WHERE session_id = ? AND source_message_id = ? AND target = ?
+UPDATE referent_episodes SET label_target_hash = ?, label_wrong_target = ?, label_steps = ?, label_tokens = ?, label_tests_green = ?, labeled_at = ?, label_added_lines = ?, settle_at = ? WHERE session_id = ? AND source_message_id = ? AND target = ?
 `
 
 type LabelReferentEpisodeParams struct {
@@ -166,14 +225,17 @@ type LabelReferentEpisodeParams struct {
 	LabelTokens      int64         `json:"label_tokens"`
 	LabelTestsGreen  sql.NullInt64 `json:"label_tests_green"`
 	LabeledAt        int64         `json:"labeled_at"`
+	LabelAddedLines  string        `json:"label_added_lines"`
+	SettleAt         int64         `json:"settle_at"`
 	SessionID        string        `json:"session_id"`
 	SourceMessageID  string        `json:"source_message_id"`
 	Target           string        `json:"target"`
 }
 
 // Stamp the artifact signals computable at episode-record time
-// (#294): the file's post-edit hash baseline, the judged turn's cost,
-// the session's test verdict, and the wrong-target count. The key
+// (#294/#340): the file's post-edit hash (diagnostic), the added-
+// lines survival fingerprint, the judged turn's cost, the session's
+// test verdict, and the observation window's +24h edge. The key
 // clause is the episode unique key -- the same idempotency point
 // the insert uses, so a repair-chain re-run re-stamps the same row
 // instead of drifting.
@@ -185,6 +247,8 @@ func (q *Queries) LabelReferentEpisode(ctx context.Context, arg LabelReferentEpi
 		arg.LabelTokens,
 		arg.LabelTestsGreen,
 		arg.LabeledAt,
+		arg.LabelAddedLines,
+		arg.SettleAt,
 		arg.SessionID,
 		arg.SourceMessageID,
 		arg.Target,
@@ -209,6 +273,49 @@ func (q *Queries) ListCommandPartitionKeys(ctx context.Context) ([]string, error
 			return nil, err
 		}
 		items = append(items, project_key)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCrushCommitRuns = `-- name: ListCrushCommitRuns :many
+SELECT last_at FROM command_memory
+WHERE project_key = ?
+    AND cmd_norm LIKE 'git commit%'
+    AND last_at >= ? AND last_at <= ?
+`
+
+type ListCrushCommitRunsParams struct {
+	ProjectKey string `json:"project_key"`
+	LastAt     int64  `json:"last_at"`
+	LastAt_2   int64  `json:"last_at_2"`
+}
+
+// Timestamps (millis) of git-commit commands this project ran through
+// the harness inside a window (#340): a commit whose author-time sits
+// within the skew bound of one of these was agent-made, and does not
+// count as external acceptance evidence. cmd_norm keeps the whole
+// invocation, so every distinct commit message is its own row; the
+// known limit is that re-running an identical message keeps only the
+// latest last_at.
+func (q *Queries) ListCrushCommitRuns(ctx context.Context, arg ListCrushCommitRunsParams) ([]int64, error) {
+	rows, err := q.query(ctx, q.listCrushCommitRunsStmt, listCrushCommitRuns, arg.ProjectKey, arg.LastAt, arg.LastAt_2)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []int64{}
+	for rows.Next() {
+		var last_at int64
+		if err := rows.Scan(&last_at); err != nil {
+			return nil, err
+		}
+		items = append(items, last_at)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -338,71 +445,6 @@ func (q *Queries) ListOpenFailures(ctx context.Context, arg ListOpenFailuresPara
 	return items, nil
 }
 
-const listPendingReferentLabels = `-- name: ListPendingReferentLabels :many
-SELECT id, target, session_id, created_at, label_target_hash, label_committed
-FROM referent_episodes
-WHERE project_key = ?
-    AND label_target_hash != ''
-    AND (label_committed IS NULL OR label_committed = 0 OR label_hash_changed = 0)
-ORDER BY labeled_at ASC
-LIMIT ?
-`
-
-type ListPendingReferentLabelsParams struct {
-	ProjectKey string `json:"project_key"`
-	Limit      int64  `json:"limit"`
-}
-
-type ListPendingReferentLabelsRow struct {
-	ID              int64         `json:"id"`
-	Target          string        `json:"target"`
-	SessionID       string        `json:"session_id"`
-	CreatedAt       int64         `json:"created_at"`
-	LabelTargetHash string        `json:"label_target_hash"`
-	LabelCommitted  sql.NullInt64 `json:"label_committed"`
-}
-
-// Episodes whose artifact labels still have a checkable signal
-// (#294): committed once observed stays observed, and a hash that
-// already diverged is terminal -- the pending set is "not yet
-// committed OR file still matches baseline". Rows with no baseline
-// hash (pre-label data, file gone at record time) are never
-// checkable, so they stay out of the scan. Least-recently-checked
-// first: labeled_at defaults to 0, so never-matured rows sort ahead
-// of re-checks and the backlog drains round-robin on the index's
-// own sort column. No-repo rows keep committed NULL forever, so
-// they never leave the pending set -- the amortized bound owns
-// that floor: a growing backlog delays, never blocks, fresh rows.
-func (q *Queries) ListPendingReferentLabels(ctx context.Context, arg ListPendingReferentLabelsParams) ([]ListPendingReferentLabelsRow, error) {
-	rows, err := q.query(ctx, q.listPendingReferentLabelsStmt, listPendingReferentLabels, arg.ProjectKey, arg.Limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ListPendingReferentLabelsRow{}
-	for rows.Next() {
-		var i ListPendingReferentLabelsRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.Target,
-			&i.SessionID,
-			&i.CreatedAt,
-			&i.LabelTargetHash,
-			&i.LabelCommitted,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listRecentCommands = `-- name: ListRecentCommands :many
 SELECT cmd_norm, cwd, kind, last_exit, last_at, ok_count, fail_count, last_session_id, last_tool_call_id, repo_state, suggested, project_key, param_version FROM command_memory WHERE project_key = ?1 ORDER BY last_at DESC, rowid DESC LIMIT ?2
 `
@@ -454,15 +496,56 @@ func (q *Queries) ListRecentCommands(ctx context.Context, arg ListRecentCommands
 	return items, nil
 }
 
+const listRecentSessions = `-- name: ListRecentSessions :many
+SELECT id, created_at FROM sessions
+WHERE id != ?
+ORDER BY created_at DESC
+LIMIT ?
+`
+
+type ListRecentSessionsParams struct {
+	ID    string `json:"id"`
+	Limit int64  `json:"limit"`
+}
+
+type ListRecentSessionsRow struct {
+	ID        string `json:"id"`
+	CreatedAt int64  `json:"created_at"`
+}
+
+// Sessions other than the live one, newest first -- the backfill
+// corpus for turn outcomes (#340). Sessions stamp created_at in
+// seconds.
+func (q *Queries) ListRecentSessions(ctx context.Context, arg ListRecentSessionsParams) ([]ListRecentSessionsRow, error) {
+	rows, err := q.query(ctx, q.listRecentSessionsStmt, listRecentSessions, arg.ID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListRecentSessionsRow{}
+	for rows.Next() {
+		var i ListRecentSessionsRow
+		if err := rows.Scan(&i.ID, &i.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listReferentCalibrationEpisodes = `-- name: ListReferentCalibrationEpisodes :many
 SELECT id, phrase, target, session_id, verdict, label_committed,
     label_hash_changed, memory_suggested
 FROM referent_episodes
 WHERE project_key = ?
-    AND (verdict IN ('accepted', 'revised')
-         OR label_hash_changed IS NOT NULL
-         OR label_committed = 1)
-ORDER BY id
+    AND settled_at IS NOT NULL
+ORDER BY id ASC
 `
 
 type ListReferentCalibrationEpisodesRow struct {
@@ -476,9 +559,9 @@ type ListReferentCalibrationEpisodesRow struct {
 	MemorySuggested  int64         `json:"memory_suggested"`
 }
 
-// Settled referent episodes in calibration form (#295): the same
-// settled predicate as the rate fold — cue verdict resolved or an
-// artifact read — plus the mapping context (phrase/target) and the
+// Settled referent episodes in calibration form (#295/#340):
+// settlement is the evidence predicate -- one fixed observation per
+// episode -- plus the mapping context (phrase/target) and the
 // suggestion flag, so the calibrator derives renderability under
 // each candidate floor and stratifies one draw per session. Oldest
 // first: per-session stratification picks the earliest episode and
@@ -519,9 +602,7 @@ const listReferentPriorEvents = `-- name: ListReferentPriorEvents :many
 SELECT verdict, label_committed, label_hash_changed
 FROM referent_episodes
 WHERE project_key != ?
-    AND (verdict IN ('accepted', 'revised')
-         OR label_hash_changed IS NOT NULL
-         OR label_committed = 1)
+    AND settled_at IS NOT NULL
 `
 
 type ListReferentPriorEventsRow struct {
@@ -563,9 +644,7 @@ SELECT id, session_id, verdict, label_committed, label_hash_changed
 FROM referent_episodes
 WHERE project_key = ?
     AND rate_folded = 0
-    AND (verdict IN ('accepted', 'revised')
-         OR label_hash_changed IS NOT NULL
-         OR label_committed = 1)
+    AND settled_at IS NOT NULL
 ORDER BY id ASC
 LIMIT ?
 `
@@ -583,13 +662,13 @@ type ListReferentRateEventsRow struct {
 	LabelHashChanged sql.NullInt64 `json:"label_hash_changed"`
 }
 
-// Settled, not-yet-folded referent episodes (#296), oldest first.
-// Membership is the rate_folded mark, not an id watermark: an
-// episode whose labels settle only after higher ids folded still
-// counts when it matures. An episode is evidence when the cue
-// verdict resolved or the artifact labels produced a read -- the
-// outcome rule lives in Go so the prior pool and the fold share
-// one definition.
+// Settled, not-yet-folded referent episodes (#296/#340), oldest
+// first. Membership is the rate_folded mark, not an id watermark.
+// Since #340 only settled rows are evidence: settlement froze the
+// windowed commit read, the hunk-survival verdict, and the cue
+// verdict into one fixed observation -- folding unsettled rows would
+// re-mix label vintages the review flagged. The outcome rule still
+// lives in Go so the prior pool and the fold share one definition.
 func (q *Queries) ListReferentRateEvents(ctx context.Context, arg ListReferentRateEventsParams) ([]ListReferentRateEventsRow, error) {
 	rows, err := q.query(ctx, q.listReferentRateEventsStmt, listReferentRateEvents, arg.ProjectKey, arg.Limit)
 	if err != nil {
@@ -903,6 +982,138 @@ func (q *Queries) ListUnclaimedFailures(ctx context.Context) ([]ListUnclaimedFai
 	return items, nil
 }
 
+const listUnsettledReferentLabels = `-- name: ListUnsettledReferentLabels :many
+SELECT id, target, session_id, created_at, settle_at, label_added_lines
+FROM referent_episodes
+WHERE project_key = ?
+    AND settled_at IS NULL
+    AND (settle_at <= ?
+         OR EXISTS (SELECT 1 FROM sessions s
+                    WHERE s.id != referent_episodes.session_id
+                      AND s.created_at * 1000 > referent_episodes.created_at))
+ORDER BY created_at ASC
+LIMIT ?
+`
+
+type ListUnsettledReferentLabelsParams struct {
+	ProjectKey string `json:"project_key"`
+	SettleAt   int64  `json:"settle_at"`
+	Limit      int64  `json:"limit"`
+}
+
+type ListUnsettledReferentLabelsRow struct {
+	ID              int64  `json:"id"`
+	Target          string `json:"target"`
+	SessionID       string `json:"session_id"`
+	CreatedAt       int64  `json:"created_at"`
+	SettleAt        int64  `json:"settle_at"`
+	LabelAddedLines string `json:"label_added_lines"`
+}
+
+// Episodes whose observation window has closed but whose label has
+// not frozen yet (#340): settle_at elapsed (the +24h cap) or a newer
+// session exists in the project -- the two settlement triggers the
+// fixed-window rule defines. Oldest first so the backlog amortizes.
+// Rows never become un-settleable: settlement writes its verdict
+// once and freezes.
+func (q *Queries) ListUnsettledReferentLabels(ctx context.Context, arg ListUnsettledReferentLabelsParams) ([]ListUnsettledReferentLabelsRow, error) {
+	rows, err := q.query(ctx, q.listUnsettledReferentLabelsStmt, listUnsettledReferentLabels, arg.ProjectKey, arg.SettleAt, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListUnsettledReferentLabelsRow{}
+	for rows.Next() {
+		var i ListUnsettledReferentLabelsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Target,
+			&i.SessionID,
+			&i.CreatedAt,
+			&i.SettleAt,
+			&i.LabelAddedLines,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUnsettledTurnOutcomes = `-- name: ListUnsettledTurnOutcomes :many
+SELECT id, session_id, turn_idx, edited_paths, edit_hunks, commands,
+    next_verdict, settle_at, created_at
+FROM turn_outcomes
+WHERE project_key = ?
+    AND settled_at IS NULL
+    AND (settle_at <= ?
+         OR EXISTS (SELECT 1 FROM sessions s
+                    WHERE s.id != turn_outcomes.session_id
+                      AND s.created_at * 1000 > turn_outcomes.created_at))
+ORDER BY created_at ASC
+LIMIT ?
+`
+
+type ListUnsettledTurnOutcomesParams struct {
+	ProjectKey string `json:"project_key"`
+	SettleAt   int64  `json:"settle_at"`
+	Limit      int64  `json:"limit"`
+}
+
+type ListUnsettledTurnOutcomesRow struct {
+	ID          int64  `json:"id"`
+	SessionID   string `json:"session_id"`
+	TurnIdx     int64  `json:"turn_idx"`
+	EditedPaths string `json:"edited_paths"`
+	EditHunks   string `json:"edit_hunks"`
+	Commands    string `json:"commands"`
+	NextVerdict string `json:"next_verdict"`
+	SettleAt    int64  `json:"settle_at"`
+	CreatedAt   int64  `json:"created_at"`
+}
+
+// Turn rows whose window closed without settling (#340): the same
+// dual trigger as episodes -- the +24h cap elapsed or a newer session
+// exists. Oldest first.
+func (q *Queries) ListUnsettledTurnOutcomes(ctx context.Context, arg ListUnsettledTurnOutcomesParams) ([]ListUnsettledTurnOutcomesRow, error) {
+	rows, err := q.query(ctx, q.listUnsettledTurnOutcomesStmt, listUnsettledTurnOutcomes, arg.ProjectKey, arg.SettleAt, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListUnsettledTurnOutcomesRow{}
+	for rows.Next() {
+		var i ListUnsettledTurnOutcomesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SessionID,
+			&i.TurnIdx,
+			&i.EditedPaths,
+			&i.EditHunks,
+			&i.Commands,
+			&i.NextVerdict,
+			&i.SettleAt,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markReferentEventsFolded = `-- name: MarkReferentEventsFolded :exec
 UPDATE referent_episodes SET rate_folded = 1
 WHERE id IN (/*SLICE:ids*/?)
@@ -939,6 +1150,27 @@ type MergeFailureFirstSeenParams struct {
 func (q *Queries) MergeFailureFirstSeen(ctx context.Context, arg MergeFailureFirstSeenParams) error {
 	_, err := q.exec(ctx, q.mergeFailureFirstSeenStmt, mergeFailureFirstSeen, arg.FirstSeen, arg.Signature)
 	return err
+}
+
+const nextSessionStartMillis = `-- name: NextSessionStartMillis :one
+SELECT MIN(created_at) * 1000 FROM sessions
+WHERE created_at * 1000 > ? AND id != ?
+`
+
+type NextSessionStartMillisParams struct {
+	CreatedAt int64  `json:"created_at"`
+	ID        string `json:"id"`
+}
+
+// The next session's start after a given episode -- the inner edge of
+// the settlement window (#340). Sessions stamp created_at in seconds;
+// episodes use millis. NULL when no newer session exists (the 24h cap
+// alone bounds the window then).
+func (q *Queries) NextSessionStartMillis(ctx context.Context, arg NextSessionStartMillisParams) (int64, error) {
+	row := q.queryRow(ctx, q.nextSessionStartMillisStmt, nextSessionStartMillis, arg.CreatedAt, arg.ID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const promoteReferent = `-- name: PromoteReferent :exec
@@ -1038,34 +1270,50 @@ func (q *Queries) ResolveFailuresForCommand(ctx context.Context, arg ResolveFail
 	return err
 }
 
-const updateReferentEpisodeLabel = `-- name: UpdateReferentEpisodeLabel :exec
-UPDATE referent_episodes SET label_committed = ?, label_hash_changed = ?, label_tests_green = ?, labeled_at = ? WHERE id = ?
+const settleReferentEpisode = `-- name: SettleReferentEpisode :exec
+UPDATE referent_episodes SET label_committed = ?, label_hash_changed = ?, label_tests_green = ?, settled_at = ?, labeled_at = ? WHERE id = ?
 `
 
-type UpdateReferentEpisodeLabelParams struct {
+type SettleReferentEpisodeParams struct {
 	LabelCommitted   sql.NullInt64 `json:"label_committed"`
 	LabelHashChanged sql.NullInt64 `json:"label_hash_changed"`
 	LabelTestsGreen  sql.NullInt64 `json:"label_tests_green"`
+	SettledAt        sql.NullInt64 `json:"settled_at"`
 	LabeledAt        int64         `json:"labeled_at"`
 	ID               int64         `json:"id"`
 }
 
-// Re-stamp one episode's maturing signals (#294). hash_changed
-// reflects the latest check -- a file restored to its baseline reads
-// surviving again; committed only ever moves 0/NULL toward 1 (a
-// landed commit can't un-happen); tests_green refreshes to the
-// session's latest observed verdict (NULL persists only while no
-// test has run). Callers keep committed's monotonicity by passing
-// the previous value through unchanged when the check says
-// "still not committed".
-func (q *Queries) UpdateReferentEpisodeLabel(ctx context.Context, arg UpdateReferentEpisodeLabelParams) error {
-	_, err := q.exec(ctx, q.updateReferentEpisodeLabelStmt, updateReferentEpisodeLabel,
+// Freeze one episode's label (#340): the write happens once, at
+// settlement -- committed counts only external commits inside the
+// window, hash_changed means the recorded added-lines diverged, and
+// settled_at is the freeze mark that takes the row out of the scan
+// and into the fold/prior evidence predicates.
+func (q *Queries) SettleReferentEpisode(ctx context.Context, arg SettleReferentEpisodeParams) error {
+	_, err := q.exec(ctx, q.settleReferentEpisodeStmt, settleReferentEpisode,
 		arg.LabelCommitted,
 		arg.LabelHashChanged,
 		arg.LabelTestsGreen,
+		arg.SettledAt,
 		arg.LabeledAt,
 		arg.ID,
 	)
+	return err
+}
+
+const settleTurnOutcome = `-- name: SettleTurnOutcome :exec
+UPDATE turn_outcomes SET verdict = ?, settled_at = ? WHERE id = ?
+`
+
+type SettleTurnOutcomeParams struct {
+	Verdict   sql.NullString `json:"verdict"`
+	SettledAt sql.NullInt64  `json:"settled_at"`
+	ID        int64          `json:"id"`
+}
+
+// Freeze one turn row's verdict (#340). Same contract as episodes:
+// written once, never re-derived.
+func (q *Queries) SettleTurnOutcome(ctx context.Context, arg SettleTurnOutcomeParams) error {
+	_, err := q.exec(ctx, q.settleTurnOutcomeStmt, settleTurnOutcome, arg.Verdict, arg.SettledAt, arg.ID)
 	return err
 }
 

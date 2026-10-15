@@ -261,12 +261,13 @@ LIMIT ?;
 
 -- name: LabelReferentEpisode :exec
 -- Stamp the artifact signals computable at episode-record time
--- (#294): the file's post-edit hash baseline, the judged turn's cost,
--- the session's test verdict, and the wrong-target count. The key
+-- (#294/#340): the file's post-edit hash (diagnostic), the added-
+-- lines survival fingerprint, the judged turn's cost, the session's
+-- test verdict, and the observation window's +24h edge. The key
 -- clause is the episode unique key -- the same idempotency point
 -- the insert uses, so a repair-chain re-run re-stamps the same row
 -- instead of drifting.
-UPDATE referent_episodes SET label_target_hash = ?, label_wrong_target = ?, label_steps = ?, label_tokens = ?, label_tests_green = ?, labeled_at = ? WHERE session_id = ? AND source_message_id = ? AND target = ?;
+UPDATE referent_episodes SET label_target_hash = ?, label_wrong_target = ?, label_steps = ?, label_tokens = ?, label_tests_green = ?, labeled_at = ?, label_added_lines = ?, settle_at = ? WHERE session_id = ? AND source_message_id = ? AND target = ?;
 
 -- name: ListSessionTestVerdicts :many
 -- kind='test' ledger rows whose last real run belongs to this
@@ -283,36 +284,52 @@ WHERE c.project_key = ?
         SELECT id FROM sessions WHERE id = ? OR parent_session_id = ?
     );
 
--- name: ListPendingReferentLabels :many
--- Episodes whose artifact labels still have a checkable signal
--- (#294): committed once observed stays observed, and a hash that
--- already diverged is terminal -- the pending set is "not yet
--- committed OR file still matches baseline". Rows with no baseline
--- hash (pre-label data, file gone at record time) are never
--- checkable, so they stay out of the scan. Least-recently-checked
--- first: labeled_at defaults to 0, so never-matured rows sort ahead
--- of re-checks and the backlog drains round-robin on the index's
--- own sort column. No-repo rows keep committed NULL forever, so
--- they never leave the pending set -- the amortized bound owns
--- that floor: a growing backlog delays, never blocks, fresh rows.
-SELECT id, target, session_id, created_at, label_target_hash, label_committed
+-- name: ListUnsettledReferentLabels :many
+-- Episodes whose observation window has closed but whose label has
+-- not frozen yet (#340): settle_at elapsed (the +24h cap) or a newer
+-- session exists in the project -- the two settlement triggers the
+-- fixed-window rule defines. Oldest first so the backlog amortizes.
+-- Rows never become un-settleable: settlement writes its verdict
+-- once and freezes.
+SELECT id, target, session_id, created_at, settle_at, label_added_lines
 FROM referent_episodes
 WHERE project_key = ?
-    AND label_target_hash != ''
-    AND (label_committed IS NULL OR label_committed = 0 OR label_hash_changed = 0)
-ORDER BY labeled_at ASC
+    AND settled_at IS NULL
+    AND (settle_at <= ?
+         OR EXISTS (SELECT 1 FROM sessions s
+                    WHERE s.id != referent_episodes.session_id
+                      AND s.created_at * 1000 > referent_episodes.created_at))
+ORDER BY created_at ASC
 LIMIT ?;
 
--- name: UpdateReferentEpisodeLabel :exec
--- Re-stamp one episode's maturing signals (#294). hash_changed
--- reflects the latest check -- a file restored to its baseline reads
--- surviving again; committed only ever moves 0/NULL toward 1 (a
--- landed commit can't un-happen); tests_green refreshes to the
--- session's latest observed verdict (NULL persists only while no
--- test has run). Callers keep committed's monotonicity by passing
--- the previous value through unchanged when the check says
--- "still not committed".
-UPDATE referent_episodes SET label_committed = ?, label_hash_changed = ?, label_tests_green = ?, labeled_at = ? WHERE id = ?;
+-- name: NextSessionStartMillis :one
+-- The next session's start after a given episode -- the inner edge of
+-- the settlement window (#340). Sessions stamp created_at in seconds;
+-- episodes use millis. NULL when no newer session exists (the 24h cap
+-- alone bounds the window then).
+SELECT MIN(created_at) * 1000 FROM sessions
+WHERE created_at * 1000 > ? AND id != ?;
+
+-- name: ListCrushCommitRuns :many
+-- Timestamps (millis) of git-commit commands this project ran through
+-- the harness inside a window (#340): a commit whose author-time sits
+-- within the skew bound of one of these was agent-made, and does not
+-- count as external acceptance evidence. cmd_norm keeps the whole
+-- invocation, so every distinct commit message is its own row; the
+-- known limit is that re-running an identical message keeps only the
+-- latest last_at.
+SELECT last_at FROM command_memory
+WHERE project_key = ?
+    AND cmd_norm LIKE 'git commit%'
+    AND last_at >= ? AND last_at <= ?;
+
+-- name: SettleReferentEpisode :exec
+-- Freeze one episode's label (#340): the write happens once, at
+-- settlement -- committed counts only external commits inside the
+-- window, hash_changed means the recorded added-lines diverged, and
+-- settled_at is the freeze mark that takes the row out of the scan
+-- and into the fold/prior evidence predicates.
+UPDATE referent_episodes SET label_committed = ?, label_hash_changed = ?, label_tests_green = ?, settled_at = ?, labeled_at = ? WHERE id = ?;
 
 -- name: GetProjectRate :one
 -- The stored posterior mass for one (project, signal) pair (#296)
@@ -331,20 +348,18 @@ ON CONFLICT (project_key, signal) DO UPDATE SET
     updated_at = excluded.updated_at;
 
 -- name: ListReferentRateEvents :many
--- Settled, not-yet-folded referent episodes (#296), oldest first.
--- Membership is the rate_folded mark, not an id watermark: an
--- episode whose labels settle only after higher ids folded still
--- counts when it matures. An episode is evidence when the cue
--- verdict resolved or the artifact labels produced a read -- the
--- outcome rule lives in Go so the prior pool and the fold share
--- one definition.
+-- Settled, not-yet-folded referent episodes (#296/#340), oldest
+-- first. Membership is the rate_folded mark, not an id watermark.
+-- Since #340 only settled rows are evidence: settlement froze the
+-- windowed commit read, the hunk-survival verdict, and the cue
+-- verdict into one fixed observation -- folding unsettled rows would
+-- re-mix label vintages the review flagged. The outcome rule still
+-- lives in Go so the prior pool and the fold share one definition.
 SELECT id, session_id, verdict, label_committed, label_hash_changed
 FROM referent_episodes
 WHERE project_key = ?
     AND rate_folded = 0
-    AND (verdict IN ('accepted', 'revised')
-         OR label_hash_changed IS NOT NULL
-         OR label_committed = 1)
+    AND settled_at IS NOT NULL
 ORDER BY id ASC
 LIMIT ?;
 
@@ -362,13 +377,11 @@ WHERE id IN (sqlc.slice('ids'));
 SELECT verdict, label_committed, label_hash_changed
 FROM referent_episodes
 WHERE project_key != ?
-    AND (verdict IN ('accepted', 'revised')
-         OR label_hash_changed IS NOT NULL
-         OR label_committed = 1);
+    AND settled_at IS NOT NULL;
 -- name: ListReferentCalibrationEpisodes :many
--- Settled referent episodes in calibration form (#295): the same
--- settled predicate as the rate fold — cue verdict resolved or an
--- artifact read — plus the mapping context (phrase/target) and the
+-- Settled referent episodes in calibration form (#295/#340):
+-- settlement is the evidence predicate -- one fixed observation per
+-- episode -- plus the mapping context (phrase/target) and the
 -- suggestion flag, so the calibrator derives renderability under
 -- each candidate floor and stratifies one draw per session. Oldest
 -- first: per-session stratification picks the earliest episode and
@@ -377,7 +390,51 @@ SELECT id, phrase, target, session_id, verdict, label_committed,
     label_hash_changed, memory_suggested
 FROM referent_episodes
 WHERE project_key = ?
-    AND (verdict IN ('accepted', 'revised')
-         OR label_hash_changed IS NOT NULL
-         OR label_committed = 1)
+    AND settled_at IS NOT NULL
 ORDER BY id ASC;
+
+-- name: InsertTurnOutcome :exec
+-- Open one turn's outcome row (#340), idempotent on the
+-- (session_id, turn_idx) unique key -- a repair-chain re-derivation
+-- or a backfill racing a live write re-inserts nothing. verdict
+-- stays NULL until settlement; next_verdict captures the cue-word
+-- judgment the following user prompt carried at record time.
+INSERT OR IGNORE INTO turn_outcomes
+    (session_id, turn_idx, project_key, edited_paths, edit_hunks,
+     commands, next_verdict, settle_at, param_version, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+-- name: ListUnsettledTurnOutcomes :many
+-- Turn rows whose window closed without settling (#340): the same
+-- dual trigger as episodes -- the +24h cap elapsed or a newer session
+-- exists. Oldest first.
+SELECT id, session_id, turn_idx, edited_paths, edit_hunks, commands,
+    next_verdict, settle_at, created_at
+FROM turn_outcomes
+WHERE project_key = ?
+    AND settled_at IS NULL
+    AND (settle_at <= ?
+         OR EXISTS (SELECT 1 FROM sessions s
+                    WHERE s.id != turn_outcomes.session_id
+                      AND s.created_at * 1000 > turn_outcomes.created_at))
+ORDER BY created_at ASC
+LIMIT ?;
+
+-- name: SettleTurnOutcome :exec
+-- Freeze one turn row's verdict (#340). Same contract as episodes:
+-- written once, never re-derived.
+UPDATE turn_outcomes SET verdict = ?, settled_at = ? WHERE id = ?;
+
+-- name: ListRecentSessions :many
+-- Sessions other than the live one, newest first -- the backfill
+-- corpus for turn outcomes (#340). Sessions stamp created_at in
+-- seconds.
+SELECT id, created_at FROM sessions
+WHERE id != ?
+ORDER BY created_at DESC
+LIMIT ?;
+
+-- name: HasTurnOutcome :one
+-- Whether a (session, turn_idx) row already exists -- the backfill's
+-- skip check before parsing a turn's messages.
+SELECT COUNT(*) FROM turn_outcomes WHERE session_id = ? AND turn_idx = ?;

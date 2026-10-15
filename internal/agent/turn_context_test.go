@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
+	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/notebook"
 	"github.com/charmbracelet/crush/internal/params"
@@ -149,7 +150,23 @@ func (failingCmdlog) LabelReferentEpisode(context.Context, cmdlog.ReferentEpisod
 	return nil
 }
 
-func (failingCmdlog) MatureReferentLabels(context.Context, int) error {
+func (failingCmdlog) SettleReferentLabels(context.Context, int) error {
+	return nil
+}
+
+func (failingCmdlog) RecordTurnOutcome(context.Context, cmdlog.TurnOutcome) error {
+	return nil
+}
+
+func (failingCmdlog) HasTurnOutcome(context.Context, string, int) (bool, error) {
+	return false, nil
+}
+
+func (failingCmdlog) ListRecentSessionIDs(context.Context, string, int) ([]db.ListRecentSessionsRow, error) {
+	return nil, nil
+}
+
+func (failingCmdlog) SettleTurnOutcomes(context.Context, int) error {
 	return nil
 }
 

@@ -169,6 +169,9 @@ type ReferentEpisode struct {
 	LabelTokens      int64         `json:"label_tokens"`
 	LabeledAt        int64         `json:"labeled_at"`
 	RateFolded       int64         `json:"rate_folded"`
+	LabelAddedLines  string        `json:"label_added_lines"`
+	SettleAt         int64         `json:"settle_at"`
+	SettledAt        sql.NullInt64 `json:"settled_at"`
 }
 
 type ReferentMemory struct {
@@ -214,4 +217,20 @@ type SessionDigest struct {
 type SessionDigestsFt struct {
 	SessionID string `json:"session_id"`
 	Body      string `json:"body"`
+}
+
+type TurnOutcome struct {
+	ID           int64          `json:"id"`
+	SessionID    string         `json:"session_id"`
+	TurnIdx      int64          `json:"turn_idx"`
+	ProjectKey   string         `json:"project_key"`
+	EditedPaths  string         `json:"edited_paths"`
+	EditHunks    string         `json:"edit_hunks"`
+	Commands     string         `json:"commands"`
+	NextVerdict  string         `json:"next_verdict"`
+	Verdict      sql.NullString `json:"verdict"`
+	SettleAt     int64          `json:"settle_at"`
+	SettledAt    sql.NullInt64  `json:"settled_at"`
+	ParamVersion string         `json:"param_version"`
+	CreatedAt    int64          `json:"created_at"`
 }

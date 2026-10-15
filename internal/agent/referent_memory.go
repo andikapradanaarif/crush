@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"regexp"
 	"strings"
@@ -84,11 +83,11 @@ func extractReferentPhrase(prompt string) string {
 	return nouns[0]
 }
 
-// referentLabelMatureLimit bounds the per-turn artifact-label
-// maturity pass (#294) — the oldest pending episodes re-check each
+// labelSettleLimit bounds the per-turn settlement passes (#340) —
+// the oldest out-of-window episodes and turn outcomes freeze each
 // turn, so the backlog amortizes across turns instead of a
 // scheduler owning it.
-const referentLabelMatureLimit = 50
+const labelSettleLimit = 50
 
 // referentJudgedVerdict classifies the current user prompt's verdict
 // on the previous turn's edits — a correction cue marks the episode
@@ -133,25 +132,28 @@ func referentJudgedVerdict(currentPrompt string) string {
 // Delegated edits count too: an `agent` tool call's mutations live in
 // the child session's messages, reachable through the deterministic
 // messageID$$toolCallID session ID.
-func (a *sessionAgent) referentTargets(ctx context.Context, msgs []message.Message, after int) []struct {
+// referentEdit is one mutated file the judged turn committed to —
+// path and originating call for the episode key, added-lines
+// fingerprint for the survival check (#340).
+type referentEdit struct {
 	path   string
 	callID string
-} {
-	var out []struct {
-		path   string
-		callID string
-	}
-	seen := map[string]struct{}{}
-	add := func(path, callID string) {
+	added  []string
+}
+
+func (a *sessionAgent) referentTargets(ctx context.Context, msgs []message.Message, after int) []referentEdit {
+	var out []referentEdit
+	seen := map[string]int{}
+	add := func(path, callID string, added []string) {
 		rel := a.relWorkdir(path)
-		if _, ok := seen[rel]; ok {
+		if i, ok := seen[rel]; ok {
+			// Later edits to the same file join its fingerprint —
+			// survival reads every line the turn added.
+			out[i].added = append(out[i].added, added...)
 			return
 		}
-		seen[rel] = struct{}{}
-		out = append(out, struct {
-			path   string
-			callID string
-		}{rel, callID})
+		seen[rel] = len(out)
+		out = append(out, referentEdit{rel, callID, added})
 	}
 	visited := map[string]struct{}{}
 	var scan func(ms []message.Message, after int)
@@ -175,13 +177,11 @@ func (a *sessionAgent) referentTargets(ctx context.Context, msgs []message.Messa
 				if !referentMutationTools[tc.Name] || tc.Input == "" {
 					continue
 				}
-				var in struct {
-					FilePath string `json:"file_path"`
-				}
-				if json.Unmarshal([]byte(tc.Input), &in) != nil || in.FilePath == "" {
+				path, added := editEvidence(tc.Input)
+				if path == "" {
 					continue
 				}
-				add(in.FilePath, tc.ID)
+				add(path, tc.ID, added)
 			}
 		}
 	}
@@ -270,6 +270,7 @@ func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionA
 			Steps:       steps,
 			Tokens:      tokens,
 			WrongTarget: int64(len(targets) - 1),
+			AddedLines:  t.added,
 		})
 		if lerr != nil {
 			slog.Warn("Failed to label referent episode", "error", lerr)

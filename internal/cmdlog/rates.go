@@ -33,17 +33,17 @@ const rateEventBatch = 64
 // ReferentEpisodeOutcome maps one settled episode onto +1 success or
 // +1 failure of referent acceptance — the single definition the fold,
 // the prior pool, and the LTT calibrator's harm metric all share, so
-// what the gate is certified on is what it gates on. Artifact reads
-// dominate: a landed commit is acceptance regardless of the other
-// signals (the project took the work); hash divergence without a
-// commit is the failure; a surviving hash is the success; only with
-// no artifact baseline does the cue verdict carry the call.
+// what the gate is certified on is what it gates on. Divergence wins
+// over commit evidence (#340): revised-then-committed is a revision,
+// not an acceptance — the artifact that matters is whether the edit's
+// lines survived, not whether a commit landed. With no survival read
+// the cue verdict carries the call.
 func ReferentEpisodeOutcome(verdict string, committed, hashChanged sql.NullInt64) (success bool) {
-	if committed.Valid && committed.Int64 == 1 {
-		return true
-	}
 	if hashChanged.Valid {
 		return hashChanged.Int64 == 0
+	}
+	if committed.Valid && committed.Int64 == 1 {
+		return true
 	}
 	return verdict == ReferentAccepted
 }

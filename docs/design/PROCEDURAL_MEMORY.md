@@ -300,18 +300,20 @@ commits the fallback measurement**:
 ## Data model
 
 ```sql
--- Turn-level outcome labels (#340): settled once at fixed window.
+-- Turn-level outcome labels (#340, shipped): settled once at fixed
+-- window — newer project session or created_at + 24h, whichever first.
 CREATE TABLE turn_outcomes (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id   TEXT NOT NULL,
   turn_idx     INTEGER NOT NULL,
   project_key  TEXT NOT NULL,
   edited_paths TEXT NOT NULL DEFAULT '[]',  -- JSON repo-relpaths
-  edit_hunks   TEXT NOT NULL DEFAULT '[]',  -- JSON hunk fingerprints
+  edit_hunks   TEXT NOT NULL DEFAULT '{}',  -- JSON path→added-lines map
   commands     TEXT NOT NULL DEFAULT '[]',  -- JSON normalized cmds
+  next_verdict TEXT NOT NULL DEFAULT '',    -- cue verdict of next prompt
   verdict      TEXT,                        -- NULL=unsettled; settled:
                                             -- accepted|revised|failed|unknown
-  settle_at    INTEGER NOT NULL,            -- next-session-start or +24h
+  settle_at    INTEGER NOT NULL,            -- created_at + 24h cap
   settled_at   INTEGER,
   param_version TEXT NOT NULL,
   created_at   INTEGER NOT NULL,

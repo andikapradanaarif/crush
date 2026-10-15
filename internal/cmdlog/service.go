@@ -119,16 +119,36 @@ type Service interface {
 	RecordReferentEpisode(ctx context.Context, ep ReferentEpisode, promoteMin int) error
 
 	// LabelReferentEpisode stamps the artifact signals computable at
-	// episode-record time (#294): the target's post-edit hash
-	// baseline, the judged turn's cost, and the session-end test
-	// verdict. Idempotent on the episode unique key.
+	// episode-record time (#294): the added-lines survival
+	// fingerprint, the judged turn's cost, the session-end test
+	// verdict, and the observation window's edge (#340). Idempotent
+	// on the episode unique key.
 	LabelReferentEpisode(ctx context.Context, ep ReferentEpisode, in ReferentEpisodeLabelInputs) error
 
-	// MatureReferentLabels re-checks the signals that only resolve
-	// over time — file still matches baseline (survival), commit
-	// landed since the episode — for pending episodes, oldest first,
-	// bounded per call so each turn's pass drains the backlog.
-	MatureReferentLabels(ctx context.Context, limit int) error
+	// SettleReferentLabels freezes the labels of episodes whose
+	// observation window closed (#340) — a newer session started or
+	// created_at + 24h elapsed — computing hunk survival, external-
+	// commit evidence, and the test verdict exactly once. Bounded
+	// per call so each turn's pass drains the backlog.
+	SettleReferentLabels(ctx context.Context, limit int) error
+
+	// RecordTurnOutcome opens one (session, turn) outcome row —
+	// the per-user-turn acceptance unit procedural memory mines
+	// (#340). Idempotent on (session_id, turn_idx).
+	RecordTurnOutcome(ctx context.Context, o TurnOutcome) error
+
+	// HasTurnOutcome reports whether a (session, turn) outcome row
+	// exists — the backfill's skip check.
+	HasTurnOutcome(ctx context.Context, sessionID string, turnIdx int) (bool, error)
+
+	// ListRecentSessionIDs lists sessions in the store, newest
+	// first, excluding the live one — the backfill scan set.
+	ListRecentSessionIDs(ctx context.Context, excludeID string, limit int) ([]db.ListRecentSessionsRow, error)
+
+	// SettleTurnOutcomes freezes the verdicts of turn rows whose
+	// observation window closed — same dual trigger and frozen-once
+	// contract as episode settlement.
+	SettleTurnOutcomes(ctx context.Context, limit int) error
 
 	// ListReferentCandidates returns promoted phrase→target mappings
 	// for the turn's extracted phrases — the referent injection pool,

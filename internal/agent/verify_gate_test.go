@@ -841,7 +841,23 @@ func (r *gateRecordingCmdLog) LabelReferentEpisode(context.Context, cmdlog.Refer
 	return nil
 }
 
-func (r *gateRecordingCmdLog) MatureReferentLabels(context.Context, int) error {
+func (r *gateRecordingCmdLog) SettleReferentLabels(context.Context, int) error {
+	return nil
+}
+
+func (r *gateRecordingCmdLog) RecordTurnOutcome(context.Context, cmdlog.TurnOutcome) error {
+	return nil
+}
+
+func (r *gateRecordingCmdLog) HasTurnOutcome(context.Context, string, int) (bool, error) {
+	return false, nil
+}
+
+func (r *gateRecordingCmdLog) ListRecentSessionIDs(context.Context, string, int) ([]db.ListRecentSessionsRow, error) {
+	return nil, nil
+}
+
+func (r *gateRecordingCmdLog) SettleTurnOutcomes(context.Context, int) error {
 	return nil
 }
 
