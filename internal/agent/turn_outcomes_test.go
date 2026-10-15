@@ -19,12 +19,21 @@ func TestEditEvidence(t *testing.T) {
 		wantPath  string
 		wantAdded []string
 	}{
-		{"edit new_string", `{"file_path":"a.go","old_string":"x","new_string":"y\nz"}`,
-			"a.go", []string{"y", "z"}},
-		{"write content", `{"file_path":"b.go","content":"line1\n\nline2"}`,
-			"b.go", []string{"line1", "line2"}},
-		{"multiedit joins", `{"file_path":"c.go","edits":[{"new_string":"p"},{"new_string":"q"}]}`,
-			"c.go", []string{"p", "q"}},
+		{
+			"edit new_string", `{"file_path":"a.go","old_string":"x","new_string":"y\nz"}`,
+			"a.go",
+			[]string{"y", "z"},
+		},
+		{
+			"write content", `{"file_path":"b.go","content":"line1\n\nline2"}`,
+			"b.go",
+			[]string{"line1", "line2"},
+		},
+		{
+			"multiedit joins", `{"file_path":"c.go","edits":[{"new_string":"p"},{"new_string":"q"}]}`,
+			"c.go",
+			[]string{"p", "q"},
+		},
 		{"malformed", `not json`, "", nil},
 		{"no path", `{"new_string":"x"}`, "", nil},
 	} {
@@ -53,12 +62,18 @@ func TestExtractTurnOutcome(t *testing.T) {
 		}}},
 		referentUserMsg("u1", "fix it"),
 		{Role: message.Assistant, Parts: []message.ContentPart{
-			message.ToolCall{ID: "tc-view", Name: tools.ViewToolName,
-				Input: `{"file_path":"v.go"}`, Finished: true},
-			message.ToolCall{ID: "tc-edit", Name: tools.EditToolName, Finished: true,
-				Input: fmt.Sprintf(`{"file_path":%q,"new_string":"new line"}`, abs)},
-			message.ToolCall{ID: "tc-bash", Name: tools.BashToolName,
-				Input: `{"command":"go test ./..."}`, Finished: true},
+			message.ToolCall{
+				ID: "tc-view", Name: tools.ViewToolName,
+				Input: `{"file_path":"v.go"}`, Finished: true,
+			},
+			message.ToolCall{
+				ID: "tc-edit", Name: tools.EditToolName, Finished: true,
+				Input: fmt.Sprintf(`{"file_path":%q,"new_string":"new line"}`, abs),
+			},
+			message.ToolCall{
+				ID: "tc-bash", Name: tools.BashToolName,
+				Input: `{"command":"go test ./..."}`, Finished: true,
+			},
 		}},
 		// A repair prompt inside the span is not a boundary — its
 		// work attributes to the judged turn.
@@ -102,7 +117,8 @@ func TestRecordTurnOutcome(t *testing.T) {
 
 	// Repair retries and sub-agents record nothing.
 	a.recordTurnOutcome(t.Context(), SessionAgentCall{
-		SessionID: "s1", Prompt: "retry", RepairAttempts: 1}, msgs)
+		SessionID: "s1", Prompt: "retry", RepairAttempts: 1,
+	}, msgs)
 }
 
 // A first-turn session backfills the stored corpus — the previous

@@ -93,15 +93,21 @@ func TestSettleTurnOutcomes_VerdictMatrix(t *testing.T) {
 
 	rows := []TurnOutcome{
 		{SessionID: "s1", TurnIdx: 0}, // nothing produced — unknown
-		{SessionID: "s1", TurnIdx: 1, // revision cue beats survival
+		{
+			SessionID: "s1", TurnIdx: 1, // revision cue beats survival
 			EditedPaths: []string{"kept.go"}, EditHunks: map[string][]string{"kept.go": {"v1"}},
-			NextVerdict: ReferentRevised},
-		{SessionID: "s1", TurnIdx: 2, // surviving edit accepts
+			NextVerdict: ReferentRevised,
+		},
+		{
+			SessionID: "s1", TurnIdx: 2, // surviving edit accepts
 			EditedPaths: []string{"kept.go"}, EditHunks: map[string][]string{"kept.go": {"v1"}},
-			NextVerdict: ReferentAccepted},
-		{SessionID: "s1", TurnIdx: 3, // diverged edit revises
+			NextVerdict: ReferentAccepted,
+		},
+		{
+			SessionID: "s1", TurnIdx: 3, // diverged edit revises
 			EditedPaths: []string{"gone.go"}, EditHunks: map[string][]string{"gone.go": {"v1"}},
-			NextVerdict: ReferentAccepted},
+			NextVerdict: ReferentAccepted,
+		},
 		{SessionID: "s1", TurnIdx: 4, // command-only in a green session
 			Commands: []string{"go build ./..."}, NextVerdict: ReferentAccepted},
 	}
