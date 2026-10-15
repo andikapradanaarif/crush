@@ -378,7 +378,7 @@ CREATE TABLE turn_outcomes (
 --
 -- Two evidence-scope choices, recorded: sessionTestsGreen is
 -- session-scoped by design (the ledger has no per-turn last-exit),
--- so a red session end marks every edited turn in it failed and
+-- so a red session end marks every non-empty turn in it failed and
 -- outranks commit evidence; and survival is conjunctive over
 -- readable fingerprints — a path without a fingerprint abstains
 -- rather than vetoing, so acceptance can rest on the paths the

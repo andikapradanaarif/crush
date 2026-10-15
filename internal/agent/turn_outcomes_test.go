@@ -28,6 +28,19 @@ func TestEditEvidence(t *testing.T) {
 			[]string{"y", "z"},
 		},
 		{
+			// Context lines carried over from old_string were not
+			// introduced by this edit — they must not pad the
+			// survival numerator.
+			"edit drops carried context", `{"file_path":"a.go","old_string":"x\nctx","new_string":"y\nctx"}`,
+			"a.go",
+			[]string{"y"},
+		},
+		{
+			"deletion introduces nothing", `{"file_path":"d.go","old_string":"x","new_string":""}`,
+			"d.go",
+			nil,
+		},
+		{
 			"write content", `{"file_path":"b.go","content":"line1\n\nline2"}`,
 			"b.go",
 			[]string{"line1", "line2"},
@@ -36,6 +49,11 @@ func TestEditEvidence(t *testing.T) {
 			"multiedit joins", `{"file_path":"c.go","edits":[{"new_string":"p"},{"new_string":"q"}]}`,
 			"c.go",
 			[]string{"p", "q"},
+		},
+		{
+			"multiedit subtracts per edit", `{"file_path":"c.go","edits":[{"old_string":"keep","new_string":"keep\np"},{"old_string":"z","new_string":"q\nkeep"}]}`,
+			"c.go",
+			[]string{"p", "q", "keep"},
 		},
 		{"malformed", `not json`, "", nil},
 		{"no path", `{"new_string":"x"}`, "", nil},
@@ -73,6 +91,12 @@ func TestExtractTurnOutcome(t *testing.T) {
 				ID: "tc-edit", Name: tools.EditToolName, Finished: true,
 				Input: fmt.Sprintf(`{"file_path":%q,"new_string":"new line"}`, abs),
 			},
+			// A second edit on the same file joins the fingerprint —
+			// deduped, so a repeated line counts once.
+			message.ToolCall{
+				ID: "tc-edit-dup", Name: tools.EditToolName, Finished: true,
+				Input: fmt.Sprintf(`{"file_path":%q,"old_string":"x","new_string":"new line\nanother"}`, abs),
+			},
 			message.ToolCall{
 				ID: "tc-bash", Name: tools.BashToolName,
 				Input: `{"command":"go test ./..."}`, Finished: true,
@@ -92,8 +116,8 @@ func TestExtractTurnOutcome(t *testing.T) {
 	require.Equal(t, "u1", o.TurnID, "the turn keys on its boundary message")
 	require.ElementsMatch(t,
 		[]string{filepath.Join("x.go"), "y.go"}, o.EditedPaths)
-	require.Equal(t, []string{"new line"}, o.EditHunks["x.go"],
-		"the added-lines fingerprint joins the file's row")
+	require.Equal(t, []string{"new line", "another"}, o.EditHunks["x.go"],
+		"the added-lines fingerprint joins the file's row, deduped")
 	require.Equal(t, []string{"y"}, o.EditHunks["y.go"])
 	require.Equal(t, []string{"go test ./..."}, o.Commands,
 		"bash invocations record in ledger-normal form; reads do not")

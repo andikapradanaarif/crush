@@ -16,7 +16,9 @@ type Querier interface {
 	// #340: promotion consumes settled outcomes, not raw cues -- the
 	// predicate is ReferentEpisodeOutcome's success arm in SQL (survival
 	// read decides; absent it a commit on the target, else the cue), so
-	// an episode that settled diverged can't promote a mapping.
+	// an episode that settled diverged can't promote a mapping. This
+	// mirrors ReferentEpisodeOutcome in cmdlog/rates.go -- a precedence
+	// change must move both sites.
 	CountCleanReferentAcceptances(ctx context.Context, arg CountCleanReferentAcceptancesParams) (int64, error)
 	// Absolute user-turn ordinal source for edge_firings.turn_seq - the
 	// bounded prompt-history query above can't serve it (DESC LIMIT 200
@@ -157,7 +159,10 @@ type Querier interface {
 	// known limit is that re-running an identical message keeps only the
 	// latest last_at. Compound shell forms count too -- a commit chained
 	// after &&, ;, or ||, or invoked as git -C dir commit -- while flag
-	// orderings beyond -C stay a documented miss.
+	// orderings beyond -C stay a documented miss. Non-commit producers
+	// are a known miss class: an agent-run git rebase/merge/cherry-pick
+	// mints commits that read as external acceptance evidence, as do
+	// packed forms like cmd&&git and sudo-prefixed invocations.
 	ListCrushCommitRuns(ctx context.Context, arg ListCrushCommitRunsParams) ([]int64, error)
 	ListFailurePartitionKeys(ctx context.Context) ([]string, error)
 	// Failure rows in one partition -- the remote-lifecycle re-claim
@@ -209,7 +214,11 @@ type Querier interface {
 	// turn is in-flight records it as a placeholder (the insert's
 	// conflict arm repairs verdict/evidence once its real next prompt
 	// lands), and a session whose last user message is a repair prompt
-	// -- excluded in Go, invisible to this predicate -- rescans.
+	// -- excluded in Go, invisible to this predicate -- rescans. The
+	// starvation corner of that waste: >=LIMIT permanently-pending
+	// sessions newer than a genuinely pending one starve it under ORDER
+	// BY created_at DESC -- rare, but a recorded marker for ineligible
+	// turns would close it for good.
 	ListRecentSessions(ctx context.Context, arg ListRecentSessionsParams) ([]ListRecentSessionsRow, error)
 	// Settled referent episodes in calibration form (#295/#340):
 	// settlement is the evidence predicate -- one fixed observation per
@@ -217,7 +226,8 @@ type Querier interface {
 	// suggestion flag, so the calibrator derives renderability under
 	// each candidate floor and stratifies one draw per session. Oldest
 	// first: per-session stratification picks the earliest episode and
-	// must be deterministic.
+	// must be deterministic. The admissibility predicate mirrors
+	// referentEpisodeAdmissible (cmdlog/rates.go) -- same lockstep rule.
 	ListReferentCalibrationEpisodes(ctx context.Context, projectKey string) ([]ListReferentCalibrationEpisodesRow, error)
 	// Pooled outcome evidence for the empirical-Bayes prior (#296) --
 	// LEAVE-ONE-OUT over every OTHER project: counting the querying
@@ -227,14 +237,18 @@ type Querier interface {
 	// Admissibility mirrors the fold: a settled row that carried zero
 	// signal (unresolved cue, no survival read, no external commit) is
 	// not evidence either way -- settled_at alone never invents mass.
+	// The predicate is referentEpisodeAdmissible (cmdlog/rates.go)
+	// re-implemented in SQL -- a change must move all sites.
 	ListReferentPriorEvents(ctx context.Context, projectKey string) ([]ListReferentPriorEventsRow, error)
 	// Settled, not-yet-folded referent episodes (#296/#340), oldest
 	// first. Membership is the rate_folded mark, not an id watermark.
 	// Since #340 only settled rows are evidence: settlement froze the
 	// windowed commit read, the hunk-survival verdict, and the cue
 	// verdict into one fixed observation -- folding unsettled rows would
-	// re-mix label vintages the review flagged. The outcome rule still
-	// lives in Go so the prior pool and the fold share one definition.
+	// re-mix label vintages the review flagged. Outcomes are computed in
+	// Go (ReferentEpisodeOutcome); the promotion count query
+	// (CountCleanReferentAcceptances) re-implements the success arms in
+	// SQL -- the two must stay in lockstep.
 	ListReferentRateEvents(ctx context.Context, arg ListReferentRateEventsParams) ([]ListReferentRateEventsRow, error)
 	// Promoted candidates whose learned phrase appears among the turn's
 	// extracted phrases -- exact-match on the normalized phrase keeps the
@@ -359,10 +373,14 @@ type Querier interface {
 	// settlement -- committed counts only external commits inside the
 	// window, hash_changed means the recorded added-lines diverged, and
 	// settled_at is the freeze mark that takes the row out of the scan
-	// and into the fold/prior evidence predicates.
+	// and into the fold/prior evidence predicates. The WHERE guard keeps
+	// a second crush instance sharing the DB from re-freezing the row --
+	// labelMu only serializes in-process.
 	SettleReferentEpisode(ctx context.Context, arg SettleReferentEpisodeParams) error
 	// Freeze one turn row's verdict (#340). Same contract as episodes:
-	// written once, never re-derived.
+	// written once, never re-derived. The WHERE guard keeps a second
+	// crush instance sharing the DB from re-freezing the row -- labelMu
+	// only serializes in-process.
 	SettleTurnOutcome(ctx context.Context, arg SettleTurnOutcomeParams) error
 	UpdateMessage(ctx context.Context, arg UpdateMessageParams) error
 	UpdateNotebookCompression(ctx context.Context, arg UpdateNotebookCompressionParams) error

@@ -144,16 +144,21 @@ type referentEdit struct {
 func (a *sessionAgent) referentTargets(ctx context.Context, msgs []message.Message, after int) []referentEdit {
 	var out []referentEdit
 	seen := map[string]int{}
+	lines := map[string]map[string]struct{}{}
 	add := func(path, callID string, added []string) {
 		rel := a.relWorkdir(path)
-		if i, ok := seen[rel]; ok {
-			// Later edits to the same file join its fingerprint —
-			// survival reads every line the turn added.
-			out[i].added = append(out[i].added, added...)
-			return
+		i, ok := seen[rel]
+		if !ok {
+			i = len(out)
+			seen[rel] = i
+			lines[rel] = map[string]struct{}{}
+			out = append(out, referentEdit{path: rel, callID: callID})
 		}
-		seen[rel] = len(out)
-		out = append(out, referentEdit{rel, callID, added})
+		// Later edits to the same file join its fingerprint —
+		// survival reads every line the turn added. Deduped: a
+		// repeated surviving line would inflate numerator and
+		// denominator together, biasing toward survived.
+		out[i].added = appendNewLines(out[i].added, lines[rel], added)
 	}
 	visited := map[string]struct{}{}
 	var scan func(ms []message.Message, after int)

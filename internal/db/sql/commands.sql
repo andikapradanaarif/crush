@@ -234,7 +234,9 @@ INSERT OR IGNORE INTO referent_episodes (
 -- #340: promotion consumes settled outcomes, not raw cues -- the
 -- predicate is ReferentEpisodeOutcome's success arm in SQL (survival
 -- read decides; absent it a commit on the target, else the cue), so
--- an episode that settled diverged can't promote a mapping.
+-- an episode that settled diverged can't promote a mapping. This
+-- mirrors ReferentEpisodeOutcome in cmdlog/rates.go -- a precedence
+-- change must move both sites.
 SELECT COUNT(DISTINCT session_id) FROM referent_episodes
 WHERE project_key = ? AND phrase = ? AND target = ?
     AND memory_suggested = 0
@@ -364,7 +366,10 @@ WHERE s.created_at * 1000 > ? AND s.id != ? AND s.parent_session_id IS NULL
 -- known limit is that re-running an identical message keeps only the
 -- latest last_at. Compound shell forms count too -- a commit chained
 -- after &&, ;, or ||, or invoked as git -C dir commit -- while flag
--- orderings beyond -C stay a documented miss.
+-- orderings beyond -C stay a documented miss. Non-commit producers
+-- are a known miss class: an agent-run git rebase/merge/cherry-pick
+-- mints commits that read as external acceptance evidence, as do
+-- packed forms like cmd&&git and sudo-prefixed invocations.
 SELECT last_at FROM command_memory
 WHERE project_key = ?
     AND (cmd_norm LIKE 'git commit%'
@@ -384,8 +389,10 @@ WHERE project_key = ?
 -- settlement -- committed counts only external commits inside the
 -- window, hash_changed means the recorded added-lines diverged, and
 -- settled_at is the freeze mark that takes the row out of the scan
--- and into the fold/prior evidence predicates.
-UPDATE referent_episodes SET label_committed = ?, label_hash_changed = ?, label_tests_green = ?, settled_at = ?, labeled_at = ? WHERE id = ?;
+-- and into the fold/prior evidence predicates. The WHERE guard keeps
+-- a second crush instance sharing the DB from re-freezing the row --
+-- labelMu only serializes in-process.
+UPDATE referent_episodes SET label_committed = ?, label_hash_changed = ?, label_tests_green = ?, settled_at = ?, labeled_at = ? WHERE id = ? AND settled_at IS NULL;
 
 -- name: GetProjectRate :one
 -- The stored posterior mass for one (project, signal) pair (#296)
@@ -409,8 +416,10 @@ ON CONFLICT (project_key, signal) DO UPDATE SET
 -- Since #340 only settled rows are evidence: settlement froze the
 -- windowed commit read, the hunk-survival verdict, and the cue
 -- verdict into one fixed observation -- folding unsettled rows would
--- re-mix label vintages the review flagged. The outcome rule still
--- lives in Go so the prior pool and the fold share one definition.
+-- re-mix label vintages the review flagged. Outcomes are computed in
+-- Go (ReferentEpisodeOutcome); the promotion count query
+-- (CountCleanReferentAcceptances) re-implements the success arms in
+-- SQL -- the two must stay in lockstep.
 SELECT id, session_id, verdict, label_committed, label_hash_changed
 FROM referent_episodes
 WHERE project_key = ?
@@ -433,6 +442,8 @@ WHERE id IN (sqlc.slice('ids'));
 -- Admissibility mirrors the fold: a settled row that carried zero
 -- signal (unresolved cue, no survival read, no external commit) is
 -- not evidence either way -- settled_at alone never invents mass.
+-- The predicate is referentEpisodeAdmissible (cmdlog/rates.go)
+-- re-implemented in SQL -- a change must move all sites.
 SELECT verdict, label_committed, label_hash_changed
 FROM referent_episodes
 WHERE project_key != ?
@@ -447,7 +458,8 @@ WHERE project_key != ?
 -- suggestion flag, so the calibrator derives renderability under
 -- each candidate floor and stratifies one draw per session. Oldest
 -- first: per-session stratification picks the earliest episode and
--- must be deterministic.
+-- must be deterministic. The admissibility predicate mirrors
+-- referentEpisodeAdmissible (cmdlog/rates.go) -- same lockstep rule.
 SELECT id, phrase, target, session_id, verdict, label_committed,
     label_hash_changed, memory_suggested
 FROM referent_episodes
@@ -516,8 +528,10 @@ LIMIT ?;
 
 -- name: SettleTurnOutcome :exec
 -- Freeze one turn row's verdict (#340). Same contract as episodes:
--- written once, never re-derived.
-UPDATE turn_outcomes SET verdict = ?, settled_at = ? WHERE id = ?;
+-- written once, never re-derived. The WHERE guard keeps a second
+-- crush instance sharing the DB from re-freezing the row -- labelMu
+-- only serializes in-process.
+UPDATE turn_outcomes SET verdict = ?, settled_at = ? WHERE id = ? AND settled_at IS NULL;
 
 -- name: ListRecentSessions :many
 -- Sessions other than the live one, newest first -- the backfill
@@ -538,7 +552,11 @@ UPDATE turn_outcomes SET verdict = ?, settled_at = ? WHERE id = ?;
 -- turn is in-flight records it as a placeholder (the insert's
 -- conflict arm repairs verdict/evidence once its real next prompt
 -- lands), and a session whose last user message is a repair prompt
--- -- excluded in Go, invisible to this predicate -- rescans.
+-- -- excluded in Go, invisible to this predicate -- rescans. The
+-- starvation corner of that waste: >=LIMIT permanently-pending
+-- sessions newer than a genuinely pending one starve it under ORDER
+-- BY created_at DESC -- rare, but a recorded marker for ineligible
+-- turns would close it for good.
 SELECT id, created_at FROM sessions s
 WHERE s.id != ? AND s.parent_session_id IS NULL
     AND EXISTS (

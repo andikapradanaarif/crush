@@ -31,19 +31,23 @@ const rateSignalReferent = "referent"
 const rateEventBatch = 64
 
 // ReferentEpisodeOutcome maps one settled episode onto +1 success or
-// +1 failure of referent acceptance — the single definition the fold,
-// the prior pool, and the LTT calibrator's harm metric all share, so
-// what the gate is certified on is what it gates on. Evidence order is
-// artifact-first: the episode's claim is path-scoped ("did following
-// this suggestion to touch <target> pan out"), and the cue verdict is
-// turn-scoped — the next prompt's judgment of the whole turn, which may
-// object to a different file. So the file's own survival read decides
-// first, divergence beats commit (revised-then-committed is a
-// revision), a commit landing on the target path is cue-independent
-// acceptance evidence, and the cue breaks the tie only when the path
-// left no artifact. This intentionally inverts settleTurn's order:
-// there the cue is scoped to the unit being judged, so a revised
-// next-prompt leads. Same evidence, different claim scope.
+// +1 failure of referent acceptance — the definition the fold, the
+// prior pool, and the LTT calibrator's harm metric share in Go, so
+// what the gate is certified on is what it gates on. One SQL mirror
+// exists: CountCleanReferentAcceptances re-implements the success
+// arms inline (maybePromoteReferent cannot call back into Go) — a
+// precedence change here must move that predicate too. Evidence
+// order is artifact-first: the episode's claim is path-scoped ("did
+// following this suggestion to touch <target> pan out"), and the cue
+// verdict is turn-scoped — the next prompt's judgment of the whole
+// turn, which may object to a different file. So the file's own
+// survival read decides first, divergence beats commit
+// (revised-then-committed is a revision), a commit landing on the
+// target path is cue-independent acceptance evidence, and the cue
+// breaks the tie only when the path left no artifact. This
+// intentionally inverts settleTurn's order: there the cue is scoped
+// to the unit being judged, so a revised next-prompt leads. Same
+// evidence, different claim scope.
 func ReferentEpisodeOutcome(verdict string, committed, hashChanged sql.NullInt64) (success bool) {
 	if hashChanged.Valid {
 		return hashChanged.Int64 == 0
@@ -56,13 +60,15 @@ func ReferentEpisodeOutcome(verdict string, committed, hashChanged sql.NullInt64
 
 // referentEpisodeAdmissible reports whether a settled row carries at
 // least one evidence signal — the predicate the rate/prior/
-// calibration consumers share. A row that settled with an unresolved
-// cue and no artifact read (committed=0 is "no commit observed," not
-// a signal) is zero-evidence: folding it would mint failure mass out
-// of nothing, the mirror violation of "missing evidence is never
-// acceptance." Inadmissible rows are still marked folded — they can
-// never gain signal after freezing, and unmarked they'd starve every
-// admissible row queued behind them.
+// calibration consumers share, re-implemented in SQL by
+// ListReferentPriorEvents and ListReferentCalibrationEpisodes: a
+// change here must move all three sites. A row that settled with an
+// unresolved cue and no artifact read (committed=0 is "no commit
+// observed," not a signal) is zero-evidence: folding it would mint
+// failure mass out of nothing, the mirror violation of "missing
+// evidence is never acceptance." Inadmissible rows are still marked
+// folded — they can never gain signal after freezing, and unmarked
+// they'd starve every admissible row queued behind them.
 func referentEpisodeAdmissible(verdict string, committed, hashChanged sql.NullInt64) bool {
 	return verdict == ReferentAccepted || verdict == ReferentRevised ||
 		hashChanged.Valid || (committed.Valid && committed.Int64 == 1)

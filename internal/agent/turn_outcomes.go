@@ -211,7 +211,7 @@ func extractTurnOutcome(ctx context.Context, d turnOutcomeDeps, sessionID string
 		// Messages stamp seconds; the store's clocks are millis.
 		o.CreatedAt = msgs[userIdx].CreatedAt * 1000
 	}
-	pathSet := map[string]struct{}{}
+	hunkLines := map[string]map[string]struct{}{}
 	var scan func(ms []message.Message, from int)
 	visited := map[string]struct{}{}
 	// scan walks one message list for evidence. It never checks turn
@@ -241,11 +241,17 @@ func extractTurnOutcome(ctx context.Context, d turnOutcomeDeps, sessionID string
 						continue
 					}
 					rel := relWorkdir(d.workdir, path)
-					o.EditHunks[rel] = append(o.EditHunks[rel], added...)
-					if _, ok := pathSet[rel]; !ok {
-						pathSet[rel] = struct{}{}
+					seen, ok := hunkLines[rel]
+					if !ok {
+						seen = map[string]struct{}{}
+						hunkLines[rel] = seen
 						o.EditedPaths = append(o.EditedPaths, rel)
 					}
+					// Same-file edits concatenate fingerprints —
+					// deduped, or a repeated surviving line inflates
+					// numerator and denominator together (and a
+					// pathological edit loop grows the JSON).
+					o.EditHunks[rel] = appendNewLines(o.EditHunks[rel], seen, added)
 				case tc.Name == tools.BashToolName:
 					if cmd := bashCommand(tc.Input); cmd != "" {
 						o.Commands = append(o.Commands, cmdlog.NormalizeOutcomeCommand(cmd))
@@ -269,34 +275,71 @@ func extractTurnOutcome(ctx context.Context, d turnOutcomeDeps, sessionID string
 }
 
 // editEvidence pulls the mutated path and the added-lines
-// fingerprint out of a mutation tool call's input — edit's
-// new_string, multiedit's concatenated new_strings, write's content.
-// The fingerprint is per-file: lines added by any of the turn's
-// edits to that file join one survival set.
+// fingerprint out of a mutation tool call's input — the lines the
+// edit introduced: edit and multiedit count new_string minus
+// old_string, so context lines carried over from the replaced text
+// don't pad the survival numerator; write fingerprints its whole
+// content, the old file being unknowable from the call. The
+// fingerprint is per-file: lines added by any of the turn's edits to
+// that file join one survival set.
 func editEvidence(input string) (path string, added []string) {
 	var in struct {
 		FilePath  string `json:"file_path"`
+		OldString string `json:"old_string"`
 		NewString string `json:"new_string"`
 		Content   string `json:"content"`
 		Edits     []struct {
+			OldString string `json:"old_string"`
 			NewString string `json:"new_string"`
 		} `json:"edits"`
 	}
 	if json.Unmarshal([]byte(input), &in) != nil || in.FilePath == "" {
 		return "", nil
 	}
-	var text string
 	switch {
 	case in.Content != "":
-		text = in.Content
+		return in.FilePath, cmdlog.NormalizeAddedLines(in.Content)
 	case len(in.Edits) > 0:
 		for _, e := range in.Edits {
-			text += e.NewString + "\n"
+			added = append(added, introducedLines(e.NewString, e.OldString)...)
 		}
+		return in.FilePath, added
 	default:
-		text = in.NewString
+		return in.FilePath, introducedLines(in.NewString, in.OldString)
 	}
-	return in.FilePath, cmdlog.NormalizeAddedLines(text)
+}
+
+// introducedLines reduces one edit's new_text to the lines it
+// introduced — new minus old in normalized space. A line the edit
+// moved or kept is not evidence it added anything; only genuinely
+// new lines should count in the survival check's numerator.
+func introducedLines(newText, oldText string) []string {
+	removed := map[string]struct{}{}
+	for _, l := range cmdlog.NormalizeAddedLines(oldText) {
+		removed[l] = struct{}{}
+	}
+	var out []string
+	for _, l := range cmdlog.NormalizeAddedLines(newText) {
+		if _, ok := removed[l]; ok {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
+// appendNewLines appends only lines not already in the per-path seen
+// set — same-file edits concatenate fingerprints, and duplicated
+// surviving lines would inflate numerator and denominator together.
+func appendNewLines(dst []string, seen map[string]struct{}, added []string) []string {
+	for _, l := range added {
+		if _, ok := seen[l]; ok {
+			continue
+		}
+		seen[l] = struct{}{}
+		dst = append(dst, l)
+	}
+	return dst
 }
 
 // bashCommand pulls the command string out of a bash tool call's

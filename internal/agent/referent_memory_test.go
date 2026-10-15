@@ -143,7 +143,9 @@ func TestReferentTargets(t *testing.T) {
 	}
 	targets := a.referentTargets(t.Context(), msgs, 1)
 	require.Len(t, targets, 2)
-	require.Equal(t, filepath.Join("internal", "cfg.go"), targets[0].path)
+	// Stored paths are slash-normalized (relWorkdir's ToSlash) —
+	// filepath.Join would assert a backslash on Windows.
+	require.Equal(t, "internal/cfg.go", targets[0].path)
 	require.Equal(t, "tc1", targets[0].callID)
 	require.Equal(t, "other.go", targets[1].path)
 	require.Equal(t, "tc3", targets[1].callID)

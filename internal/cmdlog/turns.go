@@ -181,13 +181,17 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 	_ = json.Unmarshal([]byte(r.Commands), &cmds)
 
 	diverged := false
-	survivable := false
+	// decidable marks "at least one fingerprint produced a readable
+	// survival verdict" — either way it read. A diverged read is
+	// decidable too, so acceptance must also require !diverged:
+	// every readable fingerprint survived.
+	decidable := false
 	for _, p := range paths {
 		d := s.hunkDiverged(p, encodeLines(hunks[p]))
 		if !d.Valid {
 			continue
 		}
-		survivable = true
+		decidable = true
 		if d.Int64 == 1 {
 			diverged = true
 		}
@@ -206,7 +210,7 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 		verdict = TurnRevised
 	case green.Valid && green.Int64 == 0:
 		verdict = TurnFailed
-	case committed || (survivable && !diverged):
+	case committed || (decidable && !diverged):
 		verdict = TurnAccepted
 	case len(paths) == 0 && len(cmds) > 0 && green.Valid && green.Int64 == 1:
 		// A command-only turn whose session ended green.

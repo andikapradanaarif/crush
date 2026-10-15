@@ -35,7 +35,9 @@ type CountCleanReferentAcceptancesParams struct {
 // #340: promotion consumes settled outcomes, not raw cues -- the
 // predicate is ReferentEpisodeOutcome's success arm in SQL (survival
 // read decides; absent it a commit on the target, else the cue), so
-// an episode that settled diverged can't promote a mapping.
+// an episode that settled diverged can't promote a mapping. This
+// mirrors ReferentEpisodeOutcome in cmdlog/rates.go -- a precedence
+// change must move both sites.
 func (q *Queries) CountCleanReferentAcceptances(ctx context.Context, arg CountCleanReferentAcceptancesParams) (int64, error) {
 	row := q.queryRow(ctx, q.countCleanReferentAcceptancesStmt, countCleanReferentAcceptances, arg.ProjectKey, arg.Phrase, arg.Target)
 	var count int64
@@ -338,7 +340,10 @@ type ListCrushCommitRunsParams struct {
 // known limit is that re-running an identical message keeps only the
 // latest last_at. Compound shell forms count too -- a commit chained
 // after &&, ;, or ||, or invoked as git -C dir commit -- while flag
-// orderings beyond -C stay a documented miss.
+// orderings beyond -C stay a documented miss. Non-commit producers
+// are a known miss class: an agent-run git rebase/merge/cherry-pick
+// mints commits that read as external acceptance evidence, as do
+// packed forms like cmd&&git and sudo-prefixed invocations.
 func (q *Queries) ListCrushCommitRuns(ctx context.Context, arg ListCrushCommitRunsParams) ([]int64, error) {
 	rows, err := q.query(ctx, q.listCrushCommitRunsStmt, listCrushCommitRuns, arg.ProjectKey, arg.LastAt, arg.LastAt_2)
 	if err != nil {
@@ -585,7 +590,11 @@ type ListRecentSessionsRow struct {
 // turn is in-flight records it as a placeholder (the insert's
 // conflict arm repairs verdict/evidence once its real next prompt
 // lands), and a session whose last user message is a repair prompt
-// -- excluded in Go, invisible to this predicate -- rescans.
+// -- excluded in Go, invisible to this predicate -- rescans. The
+// starvation corner of that waste: >=LIMIT permanently-pending
+// sessions newer than a genuinely pending one starve it under ORDER
+// BY created_at DESC -- rare, but a recorded marker for ineligible
+// turns would close it for good.
 func (q *Queries) ListRecentSessions(ctx context.Context, arg ListRecentSessionsParams) ([]ListRecentSessionsRow, error) {
 	rows, err := q.query(ctx, q.listRecentSessionsStmt, listRecentSessions,
 		arg.ID,
@@ -644,7 +653,8 @@ type ListReferentCalibrationEpisodesRow struct {
 // suggestion flag, so the calibrator derives renderability under
 // each candidate floor and stratifies one draw per session. Oldest
 // first: per-session stratification picks the earliest episode and
-// must be deterministic.
+// must be deterministic. The admissibility predicate mirrors
+// referentEpisodeAdmissible (cmdlog/rates.go) -- same lockstep rule.
 func (q *Queries) ListReferentCalibrationEpisodes(ctx context.Context, projectKey string) ([]ListReferentCalibrationEpisodesRow, error) {
 	rows, err := q.query(ctx, q.listReferentCalibrationEpisodesStmt, listReferentCalibrationEpisodes, projectKey)
 	if err != nil {
@@ -701,6 +711,8 @@ type ListReferentPriorEventsRow struct {
 // Admissibility mirrors the fold: a settled row that carried zero
 // signal (unresolved cue, no survival read, no external commit) is
 // not evidence either way -- settled_at alone never invents mass.
+// The predicate is referentEpisodeAdmissible (cmdlog/rates.go)
+// re-implemented in SQL -- a change must move all sites.
 func (q *Queries) ListReferentPriorEvents(ctx context.Context, projectKey string) ([]ListReferentPriorEventsRow, error) {
 	rows, err := q.query(ctx, q.listReferentPriorEventsStmt, listReferentPriorEvents, projectKey)
 	if err != nil {
@@ -752,8 +764,10 @@ type ListReferentRateEventsRow struct {
 // Since #340 only settled rows are evidence: settlement froze the
 // windowed commit read, the hunk-survival verdict, and the cue
 // verdict into one fixed observation -- folding unsettled rows would
-// re-mix label vintages the review flagged. The outcome rule still
-// lives in Go so the prior pool and the fold share one definition.
+// re-mix label vintages the review flagged. Outcomes are computed in
+// Go (ReferentEpisodeOutcome); the promotion count query
+// (CountCleanReferentAcceptances) re-implements the success arms in
+// SQL -- the two must stay in lockstep.
 func (q *Queries) ListReferentRateEvents(ctx context.Context, arg ListReferentRateEventsParams) ([]ListReferentRateEventsRow, error) {
 	rows, err := q.query(ctx, q.listReferentRateEventsStmt, listReferentRateEvents, arg.ProjectKey, arg.Limit)
 	if err != nil {
@@ -1418,7 +1432,7 @@ func (q *Queries) ResolveFailuresForCommand(ctx context.Context, arg ResolveFail
 }
 
 const settleReferentEpisode = `-- name: SettleReferentEpisode :exec
-UPDATE referent_episodes SET label_committed = ?, label_hash_changed = ?, label_tests_green = ?, settled_at = ?, labeled_at = ? WHERE id = ?
+UPDATE referent_episodes SET label_committed = ?, label_hash_changed = ?, label_tests_green = ?, settled_at = ?, labeled_at = ? WHERE id = ? AND settled_at IS NULL
 `
 
 type SettleReferentEpisodeParams struct {
@@ -1436,7 +1450,9 @@ type SettleReferentEpisodeParams struct {
 // settlement -- committed counts only external commits inside the
 // window, hash_changed means the recorded added-lines diverged, and
 // settled_at is the freeze mark that takes the row out of the scan
-// and into the fold/prior evidence predicates.
+// and into the fold/prior evidence predicates. The WHERE guard keeps
+// a second crush instance sharing the DB from re-freezing the row --
+// labelMu only serializes in-process.
 func (q *Queries) SettleReferentEpisode(ctx context.Context, arg SettleReferentEpisodeParams) error {
 	_, err := q.exec(ctx, q.settleReferentEpisodeStmt, settleReferentEpisode,
 		arg.LabelCommitted,
@@ -1450,7 +1466,7 @@ func (q *Queries) SettleReferentEpisode(ctx context.Context, arg SettleReferentE
 }
 
 const settleTurnOutcome = `-- name: SettleTurnOutcome :exec
-UPDATE turn_outcomes SET verdict = ?, settled_at = ? WHERE id = ?
+UPDATE turn_outcomes SET verdict = ?, settled_at = ? WHERE id = ? AND settled_at IS NULL
 `
 
 type SettleTurnOutcomeParams struct {
@@ -1460,7 +1476,9 @@ type SettleTurnOutcomeParams struct {
 }
 
 // Freeze one turn row's verdict (#340). Same contract as episodes:
-// written once, never re-derived.
+// written once, never re-derived. The WHERE guard keeps a second
+// crush instance sharing the DB from re-freezing the row -- labelMu
+// only serializes in-process.
 func (q *Queries) SettleTurnOutcome(ctx context.Context, arg SettleTurnOutcomeParams) error {
 	_, err := q.exec(ctx, q.settleTurnOutcomeStmt, settleTurnOutcome, arg.Verdict, arg.SettledAt, arg.ID)
 	return err

@@ -78,8 +78,10 @@ type ReferentEpisodeLabelInputs struct {
 // episode's (session, source message, target) unique constraint —
 // the same idempotency point the insert uses, so a repair-chain
 // re-derivation re-stamps rather than duplicates. Re-stamping also
-// moves the fingerprint and the window: the referent is the latest
-// derivation, not the first.
+// moves the fingerprint and the window — the outer edge runs from
+// label time, so a re-derivation widens the commit window beyond the
+// episode's created_at + 24h. Intentional: the observation covers
+// the latest derivation of the referent, not the superseded one.
 func (s *service) LabelReferentEpisode(ctx context.Context, ep ReferentEpisode, in ReferentEpisodeLabelInputs) error {
 	added, _ := json.Marshal(in.AddedLines)
 	now := s.now().UnixMilli()
@@ -180,11 +182,19 @@ func (s *service) windowEnd(ctx context.Context, createdAt int64, sessionID stri
 type commitEvidence struct {
 	commits map[string][]int64
 	runs    []int64
+	// runsUnreadable marks the harness-run exclusion list as
+	// degraded: without it an agent-run commit is indistinguishable
+	// from external acceptance, so the commit arm abstains — the
+	// same fail-closed direction the commits fetch takes.
+	runsUnreadable bool
 }
 
 // prefetchCommitEvidence fetches the batch's two evidence inputs in
 // one git call and one ledger read. Outside a repo both are empty —
-// every inWindow read is then simply false.
+// every inWindow read is then simply false. A ledger read failure
+// marks the batch degraded rather than treating every commit as
+// external: the exclusion list is what keeps agent-made commits out
+// of acceptance evidence.
 func (s *service) prefetchCommitEvidence(ctx context.Context, winLo, winHi int64) commitEvidence {
 	ev := commitEvidence{}
 	if !s.hasRepo || winHi <= winLo {
@@ -198,7 +208,9 @@ func (s *service) prefetchCommitEvidence(ctx context.Context, winLo, winHi int64
 		LastAt:     winLo - commitSkewMillis,
 		LastAt_2:   winHi + commitSkewMillis,
 	})
-	if err == nil {
+	if err != nil {
+		ev.runsUnreadable = true
+	} else {
 		ev.runs = runs
 	}
 	return ev
@@ -211,6 +223,12 @@ func (s *service) prefetchCommitEvidence(ctx context.Context, winLo, winHi int64
 // Timestamps mix units: git reports unix seconds, the ledger stores
 // millis — all comparisons happen in millis.
 func (ev commitEvidence) inWindow(paths []string, createdAt, winEnd int64) bool {
+	if ev.runsUnreadable {
+		// No exclusion list means no way to prove a commit was
+		// external — abstain rather than count agent work as
+		// acceptance.
+		return false
+	}
 	for _, p := range paths {
 		// Stored targets are slash-normalized at record time; the
 		// ToSlash here covers rows written before that (Windows
@@ -435,7 +453,11 @@ func (s *service) sessionTestsGreen(ctx context.Context, sessionID string) sql.N
 // boundary. git emits repo-root-relative paths while ledger targets
 // are workspace-relative — repoPrefix strips the prefix and drops
 // commits outside the workspace entirely (without it, commit
-// evidence is silently blind in a repo subdirectory).
+// evidence is silently blind in a repo subdirectory). Known miss:
+// git C-quotes paths with tabs/newlines/non-ASCII (core.quotePath)
+// while the ledger stores them raw, so commit evidence silently
+// misses for such files — a `-c core.quotePath=false -z` read is the
+// fix if the class ever matters.
 func (s *service) commitsTouchingPaths(ctx context.Context, sinceRFC3339, untilRFC3339 string) map[string][]int64 {
 	out := map[string][]int64{}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
