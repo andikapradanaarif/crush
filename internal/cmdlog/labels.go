@@ -150,8 +150,11 @@ func (s *service) settleReferent(ctx context.Context, r db.ListUnsettledReferent
 	}
 	winEnd := cap
 	if next, err := s.q.NextSessionStartMillis(ctx, db.NextSessionStartMillisParams{
-		CreatedAt: r.CreatedAt,
-		ID:        r.SessionID,
+		CreatedAt:    r.CreatedAt,
+		ID:           r.SessionID,
+		ProjectKey:   s.projectKey,
+		ProjectKey_2: s.projectKey,
+		ProjectKey_3: s.projectKey,
 	}); err == nil && next > 0 && next < winEnd {
 		winEnd = next
 	}
@@ -235,6 +238,12 @@ func isHarnessCommit(ms int64, runs []int64) bool {
 // edits whose lines were never captured carry no survival evidence.
 // Late settlement reads a later file state — a bounded bias toward
 // revised, documented rather than hidden.
+//
+// Both sides compare in NormalizeAddedLines' space — trimmed,
+// empty-dropped, deduped — because the fingerprint stores trimmed
+// text while files carry indentation: probing raw content for
+// "\n"+line+"\n" only ever matches column-0 lines and would read
+// nearly every real edit as diverged.
 func (s *service) hunkDiverged(target, addedJSON string) sql.NullInt64 {
 	var lines []string
 	if addedJSON == "" || json.Unmarshal([]byte(addedJSON), &lines) != nil || len(lines) == 0 {
@@ -245,10 +254,15 @@ func (s *service) hunkDiverged(target, addedJSON string) sql.NullInt64 {
 		// The file is gone — nothing survived.
 		return sql.NullInt64{Int64: 1, Valid: true}
 	}
-	content := "\n" + string(data) + "\n"
+	fileLines := map[string]struct{}{}
+	for _, l := range strings.Split(string(data), "\n") {
+		if t := strings.TrimSpace(l); t != "" {
+			fileLines[t] = struct{}{}
+		}
+	}
 	present := 0
 	for _, l := range lines {
-		if strings.Contains(content, "\n"+l+"\n") {
+		if _, ok := fileLines[l]; ok {
 			present++
 		}
 	}

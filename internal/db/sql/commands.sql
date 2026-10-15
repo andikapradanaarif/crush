@@ -287,19 +287,37 @@ WHERE c.project_key = ?
 -- name: ListUnsettledReferentLabels :many
 -- Episodes whose observation window has closed but whose label has
 -- not frozen yet (#340): settle_at elapsed (the +24h cap) or a newer
--- session exists in the project -- the two settlement triggers the
+-- session exists IN THE PROJECT -- the two settlement triggers the
 -- fixed-window rule defines. Oldest first so the backlog amortizes.
 -- Rows never become un-settleable: settlement writes its verdict
 -- once and freezes.
+-- The project proof is ledger membership: sessions carry no project
+-- column, and a store shared across projects (absolute
+-- data_directory) must not let a foreign session close this
+-- project's windows early. A session proves membership by having
+-- written a project-keyed ledger row; a session with none is not a
+-- boundary (the window stays open -- delayed, never wrong).
 SELECT id, target, session_id, created_at, settle_at, label_added_lines
 FROM referent_episodes
-WHERE project_key = ?
-    AND settled_at IS NULL
-    AND (settle_at <= ?
+WHERE referent_episodes.project_key = ?
+    AND referent_episodes.settled_at IS NULL
+    AND (referent_episodes.settle_at <= ?
          OR EXISTS (SELECT 1 FROM sessions s
                     WHERE s.id != referent_episodes.session_id
                       AND s.parent_session_id IS NULL
-                      AND s.created_at * 1000 > referent_episodes.created_at))
+                      AND s.created_at * 1000 > referent_episodes.created_at
+                      AND EXISTS (
+                          SELECT 1 FROM command_memory cm
+                            WHERE cm.last_session_id = s.id
+                              AND cm.project_key = referent_episodes.project_key
+                          UNION
+                          SELECT 1 FROM failure_memory fm
+                            WHERE fm.session_id = s.id
+                              AND fm.project_key = referent_episodes.project_key
+                          UNION
+                          SELECT 1 FROM referent_episodes re2
+                            WHERE re2.session_id = s.id
+                              AND re2.project_key = referent_episodes.project_key)))
 ORDER BY created_at ASC
 LIMIT ?;
 
@@ -309,9 +327,20 @@ LIMIT ?;
 -- episodes use millis. NULL when no newer session exists (the 24h cap
 -- alone bounds the window then). parent_session_id IS NULL keeps
 -- sub-agent child sessions out: a delegated task is work inside the
--- parent turn, not a session boundary.
-SELECT MIN(created_at) * 1000 FROM sessions
-WHERE created_at * 1000 > ? AND id != ? AND parent_session_id IS NULL;
+-- parent turn, not a session boundary. Project membership is the
+-- same ledger proof the due trigger uses -- a foreign session must
+-- not close this project's window.
+SELECT MIN(s.created_at) * 1000 FROM sessions s
+WHERE s.created_at * 1000 > ? AND s.id != ? AND s.parent_session_id IS NULL
+    AND EXISTS (
+        SELECT 1 FROM command_memory cm
+          WHERE cm.last_session_id = s.id AND cm.project_key = ?
+        UNION
+        SELECT 1 FROM failure_memory fm
+          WHERE fm.session_id = s.id AND fm.project_key = ?
+        UNION
+        SELECT 1 FROM referent_episodes re2
+          WHERE re2.session_id = s.id AND re2.project_key = ?);
 
 -- name: ListCrushCommitRuns :many
 -- Timestamps (millis) of git-commit commands this project ran through
@@ -422,13 +451,25 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 SELECT id, session_id, turn_id, edited_paths, edit_hunks, commands,
     next_verdict, settle_at, created_at
 FROM turn_outcomes
-WHERE project_key = ?
-    AND settled_at IS NULL
-    AND (settle_at <= ?
+WHERE turn_outcomes.project_key = ?
+    AND turn_outcomes.settled_at IS NULL
+    AND (turn_outcomes.settle_at <= ?
          OR EXISTS (SELECT 1 FROM sessions s
                     WHERE s.id != turn_outcomes.session_id
                       AND s.parent_session_id IS NULL
-                      AND s.created_at * 1000 > turn_outcomes.created_at))
+                      AND s.created_at * 1000 > turn_outcomes.created_at
+                      AND EXISTS (
+                          SELECT 1 FROM command_memory cm
+                            WHERE cm.last_session_id = s.id
+                              AND cm.project_key = turn_outcomes.project_key
+                          UNION
+                          SELECT 1 FROM failure_memory fm
+                            WHERE fm.session_id = s.id
+                              AND fm.project_key = turn_outcomes.project_key
+                          UNION
+                          SELECT 1 FROM referent_episodes re2
+                            WHERE re2.session_id = s.id
+                              AND re2.project_key = turn_outcomes.project_key)))
 ORDER BY created_at ASC
 LIMIT ?;
 
@@ -442,8 +483,23 @@ UPDATE turn_outcomes SET verdict = ?, settled_at = ? WHERE id = ?;
 -- corpus for turn outcomes (#340). Sessions stamp created_at in
 -- seconds. parent_session_id IS NULL keeps sub-agent sessions out:
 -- their "user prompts" are delegation text, not user verdicts.
-SELECT id, created_at FROM sessions
-WHERE id != ? AND parent_session_id IS NULL
+-- The project filter is ledger membership: sessions carry no
+-- project column and a shared store must not let the backfill mint
+-- foreign sessions' turns under this project's key -- rows that
+-- would settle diverged on missing paths, poisoning the partition
+-- they were never part of. A session with no project-keyed ledger
+-- row is thin mining material anyway.
+SELECT id, created_at FROM sessions s
+WHERE s.id != ? AND s.parent_session_id IS NULL
+    AND EXISTS (
+        SELECT 1 FROM command_memory cm
+          WHERE cm.last_session_id = s.id AND cm.project_key = ?
+        UNION
+        SELECT 1 FROM failure_memory fm
+          WHERE fm.session_id = s.id AND fm.project_key = ?
+        UNION
+        SELECT 1 FROM referent_episodes re2
+          WHERE re2.session_id = s.id AND re2.project_key = ?)
 ORDER BY created_at DESC
 LIMIT ?;
 

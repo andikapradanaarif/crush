@@ -77,10 +77,15 @@ rarely takes. Mining needs a label at the unit it clusters:
 - **Unit:** one row per (session, user-turn-index), recording the
   turn's edited-file set and command list.
 - **Settled once**, at a fixed window: the start of the next session
-  in the project, or created_at + 24h, whichever comes first. After
-  settlement the verdict never re-derives — fold and calibration read
-  only settled rows (fixes the label-drift defect from the loop
-  review).
+  provably in the project, or created_at + 24h, whichever comes
+  first. `sessions` carries no project column, so membership is
+  ledger proof — a session counts as a boundary only after it has
+  written a project-keyed row (`command_memory`, `failure_memory`,
+  `referent_episodes`). A foreign session in a shared store closes
+  no window; a session with no rows yet delays, never corrupts.
+  After settlement the verdict never re-derives — fold and
+  calibration read only settled rows (fixes the label-drift defect
+  from the loop review).
 - **Survival per hunk:** the diff hunks the turn's edits produced,
   checked line-presence at settlement — unrelated edits elsewhere in
   the same file do not count as divergence.
@@ -301,7 +306,8 @@ commits the fallback measurement**:
 
 ```sql
 -- Turn-level outcome labels (#340, shipped): settled once at fixed
--- window — newer project session or created_at + 24h, whichever first.
+-- window — newer session provably in the project, or created_at +
+-- 24h, whichever first.
 CREATE TABLE turn_outcomes (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id   TEXT NOT NULL,
@@ -326,7 +332,13 @@ CREATE TABLE turn_outcomes (
 -- session's rows collide under the unique key. Settlement
 -- boundaries count only parent_session_id IS NULL sessions — a
 -- delegated child is work inside the parent turn, not a new
--- session, and it must not close the window early.
+-- session, and it must not close the window early — and only
+-- sessions provably in the row's project: sessions carries no
+-- project column, so membership is ledger proof (a project-keyed
+-- command_memory / failure_memory / referent_episodes row). The
+-- backfill corpus filters identically, so foreign sessions never
+-- mint turns under this project's key; a real session→project
+-- mapping remains the longer-term answer.
 --
 -- Two evidence-scope choices, recorded: sessionTestsGreen is
 -- session-scoped by design (the ledger has no per-turn last-exit),

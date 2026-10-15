@@ -183,6 +183,12 @@ type Querier interface {
 	// corpus for turn outcomes (#340). Sessions stamp created_at in
 	// seconds. parent_session_id IS NULL keeps sub-agent sessions out:
 	// their "user prompts" are delegation text, not user verdicts.
+	// The project filter is ledger membership: sessions carry no
+	// project column and a shared store must not let the backfill mint
+	// foreign sessions' turns under this project's key -- rows that
+	// would settle diverged on missing paths, poisoning the partition
+	// they were never part of. A session with no project-keyed ledger
+	// row is thin mining material anyway.
 	ListRecentSessions(ctx context.Context, arg ListRecentSessionsParams) ([]ListRecentSessionsRow, error)
 	// Settled referent episodes in calibration form (#295/#340):
 	// settlement is the evidence predicate -- one fixed observation per
@@ -256,10 +262,16 @@ type Querier interface {
 	ListUnclaimedFailures(ctx context.Context) ([]ListUnclaimedFailuresRow, error)
 	// Episodes whose observation window has closed but whose label has
 	// not frozen yet (#340): settle_at elapsed (the +24h cap) or a newer
-	// session exists in the project -- the two settlement triggers the
+	// session exists IN THE PROJECT -- the two settlement triggers the
 	// fixed-window rule defines. Oldest first so the backlog amortizes.
 	// Rows never become un-settleable: settlement writes its verdict
 	// once and freezes.
+	// The project proof is ledger membership: sessions carry no project
+	// column, and a store shared across projects (absolute
+	// data_directory) must not let a foreign session close this
+	// project's windows early. A session proves membership by having
+	// written a project-keyed ledger row; a session with none is not a
+	// boundary (the window stays open -- delayed, never wrong).
 	ListUnsettledReferentLabels(ctx context.Context, arg ListUnsettledReferentLabelsParams) ([]ListUnsettledReferentLabelsRow, error)
 	// Turn rows whose window closed without settling (#340): the same
 	// dual trigger as episodes -- the +24h cap elapsed or a newer session
@@ -279,7 +291,9 @@ type Querier interface {
 	// episodes use millis. NULL when no newer session exists (the 24h cap
 	// alone bounds the window then). parent_session_id IS NULL keeps
 	// sub-agent child sessions out: a delegated task is work inside the
-	// parent turn, not a session boundary.
+	// parent turn, not a session boundary. Project membership is the
+	// same ledger proof the due trigger uses -- a foreign session must
+	// not close this project's window.
 	NextSessionStartMillis(ctx context.Context, arg NextSessionStartMillisParams) (int64, error)
 	// A mapping that cleared the acceptance floor earns its row; further
 	// clean acceptances keep scoring it (hits is evidence mass, not

@@ -85,15 +85,19 @@ func (s *service) RecordTurnOutcome(ctx context.Context, o TurnOutcome) error {
 }
 
 // ListRecentSessionIDs exposes the session ids a backfill scans —
-// every session in the store except the live one, newest first.
-// Sessions stamp created_at in seconds.
+// sessions demonstrably in this project (the ledger-membership proof
+// the query carries), except the live one, newest first. Sessions
+// stamp created_at in seconds.
 func (s *service) ListRecentSessionIDs(ctx context.Context, excludeID string, limit int) ([]db.ListRecentSessionsRow, error) {
 	if limit <= 0 {
 		limit = defaultListLimit
 	}
 	return s.q.ListRecentSessions(ctx, db.ListRecentSessionsParams{
-		ID:    excludeID,
-		Limit: int64(limit),
+		ID:           excludeID,
+		ProjectKey:   s.projectKey,
+		ProjectKey_2: s.projectKey,
+		ProjectKey_3: s.projectKey,
+		Limit:        int64(limit),
 	})
 }
 
@@ -154,8 +158,11 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 
 	winEnd := r.SettleAt
 	if next, err := s.q.NextSessionStartMillis(ctx, db.NextSessionStartMillisParams{
-		CreatedAt: r.CreatedAt,
-		ID:        r.SessionID,
+		CreatedAt:    r.CreatedAt,
+		ID:           r.SessionID,
+		ProjectKey:   s.projectKey,
+		ProjectKey_2: s.projectKey,
+		ProjectKey_3: s.projectKey,
 	}); err == nil && next > 0 && next < winEnd {
 		winEnd = next
 	}

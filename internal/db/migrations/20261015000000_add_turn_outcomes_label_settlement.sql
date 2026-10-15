@@ -15,9 +15,11 @@
 -- survival check (honest degradation, not a whole-file fallback).
 ALTER TABLE referent_episodes ADD COLUMN label_added_lines TEXT NOT NULL DEFAULT '';
 -- settle_at: the outer edge of the observation window in millis —
--- created_at + 24h at label time. A newer session in the project
--- tightens the effective window at settle time; settle_at is the
--- cap that makes long-idle projects' rows still terminate.
+-- created_at + 24h at label time. A newer session provably in the
+-- project (sessions carry no project column; membership is a
+-- project-keyed ledger row) tightens the effective window at settle
+-- time; settle_at is the cap that makes long-idle projects' rows
+-- still terminate.
 ALTER TABLE referent_episodes ADD COLUMN settle_at INTEGER NOT NULL DEFAULT 0;
 -- settled_at: when the label froze. NULL = unsettled; once set the
 -- committed/hash_changed/tests fields stop re-deriving — the fold

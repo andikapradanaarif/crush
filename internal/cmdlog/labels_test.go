@@ -63,9 +63,16 @@ func seedLabelSessionAt(t *testing.T, env *labelEnv, id, parentID string, create
 
 // dueViaNewerSession makes the episode's settlement due: a session
 // starting after the episode's created_at closes the window early.
+// The session needs a project-keyed ledger row — sessions carry no
+// project column, so a bare row proves no membership and closes no
+// window.
 func dueViaNewerSession(t *testing.T, env *labelEnv, id string) {
 	t.Helper()
 	seedLabelSessionAt(t, env, id, "", time.Now().Unix()+60)
+	env.svc.RecordRun(t.Context(), Run{
+		SessionID: id, Command: "ls", CWD: env.workingDir,
+		Ran: true, ExitCode: 0,
+	})
 }
 
 // labelCols reads back one episode's label columns for assertions.
@@ -467,8 +474,12 @@ func TestSettleReferentLabels_ProjectPartition(t *testing.T) {
 	require.NoError(t, svcB.RecordReferentEpisode(t.Context(), ep, 5))
 	require.NoError(t, svcB.LabelReferentEpisode(t.Context(), ep, in))
 
-	// Both due via a shared newer session; only proj-a settles.
+	// Both due via a shared newer session — s3 carries a ledger row in
+	// each partition so the trigger fires for both; only proj-a
+	// settles because the pass itself is project-scoped.
 	seedLabelSessionAt(t, &labelEnv{conn: conn}, "s3", "", time.Now().Unix()+60)
+	svcA.RecordRun(t.Context(), Run{SessionID: "s3", Command: "ls", CWD: dir, Ran: true, ExitCode: 0})
+	svcB.RecordRun(t.Context(), Run{SessionID: "s3", Command: "ls", CWD: dir, Ran: true, ExitCode: 0})
 	require.NoError(t, svcA.SettleReferentLabels(t.Context(), 10))
 
 	var settledA, settledB sql.NullInt64
@@ -497,8 +508,69 @@ func TestSettleReferentLabels_ChildSessionDoesNotSettle(t *testing.T) {
 	require.False(t, c.settledAt.Valid,
 		"a delegated child is not a session boundary — the window stays open")
 
-	// A real sibling session still closes it.
-	seedLabelSessionAt(t, env, "s2", "", time.Now().Unix()+60)
+	// A real sibling session — one with a project ledger row — still
+	// closes it.
+	dueViaNewerSession(t, env, "s2")
 	require.NoError(t, env.svc.SettleReferentLabels(t.Context(), 10))
 	require.True(t, readLabels(t, env, "s1", target).settledAt.Valid)
+}
+
+// The fingerprint stores trimmed lines; real code is indented. The
+// file side must compare in the same normalized space or every real
+// edit reads as diverged.
+func TestSettleReferentLabels_IndentedLinesSurvive(t *testing.T) {
+	env := setupLabelsTest(t)
+	target := "x.go"
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, target),
+		[]byte("package x\n\nfunc f() {\n\treturn 1\n\treturn 2\n}\n"), 0o644))
+	recordLabeledEpisode(t, env, "s1", "m1", target,
+		ReferentEpisodeLabelInputs{AddedLines: []string{"return 1", "return 2"}})
+	dueViaNewerSession(t, env, "s2")
+	require.NoError(t, env.svc.SettleReferentLabels(t.Context(), 10))
+	c := readLabels(t, env, "s1", target)
+	require.True(t, c.hashChanged.Valid, "the survival signal ran")
+	require.EqualValues(t, 0, c.hashChanged.Int64,
+		"indented lines survive — the fingerprint compares in normalized space")
+}
+
+// A session proves project membership by having written a
+// project-keyed ledger row. A newer session whose only rows belong
+// to another partition is not this project's boundary — a shared
+// store must not let foreign activity close this project's windows.
+func TestSettleReferentLabels_ForeignSessionNotBoundary(t *testing.T) {
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+	q := db.New(conn)
+	dir := t.TempDir()
+	svcA := NewService(q, dir, params.DefaultMemory(), WithProjectKey("proj-a"))
+	svcB := NewService(q, dir, params.DefaultMemory(), WithProjectKey("proj-b"))
+	e := &labelEnv{conn: conn}
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "x.go"), []byte("v1"), 0o644))
+	ep := ReferentEpisode{
+		Phrase: "config", Target: "x.go", SessionID: "s1",
+		SourceMessageID: "m1", ToolCallID: "c1", Verdict: ReferentAccepted,
+	}
+	require.NoError(t, svcA.RecordReferentEpisode(t.Context(), ep, 5))
+	require.NoError(t, svcA.LabelReferentEpisode(t.Context(), ep,
+		ReferentEpisodeLabelInputs{AddedLines: []string{"v1"}}))
+
+	// sf is newer but only provably in proj-b — it must not settle.
+	seedLabelSessionAt(t, e, "sf", "", time.Now().Unix()+60)
+	svcB.RecordRun(t.Context(), Run{SessionID: "sf", Command: "ls", CWD: dir, Ran: true, ExitCode: 0})
+	require.NoError(t, svcA.SettleReferentLabels(t.Context(), 10))
+	var settledA sql.NullInt64
+	require.NoError(t, conn.QueryRowContext(t.Context(),
+		`SELECT settled_at FROM referent_episodes WHERE session_id = 's1'`).Scan(&settledA))
+	require.False(t, settledA.Valid,
+		"a foreign project's session is not this project's boundary")
+
+	// A newer session with a proj-a ledger row still is.
+	seedLabelSessionAt(t, e, "s3", "", time.Now().Unix()+120)
+	svcA.RecordRun(t.Context(), Run{SessionID: "s3", Command: "ls", CWD: dir, Ran: true, ExitCode: 0})
+	require.NoError(t, svcA.SettleReferentLabels(t.Context(), 10))
+	require.NoError(t, conn.QueryRowContext(t.Context(),
+		`SELECT settled_at FROM referent_episodes WHERE session_id = 's1'`).Scan(&settledA))
+	require.True(t, settledA.Valid)
 }

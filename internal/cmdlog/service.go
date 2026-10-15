@@ -141,8 +141,10 @@ type Service interface {
 	// exists — the backfill's skip check.
 	HasTurnOutcome(ctx context.Context, sessionID, turnID string) (bool, error)
 
-	// ListRecentSessionIDs lists sessions in the store, newest
-	// first, excluding the live one — the backfill scan set.
+	// ListRecentSessionIDs lists sessions provably in this project —
+	// the ledger-membership proof — newest first, excluding the
+	// live one. Sessions carry no project column; a session with no
+	// project-keyed ledger row is out of the backfill scan set.
 	ListRecentSessionIDs(ctx context.Context, excludeID string, limit int) ([]db.ListRecentSessionsRow, error)
 
 	// SettleTurnOutcomes freezes the verdicts of turn rows whose

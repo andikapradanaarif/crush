@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/stretchr/testify/require"
 )
@@ -130,6 +131,13 @@ func TestBackfillTurnOutcomes(t *testing.T) {
 
 	old, err := env.sessions.Create(t.Context(), "old")
 	require.NoError(t, err)
+	// The corpus admits only sessions with a project-keyed ledger row
+	// (sessions carry no project column) — the run is its membership
+	// proof, as a real backfilled session's own activity would be.
+	env.cmdlog.RecordRun(t.Context(), cmdlog.Run{
+		SessionID: old.ID, Command: "ls", CWD: env.workingDir,
+		Ran: true, ExitCode: 0,
+	})
 	var turnIDs []string
 	for _, m := range []message.CreateMessageParams{
 		{Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "add file"}}},

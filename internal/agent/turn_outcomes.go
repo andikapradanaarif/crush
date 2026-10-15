@@ -13,8 +13,12 @@
 //     its next-turn verdict.
 //   - backfill: at a session's first turn, recent sessions'
 //     stored messages segment the same way and record missing rows.
-//     A session-final turn's outcome only ever arrives this way —
-//     no in-session turn ever judges it.
+//     The corpus is the project's own — ListRecentSessionIDs admits
+//     only sessions with a project-keyed ledger row (sessions carry
+//     no project column), so a shared store's foreign sessions never
+//     mint turns under this project's key. A session-final turn's
+//     outcome only ever arrives this way — no in-session turn ever
+//     judges it.
 //
 // Settlement is the store's job; this file only opens rows.
 package agent

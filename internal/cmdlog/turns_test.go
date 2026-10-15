@@ -241,7 +241,56 @@ func TestSettleTurnOutcomes_ChildSessionDoesNotSettle(t *testing.T) {
 	require.False(t, readTurn(t, env, "s1", "t0").settledAt.Valid,
 		"a delegated child is not a session boundary")
 
-	seedLabelSessionAt(t, env, "s2", "", time.Now().Unix()+60)
+	dueViaNewerSession(t, env, "s2")
 	require.NoError(t, env.svc.SettleTurnOutcomes(t.Context(), 10))
 	require.True(t, readTurn(t, env, "s1", "t0").settledAt.Valid)
+}
+
+// Turn hunks carry the same trimmed fingerprint — indented code must
+// survive there too.
+func TestSettleTurnOutcomes_IndentedLinesSurvive(t *testing.T) {
+	env := setupLabelsTest(t)
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "x.go"),
+		[]byte("package x\n\nfunc f() {\n\treturn 1\n}\n"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		EditHunks:   map[string][]string{"x.go": {"return 1"}},
+		NextVerdict: ReferentAccepted,
+	}))
+	dueViaNewerSession(t, env, "s2")
+	require.Equal(t, TurnAccepted, settleTurnRow(t, env, "s1", "t0").verdict.String,
+		"indented lines survive — raw-content probing read them as diverged")
+}
+
+// The backfill corpus is the project's own: a session with ledger
+// rows only in another partition, or with no rows at all, never
+// enters it — otherwise its turns would be written under this
+// project's key and settle diverged on missing paths.
+func TestListRecentSessionIDs_ProjectPartition(t *testing.T) {
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+	q := db.New(conn)
+	dir := t.TempDir()
+	svcA := NewService(q, dir, params.DefaultMemory(), WithProjectKey("proj-a"))
+	svcB := NewService(q, dir, params.DefaultMemory(), WithProjectKey("proj-b"))
+	e := &labelEnv{conn: conn}
+
+	seedLabelSession(t, e, "live", "")
+	seedLabelSessionAt(t, e, "own", "", 50)
+	seedLabelSessionAt(t, e, "foreign", "", 60)
+	seedLabelSessionAt(t, e, "empty", "", 70)
+	svcA.RecordRun(t.Context(), Run{SessionID: "own", Command: "ls", CWD: dir, Ran: true, ExitCode: 0})
+	svcB.RecordRun(t.Context(), Run{SessionID: "foreign", Command: "ls", CWD: dir, Ran: true, ExitCode: 0})
+
+	rows, err := svcA.ListRecentSessionIDs(t.Context(), "live", 10)
+	require.NoError(t, err)
+	got := make([]string, 0, len(rows))
+	for _, r := range rows {
+		got = append(got, r.ID)
+	}
+	require.Equal(t, []string{"own"}, got,
+		"foreign-keyed and row-less sessions are not this project's corpus")
 }
