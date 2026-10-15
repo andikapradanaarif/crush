@@ -120,10 +120,15 @@ type Querier interface {
 	// Open one turn's outcome row (#340), idempotent on the
 	// (session_id, turn_id) unique key -- turn_id is the turn's
 	// user-message ID, stable under compaction where an ordinal would
-	// shift; a repair-chain re-derivation or a backfill racing a live
-	// write re-inserts nothing. verdict stays NULL until settlement;
-	// next_verdict captures the cue-word judgment the following user
-	// prompt carried at record time.
+	// shift; a repair-chain re-derivation re-inserts nothing. verdict
+	// stays NULL until settlement; next_verdict captures the cue-word
+	// judgment the following user prompt carried at record time.
+	// The conflict arm repairs placeholder rows: a backfill can record
+	// a still-running concurrent session's in-flight turn with an empty
+	// verdict and a partial evidence span. While the row is unsettled
+	// AND still un-judged (next_verdict '' or 'unknown'), the live
+	// path's record refreshes evidence and stamps the real judgment.
+	// A judged verdict ('accepted'/'revised') is never rewritten.
 	InsertTurnOutcome(ctx context.Context, arg InsertTurnOutcomeParams) error
 	// Stamp the artifact signals computable at episode-record time
 	// (#294/#340): the file's post-edit hash (diagnostic), the added-
@@ -189,6 +194,15 @@ type Querier interface {
 	// would settle diverged on missing paths, poisoning the partition
 	// they were never part of. A session with no project-keyed ledger
 	// row is thin mining material anyway.
+	// The second EXISTS makes the corpus convergent: a session needs
+	// the scan only while some real user turn lacks an outcome row.
+	// Fully scanned sessions exit, so each first turn drains un-covered
+	// history rather than sliding over the newest slice forever.
+	// Residual re-entries are bounded waste: a session whose pending
+	// turn is in-flight records it as a placeholder (the insert's
+	// conflict arm repairs verdict/evidence once its real next prompt
+	// lands), and a session whose last user message is a repair prompt
+	// -- excluded in Go, invisible to this predicate -- rescans.
 	ListRecentSessions(ctx context.Context, arg ListRecentSessionsParams) ([]ListRecentSessionsRow, error)
 	// Settled referent episodes in calibration form (#295/#340):
 	// settlement is the evidence predicate -- one fixed observation per
@@ -203,6 +217,9 @@ type Querier interface {
 	// project's own episodes in the prior and again as local mass
 	// roughly doubles their weight, which is least conservative
 	// exactly where data is scarcest (the single-project store).
+	// Admissibility mirrors the fold: a settled row that carried zero
+	// signal (unresolved cue, no survival read, no external commit) is
+	// not evidence either way -- settled_at alone never invents mass.
 	ListReferentPriorEvents(ctx context.Context, projectKey string) ([]ListReferentPriorEventsRow, error)
 	// Settled, not-yet-folded referent episodes (#296/#340), oldest
 	// first. Membership is the rate_folded mark, not an id watermark.

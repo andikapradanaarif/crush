@@ -33,11 +33,17 @@ const rateEventBatch = 64
 // ReferentEpisodeOutcome maps one settled episode onto +1 success or
 // +1 failure of referent acceptance — the single definition the fold,
 // the prior pool, and the LTT calibrator's harm metric all share, so
-// what the gate is certified on is what it gates on. Divergence wins
-// over commit evidence (#340): revised-then-committed is a revision,
-// not an acceptance — the artifact that matters is whether the edit's
-// lines survived, not whether a commit landed. With no survival read
-// the cue verdict carries the call.
+// what the gate is certified on is what it gates on. Evidence order is
+// artifact-first: the episode's claim is path-scoped ("did following
+// this suggestion to touch <target> pan out"), and the cue verdict is
+// turn-scoped — the next prompt's judgment of the whole turn, which may
+// object to a different file. So the file's own survival read decides
+// first, divergence beats commit (revised-then-committed is a
+// revision), a commit landing on the target path is cue-independent
+// acceptance evidence, and the cue breaks the tie only when the path
+// left no artifact. This intentionally inverts settleTurn's order:
+// there the cue is scoped to the unit being judged, so a revised
+// next-prompt leads. Same evidence, different claim scope.
 func ReferentEpisodeOutcome(verdict string, committed, hashChanged sql.NullInt64) (success bool) {
 	if hashChanged.Valid {
 		return hashChanged.Int64 == 0
@@ -46,6 +52,20 @@ func ReferentEpisodeOutcome(verdict string, committed, hashChanged sql.NullInt64
 		return true
 	}
 	return verdict == ReferentAccepted
+}
+
+// referentEpisodeAdmissible reports whether a settled row carries at
+// least one evidence signal — the predicate the rate/prior/
+// calibration consumers share. A row that settled with an unresolved
+// cue and no artifact read (committed=0 is "no commit observed," not
+// a signal) is zero-evidence: folding it would mint failure mass out
+// of nothing, the mirror violation of "missing evidence is never
+// acceptance." Inadmissible rows are still marked folded — they can
+// never gain signal after freezing, and unmarked they'd starve every
+// admissible row queued behind them.
+func referentEpisodeAdmissible(verdict string, committed, hashChanged sql.NullInt64) bool {
+	return verdict == ReferentAccepted || verdict == ReferentRevised ||
+		hashChanged.Valid || (committed.Valid && committed.Int64 == 1)
 }
 
 // UpdateProjectRates folds settled referent episodes into the
@@ -91,14 +111,26 @@ func (s *service) UpdateProjectRates(ctx context.Context, gamma float64) error {
 	// one-slot lastSession accepts rather than tracking a set.)
 	sessions := map[string][]db.ListReferentRateEventsRow{}
 	var order []string
+	var maxID int64
+	ids := make([]int64, 0, len(events))
 	for _, ev := range events {
+		// Every listed row is marked folded — admissible or not — so
+		// zero-signal rows can't sit at the head of the queue and
+		// starve the evidence behind them. But inadmissible rows
+		// contribute no event and no session boundary: they mint
+		// neither success nor failure.
+		ids = append(ids, ev.ID)
+		if ev.ID > maxID {
+			maxID = ev.ID
+		}
+		if !referentEpisodeAdmissible(ev.Verdict, ev.LabelCommitted, ev.LabelHashChanged) {
+			continue
+		}
 		if _, ok := sessions[ev.SessionID]; !ok {
 			order = append(order, ev.SessionID)
 		}
 		sessions[ev.SessionID] = append(sessions[ev.SessionID], ev)
 	}
-	var maxID int64
-	ids := make([]int64, 0, len(events))
 	for _, sid := range order {
 		// Discount once per evidence-bearing session boundary:
 		// sessions are the evidence unit, not episodes. Sessions
@@ -119,10 +151,6 @@ func (s *service) UpdateProjectRates(ctx context.Context, gamma float64) error {
 				alpha++
 			} else {
 				beta++
-			}
-			ids = append(ids, ev.ID)
-			if ev.ID > maxID {
-				maxID = ev.ID
 			}
 		}
 	}

@@ -174,10 +174,17 @@ func (q *Queries) InsertReferentEpisode(ctx context.Context, arg InsertReferentE
 }
 
 const insertTurnOutcome = `-- name: InsertTurnOutcome :exec
-INSERT OR IGNORE INTO turn_outcomes
+INSERT INTO turn_outcomes
     (session_id, turn_id, project_key, edited_paths, edit_hunks,
      commands, next_verdict, settle_at, param_version, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(session_id, turn_id) DO UPDATE SET
+    next_verdict  = excluded.next_verdict,
+    edited_paths  = excluded.edited_paths,
+    edit_hunks    = excluded.edit_hunks,
+    commands      = excluded.commands
+WHERE turn_outcomes.settled_at IS NULL
+    AND turn_outcomes.next_verdict IN ('', 'unknown')
 `
 
 type InsertTurnOutcomeParams struct {
@@ -196,10 +203,15 @@ type InsertTurnOutcomeParams struct {
 // Open one turn's outcome row (#340), idempotent on the
 // (session_id, turn_id) unique key -- turn_id is the turn's
 // user-message ID, stable under compaction where an ordinal would
-// shift; a repair-chain re-derivation or a backfill racing a live
-// write re-inserts nothing. verdict stays NULL until settlement;
-// next_verdict captures the cue-word judgment the following user
-// prompt carried at record time.
+// shift; a repair-chain re-derivation re-inserts nothing. verdict
+// stays NULL until settlement; next_verdict captures the cue-word
+// judgment the following user prompt carried at record time.
+// The conflict arm repairs placeholder rows: a backfill can record
+// a still-running concurrent session's in-flight turn with an empty
+// verdict and a partial evidence span. While the row is unsettled
+// AND still un-judged (next_verdict ” or 'unknown'), the live
+// path's record refreshes evidence and stamps the real judgment.
+// A judged verdict ('accepted'/'revised') is never rewritten.
 func (q *Queries) InsertTurnOutcome(ctx context.Context, arg InsertTurnOutcomeParams) error {
 	_, err := q.exec(ctx, q.insertTurnOutcomeStmt, insertTurnOutcome,
 		arg.SessionID,
@@ -292,7 +304,10 @@ WHERE project_key = ?
          OR cmd_norm LIKE '%&& git commit%'
          OR cmd_norm LIKE '%; git commit%'
          OR cmd_norm LIKE '%|| git commit%'
-         OR cmd_norm LIKE 'git -C % commit%')
+         OR cmd_norm LIKE 'git -C % commit%'
+         OR cmd_norm LIKE 'git -c %commit%'
+         OR cmd_norm LIKE 'git --git-dir%commit%'
+         OR cmd_norm LIKE '%=% git commit%')
     AND last_at >= ? AND last_at <= ?
 `
 
@@ -516,6 +531,12 @@ WHERE s.id != ? AND s.parent_session_id IS NULL
         UNION
         SELECT 1 FROM referent_episodes re2
           WHERE re2.session_id = s.id AND re2.project_key = ?)
+    AND EXISTS (SELECT 1 FROM messages m
+                WHERE m.session_id = s.id AND m.role = 'user'
+                  AND m.is_summary_message = 0
+                  AND NOT EXISTS (SELECT 1 FROM turn_outcomes t
+                                  WHERE t.session_id = s.id
+                                    AND t.turn_id = m.id))
 ORDER BY created_at DESC
 LIMIT ?
 `
@@ -543,6 +564,15 @@ type ListRecentSessionsRow struct {
 // would settle diverged on missing paths, poisoning the partition
 // they were never part of. A session with no project-keyed ledger
 // row is thin mining material anyway.
+// The second EXISTS makes the corpus convergent: a session needs
+// the scan only while some real user turn lacks an outcome row.
+// Fully scanned sessions exit, so each first turn drains un-covered
+// history rather than sliding over the newest slice forever.
+// Residual re-entries are bounded waste: a session whose pending
+// turn is in-flight records it as a placeholder (the insert's
+// conflict arm repairs verdict/evidence once its real next prompt
+// lands), and a session whose last user message is a repair prompt
+// -- excluded in Go, invisible to this predicate -- rescans.
 func (q *Queries) ListRecentSessions(ctx context.Context, arg ListRecentSessionsParams) ([]ListRecentSessionsRow, error) {
 	rows, err := q.query(ctx, q.listRecentSessionsStmt, listRecentSessions,
 		arg.ID,
@@ -578,6 +608,9 @@ SELECT id, phrase, target, session_id, verdict, label_committed,
 FROM referent_episodes
 WHERE project_key = ?
     AND settled_at IS NOT NULL
+    AND (verdict IN ('accepted', 'revised')
+         OR label_hash_changed IS NOT NULL
+         OR label_committed = 1)
 ORDER BY id ASC
 `
 
@@ -636,6 +669,9 @@ SELECT verdict, label_committed, label_hash_changed
 FROM referent_episodes
 WHERE project_key != ?
     AND settled_at IS NOT NULL
+    AND (verdict IN ('accepted', 'revised')
+         OR label_hash_changed IS NOT NULL
+         OR label_committed = 1)
 `
 
 type ListReferentPriorEventsRow struct {
@@ -649,6 +685,9 @@ type ListReferentPriorEventsRow struct {
 // project's own episodes in the prior and again as local mass
 // roughly doubles their weight, which is least conservative
 // exactly where data is scarcest (the single-project store).
+// Admissibility mirrors the fold: a settled row that carried zero
+// signal (unresolved cue, no survival read, no external commit) is
+// not evidence either way -- settled_at alone never invents mass.
 func (q *Queries) ListReferentPriorEvents(ctx context.Context, projectKey string) ([]ListReferentPriorEventsRow, error) {
 	rows, err := q.query(ctx, q.listReferentPriorEventsStmt, listReferentPriorEvents, projectKey)
 	if err != nil {
@@ -1218,7 +1257,7 @@ func (q *Queries) MergeFailureFirstSeen(ctx context.Context, arg MergeFailureFir
 }
 
 const nextSessionStartMillis = `-- name: NextSessionStartMillis :one
-SELECT MIN(s.created_at) * 1000 FROM sessions s
+SELECT CAST(COALESCE(MIN(s.created_at) * 1000, 0) AS INTEGER) FROM sessions s
 WHERE s.created_at * 1000 > ? AND s.id != ? AND s.parent_session_id IS NULL
     AND EXISTS (
         SELECT 1 FROM command_memory cm

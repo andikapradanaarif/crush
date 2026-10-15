@@ -48,17 +48,21 @@ func (a *sessionAgent) recordTurnOutcome(ctx context.Context, call SessionAgentC
 	if a.cmdlog == nil || a.isSubAgent || call.RepairAttempts > 0 || call.Prompt == "" {
 		return
 	}
-	lastUser := lastRealUserIdx(msgs)
+	lastUser := lastRealUserIdx(msgs, call.currentUserMsgID)
 	if lastUser < 0 {
 		// Two distinct shapes land here. A genuinely new session's
 		// first turn triggers the corpus backfill. A compacted
 		// session's first post-summary turn has no real user message
 		// left in the tail — the judged turn lives before the
 		// summary, so the full transcript locates it and this prompt
-		// still supplies its verdict.
+		// still supplies its verdict. The fresh List returns the
+		// in-flight prompt too — it was persisted before msgs was
+		// sliced — so it must be excluded by ID: landing on it would
+		// mint a phantom row keyed to this turn's own message, and
+		// the unique key would then block the real evidence row.
 		if a.messages != nil {
 			if full, err := a.messages.List(ctx, call.SessionID); err == nil {
-				if idx := lastRealUserIdx(full); idx >= 0 {
+				if idx := lastRealUserIdx(full, call.currentUserMsgID); idx >= 0 {
 					o := a.extractTurnOutcome(ctx, call.SessionID, full, idx)
 					o.NextVerdict = referentJudgedVerdict(call.Prompt)
 					if err := a.cmdlog.RecordTurnOutcome(ctx, o); err != nil {
@@ -83,9 +87,16 @@ func (a *sessionAgent) recordTurnOutcome(ctx context.Context, call SessionAgentC
 }
 
 // lastRealUserIdx returns the index of the last turn boundary in ms
-// — repair prompts and the rewritten summary message don't count.
-func lastRealUserIdx(ms []message.Message) int {
+// — repair prompts, the rewritten summary message, and the
+// in-flight prompt itself (excludeID) don't count. The live tail
+// predates this run's prompt so the exclusion is a no-op there; the
+// full-transcript fallback reads storage after the prompt persists
+// and needs it.
+func lastRealUserIdx(ms []message.Message, excludeID string) int {
 	for i := len(ms) - 1; i >= 0; i-- {
+		if ms[i].ID == excludeID {
+			continue
+		}
 		if isRealUserMsg(ms[i]) {
 			return i
 		}

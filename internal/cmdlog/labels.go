@@ -130,39 +130,111 @@ func (s *service) SettleReferentLabels(ctx context.Context, limit int) error {
 	if err != nil || len(rows) == 0 {
 		return err
 	}
-	for _, r := range rows {
-		if err := s.settleReferent(ctx, r, now); err != nil {
+	// Commit evidence is prefetched for the whole batch: one git log
+	// over the union window plus one ledger read — not one exec per
+	// row. Each row still filters inside its own (created_at, winEnd].
+	winLo, winHi := now, int64(0)
+	winEnds := make([]int64, len(rows))
+	for i, r := range rows {
+		winEnds[i] = s.windowEnd(ctx, r.CreatedAt, r.SessionID, r.SettleAt)
+		if r.CreatedAt < winLo {
+			winLo = r.CreatedAt
+		}
+		if winEnds[i] > winHi {
+			winHi = winEnds[i]
+		}
+	}
+	ev := s.prefetchCommitEvidence(ctx, winLo, winHi)
+	for i, r := range rows {
+		if err := s.settleReferent(ctx, r, winEnds[i], ev, now); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// settleReferent computes and freezes one episode's label inside its
-// closed window.
-func (s *service) settleReferent(ctx context.Context, r db.ListUnsettledReferentLabelsRow, now int64) error {
-	// Window end: the earlier of the +24h cap and the next session's
-	// start. Rows predating the settle_at column carry 0 — treat the
-	// cap as created_at + 24h so their window still has a real edge.
-	cap := r.SettleAt
+// windowEnd computes a row's inner window edge — the earlier of the
+// +24h cap and the next provable session's start. Rows predating the
+// settle_at column carry 0; the cap reconstructs as created_at+24h.
+func (s *service) windowEnd(ctx context.Context, createdAt int64, sessionID string, settleAt int64) int64 {
+	cap := settleAt
 	if cap <= 0 {
-		cap = r.CreatedAt + settleWindowMillis
+		cap = createdAt + settleWindowMillis
 	}
-	winEnd := cap
 	if next, err := s.q.NextSessionStartMillis(ctx, db.NextSessionStartMillisParams{
-		CreatedAt:    r.CreatedAt,
-		ID:           r.SessionID,
+		CreatedAt:    createdAt,
+		ID:           sessionID,
 		ProjectKey:   s.projectKey,
 		ProjectKey_2: s.projectKey,
 		ProjectKey_3: s.projectKey,
-	}); err == nil && next > 0 && next < winEnd {
-		winEnd = next
+	}); err == nil && next > 0 && next < cap {
+		return next
 	}
+	return cap
+}
 
+// commitEvidence is one settle batch's prefetched commit data: every
+// commit touching paths inside the union window, plus the
+// harness-recorded commit runs to exclude from it.
+type commitEvidence struct {
+	commits map[string][]int64
+	runs    []int64
+}
+
+// prefetchCommitEvidence fetches the batch's two evidence inputs in
+// one git call and one ledger read. Outside a repo both are empty —
+// every inWindow read is then simply false.
+func (s *service) prefetchCommitEvidence(ctx context.Context, winLo, winHi int64) commitEvidence {
+	ev := commitEvidence{}
+	if !s.hasRepo || winHi <= winLo {
+		return ev
+	}
+	ev.commits = s.commitsTouchingPaths(ctx,
+		time.UnixMilli(winLo).UTC().Format(time.RFC3339),
+		time.UnixMilli(winHi).UTC().Format(time.RFC3339))
+	runs, err := s.q.ListCrushCommitRuns(ctx, db.ListCrushCommitRunsParams{
+		ProjectKey: s.projectKey,
+		LastAt:     winLo - commitSkewMillis,
+		LastAt_2:   winHi + commitSkewMillis,
+	})
+	if err == nil {
+		ev.runs = runs
+	}
+	return ev
+}
+
+// inWindow reports whether any prefetched commit landing in
+// (createdAt, winEnd] touched one of paths, excluding commits the
+// harness itself made — a commit whose time sits within the skew
+// bound of a recorded run is agent-made, not user acceptance.
+// Timestamps mix units: git reports unix seconds, the ledger stores
+// millis — all comparisons happen in millis.
+func (ev commitEvidence) inWindow(paths []string, createdAt, winEnd int64) bool {
+	for _, p := range paths {
+		for _, ct := range ev.commits[p] {
+			ms := ct * 1000
+			// Fail closed on edges: a commit we cannot prove
+			// landed inside the window is not evidence, and a
+			// commit matching a harness run is not external.
+			if ms <= createdAt || ms > winEnd {
+				continue
+			}
+			if isHarnessCommit(ms, ev.runs) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// settleReferent computes and freezes one episode's label inside its
+// closed window.
+func (s *service) settleReferent(ctx context.Context, r db.ListUnsettledReferentLabelsRow, winEnd int64, ev commitEvidence, now int64) error {
 	var committed sql.NullInt64
 	if s.hasRepo {
 		committed = sql.NullInt64{Int64: 0, Valid: true}
-		if s.externalCommitInWindow(ctx, []string{r.Target}, r.CreatedAt, winEnd) {
+		if ev.inWindow([]string{r.Target}, r.CreatedAt, winEnd) {
 			committed.Int64 = 1
 		}
 	}
@@ -176,46 +248,6 @@ func (s *service) settleReferent(ctx context.Context, r db.ListUnsettledReferent
 		LabeledAt:        now,
 		ID:               r.ID,
 	})
-}
-
-// externalCommitInWindow reports whether any commit landing in
-// (createdAt, winEnd] touched one of paths, excluding commits the
-// harness itself made — command_memory records every `git commit`
-// crush ran, and a commit whose author time sits within the skew
-// bound of a recorded run is agent-made, not user acceptance.
-// Timestamps mix units: git reports unix seconds, the ledger stores
-// millis — all comparisons happen in millis.
-func (s *service) externalCommitInWindow(ctx context.Context, paths []string, createdAt, winEnd int64) bool {
-	commits := s.commitsTouchingPaths(ctx,
-		time.UnixMilli(createdAt).UTC().Format(time.RFC3339),
-		time.UnixMilli(winEnd).UTC().Format(time.RFC3339))
-	if len(commits) == 0 {
-		return false
-	}
-	runs, err := s.q.ListCrushCommitRuns(ctx, db.ListCrushCommitRunsParams{
-		ProjectKey: s.projectKey,
-		LastAt:     createdAt - commitSkewMillis,
-		LastAt_2:   winEnd + commitSkewMillis,
-	})
-	if err != nil {
-		runs = nil
-	}
-	for _, p := range paths {
-		for _, ct := range commits[p] {
-			ms := ct * 1000
-			// Fail closed on edges: a commit we cannot prove
-			// landed inside the window is not evidence, and a
-			// commit matching a harness run is not external.
-			if ms <= createdAt || ms > winEnd {
-				continue
-			}
-			if isHarnessCommit(ms, runs) {
-				continue
-			}
-			return true
-		}
-	}
-	return false
 }
 
 // isHarnessCommit reports whether commit ms (unix millis) sits within
@@ -247,6 +279,12 @@ func isHarnessCommit(ms int64, runs []int64) bool {
 func (s *service) hunkDiverged(target, addedJSON string) sql.NullInt64 {
 	var lines []string
 	if addedJSON == "" || json.Unmarshal([]byte(addedJSON), &lines) != nil || len(lines) == 0 {
+		return sql.NullInt64{}
+	}
+	if !workspacePathSafe(target) {
+		// An absolute or escaping path is out of scope, not deleted —
+		// abstain rather than minting diverged evidence for an edit
+		// outside this workspace.
 		return sql.NullInt64{}
 	}
 	data, ok := s.readWorkspaceFile(target)
@@ -321,18 +359,27 @@ func (s *service) fileHash(target string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// workspacePathSafe reports whether a stored target stays inside the
+// workspace — absolute and ../-escaping paths are refused. Settlement
+// distinguishes this from "file deleted": an out-of-scope path
+// abstains (NULL) rather than reading as diverged.
+func workspacePathSafe(target string) bool {
+	if target == "" {
+		return false
+	}
+	clean := filepath.Clean(filepath.FromSlash(target))
+	return !filepath.IsAbs(clean) && clean != ".." &&
+		!strings.HasPrefix(clean, ".."+string(filepath.Separator))
+}
+
 // readWorkspaceFile reads a workspace-relative path, refusing
 // escapes — label targets come from tool-call paths, and a stored
 // "../x" must not read outside.
 func (s *service) readWorkspaceFile(target string) ([]byte, bool) {
-	if target == "" {
+	if !workspacePathSafe(target) {
 		return nil, false
 	}
 	clean := filepath.Clean(filepath.FromSlash(target))
-	if filepath.IsAbs(clean) || clean == ".." ||
-		strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return nil, false
-	}
 	data, err := os.ReadFile(filepath.Join(s.workingDir, clean))
 	if err != nil {
 		return nil, false
@@ -367,7 +414,11 @@ func (s *service) sessionTestsGreen(ctx context.Context, sessionID string) sql.N
 // to that commit's unix-second timestamps — one git call for the
 // whole batch, bounded both ends (#340). Commit headers are
 // NUL-prefixed "\x00commit\t<sec>": filenames cannot contain NUL, so
-// a path literally named "commit <digits>" can never fake a boundary.
+// a path literally named "commit <digits>" can never fake a
+// boundary. git emits repo-root-relative paths while ledger targets
+// are workspace-relative — repoPrefix strips the prefix and drops
+// commits outside the workspace entirely (without it, commit
+// evidence is silently blind in a repo subdirectory).
 func (s *service) commitsTouchingPaths(ctx context.Context, sinceRFC3339, untilRFC3339 string) map[string][]int64 {
 	out := map[string][]int64{}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -389,6 +440,12 @@ func (s *service) commitsTouchingPaths(ctx context.Context, sinceRFC3339, untilR
 				ct = -1
 			}
 		case line != "" && ct >= 0:
+			if s.repoPrefix != "" {
+				if !strings.HasPrefix(line, s.repoPrefix) {
+					continue // committed path outside this workspace
+				}
+				line = strings.TrimPrefix(line, s.repoPrefix)
+			}
 			out[line] = append(out[line], ct)
 		}
 	}

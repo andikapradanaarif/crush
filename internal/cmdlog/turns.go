@@ -54,10 +54,14 @@ type TurnOutcome struct {
 	CreatedAt int64
 }
 
-// RecordTurnOutcome opens one turn's row, idempotent on
-// (session_id, turn_id). settle_at is the +24h cap off the turn's
-// own timestamp; the newer-session trigger is evaluated at settle
-// time.
+// RecordTurnOutcome opens one turn's row on (session_id, turn_id).
+// settle_at is the +24h cap off the turn's own timestamp; the
+// newer-session trigger is evaluated at settle time. A conflict on
+// an unsettled, still-unjudged row (next_verdict ” or 'unknown')
+// refreshes verdict and evidence — the backfill can mint a
+// placeholder for a concurrent session's in-flight turn, and the
+// real prompt's record must repair it. A judged verdict or a frozen
+// row is never rewritten.
 func (s *service) RecordTurnOutcome(ctx context.Context, o TurnOutcome) error {
 	if o.SessionID == "" || o.TurnID == "" {
 		return nil
@@ -133,8 +137,22 @@ func (s *service) SettleTurnOutcomes(ctx context.Context, limit int) error {
 	if err != nil {
 		return err
 	}
-	for _, r := range rows {
-		if err := s.settleTurn(ctx, r, now); err != nil {
+	// Same batching as the episode pass: one git log + one ledger
+	// read over the union window, then per-row filtering.
+	winLo, winHi := now, int64(0)
+	winEnds := make([]int64, len(rows))
+	for i, r := range rows {
+		winEnds[i] = s.windowEnd(ctx, r.CreatedAt, r.SessionID, r.SettleAt)
+		if r.CreatedAt < winLo {
+			winLo = r.CreatedAt
+		}
+		if winEnds[i] > winHi {
+			winHi = winEnds[i]
+		}
+	}
+	ev := s.prefetchCommitEvidence(ctx, winLo, winHi)
+	for i, r := range rows {
+		if err := s.settleTurn(ctx, r, winEnds[i], ev, now); err != nil {
 			return err
 		}
 	}
@@ -142,11 +160,16 @@ func (s *service) SettleTurnOutcomes(ctx context.Context, limit int) error {
 }
 
 // settleTurn computes one row's verdict inside its closed window and
-// freezes it. The order encodes the review's rules: divergence (or an
-// explicit revision cue) beats commit evidence; a red session-end
-// test state fails a turn whose edits survived; acceptance requires
-// survival or external-commit evidence — never a default.
-func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomesRow, now int64) error {
+// freezes it. The order encodes the review's rules: a revision cue
+// leads — it is scoped to this very turn, so it judges the unit the
+// row certifies — and divergence shares the failure arm; a red
+// session-end test state fails a turn whose edits survived;
+// acceptance requires survival or external-commit evidence — never a
+// default. ReferentEpisodeOutcome intentionally inverts the cue-vs-
+// artifact order: an episode's claim is path-scoped, so the file's
+// own survival/commit evidence outranks a cue that may object to a
+// different file in the same turn.
+func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomesRow, winEnd int64, ev commitEvidence, now int64) error {
 	var paths []string
 	var hunks map[string][]string
 	var cmds []string
@@ -155,17 +178,6 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 	_ = json.Unmarshal([]byte(r.EditedPaths), &paths)
 	_ = json.Unmarshal([]byte(r.EditHunks), &hunks)
 	_ = json.Unmarshal([]byte(r.Commands), &cmds)
-
-	winEnd := r.SettleAt
-	if next, err := s.q.NextSessionStartMillis(ctx, db.NextSessionStartMillisParams{
-		CreatedAt:    r.CreatedAt,
-		ID:           r.SessionID,
-		ProjectKey:   s.projectKey,
-		ProjectKey_2: s.projectKey,
-		ProjectKey_3: s.projectKey,
-	}); err == nil && next > 0 && next < winEnd {
-		winEnd = next
-	}
 
 	diverged := false
 	survivable := false
@@ -180,7 +192,7 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 		}
 	}
 	committed := s.hasRepo && len(paths) > 0 &&
-		s.externalCommitInWindow(ctx, paths, r.CreatedAt, winEnd)
+		ev.inWindow(paths, r.CreatedAt, winEnd)
 	green := s.sessionTestsGreen(ctx, r.SessionID)
 
 	var verdict string

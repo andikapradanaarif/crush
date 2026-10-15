@@ -138,6 +138,13 @@ type SessionAgentCall struct {
 	// paths treat as covered by any present mark, preserving the
 	// pre-sequence behavior.
 	acceptSeq uint64
+	// currentUserMsgID is the persisted initiating user message's ID,
+	// stamped by Run after createUserMessage (#340): prior-turn
+	// bookkeeping re-reads the transcript AFTER the prompt persists, so
+	// a fresh List returns the in-flight prompt itself — it must be
+	// excluded or it mints a phantom turn that pre-empts its own
+	// evidence row under the (session, turn_id) unique key.
+	currentUserMsgID string
 	// OnAuthRefresh, when non-nil, is called by fantasy when a stream
 	// fails with an authentication error (HTTP 401). The callback should
 	// refresh credentials and return nil on success, in which case
@@ -1280,11 +1287,12 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 	}
 
 	// Add the user message to the session.
-	_, err = a.createUserMessage(ctx, call)
+	userMsg, err := a.createUserMessage(ctx, call)
 	if err != nil {
 		return nil, nil, err
 	}
 	userMsgCreated = true
+	call.currentUserMsgID = userMsg.ID
 
 	// Snapshot the initiating user message's absolute ordinal for the
 	// edge-firing records — counted now, before folded queued prompts

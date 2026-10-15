@@ -308,6 +308,11 @@ type service struct {
 	// recognize stale keys that differ only in remote prefix (#266).
 	// Empty outside a repository.
 	commonDir string
+	// repoPrefix is the workspace's path inside its repo ("" at the
+	// root) — commit paths emit repo-root-relative while ledger
+	// targets are workspace-relative, so evidence reads strip it.
+	// Empty outside a repository.
+	repoPrefix string
 	// openFailureTTL is the read-side staleness bound for open
 	// failures; 0 disables the filter.
 	openFailureTTL time.Duration
@@ -372,13 +377,14 @@ func NewService(q *db.Queries, workingDir string, p params.Memory, opts ...Optio
 		workingDir = filepathext.Canonical(abs)
 	}
 	p = p.OrDefault()
-	projectKey, commonDir, hasRepo := computeProjectKey(workingDir)
+	projectKey, commonDir, repoPrefix, hasRepo := computeProjectKey(workingDir)
 	s := &service{
 		q:              q,
 		workingDir:     workingDir,
 		openFailureTTL: p.OpenFailureTTL,
 		projectKey:     projectKey,
 		commonDir:      commonDir,
+		repoPrefix:     repoPrefix,
 		hasRepo:        hasRepo,
 		paramVersion:   p.Version(),
 		suggested:      map[string]map[string]struct{}{},
@@ -805,12 +811,17 @@ func (s *service) ParamVersion() string {
 // Also returns the common-dir component — the repo's anchor identity,
 // empty outside a repository — and whether a repo exists, so
 // RecordRun can skip the per-run rev-parse where it would fail.
-func computeProjectKey(workingDir string) (key, commonDir string, hasRepo bool) {
+// Also returns repoPrefix — the workspace's path inside the repo
+// ("" at the root, "sub/dir/" deeper) — because `git log
+// --name-only` emits repo-root-relative paths while the ledger's
+// targets are workspace-relative; commit evidence is blind without
+// the strip.
+func computeProjectKey(workingDir string) (key, commonDir, repoPrefix string, hasRepo bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	common, err := gitOut(ctx, workingDir, "rev-parse", "--git-common-dir")
 	if err != nil || common == "" {
-		return filepathext.Canonical(workingDir), "", false
+		return filepathext.Canonical(workingDir), "", "", false
 	}
 	if !filepath.IsAbs(common) {
 		common = filepath.Join(workingDir, common)
@@ -819,7 +830,8 @@ func computeProjectKey(workingDir string) (key, commonDir string, hasRepo bool) 
 	if remote, err := gitOut(ctx, workingDir, "remote", "get-url", "origin"); err == nil && remote != "" {
 		key = normalizeRemote(remote) + "|" + key
 	}
-	return key, filepathext.Canonical(common), true
+	prefix, _ := gitOut(ctx, workingDir, "rev-parse", "--show-prefix")
+	return key, filepathext.Canonical(common), filepath.ToSlash(strings.TrimSpace(prefix)), true
 }
 
 // ProjectKeyForDir derives the partition identity a DB opened under
@@ -827,7 +839,7 @@ func computeProjectKey(workingDir string) (key, commonDir string, hasRepo bool) 
 // so offline readers (the LTT calibrator, #295) can query a project's
 // rows without constructing a service.
 func ProjectKeyForDir(workingDir string) string {
-	key, _, _ := computeProjectKey(workingDir)
+	key, _, _, _ := computeProjectKey(workingDir)
 	return key
 }
 

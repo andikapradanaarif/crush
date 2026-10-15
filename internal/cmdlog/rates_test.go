@@ -134,6 +134,32 @@ func TestUpdateProjectRates_OutcomeDirections(t *testing.T) {
 	require.InDelta(t, boundFor(10, 10), BetaQuantile(11, 11, 0.1), 1e-6)
 }
 
+// A settled row with zero signal — unresolved cue, no survival read,
+// no external commit — is marked folded (it can never gain evidence)
+// but mints neither success nor failure, and doesn't starve the
+// admissible rows queued behind it.
+func TestUpdateProjectRates_ZeroSignalRowsSkip(t *testing.T) {
+	t.Parallel()
+	env := setupRatesTest(t, "pk")
+	// Zero-signal rows first in created order — they'd starve an
+	// admissible tail forever if the fold didn't still mark them.
+	for i := range 4 {
+		seedRateEpisode(t, env, "pk", "s1", "z"+itoa(i), ReferentUnknown,
+			sql.NullInt64{}, sql.NullInt64{})
+	}
+	seedRateEpisode(t, env, "pk", "s2", "ok", ReferentAccepted,
+		sql.NullInt64{}, sql.NullInt64{})
+
+	require.NoError(t, env.svc.UpdateProjectRates(t.Context(), 0.95))
+	alpha, beta, _ := storedRate(t, env, "pk")
+	require.Equal(t, 1.0, alpha, "only the admissible row counted")
+	require.Equal(t, 0.0, beta, "zero-evidence rows mint no failure mass")
+	var unfolded int64
+	require.NoError(t, env.conn.QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM referent_episodes WHERE rate_folded = 0`).Scan(&unfolded))
+	require.Zero(t, unfolded, "marked folded — inadmissible rows never re-scan")
+}
+
 // Decay lands once per distinct session — both within one fold and
 // across fold boundaries (the last_session_id cursor).
 func TestUpdateProjectRates_DecayAcrossSessions(t *testing.T) {

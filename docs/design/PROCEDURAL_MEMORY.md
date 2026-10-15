@@ -74,8 +74,11 @@ rarely takes. Mining needs a label at the unit it clusters:
 
 `turn_outcomes` (built under #340, this channel's G1 gate):
 
-- **Unit:** one row per (session, user-turn-index), recording the
-  turn's edited-file set and command list.
+- **Unit:** one row per (session, turn's user-message ID) — the
+  boundary message is the key, stable under compaction where a
+  slice-relative index would shift between the live tail and the
+  full-transcript backfill. Recording the turn's edited-file set,
+  added-line fingerprints, and command list.
 - **Settled once**, at a fixed window: the start of the next session
   provably in the project, or created_at + 24h, whichever comes
   first. `sessions` carries no project column, so membership is
@@ -88,15 +91,34 @@ rarely takes. Mining needs a label at the unit it clusters:
   from the loop review).
 - **Survival per hunk:** the diff hunks the turn's edits produced,
   checked line-presence at settlement — unrelated edits elsewhere in
-  the same file do not count as divergence.
+  the same file do not count as divergence. Both sides normalize to
+  trimmed non-empty unique lines (fingerprints store trimmed text,
+  so the file side must match or indented code reads diverged).
+  Out-of-workspace paths abstain (NULL) — distinct from an in-scope
+  deleted file, which is real divergence.
 - **Commit evidence filtered:** commits made *by* crush (recorded in
-  `command_memory` with timestamps) do not count toward acceptance.
-  User-side commit inside the window is a positive signal only when
-  no divergence precedes it (revised-then-committed is a revision).
+  `command_memory` with timestamps, including `&&`/`;`/`||` chains
+  and `git -C`/`-c`/`--git-dir` forms) do not count toward
+  acceptance. User-side commit inside the window is a positive
+  signal only when no divergence precedes it (revised-then-committed
+  is a revision). Evidence is prefetched per settle batch — one git
+  log over the union window — and paths strip the repo prefix, so
+  workspaces in repo subdirectories still see their commits.
 - **Verdict vocabulary:** `accepted` | `revised` | `failed` |
   `unknown`. `tests_green` at session end and absence of a
   revision-cue verdict on the *next* user turn feed the decision.
   Unobservable cases land `unknown`, never default-accepted.
+- **Live prompt excluded:** the initiating user message persists
+  before the record pass reads the transcript, so the pass carries
+  its ID and skips it — otherwise the in-flight prompt mints a
+  phantom turn whose unique key blocks its own evidence row.
+- **Backfill placeholders repair:** a concurrent session's in-flight
+  final turn backfills with an empty verdict; the insert's conflict
+  arm refreshes evidence and judgment while the row is unsettled and
+  unjudged (`next_verdict` `''`/`'unknown'`). A judged or frozen row
+  is never rewritten. The corpus itself is convergent: only sessions
+  with some unrecorded real user turn are scanned, so fully covered
+  history drains instead of re-sliding over the newest slice.
 
 Mining keeps only `accepted` turns (v1; `failed`/`revised` traces are
 logged for a later ReasoningBank-style pass). This is the label the

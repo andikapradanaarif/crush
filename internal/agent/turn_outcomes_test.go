@@ -236,13 +236,50 @@ func TestRecordTurnOutcome_PostCompactionTail(t *testing.T) {
 		ID: "sum", Role: message.User, IsSummaryMessage: true,
 		Parts: []message.ContentPart{message.TextContent{Text: "summary"}},
 	}}
-	a.recordTurnOutcome(t.Context(),
-		SessionAgentCall{SessionID: sess.ID, Prompt: "looks right"}, tail)
+	// Production ordering: createUserMessage persists the prompt
+	// BEFORE the record pass runs, so the fallback's fresh List sees
+	// it — the call carries its ID so the scan can exclude it.
+	inflight, err := env.messages.Create(t.Context(), sess.ID, message.CreateMessageParams{
+		Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "looks right"}},
+	})
+	require.NoError(t, err)
+	a.recordTurnOutcome(t.Context(), SessionAgentCall{
+		SessionID: sess.ID, Prompt: "looks right", currentUserMsgID: inflight.ID,
+	}, tail)
 
 	has, err := a.cmdlog.HasTurnOutcome(t.Context(), sess.ID, userID)
 	require.NoError(t, err)
 	require.True(t, has,
 		"the pre-summary judged turn records with this prompt as its verdict")
+	has, err = a.cmdlog.HasTurnOutcome(t.Context(), sess.ID, inflight.ID)
+	require.NoError(t, err)
+	require.False(t, has,
+		"the in-flight prompt is not a judged turn — no phantom row")
+}
+
+// The in-flight prompt is persisted before the record pass reads the
+// transcript — without the exclusion the fallback lands on it and
+// mints a phantom row whose key then blocks the real evidence row.
+// A first-turn session has no judged turn: no row, only the backfill.
+func TestRecordTurnOutcome_InFlightPromptExcluded(t *testing.T) {
+	t.Parallel()
+	a, env := referentAgent(t)
+
+	sess, err := env.sessions.Create(t.Context(), "s-new")
+	require.NoError(t, err)
+	inflight, err := env.messages.Create(t.Context(), sess.ID, message.CreateMessageParams{
+		Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "first prompt"}},
+	})
+	require.NoError(t, err)
+
+	a.recordTurnOutcome(t.Context(), SessionAgentCall{
+		SessionID: sess.ID, Prompt: "first prompt", currentUserMsgID: inflight.ID,
+	}, nil)
+
+	has, err := a.cmdlog.HasTurnOutcome(t.Context(), sess.ID, inflight.ID)
+	require.NoError(t, err)
+	require.False(t, has,
+		"turn 1's own prompt is not a judged turn — the phantom never mints")
 }
 
 // A delegated turn's evidence lives in the child session's
