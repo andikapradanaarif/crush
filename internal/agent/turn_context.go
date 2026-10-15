@@ -350,7 +350,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		// predicate checkable. An unarmed agent still clears a stale
 		// audit from an earlier Run in the same process.
 		if a.tailArmed() {
-			a.recordTailAudit(call, nil, "", memoryDecisions, fetchErr, "", resolverOutcome)
+			a.recordTailAudit(call, nil, "", memoryDecisions, fetchErr, "", resolverOutcome, rateGate)
 		} else if a.tailAudit != nil {
 			a.tailAudit.Del(call.SessionID)
 			if a.tailRuns != nil {
@@ -365,7 +365,7 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		"sections", len(sections),
 		"bytes", len(text),
 	)
-	a.recordTailAudit(call, sections, text, memoryDecisions, fetchErr, knowledgeFetchErr, resolverOutcome)
+	a.recordTailAudit(call, sections, text, memoryDecisions, fetchErr, knowledgeFetchErr, resolverOutcome, rateGate)
 	return []fantasy.Message{fantasy.NewUserMessage(text)}
 }
 
@@ -599,6 +599,36 @@ type TailAudit struct {
 	// this field exists for the case decisions can't show: the layer
 	// was consulted and produced nothing.
 	Resolver string `json:"resolver,omitempty"`
+	// ReferentGate is the #296 rate gate's decision for this turn
+	// (#341): bound, floor, and the closed-vocabulary verdict. Nil
+	// when the gate never ran — floor disabled, non-vague prompt,
+	// no referent phrase — so the absent/ran distinction stays
+	// legible (same engagement discipline as Resolver).
+	ReferentGate *TailReferentGate `json:"referent_gate,omitempty"`
+}
+
+// TailReferentGate mirrors the rate gate's audit record onto the
+// tail (#341): the posterior bound the gate computed, the floor it
+// compared against, the closed-vocabulary verdict, and the decision
+// propensity — 1.0 today since the gate is deterministic, the field
+// exists so a future randomized layer (#297) stamps the true
+// selection probability instead of retrofitting the audit contract.
+type TailReferentGate struct {
+	// Reason is the closed vocabulary: "admit" (bound cleared the
+	// floor — the candidate fetch ran), "rate_below_floor" (the
+	// veto: bound computed and below floor), or "gate_error" (the
+	// bound could not be computed — the incumbent fetch ran, so
+	// nothing was vetoed but the abstention is recorded).
+	Reason string `json:"reason"`
+	// Bound is the posterior lower bound the gate computed; zero on
+	// a gate_error since no bound exists.
+	Bound float64 `json:"bound,omitempty"`
+	// Floor is the configured render threshold in force.
+	Floor float64 `json:"floor"`
+	// Propensity is the logging-policy probability of this verdict —
+	// deterministic today, recorded so the audit shape survives
+	// randomized gating.
+	Propensity float64 `json:"propensity"`
 }
 
 var tailSectionNameRe = regexp.MustCompile(`^<(\w+)>`)
@@ -616,7 +646,9 @@ func tailSectionName(s string) string {
 // tailAudit is last-write-wins per session — the telemetry reads the
 // latest render — while tailRuns keeps every Run's audit so a
 // turn's repair-chain renders stay individually inspectable (#249).
-func (a *sessionAgent) recordTailAudit(call SessionAgentCall, sections []string, text string, decisions []FailureDecision, fetchErr error, knowledgeErr string, resolverOutcome string) {
+// rateGate is the referent channel's rate-gate decision this render —
+// nil when the gate never ran, stamped verbatim otherwise (#341).
+func (a *sessionAgent) recordTailAudit(call SessionAgentCall, sections []string, text string, decisions []FailureDecision, fetchErr error, knowledgeErr string, resolverOutcome string, rateGate *rateGateDecision) {
 	if a.tailAudit == nil || call.SessionID == "" {
 		return
 	}
@@ -629,6 +661,7 @@ func (a *sessionAgent) recordTailAudit(call SessionAgentCall, sections []string,
 		RunStamp:       call.RunStamp,
 		RepairAttempts: call.RepairAttempts,
 		Resolver:       resolverOutcome,
+		ReferentGate:   rateGate.tailStamp(),
 	}
 	if fetchErr != nil {
 		audit.FetchError = fetchErr.Error()

@@ -381,6 +381,20 @@ func tailResolverRenders(r *RunRecord, outcome string) float64 {
 	return float64(n)
 }
 
+// tailReferentGateRenders counts tail_runs entries where the rate
+// gate's verdict was the given reason (#341) — same per-render
+// semantics as tailResolverRenders: a repair chain's replays each
+// record the gate's decision for that render.
+func tailReferentGateRenders(r *RunRecord, verdict string) float64 {
+	n := 0
+	for _, t := range r.TailRuns {
+		if t.ReferentGate != nil && t.ReferentGate.Reason == verdict {
+			n++
+		}
+	}
+	return float64(n)
+}
+
 // tailDecisionOutcomes mirrors the closed Outcome vocabulary in
 // agent/failure_select.go — the post-run stamp's per-pool results.
 // "unexercised" is the command pool's honest negative: a selected
@@ -527,6 +541,17 @@ func init() {
 			return 0
 		}
 		return 1
+	}
+	// Referent rate gate (#341): tail.referent_gate.<verdict> counts
+	// tail_runs renders where the #296 gate decided — "admit" (bound
+	// cleared the floor), "rate_below_floor" (the veto), "gate_error"
+	// (bound uncomputable — incumbent ran, not a veto but recorded).
+	// Renders where the gate never ran carry no stamp and count
+	// under nothing — absent stays distinct from every verdict.
+	for _, verdict := range []string{"admit", "rate_below_floor", "gate_error"} {
+		armOnlyCoverageFields["tail.referent_gate."+verdict] = func(r *RunRecord) float64 {
+			return tailReferentGateRenders(r, verdict)
+		}
 	}
 	// Per-pool decision counts: tail.decisions.pool.<pool>[.admitted]
 	// — which memory channel each verdict came from, so a cell can

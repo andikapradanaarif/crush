@@ -327,6 +327,43 @@ type rateGateDecision struct {
 	err error
 }
 
+// Rate-gate verdicts — the closed vocabulary stamped on the tail's
+// ReferentGate record (#341). admit: the bound cleared the floor and
+// the candidate fetch ran; rateBelowFloor: the veto — a bound was
+// computed and fell below the floor; gateError: the bound could not
+// be computed and the incumbent fetch ran — not a veto, but recorded
+// so a degraded gate is countable rather than invisible.
+const (
+	rateGateAdmit      = "admit"
+	rateGateBelowFloor = "rate_below_floor"
+	rateGateError      = "gate_error"
+	rateGatePropensity = 1.0 // deterministic gate — the #297 contract slot
+)
+
+// tailStamp projects the decision onto the TailAudit record. Nil in,
+// nil out — a turn the gate never decided carries no stamp, which is
+// how records keep the absent/ran distinction legible.
+func (g *rateGateDecision) tailStamp() *TailReferentGate {
+	if g == nil {
+		return nil
+	}
+	stamp := &TailReferentGate{
+		Floor:      g.floor,
+		Propensity: rateGatePropensity,
+	}
+	switch {
+	case g.err != nil:
+		stamp.Reason = rateGateError
+	case g.gated:
+		stamp.Reason = rateGateBelowFloor
+		stamp.Bound = g.bound
+	default:
+		stamp.Reason = rateGateAdmit
+		stamp.Bound = g.bound
+	}
+	return stamp
+}
+
 // referentCandidates fetches promoted mappings for the turn's phrase
 // — the injection pool. A vague prompt is the only shape that carries
 // a referent phrase worth rendering, so the fetch gates on the same

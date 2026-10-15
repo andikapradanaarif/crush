@@ -744,6 +744,38 @@ func TestArmCoverage_TailResolver(t *testing.T) {
 	require.False(t, met)
 }
 
+// tail.referent_gate.* counts the #296 rate gate's per-render verdict
+// stamp (#341) — admits vs vetoes vs uncomputable bounds, so a gate
+// that suppressed reads as suppression instead of "no candidates".
+func TestArmCoverage_TailReferentGate(t *testing.T) {
+	t.Parallel()
+
+	rec := &RunRecord{
+		Tail: []TurnTail{{Turn: 1}},
+		TailRuns: []TurnTail{
+			{Turn: 0, ReferentGate: &TailReferentGate{Reason: "admit", Bound: 0.71, Floor: 0.6, Propensity: 1}},
+			{Turn: 0, ReferentGate: &TailReferentGate{Reason: "rate_below_floor", Bound: 0.4, Floor: 0.6, Propensity: 1}},
+			{Turn: 1}, // Gate never ran — no stamp, counts nowhere.
+		},
+	}
+	met, err := ArmCoverageMet(Coverage{"min_tail.referent_gate.admit": 1}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+	met, err = ArmCoverageMet(Coverage{"min_tail.referent_gate.rate_below_floor": 1}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+	met, err = ArmCoverageMet(Coverage{"min_tail.referent_gate.gate_error": 1}, rec)
+	require.NoError(t, err)
+	require.False(t, met)
+	// A verdict outside the closed set fails parse.
+	_, err = ArmCoverageMet(Coverage{"min_tail.referent_gate.bogus": 1}, rec)
+	require.Error(t, err)
+	// No envelopes at all fails closed.
+	met, err = ArmCoverageMet(Coverage{"max_tail.referent_gate.gate_error": 0}, &RunRecord{})
+	require.NoError(t, err)
+	require.False(t, met)
+}
+
 // tail.decisions.engaged / .outcome.* count the #221 post-run
 // stamps — which shown candidates the chain's actions touched, and
 // the ledger's verdict for each decision once the run's runs landed.
@@ -1021,6 +1053,29 @@ func TestValidateExperiment_ArmCoverageStarvation(t *testing.T) {
 		Coverage: Coverage{"min_tail.resolver.resolved": 1},
 	}
 	require.NoError(t, ValidateExperiment(exp))
+
+	// tail.referent_gate.* needs the referent channel armed — an
+	// unarmed arm emits no gate verdicts and starves (#341).
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"referent_memory": false}},
+		Coverage: Coverage{"min_tail.referent_gate.admit": 1},
+	}
+	require.Error(t, ValidateExperiment(exp))
+	exp.Arms[ArmTreatment] = Arm{
+		Config:   ArmConfig{Options: map[string]any{"referent_memory": true}},
+		Coverage: Coverage{"min_tail.referent_gate.admit": 1},
+	}
+	require.NoError(t, ValidateExperiment(exp))
+	// An explicit floor=0 disables the gate outright — stamps can
+	// never exist there either.
+	exp.Arms[ArmTreatment] = Arm{
+		Config: ArmConfig{Options: map[string]any{
+			"referent_memory": true,
+			"memory_params":   map[string]any{"referent_rate_floor": 0},
+		}},
+		Coverage: Coverage{"min_tail.referent_gate.admit": 1},
+	}
+	require.Error(t, ValidateExperiment(exp))
 
 	// The knowledge envelopes ride the same gate — they render only
 	// under failure_memory.
