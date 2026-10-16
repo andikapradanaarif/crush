@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -471,7 +472,7 @@ func (s *service) reclaimSiblingPartitions(ctx context.Context) error {
 		return err
 	}
 	stale := map[string]struct{}{}
-	for _, k := range append(fKeys, append(cKeys, ccKeys...)...) {
+	for _, k := range slices.Concat(fKeys, cKeys, ccKeys) {
 		if k != s.projectKey && s.siblingKey(k) {
 			stale[k] = struct{}{}
 		}

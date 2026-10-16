@@ -28,4 +28,3 @@ UPDATE OR IGNORE crush_commits SET project_key = ? WHERE project_key = ?;
 SELECT repo_state FROM command_memory
 WHERE project_key = ? AND repo_state != ''
 ORDER BY last_at DESC, rowid DESC LIMIT 1;
-
