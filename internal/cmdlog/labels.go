@@ -463,8 +463,14 @@ func (s *service) sessionTestsGreen(ctx context.Context, sessionID string) sql.N
 // boundary. git emits repo-root-relative paths while ledger targets
 // are workspace-relative — repoPrefix strips the prefix and drops
 // commits outside the workspace entirely (without it, commit
-// evidence is silently blind in a repo subdirectory). Known miss:
-// git C-quotes paths with tabs/newlines/non-ASCII (core.quotePath)
+// evidence is silently blind in a repo subdirectory). --all covers
+// commits on every reachable ref, not just the checked-out HEAD, so
+// a user commit made on another branch inside the window still
+// counts (#360) — bounded the same way by since/until. Known
+// misses: worktrees sharing one data_directory still read evidence
+// from whichever checkout a worktree's HEAD points at (partition-
+// vs-checkout mismatch is a design problem, not a patch); and git
+// C-quotes paths with tabs/newlines/non-ASCII (core.quotePath)
 // while the ledger stores them raw, so commit evidence silently
 // misses for such files — a `-c core.quotePath=false -z` read is the
 // fix if the class ever matters.
@@ -472,7 +478,7 @@ func (s *service) commitsTouchingPaths(ctx context.Context, sinceRFC3339, untilR
 	out := map[string][]int64{}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	raw, err := gitOut(ctx, s.workingDir, "log",
+	raw, err := gitOut(ctx, s.workingDir, "log", "--all",
 		"--since="+sinceRFC3339, "--until="+untilRFC3339,
 		"--format=%x00commit%x09%ct", "--name-only")
 	if err != nil {
