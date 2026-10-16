@@ -367,8 +367,9 @@ type Querier interface {
 	// a stale sibling key ride the same sweep command_memory takes --
 	// left behind, they orphan and every one of those commits reads as
 	// external acceptance forever. OR IGNORE covers the (project_key,
-	// sha) twin: a commit both eras attributed collapses onto the
-	// current key's row.
+	// sha) twin: the current key's row wins and the stale-keyed row is
+	// skipped, left dead under the old key -- reads are key-scoped, so
+	// the residue is inert.
 	RekeyCrushCommits(ctx context.Context, arg RekeyCrushCommitsParams) error
 	// Claim one legacy row onto its partitioned signature.
 	RekeyFailurePartition(ctx context.Context, arg RekeyFailurePartitionParams) error

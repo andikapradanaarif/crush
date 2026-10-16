@@ -174,9 +174,10 @@ func (s *service) windowEnd(ctx context.Context, createdAt int64, sessionID stri
 // commitRef is one commit inside the observation window: its object
 // id for crush-made exclusion and its committer time (%ct — the
 // right clock for evidence windows; author time can backdate).
+// ct is unix SECONDS — windows and ledger stamps are millis.
 type commitRef struct {
 	sha string
-	at  int64
+	ct  int64
 }
 
 // commitEvidence is one settle batch's prefetched commit data: every
@@ -241,7 +242,7 @@ func (ev commitEvidence) inWindow(paths []string, createdAt, winEnd int64) bool 
 		// filepath.Rel emitted backslashes) — git paths are always
 		// slash-separated.
 		for _, c := range ev.commits[filepath.ToSlash(p)] {
-			ms := c.at * 1000
+			ms := c.ct * 1000
 			// Fail closed on edges: a commit we cannot prove
 			// landed inside the window is not evidence, and a
 			// commit the harness made is not external.
@@ -473,7 +474,7 @@ func (s *service) commitsTouchingPaths(ctx context.Context, sinceRFC3339, untilR
 			fields := strings.Split(strings.TrimPrefix(line, "\x00commit\x09"), "\t")
 			if len(fields) == 2 {
 				if n, perr := strconv.ParseInt(fields[0], 10, 64); perr == nil {
-					cur, have = commitRef{sha: fields[1], at: n}, true
+					cur, have = commitRef{sha: fields[1], ct: n}, true
 					continue
 				}
 			}

@@ -210,7 +210,7 @@ func TestSettleReferentLabels_UnlabeledRowNotDue(t *testing.T) {
 // inside the window counts, and a degraded exclusion list abstains.
 func TestCommitEvidence_SHAExclusion(t *testing.T) {
 	in := map[string][]commitRef{
-		"x.go": {{sha: "aaa", at: 1500}, {sha: "bbb", at: 1500}},
+		"x.go": {{sha: "aaa", ct: 1500}, {sha: "bbb", ct: 1500}},
 	}
 	ev := commitEvidence{commits: in, made: map[string]struct{}{"aaa": {}}}
 	require.True(t, ev.inWindow([]string{"x.go"}, 1_000_000, 2_000_000),
@@ -227,13 +227,13 @@ func TestCommitEvidence_SHAExclusion(t *testing.T) {
 }
 
 // Commit evidence fails closed in both directions: an in-window
-// external commit counts, but a commit at/before the window, inside
-// a harness run's skew, or evaluated while the harness-run exclusion
-// list is unreadable never does.
+// external commit counts, but a commit at/before the window, one the
+// harness itself produced (exact-SHA exclusion, #359), or one
+// evaluated while the exclusion list is unreadable never does.
 func TestCommitEvidence_InWindow(t *testing.T) {
 	// Commits carry git unix seconds; windows and run stamps are
 	// millis — inWindow converts internally.
-	ev := commitEvidence{commits: map[string][]int64{"x.go": {2}}}
+	ev := commitEvidence{commits: map[string][]commitRef{"x.go": {{sha: "c1", ct: 2}}}}
 	require.True(t, ev.inWindow([]string{"x.go"}, 1_000, 3_000),
 		"an external in-window commit is acceptance evidence")
 	require.False(t, ev.inWindow([]string{"x.go"}, 2_000, 3_000),
@@ -245,15 +245,15 @@ func TestCommitEvidence_InWindow(t *testing.T) {
 	require.False(t, ev.inWindow(nil, 1_000, 3_000))
 
 	harnessed := commitEvidence{
-		commits: map[string][]int64{"x.go": {2}},
-		runs:    []int64{2_500},
+		commits: map[string][]commitRef{"x.go": {{sha: "c1", ct: 2}}},
+		made:    map[string]struct{}{"c1": {}},
 	}
 	require.False(t, harnessed.inWindow([]string{"x.go"}, 1_000, 3_000),
-		"a commit inside a harness run's skew is agent-made, not acceptance")
+		"a commit the harness produced is agent-made, not acceptance")
 
 	unreadable := commitEvidence{
-		commits:        map[string][]int64{"x.go": {2}},
-		runsUnreadable: true,
+		commits:             map[string][]commitRef{"x.go": {{sha: "c1", ct: 2}}},
+		exclusionUnreadable: true,
 	}
 	require.False(t, unreadable.inWindow([]string{"x.go"}, 1_000, 3_000),
 		"unreadable exclusion list — no way to prove externality — abstains")
@@ -498,8 +498,11 @@ func TestSettleReferentLabels_AgentCommitExcluded(t *testing.T) {
 		"a commit the harness ran is agent-made, not user acceptance")
 
 	// A commit no run produced IS external evidence. Pin its
-	// committer date 30s out so it lands inside the window s4
-	// closes at +90s.
+	// committer date 30s out so it lands inside the window s2's
+	// start set (~+60s — the newest provable session). s4 seeds at
+	// +90s but carries no ledger row, so it proves no project
+	// membership and closes nothing — a belt-and-suspenders second
+	// boundary that changes nothing if it never fires.
 	recordLabeledEpisode(t, env, "s3", "m3", target,
 		ReferentEpisodeLabelInputs{AddedLines: []string{"v1"}})
 	require.NoError(t, os.WriteFile(path, []byte("v1\n// external touch"), 0o644))

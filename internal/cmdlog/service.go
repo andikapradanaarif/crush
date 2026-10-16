@@ -338,6 +338,12 @@ type service struct {
 	// overlapping itself — two fast turns can race, and the second
 	// pass skips rather than duplicating the batch's work.
 	labelMu sync.Mutex
+	// sweepFailMu guards sweepFail: (prev..after) ranges whose
+	// attribution sweep already failed once. A second failure of the
+	// same range is deterministic, not transient — the baseline
+	// stamps past it rather than retrying forever.
+	sweepFailMu sync.Mutex
+	sweepFail   map[string]struct{}
 	// now is the timestamp source for every stamp and cutoff the
 	// service computes. Production wiring leaves it nil (wall
 	// clock); eval seeding injects a controlled clock so scripted
@@ -399,6 +405,7 @@ func NewService(q *db.Queries, workingDir string, p params.Memory, opts ...Optio
 		hasRepo:             hasRepo,
 		paramVersion:        p.Version(),
 		suggested:           map[string]map[string]struct{}{},
+		sweepFail:           map[string]struct{}{},
 		now:                 time.Now,
 	}
 	for _, opt := range opts {
@@ -977,17 +984,25 @@ func (s *service) lastRecordedHead(ctx context.Context) string {
 // commit followed by any recorded run is excluded — a user's own
 // mid-session commit, or one concurrent crush session sweeping
 // another's boundary — so the commit arm effectively only fires for
-// commits landing after the project's last recorded run. The "user
-// commits between sessions" flow survives because the settle pass
-// runs at prompt receipt, before the next session's first recorded
-// run. Stamping a pre-run head in the tool and diffing [pre, post]
-// instead of [lastRun.post, post] is the structural fix — follow-up.
+// commits landing after the project's last recorded run. Linked
+// worktrees make the mixing structural rather than incidental: they
+// share the partition by design (common-dir identity) while HEAD is
+// per-worktree, so services in sibling worktrees chain one baseline
+// and sweep each other's divergent ranges — for multi-worktree users
+// the commit-acceptance signal goes nearly dead. The "user commits
+// between sessions" flow survives on timing, not structure: the
+// settle pass is spawned detached at prompt receipt, so it usually
+// beats the next session's first recorded run — a race, not a
+// guarantee. Stamping a pre-run head in the tool and diffing
+// [pre, post] instead of [lastRun.post, post] is the structural fix
+// — follow-up.
 //
 // The bool reports whether the sweep completed. false means commits
 // in the moved range may have gone unattributed; the caller then
 // keeps the recorded baseline behind them so the next run re-sweeps
 // (INSERT OR IGNORE makes a partial or repeated attribution
-// idempotent — over-attribution is the safe direction).
+// idempotent — over-attribution is the safe direction). Permanent
+// failure classes don't retry forever — see attributionFallback.
 func (s *service) recordCrushCommits(ctx context.Context, sessionID, prevHead, headAfter string) bool {
 	if !s.hasRepo || prevHead == "" || headAfter == "" || prevHead == headAfter {
 		return true
@@ -996,9 +1011,7 @@ func (s *service) recordCrushCommits(ctx context.Context, sessionID, prevHead, h
 	defer cancel()
 	out, err := gitOut(ctx, s.workingDir, "rev-list", prevHead+".."+headAfter)
 	if err != nil {
-		slog.Error("Error sweeping commits for attribution; the recorded baseline stays behind for a re-sweep",
-			"error", err, "prev", prevHead, "after", headAfter)
-		return false
+		return s.attributionFallback(ctx, prevHead, headAfter, err)
 	}
 	if out == "" {
 		return true
@@ -1047,6 +1060,52 @@ func (s *service) recordCrushCommits(ctx context.Context, sessionID, prevHead, h
 		return false
 	}
 	return true
+}
+
+// attributionFallback decides whether a failed sweep advances the
+// recorded baseline anyway. Two failure classes get different
+// treatment:
+//
+//   - Dead baseline: the recorded head no longer resolves — orphaned
+//     by rebase+gc, a history rewrite (filter-repo/BFG), or a
+//     delete-and-reclone at the same path. Holding it can never
+//     recover: every later sweep fails identically while agent
+//     commits settle as external acceptance — the false-accept
+//     direction this mechanism exists to kill. Stamp the true head
+//     and accept the bounded one-time miss; permanent blindness is
+//     worse.
+//   - Live baseline, sweep still failed: transient (timeout, object
+//     store hiccup) or deterministic (a huge divergent pull's range).
+//     The baseline holds once so the next run re-sweeps; a range
+//     failing a second time is deterministic — holding it forever is
+//     the same livelock a dead baseline is — so it stamps too.
+//
+// The repeat set is process-local: a restart grants one free retry,
+// which is the right bound.
+func (s *service) attributionFallback(ctx context.Context, prevHead, headAfter string, sweepErr error) bool {
+	// rev-parse gets its own budget — the caller's ctx may already be
+	// dead (that's one way rev-list fails), and a verify that can't
+	// run proves nothing either way.
+	vctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	if _, err := gitOut(vctx, s.workingDir, "rev-parse", "--verify", "--quiet", prevHead+"^{commit}"); err != nil {
+		slog.Warn("Commit-attribution baseline no longer resolves — advancing past the dead range once",
+			"prev", prevHead, "after", headAfter, "error", sweepErr)
+		return true
+	}
+	key := prevHead + ".." + headAfter
+	s.sweepFailMu.Lock()
+	_, repeated := s.sweepFail[key]
+	s.sweepFail[key] = struct{}{}
+	s.sweepFailMu.Unlock()
+	if repeated {
+		slog.Warn("Commit-attribution sweep failed for this range twice — advancing past it once",
+			"prev", prevHead, "after", headAfter, "error", sweepErr)
+		return true
+	}
+	slog.Error("Error sweeping commits for attribution; the recorded baseline stays behind for a re-sweep",
+		"error", sweepErr, "prev", prevHead, "after", headAfter)
+	return false
 }
 
 // relDir normalizes a run's working directory to workspace-relative so
