@@ -112,6 +112,10 @@ type Querier interface {
 	// The FTS shadow is a plain FTS5 table (not external-content) so a
 	// digest refresh is a keyed delete + insert.
 	IndexSessionDigest(ctx context.Context, arg IndexSessionDigestParams) error
+	// One commit object the harness produced, attributed by HEAD
+	// movement at run-record time (#359) -- exact-SHA exclusion replaces
+	// the old spelling-patterns-plus-time-skew heuristic.
+	InsertCrushCommit(ctx context.Context, arg InsertCrushCommitParams) error
 	// One row per edge per run boundary; INSERT OR IGNORE makes the write
 	// idempotent within a boundary, so callers count a firing only when
 	// this reports a new row.
@@ -154,26 +158,17 @@ type Querier interface {
 	// same row instead of drifting. settled_at IS NULL keeps the
 	// write-once contract: a frozen row's label fields never re-stamp.
 	LabelReferentEpisode(ctx context.Context, arg LabelReferentEpisodeParams) error
+	// HEAD as of the most recent recorded run -- the pre-run baseline a
+	// HEAD-moving run diffs against to attribute its commits (#359).
+	LastRecordedRepoHead(ctx context.Context, projectKey string) (string, error)
 	// Backs prompt history when no session is open. Needs
 	// idx_messages_role_created_at to seek rather than scan the table.
 	ListAllUserMessages(ctx context.Context) ([]Message, error)
 	ListCommandPartitionKeys(ctx context.Context) ([]string, error)
-	// Timestamps (millis) of git-commit commands this project ran through
-	// the harness inside a window (#340): a commit whose author-time sits
-	// within the skew bound of one of these was agent-made, and does not
-	// count as external acceptance evidence. cmd_norm keeps the whole
-	// invocation, so every distinct commit message is its own row; the
-	// known limit is that re-running an identical message keeps only the
-	// latest last_at. Compound shell forms count too -- a commit chained
-	// after &&, ;, or ||, or invoked as git -C dir commit -- while flag
-	// orderings beyond -C stay a documented miss. Non-commit producers
-	// are a known miss class: an agent-run git rebase/merge/cherry-pick
-	// mints commits that read as external acceptance evidence, as do
-	// packed forms like cmd&&git and sudo-prefixed invocations. And in
-	// the other direction, merge commits emit no --name-only paths --
-	// a user merge touching the target is missed evidence (conservative:
-	// a merge is not necessarily acceptance of this turn's work).
-	ListCrushCommitRuns(ctx context.Context, arg ListCrushCommitRunsParams) ([]int64, error)
+	ListCrushCommitPartitionKeys(ctx context.Context) ([]string, error)
+	// Every commit SHA this project's harness runs produced -- the
+	// exact-match exclusion set for external commit evidence (#359).
+	ListCrushCommitSHAs(ctx context.Context, projectKey string) ([]string, error)
 	ListFailurePartitionKeys(ctx context.Context) ([]string, error)
 	// Failure rows in one partition -- the remote-lifecycle re-claim
 	// (#266) moves them off a stale key onto the current one.
@@ -370,6 +365,14 @@ type Querier interface {
 	RecordProcessedSegment(ctx context.Context, arg RecordProcessedSegmentParams) error
 	RecordSegmentAttempt(ctx context.Context, arg RecordSegmentAttemptParams) error
 	RekeyCommandPartition(ctx context.Context, arg RekeyCommandPartitionParams) error
+	// Remote-lifecycle re-claim (#266): attributed commits stamped under
+	// a stale sibling key ride the same sweep command_memory takes --
+	// left behind, they orphan and every one of those commits reads as
+	// external acceptance forever. OR IGNORE covers the (project_key,
+	// sha) twin: the current key's row wins and the stale-keyed row is
+	// skipped, left dead under the old key -- reads are key-scoped, so
+	// the residue is inert.
+	RekeyCrushCommits(ctx context.Context, arg RekeyCrushCommitsParams) error
 	// Claim one legacy row onto its partitioned signature.
 	RekeyFailurePartition(ctx context.Context, arg RekeyFailurePartitionParams) error
 	RenameSession(ctx context.Context, arg RenameSessionParams) error

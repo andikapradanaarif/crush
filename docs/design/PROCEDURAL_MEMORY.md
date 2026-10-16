@@ -102,14 +102,25 @@ rarely takes. Mining needs a label at the unit it clusters:
   so the file side must match or indented code reads diverged).
   Out-of-workspace paths abstain (NULL) — distinct from an in-scope
   deleted file, which is real divergence.
-- **Commit evidence filtered:** commits made *by* crush (recorded in
-  `command_memory` with timestamps, including `&&`/`;`/`||` chains
-  and `git -C`/`-c`/`--git-dir` forms) do not count toward
-  acceptance. User-side commit inside the window is a positive
-  signal only when no divergence precedes it (revised-then-committed
-  is a revision). Evidence is prefetched per settle batch — one git
-  log over the union window — and paths strip the repo prefix, so
-  workspaces in repo subdirectories still see their commits.
+- **Commit evidence filtered:** commits attributed *to* crush by
+  exact SHA do not count toward acceptance. Attribution runs at
+  command-record time: each HEAD-moving run sweeps
+  `git rev-list prevHead..headAfter` into `crush_commits`
+  (producer-agnostic — covers cherry-picks, merges, `git commit`
+  inside compound commands alike), and the settle pass excludes any
+  matching SHA. The miss class is conservative: an *external*
+  commit landing between two recorded runs is swept into the next
+  run's range and excluded too, so the commit arm effectively only
+  fires for commits after the project's last recorded run — the
+  between-sessions review-and-commit flow survives on the settle
+  pass's prompt-receipt timing, not structure. An unreadable
+  exclusion set abstains the commit arm entirely (fail-closed).
+  User-side commit inside the window is a positive signal only when
+  no divergence precedes it (revised-then-committed is a revision).
+  Evidence is prefetched per settle batch — one git log over the
+  union window plus one SHA-set read — and paths strip the repo
+  prefix, so workspaces in repo subdirectories still see their
+  commits.
 - **Verdict vocabulary:** `accepted` | `revised` | `failed` |
   `unknown`. `tests_green` at session end and absence of a
   revision-cue verdict on the *next* user turn feed the decision.

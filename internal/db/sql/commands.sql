@@ -364,34 +364,6 @@ WHERE s.created_at * 1000 > ? AND s.id != ? AND s.parent_session_id IS NULL
         SELECT 1 FROM referent_episodes re2
           WHERE re2.session_id = s.id AND re2.project_key = ?);
 
--- name: ListCrushCommitRuns :many
--- Timestamps (millis) of git-commit commands this project ran through
--- the harness inside a window (#340): a commit whose author-time sits
--- within the skew bound of one of these was agent-made, and does not
--- count as external acceptance evidence. cmd_norm keeps the whole
--- invocation, so every distinct commit message is its own row; the
--- known limit is that re-running an identical message keeps only the
--- latest last_at. Compound shell forms count too -- a commit chained
--- after &&, ;, or ||, or invoked as git -C dir commit -- while flag
--- orderings beyond -C stay a documented miss. Non-commit producers
--- are a known miss class: an agent-run git rebase/merge/cherry-pick
--- mints commits that read as external acceptance evidence, as do
--- packed forms like cmd&&git and sudo-prefixed invocations. And in
--- the other direction, merge commits emit no --name-only paths --
--- a user merge touching the target is missed evidence (conservative:
--- a merge is not necessarily acceptance of this turn's work).
-SELECT last_at FROM command_memory
-WHERE project_key = ?
-    AND (cmd_norm LIKE 'git commit%'
-         OR cmd_norm LIKE '%&& git commit%'
-         OR cmd_norm LIKE '%; git commit%'
-         OR cmd_norm LIKE '%|| git commit%'
-         OR cmd_norm LIKE 'git -C % commit%'
-         OR cmd_norm LIKE 'git -c %commit%'
-         OR cmd_norm LIKE 'git --git-dir%commit%'
-         OR cmd_norm LIKE '%=% git commit%')
-    AND last_at >= ? AND last_at <= ?;
-
 -- name: SettleReferentEpisode :exec
 -- labeled_at re-stamps to the settle time: it is the last label
 -- computation, so it intentionally converges with settled_at.
