@@ -49,6 +49,33 @@ func (q *Queries) LastRecordedRepoHead(ctx context.Context, projectKey string) (
 	return repo_state, err
 }
 
+const listCrushCommitPartitionKeys = `-- name: ListCrushCommitPartitionKeys :many
+SELECT DISTINCT project_key FROM crush_commits WHERE project_key != ''
+`
+
+func (q *Queries) ListCrushCommitPartitionKeys(ctx context.Context) ([]string, error) {
+	rows, err := q.query(ctx, q.listCrushCommitPartitionKeysStmt, listCrushCommitPartitionKeys)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var project_key string
+		if err := rows.Scan(&project_key); err != nil {
+			return nil, err
+		}
+		items = append(items, project_key)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listCrushCommitSHAs = `-- name: ListCrushCommitSHAs :many
 SELECT sha FROM crush_commits WHERE project_key = ?
 `
@@ -76,4 +103,24 @@ func (q *Queries) ListCrushCommitSHAs(ctx context.Context, projectKey string) ([
 		return nil, err
 	}
 	return items, nil
+}
+
+const rekeyCrushCommits = `-- name: RekeyCrushCommits :exec
+UPDATE OR IGNORE crush_commits SET project_key = ? WHERE project_key = ?
+`
+
+type RekeyCrushCommitsParams struct {
+	ProjectKey   string `json:"project_key"`
+	ProjectKey_2 string `json:"project_key_2"`
+}
+
+// Remote-lifecycle re-claim (#266): attributed commits stamped under
+// a stale sibling key ride the same sweep command_memory takes --
+// left behind, they orphan and every one of those commits reads as
+// external acceptance forever. OR IGNORE covers the (project_key,
+// sha) twin: a commit both eras attributed collapses onto the
+// current key's row.
+func (q *Queries) RekeyCrushCommits(ctx context.Context, arg RekeyCrushCommitsParams) error {
+	_, err := q.exec(ctx, q.rekeyCrushCommitsStmt, rekeyCrushCommits, arg.ProjectKey, arg.ProjectKey_2)
+	return err
 }

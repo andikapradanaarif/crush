@@ -13,5 +13,13 @@ CREATE TABLE IF NOT EXISTS crush_commits (
     PRIMARY KEY (project_key, sha)
 ) WITHOUT ROWID;
 
+-- LastRecordedRepoHead reads the latest repo_state per project on
+-- every RecordRun; command_memory's PK puts project_key last, so
+-- without a covering index the baseline read is a full scan per
+-- recorded command.
+CREATE INDEX IF NOT EXISTS idx_command_memory_project_head
+    ON command_memory (project_key, last_at);
+
 -- +goose Down
+DROP INDEX IF EXISTS idx_command_memory_project_head;
 DROP TABLE IF EXISTS crush_commits;

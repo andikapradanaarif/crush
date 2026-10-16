@@ -1124,6 +1124,98 @@ func TestReclaim_ForeignCommonDirStaysForeign(t *testing.T) {
 	require.Empty(t, failures)
 }
 
+// An attributed commit stamped under a stale sibling partition must
+// ride the remote-lifecycle re-claim — left behind, the new key's
+// exclusion set is empty and every previously-attributed agent
+// commit reads as external acceptance (#359 review).
+func TestReclaim_CrushCommitsFollowRemote(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	q := db.New(conn)
+	git("config", "user.email", "t@t")
+	git("config", "user.name", "t")
+	git("commit", "--allow-empty", "-m", "baseline")
+
+	// Era one: no remote — rows land under the bare common-dir key.
+	// A recorded run stamps the baseline, then a HEAD-moving run
+	// attributes the new commit.
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
+	oldKey := env.svc.ProjectKey()
+	run(env, "s1", "git status", env.workingDir, "", "", nil, 0)
+	git("commit", "--allow-empty", "-m", "agent work")
+	run(env, "s1", "git commit -m wip", env.workingDir, "", "", nil, 0)
+
+	var n int
+	require.NoError(t, conn.QueryRowContext(env.ctx,
+		"SELECT COUNT(*) FROM crush_commits WHERE project_key = ?", oldKey).Scan(&n))
+	require.Equal(t, 1, n)
+
+	// Adding a remote shifts the key; the next open re-claims the
+	// remoteless era's rows — exclusion evidence included.
+	git("remote", "add", "origin", "git@github.com:org/repo.git")
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
+	require.NotEqual(t, oldKey, env.svc.ProjectKey())
+
+	require.NoError(t, conn.QueryRowContext(env.ctx,
+		"SELECT COUNT(*) FROM crush_commits WHERE project_key = ?", env.svc.ProjectKey()).Scan(&n))
+	require.Equal(t, 1, n, "the attributed commit rides the re-claim to the new partition")
+	require.NoError(t, conn.QueryRowContext(env.ctx,
+		"SELECT COUNT(*) FROM crush_commits WHERE project_key = ?", oldKey).Scan(&n))
+	require.Equal(t, 0, n)
+}
+
+// A failed attribution sweep must not advance the recorded baseline
+// past the missed range: the stamp is suppressed so the next run
+// re-sweeps. Stamped-but-unattributed is the false-accept hole;
+// over-attribution on the re-sweep is the safe direction.
+func TestRecordRun_FailedSweepKeepsBaseline(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	q := db.New(conn)
+	git("config", "user.email", "t@t")
+	git("config", "user.name", "t")
+	git("commit", "--allow-empty", "-m", "baseline")
+
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
+	run(env, "s1", "git status", env.workingDir, "", "", nil, 0)
+	headA, err := gitOut(env.ctx, env.workingDir, "rev-parse", "HEAD")
+	require.NoError(t, err)
+	require.NotEmpty(t, headA)
+
+	// HEAD moves, then the recorded baseline is corrupted — a GC'd
+	// or phantom object — before the committing run records.
+	git("commit", "--allow-empty", "-m", "agent work B")
+	headB, err := gitOut(env.ctx, env.workingDir, "rev-parse", "HEAD")
+	require.NoError(t, err)
+	_, err = conn.ExecContext(env.ctx,
+		"UPDATE command_memory SET repo_state = 'not-a-real-sha'")
+	require.NoError(t, err)
+
+	run(env, "s1", "git commit -m wip", env.workingDir, "", "", nil, 0)
+
+	var n int
+	require.NoError(t, conn.QueryRowContext(env.ctx,
+		"SELECT COUNT(*) FROM crush_commits").Scan(&n))
+	require.Equal(t, 0, n, "the failed sweep attributed nothing")
+
+	// The run's own row carries no stamp — the baseline stays behind
+	// the missed range instead of jumping past it.
+	var rs string
+	require.NoError(t, conn.QueryRowContext(env.ctx,
+		"SELECT repo_state FROM command_memory WHERE cmd_norm = 'git commit -m wip'").Scan(&rs))
+	require.Equal(t, "", rs)
+
+	// Restore a valid baseline behind the missed commits; the next
+	// HEAD-moving run re-sweeps and attributes the full range.
+	_, err = conn.ExecContext(env.ctx,
+		"UPDATE command_memory SET repo_state = ? WHERE repo_state = 'not-a-real-sha'", headA)
+	require.NoError(t, err)
+	git("commit", "--allow-empty", "-m", "agent work C")
+	run(env, "s1", "git commit -m more", env.workingDir, "", "", nil, 0)
+
+	shas, err := q.ListCrushCommitSHAs(env.ctx, env.svc.ProjectKey())
+	require.NoError(t, err)
+	require.Contains(t, shas, headB, "the missed commit is swept by the next run")
+}
+
 func TestListFailures_ForeignPartitionExcluded(t *testing.T) {
 	env := setupTest(t)
 

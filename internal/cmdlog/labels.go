@@ -441,12 +441,13 @@ func (s *service) sessionTestsGreen(ctx context.Context, sessionID string) sql.N
 }
 
 // commitsTouchingPaths maps each path a commit in the window touched
-// to that commit's unix-second timestamps — one git call for the
-// whole batch, bounded both ends (#340). Commit headers are
-// NUL-prefixed "\x00commit\t<sec>": filenames cannot contain NUL, so
-// a path literally named "commit <digits>" can never fake a
-// boundary. git emits repo-root-relative paths while ledger targets
-// are workspace-relative — repoPrefix strips the prefix and drops
+// to the refs of the commits that touched it — {sha, unix-second
+// committer time} — one git call for the whole batch, bounded both
+// ends (#340). Commit headers are NUL-prefixed
+// "\x00commit\t<sec>\t<sha>": filenames cannot contain NUL, so a
+// path literally named "commit <digits>" can never fake a boundary.
+// git emits repo-root-relative paths while ledger targets are
+// workspace-relative — repoPrefix strips the prefix and drops
 // commits outside the workspace entirely (without it, commit
 // evidence is silently blind in a repo subdirectory). Known miss:
 // git C-quotes paths with tabs/newlines/non-ASCII (core.quotePath)

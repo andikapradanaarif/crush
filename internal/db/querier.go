@@ -163,6 +163,7 @@ type Querier interface {
 	// idx_messages_role_created_at to seek rather than scan the table.
 	ListAllUserMessages(ctx context.Context) ([]Message, error)
 	ListCommandPartitionKeys(ctx context.Context) ([]string, error)
+	ListCrushCommitPartitionKeys(ctx context.Context) ([]string, error)
 	// Every commit SHA this project's harness runs produced -- the
 	// exact-match exclusion set for external commit evidence (#359).
 	ListCrushCommitSHAs(ctx context.Context, projectKey string) ([]string, error)
@@ -362,6 +363,13 @@ type Querier interface {
 	RecordProcessedSegment(ctx context.Context, arg RecordProcessedSegmentParams) error
 	RecordSegmentAttempt(ctx context.Context, arg RecordSegmentAttemptParams) error
 	RekeyCommandPartition(ctx context.Context, arg RekeyCommandPartitionParams) error
+	// Remote-lifecycle re-claim (#266): attributed commits stamped under
+	// a stale sibling key ride the same sweep command_memory takes --
+	// left behind, they orphan and every one of those commits reads as
+	// external acceptance forever. OR IGNORE covers the (project_key,
+	// sha) twin: a commit both eras attributed collapses onto the
+	// current key's row.
+	RekeyCrushCommits(ctx context.Context, arg RekeyCrushCommitsParams) error
 	// Claim one legacy row onto its partitioned signature.
 	RekeyFailurePartition(ctx context.Context, arg RekeyFailurePartitionParams) error
 	RenameSession(ctx context.Context, arg RenameSessionParams) error

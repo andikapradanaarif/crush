@@ -231,6 +231,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listCommandPartitionKeysStmt, err = db.PrepareContext(ctx, listCommandPartitionKeys); err != nil {
 		return nil, fmt.Errorf("error preparing query ListCommandPartitionKeys: %w", err)
 	}
+	if q.listCrushCommitPartitionKeysStmt, err = db.PrepareContext(ctx, listCrushCommitPartitionKeys); err != nil {
+		return nil, fmt.Errorf("error preparing query ListCrushCommitPartitionKeys: %w", err)
+	}
 	if q.listCrushCommitSHAsStmt, err = db.PrepareContext(ctx, listCrushCommitSHAs); err != nil {
 		return nil, fmt.Errorf("error preparing query ListCrushCommitSHAs: %w", err)
 	}
@@ -359,6 +362,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.rekeyCommandPartitionStmt, err = db.PrepareContext(ctx, rekeyCommandPartition); err != nil {
 		return nil, fmt.Errorf("error preparing query RekeyCommandPartition: %w", err)
+	}
+	if q.rekeyCrushCommitsStmt, err = db.PrepareContext(ctx, rekeyCrushCommits); err != nil {
+		return nil, fmt.Errorf("error preparing query RekeyCrushCommits: %w", err)
 	}
 	if q.rekeyFailurePartitionStmt, err = db.PrepareContext(ctx, rekeyFailurePartition); err != nil {
 		return nil, fmt.Errorf("error preparing query RekeyFailurePartition: %w", err)
@@ -761,6 +767,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listCommandPartitionKeysStmt: %w", cerr)
 		}
 	}
+	if q.listCrushCommitPartitionKeysStmt != nil {
+		if cerr := q.listCrushCommitPartitionKeysStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listCrushCommitPartitionKeysStmt: %w", cerr)
+		}
+	}
 	if q.listCrushCommitSHAsStmt != nil {
 		if cerr := q.listCrushCommitSHAsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listCrushCommitSHAsStmt: %w", cerr)
@@ -976,6 +987,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing rekeyCommandPartitionStmt: %w", cerr)
 		}
 	}
+	if q.rekeyCrushCommitsStmt != nil {
+		if cerr := q.rekeyCrushCommitsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing rekeyCrushCommitsStmt: %w", cerr)
+		}
+	}
 	if q.rekeyFailurePartitionStmt != nil {
 		if cerr := q.rekeyFailurePartitionStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing rekeyFailurePartitionStmt: %w", cerr)
@@ -1169,6 +1185,7 @@ type Queries struct {
 	lastRecordedRepoHeadStmt             *sql.Stmt
 	listAllUserMessagesStmt              *sql.Stmt
 	listCommandPartitionKeysStmt         *sql.Stmt
+	listCrushCommitPartitionKeysStmt     *sql.Stmt
 	listCrushCommitSHAsStmt              *sql.Stmt
 	listFailurePartitionKeysStmt         *sql.Stmt
 	listFailuresByKeyStmt                *sql.Stmt
@@ -1212,6 +1229,7 @@ type Queries struct {
 	recordProcessedSegmentStmt           *sql.Stmt
 	recordSegmentAttemptStmt             *sql.Stmt
 	rekeyCommandPartitionStmt            *sql.Stmt
+	rekeyCrushCommitsStmt                *sql.Stmt
 	rekeyFailurePartitionStmt            *sql.Stmt
 	renameSessionStmt                    *sql.Stmt
 	resolveFailuresForCommandStmt        *sql.Stmt
@@ -1304,6 +1322,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		lastRecordedRepoHeadStmt:             q.lastRecordedRepoHeadStmt,
 		listAllUserMessagesStmt:              q.listAllUserMessagesStmt,
 		listCommandPartitionKeysStmt:         q.listCommandPartitionKeysStmt,
+		listCrushCommitPartitionKeysStmt:     q.listCrushCommitPartitionKeysStmt,
 		listCrushCommitSHAsStmt:              q.listCrushCommitSHAsStmt,
 		listFailurePartitionKeysStmt:         q.listFailurePartitionKeysStmt,
 		listFailuresByKeyStmt:                q.listFailuresByKeyStmt,
@@ -1347,6 +1366,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		recordProcessedSegmentStmt:           q.recordProcessedSegmentStmt,
 		recordSegmentAttemptStmt:             q.recordSegmentAttemptStmt,
 		rekeyCommandPartitionStmt:            q.rekeyCommandPartitionStmt,
+		rekeyCrushCommitsStmt:                q.rekeyCrushCommitsStmt,
 		rekeyFailurePartitionStmt:            q.rekeyFailurePartitionStmt,
 		renameSessionStmt:                    q.renameSessionStmt,
 		resolveFailuresForCommandStmt:        q.resolveFailuresForCommandStmt,
