@@ -43,6 +43,9 @@ func (f *fakeQuestionService) Ask(_ context.Context, req question.Request) ([]qu
 
 func (f *fakeQuestionService) Answer([]question.Answer) bool { return false }
 func (f *fakeQuestionService) Cancel() bool                  { return false }
+func (f *fakeQuestionService) Pending() (question.Request, bool) {
+	return question.Request{}, false
+}
 
 // countingSessionService wraps a real session.Service and counts
 // Get calls — the gate's stored-plan check must not read the session
