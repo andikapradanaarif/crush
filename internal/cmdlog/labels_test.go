@@ -731,6 +731,58 @@ func TestSettleReferentLabels_OldCommitDoesNotCount(t *testing.T) {
 		"a commit older than created_at is pre-episode history, not the landing")
 }
 
+// Issue #360 (single-branch facet): commit evidence walked only the
+// checked-out HEAD, so a user commit on an unmerged branch inside
+// the window was invisible — a conservative miss. --all covers it.
+func TestSettleReferentLabels_OtherBranchCommitCounts(t *testing.T) {
+	env := setupLabelsTest(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	git := func(args ...string) {
+		full := append([]string{"-C", env.workingDir}, args...)
+		require.NoError(t, exec.CommandContext(t.Context(), "git", full...).Run())
+	}
+	git("init")
+	git("config", "user.email", "t@t")
+	git("config", "user.name", "t")
+	// Rebuild post-init: the setup service is pre-repo — hasRepo is
+	// false and the partition is the path key, both blind to commits.
+	env.svc = NewService(db.New(env.conn), env.workingDir, params.DefaultMemory())
+
+	target := "x.go"
+	path := filepath.Join(env.workingDir, target)
+	require.NoError(t, os.WriteFile(path, []byte("v1"), 0o644))
+	git("add", target)
+	git("commit", "-m", "baseline")
+
+	recordLabeledEpisode(t, env, "s1", "m1", target,
+		ReferentEpisodeLabelInputs{AddedLines: []string{"v1"}})
+	seedLabelSession(t, env, "s1", "")
+
+	// The user commits the edit on a feature branch inside the
+	// window, then returns — HEAD-only log never sees it.
+	git("checkout", "-b", "feature")
+	require.NoError(t, os.WriteFile(path, []byte("v1\nv2"), 0o644))
+	git("add", target)
+	// Pin the committer date 30s out: inside the window s2's start
+	// sets (~+60s) but outside the skew band of the boundary run's
+	// last_at (~now+5s), so harness exclusion can't swallow it.
+	future := time.Now().Add(30 * time.Second).UTC().Format("2006-01-02T15:04:05Z")
+	cmd := exec.CommandContext(t.Context(), "git", "-C", env.workingDir,
+		"commit", "-m", "branch commit")
+	cmd.Env = append(os.Environ(), "GIT_COMMITTER_DATE="+future)
+	require.NoError(t, cmd.Run())
+	git("checkout", "-")
+
+	dueViaNewerSession(t, env, "s2")
+	require.NoError(t, env.svc.SettleReferentLabels(t.Context(), 10))
+	c := readLabels(t, env, "s1", target)
+	require.True(t, c.committed.Valid)
+	require.EqualValues(t, 1, c.committed.Int64,
+		"a commit on an unmerged branch inside the window is acceptance evidence")
+}
+
 // Divergence beats commit (#340): a settled row whose edit diverged
 // reads as failure even when a commit landed — revised-then-
 // committed is a revision.
