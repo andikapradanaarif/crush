@@ -338,3 +338,37 @@ func TestUpdateProjectRates_GammaBounds(t *testing.T) {
 		require.Error(t, env.svc.UpdateProjectRates(t.Context(), g))
 	}
 }
+
+// The pooled prior and the calibration list share the fold's
+// settled-only gate in SQL: an unsettled row is a mutable
+// observation, so neither consumer may count it — pinning the
+// mirror predicate for the two queries UpdateProjectRates doesn't
+// exercise.
+func TestReferentConsumers_SettledOnly(t *testing.T) {
+	t.Parallel()
+	env := setupRatesTest(t, "pa")
+	q := db.New(env.conn)
+	seedRateEpisode(t, env, "pa", "s1", "m1", ReferentAccepted,
+		sql.NullInt64{}, sql.NullInt64{})
+	seedRateEpisode(t, env, "pb", "s2", "m2", ReferentAccepted,
+		sql.NullInt64{}, sql.NullInt64{})
+	// Identical rows minus the freeze: neither the pool nor the
+	// calibration list may see them.
+	seedRateEpisode(t, env, "pa", "s1", "m3", ReferentAccepted,
+		sql.NullInt64{}, sql.NullInt64{})
+	seedRateEpisode(t, env, "pb", "s2", "m4", ReferentAccepted,
+		sql.NullInt64{}, sql.NullInt64{})
+	_, err := env.conn.ExecContext(t.Context(),
+		`UPDATE referent_episodes SET settled_at = NULL
+		 WHERE source_message_id IN ('m3', 'm4')`)
+	require.NoError(t, err)
+
+	priors, err := q.ListReferentPriorEvents(t.Context(), "pa")
+	require.NoError(t, err)
+	require.Len(t, priors, 1,
+		"the leave-one-out pool admits only pb's settled row")
+	cals, err := q.ListReferentCalibrationEpisodes(t.Context(), "pa")
+	require.NoError(t, err)
+	require.Len(t, cals, 1,
+		"calibration admits only pa's settled row")
+}
