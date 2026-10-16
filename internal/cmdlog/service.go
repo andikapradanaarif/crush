@@ -1016,6 +1016,14 @@ func (s *service) recordCrushCommits(ctx context.Context, sessionID, prevHead, h
 	if out == "" {
 		return true
 	}
+	// The write phase detaches from the caller's ctx with its own
+	// budget: a large range can spend most of the 3s in rev-list,
+	// and a starved tx would hold the baseline over the same
+	// (growing) range — retry once, then sweepFail stamps past the
+	// whole range as external. Fresh budget keeps the attribution
+	// the sweep already computed from dying in the commit.
+	wctx, wcancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer wcancel()
 	shas := strings.Split(out, "\n")
 	now := s.now().UnixMilli()
 	write := func(q *db.Queries) error {
@@ -1024,7 +1032,7 @@ func (s *service) recordCrushCommits(ctx context.Context, sessionID, prevHead, h
 			if sha == "" {
 				continue
 			}
-			if err := q.InsertCrushCommit(ctx, db.InsertCrushCommitParams{
+			if err := q.InsertCrushCommit(wctx, db.InsertCrushCommitParams{
 				ProjectKey: s.projectKey,
 				Sha:        sha,
 				SessionID:  sessionID,
@@ -1045,7 +1053,7 @@ func (s *service) recordCrushCommits(ctx context.Context, sessionID, prevHead, h
 		}
 		return true
 	}
-	tx, err := conn.BeginTx(ctx, nil)
+	tx, err := conn.BeginTx(wctx, nil)
 	if err != nil {
 		slog.Error("Error opening crush-commit attribution transaction", "error", err)
 		return false

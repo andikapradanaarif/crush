@@ -521,6 +521,64 @@ func TestSettleReferentLabels_AgentCommitExcluded(t *testing.T) {
 		"an unrecorded commit inside the window is external evidence")
 }
 
+// The documented conservative miss class (#359): an external commit
+// landing BETWEEN two recorded runs is swept into the second run's
+// rev-list range and attributed to crush — the commit arm only
+// fires for commits after the project's last recorded run. This
+// pins the intent: the miss starves acceptance evidence but never
+// fabricates it.
+func TestSettleReferentLabels_InterRunExternalCommitMissed(t *testing.T) {
+	env := setupLabelsTest(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	git := func(args ...string) {
+		full := append([]string{"-C", env.workingDir}, args...)
+		require.NoError(t, exec.CommandContext(t.Context(), "git", full...).Run())
+	}
+	git("init")
+	git("config", "user.email", "t@t")
+	git("config", "user.name", "t")
+	// Rebuild post-init so the service is repo-keyed — the
+	// setup-built one carries the pre-init path partition and
+	// would write the episode where the SHA exclusion can't see it.
+	env.svc = NewService(db.New(env.conn), env.workingDir, params.DefaultMemory())
+
+	// Baseline is --allow-empty so it touches no target path; one
+	// recorded run stamps prevHead for the next sweep.
+	git("commit", "--allow-empty", "-m", "baseline")
+	svcReal := NewService(db.New(env.conn), env.workingDir, params.DefaultMemory())
+	svcReal.RecordRun(t.Context(), Run{
+		SessionID: "s1", Command: "git status",
+		CWD: env.workingDir, Ran: true, ExitCode: 0,
+	})
+
+	target := "x.go"
+	path := filepath.Join(env.workingDir, target)
+	require.NoError(t, os.WriteFile(path, []byte("v1"), 0o644))
+	recordLabeledEpisode(t, env, "s1", "m1", target,
+		ReferentEpisodeLabelInputs{AddedLines: []string{"v1"}})
+	seedLabelSession(t, env, "s1", "")
+
+	// The canonical gesture — user commits the work between runs —
+	// lands inside the next run's rev-list range and attributes to
+	// crush, indistinguishable from agent-made.
+	require.NoError(t, os.WriteFile(path, []byte("v1\n// external touch"), 0o644))
+	git("add", target)
+	git("commit", "-m", "user commit")
+	svcReal.RecordRun(t.Context(), Run{
+		SessionID: "s1", Command: "git status",
+		CWD: env.workingDir, Ran: true, ExitCode: 0,
+	})
+
+	dueViaNewerSession(t, env, "s2")
+	require.NoError(t, env.svc.SettleReferentLabels(t.Context(), 10))
+	c := readLabels(t, env, "s1", target)
+	require.True(t, c.committed.Valid)
+	require.EqualValues(t, 0, c.committed.Int64,
+		"an inter-run external commit attributes to crush — a miss, never fabricated acceptance")
+}
+
 // The old spelling-patterns-plus-skew heuristic only recognized
 // `git commit` — a cherry-pick produced commits the pattern missed,
 // so they read as external acceptance (the false-accept #359 fixes).
