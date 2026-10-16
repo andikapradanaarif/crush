@@ -162,20 +162,28 @@ func TestExtractTurnOutcome_UnexecutedCallsNotEvidence(t *testing.T) {
 			},
 		}},
 		{Role: message.Tool, Parts: []message.ContentPart{
-			message.ToolResult{ToolCallID: "tc-denied-edit", Name: tools.EditToolName,
-				Content: "User denied permission", IsError: true},
+			message.ToolResult{
+				ToolCallID: "tc-denied-edit", Name: tools.EditToolName,
+				Content: "User denied permission", IsError: true,
+			},
 		}},
 		{Role: message.Tool, Parts: []message.ContentPart{
-			message.ToolResult{ToolCallID: "tc-denied-bash", Name: tools.BashToolName,
-				Content: "User denied permission", IsError: true},
+			message.ToolResult{
+				ToolCallID: "tc-denied-bash", Name: tools.BashToolName,
+				Content: "User denied permission", IsError: true,
+			},
 		}},
 		{Role: message.Tool, Parts: []message.ContentPart{
-			message.ToolResult{ToolCallID: "tc-errored", Name: tools.WriteToolName,
-				Content: "write failed: disk full", IsError: true},
+			message.ToolResult{
+				ToolCallID: "tc-errored", Name: tools.WriteToolName,
+				Content: "write failed: disk full", IsError: true,
+			},
 		}},
 		{Role: message.Tool, Parts: []message.ContentPart{
-			message.ToolResult{ToolCallID: "tc-ok", Name: tools.EditToolName,
-				Content: "edited"},
+			message.ToolResult{
+				ToolCallID: "tc-ok", Name: tools.EditToolName,
+				Content: "edited",
+			},
 		}},
 	}
 
