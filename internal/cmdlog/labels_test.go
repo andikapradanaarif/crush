@@ -231,6 +231,8 @@ func TestCommitEvidence_InWindow(t *testing.T) {
 		"an external in-window commit is acceptance evidence")
 	require.False(t, ev.inWindow([]string{"x.go"}, 2_000, 3_000),
 		"a commit at the boundary instant is not inside (created_at, winEnd]")
+	require.False(t, ev.inWindow([]string{"x.go"}, 1_000, 1_500),
+		"a commit past this row's winEnd is out — batched rows mix winEnds")
 	require.False(t, ev.inWindow([]string{"other.go"}, 1_000, 3_000),
 		"a commit that never touched the turn's paths is not evidence")
 	require.False(t, ev.inWindow(nil, 1_000, 3_000))
