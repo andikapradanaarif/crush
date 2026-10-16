@@ -95,7 +95,18 @@ const (
 	// resolverAbstain: the gate fired and the call produced no usable
 	// verdict — error, invalid, empty, truncated, or timed out.
 	resolverAbstain = "abstain"
+	// resolverBudget: the gate fired but the per-session call budget
+	// was already spent — the layer is fine, the calls ran out
+	// (#332). Splitting it from abstain keeps "resolver dead" and
+	// "budget spent early" distinguishable on eval records.
+	resolverBudget = "budget"
 )
+
+// errResolverBudget is the typed reason ResolveScope returns when
+// the consult is skipped because the call budget is spent —
+// outcomeResolver maps it to resolverBudget rather than lumping it
+// into abstain.
+var errResolverBudget = errors.New("scope resolver: call budget exhausted")
 
 // outcomeResolver wraps a ScopeResolver to record whether the call
 // produced a verdict — telemetry only, it changes no behavior. The
@@ -108,9 +119,12 @@ type outcomeResolver struct {
 
 func (o outcomeResolver) ResolveScope(ctx context.Context, prompt string, cands []ResolverCandidate) (*ScopeResolution, error) {
 	res, err := o.inner.ResolveScope(ctx, prompt, cands)
-	if err == nil && res != nil {
+	switch {
+	case err == nil && res != nil:
 		*o.out = resolverResolved
-	} else {
+	case errors.Is(err, errResolverBudget):
+		*o.out = resolverBudget
+	default:
 		*o.out = resolverAbstain
 	}
 	return res, err
@@ -156,7 +170,7 @@ func (r *llmScopeResolver) ResolveScope(ctx context.Context, prompt string, cand
 		return res, nil
 	}
 	if r.budget <= 0 || int(r.state.callsUsed.Load()) >= r.budget {
-		return nil, errors.New("scope resolver: call budget exhausted")
+		return nil, errResolverBudget
 	}
 	// Claim the call before spending it — a parse failure still
 	// burned the model round-trip, so it counts against the budget.

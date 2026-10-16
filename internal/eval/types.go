@@ -796,9 +796,10 @@ type TurnTail struct {
 	// Resolver mirrors TailAudit.Resolver — the L3 layer's engagement
 	// outcome for the turn: "resolved" (a verdict was produced — the
 	// decisions carry settled_by=resolver), "abstain" (the gate fired
-	// but the call yielded no usable verdict), or empty (the layer
-	// never ran). Without it a dead resolver is indistinguishable
-	// from a never-engaged one on records.
+	// but the call yielded no usable verdict), "budget" (the consult
+	// was skipped — the per-session call budget was spent, #332), or
+	// empty (the layer never ran). Without it a dead resolver is
+	// indistinguishable from a never-engaged one on records.
 	Resolver string `json:"resolver,omitempty"`
 	// ReferentGate mirrors TailAudit.ReferentGate — the #296 rate
 	// gate's decision for the turn (#341): the closed-vocabulary

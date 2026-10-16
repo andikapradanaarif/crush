@@ -700,7 +700,7 @@ func TestArmCoverage_TailResolver(t *testing.T) {
 		TailRuns: []TurnTail{
 			{Turn: 0, Resolver: "resolved"},
 			{Turn: 0, Resolver: "abstain"},
-			{Turn: 1},
+			{Turn: 1, Resolver: "budget"},
 		},
 	}
 	met, err := ArmCoverageMet(Coverage{"min_tail.resolver.resolved": 1}, rec)
@@ -712,7 +712,16 @@ func TestArmCoverage_TailResolver(t *testing.T) {
 	met, err = ArmCoverageMet(Coverage{"min_tail.resolver.abstain": 2}, rec)
 	require.NoError(t, err)
 	require.False(t, met)
-	// An outcome outside the closed pair fails parse.
+	// #332: budget-spent consults count separately from layer-failure
+	// abstains — "resolver dead" and "budget spent early" are no
+	// longer the same stamp.
+	met, err = ArmCoverageMet(Coverage{"min_tail.resolver.budget": 1}, rec)
+	require.NoError(t, err)
+	require.True(t, met)
+	met, err = ArmCoverageMet(Coverage{"min_tail.resolver.budget": 2}, rec)
+	require.NoError(t, err)
+	require.False(t, met)
+	// An outcome outside the closed set fails parse.
 	_, err = ArmCoverageMet(Coverage{"min_tail.resolver.bogus": 1}, rec)
 	require.Error(t, err)
 
@@ -736,6 +745,15 @@ func TestArmCoverage_TailResolver(t *testing.T) {
 		TailRuns: []TurnTail{{Turn: 0}, {Turn: 1}},
 	}
 	met, err = ArmCoverageMet(Coverage{"max_tail.resolver.dead": 0}, quiet)
+	require.NoError(t, err)
+	require.True(t, met)
+	// Budget-only renders: the layer engaged but spent its calls —
+	// not dead, and not starving on the health check (#332).
+	spent := &RunRecord{
+		Tail:     []TurnTail{{Turn: 1}},
+		TailRuns: []TurnTail{{Turn: 0, Resolver: "budget"}, {Turn: 1, Resolver: "budget"}},
+	}
+	met, err = ArmCoverageMet(Coverage{"max_tail.resolver.dead": 0}, spent)
 	require.NoError(t, err)
 	require.True(t, met)
 	// No envelopes at all still fails closed.

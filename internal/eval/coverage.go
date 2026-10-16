@@ -519,12 +519,14 @@ func init() {
 	// Turn-level L3 engagement counts: tail.resolver.<outcome> —
 	// "resolved" turns produced a verdict (decisions carry the
 	// stamps), "abstain" turns consulted the layer and got nothing
-	// usable. The abstain count is what makes a dead resolver
-	// visible: a silent layer otherwise reads as never-engaged.
-	// Renders, not distinct consults: each tail_runs entry counts —
-	// one consult plus its two repair-chain replays is 3 — so a key
-	// reads "renders where a resolution was in force".
-	for _, outcome := range []string{"resolved", "abstain"} {
+	// usable, "budget" turns found the call budget already spent
+	// (#332) — a dead layer and a spent budget read differently now.
+	// The abstain count is what makes a dead resolver visible: a
+	// silent layer otherwise reads as never-engaged. Renders, not
+	// distinct consults: each tail_runs entry counts — one consult
+	// plus its two repair-chain replays is 3 — so a key reads
+	// "renders where a resolution was in force".
+	for _, outcome := range []string{"resolved", "abstain", "budget"} {
 		armOnlyCoverageFields["tail.resolver."+outcome] = func(r *RunRecord) float64 {
 			return tailResolverRenders(r, outcome)
 		}
