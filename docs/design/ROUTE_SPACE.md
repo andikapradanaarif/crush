@@ -318,9 +318,11 @@ owns the turn. Scope-consuming routes then stamp
 `settled_by=resolver`. Engagement itself is a turn-level stamp —
 `tail.resolver` on the audit is `resolved` when a verdict landed,
 `abstain` when the gate opened but the consult failed or returned
-nothing usable, and absent when the layer never ran — so a dead or
-exhausted resolver is countable via `tail.resolver.abstain` instead
-of reading as never-engaged. For coverage, `tail.resolver.dead` is
+nothing usable, `budget` when the gate opened but the call budget
+was already spent (#332 — "dead layer" and "budget spent early" no
+longer read identically), and absent when the layer never ran — so
+a dead resolver is countable via `tail.resolver.abstain` instead of
+reading as never-engaged. For coverage, `tail.resolver.dead` is
 the engagement-conditional check: a run is dead only when the layer
 rendered and never resolved, so `max_tail.resolver.dead: 0` catches
 a broken consult path without starving cells whose prompts resolve

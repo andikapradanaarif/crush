@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -406,7 +407,8 @@ func TestLLMScopeResolver_Budget(t *testing.T) {
 	_, err := r.ResolveScope(context.Background(), "prompt one", cands)
 	require.NoError(t, err)
 	_, err = r.ResolveScope(context.Background(), "prompt two", cands)
-	require.Error(t, err)
+	require.ErrorIs(t, err, errResolverBudget,
+		"the typed reason lets the audit stamp budget, not abstain (#332)")
 	require.Equal(t, int32(1), calls.Load(), "the second call spent a model call past budget")
 
 	// A cached verdict is not a model call — it still serves after
@@ -517,6 +519,8 @@ func TestOutcomeResolver(t *testing.T) {
 		{"verdict stamps resolved", &stubResolver{res: verdict}, true, resolverResolved},
 		{"no-failure reject stamps resolved", &stubResolver{res: &ScopeResolution{About: false}}, true, resolverResolved},
 		{"error stamps abstain", &stubResolver{err: errors.New("boom")}, true, resolverAbstain},
+		{"spent budget stamps budget", &stubResolver{err: errResolverBudget}, true, resolverBudget},
+		{"wrapped budget stamps budget", &stubResolver{err: fmt.Errorf("wrap: %w", errResolverBudget)}, true, resolverBudget},
 		{"nil verdict stamps abstain", &stubResolver{}, true, resolverAbstain},
 		{"never invoked stays empty", &stubResolver{res: verdict}, false, ""},
 	} {

@@ -601,10 +601,12 @@ type TailAudit struct {
 	// Resolver is the L3 layer's engagement outcome for this turn —
 	// "resolved" when a valid verdict was produced, "abstain" when
 	// the gate fired but the call yielded none (error, invalid,
-	// empty, timeout), empty when the layer never ran. A verdict's
-	// trace already lives on the decisions (settled_by=resolver);
-	// this field exists for the case decisions can't show: the layer
-	// was consulted and produced nothing.
+	// empty, timeout), "budget" when the consult was skipped because
+	// the per-session call budget was spent (#332), empty when the
+	// layer never ran. A verdict's trace already lives on the
+	// decisions (settled_by=resolver); this field exists for the
+	// case decisions can't show: the layer was consulted and
+	// produced nothing.
 	Resolver string `json:"resolver,omitempty"`
 	// ReferentGate is the #296 rate gate's decision for this turn
 	// (#341): bound, floor, and the closed-vocabulary verdict. Nil
