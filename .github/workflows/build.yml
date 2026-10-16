@@ -29,5 +29,8 @@ jobs:
       - run: go build -race ./...
       # -short keeps the gate hermetic: realrepo-* quarantine cells
       # clone+build a pinned repo (observed 850s+ under load) and can
-      # starve siblings past the 10m package timeout (#138).
-      - run: go test -race -failfast -short ./...
+      # starve siblings past the 10m package timeout (#138). -timeout
+      # doubles the per-package ceiling: internal/agent alone runs
+      # ~520s under -race on windows-latest (87% of the 10m default)
+      # and any test growth tips the package into a timeout panic.
+      - run: go test -race -failfast -short -timeout 20m ./...
