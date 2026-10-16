@@ -292,6 +292,32 @@ func TestRecordReferentEpisodes(t *testing.T) {
 		require.Empty(t, refs)
 	})
 
+	// A denied edit's result is IsError — the call never ran, so a
+	// vague prompt plus a denied mutation mints no episode (#358).
+	t.Run("denied edit records nothing", func(t *testing.T) {
+		t.Parallel()
+		a, env := referentAgent(t)
+		svc := env.cmdlog
+		target := filepath.Join(env.workingDir, "x.go")
+		a.recordReferentEpisodes(t.Context(), SessionAgentCall{
+			SessionID: "s1", Prompt: "ok",
+		}, []message.Message{
+			referentUserMsg("u1", "fix the config"),
+			{Role: message.Assistant, Parts: []message.ContentPart{message.ToolCall{
+				ID: "tc1", Name: tools.EditToolName,
+				Input:    fmt.Sprintf(`{"file_path":%q,"new_string":"x"}`, target),
+				Finished: true,
+			}}},
+			{Role: message.Tool, Parts: []message.ContentPart{message.ToolResult{
+				ToolCallID: "tc1", Name: tools.EditToolName,
+				Content: "User denied permission", IsError: true,
+			}}},
+		})
+		refs, err := svc.ListReferentCandidates(t.Context(), []string{"config"}, 5)
+		require.NoError(t, err)
+		require.Empty(t, refs)
+	})
+
 	t.Run("multi-referent prompt records nothing", func(t *testing.T) {
 		t.Parallel()
 		a, env := referentAgent(t)

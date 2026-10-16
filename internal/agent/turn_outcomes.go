@@ -248,25 +248,13 @@ func extractTurnOutcome(ctx context.Context, d turnOutcomeDeps, sessionID string
 	// prompt — boundary-checking child slices would return on the
 	// delegation prompt itself and drop every delegated edit.
 	scan = func(ms []message.Message, from int) {
-		// A call is evidence only once its result landed clean: a
-		// denied permission's ToolResult is IsError, an errored
-		// call's is too, and a call with no result never ran —
-		// minted fingerprints or commands would attest work that
-		// never happened (#358). Error results are sticky: a call
-		// with both a success and an error stays excluded.
-		ran := map[string]bool{}
-		for _, m := range ms[from:] {
-			for _, tr := range m.ToolResults() {
-				if _, seen := ran[tr.ToolCallID]; !seen || tr.IsError {
-					ran[tr.ToolCallID] = !tr.IsError
-				}
-			}
-		}
+		clean := cleanCallResults(ms[from:])
 		for _, m := range ms[from:] {
 			if m.Role != message.Assistant {
 				continue
 			}
 			for _, tc := range m.ToolCalls() {
+				res, executed := clean[tc.ID]
 				switch {
 				case tc.Name == AgentToolName && d.sessions != nil && d.messages != nil:
 					childID := d.sessions.CreateAgentToolSessionID(m.ID, tc.ID)
@@ -277,8 +265,8 @@ func extractTurnOutcome(ctx context.Context, d turnOutcomeDeps, sessionID string
 					if childMsgs, err := d.messages.List(ctx, childID); err == nil {
 						scan(childMsgs, 0)
 					}
-				case referentMutationTools[tc.Name] && ran[tc.ID]:
-					path, added := editEvidence(tc.Input)
+				case referentMutationTools[tc.Name] && executed:
+					path, added := editEvidence(tc.Input, failedEditIndexes(res.Metadata))
 					if path == "" {
 						continue
 					}
@@ -294,7 +282,7 @@ func extractTurnOutcome(ctx context.Context, d turnOutcomeDeps, sessionID string
 					// numerator and denominator together (and a
 					// pathological edit loop grows the JSON).
 					o.EditHunks[rel] = appendNewLines(o.EditHunks[rel], seen, added)
-				case tc.Name == tools.BashToolName && ran[tc.ID]:
+				case tc.Name == tools.BashToolName && executed:
 					if cmd := bashCommand(tc.Input); cmd != "" {
 						o.Commands = append(o.Commands, cmdlog.NormalizeOutcomeCommand(cmd))
 					}
@@ -316,6 +304,54 @@ func extractTurnOutcome(ctx context.Context, d turnOutcomeDeps, sessionID string
 	return o
 }
 
+// cleanCallResults pairs tool calls with their results and keeps
+// only the ones that landed clean: a denied permission's ToolResult
+// is IsError, an errored call's is too, and a call with no result
+// never ran — all three would mint evidence for work that never
+// happened otherwise (#358). An error result is sticky: it wins over
+// a success even when it arrives second. The map carries the result
+// itself so callers can read metadata — a partial multiedit still
+// reports which of its edits failed.
+func cleanCallResults(ms []message.Message) map[string]message.ToolResult {
+	failed := map[string]bool{}
+	ok := map[string]message.ToolResult{}
+	for _, m := range ms {
+		for _, tr := range m.ToolResults() {
+			if tr.ToolCallID == "" {
+				continue
+			}
+			if tr.IsError {
+				failed[tr.ToolCallID] = true
+				delete(ok, tr.ToolCallID)
+				continue
+			}
+			if !failed[tr.ToolCallID] {
+				ok[tr.ToolCallID] = tr
+			}
+		}
+	}
+	return ok
+}
+
+// failedEditIndexes returns the edits[] positions a partial
+// multiedit reported as failed in its result metadata — those
+// edits' new_string lines never landed and must not mint
+// fingerprint lines (#358).
+func failedEditIndexes(metadata string) map[int]bool {
+	if metadata == "" {
+		return nil
+	}
+	var meta tools.MultiEditResponseMetadata
+	if json.Unmarshal([]byte(metadata), &meta) != nil || len(meta.EditsFailed) == 0 {
+		return nil
+	}
+	skip := map[int]bool{}
+	for _, f := range meta.EditsFailed {
+		skip[f.Index] = true
+	}
+	return skip
+}
+
 // editEvidence pulls the mutated path and the added-lines
 // fingerprint out of a mutation tool call's input — the lines the
 // edit introduced: edit and multiedit count new_string minus
@@ -323,8 +359,9 @@ func extractTurnOutcome(ctx context.Context, d turnOutcomeDeps, sessionID string
 // don't pad the survival numerator; write fingerprints its whole
 // content, the old file being unknowable from the call. The
 // fingerprint is per-file: lines added by any of the turn's edits to
-// that file join one survival set.
-func editEvidence(input string) (path string, added []string) {
+// that file join one survival set. skip excludes edits[] positions
+// a partial multiedit reported as failed.
+func editEvidence(input string, skip map[int]bool) (path string, added []string) {
 	var in struct {
 		FilePath  string `json:"file_path"`
 		OldString string `json:"old_string"`
@@ -342,7 +379,10 @@ func editEvidence(input string) (path string, added []string) {
 	case in.Content != "":
 		return in.FilePath, cmdlog.NormalizeAddedLines(in.Content)
 	case len(in.Edits) > 0:
-		for _, e := range in.Edits {
+		for i, e := range in.Edits {
+			if skip[i] {
+				continue
+			}
 			added = append(added, introducedLines(e.NewString, e.OldString)...)
 		}
 		return in.FilePath, added

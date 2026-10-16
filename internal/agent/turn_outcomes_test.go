@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -60,7 +61,7 @@ func TestEditEvidence(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			path, added := editEvidence(tc.input)
+			path, added := editEvidence(tc.input, nil)
 			require.Equal(t, tc.wantPath, path)
 			require.Equal(t, tc.wantAdded, added)
 		})
@@ -193,6 +194,37 @@ func TestExtractTurnOutcome_UnexecutedCallsNotEvidence(t *testing.T) {
 	require.Equal(t, []string{"real"}, o.EditHunks["real.go"])
 	require.Empty(t, o.Commands,
 		"a denied bash command is not a command the turn ran")
+}
+
+// A multiedit that partially fails reports a clean result but lists
+// the failed positions in its metadata — their new_string lines
+// never landed and must not join the fingerprint, or the survival
+// check reads phantom lines as divergence (#358).
+func TestExtractTurnOutcome_PartialMultieditFingerprint(t *testing.T) {
+	t.Parallel()
+	a, _ := referentAgent(t)
+
+	meta, err := json.Marshal(tools.MultiEditResponseMetadata{
+		EditsApplied: 1,
+		EditsFailed:  []tools.FailedEdit{{Index: 1, Error: "no match"}},
+	})
+	require.NoError(t, err)
+
+	msgs := []message.Message{
+		referentUserMsg("u1", "fix it"),
+		{Role: message.Assistant, Parts: []message.ContentPart{message.ToolCall{
+			ID: "tc-me", Name: tools.MultiEditToolName, Finished: true,
+			Input: `{"file_path":"x.go","edits":[{"old_string":"a","new_string":"landed"},{"new_string":"phantom"}]}`,
+		}}},
+		{Role: message.Tool, Parts: []message.ContentPart{message.ToolResult{
+			ToolCallID: "tc-me", Name: tools.MultiEditToolName,
+			Content: "File created with 1 of 2 edits", Metadata: string(meta),
+		}}},
+	}
+
+	o := extractTurnOutcome(t.Context(), a.turnOutcomeDeps(), "s1", msgs, 0)
+	require.Equal(t, []string{"landed"}, o.EditHunks["x.go"],
+		"the failed edit's lines are not surviving-line candidates")
 }
 
 // The live path records the judged turn at the next prompt with that
