@@ -74,24 +74,65 @@ rarely takes. Mining needs a label at the unit it clusters:
 
 `turn_outcomes` (built under #340, this channel's G1 gate):
 
-- **Unit:** one row per (session, user-turn-index), recording the
-  turn's edited-file set and command list.
+- **Unit:** one row per (session, turn's user-message ID) — the
+  boundary message is the key, stable under compaction where a
+  slice-relative index would shift between the live tail and the
+  full-transcript backfill. Recording the turn's edited-file set,
+  added-line fingerprints, and command list.
 - **Settled once**, at a fixed window: the start of the next session
-  in the project, or created_at + 24h, whichever comes first. After
-  settlement the verdict never re-derives — fold and calibration read
-  only settled rows (fixes the label-drift defect from the loop
-  review).
+  provably in the project, or created_at + 24h, whichever comes
+  first. `sessions` carries no project column, so membership is
+  ledger proof — a session counts as a boundary only after it has
+  written a project-keyed row (`command_memory`, `failure_memory`,
+  `referent_episodes`). A foreign session in a shared store closes
+  no window; a session with no rows yet delays, never corrupts.
+  After settlement the verdict never re-derives — fold and
+  calibration read only settled rows (fixes the label-drift defect
+  from the loop review). Referent promotion is settlement-driven
+  the same way: `CountCleanReferentAcceptances` counts frozen rows
+  under the artifact-first outcome rule, so a phrase→target earns
+  `referent_memory` only when its Nth clean acceptance *freezes* —
+  fired from `settleReferent` on the crossing row, and from the
+  record path when older settled evidence already clears the floor
+  (a fresh episode can never count itself).
 - **Survival per hunk:** the diff hunks the turn's edits produced,
   checked line-presence at settlement — unrelated edits elsewhere in
-  the same file do not count as divergence.
+  the same file do not count as divergence. Both sides normalize to
+  trimmed non-empty unique lines (fingerprints store trimmed text,
+  so the file side must match or indented code reads diverged).
+  Out-of-workspace paths abstain (NULL) — distinct from an in-scope
+  deleted file, which is real divergence.
 - **Commit evidence filtered:** commits made *by* crush (recorded in
-  `command_memory` with timestamps) do not count toward acceptance.
-  User-side commit inside the window is a positive signal only when
-  no divergence precedes it (revised-then-committed is a revision).
+  `command_memory` with timestamps, including `&&`/`;`/`||` chains
+  and `git -C`/`-c`/`--git-dir` forms) do not count toward
+  acceptance. User-side commit inside the window is a positive
+  signal only when no divergence precedes it (revised-then-committed
+  is a revision). Evidence is prefetched per settle batch — one git
+  log over the union window — and paths strip the repo prefix, so
+  workspaces in repo subdirectories still see their commits.
 - **Verdict vocabulary:** `accepted` | `revised` | `failed` |
   `unknown`. `tests_green` at session end and absence of a
   revision-cue verdict on the *next* user turn feed the decision.
   Unobservable cases land `unknown`, never default-accepted.
+- **Live prompt excluded:** the initiating user message persists
+  before the record pass reads the transcript, so the pass carries
+  its ID and skips it — otherwise the in-flight prompt mints a
+  phantom turn whose unique key blocks its own evidence row.
+- **Backfill placeholders repair:** a concurrent session's in-flight
+  final turn backfills with an empty verdict; a separate guarded
+  repair update refreshes evidence and judgment while the row is
+  unsettled and unjudged (`next_verdict = ''` only — `'unknown'` is
+  a resolved cue, not a placeholder). A judged or frozen row is
+  never rewritten. The corpus itself is convergent: only sessions
+  with some unrecorded real user turn are scanned, so fully covered
+  history drains instead of re-sliding over the newest slice.
+- **Detached record pass:** the whole turn-outcome record — tail
+  extraction, full-transcript fallback, and corpus backfill — runs
+  on a detached slot off the prompt path; none of it feeds the
+  render and settlement tolerates late rows. Every agent field the
+  pass touches (`messages`, `sessions`, `cmdlog`, `configStore`'s
+  working dir) is snapshotted on the request goroutine before the
+  spawn, the same contract the settle pass uses.
 
 Mining keeps only `accepted` turns (v1; `failed`/`revised` traces are
 logged for a later ReasoningBank-style pass). This is the label the
@@ -300,23 +341,51 @@ commits the fallback measurement**:
 ## Data model
 
 ```sql
--- Turn-level outcome labels (#340): settled once at fixed window.
+-- Turn-level outcome labels (#340, shipped): settled once at fixed
+-- window — newer session provably in the project, or created_at +
+-- 24h, whichever first.
 CREATE TABLE turn_outcomes (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id   TEXT NOT NULL,
-  turn_idx     INTEGER NOT NULL,
+  turn_id      TEXT NOT NULL,               -- the turn's user-message ID
   project_key  TEXT NOT NULL,
   edited_paths TEXT NOT NULL DEFAULT '[]',  -- JSON repo-relpaths
-  edit_hunks   TEXT NOT NULL DEFAULT '[]',  -- JSON hunk fingerprints
+  edit_hunks   TEXT NOT NULL DEFAULT '{}',  -- JSON path→added-lines map
   commands     TEXT NOT NULL DEFAULT '[]',  -- JSON normalized cmds
+  next_verdict TEXT NOT NULL DEFAULT '',    -- cue verdict of next prompt
   verdict      TEXT,                        -- NULL=unsettled; settled:
                                             -- accepted|revised|failed|unknown
-  settle_at    INTEGER NOT NULL,            -- next-session-start or +24h
+  settle_at    INTEGER NOT NULL,            -- created_at + 24h cap
   settled_at   INTEGER,
   param_version TEXT NOT NULL,
   created_at   INTEGER NOT NULL,
-  UNIQUE(session_id, turn_idx)
+  UNIQUE(session_id, turn_id)
 );
+
+-- turn_id is the boundary message's ID, not an ordinal: a
+-- slice-relative index shifts between the live post-summary tail
+-- and the full-transcript backfill, which would let a compacted
+-- session's rows collide under the unique key. Settlement
+-- boundaries count only parent_session_id IS NULL sessions — a
+-- delegated child is work inside the parent turn, not a new
+-- session, and it must not close the window early — and only
+-- sessions provably in the row's project: sessions carries no
+-- project column, so membership is ledger proof (a project-keyed
+-- command_memory / failure_memory / referent_episodes row). The
+-- backfill corpus filters identically, so foreign sessions never
+-- mint turns under this project's key; a real session→project
+-- mapping remains the longer-term answer.
+--
+-- Two evidence-scope choices, recorded: sessionTestsGreen is
+-- session-scoped by design (the ledger has no per-turn last-exit),
+-- so a red session end marks every non-empty turn in it failed and
+-- outranks commit evidence; and survival is conjunctive over
+-- readable fingerprints — a path without a fingerprint abstains
+-- rather than vetoing, so acceptance can rest on the paths the
+-- turn provably added. Turn boundaries are real user messages:
+-- repair prompts and compaction summaries are not, hidden
+-- continuations (programmatic runs) are — they drove work like any
+-- other prompt.
 
 -- One row per (signature, version) mined candidate.
 CREATE TABLE skills (
@@ -349,7 +418,8 @@ CREATE TABLE skill_episodes (
   sig_project   TEXT NOT NULL,
   sig_abstract  TEXT NOT NULL,
   session_id    TEXT NOT NULL,
-  turn_idx      INTEGER NOT NULL,
+  turn_id       TEXT NOT NULL,    -- turn's user-message ID, not an
+                                  -- ordinal (compaction shifts those)
   project_key   TEXT NOT NULL,
   core          TEXT NOT NULL,    -- JSON core steps
   slot_values   TEXT NOT NULL,    -- JSON {slot: [values]}
@@ -357,7 +427,7 @@ CREATE TABLE skill_episodes (
   suggested     INTEGER NOT NULL DEFAULT 0,
   param_version TEXT NOT NULL,
   created_at    INTEGER NOT NULL,
-  UNIQUE(session_id, turn_idx, sig_project)
+  UNIQUE(session_id, turn_id, sig_project)
 );
 
 CREATE TABLE skill_usage (

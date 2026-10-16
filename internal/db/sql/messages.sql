@@ -4,20 +4,24 @@ FROM messages
 WHERE id = ? LIMIT 1;
 
 -- name: ListMessagesBySession :many
+-- created_at has one-second resolution, so rowid breaks same-second
+-- ties into insertion order -- a swapped boundary pair would attach
+-- a verdict to the wrong turn's span.
 SELECT *
 FROM messages
 WHERE session_id = ?
-ORDER BY created_at ASC;
+ORDER BY created_at ASC, rowid ASC;
 
 -- name: ListMessagesBySessionFromSummary :many
 -- Messages from the summary onward, which is all a compacted session sends.
 -- created_at has one-second resolution, so a few messages preceding the
 -- summary can come back too; the caller slices from the summary by ID.
+-- Same rowid tiebreaker as ListMessagesBySession.
 SELECT m.*
 FROM messages m
 WHERE m.session_id = ?
   AND m.created_at >= (SELECT s.created_at FROM messages s WHERE s.id = ?)
-ORDER BY m.created_at ASC;
+ORDER BY m.created_at ASC, m.rowid ASC;
 
 -- name: CreateMessage :one
 INSERT INTO messages (

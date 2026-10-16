@@ -21,6 +21,7 @@ import (
 type testEnv struct {
 	ctx        context.Context
 	svc        Service
+	conn       *sql.DB
 	workingDir string
 }
 
@@ -35,6 +36,7 @@ func setupTest(t *testing.T) *testEnv {
 	return &testEnv{
 		ctx:        t.Context(),
 		svc:        NewService(db.New(conn), workingDir, params.DefaultMemory()),
+		conn:       conn,
 		workingDir: workingDir,
 	}
 }
@@ -950,7 +952,7 @@ func TestProjectKey_GitRepo(t *testing.T) {
 	git("remote", "add", "origin", "git@github.com:Org/My-Repo.git")
 
 	// Recompute after repo setup: the key folds remote + common-dir.
-	key, _, hasRepo := computeProjectKey(env.workingDir)
+	key, _, _, hasRepo := computeProjectKey(env.workingDir)
 	require.True(t, hasRepo)
 	require.Contains(t, key, "github.com/org/my-repo|")
 	require.Contains(t, key, ".git")

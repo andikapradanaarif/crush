@@ -135,11 +135,15 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	// convention as command memory), gated only on a cmdlog store and
 	// a real user prompt to judge against (#165).
 	a.recordReferentEpisodes(ctx, call, msgs)
-	// The artifact-label maturity pass (#294) drains a bounded slice
-	// of pending episodes every turn — file-hash survival and commit
-	// checks resolve over time, so each turn nudges the backlog
-	// rather than a scheduler owning it. Detached: git and
-	// filesystem reads must not serialize into the request path.
+	// Turn-level outcome recording (#340) rides the same hook: the
+	// judged turn's row opens with this prompt as its verdict, and a
+	// first-turn session backfills the recent corpus.
+	a.recordTurnOutcome(ctx, call, msgs)
+	// The label settlement pass (#340) drains a bounded slice of
+	// out-of-window rows every turn — episodes and turn outcomes
+	// freeze once at their observation close, so each turn nudges
+	// the backlog rather than a scheduler owning it. Detached: git
+	// and filesystem reads must not serialize into the request path.
 	if a.cmdlog != nil && !a.isSubAgent {
 		labelCtx := context.WithoutCancel(ctx)
 		// Read the agent fields on this goroutine — production sets
@@ -148,8 +152,11 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 		cmdlogSvc := a.cmdlog
 		rateDecay := a.memoryParams().RateDecay
 		a.spawnDetached(func() {
-			if err := cmdlogSvc.MatureReferentLabels(labelCtx, referentLabelMatureLimit); err != nil {
-				slog.Warn("Referent label maturity pass failed", "error", err)
+			if err := cmdlogSvc.SettleReferentLabels(labelCtx, labelSettleLimit); err != nil {
+				slog.Warn("Referent label settlement pass failed", "error", err)
+			}
+			if err := cmdlogSvc.SettleTurnOutcomes(labelCtx, labelSettleLimit); err != nil {
+				slog.Warn("Turn outcome settlement pass failed", "error", err)
 			}
 			// The rate fold (#296) rides the same detached slot —
 			// settled episodes become decayed posterior mass a turn
@@ -1312,13 +1319,25 @@ func (a *sessionAgent) hasTool(name string) bool {
 }
 
 // relWorkdir renders p relative to the working directory when possible,
-// keeping the blob short and prompt-portable.
+// keeping the blob short and prompt-portable. The result is slash-
+// normalized: stored ledger paths must match `git log --name-only`
+// output, which emits forward slashes on every platform — a Windows
+// filepath.Rel backslash would silently blind commit evidence.
 func (a *sessionAgent) relWorkdir(p string) string {
 	if a.configStore == nil {
 		return p
 	}
-	if rel, err := filepath.Rel(a.configStore.WorkingDir(), p); err == nil && rel != "" && !strings.HasPrefix(rel, "..") {
-		return rel
+	return relWorkdir(a.configStore.WorkingDir(), p)
+}
+
+// relWorkdir is the path-only form — the detached turn-outcome pass
+// carries the resolved workdir, not the config store.
+func relWorkdir(workdir, p string) string {
+	if workdir == "" {
+		return p
+	}
+	if rel, err := filepath.Rel(workdir, p); err == nil && rel != "" && !strings.HasPrefix(rel, "..") {
+		return filepath.ToSlash(rel)
 	}
 	return p
 }

@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"regexp"
 	"strings"
@@ -84,11 +83,11 @@ func extractReferentPhrase(prompt string) string {
 	return nouns[0]
 }
 
-// referentLabelMatureLimit bounds the per-turn artifact-label
-// maturity pass (#294) — the oldest pending episodes re-check each
+// labelSettleLimit bounds the per-turn settlement passes (#340) —
+// the oldest out-of-window episodes and turn outcomes freeze each
 // turn, so the backlog amortizes across turns instead of a
 // scheduler owning it.
-const referentLabelMatureLimit = 50
+const labelSettleLimit = 50
 
 // referentJudgedVerdict classifies the current user prompt's verdict
 // on the previous turn's edits — a correction cue marks the episode
@@ -133,25 +132,33 @@ func referentJudgedVerdict(currentPrompt string) string {
 // Delegated edits count too: an `agent` tool call's mutations live in
 // the child session's messages, reachable through the deterministic
 // messageID$$toolCallID session ID.
-func (a *sessionAgent) referentTargets(ctx context.Context, msgs []message.Message, after int) []struct {
+// referentEdit is one mutated file the judged turn committed to —
+// path and originating call for the episode key, added-lines
+// fingerprint for the survival check (#340).
+type referentEdit struct {
 	path   string
 	callID string
-} {
-	var out []struct {
-		path   string
-		callID string
-	}
-	seen := map[string]struct{}{}
-	add := func(path, callID string) {
+	added  []string
+}
+
+func (a *sessionAgent) referentTargets(ctx context.Context, msgs []message.Message, after int) []referentEdit {
+	var out []referentEdit
+	seen := map[string]int{}
+	lines := map[string]map[string]struct{}{}
+	add := func(path, callID string, added []string) {
 		rel := a.relWorkdir(path)
-		if _, ok := seen[rel]; ok {
-			return
+		i, ok := seen[rel]
+		if !ok {
+			i = len(out)
+			seen[rel] = i
+			lines[rel] = map[string]struct{}{}
+			out = append(out, referentEdit{path: rel, callID: callID})
 		}
-		seen[rel] = struct{}{}
-		out = append(out, struct {
-			path   string
-			callID string
-		}{rel, callID})
+		// Later edits to the same file join its fingerprint —
+		// survival reads every line the turn added. Deduped: a
+		// repeated surviving line would inflate numerator and
+		// denominator together, biasing toward survived.
+		out[i].added = appendNewLines(out[i].added, lines[rel], added)
 	}
 	visited := map[string]struct{}{}
 	var scan func(ms []message.Message, after int)
@@ -175,18 +182,29 @@ func (a *sessionAgent) referentTargets(ctx context.Context, msgs []message.Messa
 				if !referentMutationTools[tc.Name] || tc.Input == "" {
 					continue
 				}
-				var in struct {
-					FilePath string `json:"file_path"`
-				}
-				if json.Unmarshal([]byte(tc.Input), &in) != nil || in.FilePath == "" {
+				path, added := editEvidence(tc.Input)
+				if path == "" {
 					continue
 				}
-				add(in.FilePath, tc.ID)
+				add(path, tc.ID, added)
 			}
 		}
 	}
 	scan(msgs, after)
 	return out
+}
+
+// isRealUserMsg reports whether a stored message is a turn boundary:
+// user role, not a harness repair prompt, and not the summary message
+// — getSessionMessages rewrites a compaction summary's role to User
+// for the model, and treating it as a turn would mint a phantom turn
+// that swallows the whole post-compaction span. Hidden user
+// continuations (TextContent.Hidden — programmatic runs via the API
+// or UI hidden AgentRun) DO count as boundaries: they are real
+// instructions that drove work, distinct from a retry of the same
+// turn.
+func isRealUserMsg(m message.Message) bool {
+	return m.Role == message.User && !m.IsSummaryMessage && !isRepairPrompt(m.JoinedText())
 }
 
 // isRepairPrompt reports whether a stored user message is
@@ -215,7 +233,7 @@ func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionA
 	}
 	lastUser := -1
 	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == message.User && !isRepairPrompt(msgs[i].JoinedText()) {
+		if isRealUserMsg(msgs[i]) {
 			lastUser = i
 			break
 		}
@@ -270,6 +288,7 @@ func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionA
 			Steps:       steps,
 			Tokens:      tokens,
 			WrongTarget: int64(len(targets) - 1),
+			AddedLines:  t.added,
 		})
 		if lerr != nil {
 			slog.Warn("Failed to label referent episode", "error", lerr)

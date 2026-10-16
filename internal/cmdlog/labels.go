@@ -1,11 +1,14 @@
-// Artifact-based acceptance labels (#294): the episode verdict is
-// the next user turn's cue-word judgment — a weak, language-bound
-// signal. These columns instead record what the artifacts show, so
-// acceptance is derivable from evidence: whether the edited file
-// still matches its post-edit hash, whether a commit has since
-// touched it, whether the session's test runs ended green, and what
-// the turn cost. Every signal keeps honest absence — NULL means
-// never observed, never a passing grade.
+// Artifact-based acceptance labels (#294, settled by #340): the
+// episode verdict is the next user turn's cue-word judgment — a weak,
+// language-bound signal. The label columns instead record what the
+// artifacts show, under a fixed observation window: whether the
+// edit's added lines still survive in the file, whether a commit
+// made outside the harness touched the target inside the window,
+// and whether the session's test runs ended green. Every signal
+// keeps honest absence — NULL means never observed, never a passing
+// grade. Once a row settles, its label freezes: the fold and the
+// calibrator read only settled verdicts, so "certified on what it
+// gates on" holds across time.
 package cmdlog
 
 import (
@@ -13,6 +16,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,10 +26,36 @@ import (
 	"github.com/charmbracelet/crush/internal/db"
 )
 
+// Settlement constants (#340).
+const (
+	// settleWindowMillis caps the observation window: a row settles
+	// at the first of (a) the next session in the project starting or
+	// (b) created_at + 24h — the label is computed once, then frozen.
+	settleWindowMillis = int64(24 * 60 * 60 * 1000)
+	// commitSkewBeforeMillis / commitSkewAfterMillis bound
+	// agent-commit attribution asymmetrically: a commit whose
+	// committer time (%ct — the right clock for evidence windows;
+	// author time can backdate) sits within these bounds of a
+	// harness-run `git commit`'s recorded last_at counts as
+	// agent-made and is excluded from acceptance evidence. The
+	// commit object is created mid-run while last_at stamps run
+	// END — commit hooks (lint/test) can take tens of seconds, so
+	// the before-bound is wide while the after-bound stays tight.
+	commitSkewBeforeMillis = int64(60_000)
+	commitSkewAfterMillis  = int64(5_000)
+	// survivalMajority is the divergence cut: an edit counts as
+	// diverged when strictly fewer than this fraction of its recorded
+	// added lines remain in the file at settle time — line-level
+	// survival so unrelated edits elsewhere in the file don't score
+	// as revision.
+	survivalMajority = 0.5
+)
+
 // ReferentEpisodeLabelInputs carries the label signals only the
 // agent can compute — the judged turn's cost and scope violations
-// come from the message trace. The file- and repo-side signals the
-// store computes itself.
+// come from the message trace, as does the added-lines fingerprint
+// of the episode's edit. The file- and repo-side signals the store
+// computes itself.
 type ReferentEpisodeLabelInputs struct {
 	// Steps is the tool-call count the judged turn issued — the
 	// effort leg of "steps/tokens to done".
@@ -40,52 +70,55 @@ type ReferentEpisodeLabelInputs struct {
 	// and the column is recorded so the signal exists the day that
 	// rule relaxes.
 	WrongTarget int64
+	// AddedLines is the normalized fingerprint of the lines the
+	// episode's edit introduced — the survival check's unit (#340).
+	// Empty means no survival check can ever run for the episode.
+	AddedLines []string
 }
 
 // LabelReferentEpisode stamps the artifact signals computable at
-// episode-record time: the target's post-edit hash baseline (the
-// anchor the survival check compares against), the judged turn's
-// cost, and the judged session's last-run test verdicts. The update
-// keys on the episode's (session, source message, target) unique
-// constraint — the same idempotency point the insert uses, so a
-// repair-chain re-derivation re-stamps rather than duplicates.
-// Re-stamping also moves the baseline: a re-recorded episode's
-// survival anchor retargets to the newest file state, which is
-// correct — the referent is the latest derivation, not the first.
-// A file already unreadable at record time writes an empty baseline,
-// which keeps the episode out of the maturity scan: no baseline, no
-// survival check — unknown, not failed.
+// episode-record time: the added-lines survival fingerprint, the
+// judged turn's cost, the judged session's last-run test verdicts,
+// and the observation window's outer edge. The update keys on the
+// episode's (session, source message, target) unique constraint —
+// the same idempotency point the insert uses, so a repair-chain
+// re-derivation re-stamps rather than duplicates. Re-stamping also
+// moves the fingerprint and the window — the outer edge runs from
+// label time, so a re-derivation widens the commit window beyond the
+// episode's created_at + 24h. Intentional: the observation covers
+// the latest derivation of the referent, not the superseded one.
 func (s *service) LabelReferentEpisode(ctx context.Context, ep ReferentEpisode, in ReferentEpisodeLabelInputs) error {
+	added, _ := json.Marshal(in.AddedLines)
+	now := s.now().UnixMilli()
 	return s.q.LabelReferentEpisode(ctx, db.LabelReferentEpisodeParams{
 		LabelTargetHash:  s.fileHash(ep.Target),
 		LabelWrongTarget: in.WrongTarget,
 		LabelSteps:       in.Steps,
 		LabelTokens:      in.Tokens,
 		LabelTestsGreen:  s.sessionTestsGreen(ctx, ep.SessionID),
-		LabeledAt:        s.now().UnixMilli(),
+		LabeledAt:        now,
+		LabelAddedLines:  string(added),
+		SettleAt:         now + settleWindowMillis,
 		SessionID:        ep.SessionID,
 		SourceMessageID:  ep.SourceMessageID,
 		Target:           ep.Target,
 	})
 }
 
-// MatureReferentLabels re-checks the signals that only resolve over
-// time — whether the episode's file still matches its post-edit
-// baseline (survival), whether a commit newer than the episode has
-// touched it, and the judged session's latest test verdict. The
-// pending set is "not yet committed OR file still matches" — a
-// committed-then-diverged row is terminal and drops out of the
-// scan. hash_changed re-derives every pass, so a file restored to
-// its baseline reads surviving again; committed is monotone — once
-// observed it stays observed, since a landed commit can't
-// un-happen; tests_green refreshes each pass so an episode judged
-// mid-session still sees runs that land later — NULL persists only
-// while nothing test-shaped has run. Bounded per call: every turn's
-// pass drains the least-recently-checked rows, so the backlog
-// amortizes across turns without a scheduler. Outside a repository
-// the commit check stays NULL — honest absence rather than a
-// fabricated 0.
-func (s *service) MatureReferentLabels(ctx context.Context, limit int) error {
+// SettleReferentLabels freezes the labels of episodes whose
+// observation window closed (#340): a newer session started in the
+// project, or created_at + 24h elapsed. For each due row it computes
+// once — external-commit evidence inside [created_at, window_end]
+// (commits the harness itself ran are excluded), hunk survival (the
+// recorded added lines' presence in the file now), and the session's
+// test verdict — then writes the settled mark. Rows recorded before
+// settlement existed carry no added-lines fingerprint; they settle
+// on commit and cue evidence alone — degraded, but honest.
+//
+// Bounded per call: every turn's pass drains the oldest due rows, so
+// the backlog amortizes across turns without a scheduler. Outside a
+// repository the commit signal stays NULL — honest absence.
+func (s *service) SettleReferentLabels(ctx context.Context, limit int) error {
 	// The pass fires detached every turn; two fast turns may overlap.
 	// Writes are idempotent, so a skipped pass costs nothing.
 	if !s.labelMu.TryLock() {
@@ -96,86 +129,307 @@ func (s *service) MatureReferentLabels(ctx context.Context, limit int) error {
 		// LIMIT <= 0 in SQLite is unlimited — clamp, never unbound.
 		limit = defaultListLimit
 	}
-	rows, err := s.q.ListPendingReferentLabels(ctx, db.ListPendingReferentLabelsParams{
+	now := s.now().UnixMilli()
+	rows, err := s.q.ListUnsettledReferentLabels(ctx, db.ListUnsettledReferentLabelsParams{
 		ProjectKey: s.projectKey,
+		SettleAt:   now,
 		Limit:      int64(limit),
 	})
 	if err != nil || len(rows) == 0 {
 		return err
 	}
-	var commits map[string][]int64
-	if s.hasRepo {
-		// One log over the window covering the oldest pending
-		// episode — a single git call serves the whole batch. With
-		// least-recently-checked ordering the first row need not be
-		// the oldest, so the window starts at the batch minimum.
-		since := rows[0].CreatedAt
-		for _, r := range rows[1:] {
-			since = min(since, r.CreatedAt)
+	// Commit evidence is prefetched for the whole batch: one git log
+	// over the union window plus one ledger read — not one exec per
+	// row. Each row still filters inside its own (created_at, winEnd].
+	winLo, winHi := now, int64(0)
+	winEnds := make([]int64, len(rows))
+	for i, r := range rows {
+		winEnds[i] = s.windowEnd(ctx, r.CreatedAt, r.SessionID, r.SettleAt)
+		if r.CreatedAt < winLo {
+			winLo = r.CreatedAt
 		}
-		commits = s.commitsTouchingPaths(ctx, time.UnixMilli(since).UTC().Format(time.RFC3339))
+		if winEnds[i] > winHi {
+			winHi = winEnds[i]
+		}
 	}
-	now := s.now().UnixMilli()
-	testsCache := map[string]sql.NullInt64{}
-	for _, r := range rows {
-		changed := int64(0)
-		if cur := s.fileHash(r.Target); cur == "" || cur != r.LabelTargetHash {
-			changed = 1
-		}
-		committed := r.LabelCommitted
-		if s.hasRepo && (!committed.Valid || committed.Int64 != 1) {
-			v := int64(0)
-			for _, ct := range commits[r.Target] {
-				// Git timestamps are seconds; the episode's
-				// created_at is millis. A commit we cannot prove
-				// landed after the episode is not evidence —
-				// fail-closed on the ambiguous same-second edge.
-				if ct*1000 >= r.CreatedAt {
-					v = 1
-					break
-				}
-			}
-			committed = sql.NullInt64{Int64: v, Valid: true}
-		}
-		green, cached := testsCache[r.SessionID]
-		if !cached {
-			green = s.sessionTestsGreen(ctx, r.SessionID)
-			testsCache[r.SessionID] = green
-		}
-		if err := s.q.UpdateReferentEpisodeLabel(ctx, db.UpdateReferentEpisodeLabelParams{
-			LabelCommitted:   committed,
-			LabelHashChanged: sql.NullInt64{Int64: changed, Valid: true},
-			LabelTestsGreen:  green,
-			LabeledAt:        now,
-			ID:               r.ID,
-		}); err != nil {
+	ev := s.prefetchCommitEvidence(ctx, winLo, winHi)
+	for i, r := range rows {
+		if err := s.settleReferent(ctx, r, winEnds[i], ev, now); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// fileHash is the survival baseline: SHA-256 of the target's current
-// content, workspace-relative. Empty when the file is unreadable —
-// including already-deleted, which the maturity check reads as
-// diverged (the edit did not survive) only when a baseline exists.
-// Paths escaping the workspace refuse — label targets come from
-// tool-call paths, and a stored "../x" must not read outside.
+// windowEnd computes a row's inner window edge — the earlier of the
+// +24h cap and the next provable session's start. Rows predating the
+// settle_at column carry 0; the cap reconstructs as created_at+24h.
+func (s *service) windowEnd(ctx context.Context, createdAt int64, sessionID string, settleAt int64) int64 {
+	cap := settleAt
+	if cap <= 0 {
+		cap = createdAt + settleWindowMillis
+	}
+	if next, err := s.q.NextSessionStartMillis(ctx, db.NextSessionStartMillisParams{
+		CreatedAt:    createdAt,
+		ID:           sessionID,
+		ProjectKey:   s.projectKey,
+		ProjectKey_2: s.projectKey,
+		ProjectKey_3: s.projectKey,
+	}); err == nil && next > 0 && next < cap {
+		return next
+	}
+	return cap
+}
+
+// commitEvidence is one settle batch's prefetched commit data: every
+// commit touching paths inside the union window, plus the
+// harness-recorded commit runs to exclude from it.
+type commitEvidence struct {
+	commits map[string][]int64
+	runs    []int64
+	// runsUnreadable marks the harness-run exclusion list as
+	// degraded: without it an agent-run commit is indistinguishable
+	// from external acceptance, so the commit arm abstains — the
+	// same fail-closed direction the commits fetch takes.
+	runsUnreadable bool
+}
+
+// prefetchCommitEvidence fetches the batch's two evidence inputs in
+// one git call and one ledger read. Outside a repo both are empty —
+// every inWindow read is then simply false. A ledger read failure
+// marks the batch degraded rather than treating every commit as
+// external: the exclusion list is what keeps agent-made commits out
+// of acceptance evidence.
+func (s *service) prefetchCommitEvidence(ctx context.Context, winLo, winHi int64) commitEvidence {
+	ev := commitEvidence{}
+	if !s.hasRepo || winHi <= winLo {
+		return ev
+	}
+	ev.commits = s.commitsTouchingPaths(ctx,
+		time.UnixMilli(winLo).UTC().Format(time.RFC3339),
+		time.UnixMilli(winHi).UTC().Format(time.RFC3339))
+	// A run can only attribute commits created before its own end
+	// stamp, so the fetch window's slacks mirror the skew's
+	// direction: after-skew below, before-skew above.
+	runs, err := s.q.ListCrushCommitRuns(ctx, db.ListCrushCommitRunsParams{
+		ProjectKey: s.projectKey,
+		LastAt:     winLo - commitSkewAfterMillis,
+		LastAt_2:   winHi + commitSkewBeforeMillis,
+	})
+	if err != nil {
+		ev.runsUnreadable = true
+	} else {
+		ev.runs = runs
+	}
+	return ev
+}
+
+// inWindow reports whether any prefetched commit landing in
+// (createdAt, winEnd] touched one of paths, excluding commits the
+// harness itself made — a commit whose time sits within the skew
+// bound of a recorded run is agent-made, not user acceptance.
+// Timestamps mix units: git reports unix seconds, the ledger stores
+// millis — all comparisons happen in millis.
+func (ev commitEvidence) inWindow(paths []string, createdAt, winEnd int64) bool {
+	if ev.runsUnreadable {
+		// No exclusion list means no way to prove a commit was
+		// external — abstain rather than count agent work as
+		// acceptance.
+		return false
+	}
+	for _, p := range paths {
+		// Stored targets are slash-normalized at record time; the
+		// ToSlash here covers rows written before that (Windows
+		// filepath.Rel emitted backslashes) — git paths are always
+		// slash-separated.
+		for _, ct := range ev.commits[filepath.ToSlash(p)] {
+			ms := ct * 1000
+			// Fail closed on edges: a commit we cannot prove
+			// landed inside the window is not evidence, and a
+			// commit matching a harness run is not external.
+			if ms <= createdAt || ms > winEnd {
+				continue
+			}
+			if isHarnessCommit(ms, ev.runs) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// settleReferent computes and freezes one episode's label inside its
+// closed window.
+func (s *service) settleReferent(ctx context.Context, r db.ListUnsettledReferentLabelsRow, winEnd int64, ev commitEvidence, now int64) error {
+	var committed sql.NullInt64
+	if s.hasRepo {
+		committed = sql.NullInt64{Int64: 0, Valid: true}
+		if ev.inWindow([]string{r.Target}, r.CreatedAt, winEnd) {
+			committed.Int64 = 1
+		}
+	}
+	changed := s.hunkDiverged(r.Target, r.LabelAddedLines)
+	green := s.sessionTestsGreen(ctx, r.SessionID)
+	if err := s.q.SettleReferentEpisode(ctx, db.SettleReferentEpisodeParams{
+		LabelCommitted:   committed,
+		LabelHashChanged: changed,
+		LabelTestsGreen:  green,
+		SettledAt:        sql.NullInt64{Int64: now, Valid: true},
+		LabeledAt:        now,
+		ID:               r.ID,
+	}); err != nil {
+		return err
+	}
+	// Promotion consumes settled outcomes (#340): this row's success
+	// freezing may be the crossing observation for its mapping, so
+	// the floor check runs here too — the record path can't count the
+	// episode it just inserted. Suggested rows are echo, not
+	// evidence; zero/negative floor disables the channel.
+	if s.referentPromoteHits > 0 && r.MemorySuggested == 0 &&
+		ReferentEpisodeOutcome(r.Verdict, committed, changed) {
+		return s.maybePromoteReferent(ctx, r.Phrase, r.Target, s.referentPromoteHits)
+	}
+	return nil
+}
+
+// isHarnessCommit reports whether commit ms (unix millis) sits within
+// the skew bounds of a harness-recorded git-commit run — the commit's
+// %ct precedes the run's last_at (run end), so the bound reaches
+// further backward than forward.
+func isHarnessCommit(ms int64, runs []int64) bool {
+	for _, t := range runs {
+		if ms >= t-commitSkewBeforeMillis && ms <= t+commitSkewAfterMillis {
+			return true
+		}
+	}
+	return false
+}
+
+// hunkDiverged reads the survival signal (#340): the recorded added
+// lines' presence in the file NOW. Diverged when the file is
+// unreadable (deleted edits did not survive) or when fewer than
+// survivalMajority of the fingerprint lines remain — unrelated edits
+// elsewhere in the file no longer count as revision. An empty
+// fingerprint keeps the signal NULL: rows predating the column and
+// edits whose lines were never captured carry no survival evidence.
+// Late settlement reads a later file state — a bounded bias toward
+// revised, documented rather than hidden.
+//
+// Both sides compare in NormalizeAddedLines' space — trimmed,
+// empty-dropped, deduped — because the fingerprint stores trimmed
+// text while files carry indentation: probing raw content for
+// "\n"+line+"\n" only ever matches column-0 lines and would read
+// nearly every real edit as diverged.
+func (s *service) hunkDiverged(target, addedJSON string) sql.NullInt64 {
+	var lines []string
+	if addedJSON == "" || json.Unmarshal([]byte(addedJSON), &lines) != nil || len(lines) == 0 {
+		return sql.NullInt64{}
+	}
+	if !workspacePathSafe(target) {
+		// An absolute or escaping path is out of scope, not deleted —
+		// abstain rather than minting diverged evidence for an edit
+		// outside this workspace.
+		return sql.NullInt64{}
+	}
+	data, ok := s.readWorkspaceFile(target)
+	if !ok {
+		// The file is gone — nothing survived.
+		return sql.NullInt64{Int64: 1, Valid: true}
+	}
+	fileLines := map[string]struct{}{}
+	for _, l := range strings.Split(string(data), "\n") {
+		if t := strings.TrimSpace(l); t != "" {
+			fileLines[t] = struct{}{}
+		}
+	}
+	present := 0
+	for _, l := range lines {
+		if _, ok := fileLines[l]; ok {
+			present++
+		}
+	}
+	if float64(present)/float64(len(lines)) < survivalMajority {
+		return sql.NullInt64{Int64: 1, Valid: true}
+	}
+	return sql.NullInt64{Int64: 0, Valid: true}
+}
+
+// NormalizeOutcomeCommand normalizes a bash invocation for the
+// turn_outcomes commands column — the same whitespace-collapse,
+// redaction, and length bound as the command_memory join key, so
+// mined turn commands can join ledger rows directly.
+func NormalizeOutcomeCommand(command string) string {
+	return normalizeCommand(command)
+}
+
+// NormalizeAddedLines reduces an edit's introduced lines to the
+// survival fingerprint: trimmed, empty-dropped, first-seen deduped,
+// capped so a generated blob can't pin the row.
+func NormalizeAddedLines(text string) []string {
+	const maxLines = 256
+	seen := map[string]struct{}{}
+	out := make([]string, 0, 32)
+	for _, l := range strings.Split(text, "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
+		}
+		if _, ok := seen[l]; ok {
+			continue
+		}
+		seen[l] = struct{}{}
+		out = append(out, l)
+		if len(out) >= maxLines {
+			break
+		}
+	}
+	return out
+}
+
+// fileHash is the legacy survival baseline: SHA-256 of the target's
+// current content, workspace-relative. Still stamped at record time
+// for diagnostics; settlement no longer reads it — whole-file
+// equality counted unrelated edits as divergence (#340). Empty when
+// the file is unreadable. Paths escaping the workspace refuse.
 func (s *service) fileHash(target string) string {
 	if target == "" {
 		return ""
 	}
-	clean := filepath.Clean(filepath.FromSlash(target))
-	if filepath.IsAbs(clean) || clean == ".." ||
-		strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return ""
-	}
-	data, err := os.ReadFile(filepath.Join(s.workingDir, clean))
-	if err != nil {
+	data, ok := s.readWorkspaceFile(target)
+	if !ok {
 		return ""
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+// workspacePathSafe reports whether a stored target stays inside the
+// workspace — absolute and ../-escaping paths are refused. Settlement
+// distinguishes this from "file deleted": an out-of-scope path
+// abstains (NULL) rather than reading as diverged.
+func workspacePathSafe(target string) bool {
+	if target == "" {
+		return false
+	}
+	clean := filepath.Clean(filepath.FromSlash(target))
+	return !filepath.IsAbs(clean) && clean != ".." &&
+		!strings.HasPrefix(clean, ".."+string(filepath.Separator))
+}
+
+// readWorkspaceFile reads a workspace-relative path, refusing
+// escapes — label targets come from tool-call paths, and a stored
+// "../x" must not read outside.
+func (s *service) readWorkspaceFile(target string) ([]byte, bool) {
+	if !workspacePathSafe(target) {
+		return nil, false
+	}
+	clean := filepath.Clean(filepath.FromSlash(target))
+	data, err := os.ReadFile(filepath.Join(s.workingDir, clean))
+	if err != nil {
+		return nil, false
+	}
+	return data, true
 }
 
 // sessionTestsGreen folds the judged session's last-run test
@@ -203,15 +457,24 @@ func (s *service) sessionTestsGreen(ctx context.Context, sessionID string) sql.N
 
 // commitsTouchingPaths maps each path a commit in the window touched
 // to that commit's unix-second timestamps — one git call for the
-// whole pending batch. Commit headers are NUL-prefixed
-// "\x00commit\t<sec>": filenames cannot contain NUL, so a path
-// literally named "commit <digits>" can never fake a boundary.
-func (s *service) commitsTouchingPaths(ctx context.Context, sinceRFC3339 string) map[string][]int64 {
+// whole batch, bounded both ends (#340). Commit headers are
+// NUL-prefixed "\x00commit\t<sec>": filenames cannot contain NUL, so
+// a path literally named "commit <digits>" can never fake a
+// boundary. git emits repo-root-relative paths while ledger targets
+// are workspace-relative — repoPrefix strips the prefix and drops
+// commits outside the workspace entirely (without it, commit
+// evidence is silently blind in a repo subdirectory). Known miss:
+// git C-quotes paths with tabs/newlines/non-ASCII (core.quotePath)
+// while the ledger stores them raw, so commit evidence silently
+// misses for such files — a `-c core.quotePath=false -z` read is the
+// fix if the class ever matters.
+func (s *service) commitsTouchingPaths(ctx context.Context, sinceRFC3339, untilRFC3339 string) map[string][]int64 {
 	out := map[string][]int64{}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	raw, err := gitOut(ctx, s.workingDir, "log",
-		"--since="+sinceRFC3339, "--format=%x00commit%x09%ct", "--name-only")
+		"--since="+sinceRFC3339, "--until="+untilRFC3339,
+		"--format=%x00commit%x09%ct", "--name-only")
 	if err != nil {
 		return out
 	}
@@ -226,6 +489,12 @@ func (s *service) commitsTouchingPaths(ctx context.Context, sinceRFC3339 string)
 				ct = -1
 			}
 		case line != "" && ct >= 0:
+			if s.repoPrefix != "" {
+				if !strings.HasPrefix(line, s.repoPrefix) {
+					continue // committed path outside this workspace
+				}
+				line = strings.TrimPrefix(line, s.repoPrefix)
+			}
 			out[line] = append(out[line], ct)
 		}
 	}

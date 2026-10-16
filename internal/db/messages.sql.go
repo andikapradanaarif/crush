@@ -214,9 +214,12 @@ const listMessagesBySession = `-- name: ListMessagesBySession :many
 SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message, prism_model_id, prism_model_name, prism_hypercredit_savings, prism_dollar_savings
 FROM messages
 WHERE session_id = ?
-ORDER BY created_at ASC
+ORDER BY created_at ASC, rowid ASC
 `
 
+// created_at has one-second resolution, so rowid breaks same-second
+// ties into insertion order -- a swapped boundary pair would attach
+// a verdict to the wrong turn's span.
 func (q *Queries) ListMessagesBySession(ctx context.Context, sessionID string) ([]Message, error) {
 	rows, err := q.query(ctx, q.listMessagesBySessionStmt, listMessagesBySession, sessionID)
 	if err != nil {
@@ -260,7 +263,7 @@ SELECT m.id, m.session_id, m.role, m.parts, m.model, m.created_at, m.updated_at,
 FROM messages m
 WHERE m.session_id = ?
   AND m.created_at >= (SELECT s.created_at FROM messages s WHERE s.id = ?)
-ORDER BY m.created_at ASC
+ORDER BY m.created_at ASC, m.rowid ASC
 `
 
 type ListMessagesBySessionFromSummaryParams struct {
@@ -271,6 +274,7 @@ type ListMessagesBySessionFromSummaryParams struct {
 // Messages from the summary onward, which is all a compacted session sends.
 // created_at has one-second resolution, so a few messages preceding the
 // summary can come back too; the caller slices from the summary by ID.
+// Same rowid tiebreaker as ListMessagesBySession.
 func (q *Queries) ListMessagesBySessionFromSummary(ctx context.Context, arg ListMessagesBySessionFromSummaryParams) ([]Message, error) {
 	rows, err := q.query(ctx, q.listMessagesBySessionFromSummaryStmt, listMessagesBySessionFromSummary, arg.SessionID, arg.ID)
 	if err != nil {
