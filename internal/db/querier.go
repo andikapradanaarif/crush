@@ -130,7 +130,8 @@ type Querier interface {
 	// and without the stamp a fresh row satisfies the due predicate at
 	// birth -- a settle pass in flight before LabelReferentEpisode lands
 	// would freeze the row fingerprintless. The label UPDATE re-stamps
-	// the window at label time; pre-#340 rows keep 0 (due immediately).
+	// the same cap anchored at created_at (#354); pre-#340 rows keep 0
+	// (due immediately).
 	InsertReferentEpisode(ctx context.Context, arg InsertReferentEpisodeParams) error
 	// Open one turn's outcome row (#340), idempotent on the
 	// (session_id, turn_id) unique key -- turn_id is the turn's
@@ -150,11 +151,12 @@ type Querier interface {
 	// Stamp the artifact signals computable at episode-record time
 	// (#294/#340): the file's post-edit hash (diagnostic), the added-
 	// lines survival fingerprint, the judged turn's cost, the session's
-	// test verdict, and the observation window's +24h edge. The key
-	// clause is the episode unique key -- the same idempotency point
-	// the insert uses, so a repair-chain re-run re-stamps the same row
-	// instead of drifting. settled_at IS NULL keeps the write-once
-	// contract: a frozen row's label fields never re-stamp.
+	// test verdict, and the observation window's +24h edge anchored at
+	// created_at so a late label can't widen the documented cap (#354).
+	// The key clause is the episode unique key -- the same idempotency
+	// point the insert uses, so a repair-chain re-run re-stamps the
+	// same row instead of drifting. settled_at IS NULL keeps the
+	// write-once contract: a frozen row's label fields never re-stamp.
 	LabelReferentEpisode(ctx context.Context, arg LabelReferentEpisodeParams) error
 	// HEAD as of the most recent recorded run -- the pre-run baseline a
 	// HEAD-moving run diffs against to attribute its commits (#359).
@@ -418,6 +420,10 @@ type Querier interface {
 	// hints, and the observation's provenance all move with the latest
 	// failure, not the first.
 	UpsertFailure(ctx context.Context, arg UpsertFailureParams) error
+	// One fold's posterior write (#296). Sibling-pass exclusion comes
+	// from UpdateProjectRates holding rateMu across read, write, and
+	// mark (#356) -- an in-process racer skips rather than
+	// double-counting the batch.
 	UpsertProjectRate(ctx context.Context, arg UpsertProjectRateParams) error
 	// The digest is a per-turn refresh of the session's resumable view:
 	// title + latest checkpoint + touched files. ended_at follows the

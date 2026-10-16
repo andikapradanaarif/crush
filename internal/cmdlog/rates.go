@@ -76,15 +76,20 @@ func referentEpisodeAdmissible(verdict string, committed, hashChanged sql.NullIn
 
 // UpdateProjectRates folds settled referent episodes into the
 // project's decayed posterior mass and marks them folded.
-// Called from the detached per-turn pass — idempotent on the
-// rate_folded mark: a sibling pass racing between this pass's
-// upsert and its mark can re-fold one batch at most. gamma is the
-// per-session discount; gamma <= 0 or >= 1 is rejected so a config
-// slip can't silently freeze (gamma=1) or zero (gamma=0) memory.
+// Called from the detached per-turn pass — rateMu keeps two passes
+// in this process from overlapping the read→write→mark window and
+// re-folding one batch (#356); a racing pass skips instead. gamma
+// is the per-session discount; gamma <= 0 or >= 1 is rejected so a
+// config slip can't silently freeze (gamma=1) or zero (gamma=0)
+// memory.
 func (s *service) UpdateProjectRates(ctx context.Context, gamma float64) error {
 	if gamma <= 0 || gamma >= 1 {
 		return fmt.Errorf("rate decay gamma out of range (0,1): %v", gamma)
 	}
+	if !s.rateMu.TryLock() {
+		return nil
+	}
+	defer s.rateMu.Unlock()
 	row, err := s.q.GetProjectRate(ctx, db.GetProjectRateParams{
 		ProjectKey: s.projectKey,
 		Signal:     rateSignalReferent,
@@ -176,7 +181,8 @@ func (s *service) UpdateProjectRates(ctx context.Context, gamma float64) error {
 	}
 	// Membership marks land AFTER the upsert: a crash between them
 	// re-folds this batch (a bounded double-count), while marking
-	// first would lose the evidence permanently.
+	// first would lose the evidence permanently. rateMu above keeps
+	// in-process siblings out of the upsert→mark window entirely.
 	return s.q.MarkReferentEventsFolded(ctx, ids)
 }
 

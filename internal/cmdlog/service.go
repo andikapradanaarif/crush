@@ -161,9 +161,10 @@ type Service interface {
 	// UpdateProjectRates folds newly settled referent episodes into
 	// the project's decayed Beta-Binomial mass (#296): each new
 	// evidence-bearing session discounts stored mass by gamma before
-	// its outcomes count. Idempotent on the rate_folded mark; a
-	// sibling pass racing between upsert and mark can double-count
-	// one batch at most.
+	// its outcomes count. rateMu serializes the fold in-process
+	// (#356) — a racing sibling skips its pass rather than
+	// double-counting the batch; two crush instances sharing one
+	// store can still interleave (bounded, documented residual).
 	UpdateProjectRates(ctx context.Context, gamma float64) error
 
 	// ReferentRateLowerBound returns the quantile-q lower bound of
@@ -338,6 +339,13 @@ type service struct {
 	// overlapping itself — two fast turns can race, and the second
 	// pass skips rather than duplicating the batch's work.
 	labelMu sync.Mutex
+	// rateMu serializes the rate fold's read→write→mark (#356): two
+	// detached passes overlapping the upsert→mark window would
+	// re-fold the same batch into permanent posterior mass. Same
+	// process-local bound as labelMu — two crush instances sharing
+	// one store can still interleave, a documented residual the
+	// shared-store configuration already accepts elsewhere.
+	rateMu sync.Mutex
 	// sweepFailMu guards sweepFail: (prev..after) ranges whose
 	// attribution sweep already failed once. A second failure of the
 	// same range is deterministic, not transient — the baseline
