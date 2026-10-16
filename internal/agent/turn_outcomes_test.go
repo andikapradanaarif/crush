@@ -75,7 +75,7 @@ func TestExtractTurnOutcome(t *testing.T) {
 	a, env := referentAgent(t)
 	abs := filepath.Join(env.workingDir, "x.go")
 
-	msgs := []message.Message{
+	msgs := toolOK([]message.Message{
 		referentUserMsg("u0", "first turn"),
 		{Role: message.Assistant, Parts: []message.ContentPart{message.ToolCall{
 			ID: "tc-old", Name: tools.EditToolName, Finished: true,
@@ -110,9 +110,9 @@ func TestExtractTurnOutcome(t *testing.T) {
 			Input: `{"file_path":"y.go","content":"y"}`,
 		}}},
 		referentUserMsg("u2", "next turn starts"),
-	}
+	})
 
-	o := extractTurnOutcome(t.Context(), a.turnOutcomeDeps(), "s1", msgs, 2)
+	o := extractTurnOutcome(t.Context(), a.turnOutcomeDeps(), "s1", msgs, msgIdx(msgs, "u1"))
 	require.Equal(t, "u1", o.TurnID, "the turn keys on its boundary message")
 	require.ElementsMatch(t,
 		[]string{filepath.Join("x.go"), "y.go"}, o.EditedPaths)
@@ -121,6 +121,70 @@ func TestExtractTurnOutcome(t *testing.T) {
 	require.Equal(t, []string{"y"}, o.EditHunks["y.go"])
 	require.Equal(t, []string{"go test ./..."}, o.Commands,
 		"bash invocations record in ledger-normal form; reads do not")
+}
+
+// A tool call is evidence of work only once its result landed clean:
+// a denied permission's result is IsError, an errored call's is too,
+// and a call with no result never ran — their minted fingerprints and
+// commands would attest work that never happened (#358).
+func TestExtractTurnOutcome_UnexecutedCallsNotEvidence(t *testing.T) {
+	t.Parallel()
+	a, env := referentAgent(t)
+	abs := filepath.Join(env.workingDir, "x.go")
+
+	msgs := []message.Message{
+		referentUserMsg("u1", "do the thing"),
+		{Role: message.Assistant, Parts: []message.ContentPart{
+			// Denied at the permission prompt — the edit never ran.
+			message.ToolCall{
+				ID: "tc-denied-edit", Name: tools.EditToolName, Finished: true,
+				Input: fmt.Sprintf(`{"file_path":%q,"new_string":"phantom"}`, abs),
+			},
+			// Denied bash — its command never ran either.
+			message.ToolCall{
+				ID: "tc-denied-bash", Name: tools.BashToolName, Finished: true,
+				Input: `{"command":"rm -rf ."}`,
+			},
+			// Started, then errored mid-flight.
+			message.ToolCall{
+				ID: "tc-errored", Name: tools.WriteToolName, Finished: true,
+				Input: `{"file_path":"crash.go","content":"boom"}`,
+			},
+			// Interrupted before a result was ever written.
+			message.ToolCall{
+				ID: "tc-noresult", Name: tools.EditToolName, Finished: true,
+				Input: `{"file_path":"gone.go","new_string":"x"}`,
+			},
+			// The one call that actually ran.
+			message.ToolCall{
+				ID: "tc-ok", Name: tools.EditToolName, Finished: true,
+				Input: fmt.Sprintf(`{"file_path":%q,"new_string":"real"}`, "real.go"),
+			},
+		}},
+		{Role: message.Tool, Parts: []message.ContentPart{
+			message.ToolResult{ToolCallID: "tc-denied-edit", Name: tools.EditToolName,
+				Content: "User denied permission", IsError: true},
+		}},
+		{Role: message.Tool, Parts: []message.ContentPart{
+			message.ToolResult{ToolCallID: "tc-denied-bash", Name: tools.BashToolName,
+				Content: "User denied permission", IsError: true},
+		}},
+		{Role: message.Tool, Parts: []message.ContentPart{
+			message.ToolResult{ToolCallID: "tc-errored", Name: tools.WriteToolName,
+				Content: "write failed: disk full", IsError: true},
+		}},
+		{Role: message.Tool, Parts: []message.ContentPart{
+			message.ToolResult{ToolCallID: "tc-ok", Name: tools.EditToolName,
+				Content: "edited"},
+		}},
+	}
+
+	o := extractTurnOutcome(t.Context(), a.turnOutcomeDeps(), "s1", msgs, 0)
+	require.Equal(t, []string{"real.go"}, o.EditedPaths,
+		"denied, errored, and resultless calls mint no fingerprint")
+	require.Equal(t, []string{"real"}, o.EditHunks["real.go"])
+	require.Empty(t, o.Commands,
+		"a denied bash command is not a command the turn ran")
 }
 
 // The live path records the judged turn at the next prompt with that
@@ -272,7 +336,7 @@ func TestExtractTurnOutcome_SummaryIsNotBoundary(t *testing.T) {
 	a, env := referentAgent(t)
 	abs := filepath.Join(env.workingDir, "x.go")
 
-	msgs := []message.Message{
+	msgs := toolOK([]message.Message{
 		referentUserMsg("u0", "do work"),
 		{Role: message.Assistant, Parts: []message.ContentPart{message.ToolCall{
 			ID: "tc-before", Name: tools.EditToolName, Finished: true,
@@ -288,7 +352,7 @@ func TestExtractTurnOutcome_SummaryIsNotBoundary(t *testing.T) {
 			ID: "tc-after", Name: tools.EditToolName, Finished: true,
 			Input: fmt.Sprintf(`{"file_path":%q,"new_string":"b"}`, "y.go"),
 		}}},
-	}
+	})
 
 	o := extractTurnOutcome(t.Context(), a.turnOutcomeDeps(), "s1", msgs, 0)
 	require.Equal(t, "u0", o.TurnID)
@@ -410,6 +474,10 @@ func TestExtractTurnOutcome_DelegatedEdits(t *testing.T) {
 				ID: "tc-bash", Name: tools.BashToolName, Finished: true,
 				Input: `{"command":"go build ./..."}`,
 			},
+		}},
+		{Role: message.Tool, Parts: []message.ContentPart{
+			message.ToolResult{ToolCallID: "tc-edit", Name: tools.EditToolName, Content: "ok"},
+			message.ToolResult{ToolCallID: "tc-bash", Name: tools.BashToolName, Content: "ok"},
 		}},
 	} {
 		_, err := env.messages.Create(t.Context(), childID, m)

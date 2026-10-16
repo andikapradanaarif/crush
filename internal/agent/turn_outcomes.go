@@ -248,6 +248,20 @@ func extractTurnOutcome(ctx context.Context, d turnOutcomeDeps, sessionID string
 	// prompt — boundary-checking child slices would return on the
 	// delegation prompt itself and drop every delegated edit.
 	scan = func(ms []message.Message, from int) {
+		// A call is evidence only once its result landed clean: a
+		// denied permission's ToolResult is IsError, an errored
+		// call's is too, and a call with no result never ran —
+		// minted fingerprints or commands would attest work that
+		// never happened (#358). Error results are sticky: a call
+		// with both a success and an error stays excluded.
+		ran := map[string]bool{}
+		for _, m := range ms[from:] {
+			for _, tr := range m.ToolResults() {
+				if _, seen := ran[tr.ToolCallID]; !seen || tr.IsError {
+					ran[tr.ToolCallID] = !tr.IsError
+				}
+			}
+		}
 		for _, m := range ms[from:] {
 			if m.Role != message.Assistant {
 				continue
@@ -263,7 +277,7 @@ func extractTurnOutcome(ctx context.Context, d turnOutcomeDeps, sessionID string
 					if childMsgs, err := d.messages.List(ctx, childID); err == nil {
 						scan(childMsgs, 0)
 					}
-				case referentMutationTools[tc.Name]:
+				case referentMutationTools[tc.Name] && ran[tc.ID]:
 					path, added := editEvidence(tc.Input)
 					if path == "" {
 						continue
@@ -280,7 +294,7 @@ func extractTurnOutcome(ctx context.Context, d turnOutcomeDeps, sessionID string
 					// numerator and denominator together (and a
 					// pathological edit loop grows the JSON).
 					o.EditHunks[rel] = appendNewLines(o.EditHunks[rel], seen, added)
-				case tc.Name == tools.BashToolName:
+				case tc.Name == tools.BashToolName && ran[tc.ID]:
 					if cmd := bashCommand(tc.Input); cmd != "" {
 						o.Commands = append(o.Commands, cmdlog.NormalizeOutcomeCommand(cmd))
 					}
