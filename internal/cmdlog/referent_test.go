@@ -286,3 +286,32 @@ func TestRecordReferentEpisode_ZeroPromoteMinNeverPromotes(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, refs)
 }
+
+// The labeled insert writes the episode AND its artifact labels in
+// one statement: a prompt-anchored created_at can make the row born
+// due, so labels must not wait for a second write that a settle pass
+// could beat (#366 review).
+func TestRecordReferentEpisodeLabeled_AtomicLabelsAndPromptAnchor(t *testing.T) {
+	env := setupTest(t)
+
+	ep := referentEp("s1", "m1", "x.go", ReferentAccepted, false)
+	ep.CreatedAt = 1_700_000_000_000 // judged prompt's time, not mint time
+	require.NoError(t, env.svc.RecordReferentEpisodeLabeled(env.ctx, ep,
+		ReferentEpisodeLabelInputs{Steps: 3, Tokens: 42, AddedLines: []string{"v1"}}, 5))
+
+	var created, settleAt, labeledAt, steps, tokens int64
+	var added string
+	require.NoError(t, env.conn.QueryRowContext(env.ctx,
+		`SELECT created_at, settle_at, labeled_at, label_steps,
+		        label_tokens, label_added_lines
+		 FROM referent_episodes
+		 WHERE session_id = 's1' AND source_message_id = 'm1'`).
+		Scan(&created, &settleAt, &labeledAt, &steps, &tokens, &added))
+	require.Equal(t, int64(1_700_000_000_000), created,
+		"created_at anchors at the judged prompt")
+	require.Equal(t, created+settleWindowMillis, settleAt)
+	require.Greater(t, labeledAt, int64(0), "labels landed atomically with the insert")
+	require.Equal(t, int64(3), steps)
+	require.Equal(t, int64(42), tokens)
+	require.Contains(t, added, "v1")
+}

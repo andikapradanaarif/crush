@@ -233,7 +233,7 @@ func isRepairPrompt(text string) bool {
 // drove still attributes to the vague turn they were repairing. If it
 // was vague and the turn produced edits, the current prompt judges it
 // and the episodes record with verdict and contamination flag.
-func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionAgentCall, msgs []message.Message) {
+func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionAgentCall, msgs []message.Message, full []message.Message) {
 	if a.cmdlog == nil || a.isSubAgent || call.RepairAttempts > 0 || call.Prompt == "" {
 		return
 	}
@@ -245,7 +245,33 @@ func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionA
 		}
 	}
 	if lastUser < 0 {
-		return
+		// Post-compaction first turn (#361): the tail holds only the
+		// summary — the judged turn lives before it, so locate it on
+		// the full transcript like recordTurnOutcome's fallback. The
+		// caller fetches it once for both judgment passes; nil here
+		// means the List could not serve. The fresh transcript sees
+		// this run's persisted prompt: exclude it from the boundary
+		// search, then truncate the judged span at the next stored
+		// boundary — which by construction can only be the in-flight
+		// prompt itself. Intervening turns are judged by their own
+		// prompts on their own passes; turns before the last boundary
+		// simply never mint episodes — referents have no backfill,
+		// by design.
+		if len(full) == 0 {
+			return
+		}
+		lastUser = lastRealUserIdx(full, call.currentUserMsgID)
+		if lastUser < 0 {
+			return
+		}
+		end := len(full)
+		for i := lastUser + 1; i < len(full); i++ {
+			if isRealUserMsg(full[i]) {
+				end = i
+				break
+			}
+		}
+		msgs = full[:end]
 	}
 	prev := msgs[lastUser]
 	mp := a.memoryParams()
@@ -278,24 +304,37 @@ func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionA
 			RepoState:       a.referentRepoState(),
 			Suggested:       a.cmdlog.WasSuggestedFile(ctx, call.SessionID, t.path),
 			Verdict:         verdict,
+			// Anchor the window at the judged prompt, not the mint —
+			// a judgment arriving turns later (post-compaction, a
+			// next-day session resume) would otherwise lose the
+			// turn's aftermath: user-review commits between turn end
+			// and mint fall before a mint-anchored window. Parity
+			// with extractTurnOutcome's CreatedAt stamp.
+			CreatedAt: prev.CreatedAt * 1000,
 		}
-		err := a.cmdlog.RecordReferentEpisode(ctx, ep, mp.ReferentPromoteHits)
-		if err != nil {
-			slog.Warn("Failed to record referent episode", "error", err)
-			continue
-		}
-		// Artifact labels (#294): the signals that decide acceptance
-		// from evidence rather than cue words. WrongTarget is
-		// definitionally zero — the single-target abstention above
-		// guarantees every recorded episode had exactly one
-		// mutation — and len(targets)-1 keeps that semantics visible
-		// if the abstention ever relaxes.
-		lerr := a.cmdlog.LabelReferentEpisode(ctx, ep, cmdlog.ReferentEpisodeLabelInputs{
+		labels := cmdlog.ReferentEpisodeLabelInputs{
 			Steps:       steps,
 			Tokens:      tokens,
 			WrongTarget: int64(len(targets) - 1),
 			AddedLines:  t.added,
-		})
+		}
+		// The labeled insert carries the artifact signals atomically
+		// — a prompt-anchored row can be born due, and a settle pass
+		// between a bare insert and a second label write would
+		// freeze it fingerprintless (#366 review).
+		err := a.cmdlog.RecordReferentEpisodeLabeled(ctx, ep, labels, mp.ReferentPromoteHits)
+		if err != nil {
+			slog.Warn("Failed to record referent episode", "error", err)
+			continue
+		}
+		// Re-derivation refresh: an OR IGNORE hit on the unique key
+		// skipped the insert — the UPDATE re-stamps the fingerprint
+		// for the latest derivation. WrongTarget is definitionally
+		// zero — the single-target abstention above guarantees every
+		// recorded episode had exactly one mutation — and
+		// len(targets)-1 keeps that semantics visible if the
+		// abstention ever relaxes.
+		lerr := a.cmdlog.LabelReferentEpisode(ctx, ep, labels)
 		if lerr != nil {
 			slog.Warn("Failed to label referent episode", "error", lerr)
 		}

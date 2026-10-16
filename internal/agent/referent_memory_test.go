@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/cmdlog"
@@ -206,7 +207,7 @@ func TestRecordReferentEpisodes(t *testing.T) {
 		}
 		a.recordReferentEpisodes(t.Context(), SessionAgentCall{
 			SessionID: "s1", Prompt: "looks good",
-		}, msgs)
+		}, msgs, nil)
 
 		refs, err := svc.ListReferentCandidates(t.Context(), []string{"config"}, 5)
 		require.NoError(t, err)
@@ -219,7 +220,7 @@ func TestRecordReferentEpisodes(t *testing.T) {
 		}, []message.Message{
 			referentUserMsg("u2", "fix the config"),
 			referentEditMsg("tc2", tools.EditToolName, target),
-		})
+		}, nil)
 		// Promotion consumes settled outcomes only: a fresh row can't
 		// count itself, so the crossing happens at settlement (no
 		// git/fingerprints → the accepted cue is the frozen outcome).
@@ -240,13 +241,13 @@ func TestRecordReferentEpisodes(t *testing.T) {
 		}, []message.Message{
 			referentUserMsg("u1", "fix the config"),
 			referentEditMsg("tc1", tools.EditToolName, target),
-		})
+		}, nil)
 		a.recordReferentEpisodes(t.Context(), SessionAgentCall{
 			SessionID: "s2", Prompt: "fine",
 		}, []message.Message{
 			referentUserMsg("u2", "fix the config"),
 			referentEditMsg("tc2", tools.EditToolName, target),
-		})
+		}, nil)
 		// One revised + one accepted: the revised episode still doesn't
 		// count, so one clean session stays below the floor.
 		refs, err := svc.ListReferentCandidates(t.Context(), []string{"config"}, 5)
@@ -269,7 +270,7 @@ func TestRecordReferentEpisodes(t *testing.T) {
 			}, []message.Message{
 				referentUserMsg("u-"+sess, "fix the config"),
 				referentEditMsg("tc-"+sess, tools.EditToolName, target),
-			})
+			}, nil)
 		}
 		refs, err := svc.ListReferentCandidates(t.Context(), []string{"config"}, 5)
 		require.NoError(t, err)
@@ -286,7 +287,7 @@ func TestRecordReferentEpisodes(t *testing.T) {
 		}, []message.Message{
 			referentUserMsg("u1", "fix "+target),
 			referentEditMsg("tc1", tools.EditToolName, target),
-		})
+		}, nil)
 		refs, err := svc.ListReferentCandidates(t.Context(), []string{"config"}, 5)
 		require.NoError(t, err)
 		require.Empty(t, refs)
@@ -312,7 +313,7 @@ func TestRecordReferentEpisodes(t *testing.T) {
 				ToolCallID: "tc1", Name: tools.EditToolName,
 				Content: "User denied permission", IsError: true,
 			}}},
-		})
+		}, nil)
 		refs, err := svc.ListReferentCandidates(t.Context(), []string{"config"}, 5)
 		require.NoError(t, err)
 		require.Empty(t, refs)
@@ -328,7 +329,7 @@ func TestRecordReferentEpisodes(t *testing.T) {
 		}, []message.Message{
 			referentUserMsg("u1", "fix the config and the test"),
 			referentEditMsg("tc1", tools.EditToolName, target),
-		})
+		}, nil)
 		refs, err := svc.ListReferentCandidates(t.Context(), []string{"config", "test"}, 5)
 		require.NoError(t, err)
 		require.Empty(t, refs)
@@ -349,7 +350,7 @@ func TestRecordReferentEpisodes(t *testing.T) {
 			// A collateral edit on a second file makes phrase→target
 			// attribution unknowable — record neither.
 			referentEditMsg("tc2", tools.EditToolName, filepath.Join(env.workingDir, "y.go")),
-		})
+		}, nil)
 		refs, err := env.cmdlog.ListReferentCandidates(t.Context(), []string{"config"}, 5)
 		require.NoError(t, err)
 		require.Empty(t, refs)
@@ -377,7 +378,7 @@ func TestRecordReferentEpisodes(t *testing.T) {
 			// the scan must skip it, not judge the repair prompt.
 			referentUserMsg("r1", "Verification failed. exit code 1"),
 			referentEditMsg("tc2", tools.EditToolName, target),
-		})
+		}, nil)
 		settleReferents(t, env, env.cmdlog)
 		refs, err := env.cmdlog.ListReferentCandidates(t.Context(), []string{"config"}, 5)
 		require.NoError(t, err)
@@ -428,12 +429,183 @@ func TestRecordReferentEpisodes(t *testing.T) {
 				Input:    `{"prompt":"fix the config"}`,
 				Finished: true,
 			}}},
-		})
+		}, nil)
 		settleReferents(t, env, env.cmdlog)
 		refs, err := env.cmdlog.ListReferentCandidates(t.Context(), []string{"config"}, 5)
 		require.NoError(t, err)
 		require.Len(t, refs, 1)
 		require.Equal(t, "x.go", refs[0].Target)
+	})
+
+	// Issue #361: a vague turn followed by compaction leaves no real
+	// user message in the post-summary tail — without the
+	// full-transcript fallback the judged turn's episode is lost.
+	t.Run("post-compaction tail finds the judged turn", func(t *testing.T) {
+		t.Parallel()
+		a, env := referentAgent(t)
+		mp := params.DefaultMemory()
+		mp.ReferentPromoteHits = 1
+		env.cmdlog = cmdlog.NewService(db.New(env.conn), env.workingDir, mp)
+		a.cmdlog = env.cmdlog
+		target := filepath.Join(env.workingDir, "x.go")
+
+		sess, err := env.sessions.Create(t.Context(), "s1")
+		require.NoError(t, err)
+		var vagueID string
+		for _, m := range []message.CreateMessageParams{
+			{Role: message.User, Parts: []message.ContentPart{
+				message.TextContent{Text: "fix the config"},
+			}},
+			{Role: message.Assistant, Parts: []message.ContentPart{
+				message.ToolCall{
+					ID: "tc1", Name: tools.EditToolName, Finished: true,
+					Input: fmt.Sprintf(`{"file_path":%q,"old_string":"","new_string":"v1"}`, target),
+				},
+				message.ToolResult{ToolCallID: "tc1", Name: tools.EditToolName, Content: "ok"},
+			}},
+		} {
+			created, err := env.messages.Create(t.Context(), sess.ID, m)
+			require.NoError(t, err)
+			if m.Role == message.User {
+				vagueID = created.ID
+			}
+		}
+		// Backdate the judged prompt so mint-vs-prompt anchoring is
+		// observable — the window must cover the turn's aftermath,
+		// not the mint moment.
+		promptSec := time.Now().Add(-2 * time.Hour).Unix()
+		_, err = env.conn.ExecContext(t.Context(),
+			`UPDATE messages SET created_at = ? WHERE id = ?`, promptSec, vagueID)
+		require.NoError(t, err)
+		// Production ordering: the in-flight prompt persists before
+		// the record pass reads the transcript — exclude it or the
+		// fallback lands on it and judges nothing.
+		inflight, err := env.messages.Create(t.Context(), sess.ID, message.CreateMessageParams{
+			Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "looks right"}},
+		})
+		require.NoError(t, err)
+
+		// The tail the live path sees: only the compaction summary.
+		// The caller passes the full transcript fetched once for both
+		// judgment passes — production reads it at the same point.
+		fullTx, err := env.messages.List(t.Context(), sess.ID)
+		require.NoError(t, err)
+		a.recordReferentEpisodes(t.Context(), SessionAgentCall{
+			SessionID: sess.ID, Prompt: "looks right", currentUserMsgID: inflight.ID,
+		}, []message.Message{{
+			ID: "sum", Role: message.User, IsSummaryMessage: true,
+			Parts: []message.ContentPart{message.TextContent{Text: "summary"}},
+		}}, fullTx)
+
+		var n int
+		require.NoError(t, env.conn.QueryRowContext(t.Context(),
+			`SELECT COUNT(*) FROM referent_episodes
+			 WHERE session_id = ? AND source_message_id = ?`,
+			sess.ID, vagueID).Scan(&n))
+		require.Equal(t, 1, n,
+			"the pre-summary vague turn mints its episode via the full transcript")
+		// The in-flight prompt is a boundary for the span but records
+		// no episode of its own.
+		require.NoError(t, env.conn.QueryRowContext(t.Context(),
+			`SELECT COUNT(*) FROM referent_episodes
+			 WHERE source_message_id = ?`, inflight.ID).Scan(&n))
+		require.Zero(t, n, "no phantom episode keyed to the in-flight prompt")
+		var gotTarget, verdict string
+		require.NoError(t, env.conn.QueryRowContext(t.Context(),
+			`SELECT target, verdict FROM referent_episodes
+			 WHERE source_message_id = ?`, vagueID).Scan(&gotTarget, &verdict))
+		require.Equal(t, "x.go", gotTarget)
+		require.Equal(t, cmdlog.ReferentAccepted, verdict,
+			"the in-flight prompt is the verdict source")
+		var epCreated, labeledAt int64
+		var addedLines string
+		require.NoError(t, env.conn.QueryRowContext(t.Context(),
+			`SELECT created_at, labeled_at, label_added_lines
+			 FROM referent_episodes WHERE source_message_id = ?`,
+			vagueID).Scan(&epCreated, &labeledAt, &addedLines))
+		require.Equal(t, promptSec*1000, epCreated,
+			"created_at anchors at the judged prompt, not the mint")
+		require.Greater(t, labeledAt, int64(0),
+			"labels landed in the insert — born-due rows never freeze fingerprintless")
+		require.NotEmpty(t, addedLines)
+	})
+
+	// The last real boundary judges, always: when a real prompt
+	// intervened between a vague turn and compaction, the fallback
+	// judges THAT turn — the earlier vague turn is unrecorded
+	// (referents have no backfill, by design) and the judged span
+	// bounds targets to the intervening turn's work alone.
+	t.Run("intervening prompt is judged, earlier vague turn unrecorded", func(t *testing.T) {
+		t.Parallel()
+		a, env := referentAgent(t)
+		mp := params.DefaultMemory()
+		mp.ReferentPromoteHits = 1
+		env.cmdlog = cmdlog.NewService(db.New(env.conn), env.workingDir, mp)
+		a.cmdlog = env.cmdlog
+		targetA := filepath.Join(env.workingDir, "a.go")
+		targetB := filepath.Join(env.workingDir, "b.go")
+
+		sess, err := env.sessions.Create(t.Context(), "s1")
+		require.NoError(t, err)
+		edit := func(tcID, path string) message.CreateMessageParams {
+			return message.CreateMessageParams{
+				Role: message.Assistant,
+				Parts: []message.ContentPart{
+					message.ToolCall{
+						ID: tcID, Name: tools.EditToolName, Finished: true,
+						Input: fmt.Sprintf(`{"file_path":%q,"old_string":"","new_string":"v1"}`, path),
+					},
+					message.ToolResult{ToolCallID: tcID, Name: tools.EditToolName, Content: "ok"},
+				},
+			}
+		}
+		userMsg := func(text string) message.CreateMessageParams {
+			return message.CreateMessageParams{Role: message.User, Parts: []message.ContentPart{
+				message.TextContent{Text: text},
+			}}
+		}
+		var vagueID, interveningID string
+		for i, m := range []message.CreateMessageParams{
+			userMsg("fix the config"),
+			edit("tc1", targetA),
+			userMsg("fix the tests"),
+			edit("tc2", targetB),
+		} {
+			created, err := env.messages.Create(t.Context(), sess.ID, m)
+			require.NoError(t, err)
+			switch i {
+			case 0:
+				vagueID = created.ID
+			case 2:
+				interveningID = created.ID
+			}
+		}
+		inflight, err := env.messages.Create(t.Context(), sess.ID,
+			userMsg("looks right"))
+		require.NoError(t, err)
+
+		fullTx, err := env.messages.List(t.Context(), sess.ID)
+		require.NoError(t, err)
+		a.recordReferentEpisodes(t.Context(), SessionAgentCall{
+			SessionID: sess.ID, Prompt: "looks right", currentUserMsgID: inflight.ID,
+		}, []message.Message{{
+			ID: "sum", Role: message.User, IsSummaryMessage: true,
+			Parts: []message.ContentPart{message.TextContent{Text: "summary"}},
+		}}, fullTx)
+
+		var target, verdict string
+		require.NoError(t, env.conn.QueryRowContext(t.Context(),
+			`SELECT target, verdict FROM referent_episodes
+			 WHERE source_message_id = ?`, interveningID).Scan(&target, &verdict))
+		require.Equal(t, "b.go", target,
+			"targets are bounded to the judged turn — the earlier turn's a.go edit stays out")
+		require.Equal(t, cmdlog.ReferentAccepted, verdict)
+		var n int
+		require.NoError(t, env.conn.QueryRowContext(t.Context(),
+			`SELECT COUNT(*) FROM referent_episodes
+			 WHERE source_message_id = ?`, vagueID).Scan(&n))
+		require.Zero(t, n,
+			"the earlier vague turn mints no episode — no backfill channel")
 	})
 }
 

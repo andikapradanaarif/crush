@@ -346,6 +346,10 @@ func (r *recordingCmdLog) RecordReferentEpisode(context.Context, cmdlog.Referent
 	return nil
 }
 
+func (r *recordingCmdLog) RecordReferentEpisodeLabeled(context.Context, cmdlog.ReferentEpisode, cmdlog.ReferentEpisodeLabelInputs, int) error {
+	return nil
+}
+
 func (r *recordingCmdLog) LabelReferentEpisode(context.Context, cmdlog.ReferentEpisode, cmdlog.ReferentEpisodeLabelInputs) error {
 	return nil
 }

@@ -119,6 +119,12 @@ type Service interface {
 	// referent_memory row (#165).
 	RecordReferentEpisode(ctx context.Context, ep ReferentEpisode, promoteMin int) error
 
+	// RecordReferentEpisodeLabeled is RecordReferentEpisode with the
+	// artifact labels written in the same insert — required when
+	// ep.CreatedAt anchors at the judged prompt rather than mint
+	// time, since a prompt-anchored row can be born due.
+	RecordReferentEpisodeLabeled(ctx context.Context, ep ReferentEpisode, in ReferentEpisodeLabelInputs, promoteMin int) error
+
 	// LabelReferentEpisode stamps the artifact signals computable at
 	// episode-record time (#294): the added-lines survival
 	// fingerprint, the judged turn's cost, the session-end test
