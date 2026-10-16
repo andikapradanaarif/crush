@@ -319,64 +319,6 @@ func (q *Queries) ListCommandPartitionKeys(ctx context.Context) ([]string, error
 	return items, nil
 }
 
-const listCrushCommitRuns = `-- name: ListCrushCommitRuns :many
-SELECT last_at FROM command_memory
-WHERE project_key = ?
-    AND (cmd_norm LIKE 'git commit%'
-         OR cmd_norm LIKE '%&& git commit%'
-         OR cmd_norm LIKE '%; git commit%'
-         OR cmd_norm LIKE '%|| git commit%'
-         OR cmd_norm LIKE 'git -C % commit%'
-         OR cmd_norm LIKE 'git -c %commit%'
-         OR cmd_norm LIKE 'git --git-dir%commit%'
-         OR cmd_norm LIKE '%=% git commit%')
-    AND last_at >= ? AND last_at <= ?
-`
-
-type ListCrushCommitRunsParams struct {
-	ProjectKey string `json:"project_key"`
-	LastAt     int64  `json:"last_at"`
-	LastAt_2   int64  `json:"last_at_2"`
-}
-
-// Timestamps (millis) of git-commit commands this project ran through
-// the harness inside a window (#340): a commit whose author-time sits
-// within the skew bound of one of these was agent-made, and does not
-// count as external acceptance evidence. cmd_norm keeps the whole
-// invocation, so every distinct commit message is its own row; the
-// known limit is that re-running an identical message keeps only the
-// latest last_at. Compound shell forms count too -- a commit chained
-// after &&, ;, or ||, or invoked as git -C dir commit -- while flag
-// orderings beyond -C stay a documented miss. Non-commit producers
-// are a known miss class: an agent-run git rebase/merge/cherry-pick
-// mints commits that read as external acceptance evidence, as do
-// packed forms like cmd&&git and sudo-prefixed invocations. And in
-// the other direction, merge commits emit no --name-only paths --
-// a user merge touching the target is missed evidence (conservative:
-// a merge is not necessarily acceptance of this turn's work).
-func (q *Queries) ListCrushCommitRuns(ctx context.Context, arg ListCrushCommitRunsParams) ([]int64, error) {
-	rows, err := q.query(ctx, q.listCrushCommitRunsStmt, listCrushCommitRuns, arg.ProjectKey, arg.LastAt, arg.LastAt_2)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []int64{}
-	for rows.Next() {
-		var last_at int64
-		if err := rows.Scan(&last_at); err != nil {
-			return nil, err
-		}
-		items = append(items, last_at)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listFailurePartitionKeys = `-- name: ListFailurePartitionKeys :many
 SELECT DISTINCT project_key FROM failure_memory WHERE project_key != ''
 `

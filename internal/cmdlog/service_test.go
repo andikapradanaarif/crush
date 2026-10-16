@@ -1124,6 +1124,126 @@ func TestReclaim_ForeignCommonDirStaysForeign(t *testing.T) {
 	require.Empty(t, failures)
 }
 
+// An attributed commit stamped under a stale sibling partition must
+// ride the remote-lifecycle re-claim — left behind, the new key's
+// exclusion set is empty and every previously-attributed agent
+// commit reads as external acceptance (#359 review).
+func TestReclaim_CrushCommitsFollowRemote(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	q := db.New(conn)
+	git("config", "user.email", "t@t")
+	git("config", "user.name", "t")
+	git("commit", "--allow-empty", "-m", "baseline")
+
+	// Era one: no remote — rows land under the bare common-dir key.
+	// A recorded run stamps the baseline, then a HEAD-moving run
+	// attributes the new commit.
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
+	oldKey := env.svc.ProjectKey()
+	run(env, "s1", "git status", env.workingDir, "", "", nil, 0)
+	git("commit", "--allow-empty", "-m", "agent work")
+	run(env, "s1", "git commit -m wip", env.workingDir, "", "", nil, 0)
+
+	var n int
+	require.NoError(t, conn.QueryRowContext(env.ctx,
+		"SELECT COUNT(*) FROM crush_commits WHERE project_key = ?", oldKey).Scan(&n))
+	require.Equal(t, 1, n)
+
+	// Adding a remote shifts the key; the next open re-claims the
+	// remoteless era's rows — exclusion evidence included.
+	git("remote", "add", "origin", "git@github.com:org/repo.git")
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
+	require.NotEqual(t, oldKey, env.svc.ProjectKey())
+
+	require.NoError(t, conn.QueryRowContext(env.ctx,
+		"SELECT COUNT(*) FROM crush_commits WHERE project_key = ?", env.svc.ProjectKey()).Scan(&n))
+	require.Equal(t, 1, n, "the attributed commit rides the re-claim to the new partition")
+	require.NoError(t, conn.QueryRowContext(env.ctx,
+		"SELECT COUNT(*) FROM crush_commits WHERE project_key = ?", oldKey).Scan(&n))
+	require.Equal(t, 0, n)
+}
+
+// A baseline whose object no longer resolves — orphaned by
+// rebase+gc, a history rewrite, or a reclone at the same path — can
+// never be re-swept: every later sweep fails identically while
+// agent commits settle as external acceptance. The stamp advances
+// past the dead range once — the bounded miss beats permanent
+// attribution blindness.
+func TestRecordRun_DeadBaselineStampsBoundedMiss(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	q := db.New(conn)
+	git("config", "user.email", "t@t")
+	git("config", "user.name", "t")
+	git("commit", "--allow-empty", "-m", "baseline")
+
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
+	run(env, "s1", "git status", env.workingDir, "", "", nil, 0)
+
+	// HEAD moves, then the recorded baseline is corrupted — a GC'd
+	// or phantom object — before the committing run records.
+	git("commit", "--allow-empty", "-m", "agent work B")
+	headB, err := gitOut(env.ctx, env.workingDir, "rev-parse", "HEAD")
+	require.NoError(t, err)
+	_, err = conn.ExecContext(env.ctx,
+		"UPDATE command_memory SET repo_state = 'not-a-real-sha'")
+	require.NoError(t, err)
+
+	run(env, "s1", "git commit -m wip", env.workingDir, "", "", nil, 0)
+
+	var n int
+	require.NoError(t, conn.QueryRowContext(env.ctx,
+		"SELECT COUNT(*) FROM crush_commits").Scan(&n))
+	require.Equal(t, 0, n, "the dead range attributes nothing — the bounded miss")
+
+	// The stamp advances anyway: holding a baseline that can never
+	// resolve is the livelock the fallback exists to kill.
+	var rs string
+	require.NoError(t, conn.QueryRowContext(env.ctx,
+		"SELECT repo_state FROM command_memory WHERE cmd_norm = 'git commit -m wip'").Scan(&rs))
+	require.Equal(t, headB, rs)
+
+	// From the live baseline the next sweep works — and the miss
+	// stays bounded: only commits after it attribute.
+	git("commit", "--allow-empty", "-m", "agent work C")
+	run(env, "s1", "git commit -m more", env.workingDir, "", "", nil, 0)
+
+	shas, err := q.ListCrushCommitSHAs(env.ctx, env.svc.ProjectKey())
+	require.NoError(t, err)
+	require.Len(t, shas, 1)
+	require.NotContains(t, shas, headB, "the dead-range commit stays missed")
+}
+
+// attributionFallback's two arms, unit-tested directly — a live
+// baseline holds once then stamps, a dead one stamps immediately.
+// Fabricating the transient failure class through real git is
+// impossible (two resolvable commits never fail rev-list), so the
+// helper takes the error as a parameter.
+func TestAttributionFallback_DeadVsTransient(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	git("config", "user.email", "t@t")
+	git("config", "user.name", "t")
+	git("commit", "--allow-empty", "-m", "baseline")
+	env.svc = NewService(db.New(conn), env.workingDir, params.DefaultMemory())
+	svc := env.svc.(*service)
+
+	head, err := gitOut(env.ctx, env.workingDir, "rev-parse", "HEAD")
+	require.NoError(t, err)
+	sweepErr := errors.New("sweep failed")
+
+	// Dead baseline — stamps on the first failure.
+	require.True(t, svc.attributionFallback(env.ctx, "not-a-real-sha", head, sweepErr),
+		"a baseline that no longer resolves advances once rather than livelock")
+
+	// Live baseline — holds once, then the same range failing again
+	// is deterministic and stamps.
+	require.False(t, svc.attributionFallback(env.ctx, head, "somehead", sweepErr),
+		"first failure of a live-baseline range holds for a re-sweep")
+	require.True(t, svc.attributionFallback(env.ctx, head, "somehead", sweepErr),
+		"a second failure of the same range is deterministic — stamped past")
+	require.False(t, svc.attributionFallback(env.ctx, head, "otherhead", sweepErr),
+		"a different range gets its own free retry")
+}
+
 func TestListFailures_ForeignPartitionExcluded(t *testing.T) {
 	env := setupTest(t)
 

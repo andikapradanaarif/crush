@@ -31,6 +31,13 @@ type CommandMemory struct {
 	ParamVersion   string `json:"param_version"`
 }
 
+type CrushCommit struct {
+	ProjectKey string `json:"project_key"`
+	Sha        string `json:"sha"`
+	SessionID  string `json:"session_id"`
+	CreatedAt  int64  `json:"created_at"`
+}
+
 type EdgeFiring struct {
 	SessionID      string `json:"session_id"`
 	TurnSeq        int64  `json:"turn_seq"`

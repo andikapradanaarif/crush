@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -301,7 +302,11 @@ type service struct {
 	// hasRepo caches "a repo exists at workingDir" from key
 	// derivation, so RecordRun's per-run repo_state lookup can skip
 	// the git exec entirely outside a repository — non-git dirs are
-	// where it would fail every time.
+	// where it would fail every time. Construction-time only: a repo
+	// initialized mid-lifetime attributes nothing for this service
+	// instance, and a later instance settles those commits as
+	// external — parity with the old scheme, whose pre-init runs
+	// keyed under the file-path partition anyway.
 	hasRepo bool
 	// commonDir is the project key's repo component — the canonical
 	// git common-dir — kept separately so the sibling re-claim can
@@ -333,6 +338,12 @@ type service struct {
 	// overlapping itself — two fast turns can race, and the second
 	// pass skips rather than duplicating the batch's work.
 	labelMu sync.Mutex
+	// sweepFailMu guards sweepFail: (prev..after) ranges whose
+	// attribution sweep already failed once. A second failure of the
+	// same range is deterministic, not transient — the baseline
+	// stamps past it rather than retrying forever.
+	sweepFailMu sync.Mutex
+	sweepFail   map[string]struct{}
 	// now is the timestamp source for every stamp and cutoff the
 	// service computes. Production wiring leaves it nil (wall
 	// clock); eval seeding injects a controlled clock so scripted
@@ -394,6 +405,7 @@ func NewService(q *db.Queries, workingDir string, p params.Memory, opts ...Optio
 		hasRepo:             hasRepo,
 		paramVersion:        p.Version(),
 		suggested:           map[string]map[string]struct{}{},
+		sweepFail:           map[string]struct{}{},
 		now:                 time.Now,
 	}
 	for _, opt := range opts {
@@ -445,6 +457,11 @@ func (s *service) claimLegacyFailures(ctx context.Context) error {
 // never sibling-match. This also repairs mid-process remote changes
 // on next open: rows kept writing under the cached key until
 // restart, and the re-claim gathers them back.
+//
+// crush_commits rides the same sweep: an attributed commit orphaned
+// under the stale key leaves the current partition's exclusion set
+// empty, and every previously-attributed agent commit reads as
+// external acceptance — the false-accept direction, at table scale.
 func (s *service) reclaimSiblingPartitions(ctx context.Context) error {
 	if s.commonDir == "" {
 		return nil
@@ -457,8 +474,12 @@ func (s *service) reclaimSiblingPartitions(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	ccKeys, err := s.q.ListCrushCommitPartitionKeys(ctx)
+	if err != nil {
+		return err
+	}
 	stale := map[string]struct{}{}
-	for _, k := range append(fKeys, cKeys...) {
+	for _, k := range slices.Concat(fKeys, cKeys, ccKeys) {
 		if k != s.projectKey && s.siblingKey(k) {
 			stale[k] = struct{}{}
 		}
@@ -474,6 +495,12 @@ func (s *service) reclaimSiblingPartitions(ctx context.Context) error {
 			}
 		}
 		if err := s.rekeyCommands(ctx, k); err != nil {
+			return err
+		}
+		if err := s.q.RekeyCrushCommits(ctx, db.RekeyCrushCommitsParams{
+			ProjectKey:   s.projectKey,
+			ProjectKey_2: k,
+		}); err != nil {
 			return err
 		}
 	}
@@ -573,6 +600,24 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 		suggested = 1
 	}
 	repoState := s.headSHA(ctx)
+	// HEAD before this run ran — the last recorded run's repo_state —
+	// so a HEAD-moving run can attribute the commits it produced
+	// (#359). Attribution runs BEFORE the upsert stamps this run's
+	// head: a sweep that fails or a crash between stamp and insert
+	// would otherwise move the recorded baseline past the
+	// unattributed commits permanently, and every one of them would
+	// settle as external acceptance. On failure the stamp is
+	// suppressed so the baseline stays behind the missed range and
+	// the next run re-sweeps it — over-attribution is the safe
+	// direction, stamped-but-unattributed is the false-accept hole.
+	prevHead := s.lastRecordedHead(ctx)
+	ledgerState := repoState
+	if !s.recordCrushCommits(ctx, run.SessionID, prevHead, repoState) {
+		// repo_state's only baseline reader is lastRecordedHead; the
+		// failure upsert below still carries the true head as
+		// observation provenance.
+		ledgerState = ""
+	}
 	if err := s.q.UpsertCommandRun(ctx, db.UpsertCommandRunParams{
 		CmdNorm:        cmdNorm,
 		Cwd:            cwd,
@@ -583,7 +628,7 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 		FailCount:      fail,
 		LastSessionID:  run.SessionID,
 		LastToolCallID: run.ToolCallID,
-		RepoState:      repoState,
+		RepoState:      ledgerState,
 		Suggested:      suggested,
 		ProjectKey:     s.projectKey,
 		ParamVersion:   s.paramVersion,
@@ -907,6 +952,168 @@ func (s *service) headSHA(ctx context.Context) string {
 		return ""
 	}
 	return out
+}
+
+// lastRecordedHead returns HEAD as of this project's most recent
+// recorded run — the baseline recordCrushCommits diffs against.
+// Empty outside a repo or when nothing has recorded yet; empty means
+// no attribution for this run, which errs toward treating commits as
+// external — the narrow residual is a HEAD-moving run with zero
+// prior recorded runs, e.g. the project's very first command.
+func (s *service) lastRecordedHead(ctx context.Context) string {
+	if !s.hasRepo {
+		return ""
+	}
+	head, err := s.q.LastRecordedRepoHead(ctx, s.projectKey)
+	if err != nil {
+		return ""
+	}
+	return head
+}
+
+// recordCrushCommits attributes the commits a run produced by HEAD
+// movement, not command spelling — rebase, merge, cherry-pick, am,
+// commit-tree, sudo-prefixed and chained forms all land the same way
+// (#359). Every SHA in prevHead..headAfter is crush-made and excluded
+// from external acceptance evidence, so an agent commit can never
+// self-certify.
+//
+// An external commit landing between two runs is swept into the next
+// run's range — a conservative miss, never a false accept. The miss
+// class is wider than it sounds: in an active project, any external
+// commit followed by any recorded run is excluded — a user's own
+// mid-session commit, or one concurrent crush session sweeping
+// another's boundary — so the commit arm effectively only fires for
+// commits landing after the project's last recorded run. Linked
+// worktrees make the mixing structural rather than incidental: they
+// share the partition by design (common-dir identity) while HEAD is
+// per-worktree, so services in sibling worktrees chain one baseline
+// and sweep each other's divergent ranges — for multi-worktree users
+// the commit-acceptance signal goes nearly dead. The "user commits
+// between sessions" flow survives on timing, not structure: the
+// settle pass is spawned detached at prompt receipt, so it usually
+// beats the next session's first recorded run — a race, not a
+// guarantee. Stamping a pre-run head in the tool and diffing
+// [pre, post] instead of [lastRun.post, post] is the structural fix
+// — follow-up.
+//
+// The bool reports whether the sweep completed. false means commits
+// in the moved range may have gone unattributed; the caller then
+// keeps the recorded baseline behind them so the next run re-sweeps
+// (INSERT OR IGNORE makes a partial or repeated attribution
+// idempotent — over-attribution is the safe direction). Permanent
+// failure classes don't retry forever — see attributionFallback.
+func (s *service) recordCrushCommits(ctx context.Context, sessionID, prevHead, headAfter string) bool {
+	if !s.hasRepo || prevHead == "" || headAfter == "" || prevHead == headAfter {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	out, err := gitOut(ctx, s.workingDir, "rev-list", prevHead+".."+headAfter)
+	if err != nil {
+		return s.attributionFallback(ctx, prevHead, headAfter, err)
+	}
+	if out == "" {
+		return true
+	}
+	// The write phase detaches from the caller's ctx with its own
+	// budget: a large range can spend most of the 3s in rev-list,
+	// and a starved tx would hold the baseline over the same
+	// (growing) range — retry once, then sweepFail stamps past the
+	// whole range as external. Fresh budget keeps the attribution
+	// the sweep already computed from dying in the commit.
+	wctx, wcancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer wcancel()
+	shas := strings.Split(out, "\n")
+	now := s.now().UnixMilli()
+	write := func(q *db.Queries) error {
+		for _, sha := range shas {
+			sha = strings.TrimSpace(sha)
+			if sha == "" {
+				continue
+			}
+			if err := q.InsertCrushCommit(wctx, db.InsertCrushCommitParams{
+				ProjectKey: s.projectKey,
+				Sha:        sha,
+				SessionID:  sessionID,
+				CreatedAt:  now,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	// The sweep's inserts land as one unit — a timeout mid-range
+	// would leave the tail unattributed under an advanced baseline.
+	conn := s.q.DB()
+	if conn == nil {
+		if err := write(s.q); err != nil {
+			slog.Error("Error recording crush-made commits", "error", err)
+			return false
+		}
+		return true
+	}
+	tx, err := conn.BeginTx(wctx, nil)
+	if err != nil {
+		slog.Error("Error opening crush-commit attribution transaction", "error", err)
+		return false
+	}
+	defer tx.Rollback()
+	if err := write(s.q.WithTx(tx)); err != nil {
+		slog.Error("Error recording crush-made commits", "error", err)
+		return false
+	}
+	if err := tx.Commit(); err != nil {
+		slog.Error("Error committing crush-made commits", "error", err)
+		return false
+	}
+	return true
+}
+
+// attributionFallback decides whether a failed sweep advances the
+// recorded baseline anyway. Two failure classes get different
+// treatment:
+//
+//   - Dead baseline: the recorded head no longer resolves — orphaned
+//     by rebase+gc, a history rewrite (filter-repo/BFG), or a
+//     delete-and-reclone at the same path. Holding it can never
+//     recover: every later sweep fails identically while agent
+//     commits settle as external acceptance — the false-accept
+//     direction this mechanism exists to kill. Stamp the true head
+//     and accept the bounded one-time miss; permanent blindness is
+//     worse.
+//   - Live baseline, sweep still failed: transient (timeout, object
+//     store hiccup) or deterministic (a huge divergent pull's range).
+//     The baseline holds once so the next run re-sweeps; a range
+//     failing a second time is deterministic — holding it forever is
+//     the same livelock a dead baseline is — so it stamps too.
+//
+// The repeat set is process-local: a restart grants one free retry,
+// which is the right bound.
+func (s *service) attributionFallback(ctx context.Context, prevHead, headAfter string, sweepErr error) bool {
+	// rev-parse gets its own budget — the caller's ctx may already be
+	// dead (that's one way rev-list fails), and a verify that can't
+	// run proves nothing either way.
+	vctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	if _, err := gitOut(vctx, s.workingDir, "rev-parse", "--verify", "--quiet", prevHead+"^{commit}"); err != nil {
+		slog.Warn("Commit-attribution baseline no longer resolves — advancing past the dead range once",
+			"prev", prevHead, "after", headAfter, "error", sweepErr)
+		return true
+	}
+	key := prevHead + ".." + headAfter
+	s.sweepFailMu.Lock()
+	_, repeated := s.sweepFail[key]
+	s.sweepFail[key] = struct{}{}
+	s.sweepFailMu.Unlock()
+	if repeated {
+		slog.Warn("Commit-attribution sweep failed for this range twice — advancing past it once",
+			"prev", prevHead, "after", headAfter, "error", sweepErr)
+		return true
+	}
+	slog.Error("Error sweeping commits for attribution; the recorded baseline stays behind for a re-sweep",
+		"error", sweepErr, "prev", prevHead, "after", headAfter)
+	return false
 }
 
 // relDir normalizes a run's working directory to workspace-relative so
