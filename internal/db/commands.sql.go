@@ -173,7 +173,8 @@ type InsertReferentEpisodeParams struct {
 // and without the stamp a fresh row satisfies the due predicate at
 // birth -- a settle pass in flight before LabelReferentEpisode lands
 // would freeze the row fingerprintless. The label UPDATE re-stamps
-// the window at label time; pre-#340 rows keep 0 (due immediately).
+// the same cap anchored at created_at (#354); pre-#340 rows keep 0
+// (due immediately).
 func (q *Queries) InsertReferentEpisode(ctx context.Context, arg InsertReferentEpisodeParams) error {
 	_, err := q.exec(ctx, q.insertReferentEpisodeStmt, insertReferentEpisode,
 		arg.Phrase,
@@ -250,7 +251,7 @@ func (q *Queries) InsertTurnOutcome(ctx context.Context, arg InsertTurnOutcomePa
 }
 
 const labelReferentEpisode = `-- name: LabelReferentEpisode :exec
-UPDATE referent_episodes SET label_target_hash = ?, label_wrong_target = ?, label_steps = ?, label_tokens = ?, label_tests_green = ?, labeled_at = ?, label_added_lines = ?, settle_at = ? WHERE session_id = ? AND source_message_id = ? AND target = ? AND settled_at IS NULL
+UPDATE referent_episodes SET label_target_hash = ?, label_wrong_target = ?, label_steps = ?, label_tokens = ?, label_tests_green = ?, labeled_at = ?, label_added_lines = ?, settle_at = created_at + ? WHERE session_id = ? AND source_message_id = ? AND target = ? AND settled_at IS NULL
 `
 
 type LabelReferentEpisodeParams struct {
@@ -261,7 +262,7 @@ type LabelReferentEpisodeParams struct {
 	LabelTestsGreen  sql.NullInt64 `json:"label_tests_green"`
 	LabeledAt        int64         `json:"labeled_at"`
 	LabelAddedLines  string        `json:"label_added_lines"`
-	SettleAt         int64         `json:"settle_at"`
+	CreatedAt        int64         `json:"created_at"`
 	SessionID        string        `json:"session_id"`
 	SourceMessageID  string        `json:"source_message_id"`
 	Target           string        `json:"target"`
@@ -270,11 +271,12 @@ type LabelReferentEpisodeParams struct {
 // Stamp the artifact signals computable at episode-record time
 // (#294/#340): the file's post-edit hash (diagnostic), the added-
 // lines survival fingerprint, the judged turn's cost, the session's
-// test verdict, and the observation window's +24h edge. The key
-// clause is the episode unique key -- the same idempotency point
-// the insert uses, so a repair-chain re-run re-stamps the same row
-// instead of drifting. settled_at IS NULL keeps the write-once
-// contract: a frozen row's label fields never re-stamp.
+// test verdict, and the observation window's +24h edge anchored at
+// created_at so a late label can't widen the documented cap (#354).
+// The key clause is the episode unique key -- the same idempotency
+// point the insert uses, so a repair-chain re-run re-stamps the
+// same row instead of drifting. settled_at IS NULL keeps the
+// write-once contract: a frozen row's label fields never re-stamp.
 func (q *Queries) LabelReferentEpisode(ctx context.Context, arg LabelReferentEpisodeParams) error {
 	_, err := q.exec(ctx, q.labelReferentEpisodeStmt, labelReferentEpisode,
 		arg.LabelTargetHash,
@@ -284,7 +286,7 @@ func (q *Queries) LabelReferentEpisode(ctx context.Context, arg LabelReferentEpi
 		arg.LabelTestsGreen,
 		arg.LabeledAt,
 		arg.LabelAddedLines,
-		arg.SettleAt,
+		arg.CreatedAt,
 		arg.SessionID,
 		arg.SourceMessageID,
 		arg.Target,
@@ -1701,6 +1703,10 @@ type UpsertProjectRateParams struct {
 	UpdatedAt     int64   `json:"updated_at"`
 }
 
+// One fold's posterior write (#296). Sibling-pass exclusion comes
+// from UpdateProjectRates holding rateMu across read, write, and
+// mark (#356) -- an in-process racer skips rather than
+// double-counting the batch.
 func (q *Queries) UpsertProjectRate(ctx context.Context, arg UpsertProjectRateParams) error {
 	_, err := q.exec(ctx, q.upsertProjectRateStmt, upsertProjectRate,
 		arg.ProjectKey,

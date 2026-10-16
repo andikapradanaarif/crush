@@ -82,11 +82,12 @@ type ReferentEpisodeLabelInputs struct {
 // and the observation window's outer edge. The update keys on the
 // episode's (session, source message, target) unique constraint —
 // the same idempotency point the insert uses, so a repair-chain
-// re-derivation re-stamps rather than duplicates. Re-stamping also
-// moves the fingerprint and the window — the outer edge runs from
-// label time, so a re-derivation widens the commit window beyond the
-// episode's created_at + 24h. Intentional: the observation covers
-// the latest derivation of the referent, not the superseded one.
+// re-derivation re-stamps rather than duplicates. Re-stamping moves
+// the fingerprint but not the cap: the SQL adds the window to the
+// row's own created_at, so a label landing late — a repair-chain
+// retry — cannot widen the documented created_at + 24h edge (#354).
+// A very late re-derivation therefore settles against the original
+// window's evidence rather than minting a fresh one.
 func (s *service) LabelReferentEpisode(ctx context.Context, ep ReferentEpisode, in ReferentEpisodeLabelInputs) error {
 	added, _ := json.Marshal(in.AddedLines)
 	now := s.now().UnixMilli()
@@ -98,10 +99,12 @@ func (s *service) LabelReferentEpisode(ctx context.Context, ep ReferentEpisode, 
 		LabelTestsGreen:  s.sessionTestsGreen(ctx, ep.SessionID),
 		LabeledAt:        now,
 		LabelAddedLines:  string(added),
-		SettleAt:         now + settleWindowMillis,
-		SessionID:        ep.SessionID,
-		SourceMessageID:  ep.SourceMessageID,
-		Target:           ep.Target,
+		// Named for the column it offsets in SQL (created_at + ?);
+		// the value is the window duration, not a timestamp.
+		CreatedAt:       settleWindowMillis,
+		SessionID:       ep.SessionID,
+		SourceMessageID: ep.SourceMessageID,
+		Target:          ep.Target,
 	})
 }
 

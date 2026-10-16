@@ -333,6 +333,13 @@ type service struct {
 	// overlapping itself — two fast turns can race, and the second
 	// pass skips rather than duplicating the batch's work.
 	labelMu sync.Mutex
+	// rateMu serializes the rate fold's read→write→mark (#356): two
+	// detached passes overlapping the upsert→mark window would
+	// re-fold the same batch into permanent posterior mass. Same
+	// process-local bound as labelMu — two crush instances sharing
+	// one store can still interleave, a documented residual the
+	// shared-store configuration already accepts elsewhere.
+	rateMu sync.Mutex
 	// now is the timestamp source for every stamp and cutoff the
 	// service computes. Production wiring leaves it nil (wall
 	// clock); eval seeding injects a controlled clock so scripted

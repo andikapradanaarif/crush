@@ -88,6 +88,7 @@ type labelCols struct {
 	addedLines  string
 	settleAt    int64
 	settledAt   sql.NullInt64
+	createdAt   int64
 }
 
 func readLabels(t *testing.T, env *labelEnv, sessionID, target string) labelCols {
@@ -97,12 +98,12 @@ func readLabels(t *testing.T, env *labelEnv, sessionID, target string) labelCols
 		`SELECT label_target_hash, label_hash_changed, label_committed,
 		        label_tests_green, label_wrong_target, label_steps,
 		        label_tokens, labeled_at, label_added_lines, settle_at,
-		        settled_at
+		        settled_at, created_at
 		 FROM referent_episodes WHERE session_id = ? AND target = ?`,
 		sessionID, target).
 		Scan(&c.targetHash, &c.hashChanged, &c.committed, &c.testsGreen,
 			&c.wrongTarget, &c.steps, &c.tokens, &c.labeledAt,
-			&c.addedLines, &c.settleAt, &c.settledAt))
+			&c.addedLines, &c.settleAt, &c.settledAt, &c.createdAt))
 	return c
 }
 
@@ -143,9 +144,61 @@ func TestLabelReferentEpisode_SnapshotSignals(t *testing.T) {
 	var added []string
 	require.NoError(t, json.Unmarshal([]byte(c.addedLines), &added))
 	require.Equal(t, []string{"x = 1"}, added, "the survival fingerprint stamps at record time")
-	require.Equal(t, c.labeledAt+settleWindowMillis, c.settleAt,
+	require.Equal(t, c.createdAt+settleWindowMillis, c.settleAt,
 		"the window's outer edge is created + 24h")
 	require.False(t, c.settledAt.Valid, "a fresh row opens unsettled")
+}
+
+// Issue #354: the documented window cap is created_at + 24h, so a
+// label landing hours after the record must re-stamp settle_at from
+// the row's birth, not from label time.
+func TestLabelReferentEpisode_SettleAnchoredAtCreatedAt(t *testing.T) {
+	t.Parallel()
+	env := setupLabelsTest(t)
+	base := time.Now()
+	clock := base
+	svc := NewService(db.New(env.conn), env.workingDir, params.DefaultMemory(),
+		WithClock(func() time.Time { return clock }))
+	seedLabelSession(t, env, "s1", "")
+	ep := ReferentEpisode{
+		Phrase: "config", Target: "f.go", SessionID: "s1",
+		SourceMessageID: "m1", ToolCallID: "c1", Verdict: ReferentAccepted,
+	}
+	require.NoError(t, svc.RecordReferentEpisode(t.Context(), ep, 5))
+	// The label lands 2h late — a repair-chain retry's shape.
+	clock = base.Add(2 * time.Hour)
+	require.NoError(t, svc.LabelReferentEpisode(t.Context(), ep, ReferentEpisodeLabelInputs{}))
+	var createdAt, settleAt int64
+	require.NoError(t, env.conn.QueryRowContext(t.Context(),
+		`SELECT created_at, settle_at FROM referent_episodes
+		 WHERE session_id = 's1'`).Scan(&createdAt, &settleAt))
+	require.Equal(t, createdAt+settleWindowMillis, settleAt)
+}
+
+// Issue #355: the settle scan's (project_key, settled_at) filter
+// has a backing index, matching turn_outcomes_settle.
+func TestReferentEpisodes_SettleIndexExists(t *testing.T) {
+	t.Parallel()
+	env := setupLabelsTest(t)
+	var name string
+	require.NoError(t, env.conn.QueryRowContext(t.Context(),
+		`SELECT name FROM sqlite_master
+		 WHERE type = 'index' AND name = 'referent_episodes_settle'`).Scan(&name))
+	require.Equal(t, "referent_episodes_settle", name)
+	rows, err := env.conn.QueryContext(t.Context(),
+		`EXPLAIN QUERY PLAN SELECT id FROM referent_episodes
+		 WHERE project_key = 'x' AND settled_at IS NULL`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var plan string
+	for rows.Next() {
+		var a, b, c int
+		var detail string
+		require.NoError(t, rows.Scan(&a, &b, &c, &detail))
+		plan += detail + " "
+	}
+	require.NoError(t, rows.Err())
+	require.Contains(t, plan, "referent_episodes_settle")
 }
 
 // Without the window closing, settlement must not touch the row:

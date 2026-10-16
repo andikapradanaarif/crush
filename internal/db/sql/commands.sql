@@ -225,7 +225,8 @@ SELECT * FROM failure_memory WHERE resolved_in != '' AND project_key = sqlc.arg(
 -- and without the stamp a fresh row satisfies the due predicate at
 -- birth -- a settle pass in flight before LabelReferentEpisode lands
 -- would freeze the row fingerprintless. The label UPDATE re-stamps
--- the window at label time; pre-#340 rows keep 0 (due immediately).
+-- the same cap anchored at created_at (#354); pre-#340 rows keep 0
+-- (due immediately).
 INSERT OR IGNORE INTO referent_episodes (
     phrase, target, session_id, source_message_id, tool_call_id,
     repo_state, memory_suggested, verdict, project_key, param_version,
@@ -281,12 +282,13 @@ LIMIT ?;
 -- Stamp the artifact signals computable at episode-record time
 -- (#294/#340): the file's post-edit hash (diagnostic), the added-
 -- lines survival fingerprint, the judged turn's cost, the session's
--- test verdict, and the observation window's +24h edge. The key
--- clause is the episode unique key -- the same idempotency point
--- the insert uses, so a repair-chain re-run re-stamps the same row
--- instead of drifting. settled_at IS NULL keeps the write-once
--- contract: a frozen row's label fields never re-stamp.
-UPDATE referent_episodes SET label_target_hash = ?, label_wrong_target = ?, label_steps = ?, label_tokens = ?, label_tests_green = ?, labeled_at = ?, label_added_lines = ?, settle_at = ? WHERE session_id = ? AND source_message_id = ? AND target = ? AND settled_at IS NULL;
+-- test verdict, and the observation window's +24h edge anchored at
+-- created_at so a late label can't widen the documented cap (#354).
+-- The key clause is the episode unique key -- the same idempotency
+-- point the insert uses, so a repair-chain re-run re-stamps the
+-- same row instead of drifting. settled_at IS NULL keeps the
+-- write-once contract: a frozen row's label fields never re-stamp.
+UPDATE referent_episodes SET label_target_hash = ?, label_wrong_target = ?, label_steps = ?, label_tokens = ?, label_tests_green = ?, labeled_at = ?, label_added_lines = ?, settle_at = created_at + ? WHERE session_id = ? AND source_message_id = ? AND target = ? AND settled_at IS NULL;
 
 -- name: ListSessionTestVerdicts :many
 -- kind='test' ledger rows whose last real run belongs to this
@@ -409,6 +411,10 @@ SELECT alpha, beta, last_event_id, last_session_id FROM project_rates
 WHERE project_key = ? AND signal = ?;
 
 -- name: UpsertProjectRate :exec
+-- One fold's posterior write (#296). Sibling-pass exclusion comes
+-- from UpdateProjectRates holding rateMu across read, write, and
+-- mark (#356) -- an in-process racer skips rather than
+-- double-counting the batch.
 INSERT INTO project_rates (project_key, signal, alpha, beta, last_event_id, last_session_id, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (project_key, signal) DO UPDATE SET

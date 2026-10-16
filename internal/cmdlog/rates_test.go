@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"math"
 	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/db"
@@ -371,4 +372,40 @@ func TestReferentConsumers_SettledOnly(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, cals, 1,
 		"calibration admits only pa's settled row")
+}
+
+// Issue #356: two passes overlapping the upsert→mark window used to
+// fold one batch twice into permanent posterior mass. rateMu now
+// serializes the fold, so N concurrent passes count the batch once.
+func TestUpdateProjectRates_ConcurrentFoldCountsOnce(t *testing.T) {
+	t.Parallel()
+	env := setupRatesTest(t, "pk")
+	for i := range 10 {
+		seedRateEpisode(t, env, "pk", "s1", "m"+itoa(i), ReferentAccepted,
+			sql.NullInt64{}, sql.NullInt64{})
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- env.svc.UpdateProjectRates(t.Context(), 0.95)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	alpha, beta, _ := storedRate(t, env, "pk")
+	// Ten accepted episodes in one session fold exactly once,
+	// regardless of how the passes interleaved.
+	require.Equal(t, 10.0, alpha)
+	require.Equal(t, 0.0, beta)
+	var folded int
+	require.NoError(t, env.conn.QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM referent_episodes
+		 WHERE project_key = 'pk' AND rate_folded = 1`).Scan(&folded))
+	require.Equal(t, 10, folded)
 }
