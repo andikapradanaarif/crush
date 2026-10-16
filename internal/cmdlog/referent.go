@@ -104,6 +104,10 @@ func (s *service) RecordReferentEpisode(ctx context.Context, ep ReferentEpisode,
 		ProjectKey:      s.projectKey,
 		ParamVersion:    s.paramVersion,
 		CreatedAt:       now,
+		// Stamped at insert so the row is never born due — a settle
+		// pass landing between this insert and LabelReferentEpisode's
+		// re-stamp would otherwise freeze it fingerprintless.
+		SettleAt: now + settleWindowMillis,
 	}); err != nil {
 		return err
 	}

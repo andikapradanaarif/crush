@@ -146,8 +146,8 @@ const insertReferentEpisode = `-- name: InsertReferentEpisode :exec
 INSERT OR IGNORE INTO referent_episodes (
     phrase, target, session_id, source_message_id, tool_call_id,
     repo_state, memory_suggested, verdict, project_key, param_version,
-    created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    created_at, settle_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertReferentEpisodeParams struct {
@@ -162,12 +162,18 @@ type InsertReferentEpisodeParams struct {
 	ProjectKey      string `json:"project_key"`
 	ParamVersion    string `json:"param_version"`
 	CreatedAt       int64  `json:"created_at"`
+	SettleAt        int64  `json:"settle_at"`
 }
 
 // One judged vague-prompt observation (#165). INSERT OR IGNORE makes
 // the (session_id, source_message_id, target) unique key the retry
 // idempotency point: a repair-chain re-run of the turn-context pass
 // re-derives the same episode and must not count twice.
+// settle_at stamps the +24h cap at insert: the column default is 0,
+// and without the stamp a fresh row satisfies the due predicate at
+// birth -- a settle pass in flight before LabelReferentEpisode lands
+// would freeze the row fingerprintless. The label UPDATE re-stamps
+// the window at label time; pre-#340 rows keep 0 (due immediately).
 func (q *Queries) InsertReferentEpisode(ctx context.Context, arg InsertReferentEpisodeParams) error {
 	_, err := q.exec(ctx, q.insertReferentEpisodeStmt, insertReferentEpisode,
 		arg.Phrase,
@@ -181,6 +187,7 @@ func (q *Queries) InsertReferentEpisode(ctx context.Context, arg InsertReferentE
 		arg.ProjectKey,
 		arg.ParamVersion,
 		arg.CreatedAt,
+		arg.SettleAt,
 	)
 	return err
 }
@@ -343,7 +350,10 @@ type ListCrushCommitRunsParams struct {
 // orderings beyond -C stay a documented miss. Non-commit producers
 // are a known miss class: an agent-run git rebase/merge/cherry-pick
 // mints commits that read as external acceptance evidence, as do
-// packed forms like cmd&&git and sudo-prefixed invocations.
+// packed forms like cmd&&git and sudo-prefixed invocations. And in
+// the other direction, merge commits emit no --name-only paths --
+// a user merge touching the target is missed evidence (conservative:
+// a merge is not necessarily acceptance of this turn's work).
 func (q *Queries) ListCrushCommitRuns(ctx context.Context, arg ListCrushCommitRunsParams) ([]int64, error) {
 	rows, err := q.query(ctx, q.listCrushCommitRunsStmt, listCrushCommitRuns, arg.ProjectKey, arg.LastAt, arg.LastAt_2)
 	if err != nil {
@@ -594,7 +604,11 @@ type ListRecentSessionsRow struct {
 // starvation corner of that waste: >=LIMIT permanently-pending
 // sessions newer than a genuinely pending one starve it under ORDER
 // BY created_at DESC -- rare, but a recorded marker for ineligible
-// turns would close it for good.
+// turns would close it for good. Membership is also last-writer:
+// command_memory.last_session_id moves with each re-run, so a
+// session whose only ledger rows were overwritten by a later
+// session loses its membership proof -- its windows stay open
+// (fail-safe) but its turns also leave this corpus.
 func (q *Queries) ListRecentSessions(ctx context.Context, arg ListRecentSessionsParams) ([]ListRecentSessionsRow, error) {
 	rows, err := q.query(ctx, q.listRecentSessionsStmt, listRecentSessions,
 		arg.ID,
@@ -712,7 +726,11 @@ type ListReferentPriorEventsRow struct {
 // signal (unresolved cue, no survival read, no external commit) is
 // not evidence either way -- settled_at alone never invents mass.
 // The predicate is referentEpisodeAdmissible (cmdlog/rates.go)
-// re-implemented in SQL -- a change must move all sites.
+// re-implemented in SQL -- a change must move all sites. Note the
+// upgrade path: rows folded before settlement existed (rate_folded=1,
+// settled_at NULL) settle on first post-upgrade pass and re-enter
+// this pool as fixed-window evidence -- intended, they now carry a
+// frozen observation like any settled row.
 func (q *Queries) ListReferentPriorEvents(ctx context.Context, projectKey string) ([]ListReferentPriorEventsRow, error) {
 	rows, err := q.query(ctx, q.listReferentPriorEventsStmt, listReferentPriorEvents, projectKey)
 	if err != nil {

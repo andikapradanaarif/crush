@@ -163,6 +163,62 @@ func TestSettleReferentLabels_NotDue(t *testing.T) {
 	require.False(t, c.hashChanged.Valid)
 }
 
+// The insert/label gap race: a row born with settle_at=0 satisfied
+// the due predicate at birth, so a settle pass landing between
+// RecordReferentEpisode's insert and LabelReferentEpisode's stamp
+// froze it fingerprintless forever. settle_at is now stamped
+// created_at+24h at insert, so the unlabeled row survives the pass.
+func TestSettleReferentLabels_UnlabeledRowNotDue(t *testing.T) {
+	env := setupLabelsTest(t)
+	target := "x.go"
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, target), []byte("v1"), 0o644))
+	seedLabelSession(t, env, "s1", "")
+
+	ep := ReferentEpisode{
+		Phrase: "config", Target: target, SessionID: "s1",
+		SourceMessageID: "m1", ToolCallID: "c1", Verdict: ReferentAccepted,
+	}
+	require.NoError(t, env.svc.RecordReferentEpisode(t.Context(), ep, 0))
+
+	// The detached pass fires every turn — this interleaving is its
+	// landing inside the insert→label gap.
+	require.NoError(t, env.svc.SettleReferentLabels(t.Context(), 10))
+	c := readLabels(t, env, "s1", target)
+	require.False(t, c.settledAt.Valid,
+		"a born-due row would freeze here — fingerprintless forever")
+	require.Zero(t, c.labeledAt, "the label pass has not run yet")
+
+	// The label still lands after the pass, and the row then settles
+	// normally once its (re-stamped) window closes.
+	require.NoError(t, env.svc.LabelReferentEpisode(t.Context(), ep,
+		ReferentEpisodeLabelInputs{AddedLines: []string{"v1"}}))
+	c = readLabels(t, env, "s1", target)
+	require.Contains(t, c.addedLines, "v1")
+
+	_, err := env.conn.ExecContext(t.Context(),
+		`UPDATE referent_episodes SET settle_at = 0 WHERE session_id = 's1'`)
+	require.NoError(t, err)
+	require.NoError(t, env.svc.SettleReferentLabels(t.Context(), 10))
+	c = readLabels(t, env, "s1", target)
+	require.True(t, c.settledAt.Valid)
+	require.True(t, c.hashChanged.Valid)
+	require.Zero(t, c.hashChanged.Int64, `"v1" survives in the file`)
+}
+
+// Harness-commit attribution is asymmetric: the commit's %ct precedes
+// the run's last_at (run end), so the bound reaches 60s backward —
+// long hooks — and only 5s forward.
+func TestIsHarnessCommit_AsymmetricSkew(t *testing.T) {
+	const t0 = 1_000_000_000
+	runs := []int64{t0}
+	require.True(t, isHarnessCommit(t0, runs))
+	require.True(t, isHarnessCommit(t0-commitSkewBeforeMillis, runs))
+	require.True(t, isHarnessCommit(t0+commitSkewAfterMillis, runs))
+	require.False(t, isHarnessCommit(t0-commitSkewBeforeMillis-1, runs))
+	require.False(t, isHarnessCommit(t0+commitSkewAfterMillis+1, runs))
+	require.False(t, isHarnessCommit(t0, nil))
+}
+
 // A newer session in the project closes the window: the row settles
 // once and freezes — later state cannot rewrite the verdict.
 func TestSettleReferentLabels_NewerSessionSettlesOnce(t *testing.T) {

@@ -148,6 +148,70 @@ func TestRecordTurnOutcome(t *testing.T) {
 	}, msgs)
 }
 
+// A prompt folded into an earlier run's queue persists as a real
+// boundary (drainQueueForStep) but no per-run pass ever judged the
+// turn it closed — the live record's same-session sweep writes its
+// row off the stored next prompt. The in-flight prompt itself,
+// absent from msgs, still must not mint a row.
+func TestRecordTurnOutcome_SweepsFoldedBoundaries(t *testing.T) {
+	t.Parallel()
+	a, env := referentAgent(t)
+
+	msgs := []message.Message{
+		referentUserMsg("u1", "first prompt"),
+		{Role: message.Assistant, Parts: []message.ContentPart{message.ToolCall{
+			ID: "tc1", Name: tools.WriteToolName, Finished: true,
+			Input: `{"file_path":"a.go","content":"a"}`,
+		}}},
+		// Folded mid-run: the boundary that closed the previous turn.
+		referentUserMsg("uq", "wrong file"),
+		{Role: message.Assistant, Parts: []message.ContentPart{message.ToolCall{
+			ID: "tc2", Name: tools.WriteToolName, Finished: true,
+			Input: `{"file_path":"b.go","content":"b"}`,
+		}}},
+	}
+	call := SessionAgentCall{
+		SessionID: "s1", Prompt: "thanks", currentUserMsgID: "u2",
+	}
+	recordTurnOutcome(t.Context(), a.turnOutcomeDeps(), call, msgs)
+
+	readVerdict := func(turnID string) (string, bool) {
+		var nv string
+		var has bool
+		err := env.conn.QueryRowContext(t.Context(),
+			`SELECT next_verdict, settled_at IS NOT NULL FROM turn_outcomes
+			 WHERE session_id = 's1' AND turn_id = ?`, turnID).
+			Scan(&nv, &has)
+		if err != nil {
+			return "", false
+		}
+		return nv, has
+	}
+
+	// The judged boundary records with the live prompt's cue.
+	nv, _ := readVerdict("uq")
+	require.Equal(t, cmdlog.ReferentAccepted, nv)
+
+	// The folded turn records with the verdict the stored next
+	// prompt implies — "wrong file" is a revision cue.
+	nv, _ = readVerdict("u1")
+	require.Equal(t, cmdlog.ReferentRevised, nv,
+		"the orphaned turn must exist with its stored-prompt verdict")
+
+	// The in-flight prompt records nothing — it is no closed turn.
+	var n int
+	require.NoError(t, env.conn.QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM turn_outcomes WHERE session_id = 's1' AND turn_id = 'u2'`).
+		Scan(&n))
+	require.Zero(t, n)
+
+	// Re-running is a no-op: HasTurnOutcome plus the unique key keep
+	// the sweep idempotent.
+	recordTurnOutcome(t.Context(), a.turnOutcomeDeps(), call, msgs)
+	nv, _ = readVerdict("u1")
+	require.Equal(t, cmdlog.ReferentRevised, nv)
+}
+
 // A first-turn session backfills the stored corpus — the previous
 // session's turns and their stored next-prompt verdicts arrive even
 // though no in-session turn ever judged them.

@@ -74,9 +74,13 @@ func (a *sessionAgent) turnOutcomeDeps() turnOutcomeDeps {
 // guard and the field snapshot run on this goroutine; the detached
 // closure reads only its parameters.
 func (a *sessionAgent) recordTurnOutcome(ctx context.Context, call SessionAgentCall, msgs []message.Message) {
-	if a.cmdlog == nil || a.isSubAgent || call.RepairAttempts > 0 || call.Prompt == "" {
+	if a.cmdlog == nil || a.isSubAgent || call.RepairAttempts > 0 {
 		return
 	}
+	// A prompt-less run supplies no cue, so it skips the judged-turn
+	// record — "unknown" is a real verdict and would freeze wrong —
+	// but it still sweeps: folded boundaries' verdicts come from
+	// stored next prompts regardless of this call's prompt.
 	deps := a.turnOutcomeDeps()
 	detachedCtx := context.WithoutCancel(ctx)
 	a.spawnDetached(func() {
@@ -103,13 +107,21 @@ func recordTurnOutcome(ctx context.Context, d turnOutcomeDeps, call SessionAgent
 		// the unique key would then block the real evidence row.
 		if d.messages != nil {
 			if full, err := d.messages.List(ctx, call.SessionID); err == nil {
-				if idx := lastRealUserIdx(full, call.currentUserMsgID); idx >= 0 {
-					o := extractTurnOutcome(ctx, d, call.SessionID, full, idx)
-					o.NextVerdict = referentJudgedVerdict(call.Prompt)
-					if err := d.cmdlog.RecordTurnOutcome(ctx, o); err != nil {
-						slog.Warn("Failed to record turn outcome", "error", err)
+				if call.Prompt != "" {
+					if idx := lastRealUserIdx(full, call.currentUserMsgID); idx >= 0 {
+						o := extractTurnOutcome(ctx, d, call.SessionID, full, idx)
+						o.NextVerdict = referentJudgedVerdict(call.Prompt)
+						if err := d.cmdlog.RecordTurnOutcome(ctx, o); err != nil {
+							slog.Warn("Failed to record turn outcome", "error", err)
+						}
 					}
 				}
+				// Same-session sweep on the full transcript —
+				// compacted sessions drop pre-summary turns from
+				// the tail, and queued prompts folded mid-run
+				// (drainQueueForStep) close turns no per-run pass
+				// ever judged.
+				backfillSession(ctx, d, call.SessionID, full, call.currentUserMsgID)
 			}
 		}
 		// The corpus scan does up to backfillLimit message-list
@@ -117,11 +129,22 @@ func recordTurnOutcome(ctx context.Context, d turnOutcomeDeps, call SessionAgent
 		backfillTurnOutcomes(ctx, d, call)
 		return
 	}
-	o := extractTurnOutcome(ctx, d, call.SessionID, msgs, lastUser)
-	o.NextVerdict = referentJudgedVerdict(call.Prompt)
-	if err := d.cmdlog.RecordTurnOutcome(ctx, o); err != nil {
-		slog.Warn("Failed to record turn outcome", "error", err)
+	if call.Prompt != "" {
+		o := extractTurnOutcome(ctx, d, call.SessionID, msgs, lastUser)
+		o.NextVerdict = referentJudgedVerdict(call.Prompt)
+		if err := d.cmdlog.RecordTurnOutcome(ctx, o); err != nil {
+			slog.Warn("Failed to record turn outcome", "error", err)
+		}
 	}
+	// The live path records only the last boundary per run — a
+	// prompt folded into an earlier step persists a real boundary
+	// that closed a turn without a record pass, and prompt-less
+	// runs skip the pass entirely. Sweep the tail's unrecorded
+	// boundaries the same way the cross-session backfill does —
+	// idempotent via HasTurnOutcome and the unique key — so the
+	// row exists while the session is live instead of waiting for
+	// another session's first turn to drain it.
+	backfillSession(ctx, d, call.SessionID, msgs, call.currentUserMsgID)
 }
 
 // lastRealUserIdx returns the index of the last turn boundary in ms
@@ -160,7 +183,7 @@ func backfillTurnOutcomes(ctx context.Context, d turnOutcomeDeps, call SessionAg
 		if err != nil || len(msgs) == 0 {
 			continue
 		}
-		backfillSession(ctx, d, sess.ID, msgs)
+		backfillSession(ctx, d, sess.ID, msgs, call.currentUserMsgID)
 	}
 }
 
@@ -169,8 +192,10 @@ func backfillTurnOutcomes(ctx context.Context, d turnOutcomeDeps, call SessionAg
 // ordinal would shift between this full transcript and the live
 // path's post-summary tail. Mid-session turns read their verdict off
 // the following stored prompt — the same cue judgment the live path
-// stamps; a final turn carries "".
-func backfillSession(ctx context.Context, d turnOutcomeDeps, sessionID string, msgs []message.Message) {
+// stamps; a final turn carries "". excludeID is the in-flight
+// prompt's message ID: it still supplies the previous segment's
+// verdict but is itself no closed turn, so it records no row.
+func backfillSession(ctx context.Context, d turnOutcomeDeps, sessionID string, msgs []message.Message, excludeID string) {
 	var segs []int
 	for i, m := range msgs {
 		if isRealUserMsg(m) {
@@ -178,6 +203,9 @@ func backfillSession(ctx context.Context, d turnOutcomeDeps, sessionID string, m
 		}
 	}
 	for i, start := range segs {
+		if msgs[start].ID == excludeID {
+			continue
+		}
 		has, err := d.cmdlog.HasTurnOutcome(ctx, sessionID, msgs[start].ID)
 		if err != nil || has {
 			continue

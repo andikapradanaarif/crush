@@ -438,7 +438,7 @@ func TestReferentCandidates_Gating(t *testing.T) {
 		// #340: only settled labels are evidence — settle the
 		// recorded episodes, then fold, so the posterior (not
 		// settlement) is the subject under test.
-		require.NoError(t, env.cmdlog.SettleReferentLabels(t.Context(), 50))
+		settleReferents(t, env, env.cmdlog)
 		require.NoError(t, env.cmdlog.UpdateProjectRates(t.Context(), params.DefaultMemory().RateDecay))
 		refs, gate := a.referentCandidates(t.Context(), SessionAgentCall{
 			SessionID: "s6", Prompt: "fix the config",

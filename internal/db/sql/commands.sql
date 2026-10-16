@@ -221,11 +221,16 @@ SELECT * FROM failure_memory WHERE resolved_in != '' AND project_key = sqlc.arg(
 -- the (session_id, source_message_id, target) unique key the retry
 -- idempotency point: a repair-chain re-run of the turn-context pass
 -- re-derives the same episode and must not count twice.
+-- settle_at stamps the +24h cap at insert: the column default is 0,
+-- and without the stamp a fresh row satisfies the due predicate at
+-- birth -- a settle pass in flight before LabelReferentEpisode lands
+-- would freeze the row fingerprintless. The label UPDATE re-stamps
+-- the window at label time; pre-#340 rows keep 0 (due immediately).
 INSERT OR IGNORE INTO referent_episodes (
     phrase, target, session_id, source_message_id, tool_call_id,
     repo_state, memory_suggested, verdict, project_key, param_version,
-    created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    created_at, settle_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: CountCleanReferentAcceptances :one
 -- Evidence for a phrase->target mapping: accepted episodes the memory
@@ -369,7 +374,10 @@ WHERE s.created_at * 1000 > ? AND s.id != ? AND s.parent_session_id IS NULL
 -- orderings beyond -C stay a documented miss. Non-commit producers
 -- are a known miss class: an agent-run git rebase/merge/cherry-pick
 -- mints commits that read as external acceptance evidence, as do
--- packed forms like cmd&&git and sudo-prefixed invocations.
+-- packed forms like cmd&&git and sudo-prefixed invocations. And in
+-- the other direction, merge commits emit no --name-only paths --
+-- a user merge touching the target is missed evidence (conservative:
+-- a merge is not necessarily acceptance of this turn's work).
 SELECT last_at FROM command_memory
 WHERE project_key = ?
     AND (cmd_norm LIKE 'git commit%'
@@ -443,7 +451,11 @@ WHERE id IN (sqlc.slice('ids'));
 -- signal (unresolved cue, no survival read, no external commit) is
 -- not evidence either way -- settled_at alone never invents mass.
 -- The predicate is referentEpisodeAdmissible (cmdlog/rates.go)
--- re-implemented in SQL -- a change must move all sites.
+-- re-implemented in SQL -- a change must move all sites. Note the
+-- upgrade path: rows folded before settlement existed (rate_folded=1,
+-- settled_at NULL) settle on first post-upgrade pass and re-enter
+-- this pool as fixed-window evidence -- intended, they now carry a
+-- frozen observation like any settled row.
 SELECT verdict, label_committed, label_hash_changed
 FROM referent_episodes
 WHERE project_key != ?
@@ -556,7 +568,11 @@ UPDATE turn_outcomes SET verdict = ?, settled_at = ? WHERE id = ? AND settled_at
 -- starvation corner of that waste: >=LIMIT permanently-pending
 -- sessions newer than a genuinely pending one starve it under ORDER
 -- BY created_at DESC -- rare, but a recorded marker for ineligible
--- turns would close it for good.
+-- turns would close it for good. Membership is also last-writer:
+-- command_memory.last_session_id moves with each re-run, so a
+-- session whose only ledger rows were overwritten by a later
+-- session loses its membership proof -- its windows stay open
+-- (fail-safe) but its turns also leave this corpus.
 SELECT id, created_at FROM sessions s
 WHERE s.id != ? AND s.parent_session_id IS NULL
     AND EXISTS (

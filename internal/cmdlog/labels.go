@@ -32,12 +32,17 @@ const (
 	// at the first of (a) the next session in the project starting or
 	// (b) created_at + 24h — the label is computed once, then frozen.
 	settleWindowMillis = int64(24 * 60 * 60 * 1000)
-	// commitSkewMillis bounds agent-commit attribution: a commit
-	// whose committer time (%ct — the right clock for evidence
-	// windows; author time can backdate) lands within this skew of a
+	// commitSkewBeforeMillis / commitSkewAfterMillis bound
+	// agent-commit attribution asymmetrically: a commit whose
+	// committer time (%ct — the right clock for evidence windows;
+	// author time can backdate) sits within these bounds of a
 	// harness-run `git commit`'s recorded last_at counts as
-	// agent-made and is excluded from acceptance evidence.
-	commitSkewMillis = int64(5000)
+	// agent-made and is excluded from acceptance evidence. The
+	// commit object is created mid-run while last_at stamps run
+	// END — commit hooks (lint/test) can take tens of seconds, so
+	// the before-bound is wide while the after-bound stays tight.
+	commitSkewBeforeMillis = int64(60_000)
+	commitSkewAfterMillis  = int64(5_000)
 	// survivalMajority is the divergence cut: an edit counts as
 	// diverged when strictly fewer than this fraction of its recorded
 	// added lines remain in the file at settle time — line-level
@@ -203,10 +208,13 @@ func (s *service) prefetchCommitEvidence(ctx context.Context, winLo, winHi int64
 	ev.commits = s.commitsTouchingPaths(ctx,
 		time.UnixMilli(winLo).UTC().Format(time.RFC3339),
 		time.UnixMilli(winHi).UTC().Format(time.RFC3339))
+	// A run can only attribute commits created before its own end
+	// stamp, so the fetch window's slacks mirror the skew's
+	// direction: after-skew below, before-skew above.
 	runs, err := s.q.ListCrushCommitRuns(ctx, db.ListCrushCommitRunsParams{
 		ProjectKey: s.projectKey,
-		LastAt:     winLo - commitSkewMillis,
-		LastAt_2:   winHi + commitSkewMillis,
+		LastAt:     winLo - commitSkewAfterMillis,
+		LastAt_2:   winHi + commitSkewBeforeMillis,
 	})
 	if err != nil {
 		ev.runsUnreadable = true
@@ -286,10 +294,12 @@ func (s *service) settleReferent(ctx context.Context, r db.ListUnsettledReferent
 }
 
 // isHarnessCommit reports whether commit ms (unix millis) sits within
-// the skew bound of a harness-recorded git-commit run.
+// the skew bounds of a harness-recorded git-commit run — the commit's
+// %ct precedes the run's last_at (run end), so the bound reaches
+// further backward than forward.
 func isHarnessCommit(ms int64, runs []int64) bool {
 	for _, t := range runs {
-		if ms >= t-commitSkewMillis && ms <= t+commitSkewMillis {
+		if ms >= t-commitSkewBeforeMillis && ms <= t+commitSkewAfterMillis {
 			return true
 		}
 	}

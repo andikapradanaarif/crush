@@ -418,7 +418,8 @@ CREATE TABLE skill_episodes (
   sig_project   TEXT NOT NULL,
   sig_abstract  TEXT NOT NULL,
   session_id    TEXT NOT NULL,
-  turn_idx      INTEGER NOT NULL,
+  turn_id       TEXT NOT NULL,    -- turn's user-message ID, not an
+                                  -- ordinal (compaction shifts those)
   project_key   TEXT NOT NULL,
   core          TEXT NOT NULL,    -- JSON core steps
   slot_values   TEXT NOT NULL,    -- JSON {slot: [values]}
@@ -426,7 +427,7 @@ CREATE TABLE skill_episodes (
   suggested     INTEGER NOT NULL DEFAULT 0,
   param_version TEXT NOT NULL,
   created_at    INTEGER NOT NULL,
-  UNIQUE(session_id, turn_idx, sig_project)
+  UNIQUE(session_id, turn_id, sig_project)
 );
 
 CREATE TABLE skill_usage (

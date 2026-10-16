@@ -122,6 +122,11 @@ type Querier interface {
 	// the (session_id, source_message_id, target) unique key the retry
 	// idempotency point: a repair-chain re-run of the turn-context pass
 	// re-derives the same episode and must not count twice.
+	// settle_at stamps the +24h cap at insert: the column default is 0,
+	// and without the stamp a fresh row satisfies the due predicate at
+	// birth -- a settle pass in flight before LabelReferentEpisode lands
+	// would freeze the row fingerprintless. The label UPDATE re-stamps
+	// the window at label time; pre-#340 rows keep 0 (due immediately).
 	InsertReferentEpisode(ctx context.Context, arg InsertReferentEpisodeParams) error
 	// Open one turn's outcome row (#340), idempotent on the
 	// (session_id, turn_id) unique key -- turn_id is the turn's
@@ -162,7 +167,10 @@ type Querier interface {
 	// orderings beyond -C stay a documented miss. Non-commit producers
 	// are a known miss class: an agent-run git rebase/merge/cherry-pick
 	// mints commits that read as external acceptance evidence, as do
-	// packed forms like cmd&&git and sudo-prefixed invocations.
+	// packed forms like cmd&&git and sudo-prefixed invocations. And in
+	// the other direction, merge commits emit no --name-only paths --
+	// a user merge touching the target is missed evidence (conservative:
+	// a merge is not necessarily acceptance of this turn's work).
 	ListCrushCommitRuns(ctx context.Context, arg ListCrushCommitRunsParams) ([]int64, error)
 	ListFailurePartitionKeys(ctx context.Context) ([]string, error)
 	// Failure rows in one partition -- the remote-lifecycle re-claim
@@ -179,10 +187,14 @@ type Querier interface {
 	ListLatestSessionFiles(ctx context.Context, sessionID string) ([]File, error)
 	ListMCPDisabledServers(ctx context.Context) ([]string, error)
 	ListMCPEnabledServers(ctx context.Context) ([]string, error)
+	// created_at has one-second resolution, so rowid breaks same-second
+	// ties into insertion order -- a swapped boundary pair would attach
+	// a verdict to the wrong turn's span.
 	ListMessagesBySession(ctx context.Context, sessionID string) ([]Message, error)
 	// Messages from the summary onward, which is all a compacted session sends.
 	// created_at has one-second resolution, so a few messages preceding the
 	// summary can come back too; the caller slices from the summary by ID.
+	// Same rowid tiebreaker as ListMessagesBySession.
 	ListMessagesBySessionFromSummary(ctx context.Context, arg ListMessagesBySessionFromSummaryParams) ([]Message, error)
 	ListNewFiles(ctx context.Context) ([]File, error)
 	ListOpenFailures(ctx context.Context, arg ListOpenFailuresParams) ([]FailureMemory, error)
@@ -218,7 +230,11 @@ type Querier interface {
 	// starvation corner of that waste: >=LIMIT permanently-pending
 	// sessions newer than a genuinely pending one starve it under ORDER
 	// BY created_at DESC -- rare, but a recorded marker for ineligible
-	// turns would close it for good.
+	// turns would close it for good. Membership is also last-writer:
+	// command_memory.last_session_id moves with each re-run, so a
+	// session whose only ledger rows were overwritten by a later
+	// session loses its membership proof -- its windows stay open
+	// (fail-safe) but its turns also leave this corpus.
 	ListRecentSessions(ctx context.Context, arg ListRecentSessionsParams) ([]ListRecentSessionsRow, error)
 	// Settled referent episodes in calibration form (#295/#340):
 	// settlement is the evidence predicate -- one fixed observation per
@@ -238,7 +254,11 @@ type Querier interface {
 	// signal (unresolved cue, no survival read, no external commit) is
 	// not evidence either way -- settled_at alone never invents mass.
 	// The predicate is referentEpisodeAdmissible (cmdlog/rates.go)
-	// re-implemented in SQL -- a change must move all sites.
+	// re-implemented in SQL -- a change must move all sites. Note the
+	// upgrade path: rows folded before settlement existed (rate_folded=1,
+	// settled_at NULL) settle on first post-upgrade pass and re-enter
+	// this pool as fixed-window evidence -- intended, they now carry a
+	// frozen observation like any settled row.
 	ListReferentPriorEvents(ctx context.Context, projectKey string) ([]ListReferentPriorEventsRow, error)
 	// Settled, not-yet-folded referent episodes (#296/#340), oldest
 	// first. Membership is the rate_folded mark, not an id watermark.

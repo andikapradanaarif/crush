@@ -81,8 +81,12 @@ func TestSettleReferentLabels_PromotesOnFrozenOutcome(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, refs)
 
-	// settle_at defaults to 0 — due immediately; with no git or
-	// fingerprints the settled outcome falls back to the accepted cue.
+	// Force the window closed — settle_at stamps +24h at insert now;
+	// with no git or fingerprints the settled outcome falls back to
+	// the accepted cue.
+	_, err = env.conn.ExecContext(env.ctx,
+		`UPDATE referent_episodes SET settle_at = 0 WHERE settled_at IS NULL`)
+	require.NoError(t, err)
 	require.NoError(t, env.svc.SettleReferentLabels(env.ctx, 50))
 
 	refs, err = env.svc.ListReferentCandidates(env.ctx, []string{"config"}, 5)
@@ -100,6 +104,9 @@ func TestSettleReferentLabels_FailedOutcomeDoesNotPromote(t *testing.T) {
 	require.NoError(t, env.svc.RecordReferentEpisode(env.ctx,
 		referentEp("s2", "m2", "x.go", ReferentRevised, false), 2))
 
+	_, err := env.conn.ExecContext(env.ctx,
+		`UPDATE referent_episodes SET settle_at = 0 WHERE settled_at IS NULL`)
+	require.NoError(t, err)
 	require.NoError(t, env.svc.SettleReferentLabels(env.ctx, 50))
 
 	refs, err := env.svc.ListReferentCandidates(env.ctx, []string{"config"}, 5)

@@ -213,7 +213,11 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 	case committed || (decidable && !diverged):
 		verdict = TurnAccepted
 	case len(paths) == 0 && len(cmds) > 0 && green.Valid && green.Int64 == 1:
-		// A command-only turn whose session ended green.
+		// A command-only turn whose session ended green. Edit-only
+		// turns can't reach this arm — a pure deletion leaves no
+		// fingerprint to read, so decidable stays false and the row
+		// can only accept via commit evidence. Asymmetric by design:
+		// missing evidence is never acceptance.
 		verdict = TurnAccepted
 	default:
 		verdict = TurnUnknown

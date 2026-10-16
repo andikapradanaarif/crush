@@ -291,6 +291,14 @@ func (r *Runner) runScriptedSeed(ctx context.Context, q *db.Queries, conn *sql.D
 			return sessionID, fmt.Errorf("referent %d (%q→%q): %w", i, ref.Phrase, ref.Target, err)
 		}
 	}
+	// Episodes stamp their +24h window at insert now — a seed aged
+	// less than that would sit un-due forever. Seeds are due
+	// immediately by contract, so stamp the window closed.
+	if _, err := conn.ExecContext(ctx,
+		`UPDATE referent_episodes SET settle_at = 0
+		 WHERE session_id = ? AND settled_at IS NULL`, sessionID); err != nil {
+		return sessionID, fmt.Errorf("backdate seed referent windows: %w", err)
+	}
 	return sessionID, nil
 }
 
