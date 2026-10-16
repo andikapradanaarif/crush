@@ -330,6 +330,74 @@ func TestSettleTurnOutcomes_ChildSessionDoesNotSettle(t *testing.T) {
 	require.True(t, readTurn(t, env, "s1", "t0").settledAt.Valid)
 }
 
+// The newer-session trigger is project-scoped: a session whose only
+// membership proof lives under another key must not close this
+// project's window — the EXISTS requires a same-project ledger row.
+func TestSettleTurnOutcomes_ForeignSessionNotBoundary(t *testing.T) {
+	env := setupLabelsTest(t)
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID: "s1", TurnID: "t0", Commands: []string{"ls"},
+	}))
+
+	foreign := NewService(db.New(env.conn), env.workingDir, params.DefaultMemory(),
+		WithProjectKey("pk-foreign"))
+	seedLabelSessionAt(t, env, "sf", "", time.Now().Unix()+60)
+	foreign.RecordRun(t.Context(), Run{
+		SessionID: "sf", Command: "ls", CWD: env.workingDir,
+		Ran: true, ExitCode: 0,
+	})
+
+	require.NoError(t, env.svc.SettleTurnOutcomes(t.Context(), 10))
+	require.False(t, readTurn(t, env, "s1", "t0").settledAt.Valid,
+		"a foreign-project session must not close this window")
+}
+
+// The settle pass itself is project-scoped: another partition's due
+// turn rows are not this project's backlog — the same contract the
+// episode pass's partition test pins.
+func TestSettleTurnOutcomes_ProjectPartition(t *testing.T) {
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+	q := db.New(conn)
+	dir := t.TempDir()
+	svcA := NewService(q, dir, params.DefaultMemory(), WithProjectKey("proj-a"))
+	svcB := NewService(q, dir, params.DefaultMemory(), WithProjectKey("proj-b"))
+	e := &labelEnv{conn: conn}
+
+	// Both due via the +24h cap — no newer-session trigger needed.
+	old := time.Now().Add(-48 * time.Hour).UnixMilli()
+	require.NoError(t, svcA.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID: "s1", TurnID: "t0", Commands: []string{"ls"}, CreatedAt: old,
+	}))
+	require.NoError(t, svcB.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID: "s2", TurnID: "t0", Commands: []string{"ls"}, CreatedAt: old,
+	}))
+	require.NoError(t, svcA.SettleTurnOutcomes(t.Context(), 10))
+	require.True(t, readTurn(t, e, "s1", "t0").settledAt.Valid)
+	require.False(t, readTurn(t, e, "s2", "t0").settledAt.Valid,
+		"proj-b's due row is not proj-a's backlog")
+}
+
+// An 'accepted' cue is a weak signal — with no readable artifact
+// evidence (the fingerprint never landed, no repo to show a commit,
+// no test verdict) there is nothing to accept ON. The row settles
+// unknown: missing evidence is never a passing grade.
+func TestSettleTurnOutcomes_AcceptedCueNoEvidenceUnknown(t *testing.T) {
+	env := setupLabelsTest(t)
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		// No EditHunks entry for the path: survival cannot read,
+		// and a TempDir workspace carries no repo or test runs.
+		NextVerdict: ReferentAccepted,
+	}))
+	dueViaNewerSession(t, env, "s2")
+	require.Equal(t, TurnUnknown, settleTurnRow(t, env, "s1", "t0").verdict.String,
+		"an accepted cue with zero decidable evidence settles unknown")
+}
+
 // Turn hunks carry the same trimmed fingerprint — indented code must
 // survive there too.
 func TestSettleTurnOutcomes_IndentedLinesSurvive(t *testing.T) {
