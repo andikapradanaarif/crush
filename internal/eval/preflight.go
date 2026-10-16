@@ -62,6 +62,11 @@ func (r *Runner) preflightExperiment(ctx context.Context, exp *Experiment) error
 	if !ok {
 		return nil
 	}
+	// Resolve against the child's allowlisted env (#345): a referenced
+	// key that is absent reports "resolves empty" here exactly as the
+	// child would see it, and an ambient-but-unreferenced key can no
+	// longer mask the absence in the check.
+	cr.AllowedEnv = envAllowlist(exp)
 	envMap := make(map[string]string)
 	for _, kv := range cr.subprocessEnv("", 0, nil) {
 		k, v, _ := strings.Cut(kv, "=")

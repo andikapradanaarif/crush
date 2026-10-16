@@ -252,6 +252,11 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 		return rec, fmt.Errorf("content hash: %w", err)
 	}
 	rec.Env.ContentHash = contentHash
+	// #345: the record names every parent-env var allowed into the
+	// child — names only, never values — so a run reproduces from its
+	// record and a leaked credential is visibly absent from it.
+	allow := envAllowlist(exp)
+	rec.Env.EnvAllowlist = allow
 	// The process regime is provenance: an early-exit record must
 	// still say which regime produced (or failed to produce) it.
 	rec.ProcessModel = cmp.Or(exp.ProcessModel, ProcessModelRestart)
@@ -281,6 +286,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	drv := r.driver()
 	if cr, ok := drv.(CrushRunner); ok {
 		cr.FlagKeys = flagNames(manifest)
+		cr.AllowedEnv = allow
 		drv = cr
 	}
 	if exp.ProcessModel == ProcessModelPersistent {
@@ -1493,8 +1499,9 @@ func (r *Runner) checkEnv() []string {
 		"XDG_STATE_HOME":  filepath.Join(r.home(), ".local", "state"),
 	}
 	// Go caches pin to a shared eval cache, not the per-run home —
-	// see goCachePins.
-	for k, v := range goCachePins(nil) {
+	// see goCachePins. check.sh still inherits ambient vars, so an
+	// ambient GOMODCACHE is honored rather than pinned over.
+	for k, v := range goCachePins(nil, true) {
 		pinned[k] = v
 	}
 	env := make([]string, 0, len(os.Environ()))
@@ -1577,9 +1584,13 @@ const EvalGoCacheEnvVar = "CRUSH_EVAL_GO_CACHE"
 // and every run re-downloads the entire module graph into its temp
 // home — observed 1–3 GB per leaked home on a live machine. A shared
 // cache keeps runs hermetic against the operator's real caches while
-// ending the per-home duplication. Keys already set in the ambient env
-// — or reserved by a caller's ExtraEnv — are honored, not overridden.
-func goCachePins(reserved map[string]bool) map[string]string {
+// ending the per-home duplication. When the caller's env still
+// inherits ambient vars (checkEnv), ambient-set keys are honored
+// rather than pinned over; under the subprocess allowlist ambient
+// keys are scrubbed anyway, so honoring them would only skip the pin
+// and drop children back to per-home caches. ExtraEnv reservations
+// are honored either way.
+func goCachePins(reserved map[string]bool, honorAmbient bool) map[string]string {
 	dir := os.Getenv(EvalGoCacheEnvVar)
 	if dir != "" && !filepath.IsAbs(dir) {
 		slog.Warn("Ignoring relative "+EvalGoCacheEnvVar+" — Go caches need an absolute path", "dir", dir)
@@ -1601,7 +1612,7 @@ func goCachePins(reserved map[string]bool) map[string]string {
 		{"GOMODCACHE", filepath.Join(dir, "mod")},
 		{"GOCACHE", filepath.Join(dir, "build")},
 	} {
-		if _, set := os.LookupEnv(kv[0]); set || reserved[kv[0]] {
+		if _, set := os.LookupEnv(kv[0]); (set && honorAmbient) || reserved[kv[0]] {
 			continue
 		}
 		pins[kv[0]] = kv[1]

@@ -1035,6 +1035,13 @@ type Env struct {
 	Go          string `json:"go"`
 	OS          string `json:"os"`
 	ContentHash string `json:"content_hash"`
+	// EnvAllowlist names every parent-env variable permitted into the
+	// run's subprocesses (#345) — the fixed minimal set plus the vars
+	// the manifest references. Names only, never values: the list is
+	// the reproducibility surface (a run's effective env reconstructs
+	// from record + operator env), and a credential that influenced a
+	// run must appear here.
+	EnvAllowlist []string `json:"env_allowlist,omitempty"`
 }
 
 // BaselineCounts are the integer cells Fisher's exact needs; p̂ is

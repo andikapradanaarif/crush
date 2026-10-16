@@ -139,6 +139,12 @@ type CrushRunner struct {
 	// FlagKeys are the manifest flag names the child reports resolved
 	// values for, via CRUSH_EVAL_FLAGS.
 	FlagKeys []string
+	// AllowedEnv is the subprocess allowlist (#345): parent-env names
+	// permitted through to the child, computed by envAllowlist from
+	// the manifest plus the fixed minimal set. Empty is fail-closed —
+	// only the fixed set passes — so a path that forgets to populate
+	// it scrubs credentials rather than inheriting them.
+	AllowedEnv []string
 }
 
 // runTelemetry is the JSON the agent subprocess drops at
@@ -587,12 +593,17 @@ func isCancellation(e string) bool {
 		strings.Contains(e, "request canceled by user")
 }
 
-// subprocessEnv builds the run's environment: the eval environment's
-// credentials pass through; HOME and the XDG dirs are pinned so the
-// global config layers merge nothing in. The parent's own CRUSH_* vars
-// are stripped — a CRUSH_CLIENT_SERVER=1 left over in the operator's
-// env would take the client/server path where the telemetry hook
-// doesn't fire, silently breaking session continuation.
+// subprocessEnv builds the run's environment under the #345 allowlist:
+// only names the manifest references (AllowedEnv, computed by
+// envAllowlist) plus the fixed minimal set cross the exec boundary —
+// an ambient credential the manifest never named would alter provider
+// resolution without appearing in any record (the #333 failure shape).
+// HOME and the XDG dirs are pinned so the global config layers merge
+// nothing in. The parent's own CRUSH_* vars are stripped — a
+// CRUSH_CLIENT_SERVER=1 left over in the operator's env would take the
+// client/server path where the telemetry hook doesn't fire, silently
+// breaking session continuation — and the allowlist cannot re-admit
+// one.
 func (c CrushRunner) subprocessEnv(telemetryFile string, maxSteps int, prevVector json.RawMessage) []string {
 	pinned := map[string]string{
 		"HOME":              c.Home,
@@ -617,20 +628,40 @@ func (c CrushRunner) subprocessEnv(telemetryFile string, maxSteps int, prevVecto
 		k, _, _ := strings.Cut(kv, "=")
 		reserved[k] = true
 	}
-	for k, v := range goCachePins(reserved) {
+	// Ambient GOMODCACHE/GOCACHE are scrubbed by the allowlist below,
+	// so the cache pins must not honor them — only an ExtraEnv
+	// reservation keeps the caller's value.
+	for k, v := range goCachePins(reserved, false) {
 		pinned[k] = v
 	}
 	// Replace rather than append: duplicated keys in environ are
 	// resolved first-match by getenv, so a second HOME wouldn't pin.
-	env := make([]string, 0, len(os.Environ()))
+	// The fixed minimal set passes regardless — AllowedEnv only adds
+	// the manifest-referenced names on top of it.
+	allowed := make(map[string]bool, len(c.AllowedEnv)+len(fixedChildEnv()))
+	for _, k := range fixedChildEnv() {
+		allowed[k] = true
+	}
+	for _, k := range c.AllowedEnv {
+		allowed[k] = true
+	}
+	env := make([]string, 0, len(allowed))
 	for _, kv := range os.Environ() {
 		k, _, _ := strings.Cut(kv, "=")
 		// Harness-prefixed vars never inherit — an exported
-		// EVAL_WORKDIR or CRUSH_MODE would shadow/derail the run.
+		// EVAL_WORKDIR or CRUSH_MODE would shadow/derail the run —
+		// and the allowlist can never re-admit one.
 		if strings.HasPrefix(k, "CRUSH_") || strings.HasPrefix(k, "EVAL_") {
 			continue
 		}
-		if _, overridden := pinned[k]; !overridden {
+		if _, overridden := pinned[k]; overridden {
+			continue
+		}
+		// #345: only manifest-referenced names plus the fixed minimal
+		// set cross the exec boundary — an ambient credential or
+		// proxy var the manifest never named alters the child without
+		// appearing in any record (the #333 failure shape).
+		if allowed[k] {
 			env = append(env, kv)
 		}
 	}
