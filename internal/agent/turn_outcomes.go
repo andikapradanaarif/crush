@@ -73,7 +73,7 @@ func (a *sessionAgent) turnOutcomeDeps() turnOutcomeDeps {
 // and ledger writes must not serialize into the prompt path. The
 // guard and the field snapshot run on this goroutine; the detached
 // closure reads only its parameters.
-func (a *sessionAgent) recordTurnOutcome(ctx context.Context, call SessionAgentCall, msgs []message.Message) {
+func (a *sessionAgent) recordTurnOutcome(ctx context.Context, call SessionAgentCall, msgs []message.Message, full []message.Message) {
 	if a.cmdlog == nil || a.isSubAgent || call.RepairAttempts > 0 {
 		return
 	}
@@ -84,7 +84,7 @@ func (a *sessionAgent) recordTurnOutcome(ctx context.Context, call SessionAgentC
 	deps := a.turnOutcomeDeps()
 	detachedCtx := context.WithoutCancel(ctx)
 	a.spawnDetached(func() {
-		recordTurnOutcome(detachedCtx, deps, call, msgs)
+		recordTurnOutcome(detachedCtx, deps, call, msgs, full)
 	})
 }
 
@@ -92,7 +92,7 @@ func (a *sessionAgent) recordTurnOutcome(ctx context.Context, call SessionAgentC
 // the last real user message before this run's prompt; the arriving
 // prompt is its next-turn verdict. A session with no prior real
 // user message is in its first turn — the backfill trigger.
-func recordTurnOutcome(ctx context.Context, d turnOutcomeDeps, call SessionAgentCall, msgs []message.Message) {
+func recordTurnOutcome(ctx context.Context, d turnOutcomeDeps, call SessionAgentCall, msgs []message.Message, full []message.Message) {
 	lastUser := lastRealUserIdx(msgs, call.currentUserMsgID)
 	if lastUser < 0 {
 		// Two distinct shapes land here. A genuinely new session's
@@ -100,29 +100,28 @@ func recordTurnOutcome(ctx context.Context, d turnOutcomeDeps, call SessionAgent
 		// session's first post-summary turn has no real user message
 		// left in the tail — the judged turn lives before the
 		// summary, so the full transcript locates it and this prompt
-		// still supplies its verdict. The fresh List returns the
-		// in-flight prompt too — it was persisted before msgs was
-		// sliced — so it must be excluded by ID: landing on it would
-		// mint a phantom row keyed to this turn's own message, and
-		// the unique key would then block the real evidence row.
-		if d.messages != nil {
-			if full, err := d.messages.List(ctx, call.SessionID); err == nil {
-				if call.Prompt != "" {
-					if idx := lastRealUserIdx(full, call.currentUserMsgID); idx >= 0 {
-						o := extractTurnOutcome(ctx, d, call.SessionID, full, idx)
-						o.NextVerdict = referentJudgedVerdict(call.Prompt)
-						if err := d.cmdlog.RecordTurnOutcome(ctx, o); err != nil {
-							slog.Warn("Failed to record turn outcome", "error", err)
-						}
+		// still supplies its verdict. The transcript comes from the
+		// caller (fetched once for both judgment passes); it returns
+		// the in-flight prompt too — it was persisted before msgs
+		// was sliced — so it must be excluded by ID: landing on it
+		// would mint a phantom row keyed to this turn's own message,
+		// and the unique key would then block the real evidence row.
+		if len(full) > 0 {
+			if call.Prompt != "" {
+				if idx := lastRealUserIdx(full, call.currentUserMsgID); idx >= 0 {
+					o := extractTurnOutcome(ctx, d, call.SessionID, full, idx)
+					o.NextVerdict = referentJudgedVerdict(call.Prompt)
+					if err := d.cmdlog.RecordTurnOutcome(ctx, o); err != nil {
+						slog.Warn("Failed to record turn outcome", "error", err)
 					}
 				}
-				// Same-session sweep on the full transcript —
-				// compacted sessions drop pre-summary turns from
-				// the tail, and queued prompts folded mid-run
-				// (drainQueueForStep) close turns no per-run pass
-				// ever judged.
-				backfillSession(ctx, d, call.SessionID, full, call.currentUserMsgID)
 			}
+			// Same-session sweep on the full transcript —
+			// compacted sessions drop pre-summary turns from
+			// the tail, and queued prompts folded mid-run
+			// (drainQueueForStep) close turns no per-run pass
+			// ever judged.
+			backfillSession(ctx, d, call.SessionID, full, call.currentUserMsgID)
 		}
 		// The corpus scan does up to backfillLimit message-list
 		// reads — the caller already runs detached.

@@ -240,7 +240,7 @@ func TestRecordTurnOutcome(t *testing.T) {
 		}}},
 	}
 	call := SessionAgentCall{SessionID: "s1", Prompt: "thanks"}
-	recordTurnOutcome(t.Context(), a.turnOutcomeDeps(), call, msgs)
+	recordTurnOutcome(t.Context(), a.turnOutcomeDeps(), call, msgs, nil)
 
 	has, err := a.cmdlog.HasTurnOutcome(t.Context(), "s1", "u1")
 	require.NoError(t, err)
@@ -249,7 +249,7 @@ func TestRecordTurnOutcome(t *testing.T) {
 	// Repair retries and sub-agents record nothing.
 	recordTurnOutcome(t.Context(), a.turnOutcomeDeps(), SessionAgentCall{
 		SessionID: "s1", Prompt: "retry", RepairAttempts: 1,
-	}, msgs)
+	}, msgs, nil)
 }
 
 // A prompt folded into an earlier run's queue persists as a real
@@ -277,7 +277,7 @@ func TestRecordTurnOutcome_SweepsFoldedBoundaries(t *testing.T) {
 	call := SessionAgentCall{
 		SessionID: "s1", Prompt: "thanks", currentUserMsgID: "u2",
 	}
-	recordTurnOutcome(t.Context(), a.turnOutcomeDeps(), call, msgs)
+	recordTurnOutcome(t.Context(), a.turnOutcomeDeps(), call, msgs, nil)
 
 	readVerdict := func(turnID string) (string, bool) {
 		var nv string
@@ -311,7 +311,7 @@ func TestRecordTurnOutcome_SweepsFoldedBoundaries(t *testing.T) {
 
 	// Re-running is a no-op: HasTurnOutcome plus the unique key keep
 	// the sweep idempotent.
-	recordTurnOutcome(t.Context(), a.turnOutcomeDeps(), call, msgs)
+	recordTurnOutcome(t.Context(), a.turnOutcomeDeps(), call, msgs, nil)
 	nv, _ = readVerdict("u1")
 	require.Equal(t, cmdlog.ReferentRevised, nv)
 }
@@ -355,7 +355,7 @@ func TestBackfillTurnOutcomes(t *testing.T) {
 	// First turn of the new session: no prior user message, so the
 	// record path becomes the (detached) backfill — poll for it.
 	recordTurnOutcome(t.Context(), a.turnOutcomeDeps(),
-		SessionAgentCall{SessionID: "s-new", Prompt: "hello"}, nil)
+		SessionAgentCall{SessionID: "s-new", Prompt: "hello"}, nil, nil)
 
 	require.Eventually(t, func() bool {
 		has, err := a.cmdlog.HasTurnOutcome(t.Context(), old.ID, turnIDs[0])
@@ -437,9 +437,13 @@ func TestRecordTurnOutcome_PostCompactionTail(t *testing.T) {
 		Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "looks right"}},
 	})
 	require.NoError(t, err)
+	// The caller fetches the transcript once for both judgment
+	// passes when the tail carries no real boundary.
+	fullTx, err := env.messages.List(t.Context(), sess.ID)
+	require.NoError(t, err)
 	recordTurnOutcome(t.Context(), a.turnOutcomeDeps(), SessionAgentCall{
 		SessionID: sess.ID, Prompt: "looks right", currentUserMsgID: inflight.ID,
-	}, tail)
+	}, tail, fullTx)
 
 	has, err := a.cmdlog.HasTurnOutcome(t.Context(), sess.ID, userID)
 	require.NoError(t, err)
@@ -466,9 +470,13 @@ func TestRecordTurnOutcome_InFlightPromptExcluded(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// The transcript contains only the in-flight prompt — the
+	// exclusion must keep it from being judged as its own turn.
+	fullTx, err := env.messages.List(t.Context(), sess.ID)
+	require.NoError(t, err)
 	recordTurnOutcome(t.Context(), a.turnOutcomeDeps(), SessionAgentCall{
 		SessionID: sess.ID, Prompt: "first prompt", currentUserMsgID: inflight.ID,
-	}, nil)
+	}, nil, fullTx)
 
 	has, err := a.cmdlog.HasTurnOutcome(t.Context(), sess.ID, inflight.ID)
 	require.NoError(t, err)
@@ -552,7 +560,7 @@ func TestRecordTurnOutcomeDetachedFieldSnapshot(t *testing.T) {
 	}
 	call := SessionAgentCall{SessionID: "s1", Prompt: "next turn"}
 	for range 50 {
-		a.recordTurnOutcome(t.Context(), call, msgs)
+		a.recordTurnOutcome(t.Context(), call, msgs, nil)
 		// Re-stamp the fields the detached pass used to read —
 		// nil first so a late read would also panic, then restore
 		// so the next iteration's guard passes.

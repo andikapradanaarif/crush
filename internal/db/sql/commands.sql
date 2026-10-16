@@ -233,6 +233,21 @@ INSERT OR IGNORE INTO referent_episodes (
     created_at, settle_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
+-- name: InsertReferentEpisodeLabeled :exec
+-- The episode plus its artifact labels in one insert. Required when
+-- created_at anchors at the judged prompt rather than mint time: a
+-- prompt-anchored window may already be closed, making the row born
+-- due via EITHER settle arm (elapsed cap or a newer project
+-- session) -- a label write landing in a second statement could
+-- freeze the row fingerprintless if a settle pass interleaves.
+INSERT OR IGNORE INTO referent_episodes (
+    phrase, target, session_id, source_message_id, tool_call_id,
+    repo_state, memory_suggested, verdict, project_key, param_version,
+    created_at, settle_at,
+    label_target_hash, label_wrong_target, label_steps, label_tokens,
+    label_tests_green, labeled_at, label_added_lines
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
 -- name: CountCleanReferentAcceptances :one
 -- Evidence for a phrase->target mapping: accepted episodes the memory
 -- tail did not suggest, counted by distinct session so a session

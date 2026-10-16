@@ -2,6 +2,7 @@ package cmdlog
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/charmbracelet/crush/internal/db"
@@ -34,6 +35,12 @@ type ReferentEpisode struct {
 	RepoState       string
 	Suggested       bool   // the rendered tail itself named this target
 	Verdict         string // ReferentAccepted, ReferentRevised, or ReferentUnknown
+	// CreatedAt anchors the observation window — the judged prompt's
+	// unix-millisecond timestamp, not mint time, so the evidence
+	// window covers the turn's actual aftermath (the user-review gap
+	// between turn end and the prompt that mints the judgment).
+	// Zero falls back to mint time.
+	CreatedAt int64
 }
 
 // Referent is a promoted phrase→target candidate — enough clean
@@ -91,7 +98,10 @@ func (s *service) RecordReferentEpisode(ctx context.Context, ep ReferentEpisode,
 	if ep.Suggested {
 		suggested = 1
 	}
-	now := s.now().UnixMilli()
+	created := ep.CreatedAt
+	if created <= 0 {
+		created = s.now().UnixMilli()
+	}
 	if err := s.q.InsertReferentEpisode(ctx, db.InsertReferentEpisodeParams{
 		Phrase:          ep.Phrase,
 		Target:          ep.Target,
@@ -103,14 +113,69 @@ func (s *service) RecordReferentEpisode(ctx context.Context, ep ReferentEpisode,
 		Verdict:         ep.Verdict,
 		ProjectKey:      s.projectKey,
 		ParamVersion:    s.paramVersion,
-		CreatedAt:       now,
+		CreatedAt:       created,
 		// Stamped at insert so the row is never born due — a settle
 		// pass landing between this insert and LabelReferentEpisode's
 		// re-stamp would otherwise freeze it fingerprintless.
-		SettleAt: now + settleWindowMillis,
+		SettleAt: created + settleWindowMillis,
 	}); err != nil {
 		return err
 	}
+	return s.maybePromoteReferentIfClean(ctx, ep, promoteMin)
+}
+
+// RecordReferentEpisodeLabeled is RecordReferentEpisode with the
+// artifact labels written in the same insert — required when
+// ep.CreatedAt anchors at the judged prompt: a prompt-anchored
+// window may already be closed, so the row can be born due via
+// either settle arm (elapsed cap or a newer project session), and
+// labels arriving in a second statement would freeze too late if a
+// settle pass interleaved. The trailing LabelReferentEpisode call in
+// the agent stays — an OR IGNORE hit on the unique key is a
+// re-derivation whose fingerprint refresh still needs the UPDATE.
+func (s *service) RecordReferentEpisodeLabeled(ctx context.Context, ep ReferentEpisode, in ReferentEpisodeLabelInputs, promoteMin int) error {
+	if ep.Phrase == "" || ep.Target == "" || ep.SessionID == "" || ep.SourceMessageID == "" {
+		return nil
+	}
+	if ep.Verdict != ReferentAccepted && ep.Verdict != ReferentRevised && ep.Verdict != ReferentUnknown {
+		return nil
+	}
+	suggested := int64(0)
+	if ep.Suggested {
+		suggested = 1
+	}
+	created := ep.CreatedAt
+	if created <= 0 {
+		created = s.now().UnixMilli()
+	}
+	added, _ := json.Marshal(in.AddedLines)
+	if err := s.q.InsertReferentEpisodeLabeled(ctx, db.InsertReferentEpisodeLabeledParams{
+		Phrase:           ep.Phrase,
+		Target:           ep.Target,
+		SessionID:        ep.SessionID,
+		SourceMessageID:  ep.SourceMessageID,
+		ToolCallID:       ep.ToolCallID,
+		RepoState:        ep.RepoState,
+		MemorySuggested:  suggested,
+		Verdict:          ep.Verdict,
+		ProjectKey:       s.projectKey,
+		ParamVersion:     s.paramVersion,
+		CreatedAt:        created,
+		SettleAt:         created + settleWindowMillis,
+		LabelTargetHash:  s.fileHash(ep.Target),
+		LabelWrongTarget: in.WrongTarget,
+		LabelSteps:       in.Steps,
+		LabelTokens:      in.Tokens,
+		LabelTestsGreen:  s.sessionTestsGreen(ctx, ep.SessionID),
+		LabeledAt:        s.now().UnixMilli(),
+		LabelAddedLines:  string(added),
+	}); err != nil {
+		return err
+	}
+	return s.maybePromoteReferentIfClean(ctx, ep, promoteMin)
+}
+
+func (s *service) maybePromoteReferentIfClean(ctx context.Context, ep ReferentEpisode, promoteMin int) error {
 	if ep.Verdict != ReferentAccepted || ep.Suggested || promoteMin <= 0 {
 		return nil
 	}
