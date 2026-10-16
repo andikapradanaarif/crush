@@ -205,18 +205,25 @@ func TestSettleReferentLabels_UnlabeledRowNotDue(t *testing.T) {
 	require.Zero(t, c.hashChanged.Int64, `"v1" survives in the file`)
 }
 
-// Harness-commit attribution is asymmetric: the commit's %ct precedes
-// the run's last_at (run end), so the bound reaches 60s backward —
-// long hooks — and only 5s forward.
-func TestIsHarnessCommit_AsymmetricSkew(t *testing.T) {
-	const t0 = 1_000_000_000
-	runs := []int64{t0}
-	require.True(t, isHarnessCommit(t0, runs))
-	require.True(t, isHarnessCommit(t0-commitSkewBeforeMillis, runs))
-	require.True(t, isHarnessCommit(t0+commitSkewAfterMillis, runs))
-	require.False(t, isHarnessCommit(t0-commitSkewBeforeMillis-1, runs))
-	require.False(t, isHarnessCommit(t0+commitSkewAfterMillis+1, runs))
-	require.False(t, isHarnessCommit(t0, nil))
+// Harness-commit exclusion is exact-SHA now (#359): a commit whose
+// object id landed in crush_commits is agent-made; any other commit
+// inside the window counts, and a degraded exclusion list abstains.
+func TestCommitEvidence_SHAExclusion(t *testing.T) {
+	in := map[string][]commitRef{
+		"x.go": {{sha: "aaa", at: 1500}, {sha: "bbb", at: 1500}},
+	}
+	ev := commitEvidence{commits: in, made: map[string]struct{}{"aaa": {}}}
+	require.True(t, ev.inWindow([]string{"x.go"}, 1_000_000, 2_000_000),
+		"the unattributed commit in the same window still counts")
+
+	ev.made["bbb"] = struct{}{}
+	require.False(t, ev.inWindow([]string{"x.go"}, 1_000_000, 2_000_000),
+		"every crush-made SHA is excluded")
+
+	ev.exclusionUnreadable = true
+	delete(ev.made, "aaa")
+	require.False(t, ev.inWindow([]string{"x.go"}, 1_000_000, 2_000_000),
+		"a degraded exclusion list fails closed")
 }
 
 // A newer session in the project closes the window: the row settles
@@ -430,9 +437,19 @@ func TestSettleReferentLabels_AgentCommitExcluded(t *testing.T) {
 		ReferentEpisodeLabelInputs{AddedLines: []string{"v1"}})
 	seedLabelSession(t, env, "s1", "")
 
+	// Baseline: seed the repo's first commit plus one recorded run so
+	// the ledger holds a pre-run HEAD to attribute against (#359) —
+	// empty, so it touches no target path itself.
+	git("commit", "--allow-empty", "-m", "baseline")
+	svcReal := NewService(db.New(env.conn), env.workingDir, params.DefaultMemory())
+	svcReal.RecordRun(t.Context(), Run{
+		SessionID: "s1", Command: "git status",
+		CWD: env.workingDir, Ran: true, ExitCode: 0,
+	})
+
 	// The agent commits its own work — recorded through a
 	// real-clock service so the ledger stamps wall time.
-	svcReal := NewService(db.New(env.conn), env.workingDir, params.DefaultMemory())
+	require.NoError(t, os.WriteFile(path, []byte("v1\nv2"), 0o644))
 	git("add", target)
 	git("commit", "-m", "agent commit")
 	svcReal.RecordRun(t.Context(), Run{
@@ -447,9 +464,9 @@ func TestSettleReferentLabels_AgentCommitExcluded(t *testing.T) {
 	require.EqualValues(t, 0, c.committed.Int64,
 		"a commit the harness ran is agent-made, not user acceptance")
 
-	// A commit with no ledger run IS external evidence. Pin its
-	// committer date 30s out so it lands outside the recorded run's
-	// skew bound but still inside the window s4 closes at +90s.
+	// A commit no run produced IS external evidence. Pin its
+	// committer date 30s out so it lands inside the window s4
+	// closes at +90s.
 	recordLabeledEpisode(t, env, "s3", "m3", target,
 		ReferentEpisodeLabelInputs{AddedLines: []string{"v1"}})
 	require.NoError(t, os.WriteFile(path, []byte("v1\n// external touch"), 0o644))
@@ -466,6 +483,63 @@ func TestSettleReferentLabels_AgentCommitExcluded(t *testing.T) {
 	c = readLabels(t, env, "s3", target)
 	require.EqualValues(t, 1, c.committed.Int64,
 		"an unrecorded commit inside the window is external evidence")
+}
+
+// The old spelling-patterns-plus-skew heuristic only recognized
+// `git commit` — a cherry-pick produced commits the pattern missed,
+// so they read as external acceptance (the false-accept #359 fixes).
+// Attribution is by HEAD movement now: any run whose HEAD moved marks
+// every new SHA crush-made regardless of the command's shape.
+func TestSettleReferentLabels_NonCommitProducerExcluded(t *testing.T) {
+	env := setupLabelsTest(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	git := func(args ...string) {
+		full := append([]string{"-C", env.workingDir}, args...)
+		require.NoError(t, exec.CommandContext(t.Context(), "git", full...).Run())
+	}
+	git("init")
+	git("config", "user.email", "t@t")
+	git("config", "user.name", "t")
+	env.svc = NewService(db.New(env.conn), env.workingDir, params.DefaultMemory(),
+		WithClock(func() time.Time { return time.Now().Add(-time.Minute) }))
+
+	target := "x.go"
+	path := filepath.Join(env.workingDir, target)
+	// Empty baseline — it establishes a HEAD for attribution without
+	// touching the target, so it can never read as external evidence.
+	git("commit", "--allow-empty", "-m", "baseline")
+
+	recordLabeledEpisode(t, env, "s1", "m1", target,
+		ReferentEpisodeLabelInputs{AddedLines: []string{"v1"}})
+	seedLabelSession(t, env, "s1", "")
+
+	// A recorded run stamps the baseline head, then the agent
+	// produces the commit with a command the old patterns never
+	// matched — a cherry-pick of a side-branch edit to the target.
+	svcReal := NewService(db.New(env.conn), env.workingDir, params.DefaultMemory())
+	svcReal.RecordRun(t.Context(), Run{
+		SessionID: "s1", Command: "git status",
+		CWD: env.workingDir, Ran: true, ExitCode: 0,
+	})
+	git("checkout", "-b", "side")
+	require.NoError(t, os.WriteFile(path, []byte("v1\nv2"), 0o644))
+	git("add", target)
+	git("commit", "-m", "side change")
+	git("checkout", "-")       // back to the baseline branch
+	git("cherry-pick", "side") // new commit, no "commit" in argv
+	svcReal.RecordRun(t.Context(), Run{
+		SessionID: "s1", Command: "git cherry-pick side",
+		CWD: env.workingDir, Ran: true, ExitCode: 0,
+	})
+
+	dueViaNewerSession(t, env, "s2")
+	require.NoError(t, env.svc.SettleReferentLabels(t.Context(), 10))
+	c := readLabels(t, env, "s1", target)
+	require.True(t, c.committed.Valid)
+	require.EqualValues(t, 0, c.committed.Int64,
+		"a cherry-pick the harness ran is crush-made by HEAD movement")
 }
 
 // A commit older than the episode is history — the window's lower

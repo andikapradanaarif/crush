@@ -32,17 +32,7 @@ const (
 	// at the first of (a) the next session in the project starting or
 	// (b) created_at + 24h — the label is computed once, then frozen.
 	settleWindowMillis = int64(24 * 60 * 60 * 1000)
-	// commitSkewBeforeMillis / commitSkewAfterMillis bound
-	// agent-commit attribution asymmetrically: a commit whose
-	// committer time (%ct — the right clock for evidence windows;
-	// author time can backdate) sits within these bounds of a
-	// harness-run `git commit`'s recorded last_at counts as
-	// agent-made and is excluded from acceptance evidence. The
-	// commit object is created mid-run while last_at stamps run
-	// END — commit hooks (lint/test) can take tens of seconds, so
-	// the before-bound is wide while the after-bound stays tight.
-	commitSkewBeforeMillis = int64(60_000)
-	commitSkewAfterMillis  = int64(5_000)
+
 	// survivalMajority is the divergence cut: an edit counts as
 	// diverged when strictly fewer than this fraction of its recorded
 	// added lines remain in the file at settle time — line-level
@@ -181,17 +171,25 @@ func (s *service) windowEnd(ctx context.Context, createdAt int64, sessionID stri
 	return cap
 }
 
+// commitRef is one commit inside the observation window: its object
+// id for crush-made exclusion and its committer time (%ct — the
+// right clock for evidence windows; author time can backdate).
+type commitRef struct {
+	sha string
+	at  int64
+}
+
 // commitEvidence is one settle batch's prefetched commit data: every
-// commit touching paths inside the union window, plus the
-// harness-recorded commit runs to exclude from it.
+// commit touching paths inside the union window, plus the exact SHAs
+// the harness itself produced to exclude from it.
 type commitEvidence struct {
-	commits map[string][]int64
-	runs    []int64
-	// runsUnreadable marks the harness-run exclusion list as
-	// degraded: without it an agent-run commit is indistinguishable
-	// from external acceptance, so the commit arm abstains — the
-	// same fail-closed direction the commits fetch takes.
-	runsUnreadable bool
+	commits map[string][]commitRef
+	made    map[string]struct{}
+	// exclusionUnreadable marks the crush-made list as degraded:
+	// without it an agent-run commit is indistinguishable from
+	// external acceptance, so the commit arm abstains — the same
+	// fail-closed direction the commits fetch takes.
+	exclusionUnreadable bool
 }
 
 // prefetchCommitEvidence fetches the batch's two evidence inputs in
@@ -208,30 +206,30 @@ func (s *service) prefetchCommitEvidence(ctx context.Context, winLo, winHi int64
 	ev.commits = s.commitsTouchingPaths(ctx,
 		time.UnixMilli(winLo).UTC().Format(time.RFC3339),
 		time.UnixMilli(winHi).UTC().Format(time.RFC3339))
-	// A run can only attribute commits created before its own end
-	// stamp, so the fetch window's slacks mirror the skew's
-	// direction: after-skew below, before-skew above.
-	runs, err := s.q.ListCrushCommitRuns(ctx, db.ListCrushCommitRunsParams{
-		ProjectKey: s.projectKey,
-		LastAt:     winLo - commitSkewAfterMillis,
-		LastAt_2:   winHi + commitSkewBeforeMillis,
-	})
+	// Exclusion is an exact SHA match against commits the harness's
+	// own runs produced — no spelling patterns, no time skew: every
+	// producer (rebase, merge, cherry-pick, am, commit-tree, sudo,
+	// chained forms) attributes the same way at record time (#359).
+	shas, err := s.q.ListCrushCommitSHAs(ctx, s.projectKey)
 	if err != nil {
-		ev.runsUnreadable = true
+		ev.exclusionUnreadable = true
 	} else {
-		ev.runs = runs
+		ev.made = map[string]struct{}{}
+		for _, sha := range shas {
+			ev.made[sha] = struct{}{}
+		}
 	}
 	return ev
 }
 
 // inWindow reports whether any prefetched commit landing in
 // (createdAt, winEnd] touched one of paths, excluding commits the
-// harness itself made — a commit whose time sits within the skew
-// bound of a recorded run is agent-made, not user acceptance.
+// harness itself made — an SHA recorded in crush_commits is
+// agent-made, not user acceptance.
 // Timestamps mix units: git reports unix seconds, the ledger stores
 // millis — all comparisons happen in millis.
 func (ev commitEvidence) inWindow(paths []string, createdAt, winEnd int64) bool {
-	if ev.runsUnreadable {
+	if ev.exclusionUnreadable {
 		// No exclusion list means no way to prove a commit was
 		// external — abstain rather than count agent work as
 		// acceptance.
@@ -242,15 +240,15 @@ func (ev commitEvidence) inWindow(paths []string, createdAt, winEnd int64) bool 
 		// ToSlash here covers rows written before that (Windows
 		// filepath.Rel emitted backslashes) — git paths are always
 		// slash-separated.
-		for _, ct := range ev.commits[filepath.ToSlash(p)] {
-			ms := ct * 1000
+		for _, c := range ev.commits[filepath.ToSlash(p)] {
+			ms := c.at * 1000
 			// Fail closed on edges: a commit we cannot prove
 			// landed inside the window is not evidence, and a
-			// commit matching a harness run is not external.
+			// commit the harness made is not external.
 			if ms <= createdAt || ms > winEnd {
 				continue
 			}
-			if isHarnessCommit(ms, ev.runs) {
+			if _, ok := ev.made[c.sha]; ok {
 				continue
 			}
 			return true
@@ -291,19 +289,6 @@ func (s *service) settleReferent(ctx context.Context, r db.ListUnsettledReferent
 		return s.maybePromoteReferent(ctx, r.Phrase, r.Target, s.referentPromoteHits)
 	}
 	return nil
-}
-
-// isHarnessCommit reports whether commit ms (unix millis) sits within
-// the skew bounds of a harness-recorded git-commit run — the commit's
-// %ct precedes the run's last_at (run end), so the bound reaches
-// further backward than forward.
-func isHarnessCommit(ms int64, runs []int64) bool {
-	for _, t := range runs {
-		if ms >= t-commitSkewBeforeMillis && ms <= t+commitSkewAfterMillis {
-			return true
-		}
-	}
-	return false
 }
 
 // hunkDiverged reads the survival signal (#340): the recorded added
@@ -468,34 +453,38 @@ func (s *service) sessionTestsGreen(ctx context.Context, sessionID string) sql.N
 // while the ledger stores them raw, so commit evidence silently
 // misses for such files — a `-c core.quotePath=false -z` read is the
 // fix if the class ever matters.
-func (s *service) commitsTouchingPaths(ctx context.Context, sinceRFC3339, untilRFC3339 string) map[string][]int64 {
-	out := map[string][]int64{}
+func (s *service) commitsTouchingPaths(ctx context.Context, sinceRFC3339, untilRFC3339 string) map[string][]commitRef {
+	out := map[string][]commitRef{}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	raw, err := gitOut(ctx, s.workingDir, "log",
 		"--since="+sinceRFC3339, "--until="+untilRFC3339,
-		"--format=%x00commit%x09%ct", "--name-only")
+		"--format=%x00commit%x09%ct%x09%H", "--name-only")
 	if err != nil {
 		return out
 	}
-	var ct int64 = -1
+	var cur commitRef
+	var have bool
 	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(line, "\x00commit\x09"):
-			if n, perr := strconv.ParseInt(strings.TrimPrefix(line, "\x00commit\x09"), 10, 64); perr == nil {
-				ct = n
-			} else {
-				ct = -1
+			fields := strings.Split(strings.TrimPrefix(line, "\x00commit\x09"), "\t")
+			if len(fields) == 2 {
+				if n, perr := strconv.ParseInt(fields[0], 10, 64); perr == nil {
+					cur, have = commitRef{sha: fields[1], at: n}, true
+					continue
+				}
 			}
-		case line != "" && ct >= 0:
+			have = false
+		case line != "" && have:
 			if s.repoPrefix != "" {
 				if !strings.HasPrefix(line, s.repoPrefix) {
 					continue // committed path outside this workspace
 				}
 				line = strings.TrimPrefix(line, s.repoPrefix)
 			}
-			out[line] = append(out[line], ct)
+			out[line] = append(out[line], cur)
 		}
 	}
 	return out

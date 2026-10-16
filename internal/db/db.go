@@ -201,6 +201,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.indexSessionDigestStmt, err = db.PrepareContext(ctx, indexSessionDigest); err != nil {
 		return nil, fmt.Errorf("error preparing query IndexSessionDigest: %w", err)
 	}
+	if q.insertCrushCommitStmt, err = db.PrepareContext(ctx, insertCrushCommit); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertCrushCommit: %w", err)
+	}
 	if q.insertEdgeFiringStmt, err = db.PrepareContext(ctx, insertEdgeFiring); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertEdgeFiring: %w", err)
 	}
@@ -219,14 +222,17 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.labelReferentEpisodeStmt, err = db.PrepareContext(ctx, labelReferentEpisode); err != nil {
 		return nil, fmt.Errorf("error preparing query LabelReferentEpisode: %w", err)
 	}
+	if q.lastRecordedRepoHeadStmt, err = db.PrepareContext(ctx, lastRecordedRepoHead); err != nil {
+		return nil, fmt.Errorf("error preparing query LastRecordedRepoHead: %w", err)
+	}
 	if q.listAllUserMessagesStmt, err = db.PrepareContext(ctx, listAllUserMessages); err != nil {
 		return nil, fmt.Errorf("error preparing query ListAllUserMessages: %w", err)
 	}
 	if q.listCommandPartitionKeysStmt, err = db.PrepareContext(ctx, listCommandPartitionKeys); err != nil {
 		return nil, fmt.Errorf("error preparing query ListCommandPartitionKeys: %w", err)
 	}
-	if q.listCrushCommitRunsStmt, err = db.PrepareContext(ctx, listCrushCommitRuns); err != nil {
-		return nil, fmt.Errorf("error preparing query ListCrushCommitRuns: %w", err)
+	if q.listCrushCommitSHAsStmt, err = db.PrepareContext(ctx, listCrushCommitSHAs); err != nil {
+		return nil, fmt.Errorf("error preparing query ListCrushCommitSHAs: %w", err)
 	}
 	if q.listFailurePartitionKeysStmt, err = db.PrepareContext(ctx, listFailurePartitionKeys); err != nil {
 		return nil, fmt.Errorf("error preparing query ListFailurePartitionKeys: %w", err)
@@ -705,6 +711,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing indexSessionDigestStmt: %w", cerr)
 		}
 	}
+	if q.insertCrushCommitStmt != nil {
+		if cerr := q.insertCrushCommitStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertCrushCommitStmt: %w", cerr)
+		}
+	}
 	if q.insertEdgeFiringStmt != nil {
 		if cerr := q.insertEdgeFiringStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertEdgeFiringStmt: %w", cerr)
@@ -735,6 +746,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing labelReferentEpisodeStmt: %w", cerr)
 		}
 	}
+	if q.lastRecordedRepoHeadStmt != nil {
+		if cerr := q.lastRecordedRepoHeadStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing lastRecordedRepoHeadStmt: %w", cerr)
+		}
+	}
 	if q.listAllUserMessagesStmt != nil {
 		if cerr := q.listAllUserMessagesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listAllUserMessagesStmt: %w", cerr)
@@ -745,9 +761,9 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listCommandPartitionKeysStmt: %w", cerr)
 		}
 	}
-	if q.listCrushCommitRunsStmt != nil {
-		if cerr := q.listCrushCommitRunsStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing listCrushCommitRunsStmt: %w", cerr)
+	if q.listCrushCommitSHAsStmt != nil {
+		if cerr := q.listCrushCommitSHAsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listCrushCommitSHAsStmt: %w", cerr)
 		}
 	}
 	if q.listFailurePartitionKeysStmt != nil {
@@ -1143,15 +1159,17 @@ type Queries struct {
 	getUsageByModelStmt                  *sql.Stmt
 	hasTurnOutcomeStmt                   *sql.Stmt
 	indexSessionDigestStmt               *sql.Stmt
+	insertCrushCommitStmt                *sql.Stmt
 	insertEdgeFiringStmt                 *sql.Stmt
 	insertMCPDisabledServerStmt          *sql.Stmt
 	insertMCPEnabledServerStmt           *sql.Stmt
 	insertReferentEpisodeStmt            *sql.Stmt
 	insertTurnOutcomeStmt                *sql.Stmt
 	labelReferentEpisodeStmt             *sql.Stmt
+	lastRecordedRepoHeadStmt             *sql.Stmt
 	listAllUserMessagesStmt              *sql.Stmt
 	listCommandPartitionKeysStmt         *sql.Stmt
-	listCrushCommitRunsStmt              *sql.Stmt
+	listCrushCommitSHAsStmt              *sql.Stmt
 	listFailurePartitionKeysStmt         *sql.Stmt
 	listFailuresByKeyStmt                *sql.Stmt
 	listFilesByPathStmt                  *sql.Stmt
@@ -1276,15 +1294,17 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getUsageByModelStmt:                  q.getUsageByModelStmt,
 		hasTurnOutcomeStmt:                   q.hasTurnOutcomeStmt,
 		indexSessionDigestStmt:               q.indexSessionDigestStmt,
+		insertCrushCommitStmt:                q.insertCrushCommitStmt,
 		insertEdgeFiringStmt:                 q.insertEdgeFiringStmt,
 		insertMCPDisabledServerStmt:          q.insertMCPDisabledServerStmt,
 		insertMCPEnabledServerStmt:           q.insertMCPEnabledServerStmt,
 		insertReferentEpisodeStmt:            q.insertReferentEpisodeStmt,
 		insertTurnOutcomeStmt:                q.insertTurnOutcomeStmt,
 		labelReferentEpisodeStmt:             q.labelReferentEpisodeStmt,
+		lastRecordedRepoHeadStmt:             q.lastRecordedRepoHeadStmt,
 		listAllUserMessagesStmt:              q.listAllUserMessagesStmt,
 		listCommandPartitionKeysStmt:         q.listCommandPartitionKeysStmt,
-		listCrushCommitRunsStmt:              q.listCrushCommitRunsStmt,
+		listCrushCommitSHAsStmt:              q.listCrushCommitSHAsStmt,
 		listFailurePartitionKeysStmt:         q.listFailurePartitionKeysStmt,
 		listFailuresByKeyStmt:                q.listFailuresByKeyStmt,
 		listFilesByPathStmt:                  q.listFilesByPathStmt,

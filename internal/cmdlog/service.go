@@ -573,6 +573,10 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 		suggested = 1
 	}
 	repoState := s.headSHA(ctx)
+	// HEAD before this run ran — the last recorded run's repo_state —
+	// so a HEAD-moving run can attribute the commits it produced
+	// (#359). Read before the upsert writes this run's own head.
+	prevHead := s.lastRecordedHead(ctx)
 	if err := s.q.UpsertCommandRun(ctx, db.UpsertCommandRunParams{
 		CmdNorm:        cmdNorm,
 		Cwd:            cwd,
@@ -591,6 +595,7 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 		slog.Error("Error recording command run", "error", err)
 		return
 	}
+	s.recordCrushCommits(ctx, run.SessionID, prevHead, repoState)
 	// Each clean component is its own pass evidence — a decorated or
 	// composite re-run resolves the row its inner command opened even
 	// when the composite spelling never matches it. Runs before the
@@ -907,6 +912,57 @@ func (s *service) headSHA(ctx context.Context) string {
 		return ""
 	}
 	return out
+}
+
+// lastRecordedHead returns HEAD as of this project's most recent
+// recorded run — the baseline recordCrushCommits diffs against.
+// Empty outside a repo or when nothing has recorded yet; empty means
+// no attribution for this run, which errs toward treating commits as
+// external — the narrow residual is a HEAD-moving run with zero
+// prior recorded runs, e.g. the project's very first command.
+func (s *service) lastRecordedHead(ctx context.Context) string {
+	if !s.hasRepo {
+		return ""
+	}
+	head, err := s.q.LastRecordedRepoHead(ctx, s.projectKey)
+	if err != nil {
+		return ""
+	}
+	return head
+}
+
+// recordCrushCommits attributes the commits a run produced by HEAD
+// movement, not command spelling — rebase, merge, cherry-pick, am,
+// commit-tree, sudo-prefixed and chained forms all land the same way
+// (#359). Every SHA in prevHead..headAfter is crush-made and excluded
+// from external acceptance evidence, so an agent commit can never
+// self-certify. An external commit landing between two runs is swept
+// into the next run's range — a conservative miss, never a false
+// accept.
+func (s *service) recordCrushCommits(ctx context.Context, sessionID, prevHead, headAfter string) {
+	if !s.hasRepo || prevHead == "" || headAfter == "" || prevHead == headAfter {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	out, err := gitOut(ctx, s.workingDir, "rev-list", prevHead+".."+headAfter)
+	if err != nil || out == "" {
+		return
+	}
+	for _, sha := range strings.Split(out, "\n") {
+		sha = strings.TrimSpace(sha)
+		if sha == "" {
+			continue
+		}
+		if err := s.q.InsertCrushCommit(ctx, db.InsertCrushCommitParams{
+			ProjectKey: s.projectKey,
+			Sha:        sha,
+			SessionID:  sessionID,
+			CreatedAt:  s.now().UnixMilli(),
+		}); err != nil {
+			slog.Error("Error recording crush-made commit", "error", err)
+		}
+	}
 }
 
 // relDir normalizes a run's working directory to workspace-relative so
