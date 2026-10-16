@@ -498,6 +498,89 @@ func TestRecordReferentEpisodes(t *testing.T) {
 			`SELECT COUNT(*) FROM referent_episodes
 			 WHERE source_message_id = ?`, inflight.ID).Scan(&n))
 		require.Zero(t, n, "no phantom episode keyed to the in-flight prompt")
+		var gotTarget, verdict string
+		require.NoError(t, env.conn.QueryRowContext(t.Context(),
+			`SELECT target, verdict FROM referent_episodes
+			 WHERE source_message_id = ?`, vagueID).Scan(&gotTarget, &verdict))
+		require.Equal(t, "x.go", gotTarget)
+		require.Equal(t, cmdlog.ReferentAccepted, verdict,
+			"the in-flight prompt is the verdict source")
+	})
+
+	// The last real boundary judges, always: when a real prompt
+	// intervened between a vague turn and compaction, the fallback
+	// judges THAT turn — the earlier vague turn is unrecorded
+	// (referents have no backfill, by design) and the judged span
+	// bounds targets to the intervening turn's work alone.
+	t.Run("intervening prompt is judged, earlier vague turn unrecorded", func(t *testing.T) {
+		t.Parallel()
+		a, env := referentAgent(t)
+		mp := params.DefaultMemory()
+		mp.ReferentPromoteHits = 1
+		env.cmdlog = cmdlog.NewService(db.New(env.conn), env.workingDir, mp)
+		a.cmdlog = env.cmdlog
+		targetA := filepath.Join(env.workingDir, "a.go")
+		targetB := filepath.Join(env.workingDir, "b.go")
+
+		sess, err := env.sessions.Create(t.Context(), "s1")
+		require.NoError(t, err)
+		edit := func(tcID, path string) message.CreateMessageParams {
+			return message.CreateMessageParams{
+				Role: message.Assistant,
+				Parts: []message.ContentPart{
+					message.ToolCall{
+						ID: tcID, Name: tools.EditToolName, Finished: true,
+						Input: fmt.Sprintf(`{"file_path":%q,"old_string":"","new_string":"v1"}`, path),
+					},
+					message.ToolResult{ToolCallID: tcID, Name: tools.EditToolName, Content: "ok"},
+				},
+			}
+		}
+		userMsg := func(text string) message.CreateMessageParams {
+			return message.CreateMessageParams{Role: message.User, Parts: []message.ContentPart{
+				message.TextContent{Text: text},
+			}}
+		}
+		var vagueID, interveningID string
+		for i, m := range []message.CreateMessageParams{
+			userMsg("fix the config"),
+			edit("tc1", targetA),
+			userMsg("fix the tests"),
+			edit("tc2", targetB),
+		} {
+			created, err := env.messages.Create(t.Context(), sess.ID, m)
+			require.NoError(t, err)
+			switch i {
+			case 0:
+				vagueID = created.ID
+			case 2:
+				interveningID = created.ID
+			}
+		}
+		inflight, err := env.messages.Create(t.Context(), sess.ID,
+			userMsg("looks right"))
+		require.NoError(t, err)
+
+		a.recordReferentEpisodes(t.Context(), SessionAgentCall{
+			SessionID: sess.ID, Prompt: "looks right", currentUserMsgID: inflight.ID,
+		}, []message.Message{{
+			ID: "sum", Role: message.User, IsSummaryMessage: true,
+			Parts: []message.ContentPart{message.TextContent{Text: "summary"}},
+		}})
+
+		var target, verdict string
+		require.NoError(t, env.conn.QueryRowContext(t.Context(),
+			`SELECT target, verdict FROM referent_episodes
+			 WHERE source_message_id = ?`, interveningID).Scan(&target, &verdict))
+		require.Equal(t, "b.go", target,
+			"targets are bounded to the judged turn — the earlier turn's a.go edit stays out")
+		require.Equal(t, cmdlog.ReferentAccepted, verdict)
+		var n int
+		require.NoError(t, env.conn.QueryRowContext(t.Context(),
+			`SELECT COUNT(*) FROM referent_episodes
+			 WHERE source_message_id = ?`, vagueID).Scan(&n))
+		require.Zero(t, n,
+			"the earlier vague turn mints no episode — no backfill channel")
 	})
 }
 

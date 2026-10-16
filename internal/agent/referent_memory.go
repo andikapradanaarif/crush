@@ -244,16 +244,20 @@ func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionA
 			break
 		}
 	}
-	verdictPrompt := call.Prompt
 	if lastUser < 0 {
 		// Post-compaction first turn (#361): the tail holds only the
 		// summary — the judged turn lives before it, so locate it on
 		// the full transcript like recordTurnOutcome's fallback. The
 		// fresh List sees this run's persisted prompt: exclude it
-		// from the boundary search, then bound the judged span at the
-		// NEXT stored boundary — if turns intervened between the
-		// vague prompt and compaction, that stored prompt (not this
-		// run's) is what judged the turn.
+		// from the boundary search, then truncate the judged span at
+		// the next stored boundary — which by construction can only
+		// be the in-flight prompt itself. Intervening turns are
+		// judged by their own prompts on their own passes; turns
+		// before the last boundary simply never mint episodes —
+		// referents have no backfill, by design. The List is the
+		// full-transcript read getSessionMessages avoids, accepted
+		// here because it fires only on boundary-free tails — the
+		// first post-compaction turn or a genuinely fresh session.
 		if a.messages == nil {
 			return
 		}
@@ -269,9 +273,6 @@ func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionA
 		for i := lastUser + 1; i < len(full); i++ {
 			if isRealUserMsg(full[i]) {
 				end = i
-				if full[i].ID != call.currentUserMsgID {
-					verdictPrompt = full[i].JoinedText()
-				}
 				break
 			}
 		}
@@ -296,7 +297,7 @@ func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionA
 		// wrong-attribution failure this channel exists to avoid.
 		return
 	}
-	verdict := referentJudgedVerdict(verdictPrompt)
+	verdict := referentJudgedVerdict(call.Prompt)
 	steps, tokens := a.judgedTurnCost(msgs, lastUser+1, call.SessionID)
 	for _, t := range targets {
 		ep := cmdlog.ReferentEpisode{
