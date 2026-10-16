@@ -330,6 +330,28 @@ func TestSettleTurnOutcomes_ChildSessionDoesNotSettle(t *testing.T) {
 	require.True(t, readTurn(t, env, "s1", "t0").settledAt.Valid)
 }
 
+// The newer-session trigger is project-scoped: a session whose only
+// membership proof lives under another key must not close this
+// project's window — the EXISTS requires a same-project ledger row.
+func TestSettleTurnOutcomes_ForeignSessionNotBoundary(t *testing.T) {
+	env := setupLabelsTest(t)
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID: "s1", TurnID: "t0", Commands: []string{"ls"},
+	}))
+
+	foreign := NewService(db.New(env.conn), env.workingDir, params.DefaultMemory(),
+		WithProjectKey("pk-foreign"))
+	seedLabelSessionAt(t, env, "sf", "", time.Now().Unix()+60)
+	foreign.RecordRun(t.Context(), Run{
+		SessionID: "sf", Command: "ls", CWD: env.workingDir,
+		Ran: true, ExitCode: 0,
+	})
+
+	require.NoError(t, env.svc.SettleTurnOutcomes(t.Context(), 10))
+	require.False(t, readTurn(t, env, "s1", "t0").settledAt.Valid,
+		"a foreign-project session must not close this window")
+}
+
 // Turn hunks carry the same trimmed fingerprint — indented code must
 // survive there too.
 func TestSettleTurnOutcomes_IndentedLinesSurvive(t *testing.T) {

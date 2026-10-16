@@ -219,6 +219,37 @@ func TestIsHarnessCommit_AsymmetricSkew(t *testing.T) {
 	require.False(t, isHarnessCommit(t0, nil))
 }
 
+// Commit evidence fails closed in both directions: an in-window
+// external commit counts, but a commit at/before the window, inside
+// a harness run's skew, or evaluated while the harness-run exclusion
+// list is unreadable never does.
+func TestCommitEvidence_InWindow(t *testing.T) {
+	// Commits carry git unix seconds; windows and run stamps are
+	// millis — inWindow converts internally.
+	ev := commitEvidence{commits: map[string][]int64{"x.go": {2}}}
+	require.True(t, ev.inWindow([]string{"x.go"}, 1_000, 3_000),
+		"an external in-window commit is acceptance evidence")
+	require.False(t, ev.inWindow([]string{"x.go"}, 2_000, 3_000),
+		"a commit at the boundary instant is not inside (created_at, winEnd]")
+	require.False(t, ev.inWindow([]string{"other.go"}, 1_000, 3_000),
+		"a commit that never touched the turn's paths is not evidence")
+	require.False(t, ev.inWindow(nil, 1_000, 3_000))
+
+	harnessed := commitEvidence{
+		commits: map[string][]int64{"x.go": {2}},
+		runs:    []int64{2_500},
+	}
+	require.False(t, harnessed.inWindow([]string{"x.go"}, 1_000, 3_000),
+		"a commit inside a harness run's skew is agent-made, not acceptance")
+
+	unreadable := commitEvidence{
+		commits:        map[string][]int64{"x.go": {2}},
+		runsUnreadable: true,
+	}
+	require.False(t, unreadable.inWindow([]string{"x.go"}, 1_000, 3_000),
+		"unreadable exclusion list — no way to prove externality — abstains")
+}
+
 // A newer session in the project closes the window: the row settles
 // once and freezes — later state cannot rewrite the verdict.
 func TestSettleReferentLabels_NewerSessionSettlesOnce(t *testing.T) {
