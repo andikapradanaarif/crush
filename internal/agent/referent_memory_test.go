@@ -35,15 +35,56 @@ func referentUserMsg(id, text string) message.Message {
 	}
 }
 
+// msgIdx locates a fixture message by ID — toolOK inserts result
+// messages, so positions can't stay numeric literals.
+func msgIdx(msgs []message.Message, id string) int {
+	for i, m := range msgs {
+		if m.ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// toolOK stamps a clean ToolResult for every tool call in the
+// fixture — the shape a real transcript has, where a finished call's
+// result rides a tool-role message behind the assistant's. Turn and
+// referent evidence counts only executed calls (#358), so a fixture
+// call that must count must show its result.
+func toolOK(msgs []message.Message) []message.Message {
+	var out []message.Message
+	for _, m := range msgs {
+		out = append(out, m)
+		if m.Role != message.Assistant {
+			continue
+		}
+		for _, tc := range m.ToolCalls() {
+			out = append(out, message.Message{
+				Role: message.Tool,
+				Parts: []message.ContentPart{message.ToolResult{
+					ToolCallID: tc.ID, Name: tc.Name, Content: "ok",
+				}},
+			})
+		}
+	}
+	return out
+}
+
 func referentEditMsg(callID, tool, path string) message.Message {
 	return message.Message{
 		Role: message.Assistant,
-		Parts: []message.ContentPart{message.ToolCall{
-			ID:       callID,
-			Name:     tool,
-			Input:    fmt.Sprintf(`{"file_path":%q}`, path),
-			Finished: true,
-		}},
+		Parts: []message.ContentPart{
+			message.ToolCall{
+				ID:       callID,
+				Name:     tool,
+				Input:    fmt.Sprintf(`{"file_path":%q}`, path),
+				Finished: true,
+			},
+			// The result rides the same fixture message —
+			// ToolResults() scans parts regardless of role, and a
+			// call counts as evidence only with a clean result.
+			message.ToolResult{ToolCallID: callID, Name: tool, Content: "ok"},
+		},
 	}
 }
 
@@ -251,6 +292,32 @@ func TestRecordReferentEpisodes(t *testing.T) {
 		require.Empty(t, refs)
 	})
 
+	// A denied edit's result is IsError — the call never ran, so a
+	// vague prompt plus a denied mutation mints no episode (#358).
+	t.Run("denied edit records nothing", func(t *testing.T) {
+		t.Parallel()
+		a, env := referentAgent(t)
+		svc := env.cmdlog
+		target := filepath.Join(env.workingDir, "x.go")
+		a.recordReferentEpisodes(t.Context(), SessionAgentCall{
+			SessionID: "s1", Prompt: "ok",
+		}, []message.Message{
+			referentUserMsg("u1", "fix the config"),
+			{Role: message.Assistant, Parts: []message.ContentPart{message.ToolCall{
+				ID: "tc1", Name: tools.EditToolName,
+				Input:    fmt.Sprintf(`{"file_path":%q,"new_string":"x"}`, target),
+				Finished: true,
+			}}},
+			{Role: message.Tool, Parts: []message.ContentPart{message.ToolResult{
+				ToolCallID: "tc1", Name: tools.EditToolName,
+				Content: "User denied permission", IsError: true,
+			}}},
+		})
+		refs, err := svc.ListReferentCandidates(t.Context(), []string{"config"}, 5)
+		require.NoError(t, err)
+		require.Empty(t, refs)
+	})
+
 	t.Run("multi-referent prompt records nothing", func(t *testing.T) {
 		t.Parallel()
 		a, env := referentAgent(t)
@@ -341,6 +408,13 @@ func TestRecordReferentEpisodes(t *testing.T) {
 				ID: "tc-child", Name: tools.EditToolName,
 				Input:    fmt.Sprintf(`{"file_path":%q}`, target),
 				Finished: true,
+			}},
+		})
+		require.NoError(t, err)
+		_, err = env.messages.Create(t.Context(), childID, message.CreateMessageParams{
+			Role: message.Tool,
+			Parts: []message.ContentPart{message.ToolResult{
+				ToolCallID: "tc-child", Name: tools.EditToolName, Content: "ok",
 			}},
 		})
 		require.NoError(t, err)

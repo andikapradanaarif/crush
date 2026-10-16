@@ -163,6 +163,11 @@ func (a *sessionAgent) referentTargets(ctx context.Context, msgs []message.Messa
 	visited := map[string]struct{}{}
 	var scan func(ms []message.Message, after int)
 	scan = func(ms []message.Message, after int) {
+		// Same execution gate as turn outcomes (#358): only a call
+		// whose clean ToolResult exists counts — a denied or errored
+		// edit's fingerprint would settle diverged on work that
+		// never landed, a false revise.
+		clean := cleanCallResults(ms[after:])
 		for _, m := range ms[after:] {
 			if m.Role != message.Assistant {
 				continue
@@ -179,10 +184,11 @@ func (a *sessionAgent) referentTargets(ctx context.Context, msgs []message.Messa
 					}
 					continue
 				}
-				if !referentMutationTools[tc.Name] || tc.Input == "" {
+				res, executed := clean[tc.ID]
+				if !referentMutationTools[tc.Name] || tc.Input == "" || !executed {
 					continue
 				}
-				path, added := editEvidence(tc.Input)
+				path, added := editEvidence(tc.Input, failedEditIndexes(res.Metadata))
 				if path == "" {
 					continue
 				}
