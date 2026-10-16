@@ -213,6 +213,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.insertReferentEpisodeStmt, err = db.PrepareContext(ctx, insertReferentEpisode); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertReferentEpisode: %w", err)
 	}
+	if q.insertReferentEpisodeLabeledStmt, err = db.PrepareContext(ctx, insertReferentEpisodeLabeled); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertReferentEpisodeLabeled: %w", err)
+	}
 	if q.insertTurnOutcomeStmt, err = db.PrepareContext(ctx, insertTurnOutcome); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertTurnOutcome: %w", err)
 	}
@@ -725,6 +728,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing insertReferentEpisodeStmt: %w", cerr)
 		}
 	}
+	if q.insertReferentEpisodeLabeledStmt != nil {
+		if cerr := q.insertReferentEpisodeLabeledStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertReferentEpisodeLabeledStmt: %w", cerr)
+		}
+	}
 	if q.insertTurnOutcomeStmt != nil {
 		if cerr := q.insertTurnOutcomeStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertTurnOutcomeStmt: %w", cerr)
@@ -1147,6 +1155,7 @@ type Queries struct {
 	insertMCPDisabledServerStmt          *sql.Stmt
 	insertMCPEnabledServerStmt           *sql.Stmt
 	insertReferentEpisodeStmt            *sql.Stmt
+	insertReferentEpisodeLabeledStmt     *sql.Stmt
 	insertTurnOutcomeStmt                *sql.Stmt
 	labelReferentEpisodeStmt             *sql.Stmt
 	listAllUserMessagesStmt              *sql.Stmt
@@ -1280,6 +1289,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		insertMCPDisabledServerStmt:          q.insertMCPDisabledServerStmt,
 		insertMCPEnabledServerStmt:           q.insertMCPEnabledServerStmt,
 		insertReferentEpisodeStmt:            q.insertReferentEpisodeStmt,
+		insertReferentEpisodeLabeledStmt:     q.insertReferentEpisodeLabeledStmt,
 		insertTurnOutcomeStmt:                q.insertTurnOutcomeStmt,
 		labelReferentEpisodeStmt:             q.labelReferentEpisodeStmt,
 		listAllUserMessagesStmt:              q.listAllUserMessagesStmt,

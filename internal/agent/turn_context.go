@@ -133,12 +133,21 @@ func (a *sessionAgent) turnTailMessages(ctx context.Context, call SessionAgentCa
 	// Judgment pass for the PREVIOUS turn — episodes are write-side
 	// bookkeeping (recording regardless of injection flags, the same
 	// convention as command memory), gated only on a cmdlog store and
-	// a real user prompt to judge against (#165).
-	a.recordReferentEpisodes(ctx, call, msgs)
+	// a real user prompt to judge against (#165). When the tail has
+	// no real boundary (first post-compaction turn), both passes need
+	// the full transcript — fetch it once here so the identical List
+	// doesn't run twice.
+	var fullTx []message.Message
+	if lastRealUserIdx(msgs, call.currentUserMsgID) < 0 && a.messages != nil {
+		if f, err := a.messages.List(ctx, call.SessionID); err == nil {
+			fullTx = f
+		}
+	}
+	a.recordReferentEpisodes(ctx, call, msgs, fullTx)
 	// Turn-level outcome recording (#340) rides the same hook: the
 	// judged turn's row opens with this prompt as its verdict, and a
 	// first-turn session backfills the recent corpus.
-	a.recordTurnOutcome(ctx, call, msgs)
+	a.recordTurnOutcome(ctx, call, msgs, fullTx)
 	// The label settlement pass (#340) drains a bounded slice of
 	// out-of-window rows every turn — episodes and turn outcomes
 	// freeze once at their observation close, so each turn nudges

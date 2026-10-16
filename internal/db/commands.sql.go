@@ -192,6 +192,69 @@ func (q *Queries) InsertReferentEpisode(ctx context.Context, arg InsertReferentE
 	return err
 }
 
+const insertReferentEpisodeLabeled = `-- name: InsertReferentEpisodeLabeled :exec
+INSERT OR IGNORE INTO referent_episodes (
+    phrase, target, session_id, source_message_id, tool_call_id,
+    repo_state, memory_suggested, verdict, project_key, param_version,
+    created_at, settle_at,
+    label_target_hash, label_wrong_target, label_steps, label_tokens,
+    label_tests_green, labeled_at, label_added_lines
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`
+
+type InsertReferentEpisodeLabeledParams struct {
+	Phrase           string        `json:"phrase"`
+	Target           string        `json:"target"`
+	SessionID        string        `json:"session_id"`
+	SourceMessageID  string        `json:"source_message_id"`
+	ToolCallID       string        `json:"tool_call_id"`
+	RepoState        string        `json:"repo_state"`
+	MemorySuggested  int64         `json:"memory_suggested"`
+	Verdict          string        `json:"verdict"`
+	ProjectKey       string        `json:"project_key"`
+	ParamVersion     string        `json:"param_version"`
+	CreatedAt        int64         `json:"created_at"`
+	SettleAt         int64         `json:"settle_at"`
+	LabelTargetHash  string        `json:"label_target_hash"`
+	LabelWrongTarget int64         `json:"label_wrong_target"`
+	LabelSteps       int64         `json:"label_steps"`
+	LabelTokens      int64         `json:"label_tokens"`
+	LabelTestsGreen  sql.NullInt64 `json:"label_tests_green"`
+	LabeledAt        int64         `json:"labeled_at"`
+	LabelAddedLines  string        `json:"label_added_lines"`
+}
+
+// The episode plus its artifact labels in one insert. Required when
+// created_at anchors at the judged prompt rather than mint time: a
+// prompt-anchored window may already be closed, making the row born
+// due via EITHER settle arm (elapsed cap or a newer project
+// session) -- a label write landing in a second statement could
+// freeze the row fingerprintless if a settle pass interleaves.
+func (q *Queries) InsertReferentEpisodeLabeled(ctx context.Context, arg InsertReferentEpisodeLabeledParams) error {
+	_, err := q.exec(ctx, q.insertReferentEpisodeLabeledStmt, insertReferentEpisodeLabeled,
+		arg.Phrase,
+		arg.Target,
+		arg.SessionID,
+		arg.SourceMessageID,
+		arg.ToolCallID,
+		arg.RepoState,
+		arg.MemorySuggested,
+		arg.Verdict,
+		arg.ProjectKey,
+		arg.ParamVersion,
+		arg.CreatedAt,
+		arg.SettleAt,
+		arg.LabelTargetHash,
+		arg.LabelWrongTarget,
+		arg.LabelSteps,
+		arg.LabelTokens,
+		arg.LabelTestsGreen,
+		arg.LabeledAt,
+		arg.LabelAddedLines,
+	)
+	return err
+}
+
 const insertTurnOutcome = `-- name: InsertTurnOutcome :exec
 INSERT INTO turn_outcomes
     (session_id, turn_id, project_key, edited_paths, edit_hunks,

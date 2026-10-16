@@ -128,6 +128,13 @@ type Querier interface {
 	// would freeze the row fingerprintless. The label UPDATE re-stamps
 	// the window at label time; pre-#340 rows keep 0 (due immediately).
 	InsertReferentEpisode(ctx context.Context, arg InsertReferentEpisodeParams) error
+	// The episode plus its artifact labels in one insert. Required when
+	// created_at anchors at the judged prompt rather than mint time: a
+	// prompt-anchored window may already be closed, making the row born
+	// due via EITHER settle arm (elapsed cap or a newer project
+	// session) -- a label write landing in a second statement could
+	// freeze the row fingerprintless if a settle pass interleaves.
+	InsertReferentEpisodeLabeled(ctx context.Context, arg InsertReferentEpisodeLabeledParams) error
 	// Open one turn's outcome row (#340), idempotent on the
 	// (session_id, turn_id) unique key -- turn_id is the turn's
 	// user-message ID, stable under compaction where an ordinal would
