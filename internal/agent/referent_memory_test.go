@@ -435,6 +435,70 @@ func TestRecordReferentEpisodes(t *testing.T) {
 		require.Len(t, refs, 1)
 		require.Equal(t, "x.go", refs[0].Target)
 	})
+
+	// Issue #361: a vague turn followed by compaction leaves no real
+	// user message in the post-summary tail — without the
+	// full-transcript fallback the judged turn's episode is lost.
+	t.Run("post-compaction tail finds the judged turn", func(t *testing.T) {
+		t.Parallel()
+		a, env := referentAgent(t)
+		mp := params.DefaultMemory()
+		mp.ReferentPromoteHits = 1
+		env.cmdlog = cmdlog.NewService(db.New(env.conn), env.workingDir, mp)
+		a.cmdlog = env.cmdlog
+		target := filepath.Join(env.workingDir, "x.go")
+
+		sess, err := env.sessions.Create(t.Context(), "s1")
+		require.NoError(t, err)
+		var vagueID string
+		for _, m := range []message.CreateMessageParams{
+			{Role: message.User, Parts: []message.ContentPart{
+				message.TextContent{Text: "fix the config"},
+			}},
+			{Role: message.Assistant, Parts: []message.ContentPart{
+				message.ToolCall{
+					ID: "tc1", Name: tools.EditToolName, Finished: true,
+					Input: fmt.Sprintf(`{"file_path":%q,"old_string":"","new_string":"v1"}`, target),
+				},
+				message.ToolResult{ToolCallID: "tc1", Name: tools.EditToolName, Content: "ok"},
+			}},
+		} {
+			created, err := env.messages.Create(t.Context(), sess.ID, m)
+			require.NoError(t, err)
+			if m.Role == message.User {
+				vagueID = created.ID
+			}
+		}
+		// Production ordering: the in-flight prompt persists before
+		// the record pass reads the transcript — exclude it or the
+		// fallback lands on it and judges nothing.
+		inflight, err := env.messages.Create(t.Context(), sess.ID, message.CreateMessageParams{
+			Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "looks right"}},
+		})
+		require.NoError(t, err)
+
+		// The tail the live path sees: only the compaction summary.
+		a.recordReferentEpisodes(t.Context(), SessionAgentCall{
+			SessionID: sess.ID, Prompt: "looks right", currentUserMsgID: inflight.ID,
+		}, []message.Message{{
+			ID: "sum", Role: message.User, IsSummaryMessage: true,
+			Parts: []message.ContentPart{message.TextContent{Text: "summary"}},
+		}})
+
+		var n int
+		require.NoError(t, env.conn.QueryRowContext(t.Context(),
+			`SELECT COUNT(*) FROM referent_episodes
+			 WHERE session_id = ? AND source_message_id = ?`,
+			sess.ID, vagueID).Scan(&n))
+		require.Equal(t, 1, n,
+			"the pre-summary vague turn mints its episode via the full transcript")
+		// The in-flight prompt is a boundary for the span but records
+		// no episode of its own.
+		require.NoError(t, env.conn.QueryRowContext(t.Context(),
+			`SELECT COUNT(*) FROM referent_episodes
+			 WHERE source_message_id = ?`, inflight.ID).Scan(&n))
+		require.Zero(t, n, "no phantom episode keyed to the in-flight prompt")
+	})
 }
 
 func TestReferentCandidates_Gating(t *testing.T) {

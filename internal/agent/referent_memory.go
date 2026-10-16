@@ -244,8 +244,38 @@ func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionA
 			break
 		}
 	}
+	verdictPrompt := call.Prompt
 	if lastUser < 0 {
-		return
+		// Post-compaction first turn (#361): the tail holds only the
+		// summary — the judged turn lives before it, so locate it on
+		// the full transcript like recordTurnOutcome's fallback. The
+		// fresh List sees this run's persisted prompt: exclude it
+		// from the boundary search, then bound the judged span at the
+		// NEXT stored boundary — if turns intervened between the
+		// vague prompt and compaction, that stored prompt (not this
+		// run's) is what judged the turn.
+		if a.messages == nil {
+			return
+		}
+		full, err := a.messages.List(ctx, call.SessionID)
+		if err != nil || len(full) == 0 {
+			return
+		}
+		lastUser = lastRealUserIdx(full, call.currentUserMsgID)
+		if lastUser < 0 {
+			return
+		}
+		end := len(full)
+		for i := lastUser + 1; i < len(full); i++ {
+			if isRealUserMsg(full[i]) {
+				end = i
+				if full[i].ID != call.currentUserMsgID {
+					verdictPrompt = full[i].JoinedText()
+				}
+				break
+			}
+		}
+		msgs = full[:end]
 	}
 	prev := msgs[lastUser]
 	mp := a.memoryParams()
@@ -266,7 +296,7 @@ func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionA
 		// wrong-attribution failure this channel exists to avoid.
 		return
 	}
-	verdict := referentJudgedVerdict(call.Prompt)
+	verdict := referentJudgedVerdict(verdictPrompt)
 	steps, tokens := a.judgedTurnCost(msgs, lastUser+1, call.SessionID)
 	for _, t := range targets {
 		ep := cmdlog.ReferentEpisode{
