@@ -50,6 +50,13 @@ type BackgroundShell struct {
 	Description string
 	Shell       *Shell
 	WorkingDir  string
+	// HeadBefore is HEAD stamped just before exec — the bash tool
+	// sets it so the run recorded at completion attributes only the
+	// movement in [pre, post], leaving inter-run external commits to
+	// acceptance evidence (#365). Written once before the shell ID
+	// reaches a consumer, so no lock; "" leaves the run on the
+	// ledger-baseline fallback.
+	HeadBefore  string
 	ctx         context.Context
 	cancel      context.CancelFunc
 	stdout      *syncBuffer

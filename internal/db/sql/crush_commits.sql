@@ -24,8 +24,10 @@ SELECT DISTINCT project_key FROM crush_commits WHERE project_key != '';
 UPDATE OR IGNORE crush_commits SET project_key = ? WHERE project_key = ?;
 
 -- name: LastRecordedRepoHead :one
--- HEAD as of the most recent recorded run -- the pre-run baseline a
--- HEAD-moving run diffs against to attribute its commits (#359).
+-- HEAD as of the most recent recorded run -- the catch-up baseline
+-- an unstamped run diffs against to attribute its commits, and the
+-- retry range when a stamped pre-run head died in the run's own
+-- rewrite (#359, #365).
 SELECT repo_state FROM command_memory
 WHERE project_key = ? AND repo_state != ''
 ORDER BY last_at DESC, rowid DESC LIMIT 1;

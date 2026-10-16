@@ -120,6 +120,7 @@ func listOpenFailures(t *testing.T, env fakeEnv) []cmdlog.Failure {
 type failingCmdlog struct{}
 
 func (failingCmdlog) RecordRun(context.Context, cmdlog.Run) {}
+func (failingCmdlog) HeadSHA(context.Context) string        { return "" }
 func (failingCmdlog) ListCommands(context.Context, int) ([]cmdlog.Command, error) {
 	return nil, nil
 }

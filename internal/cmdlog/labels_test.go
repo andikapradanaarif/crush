@@ -582,13 +582,14 @@ func TestSettleReferentLabels_AgentCommitExcluded(t *testing.T) {
 		"an unrecorded commit inside the window is external evidence")
 }
 
-// The documented conservative miss class (#359): an external commit
-// landing BETWEEN two recorded runs is swept into the second run's
-// rev-list range and attributed to crush — the commit arm only
-// fires for commits after the project's last recorded run. This
-// pins the intent: the miss starves acceptance evidence but never
-// fabricates it.
-func TestSettleReferentLabels_InterRunExternalCommitMissed(t *testing.T) {
+// Issue #365's regression pin: with a stamped pre-run head, an
+// external commit landing BETWEEN two recorded runs sits below the
+// second run's pre — outside its range entirely — so it stays out
+// of crush_commits and reads as the acceptance evidence it is.
+// Under the ledger-baseline scheme (#359) the same gesture was
+// swept into the next run's range and attributed to crush — the
+// recall loss this pin guards against.
+func TestSettleReferentLabels_InterRunExternalCommitCounted(t *testing.T) {
 	env := setupLabelsTest(t)
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
@@ -600,13 +601,16 @@ func TestSettleReferentLabels_InterRunExternalCommitMissed(t *testing.T) {
 	git("init")
 	git("config", "user.email", "t@t")
 	git("config", "user.name", "t")
-	// Rebuild post-init so the service is repo-keyed — the
-	// setup-built one carries the pre-init path partition and
-	// would write the episode where the SHA exclusion can't see it.
-	env.svc = NewService(db.New(env.conn), env.workingDir, params.DefaultMemory())
+	// Pin the episode clock a minute back so the commit provably
+	// postdates created_at, and rebuild post-init so the service is
+	// repo-keyed — the setup-built one carries the pre-init path
+	// partition and would write the episode where the SHA exclusion
+	// can't see it.
+	env.svc = NewService(db.New(env.conn), env.workingDir, params.DefaultMemory(),
+		WithClock(func() time.Time { return time.Now().Add(-time.Minute) }))
 
 	// Baseline is --allow-empty so it touches no target path; one
-	// recorded run stamps prevHead for the next sweep.
+	// recorded run stamps the ledger head.
 	git("commit", "--allow-empty", "-m", "baseline")
 	svcReal := NewService(db.New(env.conn), env.workingDir, params.DefaultMemory())
 	svcReal.RecordRun(t.Context(), Run{
@@ -622,22 +626,40 @@ func TestSettleReferentLabels_InterRunExternalCommitMissed(t *testing.T) {
 	seedLabelSession(t, env, "s1", "")
 
 	// The canonical gesture — user commits the work between runs —
-	// lands inside the next run's rev-list range and attributes to
-	// crush, indistinguishable from agent-made.
+	// then the next run stamps its own start head (what the tool
+	// does pre-exec): the commit is below the stamp, so the run's
+	// pre..post range never sees it. The commit pins its committer
+	// date +30s out so it lands inside the window s2's start sets
+	// (~+60s) — %ct is seconds-grained, same pin the
+	// AgentCommitExcluded half takes.
 	require.NoError(t, os.WriteFile(path, []byte("v1\n// external touch"), 0o644))
 	git("add", target)
-	git("commit", "-m", "user commit")
+	future := time.Now().Add(30 * time.Second).UTC().Format("2006-01-02T15:04:05Z")
+	cmd := exec.CommandContext(t.Context(), "git", "-C", env.workingDir,
+		"commit", "-m", "user commit")
+	cmd.Env = append(os.Environ(), "GIT_COMMITTER_DATE="+future)
+	require.NoError(t, cmd.Run())
+	userSHA, err := gitOut(t.Context(), env.workingDir, "rev-parse", "HEAD")
+	require.NoError(t, err)
 	svcReal.RecordRun(t.Context(), Run{
 		SessionID: "s1", Command: "git status",
 		CWD: env.workingDir, Ran: true, ExitCode: 0,
+		HeadBefore: userSHA,
 	})
+
+	// The stamp kept the run's range empty — the commit attributes
+	// to nobody, which is what lets it count as external evidence.
+	shas, err := db.New(env.conn).ListCrushCommitSHAs(t.Context(), env.svc.ProjectKey())
+	require.NoError(t, err)
+	require.NotContains(t, shas, userSHA,
+		"the inter-run external commit must not be attributed to the next run")
 
 	dueViaNewerSession(t, env, "s2")
 	require.NoError(t, env.svc.SettleReferentLabels(t.Context(), 10))
 	c := readLabels(t, env, "s1", target)
 	require.True(t, c.committed.Valid)
-	require.EqualValues(t, 0, c.committed.Int64,
-		"an inter-run external commit attributes to crush — a miss, never fabricated acceptance")
+	require.EqualValues(t, 1, c.committed.Int64,
+		"an inter-run external commit is acceptance evidence, not crush-made")
 }
 
 // The old spelling-patterns-plus-skew heuristic only recognized

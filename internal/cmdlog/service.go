@@ -14,6 +14,7 @@
 package cmdlog
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -74,6 +75,13 @@ type Service interface {
 	// cancelled command is neither a project failure nor a
 	// resolution.
 	RecordRun(ctx context.Context, run Run)
+
+	// HeadSHA reads the repo's current HEAD — the stamp the bash
+	// tool takes pre-exec so the recorded run attributes only its
+	// own HEAD movement (#365). Best-effort: empty outside a
+	// repository or when git is absent, which leaves the run on the
+	// ledger-baseline fallback.
+	HeadSHA(ctx context.Context) string
 
 	// ListCommands returns the project command ledger, most recent
 	// first, capped at limit.
@@ -235,6 +243,14 @@ type Run struct {
 	// context kill is not a project failure — it never ran.
 	Ran         bool
 	Interrupted bool
+	// HeadBefore is HEAD stamped by the tool just before the command
+	// executed — the primary attribution baseline (#365): the run
+	// owns pre..post, so an external commit landing between two
+	// recorded runs stays outside every run's range and counts as
+	// external acceptance evidence. Empty for recorders that can't
+	// stamp (verify gate, `!` commands, eval seeds) — the ledger's
+	// last-recorded head falls back as the catch-up net, unchanged.
+	HeadBefore string
 	// Components carries each call the interpreter dispatched during
 	// the run — argv, dispatch-time directory, and exit status,
 	// pipeline and list elements included — so a composite like
@@ -607,20 +623,26 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 	if s.wasSuggested(ctx, run.SessionID, cmdNorm) {
 		suggested = 1
 	}
-	repoState := s.headSHA(ctx)
-	// HEAD before this run ran — the last recorded run's repo_state —
-	// so a HEAD-moving run can attribute the commits it produced
-	// (#359). Attribution runs BEFORE the upsert stamps this run's
-	// head: a sweep that fails or a crash between stamp and insert
-	// would otherwise move the recorded baseline past the
-	// unattributed commits permanently, and every one of them would
-	// settle as external acceptance. On failure the stamp is
-	// suppressed so the baseline stays behind the missed range and
-	// the next run re-sweeps it — over-attribution is the safe
-	// direction, stamped-but-unattributed is the false-accept hole.
-	prevHead := s.lastRecordedHead(ctx)
+	repoState := s.HeadSHA(ctx)
+	// HEAD before this run ran is the primary baseline — the tool
+	// stamps it pre-exec, so the sweep's range is the movement this
+	// run itself produced (#365). Recorders that can't stamp (verify
+	// gate, `!` commands, eval seeds) carry HeadBefore="" and fall
+	// back to the ledger's last-recorded head — the #359 catch-up
+	// net, unchanged. ledgerHead also feeds the self-rewrite retry
+	// inside recordCrushCommits. Attribution still runs BEFORE the
+	// upsert stamps this run's head: a sweep that fails or a crash
+	// between stamp and insert would otherwise move the recorded
+	// baseline past the unattributed commits permanently, and every
+	// one of them would settle as external acceptance. On failure
+	// the stamp is suppressed so the baseline stays behind the
+	// missed range and the next unstamped run re-sweeps it —
+	// over-attribution is the safe direction, stamped-but-
+	// unattributed is the false-accept hole.
+	ledgerHead := s.lastRecordedHead(ctx)
+	prevHead := cmp.Or(run.HeadBefore, ledgerHead)
 	ledgerState := repoState
-	if !s.recordCrushCommits(ctx, run.SessionID, prevHead, repoState) {
+	if !s.recordCrushCommits(ctx, run.SessionID, prevHead, ledgerHead, repoState) {
 		// repo_state's only baseline reader is lastRecordedHead; the
 		// failure upsert below still carries the true head as
 		// observation provenance.
@@ -944,12 +966,13 @@ func gitOut(ctx context.Context, dir string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// headSHA is the repo state anchor for a recorded run: HEAD at
-// observation time, best-effort — empty outside a repository or
-// when git is absent. Bounded: RecordRun's ctx is detached from
-// cancellation, so the lookup carries its own deadline rather than
-// inherit none.
-func (s *service) headSHA(ctx context.Context) string {
+// HeadSHA is the repo state anchor: HEAD right now, best-effort —
+// empty outside a repository or when git is absent. RecordRun reads
+// it post-run for the ledger stamp; the bash tool reads it pre-exec
+// so the recorded run can attribute only its own movement (#365).
+// Bounded: callers' ctx may be detached from cancellation, so the
+// lookup carries its own deadline rather than inherit none.
+func (s *service) HeadSHA(ctx context.Context) string {
 	if !s.hasRepo {
 		return ""
 	}
@@ -963,11 +986,14 @@ func (s *service) headSHA(ctx context.Context) string {
 }
 
 // lastRecordedHead returns HEAD as of this project's most recent
-// recorded run — the baseline recordCrushCommits diffs against.
-// Empty outside a repo or when nothing has recorded yet; empty means
-// no attribution for this run, which errs toward treating commits as
-// external — the narrow residual is a HEAD-moving run with zero
-// prior recorded runs, e.g. the project's very first command.
+// recorded run — the catch-up baseline recordCrushCommits falls back
+// to when a run carries no stamped pre-exec head, and the retry
+// range when a stamp's object died inside the run's own rewrite
+// (#365). Empty outside a repo or when nothing has recorded yet;
+// empty means no attribution for an unstamped run, which errs
+// toward treating commits as external — the narrow residual is a
+// HEAD-moving run with zero prior recorded runs, e.g. the project's
+// very first command.
 func (s *service) lastRecordedHead(ctx context.Context) string {
 	if !s.hasRepo {
 		return ""
@@ -986,38 +1012,52 @@ func (s *service) lastRecordedHead(ctx context.Context) string {
 // from external acceptance evidence, so an agent commit can never
 // self-certify.
 //
-// An external commit landing between two runs is swept into the next
-// run's range — a conservative miss, never a false accept. The miss
-// class is wider than it sounds: in an active project, any external
-// commit followed by any recorded run is excluded — a user's own
-// mid-session commit, or one concurrent crush session sweeping
-// another's boundary — so the commit arm effectively only fires for
-// commits landing after the project's last recorded run. Linked
-// worktrees make the mixing structural rather than incidental: they
-// share the partition by design (common-dir identity) while HEAD is
-// per-worktree, so services in sibling worktrees chain one baseline
-// and sweep each other's divergent ranges — for multi-worktree users
-// the commit-acceptance signal goes nearly dead. The "user commits
-// between sessions" flow survives on timing, not structure: the
-// settle pass is spawned detached at prompt receipt, so it usually
-// beats the next session's first recorded run — a race, not a
-// guarantee. Stamping a pre-run head in the tool and diffing
-// [pre, post] instead of [lastRun.post, post] is the structural fix
-// — follow-up.
+// prevHead is the run's pre-exec head when the tool stamped one
+// (#365): the range covers exactly the movement this run produced,
+// so an external commit landing between two recorded runs stays
+// outside every run's range and survives as external acceptance
+// evidence — the recall the ledger-baseline sweep lost. It also ends
+// the cross-worktree baseline chaining: siblings share a project_key
+// but each run sweeps only its own worktree's movement. Recorders
+// that can't stamp keep sweeping the ledger baseline (ledgerHead) —
+// the catch-up net, unchanged, still conservatively absorbing the
+// inter-run gap.
+//
+// A stamped pre can die inside the run's own range — an amend or
+// rebase orphaned the object — so a failed sweep retries once
+// against ledgerHead: the widened range still covers the run's
+// commits at the cost of over-attributing the gap, the safe
+// direction. A second failure lands in attributionFallback.
+//
+// Bounded residual, accepted: a run that dies post-exec before
+// RecordRun leaves its commits below the next stamped run's pre,
+// where neither baseline's range reaches — they settle as external
+// acceptance. The window is the exec→record gap only (crash or
+// force-kill); unstamped recorders still catch it via the net.
 //
 // The bool reports whether the sweep completed. false means commits
 // in the moved range may have gone unattributed; the caller then
-// keeps the recorded baseline behind them so the next run re-sweeps
-// (INSERT OR IGNORE makes a partial or repeated attribution
-// idempotent — over-attribution is the safe direction). Permanent
-// failure classes don't retry forever — see attributionFallback.
-func (s *service) recordCrushCommits(ctx context.Context, sessionID, prevHead, headAfter string) bool {
+// keeps the recorded baseline behind them so a later unstamped run
+// re-sweeps (INSERT OR IGNORE makes a partial or repeated
+// attribution idempotent — over-attribution is the safe direction).
+// Permanent failure classes don't retry forever — see
+// attributionFallback.
+func (s *service) recordCrushCommits(ctx context.Context, sessionID, prevHead, ledgerHead, headAfter string) bool {
 	if !s.hasRepo || prevHead == "" || headAfter == "" || prevHead == headAfter {
 		return true
 	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	out, err := gitOut(ctx, s.workingDir, "rev-list", prevHead+".."+headAfter)
+	if err != nil && ledgerHead != "" && ledgerHead != prevHead {
+		// The stamped pre-run head no longer resolves — the run
+		// amended or rebased its own base. Retry once against the
+		// ledger baseline: the range widens to include inter-run
+		// externals, but the run's commits still attribute and
+		// over-attribution is the safe direction.
+		prevHead = ledgerHead
+		out, err = gitOut(ctx, s.workingDir, "rev-list", prevHead+".."+headAfter)
+	}
 	if err != nil {
 		return s.attributionFallback(ctx, prevHead, headAfter, err)
 	}
