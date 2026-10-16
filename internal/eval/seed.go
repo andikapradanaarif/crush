@@ -103,15 +103,19 @@ func (r *Runner) materializeSeededDigests(ctx context.Context, workdir, seedKey 
 	return svc.RefreshSessionDigests(ctx, bound)
 }
 
-// foldSeededRates drains UpdateProjectRates passes over the seeded
-// db. The production fold lands a turn late on the detached slot and
-// scripted seeds never run a turn, so without an explicit pass the
-// snapshot's project_rates stays empty and the referent gate vetoes
-// a warm state whose episodes are already settled — the seeded
-// verdicts count as evidence exactly like live ones. Idempotent on
-// the rate_folded mark: a pre-fold snapshot re-seeding under a new
-// key folds its unmarked rows deterministically on first restore,
-// same normalize-on-restore pattern as the digest refresh above.
+// foldSeededRates settles then drains UpdateProjectRates passes over
+// the seeded db. Scripted seeds never run a turn, so without an
+// explicit pass the snapshot's project_rates stays empty and the
+// referent gate vetoes a warm state whose episodes should count —
+// the seeded verdicts are evidence exactly like live ones. Since
+// #340 only settled rows fold, the settle pass runs first: seeded
+// episodes carry settle_at=0 (due immediately), and settlement reads
+// the seeded repo's real artifacts — git commits the seed itself ran
+// through the ledger exclude correctly via the agent-commit rule.
+// Idempotent on the settled_at/rate_folded marks: a pre-fold
+// snapshot re-seeding under a new key settles and folds its unmarked
+// rows deterministically on first restore, same normalize-on-restore
+// pattern as the digest refresh above.
 //
 // Seed-time derived state is built under params.DefaultMemory():
 // arms may overlay memory_params (rate_decay, referent_promote_hits)
@@ -133,6 +137,32 @@ func (r *Runner) foldSeededRates(ctx context.Context, workdir, seedKey string) e
 	q := db.New(conn)
 	svc := cmdlog.NewService(q, workdir, params.DefaultMemory(),
 		cmdlog.WithProjectKey(seedKey))
+	// Settlement runs through the same bounded drain as the fold —
+	// seeded rows are due by default, so a few passes close them all.
+	// Mirror the fold loop's contract: a backlog deeper than
+	// 64×limit must surface, not silently fold a partially-settled
+	// corpus into a colder snapshot than intended.
+	drained := false
+	for i := 0; i < 64; i++ {
+		if err := svc.SettleReferentLabels(ctx, 50); err != nil {
+			return fmt.Errorf("seed label settlement: %w", err)
+		}
+		done, err := q.ListUnsettledReferentLabels(ctx, db.ListUnsettledReferentLabelsParams{
+			ProjectKey: seedKey,
+			SettleAt:   r.now().UnixMilli(),
+			Limit:      1,
+		})
+		if err != nil {
+			return fmt.Errorf("seed settle scan: %w", err)
+		}
+		if len(done) == 0 {
+			drained = true
+			break
+		}
+	}
+	if !drained {
+		return fmt.Errorf("seed label settlement did not drain after 64 passes")
+	}
 	gamma := params.DefaultMemory().RateDecay
 	// UpdateProjectRates folds at most one rateEventBatch per call;
 	// live history drains across turns, so the seed pass loops to the
@@ -260,6 +290,14 @@ func (r *Runner) runScriptedSeed(ctx context.Context, q *db.Queries, conn *sql.D
 		}, params.DefaultMemory().ReferentPromoteHits); err != nil {
 			return sessionID, fmt.Errorf("referent %d (%q→%q): %w", i, ref.Phrase, ref.Target, err)
 		}
+	}
+	// Episodes stamp their +24h window at insert now — a seed aged
+	// less than that would sit un-due forever. Seeds are due
+	// immediately by contract, so stamp the window closed.
+	if _, err := conn.ExecContext(ctx,
+		`UPDATE referent_episodes SET settle_at = 0
+		 WHERE session_id = ? AND settled_at IS NULL`, sessionID); err != nil {
+		return sessionID, fmt.Errorf("backdate seed referent windows: %w", err)
 	}
 	return sessionID, nil
 }

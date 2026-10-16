@@ -32,8 +32,8 @@ func setupRatesTest(t *testing.T, projectKey string) *rateEnv {
 }
 
 // seedRateEpisode inserts one referent_episodes row straight into
-// the ledger — the fold reads settled outcomes, so tests need only
-// the verdict and label columns, not the full episode pipeline.
+// the ledger — the fold reads settled outcomes (#340), so seeds
+// stamp settled_at directly; tests for the unsettled edge unset it.
 func seedRateEpisode(t *testing.T, env *rateEnv, projectKey, session, msg, verdict string,
 	committed, hashChanged sql.NullInt64,
 ) {
@@ -42,8 +42,9 @@ func seedRateEpisode(t *testing.T, env *rateEnv, projectKey, session, msg, verdi
 		`INSERT INTO referent_episodes
 		 (phrase, target, session_id, source_message_id, tool_call_id,
 		  repo_state, memory_suggested, verdict, project_key,
-		  param_version, created_at, label_committed, label_hash_changed)
-		 VALUES ('p', 'f.go', ?, ?, 'c', '', 0, ?, ?, '', 1, ?, ?)`,
+		  param_version, created_at, label_committed, label_hash_changed,
+		  settled_at)
+		 VALUES ('p', 'f.go', ?, ?, 'c', '', 0, ?, ?, '', 1, ?, ?, 1)`,
 		session, msg, verdict, projectKey, committed, hashChanged)
 	require.NoError(t, err)
 }
@@ -133,6 +134,32 @@ func TestUpdateProjectRates_OutcomeDirections(t *testing.T) {
 	require.InDelta(t, boundFor(10, 10), BetaQuantile(11, 11, 0.1), 1e-6)
 }
 
+// A settled row with zero signal — unresolved cue, no survival read,
+// no external commit — is marked folded (it can never gain evidence)
+// but mints neither success nor failure, and doesn't starve the
+// admissible rows queued behind it.
+func TestUpdateProjectRates_ZeroSignalRowsSkip(t *testing.T) {
+	t.Parallel()
+	env := setupRatesTest(t, "pk")
+	// Zero-signal rows first in created order — they'd starve an
+	// admissible tail forever if the fold didn't still mark them.
+	for i := range 4 {
+		seedRateEpisode(t, env, "pk", "s1", "z"+itoa(i), ReferentUnknown,
+			sql.NullInt64{}, sql.NullInt64{})
+	}
+	seedRateEpisode(t, env, "pk", "s2", "ok", ReferentAccepted,
+		sql.NullInt64{}, sql.NullInt64{})
+
+	require.NoError(t, env.svc.UpdateProjectRates(t.Context(), 0.95))
+	alpha, beta, _ := storedRate(t, env, "pk")
+	require.Equal(t, 1.0, alpha, "only the admissible row counted")
+	require.Equal(t, 0.0, beta, "zero-evidence rows mint no failure mass")
+	var unfolded int64
+	require.NoError(t, env.conn.QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM referent_episodes WHERE rate_folded = 0`).Scan(&unfolded))
+	require.Zero(t, unfolded, "marked folded — inadmissible rows never re-scan")
+}
+
 // Decay lands once per distinct session — both within one fold and
 // across fold boundaries (the last_session_id cursor).
 func TestUpdateProjectRates_DecayAcrossSessions(t *testing.T) {
@@ -190,7 +217,7 @@ func TestReferentEpisodeOutcome(t *testing.T) {
 		changed   sql.NullInt64
 		want      bool
 	}{
-		{"commit beats divergence", ReferentRevised, yes, yes, true},
+		{"divergence beats commit", ReferentRevised, yes, yes, false},
 		{"commit beats survival", ReferentAccepted, yes, no, true},
 		{"commit alone", ReferentUnknown, yes, null, true},
 		{"divergence uncommitted", ReferentAccepted, null, yes, false},
@@ -208,12 +235,16 @@ func TestReferentEpisodeOutcome(t *testing.T) {
 	}
 }
 
-// Settledness: an unresolved episode never enters the event stream.
+// Settledness: an unsettled episode never enters the event stream —
+// the fold reads only frozen labels (#340).
 func TestUpdateProjectRates_UnsettledSkipped(t *testing.T) {
 	t.Parallel()
 	env := setupRatesTest(t, "pk")
 	seedRateEpisode(t, env, "pk", "s1", "1", ReferentUnknown,
 		sql.NullInt64{}, sql.NullInt64{})
+	_, err := env.conn.ExecContext(t.Context(),
+		`UPDATE referent_episodes SET settled_at = NULL`)
+	require.NoError(t, err)
 	require.NoError(t, env.svc.UpdateProjectRates(t.Context(), 0.95))
 	var n int
 	require.NoError(t, env.conn.QueryRowContext(t.Context(),
@@ -274,9 +305,13 @@ func TestReferentRateLowerBound_ProjectIsolation(t *testing.T) {
 func TestUpdateProjectRates_LateSettlingRowFolds(t *testing.T) {
 	t.Parallel()
 	env := setupRatesTest(t, "pk")
-	// Unknown verdict, no labels yet — unsettled at fold time.
+	// Unsettled at fold time — the earlier row has not frozen yet.
 	seedRateEpisode(t, env, "pk", "s1", "early", ReferentUnknown,
 		sql.NullInt64{}, sql.NullInt64{})
+	_, err := env.conn.ExecContext(t.Context(),
+		`UPDATE referent_episodes SET settled_at = NULL
+		 WHERE source_message_id = 'early'`)
+	require.NoError(t, err)
 	// A higher-id row that IS settled folds first.
 	seedRateEpisode(t, env, "pk", "s2", "late", ReferentAccepted,
 		sql.NullInt64{}, sql.NullInt64{})
@@ -284,9 +319,9 @@ func TestUpdateProjectRates_LateSettlingRowFolds(t *testing.T) {
 	alpha, beta, _ := storedRate(t, env, "pk")
 	require.InDelta(t, 1, alpha, 1e-9)
 	require.Zero(t, beta)
-	// Maturity resolves the earlier row: hash still matches.
-	_, err := env.conn.ExecContext(t.Context(),
-		`UPDATE referent_episodes SET label_hash_changed = 0
+	// Settlement freezes the earlier row: hash still matches.
+	_, err = env.conn.ExecContext(t.Context(),
+		`UPDATE referent_episodes SET label_hash_changed = 0, settled_at = 1
 		 WHERE source_message_id = 'early'`)
 	require.NoError(t, err)
 	require.NoError(t, env.svc.UpdateProjectRates(t.Context(), 0.95))

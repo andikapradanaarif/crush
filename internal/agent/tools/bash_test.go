@@ -10,6 +10,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/shell"
@@ -341,7 +342,21 @@ func (r *recordingCmdLog) LabelReferentEpisode(context.Context, cmdlog.ReferentE
 	return nil
 }
 
-func (r *recordingCmdLog) MatureReferentLabels(context.Context, int) error { return nil }
+func (r *recordingCmdLog) SettleReferentLabels(context.Context, int) error { return nil }
+
+func (r *recordingCmdLog) RecordTurnOutcome(context.Context, cmdlog.TurnOutcome) error {
+	return nil
+}
+
+func (r *recordingCmdLog) HasTurnOutcome(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+
+func (r *recordingCmdLog) ListRecentSessionIDs(context.Context, string, int) ([]db.ListRecentSessionsRow, error) {
+	return nil, nil
+}
+
+func (r *recordingCmdLog) SettleTurnOutcomes(context.Context, int) error { return nil }
 
 func (r *recordingCmdLog) ListReferentCandidates(context.Context, []string, int) ([]cmdlog.Referent, error) {
 	return nil, nil

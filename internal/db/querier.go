@@ -13,6 +13,12 @@ type Querier interface {
 	// Evidence for a phrase->target mapping: accepted episodes the memory
 	// tail did not suggest, counted by distinct session so a session
 	// re-deriving its own mapping cannot self-promote.
+	// #340: promotion consumes settled outcomes, not raw cues -- the
+	// predicate is ReferentEpisodeOutcome's success arm in SQL (survival
+	// read decides; absent it a commit on the target, else the cue), so
+	// an episode that settled diverged can't promote a mapping. This
+	// mirrors ReferentEpisodeOutcome in cmdlog/rates.go -- a precedence
+	// change must move both sites.
 	CountCleanReferentAcceptances(ctx context.Context, arg CountCleanReferentAcceptancesParams) (int64, error)
 	// Absolute user-turn ordinal source for edge_firings.turn_seq - the
 	// bounded prompt-history query above can't serve it (DESC LIMIT 200
@@ -100,6 +106,9 @@ type Querier interface {
 	GetUsageByDayOfWeek(ctx context.Context) ([]GetUsageByDayOfWeekRow, error)
 	GetUsageByHour(ctx context.Context) ([]GetUsageByHourRow, error)
 	GetUsageByModel(ctx context.Context) ([]GetUsageByModelRow, error)
+	// Whether a (session, turn_id) row already exists -- the backfill's
+	// skip check before parsing a turn's messages.
+	HasTurnOutcome(ctx context.Context, arg HasTurnOutcomeParams) (int64, error)
 	// The FTS shadow is a plain FTS5 table (not external-content) so a
 	// digest refresh is a keyed delete + insert.
 	IndexSessionDigest(ctx context.Context, arg IndexSessionDigestParams) error
@@ -113,18 +122,56 @@ type Querier interface {
 	// the (session_id, source_message_id, target) unique key the retry
 	// idempotency point: a repair-chain re-run of the turn-context pass
 	// re-derives the same episode and must not count twice.
+	// settle_at stamps the +24h cap at insert: the column default is 0,
+	// and without the stamp a fresh row satisfies the due predicate at
+	// birth -- a settle pass in flight before LabelReferentEpisode lands
+	// would freeze the row fingerprintless. The label UPDATE re-stamps
+	// the window at label time; pre-#340 rows keep 0 (due immediately).
 	InsertReferentEpisode(ctx context.Context, arg InsertReferentEpisodeParams) error
+	// Open one turn's outcome row (#340), idempotent on the
+	// (session_id, turn_id) unique key -- turn_id is the turn's
+	// user-message ID, stable under compaction where an ordinal would
+	// shift; a repair-chain re-derivation re-inserts nothing. verdict
+	// stays NULL until settlement; next_verdict captures the cue-word
+	// judgment the following user prompt carried at record time.
+	// The conflict arm repairs placeholder rows: a backfill can record
+	// a still-running concurrent session's in-flight turn with an empty
+	// verdict and a partial evidence span. While the row is unsettled
+	// AND carries no judgment at all (next_verdict = ''), the live
+	// path's record refreshes evidence and stamps the real judgment.
+	// A judged unknown keeps its evidence -- unknown is a resolved cue
+	// verdict, not a placeholder -- and accepted/revised/frozen rows
+	// are likewise never rewritten.
+	InsertTurnOutcome(ctx context.Context, arg InsertTurnOutcomeParams) error
 	// Stamp the artifact signals computable at episode-record time
-	// (#294): the file's post-edit hash baseline, the judged turn's cost,
-	// the session's test verdict, and the wrong-target count. The key
+	// (#294/#340): the file's post-edit hash (diagnostic), the added-
+	// lines survival fingerprint, the judged turn's cost, the session's
+	// test verdict, and the observation window's +24h edge. The key
 	// clause is the episode unique key -- the same idempotency point
 	// the insert uses, so a repair-chain re-run re-stamps the same row
-	// instead of drifting.
+	// instead of drifting. settled_at IS NULL keeps the write-once
+	// contract: a frozen row's label fields never re-stamp.
 	LabelReferentEpisode(ctx context.Context, arg LabelReferentEpisodeParams) error
 	// Backs prompt history when no session is open. Needs
 	// idx_messages_role_created_at to seek rather than scan the table.
 	ListAllUserMessages(ctx context.Context) ([]Message, error)
 	ListCommandPartitionKeys(ctx context.Context) ([]string, error)
+	// Timestamps (millis) of git-commit commands this project ran through
+	// the harness inside a window (#340): a commit whose author-time sits
+	// within the skew bound of one of these was agent-made, and does not
+	// count as external acceptance evidence. cmd_norm keeps the whole
+	// invocation, so every distinct commit message is its own row; the
+	// known limit is that re-running an identical message keeps only the
+	// latest last_at. Compound shell forms count too -- a commit chained
+	// after &&, ;, or ||, or invoked as git -C dir commit -- while flag
+	// orderings beyond -C stay a documented miss. Non-commit producers
+	// are a known miss class: an agent-run git rebase/merge/cherry-pick
+	// mints commits that read as external acceptance evidence, as do
+	// packed forms like cmd&&git and sudo-prefixed invocations. And in
+	// the other direction, merge commits emit no --name-only paths --
+	// a user merge touching the target is missed evidence (conservative:
+	// a merge is not necessarily acceptance of this turn's work).
+	ListCrushCommitRuns(ctx context.Context, arg ListCrushCommitRunsParams) ([]int64, error)
 	ListFailurePartitionKeys(ctx context.Context) ([]string, error)
 	// Failure rows in one partition -- the remote-lifecycle re-claim
 	// (#266) moves them off a stale key onto the current one.
@@ -140,25 +187,17 @@ type Querier interface {
 	ListLatestSessionFiles(ctx context.Context, sessionID string) ([]File, error)
 	ListMCPDisabledServers(ctx context.Context) ([]string, error)
 	ListMCPEnabledServers(ctx context.Context) ([]string, error)
+	// created_at has one-second resolution, so rowid breaks same-second
+	// ties into insertion order -- a swapped boundary pair would attach
+	// a verdict to the wrong turn's span.
 	ListMessagesBySession(ctx context.Context, sessionID string) ([]Message, error)
 	// Messages from the summary onward, which is all a compacted session sends.
 	// created_at has one-second resolution, so a few messages preceding the
 	// summary can come back too; the caller slices from the summary by ID.
+	// Same rowid tiebreaker as ListMessagesBySession.
 	ListMessagesBySessionFromSummary(ctx context.Context, arg ListMessagesBySessionFromSummaryParams) ([]Message, error)
 	ListNewFiles(ctx context.Context) ([]File, error)
 	ListOpenFailures(ctx context.Context, arg ListOpenFailuresParams) ([]FailureMemory, error)
-	// Episodes whose artifact labels still have a checkable signal
-	// (#294): committed once observed stays observed, and a hash that
-	// already diverged is terminal -- the pending set is "not yet
-	// committed OR file still matches baseline". Rows with no baseline
-	// hash (pre-label data, file gone at record time) are never
-	// checkable, so they stay out of the scan. Least-recently-checked
-	// first: labeled_at defaults to 0, so never-matured rows sort ahead
-	// of re-checks and the backlog drains round-robin on the index's
-	// own sort column. No-repo rows keep committed NULL forever, so
-	// they never leave the pending set -- the amortized bound owns
-	// that floor: a growing backlog delays, never blocks, fresh rows.
-	ListPendingReferentLabels(ctx context.Context, arg ListPendingReferentLabelsParams) ([]ListPendingReferentLabelsRow, error)
 	ListProcessedSegments(ctx context.Context, sessionID string) ([]ProcessedSegment, error)
 	// last_at is millisecond-granularity so re-runs order by recency;
 	// rowid settles ties for rows written in the same millisecond.
@@ -169,27 +208,67 @@ type Querier interface {
 	// The recency fallback: "continue" carries no terms to match, so the
 	// tail offers the freshest other sessions instead.
 	ListRecentSessionDigests(ctx context.Context, arg ListRecentSessionDigestsParams) ([]SessionDigest, error)
-	// Settled referent episodes in calibration form (#295): the same
-	// settled predicate as the rate fold — cue verdict resolved or an
-	// artifact read — plus the mapping context (phrase/target) and the
+	// Sessions other than the live one, newest first -- the backfill
+	// corpus for turn outcomes (#340). Sessions stamp created_at in
+	// seconds. parent_session_id IS NULL keeps sub-agent sessions out:
+	// their "user prompts" are delegation text, not user verdicts.
+	// The project filter is ledger membership: sessions carry no
+	// project column and a shared store must not let the backfill mint
+	// foreign sessions' turns under this project's key -- rows that
+	// would settle diverged on missing paths, poisoning the partition
+	// they were never part of. A session with no project-keyed ledger
+	// row is thin mining material anyway.
+	// The second EXISTS makes the corpus convergent: a session needs
+	// the scan only while some real user turn lacks an outcome row.
+	// Fully scanned sessions exit, so each first turn drains un-covered
+	// history rather than sliding over the newest slice forever.
+	// Residual re-entries are bounded waste: a session whose pending
+	// turn is in-flight records it as a placeholder (the insert's
+	// conflict arm repairs verdict/evidence once its real next prompt
+	// lands), and a session whose last user message is a repair prompt
+	// -- excluded in Go, invisible to this predicate -- rescans. The
+	// starvation corner of that waste: >=LIMIT permanently-pending
+	// sessions newer than a genuinely pending one starve it under ORDER
+	// BY created_at DESC -- rare, but a recorded marker for ineligible
+	// turns would close it for good. Membership is also last-writer:
+	// command_memory.last_session_id moves with each re-run, so a
+	// session whose only ledger rows were overwritten by a later
+	// session loses its membership proof -- its windows stay open
+	// (fail-safe) but its turns also leave this corpus.
+	ListRecentSessions(ctx context.Context, arg ListRecentSessionsParams) ([]ListRecentSessionsRow, error)
+	// Settled referent episodes in calibration form (#295/#340):
+	// settlement is the evidence predicate -- one fixed observation per
+	// episode -- plus the mapping context (phrase/target) and the
 	// suggestion flag, so the calibrator derives renderability under
 	// each candidate floor and stratifies one draw per session. Oldest
 	// first: per-session stratification picks the earliest episode and
-	// must be deterministic.
+	// must be deterministic. The admissibility predicate mirrors
+	// referentEpisodeAdmissible (cmdlog/rates.go) -- same lockstep rule.
 	ListReferentCalibrationEpisodes(ctx context.Context, projectKey string) ([]ListReferentCalibrationEpisodesRow, error)
 	// Pooled outcome evidence for the empirical-Bayes prior (#296) --
 	// LEAVE-ONE-OUT over every OTHER project: counting the querying
 	// project's own episodes in the prior and again as local mass
 	// roughly doubles their weight, which is least conservative
 	// exactly where data is scarcest (the single-project store).
+	// Admissibility mirrors the fold: a settled row that carried zero
+	// signal (unresolved cue, no survival read, no external commit) is
+	// not evidence either way -- settled_at alone never invents mass.
+	// The predicate is referentEpisodeAdmissible (cmdlog/rates.go)
+	// re-implemented in SQL -- a change must move all sites. Note the
+	// upgrade path: rows folded before settlement existed (rate_folded=1,
+	// settled_at NULL) settle on first post-upgrade pass and re-enter
+	// this pool as fixed-window evidence -- intended, they now carry a
+	// frozen observation like any settled row.
 	ListReferentPriorEvents(ctx context.Context, projectKey string) ([]ListReferentPriorEventsRow, error)
-	// Settled, not-yet-folded referent episodes (#296), oldest first.
-	// Membership is the rate_folded mark, not an id watermark: an
-	// episode whose labels settle only after higher ids folded still
-	// counts when it matures. An episode is evidence when the cue
-	// verdict resolved or the artifact labels produced a read -- the
-	// outcome rule lives in Go so the prior pool and the fold share
-	// one definition.
+	// Settled, not-yet-folded referent episodes (#296/#340), oldest
+	// first. Membership is the rate_folded mark, not an id watermark.
+	// Since #340 only settled rows are evidence: settlement froze the
+	// windowed commit read, the hunk-survival verdict, and the cue
+	// verdict into one fixed observation -- folding unsettled rows would
+	// re-mix label vintages the review flagged. Outcomes are computed in
+	// Go (ReferentEpisodeOutcome); the promotion count query
+	// (CountCleanReferentAcceptances) re-implements the success arms in
+	// SQL -- the two must stay in lockstep.
 	ListReferentRateEvents(ctx context.Context, arg ListReferentRateEventsParams) ([]ListReferentRateEventsRow, error)
 	// Promoted candidates whose learned phrase appears among the turn's
 	// extracted phrases -- exact-match on the normalized phrase keeps the
@@ -239,6 +318,23 @@ type Querier interface {
 	// stale PK, and the next occurrence of the same failure would open a
 	// second row.
 	ListUnclaimedFailures(ctx context.Context) ([]ListUnclaimedFailuresRow, error)
+	// Episodes whose observation window has closed but whose label has
+	// not frozen yet (#340): settle_at elapsed (the +24h cap) or a newer
+	// session exists IN THE PROJECT -- the two settlement triggers the
+	// fixed-window rule defines. Oldest first so the backlog amortizes.
+	// Rows never become un-settleable: settlement writes its verdict
+	// once and freezes.
+	// The project proof is ledger membership: sessions carry no project
+	// column, and a store shared across projects (absolute
+	// data_directory) must not let a foreign session close this
+	// project's windows early. A session proves membership by having
+	// written a project-keyed ledger row; a session with none is not a
+	// boundary (the window stays open -- delayed, never wrong).
+	ListUnsettledReferentLabels(ctx context.Context, arg ListUnsettledReferentLabelsParams) ([]ListUnsettledReferentLabelsRow, error)
+	// Turn rows whose window closed without settling (#340): the same
+	// dual trigger as episodes -- the +24h cap elapsed or a newer session
+	// exists. Oldest first.
+	ListUnsettledTurnOutcomes(ctx context.Context, arg ListUnsettledTurnOutcomesParams) ([]ListUnsettledTurnOutcomesRow, error)
 	// Backs prompt history, which steps back one entry at a time.
 	ListUserMessagesBySession(ctx context.Context, sessionID string) ([]Message, error)
 	// Stamp the fold's membership mark on the ids this pass counted.
@@ -248,11 +344,21 @@ type Querier interface {
 	// twin (fresher provenance) but the failure's true age survives --
 	// the caller passes min(twin.first_seen, legacy.first_seen).
 	MergeFailureFirstSeen(ctx context.Context, arg MergeFailureFirstSeenParams) error
-	// A mapping that cleared the acceptance floor earns its row; further
-	// clean acceptances keep scoring it (hits is evidence mass, not
-	// capped at the threshold). The insert carries the true acceptance
-	// count that crossed the floor -- seeding 1 would understate the
-	// evidence that promoted it.
+	// The next session's start after a given episode -- the inner edge of
+	// the settlement window (#340). Sessions stamp created_at in seconds;
+	// episodes use millis. NULL when no newer session exists (the 24h cap
+	// alone bounds the window then). parent_session_id IS NULL keeps
+	// sub-agent child sessions out: a delegated task is work inside the
+	// parent turn, not a session boundary. Project membership is the
+	// same ledger proof the due trigger uses -- a foreign session must
+	// not close this project's window.
+	NextSessionStartMillis(ctx context.Context, arg NextSessionStartMillisParams) (int64, error)
+	// A mapping that crossed the acceptance floor earns its row. hits
+	// carries the true clean-acceptance count at promotion time --
+	// seeding 1 would understate the evidence that promoted it. The
+	// count is recomputed on every trigger (record-time and settle-
+	// time), so the stored value always equals observed evidence --
+	// never a drifted increment.
 	PromoteReferent(ctx context.Context, arg PromoteReferentParams) error
 	// One row per collapsed prior turn; INSERT OR IGNORE makes the write
 	// idempotent across renders and across processes sharing the session
@@ -281,17 +387,23 @@ type Querier interface {
 	// two are equivalent here.
 	SearchSessionDigests(ctx context.Context, arg SearchSessionDigestsParams) ([]SessionDigest, error)
 	SetSessionChannel(ctx context.Context, arg SetSessionChannelParams) (Session, error)
+	// labeled_at re-stamps to the settle time: it is the last label
+	// computation, so it intentionally converges with settled_at.
+	// Freeze one episode's label (#340): the write happens once, at
+	// settlement -- committed counts only external commits inside the
+	// window, hash_changed means the recorded added-lines diverged, and
+	// settled_at is the freeze mark that takes the row out of the scan
+	// and into the fold/prior evidence predicates. The WHERE guard keeps
+	// a second crush instance sharing the DB from re-freezing the row --
+	// labelMu only serializes in-process.
+	SettleReferentEpisode(ctx context.Context, arg SettleReferentEpisodeParams) error
+	// Freeze one turn row's verdict (#340). Same contract as episodes:
+	// written once, never re-derived. The WHERE guard keeps a second
+	// crush instance sharing the DB from re-freezing the row -- labelMu
+	// only serializes in-process.
+	SettleTurnOutcome(ctx context.Context, arg SettleTurnOutcomeParams) error
 	UpdateMessage(ctx context.Context, arg UpdateMessageParams) error
 	UpdateNotebookCompression(ctx context.Context, arg UpdateNotebookCompressionParams) error
-	// Re-stamp one episode's maturing signals (#294). hash_changed
-	// reflects the latest check -- a file restored to its baseline reads
-	// surviving again; committed only ever moves 0/NULL toward 1 (a
-	// landed commit can't un-happen); tests_green refreshes to the
-	// session's latest observed verdict (NULL persists only while no
-	// test has run). Callers keep committed's monotonicity by passing
-	// the previous value through unchanged when the check says
-	// "still not committed".
-	UpdateReferentEpisodeLabel(ctx context.Context, arg UpdateReferentEpisodeLabelParams) error
 	UpdateSession(ctx context.Context, arg UpdateSessionParams) (Session, error)
 	UpdateSessionTitleAndUsage(ctx context.Context, arg UpdateSessionTitleAndUsageParams) error
 	// Project-scoped command ledger: one row per normalized command,

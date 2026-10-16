@@ -119,16 +119,38 @@ type Service interface {
 	RecordReferentEpisode(ctx context.Context, ep ReferentEpisode, promoteMin int) error
 
 	// LabelReferentEpisode stamps the artifact signals computable at
-	// episode-record time (#294): the target's post-edit hash
-	// baseline, the judged turn's cost, and the session-end test
-	// verdict. Idempotent on the episode unique key.
+	// episode-record time (#294): the added-lines survival
+	// fingerprint, the judged turn's cost, the session-end test
+	// verdict, and the observation window's edge (#340). Idempotent
+	// on the episode unique key.
 	LabelReferentEpisode(ctx context.Context, ep ReferentEpisode, in ReferentEpisodeLabelInputs) error
 
-	// MatureReferentLabels re-checks the signals that only resolve
-	// over time — file still matches baseline (survival), commit
-	// landed since the episode — for pending episodes, oldest first,
-	// bounded per call so each turn's pass drains the backlog.
-	MatureReferentLabels(ctx context.Context, limit int) error
+	// SettleReferentLabels freezes the labels of episodes whose
+	// observation window closed (#340) — a newer session started or
+	// created_at + 24h elapsed — computing hunk survival, external-
+	// commit evidence, and the test verdict exactly once. Bounded
+	// per call so each turn's pass drains the backlog.
+	SettleReferentLabels(ctx context.Context, limit int) error
+
+	// RecordTurnOutcome opens one (session, turn) outcome row —
+	// the per-user-turn acceptance unit procedural memory mines
+	// (#340). Idempotent on (session_id, turn_id).
+	RecordTurnOutcome(ctx context.Context, o TurnOutcome) error
+
+	// HasTurnOutcome reports whether a (session, turn) outcome row
+	// exists — the backfill's skip check.
+	HasTurnOutcome(ctx context.Context, sessionID, turnID string) (bool, error)
+
+	// ListRecentSessionIDs lists sessions provably in this project —
+	// the ledger-membership proof — newest first, excluding the
+	// live one. Sessions carry no project column; a session with no
+	// project-keyed ledger row is out of the backfill scan set.
+	ListRecentSessionIDs(ctx context.Context, excludeID string, limit int) ([]db.ListRecentSessionsRow, error)
+
+	// SettleTurnOutcomes freezes the verdicts of turn rows whose
+	// observation window closed — same dual trigger and frozen-once
+	// contract as episode settlement.
+	SettleTurnOutcomes(ctx context.Context, limit int) error
 
 	// ListReferentCandidates returns promoted phrase→target mappings
 	// for the turn's extracted phrases — the referent injection pool,
@@ -286,9 +308,19 @@ type service struct {
 	// recognize stale keys that differ only in remote prefix (#266).
 	// Empty outside a repository.
 	commonDir string
+	// repoPrefix is the workspace's path inside its repo ("" at the
+	// root) — commit paths emit repo-root-relative while ledger
+	// targets are workspace-relative, so evidence reads strip it.
+	// Empty outside a repository.
+	repoPrefix string
 	// openFailureTTL is the read-side staleness bound for open
 	// failures; 0 disables the filter.
 	openFailureTTL time.Duration
+	// referentPromoteHits is the promotion floor the settle-time
+	// trigger uses — promotion consumes settled outcomes now, so the
+	// check can fire when a clean acceptance freezes, not only when
+	// the next accepted episode records.
+	referentPromoteHits int
 	// suggested is the per-session set of commands the model was
 	// shown in injected memory — a run of one writes suggested=1.
 	// Process-local: the flag means "influence currently rendered in
@@ -350,17 +382,19 @@ func NewService(q *db.Queries, workingDir string, p params.Memory, opts ...Optio
 		workingDir = filepathext.Canonical(abs)
 	}
 	p = p.OrDefault()
-	projectKey, commonDir, hasRepo := computeProjectKey(workingDir)
+	projectKey, commonDir, repoPrefix, hasRepo := computeProjectKey(workingDir)
 	s := &service{
-		q:              q,
-		workingDir:     workingDir,
-		openFailureTTL: p.OpenFailureTTL,
-		projectKey:     projectKey,
-		commonDir:      commonDir,
-		hasRepo:        hasRepo,
-		paramVersion:   p.Version(),
-		suggested:      map[string]map[string]struct{}{},
-		now:            time.Now,
+		q:                   q,
+		workingDir:          workingDir,
+		openFailureTTL:      p.OpenFailureTTL,
+		referentPromoteHits: p.ReferentPromoteHits,
+		projectKey:          projectKey,
+		commonDir:           commonDir,
+		repoPrefix:          repoPrefix,
+		hasRepo:             hasRepo,
+		paramVersion:        p.Version(),
+		suggested:           map[string]map[string]struct{}{},
+		now:                 time.Now,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -783,12 +817,17 @@ func (s *service) ParamVersion() string {
 // Also returns the common-dir component — the repo's anchor identity,
 // empty outside a repository — and whether a repo exists, so
 // RecordRun can skip the per-run rev-parse where it would fail.
-func computeProjectKey(workingDir string) (key, commonDir string, hasRepo bool) {
+// Also returns repoPrefix — the workspace's path inside the repo
+// ("" at the root, "sub/dir/" deeper) — because `git log
+// --name-only` emits repo-root-relative paths while the ledger's
+// targets are workspace-relative; commit evidence is blind without
+// the strip.
+func computeProjectKey(workingDir string) (key, commonDir, repoPrefix string, hasRepo bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	common, err := gitOut(ctx, workingDir, "rev-parse", "--git-common-dir")
 	if err != nil || common == "" {
-		return filepathext.Canonical(workingDir), "", false
+		return filepathext.Canonical(workingDir), "", "", false
 	}
 	if !filepath.IsAbs(common) {
 		common = filepath.Join(workingDir, common)
@@ -797,7 +836,8 @@ func computeProjectKey(workingDir string) (key, commonDir string, hasRepo bool) 
 	if remote, err := gitOut(ctx, workingDir, "remote", "get-url", "origin"); err == nil && remote != "" {
 		key = normalizeRemote(remote) + "|" + key
 	}
-	return key, filepathext.Canonical(common), true
+	prefix, _ := gitOut(ctx, workingDir, "rev-parse", "--show-prefix")
+	return key, filepathext.Canonical(common), filepath.ToSlash(strings.TrimSpace(prefix)), true
 }
 
 // ProjectKeyForDir derives the partition identity a DB opened under
@@ -805,7 +845,7 @@ func computeProjectKey(workingDir string) (key, commonDir string, hasRepo bool) 
 // so offline readers (the LTT calibrator, #295) can query a project's
 // rows without constructing a service.
 func ProjectKeyForDir(workingDir string) string {
-	key, _, _ := computeProjectKey(workingDir)
+	key, _, _, _ := computeProjectKey(workingDir)
 	return key
 }
 

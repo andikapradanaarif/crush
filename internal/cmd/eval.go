@@ -770,6 +770,9 @@ func referentSchemaReady(ctx context.Context, conn *sql.DB) (bool, error) {
 	for _, want := range []string{
 		"id", "phrase", "target", "session_id", "verdict",
 		"label_committed", "label_hash_changed", "memory_suggested",
+		// #340: only settled labels feed the fold and calibrator —
+		// a db missing the settlement columns reads nothing.
+		"settled_at",
 	} {
 		if !cols[want] {
 			return false, nil

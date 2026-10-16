@@ -9,10 +9,23 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/params"
 	"github.com/stretchr/testify/require"
 )
+
+// settleReferents forces every pending episode's window closed
+// (settle_at=0 mimics the +24h cap elapsing) and runs one settle
+// pass — the path promotion now takes, since #340 counts frozen
+// outcomes rather than raw cues.
+func settleReferents(t *testing.T, env fakeEnv, svc cmdlog.Service) {
+	t.Helper()
+	_, err := env.conn.ExecContext(t.Context(),
+		`UPDATE referent_episodes SET settle_at = 0 WHERE settled_at IS NULL`)
+	require.NoError(t, err)
+	require.NoError(t, svc.SettleReferentLabels(t.Context(), 50))
+}
 
 func referentUserMsg(id, text string) message.Message {
 	return message.Message{
@@ -130,7 +143,9 @@ func TestReferentTargets(t *testing.T) {
 	}
 	targets := a.referentTargets(t.Context(), msgs, 1)
 	require.Len(t, targets, 2)
-	require.Equal(t, filepath.Join("internal", "cfg.go"), targets[0].path)
+	// Stored paths are slash-normalized (relWorkdir's ToSlash) —
+	// filepath.Join would assert a backslash on Windows.
+	require.Equal(t, "internal/cfg.go", targets[0].path)
 	require.Equal(t, "tc1", targets[0].callID)
 	require.Equal(t, "other.go", targets[1].path)
 	require.Equal(t, "tc3", targets[1].callID)
@@ -157,13 +172,17 @@ func TestRecordReferentEpisodes(t *testing.T) {
 		require.Empty(t, refs) // one clean session is below the default floor
 
 		// A second session re-deriving the same mapping crosses the
-		// promotion floor.
+		// promotion floor — once both episodes' outcomes freeze.
 		a.recordReferentEpisodes(t.Context(), SessionAgentCall{
 			SessionID: "s2", Prompt: "ok",
 		}, []message.Message{
 			referentUserMsg("u2", "fix the config"),
 			referentEditMsg("tc2", tools.EditToolName, target),
 		})
+		// Promotion consumes settled outcomes only: a fresh row can't
+		// count itself, so the crossing happens at settlement (no
+		// git/fingerprints → the accepted cue is the frozen outcome).
+		settleReferents(t, env, svc)
 		refs, err = svc.ListReferentCandidates(t.Context(), []string{"config"}, 5)
 		require.NoError(t, err)
 		require.Len(t, refs, 1)
@@ -274,6 +293,12 @@ func TestRecordReferentEpisodes(t *testing.T) {
 		a, env := referentAgent(t)
 		a.memParams = params.DefaultMemory()
 		a.memParams.ReferentPromoteHits = 1
+		// The settle-time floor lives on the service, built at
+		// construction — rebuild it with the test's floor of 1.
+		mp := params.DefaultMemory()
+		mp.ReferentPromoteHits = 1
+		env.cmdlog = cmdlog.NewService(db.New(env.conn), env.workingDir, mp)
+		a.cmdlog = env.cmdlog
 		target := filepath.Join(env.workingDir, "x.go")
 		a.recordReferentEpisodes(t.Context(), SessionAgentCall{
 			SessionID: "s1", Prompt: "ok",
@@ -286,6 +311,7 @@ func TestRecordReferentEpisodes(t *testing.T) {
 			referentUserMsg("r1", "Verification failed. exit code 1"),
 			referentEditMsg("tc2", tools.EditToolName, target),
 		})
+		settleReferents(t, env, env.cmdlog)
 		refs, err := env.cmdlog.ListReferentCandidates(t.Context(), []string{"config"}, 5)
 		require.NoError(t, err)
 		require.Len(t, refs, 1)
@@ -297,6 +323,11 @@ func TestRecordReferentEpisodes(t *testing.T) {
 		a, env := referentAgent(t)
 		a.memParams = params.DefaultMemory()
 		a.memParams.ReferentPromoteHits = 1
+		// Same settle-floor rebuild as the repair-prompt case.
+		mp := params.DefaultMemory()
+		mp.ReferentPromoteHits = 1
+		env.cmdlog = cmdlog.NewService(db.New(env.conn), env.workingDir, mp)
+		a.cmdlog = env.cmdlog
 		target := filepath.Join(env.workingDir, "x.go")
 
 		// The edit lives in the child `agent` session's transcript —
@@ -324,6 +355,7 @@ func TestRecordReferentEpisodes(t *testing.T) {
 				Finished: true,
 			}}},
 		})
+		settleReferents(t, env, env.cmdlog)
 		refs, err := env.cmdlog.ListReferentCandidates(t.Context(), []string{"config"}, 5)
 		require.NoError(t, err)
 		require.Len(t, refs, 1)
@@ -334,20 +366,23 @@ func TestRecordReferentEpisodes(t *testing.T) {
 func TestReferentCandidates_Gating(t *testing.T) {
 	t.Parallel()
 
-	promote := func(t *testing.T, svc cmdlog.Service, target string) {
+	promote := func(t *testing.T, env fakeEnv, target string) {
 		t.Helper()
 		for _, sess := range []string{"s1", "s2"} {
-			require.NoError(t, svc.RecordReferentEpisode(t.Context(), cmdlog.ReferentEpisode{
+			require.NoError(t, env.cmdlog.RecordReferentEpisode(t.Context(), cmdlog.ReferentEpisode{
 				Phrase: "config", Target: target, SessionID: sess,
 				SourceMessageID: "m-" + sess, Verdict: cmdlog.ReferentAccepted,
 			}, params.DefaultMemory().ReferentPromoteHits))
 		}
+		// Promotion consumes settled outcomes — freeze both episodes
+		// so the second row's success crossing fires at settle time.
+		settleReferents(t, env, env.cmdlog)
 	}
 
 	t.Run("option off fetches nothing", func(t *testing.T) {
 		t.Parallel()
 		a, env := referentAgent(t)
-		promote(t, env.cmdlog, "x.go")
+		promote(t, env, "x.go")
 		refs, _ := a.referentCandidates(t.Context(), SessionAgentCall{
 			SessionID: "s3", Prompt: "fix the config",
 		}, params.DefaultMemory())
@@ -358,7 +393,7 @@ func TestReferentCandidates_Gating(t *testing.T) {
 		t.Parallel()
 		a, env := referentAgent(t)
 		a.referentMemory = true
-		promote(t, env.cmdlog, "x.go")
+		promote(t, env, "x.go")
 		// The promotion floor is this test's subject — the rate
 		// gate (#296) gets its own subtests below.
 		mp := params.DefaultMemory()
@@ -375,7 +410,7 @@ func TestReferentCandidates_Gating(t *testing.T) {
 		t.Parallel()
 		a, env := referentAgent(t)
 		a.referentMemory = true
-		promote(t, env.cmdlog, "x.go")
+		promote(t, env, "x.go")
 		// Two accepted episodes sit in the ledger but the leave-
 		// one-out prior is still Beta(1,1) — q0.1 = 0.1, well under
 		// the 0.6 floor, so a sparse project abstains (#296).
@@ -393,15 +428,17 @@ func TestReferentCandidates_Gating(t *testing.T) {
 		t.Parallel()
 		a, env := referentAgent(t)
 		a.referentMemory = true
-		promote(t, env.cmdlog, "x.go")
+		promote(t, env, "x.go")
 		for _, sess := range []string{"s4", "s5"} {
 			require.NoError(t, env.cmdlog.RecordReferentEpisode(t.Context(), cmdlog.ReferentEpisode{
 				Phrase: "other", Target: "y.go", SessionID: sess,
 				SourceMessageID: "m-" + sess, Verdict: cmdlog.ReferentAccepted,
 			}, params.DefaultMemory().ReferentPromoteHits))
 		}
-		// Fold the settled episodes, then the decayed posterior
-		// clears the floor and the mapping renders.
+		// #340: only settled labels are evidence — settle the
+		// recorded episodes, then fold, so the posterior (not
+		// settlement) is the subject under test.
+		settleReferents(t, env, env.cmdlog)
 		require.NoError(t, env.cmdlog.UpdateProjectRates(t.Context(), params.DefaultMemory().RateDecay))
 		refs, gate := a.referentCandidates(t.Context(), SessionAgentCall{
 			SessionID: "s6", Prompt: "fix the config",
@@ -417,7 +454,7 @@ func TestReferentCandidates_Gating(t *testing.T) {
 		t.Parallel()
 		a, env := referentAgent(t)
 		a.referentMemory = true
-		promote(t, env.cmdlog, "x.go")
+		promote(t, env, "x.go")
 		refs, _ := a.referentCandidates(t.Context(), SessionAgentCall{
 			SessionID: "s3", Prompt: "refactor internal/config/config.go to split the Options struct",
 		}, params.DefaultMemory())
