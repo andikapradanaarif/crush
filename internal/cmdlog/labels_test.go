@@ -159,20 +159,28 @@ func TestLabelReferentEpisode_SettleAnchoredAtCreatedAt(t *testing.T) {
 	clock := base
 	svc := NewService(db.New(env.conn), env.workingDir, params.DefaultMemory(),
 		WithClock(func() time.Time { return clock }))
-	seedLabelSession(t, env, "s1", "")
 	ep := ReferentEpisode{
 		Phrase: "config", Target: "f.go", SessionID: "s1",
 		SourceMessageID: "m1", ToolCallID: "c1", Verdict: ReferentAccepted,
 	}
 	require.NoError(t, svc.RecordReferentEpisode(t.Context(), ep, 5))
-	// The label lands 2h late — a repair-chain retry's shape.
-	clock = base.Add(2 * time.Hour)
+	// The label lands past the window itself — a repair-chain retry
+	// arriving a day late. The cap anchors at created_at anyway.
+	clock = base.Add(26 * time.Hour)
 	require.NoError(t, svc.LabelReferentEpisode(t.Context(), ep, ReferentEpisodeLabelInputs{}))
 	var createdAt, settleAt int64
 	require.NoError(t, env.conn.QueryRowContext(t.Context(),
 		`SELECT created_at, settle_at FROM referent_episodes
 		 WHERE session_id = 's1'`).Scan(&createdAt, &settleAt))
 	require.Equal(t, createdAt+settleWindowMillis, settleAt)
+	// A cap already in the past makes the row due on the next pass —
+	// it settles against the original window, not a widened one.
+	require.NoError(t, svc.SettleReferentLabels(t.Context(), 10))
+	var settledAt sql.NullInt64
+	require.NoError(t, env.conn.QueryRowContext(t.Context(),
+		`SELECT settled_at FROM referent_episodes
+		 WHERE session_id = 's1'`).Scan(&settledAt))
+	require.True(t, settledAt.Valid)
 }
 
 // Issue #355: the settle scan's (project_key, settled_at) filter
