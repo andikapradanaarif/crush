@@ -91,9 +91,11 @@ func TestCalibrateOpenRenderLimit_ClassSeparation(t *testing.T) {
 	// explicit_scope is clean; unresolved's only bound rows are
 	// excluded — the veto sits at render rank 0 inside every cap.
 	// The failing class must not poison the certified one — and must
-	// be named in the caveats.
+	// be named in the caveats. Two classes with draws means each
+	// walk tests at delta/2 = 0.025, so eight units (e·0.5^8≈0.011)
+	// are the zero-harm certification bar here, not six.
 	var decs []CalibrationDecision
-	for i := range 6 {
+	for i := range 8 {
 		decs = append(decs, boundDec(fmt.Sprintf("e%d", i), agent.ScopeClassExplicit, 1, 0)...)
 	}
 	for i := range 8 {
@@ -105,6 +107,7 @@ func TestCalibrateOpenRenderLimit_ClassSeparation(t *testing.T) {
 	require.Equal(t, 3, *cert.CertifiedValue)
 	require.Len(t, cert.Classes, 2, "only classes with evidence emit runs")
 	require.Equal(t, agent.ScopeClassExplicit, cert.Classes[0].Class)
+	require.Equal(t, 0.025, cert.Classes[0].Delta, "the family-wise budget splits evenly")
 	require.Equal(t, 3, *cert.Classes[0].CertifiedValue)
 	require.Equal(t, agent.ScopeClassUnresolved, cert.Classes[1].Class)
 	require.Nil(t, cert.Classes[1].CertifiedValue)
@@ -125,11 +128,13 @@ func TestCalibrateOpenRenderLimit_ComposedValueIsMinAcrossClasses(t *testing.T) 
 	// explicit certifies the whole grid; referent_kind carries one
 	// unit whose excluded row only renders at cap>=3 — it certifies
 	// 1 and 2, fails 3, and the composed overlay value is the min.
+	// Two classes → each walk tests at delta/2 = 0.025: seven
+	// zero-harm units (e·0.5^7≈0.021) certify, six (0.043) do not.
 	var decs []CalibrationDecision
-	for i := range 6 {
+	for i := range 8 {
 		decs = append(decs, boundDec(fmt.Sprintf("e%d", i), agent.ScopeClassExplicit, 1, 0)...)
 	}
-	for i := range 6 {
+	for i := range 7 {
 		decs = append(decs, boundDec(fmt.Sprintf("k%d", i), agent.ScopeClassReferentKind, 1, 0)...)
 	}
 	// The harm unit: two clean bound rows rank ahead of the
@@ -148,7 +153,7 @@ func TestCalibrateOpenRenderLimit_ComposedValueIsMinAcrossClasses(t *testing.T) 
 	require.Equal(t, 4, *cert.Classes[0].CertifiedValue)
 	require.Equal(t, 2, *cert.Classes[1].CertifiedValue)
 	require.Len(t, cert.Classes[1].Candidates, 3, "referent_kind stops at the first failure")
-	require.Equal(t, 7, cert.Classes[1].Candidates[2].Admits)
+	require.Equal(t, 8, cert.Classes[1].Candidates[2].Admits)
 	require.Equal(t, 1, cert.Classes[1].Candidates[2].Harms)
 }
 
@@ -209,6 +214,23 @@ func TestCalibrateOpenRenderLimit_Validation(t *testing.T) {
 	require.Error(t, err)
 	_, err = CalibrateOpenRenderLimit(nil, []int{1}, 0.5, 1.5)
 	require.Error(t, err)
+	// A non-positive cap renders nothing — admits=0 would halt the
+	// walk at the first candidate and mislabel the class as
+	// unevidenced. Channel-off is a deployment state, not a
+	// certifiable value.
+	_, err = CalibrateOpenRenderLimit(nil, []int{0, 2}, 0.5, 0.05)
+	require.Error(t, err)
+	_, err = CalibrateOpenRenderLimit(nil, []int{-1}, 0.5, 0.05)
+	require.Error(t, err)
+	// A unit's class is a prompt property — a mixed-class stream is
+	// a producer bug, and merging it would leak one class's harm
+	// into another's run.
+	_, err = CalibrateOpenRenderLimit([]CalibrationDecision{
+		{Unit: "c1", Class: agent.ScopeClassExplicit, Bound: true},
+		{Unit: "c1", Class: agent.ScopeClassUnresolved, Bound: true},
+	}, []int{1}, 0.5, 0.05)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "mixed scope classes")
 }
 
 func TestProjectBindingDecisions_RealCorpus(t *testing.T) {

@@ -900,7 +900,7 @@ func init() {
 	evalCurveCmd.Flags().String("out", "curve.jsonl", "JSONL output path")
 	evalCalibrateCmd.Flags().String("param", eval.CalibrateParamPromoteHits, "parameter to certify (referent_promote_hits|open_render_limit)")
 	evalCalibrateCmd.Flags().String("db", ".crush/crush.db", "project crush.db to read episodes from (referent arm)")
-	evalCalibrateCmd.Flags().String("binding", "internal/agent/testdata/failure_binding.jsonl", "labeled selector corpus for the open_render_limit arm")
+	evalCalibrateCmd.Flags().String("binding", "internal/agent/testdata/failure_binding.jsonl", "labeled selector corpus for the open_render_limit arm (relative to CWD)")
 	evalCalibrateCmd.Flags().String("workdir", "", "project dir for project_key derivation (default: CWD)")
 	evalCalibrateCmd.Flags().Float64("alpha", 0.05, "certified harm-rate bound")
 	evalCalibrateCmd.Flags().Float64("delta", 0.05, "family-wise error level")

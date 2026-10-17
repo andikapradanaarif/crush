@@ -59,7 +59,8 @@ type CalibrationDecision struct {
 	// Class is the prompt's deterministic scope class — one of
 	// agent.ScopeClassExplicit, agent.ScopeClassReferentKind,
 	// agent.ScopeClassUnresolved. Harm concentrates differently per
-	// regime, so classes calibrate separately.
+	// regime, so classes calibrate separately. It must be constant
+	// within a unit — the calibrator rejects a mixed-class stream.
 	Class string
 	// Pool is the memory pool the decision came from — "open",
 	// "resolved", or "command"; empty reads as "open" (the wire
@@ -128,8 +129,11 @@ func (u DecisionUnit) harmAt(k int) bool {
 // corpus's independence contract is the authored instance, not the
 // project session that produced it. Units keep first-appearance
 // order and decisions keep their in-unit render order; the input is
-// not mutated. The empty unit name collapses into a single draw —
-// an unnamed stream is one correlated context by construction.
+// not mutated. A unit's class is taken from its first decision —
+// producers emit one class per unit (the calibrator rejects mixed
+// streams upstream). The empty unit name collapses into a single
+// draw — an unnamed stream is one correlated context by
+// construction.
 func StratifyDecisionsByUnit(decs []CalibrationDecision) []DecisionUnit {
 	idx := map[string]int{}
 	var out []DecisionUnit
@@ -165,8 +169,13 @@ type ClassCandidate struct {
 
 // ClassCertificate is one ambiguity class's fixed-sequence result —
 // its own draws, candidates, and certified value or honest absence.
+// Delta is the level this class's walk ran at — the certificate's
+// family-wise budget split evenly across the classes that had
+// draws, so the classes' certified bounds hold jointly at the
+// certificate's delta.
 type ClassCertificate struct {
 	Class          string           `json:"class"`
+	Delta          float64          `json:"delta"`
 	Draws          int              `json:"draws"`
 	Candidates     []ClassCandidate `json:"candidates"`
 	CertifiedValue *int             `json:"certified_value"`
@@ -177,9 +186,14 @@ type ClassCertificate struct {
 // composed CertifiedValue — when any class certified — is the most
 // conservative certified cap across classes, because the deployed
 // open_render_limit is one global value whose bound must hold under
-// every certified class's distribution. Guarantee and Caveats name
-// the corpus distribution explicitly: the run bounds harm on the
-// labeled decisions it saw, never "the selector is safe".
+// every certified class's distribution. The class walks split the
+// family-wise budget evenly (each runs at delta/m for m classes
+// with draws), so the joint claim over certified classes holds at
+// the certificate's delta — not m·delta. Decisions is the input
+// stream's size before pool filtering; the per-class draw counts
+// are the stratification's. Guarantee and Caveats name the corpus
+// distribution explicitly: the run bounds harm on the labeled
+// decisions it saw, never "the selector is safe".
 type SelectorCertificate struct {
 	Param          string             `json:"param"`
 	Metric         string             `json:"metric"`
@@ -200,8 +214,9 @@ type SelectorCertificate struct {
 
 // selectorClassOrder is the deterministic emission order for the
 // closed class vocabulary — the three regimes the issue names
-// first, then any producer-invented class sorted after them so the
-// output is stable.
+// first, then any producer-invented class appended in
+// first-appearance order, so the output is stable for a given
+// input.
 var selectorClassOrder = []string{
 	agent.ScopeClassExplicit,
 	agent.ScopeClassReferentKind,
@@ -216,8 +231,11 @@ var selectorClassOrder = []string{
 // value it cannot certify; the composed certified value is the
 // smallest certified cap across classes — every class's bound
 // holds at it (the walk certified every smaller tested value).
-// A class with no evidence cannot certify and does not poison the
-// others; the caveat names it.
+// The classes split the family-wise budget evenly (each walk runs
+// at delta/m for m classes with draws), so the certificate's joint
+// claim over certified classes holds at delta. A class with no
+// evidence cannot certify and does not poison the others; the
+// caveat names it.
 func CalibrateOpenRenderLimit(decs []CalibrationDecision, grid []int, alpha, delta float64) (SelectorCertificate, error) {
 	if len(grid) == 0 {
 		return SelectorCertificate{}, fmt.Errorf("empty candidate grid")
@@ -228,6 +246,25 @@ func CalibrateOpenRenderLimit(decs []CalibrationDecision, grid []int, alpha, del
 	grid = slices.Clone(grid)
 	slices.Sort(grid)
 	grid = slices.Compact(grid)
+	if grid[0] <= 0 {
+		// A non-positive cap renders nothing — admits=0 gives p=1,
+		// which would halt the walk at the first candidate and
+		// mislabel the class as unevidenced. Channel-off is a
+		// deployment state, not a certifiable value.
+		return SelectorCertificate{}, fmt.Errorf("grid values must be positive: %v", grid[0])
+	}
+
+	// A unit's class is a prompt property — one value per unit. A
+	// mixed-class stream is a producer bug; merging it would drop
+	// one class's harm into another's run, so it fails closed.
+	unitClass := map[string]string{}
+	for _, d := range decs {
+		if prev, ok := unitClass[d.Unit]; ok && prev != d.Class {
+			return SelectorCertificate{}, fmt.Errorf(
+				"unit %q carries mixed scope classes (%q then %q)", d.Unit, prev, d.Class)
+		}
+		unitClass[d.Unit] = d.Class
+	}
 
 	units := StratifyDecisionsByUnit(decs)
 	byClass := map[string][]DecisionUnit{}
@@ -237,6 +274,21 @@ func CalibrateOpenRenderLimit(decs []CalibrationDecision, grid []int, alpha, del
 			classes = append(classes, u.Class)
 		}
 		byClass[u.Class] = append(byClass[u.Class], u)
+	}
+
+	// The classes' walks split the family-wise budget evenly so the
+	// certificate's joint claim — every certified class's bound
+	// holding at the composed value — is honest at delta rather
+	// than silently degrading to m·delta.
+	m := 0
+	for _, class := range classes {
+		if len(byClass[class]) > 0 {
+			m++
+		}
+	}
+	classDelta := delta
+	if m > 0 {
+		classDelta = delta / float64(m)
 	}
 
 	cert := SelectorCertificate{
@@ -252,7 +304,7 @@ func CalibrateOpenRenderLimit(decs []CalibrationDecision, grid []int, alpha, del
 		if len(draws) == 0 {
 			continue
 		}
-		cc := ClassCertificate{Class: class, Draws: len(draws)}
+		cc := ClassCertificate{Class: class, Delta: classDelta, Draws: len(draws)}
 		for _, k := range grid {
 			var res ClassCandidate
 			res.Value = k
@@ -269,7 +321,7 @@ func CalibrateOpenRenderLimit(decs []CalibrationDecision, grid []int, alpha, del
 			if res.Admits > 0 {
 				res.RiskHat = float64(res.Harms) / float64(res.Admits)
 			}
-			res.Certified = res.PValue <= delta && res.Admits > 0
+			res.Certified = res.PValue <= classDelta && res.Admits > 0
 			cc.Candidates = append(cc.Candidates, res)
 			if !res.Certified {
 				break
@@ -298,6 +350,10 @@ func CalibrateOpenRenderLimit(decs []CalibrationDecision, grid []int, alpha, del
 		"decisions calibrate under the deterministic arm — an L3 resolver overlay can shift a prompt's effective class at runtime; these runs classify on the unoverlaid analysis",
 		"render order is the producer's candidate order — live fetches are recency-ordered, the binding corpus's authored order stands in",
 		"a class with no bound evidence or no certification does not constrain the composed value — the overlay covers the certified classes' distributions",
+	}
+	if m > 0 {
+		cert.Caveats = append(cert.Caveats,
+			fmt.Sprintf("each class walk ran at delta/%d = %.4f so the joint claim over certified classes holds at the certificate's delta", m, classDelta))
 	}
 	if len(unevidenced) > 0 {
 		cert.Caveats = append(cert.Caveats,
