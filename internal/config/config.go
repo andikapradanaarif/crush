@@ -541,6 +541,13 @@ type Options struct {
 	// tripwire. Experimental; default off until the vague-prompt
 	// corpus arm justifies flipping it.
 	AmbiguityClarification *bool `json:"ambiguity_clarification,omitempty" jsonschema:"description=Enable deterministic clarification gates: turn-zero vagueness pre-filter\\, first-write scope gate\\, loop-stop replan and escalation\\, and the burn-watch spend tripwire. Experimental.,default=false"`
+	// ScopeGate overrides the first-write scope gate specifically —
+	// the deterministic checkpoint that asks "confirm scope" before a
+	// run's first mutating call after deep exploration. Nil follows
+	// ambiguity_clarification; an explicit bool wins either way, so
+	// the gate can be silenced (or armed) independently of the other
+	// calibrated-autonomy gates.
+	ScopeGate *bool `json:"scope_gate,omitempty" jsonschema:"description=Override the first-write scope gate independently of ambiguity_clarification: unset follows it\\, true or false wins. Experimental.,default=unset"`
 	// FailureMemory injects the <open_failures> tail — commands that
 	// failed in this workspace and have not passed since — independent
 	// of the turn_context tier so its contribution can be measured on
@@ -1703,6 +1710,16 @@ func (o *Options) AmbiguityClarificationEnabled() bool {
 		return false
 	}
 	return *o.AmbiguityClarification
+}
+
+// ScopeGateEnabled resolves the first-write scope gate: an explicit
+// scope_gate value wins, and unset follows ambiguity_clarification —
+// the bundle stays the default, the gate is separately overridable.
+func (o *Options) ScopeGateEnabled() bool {
+	if o.ScopeGate != nil {
+		return *o.ScopeGate
+	}
+	return o.AmbiguityClarificationEnabled()
 }
 
 // NotebookMemoryServerName returns the resolved memory server name,
