@@ -53,6 +53,10 @@ type ContentPart interface {
 }
 
 type ReasoningContent struct {
+	// ID is the stream's reasoning block id — fantasy emits one per
+	// reasoning block, so it keys deltas and end-of-block signatures to
+	// the right part on interleaved multi-block streams.
+	ID               string                             `json:"id,omitempty"`
 	Thinking         string                             `json:"thinking"`
 	Signature        string                             `json:"signature"`
 	ThoughtSignature string                             `json:"thought_signature"` // Used for google
@@ -466,85 +470,92 @@ func (m *Message) AppendContent(delta string) {
 	}
 }
 
-func (m *Message) AppendReasoningContent(delta string) {
-	found := false
-	for i, part := range m.Parts {
-		if c, ok := part.(ReasoningContent); ok {
-			m.Parts[i] = ReasoningContent{
-				Thinking:   c.Thinking + delta,
-				Signature:  c.Signature,
-				StartedAt:  c.StartedAt,
-				FinishedAt: c.FinishedAt,
+// reasoningPartIndex returns the index of the reasoning part a stream
+// event addresses: the part carrying the event's block id when one is
+// supplied, else the last still-open reasoning part, else the last
+// reasoning part at all. The empty-id fallback keeps id-less streams
+// accumulating on a single part — a fresh part there would be invisible
+// to ReasoningContent(), which reads the first. Returns -1 when no part
+// matches.
+func (m *Message) reasoningPartIndex(id string) int {
+	if id != "" {
+		for i, part := range m.Parts {
+			if c, ok := part.(ReasoningContent); ok && c.ID == id {
+				return i
 			}
-			found = true
 		}
+		return -1
 	}
-	if !found {
-		m.Parts = append(m.Parts, ReasoningContent{
-			Thinking:  delta,
-			StartedAt: time.Now().Unix(),
-		})
-	}
-}
-
-func (m *Message) AppendThoughtSignature(signature string, toolCallID string) {
+	last, lastOpen := -1, -1
 	for i, part := range m.Parts {
 		if c, ok := part.(ReasoningContent); ok {
-			m.Parts[i] = ReasoningContent{
-				Thinking:         c.Thinking,
-				ThoughtSignature: c.ThoughtSignature + signature,
-				ToolID:           toolCallID,
-				Signature:        c.Signature,
-				StartedAt:        c.StartedAt,
-				FinishedAt:       c.FinishedAt,
-			}
-			return
-		}
-	}
-	m.Parts = append(m.Parts, ReasoningContent{ThoughtSignature: signature})
-}
-
-func (m *Message) AppendReasoningSignature(signature string) {
-	for i, part := range m.Parts {
-		if c, ok := part.(ReasoningContent); ok {
-			m.Parts[i] = ReasoningContent{
-				Thinking:   c.Thinking,
-				Signature:  c.Signature + signature,
-				StartedAt:  c.StartedAt,
-				FinishedAt: c.FinishedAt,
-			}
-			return
-		}
-	}
-	m.Parts = append(m.Parts, ReasoningContent{Signature: signature})
-}
-
-func (m *Message) SetReasoningResponsesData(data *openai.ResponsesReasoningMetadata) {
-	for i, part := range m.Parts {
-		if c, ok := part.(ReasoningContent); ok {
-			m.Parts[i] = ReasoningContent{
-				Thinking:      c.Thinking,
-				ResponsesData: data,
-				StartedAt:     c.StartedAt,
-				FinishedAt:    c.FinishedAt,
-			}
-			return
-		}
-	}
-}
-
-func (m *Message) FinishThinking() {
-	for i, part := range m.Parts {
-		if c, ok := part.(ReasoningContent); ok {
+			last = i
 			if c.FinishedAt == 0 {
-				m.Parts[i] = ReasoningContent{
-					Thinking:   c.Thinking,
-					Signature:  c.Signature,
-					StartedAt:  c.StartedAt,
-					FinishedAt: time.Now().Unix(),
-				}
+				lastOpen = i
 			}
-			return
+		}
+	}
+	if lastOpen >= 0 {
+		return lastOpen
+	}
+	return last
+}
+
+func (m *Message) AppendReasoningContent(id string, delta string) {
+	if i := m.reasoningPartIndex(id); i >= 0 {
+		c := m.Parts[i].(ReasoningContent)
+		c.Thinking += delta
+		m.Parts[i] = c
+		return
+	}
+	m.Parts = append(m.Parts, ReasoningContent{
+		ID:        id,
+		Thinking:  delta,
+		StartedAt: time.Now().Unix(),
+	})
+}
+
+func (m *Message) AppendThoughtSignature(id string, signature string, toolCallID string) {
+	if i := m.reasoningPartIndex(id); i >= 0 {
+		c := m.Parts[i].(ReasoningContent)
+		c.ThoughtSignature += signature
+		c.ToolID = toolCallID
+		m.Parts[i] = c
+		return
+	}
+	m.Parts = append(m.Parts, ReasoningContent{
+		ID:               id,
+		ThoughtSignature: signature,
+		ToolID:           toolCallID,
+	})
+}
+
+func (m *Message) AppendReasoningSignature(id string, signature string) {
+	if i := m.reasoningPartIndex(id); i >= 0 {
+		c := m.Parts[i].(ReasoningContent)
+		c.Signature += signature
+		m.Parts[i] = c
+		return
+	}
+	m.Parts = append(m.Parts, ReasoningContent{ID: id, Signature: signature})
+}
+
+func (m *Message) SetReasoningResponsesData(id string, data *openai.ResponsesReasoningMetadata) {
+	if i := m.reasoningPartIndex(id); i >= 0 {
+		c := m.Parts[i].(ReasoningContent)
+		c.ResponsesData = data
+		m.Parts[i] = c
+		return
+	}
+	m.Parts = append(m.Parts, ReasoningContent{ID: id, ResponsesData: data})
+}
+
+func (m *Message) FinishThinking(id string) {
+	if i := m.reasoningPartIndex(id); i >= 0 {
+		c := m.Parts[i].(ReasoningContent)
+		if c.FinishedAt == 0 {
+			c.FinishedAt = time.Now().Unix()
+			m.Parts[i] = c
 		}
 	}
 }
@@ -565,32 +576,20 @@ func (m *Message) ThinkingDuration() time.Duration {
 
 func (m *Message) FinishToolCall(toolCallID string) {
 	for i, part := range m.Parts {
-		if c, ok := part.(ToolCall); ok {
-			if c.ID == toolCallID {
-				m.Parts[i] = ToolCall{
-					ID:       c.ID,
-					Name:     c.Name,
-					Input:    c.Input,
-					Finished: true,
-				}
-				return
-			}
+		if c, ok := part.(ToolCall); ok && c.ID == toolCallID {
+			c.Finished = true
+			m.Parts[i] = c
+			return
 		}
 	}
 }
 
 func (m *Message) AppendToolCallInput(toolCallID string, inputDelta string) {
 	for i, part := range m.Parts {
-		if c, ok := part.(ToolCall); ok {
-			if c.ID == toolCallID {
-				m.Parts[i] = ToolCall{
-					ID:       c.ID,
-					Name:     c.Name,
-					Input:    c.Input + inputDelta,
-					Finished: c.Finished,
-				}
-				return
-			}
+		if c, ok := part.(ToolCall); ok && c.ID == toolCallID {
+			c.Input += inputDelta
+			m.Parts[i] = c
+			return
 		}
 	}
 }
