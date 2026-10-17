@@ -95,9 +95,12 @@ Batched example (tabbed form + confirmation screen):
 
 ## When to use
 
-- Confirm destructive or ambiguous actions, or pick between
-  interpretations
+- Confirm irreversible or outside-the-repo actions (deleting data,
+  force-push, publishing, external APIs), or pick between
+  interpretations only the user can own
 - Gather multiple related answers at once
 - NOT for questions answerable by reading code or docs, information
-  obtainable via other tools, or permission requests (use the
-  permission system)
+  obtainable via other tools, permission requests (use the
+  permission system), or confirming an action the user already
+  requested - a "proceed?" prompt after being asked to do the work
+  is redundant; proceed
