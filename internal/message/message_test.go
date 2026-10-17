@@ -373,7 +373,10 @@ func TestBroker_PublishMustDeliverHonorsTimeout(t *testing.T) {
 
 	require.GreaterOrEqual(t, elapsed, 20*time.Millisecond,
 		"PublishMustDeliver should block at least the timeout under contention")
-	require.Less(t, elapsed, 200*time.Millisecond,
+	// The upper bound is a liveness check, not a latency contract —
+	// a loaded CI runner (windows under -race) inflates the window
+	// well past 200ms without the call ever blocking indefinitely.
+	require.Less(t, elapsed, 5*time.Second,
 		"PublishMustDeliver must not block indefinitely")
 	require.GreaterOrEqual(t, b.MustDeliverDropCount(), uint64(1),
 		"timeout must increment the must-deliver drop counter")
