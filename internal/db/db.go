@@ -24,6 +24,9 @@ func New(db DBTX) *Queries {
 func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	q := Queries{db: db}
 	var err error
+	if q.bumpPendingAttributionAttemptsStmt, err = db.PrepareContext(ctx, bumpPendingAttributionAttempts); err != nil {
+		return nil, fmt.Errorf("error preparing query BumpPendingAttributionAttempts: %w", err)
+	}
 	if q.bumpSessionCounterStmt, err = db.PrepareContext(ctx, bumpSessionCounter); err != nil {
 		return nil, fmt.Errorf("error preparing query BumpSessionCounter: %w", err)
 	}
@@ -69,6 +72,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.deleteNotebookEntriesBySessionStmt, err = db.PrepareContext(ctx, deleteNotebookEntriesBySession); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteNotebookEntriesBySession: %w", err)
 	}
+	if q.deletePendingAttributionStmt, err = db.PrepareContext(ctx, deletePendingAttribution); err != nil {
+		return nil, fmt.Errorf("error preparing query DeletePendingAttribution: %w", err)
+	}
 	if q.deleteProcessedSegmentsBySessionStmt, err = db.PrepareContext(ctx, deleteProcessedSegmentsBySession); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteProcessedSegmentsBySession: %w", err)
 	}
@@ -86,6 +92,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.deleteSessionMessagesStmt, err = db.PrepareContext(ctx, deleteSessionMessages); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteSessionMessages: %w", err)
+	}
+	if q.evictPendingAttributionStmt, err = db.PrepareContext(ctx, evictPendingAttribution); err != nil {
+		return nil, fmt.Errorf("error preparing query EvictPendingAttribution: %w", err)
 	}
 	if q.getAverageResponseTimeStmt, err = db.PrepareContext(ctx, getAverageResponseTime); err != nil {
 		return nil, fmt.Errorf("error preparing query GetAverageResponseTime: %w", err)
@@ -213,6 +222,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.insertMCPEnabledServerStmt, err = db.PrepareContext(ctx, insertMCPEnabledServer); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertMCPEnabledServer: %w", err)
 	}
+	if q.insertPendingAttributionStmt, err = db.PrepareContext(ctx, insertPendingAttribution); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertPendingAttribution: %w", err)
+	}
 	if q.insertReferentEpisodeStmt, err = db.PrepareContext(ctx, insertReferentEpisode); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertReferentEpisode: %w", err)
 	}
@@ -275,6 +287,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.listOpenFailuresStmt, err = db.PrepareContext(ctx, listOpenFailures); err != nil {
 		return nil, fmt.Errorf("error preparing query ListOpenFailures: %w", err)
+	}
+	if q.listPendingAttributionStmt, err = db.PrepareContext(ctx, listPendingAttribution); err != nil {
+		return nil, fmt.Errorf("error preparing query ListPendingAttribution: %w", err)
+	}
+	if q.listPendingAttributionPartitionKeysStmt, err = db.PrepareContext(ctx, listPendingAttributionPartitionKeys); err != nil {
+		return nil, fmt.Errorf("error preparing query ListPendingAttributionPartitionKeys: %w", err)
 	}
 	if q.listProcessedSegmentsStmt, err = db.PrepareContext(ctx, listProcessedSegments); err != nil {
 		return nil, fmt.Errorf("error preparing query ListProcessedSegments: %w", err)
@@ -372,6 +390,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.rekeyFailurePartitionStmt, err = db.PrepareContext(ctx, rekeyFailurePartition); err != nil {
 		return nil, fmt.Errorf("error preparing query RekeyFailurePartition: %w", err)
 	}
+	if q.rekeyPendingAttributionStmt, err = db.PrepareContext(ctx, rekeyPendingAttribution); err != nil {
+		return nil, fmt.Errorf("error preparing query RekeyPendingAttribution: %w", err)
+	}
 	if q.renameSessionStmt, err = db.PrepareContext(ctx, renameSession); err != nil {
 		return nil, fmt.Errorf("error preparing query RenameSession: %w", err)
 	}
@@ -425,6 +446,11 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 
 func (q *Queries) Close() error {
 	var err error
+	if q.bumpPendingAttributionAttemptsStmt != nil {
+		if cerr := q.bumpPendingAttributionAttemptsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing bumpPendingAttributionAttemptsStmt: %w", cerr)
+		}
+	}
 	if q.bumpSessionCounterStmt != nil {
 		if cerr := q.bumpSessionCounterStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing bumpSessionCounterStmt: %w", cerr)
@@ -500,6 +526,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing deleteNotebookEntriesBySessionStmt: %w", cerr)
 		}
 	}
+	if q.deletePendingAttributionStmt != nil {
+		if cerr := q.deletePendingAttributionStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deletePendingAttributionStmt: %w", cerr)
+		}
+	}
 	if q.deleteProcessedSegmentsBySessionStmt != nil {
 		if cerr := q.deleteProcessedSegmentsBySessionStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteProcessedSegmentsBySessionStmt: %w", cerr)
@@ -528,6 +559,11 @@ func (q *Queries) Close() error {
 	if q.deleteSessionMessagesStmt != nil {
 		if cerr := q.deleteSessionMessagesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteSessionMessagesStmt: %w", cerr)
+		}
+	}
+	if q.evictPendingAttributionStmt != nil {
+		if cerr := q.evictPendingAttributionStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing evictPendingAttributionStmt: %w", cerr)
 		}
 	}
 	if q.getAverageResponseTimeStmt != nil {
@@ -740,6 +776,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing insertMCPEnabledServerStmt: %w", cerr)
 		}
 	}
+	if q.insertPendingAttributionStmt != nil {
+		if cerr := q.insertPendingAttributionStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertPendingAttributionStmt: %w", cerr)
+		}
+	}
 	if q.insertReferentEpisodeStmt != nil {
 		if cerr := q.insertReferentEpisodeStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertReferentEpisodeStmt: %w", cerr)
@@ -843,6 +884,16 @@ func (q *Queries) Close() error {
 	if q.listOpenFailuresStmt != nil {
 		if cerr := q.listOpenFailuresStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listOpenFailuresStmt: %w", cerr)
+		}
+	}
+	if q.listPendingAttributionStmt != nil {
+		if cerr := q.listPendingAttributionStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listPendingAttributionStmt: %w", cerr)
+		}
+	}
+	if q.listPendingAttributionPartitionKeysStmt != nil {
+		if cerr := q.listPendingAttributionPartitionKeysStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listPendingAttributionPartitionKeysStmt: %w", cerr)
 		}
 	}
 	if q.listProcessedSegmentsStmt != nil {
@@ -1005,6 +1056,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing rekeyFailurePartitionStmt: %w", cerr)
 		}
 	}
+	if q.rekeyPendingAttributionStmt != nil {
+		if cerr := q.rekeyPendingAttributionStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing rekeyPendingAttributionStmt: %w", cerr)
+		}
+	}
 	if q.renameSessionStmt != nil {
 		if cerr := q.renameSessionStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing renameSessionStmt: %w", cerr)
@@ -1122,277 +1178,291 @@ func (q *Queries) queryRow(ctx context.Context, stmt *sql.Stmt, query string, ar
 }
 
 type Queries struct {
-	db                                   DBTX
-	tx                                   *sql.Tx
-	bumpSessionCounterStmt               *sql.Stmt
-	countCleanReferentAcceptancesStmt    *sql.Stmt
-	countUserMessagesBySessionStmt       *sql.Stmt
-	createFileStmt                       *sql.Stmt
-	createMessageStmt                    *sql.Stmt
-	createNotebookEntryStmt              *sql.Stmt
-	createNotebookTagStmt                *sql.Stmt
-	createSessionStmt                    *sql.Stmt
-	deleteCommandConflictsStmt           *sql.Stmt
-	deleteFailureStmt                    *sql.Stmt
-	deleteFileStmt                       *sql.Stmt
-	deleteMCPDisabledServerStmt          *sql.Stmt
-	deleteMCPEnabledServerStmt           *sql.Stmt
-	deleteMessageStmt                    *sql.Stmt
-	deleteNotebookEntriesBySessionStmt   *sql.Stmt
-	deleteProcessedSegmentsBySessionStmt *sql.Stmt
-	deleteSessionStmt                    *sql.Stmt
-	deleteSessionDigestStmt              *sql.Stmt
-	deleteSessionDigestIndexStmt         *sql.Stmt
-	deleteSessionFilesStmt               *sql.Stmt
-	deleteSessionMessagesStmt            *sql.Stmt
-	getAverageResponseTimeStmt           *sql.Stmt
-	getCollapsedTurnStatsStmt            *sql.Stmt
-	getEdgeFiringStatsStmt               *sql.Stmt
-	getFailureMetaStmt                   *sql.Stmt
-	getFileStmt                          *sql.Stmt
-	getFileByPathAndSessionStmt          *sql.Stmt
-	getFileReadStmt                      *sql.Stmt
-	getHourDayHeatmapStmt                *sql.Stmt
-	getLastAssistantMessageBySessionStmt *sql.Stmt
-	getLastSessionStmt                   *sql.Stmt
-	getLatestCheckpointEntryStmt         *sql.Stmt
-	getMapUsageStmt                      *sql.Stmt
-	getMaxNotebookEventNumberStmt        *sql.Stmt
-	getMessageStmt                       *sql.Stmt
-	getNotebookEntriesStmt               *sql.Stmt
-	getNotebookEntriesByEventTypeStmt    *sql.Stmt
-	getNotebookEntriesByTurnStmt         *sql.Stmt
-	getNotebookEntriesByTurnSegmentStmt  *sql.Stmt
-	getNotebookEntryCountStmt            *sql.Stmt
-	getNotebookTagsByEntryStmt           *sql.Stmt
-	getNotebookTokenCountStmt            *sql.Stmt
-	getNotebookTurnsWithEntriesStmt      *sql.Stmt
-	getOldestNotebookEntriesStmt         *sql.Stmt
-	getProcessedSegmentStmt              *sql.Stmt
-	getProjectRateStmt                   *sql.Stmt
-	getPruningStatsStmt                  *sql.Stmt
-	getRecentActivityStmt                *sql.Stmt
-	getSessionByIDStmt                   *sql.Stmt
-	getSessionCounterStmt                *sql.Stmt
-	getSessionDigestStmt                 *sql.Stmt
-	getToolUsageStmt                     *sql.Stmt
-	getTotalStatsStmt                    *sql.Stmt
-	getUsageByDayStmt                    *sql.Stmt
-	getUsageByDayOfWeekStmt              *sql.Stmt
-	getUsageByHourStmt                   *sql.Stmt
-	getUsageByModelStmt                  *sql.Stmt
-	hasTurnOutcomeStmt                   *sql.Stmt
-	indexSessionDigestStmt               *sql.Stmt
-	insertCrushCommitStmt                *sql.Stmt
-	insertEdgeFiringStmt                 *sql.Stmt
-	insertMCPDisabledServerStmt          *sql.Stmt
-	insertMCPEnabledServerStmt           *sql.Stmt
-	insertReferentEpisodeStmt            *sql.Stmt
-	insertReferentEpisodeLabeledStmt     *sql.Stmt
-	insertTurnOutcomeStmt                *sql.Stmt
-	labelReferentEpisodeStmt             *sql.Stmt
-	lastRecordedRepoHeadStmt             *sql.Stmt
-	listAllUserMessagesStmt              *sql.Stmt
-	listCommandPartitionKeysStmt         *sql.Stmt
-	listCrushCommitPartitionKeysStmt     *sql.Stmt
-	listCrushCommitSHAsStmt              *sql.Stmt
-	listFailurePartitionKeysStmt         *sql.Stmt
-	listFailuresByKeyStmt                *sql.Stmt
-	listFilesByPathStmt                  *sql.Stmt
-	listFilesBySessionStmt               *sql.Stmt
-	listHotReadFilesStmt                 *sql.Stmt
-	listLatestSessionFilesStmt           *sql.Stmt
-	listMCPDisabledServersStmt           *sql.Stmt
-	listMCPEnabledServersStmt            *sql.Stmt
-	listMessagesBySessionStmt            *sql.Stmt
-	listMessagesBySessionFromSummaryStmt *sql.Stmt
-	listNewFilesStmt                     *sql.Stmt
-	listOpenFailuresStmt                 *sql.Stmt
-	listProcessedSegmentsStmt            *sql.Stmt
-	listRecentCommandsStmt               *sql.Stmt
-	listRecentSessionDigestsStmt         *sql.Stmt
-	listRecentSessionsStmt               *sql.Stmt
-	listReferentCalibrationEpisodesStmt  *sql.Stmt
-	listReferentPriorEventsStmt          *sql.Stmt
-	listReferentRateEventsStmt           *sql.Stmt
-	listReferentsForPhrasesStmt          *sql.Stmt
-	listResolvedFailuresStmt             *sql.Stmt
-	listSessionCountersStmt              *sql.Stmt
-	listSessionOpenFailuresStmt          *sql.Stmt
-	listSessionReadFilesStmt             *sql.Stmt
-	listSessionTestVerdictsStmt          *sql.Stmt
-	listSessionTouchedPathsStmt          *sql.Stmt
-	listSessionsStmt                     *sql.Stmt
-	listStaleDigestSessionsStmt          *sql.Stmt
-	listUnclaimedFailuresStmt            *sql.Stmt
-	listUnsettledReferentLabelsStmt      *sql.Stmt
-	listUnsettledTurnOutcomesStmt        *sql.Stmt
-	listUserMessagesBySessionStmt        *sql.Stmt
-	markReferentEventsFoldedStmt         *sql.Stmt
-	markSegmentProcessedStmt             *sql.Stmt
-	mergeFailureFirstSeenStmt            *sql.Stmt
-	nextSessionStartMillisStmt           *sql.Stmt
-	promoteReferentStmt                  *sql.Stmt
-	recordCollapsedTurnStmt              *sql.Stmt
-	recordFileReadStmt                   *sql.Stmt
-	recordProcessedSegmentStmt           *sql.Stmt
-	recordSegmentAttemptStmt             *sql.Stmt
-	rekeyCommandPartitionStmt            *sql.Stmt
-	rekeyCrushCommitsStmt                *sql.Stmt
-	rekeyFailurePartitionStmt            *sql.Stmt
-	renameSessionStmt                    *sql.Stmt
-	resolveFailuresForCommandStmt        *sql.Stmt
-	searchNotebookByTagStmt              *sql.Stmt
-	searchNotebookByTextStmt             *sql.Stmt
-	searchSessionDigestsStmt             *sql.Stmt
-	setSessionChannelStmt                *sql.Stmt
-	settleReferentEpisodeStmt            *sql.Stmt
-	settleTurnOutcomeStmt                *sql.Stmt
-	updateMessageStmt                    *sql.Stmt
-	updateNotebookCompressionStmt        *sql.Stmt
-	updateSessionStmt                    *sql.Stmt
-	updateSessionTitleAndUsageStmt       *sql.Stmt
-	upsertCommandRunStmt                 *sql.Stmt
-	upsertFailureStmt                    *sql.Stmt
-	upsertProjectRateStmt                *sql.Stmt
-	upsertSessionDigestStmt              *sql.Stmt
+	db                                      DBTX
+	tx                                      *sql.Tx
+	bumpPendingAttributionAttemptsStmt      *sql.Stmt
+	bumpSessionCounterStmt                  *sql.Stmt
+	countCleanReferentAcceptancesStmt       *sql.Stmt
+	countUserMessagesBySessionStmt          *sql.Stmt
+	createFileStmt                          *sql.Stmt
+	createMessageStmt                       *sql.Stmt
+	createNotebookEntryStmt                 *sql.Stmt
+	createNotebookTagStmt                   *sql.Stmt
+	createSessionStmt                       *sql.Stmt
+	deleteCommandConflictsStmt              *sql.Stmt
+	deleteFailureStmt                       *sql.Stmt
+	deleteFileStmt                          *sql.Stmt
+	deleteMCPDisabledServerStmt             *sql.Stmt
+	deleteMCPEnabledServerStmt              *sql.Stmt
+	deleteMessageStmt                       *sql.Stmt
+	deleteNotebookEntriesBySessionStmt      *sql.Stmt
+	deletePendingAttributionStmt            *sql.Stmt
+	deleteProcessedSegmentsBySessionStmt    *sql.Stmt
+	deleteSessionStmt                       *sql.Stmt
+	deleteSessionDigestStmt                 *sql.Stmt
+	deleteSessionDigestIndexStmt            *sql.Stmt
+	deleteSessionFilesStmt                  *sql.Stmt
+	deleteSessionMessagesStmt               *sql.Stmt
+	evictPendingAttributionStmt             *sql.Stmt
+	getAverageResponseTimeStmt              *sql.Stmt
+	getCollapsedTurnStatsStmt               *sql.Stmt
+	getEdgeFiringStatsStmt                  *sql.Stmt
+	getFailureMetaStmt                      *sql.Stmt
+	getFileStmt                             *sql.Stmt
+	getFileByPathAndSessionStmt             *sql.Stmt
+	getFileReadStmt                         *sql.Stmt
+	getHourDayHeatmapStmt                   *sql.Stmt
+	getLastAssistantMessageBySessionStmt    *sql.Stmt
+	getLastSessionStmt                      *sql.Stmt
+	getLatestCheckpointEntryStmt            *sql.Stmt
+	getMapUsageStmt                         *sql.Stmt
+	getMaxNotebookEventNumberStmt           *sql.Stmt
+	getMessageStmt                          *sql.Stmt
+	getNotebookEntriesStmt                  *sql.Stmt
+	getNotebookEntriesByEventTypeStmt       *sql.Stmt
+	getNotebookEntriesByTurnStmt            *sql.Stmt
+	getNotebookEntriesByTurnSegmentStmt     *sql.Stmt
+	getNotebookEntryCountStmt               *sql.Stmt
+	getNotebookTagsByEntryStmt              *sql.Stmt
+	getNotebookTokenCountStmt               *sql.Stmt
+	getNotebookTurnsWithEntriesStmt         *sql.Stmt
+	getOldestNotebookEntriesStmt            *sql.Stmt
+	getProcessedSegmentStmt                 *sql.Stmt
+	getProjectRateStmt                      *sql.Stmt
+	getPruningStatsStmt                     *sql.Stmt
+	getRecentActivityStmt                   *sql.Stmt
+	getSessionByIDStmt                      *sql.Stmt
+	getSessionCounterStmt                   *sql.Stmt
+	getSessionDigestStmt                    *sql.Stmt
+	getToolUsageStmt                        *sql.Stmt
+	getTotalStatsStmt                       *sql.Stmt
+	getUsageByDayStmt                       *sql.Stmt
+	getUsageByDayOfWeekStmt                 *sql.Stmt
+	getUsageByHourStmt                      *sql.Stmt
+	getUsageByModelStmt                     *sql.Stmt
+	hasTurnOutcomeStmt                      *sql.Stmt
+	indexSessionDigestStmt                  *sql.Stmt
+	insertCrushCommitStmt                   *sql.Stmt
+	insertEdgeFiringStmt                    *sql.Stmt
+	insertMCPDisabledServerStmt             *sql.Stmt
+	insertMCPEnabledServerStmt              *sql.Stmt
+	insertPendingAttributionStmt            *sql.Stmt
+	insertReferentEpisodeStmt               *sql.Stmt
+	insertReferentEpisodeLabeledStmt        *sql.Stmt
+	insertTurnOutcomeStmt                   *sql.Stmt
+	labelReferentEpisodeStmt                *sql.Stmt
+	lastRecordedRepoHeadStmt                *sql.Stmt
+	listAllUserMessagesStmt                 *sql.Stmt
+	listCommandPartitionKeysStmt            *sql.Stmt
+	listCrushCommitPartitionKeysStmt        *sql.Stmt
+	listCrushCommitSHAsStmt                 *sql.Stmt
+	listFailurePartitionKeysStmt            *sql.Stmt
+	listFailuresByKeyStmt                   *sql.Stmt
+	listFilesByPathStmt                     *sql.Stmt
+	listFilesBySessionStmt                  *sql.Stmt
+	listHotReadFilesStmt                    *sql.Stmt
+	listLatestSessionFilesStmt              *sql.Stmt
+	listMCPDisabledServersStmt              *sql.Stmt
+	listMCPEnabledServersStmt               *sql.Stmt
+	listMessagesBySessionStmt               *sql.Stmt
+	listMessagesBySessionFromSummaryStmt    *sql.Stmt
+	listNewFilesStmt                        *sql.Stmt
+	listOpenFailuresStmt                    *sql.Stmt
+	listPendingAttributionStmt              *sql.Stmt
+	listPendingAttributionPartitionKeysStmt *sql.Stmt
+	listProcessedSegmentsStmt               *sql.Stmt
+	listRecentCommandsStmt                  *sql.Stmt
+	listRecentSessionDigestsStmt            *sql.Stmt
+	listRecentSessionsStmt                  *sql.Stmt
+	listReferentCalibrationEpisodesStmt     *sql.Stmt
+	listReferentPriorEventsStmt             *sql.Stmt
+	listReferentRateEventsStmt              *sql.Stmt
+	listReferentsForPhrasesStmt             *sql.Stmt
+	listResolvedFailuresStmt                *sql.Stmt
+	listSessionCountersStmt                 *sql.Stmt
+	listSessionOpenFailuresStmt             *sql.Stmt
+	listSessionReadFilesStmt                *sql.Stmt
+	listSessionTestVerdictsStmt             *sql.Stmt
+	listSessionTouchedPathsStmt             *sql.Stmt
+	listSessionsStmt                        *sql.Stmt
+	listStaleDigestSessionsStmt             *sql.Stmt
+	listUnclaimedFailuresStmt               *sql.Stmt
+	listUnsettledReferentLabelsStmt         *sql.Stmt
+	listUnsettledTurnOutcomesStmt           *sql.Stmt
+	listUserMessagesBySessionStmt           *sql.Stmt
+	markReferentEventsFoldedStmt            *sql.Stmt
+	markSegmentProcessedStmt                *sql.Stmt
+	mergeFailureFirstSeenStmt               *sql.Stmt
+	nextSessionStartMillisStmt              *sql.Stmt
+	promoteReferentStmt                     *sql.Stmt
+	recordCollapsedTurnStmt                 *sql.Stmt
+	recordFileReadStmt                      *sql.Stmt
+	recordProcessedSegmentStmt              *sql.Stmt
+	recordSegmentAttemptStmt                *sql.Stmt
+	rekeyCommandPartitionStmt               *sql.Stmt
+	rekeyCrushCommitsStmt                   *sql.Stmt
+	rekeyFailurePartitionStmt               *sql.Stmt
+	rekeyPendingAttributionStmt             *sql.Stmt
+	renameSessionStmt                       *sql.Stmt
+	resolveFailuresForCommandStmt           *sql.Stmt
+	searchNotebookByTagStmt                 *sql.Stmt
+	searchNotebookByTextStmt                *sql.Stmt
+	searchSessionDigestsStmt                *sql.Stmt
+	setSessionChannelStmt                   *sql.Stmt
+	settleReferentEpisodeStmt               *sql.Stmt
+	settleTurnOutcomeStmt                   *sql.Stmt
+	updateMessageStmt                       *sql.Stmt
+	updateNotebookCompressionStmt           *sql.Stmt
+	updateSessionStmt                       *sql.Stmt
+	updateSessionTitleAndUsageStmt          *sql.Stmt
+	upsertCommandRunStmt                    *sql.Stmt
+	upsertFailureStmt                       *sql.Stmt
+	upsertProjectRateStmt                   *sql.Stmt
+	upsertSessionDigestStmt                 *sql.Stmt
 }
 
 func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 	return &Queries{
-		db:                                   tx,
-		tx:                                   tx,
-		bumpSessionCounterStmt:               q.bumpSessionCounterStmt,
-		countCleanReferentAcceptancesStmt:    q.countCleanReferentAcceptancesStmt,
-		countUserMessagesBySessionStmt:       q.countUserMessagesBySessionStmt,
-		createFileStmt:                       q.createFileStmt,
-		createMessageStmt:                    q.createMessageStmt,
-		createNotebookEntryStmt:              q.createNotebookEntryStmt,
-		createNotebookTagStmt:                q.createNotebookTagStmt,
-		createSessionStmt:                    q.createSessionStmt,
-		deleteCommandConflictsStmt:           q.deleteCommandConflictsStmt,
-		deleteFailureStmt:                    q.deleteFailureStmt,
-		deleteFileStmt:                       q.deleteFileStmt,
-		deleteMCPDisabledServerStmt:          q.deleteMCPDisabledServerStmt,
-		deleteMCPEnabledServerStmt:           q.deleteMCPEnabledServerStmt,
-		deleteMessageStmt:                    q.deleteMessageStmt,
-		deleteNotebookEntriesBySessionStmt:   q.deleteNotebookEntriesBySessionStmt,
-		deleteProcessedSegmentsBySessionStmt: q.deleteProcessedSegmentsBySessionStmt,
-		deleteSessionStmt:                    q.deleteSessionStmt,
-		deleteSessionDigestStmt:              q.deleteSessionDigestStmt,
-		deleteSessionDigestIndexStmt:         q.deleteSessionDigestIndexStmt,
-		deleteSessionFilesStmt:               q.deleteSessionFilesStmt,
-		deleteSessionMessagesStmt:            q.deleteSessionMessagesStmt,
-		getAverageResponseTimeStmt:           q.getAverageResponseTimeStmt,
-		getCollapsedTurnStatsStmt:            q.getCollapsedTurnStatsStmt,
-		getEdgeFiringStatsStmt:               q.getEdgeFiringStatsStmt,
-		getFailureMetaStmt:                   q.getFailureMetaStmt,
-		getFileStmt:                          q.getFileStmt,
-		getFileByPathAndSessionStmt:          q.getFileByPathAndSessionStmt,
-		getFileReadStmt:                      q.getFileReadStmt,
-		getHourDayHeatmapStmt:                q.getHourDayHeatmapStmt,
-		getLastAssistantMessageBySessionStmt: q.getLastAssistantMessageBySessionStmt,
-		getLastSessionStmt:                   q.getLastSessionStmt,
-		getLatestCheckpointEntryStmt:         q.getLatestCheckpointEntryStmt,
-		getMapUsageStmt:                      q.getMapUsageStmt,
-		getMaxNotebookEventNumberStmt:        q.getMaxNotebookEventNumberStmt,
-		getMessageStmt:                       q.getMessageStmt,
-		getNotebookEntriesStmt:               q.getNotebookEntriesStmt,
-		getNotebookEntriesByEventTypeStmt:    q.getNotebookEntriesByEventTypeStmt,
-		getNotebookEntriesByTurnStmt:         q.getNotebookEntriesByTurnStmt,
-		getNotebookEntriesByTurnSegmentStmt:  q.getNotebookEntriesByTurnSegmentStmt,
-		getNotebookEntryCountStmt:            q.getNotebookEntryCountStmt,
-		getNotebookTagsByEntryStmt:           q.getNotebookTagsByEntryStmt,
-		getNotebookTokenCountStmt:            q.getNotebookTokenCountStmt,
-		getNotebookTurnsWithEntriesStmt:      q.getNotebookTurnsWithEntriesStmt,
-		getOldestNotebookEntriesStmt:         q.getOldestNotebookEntriesStmt,
-		getProcessedSegmentStmt:              q.getProcessedSegmentStmt,
-		getProjectRateStmt:                   q.getProjectRateStmt,
-		getPruningStatsStmt:                  q.getPruningStatsStmt,
-		getRecentActivityStmt:                q.getRecentActivityStmt,
-		getSessionByIDStmt:                   q.getSessionByIDStmt,
-		getSessionCounterStmt:                q.getSessionCounterStmt,
-		getSessionDigestStmt:                 q.getSessionDigestStmt,
-		getToolUsageStmt:                     q.getToolUsageStmt,
-		getTotalStatsStmt:                    q.getTotalStatsStmt,
-		getUsageByDayStmt:                    q.getUsageByDayStmt,
-		getUsageByDayOfWeekStmt:              q.getUsageByDayOfWeekStmt,
-		getUsageByHourStmt:                   q.getUsageByHourStmt,
-		getUsageByModelStmt:                  q.getUsageByModelStmt,
-		hasTurnOutcomeStmt:                   q.hasTurnOutcomeStmt,
-		indexSessionDigestStmt:               q.indexSessionDigestStmt,
-		insertCrushCommitStmt:                q.insertCrushCommitStmt,
-		insertEdgeFiringStmt:                 q.insertEdgeFiringStmt,
-		insertMCPDisabledServerStmt:          q.insertMCPDisabledServerStmt,
-		insertMCPEnabledServerStmt:           q.insertMCPEnabledServerStmt,
-		insertReferentEpisodeStmt:            q.insertReferentEpisodeStmt,
-		insertReferentEpisodeLabeledStmt:     q.insertReferentEpisodeLabeledStmt,
-		insertTurnOutcomeStmt:                q.insertTurnOutcomeStmt,
-		labelReferentEpisodeStmt:             q.labelReferentEpisodeStmt,
-		lastRecordedRepoHeadStmt:             q.lastRecordedRepoHeadStmt,
-		listAllUserMessagesStmt:              q.listAllUserMessagesStmt,
-		listCommandPartitionKeysStmt:         q.listCommandPartitionKeysStmt,
-		listCrushCommitPartitionKeysStmt:     q.listCrushCommitPartitionKeysStmt,
-		listCrushCommitSHAsStmt:              q.listCrushCommitSHAsStmt,
-		listFailurePartitionKeysStmt:         q.listFailurePartitionKeysStmt,
-		listFailuresByKeyStmt:                q.listFailuresByKeyStmt,
-		listFilesByPathStmt:                  q.listFilesByPathStmt,
-		listFilesBySessionStmt:               q.listFilesBySessionStmt,
-		listHotReadFilesStmt:                 q.listHotReadFilesStmt,
-		listLatestSessionFilesStmt:           q.listLatestSessionFilesStmt,
-		listMCPDisabledServersStmt:           q.listMCPDisabledServersStmt,
-		listMCPEnabledServersStmt:            q.listMCPEnabledServersStmt,
-		listMessagesBySessionStmt:            q.listMessagesBySessionStmt,
-		listMessagesBySessionFromSummaryStmt: q.listMessagesBySessionFromSummaryStmt,
-		listNewFilesStmt:                     q.listNewFilesStmt,
-		listOpenFailuresStmt:                 q.listOpenFailuresStmt,
-		listProcessedSegmentsStmt:            q.listProcessedSegmentsStmt,
-		listRecentCommandsStmt:               q.listRecentCommandsStmt,
-		listRecentSessionDigestsStmt:         q.listRecentSessionDigestsStmt,
-		listRecentSessionsStmt:               q.listRecentSessionsStmt,
-		listReferentCalibrationEpisodesStmt:  q.listReferentCalibrationEpisodesStmt,
-		listReferentPriorEventsStmt:          q.listReferentPriorEventsStmt,
-		listReferentRateEventsStmt:           q.listReferentRateEventsStmt,
-		listReferentsForPhrasesStmt:          q.listReferentsForPhrasesStmt,
-		listResolvedFailuresStmt:             q.listResolvedFailuresStmt,
-		listSessionCountersStmt:              q.listSessionCountersStmt,
-		listSessionOpenFailuresStmt:          q.listSessionOpenFailuresStmt,
-		listSessionReadFilesStmt:             q.listSessionReadFilesStmt,
-		listSessionTestVerdictsStmt:          q.listSessionTestVerdictsStmt,
-		listSessionTouchedPathsStmt:          q.listSessionTouchedPathsStmt,
-		listSessionsStmt:                     q.listSessionsStmt,
-		listStaleDigestSessionsStmt:          q.listStaleDigestSessionsStmt,
-		listUnclaimedFailuresStmt:            q.listUnclaimedFailuresStmt,
-		listUnsettledReferentLabelsStmt:      q.listUnsettledReferentLabelsStmt,
-		listUnsettledTurnOutcomesStmt:        q.listUnsettledTurnOutcomesStmt,
-		listUserMessagesBySessionStmt:        q.listUserMessagesBySessionStmt,
-		markReferentEventsFoldedStmt:         q.markReferentEventsFoldedStmt,
-		markSegmentProcessedStmt:             q.markSegmentProcessedStmt,
-		mergeFailureFirstSeenStmt:            q.mergeFailureFirstSeenStmt,
-		nextSessionStartMillisStmt:           q.nextSessionStartMillisStmt,
-		promoteReferentStmt:                  q.promoteReferentStmt,
-		recordCollapsedTurnStmt:              q.recordCollapsedTurnStmt,
-		recordFileReadStmt:                   q.recordFileReadStmt,
-		recordProcessedSegmentStmt:           q.recordProcessedSegmentStmt,
-		recordSegmentAttemptStmt:             q.recordSegmentAttemptStmt,
-		rekeyCommandPartitionStmt:            q.rekeyCommandPartitionStmt,
-		rekeyCrushCommitsStmt:                q.rekeyCrushCommitsStmt,
-		rekeyFailurePartitionStmt:            q.rekeyFailurePartitionStmt,
-		renameSessionStmt:                    q.renameSessionStmt,
-		resolveFailuresForCommandStmt:        q.resolveFailuresForCommandStmt,
-		searchNotebookByTagStmt:              q.searchNotebookByTagStmt,
-		searchNotebookByTextStmt:             q.searchNotebookByTextStmt,
-		searchSessionDigestsStmt:             q.searchSessionDigestsStmt,
-		setSessionChannelStmt:                q.setSessionChannelStmt,
-		settleReferentEpisodeStmt:            q.settleReferentEpisodeStmt,
-		settleTurnOutcomeStmt:                q.settleTurnOutcomeStmt,
-		updateMessageStmt:                    q.updateMessageStmt,
-		updateNotebookCompressionStmt:        q.updateNotebookCompressionStmt,
-		updateSessionStmt:                    q.updateSessionStmt,
-		updateSessionTitleAndUsageStmt:       q.updateSessionTitleAndUsageStmt,
-		upsertCommandRunStmt:                 q.upsertCommandRunStmt,
-		upsertFailureStmt:                    q.upsertFailureStmt,
-		upsertProjectRateStmt:                q.upsertProjectRateStmt,
-		upsertSessionDigestStmt:              q.upsertSessionDigestStmt,
+		db:                                      tx,
+		tx:                                      tx,
+		bumpPendingAttributionAttemptsStmt:      q.bumpPendingAttributionAttemptsStmt,
+		bumpSessionCounterStmt:                  q.bumpSessionCounterStmt,
+		countCleanReferentAcceptancesStmt:       q.countCleanReferentAcceptancesStmt,
+		countUserMessagesBySessionStmt:          q.countUserMessagesBySessionStmt,
+		createFileStmt:                          q.createFileStmt,
+		createMessageStmt:                       q.createMessageStmt,
+		createNotebookEntryStmt:                 q.createNotebookEntryStmt,
+		createNotebookTagStmt:                   q.createNotebookTagStmt,
+		createSessionStmt:                       q.createSessionStmt,
+		deleteCommandConflictsStmt:              q.deleteCommandConflictsStmt,
+		deleteFailureStmt:                       q.deleteFailureStmt,
+		deleteFileStmt:                          q.deleteFileStmt,
+		deleteMCPDisabledServerStmt:             q.deleteMCPDisabledServerStmt,
+		deleteMCPEnabledServerStmt:              q.deleteMCPEnabledServerStmt,
+		deleteMessageStmt:                       q.deleteMessageStmt,
+		deleteNotebookEntriesBySessionStmt:      q.deleteNotebookEntriesBySessionStmt,
+		deletePendingAttributionStmt:            q.deletePendingAttributionStmt,
+		deleteProcessedSegmentsBySessionStmt:    q.deleteProcessedSegmentsBySessionStmt,
+		deleteSessionStmt:                       q.deleteSessionStmt,
+		deleteSessionDigestStmt:                 q.deleteSessionDigestStmt,
+		deleteSessionDigestIndexStmt:            q.deleteSessionDigestIndexStmt,
+		deleteSessionFilesStmt:                  q.deleteSessionFilesStmt,
+		deleteSessionMessagesStmt:               q.deleteSessionMessagesStmt,
+		evictPendingAttributionStmt:             q.evictPendingAttributionStmt,
+		getAverageResponseTimeStmt:              q.getAverageResponseTimeStmt,
+		getCollapsedTurnStatsStmt:               q.getCollapsedTurnStatsStmt,
+		getEdgeFiringStatsStmt:                  q.getEdgeFiringStatsStmt,
+		getFailureMetaStmt:                      q.getFailureMetaStmt,
+		getFileStmt:                             q.getFileStmt,
+		getFileByPathAndSessionStmt:             q.getFileByPathAndSessionStmt,
+		getFileReadStmt:                         q.getFileReadStmt,
+		getHourDayHeatmapStmt:                   q.getHourDayHeatmapStmt,
+		getLastAssistantMessageBySessionStmt:    q.getLastAssistantMessageBySessionStmt,
+		getLastSessionStmt:                      q.getLastSessionStmt,
+		getLatestCheckpointEntryStmt:            q.getLatestCheckpointEntryStmt,
+		getMapUsageStmt:                         q.getMapUsageStmt,
+		getMaxNotebookEventNumberStmt:           q.getMaxNotebookEventNumberStmt,
+		getMessageStmt:                          q.getMessageStmt,
+		getNotebookEntriesStmt:                  q.getNotebookEntriesStmt,
+		getNotebookEntriesByEventTypeStmt:       q.getNotebookEntriesByEventTypeStmt,
+		getNotebookEntriesByTurnStmt:            q.getNotebookEntriesByTurnStmt,
+		getNotebookEntriesByTurnSegmentStmt:     q.getNotebookEntriesByTurnSegmentStmt,
+		getNotebookEntryCountStmt:               q.getNotebookEntryCountStmt,
+		getNotebookTagsByEntryStmt:              q.getNotebookTagsByEntryStmt,
+		getNotebookTokenCountStmt:               q.getNotebookTokenCountStmt,
+		getNotebookTurnsWithEntriesStmt:         q.getNotebookTurnsWithEntriesStmt,
+		getOldestNotebookEntriesStmt:            q.getOldestNotebookEntriesStmt,
+		getProcessedSegmentStmt:                 q.getProcessedSegmentStmt,
+		getProjectRateStmt:                      q.getProjectRateStmt,
+		getPruningStatsStmt:                     q.getPruningStatsStmt,
+		getRecentActivityStmt:                   q.getRecentActivityStmt,
+		getSessionByIDStmt:                      q.getSessionByIDStmt,
+		getSessionCounterStmt:                   q.getSessionCounterStmt,
+		getSessionDigestStmt:                    q.getSessionDigestStmt,
+		getToolUsageStmt:                        q.getToolUsageStmt,
+		getTotalStatsStmt:                       q.getTotalStatsStmt,
+		getUsageByDayStmt:                       q.getUsageByDayStmt,
+		getUsageByDayOfWeekStmt:                 q.getUsageByDayOfWeekStmt,
+		getUsageByHourStmt:                      q.getUsageByHourStmt,
+		getUsageByModelStmt:                     q.getUsageByModelStmt,
+		hasTurnOutcomeStmt:                      q.hasTurnOutcomeStmt,
+		indexSessionDigestStmt:                  q.indexSessionDigestStmt,
+		insertCrushCommitStmt:                   q.insertCrushCommitStmt,
+		insertEdgeFiringStmt:                    q.insertEdgeFiringStmt,
+		insertMCPDisabledServerStmt:             q.insertMCPDisabledServerStmt,
+		insertMCPEnabledServerStmt:              q.insertMCPEnabledServerStmt,
+		insertPendingAttributionStmt:            q.insertPendingAttributionStmt,
+		insertReferentEpisodeStmt:               q.insertReferentEpisodeStmt,
+		insertReferentEpisodeLabeledStmt:        q.insertReferentEpisodeLabeledStmt,
+		insertTurnOutcomeStmt:                   q.insertTurnOutcomeStmt,
+		labelReferentEpisodeStmt:                q.labelReferentEpisodeStmt,
+		lastRecordedRepoHeadStmt:                q.lastRecordedRepoHeadStmt,
+		listAllUserMessagesStmt:                 q.listAllUserMessagesStmt,
+		listCommandPartitionKeysStmt:            q.listCommandPartitionKeysStmt,
+		listCrushCommitPartitionKeysStmt:        q.listCrushCommitPartitionKeysStmt,
+		listCrushCommitSHAsStmt:                 q.listCrushCommitSHAsStmt,
+		listFailurePartitionKeysStmt:            q.listFailurePartitionKeysStmt,
+		listFailuresByKeyStmt:                   q.listFailuresByKeyStmt,
+		listFilesByPathStmt:                     q.listFilesByPathStmt,
+		listFilesBySessionStmt:                  q.listFilesBySessionStmt,
+		listHotReadFilesStmt:                    q.listHotReadFilesStmt,
+		listLatestSessionFilesStmt:              q.listLatestSessionFilesStmt,
+		listMCPDisabledServersStmt:              q.listMCPDisabledServersStmt,
+		listMCPEnabledServersStmt:               q.listMCPEnabledServersStmt,
+		listMessagesBySessionStmt:               q.listMessagesBySessionStmt,
+		listMessagesBySessionFromSummaryStmt:    q.listMessagesBySessionFromSummaryStmt,
+		listNewFilesStmt:                        q.listNewFilesStmt,
+		listOpenFailuresStmt:                    q.listOpenFailuresStmt,
+		listPendingAttributionStmt:              q.listPendingAttributionStmt,
+		listPendingAttributionPartitionKeysStmt: q.listPendingAttributionPartitionKeysStmt,
+		listProcessedSegmentsStmt:               q.listProcessedSegmentsStmt,
+		listRecentCommandsStmt:                  q.listRecentCommandsStmt,
+		listRecentSessionDigestsStmt:            q.listRecentSessionDigestsStmt,
+		listRecentSessionsStmt:                  q.listRecentSessionsStmt,
+		listReferentCalibrationEpisodesStmt:     q.listReferentCalibrationEpisodesStmt,
+		listReferentPriorEventsStmt:             q.listReferentPriorEventsStmt,
+		listReferentRateEventsStmt:              q.listReferentRateEventsStmt,
+		listReferentsForPhrasesStmt:             q.listReferentsForPhrasesStmt,
+		listResolvedFailuresStmt:                q.listResolvedFailuresStmt,
+		listSessionCountersStmt:                 q.listSessionCountersStmt,
+		listSessionOpenFailuresStmt:             q.listSessionOpenFailuresStmt,
+		listSessionReadFilesStmt:                q.listSessionReadFilesStmt,
+		listSessionTestVerdictsStmt:             q.listSessionTestVerdictsStmt,
+		listSessionTouchedPathsStmt:             q.listSessionTouchedPathsStmt,
+		listSessionsStmt:                        q.listSessionsStmt,
+		listStaleDigestSessionsStmt:             q.listStaleDigestSessionsStmt,
+		listUnclaimedFailuresStmt:               q.listUnclaimedFailuresStmt,
+		listUnsettledReferentLabelsStmt:         q.listUnsettledReferentLabelsStmt,
+		listUnsettledTurnOutcomesStmt:           q.listUnsettledTurnOutcomesStmt,
+		listUserMessagesBySessionStmt:           q.listUserMessagesBySessionStmt,
+		markReferentEventsFoldedStmt:            q.markReferentEventsFoldedStmt,
+		markSegmentProcessedStmt:                q.markSegmentProcessedStmt,
+		mergeFailureFirstSeenStmt:               q.mergeFailureFirstSeenStmt,
+		nextSessionStartMillisStmt:              q.nextSessionStartMillisStmt,
+		promoteReferentStmt:                     q.promoteReferentStmt,
+		recordCollapsedTurnStmt:                 q.recordCollapsedTurnStmt,
+		recordFileReadStmt:                      q.recordFileReadStmt,
+		recordProcessedSegmentStmt:              q.recordProcessedSegmentStmt,
+		recordSegmentAttemptStmt:                q.recordSegmentAttemptStmt,
+		rekeyCommandPartitionStmt:               q.rekeyCommandPartitionStmt,
+		rekeyCrushCommitsStmt:                   q.rekeyCrushCommitsStmt,
+		rekeyFailurePartitionStmt:               q.rekeyFailurePartitionStmt,
+		rekeyPendingAttributionStmt:             q.rekeyPendingAttributionStmt,
+		renameSessionStmt:                       q.renameSessionStmt,
+		resolveFailuresForCommandStmt:           q.resolveFailuresForCommandStmt,
+		searchNotebookByTagStmt:                 q.searchNotebookByTagStmt,
+		searchNotebookByTextStmt:                q.searchNotebookByTextStmt,
+		searchSessionDigestsStmt:                q.searchSessionDigestsStmt,
+		setSessionChannelStmt:                   q.setSessionChannelStmt,
+		settleReferentEpisodeStmt:               q.settleReferentEpisodeStmt,
+		settleTurnOutcomeStmt:                   q.settleTurnOutcomeStmt,
+		updateMessageStmt:                       q.updateMessageStmt,
+		updateNotebookCompressionStmt:           q.updateNotebookCompressionStmt,
+		updateSessionStmt:                       q.updateSessionStmt,
+		updateSessionTitleAndUsageStmt:          q.updateSessionTitleAndUsageStmt,
+		upsertCommandRunStmt:                    q.upsertCommandRunStmt,
+		upsertFailureStmt:                       q.upsertFailureStmt,
+		upsertProjectRateStmt:                   q.upsertProjectRateStmt,
+		upsertSessionDigestStmt:                 q.upsertSessionDigestStmt,
 	}
 }

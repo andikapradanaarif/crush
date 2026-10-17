@@ -126,6 +126,14 @@ type NotebookTag struct {
 	Tag     string `json:"tag"`
 }
 
+type PendingAttribution struct {
+	ProjectKey string `json:"project_key"`
+	PrevSha    string `json:"prev_sha"`
+	PostSha    string `json:"post_sha"`
+	Attempts   int64  `json:"attempts"`
+	CreatedAt  int64  `json:"created_at"`
+}
+
 type ProcessedSegment struct {
 	SessionID     string        `json:"session_id"`
 	TurnNumber    int64         `json:"turn_number"`

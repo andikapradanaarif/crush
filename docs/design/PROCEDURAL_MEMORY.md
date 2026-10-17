@@ -117,11 +117,18 @@ rarely takes. Mining needs a label at the unit it clusters:
   ledger's last-recorded head — the catch-up net — and a stamped
   pre that died inside the run's own rewrite retries once against
   that same baseline; both over-attribute the gap, the safe
-  direction. Bounded false-accept residuals: a run dying post-exec
-  before record (crash window), or a stamped run whose sweep fails
-  terminally — its range is unique per run, so no later stamp
-  re-covers it (#372 tracks draining persisted miss ranges). An unreadable
-  exclusion set abstains the commit arm entirely (fail-closed).
+  direction. A stamped run's failed range is unique, so no later
+  stamp re-covers it — the hold arm persists it to
+  `pending_attribution` and every later successful sweep drains
+  those rows through their own bounded rev-lists, dropping a range
+  whose endpoint died or that fails twice — a dropped range can be
+  re-persisted fresh (restarting its attempts) if a later
+  ledger-baseline failure overlaps it, which only happens on a live
+  hold and so stays practically bounded (#372).
+  Bounded false-accept residuals: a run dying post-exec before
+  record (crash window), and a drained range past its retry bound.
+  An unreadable exclusion set abstains the commit arm entirely
+  (fail-closed).
   User-side commit inside the window is a positive signal only when
   no divergence precedes it (revised-then-committed is a revision).
   Evidence is prefetched per settle batch — one git log over the

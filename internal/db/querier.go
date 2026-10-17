@@ -9,6 +9,9 @@ import (
 )
 
 type Querier interface {
+	// A drained range that failed rev-list again -- the bound drops the
+	// row at the retry limit, mirroring sweepFail's once-more contract.
+	BumpPendingAttributionAttempts(ctx context.Context, arg BumpPendingAttributionAttemptsParams) error
 	BumpSessionCounter(ctx context.Context, arg BumpSessionCounterParams) error
 	// Evidence for a phrase->target mapping: accepted episodes the memory
 	// tail did not suggest, counted by distinct session so a session
@@ -41,12 +44,19 @@ type Querier interface {
 	DeleteMCPEnabledServer(ctx context.Context, name string) error
 	DeleteMessage(ctx context.Context, id string) error
 	DeleteNotebookEntriesBySession(ctx context.Context, sessionID string) error
+	// A range fully drained, proven dead, or past its retry bound.
+	DeletePendingAttribution(ctx context.Context, arg DeletePendingAttributionParams) error
 	DeleteProcessedSegmentsBySession(ctx context.Context, sessionID string) error
 	DeleteSession(ctx context.Context, id string) error
 	DeleteSessionDigest(ctx context.Context, sessionID string) error
 	DeleteSessionDigestIndex(ctx context.Context, sessionID string) error
 	DeleteSessionFiles(ctx context.Context, sessionID string) error
 	DeleteSessionMessages(ctx context.Context, sessionID string) error
+	// Cap the pending set -- beyond it the newest rows win and the oldest
+	// are abandoned (a bounded miss, not a pile-up of deterministic
+	// failures re-queued forever). Rows tied at the boundary tick all
+	// survive -- a slight overshoot is cheaper than picking between them.
+	EvictPendingAttribution(ctx context.Context, arg EvictPendingAttributionParams) error
 	GetAverageResponseTime(ctx context.Context) (int64, error)
 	GetCollapsedTurnStats(ctx context.Context) (GetCollapsedTurnStatsRow, error)
 	GetEdgeFiringStats(ctx context.Context) ([]GetEdgeFiringStatsRow, error)
@@ -122,6 +132,11 @@ type Querier interface {
 	InsertEdgeFiring(ctx context.Context, arg InsertEdgeFiringParams) (int64, error)
 	InsertMCPDisabledServer(ctx context.Context, name string) error
 	InsertMCPEnabledServer(ctx context.Context, name string) error
+	// A (prev, post) range whose sweep failed under a held baseline
+	// (#372) -- persisted so a later run's drain re-sweeps what no
+	// stamped run will. OR IGNORE covers re-persist of the same range:
+	// the original row's attempts count and created_at stand.
+	InsertPendingAttribution(ctx context.Context, arg InsertPendingAttributionParams) error
 	// One judged vague-prompt observation (#165). INSERT OR IGNORE makes
 	// the (session_id, source_message_id, target) unique key the retry
 	// idempotency point: a repair-chain re-run of the turn-context pass
@@ -165,8 +180,10 @@ type Querier interface {
 	// same row instead of drifting. settled_at IS NULL keeps the
 	// write-once contract: a frozen row's label fields never re-stamp.
 	LabelReferentEpisode(ctx context.Context, arg LabelReferentEpisodeParams) error
-	// HEAD as of the most recent recorded run -- the pre-run baseline a
-	// HEAD-moving run diffs against to attribute its commits (#359).
+	// HEAD as of the most recent recorded run -- the catch-up baseline
+	// an unstamped run diffs against to attribute its commits, and the
+	// retry range when a stamped pre-run head died in the run's own
+	// rewrite (#359, #365).
 	LastRecordedRepoHead(ctx context.Context, projectKey string) (string, error)
 	// Backs prompt history when no session is open. Needs
 	// idx_messages_role_created_at to seek rather than scan the table.
@@ -202,6 +219,10 @@ type Querier interface {
 	ListMessagesBySessionFromSummary(ctx context.Context, arg ListMessagesBySessionFromSummaryParams) ([]Message, error)
 	ListNewFiles(ctx context.Context) ([]File, error)
 	ListOpenFailures(ctx context.Context, arg ListOpenFailuresParams) ([]FailureMemory, error)
+	// Pending ranges oldest-first for FIFO drain; the sort tiebreak keeps
+	// the order deterministic when two ranges share a created_at tick.
+	ListPendingAttribution(ctx context.Context, arg ListPendingAttributionParams) ([]ListPendingAttributionRow, error)
+	ListPendingAttributionPartitionKeys(ctx context.Context) ([]string, error)
 	ListProcessedSegments(ctx context.Context, sessionID string) ([]ProcessedSegment, error)
 	// last_at is millisecond-granularity so re-runs order by recency;
 	// rowid settles ties for rows written in the same millisecond.
@@ -382,6 +403,11 @@ type Querier interface {
 	RekeyCrushCommits(ctx context.Context, arg RekeyCrushCommitsParams) error
 	// Claim one legacy row onto its partitioned signature.
 	RekeyFailurePartition(ctx context.Context, arg RekeyFailurePartitionParams) error
+	// Remote-lifecycle re-claim (#266): pending rows under a stale
+	// sibling key would never drain -- reads are key-scoped. OR IGNORE
+	// covers a (project_key, prev_sha, post_sha) twin: the current key's
+	// row wins, the stale-keyed row is left dead under the old key.
+	RekeyPendingAttribution(ctx context.Context, arg RekeyPendingAttributionParams) error
 	RenameSession(ctx context.Context, arg RenameSessionParams) error
 	// A clean run of a normalized command resolves its open failure rows
 	// in the same directory -- "go test ./..." passing in packages/web

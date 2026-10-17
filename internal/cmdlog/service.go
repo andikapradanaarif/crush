@@ -374,6 +374,15 @@ type service struct {
 	// stamps past it rather than retrying forever.
 	sweepFailMu sync.Mutex
 	sweepFail   map[string]struct{}
+	// drainMu serializes pending-attribution drains — overlapping
+	// drains duplicate rev-list work for idempotent writes, so a
+	// busy drain makes the next one skip rather than queue.
+	drainMu sync.Mutex
+	// drainRangeFn lists one pending range's commits. Nil means the
+	// real drainRange — tests inject it to reach the ordinary-failure
+	// class, which a live repo can't produce (two resolvable commits
+	// never fail rev-list).
+	drainRangeFn func(ctx context.Context, prevSha, postSha string) (string, error)
 	// now is the timestamp source for every stamp and cutoff the
 	// service computes. Production wiring leaves it nil (wall
 	// clock); eval seeding injects a controlled clock so scripted
@@ -508,8 +517,12 @@ func (s *service) reclaimSiblingPartitions(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	paKeys, err := s.q.ListPendingAttributionPartitionKeys(ctx)
+	if err != nil {
+		return err
+	}
 	stale := map[string]struct{}{}
-	for _, k := range slices.Concat(fKeys, cKeys, ccKeys) {
+	for _, k := range slices.Concat(fKeys, cKeys, ccKeys, paKeys) {
 		if k != s.projectKey && s.siblingKey(k) {
 			stale[k] = struct{}{}
 		}
@@ -528,6 +541,12 @@ func (s *service) reclaimSiblingPartitions(ctx context.Context) error {
 			return err
 		}
 		if err := s.q.RekeyCrushCommits(ctx, db.RekeyCrushCommitsParams{
+			ProjectKey:   s.projectKey,
+			ProjectKey_2: k,
+		}); err != nil {
+			return err
+		}
+		if err := s.q.RekeyPendingAttribution(ctx, db.RekeyPendingAttributionParams{
 			ProjectKey:   s.projectKey,
 			ProjectKey_2: k,
 		}); err != nil {
@@ -1049,16 +1068,13 @@ func (s *service) lastRecordedHead(ctx context.Context) string {
 // always fails again and lands in the same fallback one exec
 // later; discriminating would need error parsing for no gain.
 //
-// Bounded residual, accepted — commits below the next stamped
-// run's pre settle as external acceptance by either door: a run
-// dying post-exec before RecordRun (crash or force-kill in the
-// exec→record gap), or a stamped run whose sweep fails terminally
-// (transient rev-list error) — its range is unique per run, so no
-// later stamp re-covers it and the next successful stamp advances
-// the ledger baseline past it. The held baseline repairs only if
-// an unstamped run records before that next stamp — rare by
-// construction; draining persisted miss ranges on later stamped
-// runs is the follow-up (#372).
+// A stamped run's failed range is unique, so no later stamp
+// re-covers it — attributionFallback persists it to
+// pending_attribution on the hold arm, and every successful sweep
+// drains pending ranges afterward (#372). What still settles as
+// external acceptance: a run dying post-exec before RecordRun
+// (crash or force-kill in the exec→record gap), and a drained
+// range past its retry bound — both bounded misses.
 //
 // The bool reports whether the sweep completed. false means commits
 // in the moved range may have gone unattributed; the caller then
@@ -1068,7 +1084,11 @@ func (s *service) lastRecordedHead(ctx context.Context) string {
 // Permanent failure classes don't retry forever — see
 // attributionFallback.
 func (s *service) recordCrushCommits(ctx context.Context, sessionID, prevHead, ledgerHead, headAfter string) bool {
-	if !s.hasRepo || prevHead == "" || headAfter == "" || prevHead == headAfter {
+	if !s.hasRepo {
+		return true
+	}
+	if prevHead == "" || headAfter == "" || prevHead == headAfter {
+		s.drainPendingAttribution(ctx, sessionID)
 		return true
 	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -1087,6 +1107,7 @@ func (s *service) recordCrushCommits(ctx context.Context, sessionID, prevHead, l
 		return s.attributionFallback(ctx, prevHead, headAfter, err)
 	}
 	if out == "" {
+		s.drainPendingAttribution(ctx, sessionID)
 		return true
 	}
 	// The write phase detaches from the caller's ctx with its own
@@ -1124,6 +1145,7 @@ func (s *service) recordCrushCommits(ctx context.Context, sessionID, prevHead, l
 			slog.Error("Error recording crush-made commits", "error", err)
 			return false
 		}
+		s.drainPendingAttribution(ctx, sessionID)
 		return true
 	}
 	tx, err := conn.BeginTx(wctx, nil)
@@ -1140,6 +1162,7 @@ func (s *service) recordCrushCommits(ctx context.Context, sessionID, prevHead, l
 		slog.Error("Error committing crush-made commits", "error", err)
 		return false
 	}
+	s.drainPendingAttribution(ctx, sessionID)
 	return true
 }
 
@@ -1157,9 +1180,12 @@ func (s *service) recordCrushCommits(ctx context.Context, sessionID, prevHead, l
 //     worse.
 //   - Live baseline, sweep still failed: transient (timeout, object
 //     store hiccup) or deterministic (a huge divergent pull's range).
-//     The baseline holds once so the next run re-sweeps; a range
-//     failing a second time is deterministic — holding it forever is
-//     the same livelock a dead baseline is — so it stamps too.
+//     The baseline holds once so the next run re-sweeps — and the
+//     range persists to pending_attribution so a later stamped run's
+//     drain re-sweeps what its unique pre would otherwise skip
+//     (#372); a range failing a second time is deterministic —
+//     holding it forever is the same livelock a dead baseline is —
+//     so it stamps too.
 //
 // The repeat set is process-local: a restart grants one free retry,
 // which is the right bound.
@@ -1186,7 +1212,187 @@ func (s *service) attributionFallback(ctx context.Context, prevHead, headAfter s
 	}
 	slog.Error("Error sweeping commits for attribution; the recorded baseline stays behind for a re-sweep",
 		"error", sweepErr, "prev", prevHead, "after", headAfter)
+	s.persistPendingAttribution(prevHead, headAfter)
 	return false
+}
+
+// pendingAttributionCap bounds the pending_attribution set — inserts
+// beyond it evict the oldest rows.
+const pendingAttributionCap = 8
+
+// pendingAttributionMaxAttempts mirrors sweepFail's retry-once bound:
+// a drained range that fails rev-list twice is deterministic and is
+// dropped rather than re-queued forever.
+const pendingAttributionMaxAttempts = 2
+
+// drainRangeBudget is each pending range's share of the drain — the
+// drain's parent budget scales to len(rows) × this so a few slow
+// ranges can't starve the tail into deadline-burned attempts.
+const drainRangeBudget = 3 * time.Second
+
+// persistPendingAttribution queues a held range for a later run's
+// drain (#372). Best-effort and detached — the caller's ctx may
+// already be dead, and a persist failure just keeps today's residual.
+func (s *service) persistPendingAttribution(prevSha, postSha string) {
+	if prevSha == "" || postSha == "" {
+		return
+	}
+	pctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := s.q.InsertPendingAttribution(pctx, db.InsertPendingAttributionParams{
+		ProjectKey: s.projectKey,
+		PrevSha:    prevSha,
+		PostSha:    postSha,
+		CreatedAt:  s.now().UnixMilli(),
+	}); err != nil {
+		slog.Error("Error queueing failed attribution range for drain", "error", err)
+		return
+	}
+	if err := s.q.EvictPendingAttribution(pctx, db.EvictPendingAttributionParams{
+		ProjectKey:   s.projectKey,
+		ProjectKey_2: s.projectKey,
+		Limit:        pendingAttributionCap,
+	}); err != nil {
+		slog.Error("Error capping pending attribution ranges", "error", err)
+	}
+}
+
+// drainPendingAttribution re-sweeps ranges a held baseline persisted
+// (#372). It runs only after the run's own sweep succeeded — a failing
+// git is the wrong time to pile on more rev-lists — on its own detached
+// budget, since the caller's ctx may already be dead. Each pending
+// range gets its own bounded rev-list so one dead range can't poison
+// the drain: either endpoint failing rev-parse drops the row outright
+// (the dead-baseline contract — bounded one-time miss, not permanent
+// blindness); a range that fails rev-list burns an attempt and drops
+// at the retry bound. Drained SHAs record under the draining run's
+// session — the original recording session is gone, and exclusion
+// reads are project-scoped. A dropped range can re-persist fresh if a
+// later ledger-baseline sweep fails on an overlapping range — the
+// fresh row restarts the attempts budget, but re-persist only happens
+// on a live hold, so the cycle stays practically bounded.
+func (s *service) drainPendingAttribution(ctx context.Context, sessionID string) {
+	if !s.hasRepo {
+		return
+	}
+	// One drain at a time — a racing second drain would just redo
+	// the same rev-lists; skip rather than queue behind it.
+	if !s.drainMu.TryLock() {
+		return
+	}
+	defer s.drainMu.Unlock()
+	listRange := s.drainRangeFn
+	if listRange == nil {
+		listRange = s.drainRange
+	}
+	// The row list is cheap — fetch it on its own budget, then size
+	// the drain's to the rows it returned so every pending range
+	// gets a full per-range shot.
+	lctx, lcancel := context.WithTimeout(context.WithoutCancel(ctx), drainRangeBudget)
+	rows, err := s.q.ListPendingAttribution(lctx, db.ListPendingAttributionParams{
+		ProjectKey: s.projectKey,
+		Limit:      pendingAttributionCap,
+	})
+	lcancel()
+	if err != nil {
+		slog.Error("Error listing pending attribution ranges", "error", err)
+		return
+	}
+	if len(rows) == 0 {
+		return
+	}
+	// Parent gets one extra range-budget of slack: the loop only
+	// starts a row when a full budget remains, so an n-row parent
+	// sized at exactly n budgets would starve its last row.
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx),
+		drainRangeBudget*time.Duration(len(rows)+1))
+	defer cancel()
+	deadline, hasDeadline := dctx.Deadline()
+	now := s.now().UnixMilli()
+	for _, r := range rows {
+		// Less than one full range budget left — stop rather than
+		// burn attempts on rev-lists that die to the parent
+		// deadline. Starved rows keep their attempts for the next
+		// drain.
+		if hasDeadline && time.Until(deadline) < drainRangeBudget {
+			break
+		}
+		del := db.DeletePendingAttributionParams{
+			ProjectKey: s.projectKey,
+			PrevSha:    r.PrevSha,
+			PostSha:    r.PostSha,
+		}
+		rctx, rcancel := context.WithTimeout(dctx, drainRangeBudget)
+		out, rerr := listRange(rctx, r.PrevSha, r.PostSha)
+		rcancel()
+		switch {
+		case errors.Is(rerr, errDeadRange):
+			// The base no longer resolves — same contract as the
+			// live sweep's dead-baseline arm: drop the row, accept
+			// the bounded miss.
+			if err := s.q.DeletePendingAttribution(dctx, del); err != nil {
+				slog.Error("Error dropping dead pending attribution range", "error", err)
+			}
+		case rerr != nil && r.Attempts+1 >= pendingAttributionMaxAttempts:
+			slog.Warn("Pending attribution range failed past its retry bound — dropping",
+				"prev", r.PrevSha, "after", r.PostSha, "error", rerr)
+			if err := s.q.DeletePendingAttribution(dctx, del); err != nil {
+				slog.Error("Error dropping bounded-out pending range", "error", err)
+			}
+		case rerr != nil:
+			if err := s.q.BumpPendingAttributionAttempts(dctx, db.BumpPendingAttributionAttemptsParams{
+				ProjectKey: s.projectKey,
+				PrevSha:    r.PrevSha,
+				PostSha:    r.PostSha,
+			}); err != nil {
+				slog.Error("Error bumping pending attribution attempts", "error", err)
+			}
+		default:
+			// Drained — attribute every commit in the range under
+			// the draining run's session, then retire the row. A
+			// failed insert keeps the row (OR IGNORE makes the retry
+			// idempotent) rather than dropping the tail permanently.
+			insertFailed := false
+			for _, sha := range strings.Split(out, "\n") {
+				sha = strings.TrimSpace(sha)
+				if sha == "" {
+					continue
+				}
+				if err := s.q.InsertCrushCommit(dctx, db.InsertCrushCommitParams{
+					ProjectKey: s.projectKey,
+					Sha:        sha,
+					SessionID:  sessionID,
+					CreatedAt:  now,
+				}); err != nil {
+					slog.Error("Error inserting drained commit attribution", "error", err)
+					insertFailed = true
+				}
+			}
+			if insertFailed {
+				continue
+			}
+			if err := s.q.DeletePendingAttribution(dctx, del); err != nil {
+				slog.Error("Error retiring drained attribution range", "error", err)
+			}
+		}
+	}
+}
+
+// errDeadRange marks a pending range whose endpoints can no longer
+// resolve — the drain drops the row instead of burning an attempt.
+var errDeadRange = errors.New("pending attribution range does not resolve")
+
+// drainRange reads one pending range: verify both endpoints resolve,
+// then rev-list it. Failures classify as dead-range (drop — either
+// dead endpoint makes the range permanently unresolvable) or ordinary
+// (count toward the retry bound).
+func (s *service) drainRange(ctx context.Context, prevSha, postSha string) (string, error) {
+	for _, sha := range []string{prevSha, postSha} {
+		if _, err := gitOut(ctx, s.workingDir, "rev-parse", "--verify", "--quiet", sha+"^{commit}"); err != nil {
+			return "", errDeadRange
+		}
+	}
+	return gitOut(ctx, s.workingDir, "rev-list", prevSha+".."+postSha)
 }
 
 // relDir normalizes a run's working directory to workspace-relative so
