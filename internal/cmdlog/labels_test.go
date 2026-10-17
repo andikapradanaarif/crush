@@ -550,6 +550,14 @@ func TestSettleReferentLabels_AgentCommitExcluded(t *testing.T) {
 		SessionID: "s1", Command: "git commit -m \"agent commit\"",
 		CWD: env.workingDir, Ran: true, ExitCode: 0,
 	})
+	// Bounded-attribution retry: a starved sweep holds the baseline so
+	// the next recorded run re-sweeps the same range. The second run
+	// exercises the retry contract rather than depending on one
+	// attempt's timing.
+	svcReal.RecordRun(t.Context(), Run{
+		SessionID: "s1", Command: "git status",
+		CWD: env.workingDir, Ran: true, ExitCode: 0,
+	})
 
 	dueViaNewerSession(t, env, "s2")
 	require.NoError(t, env.svc.SettleReferentLabels(t.Context(), 10))
@@ -681,11 +689,31 @@ func TestSettleReferentLabels_NonCommitProducerExcluded(t *testing.T) {
 	git("checkout", "-b", "side")
 	require.NoError(t, os.WriteFile(path, []byte("v1\nv2"), 0o644))
 	git("add", target)
-	git("commit", "-m", "side change")
+	// The side commit must stay distinguishable from its cherry-pick:
+	// the pick reuses tree, parent, author and message, so a
+	// same-second cherry-pick produces the IDENTICAL commit object —
+	// one SHA, refs/heads/master and refs/heads/side both pointing at
+	// it, and the "external" original never exists as evidence. Pin
+	// the committer date below the window: the SHAs can never
+	// collide and the original is history, not acceptance evidence.
+	sideCommit := exec.CommandContext(t.Context(), "git",
+		"-C", env.workingDir, "commit", "-m", "side change")
+	sideCommit.Env = append(os.Environ(),
+		"GIT_COMMITTER_DATE=2000-01-01T00:00:00Z")
+	require.NoError(t, sideCommit.Run())
 	git("checkout", "-")       // back to the baseline branch
 	git("cherry-pick", "side") // new commit, no "commit" in argv
 	svcReal.RecordRun(t.Context(), Run{
 		SessionID: "s1", Command: "git cherry-pick side",
+		CWD: env.workingDir, Ran: true, ExitCode: 0,
+	})
+	// Attribution is bounded, not instant: the sweep's git calls are
+	// 3s budgets, and a starved attempt holds the baseline so the
+	// next recorded run re-sweeps the same range. A second run
+	// exercises exactly that retry — the contract under test — rather
+	// than depending on one attempt's timing on a loaded CI box.
+	svcReal.RecordRun(t.Context(), Run{
+		SessionID: "s1", Command: "git status",
 		CWD: env.workingDir, Ran: true, ExitCode: 0,
 	})
 

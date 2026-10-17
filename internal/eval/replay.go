@@ -265,6 +265,7 @@ func (r *Runner) runReplay(ctx context.Context, exp *Experiment, traj *Trajector
 	}
 	if cr, ok := drv.(CrushRunner); ok {
 		cr.FlagKeys = flagNames(manifest)
+		cr.AllowedEnv = envAllowlist(exp)
 		drv = cr
 		tr = cr
 	}
@@ -432,12 +433,13 @@ func (r *Runner) executeReplayRun(ctx context.Context, exp *Experiment, traj *Tr
 		RunIndex:     attempt,
 		StartedAt:    r.now(),
 		Env: Env{
-			CrushSHA:    crushSHA(),
-			Go:          goToolchain(),
-			OS:          runtime.GOOS,
-			ContentHash: strings.TrimPrefix(seedKey, "eval-"),
-			Temperature: temperatureKey(exp.Temperature),
-			ModelPin:    exp.Model,
+			CrushSHA:     crushSHA(),
+			Go:           goToolchain(),
+			OS:           runtime.GOOS,
+			ContentHash:  strings.TrimPrefix(seedKey, "eval-"),
+			Temperature:  temperatureKey(exp.Temperature),
+			ModelPin:     exp.Model,
+			EnvAllowlist: envAllowlist(exp),
 		},
 		Replay: &ReplayMeta{
 			ForkTurn:     fork,

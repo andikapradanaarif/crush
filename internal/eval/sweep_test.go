@@ -162,7 +162,7 @@ func TestGoCachePins(t *testing.T) {
 	// "/x/eval-go" is not filepath.IsAbs there and would be ignored.
 	cacheDir := filepath.Join(os.TempDir(), "eval-go")
 	t.Setenv(EvalGoCacheEnvVar, cacheDir)
-	pins := goCachePins(nil)
+	pins := goCachePins(nil, true)
 	require.Equal(t, filepath.Join(cacheDir, "mod"), pins["GOMODCACHE"])
 	require.Equal(t, filepath.Join(cacheDir, "build"), pins["GOCACHE"])
 }
@@ -171,7 +171,7 @@ func TestGoCachePins_RelativeOverrideIgnored(t *testing.T) {
 	unsetEnv(t, "GOMODCACHE")
 	unsetEnv(t, "GOCACHE")
 	t.Setenv(EvalGoCacheEnvVar, "rel/path")
-	pins := goCachePins(nil)
+	pins := goCachePins(nil, true)
 	require.NotEqual(t, filepath.Join("rel/path", "mod"), pins["GOMODCACHE"])
 }
 
@@ -179,13 +179,13 @@ func TestGoCachePins_HonorsAmbient(t *testing.T) {
 	t.Setenv("GOMODCACHE", "/operator/mod")
 	t.Setenv("GOCACHE", "/operator/build")
 	t.Setenv(EvalGoCacheEnvVar, "/x/eval-go")
-	require.Empty(t, goCachePins(nil))
+	require.Empty(t, goCachePins(nil, true))
 }
 
 func TestGoCachePins_HonorsReserved(t *testing.T) {
 	unsetEnv(t, "GOMODCACHE")
 	unsetEnv(t, "GOCACHE")
-	pins := goCachePins(map[string]bool{"GOMODCACHE": true})
+	pins := goCachePins(map[string]bool{"GOMODCACHE": true}, true)
 	require.NotContains(t, pins, "GOMODCACHE")
 	require.Contains(t, pins, "GOCACHE")
 }

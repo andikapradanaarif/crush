@@ -680,12 +680,18 @@ and the child's `.crushrc` all record what actually ran — a run
 under `LLM_MODEL` still keys to its own condition cell, distinct
 from manifest-pin records by design.
 
-Agent subprocesses inherit the operator's full credential environment
-(provider keys, `GITHUB_TOKEN`, `AWS_*`, `SSH_AUTH_SOCK`) — pinning is
-on `HOME`/`XDG` config, not on secrets. `origin.kind: production`
-prompts replay verbatim; run experiments that replay real prompts in a
-credential-scoped environment or accept that exposure as the runner's
-documented posture.
+Agent subprocesses run under an env allowlist (#345): only names the
+manifest references — `$VAR`/`${VAR}` templates in the providers block
+and arm options, catalog credential templates of pinned-but-undeclared
+providers, and the ambient credential chains of pinned SDK-native
+providers (hyper's `HYPER_API_KEY`, AWS SDK behind bedrock, Google ADC
+behind vertex) — plus a fixed minimal set (`PATH`, `HOME`, `TMPDIR`,
+Windows spawn vars) cross the exec boundary. Every admitted name lands
+on the record as `env.env_allowlist` (names only, never values), so a
+run reproduces from record + operator env and an ambient credential
+the manifest never named — the leak class behind #333 — cannot reach
+the child. `origin.kind: production` prompts replay verbatim under the
+same allowlist: credential exposure is what the manifest declared.
 
 `GOMODCACHE`/`GOCACHE` pin to a shared eval cache
 (`<user cache>/crush/eval-go`, overridable via
@@ -806,8 +812,9 @@ Before sampling, `RunExperiment` dry-resolves providers exactly as a
 turn subprocess will: a minimal `Config` built from `exp.providers`
 and the arm's option fragment, the real provider-prep path
 (`Config.PreflightProviders`), and the driver's effective environment
-(`subprocessEnv` — inherited env plus `ExtraEnv`, minus `CRUSH_*`/
-`EVAL_*`). Unresolved credential templates, dropped providers, and
+(`subprocessEnv` — the manifest-referenced allowlist plus the fixed
+minimal set and `ExtraEnv`, minus `CRUSH_*`/`EVAL_*`). Unresolved
+credential templates, dropped providers, and
 model pins that can't resolve abort before a subprocess spawns. A
 *declared* `api_key` that resolves empty is flagged even though the
 child only warns — custom providers survive keyless load (legitimate
