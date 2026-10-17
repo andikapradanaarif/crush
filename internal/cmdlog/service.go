@@ -1033,13 +1033,22 @@ func (s *service) lastRecordedHead(ctx context.Context) string {
 // rebase orphaned the object — so a failed sweep retries once
 // against ledgerHead: the widened range still covers the run's
 // commits at the cost of over-attributing the gap, the safe
-// direction. A second failure lands in attributionFallback.
+// direction. A second failure lands in attributionFallback. The
+// retry is unconditioned on the error class — a transient failure
+// retries the wider range on the same dying ctx, which almost
+// always fails again and lands in the same fallback one exec
+// later; discriminating would need error parsing for no gain.
 //
-// Bounded residual, accepted: a run that dies post-exec before
-// RecordRun leaves its commits below the next stamped run's pre,
-// where neither baseline's range reaches — they settle as external
-// acceptance. The window is the exec→record gap only (crash or
-// force-kill); unstamped recorders still catch it via the net.
+// Bounded residual, accepted — commits below the next stamped
+// run's pre settle as external acceptance by either door: a run
+// dying post-exec before RecordRun (crash or force-kill in the
+// exec→record gap), or a stamped run whose sweep fails terminally
+// (transient rev-list error) — its range is unique per run, so no
+// later stamp re-covers it and the next successful stamp advances
+// the ledger baseline past it. The held baseline repairs only if
+// an unstamped run records before that next stamp — rare by
+// construction; draining persisted miss ranges on later stamped
+// runs is the follow-up (#372).
 //
 // The bool reports whether the sweep completed. false means commits
 // in the moved range may have gone unattributed; the caller then
@@ -1056,11 +1065,11 @@ func (s *service) recordCrushCommits(ctx context.Context, sessionID, prevHead, l
 	defer cancel()
 	out, err := gitOut(ctx, s.workingDir, "rev-list", prevHead+".."+headAfter)
 	if err != nil && ledgerHead != "" && ledgerHead != prevHead {
-		// The stamped pre-run head no longer resolves — the run
-		// amended or rebased its own base. Retry once against the
-		// ledger baseline: the range widens to include inter-run
-		// externals, but the run's commits still attribute and
-		// over-attribution is the safe direction.
+		// Usually the stamped pre-run head no longer resolving —
+		// the run amended or rebased its own base. Retry once
+		// against the ledger baseline: the range widens to include
+		// inter-run externals, but the run's commits still
+		// attribute and over-attribution is the safe direction.
 		prevHead = ledgerHead
 		out, err = gitOut(ctx, s.workingDir, "rev-list", prevHead+".."+headAfter)
 	}

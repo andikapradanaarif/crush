@@ -513,9 +513,8 @@ func TestJobOutput_CarriesPreRunHead(t *testing.T) {
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	bgManager := shell.GetBackgroundShellManager()
-	bgShell, err := bgManager.Start(ctx, workingDir, nil, "echo done", "")
+	bgShell, err := bgManager.Start(ctx, workingDir, nil, "echo done", "", "pre-sha")
 	require.NoError(t, err)
-	bgShell.HeadBefore = "pre-sha"
 	bgShell.Wait()
 	defer func() { _ = bgManager.Remove(bgShell.ID) }()
 

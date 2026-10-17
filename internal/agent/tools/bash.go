@@ -264,11 +264,10 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 				// records it — sync fast-exit, job_output, or kill.
 				headBefore := preRunHead(ctx, cmdLog)
 				// Use background context so it continues after tool returns
-				bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), params.Command, params.Description)
+				bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), params.Command, params.Description, headBefore)
 				if err != nil {
 					return fantasy.ToolResponse{}, fmt.Errorf("error starting background shell: %w", err)
 				}
-				bgShell.HeadBefore = headBefore
 
 				// Wait a short time to detect fast failures (blocked commands, syntax errors, etc.)
 				time.Sleep(1 * time.Second)
@@ -340,11 +339,10 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 			bgManager := shell.GetBackgroundShellManager()
 			bgManager.Cleanup()
 			headBefore := preRunHead(ctx, cmdLog)
-			bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), params.Command, params.Description)
+			bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), params.Command, params.Description, headBefore)
 			if err != nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("error starting shell: %w", err)
 			}
-			bgShell.HeadBefore = headBefore
 
 			// Wait for either completion, auto-background threshold, or context cancellation
 			ticker := time.NewTicker(100 * time.Millisecond)

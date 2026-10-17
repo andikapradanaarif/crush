@@ -51,10 +51,11 @@ type BackgroundShell struct {
 	Shell       *Shell
 	WorkingDir  string
 	// HeadBefore is HEAD stamped just before exec — the bash tool
-	// sets it so the run recorded at completion attributes only the
-	// movement in [pre, post], leaving inter-run external commits to
-	// acceptance evidence (#365). Written once before the shell ID
-	// reaches a consumer, so no lock; "" leaves the run on the
+	// passes it to Start so the run recorded at completion
+	// attributes only the movement in [pre, post], leaving inter-run
+	// external commits to acceptance evidence (#365). Set at
+	// construction before the shell is published — never mutated —
+	// so readers need no lock; "" leaves the run on the
 	// ledger-baseline fallback.
 	HeadBefore  string
 	ctx         context.Context
@@ -96,8 +97,10 @@ func GetBackgroundShellManager() *BackgroundShellManager {
 	return backgroundManager
 }
 
-// Start creates and starts a new background shell with the given command.
-func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, blockFuncs []BlockFunc, command string, description string) (*BackgroundShell, error) {
+// Start creates and starts a new background shell with the given
+// command. headBefore carries the caller's pre-exec HEAD stamp
+// through to whoever records the run — opaque to the shell.
+func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, blockFuncs []BlockFunc, command string, description string, headBefore string) (*BackgroundShell, error) {
 	// Check job limit
 	if m.shells.Len() >= MaxBackgroundJobs {
 		return nil, fmt.Errorf("maximum number of background jobs (%d) reached. Please terminate or wait for some jobs to complete", MaxBackgroundJobs)
@@ -117,6 +120,7 @@ func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, b
 		Command:     command,
 		Description: description,
 		WorkingDir:  workingDir,
+		HeadBefore:  headBefore,
 		Shell:       shell,
 		ctx:         shellCtx,
 		cancel:      cancel,
