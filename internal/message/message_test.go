@@ -805,3 +805,35 @@ func TestShouldFlushNow_AgainstCompactBaseline(t *testing.T) {
 		require.NotZero(t, got.ReasoningContent().FinishedAt)
 	})
 }
+
+// A reasoning block that isn't the first is invisible to
+// ReasoningContent(), but its finish is just as structural — without a
+// per-part baseline the flush rides the debounce window instead.
+func TestUpdate_SecondReasoningBlockFinishFlushes(t *testing.T) {
+	t.Parallel()
+
+	svc, sessionID := newTestService(t, WithDebounce(time.Hour))
+	msg, err := svc.Create(t.Context(), sessionID, CreateMessageParams{Role: Assistant})
+	require.NoError(t, err)
+
+	// Land a baseline carrying two open reasoning blocks.
+	msg.AppendReasoningContent("a", "ta")
+	require.NoError(t, svc.Update(t.Context(), msg))
+	msg.AppendReasoningContent("b", "tb")
+	require.NoError(t, svc.Update(t.Context(), msg))
+
+	// Finishing block b must flush now — the debounce is an hour.
+	msg.FinishThinking("b")
+	require.NoError(t, svc.Update(t.Context(), msg))
+
+	got, err := svc.Get(t.Context(), msg.ID)
+	require.NoError(t, err)
+	var b ReasoningContent
+	for _, part := range got.Parts {
+		if c, ok := part.(ReasoningContent); ok && c.ID == "b" {
+			b = c
+		}
+	}
+	require.Equal(t, "b", b.ID, "block b must persist")
+	require.NotZero(t, b.FinishedAt, "block b's finish must flush, not ride the debounce")
+}

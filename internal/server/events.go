@@ -365,17 +365,21 @@ func messageToProto(m message.Message) proto.Message {
 			msg.Parts = append(msg.Parts, proto.TextContent{Text: v.Text, Hidden: v.Hidden})
 		case message.ReasoningContent:
 			msg.Parts = append(msg.Parts, proto.ReasoningContent{
-				Thinking:   v.Thinking,
-				Signature:  v.Signature,
-				StartedAt:  v.StartedAt,
-				FinishedAt: v.FinishedAt,
+				ID:               v.ID,
+				Thinking:         v.Thinking,
+				Signature:        v.Signature,
+				ThoughtSignature: v.ThoughtSignature,
+				ToolID:           v.ToolID,
+				StartedAt:        v.StartedAt,
+				FinishedAt:       v.FinishedAt,
 			})
 		case message.ToolCall:
 			msg.Parts = append(msg.Parts, proto.ToolCall{
-				ID:       v.ID,
-				Name:     v.Name,
-				Input:    v.Input,
-				Finished: v.Finished,
+				ID:               v.ID,
+				Name:             v.Name,
+				Input:            v.Input,
+				ProviderExecuted: v.ProviderExecuted,
+				Finished:         v.Finished,
 			})
 		case message.ToolResult:
 			msg.Parts = append(msg.Parts, proto.ToolResult{

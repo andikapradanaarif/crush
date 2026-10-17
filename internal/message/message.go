@@ -111,8 +111,8 @@ type pendingState struct {
 // Message: a finished stream would otherwise pin its parts — reasoning
 // text, tool inputs, tool results — on the heap forever.
 type flushBaseline struct {
-	toolCallsFinished   []bool
-	reasoningFinishedAt int64
+	toolCallsFinished      []bool
+	reasoningFinishedCount int
 }
 
 // newFlushBaseline projects the fields [shouldFlushNow] reads out of a
@@ -124,9 +124,23 @@ func newFlushBaseline(m *Message) flushBaseline {
 		finished[i] = c.Finished
 	}
 	return flushBaseline{
-		toolCallsFinished:   finished,
-		reasoningFinishedAt: m.ReasoningContent().FinishedAt,
+		toolCallsFinished:      finished,
+		reasoningFinishedCount: countFinishedReasoning(m),
 	}
+}
+
+// countFinishedReasoning counts reasoning parts whose finish landed.
+// The count is the right baseline signal: it is monotone per part
+// (FinishedAt only ever goes 0→nonzero), and it sees finishes on parts
+// ReasoningContent() — first-part — never reports.
+func countFinishedReasoning(m *Message) int {
+	n := 0
+	for _, part := range m.Parts {
+		if c, ok := part.(ReasoningContent); ok && c.FinishedAt != 0 {
+			n++
+		}
+	}
+	return n
 }
 
 type service struct {
@@ -477,10 +491,10 @@ func shouldFlushNow(prev *flushBaseline, next *Message) bool {
 	}
 
 	var prevCalls []bool
-	var prevReasoningFinishedAt int64
+	var prevReasoningFinished int
 	if prev != nil {
 		prevCalls = prev.toolCallsFinished
-		prevReasoningFinishedAt = prev.reasoningFinishedAt
+		prevReasoningFinished = prev.reasoningFinishedCount
 	}
 	nextCalls := next.ToolCalls()
 	if len(nextCalls) != len(prevCalls) {
@@ -495,7 +509,11 @@ func shouldFlushNow(prev *flushBaseline, next *Message) bool {
 		// flips true). Earlier deltas to Input are debounced with the
 		// rest of the streaming state.
 	}
-	if next.ReasoningContent().FinishedAt > 0 && prevReasoningFinishedAt == 0 {
+	// A reasoning part finishing is structural on ANY part, not just the
+	// first — a multi-block stream's later blocks end on parts
+	// ReasoningContent() never sees. Finished count is monotone, so a
+	// part created already-finished counts here too.
+	if countFinishedReasoning(next) > prevReasoningFinished {
 		return true
 	}
 	return false

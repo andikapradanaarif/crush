@@ -333,3 +333,18 @@ func TestToolCallMutators_PreserveProviderExecuted(t *testing.T) {
 	require.Equal(t, `{"q":"x"}`, calls[0].Input)
 	require.True(t, calls[0].Finished)
 }
+
+func TestFinishThinking_UnmatchedIDClosesOpenPart(t *testing.T) {
+	t.Parallel()
+
+	// An end event no part claims still closes whatever is open — a
+	// signature-minted carrier must not linger absorbing id-less events.
+	msg := &Message{}
+	msg.AppendThoughtSignature("x", "sig", "call-1")
+	msg.FinishThinking("y")
+
+	got := msg.ReasoningContent()
+	require.Equal(t, "x", got.ID)
+	require.Equal(t, "sig", got.ThoughtSignature)
+	require.NotZero(t, got.FinishedAt)
+}

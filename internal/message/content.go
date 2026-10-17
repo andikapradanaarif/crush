@@ -486,17 +486,28 @@ func (m *Message) reasoningPartIndex(id string) int {
 		}
 		return -1
 	}
-	last, lastOpen := -1, -1
+	if i := m.lastOpenReasoningIndex(); i >= 0 {
+		return i
+	}
+	// No open part — fall back to the last reasoning part at all so
+	// id-less streams keep accumulating on one part.
+	last := -1
 	for i, part := range m.Parts {
-		if c, ok := part.(ReasoningContent); ok {
+		if _, ok := part.(ReasoningContent); ok {
 			last = i
-			if c.FinishedAt == 0 {
-				lastOpen = i
-			}
 		}
 	}
-	if lastOpen >= 0 {
-		return lastOpen
+	return last
+}
+
+// lastOpenReasoningIndex returns the last reasoning part still streaming
+// (FinishedAt unset), or -1 when none is open.
+func (m *Message) lastOpenReasoningIndex() int {
+	last := -1
+	for i, part := range m.Parts {
+		if c, ok := part.(ReasoningContent); ok && c.FinishedAt == 0 {
+			last = i
+		}
 	}
 	return last
 }
@@ -551,12 +562,19 @@ func (m *Message) SetReasoningResponsesData(id string, data *openai.ResponsesRea
 }
 
 func (m *Message) FinishThinking(id string) {
-	if i := m.reasoningPartIndex(id); i >= 0 {
-		c := m.Parts[i].(ReasoningContent)
-		if c.FinishedAt == 0 {
-			c.FinishedAt = time.Now().Unix()
-			m.Parts[i] = c
-		}
+	i := m.reasoningPartIndex(id)
+	if i < 0 {
+		// An end event for a block no part claims — close whatever is
+		// still open so no part lingers open absorbing id-less events.
+		i = m.lastOpenReasoningIndex()
+	}
+	if i < 0 {
+		return
+	}
+	c := m.Parts[i].(ReasoningContent)
+	if c.FinishedAt == 0 {
+		c.FinishedAt = time.Now().Unix()
+		m.Parts[i] = c
 	}
 }
 
