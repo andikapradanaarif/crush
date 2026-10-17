@@ -16,6 +16,18 @@ information to `crush.db` but never effectively read it back across
 sessions — memory was a write-only ledger. This milestone series exists
 to turn "it learns" from a claim into a measurement.
 
+**Direction (10-17): regularized harness evolution.** Plan of record:
+[2026-10-17-roadmap-regularized-evolution](2026-10-17-roadmap-regularized-evolution.md).
+The learning-loop machinery is correct but has no data at single-user
+volume (348 real turns, 0 `referent_episodes`, 0 `project_rates`), and
+the eval corpus sits at the pass ceiling. The bet moves to an offline
+RRSI-style loop that evolves prompts, tool descriptions, edges, and
+memory settings, judged on tasks it never tuned on, with every kept
+change landing as a reviewed PR. Gate G1 — Terminal-Bench 2.1 evolve
+set, SWE-bench Verified OOD gate, δ ≤ 3pp — decides whether transfer
+is measurable at all; if not, the fallback keeps the ledger discipline
+without self-evolving claims.
+
 **Failure memory — existence proof: DONE and armored.** A durable failure
 record written in session N provably changes behavior in session N+1, measured
 across two powered runs (−27% total calls, ~25–30% discovery savings,
@@ -73,7 +85,9 @@ no overlay emitted).
 | Small-model verdicts steer selection (L3) | **First evidence, in-sample** — −33.3% discovery on resolver-engaged cells, under the 35% bar |
 | Turn-level acceptance labels | **Machinery landed** — `turn_outcomes` settlement at a fixed window; production volume pending |
 | Selector admits certifiable | **Machinery landed, honest null** — LTT arm (#380): corpus under the 78-draw floor, no overlay emitted; volume path is `tail.decisions` telemetry |
-| Smarter *every time* (compounding with depth) | Unproven — and currently *untestable*: only open failures render; `command_memory` never read. Capacity fix precedes the ladder |
+| Smarter *every time* (compounding with depth) | **Inconclusive** — capacity fix landed (#222); depth ladder inconclusive with distractor harm at j=3 (10-08) |
+| The corpus can measure capability, not just efficiency | **No** — control arms at the ceiling on every powered cell (expdisc 29/32, 21/21, 21/21; held 22/22–22/23); #227 closed without meeting its 40–70% band |
+| Harness evolution yields held-out gains here | **Untested** — Gate G1 of the 10-17 roadmap decides measurability |
 | Selectivity survives scale | Unproven — needs distractor ladder; abstention must be scoreable first |
 | Generalizes (models, task classes, memory types) | **Partial directional read only** — DeepSeek replication on the validation pool: 121/121 pass, −14.4% discovery on completed cells; #348 fixed, sealed-pool rerun is what counts |
 
@@ -125,8 +139,9 @@ record the plan that followed from it.
 | 2026-09-30 | exp | [Failure-memory powered runs + negative control](2026-09-30-exp-failure-memory-powered.md) — the existence proof |
 | 2026-10-01 | exp | [Existence-proof position + mask verdict](2026-10-01-exp-failure-memory-existence-proof.md) — current snapshot |
 | 2026-10-01 | roadmap | [Roadmap after the mask verdict](2026-10-01-roadmap-after-mask.md) — log only; superseded 10-04 |
-| 2026-10-04 | roadmap | [Fixed skeleton, learned variables](2026-10-04-roadmap-fixed-skeleton.md) — **plan of record**: four-tier memory, per-project learned params, user-level priors |
+| 2026-10-04 | roadmap | [Fixed skeleton, learned variables](2026-10-04-roadmap-fixed-skeleton.md) — superseded 10-09: four-tier memory, per-project learned params, user-level priors |
 | 2026-10-08 | exp | [Memory ladders](2026-10-08-exp-memory-ladders.md) — LOO ablations held; depth ladder inconclusive (distractor harm at j=3) |
 | 2026-10-09 | roadmap | [Value and use](2026-10-09-roadmap-value-and-use.md) — superseded 10-15: phases mirror milestones; memory off-instrument-building onto real use |
 | 2026-10-15 | exp | [Verify-loop + resolver chain](2026-10-15-exp-verify-loop-and-resolver.md) — edge validated in-sample (86/88 vs 78/88, cross-invocation), resolver made live, engagement-conditional coverage — pool relabeled validation per #343 |
-| 2026-10-15 | roadmap | [Honest evidence before new capability](2026-10-15-roadmap-honest-evidence.md) — **plan of record**: two reviews found label instability + in-sample claims; integrity work (#340–#348) precedes procedural Phase A |
+| 2026-10-15 | roadmap | [Honest evidence before new capability](2026-10-15-roadmap-honest-evidence.md) — superseded 10-17: two reviews found label instability + in-sample claims; integrity work (#340–#348) precedes procedural Phase A |
+| 2026-10-17 | roadmap | [Regularized harness evolution](2026-10-17-roadmap-regularized-evolution.md) — **plan of record**: learning loop parked (no data at single-user volume); RRSI-style evolution loop with Gate G1 (Terminal-Bench evolve, SWE-bench Verified OOD); memory channels become evolvable components; edit capture for user-level memory |
