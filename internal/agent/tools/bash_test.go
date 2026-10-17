@@ -117,7 +117,7 @@ func (m *recordingPermissionService) SubscribeNotifications(ctx context.Context)
 func newBashToolForTest(workingDir string) fantasy.AgentTool {
 	permissions := &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
 	attribution := &config.Attribution{TrailerStyle: config.TrailerStyleNone}
-	return NewBashTool(nil, permissions, workingDir, attribution, "test-model")
+	return NewBashTool(nil, permissions, workingDir, workingDir, attribution, "test-model")
 }
 
 func newBashToolWithRecordingPerms(workingDir string, allow bool) (fantasy.AgentTool, *recordingPermissionService) {
@@ -126,7 +126,7 @@ func newBashToolWithRecordingPerms(workingDir string, allow bool) (fantasy.Agent
 		allow:  allow,
 	}
 	attribution := &config.Attribution{TrailerStyle: config.TrailerStyleNone}
-	return NewBashTool(nil, perms, workingDir, attribution, "test-model"), perms
+	return NewBashTool(nil, perms, workingDir, workingDir, attribution, "test-model"), perms
 }
 
 func TestBashTool_ChainedCommandsRequirePermission(t *testing.T) {
@@ -191,7 +191,7 @@ func TestTruncateOutputValidUTF8(t *testing.T) {
 	// MaxOutputLength so TruncateOutput must truncate it.
 	content := strings.Repeat("你好世界", MaxOutputLength)
 
-	out := TruncateOutput(content)
+	out := TruncateOutput(content, t.TempDir())
 	require.True(t, utf8.ValidString(out), "truncated output must stay valid UTF-8")
 	require.Contains(t, out, "truncated at capture")
 }
@@ -199,7 +199,7 @@ func TestTruncateOutputValidUTF8(t *testing.T) {
 func TestTruncateOutputShortContent(t *testing.T) {
 	t.Parallel()
 	content := "short output"
-	require.Equal(t, content, TruncateOutput(content))
+	require.Equal(t, content, TruncateOutput(content, t.TempDir()))
 }
 
 func TestTruncateOutputEmoji(t *testing.T) {
@@ -207,7 +207,7 @@ func TestTruncateOutputEmoji(t *testing.T) {
 	// Emoji with ZWJ sequences should not be split.
 	content := strings.Repeat("👨‍👩‍👧‍👦", MaxOutputLength)
 
-	out := TruncateOutput(content)
+	out := TruncateOutput(content, t.TempDir())
 	require.True(t, utf8.ValidString(out), "truncated output must stay valid UTF-8")
 	require.Contains(t, out, "truncated at capture")
 }
@@ -280,7 +280,7 @@ func TestTruncateOutputANSISafe(t *testing.T) {
 	// Head cut straddles the escape: it must land whole in the
 	// omitted middle, not split into a partial sequence.
 	content := strings.Repeat("x", half-5) + esc + strings.Repeat("y", MaxOutputLength)
-	out := TruncateOutput(content)
+	out := TruncateOutput(content, t.TempDir())
 	require.True(t, utf8.ValidString(out))
 	parts := strings.SplitN(out, "\n\n... [", 2)
 	require.Len(t, parts, 2)
@@ -291,7 +291,7 @@ func TestTruncateOutputANSISafe(t *testing.T) {
 	total := MaxOutputLength * 2
 	tailStart := total - half
 	content = strings.Repeat("z", tailStart-3) + esc + strings.Repeat("w", total-tailStart+3-len(esc))
-	out = TruncateOutput(content)
+	out = TruncateOutput(content, t.TempDir())
 	parts = strings.SplitN(out, "] ...\n\n", 2)
 	require.Len(t, parts, 2)
 	tail := parts[1]
