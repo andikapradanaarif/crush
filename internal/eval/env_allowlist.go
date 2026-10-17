@@ -25,16 +25,18 @@ import (
 var envRefRe = regexp.MustCompile(`\$(?:\{[#?!]*([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*))`)
 
 // passthroughNameRe is the env_passthrough grammar: an env var name
-// with an optional single trailing '*' admitting the family
-// ("CLOUDSDK_*" passes CLOUDSDK_CONFIG). A bare '*' is not a name.
-var passthroughNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*\*?$`)
+// with an optional trailing '_*' admitting the family
+// ("CLOUDSDK_*" passes CLOUDSDK_CONFIG). The underscore is required
+// — a bare '*' would make "FOO*" a raw prefix admitting FOOBAR,
+// which is a footgun, not a family. A bare '*' is not a name.
+var passthroughNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(?:_\*)?$`)
 
 // validatePassthroughName rejects env_passthrough entries that can
 // never admit anything or smuggle a value past the names-only
 // contract.
 func validatePassthroughName(name string) error {
 	if !passthroughNameRe.MatchString(name) {
-		return fmt.Errorf("%q is not an env var name (optionally ending in one '*')", name)
+		return fmt.Errorf("%q is not an env var name (optionally ending in '_*')", name)
 	}
 	if strings.HasPrefix(name, "CRUSH_") || strings.HasPrefix(name, "EVAL_") {
 		return fmt.Errorf("%q is reserved — harness-prefixed vars are stripped before the allowlist runs", name)

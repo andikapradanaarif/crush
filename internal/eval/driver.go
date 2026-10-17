@@ -642,9 +642,12 @@ func (c CrushRunner) subprocessEnv(telemetryFile string, maxSteps int, prevVecto
 	allowed := make(map[string]bool)
 	var prefixes []string
 	for _, k := range append(fixedChildEnv(), c.AllowedEnv...) {
-		// env_passthrough admits families via one trailing '*' —
-		// CLOUDSDK_* matches CLOUDSDK_CONFIG et al.
-		if strings.HasSuffix(k, "*") {
+		// env_passthrough admits families via a trailing '_*' —
+		// CLOUDSDK_* matches CLOUDSDK_CONFIG et al. The underscore
+		// check doubles as fail-closed: a bare "FOO*" reaching the
+		// allowlist past validation lands as a literal name that
+		// matches nothing, not a FOOBAR-admitting prefix.
+		if strings.HasSuffix(k, "_*") {
 			prefixes = append(prefixes, strings.TrimSuffix(k, "*"))
 			continue
 		}

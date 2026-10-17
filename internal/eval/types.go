@@ -262,8 +262,9 @@ type Experiment struct {
 	// vars (CLOUDSDK_*, PASSWORD_STORE_*, GNUPGHOME) and
 	// proxy/toolchain vars (HTTP_PROXY, GOPROXY, SSL_CERT_FILE,
 	// SSH_AUTH_SOCK). Entries are env var names — never values —
-	// with an optional single trailing '*' admitting the family
-	// ("CLOUDSDK_*" passes CLOUDSDK_CONFIG et al.). Each lands on
+	// with an optional trailing '_*' admitting the family
+	// ("CLOUDSDK_*" passes CLOUDSDK_CONFIG et al.; the underscore is
+	// required — "FOO*" would prefix-admit FOOBAR). Each lands on
 	// env.env_allowlist provenance like every other admission: the
 	// admission is declared, therefore recorded. CRUSH_*/EVAL_*-
 	// prefixed names are rejected at load — the harness strip runs

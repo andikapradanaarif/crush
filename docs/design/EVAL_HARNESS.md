@@ -698,9 +698,10 @@ a manifest-level list of parent-env names the experiment declares:
 `$(command)` credential helpers' ambient vars (`CLOUDSDK_*`,
 `PASSWORD_STORE_*`, `GNUPGHOME`) and proxy/toolchain vars
 (`HTTP_PROXY`, `GOPROXY`, `SSL_CERT_FILE`, `SSH_AUTH_SOCK`, `LANG`).
-Entries are names, never values; a single trailing `*` admits a
-family (`"env_passthrough": ["CLOUDSDK_*"]` passes `CLOUDSDK_CONFIG`
-et al.). Each lands on `env_allowlist` provenance like every other
+Entries are names, never values; a trailing `_*` admits a family
+(`"env_passthrough": ["CLOUDSDK_*"]` passes `CLOUDSDK_CONFIG` et
+al. — the underscore is required, so a bare `FOO*` prefix can't
+admit `FOOBAR`). Each lands on `env_allowlist` provenance like every other
 admission — declared, therefore recorded. `CRUSH_*`/`EVAL_*` names
 are rejected at load: the harness strip runs ahead of the allowlist,
 so declaring one could never pass. What the field deliberately is

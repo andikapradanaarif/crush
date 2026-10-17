@@ -283,6 +283,8 @@ func TestValidateExperiment_EnvPassthrough(t *testing.T) {
 		"EVALTEST_A=x",   // value, not a name
 		"",               // empty
 		"*",              // bare wildcard
+		"A*",             // raw prefix — admits ANTHROPIC_*, AWS_*, PASSWD…
+		"EVALTEST_A*",    // same — the glob requires the underscore
 		"EVALTEST_A**",   // double star
 		"EVALTEST_*_MID", // mid-string glob — grammar is suffix-only
 		"CRUSH_EVAL_FOO", // harness prefix — stripped before allowlist
