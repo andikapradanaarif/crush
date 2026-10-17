@@ -1411,20 +1411,31 @@ func TestDrainPendingAttribution_DrainsAndRetires(t *testing.T) {
 	require.Empty(t, rows, "the drained row retires")
 }
 
-// A pending base that no longer resolves drops outright — the
-// dead-baseline contract: bounded miss, not a burned retry.
-func TestDrainPendingAttribution_DeadBaseDropped(t *testing.T) {
+// A pending endpoint that no longer resolves drops outright — the
+// dead-baseline contract applies to either side: bounded miss, not a
+// burned retry.
+func TestDrainPendingAttribution_DeadEndpointsDropped(t *testing.T) {
 	env, conn, git := setupGitTest(t)
 	git("config", "user.email", "t@t")
 	git("config", "user.name", "t")
 	git("commit", "--allow-empty", "-m", "baseline")
+	live, err := gitOut(env.ctx, env.workingDir, "rev-parse", "HEAD")
+	require.NoError(t, err)
 	env.svc = NewService(db.New(conn), env.workingDir, params.DefaultMemory())
 	svc := env.svc.(*service)
 	require.NoError(t, svc.q.InsertPendingAttribution(env.ctx, db.InsertPendingAttributionParams{
 		ProjectKey: svc.projectKey,
 		PrevSha:    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-		PostSha:    "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00",
+		PostSha:    live,
 		CreatedAt:  1,
+	}))
+	// A dead post symmetrically drops too — it can never resolve, so
+	// retrying would burn attempts on a deterministic miss.
+	require.NoError(t, svc.q.InsertPendingAttribution(env.ctx, db.InsertPendingAttributionParams{
+		ProjectKey: svc.projectKey,
+		PrevSha:    live,
+		PostSha:    "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00",
+		CreatedAt:  2,
 	}))
 
 	svc.drainPendingAttribution(env.ctx, "s1")
@@ -1433,11 +1444,12 @@ func TestDrainPendingAttribution_DeadBaseDropped(t *testing.T) {
 		ProjectKey: svc.projectKey, Limit: 10,
 	})
 	require.NoError(t, err)
-	require.Empty(t, rows, "the dead range is dropped, not retried")
+	require.Empty(t, rows, "both dead-endpoint rows are dropped, not retried")
 }
 
 // A range that fails rev-list burns an attempt; at the bound it drops —
-// deterministic failures don't re-queue forever.
+// deterministic failures don't re-queue forever. The failure is
+// injected because two resolvable commits never fail rev-list for real.
 func TestDrainPendingAttribution_AttemptsBound(t *testing.T) {
 	env, conn, git := setupGitTest(t)
 	git("config", "user.email", "t@t")
@@ -1447,15 +1459,17 @@ func TestDrainPendingAttribution_AttemptsBound(t *testing.T) {
 	require.NoError(t, err)
 	env.svc = NewService(db.New(conn), env.workingDir, params.DefaultMemory())
 	svc := env.svc.(*service)
-	// resolvable prev, dead post — rev-list fails while the base verifies.
+	svc.drainRangeFn = func(context.Context, string, string) (string, error) {
+		return "", errors.New("transient rev-list failure")
+	}
 	require.NoError(t, svc.q.InsertPendingAttribution(env.ctx, db.InsertPendingAttributionParams{
-		ProjectKey: svc.projectKey, PrevSha: prev, PostSha: "dead-post", CreatedAt: 1,
+		ProjectKey: svc.projectKey, PrevSha: prev, PostSha: prev, CreatedAt: 1,
 	}))
 	require.NoError(t, svc.q.InsertPendingAttribution(env.ctx, db.InsertPendingAttributionParams{
-		ProjectKey: svc.projectKey, PrevSha: prev, PostSha: "dead-post-2", CreatedAt: 2,
+		ProjectKey: svc.projectKey, PrevSha: prev, PostSha: "attempted", CreatedAt: 2,
 	}))
 	require.NoError(t, svc.q.BumpPendingAttributionAttempts(env.ctx, db.BumpPendingAttributionAttemptsParams{
-		ProjectKey: svc.projectKey, PrevSha: prev, PostSha: "dead-post-2",
+		ProjectKey: svc.projectKey, PrevSha: prev, PostSha: "attempted",
 	}))
 
 	svc.drainPendingAttribution(env.ctx, "s1")
@@ -1465,8 +1479,35 @@ func TestDrainPendingAttribution_AttemptsBound(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, rows, 1, "the fresh row bumps and stays; the attempt-1 row hits the bound and drops")
-	require.Equal(t, "dead-post", rows[0].PostSha)
+	require.Equal(t, prev, rows[0].PostSha)
 	require.Equal(t, int64(1), rows[0].Attempts)
+}
+
+// A drain already in flight makes the next one skip — overlapping
+// drains would duplicate rev-list work for idempotent writes.
+func TestDrainPendingAttribution_ConcurrentSkips(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	git("config", "user.email", "t@t")
+	git("config", "user.name", "t")
+	git("commit", "--allow-empty", "-m", "baseline")
+	prev, err := gitOut(env.ctx, env.workingDir, "rev-parse", "HEAD")
+	require.NoError(t, err)
+	env.svc = NewService(db.New(conn), env.workingDir, params.DefaultMemory())
+	svc := env.svc.(*service)
+	require.NoError(t, svc.q.InsertPendingAttribution(env.ctx, db.InsertPendingAttributionParams{
+		ProjectKey: svc.projectKey, PrevSha: prev, PostSha: prev, CreatedAt: 1,
+	}))
+
+	svc.drainMu.Lock()
+	svc.drainPendingAttribution(env.ctx, "s1")
+	svc.drainMu.Unlock()
+
+	rows, err := svc.q.ListPendingAttribution(env.ctx, db.ListPendingAttributionParams{
+		ProjectKey: svc.projectKey, Limit: 10,
+	})
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "the concurrent drain skipped rather than touching the row")
+	require.Equal(t, int64(0), rows[0].Attempts)
 }
 
 // A failed own-sweep never drains — a sick git is the wrong time to

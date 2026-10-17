@@ -374,6 +374,15 @@ type service struct {
 	// stamps past it rather than retrying forever.
 	sweepFailMu sync.Mutex
 	sweepFail   map[string]struct{}
+	// drainMu serializes pending-attribution drains — overlapping
+	// drains duplicate rev-list work for idempotent writes, so a
+	// busy drain makes the next one skip rather than queue.
+	drainMu sync.Mutex
+	// drainRangeFn lists one pending range's commits. Nil means the
+	// real drainRange — tests inject it to reach the ordinary-failure
+	// class, which a live repo can't produce (two resolvable commits
+	// never fail rev-list).
+	drainRangeFn func(ctx context.Context, prevSha, postSha string) (string, error)
 	// now is the timestamp source for every stamp and cutoff the
 	// service computes. Production wiring leaves it nil (wall
 	// clock); eval seeding injects a controlled clock so scripted
@@ -1075,7 +1084,10 @@ func (s *service) lastRecordedHead(ctx context.Context) string {
 // Permanent failure classes don't retry forever — see
 // attributionFallback.
 func (s *service) recordCrushCommits(ctx context.Context, sessionID, prevHead, ledgerHead, headAfter string) bool {
-	if !s.hasRepo || prevHead == "" || headAfter == "" || prevHead == headAfter {
+	if !s.hasRepo {
+		return true
+	}
+	if prevHead == "" || headAfter == "" || prevHead == headAfter {
 		s.drainPendingAttribution(ctx, sessionID)
 		return true
 	}
@@ -1213,6 +1225,11 @@ const pendingAttributionCap = 8
 // dropped rather than re-queued forever.
 const pendingAttributionMaxAttempts = 2
 
+// drainRangeBudget is each pending range's share of the drain — the
+// drain's parent budget scales to len(rows) × this so a few slow
+// ranges can't starve the tail into deadline-burned attempts.
+const drainRangeBudget = 3 * time.Second
+
 // persistPendingAttribution queues a held range for a later run's
 // drain (#372). Best-effort and detached — the caller's ctx may
 // already be dead, and a persist failure just keeps today's residual.
@@ -1245,37 +1262,68 @@ func (s *service) persistPendingAttribution(prevSha, postSha string) {
 // git is the wrong time to pile on more rev-lists — on its own detached
 // budget, since the caller's ctx may already be dead. Each pending
 // range gets its own bounded rev-list so one dead range can't poison
-// the drain: a prev that no longer resolves is dropped outright (the
-// dead-baseline contract — bounded one-time miss, not permanent
+// the drain: either endpoint failing rev-parse drops the row outright
+// (the dead-baseline contract — bounded one-time miss, not permanent
 // blindness); a range that fails rev-list burns an attempt and drops
 // at the retry bound. Drained SHAs record under the draining run's
 // session — the original recording session is gone, and exclusion
-// reads are project-scoped.
+// reads are project-scoped. A dropped range can re-persist fresh if a
+// later ledger-baseline sweep fails on an overlapping range — the
+// fresh row restarts the attempts budget, but re-persist only happens
+// on a live hold, so the cycle stays practically bounded.
 func (s *service) drainPendingAttribution(ctx context.Context, sessionID string) {
 	if !s.hasRepo {
 		return
 	}
-	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	defer cancel()
-	rows, err := s.q.ListPendingAttribution(dctx, db.ListPendingAttributionParams{
+	// One drain at a time — a racing second drain would just redo
+	// the same rev-lists; skip rather than queue behind it.
+	if !s.drainMu.TryLock() {
+		return
+	}
+	defer s.drainMu.Unlock()
+	listRange := s.drainRangeFn
+	if listRange == nil {
+		listRange = s.drainRange
+	}
+	// The row list is cheap — fetch it on its own budget, then size
+	// the drain's to the rows it returned so every pending range
+	// gets a full per-range shot.
+	lctx, lcancel := context.WithTimeout(context.WithoutCancel(ctx), drainRangeBudget)
+	rows, err := s.q.ListPendingAttribution(lctx, db.ListPendingAttributionParams{
 		ProjectKey: s.projectKey,
 		Limit:      pendingAttributionCap,
 	})
+	lcancel()
 	if err != nil {
 		slog.Error("Error listing pending attribution ranges", "error", err)
 		return
 	}
+	if len(rows) == 0 {
+		return
+	}
+	// Parent gets one extra range-budget of slack: the loop only
+	// starts a row when a full budget remains, so an n-row parent
+	// sized at exactly n budgets would starve its last row.
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx),
+		drainRangeBudget*time.Duration(len(rows)+1))
+	defer cancel()
+	deadline, hasDeadline := dctx.Deadline()
 	now := s.now().UnixMilli()
 	for _, r := range rows {
+		// Less than one full range budget left — stop rather than
+		// burn attempts on rev-lists that die to the parent
+		// deadline. Starved rows keep their attempts for the next
+		// drain.
+		if hasDeadline && time.Until(deadline) < drainRangeBudget {
+			break
+		}
 		del := db.DeletePendingAttributionParams{
 			ProjectKey: s.projectKey,
 			PrevSha:    r.PrevSha,
 			PostSha:    r.PostSha,
 		}
-		// One bounded ctx per range — a slow or dead pending range
-		// must not eat the drain's whole budget.
-		rctx, rcancel := context.WithTimeout(dctx, 3*time.Second)
-		out, rerr := s.drainRange(rctx, r.PrevSha, r.PostSha)
+		rctx, rcancel := context.WithTimeout(dctx, drainRangeBudget)
+		out, rerr := listRange(rctx, r.PrevSha, r.PostSha)
 		rcancel()
 		switch {
 		case errors.Is(rerr, errDeadRange):
@@ -1330,16 +1378,19 @@ func (s *service) drainPendingAttribution(ctx context.Context, sessionID string)
 	}
 }
 
-// errDeadRange marks a pending range whose base can no longer resolve —
-// the drain drops the row instead of burning an attempt.
-var errDeadRange = errors.New("pending attribution base does not resolve")
+// errDeadRange marks a pending range whose endpoints can no longer
+// resolve — the drain drops the row instead of burning an attempt.
+var errDeadRange = errors.New("pending attribution range does not resolve")
 
-// drainRange reads one pending range: verify the base resolves, then
-// rev-list it. Failures classify as dead-range (drop) or ordinary
+// drainRange reads one pending range: verify both endpoints resolve,
+// then rev-list it. Failures classify as dead-range (drop — either
+// dead endpoint makes the range permanently unresolvable) or ordinary
 // (count toward the retry bound).
 func (s *service) drainRange(ctx context.Context, prevSha, postSha string) (string, error) {
-	if _, err := gitOut(ctx, s.workingDir, "rev-parse", "--verify", "--quiet", prevSha+"^{commit}"); err != nil {
-		return "", errDeadRange
+	for _, sha := range []string{prevSha, postSha} {
+		if _, err := gitOut(ctx, s.workingDir, "rev-parse", "--verify", "--quiet", sha+"^{commit}"); err != nil {
+			return "", errDeadRange
+		}
 	}
 	return gitOut(ctx, s.workingDir, "rev-list", prevSha+".."+postSha)
 }
