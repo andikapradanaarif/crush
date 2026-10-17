@@ -385,9 +385,12 @@ func TestSummarizeAssistantForTurn_TurnLevelReasoningPresence(t *testing.T) {
 	}
 	require.Len(t, calls, 1)
 	require.Equal(t, "tc-q", calls[0].ID)
-	require.Len(t, rcs, 2)
+	// The unbound part and the part bound to the dropped call both
+	// ride the surviving question call stripped to presence.
+	require.Len(t, rcs, 3)
 	require.Empty(t, rcs[0].Thinking)
-	require.Equal(t, "signed for question", rcs[1].Thinking)
+	require.Empty(t, rcs[1].Thinking)
+	require.Equal(t, "signed for question", rcs[2].Thinking)
 
 	// No surviving call, no contract — turn-level reasoning drops
 	// with the turn.

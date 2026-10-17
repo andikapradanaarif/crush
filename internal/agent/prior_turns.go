@@ -360,12 +360,13 @@ func (a *sessionAgent) turnSummaries(ctx context.Context, sessionID string, cove
 // survive verbatim: their results carry user decisions, the one
 // payload a summary cannot safely compress, and a signed question
 // call keeps its bound reasoning — replaying a signed call without
-// its thought signature is a provider rejection mode. Turn-level
-// reasoning (no bound call) survives stripped to presence whenever a
-// question call does — strict OpenAI-compatible providers reject a
-// replayed tool-call turn missing the reasoning_content field. No
-// tool call is mutated, so no provider replays a falsified call.
-// Returns the message and the number of dropped calls.
+// its thought signature is a provider rejection mode. Every other
+// reasoning part — turn-level or bound to a dropped call — survives
+// stripped to presence whenever a question call does: strict
+// OpenAI-compatible providers reject a replayed tool-call turn
+// missing the reasoning_content field. No tool call is mutated, so no
+// provider replays a falsified call. Returns the message and the
+// number of dropped calls.
 func summarizeAssistantForTurn(m message.Message) (message.Message, int) {
 	keep := make(map[string]bool)
 	for _, part := range m.Parts {
@@ -397,11 +398,12 @@ func summarizeAssistantForTurn(m message.Message) (message.Message, int) {
 				parts = append(parts, part)
 				continue
 			}
-			// Turn-level reasoning rides any surviving call, stripped
-			// to presence — strict OpenAI-compatible providers reject
-			// a replayed tool-call turn missing the reasoning_content
-			// field.
-			if p.ToolID == "" && len(keep) > 0 {
+			// Any surviving call needs the field — strict
+			// OpenAI-compatible providers reject a replayed tool-call
+			// turn missing reasoning_content — so every other
+			// reasoning part rides with it stripped to presence,
+			// whether unbound or bound to a dropped call.
+			if len(keep) > 0 {
 				parts = append(parts, collapseReasoningForTurn(p))
 			}
 			continue

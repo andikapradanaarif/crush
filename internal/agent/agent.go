@@ -2792,9 +2792,10 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 				collapsedEvents[turn] += 0
 			}
 			if m.Role == message.Assistant {
-				// Reasoning drops with the turn and calls leave under
-				// summarize (stub mutates their inputs); the emptiness
-				// checks below must see the stripped copy.
+				// Reasoning strips to presence with the turn and
+				// calls leave under summarize (stub mutates their
+				// inputs); the emptiness checks below must see the
+				// stripped copy.
 				var n int
 				if a.priorTurns == priorTurnsSummarize {
 					m, n = summarizeAssistantForTurn(m)

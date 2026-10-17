@@ -44,15 +44,22 @@ func TestToAIMessage_ReasoningEmitsOnPresence(t *testing.T) {
 	messages := msg.ToAIMessage()
 	require.Len(t, messages, 1)
 	var reasoning []fantasy.ReasoningPart
-	for _, p := range messages[0].Content {
+	callIdx := -1
+	for i, p := range messages[0].Content {
 		if rp, ok := p.(fantasy.ReasoningPart); ok {
 			reasoning = append(reasoning, rp)
+		}
+		if tc, ok := p.(fantasy.ToolCallPart); ok && tc.ToolCallID == "call_1" {
+			callIdx = i
 		}
 	}
 	require.Len(t, reasoning, 2)
 	require.Empty(t, reasoning[0].Text)
 	require.Empty(t, reasoning[0].ProviderOptions)
 	require.Equal(t, "signed", reasoning[1].Text)
+	// The bound part emits directly before its call — google signs
+	// the next emitted part positionally.
+	require.Equal(t, callIdx-1, 1)
 }
 
 func TestToAIMessage_CorruptedMediaData(t *testing.T) {
