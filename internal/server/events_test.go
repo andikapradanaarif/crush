@@ -313,3 +313,50 @@ func TestMessageToProtoPrismModel(t *testing.T) {
 }
 
 func ptrFloat(v float64) *float64 { return &v }
+
+// TestMessageToProtoReasoningParity pins that the fields mutators now
+// retain — block id, both signature kinds, call binding — cross the wire
+// conversion, and that a provider-executed flag survives with its call.
+func TestMessageToProtoReasoningParity(t *testing.T) {
+	t.Parallel()
+
+	src := message.Message{
+		ID:   "m1",
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.ReasoningContent{
+				ID:               "block-0",
+				Thinking:         "thinking",
+				Signature:        "asig",
+				ThoughtSignature: "gsig",
+				ToolID:           "call-1",
+				StartedAt:        10,
+				FinishedAt:       20,
+			},
+			message.ToolCall{
+				ID:               "call-1",
+				Name:             "web_search",
+				Input:            `{"q":"x"}`,
+				ProviderExecuted: true,
+				Finished:         true,
+			},
+		},
+	}
+
+	got := messageToProto(src)
+	require.Len(t, got.Parts, 2)
+
+	rc, ok := got.Parts[0].(proto.ReasoningContent)
+	require.True(t, ok, "expected proto.ReasoningContent, got %T", got.Parts[0])
+	require.Equal(t, "block-0", rc.ID)
+	require.Equal(t, "thinking", rc.Thinking)
+	require.Equal(t, "asig", rc.Signature)
+	require.Equal(t, "gsig", rc.ThoughtSignature)
+	require.Equal(t, "call-1", rc.ToolID)
+	require.Equal(t, int64(10), rc.StartedAt)
+	require.Equal(t, int64(20), rc.FinishedAt)
+
+	tc, ok := got.Parts[1].(proto.ToolCall)
+	require.True(t, ok, "expected proto.ToolCall, got %T", got.Parts[1])
+	require.True(t, tc.ProviderExecuted)
+}

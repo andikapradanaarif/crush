@@ -29,9 +29,9 @@ func buildSession(n int) []chat.MessageItem {
 
 		am := &message.Message{ID: fmt.Sprintf("a%d", i), Role: message.Assistant}
 		for j := range 20 {
-			am.AppendReasoningContent(fmt.Sprintf("Considering angle %d of question %d in some detail.\n", j, i))
+			am.AppendReasoningContent("", fmt.Sprintf("Considering angle %d of question %d in some detail.\n", j, i))
 		}
-		am.FinishThinking()
+		am.FinishThinking("")
 		am.AppendContent(strings.Repeat("Here is a paragraph of the answer body that wraps across lines. ", 12))
 		am.AddFinish(message.FinishReasonEndTurn, "", "")
 		items = append(items, chat.NewAssistantMessageItem(sty, am))
@@ -88,9 +88,9 @@ func BenchmarkDrawStreaming(b *testing.B) {
 			item := chat.NewAssistantMessageItem(benchStyles(), live).(*chat.AssistantMessageItem)
 			items = append(items, item)
 			benchDraw(b, items, func(i int) {
-				live.AppendReasoningContent(fmt.Sprintf("Delta %d of the reasoning trace here.\n", i))
+				live.AppendReasoningContent("", fmt.Sprintf("Delta %d of the reasoning trace here.\n", i))
 				if sh.blankEvery > 0 && i%sh.blankEvery == sh.blankEvery-1 {
-					live.AppendReasoningContent("\n")
+					live.AppendReasoningContent("", "\n")
 				}
 				item.SetMessage(live)
 			})

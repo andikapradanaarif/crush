@@ -202,14 +202,14 @@ func TestUpdate_ReasoningEndFlushes(t *testing.T) {
 	require.NoError(t, err)
 
 	// Reasoning deltas alone debounce.
-	msg.AppendReasoningContent("hmm")
+	msg.AppendReasoningContent("", "hmm")
 	require.NoError(t, svc.Update(t.Context(), msg))
 	got, err := svc.Get(t.Context(), msg.ID)
 	require.NoError(t, err)
 	require.Empty(t, got.ReasoningContent().Thinking, "reasoning delta should still be in the debounce buffer")
 
 	// FinishThinking sets FinishedAt → terminal flush.
-	msg.FinishThinking()
+	msg.FinishThinking("")
 	require.NoError(t, svc.Update(t.Context(), msg))
 
 	got, err = svc.Get(t.Context(), msg.ID)
@@ -276,11 +276,11 @@ func TestUpdate_OrderingMatchesNonCoalesced(t *testing.T) {
 	build := func(svc Service, sessionID string) Message {
 		msg, err := svc.Create(t.Context(), sessionID, CreateMessageParams{Role: Assistant})
 		require.NoError(t, err)
-		msg.AppendReasoningContent("thinking 1 ")
+		msg.AppendReasoningContent("", "thinking 1 ")
 		require.NoError(t, svc.Update(t.Context(), msg))
-		msg.AppendReasoningContent("thinking 2")
+		msg.AppendReasoningContent("", "thinking 2")
 		require.NoError(t, svc.Update(t.Context(), msg))
-		msg.FinishThinking()
+		msg.FinishThinking("")
 		require.NoError(t, svc.Update(t.Context(), msg))
 		msg.AppendContent("hello ")
 		require.NoError(t, svc.Update(t.Context(), msg))
@@ -633,8 +633,8 @@ func TestUpdate_StructuralFlushUsesMustDeliver(t *testing.T) {
 		{
 			name: "reasoning end",
 			mut: func(m *Message) {
-				m.AppendReasoningContent("hmm")
-				m.FinishThinking()
+				m.AppendReasoningContent("", "hmm")
+				m.FinishThinking("")
 			},
 		},
 	}
@@ -711,7 +711,7 @@ func TestPendingStateDoesNotRetainPayload(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	msg.AppendReasoningContent(strings.Repeat("x", 64*1024))
+	msg.AppendReasoningContent("", strings.Repeat("x", 64*1024))
 	msg.AddToolCall(ToolCall{ID: "tc-1", Name: "bash", Finished: true})
 	msg.AddFinish(FinishReasonEndTurn, "", "")
 	require.NoError(t, svc.Update(t.Context(), msg))
@@ -746,7 +746,7 @@ func TestShouldFlushNow_AgainstCompactBaseline(t *testing.T) {
 		require.NoError(t, err)
 
 		// Land a baseline: one unfinished tool call, reasoning still open.
-		msg.AppendReasoningContent("thinking")
+		msg.AppendReasoningContent("", "thinking")
 		msg.AddToolCall(ToolCall{ID: "tc1", Name: "view", Finished: false})
 		require.NoError(t, svc.Update(t.Context(), msg))
 		got, err := svc.Get(t.Context(), msg.ID)
@@ -763,7 +763,7 @@ func TestShouldFlushNow_AgainstCompactBaseline(t *testing.T) {
 		// Same tool call, same finished flag, reasoning still open. A
 		// baseline that lost the projection would see a length or flag
 		// mismatch here and flush.
-		msg.AppendReasoningContent(" some more")
+		msg.AppendReasoningContent("", " some more")
 		require.NoError(t, svc.Update(t.Context(), msg))
 
 		got, err := svc.Get(t.Context(), msg.ID)
@@ -800,11 +800,43 @@ func TestShouldFlushNow_AgainstCompactBaseline(t *testing.T) {
 		t.Parallel()
 		svc, msg := setup(t)
 
-		msg.FinishThinking()
+		msg.FinishThinking("")
 		require.NoError(t, svc.Update(t.Context(), msg))
 
 		got, err := svc.Get(t.Context(), msg.ID)
 		require.NoError(t, err)
 		require.NotZero(t, got.ReasoningContent().FinishedAt)
 	})
+}
+
+// A reasoning block that isn't the first is invisible to
+// ReasoningContent(), but its finish is just as structural — without a
+// per-part baseline the flush rides the debounce window instead.
+func TestUpdate_SecondReasoningBlockFinishFlushes(t *testing.T) {
+	t.Parallel()
+
+	svc, sessionID := newTestService(t, WithDebounce(time.Hour))
+	msg, err := svc.Create(t.Context(), sessionID, CreateMessageParams{Role: Assistant})
+	require.NoError(t, err)
+
+	// Land a baseline carrying two open reasoning blocks.
+	msg.AppendReasoningContent("a", "ta")
+	require.NoError(t, svc.Update(t.Context(), msg))
+	msg.AppendReasoningContent("b", "tb")
+	require.NoError(t, svc.Update(t.Context(), msg))
+
+	// Finishing block b must flush now — the debounce is an hour.
+	msg.FinishThinking("b")
+	require.NoError(t, svc.Update(t.Context(), msg))
+
+	got, err := svc.Get(t.Context(), msg.ID)
+	require.NoError(t, err)
+	var b ReasoningContent
+	for _, part := range got.Parts {
+		if c, ok := part.(ReasoningContent); ok && c.ID == "b" {
+			b = c
+		}
+	}
+	require.Equal(t, "b", b.ID, "block b must persist")
+	require.NotZero(t, b.FinishedAt, "block b's finish must flush, not ride the debounce")
 }

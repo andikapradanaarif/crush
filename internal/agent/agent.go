@@ -1597,31 +1597,31 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 			return callContext, prepared, err
 		},
 		OnReasoningStart: func(id string, reasoning fantasy.ReasoningContent) error {
-			currentAssistant.AppendReasoningContent(reasoning.Text)
+			currentAssistant.AppendReasoningContent(id, reasoning.Text)
 			return a.messages.Update(genCtx, *currentAssistant)
 		},
 		OnReasoningDelta: func(id string, text string) error {
-			currentAssistant.AppendReasoningContent(text)
+			currentAssistant.AppendReasoningContent(id, text)
 			return a.messages.Update(genCtx, *currentAssistant)
 		},
 		OnReasoningEnd: func(id string, reasoning fantasy.ReasoningContent) error {
 			// handle anthropic signature
 			if anthropicData, ok := reasoning.ProviderMetadata[anthropic.Name]; ok {
 				if reasoning, ok := anthropicData.(*anthropic.ReasoningOptionMetadata); ok {
-					currentAssistant.AppendReasoningSignature(reasoning.Signature)
+					currentAssistant.AppendReasoningSignature(id, reasoning.Signature)
 				}
 			}
 			if googleData, ok := reasoning.ProviderMetadata[google.Name]; ok {
 				if reasoning, ok := googleData.(*google.ReasoningMetadata); ok {
-					currentAssistant.AppendThoughtSignature(reasoning.Signature, reasoning.ToolID)
+					currentAssistant.AppendThoughtSignature(id, reasoning.Signature, reasoning.ToolID)
 				}
 			}
 			if openaiData, ok := reasoning.ProviderMetadata[openai.Name]; ok {
 				if reasoning, ok := openaiData.(*openai.ResponsesReasoningMetadata); ok {
-					currentAssistant.SetReasoningResponsesData(reasoning)
+					currentAssistant.SetReasoningResponsesData(id, reasoning)
 				}
 			}
-			currentAssistant.FinishThinking()
+			currentAssistant.FinishThinking(id)
 			return a.messages.Update(genCtx, *currentAssistant)
 		},
 		OnTextDelta: func(id string, text string) error {
@@ -1679,11 +1679,14 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 					})
 				}
 			}
+			// ProviderExecuted only arrives with the completed call —
+			// OnToolInputStart's signature doesn't carry it, so the
+			// streaming stub this replaces always reads false.
 			toolCall := message.ToolCall{
 				ID:               tc.ToolCallID,
 				Name:             tc.ToolName,
 				Input:            input,
-				ProviderExecuted: false,
+				ProviderExecuted: tc.ProviderExecuted,
 				Finished:         true,
 			}
 			currentAssistant.AddToolCall(toolCall)
@@ -1912,7 +1915,8 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cleanupCancel()
 		// Ensure we finish thinking on error to close the reasoning state.
-		currentAssistant.FinishThinking()
+		// No block id is in scope here — finish the last open part.
+		currentAssistant.FinishThinking("")
 		toolCalls := currentAssistant.ToolCalls()
 		// INFO: we use the cleanup context here because the genCtx has been cancelled.
 		msgs, createErr := a.messages.List(cleanupCtx, currentAssistant.SessionID)
@@ -2337,17 +2341,17 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 			return callContext, prepared, nil
 		},
 		OnReasoningDelta: func(id string, text string) error {
-			summaryMessage.AppendReasoningContent(text)
+			summaryMessage.AppendReasoningContent(id, text)
 			return a.messages.Update(genCtx, summaryMessage)
 		},
 		OnReasoningEnd: func(id string, reasoning fantasy.ReasoningContent) error {
 			// Handle anthropic signature.
 			if anthropicData, ok := reasoning.ProviderMetadata["anthropic"]; ok {
 				if signature, ok := anthropicData.(*anthropic.ReasoningOptionMetadata); ok && signature.Signature != "" {
-					summaryMessage.AppendReasoningSignature(signature.Signature)
+					summaryMessage.AppendReasoningSignature(id, signature.Signature)
 				}
 			}
-			summaryMessage.FinishThinking()
+			summaryMessage.FinishThinking(id)
 			return a.messages.Update(genCtx, summaryMessage)
 		},
 		OnTextDelta: func(id, text string) error {

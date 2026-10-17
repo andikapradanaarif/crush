@@ -87,11 +87,16 @@ type ContentPart interface {
 }
 
 // ReasoningContent represents the reasoning/thinking part of a message.
+// ResponsesData is deliberately not projected onto the wire: it is an
+// openai-typed replay payload, server-side only.
 type ReasoningContent struct {
-	Thinking   string `json:"thinking"`
-	Signature  string `json:"signature"`
-	StartedAt  int64  `json:"started_at,omitempty"`
-	FinishedAt int64  `json:"finished_at,omitempty"`
+	ID               string `json:"id,omitempty"`
+	Thinking         string `json:"thinking"`
+	Signature        string `json:"signature"`
+	ThoughtSignature string `json:"thought_signature,omitempty"`
+	ToolID           string `json:"tool_id,omitempty"`
+	StartedAt        int64  `json:"started_at,omitempty"`
+	FinishedAt       int64  `json:"finished_at,omitempty"`
 }
 
 // String returns the thinking content as a string.
@@ -147,11 +152,12 @@ func (BinaryContent) isPart() {}
 
 // ToolCall represents a tool call in a message.
 type ToolCall struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Input    string `json:"input"`
-	Type     string `json:"type,omitempty"`
-	Finished bool   `json:"finished,omitempty"`
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	Input            string `json:"input"`
+	Type             string `json:"type,omitempty"`
+	ProviderExecuted bool   `json:"provider_executed,omitempty"`
+	Finished         bool   `json:"finished,omitempty"`
 }
 
 func (ToolCall) isPart() {}
@@ -346,12 +352,8 @@ func (m *Message) AppendReasoningContent(delta string) {
 	found := false
 	for i, part := range m.Parts {
 		if c, ok := part.(ReasoningContent); ok {
-			m.Parts[i] = ReasoningContent{
-				Thinking:   c.Thinking + delta,
-				Signature:  c.Signature,
-				StartedAt:  c.StartedAt,
-				FinishedAt: c.FinishedAt,
-			}
+			c.Thinking += delta
+			m.Parts[i] = c
 			found = true
 		}
 	}
@@ -367,12 +369,8 @@ func (m *Message) AppendReasoningContent(delta string) {
 func (m *Message) AppendReasoningSignature(signature string) {
 	for i, part := range m.Parts {
 		if c, ok := part.(ReasoningContent); ok {
-			m.Parts[i] = ReasoningContent{
-				Thinking:   c.Thinking,
-				Signature:  c.Signature + signature,
-				StartedAt:  c.StartedAt,
-				FinishedAt: c.FinishedAt,
-			}
+			c.Signature += signature
+			m.Parts[i] = c
 			return
 		}
 	}
@@ -384,12 +382,8 @@ func (m *Message) FinishThinking() {
 	for i, part := range m.Parts {
 		if c, ok := part.(ReasoningContent); ok {
 			if c.FinishedAt == 0 {
-				m.Parts[i] = ReasoningContent{
-					Thinking:   c.Thinking,
-					Signature:  c.Signature,
-					StartedAt:  c.StartedAt,
-					FinishedAt: time.Now().Unix(),
-				}
+				c.FinishedAt = time.Now().Unix()
+				m.Parts[i] = c
 			}
 			return
 		}
@@ -414,17 +408,10 @@ func (m *Message) ThinkingDuration() time.Duration {
 // FinishToolCall marks a tool call as finished.
 func (m *Message) FinishToolCall(toolCallID string) {
 	for i, part := range m.Parts {
-		if c, ok := part.(ToolCall); ok {
-			if c.ID == toolCallID {
-				m.Parts[i] = ToolCall{
-					ID:       c.ID,
-					Name:     c.Name,
-					Input:    c.Input,
-					Type:     c.Type,
-					Finished: true,
-				}
-				return
-			}
+		if c, ok := part.(ToolCall); ok && c.ID == toolCallID {
+			c.Finished = true
+			m.Parts[i] = c
+			return
 		}
 	}
 }
@@ -432,17 +419,10 @@ func (m *Message) FinishToolCall(toolCallID string) {
 // AppendToolCallInput appends input to a tool call.
 func (m *Message) AppendToolCallInput(toolCallID string, inputDelta string) {
 	for i, part := range m.Parts {
-		if c, ok := part.(ToolCall); ok {
-			if c.ID == toolCallID {
-				m.Parts[i] = ToolCall{
-					ID:       c.ID,
-					Name:     c.Name,
-					Input:    c.Input + inputDelta,
-					Type:     c.Type,
-					Finished: c.Finished,
-				}
-				return
-			}
+		if c, ok := part.(ToolCall); ok && c.ID == toolCallID {
+			c.Input += inputDelta
+			m.Parts[i] = c
+			return
 		}
 	}
 }

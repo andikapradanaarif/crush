@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"charm.land/fantasy"
+	"charm.land/fantasy/providers/openai"
 	"github.com/stretchr/testify/require"
 )
 
@@ -186,7 +187,7 @@ func TestResetStreamedContent(t *testing.T) {
 	msg := &Message{}
 	msg.AddImageURL("https://example.com/img.png", "high")
 	msg.AppendContent("partial answer")
-	msg.AppendReasoningContent("thinking...")
+	msg.AppendReasoningContent("", "thinking...")
 	msg.AddToolCall(ToolCall{ID: "1", Name: "bash"})
 	msg.AddToolResult(ToolResult{ToolCallID: "1", Content: "output"})
 	msg.AddFinish(FinishReasonError, "boom", "stream died")
@@ -211,4 +212,178 @@ func TestResetStreamedContentEmpty(t *testing.T) {
 	msg := &Message{}
 	msg.ResetStreamedContent()
 	require.Empty(t, msg.Parts)
+}
+
+func TestReasoningMutators_PreserveProviderFields(t *testing.T) {
+	t.Parallel()
+
+	// Every reasoning mutator is copy-and-mutate: provider metadata
+	// written mid-stream survives the delta → end → finish sequence.
+	t.Run("google thought signature", func(t *testing.T) {
+		t.Parallel()
+		msg := &Message{}
+		msg.AppendReasoningContent("b1", "thinking ")
+		msg.AppendThoughtSignature("b1", "gsig", "call-1")
+		msg.AppendReasoningContent("b1", "more")
+		msg.FinishThinking("b1")
+
+		got := msg.ReasoningContent()
+		require.Equal(t, "thinking more", got.Thinking)
+		require.Equal(t, "gsig", got.ThoughtSignature)
+		require.Equal(t, "call-1", got.ToolID)
+		require.NotZero(t, got.FinishedAt)
+	})
+
+	t.Run("anthropic signature", func(t *testing.T) {
+		t.Parallel()
+		msg := &Message{}
+		msg.AppendReasoningContent("b1", "thinking")
+		msg.AppendReasoningSignature("b1", "asig")
+		msg.AppendReasoningContent("b1", " more")
+		msg.FinishThinking("b1")
+
+		got := msg.ReasoningContent()
+		require.Equal(t, "thinking more", got.Thinking)
+		require.Equal(t, "asig", got.Signature)
+		require.NotZero(t, got.FinishedAt)
+	})
+
+	t.Run("openai responses metadata", func(t *testing.T) {
+		t.Parallel()
+		data := &openai.ResponsesReasoningMetadata{ItemID: "rs_1"}
+		msg := &Message{}
+		msg.AppendReasoningContent("b1", "thinking")
+		msg.SetReasoningResponsesData("b1", data)
+		msg.AppendReasoningContent("b1", " more")
+		msg.FinishThinking("b1")
+
+		got := msg.ReasoningContent()
+		require.Equal(t, "thinking more", got.Thinking)
+		require.Same(t, data, got.ResponsesData)
+		require.NotZero(t, got.FinishedAt)
+	})
+
+	t.Run("all providers on one part", func(t *testing.T) {
+		t.Parallel()
+		data := &openai.ResponsesReasoningMetadata{ItemID: "rs_1"}
+		msg := &Message{}
+		msg.AppendReasoningContent("b1", "thinking")
+		msg.AppendReasoningSignature("b1", "asig")
+		msg.AppendThoughtSignature("b1", "gsig", "call-1")
+		msg.SetReasoningResponsesData("b1", data)
+		msg.FinishThinking("b1")
+		msg.AppendReasoningContent("b1", "more")
+
+		got := msg.ReasoningContent()
+		require.Equal(t, "thinkingmore", got.Thinking)
+		require.Equal(t, "asig", got.Signature)
+		require.Equal(t, "gsig", got.ThoughtSignature)
+		require.Equal(t, "call-1", got.ToolID)
+		require.Same(t, data, got.ResponsesData)
+	})
+}
+
+func TestReasoningMutators_MultiBlockAddressing(t *testing.T) {
+	t.Parallel()
+
+	// Interleaved blocks keep their ids: deltas, signatures, and finish
+	// land on the addressed part, never first-part-everything.
+	msg := &Message{}
+	msg.AppendReasoningContent("a", "ta ")
+	msg.AppendReasoningContent("b", "tb ")
+	msg.AppendReasoningContent("a", "more-a")
+	msg.AppendThoughtSignature("a", "gsig-a", "call-a")
+	msg.AppendReasoningSignature("b", "asig-b")
+	msg.FinishThinking("a")
+	msg.AppendReasoningContent("b", "more-b")
+
+	var a, b ReasoningContent
+	for _, part := range msg.Parts {
+		if c, ok := part.(ReasoningContent); ok {
+			switch c.ID {
+			case "a":
+				a = c
+			case "b":
+				b = c
+			}
+		}
+	}
+	require.Equal(t, "a", a.ID)
+	require.Equal(t, "b", b.ID)
+	require.Equal(t, "ta more-a", a.Thinking)
+	require.Equal(t, "gsig-a", a.ThoughtSignature)
+	require.Equal(t, "call-a", a.ToolID)
+	require.NotZero(t, a.FinishedAt)
+	require.Equal(t, "tb more-b", b.Thinking)
+	require.Equal(t, "asig-b", b.Signature)
+	require.Zero(t, b.FinishedAt, "FinishThinking(\"a\") must not close block b")
+}
+
+func TestReasoningMutators_EmptyIDFallback(t *testing.T) {
+	t.Parallel()
+
+	// Id-less streams accumulate on one part: deltas append to the
+	// last-open part, finish closes it, and a later block's deltas merge
+	// into it rather than spawn a part ReasoningContent() cannot see.
+	msg := &Message{}
+	msg.AppendReasoningContent("", "one")
+	msg.FinishThinking("")
+	msg.AppendReasoningContent("", " two")
+	msg.AppendReasoningSignature("", "sig")
+
+	count := 0
+	for _, part := range msg.Parts {
+		if _, ok := part.(ReasoningContent); ok {
+			count++
+		}
+	}
+	require.Equal(t, 1, count, "id-less stream must stay single-part")
+	got := msg.ReasoningContent()
+	require.Equal(t, "one two", got.Thinking)
+	require.Equal(t, "sig", got.Signature)
+	require.NotZero(t, got.FinishedAt)
+}
+
+func TestReasoningMutators_UnknownIDCreatesPart(t *testing.T) {
+	t.Parallel()
+
+	// A signature for a block whose start never streamed still lands —
+	// dropped metadata is worse than a carrier part.
+	msg := &Message{}
+	msg.AppendThoughtSignature("late", "gsig", "call-9")
+
+	got := msg.ReasoningContent()
+	require.Equal(t, "late", got.ID)
+	require.Equal(t, "gsig", got.ThoughtSignature)
+	require.Equal(t, "call-9", got.ToolID)
+}
+
+func TestToolCallMutators_PreserveProviderExecuted(t *testing.T) {
+	t.Parallel()
+
+	msg := &Message{}
+	msg.AddToolCall(ToolCall{ID: "t1", Name: "web_search", ProviderExecuted: true, Input: "{"})
+	msg.AppendToolCallInput("t1", `"q":"x"}`)
+	msg.FinishToolCall("t1")
+
+	calls := msg.ToolCalls()
+	require.Len(t, calls, 1)
+	require.True(t, calls[0].ProviderExecuted, "provider-executed flag must survive input/finish rebuilds")
+	require.Equal(t, `{"q":"x"}`, calls[0].Input)
+	require.True(t, calls[0].Finished)
+}
+
+func TestFinishThinking_UnmatchedIDClosesOpenPart(t *testing.T) {
+	t.Parallel()
+
+	// An end event no part claims still closes whatever is open — a
+	// signature-minted carrier must not linger absorbing id-less events.
+	msg := &Message{}
+	msg.AppendThoughtSignature("x", "sig", "call-1")
+	msg.FinishThinking("y")
+
+	got := msg.ReasoningContent()
+	require.Equal(t, "x", got.ID)
+	require.Equal(t, "sig", got.ThoughtSignature)
+	require.NotZero(t, got.FinishedAt)
 }
