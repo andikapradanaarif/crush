@@ -45,7 +45,9 @@ the corrected conclusions the plan depends on:
   bound is unestablished.
 - **RRSI Table 6 is four hand-picked decisions**, not a convergence
   analysis. "Consistent with our verify-gate" is fair; "converged"
-  overclaims.
+  overclaims. *(10-17: reads RRSI v1/v2 — in v3 Table 6 is a paired
+  bootstrap and Table 7 an independent search repeat; see
+  [2026-10-17 roadmap](2026-10-17-roadmap-regularized-evolution.md).)*
 - **#197's `ΔC ≤ β₀ + β₁·|Δprimary|` was circular** — efficiency
   isn't quality. Corrected: pass-rate floor; flat cost allowance only
   when ΔS > δ; within-band `ΔC ≤ 0` + efficiency tie-break; cost
@@ -155,7 +157,7 @@ All of it hangs off two items:
 | Source | What transfers | What doesn't |
 |---|---|---|
 | **Survey** (ETCLOVG; OpenReview `eONq7FdiHa`) | The layer map — this fork builds in its thinnest layers (context/memory: 9 projects vs lifecycle: 47; observability + governance mostly commercial). Open problems #2/#3/#5 ≈ our #220 provenance/staleness, trace-native diagnosis, #198 re-verification | — |
-| **RRSI** | The fixed *evolution* loop — attributable edits, noise-adjusted acceptance, cost-justified gain, periodic pruning. It governs which mechanisms stay installed; it says nothing about per-turn routing | The "converged" reading (Table 6 = four hand-picked decisions); the circular cost rule (#197, already corrected) |
+| **RRSI** | The fixed *evolution* loop — attributable edits, noise-adjusted acceptance, cost-justified gain, periodic pruning. It governs which mechanisms stay installed; it says nothing about per-turn routing | The "converged" reading (Table 6 = four hand-picked decisions — *10-17: v1/v2 reading, see above*); the circular cost rule (#197, already corrected) |
 | **HarnessX** (arXiv:2606.14249) | Typed primitives + substitution over a slot schema — the honest ceiling if slot *contents* ever need structural evolution. "Gains largest where baselines lowest" (+14.5% avg, up to +44%) is **in-distribution** evidence — candidates were tested on the same adaptation batch; RRSI's independent Table 1 shows HarnessX's OOD scores ≈ the base harness's (36.3/48.5/34.3 vs 36.0/48.8/34.2 — no transfer). Confirms mechanism value is conditional on baseline gaps, not that structure evolution transfers | Structural rewriting of the skeleton itself — un-auditable learned routing, worse in multi-project where it can smuggle cross-context associations no deterministic check catches. Trajectory→model-training loop is out of scope |
 
 The convergence worth stating: all three treat **the trace as the

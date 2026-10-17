@@ -1,5 +1,10 @@
 # 2026-10-09 — Roadmap: value and use
 
+**Superseded by [2026-10-15-roadmap-honest-evidence](2026-10-15-roadmap-honest-evidence.md)**
+— kept as the record of the learning-method design era. Its "no
+adaptive search on dev fixtures" rule is explicitly replaced in
+[2026-10-17-roadmap-regularized-evolution](2026-10-17-roadmap-regularized-evolution.md).
+
 **Plan of record.** Supersedes
 [2026-10-04-roadmap-fixed-skeleton](2026-10-04-roadmap-fixed-skeleton.md),
 which stays as the record of the measurement era — what was built,

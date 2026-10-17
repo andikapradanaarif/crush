@@ -1,5 +1,9 @@
 # 2026-10-15 — Roadmap: honest evidence before new capability
 
+**Superseded by [2026-10-17-roadmap-regularized-evolution](2026-10-17-roadmap-regularized-evolution.md)**
+— kept as the record of the integrity era; its standing rules carry
+forward unchanged.
+
 **Plan of record.** Supersedes
 [2026-10-09-roadmap-value-and-use](2026-10-09-roadmap-value-and-use.md),
 which stays as the record of the learning-method design era — the

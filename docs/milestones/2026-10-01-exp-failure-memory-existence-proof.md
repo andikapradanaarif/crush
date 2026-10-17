@@ -213,6 +213,14 @@ critic. And #197 needs a rewrite — RRSI's cost rule applies only when
 ΔS > δ (task score), not to efficiency metrics; our all-at-ceiling corpus
 routes everything to the within-band rule.
 
+> **Correction (10-17):** the "Table 6" reading above is of RRSI
+> v1/v2. In v3 (2026-10-04) Table 6 is a task-level paired bootstrap
+> and Table 7 an independent repeat of the search; the hand-picked
+> decisions are now Table 8. The #197 objection holds only while S is
+> an efficiency metric — with S = pass rate, RRSI's β₁ is a token
+> allowance per extra pass and is not circular. See
+> [2026-10-17-roadmap-regularized-evolution](2026-10-17-roadmap-regularized-evolution.md).
+
 ## Repaired corpus (PR #212) — reading the primary
 
 The repaired matrix disentangles prompt ambiguity from referent truth

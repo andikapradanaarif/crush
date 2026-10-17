@@ -24,7 +24,7 @@ evidence base.
 | "Zero harm" | No harm observed *on the tested positive corpus*. A general harm bound is unestablished |
 | "Gate proven honest" | The `noop-flag` alarm works. Statistical calibration, cost enforcement, and regression sensitivity are unmeasured |
 | "PR #201 framed rows as historical context" | #201 closed **unmerged**; the code still says "the likely referents". (README corrected) |
-| "RRSI converged on our mechanisms" | RRSI Table 6 is four hand-picked decisions, not a convergence analysis. "Consistent with our verify-gate" is fair; "converged" overclaims |
+| "RRSI converged on our mechanisms" | RRSI Table 6 is four hand-picked decisions, not a convergence analysis. "Consistent with our verify-gate" is fair; "converged" overclaims. *(10-17: reads RRSI v1/v2 — in v3 Table 6 is a paired bootstrap and Table 7 an independent search repeat; see [2026-10-17 roadmap](2026-10-17-roadmap-regularized-evolution.md))* |
 | #197's `ΔC ≤ β₀ + β₁·|Δprimary|` | Units are circular — efficiency isn't quality. RRSI's rule fires only when ΔS > δ; our corpus sits at pass 1.00, so *everything* routes to the within-band rule. #197 needs rewrite: pass-rate floor + cost rule on quality + within-band cost tie-breaker |
 
 **Estimator bug (verified, affects all powered reads):** `compare.go:377`
