@@ -183,7 +183,7 @@ func TestReferentTargets(t *testing.T) {
 			ID: "tc-bad", Name: tools.EditToolName, Input: "not json", Finished: true,
 		}}},
 	}
-	targets := a.referentTargets(t.Context(), msgs, 1)
+	targets := referentTargets(t.Context(), a.turnOutcomeDeps(), msgs, 1)
 	require.Len(t, targets, 2)
 	// Stored paths are slash-normalized (relWorkdir's ToSlash) —
 	// filepath.Join would assert a backslash on Windows.
@@ -605,7 +605,187 @@ func TestRecordReferentEpisodes(t *testing.T) {
 			`SELECT COUNT(*) FROM referent_episodes
 			 WHERE source_message_id = ?`, vagueID).Scan(&n))
 		require.Zero(t, n,
-			"the earlier vague turn mints no episode — no backfill channel")
+			"the earlier vague turn mints no episode — the live pass alone leaves it to the sweep")
+	})
+}
+
+// TestBackfillReferentEpisodes covers the same-session sweep (#368):
+// vague turns judged by prompts that never ran a live pass — folded
+// queue entries, pre-compaction boundaries — mint their episodes
+// through the detached pass, with the same abstention contract the
+// live path holds.
+func TestBackfillReferentEpisodes(t *testing.T) {
+	t.Parallel()
+
+	// episodeAt reads one episode by its source message — the
+	// (session, source, target) unique key means at most one row
+	// can carry it.
+	episodeAt := func(t *testing.T, env fakeEnv, sessionID, srcID string) (target, verdict string, created int64) {
+		t.Helper()
+		err := env.conn.QueryRowContext(t.Context(),
+			`SELECT target, verdict, created_at FROM referent_episodes
+			 WHERE session_id = ? AND source_message_id = ?`,
+			sessionID, srcID).Scan(&target, &verdict, &created)
+		require.NoError(t, err)
+		return target, verdict, created
+	}
+	episodeCount := func(t *testing.T, env fakeEnv, sessionID, srcID string) int {
+		t.Helper()
+		var n int
+		require.NoError(t, env.conn.QueryRowContext(t.Context(),
+			`SELECT COUNT(*) FROM referent_episodes
+			 WHERE session_id = ? AND source_message_id = ?`,
+			sessionID, srcID).Scan(&n))
+		return n
+	}
+
+	// Boundary-pair semantics: each stored prompt judges the turn
+	// behind it — u0's episode carries u1's verdict, u1's carries
+	// u3's, and u3 (the slice's last boundary) mints nothing.
+	t.Run("boundary pairs mint with the next prompt's verdict", func(t *testing.T) {
+		t.Parallel()
+		a, env := referentAgent(t)
+		targetA := filepath.Join(env.workingDir, "a.go")
+		targetB := filepath.Join(env.workingDir, "b.go")
+		u0, u1, u3 := referentUserMsg("u0", "fix the config"),
+			referentUserMsg("u1", "fix the tests"),
+			referentUserMsg("u3", "wrong, revert it")
+		u0.CreatedAt, u1.CreatedAt, u3.CreatedAt = 1_700_000_000, 1_700_000_100, 1_700_000_200
+		msgs := []message.Message{
+			u0,
+			referentEditMsg("tc1", tools.EditToolName, targetA),
+			u1,
+			referentEditMsg("tc2", tools.EditToolName, targetB),
+			u3,
+			referentEditMsg("tc3", tools.EditToolName, targetB),
+		}
+		backfillReferentEpisodes(t.Context(), a.turnOutcomeDeps(), "s1", msgs, "")
+
+		target, verdict, created := episodeAt(t, env, "s1", "u0")
+		require.Equal(t, "a.go", target)
+		require.Equal(t, cmdlog.ReferentAccepted, verdict,
+			"u1's text carries no revision cue — the judgment the live pass would stamp")
+		require.Equal(t, u0.CreatedAt*1000, created,
+			"the episode anchors at the judged prompt, not sweep time")
+		target, verdict, _ = episodeAt(t, env, "s1", "u1")
+		require.Equal(t, "b.go", target)
+		require.Equal(t, cmdlog.ReferentRevised, verdict, "u3's cue is u1's verdict")
+		require.Zero(t, episodeCount(t, env, "s1", "u3"),
+			"the last boundary has no stored judge — it mints nothing")
+	})
+
+	// A turn the live pass already minted skips the sweep's scan —
+	// the source-ID set short-circuits before targets resolve, and
+	// the unique key is the correctness net underneath.
+	t.Run("already-minted turns dedupe, unminted pairs still mint", func(t *testing.T) {
+		t.Parallel()
+		a, env := referentAgent(t)
+		targetA := filepath.Join(env.workingDir, "a.go")
+		targetB := filepath.Join(env.workingDir, "b.go")
+		msgs := []message.Message{
+			referentUserMsg("u0", "fix the config"),
+			referentEditMsg("tc1", tools.EditToolName, targetA),
+			referentUserMsg("u1", "fix the tests"),
+			referentEditMsg("tc2", tools.EditToolName, targetB),
+			referentUserMsg("u2", "looks right"),
+		}
+		// The live pass minted u1's episode when u2's receipt ran —
+		// u0's turn went unjudged (one judgment per receipt).
+		a.recordReferentEpisodes(t.Context(), SessionAgentCall{
+			SessionID: "s1", Prompt: "looks right",
+		}, msgs[:msgIdx(msgs, "u2")], nil)
+		require.Equal(t, 1, episodeCount(t, env, "s1", "u1"), "the live mint landed")
+
+		backfillReferentEpisodes(t.Context(), a.turnOutcomeDeps(), "s1", msgs, "")
+
+		require.Equal(t, 1, episodeCount(t, env, "s1", "u1"),
+			"the already-minted turn stays one row")
+		target, _, _ := episodeAt(t, env, "s1", "u0")
+		require.Equal(t, "a.go", target, "the missed pair mints on the sweep")
+	})
+
+	// Abstention parity: the sweep widens WHERE judgment happens,
+	// never WHAT counts — the multi-target turn and the non-vague
+	// boundary mint nothing, exactly as the live path decides.
+	t.Run("live abstentions stay abstentions", func(t *testing.T) {
+		t.Parallel()
+		a, env := referentAgent(t)
+		targetA := filepath.Join(env.workingDir, "a.go")
+		targetB := filepath.Join(env.workingDir, "b.go")
+		msgs := []message.Message{
+			referentUserMsg("u0", "fix the config"),
+			// Two mutated files: which edit maps to the phrase is
+			// unknowable — the same abstention the live path takes.
+			referentEditMsg("tc1", tools.EditToolName, targetA),
+			referentEditMsg("tc2", tools.EditToolName, targetB),
+			// An explicit-path prompt is not vague — never a source.
+			// (fullPathRegex reads relative paths, so name one.)
+			referentUserMsg("u1", "refactor internal/config/config.go to split Options"),
+			referentEditMsg("tc3", tools.EditToolName, targetB),
+			referentUserMsg("u2", "looks right"),
+		}
+		backfillReferentEpisodes(t.Context(), a.turnOutcomeDeps(), "s1", msgs, "")
+
+		require.Zero(t, episodeCount(t, env, "s1", "u0"), "multi-target turn abstains")
+		require.Zero(t, episodeCount(t, env, "s1", "u1"), "non-vague boundary abstains")
+	})
+
+	// The in-flight prompt is a judge, not a judged turn: it closes
+	// its predecessor's pair (the live pass's own judgment, replayed
+	// identically) but never keys an episode itself.
+	t.Run("in-flight prompt judges its predecessor, mints nothing itself", func(t *testing.T) {
+		t.Parallel()
+		a, env := referentAgent(t)
+		target := filepath.Join(env.workingDir, "a.go")
+		msgs := []message.Message{
+			referentUserMsg("u0", "fix the config"),
+			referentEditMsg("tc1", tools.EditToolName, target),
+			referentUserMsg("inflight", "looks right"),
+		}
+		backfillReferentEpisodes(t.Context(), a.turnOutcomeDeps(), "s1", msgs, "inflight")
+
+		target, verdict, _ := episodeAt(t, env, "s1", "u0")
+		require.Equal(t, "a.go", target)
+		require.Equal(t, cmdlog.ReferentAccepted, verdict,
+			"the in-flight prompt's text judges its predecessor")
+		require.Zero(t, episodeCount(t, env, "s1", "inflight"),
+			"excludeID keeps the in-flight message out of the judged set")
+	})
+
+	// The wiring shape the issue names: a post-compaction tail has
+	// no boundary, so recordTurnOutcome's fallback branch sweeps the
+	// full transcript — vague turns dropped by the summary mint
+	// anyway.
+	t.Run("post-compaction sweep mints pre-summary turns", func(t *testing.T) {
+		t.Parallel()
+		a, env := referentAgent(t)
+		targetA := filepath.Join(env.workingDir, "a.go")
+		targetB := filepath.Join(env.workingDir, "b.go")
+		full := []message.Message{
+			referentUserMsg("u0", "fix the config"),
+			referentEditMsg("tc1", tools.EditToolName, targetA),
+			referentUserMsg("u1", "fix the tests"),
+			referentEditMsg("tc2", tools.EditToolName, targetB),
+			referentUserMsg("inflight", "looks right"),
+		}
+		// The tail the live path sees post-compaction: only the
+		// summary — no real boundary survives it.
+		tail := []message.Message{{
+			ID: "sum", Role: message.User, IsSummaryMessage: true,
+			Parts: []message.ContentPart{message.TextContent{Text: "summary"}},
+		}}
+		recordTurnOutcome(t.Context(), a.turnOutcomeDeps(), SessionAgentCall{
+			SessionID: "s1", Prompt: "looks right", currentUserMsgID: "inflight",
+		}, tail, full)
+
+		target, _, _ := episodeAt(t, env, "s1", "u0")
+		require.Equal(t, "a.go", target, "the pre-summary vague turn mints via the sweep")
+		target, verdict, _ := episodeAt(t, env, "s1", "u1")
+		require.Equal(t, "b.go", target)
+		require.Equal(t, cmdlog.ReferentAccepted, verdict,
+			"the last stored boundary judges off the in-flight prompt")
+		require.Zero(t, episodeCount(t, env, "s1", "inflight"),
+			"the in-flight prompt records no episode")
 	})
 }
 

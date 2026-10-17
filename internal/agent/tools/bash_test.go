@@ -399,6 +399,10 @@ func (r *recordingCmdLog) ProjectKey() string                                { r
 func (r *recordingCmdLog) ParamVersion() string                              { return "" }
 func (r *recordingCmdLog) ForgetSession(string)                              {}
 
+func (r *recordingCmdLog) ListReferentEpisodeSourceIDs(context.Context, string) ([]string, error) {
+	return nil, nil
+}
+
 func TestBashTool_RecordsRunToCmdLog(t *testing.T) {
 	workingDir := t.TempDir()
 	perms := &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}

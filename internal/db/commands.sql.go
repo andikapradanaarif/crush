@@ -708,6 +708,38 @@ func (q *Queries) ListReferentCalibrationEpisodes(ctx context.Context, projectKe
 	return items, nil
 }
 
+const listReferentEpisodeSourceIDs = `-- name: ListReferentEpisodeSourceIDs :many
+SELECT source_message_id FROM referent_episodes WHERE session_id = ?
+`
+
+// Every source message a session's episodes were minted under -- the
+// referent backfill's dedup set (#368). One read up front instead of
+// a per-boundary existence check, so already-judged turns skip the
+// expensive target scan; the (session, source_message, target)
+// unique key remains the correctness dedup underneath.
+func (q *Queries) ListReferentEpisodeSourceIDs(ctx context.Context, sessionID string) ([]string, error) {
+	rows, err := q.query(ctx, q.listReferentEpisodeSourceIDsStmt, listReferentEpisodeSourceIDs, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var source_message_id string
+		if err := rows.Scan(&source_message_id); err != nil {
+			return nil, err
+		}
+		items = append(items, source_message_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listReferentPriorEvents = `-- name: ListReferentPriorEvents :many
 SELECT verdict, label_committed, label_hash_changed
 FROM referent_episodes

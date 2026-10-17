@@ -159,6 +159,10 @@ func (failingCmdlog) SettleReferentLabels(context.Context, int) error {
 	return nil
 }
 
+func (failingCmdlog) ListReferentEpisodeSourceIDs(context.Context, string) ([]string, error) {
+	return nil, nil
+}
+
 func (failingCmdlog) RecordTurnOutcome(context.Context, cmdlog.TurnOutcome) error {
 	return nil
 }

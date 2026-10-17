@@ -69,7 +69,13 @@ the runtime mechanism), and the render/channel params.
 v1 filtered on `referent_episodes` artifact labels. That table
 holds **zero rows** in nexus after 25 sessions — episodes only
 record on vague-prompt + single-edit turns, a shape real usage
-rarely takes. Mining needs a label at the unit it clusters:
+rarely takes. Recording happens under one mint contract at two
+judgment locations: the live pass judges the turn behind each
+receipt, and a same-session sweep on the detached record slot
+replays stored boundary pairs so turns judged by prompts that
+never ran a live pass — folded queue entries, pre-compaction
+boundaries — still mint (#368). Mining needs a label at the unit
+it clusters:
 **the user turn** (prompt → agent's tool calls → stop).
 
 `turn_outcomes` (built under #340, this channel's G1 gate):
