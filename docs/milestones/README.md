@@ -10,10 +10,11 @@ position and the index; the history lives in the dated files.
 
 ## Current position
 
-**Scope: "prove it learns."** Crush already wrote substantial information to
-`crush.db` but never effectively read it back across sessions — memory was a
-write-only ledger. This milestone series exists to turn "it learns" from a
-claim into a measurement.
+**Scope: "prove it learns" — the integrity wave shipped; labels and
+certification machinery now exist.** Crush already wrote substantial
+information to `crush.db` but never effectively read it back across
+sessions — memory was a write-only ledger. This milestone series exists
+to turn "it learns" from a claim into a measurement.
 
 **Failure memory — existence proof: DONE and armored.** A durable failure
 record written in session N provably changes behavior in session N+1, measured
@@ -35,18 +36,46 @@ anchors referent choice under ambiguity; selection/abstention is
 correctness-relevant.** Presence-vs-content stays unisolated until a
 non-actionable placebo arm exists.
 
+**Seal status — the `held-*` 8-cell pool is a validation pool (#343).**
+Its seal broke during development: the verify-loop edge was designed
+from its own harm read, resolver fixes iterated on its l3 runs, coverage
+was tuned when one of its cells starved. Everything measured on it is
+**in-sample evidence** — the 86/88 verify-loop read, the −33.3% resolver
+discovery read, and the partial DeepSeek replication (−14.4% on
+completed cells) are validation-pool numbers, and 86/88-vs-78/88 is a
+cross-invocation contrast, not paired. A genuinely sealed blind pool is
+#224's remaining scope; sealed claims wait for it.
+
+**The integrity wave landed (10-16/10-17).** The honest-evidence plan's
+machinery is now on main: `turn_outcomes` label settlement at a fixed
+window (hunk survival, agent-commit exclusion, settle anchored to
+`created_at + 24h`, indexed settle scans, serialized folds), commit
+attribution (pre-run HEAD stamp, `--all` ref coverage, per-session run
+history, orphaned-range drain, non-git producers), referent-episode
+backfill for pre-compaction vague turns, eval env allowlist +
+manifest `env_passthrough`, `tail.referent_gate` decision records,
+abstain cause split, `options.scope_gate`, the DeepSeek
+reasoning-collapse fix (#381), write-path mutator field preservation
+(#385), and the selector LTT arm (`crush eval calibrate`, #380 — ran
+the labeled corpus to an honest null: 55 draws, under the ~78 floor,
+no overlay emitted).
+
 **The claim hierarchy:**
 
 | Claim | Status |
 |---|---|
 | Memory exists and persists | Proven (tables, tail rendering) |
-| One session's memory reduces measured discovery work | **Proven** — replicated powered runs; *behavior change* shown, useful-information vs presence not yet decomposed |
+| One session's memory reduces measured discovery work | **Proven** — replicated powered runs on the failure-memory corpus (predates the held pool); *behavior change* shown, useful-information vs presence not yet decomposed |
 | The *content* does the work (not token presence) | **Unisolated** — wrong-target memory is actionable content, not placebo; needs a non-actionable placebo arm |
 | True-but-task-irrelevant memory can redirect work | **Observed** — pass 0.86 vs 1.00 via early termination on an ambiguous prompt (mask); mechanism = referent anchoring + narrow verify, not retrieval error |
 | Estimator reports the true effect | **Corrected** — zero-count pairs (mostly treatment wins) dropped by log-ratio; headline understated; zero-safe estimator queued |
+| Run-loop pathologies are detectable and repairable mid-run | **Validated in-sample** (#343) — verify-loop edge; sealed claim awaits #224 + same-invocation rerun |
+| Small-model verdicts steer selection (L3) | **First evidence, in-sample** — −33.3% discovery on resolver-engaged cells, under the 35% bar |
+| Turn-level acceptance labels | **Machinery landed** — `turn_outcomes` settlement at a fixed window; production volume pending |
+| Selector admits certifiable | **Machinery landed, honest null** — LTT arm (#380): corpus under the 78-draw floor, no overlay emitted; volume path is `tail.decisions` telemetry |
 | Smarter *every time* (compounding with depth) | Unproven — and currently *untestable*: only open failures render; `command_memory` never read. Capacity fix precedes the ladder |
 | Selectivity survives scale | Unproven — needs distractor ladder; abstention must be scoreable first |
-| Generalizes (models, task classes, memory types) | Unproven — one model, Go fixtures, all-at-ceiling pass rates |
+| Generalizes (models, task classes, memory types) | **Partial directional read only** — DeepSeek replication on the validation pool: 121/121 pass, −14.4% discovery on completed cells; #348 fixed, sealed-pool rerun is what counts |
 
 ## The machine today — quantified
 
@@ -56,19 +85,26 @@ non-actionable placebo arm exists.
 |---|---|
 | `command_memory` | `(cmd, cwd)`-keyed; kind, last exit, ok/fail counts, last session |
 | `failure_memory` | Open failures; resolved on clean re-run; 30-day TTL + `Nd ago` age hints |
-| Write path | `RecordRun` instrumented at **7 call sites** (bash, job_output, job_kill, verify gate, workspace, backend); `ComponentExits` recover real verdicts inside pipelines/lists/substitutions — composites can't launder |
+| `turn_outcomes` | Per-turn settled labels — hunk survival, agent-commit exclusion, divergence-beats-commit ordering |
+| `referent_episodes` / `referent_memory` | Vague-prompt phrase→target episodes + promoted maps |
+| `session_digests` | Per-session FTS5-indexed digests backing `<session_memory>` |
+| `project_rates` | Beta-Binomial per-project rates with decay, lower-bound gating |
+| `crush_commits` / `pending_attribution` / `session_command_runs` | Commit attribution + per-session run history for settlement evidence |
+| Write path | `RecordRun` instrumented at **10 call sites** (bash, job_output, job_kill, verify gate, workspace, backend); `ComponentExits` recover real verdicts inside pipelines/lists/substitutions — composites can't launder |
 | Read path | `<open_failures>` tail: freshest **5** rows, ≤3 file hints, cmd ≤200 runes, headline ≤140 runes, envelope-neutralized; task-bound by the deterministic selector (#207): prompt scope/referent → admit or abstain, per-candidate verdicts in `tail.decisions`. (Header still reads "the likely referents" — #201's reframe was closed unmerged after failing validation) |
+| Gates | `ambiguity_clarification` bundle (vagueness pre-filter, first-write scope gate, loop-stop, burn-watch) with `scope_gate` as its own override (#384); `failure_memory_edges` reconcile edge on by default; `referent_memory`, `session_memory`, `memory_telemetry` opt-in |
 
 **Evaluation machinery:**
 
 | Component | Count / detail |
 |---|---|
-| Corpus trajectories | 23 (`eval/corpus/`) |
-| Experiment manifests | 18 (`eval/experiments/`) |
-| Preserved run records | ~1,300+ across 12 result dirs, incl. per-run session DBs for forensics |
+| Corpus trajectories | 62 (`eval/corpus/`) |
+| Experiment manifests | 50 (`eval/experiments/`) |
+| Preserved run records | ~3,600 artifacts across 34 result dirs, incl. per-run session DBs for forensics |
 | Metrics per record | 32 fields; ~60 metric families in compare (calls, tokens, requests, steps, warm-start, edge firings) |
 | Gate alarm kinds | 8 — catastrophic, coincident-collapse, coverage-starved, error-saturated, excluded-differential, expected-exclusion-missed, noop-flag, smoke |
 | Power gate | CV-seeded sizing (`eval/noise.json`); refuses underpowered manifests |
+| Calibration | `crush eval calibrate --param …` — per-class LTT walks emitting versioned `memory_params` overlays, honest-null on insufficient draws (#380) |
 
 **Evidence produced so far:** 68 conclusive powered pairs (existence), 44 mask
 records (confound isolation), 2 negative-control records (gate honesty) —
@@ -92,5 +128,5 @@ record the plan that followed from it.
 | 2026-10-04 | roadmap | [Fixed skeleton, learned variables](2026-10-04-roadmap-fixed-skeleton.md) — **plan of record**: four-tier memory, per-project learned params, user-level priors |
 | 2026-10-08 | exp | [Memory ladders](2026-10-08-exp-memory-ladders.md) — LOO ablations held; depth ladder inconclusive (distractor harm at j=3) |
 | 2026-10-09 | roadmap | [Value and use](2026-10-09-roadmap-value-and-use.md) — superseded 10-15: phases mirror milestones; memory off-instrument-building onto real use |
-| 2026-10-15 | exp | [Verify-loop + resolver chain](2026-10-15-exp-verify-loop-and-resolver.md) — edge validated (86/88 vs 78/88), resolver made live, engagement-conditional coverage |
+| 2026-10-15 | exp | [Verify-loop + resolver chain](2026-10-15-exp-verify-loop-and-resolver.md) — edge validated in-sample (86/88 vs 78/88, cross-invocation), resolver made live, engagement-conditional coverage — pool relabeled validation per #343 |
 | 2026-10-15 | roadmap | [Honest evidence before new capability](2026-10-15-roadmap-honest-evidence.md) — **plan of record**: two reviews found label instability + in-sample claims; integrity work (#340–#348) precedes procedural Phase A |

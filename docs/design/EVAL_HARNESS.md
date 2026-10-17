@@ -596,12 +596,18 @@ discovery calls; the fixture still measures the efficiency claim
 there, but not the capability one). Characterize under the pinned
 model before reading arm differences.
 
-### The `held-*` family — the sealed held-out tier (#224)
+### The `held-*` family — the validation pool (seal broken, #343)
 
-`held-*` cells are the sealed corpus: blind-authored against this
-spec, never run under an experiment until sealed by review, and
-never tuned against selector internals afterward — divergences get
-attributed in analysis (via `decisions.reasons`), not patched away.
+`held-*` cells were authored as the sealed corpus — blind-authored
+against this spec, divergences attributed in analysis (via
+`decisions.reasons`), not patched away. **The seal did not hold**
+(#343): the verify-loop edge was designed from harm diagnosed on
+held-memory run #2 then validated on the same cells, resolver fixes
+iterated across held-memory-l3 runs 3–5, and coverage rules changed
+(#337) after a held cell starved. The family is therefore the
+**validation pool** — every result on it is in-sample evidence. A
+genuinely sealed blind pool is #224's remaining scope: same generator,
+pools held back, never run during development.
 Three shared fixtures (`held-bistro`, `held-papertrail`,
 `held-studio` file trees inside the host cells) back 8 cells across
 en/id/es/ja plus a code-switched prompt, a veto shape, and a decoy
