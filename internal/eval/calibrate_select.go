@@ -68,7 +68,11 @@ type CalibrationDecision struct {
 	Pool string
 	// Bound reports the selector bound the row — it renders under
 	// an unlimited cap. render_capped is a budget verdict, not a
-	// binding one, so producers record uncapped decisions.
+	// binding one, so producers record uncapped decisions — or, on
+	// a live-telemetry projection (#341 tail.decisions), the
+	// mapping is Bound = Admit || Reason == "render_capped": a
+	// naive Bound = Admit silently drops the capped tail, leaving
+	// candidate caps larger than the deployed one unmodelable.
 	Bound bool
 	// Excluded is the corpus's known-correct label: the row should
 	// NOT have rendered (the cell expected a rejection). A bound
