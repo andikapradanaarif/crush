@@ -693,6 +693,21 @@ the manifest never named — the leak class behind #333 — cannot reach
 the child. `origin.kind: production` prompts replay verbatim under the
 same allowlist: credential exposure is what the manifest declared.
 
+Surfaces no `$`-ref can name admit through `env_passthrough` (#373) —
+a manifest-level list of parent-env names the experiment declares:
+`$(command)` credential helpers' ambient vars (`CLOUDSDK_*`,
+`PASSWORD_STORE_*`, `GNUPGHOME`) and proxy/toolchain vars
+(`HTTP_PROXY`, `GOPROXY`, `SSL_CERT_FILE`, `SSH_AUTH_SOCK`, `LANG`).
+Entries are names, never values; a trailing `_*` admits a family
+(`"env_passthrough": ["CLOUDSDK_*"]` passes `CLOUDSDK_CONFIG` et
+al. — the underscore is required, so a bare `FOO*` prefix can't
+admit `FOOBAR`). Each lands on `env_allowlist` provenance like every other
+admission — declared, therefore recorded. `CRUSH_*`/`EVAL_*` names
+are rejected at load: the harness strip runs ahead of the allowlist,
+so declaring one could never pass. What the field deliberately is
+not is ambient inheritance — an undeclared passthrough is the #333
+leak class.
+
 `GOMODCACHE`/`GOCACHE` pin to a shared eval cache
 (`<user cache>/crush/eval-go`, overridable via
 `CRUSH_EVAL_GO_CACHE`) rather than the per-run home — otherwise `go`

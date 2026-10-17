@@ -255,6 +255,21 @@ type Experiment struct {
 	// rejectDivergentProviderKeys byte-compares marshaled blocks —
 	// stable for maps (sorted keys) but not struct field order.
 	Providers map[string]any `json:"providers,omitempty"`
+	// EnvPassthrough names parent-env variables the experiment
+	// declares for admission into eval children (#373) — the
+	// allowlist's declared escape hatch for surfaces no template
+	// reference can name: $(command) credential helpers' ambient
+	// vars (CLOUDSDK_*, PASSWORD_STORE_*, GNUPGHOME) and
+	// proxy/toolchain vars (HTTP_PROXY, GOPROXY, SSL_CERT_FILE,
+	// SSH_AUTH_SOCK). Entries are env var names — never values —
+	// with an optional trailing '_*' admitting the family
+	// ("CLOUDSDK_*" passes CLOUDSDK_CONFIG et al.; the underscore is
+	// required — "FOO*" would prefix-admit FOOBAR). Each lands on
+	// env.env_allowlist provenance like every other admission: the
+	// admission is declared, therefore recorded. CRUSH_*/EVAL_*-
+	// prefixed names are rejected at load — the harness strip runs
+	// ahead of the allowlist, so declaring one could never pass.
+	EnvPassthrough []string `json:"env_passthrough,omitempty"`
 	// ExpectedExclusion declares an arm's designed exclusion
 	// pattern — the experiment's hypothesis is that the arm cannot
 	// complete the corpus (the pressure-regime control dying at the
