@@ -77,6 +77,28 @@ func (q *Queries) DeleteFailure(ctx context.Context, signature string) error {
 	return err
 }
 
+const deleteSessionRunConflicts = `-- name: DeleteSessionRunConflicts :exec
+DELETE FROM session_command_runs AS stale WHERE stale.project_key = ? AND EXISTS (
+    SELECT 1 FROM session_command_runs twin
+    WHERE twin.project_key = ?
+        AND twin.session_id = stale.session_id
+        AND twin.cmd_norm = stale.cmd_norm
+        AND twin.cwd = stale.cwd
+)
+`
+
+type DeleteSessionRunConflictsParams struct {
+	ProjectKey   string `json:"project_key"`
+	ProjectKey_2 string `json:"project_key_2"`
+}
+
+// Same re-key collision shape as command_memory: the (session_id,
+// cmd_norm, cwd, target) twin wins, the stale row goes first.
+func (q *Queries) DeleteSessionRunConflicts(ctx context.Context, arg DeleteSessionRunConflictsParams) error {
+	_, err := q.exec(ctx, q.deleteSessionRunConflictsStmt, deleteSessionRunConflicts, arg.ProjectKey, arg.ProjectKey_2)
+	return err
+}
+
 const getFailureMeta = `-- name: GetFailureMeta :one
 SELECT signature, first_seen FROM failure_memory WHERE signature = ?
 `
@@ -1009,46 +1031,80 @@ func (q *Queries) ListSessionOpenFailures(ctx context.Context, arg ListSessionOp
 	return items, nil
 }
 
-const listSessionTestVerdicts = `-- name: ListSessionTestVerdicts :many
-SELECT c.cmd_norm, c.last_exit FROM command_memory c
-WHERE c.project_key = ?
-    AND c.kind = 'test'
-    AND c.last_exit >= 0
-    AND c.last_session_id IN (
-        SELECT id FROM sessions WHERE id = ? OR parent_session_id = ?
-    )
+const listSessionRunPartitionKeys = `-- name: ListSessionRunPartitionKeys :many
+SELECT DISTINCT project_key FROM session_command_runs WHERE project_key != ''
 `
 
-type ListSessionTestVerdictsParams struct {
-	ProjectKey      string         `json:"project_key"`
-	ID              string         `json:"id"`
-	ParentSessionID sql.NullString `json:"parent_session_id"`
-}
-
-type ListSessionTestVerdictsRow struct {
-	CmdNorm  string `json:"cmd_norm"`
-	LastExit int64  `json:"last_exit"`
-}
-
-// kind='test' ledger rows whose last real run belongs to this
-// session (or a task-tool child) -- the session-end test evidence
-// (#294). last_exit is the row's last verdict, not this run's, so a
-// command the session ran only early counts toward session-end
-// state the way the ledger models it. Matches the
-// ListSessionOpenFailures session-with-children shape.
-func (q *Queries) ListSessionTestVerdicts(ctx context.Context, arg ListSessionTestVerdictsParams) ([]ListSessionTestVerdictsRow, error) {
-	rows, err := q.query(ctx, q.listSessionTestVerdictsStmt, listSessionTestVerdicts, arg.ProjectKey, arg.ID, arg.ParentSessionID)
+func (q *Queries) ListSessionRunPartitionKeys(ctx context.Context) ([]string, error) {
+	rows, err := q.query(ctx, q.listSessionRunPartitionKeysStmt, listSessionRunPartitionKeys)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []ListSessionTestVerdictsRow{}
+	items := []string{}
 	for rows.Next() {
-		var i ListSessionTestVerdictsRow
-		if err := rows.Scan(&i.CmdNorm, &i.LastExit); err != nil {
+		var project_key string
+		if err := rows.Scan(&project_key); err != nil {
 			return nil, err
 		}
-		items = append(items, i)
+		items = append(items, project_key)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSessionTestVerdicts = `-- name: ListSessionTestVerdicts :many
+SELECT r.last_exit FROM session_command_runs r
+WHERE r.project_key = ?1
+    AND r.kind = 'test'
+    AND r.last_exit >= 0
+    AND r.session_id IN (
+        SELECT s.id FROM sessions s
+        WHERE s.id = ?2 OR s.parent_session_id = ?2
+    )
+UNION
+SELECT c.last_exit FROM command_memory c
+WHERE c.project_key = ?1
+    AND c.kind = 'test'
+    AND c.last_exit >= 0
+    AND c.last_session_id IN (
+        SELECT s.id FROM sessions s
+        WHERE s.id = ?2 OR s.parent_session_id = ?2
+    )
+`
+
+type ListSessionTestVerdictsParams struct {
+	ProjectKey string `json:"project_key"`
+	SessionID  string `json:"session_id"`
+}
+
+// kind='test' evidence the session (or a task-tool child) provably
+// ran -- the session-end test signal (#294). Two sources, unioned:
+// session_command_runs is the session's own last verdict per
+// command and never drifts (#357); the command_memory arm keeps the
+// pre-#357 coverage -- last-writer rows the session still owns, its
+// only evidence on stores populated before the session table
+// existed. last_exit is the row's last verdict, not this run's, so
+// a command the session ran only early counts toward session-end
+// state the way the ledger models it.
+func (q *Queries) ListSessionTestVerdicts(ctx context.Context, arg ListSessionTestVerdictsParams) ([]int64, error) {
+	rows, err := q.query(ctx, q.listSessionTestVerdictsStmt, listSessionTestVerdicts, arg.ProjectKey, arg.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []int64{}
+	for rows.Next() {
+		var last_exit int64
+		if err := rows.Scan(&last_exit); err != nil {
+			return nil, err
+		}
+		items = append(items, last_exit)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -1424,6 +1480,20 @@ func (q *Queries) RekeyFailurePartition(ctx context.Context, arg RekeyFailurePar
 	return err
 }
 
+const rekeySessionRunPartition = `-- name: RekeySessionRunPartition :exec
+UPDATE session_command_runs SET project_key = ? WHERE project_key = ?
+`
+
+type RekeySessionRunPartitionParams struct {
+	ProjectKey   string `json:"project_key"`
+	ProjectKey_2 string `json:"project_key_2"`
+}
+
+func (q *Queries) RekeySessionRunPartition(ctx context.Context, arg RekeySessionRunPartitionParams) error {
+	_, err := q.exec(ctx, q.rekeySessionRunPartitionStmt, rekeySessionRunPartition, arg.ProjectKey, arg.ProjectKey_2)
+	return err
+}
+
 const resolveFailuresForCommand = `-- name: ResolveFailuresForCommand :exec
 UPDATE failure_memory SET
     resolved_in = ?,
@@ -1721,6 +1791,63 @@ func (q *Queries) UpsertProjectRate(ctx context.Context, arg UpsertProjectRatePa
 		arg.LastEventID,
 		arg.LastSessionID,
 		arg.UpdatedAt,
+	)
+	return err
+}
+
+const upsertSessionCommandRun = `-- name: UpsertSessionCommandRun :exec
+INSERT INTO session_command_runs (
+    session_id,
+    cmd_norm,
+    cwd,
+    kind,
+    last_exit,
+    last_at,
+    project_key,
+    param_version
+) VALUES (
+    ?,
+    ?,
+    ?,
+    ?,
+    ?,
+    ?,
+    ?,
+    ?
+) ON CONFLICT(session_id, cmd_norm, cwd, project_key) DO UPDATE SET
+    kind = CASE WHEN excluded.last_exit >= 0 THEN excluded.kind ELSE session_command_runs.kind END,
+    last_exit = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_exit ELSE session_command_runs.last_exit END,
+    last_at = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_at ELSE session_command_runs.last_at END,
+    project_key = excluded.project_key,
+    param_version = excluded.param_version
+`
+
+type UpsertSessionCommandRunParams struct {
+	SessionID    string `json:"session_id"`
+	CmdNorm      string `json:"cmd_norm"`
+	Cwd          string `json:"cwd"`
+	Kind         string `json:"kind"`
+	LastExit     int64  `json:"last_exit"`
+	LastAt       int64  `json:"last_at"`
+	ProjectKey   string `json:"project_key"`
+	ParamVersion string `json:"param_version"`
+}
+
+// Session-scoped twin of the command ledger (#357): one row per
+// (session, normalized command, directory), holding THIS session's
+// last real verdict for the command. The verdict columns ride the
+// same CASE guard as command_memory -- an interrupted run notes the
+// attempt but never overwrites the session's last real verdict.
+func (q *Queries) UpsertSessionCommandRun(ctx context.Context, arg UpsertSessionCommandRunParams) error {
+	_, err := q.exec(ctx, q.upsertSessionCommandRunStmt, upsertSessionCommandRun,
+		arg.SessionID,
+		arg.CmdNorm,
+		arg.Cwd,
+		arg.Kind,
+		arg.LastExit,
+		arg.LastAt,
+		arg.ProjectKey,
+		arg.ParamVersion,
 	)
 	return err
 }

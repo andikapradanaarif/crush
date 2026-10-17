@@ -213,6 +213,17 @@ type Session struct {
 	Channel          sql.NullString `json:"channel"`
 }
 
+type SessionCommandRun struct {
+	SessionID    string `json:"session_id"`
+	CmdNorm      string `json:"cmd_norm"`
+	Cwd          string `json:"cwd"`
+	Kind         string `json:"kind"`
+	LastExit     int64  `json:"last_exit"`
+	LastAt       int64  `json:"last_at"`
+	ProjectKey   string `json:"project_key"`
+	ParamVersion string `json:"param_version"`
+}
+
 type SessionCounter struct {
 	SessionID string `json:"session_id"`
 	Name      string `json:"name"`

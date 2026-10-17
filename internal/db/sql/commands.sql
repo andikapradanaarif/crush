@@ -52,6 +52,37 @@ INSERT INTO command_memory (
     project_key = excluded.project_key,
     param_version = excluded.param_version;
 
+-- name: UpsertSessionCommandRun :exec
+-- Session-scoped twin of the command ledger (#357): one row per
+-- (session, normalized command, directory), holding THIS session's
+-- last real verdict for the command. The verdict columns ride the
+-- same CASE guard as command_memory -- an interrupted run notes the
+-- attempt but never overwrites the session's last real verdict.
+INSERT INTO session_command_runs (
+    session_id,
+    cmd_norm,
+    cwd,
+    kind,
+    last_exit,
+    last_at,
+    project_key,
+    param_version
+) VALUES (
+    ?,
+    ?,
+    ?,
+    ?,
+    ?,
+    ?,
+    ?,
+    ?
+) ON CONFLICT(session_id, cmd_norm, cwd, project_key) DO UPDATE SET
+    kind = CASE WHEN excluded.last_exit >= 0 THEN excluded.kind ELSE session_command_runs.kind END,
+    last_exit = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_exit ELSE session_command_runs.last_exit END,
+    last_at = CASE WHEN excluded.last_exit >= 0 THEN excluded.last_at ELSE session_command_runs.last_at END,
+    project_key = excluded.project_key,
+    param_version = excluded.param_version;
+
 -- name: UpsertFailure :exec
 -- One row per (normalized command, directory, error headline)
 -- signature. A re-fail refreshes the observation -- headline, file
@@ -137,6 +168,9 @@ SELECT DISTINCT project_key FROM failure_memory WHERE project_key != '';
 -- name: ListCommandPartitionKeys :many
 SELECT DISTINCT project_key FROM command_memory WHERE project_key != '';
 
+-- name: ListSessionRunPartitionKeys :many
+SELECT DISTINCT project_key FROM session_command_runs WHERE project_key != '';
+
 -- name: GetFailureMeta :one
 SELECT signature, first_seen FROM failure_memory WHERE signature = ?;
 
@@ -167,6 +201,20 @@ DELETE FROM command_memory AS stale WHERE stale.project_key = ? AND EXISTS (
 
 -- name: RekeyCommandPartition :exec
 UPDATE command_memory SET project_key = ? WHERE project_key = ?;
+
+-- name: DeleteSessionRunConflicts :exec
+-- Same re-key collision shape as command_memory: the (session_id,
+-- cmd_norm, cwd, target) twin wins, the stale row goes first.
+DELETE FROM session_command_runs AS stale WHERE stale.project_key = ? AND EXISTS (
+    SELECT 1 FROM session_command_runs twin
+    WHERE twin.project_key = ?
+        AND twin.session_id = stale.session_id
+        AND twin.cmd_norm = stale.cmd_norm
+        AND twin.cwd = stale.cwd
+);
+
+-- name: RekeySessionRunPartition :exec
+UPDATE session_command_runs SET project_key = ? WHERE project_key = ?;
 
 -- name: ListRecentCommands :many
 -- last_at is millisecond-granularity so re-runs order by recency;
@@ -306,18 +354,31 @@ LIMIT ?;
 UPDATE referent_episodes SET label_target_hash = ?, label_wrong_target = ?, label_steps = ?, label_tokens = ?, label_tests_green = ?, labeled_at = ?, label_added_lines = ?, settle_at = created_at + ? WHERE session_id = ? AND source_message_id = ? AND target = ? AND settled_at IS NULL;
 
 -- name: ListSessionTestVerdicts :many
--- kind='test' ledger rows whose last real run belongs to this
--- session (or a task-tool child) -- the session-end test evidence
--- (#294). last_exit is the row's last verdict, not this run's, so a
--- command the session ran only early counts toward session-end
--- state the way the ledger models it. Matches the
--- ListSessionOpenFailures session-with-children shape.
-SELECT c.cmd_norm, c.last_exit FROM command_memory c
-WHERE c.project_key = ?
+-- kind='test' evidence the session (or a task-tool child) provably
+-- ran -- the session-end test signal (#294). Two sources, unioned:
+-- session_command_runs is the session's own last verdict per
+-- command and never drifts (#357); the command_memory arm keeps the
+-- pre-#357 coverage -- last-writer rows the session still owns, its
+-- only evidence on stores populated before the session table
+-- existed. last_exit is the row's last verdict, not this run's, so
+-- a command the session ran only early counts toward session-end
+-- state the way the ledger models it.
+SELECT r.last_exit FROM session_command_runs r
+WHERE r.project_key = sqlc.arg(project_key)
+    AND r.kind = 'test'
+    AND r.last_exit >= 0
+    AND r.session_id IN (
+        SELECT s.id FROM sessions s
+        WHERE s.id = sqlc.arg(session_id) OR s.parent_session_id = sqlc.arg(session_id)
+    )
+UNION
+SELECT c.last_exit FROM command_memory c
+WHERE c.project_key = sqlc.arg(project_key)
     AND c.kind = 'test'
     AND c.last_exit >= 0
     AND c.last_session_id IN (
-        SELECT id FROM sessions WHERE id = ? OR parent_session_id = ?
+        SELECT s.id FROM sessions s
+        WHERE s.id = sqlc.arg(session_id) OR s.parent_session_id = sqlc.arg(session_id)
     );
 
 -- name: ListUnsettledReferentLabels :many
