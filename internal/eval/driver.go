@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -639,10 +640,14 @@ func (c CrushRunner) subprocessEnv(telemetryFile string, maxSteps int, prevVecto
 	// The fixed minimal set passes regardless — AllowedEnv only adds
 	// the manifest-referenced names on top of it.
 	allowed := make(map[string]bool)
-	for _, k := range fixedChildEnv() {
-		allowed[k] = true
-	}
-	for _, k := range c.AllowedEnv {
+	var prefixes []string
+	for _, k := range append(fixedChildEnv(), c.AllowedEnv...) {
+		// env_passthrough admits families via one trailing '*' —
+		// CLOUDSDK_* matches CLOUDSDK_CONFIG et al.
+		if strings.HasSuffix(k, "*") {
+			prefixes = append(prefixes, strings.TrimSuffix(k, "*"))
+			continue
+		}
 		allowed[k] = true
 	}
 	env := make([]string, 0, len(allowed))
@@ -661,7 +666,9 @@ func (c CrushRunner) subprocessEnv(telemetryFile string, maxSteps int, prevVecto
 		// set cross the exec boundary — an ambient credential or
 		// proxy var the manifest never named alters the child without
 		// appearing in any record (the #333 failure shape).
-		if allowed[k] {
+		if allowed[k] || slices.ContainsFunc(prefixes, func(p string) bool {
+			return strings.HasPrefix(k, p)
+		}) {
 			env = append(env, kv)
 		}
 	}

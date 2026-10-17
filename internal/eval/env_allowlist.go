@@ -2,6 +2,7 @@ package eval
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"runtime"
 	"slices"
@@ -22,6 +23,24 @@ import (
 // Command substitution ($(cmd)) starts with '(' so it can't match;
 // variable references inside the substituted command still surface.
 var envRefRe = regexp.MustCompile(`\$(?:\{[#?!]*([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*))`)
+
+// passthroughNameRe is the env_passthrough grammar: an env var name
+// with an optional single trailing '*' admitting the family
+// ("CLOUDSDK_*" passes CLOUDSDK_CONFIG). A bare '*' is not a name.
+var passthroughNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*\*?$`)
+
+// validatePassthroughName rejects env_passthrough entries that can
+// never admit anything or smuggle a value past the names-only
+// contract.
+func validatePassthroughName(name string) error {
+	if !passthroughNameRe.MatchString(name) {
+		return fmt.Errorf("%q is not an env var name (optionally ending in one '*')", name)
+	}
+	if strings.HasPrefix(name, "CRUSH_") || strings.HasPrefix(name, "EVAL_") {
+		return fmt.Errorf("%q is reserved — harness-prefixed vars are stripped before the allowlist runs", name)
+	}
+	return nil
+}
 
 // ambientCredentialEnv names the out-of-band credential chains for
 // providers whose catalog entries carry no api_key template — the
@@ -130,14 +149,12 @@ func scanEnvRefs(doc any, out map[string]bool) {
 // undeclared pins then fail loudly in preflight ("resolves empty")
 // rather than silently inheriting.
 //
-// Deliberate scope cuts, both fail-closed: $(command) credential
-// helpers (e.g. $(gcloud auth print-access-token)) run under the
-// scrubbed env, so helper ambient vars like CLOUDSDK_* /
-// PASSWORD_STORE_* only pass when the pinned provider's chain names
-// them; and proxy/toolchain ambient vars (HTTP_PROXY, GOPROXY,
-// SSL_CERT_FILE, LANG, SSH_AUTH_SOCK) admit nothing by default.
-// Both want a manifest-level passthrough field rather than ambient
-// inheritance — the admission must be declared to be recorded (#373).
+// Surfaces no $-ref can name — $(command) helpers' ambient vars
+// (CLOUDSDK_*, PASSWORD_STORE_*), proxy/toolchain vars (HTTP_PROXY,
+// GOPROXY, SSH_AUTH_SOCK) — admit through env_passthrough (#373):
+// declared names, recorded like every other admission. What stays
+// cut is ambient inheritance itself — a passthrough without a
+// declaration is the #333 leak class.
 func envAllowlist(exp *Experiment) []string {
 	set := map[string]bool{}
 	for _, k := range fixedChildEnv() {
@@ -146,6 +163,11 @@ func envAllowlist(exp *Experiment) []string {
 	scanEnvRefs(exp.Providers, set)
 	for _, arm := range exp.Arms {
 		scanEnvRefs(arm.Config.Options, set)
+	}
+	// Declared passthrough names merge verbatim — the pattern itself
+	// (e.g. CLOUDSDK_*) is the honest record of what was admitted.
+	for _, name := range exp.EnvPassthrough {
+		set[name] = true
 	}
 	// Pinned providers get two admissions: the ambient credential
 	// chain for SDK-native auth (hyper, bedrock, vertex) and — when

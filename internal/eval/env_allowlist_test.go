@@ -227,3 +227,69 @@ func TestEnvRecord_AllowlistProvenance(t *testing.T) {
 	require.NotContains(t, string(data), "abc123",
 		"allowlist records names only — no value ever lands in it")
 }
+
+// env_passthrough is the allowlist's declared escape hatch (#373):
+// surfaces no $-ref can name — credential-helper families, proxy and
+// toolchain vars — pass only when the manifest declares them, and the
+// declaration lands in env_allowlist provenance like any other name.
+func TestEnvAllowlist_Passthrough(t *testing.T) {
+	exp := &Experiment{
+		Name:           "pass",
+		Model:          "testp/m",
+		EnvPassthrough: []string{"EVALTEST_HELPER_DIR", "EVALTEST_SDK_*"},
+		Arms:           map[string]Arm{ArmControl: {}},
+	}
+	got := envAllowlist(exp)
+	require.Contains(t, got, "EVALTEST_HELPER_DIR")
+	require.Contains(t, got, "EVALTEST_SDK_*",
+		"the pattern itself is the honest record of the admitted family")
+}
+
+func TestSubprocessEnv_PassthroughPattern(t *testing.T) {
+	t.Setenv("EVALTEST_SDK_KEY", "k")
+	t.Setenv("EVALTEST_SDK_REGION", "r")
+	t.Setenv("EVALTEST_OTHER", "x")
+	c := CrushRunner{
+		Home:       t.TempDir(),
+		AllowedEnv: []string{"EVALTEST_SDK_*"},
+	}
+	env := c.subprocessEnv("tel", 0, nil)
+	got, ok := envValue(env, "EVALTEST_SDK_KEY")
+	require.True(t, ok)
+	require.Equal(t, "k", got)
+	got, ok = envValue(env, "EVALTEST_SDK_REGION")
+	require.True(t, ok)
+	require.Equal(t, "r", got)
+	_, ok = envValue(env, "EVALTEST_OTHER")
+	require.False(t, ok, "outside the declared family — scrubbed")
+}
+
+// The grammar is names-only: no values, no assignment syntax, no
+// reserved harness prefixes — a declared name that can never pass is
+// a load error, not a silent scrub.
+func TestValidateExperiment_EnvPassthrough(t *testing.T) {
+	base := func() *Experiment {
+		return &Experiment{
+			Name: "e", Model: "m/x", Temperature: ptr(0.0),
+			Corpus:            []string{"t"},
+			RunsPerTrajectory: map[Band]int{BandStable: 1},
+			Arms:              map[string]Arm{ArmControl: {}, ArmTreatment: {}},
+		}
+	}
+	e := base()
+	e.EnvPassthrough = []string{"EVALTEST_A", "EVALTEST_FAMILY_*"}
+	require.NoError(t, ValidateExperiment(e))
+	for _, bad := range []string{
+		"EVALTEST_A=x",   // value, not a name
+		"",               // empty
+		"*",              // bare wildcard
+		"EVALTEST_A**",   // double star
+		"EVALTEST_*_MID", // mid-string glob — grammar is suffix-only
+		"CRUSH_EVAL_FOO", // harness prefix — stripped before allowlist
+		"EVAL_MAX_STEPS", // same
+	} {
+		e = base()
+		e.EnvPassthrough = []string{bad}
+		require.ErrorContains(t, ValidateExperiment(e), "env_passthrough", bad)
+	}
+}

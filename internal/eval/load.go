@@ -382,6 +382,11 @@ func ValidateExperiment(e *Experiment) error {
 		// semantics for it to mean.
 		return fmt.Errorf("process_model %q cannot combine with replay — forked boundaries restart per turn by construction", ProcessModelPersistent)
 	}
+	for _, name := range e.EnvPassthrough {
+		if err := validatePassthroughName(name); err != nil {
+			return fmt.Errorf("env_passthrough: %w", err)
+		}
+	}
 	if len(e.Corpus) == 0 {
 		return fmt.Errorf("corpus selector is required")
 	}
