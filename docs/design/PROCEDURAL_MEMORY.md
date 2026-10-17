@@ -160,8 +160,10 @@ rarely takes. Mining needs a label at the unit it clusters:
   spawn, the same contract the settle pass uses.
 
 Mining keeps only `accepted` turns (v1; `failed`/`revised` traces are
-logged for a later ReasoningBank-style pass). This is the label the
-whole channel inherits — its correctness is G1.
+logged for a later ReasoningBank-style pass — where `failed` reads
+session-grain per the `turn_outcomes` contract, never as per-turn
+failure). This is the label the whole channel inherits — its
+correctness is G1.
 
 ## Vocabulary
 
@@ -411,6 +413,19 @@ CREATE TABLE turn_outcomes (
 -- repair prompts and compaction summaries are not, hidden
 -- continuations (programmatic runs) are — they drove work like any
 -- other prompt.
+--
+-- The failed arm is therefore session-grain evidence: read it as
+-- "the session ended red and no stronger per-turn artifact
+-- contradicted it", never "this turn's work failed" (#353). Two
+-- consequences for consumers: the accepted pool is a lower bound —
+-- committed turns in red-ending sessions still settle failed — and
+-- a failed row carries no per-turn signal, so the census excludes
+-- it rather than counting it against a candidate's procedure.
+-- Verdict mixes reported per-turn skew toward failed on projects
+-- whose sessions habitually end red; session-grain aggregates are
+-- the honest reporting unit. Per-turn re-derivation stays possible
+-- — the transcripts and the command ledger are stored — but it is
+-- a semantics change of its own, not a label fix.
 
 -- One row per (signature, version) mined candidate.
 CREATE TABLE skills (
