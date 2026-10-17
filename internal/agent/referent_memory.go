@@ -318,10 +318,12 @@ func mintReferentEpisode(ctx context.Context, d turnOutcomeDeps, sessionID strin
 	// RepoState is the worktree's HEAD at mint — near the judged
 	// turn on the live path, arbitrarily later on a backfilled one
 	// (the turn's historical HEAD is not stored). It is provenance
-	// only: no consumer reads repo_state for a decision.
+	// only: no consumer reads repo_state for a decision. The probe
+	// is memoized on the deps so a sweep minting K episodes runs
+	// one rev-parse; nil tolerates hand-built test deps.
 	repoState := ""
-	if d.workdir != "" {
-		repoState = headSHA(d.workdir)
+	if d.headSHA != nil {
+		repoState = d.headSHA()
 	}
 	for _, t := range targets {
 		ep := cmdlog.ReferentEpisode{
@@ -384,10 +386,13 @@ func mintReferentEpisode(ctx context.Context, d turnOutcomeDeps, sessionID strin
 // as its predecessor's judge text.
 //
 // A session's minted source IDs are fetched once — already-minted
-// turns skip the target scan entirely. Turns that abstained (non-
-// vague, no phrase, multi-target) re-scan on each receipt — a
-// bounded cost accepted over an abstention marker that would wedge
-// a "judged but empty" state into the store.
+// turns skip the target scan entirely. Skipping also bypasses the
+// live path's OR-IGNORE label refresh — preferable: the first
+// mint's label_tokens and repo_state sit closer to the judged turn
+// than anything a sweep-time re-stamp would write. Turns that
+// abstained (non-vague, no phrase, multi-target) re-scan on each
+// receipt — a bounded cost accepted over an abstention marker that
+// would wedge a "judged but empty" state into the store.
 func backfillReferentEpisodes(ctx context.Context, d turnOutcomeDeps, sessionID string, msgs []message.Message, excludeID string) {
 	var segs []int
 	for i, m := range msgs {

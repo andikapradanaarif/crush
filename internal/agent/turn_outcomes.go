@@ -27,6 +27,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sync"
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/cmdlog"
@@ -51,7 +52,9 @@ const turnOutcomeBackfillLimit = 25
 // mp serve the referent backfill (#368): the episode mint reads the
 // judged turn's cumulative token cost and the vagueness/promotion
 // parameters — snapshotted alongside for the same off-goroutine
-// reason.
+// reason. headSHA is a lazily memoized mint-time HEAD probe: every
+// copy of the struct shares the once, so a sweep minting K episodes
+// runs one rev-parse, and a deps that never mints runs none.
 type turnOutcomeDeps struct {
 	messages message.Service
 	sessions session.Service
@@ -59,6 +62,7 @@ type turnOutcomeDeps struct {
 	workdir  string
 	reqStats *csync.Map[string, requestStats]
 	mp       params.Memory
+	headSHA  func() string
 }
 
 // turnOutcomeDeps snapshots the fields on the caller's goroutine —
@@ -74,6 +78,12 @@ func (a *sessionAgent) turnOutcomeDeps() turnOutcomeDeps {
 	if a.configStore != nil {
 		d.workdir = a.configStore.WorkingDir()
 	}
+	d.headSHA = sync.OnceValue(func() string {
+		if d.workdir == "" {
+			return ""
+		}
+		return headSHA(d.workdir)
+	})
 	return d
 }
 
