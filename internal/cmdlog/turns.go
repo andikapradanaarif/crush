@@ -209,6 +209,10 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 	case diverged || r.NextVerdict == ReferentRevised:
 		verdict = TurnRevised
 	case green.Valid && green.Int64 == 0:
+		// Session-grain by design: the ledger has no per-turn
+		// last-exit, so a red session end fails every non-empty
+		// turn in it — "failed" means the session ended red, not
+		// that this turn's work failed (#353).
 		verdict = TurnFailed
 	case committed || (decidable && !diverged):
 		verdict = TurnAccepted
