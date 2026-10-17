@@ -689,12 +689,15 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 		// observation provenance.
 		ledgerState = ""
 	}
+	// One stamp for both writes — the ledger row and its
+	// session-scoped twin describe the same observation.
+	runAt := s.now().UnixMilli()
 	if err := s.q.UpsertCommandRun(ctx, db.UpsertCommandRunParams{
 		CmdNorm:        cmdNorm,
 		Cwd:            cwd,
 		Kind:           toolclass.CommandKind(command),
 		LastExit:       lastExit,
-		LastAt:         s.now().UnixMilli(),
+		LastAt:         runAt,
 		OkCount:        ok,
 		FailCount:      fail,
 		LastSessionID:  run.SessionID,
@@ -718,7 +721,7 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 		Cwd:          cwd,
 		Kind:         toolclass.CommandKind(command),
 		LastExit:     lastExit,
-		LastAt:       s.now().UnixMilli(),
+		LastAt:       runAt,
 		ProjectKey:   s.projectKey,
 		ParamVersion: s.paramVersion,
 	}); err != nil {

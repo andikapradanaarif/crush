@@ -588,6 +588,62 @@ func TestSessionTestsGreen_SessionHistory(t *testing.T) {
 	require.EqualValues(t, 1, env.svc.(*service).sessionTestsGreen(ctx, "other").Int64)
 }
 
+// The tree's latest verdict per command wins across writers: a
+// child's red lifts when the parent re-runs the same command green
+// — the intra-tree supersession command_memory's shared row always
+// modeled, preserved per-(cmd, cwd) under session-scoped storage.
+// Direct upserts pin the ordering: RecordRun's wall clock can stamp
+// equal millisecond last_at, where ordering falls to the session_id
+// tie-break and the assertion would flake.
+func TestSessionTestsGreen_TreeLatestVerdictWins(t *testing.T) {
+	env := setupLabelsTest(t)
+	seedLabelSession(t, env, "p1", "")
+	seedLabelSession(t, env, "child", "p1")
+	ctx := t.Context()
+	q := db.New(env.conn)
+	key := env.svc.ProjectKey()
+
+	put := func(session, cmd string, exit, at int64) {
+		t.Helper()
+		require.NoError(t, q.UpsertSessionCommandRun(ctx, db.UpsertSessionCommandRunParams{
+			SessionID: session, CmdNorm: cmd, Cwd: ".",
+			Kind: "test", LastExit: exit, LastAt: at, ProjectKey: key,
+		}))
+	}
+
+	put("child", "go test ./b", 1, 1000)
+	put("p1", "go test ./b", 0, 2000)
+	require.EqualValues(t, 1, env.svc.(*service).sessionTestsGreen(ctx, "p1").Int64,
+		"the parent's later green supersedes the child's red on the same command")
+
+	// The reverse ordering fails: the tree's latest verdict is red.
+	put("p1", "go test ./e", 0, 3000)
+	put("child", "go test ./e", 1, 4000)
+	require.EqualValues(t, 0, env.svc.(*service).sessionTestsGreen(ctx, "p1").Int64,
+		"the child's later red supersedes the parent's earlier green")
+}
+
+// The union's legacy arm keeps stores populated before
+// session_command_runs existed: a command_memory row the session
+// still last-writes is its only evidence — deleting the session
+// rows must not blind the read.
+func TestSessionTestsGreen_LegacyArmAlone(t *testing.T) {
+	env := setupLabelsTest(t)
+	seedLabelSession(t, env, "s1", "")
+	ctx := t.Context()
+
+	env.svc.RecordRun(ctx, Run{
+		SessionID: "s1", Command: "go test ./...", CWD: env.workingDir,
+		Ran: true, ExitCode: 1,
+	})
+	_, err := env.conn.ExecContext(ctx, "DELETE FROM session_command_runs")
+	require.NoError(t, err)
+
+	g := env.svc.(*service).sessionTestsGreen(ctx, "s1")
+	require.True(t, g.Valid, "the last-writer arm still reports the red verdict")
+	require.EqualValues(t, 0, g.Int64)
+}
+
 // A commit the harness itself ran is not acceptance evidence: the
 // command_memory row for the git-commit run excludes it.
 func TestSettleReferentLabels_AgentCommitExcluded(t *testing.T) {

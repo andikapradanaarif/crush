@@ -425,10 +425,13 @@ func (s *service) readWorkspaceFile(target string) ([]byte, bool) {
 // verdicts into the tri-state signal: every observed kind='test'
 // command ending clean is 1, any failure is 0, and a session that
 // ran nothing the ledger calls a test leaves NULL — unobserved, not
-// green. Evidence comes from the session's own run history
+// green. Evidence comes from the session tree's own run history
 // (session_command_runs — immune to the ledger's last-writer drift,
 // #357) unioned with last-writer command_memory rows the session
-// still owns, the only source on stores predating that table. The
+// still owns, the only source on stores predating that table.
+// Within the tree the LATEST verdict per command wins — a child's
+// red lifts when the parent re-runs it green — while a foreign
+// session's re-run can never erase the tree's evidence. The
 // last-exit semantics mean a test the session ran early still
 // counts toward session-end state — session-grain by design (#353).
 func (s *service) sessionTestsGreen(ctx context.Context, sessionID string) sql.NullInt64 {

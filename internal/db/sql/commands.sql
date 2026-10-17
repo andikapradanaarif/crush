@@ -363,14 +363,26 @@ UPDATE referent_episodes SET label_target_hash = ?, label_wrong_target = ?, labe
 -- existed. last_exit is the row's last verdict, not this run's, so
 -- a command the session ran only early counts toward session-end
 -- state the way the ledger models it.
-SELECT r.last_exit FROM session_command_runs r
-WHERE r.project_key = sqlc.arg(project_key)
-    AND r.kind = 'test'
-    AND r.last_exit >= 0
-    AND r.session_id IN (
-        SELECT s.id FROM sessions s
-        WHERE s.id = sqlc.arg(session_id) OR s.parent_session_id = sqlc.arg(session_id)
-    )
+-- The tree's latest verdict per command: writers inside the session
+-- tree (parent + task-tool children) each keep their own row, so a
+-- child's red can be lifted by the parent's later green on the same
+-- command -- the same last-writer supersession command_memory models,
+-- scoped to the tree. Millisecond ties (injected clocks) break
+-- deterministically on session_id.
+SELECT last_exit FROM (
+    SELECT r.last_exit, ROW_NUMBER() OVER (
+        PARTITION BY r.cmd_norm, r.cwd
+        ORDER BY r.last_at DESC, r.session_id
+    ) AS rn
+    FROM session_command_runs r
+    WHERE r.project_key = sqlc.arg(project_key)
+        AND r.kind = 'test'
+        AND r.last_exit >= 0
+        AND r.session_id IN (
+            SELECT s.id FROM sessions s
+            WHERE s.id = sqlc.arg(session_id) OR s.parent_session_id = sqlc.arg(session_id)
+        )
+) WHERE rn = 1
 UNION
 SELECT c.last_exit FROM command_memory c
 WHERE c.project_key = sqlc.arg(project_key)

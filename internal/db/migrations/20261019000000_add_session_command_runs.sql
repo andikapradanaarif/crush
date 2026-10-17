@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS session_command_runs (
     PRIMARY KEY (session_id, cmd_norm, cwd, project_key)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_session_command_runs_key
-    ON session_command_runs(project_key);
+    ON session_command_runs(project_key, session_id);
 
 -- +goose Down
 DROP TABLE IF EXISTS session_command_runs;

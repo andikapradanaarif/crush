@@ -335,6 +335,12 @@ type Querier interface {
 	// existed. last_exit is the row's last verdict, not this run's, so
 	// a command the session ran only early counts toward session-end
 	// state the way the ledger models it.
+	// The tree's latest verdict per command: writers inside the session
+	// tree (parent + task-tool children) each keep their own row, so a
+	// child's red can be lifted by the parent's later green on the same
+	// command -- the same last-writer supersession command_memory models,
+	// scoped to the tree. Millisecond ties (injected clocks) break
+	// deterministically on session_id.
 	ListSessionTestVerdicts(ctx context.Context, arg ListSessionTestVerdictsParams) ([]int64, error)
 	// Read files are already workspace-relative; files rows store the
 	// path the tool passed, relativized service-side when needed.
