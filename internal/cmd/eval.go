@@ -645,38 +645,35 @@ var evalCalibrateCmd = &cobra.Command{
 	Short: "Learn-then-Test offline certification of memory params",
 	Long: `Offline certification for learned memory parameters (#295).
 
-Reads the settled referent episodes in a project crush.db, estimates
-the harm rate of each candidate parameter value, and tests the fixed
-sequence most-conservative → least with Hoeffding–Bentkus p-values.
-The emitted certificate is reproducible from the episode set plus
-the stated bound; a run that certifies nothing keeps the default.
+referent_promote_hits reads the settled referent episodes in a
+project crush.db and certifies a distinct-session floor over their
+outcomes. open_render_limit (#342) runs the selector arm instead:
+the labeled binding corpus (--binding) supplies per-cell admit
+decisions with known-correct verdicts, stratified into one draw per
+cell and calibrated separately per prompt scope class — exchange-
+ability is per class because a prompt's scope regime decides what
+can bind.
 
-The guarantee holds on the calibration distribution only — episodes
-are stratified to one per session because within-session draws are
-correlated. ~78 admit draws are needed before α=5% can certify at
-all.`,
+Both arms estimate each candidate's harm rate and test the fixed
+sequence most-conservative → least with Hoeffding–Bentkus p-values.
+The emitted certificate is reproducible from the input set plus the
+stated bound; a run that certifies nothing keeps the default.
+
+The guarantee holds on the calibration distribution only — referent
+episodes stratify one per session because within-session draws are
+correlated; binding cells stratify one per cell because the authored
+instance is the independence unit. ~78 admit draws are needed before
+α=5% can certify at all.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
 
 		param, _ := cmd.Flags().GetString("param")
-		dbPath, _ := cmd.Flags().GetString("db")
-		workdir, _ := cmd.Flags().GetString("workdir")
 		alpha, _ := cmd.Flags().GetFloat64("alpha")
 		delta, _ := cmd.Flags().GetFloat64("delta")
 		gridStr, _ := cmd.Flags().GetString("grid")
 		out, _ := cmd.Flags().GetString("out")
 
-		if workdir == "" {
-			var err error
-			workdir, err = os.Getwd()
-			if err != nil {
-				return err
-			}
-		}
-		if param != eval.CalibrateParamPromoteHits {
-			return fmt.Errorf("unknown --param %q (have %q)", param, eval.CalibrateParamPromoteHits)
-		}
 		var grid []int
 		for _, s := range strings.Split(gridStr, ",") {
 			v, err := strconv.Atoi(strings.TrimSpace(s))
@@ -686,60 +683,109 @@ all.`,
 			grid = append(grid, v)
 		}
 
-		conn, err := db.ConnectReadOnly(ctx, dbPath)
-		if err != nil {
-			return fmt.Errorf("open %s: %w", dbPath, err)
-		}
-		defer conn.Close()
-		var rows []db.ListReferentCalibrationEpisodesRow
-		ready, err := referentSchemaReady(ctx, conn)
-		if err != nil {
-			return fmt.Errorf("check referent schema: %w", err)
-		}
-		if ready {
-			rows, err = db.New(conn).ListReferentCalibrationEpisodes(ctx, cmdlog.ProjectKeyForDir(workdir))
-			if err != nil {
-				return fmt.Errorf("list calibration episodes: %w", err)
+		var data []byte
+		var certified bool
+		var err error
+		switch param {
+		case eval.CalibrateParamPromoteHits:
+			var cert eval.Certificate
+			cert, err = calibratePromoteHitsRun(ctx, cmd, grid, alpha, delta)
+			if err == nil {
+				data, err = json.MarshalIndent(cert, "", "  ")
+				certified = cert.CertifiedValue != nil
 			}
+		case eval.CalibrateParamOpenRenderLimit:
+			var cert eval.SelectorCertificate
+			cert, err = calibrateOpenRenderLimitRun(cmd, grid, alpha, delta)
+			if err == nil {
+				data, err = json.MarshalIndent(cert, "", "  ")
+				certified = cert.CertifiedValue != nil
+			}
+		default:
+			return fmt.Errorf("unknown --param %q (have %q, %q)",
+				param, eval.CalibrateParamPromoteHits, eval.CalibrateParamOpenRenderLimit)
 		}
-		// A DB written before the referent schema — or before the #294
-		// label columns — has no calibratable episodes: that is an empty
-		// calibration set ("no certification"), not an error worth
-		// dying on.
-		eps := make([]eval.CalibrationEpisode, 0, len(rows))
-		for _, r := range rows {
-			eps = append(eps, eval.CalibrationEpisode{
-				ID:          r.ID,
-				Phrase:      r.Phrase,
-				Target:      r.Target,
-				SessionID:   r.SessionID,
-				Verdict:     r.Verdict,
-				Committed:   r.LabelCommitted,
-				HashChanged: r.LabelHashChanged,
-				Suggested:   r.MemorySuggested != 0,
-			})
-		}
-
-		cert, err := eval.CalibratePromoteHits(eps, grid, alpha, delta)
 		if err != nil {
 			return err
 		}
 
-		data, err := json.MarshalIndent(cert, "", "  ")
-		if err != nil {
-			return err
-		}
 		if out != "" {
 			if err := os.WriteFile(out, append(data, '\n'), 0o644); err != nil {
 				return err
 			}
 		}
 		fmt.Println(string(data))
-		if cert.CertifiedValue == nil {
+		if !certified {
 			fmt.Println("calibrate: no certification — keeping the default")
 		}
 		return nil
 	},
+}
+
+// calibratePromoteHitsRun is the referent-episode arm of eval
+// calibrate — the DB read plus the #295 fixed-sequence run.
+func calibratePromoteHitsRun(ctx context.Context, cmd *cobra.Command,
+	grid []int, alpha, delta float64,
+) (eval.Certificate, error) {
+	dbPath, _ := cmd.Flags().GetString("db")
+	workdir, _ := cmd.Flags().GetString("workdir")
+	if workdir == "" {
+		var err error
+		workdir, err = os.Getwd()
+		if err != nil {
+			return eval.Certificate{}, err
+		}
+	}
+	conn, err := db.ConnectReadOnly(ctx, dbPath)
+	if err != nil {
+		return eval.Certificate{}, fmt.Errorf("open %s: %w", dbPath, err)
+	}
+	defer conn.Close()
+	var rows []db.ListReferentCalibrationEpisodesRow
+	ready, err := referentSchemaReady(ctx, conn)
+	if err != nil {
+		return eval.Certificate{}, fmt.Errorf("check referent schema: %w", err)
+	}
+	if ready {
+		rows, err = db.New(conn).ListReferentCalibrationEpisodes(ctx, cmdlog.ProjectKeyForDir(workdir))
+		if err != nil {
+			return eval.Certificate{}, fmt.Errorf("list calibration episodes: %w", err)
+		}
+	}
+	// A DB written before the referent schema — or before the #294
+	// label columns — has no calibratable episodes: that is an empty
+	// calibration set ("no certification"), not an error worth
+	// dying on.
+	eps := make([]eval.CalibrationEpisode, 0, len(rows))
+	for _, r := range rows {
+		eps = append(eps, eval.CalibrationEpisode{
+			ID:          r.ID,
+			Phrase:      r.Phrase,
+			Target:      r.Target,
+			SessionID:   r.SessionID,
+			Verdict:     r.Verdict,
+			Committed:   r.LabelCommitted,
+			HashChanged: r.LabelHashChanged,
+			Suggested:   r.MemorySuggested != 0,
+		})
+	}
+	return eval.CalibratePromoteHits(eps, grid, alpha, delta)
+}
+
+// calibrateOpenRenderLimitRun is the selector arm (#342): decode the
+// labeled binding corpus, run the real selector over every cell, and
+// calibrate per scope class. The corpus is the independence unit —
+// a cell's candidates share its prompt and disk shape, so the cell
+// (not the session, not the decision) is the draw.
+func calibrateOpenRenderLimitRun(cmd *cobra.Command, grid []int,
+	alpha, delta float64,
+) (eval.SelectorCertificate, error) {
+	binding, _ := cmd.Flags().GetString("binding")
+	decs, err := eval.LoadBindingDecisions(binding, "")
+	if err != nil {
+		return eval.SelectorCertificate{}, err
+	}
+	return eval.CalibrateOpenRenderLimit(decs, grid, alpha, delta)
 }
 
 // referentSchemaReady reports whether a crush.db carries the referent
@@ -852,8 +898,9 @@ func init() {
 	evalCurveCmd.Flags().Int64("seed", 1, "base RNG seed for the grid")
 	evalCurveCmd.Flags().String("memory-params", "", "JSON overlay for params.Memory")
 	evalCurveCmd.Flags().String("out", "curve.jsonl", "JSONL output path")
-	evalCalibrateCmd.Flags().String("param", eval.CalibrateParamPromoteHits, "parameter to certify")
-	evalCalibrateCmd.Flags().String("db", ".crush/crush.db", "project crush.db to read episodes from")
+	evalCalibrateCmd.Flags().String("param", eval.CalibrateParamPromoteHits, "parameter to certify (referent_promote_hits|open_render_limit)")
+	evalCalibrateCmd.Flags().String("db", ".crush/crush.db", "project crush.db to read episodes from (referent arm)")
+	evalCalibrateCmd.Flags().String("binding", "internal/agent/testdata/failure_binding.jsonl", "labeled selector corpus for the open_render_limit arm")
 	evalCalibrateCmd.Flags().String("workdir", "", "project dir for project_key derivation (default: CWD)")
 	evalCalibrateCmd.Flags().Float64("alpha", 0.05, "certified harm-rate bound")
 	evalCalibrateCmd.Flags().Float64("delta", 0.05, "family-wise error level")

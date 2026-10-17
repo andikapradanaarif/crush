@@ -1558,6 +1558,57 @@ var selectorPromptReplacer = strings.NewReplacer(
 // render_capped — cut by budget, not by the prompt. renderLimit <= 0
 // renders everything that binds.
 //
+// selectorPromptText is the canonical prompt form the selector's
+// scope analysis reads — resume-unwrap, typography fold, and slash
+// normalization. Shared by selectMemory and ScopeClass so a
+// classification reads the text the routes did. Windows-native
+// strings normalize by literal replacement — filepath.ToSlash is a
+// no-op off Windows, and rows produced on Windows must still bind
+// everywhere.
+func selectorPromptText(prompt string) string {
+	if m := interruptedRequestRe.FindStringSubmatch(prompt); m != nil {
+		prompt = m[1]
+	}
+	return strings.ReplaceAll(selectorPromptReplacer.Replace(prompt), `\`, "/")
+}
+
+// Prompt scope classes — the closed vocabulary ScopeClass returns.
+// The class is a prompt property: which regime the route table's
+// scope checks ran under, which is also the granularity harm rates
+// differ at (#342).
+const (
+	// ScopeClassExplicit is a prompt carrying positive path scope —
+	// named dirs/files the route table binds against directly.
+	ScopeClassExplicit = "explicit_scope"
+	// ScopeClassReferentKind is an ambiguous prompt that still
+	// names a verification kind ("the test fails") — referent-bound
+	// rows can admit by kind, uniqueness, or top-level shape.
+	ScopeClassReferentKind = "referent_kind"
+	// ScopeClassUnresolved is the residue — no scope, no kind; the
+	// deterministic layers can only admit a positively-named
+	// identifier. The L3 resolver consults exactly this class.
+	ScopeClassUnresolved = "unresolved"
+)
+
+// ScopeClass is the selector's deterministic prompt-scope class —
+// the ambiguity regime the prompt falls under before any candidate
+// evaluates (#342). It replicates selectMemory's preamble analysis
+// (normalized prompt, explicit scope, referent kinds) without the
+// L3 resolver overlay: an unresolved prompt the resolver would later
+// scope still classifies unresolved here, matching the calibration
+// corpus's deterministic-arm decisions.
+func ScopeClass(prompt, workDir string) string {
+	prompt = selectorPromptText(prompt)
+	pos, _ := promptScope(prompt, workDir)
+	if len(pos) > 0 {
+		return ScopeClassExplicit
+	}
+	if referentKinds(prompt) != nil {
+		return ScopeClassReferentKind
+	}
+	return ScopeClassUnresolved
+}
+
 // selectOpenFailures is the test-facing open-pool-only wrapper over
 // selectMemory — production calls selectMemory directly so all three
 // pools share one prompt analysis. A new caller wanting open-only
@@ -1782,13 +1833,7 @@ func selectMemory(ctx context.Context, prompt string, pools memoryPools, workDir
 	if commandLimit <= 0 {
 		commandLimit = len(pools.commands)
 	}
-	if m := interruptedRequestRe.FindStringSubmatch(prompt); m != nil {
-		prompt = m[1]
-	}
-	// Windows-native strings normalize by literal replacement —
-	// filepath.ToSlash is a no-op off Windows, and rows produced on
-	// Windows must still bind everywhere.
-	prompt = strings.ReplaceAll(selectorPromptReplacer.Replace(prompt), `\`, "/")
+	prompt = selectorPromptText(prompt)
 	pos, neg := promptScope(prompt, workDir)
 	explicit := len(pos) > 0
 	var kinds []string
