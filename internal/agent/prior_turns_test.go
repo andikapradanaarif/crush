@@ -2,11 +2,13 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 
 	"charm.land/fantasy"
+	"charm.land/fantasy/providers/openaicompat"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
@@ -89,6 +91,25 @@ func renderedReasoning(history []fantasy.Message) string {
 		}
 	}
 	return out
+}
+
+// reasoningPartsForCall returns the reasoning parts rendered on the
+// assistant message carrying tool call id.
+func reasoningPartsForCall(t *testing.T, history []fantasy.Message, id string) []fantasy.ReasoningPart {
+	t.Helper()
+	for _, m := range history {
+		var parts []fantasy.ReasoningPart
+		for _, p := range m.Content {
+			if rp, ok := p.(fantasy.ReasoningPart); ok {
+				parts = append(parts, rp)
+			}
+			if tc, ok := p.(fantasy.ToolCallPart); ok && tc.ToolCallID == id {
+				return parts
+			}
+		}
+	}
+	t.Fatalf("tool call %s missing from rendered history", id)
+	return nil
 }
 
 // failEntryGen keeps segments unprocessed forever — the persistent
@@ -213,13 +234,22 @@ func TestPreparePrompt_CollapsesCoveredPriorTurn(t *testing.T) {
 	}
 	require.NotContains(t, renderedReasoning(history), "unsigned musing")
 
-	// Reasoning bound to a collapsed call drops — its signature is
-	// invalid against the mutated input anyway. Reasoning bound to the
-	// exempt question call keeps both thinking and signature: replaying
-	// a signed call without its thought signature is a rejection mode.
+	// Reasoning bound to a collapsed call strips to presence — text
+	// and signature shed with the turn, but the part itself stays so
+	// strict OpenAI-compatible providers still see the
+	// reasoning_content field. Reasoning bound to the exempt question
+	// call keeps both thinking and signature: replaying a signed call
+	// without its thought signature is a rejection mode.
 	reasoning := renderedReasoning(history)
 	require.NotContains(t, reasoning, "deep thoughts")
 	require.Contains(t, reasoning, "signed for question")
+	shell := false
+	for _, rp := range reasoningPartsForCall(t, history, "tc-bash") {
+		if rp.Text == "" && len(rp.ProviderOptions) == 0 {
+			shell = true
+		}
+	}
+	require.True(t, shell, "a presence-stripped reasoning part must ride the stubbed calls")
 
 	// Provider-executed calls stay verbatim — typed server-tool inputs
 	// may be schema-validated on replay.
@@ -248,6 +278,125 @@ func TestPreparePrompt_CollapsesCoveredPriorTurn(t *testing.T) {
 		}
 	}
 	require.Contains(t, original, "file content line")
+}
+
+// The strict-provider contract end to end: a collapsed tool-call
+// turn must serialize with reasoning_content present — DeepSeek and
+// Kimi 400 the request when the field is missing, which is the
+// multi-turn failure in #348.
+func TestPreparePrompt_CollapsedTurnReasoningContentOnWire(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsStub
+	msgs := priorTurnFixture(t, svc, sessionID)
+	ctx := t.Context()
+	a.detectSegments(ctx, sessionID, msgs)
+
+	collapse := a.newTurnCollapse(1)
+	history, _ := a.preparePrompt(ctx, msgs, false, collapse, false)
+
+	wire, _ := openaicompat.ToPromptFunc(fantasy.Prompt(history), "", "")
+	seen := false
+	for _, wmsg := range wire {
+		raw, err := json.Marshal(wmsg)
+		require.NoError(t, err)
+		var fields map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(raw, &fields))
+		if _, ok := fields["tool_calls"]; !ok {
+			continue
+		}
+		seen = true
+		require.Contains(t, fields, "reasoning_content")
+		require.NotEqual(t, "null", strings.TrimSpace(string(fields["reasoning_content"])))
+	}
+	require.True(t, seen, "expected a collapsed assistant tool-call message")
+}
+
+// Stub collapse keeps every call — so every reasoning part survives
+// too, stripped to presence: strict OpenAI-compatible providers
+// reject a replayed tool-call turn missing reasoning_content, and the
+// signatures bound to stubbed inputs must not replay falsified.
+func TestCollapseAssistantForTurn_ReasoningStrippedToPresence(t *testing.T) {
+	t.Parallel()
+
+	m := message.Message{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.ReasoningContent{Thinking: "unsigned turn thinking"},
+			message.ReasoningContent{Thinking: "google-bound", ThoughtSignature: "gsig", ToolID: "tc-bash"},
+			message.ReasoningContent{Thinking: "anthropic-bound", Signature: "asig", ToolID: "tc-bash"},
+			message.ReasoningContent{Thinking: "exempt-bound", ThoughtSignature: "qsig", ToolID: "tc-q"},
+			message.ToolCall{ID: "tc-bash", Name: "bash", Input: `{"command":"cat big.go"}`, Finished: true},
+			message.ToolCall{ID: "tc-q", Name: "question", Input: `{"questions":[]}`, Finished: true},
+		},
+	}
+
+	out, n := collapseAssistantForTurn(m, 0, priorTurnsStub)
+	require.Equal(t, 1, n)
+	rcs := make([]message.ReasoningContent, 0)
+	for _, part := range out.Parts {
+		if rc, ok := part.(message.ReasoningContent); ok {
+			rcs = append(rcs, rc)
+		}
+	}
+	require.Len(t, rcs, 4)
+	// Unbound and non-exempt-bound parts keep their shell only.
+	require.Empty(t, rcs[0].Thinking)
+	require.Empty(t, rcs[1].Thinking)
+	require.Empty(t, rcs[1].ThoughtSignature)
+	require.Empty(t, rcs[1].ToolID)
+	require.Empty(t, rcs[2].Thinking)
+	require.Empty(t, rcs[2].Signature)
+	// The exempt question call's bound reasoning stays verbatim —
+	// replaying the signed call without it is a rejection mode.
+	require.Equal(t, "exempt-bound", rcs[3].Thinking)
+	require.Equal(t, "qsig", rcs[3].ThoughtSignature)
+}
+
+// Summarize drops non-question calls whole, but turn-level reasoning
+// must ride any surviving question call stripped to presence — the
+// strict-provider field contract applies there too.
+func TestSummarizeAssistantForTurn_TurnLevelReasoningPresence(t *testing.T) {
+	t.Parallel()
+
+	m := message.Message{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.ReasoningContent{Thinking: "turn thinking"},
+			message.ReasoningContent{Thinking: "bound to dropped call", ToolID: "tc-bash"},
+			message.ReasoningContent{Thinking: "signed for question", ThoughtSignature: "qsig", ToolID: "tc-q"},
+			message.ToolCall{ID: "tc-bash", Name: "bash", Input: `{"command":"ls"}`, Finished: true},
+			message.ToolCall{ID: "tc-q", Name: "question", Input: `{"questions":[]}`, Finished: true},
+		},
+	}
+
+	out, n := summarizeAssistantForTurn(m)
+	require.Equal(t, 1, n)
+	rcs := make([]message.ReasoningContent, 0)
+	calls := make([]message.ToolCall, 0)
+	for _, part := range out.Parts {
+		switch p := part.(type) {
+		case message.ReasoningContent:
+			rcs = append(rcs, p)
+		case message.ToolCall:
+			calls = append(calls, p)
+		}
+	}
+	require.Len(t, calls, 1)
+	require.Equal(t, "tc-q", calls[0].ID)
+	require.Len(t, rcs, 2)
+	require.Empty(t, rcs[0].Thinking)
+	require.Equal(t, "signed for question", rcs[1].Thinking)
+
+	// No surviving call, no contract — turn-level reasoning drops
+	// with the turn.
+	m.Parts = m.Parts[:4]
+	out, _ = summarizeAssistantForTurn(m)
+	for _, part := range out.Parts {
+		_, isRC := part.(message.ReasoningContent)
+		require.False(t, isRC)
+	}
 }
 
 func TestPreparePrompt_UncoveredPriorTurnStaysRaw(t *testing.T) {

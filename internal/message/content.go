@@ -752,8 +752,18 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 		if text != "" {
 			parts = append(parts, fantasy.TextPart{Text: text})
 		}
-		reasoning := m.ReasoningContent()
-		if reasoning.Thinking != "" {
+		// Reasoning replays whenever the part exists, even with empty
+		// thinking: strict OpenAI-compatible providers (DeepSeek,
+		// Kimi) reject an assistant tool-call turn replayed without
+		// the reasoning_content field — presence is the contract, and
+		// an empty part emits the field as "". Anthropic and Google
+		// converters consume only provider metadata and skip
+		// metadata-less parts, so stripped parts stay inert there.
+		for _, part := range m.Parts {
+			reasoning, ok := part.(ReasoningContent)
+			if !ok {
+				continue
+			}
 			reasoningPart := fantasy.ReasoningPart{Text: reasoning.Thinking, ProviderOptions: fantasy.ProviderOptions{}}
 			if reasoning.Signature != "" {
 				reasoningPart.ProviderOptions[anthropic.Name] = &anthropic.ReasoningOptionMetadata{
