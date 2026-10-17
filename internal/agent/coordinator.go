@@ -1529,7 +1529,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	// permissions, and verification unchanged. Headless wraps too —
 	// the degrade branch is proceed-with-logged-assumption, since a
 	// question nobody can answer must never stall.
-	if !isSubAgent && cfg.Options.AmbiguityClarificationEnabled() && c.scopeGate != nil {
+	if !isSubAgent && cfg.Options.ScopeGateEnabled() && c.scopeGate != nil {
 		filteredTools = c.scopeGate.wrap(filteredTools)
 	}
 

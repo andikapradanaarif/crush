@@ -813,6 +813,10 @@
           "description": "Enable deterministic clarification gates: turn-zero vagueness pre-filter, first-write scope gate, loop-stop replan and escalation, and the burn-watch spend tripwire. Experimental.",
           "default": false
         },
+        "scope_gate": {
+          "type": "boolean",
+          "description": "Override the first-write scope gate independently of ambiguity_clarification: unset follows it, true or false wins. Experimental."
+        },
         "failure_memory": {
           "type": "boolean",
           "description": "Read unresolved command/failure memory: inject the \u003copen_failures\u003e tail section and arm the reconcile run-edge (open failures the run observed still open block done-ness). Recording happens regardless; this gates the read side. Experimental.",

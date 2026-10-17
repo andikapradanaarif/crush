@@ -166,3 +166,30 @@ func TestShellConfigOptionResetRejectsNonList(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not one")
 }
+
+func TestShellConfigOptionScopeGate(t *testing.T) {
+	store := loadCrushSh(t, `option ambiguity-clarification true
+option scope-gate false`)
+
+	opts := store.Config().Options
+	require.NotNil(t, opts.AmbiguityClarification)
+	require.True(t, *opts.AmbiguityClarification)
+	require.NotNil(t, opts.ScopeGate)
+	require.False(t, *opts.ScopeGate)
+	require.False(t, opts.ScopeGateEnabled(),
+		"explicit scope-gate false overrides the ambiguity bundle")
+}
+
+// The tri-state resolver: unset follows ambiguity_clarification, an
+// explicit bool wins either way.
+func TestScopeGateEnabledResolves(t *testing.T) {
+	trueV, falseV := true, false
+	require.False(t, (&config.Options{}).ScopeGateEnabled(),
+		"nothing set: the bundle defaults off")
+	require.True(t, (&config.Options{AmbiguityClarification: &trueV}).ScopeGateEnabled(),
+		"unset scope_gate follows ambiguity_clarification")
+	require.False(t, (&config.Options{AmbiguityClarification: &trueV, ScopeGate: &falseV}).ScopeGateEnabled(),
+		"explicit false silences the gate inside an enabled bundle")
+	require.True(t, (&config.Options{ScopeGate: &trueV}).ScopeGateEnabled(),
+		"explicit true arms the gate without the bundle")
+}
