@@ -93,6 +93,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.deleteSessionMessagesStmt, err = db.PrepareContext(ctx, deleteSessionMessages); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteSessionMessages: %w", err)
 	}
+	if q.deleteSessionRunConflictsStmt, err = db.PrepareContext(ctx, deleteSessionRunConflicts); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteSessionRunConflicts: %w", err)
+	}
 	if q.evictPendingAttributionStmt, err = db.PrepareContext(ctx, evictPendingAttribution); err != nil {
 		return nil, fmt.Errorf("error preparing query EvictPendingAttribution: %w", err)
 	}
@@ -333,6 +336,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listSessionReadFilesStmt, err = db.PrepareContext(ctx, listSessionReadFiles); err != nil {
 		return nil, fmt.Errorf("error preparing query ListSessionReadFiles: %w", err)
 	}
+	if q.listSessionRunPartitionKeysStmt, err = db.PrepareContext(ctx, listSessionRunPartitionKeys); err != nil {
+		return nil, fmt.Errorf("error preparing query ListSessionRunPartitionKeys: %w", err)
+	}
 	if q.listSessionTestVerdictsStmt, err = db.PrepareContext(ctx, listSessionTestVerdicts); err != nil {
 		return nil, fmt.Errorf("error preparing query ListSessionTestVerdicts: %w", err)
 	}
@@ -396,6 +402,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.rekeyPendingAttributionStmt, err = db.PrepareContext(ctx, rekeyPendingAttribution); err != nil {
 		return nil, fmt.Errorf("error preparing query RekeyPendingAttribution: %w", err)
 	}
+	if q.rekeySessionRunPartitionStmt, err = db.PrepareContext(ctx, rekeySessionRunPartition); err != nil {
+		return nil, fmt.Errorf("error preparing query RekeySessionRunPartition: %w", err)
+	}
 	if q.renameSessionStmt, err = db.PrepareContext(ctx, renameSession); err != nil {
 		return nil, fmt.Errorf("error preparing query RenameSession: %w", err)
 	}
@@ -440,6 +449,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.upsertProjectRateStmt, err = db.PrepareContext(ctx, upsertProjectRate); err != nil {
 		return nil, fmt.Errorf("error preparing query UpsertProjectRate: %w", err)
+	}
+	if q.upsertSessionCommandRunStmt, err = db.PrepareContext(ctx, upsertSessionCommandRun); err != nil {
+		return nil, fmt.Errorf("error preparing query UpsertSessionCommandRun: %w", err)
 	}
 	if q.upsertSessionDigestStmt, err = db.PrepareContext(ctx, upsertSessionDigest); err != nil {
 		return nil, fmt.Errorf("error preparing query UpsertSessionDigest: %w", err)
@@ -562,6 +574,11 @@ func (q *Queries) Close() error {
 	if q.deleteSessionMessagesStmt != nil {
 		if cerr := q.deleteSessionMessagesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteSessionMessagesStmt: %w", cerr)
+		}
+	}
+	if q.deleteSessionRunConflictsStmt != nil {
+		if cerr := q.deleteSessionRunConflictsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteSessionRunConflictsStmt: %w", cerr)
 		}
 	}
 	if q.evictPendingAttributionStmt != nil {
@@ -964,6 +981,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listSessionReadFilesStmt: %w", cerr)
 		}
 	}
+	if q.listSessionRunPartitionKeysStmt != nil {
+		if cerr := q.listSessionRunPartitionKeysStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listSessionRunPartitionKeysStmt: %w", cerr)
+		}
+	}
 	if q.listSessionTestVerdictsStmt != nil {
 		if cerr := q.listSessionTestVerdictsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listSessionTestVerdictsStmt: %w", cerr)
@@ -1069,6 +1091,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing rekeyPendingAttributionStmt: %w", cerr)
 		}
 	}
+	if q.rekeySessionRunPartitionStmt != nil {
+		if cerr := q.rekeySessionRunPartitionStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing rekeySessionRunPartitionStmt: %w", cerr)
+		}
+	}
 	if q.renameSessionStmt != nil {
 		if cerr := q.renameSessionStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing renameSessionStmt: %w", cerr)
@@ -1144,6 +1171,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing upsertProjectRateStmt: %w", cerr)
 		}
 	}
+	if q.upsertSessionCommandRunStmt != nil {
+		if cerr := q.upsertSessionCommandRunStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing upsertSessionCommandRunStmt: %w", cerr)
+		}
+	}
 	if q.upsertSessionDigestStmt != nil {
 		if cerr := q.upsertSessionDigestStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing upsertSessionDigestStmt: %w", cerr)
@@ -1211,6 +1243,7 @@ type Queries struct {
 	deleteSessionDigestIndexStmt            *sql.Stmt
 	deleteSessionFilesStmt                  *sql.Stmt
 	deleteSessionMessagesStmt               *sql.Stmt
+	deleteSessionRunConflictsStmt           *sql.Stmt
 	evictPendingAttributionStmt             *sql.Stmt
 	getAverageResponseTimeStmt              *sql.Stmt
 	getCollapsedTurnStatsStmt               *sql.Stmt
@@ -1291,6 +1324,7 @@ type Queries struct {
 	listSessionCountersStmt                 *sql.Stmt
 	listSessionOpenFailuresStmt             *sql.Stmt
 	listSessionReadFilesStmt                *sql.Stmt
+	listSessionRunPartitionKeysStmt         *sql.Stmt
 	listSessionTestVerdictsStmt             *sql.Stmt
 	listSessionTouchedPathsStmt             *sql.Stmt
 	listSessionsStmt                        *sql.Stmt
@@ -1312,6 +1346,7 @@ type Queries struct {
 	rekeyCrushCommitsStmt                   *sql.Stmt
 	rekeyFailurePartitionStmt               *sql.Stmt
 	rekeyPendingAttributionStmt             *sql.Stmt
+	rekeySessionRunPartitionStmt            *sql.Stmt
 	renameSessionStmt                       *sql.Stmt
 	resolveFailuresForCommandStmt           *sql.Stmt
 	searchNotebookByTagStmt                 *sql.Stmt
@@ -1327,6 +1362,7 @@ type Queries struct {
 	upsertCommandRunStmt                    *sql.Stmt
 	upsertFailureStmt                       *sql.Stmt
 	upsertProjectRateStmt                   *sql.Stmt
+	upsertSessionCommandRunStmt             *sql.Stmt
 	upsertSessionDigestStmt                 *sql.Stmt
 }
 
@@ -1357,6 +1393,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		deleteSessionDigestIndexStmt:            q.deleteSessionDigestIndexStmt,
 		deleteSessionFilesStmt:                  q.deleteSessionFilesStmt,
 		deleteSessionMessagesStmt:               q.deleteSessionMessagesStmt,
+		deleteSessionRunConflictsStmt:           q.deleteSessionRunConflictsStmt,
 		evictPendingAttributionStmt:             q.evictPendingAttributionStmt,
 		getAverageResponseTimeStmt:              q.getAverageResponseTimeStmt,
 		getCollapsedTurnStatsStmt:               q.getCollapsedTurnStatsStmt,
@@ -1437,6 +1474,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listSessionCountersStmt:                 q.listSessionCountersStmt,
 		listSessionOpenFailuresStmt:             q.listSessionOpenFailuresStmt,
 		listSessionReadFilesStmt:                q.listSessionReadFilesStmt,
+		listSessionRunPartitionKeysStmt:         q.listSessionRunPartitionKeysStmt,
 		listSessionTestVerdictsStmt:             q.listSessionTestVerdictsStmt,
 		listSessionTouchedPathsStmt:             q.listSessionTouchedPathsStmt,
 		listSessionsStmt:                        q.listSessionsStmt,
@@ -1458,6 +1496,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		rekeyCrushCommitsStmt:                   q.rekeyCrushCommitsStmt,
 		rekeyFailurePartitionStmt:               q.rekeyFailurePartitionStmt,
 		rekeyPendingAttributionStmt:             q.rekeyPendingAttributionStmt,
+		rekeySessionRunPartitionStmt:            q.rekeySessionRunPartitionStmt,
 		renameSessionStmt:                       q.renameSessionStmt,
 		resolveFailuresForCommandStmt:           q.resolveFailuresForCommandStmt,
 		searchNotebookByTagStmt:                 q.searchNotebookByTagStmt,
@@ -1473,6 +1512,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		upsertCommandRunStmt:                    q.upsertCommandRunStmt,
 		upsertFailureStmt:                       q.upsertFailureStmt,
 		upsertProjectRateStmt:                   q.upsertProjectRateStmt,
+		upsertSessionCommandRunStmt:             q.upsertSessionCommandRunStmt,
 		upsertSessionDigestStmt:                 q.upsertSessionDigestStmt,
 	}
 }

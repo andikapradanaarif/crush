@@ -52,6 +52,9 @@ type Querier interface {
 	DeleteSessionDigestIndex(ctx context.Context, sessionID string) error
 	DeleteSessionFiles(ctx context.Context, sessionID string) error
 	DeleteSessionMessages(ctx context.Context, sessionID string) error
+	// Same re-key collision shape as command_memory: the (session_id,
+	// cmd_norm, cwd, target) twin wins, the stale row goes first.
+	DeleteSessionRunConflicts(ctx context.Context, arg DeleteSessionRunConflictsParams) error
 	// Cap the pending set -- beyond it the newest rows win and the oldest
 	// are abandoned (a bounded miss, not a pile-up of deterministic
 	// failures re-queued forever). Rows tied at the boundary tick all
@@ -328,13 +331,23 @@ type Querier interface {
 	// prompt renders at most ten.
 	ListSessionOpenFailures(ctx context.Context, arg ListSessionOpenFailuresParams) ([]FailureMemory, error)
 	ListSessionReadFiles(ctx context.Context, sessionID string) ([]ReadFile, error)
-	// kind='test' ledger rows whose last real run belongs to this
-	// session (or a task-tool child) -- the session-end test evidence
-	// (#294). last_exit is the row's last verdict, not this run's, so a
-	// command the session ran only early counts toward session-end
-	// state the way the ledger models it. Matches the
-	// ListSessionOpenFailures session-with-children shape.
-	ListSessionTestVerdicts(ctx context.Context, arg ListSessionTestVerdictsParams) ([]ListSessionTestVerdictsRow, error)
+	ListSessionRunPartitionKeys(ctx context.Context) ([]string, error)
+	// kind='test' evidence the session (or a task-tool child) provably
+	// ran -- the session-end test signal (#294). Two sources, unioned:
+	// session_command_runs is the session's own last verdict per
+	// command and never drifts (#357); the command_memory arm keeps the
+	// pre-#357 coverage -- last-writer rows the session still owns, its
+	// only evidence on stores populated before the session table
+	// existed. last_exit is the row's last verdict, not this run's, so
+	// a command the session ran only early counts toward session-end
+	// state the way the ledger models it.
+	// The tree's latest verdict per command: writers inside the session
+	// tree (parent + task-tool children) each keep their own row, so a
+	// child's red can be lifted by the parent's later green on the same
+	// command -- the same last-writer supersession command_memory models,
+	// scoped to the tree. Millisecond ties (injected clocks) break
+	// deterministically on session_id.
+	ListSessionTestVerdicts(ctx context.Context, arg ListSessionTestVerdictsParams) ([]int64, error)
 	// Read files are already workspace-relative; files rows store the
 	// path the tool passed, relativized service-side when needed.
 	ListSessionTouchedPaths(ctx context.Context, arg ListSessionTouchedPathsParams) ([]string, error)
@@ -414,6 +427,7 @@ type Querier interface {
 	// covers a (project_key, prev_sha, post_sha) twin: the current key's
 	// row wins, the stale-keyed row is left dead under the old key.
 	RekeyPendingAttribution(ctx context.Context, arg RekeyPendingAttributionParams) error
+	RekeySessionRunPartition(ctx context.Context, arg RekeySessionRunPartitionParams) error
 	RenameSession(ctx context.Context, arg RenameSessionParams) error
 	// A clean run of a normalized command resolves its open failure rows
 	// in the same directory -- "go test ./..." passing in packages/web
@@ -464,6 +478,12 @@ type Querier interface {
 	// mark (#356) -- an in-process racer skips rather than
 	// double-counting the batch.
 	UpsertProjectRate(ctx context.Context, arg UpsertProjectRateParams) error
+	// Session-scoped twin of the command ledger (#357): one row per
+	// (session, normalized command, directory), holding THIS session's
+	// last real verdict for the command. The verdict columns ride the
+	// same CASE guard as command_memory -- an interrupted run notes the
+	// attempt but never overwrites the session's last real verdict.
+	UpsertSessionCommandRun(ctx context.Context, arg UpsertSessionCommandRunParams) error
 	// The digest is a per-turn refresh of the session's resumable view:
 	// title + latest checkpoint + touched files. ended_at follows the
 	// session row's updated_at --- the closest thing to an end timestamp a

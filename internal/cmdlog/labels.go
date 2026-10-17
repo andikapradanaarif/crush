@@ -425,19 +425,25 @@ func (s *service) readWorkspaceFile(target string) ([]byte, bool) {
 // verdicts into the tri-state signal: every observed kind='test'
 // command ending clean is 1, any failure is 0, and a session that
 // ran nothing the ledger calls a test leaves NULL — unobserved, not
-// green. The ledger's last-exit semantics mean a test the session
-// ran early still counts toward session-end state.
+// green. Evidence comes from the session tree's own run history
+// (session_command_runs — immune to the ledger's last-writer drift,
+// #357) unioned with last-writer command_memory rows the session
+// still owns, the only source on stores predating that table.
+// Within the tree the LATEST verdict per command wins — a child's
+// red lifts when the parent re-runs it green — while a foreign
+// session's re-run can never erase the tree's evidence. The
+// last-exit semantics mean a test the session ran early still
+// counts toward session-end state — session-grain by design (#353).
 func (s *service) sessionTestsGreen(ctx context.Context, sessionID string) sql.NullInt64 {
 	rows, err := s.q.ListSessionTestVerdicts(ctx, db.ListSessionTestVerdictsParams{
-		ProjectKey:      s.projectKey,
-		ID:              sessionID,
-		ParentSessionID: sql.NullString{String: sessionID, Valid: true},
+		ProjectKey: s.projectKey,
+		SessionID:  sessionID,
 	})
 	if err != nil || len(rows) == 0 {
 		return sql.NullInt64{}
 	}
-	for _, r := range rows {
-		if r.LastExit != 0 {
+	for _, e := range rows {
+		if e != 0 {
 			return sql.NullInt64{Int64: 0, Valid: true}
 		}
 	}

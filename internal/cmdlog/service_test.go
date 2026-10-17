@@ -1163,6 +1163,74 @@ func TestReclaim_CrushCommitsFollowRemote(t *testing.T) {
 	require.Equal(t, 0, n)
 }
 
+// session_command_runs rides the same sibling-partition re-claim as
+// command_memory — a session's own verdict history orphaned under a
+// stale key (remote added after the run) leaves sessionTestsGreen
+// blind to it (#357).
+func TestReclaim_SessionRunsFollowRemote(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	q := db.New(conn)
+
+	// Era one: no remote — the session's run history lands under the
+	// bare common-dir key.
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
+	oldKey := env.svc.ProjectKey()
+	run(env, "s1", "go test ./...", env.workingDir, "", "", nil, 1)
+
+	var n int
+	require.NoError(t, conn.QueryRowContext(env.ctx,
+		"SELECT COUNT(*) FROM session_command_runs WHERE project_key = ?", oldKey).Scan(&n))
+	require.Equal(t, 1, n)
+
+	// Adding a remote shifts the key; the next open re-claims the
+	// remoteless era's session rows — the test evidence follows.
+	git("remote", "add", "origin", "git@github.com:org/repo.git")
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
+	require.NotEqual(t, oldKey, env.svc.ProjectKey())
+
+	require.NoError(t, conn.QueryRowContext(env.ctx,
+		"SELECT COUNT(*) FROM session_command_runs WHERE project_key = ?", env.svc.ProjectKey()).Scan(&n))
+	require.Equal(t, 1, n, "the session's run history rides the re-claim")
+	require.NoError(t, conn.QueryRowContext(env.ctx,
+		"SELECT COUNT(*) FROM session_command_runs WHERE project_key = ?", oldKey).Scan(&n))
+	require.Equal(t, 0, n)
+}
+
+// A twin under the current key wins the re-claim merge: the stale
+// partition's row goes first (DeleteSessionRunConflicts), then the
+// re-key moves nothing — mirroring CommandCollisionKeepsNewerTwin.
+func TestReclaim_SessionRunCollisionKeepsNewerTwin(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	q := db.New(conn)
+	git("remote", "add", "origin", "git@github.com:org/new.git")
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
+	svc := env.svc.(*service)
+	staleKey := "github.com/org/old|" + svc.commonDir
+
+	// The same (session, command) under both the stale sibling key
+	// and the current key: the current row survives the re-claim.
+	now := time.Now().UnixMilli()
+	require.NoError(t, q.UpsertSessionCommandRun(env.ctx, db.UpsertSessionCommandRunParams{
+		SessionID: "s1", CmdNorm: "go test ./...", Cwd: ".",
+		Kind: "test", LastExit: 1, LastAt: now - 1000, ProjectKey: staleKey,
+	}))
+	require.NoError(t, q.UpsertSessionCommandRun(env.ctx, db.UpsertSessionCommandRunParams{
+		SessionID: "s1", CmdNorm: "go test ./...", Cwd: ".",
+		Kind: "test", LastExit: 0, LastAt: now, ProjectKey: svc.ProjectKey(),
+	}))
+
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
+	var n int
+	require.NoError(t, conn.QueryRowContext(env.ctx,
+		"SELECT COUNT(*) FROM session_command_runs WHERE session_id = 's1'").Scan(&n))
+	require.Equal(t, 1, n)
+	var exit int64
+	require.NoError(t, conn.QueryRowContext(env.ctx,
+		"SELECT last_exit FROM session_command_runs WHERE session_id = 's1'").Scan(&exit))
+	require.Equal(t, int64(0), exit,
+		"the current partition's fresher verdict survives")
+}
+
 // A baseline whose object no longer resolves — orphaned by
 // rebase+gc, a history rewrite, or a reclone at the same path — can
 // never be re-swept: every later sweep fails identically while

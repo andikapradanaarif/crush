@@ -526,8 +526,12 @@ func (s *service) reclaimSiblingPartitions(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	srKeys, err := s.q.ListSessionRunPartitionKeys(ctx)
+	if err != nil {
+		return err
+	}
 	stale := map[string]struct{}{}
-	for _, k := range slices.Concat(fKeys, cKeys, ccKeys, paKeys) {
+	for _, k := range slices.Concat(fKeys, cKeys, ccKeys, paKeys, srKeys) {
 		if k != s.projectKey && s.siblingKey(k) {
 			stale[k] = struct{}{}
 		}
@@ -594,10 +598,10 @@ func (s *service) rekeyFailure(ctx context.Context, oldSig, cmd, cwd, headline s
 	}
 }
 
-// rekeyCommands moves command_memory rows off sourceKey onto the
-// current partition. project_key is PK material there, so a row
-// colliding with an existing twin goes first — the twin keeps its
-// fresher provenance.
+// rekeyCommands moves command_memory and session_command_runs rows
+// off sourceKey onto the current partition. project_key is PK
+// material in both, so a row colliding with an existing twin goes
+// first — the twin keeps its fresher provenance.
 func (s *service) rekeyCommands(ctx context.Context, sourceKey string) error {
 	if err := s.q.DeleteCommandConflicts(ctx, db.DeleteCommandConflictsParams{
 		ProjectKey:   sourceKey,
@@ -605,7 +609,19 @@ func (s *service) rekeyCommands(ctx context.Context, sourceKey string) error {
 	}); err != nil {
 		return err
 	}
-	return s.q.RekeyCommandPartition(ctx, db.RekeyCommandPartitionParams{
+	if err := s.q.DeleteSessionRunConflicts(ctx, db.DeleteSessionRunConflictsParams{
+		ProjectKey:   sourceKey,
+		ProjectKey_2: s.projectKey,
+	}); err != nil {
+		return err
+	}
+	if err := s.q.RekeyCommandPartition(ctx, db.RekeyCommandPartitionParams{
+		ProjectKey:   s.projectKey,
+		ProjectKey_2: sourceKey,
+	}); err != nil {
+		return err
+	}
+	return s.q.RekeySessionRunPartition(ctx, db.RekeySessionRunPartitionParams{
 		ProjectKey:   s.projectKey,
 		ProjectKey_2: sourceKey,
 	})
@@ -678,12 +694,15 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 		// observation provenance.
 		ledgerState = ""
 	}
+	// One stamp for both writes — the ledger row and its
+	// session-scoped twin describe the same observation.
+	runAt := s.now().UnixMilli()
 	if err := s.q.UpsertCommandRun(ctx, db.UpsertCommandRunParams{
 		CmdNorm:        cmdNorm,
 		Cwd:            cwd,
 		Kind:           toolclass.CommandKind(command),
 		LastExit:       lastExit,
-		LastAt:         s.now().UnixMilli(),
+		LastAt:         runAt,
 		OkCount:        ok,
 		FailCount:      fail,
 		LastSessionID:  run.SessionID,
@@ -695,6 +714,23 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 	}); err != nil {
 		slog.Error("Error recording command run", "error", err)
 		return
+	}
+	// The session-scoped twin keeps THIS session's last verdict per
+	// command: command_memory's last_session_id is last-writer, so a
+	// session whose commands were all re-run elsewhere would lose
+	// its test evidence and settle unknown instead of failed (#357).
+	// Non-fatal — the ledger row above still records the run.
+	if err := s.q.UpsertSessionCommandRun(ctx, db.UpsertSessionCommandRunParams{
+		SessionID:    run.SessionID,
+		CmdNorm:      cmdNorm,
+		Cwd:          cwd,
+		Kind:         toolclass.CommandKind(command),
+		LastExit:     lastExit,
+		LastAt:       runAt,
+		ProjectKey:   s.projectKey,
+		ParamVersion: s.paramVersion,
+	}); err != nil {
+		slog.Warn("Error recording session command run", "error", err)
 	}
 	// Each clean component is its own pass evidence — a decorated or
 	// composite re-run resolves the row its inner command opened even

@@ -145,6 +145,10 @@ it clusters:
   `unknown`. `tests_green` at session end and absence of a
   revision-cue verdict on the *next* user turn feed the decision.
   Unobservable cases land `unknown`, never default-accepted.
+  `tests_green` reads the session tree's own run history
+  (`session_command_runs`, #357) — the latest verdict per command
+  among the session and its task-tool children — not the ledger's
+  last-writer row, which drifts to other sessions.
 - **Live prompt excluded:** the initiating user message persists
   before the record pass reads the transcript, so the pass carries
   its ID and skips it — otherwise the in-flight prompt mints a

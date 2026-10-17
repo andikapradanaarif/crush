@@ -505,6 +505,145 @@ func TestSettleReferentLabels_TestsGreenAtSettle(t *testing.T) {
 		"the verdict read at settle is the session-end state")
 }
 
+// A later session re-running the same test command takes last-writer
+// on the ledger row — the earlier session's evidence must survive on
+// its own run history (#357): without session_command_runs the red
+// verdict drifts to NULL and the episode's tests_green under-reads.
+func TestSettleReferentLabels_TestsGreenSurvivesLastWriterDrift(t *testing.T) {
+	env := setupLabelsTest(t)
+	seedLabelSession(t, env, "s1", "")
+	seedLabelSession(t, env, "s2", "")
+	target := "x.go"
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, target), []byte("v1"), 0o644))
+	recordLabeledEpisode(t, env, "s1", "m1", target, ReferentEpisodeLabelInputs{})
+
+	// s1 runs the suite red; s2 later re-runs the identical command
+	// green and takes last-writer on the command_memory row.
+	env.svc.RecordRun(t.Context(), Run{
+		SessionID: "s1", Command: "go test ./...", CWD: env.workingDir,
+		Ran: true, ExitCode: 1,
+	})
+	env.svc.RecordRun(t.Context(), Run{
+		SessionID: "s2", Command: "go test ./...", CWD: env.workingDir,
+		Ran: true, ExitCode: 0,
+	})
+
+	dueViaNewerSession(t, env, "s3")
+	require.NoError(t, env.svc.SettleReferentLabels(t.Context(), 10))
+	c := readLabels(t, env, "s1", target)
+	require.True(t, c.testsGreen.Valid,
+		"the session's own run history holds the red verdict")
+	require.EqualValues(t, 0, c.testsGreen.Int64)
+}
+
+// The session-history read pins the edges the union must hold: a
+// delegated child's run counts for the parent, an interrupted-only
+// run keeps the tri-state NULL, and the per-(session, cmd) row is
+// last-verdict — red early, green late ends green.
+func TestSessionTestsGreen_SessionHistory(t *testing.T) {
+	env := setupLabelsTest(t)
+	seedLabelSession(t, env, "p1", "")
+	seedLabelSession(t, env, "child", "p1")
+	seedLabelSession(t, env, "other", "")
+	ctx := t.Context()
+
+	require.False(t, env.svc.(*service).sessionTestsGreen(ctx, "p1").Valid,
+		"no evidence at all — unobserved, not green")
+
+	// Interrupted-only: noted, but no real verdict — still NULL.
+	env.svc.RecordRun(ctx, Run{
+		SessionID: "p1", Command: "go test ./a", CWD: env.workingDir,
+		Ran: true, Interrupted: true, ExitCode: 130,
+	})
+	require.False(t, env.svc.(*service).sessionTestsGreen(ctx, "p1").Valid)
+
+	// A delegated child's red run counts for the parent.
+	env.svc.RecordRun(ctx, Run{
+		SessionID: "child", Command: "go test ./b", CWD: env.workingDir,
+		Ran: true, ExitCode: 1,
+	})
+	g := env.svc.(*service).sessionTestsGreen(ctx, "p1")
+	require.True(t, g.Valid)
+	require.EqualValues(t, 0, g.Int64)
+
+	// The parent's own green elsewhere doesn't lift the child's red.
+	env.svc.RecordRun(ctx, Run{
+		SessionID: "p1", Command: "go test ./c", CWD: env.workingDir,
+		Ran: true, ExitCode: 0,
+	})
+	require.EqualValues(t, 0, env.svc.(*service).sessionTestsGreen(ctx, "p1").Int64,
+		"any red in the session's evidence set fails the fold")
+
+	// In-session last-writer: a red run the session itself later
+	// drove green ends green — the row is last-verdict, not
+	// worst-verdict.
+	env.svc.RecordRun(ctx, Run{
+		SessionID: "other", Command: "go test ./d", CWD: env.workingDir,
+		Ran: true, ExitCode: 1,
+	})
+	env.svc.RecordRun(ctx, Run{
+		SessionID: "other", Command: "go test ./d", CWD: env.workingDir,
+		Ran: true, ExitCode: 0,
+	})
+	require.EqualValues(t, 1, env.svc.(*service).sessionTestsGreen(ctx, "other").Int64)
+}
+
+// The tree's latest verdict per command wins across writers: a
+// child's red lifts when the parent re-runs the same command green
+// — the intra-tree supersession command_memory's shared row always
+// modeled, preserved per-(cmd, cwd) under session-scoped storage.
+// Direct upserts pin the ordering: RecordRun's wall clock can stamp
+// equal millisecond last_at, where ordering falls to the session_id
+// tie-break and the assertion would flake.
+func TestSessionTestsGreen_TreeLatestVerdictWins(t *testing.T) {
+	env := setupLabelsTest(t)
+	seedLabelSession(t, env, "p1", "")
+	seedLabelSession(t, env, "child", "p1")
+	ctx := t.Context()
+	q := db.New(env.conn)
+	key := env.svc.ProjectKey()
+
+	put := func(session, cmd string, exit, at int64) {
+		t.Helper()
+		require.NoError(t, q.UpsertSessionCommandRun(ctx, db.UpsertSessionCommandRunParams{
+			SessionID: session, CmdNorm: cmd, Cwd: ".",
+			Kind: "test", LastExit: exit, LastAt: at, ProjectKey: key,
+		}))
+	}
+
+	put("child", "go test ./b", 1, 1000)
+	put("p1", "go test ./b", 0, 2000)
+	require.EqualValues(t, 1, env.svc.(*service).sessionTestsGreen(ctx, "p1").Int64,
+		"the parent's later green supersedes the child's red on the same command")
+
+	// The reverse ordering fails: the tree's latest verdict is red.
+	put("p1", "go test ./e", 0, 3000)
+	put("child", "go test ./e", 1, 4000)
+	require.EqualValues(t, 0, env.svc.(*service).sessionTestsGreen(ctx, "p1").Int64,
+		"the child's later red supersedes the parent's earlier green")
+}
+
+// The union's legacy arm keeps stores populated before
+// session_command_runs existed: a command_memory row the session
+// still last-writes is its only evidence — deleting the session
+// rows must not blind the read.
+func TestSessionTestsGreen_LegacyArmAlone(t *testing.T) {
+	env := setupLabelsTest(t)
+	seedLabelSession(t, env, "s1", "")
+	ctx := t.Context()
+
+	env.svc.RecordRun(ctx, Run{
+		SessionID: "s1", Command: "go test ./...", CWD: env.workingDir,
+		Ran: true, ExitCode: 1,
+	})
+	_, err := env.conn.ExecContext(ctx, "DELETE FROM session_command_runs")
+	require.NoError(t, err)
+
+	g := env.svc.(*service).sessionTestsGreen(ctx, "s1")
+	require.True(t, g.Valid, "the last-writer arm still reports the red verdict")
+	require.EqualValues(t, 0, g.Int64)
+}
+
 // A commit the harness itself ran is not acceptance evidence: the
 // command_memory row for the git-commit run excludes it.
 func TestSettleReferentLabels_AgentCommitExcluded(t *testing.T) {
