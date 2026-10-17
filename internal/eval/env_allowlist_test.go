@@ -131,6 +131,69 @@ func TestEnvAllowlist_BuiltinPinBorrowsCatalogTemplates(t *testing.T) {
 		"unrelated catalog providers contribute nothing")
 }
 
+// SDK-native pins admit their ambient credential chain — the catalog
+// carries no api_key template for them, so the supplemental map is
+// what lets an undeclared pin auth at all.
+func TestEnvAllowlist_SDKNativePinsAdmitAmbientChains(t *testing.T) {
+	exp := &Experiment{
+		Name:  "allow-hyper",
+		Model: "hyper/deepseek-v4-pro-0813",
+		Arms:  map[string]Arm{ArmControl: {}},
+	}
+	require.Contains(t, envAllowlist(exp), "HYPER_API_KEY")
+
+	exp.Model = "bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+	got := envAllowlist(exp)
+	require.Contains(t, got, "AWS_ACCESS_KEY_ID")
+	require.Contains(t, got, "AWS_PROFILE")
+	require.Contains(t, got, "AWS_REGION")
+
+	exp.Model = "vertexai/gemini-2.5-pro"
+	got = envAllowlist(exp)
+	require.Contains(t, got, "GOOGLE_APPLICATION_CREDENTIALS")
+	require.Contains(t, got, "CLOUDSDK_PROJECT")
+}
+
+// Providers not pinned admit nothing — the ambient map fires on the
+// measured pin only, never on catalog membership.
+func TestEnvAllowlist_UnpinnedSDKProviderAdmitsNothing(t *testing.T) {
+	exp := &Experiment{
+		Name:  "allow-none",
+		Model: "testp/m",
+		Providers: map[string]any{
+			"testp": map[string]any{"type": "openai-compat", "api_key": "$EVALTEST_TP_KEY"},
+		},
+		Arms: map[string]Arm{ArmControl: {}},
+	}
+	got := envAllowlist(exp)
+	require.NotContains(t, got, "HYPER_API_KEY")
+	require.NotContains(t, got, "AWS_ACCESS_KEY_ID")
+	require.NotContains(t, got, "GOOGLE_APPLICATION_CREDENTIALS")
+}
+
+// The extractor covers the braced forms mvdan supports — nested
+// defaults, length, and indirect sigils all surface their name.
+func TestEnvAllowlist_RefExtractionForms(t *testing.T) {
+	exp := &Experiment{
+		Name:  "allow-forms",
+		Model: "testp/m",
+		Providers: map[string]any{
+			"testp": map[string]any{
+				"type":     "openai-compat",
+				"api_key":  "${EVALTEST_NESTED:-${EVALTEST_INNER}}",
+				"base_url": "http://x/${#EVALTEST_LEN}/${!EVALTEST_INDIRECT}",
+			},
+		},
+		Arms: map[string]Arm{ArmControl: {}},
+	}
+	got := envAllowlist(exp)
+	for _, want := range []string{
+		"EVALTEST_NESTED", "EVALTEST_INNER", "EVALTEST_LEN", "EVALTEST_INDIRECT",
+	} {
+		require.Contains(t, got, want)
+	}
+}
+
 // An ambient-but-unreferenced credential can no longer mask a missing
 // manifest key in preflight: the resolver sees the child env exactly.
 func TestPreflightExperiment_AmbientCannotMaskMissing(t *testing.T) {

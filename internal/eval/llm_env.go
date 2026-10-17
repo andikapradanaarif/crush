@@ -40,12 +40,12 @@ const defaultSynthMaxTokens int64 = 8192
 // Declared as a var so tests can stub the catalog fetch — the real
 // path consults the same cached catalog preflight resolves against.
 var catalogModelLookup = func(modelID string) (*catwalk.Model, bool) {
-	known, err := config.Providers(&config.Config{
+	known, _ := config.Providers(&config.Config{
 		Options: &config.Options{DisableProviderAutoUpdate: true},
 	})
-	if err != nil {
-		return nil, false
-	}
+	// Iterate whatever the catalog returned even alongside an error —
+	// the fetch is memoized process-wide, so discarding a populated
+	// list on a stale error hides models that did load.
 	for _, p := range known {
 		for i := range p.Models {
 			if p.Models[i].ID == modelID {
