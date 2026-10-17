@@ -1,5 +1,20 @@
 # 2026-10-15 — Verify-loop edge validated; resolver chain fixed; coverage made engagement-conditional
 
+> **Status note (10-17, #343):** the 8-cell `held-*` pool this record
+> calls "held" is development-contaminated — the verify-loop edge was
+> designed from harm diagnosed on its run #2 and validated on the same
+> cells; resolver fixes iterated across its l3 runs 3–5; coverage rules
+> changed (#337) after one of its cells starved. The pool is relabeled a
+> **validation pool**: every result below is **in-sample** evidence, and
+> "86/88 vs 78/88" is a **cross-invocation, cross-binary contrast —
+> informal, not paired**. A sealed blind pool is #224's scope; edge
+> claims get re-run as same-invocation contrasts once it exists.
+> The #225 replication resolved to a partial DeepSeek read (invocation
+> `20261015T013755Z-4ea7`: 121/121 pass both arms, discovery −14.4% on
+> completed cells, coverage-FAILed by the #348 provider bug — now fixed
+> via #381, rerun unblocked but deprioritized: a cross-model read on a
+> validation pool carries validation-pool weight).
+
 Experiment record: held-memory verify-loop arm + held-memory-l3 runs
 3–5. Companion to
 [2026-10-09-roadmap-value-and-use](2026-10-09-roadmap-value-and-use.md),
@@ -69,7 +84,7 @@ Open Phase-2+: #297 bandits (needs propensity-logged volume from
 
 | Claim | Status |
 |---|---|
-| Run-loop pathologies are detectable and repairable mid-run | **Proven on verify-loop** — designed from attributed harm, recovered 8/10 prior timeouts, firings attributed per-cell |
+| Run-loop pathologies are detectable and repairable mid-run | **Validated in-sample** (#343) — designed from attributed harm on the same pool it was measured on; recovered 8/10 prior timeouts, firings attributed per-cell; sealed claim awaits #224 + same-invocation rerun |
 | A dead consult layer is visible, not silent | **Proven** — `tail.resolver` stamps made run-3's 125-abstain corpse legible; `dead` coverage now fails closed on it |
 | L3 verdicts steer selection when the layer works | **First evidence** — resolver-engaged cells show −33% discovery; under the 35% bar, mix-cs adds placebo stratum |
-| Generalizes across models | **In flight** — qwen3.8-max replication running |
+| Generalizes across models | **Partial directional read** — DeepSeek replication: 121/121 pass both arms, discovery −14.4% on completed cells, coverage-FAILed by the #348 provider bug (fixed via #381; rerun unblocked, deprioritized — a validation-pool read carries validation-pool weight) |
