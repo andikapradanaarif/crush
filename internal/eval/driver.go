@@ -638,7 +638,7 @@ func (c CrushRunner) subprocessEnv(telemetryFile string, maxSteps int, prevVecto
 	// resolved first-match by getenv, so a second HOME wouldn't pin.
 	// The fixed minimal set passes regardless — AllowedEnv only adds
 	// the manifest-referenced names on top of it.
-	allowed := make(map[string]bool, len(c.AllowedEnv)+len(fixedChildEnv()))
+	allowed := make(map[string]bool)
 	for _, k := range fixedChildEnv() {
 		allowed[k] = true
 	}
