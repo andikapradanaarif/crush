@@ -159,20 +159,24 @@ func collapsedResultText(mode string, turn int64, toolCallID string, write bool)
 }
 
 // collapseAssistantForTurn returns m with prior-turn detail removed:
-// reasoning parts drop with the turn and tool-call inputs are replaced
-// by collapsedCallInput under the given mode. question and
+// tool-call inputs are replaced by collapsedCallInput under the given
+// mode and reasoning parts strip to presence — the part stays but its
+// thinking and signatures shed with the turn. question and
 // provider-executed calls are
 // exempt — the former carry user decisions rather than execution
 // detail, and the latter carry typed inputs providers may
 // schema-validate on replay (a stubbed server-tool input can 400 the
-// whole request). Reasoning bound via ToolID to an exempt call is kept:
-// replaying a signed function call without its thought signature is a
-// provider rejection mode, so the signature survives with the call it
-// signs. Reasoning bound to a collapsed call drops — the signature is
-// invalid against the mutated input either way. IDs, names, and finish
-// state are preserved. Returns m unchanged when nothing needs
-// collapsing, plus the number of collapsed calls — the per-turn event
-// count the collapse telemetry records.
+// whole request). Reasoning bound via ToolID to an exempt call is kept
+// verbatim: replaying a signed function call without its thought
+// signature is a provider rejection mode, so the signature survives
+// with the call it signs. Reasoning bound to a collapsed call keeps
+// the part stripped to presence: strict OpenAI-compatible providers
+// (DeepSeek, Kimi) reject a replayed tool-call turn missing the
+// reasoning_content field entirely — the signature is invalid against
+// the mutated input either way, so only the field's presence survives.
+// IDs, names, and finish state are preserved. Returns m unchanged when
+// nothing needs collapsing, plus the number of collapsed calls — the
+// per-turn event count the collapse telemetry records.
 func collapseAssistantForTurn(m message.Message, turn int64, mode string) (message.Message, int) {
 	exempt := make(map[string]bool)
 	for _, part := range m.Parts {
@@ -202,7 +206,13 @@ func collapseAssistantForTurn(m message.Message, turn int64, mode string) (messa
 		case message.ReasoningContent:
 			if exempt[p.ToolID] {
 				parts = append(parts, part)
+				continue
 			}
+			// Every call survives stub collapse, so its reasoning
+			// rides with it stripped to presence — the field is the
+			// replay contract, and signatures covering the mutated
+			// call input or the shed thinking must not render.
+			parts = append(parts, collapseReasoningForTurn(p))
 			continue
 		case message.ToolCall:
 			if !exempt[p.ID] {
@@ -222,6 +232,24 @@ func collapseAssistantForTurn(m message.Message, turn int64, mode string) (messa
 // collapsed turn — question pairs and provider-executed calls.
 func callIsExempt(tc message.ToolCall) bool {
 	return tc.Name == tools.QuestionToolName || tc.ProviderExecuted
+}
+
+// collapseReasoningForTurn strips a reasoning part to presence: strict
+// OpenAI-compatible providers (DeepSeek, Kimi) reject a replayed
+// tool-call turn that drops the reasoning_content field entirely, so
+// the part survives while its thinking collapses with the turn's.
+// Provider signatures clear with the text — a google thought_signature
+// signs the call input the stub rewrote and an anthropic signature
+// signs the thinking it shed, so replaying either falsified signature
+// is a worse rejection mode than the bare field. ResponsesData stays:
+// it carries the opaque encrypted reasoning item OpenAI's Responses
+// API replays byte-stable.
+func collapseReasoningForTurn(p message.ReasoningContent) message.ReasoningContent {
+	p.Thinking = ""
+	p.Signature = ""
+	p.ThoughtSignature = ""
+	p.ToolID = ""
+	return p
 }
 
 // collapseToolMessageForTurn returns m with each tool result's stored
@@ -332,9 +360,13 @@ func (a *sessionAgent) turnSummaries(ctx context.Context, sessionID string, cove
 // survive verbatim: their results carry user decisions, the one
 // payload a summary cannot safely compress, and a signed question
 // call keeps its bound reasoning — replaying a signed call without
-// its thought signature is a provider rejection mode. Unlike stub
-// collapse nothing is mutated, so no provider replays a falsified
-// call. Returns the message and the number of dropped calls.
+// its thought signature is a provider rejection mode. Every other
+// reasoning part — turn-level or bound to a dropped call — survives
+// stripped to presence whenever a question call does: strict
+// OpenAI-compatible providers reject a replayed tool-call turn
+// missing the reasoning_content field. No tool call is mutated, so no
+// provider replays a falsified call. Returns the message and the
+// number of dropped calls.
 func summarizeAssistantForTurn(m message.Message) (message.Message, int) {
 	keep := make(map[string]bool)
 	for _, part := range m.Parts {
@@ -364,6 +396,15 @@ func summarizeAssistantForTurn(m message.Message) (message.Message, int) {
 		case message.ReasoningContent:
 			if keep[p.ToolID] {
 				parts = append(parts, part)
+				continue
+			}
+			// Any surviving call needs the field — strict
+			// OpenAI-compatible providers reject a replayed tool-call
+			// turn missing reasoning_content — so every other
+			// reasoning part rides with it stripped to presence,
+			// whether unbound or bound to a dropped call.
+			if len(keep) > 0 {
+				parts = append(parts, collapseReasoningForTurn(p))
 			}
 			continue
 		case message.ToolCall:

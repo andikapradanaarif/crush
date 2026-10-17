@@ -255,6 +255,7 @@ func TestGenerateRunEndCheckpoint_ResumedSessionStamps(t *testing.T) {
 		notebookCheckpoint: true,
 		syncSegmentGen:     true,
 		segmentTrackers:    a.segmentTrackers,
+		detachedWork:       a.detachedWork,
 	}
 	a2.runStampGen.Store(runStampEpoch())
 	fresh := a2.runStampGen.Add(1)

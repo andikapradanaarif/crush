@@ -752,8 +752,29 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 		if text != "" {
 			parts = append(parts, fantasy.TextPart{Text: text})
 		}
-		reasoning := m.ReasoningContent()
-		if reasoning.Thinking != "" {
+		// Reasoning replays whenever the part exists, even with empty
+		// thinking: strict OpenAI-compatible providers (DeepSeek,
+		// Kimi) reject an assistant tool-call turn replayed without
+		// the reasoning_content field — presence is the contract, and
+		// an empty part emits the field as "". Anthropic and Google
+		// converters consume only provider metadata and skip
+		// metadata-less parts, so stripped parts stay inert there.
+		// Call-bound parts emit directly before their call: google
+		// attaches a reasoning part's signature to the next emitted
+		// part positionally, so batching all reasoning ahead of all
+		// calls would sign the wrong call on multi-call turns.
+		calls := m.ToolCalls()
+		present := make(map[string]bool, len(calls))
+		for _, call := range calls {
+			present[call.ID] = true
+		}
+		unbound := make([]fantasy.ReasoningPart, 0)
+		bound := make(map[string][]fantasy.ReasoningPart)
+		for _, part := range m.Parts {
+			reasoning, ok := part.(ReasoningContent)
+			if !ok {
+				continue
+			}
 			reasoningPart := fantasy.ReasoningPart{Text: reasoning.Thinking, ProviderOptions: fantasy.ProviderOptions{}}
 			if reasoning.Signature != "" {
 				reasoningPart.ProviderOptions[anthropic.Name] = &anthropic.ReasoningOptionMetadata{
@@ -769,9 +790,22 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 					ToolID:    reasoning.ToolID,
 				}
 			}
+			if present[reasoning.ToolID] {
+				bound[reasoning.ToolID] = append(bound[reasoning.ToolID], reasoningPart)
+			} else {
+				// Unbound, or bound to a call the message no longer
+				// carries — either way the field still rides the
+				// turn.
+				unbound = append(unbound, reasoningPart)
+			}
+		}
+		for _, reasoningPart := range unbound {
 			parts = append(parts, reasoningPart)
 		}
-		for _, call := range m.ToolCalls() {
+		for _, call := range calls {
+			for _, reasoningPart := range bound[call.ID] {
+				parts = append(parts, reasoningPart)
+			}
 			parts = append(parts, fantasy.ToolCallPart{
 				ToolCallID:       call.ID,
 				ToolName:         call.Name,

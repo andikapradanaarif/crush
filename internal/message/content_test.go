@@ -23,6 +23,45 @@ func makeTestAttachments(n int, contentSize int) []Attachment {
 	return attachments
 }
 
+// Reasoning replays on part presence, not text: strict
+// OpenAI-compatible providers (DeepSeek, Kimi) reject a tool-call
+// turn replayed without the reasoning_content field, so an
+// empty-thinking part must still emit — the field serializes as "".
+// Every reasoning part emits too: a collapse-stripped shell ahead of
+// a signed part must not shadow its signature.
+func TestToAIMessage_ReasoningEmitsOnPresence(t *testing.T) {
+	t.Parallel()
+
+	msg := &Message{
+		Role: Assistant,
+		Parts: []ContentPart{
+			ReasoningContent{Thinking: "", StartedAt: 1, FinishedAt: 2},
+			ReasoningContent{Thinking: "signed", ThoughtSignature: "sig", ToolID: "call_1"},
+			ToolCall{ID: "call_1", Name: "bash", Input: `{"command":"ls"}`, Finished: true},
+		},
+	}
+
+	messages := msg.ToAIMessage()
+	require.Len(t, messages, 1)
+	var reasoning []fantasy.ReasoningPart
+	callIdx := -1
+	for i, p := range messages[0].Content {
+		if rp, ok := p.(fantasy.ReasoningPart); ok {
+			reasoning = append(reasoning, rp)
+		}
+		if tc, ok := p.(fantasy.ToolCallPart); ok && tc.ToolCallID == "call_1" {
+			callIdx = i
+		}
+	}
+	require.Len(t, reasoning, 2)
+	require.Empty(t, reasoning[0].Text)
+	require.Empty(t, reasoning[0].ProviderOptions)
+	require.Equal(t, "signed", reasoning[1].Text)
+	// The bound part emits directly before its call — google signs
+	// the next emitted part positionally.
+	require.Equal(t, callIdx-1, 1)
+}
+
 func TestToAIMessage_CorruptedMediaData(t *testing.T) {
 	t.Parallel()
 
