@@ -254,7 +254,7 @@ type Run struct {
 	// owns pre..post, so an external commit landing between two
 	// recorded runs stays outside every run's range and counts as
 	// external acceptance evidence. Empty for recorders that can't
-	// stamp (verify gate, `!` commands, eval seeds) — the ledger's
+	// stamp (verify gate, server shell, eval seeds) — the ledger's
 	// last-recorded head falls back as the catch-up net, unchanged.
 	HeadBefore string
 	// Components carries each call the interpreter dispatched during
@@ -633,7 +633,7 @@ func (s *service) RecordRun(ctx context.Context, run Run) {
 	// HEAD before this run ran is the primary baseline — the tool
 	// stamps it pre-exec, so the sweep's range is the movement this
 	// run itself produced (#365). Recorders that can't stamp (verify
-	// gate, `!` commands, eval seeds) carry HeadBefore="" and fall
+	// gate, server shell, eval seeds) carry HeadBefore="" and fall
 	// back to the ledger's last-recorded head — the #359 catch-up
 	// net, unchanged. ledgerHead also feeds the self-rewrite retry
 	// inside recordCrushCommits. Attribution still runs BEFORE the
@@ -1028,6 +1028,16 @@ func (s *service) lastRecordedHead(ctx context.Context) string {
 // that can't stamp keep sweeping the ledger baseline (ledgerHead) —
 // the catch-up net, unchanged, still conservatively absorbing the
 // inter-run gap.
+//
+// The range spans the run's exec window, so external movement that
+// lands while the run executes still attributes to it — a
+// long-lived background job's range can cover much of a session.
+// That's the same absorption the ledger sweep produced, now bounded
+// by job lifetime instead of ledger recency: over-attribution, the
+// safe direction. Overlapping stamped runs can likewise
+// cross-attribute session_id provenance — harmless, since the
+// exclusion consumers read is keyed on project_key, not the
+// recording session.
 //
 // A stamped pre can die inside the run's own range — an amend or
 // rebase orphaned the object — so a failed sweep retries once

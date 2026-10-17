@@ -113,12 +113,14 @@ rarely takes. Mining needs a label at the unit it clusters:
   recorded runs sits below every run's range and still counts
   toward acceptance — the between-sessions review-and-commit flow
   no longer depends on settle-pass timing. Recorders that can't
-  stamp (verify gate, `!` commands, eval seeds) fall back to the
+  stamp (verify gate, server shell, eval seeds) fall back to the
   ledger's last-recorded head — the catch-up net — and a stamped
   pre that died inside the run's own rewrite retries once against
   that same baseline; both over-attribute the gap, the safe
-  direction. A run dying post-exec before record is the bounded
-  false-accept residual (crash window only). An unreadable
+  direction. Bounded false-accept residuals: a run dying post-exec
+  before record (crash window), or a stamped run whose sweep fails
+  terminally — its range is unique per run, so no later stamp
+  re-covers it (#372 tracks draining persisted miss ranges). An unreadable
   exclusion set abstains the commit arm entirely (fail-closed).
   User-side commit inside the window is a positive signal only when
   no divergence precedes it (revised-then-committed is a revision).

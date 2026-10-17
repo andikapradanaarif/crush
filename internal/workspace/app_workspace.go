@@ -139,6 +139,14 @@ func (w *AppWorkspace) AgentRunShellCommand(ctx context.Context, sessionID, comm
 		TermWidth: termWidth,
 	}
 
+	// Stamp before exec so the recorded run attributes only its own
+	// movement — `!` commands get the same [pre, post] treatment as
+	// bash-tool runs (#365).
+	headBefore := ""
+	if w.app.CmdLog != nil {
+		headBefore = w.app.CmdLog.HeadSHA(ctx)
+	}
+
 	var result shell.CaptureResult
 	var err error
 
@@ -172,6 +180,7 @@ func (w *AppWorkspace) AgentRunShellCommand(ctx context.Context, sessionID, comm
 			Ran:         result.Verdict,
 			Interrupted: ctx.Err() != nil,
 			Components:  result.Components,
+			HeadBefore:  headBefore,
 		})
 	}
 

@@ -466,7 +466,9 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 // recorded run then attributes only the movement in [pre, post], so
 // an external commit landing between two runs stays outside every
 // run's range (#365). Empty without a memory service or outside a
-// repo; the run then falls back to the ledger baseline.
+// repo; the run then falls back to the ledger baseline. The read
+// sits on the exec critical path — normally ~ms, worst case
+// HeadSHA's 3s cap when .git is wedged.
 func preRunHead(ctx context.Context, cmdLog cmdlog.Service) string {
 	if cmdLog == nil {
 		return ""
