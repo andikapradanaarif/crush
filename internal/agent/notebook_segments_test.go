@@ -350,6 +350,12 @@ func newSegmentTestAgent(t *testing.T, gen notebook.Generator) (*sessionAgent, m
 	// random-epoch, so tests must assert explicit stamps rather than
 	// assuming a run:1 sequence.
 	a.runStampGen.Store(runStampEpoch())
+	a.detachedWork = &sync.WaitGroup{}
+	// Join detached async work before the DB closes (registered last
+	// so it runs first): an in-flight segment generation still holds
+	// the SQLite handle at teardown and Windows TempDir cleanup fails
+	// on the locked file.
+	t.Cleanup(func() { a.detachedWork.Wait() })
 	return a, svc, nb, sess.ID
 }
 
