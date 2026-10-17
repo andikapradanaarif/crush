@@ -270,6 +270,12 @@ type Querier interface {
 	// must be deterministic. The admissibility predicate mirrors
 	// referentEpisodeAdmissible (cmdlog/rates.go) -- same lockstep rule.
 	ListReferentCalibrationEpisodes(ctx context.Context, projectKey string) ([]ListReferentCalibrationEpisodesRow, error)
+	// Every source message a session's episodes were minted under -- the
+	// referent backfill's dedup set (#368). One read up front instead of
+	// a per-boundary existence check, so already-judged turns skip the
+	// expensive target scan; the (session, source_message, target)
+	// unique key remains the correctness dedup underneath.
+	ListReferentEpisodeSourceIDs(ctx context.Context, sessionID string) ([]string, error)
 	// Pooled outcome evidence for the empirical-Bayes prior (#296) --
 	// LEAVE-ONE-OUT over every OTHER project: counting the querying
 	// project's own episodes in the prior and again as local mass

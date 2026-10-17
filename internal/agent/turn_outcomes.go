@@ -30,7 +30,9 @@ import (
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/cmdlog"
+	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/params"
 	"github.com/charmbracelet/crush/internal/session"
 )
 
@@ -45,12 +47,18 @@ const turnOutcomeBackfillLimit = 25
 // slot spawns — tests re-stamp agent fields mid-flight, and a
 // detached read races them (the same hazard the settle pass
 // documents at its spawn site). workdir is relWorkdir's basis,
-// resolved now because configStore lives on the agent.
+// resolved now because configStore lives on the agent. reqStats and
+// mp serve the referent backfill (#368): the episode mint reads the
+// judged turn's cumulative token cost and the vagueness/promotion
+// parameters — snapshotted alongside for the same off-goroutine
+// reason.
 type turnOutcomeDeps struct {
 	messages message.Service
 	sessions session.Service
 	cmdlog   cmdlog.Service
 	workdir  string
+	reqStats *csync.Map[string, requestStats]
+	mp       params.Memory
 }
 
 // turnOutcomeDeps snapshots the fields on the caller's goroutine —
@@ -60,6 +68,8 @@ func (a *sessionAgent) turnOutcomeDeps() turnOutcomeDeps {
 		messages: a.messages,
 		sessions: a.sessions,
 		cmdlog:   a.cmdlog,
+		reqStats: a.reqStats,
+		mp:       a.memoryParams(),
 	}
 	if a.configStore != nil {
 		d.workdir = a.configStore.WorkingDir()
@@ -122,6 +132,13 @@ func recordTurnOutcome(ctx context.Context, d turnOutcomeDeps, call SessionAgent
 			// (drainQueueForStep) close turns no per-run pass
 			// ever judged.
 			backfillSession(ctx, d, call.SessionID, full, call.currentUserMsgID)
+			// The referent channel's same-session analog
+			// (#368): vague turns judged by prompts that
+			// never got a live pass — folded receipts,
+			// pre-compaction boundaries — mint their
+			// episodes here, judged by the next stored
+			// prompt exactly as the live pass would.
+			backfillReferentEpisodes(ctx, d, call.SessionID, full, call.currentUserMsgID)
 		}
 		// The corpus scan does up to backfillLimit message-list
 		// reads — the caller already runs detached.
@@ -144,6 +161,10 @@ func recordTurnOutcome(ctx context.Context, d turnOutcomeDeps, call SessionAgent
 	// row exists while the session is live instead of waiting for
 	// another session's first turn to drain it.
 	backfillSession(ctx, d, call.SessionID, msgs, call.currentUserMsgID)
+	// Same sweep for referent episodes (#368) — a folded prompt
+	// can close a vague turn without its judgment receipt ever
+	// running the live mint.
+	backfillReferentEpisodes(ctx, d, call.SessionID, msgs, call.currentUserMsgID)
 }
 
 // lastRealUserIdx returns the index of the last turn boundary in ms

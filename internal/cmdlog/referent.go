@@ -218,6 +218,15 @@ func (s *service) maybePromoteReferent(ctx context.Context, phrase, target strin
 	})
 }
 
+// ListReferentEpisodeSourceIDs returns the source message IDs a
+// session's episodes were minted under — the referent backfill's
+// dedup set (#368): already-judged turns skip their target scan
+// entirely, while the unique key underneath stays the correctness
+// dedup for anything the set missed.
+func (s *service) ListReferentEpisodeSourceIDs(ctx context.Context, sessionID string) ([]string, error) {
+	return s.q.ListReferentEpisodeSourceIDs(ctx, sessionID)
+}
+
 // ListReferentCandidates returns promoted mappings for the turn's
 // extracted phrases, strongest evidence first, capped at limit —
 // the injection pool the turn tail renders.

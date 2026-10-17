@@ -141,12 +141,12 @@ type referentEdit struct {
 	added  []string
 }
 
-func (a *sessionAgent) referentTargets(ctx context.Context, msgs []message.Message, after int) []referentEdit {
+func referentTargets(ctx context.Context, d turnOutcomeDeps, msgs []message.Message, after int) []referentEdit {
 	var out []referentEdit
 	seen := map[string]int{}
 	lines := map[string]map[string]struct{}{}
 	add := func(path, callID string, added []string) {
-		rel := a.relWorkdir(path)
+		rel := relWorkdir(d.workdir, path)
 		i, ok := seen[rel]
 		if !ok {
 			i = len(out)
@@ -173,13 +173,13 @@ func (a *sessionAgent) referentTargets(ctx context.Context, msgs []message.Messa
 				continue
 			}
 			for _, tc := range m.ToolCalls() {
-				if tc.Name == AgentToolName && a.sessions != nil && a.messages != nil {
-					childID := a.sessions.CreateAgentToolSessionID(m.ID, tc.ID)
+				if tc.Name == AgentToolName && d.sessions != nil && d.messages != nil {
+					childID := d.sessions.CreateAgentToolSessionID(m.ID, tc.ID)
 					if _, ok := visited[childID]; ok {
 						continue
 					}
 					visited[childID] = struct{}{}
-					if childMsgs, err := a.messages.List(ctx, childID); err == nil {
+					if childMsgs, err := d.messages.List(ctx, childID); err == nil {
 						scan(childMsgs, 0)
 					}
 					continue
@@ -232,7 +232,10 @@ func isRepairPrompt(text string) bool {
 // the prompt and this turn, so the scan skips them — the work they
 // drove still attributes to the vague turn they were repairing. If it
 // was vague and the turn produced edits, the current prompt judges it
-// and the episodes record with verdict and contamination flag.
+// and the episodes record with verdict and contamination flag. Turns
+// an intervening prompt judged before this receipt — folded queue
+// entries, pre-compaction boundaries — mint through the detached
+// backfill sweep (#368) riding recordTurnOutcome's slot.
 func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionAgentCall, msgs []message.Message, full []message.Message) {
 	if a.cmdlog == nil || a.isSubAgent || call.RepairAttempts > 0 || call.Prompt == "" {
 		return
@@ -254,9 +257,8 @@ func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionA
 		// search, then truncate the judged span at the next stored
 		// boundary — which by construction can only be the in-flight
 		// prompt itself. Intervening turns are judged by their own
-		// prompts on their own passes; turns before the last boundary
-		// simply never mint episodes — referents have no backfill,
-		// by design.
+		// prompts — either on the pass that receipt ran, or by the
+		// detached sweep when no pass ran (#368).
 		if len(full) == 0 {
 			return
 		}
@@ -273,8 +275,27 @@ func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionA
 		}
 		msgs = full[:end]
 	}
-	prev := msgs[lastUser]
-	mp := a.memoryParams()
+	mintReferentEpisode(ctx, a.turnOutcomeDeps(), call.SessionID,
+		msgs[lastUser], call.Prompt, msgs, lastUser+1)
+}
+
+// mintReferentEpisode is the episode-minting core both judgment
+// paths share — WHERE judgment happens differs (the live pass judges
+// one turn per receipt; the backfill sweeps every stored boundary
+// pair), but WHAT counts is identical: the vague-prompt gate, the
+// single-phrase extraction, the single-target abstention, and the
+// cue verdict all run here so the backfill can never mint a turn the
+// live path would have abstained on. prev is the boundary message
+// whose turn is under judgment and judgePrompt is the next real
+// prompt's text — on the live path that's the in-flight call.Prompt,
+// on the backfill the stored boundary that follows prev. msgs is the
+// transcript slice truncated at that next boundary so the target
+// scan sees exactly the judged turn's span.
+func mintReferentEpisode(ctx context.Context, d turnOutcomeDeps, sessionID string, prev message.Message, judgePrompt string, msgs []message.Message, turnStart int) {
+	// OrDefault guards a hand-built deps literal the way
+	// memoryParams guards a fixture agent: a zero set means the
+	// shipped params, never an all-zero selector.
+	mp := d.mp.OrDefault()
 	prevPrompt := prev.JoinedText()
 	if !isVaguePrompt(prevPrompt, mp.VaguePromptMaxWords) {
 		return
@@ -283,7 +304,7 @@ func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionA
 	if phrase == "" {
 		return
 	}
-	targets := a.referentTargets(ctx, msgs, lastUser+1)
+	targets := referentTargets(ctx, d, msgs, turnStart)
 	if len(targets) != 1 {
 		// Zero targets is nothing to judge; several is the
 		// multi-referent case the channel abstains from — which edit
@@ -292,17 +313,25 @@ func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionA
 		// wrong-attribution failure this channel exists to avoid.
 		return
 	}
-	verdict := referentJudgedVerdict(call.Prompt)
-	steps, tokens := a.judgedTurnCost(msgs, lastUser+1, call.SessionID)
+	verdict := referentJudgedVerdict(judgePrompt)
+	steps, tokens := judgedTurnCost(d, msgs, turnStart, sessionID)
+	// RepoState is the worktree's HEAD at mint — near the judged
+	// turn on the live path, arbitrarily later on a backfilled one
+	// (the turn's historical HEAD is not stored). It is provenance
+	// only: no consumer reads repo_state for a decision.
+	repoState := ""
+	if d.workdir != "" {
+		repoState = headSHA(d.workdir)
+	}
 	for _, t := range targets {
 		ep := cmdlog.ReferentEpisode{
 			Phrase:          phrase,
 			Target:          t.path,
-			SessionID:       call.SessionID,
+			SessionID:       sessionID,
 			SourceMessageID: prev.ID,
 			ToolCallID:      t.callID,
-			RepoState:       a.referentRepoState(),
-			Suggested:       a.cmdlog.WasSuggestedFile(ctx, call.SessionID, t.path),
+			RepoState:       repoState,
+			Suggested:       d.cmdlog.WasSuggestedFile(ctx, sessionID, t.path),
 			Verdict:         verdict,
 			// Anchor the window at the judged prompt, not the mint —
 			// a judgment arriving turns later (post-compaction, a
@@ -322,7 +351,7 @@ func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionA
 		// — a prompt-anchored row can be born due, and a settle pass
 		// between a bare insert and a second label write would
 		// freeze it fingerprintless (#366 review).
-		err := a.cmdlog.RecordReferentEpisodeLabeled(ctx, ep, labels, mp.ReferentPromoteHits)
+		err := d.cmdlog.RecordReferentEpisodeLabeled(ctx, ep, labels, mp.ReferentPromoteHits)
 		if err != nil {
 			slog.Warn("Failed to record referent episode", "error", err)
 			continue
@@ -334,10 +363,63 @@ func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionA
 		// recorded episode had exactly one mutation — and
 		// len(targets)-1 keeps that semantics visible if the
 		// abstention ever relaxes.
-		lerr := a.cmdlog.LabelReferentEpisode(ctx, ep, labels)
+		lerr := d.cmdlog.LabelReferentEpisode(ctx, ep, labels)
 		if lerr != nil {
 			slog.Warn("Failed to label referent episode", "error", lerr)
 		}
+	}
+}
+
+// backfillReferentEpisodes is the referent channel's same-session
+// sweep (#368) — backfillSession's analog. The live pass mints at
+// most one episode per receipt (the turn behind it), so a vague
+// turn judged by a prompt that never ran the live pass — a folded
+// queued prompt, a boundary dropped by compaction — never minted.
+// Each boundary pair (segs[i], segs[i+1]) replays the live
+// semantics: segs[i]'s turn is judged by segs[i+1]'s prompt text.
+// The slice's last boundary has no stored judge — it was the live
+// pass's turn (or awaits its next prompt), so the sweep covers
+// pairs only. excludeID skips the in-flight prompt as a judged
+// turn — the live path owns its judgment — while it still serves
+// as its predecessor's judge text.
+//
+// A session's minted source IDs are fetched once — already-minted
+// turns skip the target scan entirely. Turns that abstained (non-
+// vague, no phrase, multi-target) re-scan on each receipt — a
+// bounded cost accepted over an abstention marker that would wedge
+// a "judged but empty" state into the store.
+func backfillReferentEpisodes(ctx context.Context, d turnOutcomeDeps, sessionID string, msgs []message.Message, excludeID string) {
+	var segs []int
+	for i, m := range msgs {
+		if isRealUserMsg(m) {
+			segs = append(segs, i)
+		}
+	}
+	if len(segs) < 2 {
+		return
+	}
+	srcIDs, err := d.cmdlog.ListReferentEpisodeSourceIDs(ctx, sessionID)
+	if err != nil {
+		slog.Warn("Referent backfill dedup fetch failed", "error", err)
+		return
+	}
+	minted := make(map[string]struct{}, len(srcIDs))
+	for _, id := range srcIDs {
+		minted[id] = struct{}{}
+	}
+	for i := 0; i+1 < len(segs); i++ {
+		prev := msgs[segs[i]]
+		if prev.ID == excludeID {
+			continue
+		}
+		if _, ok := minted[prev.ID]; ok {
+			continue
+		}
+		// Truncate at the judging boundary so the target scan sees
+		// exactly this turn's span — the same shape the live path
+		// gets from the tail ending at the in-flight prompt.
+		mintReferentEpisode(ctx, d, sessionID, prev,
+			msgs[segs[i+1]].JoinedText(), msgs[:segs[i+1]], segs[i]+1)
 	}
 }
 
@@ -348,31 +430,23 @@ func (a *sessionAgent) recordReferentEpisodes(ctx context.Context, call SessionA
 // request usage through this pass from reqStats. Session-cumulative,
 // not per-turn: the honest bound "effort spent through the judged
 // turn plus the margin to judge it", and process-local, so a
-// restarted session undercounts rather than guesses.
-func (a *sessionAgent) judgedTurnCost(msgs []message.Message, after int, sessionID string) (steps, tokens int64) {
+// restarted session undercounts rather than guesses. A backfilled
+// episode carries cumulative tokens at sweep time — the coarser
+// "through now" bound for a turn judged long after it closed.
+func judgedTurnCost(d turnOutcomeDeps, msgs []message.Message, after int, sessionID string) (steps, tokens int64) {
 	for _, m := range msgs[after:] {
 		if m.Role == message.Assistant {
 			steps += int64(len(m.ToolCalls()))
 		}
 	}
-	if a.reqStats != nil {
-		if rs, ok := a.reqStats.Get(sessionID); ok {
+	if d.reqStats != nil {
+		if rs, ok := d.reqStats.Get(sessionID); ok {
 			for _, s := range rs.Steps {
 				tokens += s.InputTokens + s.OutputTokens
 			}
 		}
 	}
 	return steps, tokens
-}
-
-// referentRepoState stamps the episode with the repo state the
-// observation was true of — HEAD SHA inside a repository, empty
-// outside (the cmdlog helper tolerates the same shape).
-func (a *sessionAgent) referentRepoState() string {
-	if a.configStore == nil {
-		return ""
-	}
-	return headSHA(a.configStore.WorkingDir())
 }
 
 // rateGateDecision is the learned gate's audit record (#296): the

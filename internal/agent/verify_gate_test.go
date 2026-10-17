@@ -851,6 +851,10 @@ func (r *gateRecordingCmdLog) SettleReferentLabels(context.Context, int) error {
 	return nil
 }
 
+func (r *gateRecordingCmdLog) ListReferentEpisodeSourceIDs(context.Context, string) ([]string, error) {
+	return nil, nil
+}
+
 func (r *gateRecordingCmdLog) RecordTurnOutcome(context.Context, cmdlog.TurnOutcome) error {
 	return nil
 }

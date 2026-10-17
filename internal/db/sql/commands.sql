@@ -305,6 +305,14 @@ LIMIT ?;
 -- write-once contract: a frozen row's label fields never re-stamp.
 UPDATE referent_episodes SET label_target_hash = ?, label_wrong_target = ?, label_steps = ?, label_tokens = ?, label_tests_green = ?, labeled_at = ?, label_added_lines = ?, settle_at = created_at + ? WHERE session_id = ? AND source_message_id = ? AND target = ? AND settled_at IS NULL;
 
+-- name: ListReferentEpisodeSourceIDs :many
+-- Every source message a session's episodes were minted under -- the
+-- referent backfill's dedup set (#368). One read up front instead of
+-- a per-boundary existence check, so already-judged turns skip the
+-- expensive target scan; the (session, source_message, target)
+-- unique key remains the correctness dedup underneath.
+SELECT source_message_id FROM referent_episodes WHERE session_id = ?;
+
 -- name: ListSessionTestVerdicts :many
 -- kind='test' ledger rows whose last real run belongs to this
 -- session (or a task-tool child) -- the session-end test evidence

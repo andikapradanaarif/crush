@@ -147,6 +147,11 @@ type Service interface {
 	// per call so each turn's pass drains the backlog.
 	SettleReferentLabels(ctx context.Context, limit int) error
 
+	// ListReferentEpisodeSourceIDs returns every source message ID a
+	// session's episodes were minted under — the referent backfill's
+	// dedup set (#368), one read instead of a per-boundary check.
+	ListReferentEpisodeSourceIDs(ctx context.Context, sessionID string) ([]string, error)
+
 	// RecordTurnOutcome opens one (session, turn) outcome row —
 	// the per-user-turn acceptance unit procedural memory mines
 	// (#340). Idempotent on (session_id, turn_id).
