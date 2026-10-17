@@ -9,6 +9,67 @@ import (
 	"context"
 )
 
+const bumpPendingAttributionAttempts = `-- name: BumpPendingAttributionAttempts :exec
+UPDATE pending_attribution SET attempts = attempts + 1
+WHERE project_key = ? AND prev_sha = ? AND post_sha = ?
+`
+
+type BumpPendingAttributionAttemptsParams struct {
+	ProjectKey string `json:"project_key"`
+	PrevSha    string `json:"prev_sha"`
+	PostSha    string `json:"post_sha"`
+}
+
+// A drained range that failed rev-list again -- the bound drops the
+// row at the retry limit, mirroring sweepFail's once-more contract.
+func (q *Queries) BumpPendingAttributionAttempts(ctx context.Context, arg BumpPendingAttributionAttemptsParams) error {
+	_, err := q.exec(ctx, q.bumpPendingAttributionAttemptsStmt, bumpPendingAttributionAttempts, arg.ProjectKey, arg.PrevSha, arg.PostSha)
+	return err
+}
+
+const deletePendingAttribution = `-- name: DeletePendingAttribution :exec
+DELETE FROM pending_attribution
+WHERE project_key = ? AND prev_sha = ? AND post_sha = ?
+`
+
+type DeletePendingAttributionParams struct {
+	ProjectKey string `json:"project_key"`
+	PrevSha    string `json:"prev_sha"`
+	PostSha    string `json:"post_sha"`
+}
+
+// A range fully drained, proven dead, or past its retry bound.
+func (q *Queries) DeletePendingAttribution(ctx context.Context, arg DeletePendingAttributionParams) error {
+	_, err := q.exec(ctx, q.deletePendingAttributionStmt, deletePendingAttribution, arg.ProjectKey, arg.PrevSha, arg.PostSha)
+	return err
+}
+
+const evictPendingAttribution = `-- name: EvictPendingAttribution :exec
+DELETE FROM pending_attribution
+WHERE pending_attribution.project_key = ?
+  AND pending_attribution.created_at NOT IN (
+    SELECT keep.created_at FROM pending_attribution AS keep
+    WHERE keep.project_key = ?
+    ORDER BY keep.created_at DESC
+    LIMIT ?
+  )
+`
+
+type EvictPendingAttributionParams struct {
+	ProjectKey   string `json:"project_key"`
+	ProjectKey_2 string `json:"project_key_2"`
+	Limit        int64  `json:"limit"`
+}
+
+// Cap the pending set -- beyond it the newest rows win and the oldest
+// are abandoned (a bounded miss, not a pile-up of deterministic
+// failures re-queued forever). Rows tied at the boundary tick all
+// survive -- a slight overshoot is cheaper than picking between them.
+func (q *Queries) EvictPendingAttribution(ctx context.Context, arg EvictPendingAttributionParams) error {
+	_, err := q.exec(ctx, q.evictPendingAttributionStmt, evictPendingAttribution, arg.ProjectKey, arg.ProjectKey_2, arg.Limit)
+	return err
+}
+
 const insertCrushCommit = `-- name: InsertCrushCommit :exec
 INSERT OR IGNORE INTO crush_commits (project_key, sha, session_id, created_at)
 VALUES (?, ?, ?, ?)
@@ -34,14 +95,42 @@ func (q *Queries) InsertCrushCommit(ctx context.Context, arg InsertCrushCommitPa
 	return err
 }
 
+const insertPendingAttribution = `-- name: InsertPendingAttribution :exec
+INSERT OR IGNORE INTO pending_attribution (project_key, prev_sha, post_sha, attempts, created_at)
+VALUES (?, ?, ?, 0, ?)
+`
+
+type InsertPendingAttributionParams struct {
+	ProjectKey string `json:"project_key"`
+	PrevSha    string `json:"prev_sha"`
+	PostSha    string `json:"post_sha"`
+	CreatedAt  int64  `json:"created_at"`
+}
+
+// A (prev, post) range whose sweep failed under a held baseline
+// (#372) -- persisted so a later run's drain re-sweeps what no
+// stamped run will. OR IGNORE covers re-persist of the same range:
+// the original row's attempts count and created_at stand.
+func (q *Queries) InsertPendingAttribution(ctx context.Context, arg InsertPendingAttributionParams) error {
+	_, err := q.exec(ctx, q.insertPendingAttributionStmt, insertPendingAttribution,
+		arg.ProjectKey,
+		arg.PrevSha,
+		arg.PostSha,
+		arg.CreatedAt,
+	)
+	return err
+}
+
 const lastRecordedRepoHead = `-- name: LastRecordedRepoHead :one
 SELECT repo_state FROM command_memory
 WHERE project_key = ? AND repo_state != ''
 ORDER BY last_at DESC, rowid DESC LIMIT 1
 `
 
-// HEAD as of the most recent recorded run -- the pre-run baseline a
-// HEAD-moving run diffs against to attribute its commits (#359).
+// HEAD as of the most recent recorded run -- the catch-up baseline
+// an unstamped run diffs against to attribute its commits, and the
+// retry range when a stamped pre-run head died in the run's own
+// rewrite (#359, #365).
 func (q *Queries) LastRecordedRepoHead(ctx context.Context, projectKey string) (string, error) {
 	row := q.queryRow(ctx, q.lastRecordedRepoHeadStmt, lastRecordedRepoHead, projectKey)
 	var repo_state string
@@ -105,6 +194,76 @@ func (q *Queries) ListCrushCommitSHAs(ctx context.Context, projectKey string) ([
 	return items, nil
 }
 
+const listPendingAttribution = `-- name: ListPendingAttribution :many
+SELECT prev_sha, post_sha, attempts FROM pending_attribution
+WHERE project_key = ?
+ORDER BY created_at ASC, prev_sha ASC, post_sha ASC
+LIMIT ?
+`
+
+type ListPendingAttributionParams struct {
+	ProjectKey string `json:"project_key"`
+	Limit      int64  `json:"limit"`
+}
+
+type ListPendingAttributionRow struct {
+	PrevSha  string `json:"prev_sha"`
+	PostSha  string `json:"post_sha"`
+	Attempts int64  `json:"attempts"`
+}
+
+// Pending ranges oldest-first for FIFO drain; the sort tiebreak keeps
+// the order deterministic when two ranges share a created_at tick.
+func (q *Queries) ListPendingAttribution(ctx context.Context, arg ListPendingAttributionParams) ([]ListPendingAttributionRow, error) {
+	rows, err := q.query(ctx, q.listPendingAttributionStmt, listPendingAttribution, arg.ProjectKey, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPendingAttributionRow{}
+	for rows.Next() {
+		var i ListPendingAttributionRow
+		if err := rows.Scan(&i.PrevSha, &i.PostSha, &i.Attempts); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPendingAttributionPartitionKeys = `-- name: ListPendingAttributionPartitionKeys :many
+SELECT DISTINCT project_key FROM pending_attribution WHERE project_key != ''
+`
+
+func (q *Queries) ListPendingAttributionPartitionKeys(ctx context.Context) ([]string, error) {
+	rows, err := q.query(ctx, q.listPendingAttributionPartitionKeysStmt, listPendingAttributionPartitionKeys)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var project_key string
+		if err := rows.Scan(&project_key); err != nil {
+			return nil, err
+		}
+		items = append(items, project_key)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const rekeyCrushCommits = `-- name: RekeyCrushCommits :exec
 UPDATE OR IGNORE crush_commits SET project_key = ? WHERE project_key = ?
 `
@@ -123,5 +282,23 @@ type RekeyCrushCommitsParams struct {
 // the residue is inert.
 func (q *Queries) RekeyCrushCommits(ctx context.Context, arg RekeyCrushCommitsParams) error {
 	_, err := q.exec(ctx, q.rekeyCrushCommitsStmt, rekeyCrushCommits, arg.ProjectKey, arg.ProjectKey_2)
+	return err
+}
+
+const rekeyPendingAttribution = `-- name: RekeyPendingAttribution :exec
+UPDATE OR IGNORE pending_attribution SET project_key = ? WHERE project_key = ?
+`
+
+type RekeyPendingAttributionParams struct {
+	ProjectKey   string `json:"project_key"`
+	ProjectKey_2 string `json:"project_key_2"`
+}
+
+// Remote-lifecycle re-claim (#266): pending rows under a stale
+// sibling key would never drain -- reads are key-scoped. OR IGNORE
+// covers a (project_key, prev_sha, post_sha) twin: the current key's
+// row wins, the stale-keyed row is left dead under the old key.
+func (q *Queries) RekeyPendingAttribution(ctx context.Context, arg RekeyPendingAttributionParams) error {
+	_, err := q.exec(ctx, q.rekeyPendingAttributionStmt, rekeyPendingAttribution, arg.ProjectKey, arg.ProjectKey_2)
 	return err
 }

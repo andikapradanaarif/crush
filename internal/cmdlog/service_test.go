@@ -1355,6 +1355,217 @@ func TestAttributionFallback_DeadVsTransient(t *testing.T) {
 		"a different range gets its own free retry")
 }
 
+// A live-baseline hold persists the failed range (#372) — the drain
+// is what re-sweeps it, since no stamped run will.
+func TestRecordCrushCommits_HoldPersistsPendingRange(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	git("config", "user.email", "t@t")
+	git("config", "user.name", "t")
+	git("commit", "--allow-empty", "-m", "baseline")
+	env.svc = NewService(db.New(conn), env.workingDir, params.DefaultMemory())
+	svc := env.svc.(*service)
+
+	prev, err := gitOut(env.ctx, env.workingDir, "rev-parse", "HEAD")
+	require.NoError(t, err)
+	// A live base with an unresolvable post fails rev-list but
+	// verifies — the live-baseline arm: hold + persist.
+	require.False(t, svc.recordCrushCommits(env.ctx, "s1", prev, prev, "dead-post-sha"))
+	rows, err := svc.q.ListPendingAttribution(env.ctx, db.ListPendingAttributionParams{
+		ProjectKey: svc.projectKey, Limit: 10,
+	})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, prev, rows[0].PrevSha)
+	require.Equal(t, "dead-post-sha", rows[0].PostSha)
+}
+
+// The drain attributes a persisted range's commits and retires the
+// row — run directly since two resolvable commits never fail the
+// live sweep's rev-list.
+func TestDrainPendingAttribution_DrainsAndRetires(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	git("config", "user.email", "t@t")
+	git("config", "user.name", "t")
+	git("commit", "--allow-empty", "-m", "one")
+	prev, err := gitOut(env.ctx, env.workingDir, "rev-parse", "HEAD")
+	require.NoError(t, err)
+	git("commit", "--allow-empty", "-m", "two")
+	post, err := gitOut(env.ctx, env.workingDir, "rev-parse", "HEAD")
+	require.NoError(t, err)
+
+	env.svc = NewService(db.New(conn), env.workingDir, params.DefaultMemory())
+	svc := env.svc.(*service)
+	require.NoError(t, svc.q.InsertPendingAttribution(env.ctx, db.InsertPendingAttributionParams{
+		ProjectKey: svc.projectKey, PrevSha: prev, PostSha: post, CreatedAt: 1,
+	}))
+
+	svc.drainPendingAttribution(env.ctx, "s9")
+
+	shas, err := svc.q.ListCrushCommitSHAs(env.ctx, svc.projectKey)
+	require.NoError(t, err)
+	require.Contains(t, shas, post, "the drained range's commit attributes to crush")
+	rows, err := svc.q.ListPendingAttribution(env.ctx, db.ListPendingAttributionParams{
+		ProjectKey: svc.projectKey, Limit: 10,
+	})
+	require.NoError(t, err)
+	require.Empty(t, rows, "the drained row retires")
+}
+
+// A pending base that no longer resolves drops outright — the
+// dead-baseline contract: bounded miss, not a burned retry.
+func TestDrainPendingAttribution_DeadBaseDropped(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	git("config", "user.email", "t@t")
+	git("config", "user.name", "t")
+	git("commit", "--allow-empty", "-m", "baseline")
+	env.svc = NewService(db.New(conn), env.workingDir, params.DefaultMemory())
+	svc := env.svc.(*service)
+	require.NoError(t, svc.q.InsertPendingAttribution(env.ctx, db.InsertPendingAttributionParams{
+		ProjectKey: svc.projectKey,
+		PrevSha:    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+		PostSha:    "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00",
+		CreatedAt:  1,
+	}))
+
+	svc.drainPendingAttribution(env.ctx, "s1")
+
+	rows, err := svc.q.ListPendingAttribution(env.ctx, db.ListPendingAttributionParams{
+		ProjectKey: svc.projectKey, Limit: 10,
+	})
+	require.NoError(t, err)
+	require.Empty(t, rows, "the dead range is dropped, not retried")
+}
+
+// A range that fails rev-list burns an attempt; at the bound it drops —
+// deterministic failures don't re-queue forever.
+func TestDrainPendingAttribution_AttemptsBound(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	git("config", "user.email", "t@t")
+	git("config", "user.name", "t")
+	git("commit", "--allow-empty", "-m", "baseline")
+	prev, err := gitOut(env.ctx, env.workingDir, "rev-parse", "HEAD")
+	require.NoError(t, err)
+	env.svc = NewService(db.New(conn), env.workingDir, params.DefaultMemory())
+	svc := env.svc.(*service)
+	// resolvable prev, dead post — rev-list fails while the base verifies.
+	require.NoError(t, svc.q.InsertPendingAttribution(env.ctx, db.InsertPendingAttributionParams{
+		ProjectKey: svc.projectKey, PrevSha: prev, PostSha: "dead-post", CreatedAt: 1,
+	}))
+	require.NoError(t, svc.q.InsertPendingAttribution(env.ctx, db.InsertPendingAttributionParams{
+		ProjectKey: svc.projectKey, PrevSha: prev, PostSha: "dead-post-2", CreatedAt: 2,
+	}))
+	require.NoError(t, svc.q.BumpPendingAttributionAttempts(env.ctx, db.BumpPendingAttributionAttemptsParams{
+		ProjectKey: svc.projectKey, PrevSha: prev, PostSha: "dead-post-2",
+	}))
+
+	svc.drainPendingAttribution(env.ctx, "s1")
+
+	rows, err := svc.q.ListPendingAttribution(env.ctx, db.ListPendingAttributionParams{
+		ProjectKey: svc.projectKey, Limit: 10,
+	})
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "the fresh row bumps and stays; the attempt-1 row hits the bound and drops")
+	require.Equal(t, "dead-post", rows[0].PostSha)
+	require.Equal(t, int64(1), rows[0].Attempts)
+}
+
+// A failed own-sweep never drains — a sick git is the wrong time to
+// pile on more rev-lists.
+func TestRecordCrushCommits_FailedSweepSkipsDrain(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	git("config", "user.email", "t@t")
+	git("config", "user.name", "t")
+	git("commit", "--allow-empty", "-m", "one")
+	prev, err := gitOut(env.ctx, env.workingDir, "rev-parse", "HEAD")
+	require.NoError(t, err)
+	git("commit", "--allow-empty", "-m", "two")
+	post, err := gitOut(env.ctx, env.workingDir, "rev-parse", "HEAD")
+	require.NoError(t, err)
+
+	env.svc = NewService(db.New(conn), env.workingDir, params.DefaultMemory())
+	svc := env.svc.(*service)
+	// A drainable row sits pending — a healthy sweep would retire it.
+	require.NoError(t, svc.q.InsertPendingAttribution(env.ctx, db.InsertPendingAttributionParams{
+		ProjectKey: svc.projectKey, PrevSha: prev, PostSha: post, CreatedAt: 1,
+	}))
+
+	// The run's own sweep fails (dead post) — the pending row must
+	// survive untouched and no commit may attribute.
+	require.False(t, svc.recordCrushCommits(env.ctx, "s1", prev, prev, "dead-post"))
+	rows, err := svc.q.ListPendingAttribution(env.ctx, db.ListPendingAttributionParams{
+		ProjectKey: svc.projectKey, Limit: 10,
+	})
+	require.NoError(t, err)
+	require.Len(t, rows, 2, "the seeded row stayed; the failed range persisted as a second row")
+	shas, err := svc.q.ListCrushCommitSHAs(env.ctx, svc.projectKey)
+	require.NoError(t, err)
+	require.Empty(t, shas, "no drain ran — nothing attributed")
+}
+
+// RecordRun's own sweep is a no-op when HEAD doesn't move, but the
+// drain still runs — pending rows retire on ordinary runs.
+func TestRecordRun_DrainsPendingRange(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	git("config", "user.email", "t@t")
+	git("config", "user.name", "t")
+	git("commit", "--allow-empty", "-m", "one")
+	prev, err := gitOut(env.ctx, env.workingDir, "rev-parse", "HEAD")
+	require.NoError(t, err)
+	git("commit", "--allow-empty", "-m", "two")
+	post, err := gitOut(env.ctx, env.workingDir, "rev-parse", "HEAD")
+	require.NoError(t, err)
+
+	env.svc = NewService(db.New(conn), env.workingDir, params.DefaultMemory())
+	svc := env.svc.(*service)
+	require.NoError(t, svc.q.InsertPendingAttribution(env.ctx, db.InsertPendingAttributionParams{
+		ProjectKey: svc.projectKey, PrevSha: prev, PostSha: post, CreatedAt: 1,
+	}))
+
+	run(env, "s1", "git status", env.workingDir, "", "", nil, 0)
+
+	shas, err := svc.q.ListCrushCommitSHAs(env.ctx, svc.projectKey)
+	require.NoError(t, err)
+	require.Contains(t, shas, post, "the pending range drained on the next recorded run")
+	rows, err := svc.q.ListPendingAttribution(env.ctx, db.ListPendingAttributionParams{
+		ProjectKey: svc.projectKey, Limit: 10,
+	})
+	require.NoError(t, err)
+	require.Empty(t, rows)
+}
+
+// Inserts past the cap evict the oldest pending rows — a bounded
+// miss, not an unbounded deterministic-failure queue.
+func TestPersistPendingAttribution_CapEvictsOldest(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	git("config", "user.email", "t@t")
+	git("config", "user.name", "t")
+	git("commit", "--allow-empty", "-m", "baseline")
+	env.svc = NewService(db.New(conn), env.workingDir, params.DefaultMemory())
+	svc := env.svc.(*service)
+
+	for i := range pendingAttributionCap + 2 {
+		require.NoError(t, svc.q.InsertPendingAttribution(env.ctx, db.InsertPendingAttributionParams{
+			ProjectKey: svc.projectKey,
+			PrevSha:    fmt.Sprintf("prev-%d", i),
+			PostSha:    fmt.Sprintf("post-%d", i),
+			CreatedAt:  int64(i + 1),
+		}))
+		require.NoError(t, svc.q.EvictPendingAttribution(env.ctx, db.EvictPendingAttributionParams{
+			ProjectKey:   svc.projectKey,
+			ProjectKey_2: svc.projectKey,
+			Limit:        pendingAttributionCap,
+		}))
+	}
+
+	rows, err := svc.q.ListPendingAttribution(env.ctx, db.ListPendingAttributionParams{
+		ProjectKey: svc.projectKey, Limit: 20,
+	})
+	require.NoError(t, err)
+	require.Len(t, rows, pendingAttributionCap)
+	require.Equal(t, "prev-2", rows[0].PrevSha, "the two oldest ranges evicted — FIFO order preserved")
+	require.Equal(t, fmt.Sprintf("prev-%d", pendingAttributionCap+1), rows[len(rows)-1].PrevSha)
+}
+
 func TestListFailures_ForeignPartitionExcluded(t *testing.T) {
 	env := setupTest(t)
 
