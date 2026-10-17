@@ -2115,6 +2115,49 @@ crush eval calibrate --db .crush/crush.db \
   corpora emit "no certification" — that is the honest dormant
   path, not a failure.
 
+The second arm (#342) certifies selector decisions instead of
+referent episodes — `referent_episodes` has no volume on real
+projects, while labeled selector corpora already supply decisions
+with known-correct outcomes:
+
+```text
+crush eval calibrate --param open_render_limit \
+    --binding internal/agent/testdata/failure_binding.jsonl \
+    --alpha 0.05 --delta 0.05 --grid 5,4,3,2,1 [--out cert.json]
+```
+
+- **Data source.** A labeled binding corpus (`--binding`, relative
+  to CWD): each cell's prompt materializes on a temp disk shape,
+  the production selector (`SimulateSelection`, uncapped, no L3
+  resolver) re-decides every candidate, and the cell's `expect`
+  map supplies the known-correct label per decision.
+- **Risk unit.** One draw per corpus *cell* — the authored
+  instance is the independence contract (a cell's candidates share
+  its prompt and disk shape), not the session or the decision.
+  Harm is per-cell any-violation: the capped render contained a
+  row the cell labeled excluded — stricter than the bench's
+  row-level veto rate. `Excluded` is fail-closed: any non-admit
+  expected verdict counts as excluded.
+- **Per-class walks.** Decisions stratify by the prompt's
+  deterministic scope class (`agent.ScopeClass` — explicit /
+  referent-kind / unresolved, pre-resolver-overlay), because what
+  can bind and where harm concentrates differ per regime. Each
+  class runs its own fixed-sequence walk at δ/m (the family budget
+  split evenly over the m classes with draws), so the composed
+  certified value — the **min** across certified classes, one
+  deployed cap — holds its joint claim at δ. A class that can't
+  certify names itself in the caveats without poisoning the
+  others; a class with no bound evidence is unevidenced, not a
+  failure.
+- **Metric.** `veto_violating_render` — the share of drawing cells
+  whose capped render carried a labeled-excluded row. Admits are
+  flat across k≥1 (a cell's first bound row always ranks 0) and
+  harms are monotone in k, so the conservative→least walk runs
+  ascending and the early stop is exact. `k≤0` grid values are
+  rejected: channel-off is a deployment state, not a certifiable
+  value, and a 0-cap candidate would only halt the walk on a
+  misleading "no bound units".
+
 ## Non-goals
 
 - **Model-path replay.** No VCR anywhere near the LLM calls —
