@@ -74,6 +74,7 @@ func NewJobOutputTool(spillDir string, cmdLog cmdlog.Service) fantasy.AgentTool 
 					ExitCode:    shell.ExitCode(err),
 					Ran:         shell.IsExitStatus(err),
 					Interrupted: interrupted,
+					HeadBefore:  bgShell.HeadBefore,
 					Components:  bgShell.Shell.TakeComponents(),
 				})
 			}

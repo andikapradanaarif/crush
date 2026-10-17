@@ -311,14 +311,18 @@ func TestTruncateOutputANSISafe(t *testing.T) {
 
 // recordingCmdLog captures the Run struct bash hands to command
 // memory — the seam where ExitCode/Ran/Interrupted/CWD get derived
-// from the shell's execErr.
+// from the shell's execErr. headBefore is what HeadSHA returns so
+// tests can pin the pre-run stamp's trip into Run.HeadBefore.
 type recordingCmdLog struct {
-	runs []cmdlog.Run
+	runs       []cmdlog.Run
+	headBefore string
 }
 
 func (r *recordingCmdLog) RecordRun(_ context.Context, run cmdlog.Run) {
 	r.runs = append(r.runs, run)
 }
+
+func (r *recordingCmdLog) HeadSHA(context.Context) string { return r.headBefore }
 
 func (r *recordingCmdLog) ListCommands(context.Context, int) ([]cmdlog.Command, error) {
 	return nil, nil
@@ -476,4 +480,50 @@ func TestBashTool_BlockedCommandNotAProjectFailure(t *testing.T) {
 	require.False(t, run.Ran, "a blocked command never ran")
 	require.NotNil(t, run.Err)
 	_ = resp
+}
+
+// The pre-exec HEAD stamp the tool takes must reach the recorded
+// run — it's the seam that keeps inter-run external commits out of
+// the run's attribution range (#365).
+func TestBashTool_StampsPreRunHead(t *testing.T) {
+	workingDir := t.TempDir()
+	perms := &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
+	attribution := &config.Attribution{TrailerStyle: config.TrailerStyleNone}
+	log := &recordingCmdLog{headBefore: "pre-sha"}
+	tool := NewBashTool(nil, perms, workingDir, workingDir, attribution, "test-model", log)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+
+	resp := runBashTool(t, tool, ctx, BashParams{
+		Description: "stamped run",
+		Command:     "echo hi",
+	})
+	require.False(t, resp.IsError)
+	require.Len(t, log.runs, 1)
+	require.Equal(t, "pre-sha", log.runs[0].HeadBefore,
+		"HeadSHA's stamp rides the shell into Run.HeadBefore")
+}
+
+// A background job outlives its tool call — the stamp rides
+// BackgroundShell so whichever consumer records the completion
+// carries it through (#365).
+func TestJobOutput_CarriesPreRunHead(t *testing.T) {
+	workingDir := t.TempDir()
+	log := &recordingCmdLog{}
+	tool := NewJobOutputTool(workingDir, log)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+
+	bgManager := shell.GetBackgroundShellManager()
+	bgShell, err := bgManager.Start(ctx, workingDir, nil, "echo done", "", "pre-sha")
+	require.NoError(t, err)
+	bgShell.Wait()
+	defer func() { _ = bgManager.Remove(bgShell.ID) }()
+
+	input, err := json.Marshal(JobOutputParams{ShellID: bgShell.ID})
+	require.NoError(t, err)
+	resp, err := tool.Run(ctx, fantasy.ToolCall{ID: "c1", Name: JobOutputToolName, Input: string(input)})
+	require.NoError(t, err)
+	require.False(t, resp.IsError)
+	require.Len(t, log.runs, 1)
+	require.Equal(t, "pre-sha", log.runs[0].HeadBefore,
+		"the job's stamped pre reaches the recorded run")
 }

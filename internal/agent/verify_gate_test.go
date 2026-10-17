@@ -811,6 +811,8 @@ func (r *gateRecordingCmdLog) RecordRun(_ context.Context, run cmdlog.Run) {
 	r.runs = append(r.runs, run)
 }
 
+func (r *gateRecordingCmdLog) HeadSHA(context.Context) string { return "" }
+
 func (r *gateRecordingCmdLog) ListCommands(context.Context, int) ([]cmdlog.Command, error) {
 	return nil, nil
 }

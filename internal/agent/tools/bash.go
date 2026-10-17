@@ -260,8 +260,11 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 				startTime := time.Now()
 				bgManager := shell.GetBackgroundShellManager()
 				bgManager.Cleanup()
+				// The pre-exec stamp rides the job to whichever path
+				// records it — sync fast-exit, job_output, or kill.
+				headBefore := preRunHead(ctx, cmdLog)
 				// Use background context so it continues after tool returns
-				bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), params.Command, params.Description)
+				bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), params.Command, params.Description, headBefore)
 				if err != nil {
 					return fantasy.ToolResponse{}, fmt.Errorf("error starting background shell: %w", err)
 				}
@@ -291,6 +294,7 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 							ExitCode:    exitCode,
 							Ran:         shell.IsExitStatus(execErr),
 							Interrupted: interrupted,
+							HeadBefore:  bgShell.HeadBefore,
 							Components:  bgShell.Shell.TakeComponents(),
 						})
 					}
@@ -334,7 +338,8 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 			// Start with detached context so it can survive if moved to background
 			bgManager := shell.GetBackgroundShellManager()
 			bgManager.Cleanup()
-			bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), params.Command, params.Description)
+			headBefore := preRunHead(ctx, cmdLog)
+			bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), params.Command, params.Description, headBefore)
 			if err != nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("error starting shell: %w", err)
 			}
@@ -377,6 +382,7 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 							Stderr:      killErr,
 							Err:         ctx.Err(),
 							Interrupted: true,
+							HeadBefore:  bgShell.HeadBefore,
 							Components:  bgShell.Shell.TakeComponents(),
 						}
 						// The job may have reached its own verdict
@@ -416,6 +422,7 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 						ExitCode:    exitCode,
 						Ran:         shell.IsExitStatus(execErr),
 						Interrupted: interrupted,
+						HeadBefore:  bgShell.HeadBefore,
 						Components:  bgShell.Shell.TakeComponents(),
 					})
 				}
@@ -453,6 +460,20 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 			return fantasy.WithResponseMetadata(fantasy.NewTextResponse(response), metadata), nil
 		},
 	)
+}
+
+// preRunHead stamps HEAD just before the command execs — the
+// recorded run then attributes only the movement in [pre, post], so
+// an external commit landing between two runs stays outside every
+// run's range (#365). Empty without a memory service or outside a
+// repo; the run then falls back to the ledger baseline. The read
+// sits on the exec critical path — normally ~ms, worst case
+// HeadSHA's 3s cap when .git is wedged.
+func preRunHead(ctx context.Context, cmdLog cmdlog.Service) string {
+	if cmdLog == nil {
+		return ""
+	}
+	return cmdLog.HeadSHA(ctx)
 }
 
 // formatOutput formats the output of a completed command with error handling

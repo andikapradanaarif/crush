@@ -105,15 +105,22 @@ rarely takes. Mining needs a label at the unit it clusters:
 - **Commit evidence filtered:** commits attributed *to* crush by
   exact SHA do not count toward acceptance. Attribution runs at
   command-record time: each HEAD-moving run sweeps
-  `git rev-list prevHead..headAfter` into `crush_commits`
+  `git rev-list preHead..headAfter` into `crush_commits`
   (producer-agnostic — covers cherry-picks, merges, `git commit`
   inside compound commands alike), and the settle pass excludes any
-  matching SHA. The miss class is conservative: an *external*
-  commit landing between two recorded runs is swept into the next
-  run's range and excluded too, so the commit arm effectively only
-  fires for commits after the project's last recorded run — the
-  between-sessions review-and-commit flow survives on the settle
-  pass's prompt-receipt timing, not structure. An unreadable
+  matching SHA. `preHead` is HEAD stamped by the bash tool just
+  before exec (#365), so an *external* commit landing between two
+  recorded runs sits below every run's range and still counts
+  toward acceptance — the between-sessions review-and-commit flow
+  no longer depends on settle-pass timing. Recorders that can't
+  stamp (verify gate, server shell, eval seeds) fall back to the
+  ledger's last-recorded head — the catch-up net — and a stamped
+  pre that died inside the run's own rewrite retries once against
+  that same baseline; both over-attribute the gap, the safe
+  direction. Bounded false-accept residuals: a run dying post-exec
+  before record (crash window), or a stamped run whose sweep fails
+  terminally — its range is unique per run, so no later stamp
+  re-covers it (#372 tracks draining persisted miss ranges). An unreadable
   exclusion set abstains the commit arm entirely (fail-closed).
   User-side commit inside the window is a positive signal only when
   no divergence precedes it (revised-then-committed is a revision).

@@ -1213,6 +1213,117 @@ func TestRecordRun_DeadBaselineStampsBoundedMiss(t *testing.T) {
 	require.NotContains(t, shas, headB, "the dead-range commit stays missed")
 }
 
+// The #365 primary path: a stamped run owns only pre..post — its
+// own commit attributes, the inter-run external commit below the
+// stamp does not.
+func TestRecordRun_StampedHeadBoundsAttribution(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	q := db.New(conn)
+	git("config", "user.email", "t@t")
+	git("config", "user.name", "t")
+	git("commit", "--allow-empty", "-m", "baseline")
+
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
+	run(env, "s1", "git status", env.workingDir, "", "", nil, 0)
+
+	// An external commit lands between recorded runs — below the
+	// next run's stamped pre, so outside its range entirely.
+	git("commit", "--allow-empty", "-m", "external between runs")
+	external, err := gitOut(env.ctx, env.workingDir, "rev-parse", "HEAD")
+	require.NoError(t, err)
+
+	// The tool stamps pre-exec, then the run moves HEAD itself.
+	pre, err := gitOut(env.ctx, env.workingDir, "rev-parse", "HEAD")
+	require.NoError(t, err)
+	git("commit", "--allow-empty", "-m", "agent work")
+	headAfter, err := gitOut(env.ctx, env.workingDir, "rev-parse", "HEAD")
+	require.NoError(t, err)
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID: "s1", Command: "git commit -m work",
+		CWD: env.workingDir, Ran: true, ExitCode: 0,
+		HeadBefore: pre,
+	})
+
+	shas, err := q.ListCrushCommitSHAs(env.ctx, env.svc.ProjectKey())
+	require.NoError(t, err)
+	require.Contains(t, shas, headAfter, "the run's own commit attributes")
+	require.NotContains(t, shas, external,
+		"the inter-run gap stays external — the recall fix")
+}
+
+// A run that can't stamp a pre-exec head (verify gate, `!` command,
+// eval seed) keeps the #359 catch-up net: the ledger baseline still
+// sweeps the inter-run gap — bounded over-attribution, the safe
+// direction.
+func TestRecordRun_UnstampedRunKeepsLedgerNet(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	q := db.New(conn)
+	git("config", "user.email", "t@t")
+	git("config", "user.name", "t")
+	git("commit", "--allow-empty", "-m", "baseline")
+
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
+	run(env, "s1", "git status", env.workingDir, "", "", nil, 0)
+
+	git("commit", "--allow-empty", "-m", "external between runs")
+	external, err := gitOut(env.ctx, env.workingDir, "rev-parse", "HEAD")
+	require.NoError(t, err)
+
+	// No HeadBefore — the recorded ledger head is the baseline.
+	run(env, "s1", "git status", env.workingDir, "", "", nil, 0)
+
+	shas, err := q.ListCrushCommitSHAs(env.ctx, env.svc.ProjectKey())
+	require.NoError(t, err)
+	require.Contains(t, shas, external,
+		"unstamped runs still sweep ledger..post — the net is unchanged")
+}
+
+// The stamped pre can die inside the run's own range — an amend
+// orphaned the object. The sweep retries once against the ledger
+// baseline: the widened range still attributes the run's commit
+// instead of falling to the bounded stamp-and-miss (#365).
+func TestRecordRun_DeadPreHeadFallsBackToLedger(t *testing.T) {
+	env, conn, git := setupGitTest(t)
+	q := db.New(conn)
+	git("config", "user.email", "t@t")
+	git("config", "user.name", "t")
+	git("commit", "--allow-empty", "-m", "baseline")
+
+	env.svc = NewService(q, env.workingDir, params.DefaultMemory())
+	run(env, "s1", "git status", env.workingDir, "", "", nil, 0)
+
+	// pre stamps at the external commit, then the run amends it
+	// away and gc prunes the orphaned object — rev-list pre..post
+	// can never resolve it.
+	git("commit", "--allow-empty", "-m", "external")
+	pre, err := gitOut(env.ctx, env.workingDir, "rev-parse", "HEAD")
+	require.NoError(t, err)
+	git("commit", "--amend", "--allow-empty", "-m", "rewritten")
+	git("reflog", "expire", "--expire=now", "--all")
+	git("gc", "--prune=now")
+	headAfter, err := gitOut(env.ctx, env.workingDir, "rev-parse", "HEAD")
+	require.NoError(t, err)
+	_, err = gitOut(env.ctx, env.workingDir, "rev-parse", "--verify", "--quiet", pre+"^{commit}")
+	require.Error(t, err, "setup: the amended-away commit must be unreachable")
+
+	env.svc.RecordRun(env.ctx, Run{
+		SessionID: "s1", Command: "git commit --amend -m rewritten",
+		CWD: env.workingDir, Ran: true, ExitCode: 0,
+		HeadBefore: pre,
+	})
+
+	// The ledger retry attributes the rewritten commit and the
+	// stamp advances — no bounded miss taken.
+	shas, err := q.ListCrushCommitSHAs(env.ctx, env.svc.ProjectKey())
+	require.NoError(t, err)
+	require.Contains(t, shas, headAfter,
+		"the dead pre retries ledger..post and the run's commit attributes")
+	var rs string
+	require.NoError(t, conn.QueryRowContext(env.ctx,
+		"SELECT repo_state FROM command_memory WHERE cmd_norm = 'git commit --amend -m rewritten'").Scan(&rs))
+	require.Equal(t, headAfter, rs)
+}
+
 // attributionFallback's two arms, unit-tested directly — a live
 // baseline holds once then stamps, a dead one stamps immediately.
 // Fabricating the transient failure class through real git is

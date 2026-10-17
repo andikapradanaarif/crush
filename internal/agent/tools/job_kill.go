@@ -68,6 +68,7 @@ func NewJobKillTool(cmdLog cmdlog.Service) fantasy.AgentTool {
 					Stderr:      stderr,
 					Err:         ctx.Err(),
 					Interrupted: true,
+					HeadBefore:  bgShell.HeadBefore,
 					Components:  bgShell.Shell.TakeComponents(),
 				}
 				if done {
