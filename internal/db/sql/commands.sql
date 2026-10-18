@@ -630,7 +630,7 @@ UPDATE turn_outcomes SET verdict = ?, settled_at = ?, hunk_after = ? WHERE id = 
 -- before settlement runs. The flag marks paths a later recorded
 -- turn also touched, so the preference pair isn't misread as a
 -- user revision when a later agent turn rewrote the region.
-SELECT edited_paths FROM turn_outcomes
+SELECT created_at, edited_paths FROM turn_outcomes
 WHERE project_key = ? AND created_at > ?;
 
 -- name: ListRecentSessions :many

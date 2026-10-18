@@ -332,22 +332,7 @@ func (s *service) hunkDiverged(target, addedJSON string) sql.NullInt64 {
 		// The file is gone — nothing survived.
 		return sql.NullInt64{Int64: 1, Valid: true}
 	}
-	fileLines := map[string]struct{}{}
-	for _, l := range strings.Split(string(data), "\n") {
-		if t := strings.TrimSpace(l); t != "" {
-			fileLines[t] = struct{}{}
-		}
-	}
-	present := 0
-	for _, l := range lines {
-		if _, ok := fileLines[l]; ok {
-			present++
-		}
-	}
-	if float64(present)/float64(len(lines)) < survivalMajority {
-		return sql.NullInt64{Int64: 1, Valid: true}
-	}
-	return sql.NullInt64{Int64: 0, Valid: true}
+	return fingerprintDiverged(data, lines)
 }
 
 // NormalizeOutcomeCommand normalizes a bash invocation for the

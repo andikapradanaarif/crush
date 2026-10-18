@@ -215,7 +215,7 @@ type Querier interface {
 	// before settlement runs. The flag marks paths a later recorded
 	// turn also touched, so the preference pair isn't misread as a
 	// user revision when a later agent turn rewrote the region.
-	ListLaterTurnEditPaths(ctx context.Context, arg ListLaterTurnEditPathsParams) ([]string, error)
+	ListLaterTurnEditPaths(ctx context.Context, arg ListLaterTurnEditPathsParams) ([]ListLaterTurnEditPathsRow, error)
 	ListLatestSessionFiles(ctx context.Context, sessionID string) ([]File, error)
 	ListMCPDisabledServers(ctx context.Context) ([]string, error)
 	ListMCPEnabledServers(ctx context.Context) ([]string, error)

@@ -188,7 +188,10 @@ func referentTargets(ctx context.Context, d turnOutcomeDeps, msgs []message.Mess
 				if !referentMutationTools[tc.Name] || tc.Input == "" || !executed {
 					continue
 				}
-				path, added, _, _ := editEvidence(tc.Input, failedEditIndexes(res.Metadata), res.Metadata)
+				// The referent channel needs the path and added
+				// lines only — skip the metadata diff that spans
+				// require.
+				path, added, _, _ := editEvidence(tc.Input, failedEditIndexes(res.Metadata), "")
 				if path == "" {
 					continue
 				}

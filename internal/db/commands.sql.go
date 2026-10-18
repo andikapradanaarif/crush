@@ -482,13 +482,18 @@ func (q *Queries) ListFailuresByKey(ctx context.Context, projectKey string) ([]L
 }
 
 const listLaterTurnEditPaths = `-- name: ListLaterTurnEditPaths :many
-SELECT edited_paths FROM turn_outcomes
+SELECT created_at, edited_paths FROM turn_outcomes
 WHERE project_key = ? AND created_at > ?
 `
 
 type ListLaterTurnEditPathsParams struct {
 	ProjectKey string `json:"project_key"`
 	CreatedAt  int64  `json:"created_at"`
+}
+
+type ListLaterTurnEditPathsRow struct {
+	CreatedAt   int64  `json:"created_at"`
+	EditedPaths string `json:"edited_paths"`
 }
 
 // Edited-path lists of the turn rows that follow this one on the
@@ -498,19 +503,19 @@ type ListLaterTurnEditPathsParams struct {
 // before settlement runs. The flag marks paths a later recorded
 // turn also touched, so the preference pair isn't misread as a
 // user revision when a later agent turn rewrote the region.
-func (q *Queries) ListLaterTurnEditPaths(ctx context.Context, arg ListLaterTurnEditPathsParams) ([]string, error) {
+func (q *Queries) ListLaterTurnEditPaths(ctx context.Context, arg ListLaterTurnEditPathsParams) ([]ListLaterTurnEditPathsRow, error) {
 	rows, err := q.query(ctx, q.listLaterTurnEditPathsStmt, listLaterTurnEditPaths, arg.ProjectKey, arg.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []string{}
+	items := []ListLaterTurnEditPathsRow{}
 	for rows.Next() {
-		var edited_paths string
-		if err := rows.Scan(&edited_paths); err != nil {
+		var i ListLaterTurnEditPathsRow
+		if err := rows.Scan(&i.CreatedAt, &i.EditedPaths); err != nil {
 			return nil, err
 		}
-		items = append(items, edited_paths)
+		items = append(items, i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err

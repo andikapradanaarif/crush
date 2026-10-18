@@ -184,8 +184,12 @@ func (s *service) SettleTurnOutcomes(ctx context.Context, limit int) error {
 		}
 	}
 	ev := s.prefetchCommitEvidence(ctx, winLo, winHi)
+	// One later-rows read for the whole batch — the per-row filter
+	// (created_at > row's) happens in memory instead of an unbounded
+	// query per settling row.
+	later := s.laterEditedPaths(ctx, s.projectKey, winLo)
 	for i, r := range rows {
-		if err := s.settleTurn(ctx, r, winEnds[i], ev, now); err != nil {
+		if err := s.settleTurn(ctx, r, winEnds[i], ev, now, later); err != nil {
 			return err
 		}
 	}
@@ -202,7 +206,7 @@ func (s *service) SettleTurnOutcomes(ctx context.Context, limit int) error {
 // artifact order: an episode's claim is path-scoped, so the file's
 // own survival/commit evidence outranks a cue that may object to a
 // different file in the same turn.
-func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomesRow, winEnd int64, ev commitEvidence, now int64) error {
+func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomesRow, winEnd int64, ev commitEvidence, now int64, laterRows []laterEditRow) error {
 	var paths []string
 	var hunks map[string][]string
 	var cmds []string
@@ -217,7 +221,15 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 	// a corrupt cell degrades to no spans — settle marks the path's
 	// region unknown rather than guessing at it.
 	_ = json.Unmarshal([]byte(r.HunkAdded), &added)
-	later := s.laterEditedPaths(ctx, r.ProjectKey, r.CreatedAt)
+	later := map[string]bool{}
+	for _, lr := range laterRows {
+		if lr.createdAt <= r.CreatedAt {
+			continue
+		}
+		for _, p := range lr.paths {
+			later[p] = true
+		}
+	}
 	// A row settling far past its own window — almost always a
 	// backfilled historical turn — produces a stale pair: the
 	// windows are real but the "post-window" state is not.
@@ -260,10 +272,12 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 					diverged = true
 				}
 			}
-		case !s.pathEscapesWorkspace(p):
-			// The file is gone or refused the read — nothing
-			// survived. An escape (textual or symlink) abstains,
-			// not a deletion.
+		case !workspacePathSafe(p) || s.pathEscapesWorkspace(p):
+			// Out-of-scope targets — textual or symlink escapes —
+			// abstain, same as the pre-capture reader.
+		default:
+			// A safe path that still doesn't read is gone or
+			// refused — nothing survived.
 			decidable, diverged = true, true
 		}
 	}
@@ -350,20 +364,23 @@ var sensitiveSourceExts = map[string]bool{
 	".m": true, ".scala": true, ".clj": true, ".ex": true,
 	".exs": true, ".erl": true, ".hrl": true, ".lua": true,
 	".r": true, ".jl": true, ".sh": true, ".pl": true, ".pm": true,
-	".md": true,
 }
 
 func sensitivePath(path string) bool {
-	base := strings.ToLower(filepath.Base(path))
-	for _, pat := range sensitiveBasenames {
-		if ok, _ := filepath.Match(pat, base); !ok {
-			continue
+	// Every segment, not just the basename — a `.env/` directory's
+	// contents carry the same risk as the file.
+	for _, seg := range strings.Split(filepath.ToSlash(path), "/") {
+		base := strings.ToLower(seg)
+		for _, pat := range sensitiveBasenames {
+			if ok, _ := filepath.Match(pat, base); !ok {
+				continue
+			}
+			if (strings.HasPrefix(pat, "credentials") || strings.HasPrefix(pat, "secrets.")) &&
+				sensitiveSourceExts[filepath.Ext(base)] {
+				continue
+			}
+			return true
 		}
-		if (strings.HasPrefix(pat, "credentials") || strings.HasPrefix(pat, "secrets.")) &&
-			sensitiveSourceExts[filepath.Ext(base)] {
-			return false
-		}
-		return true
 	}
 	return false
 }
@@ -513,8 +530,17 @@ func (s *service) buildHunkAdded(raw map[string][]HunkEdit, spans map[string][]H
 			// Spans ride along under every state — over_cap drops
 			// text, not the anchors the after side still needs.
 			e.Spans = mergeSpanRecs(spans[p])
-			for _, sp := range e.Spans {
-				total += len([]rune(sp.Before)) + len([]rune(sp.After))
+			for i, sp := range e.Spans {
+				c := len([]rune(sp.Before)) + len([]rune(sp.After))
+				if total+c > maxHunkRowRunes {
+					// The row is full — keep the span geometry
+					// but shed the anchor text rather than grow
+					// the cell past the bound.
+					e.Spans[i].Before, e.Spans[i].After = "", ""
+					e.Truncated = true
+					continue
+				}
+				total += c
 			}
 		}
 		out[p] = e
@@ -617,7 +643,7 @@ func reanchorSpan(lines []string, rec HunkSpan) (span [2]int, moved, drifted boo
 		// numbers are the definition, not a guess.
 		return span, false, false
 	}
-	bIdx, aIdx, bFound, aFound := -1, -1, rec.Before == "", rec.After == ""
+	bIdx, aIdx := -1, -1
 	if rec.Before != "" {
 		for i, l := range lines {
 			if strings.TrimSpace(l) == rec.Before &&
@@ -625,7 +651,6 @@ func reanchorSpan(lines []string, rec HunkSpan) (span [2]int, moved, drifted boo
 				bIdx = i
 			}
 		}
-		bFound = bIdx >= 0
 	}
 	if rec.After != "" {
 		for i, l := range lines {
@@ -634,23 +659,23 @@ func reanchorSpan(lines []string, rec HunkSpan) (span [2]int, moved, drifted boo
 				aIdx = i
 			}
 		}
-		aFound = aIdx >= 0
 	}
+	// "Found" means recorded AND located — an absent anchor must not
+	// route into the two-anchor arm, or it pins the missing side to a
+	// file edge instead of reconstructing from the found one.
+	bFound := rec.Before != "" && bIdx >= 0
+	aFound := rec.After != "" && aIdx >= 0
 	size := rec.End - rec.Start
 	switch {
 	case bFound && aFound:
-		start := 0
-		if rec.Before != "" {
-			start = bIdx + 1
-		}
-		end := len(lines)
-		if rec.After != "" {
-			end = aIdx
-		}
-		if end > start {
+		start, end := bIdx+1, aIdx
+		// A zero-width span (a pure deletion) verifies on adjacent
+		// anchors — end == start is its correct shape. end < start,
+		// or a nonempty region collapsed to nothing, means the
+		// anchors crossed and the file can't be trusted.
+		if end > start || (end == start && size == 0) {
 			return [2]int{start, end}, start != rec.Start || end != rec.End, false
 		}
-		// Anchors crossed — the file is too mangled to trust.
 		return span, false, true
 	case bFound:
 		return [2]int{bIdx + 1, min(bIdx+1+size, len(lines))}, false, true
@@ -774,28 +799,33 @@ func fingerprintDiverged(data []byte, fingerprint []string) sql.NullInt64 {
 	return sql.NullInt64{Int64: 0, Valid: true}
 }
 
-// laterEditedPaths unions the edited_paths of the turn rows recorded
-// after this one on the same project — the flag that separates "user
+// laterEditRow is one later turn's edited-path list, keyed by its
+// created_at so each settling row filters to rows strictly after it.
+type laterEditRow struct {
+	createdAt int64
+	paths     []string
+}
+
+// laterEditedPaths fetches the project's turn rows newer than
+// createdAt once per settle batch — the flag that separates "user
 // revised the region" from "a later agent turn rewrote it" (#400
 // review). Cross-session because the newer-session settle trigger
 // means the next session's first-turn edits often land before
 // settlement runs. Best-effort: a later turn whose row hasn't opened
 // yet can't mark the flag.
-func (s *service) laterEditedPaths(ctx context.Context, projectKey string, createdAt int64) map[string]bool {
-	out := map[string]bool{}
+func (s *service) laterEditedPaths(ctx context.Context, projectKey string, createdAt int64) []laterEditRow {
 	rows, err := s.q.ListLaterTurnEditPaths(ctx, db.ListLaterTurnEditPathsParams{
 		ProjectKey: projectKey,
 		CreatedAt:  createdAt,
 	})
 	if err != nil {
-		return out
+		return nil
 	}
+	out := make([]laterEditRow, 0, len(rows))
 	for _, r := range rows {
 		var ps []string
-		if json.Unmarshal([]byte(r), &ps) == nil {
-			for _, p := range ps {
-				out[p] = true
-			}
+		if json.Unmarshal([]byte(r.EditedPaths), &ps) == nil {
+			out = append(out, laterEditRow{createdAt: r.CreatedAt, paths: ps})
 		}
 	}
 	return out

@@ -502,6 +502,7 @@ func hunkSpansFromUnified(unified, newContent string) []cmdlog.HunkSpan {
 	// the run of new lines the hunk actually adds — context lines
 	// around a small change must not stretch it.
 	var pos, spanStart, spanEnd int
+	spanStart, spanEnd = -1, -1
 	flush := func() {
 		if spanStart < 0 {
 			return
@@ -513,9 +514,12 @@ func hunkSpansFromUnified(unified, newContent string) []cmdlog.HunkSpan {
 			Before: spanAnchor(lines, start-1, -1),
 			After:  spanAnchor(lines, min(end, len(lines)), +1),
 		})
-		spanStart = -1
+		spanStart, spanEnd = -1, -1
 	}
-	spanStart = -1
+	// inHunk gates the body lines: only after an @@ header is a "+"
+	// an added line — before it, "---"/"+++" name the diff's files,
+	// and inside it "++foo" really is added content.
+	inHunk := false
 	for _, l := range strings.Split(unified, "\n") {
 		if m := unifiedHunkHeader.FindStringSubmatch(l); m != nil {
 			flush()
@@ -530,24 +534,30 @@ func hunkSpansFromUnified(unified, newContent string) []cmdlog.HunkSpan {
 			if nc == 0 {
 				pos = ns
 			}
+			inHunk = true
 			continue
 		}
-		switch {
-		case strings.HasPrefix(l, "+") && !strings.HasPrefix(l, "+++"):
+		if !inHunk || l == "" {
+			continue
+		}
+		switch l[0] {
+		case '+':
 			if spanStart < 0 {
 				spanStart = pos
 			}
 			pos++
 			spanEnd = pos
-		case strings.HasPrefix(l, "-") && !strings.HasPrefix(l, "---"):
+		case '-':
 			// A removed line advances nothing in the new file —
 			// a deletion-only hunk records an empty span at pos.
 			if spanStart < 0 {
 				spanStart = pos
 			}
-		case strings.HasPrefix(l, " "):
+		case ' ':
 			pos++
 		}
+		// "\" lines ("\ No newline at end of file") carry no
+		// position; anything else is ignored.
 	}
 	flush()
 	return out
