@@ -311,6 +311,9 @@ func TestExtractTurnOutcome_PartialMultieditFingerprint(t *testing.T) {
 	o := extractTurnOutcome(t.Context(), a.turnOutcomeDeps(), "s1", msgs, 0)
 	require.Equal(t, []string{"landed"}, o.EditHunks["x.go"],
 		"the failed edit's lines are not surviving-line candidates")
+	require.Equal(t, []cmdlog.HunkEdit{{Old: "a", New: "landed"}},
+		o.HunkAdded["x.go"],
+		"the failed edit's verbatim pair is not agent output either")
 }
 
 // The live path records the judged turn at the next prompt with that
