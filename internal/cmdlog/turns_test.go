@@ -255,8 +255,6 @@ func TestSettleTurnOutcomes_HunkAfter(t *testing.T) {
 func TestSettleTurnOutcomes_HunkAfterRewrittenRegion(t *testing.T) {
 	env := setupLabelsTest(t)
 	dir := env.workingDir
-	body := strings.Repeat("prelude line\n", 60) +
-		"AGENT FUNCTION\n" + strings.Repeat("tail line\n", 60)
 	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
 		SessionID:   "s1",
 		TurnID:      "t0",
@@ -269,7 +267,7 @@ func TestSettleTurnOutcomes_HunkAfterRewrittenRegion(t *testing.T) {
 
 	// The region is fully rewritten — no agent text remains. The
 	// boundary anchors still cut the right lines.
-	body = strings.Repeat("prelude line\n", 60) +
+	body := strings.Repeat("prelude line\n", 60) +
 		"USER REWRITE\n" + strings.Repeat("tail line\n", 60)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "x.go"), []byte(body), 0o644))
 
