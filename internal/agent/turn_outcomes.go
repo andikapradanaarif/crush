@@ -304,7 +304,7 @@ func extractTurnOutcome(ctx context.Context, d turnOutcomeDeps, sessionID string
 						scan(childMsgs, 0)
 					}
 				case referentMutationTools[tc.Name] && executed:
-					path, added, edits, spans := editEvidence(tc.Input, failedEditIndexes(res.Metadata), res.Metadata)
+					path, added, edits, spans := editEvidence(tc.Name, tc.Input, failedEditIndexes(res.Metadata), res.Metadata)
 					if path == "" {
 						continue
 					}
@@ -426,7 +426,7 @@ func failedEditIndexes(metadata string) map[int]bool {
 // replace_all, deletions, and edits the user made before the row
 // recorded; a tool result without metadata yields no spans and the
 // settle side marks the region unknown.
-func editEvidence(input string, skip map[int]bool, metadata string) (path string, added []string, edits []cmdlog.HunkEdit, spans []cmdlog.HunkSpan) {
+func editEvidence(tool, input string, skip map[int]bool, metadata string) (path string, added []string, edits []cmdlog.HunkEdit, spans []cmdlog.HunkSpan) {
 	var in struct {
 		FilePath  string `json:"file_path"`
 		OldString string `json:"old_string"`
@@ -458,8 +458,11 @@ func editEvidence(input string, skip map[int]bool, metadata string) (path string
 	oldContent, _ := fsext.ToUnixLineEndings(meta.OldContent)
 	newContent, _ := fsext.ToUnixLineEndings(meta.NewContent)
 	var unified string
+	// Only the write tool owns the content key — a hallucinated
+	// content field on an edit call must not mint a wrong-arm pair.
+	write := in.Content != nil && tool == tools.WriteToolName
 	switch {
-	case in.Content != nil:
+	case write:
 		// A write's metadata ships a ready-made unified diff;
 		// the written content is the new file itself.
 		unified = meta.Diff
@@ -468,14 +471,14 @@ func editEvidence(input string, skip map[int]bool, metadata string) (path string
 		unified, _, _ = diff.GenerateDiff(oldContent, newContent, in.FilePath)
 	}
 	spans = hunkSpansFromUnified(unified, newContent)
-	if len(spans) == 0 && in.Content != nil {
+	if len(spans) == 0 && write {
 		// Write with no diff metadata — the file IS the region.
 		spans = []cmdlog.HunkSpan{
 			{Start: 0, End: len(strings.Split(newContent, "\n"))},
 		}
 	}
 	switch {
-	case in.Content != nil:
+	case write:
 		return in.FilePath, cmdlog.NormalizeAddedLines(*in.Content),
 			[]cmdlog.HunkEdit{{New: *in.Content}}, spans
 	case len(in.Edits) > 0:
@@ -577,19 +580,72 @@ func hunkSpansFromUnified(unified, newContent string) []cmdlog.HunkSpan {
 // spanAnchor picks the nearest non-blank line in direction dir from
 // position pos (a few lines at most), stored trimmed, scrubbed, and
 // length-bounded. A line that scrubs whole is skipped — a
-// "[REDACTED]" anchor would re-anchor to any secret line.
+// "[REDACTED]" anchor would re-anchor to any secret line. Within
+// the window a line unique in the file is preferred over a generic
+// repeated one ("}", "return") — a duplicated anchor can silently
+// re-attach to the wrong occurrence at settle.
 func spanAnchor(lines []string, pos, dir int) string {
+	var fallback string
 	for i := pos; i >= 0 && i < len(lines) && abs(i-pos) < 8; i += dir {
-		a := redact.Secrets(strings.TrimSpace(lines[i]))
-		if a == "" || a == "[REDACTED]" {
+		cand := strings.TrimSpace(lines[i])
+		if cand == "" {
+			continue
+		}
+		a := redact.Secrets(cand)
+		if a == "[REDACTED]" {
 			continue
 		}
 		if r := []rune(a); len(r) > cmdlog.HunkAnchorRunes {
 			a = string(r[:cmdlog.HunkAnchorRunes])
 		}
-		return a
+		if fallback == "" {
+			fallback = a
+		}
+		switch {
+		case a == cand && anchorUnique(lines, cand):
+			// A clean line unique in the file — the settle match
+			// names one position unambiguously.
+			return a
+		case a != cand && len([]rune(a)) == cmdlog.HunkAnchorRunes &&
+			anchorPrefixUnique(lines, a):
+			// A capped anchor re-matches by prefix — uniqueness
+			// must hold for the prefix, not the full raw line.
+			return a
+			// A partially scrubbed line ("a != cand" under the cap)
+			// stores redacted text whose collisions can't be
+			// counted on raw lines — fallback only.
+		}
 	}
-	return ""
+	return fallback
+}
+
+// anchorUnique reports whether the trimmed line occurs exactly once
+// in the file — the property that lets a settle-time anchor match
+// name one position unambiguously.
+func anchorUnique(lines []string, cand string) bool {
+	n := 0
+	for _, l := range lines {
+		if strings.TrimSpace(l) == cand {
+			if n++; n > 1 {
+				return false
+			}
+		}
+	}
+	return n == 1
+}
+
+// anchorPrefixUnique is anchorUnique for a capped anchor, which
+// re-matches by prefix rather than equality.
+func anchorPrefixUnique(lines []string, prefix string) bool {
+	n := 0
+	for _, l := range lines {
+		if strings.HasPrefix(strings.TrimSpace(l), prefix) {
+			if n++; n > 1 {
+				return false
+			}
+		}
+	}
+	return n == 1
 }
 
 func abs(x int) int {

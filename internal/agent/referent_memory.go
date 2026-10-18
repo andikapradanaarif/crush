@@ -191,7 +191,7 @@ func referentTargets(ctx context.Context, d turnOutcomeDeps, msgs []message.Mess
 				// The referent channel needs the path and added
 				// lines only — skip the metadata diff that spans
 				// require.
-				path, added, _, _ := editEvidence(tc.Input, failedEditIndexes(res.Metadata), "")
+				path, added, _, _ := editEvidence(tc.Name, tc.Input, failedEditIndexes(res.Metadata), "")
 				if path == "" {
 					continue
 				}

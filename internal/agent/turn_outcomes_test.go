@@ -20,6 +20,7 @@ func TestEditEvidence(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name      string
+		tool      string
 		input     string
 		metadata  string
 		wantPath  string
@@ -28,7 +29,7 @@ func TestEditEvidence(t *testing.T) {
 		wantSpans []cmdlog.HunkSpan
 	}{
 		{
-			"edit new_string", `{"file_path":"a.go","old_string":"x","new_string":"y\nz"}`, "",
+			"edit new_string", tools.EditToolName, `{"file_path":"a.go","old_string":"x","new_string":"y\nz"}`, "",
 			"a.go",
 			[]string{"y", "z"},
 			[]cmdlog.HunkEdit{{Old: "x", New: "y\nz"}},
@@ -37,7 +38,7 @@ func TestEditEvidence(t *testing.T) {
 		{
 			// The execution-time content pair gives exact spans —
 			// independent of whatever the file says later.
-			"edit spans from metadata", `{"file_path":"a.go","old_string":"x","new_string":"y\nz"}`,
+			"edit spans from metadata", tools.EditToolName, `{"file_path":"a.go","old_string":"x","new_string":"y\nz"}`,
 			`{"old_content":"head\nx\nmid\ntail\n","new_content":"head\ny\nz\nmid\ntail\n"}`,
 			"a.go",
 			[]string{"y", "z"},
@@ -48,7 +49,7 @@ func TestEditEvidence(t *testing.T) {
 			// The tools persist old_content LF-normalized but
 			// new_content CRLF-restored — the diff normalizes
 			// before comparing, or every line looks changed.
-			"crlf metadata narrows the span",
+			"crlf metadata narrows the span", tools.EditToolName,
 			`{"file_path":"a.go","old_string":"x","new_string":"y"}`,
 			`{"old_content":"head\nx\nmid\ntail\n","new_content":"head\r\ny\r\nmid\r\ntail\r\n"}`,
 			"a.go",
@@ -61,14 +62,14 @@ func TestEditEvidence(t *testing.T) {
 			// introduced by this edit — they must not pad the
 			// survival numerator. The edits keep them: verbatim
 			// agent output, not net-new lines.
-			"edit drops carried context", `{"file_path":"a.go","old_string":"x\nctx","new_string":"y\nctx"}`, "",
+			"edit drops carried context", tools.EditToolName, `{"file_path":"a.go","old_string":"x\nctx","new_string":"y\nctx"}`, "",
 			"a.go",
 			[]string{"y"},
 			[]cmdlog.HunkEdit{{Old: "x\nctx", New: "y\nctx"}},
 			nil,
 		},
 		{
-			"deletion introduces nothing", `{"file_path":"d.go","old_string":"x","new_string":""}`, "",
+			"deletion introduces nothing", tools.EditToolName, `{"file_path":"d.go","old_string":"x","new_string":""}`, "",
 			"d.go",
 			nil,
 			[]cmdlog.HunkEdit{{Old: "x"}},
@@ -77,7 +78,7 @@ func TestEditEvidence(t *testing.T) {
 		{
 			// A pure deletion yields an empty span at the position —
 			// the boundary anchors still bracket where it happened.
-			"deletion spans empty", `{"file_path":"d.go","old_string":"x","new_string":""}`,
+			"deletion spans empty", tools.EditToolName, `{"file_path":"d.go","old_string":"x","new_string":""}`,
 			`{"old_content":"a\nx\nb\n","new_content":"a\nb\n"}`,
 			"d.go",
 			nil,
@@ -85,7 +86,7 @@ func TestEditEvidence(t *testing.T) {
 			[]cmdlog.HunkSpan{{Start: 1, End: 1, Before: "a", After: "b"}},
 		},
 		{
-			"write content", `{"file_path":"b.go","content":"line1\n\nline2"}`, "",
+			"write content", tools.WriteToolName, `{"file_path":"b.go","content":"line1\n\nline2"}`, "",
 			"b.go",
 			[]string{"line1", "line2"},
 			[]cmdlog.HunkEdit{{New: "line1\n\nline2"}},
@@ -94,7 +95,7 @@ func TestEditEvidence(t *testing.T) {
 		{
 			// A write's result metadata ships a ready-made diff —
 			// the hunk header gives the region directly.
-			"write diff metadata", `{"file_path":"b.go","content":"head\nnew body\nfoot"}`,
+			"write diff metadata", tools.WriteToolName, `{"file_path":"b.go","content":"head\nnew body\nfoot"}`,
 			`{"diff":"--- a/b.go\n+++ b/b.go\n@@ -2,1 +2,1 @@\n-old\n+new body\n"}`,
 			"b.go",
 			[]string{"head", "new body", "foot"},
@@ -102,25 +103,36 @@ func TestEditEvidence(t *testing.T) {
 			[]cmdlog.HunkSpan{{Start: 1, End: 2, Before: "head", After: "foot"}},
 		},
 		{
-			"multiedit joins", `{"file_path":"c.go","edits":[{"new_string":"p"},{"new_string":"q"}]}`, "",
+			"multiedit joins", tools.MultiEditToolName, `{"file_path":"c.go","edits":[{"new_string":"p"},{"new_string":"q"}]}`, "",
 			"c.go",
 			[]string{"p", "q"},
 			[]cmdlog.HunkEdit{{New: "p"}, {New: "q"}},
 			nil,
 		},
 		{
-			"multiedit subtracts per edit", `{"file_path":"c.go","edits":[{"old_string":"keep","new_string":"keep\np"},{"old_string":"z","new_string":"q\nkeep"}]}`, "",
+			"multiedit subtracts per edit", tools.MultiEditToolName, `{"file_path":"c.go","edits":[{"old_string":"keep","new_string":"keep\np"},{"old_string":"z","new_string":"q\nkeep"}]}`, "",
 			"c.go",
 			[]string{"p", "q", "keep"},
 			[]cmdlog.HunkEdit{{Old: "keep", New: "keep\np"}, {Old: "z", New: "q\nkeep"}},
 			nil,
 		},
-		{"malformed", `not json`, "", "", nil, nil, nil},
-		{"no path", `{"new_string":"x"}`, "", "", nil, nil, nil},
+		{
+			// A content key on a non-write call is model noise —
+			// the edit arm, not the write arm, must take it.
+			"edit ignores stray content", tools.EditToolName,
+			`{"file_path":"a.go","old_string":"x","new_string":"y","content":"z"}`,
+			"",
+			"a.go",
+			[]string{"y"},
+			[]cmdlog.HunkEdit{{Old: "x", New: "y"}},
+			nil,
+		},
+		{"malformed", tools.EditToolName, `not json`, "", "", nil, nil, nil},
+		{"no path", tools.EditToolName, `{"new_string":"x"}`, "", "", nil, nil, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			path, added, edits, spans := editEvidence(tc.input, nil, tc.metadata)
+			path, added, edits, spans := editEvidence(tc.tool, tc.input, nil, tc.metadata)
 			require.Equal(t, tc.wantPath, path)
 			require.Equal(t, tc.wantAdded, added)
 			require.Equal(t, tc.wantEdits, edits)

@@ -691,6 +691,94 @@ func TestSettleTurnOutcomes_HunkAfterSingleAnchor(t *testing.T) {
 		"the window is the region ±context, not from the file head")
 }
 
+// A moved span whose anchor text repeats in the file is a guess,
+// not a verified relocation — the duplicated match flags drifted,
+// not relocated.
+func TestSettleTurnOutcomes_HunkAfterAmbiguousAnchor(t *testing.T) {
+	env := setupLabelsTest(t)
+	dir := env.workingDir
+	// "common" and "mid" each occur twice — nearest occurrence wins
+	// a non-crossing but wrong position for the recorded span.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "x.go"),
+		[]byte("common\nmid\ncommon\nREGION\nmid\ntail\n"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string][]HunkEdit{"x.go": {{New: "REGION"}}},
+		HunkSpans: map[string][]HunkSpan{
+			"x.go": {{Start: 5, End: 6, Before: "common", After: "mid"}},
+		},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.Equal(t, hunkOK, m["x.go"].State)
+	require.False(t, m["x.go"].Relocated,
+		"a duplicated anchor can't certify the new position")
+	require.True(t, m["x.go"].Drifted,
+		"the nearest occurrence may be the wrong one — drift, not relocation")
+}
+
+// A single-anchor span CAN relocate — when the anchor is unique in
+// the file the reposition is verified on that side.
+func TestSettleTurnOutcomes_HunkAfterSingleAnchorRelocates(t *testing.T) {
+	env := setupLabelsTest(t)
+	dir := env.workingDir
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "x.go"),
+		[]byte(strings.Repeat("filler\n", 80)+"REGION\none anchor\n"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string][]HunkEdit{"x.go": {{New: "REGION"}}},
+		HunkSpans: map[string][]HunkSpan{
+			// No Before — the region's file-head neighborhood gave
+			// none. 80 inserted lines moved the span; the unique
+			// After still finds it.
+			"x.go": {{Start: 5, End: 6, After: "one anchor"}},
+		},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.Equal(t, hunkOK, m["x.go"].State)
+	require.True(t, m["x.go"].Relocated,
+		"a unique single anchor verifies the moved position")
+	require.False(t, m["x.go"].Drifted)
+	require.Contains(t, m["x.go"].Windows[0].Text, "REGION")
+}
+
+// A span whose anchors were shed for the row cap must not read as
+// a whole-file span — the position is unverifiable, so it drifts.
+func TestSettleTurnOutcomes_HunkAfterAnchorsDropped(t *testing.T) {
+	env := setupLabelsTest(t)
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "x.go"),
+		[]byte("a\nREGION\nb\n"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string][]HunkEdit{"x.go": {{New: "REGION"}}},
+		HunkSpans: map[string][]HunkSpan{
+			"x.go": {{Start: 1, End: 2, AnchorsDropped: true}},
+		},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.Equal(t, hunkOK, m["x.go"].State)
+	require.True(t, m["x.go"].Drifted,
+		"shed anchors are not whole-file semantics — flag the guess")
+	require.False(t, m["x.go"].Relocated)
+}
+
 // An edited path outside the workspace carries no survival evidence
 // — a fingerprint for an out-of-scope file abstains, never revised.
 func TestSettleTurnOutcomes_UnsafePathFingerprintAbstains(t *testing.T) {

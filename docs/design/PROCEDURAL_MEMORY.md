@@ -441,6 +441,14 @@ CREATE TABLE turn_outcomes (
 -- the honest reporting unit. Per-turn re-derivation stays possible
 -- — the transcripts and the command ledger are stored — but it is
 -- a semantics change of its own, not a label fix.
+--
+-- Caveat on rule changes: edit_hunks fingerprints for partial
+-- multiedits changed meaning with the 1-based FailedEdit.Index fix
+-- (#394/#358) — rows recorded before it carry phantom lines from
+-- the failed edit's successor. param_version stamps channel knobs,
+-- not extraction rules, so mixed-era rows coexist unmarked; miners
+-- comparing eras should treat partial-multiedit fingerprints as
+-- lower-confidence.
 
 -- One row per (signature, version) mined candidate.
 CREATE TABLE skills (

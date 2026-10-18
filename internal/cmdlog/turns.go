@@ -324,6 +324,9 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 // line-shaped evidence, and a rune cap keeps the worst case near
 // 4× before JSON escaping. Sensitive-path content is never stored.
 const (
+	// The per-path cap bounds edit/window TEXT only — span anchors
+	// (≤160 runes each) count against the row cap, so a path can
+	// exceed 16K effective when many spans ride along.
 	maxHunkPathRunes = 16 * 1024 // per path, per column
 	maxHunkRowRunes  = 64 * 1024 // per row, per column
 	// maxHunkReadBytes gates the settle-time read: a lockfile or
@@ -355,23 +358,27 @@ const (
 var sensitiveBasenames = []string{
 	".env", ".env.*", ".envrc", ".git-credentials", ".netrc",
 	".npmrc", ".pypirc", ".htpasswd", ".pgpass", "my.cnf",
-	"*.pem", "*.key", "*.p8", "*.p12", "*.pfx", "*.keystore", "*.ovpn",
+	"*.pem", "*.key", "*.p8", "*.ppk", "*.p12", "*.pfx", "*.keystore",
+	"*.ovpn",
 	"*.tfvars", "*.tfvars.json", "*.tfstate", "*.tfstate.*",
 	// *_id_* covers my_id_rsa-style prefixed names the bare
 	// id_* prefixes miss (the underscore separator keeps
 	// avoid_rsa.go out).
 	"id_rsa*", "id_dsa*", "id_ecdsa*", "id_ed25519*",
 	"*_id_rsa*", "*_id_dsa*", "*_id_ecdsa*", "*_id_ed25519*",
-	// .kube/ and .docker/ directories carry credential configs —
-	// segment matching marks everything under them.
-	".kube", ".docker",
-	"credentials*", "secrets.*", "kubeconfig", "kubeconfig.*",
+	// Credential-carrying directories — segment matching marks
+	// everything under them.
+	".kube", ".docker", ".aws", ".gnupg",
+	"credentials*", "secrets", "secrets.*", "kubeconfig",
+	".kubeconfig", "kubeconfig.*",
 	"service-account*.json", "service_account*.json",
 }
 
 // sensitiveSourceExts are file extensions that exempt a name from
 // the credentials*/secrets.* patterns — credentials.go and
 // secrets.go are ordinary source files, not credential stores.
+// Scripts (.sh, .pl, .pm) are NOT exempt: a credentials.sh is a
+// plausible secret carrier, not code in the same sense.
 var sensitiveSourceExts = map[string]bool{
 	".go": true, ".rs": true, ".py": true, ".js": true, ".ts": true,
 	".tsx": true, ".jsx": true, ".java": true, ".kt": true,
@@ -379,7 +386,7 @@ var sensitiveSourceExts = map[string]bool{
 	".cs": true, ".rb": true, ".php": true, ".swift": true,
 	".m": true, ".scala": true, ".clj": true, ".ex": true,
 	".exs": true, ".erl": true, ".hrl": true, ".lua": true,
-	".r": true, ".jl": true, ".sh": true, ".pl": true, ".pm": true,
+	".r": true, ".jl": true,
 }
 
 func sensitivePath(path string) bool {
@@ -412,6 +419,12 @@ type HunkSpan struct {
 	End    int    `json:"end"`
 	Before string `json:"before,omitempty"`
 	After  string `json:"after,omitempty"`
+	// AnchorsDropped marks a span whose boundary text was shed to
+	// keep the hunk_added cell under the row cap. It reads as a bare
+	// {start,end} — like a whole-file span — but its position is
+	// unverified, so settle flags it drifted rather than trust the
+	// absolute numbers.
+	AnchorsDropped bool `json:"anchors_dropped,omitempty"`
 }
 
 // hunkAddedEntry is one path's record-time cell in hunk_added: the
@@ -427,8 +440,8 @@ type hunkAddedEntry struct {
 }
 
 // hunkWindow is one captured region slice: Start is its first line
-// number in the file as captured, so consumers can line windows up
-// with the recorded spans.
+// number in the file as captured, 0-based like the spans, so
+// consumers can line windows up with the recorded spans.
 type hunkWindow struct {
 	Start int    `json:"start"`
 	Text  string `json:"text"`
@@ -557,8 +570,11 @@ func (s *service) buildHunkAdded(raw map[string][]HunkEdit, spans map[string][]H
 				if total+c > maxHunkRowRunes {
 					// The row is full — keep the span geometry
 					// but shed the anchor text rather than grow
-					// the cell past the bound.
+					// the cell past the bound. The flag keeps the
+					// bare span honest at settle: an unverifiable
+					// position, not a whole-file definition.
 					e.Spans[i].Before, e.Spans[i].After = "", ""
+					e.Spans[i].AnchorsDropped = true
 					e.Truncated = true
 					continue
 				}
@@ -609,6 +625,10 @@ func mergeSpanRecs(spans []HunkSpan) []HunkSpan {
 	if len(spans) == 0 {
 		return nil
 	}
+	// Clone before sorting — spans is the caller's
+	// TurnOutcome.HunkSpans backing array, and reordering it in
+	// place is a side effect the record path shouldn't pay for.
+	spans = slices.Clone(spans)
 	slices.SortFunc(spans, func(a, b HunkSpan) int { return a.Start - b.Start })
 	out := []HunkSpan{spans[0]}
 	for _, s := range spans[1:] {
@@ -618,6 +638,7 @@ func mergeSpanRecs(spans []HunkSpan) []HunkSpan {
 			if s.After != "" {
 				last.After = s.After
 			}
+			last.AnchorsDropped = last.AnchorsDropped || s.AnchorsDropped
 		} else {
 			out = append(out, s)
 		}
@@ -626,6 +647,8 @@ func mergeSpanRecs(spans []HunkSpan) []HunkSpan {
 		return []HunkSpan{{
 			Start: out[0].Start, End: out[len(out)-1].End,
 			Before: out[0].Before, After: out[len(out)-1].After,
+			AnchorsDropped: out[0].AnchorsDropped ||
+				out[len(out)-1].AnchorsDropped,
 		}}
 	}
 	return out
@@ -655,12 +678,20 @@ func mergeLineSpans(spans [][2]int) [][2]int {
 // than hunkContextLines inserted above the region would push it out
 // of the window — so the span's boundary lines re-anchor it first.
 // Lines are compared in already-scrubbed space, matching the
-// anchors' stored form. Returns the adjusted span and flags: moved
-// when both anchors landed elsewhere, drifted when the position
-// couldn't be verified (partial or no anchor hit).
+// anchors' stored form. Returns the adjusted span and flags:
+// moved (relocated) only when unique anchors verify the new
+// position — a repeated anchor text ("}", "return") can re-attach
+// to the wrong occurrence, so an ambiguous match that moved the
+// span reports drifted instead of a confident relocation.
 func reanchorSpan(lines []string, rec HunkSpan) (span [2]int, moved, drifted bool) {
 	span = [2]int{rec.Start, rec.End}
 	if rec.Before == "" && rec.After == "" {
+		if rec.AnchorsDropped {
+			// Anchors existed at record and were shed for the row
+			// cap — unlike a whole-file span, this position is a
+			// guess, so it must not read as verified.
+			return span, false, true
+		}
 		// No anchors recorded (a whole-file span) — the absolute
 		// numbers are the definition, not a guess.
 		return span, false, false
@@ -676,19 +707,29 @@ func reanchorSpan(lines []string, rec HunkSpan) (span [2]int, moved, drifted boo
 		return len([]rune(anchor)) == HunkAnchorRunes &&
 			strings.HasPrefix(l, anchor)
 	}
-	bIdx, aIdx := -1, -1
+	// Each anchor counts its matches: the nearest occurrence wins
+	// the position, but a count over one means "nearest" was a
+	// guess — a moved span on a duplicated anchor is drift, not a
+	// verified relocation.
+	bIdx, aIdx, bCount, aCount := -1, -1, 0, 0
 	if rec.Before != "" {
 		for i, l := range lines {
-			if matchAnchor(l, rec.Before) &&
-				(bIdx < 0 || abs(i-(rec.Start-1)) < abs(bIdx-(rec.Start-1))) {
+			if !matchAnchor(l, rec.Before) {
+				continue
+			}
+			bCount++
+			if bIdx < 0 || abs(i-(rec.Start-1)) < abs(bIdx-(rec.Start-1)) {
 				bIdx = i
 			}
 		}
 	}
 	if rec.After != "" {
 		for i, l := range lines {
-			if matchAnchor(l, rec.After) &&
-				(aIdx < 0 || abs(i-rec.End) < abs(aIdx-rec.End)) {
+			if !matchAnchor(l, rec.After) {
+				continue
+			}
+			aCount++
+			if aIdx < 0 || abs(i-rec.End) < abs(aIdx-rec.End) {
 				aIdx = i
 			}
 		}
@@ -699,6 +740,19 @@ func reanchorSpan(lines []string, rec HunkSpan) (span [2]int, moved, drifted boo
 	bFound := rec.Before != "" && bIdx >= 0
 	aFound := rec.After != "" && aIdx >= 0
 	size := rec.End - rec.Start
+	// single resolves a one-anchor result: unmoved is verified
+	// enough (a shift would have moved the anchor), a unique match
+	// that moved is a real relocation, a duplicated one is drift.
+	single := func(ns [2]int, count int) ([2]int, bool, bool) {
+		switch {
+		case ns == span:
+			return ns, false, false
+		case count == 1:
+			return ns, true, false
+		default:
+			return ns, false, true
+		}
+	}
 	switch {
 	case bFound && aFound:
 		start, end := bIdx+1, aIdx
@@ -707,13 +761,17 @@ func reanchorSpan(lines []string, rec HunkSpan) (span [2]int, moved, drifted boo
 		// or a nonempty region collapsed to nothing, means the
 		// anchors crossed and the file can't be trusted.
 		if end > start || (end == start && size == 0) {
-			return [2]int{start, end}, start != rec.Start || end != rec.End, false
+			ns := [2]int{start, end}
+			moved = ns != span
+			// Either boundary on a duplicated text is a guess.
+			return ns, moved && bCount == 1 && aCount == 1,
+				moved && (bCount > 1 || aCount > 1)
 		}
 		return span, false, true
 	case bFound:
-		return [2]int{bIdx + 1, min(bIdx+1+size, len(lines))}, false, true
+		return single([2]int{bIdx + 1, min(bIdx+1+size, len(lines))}, bCount)
 	case aFound:
-		return [2]int{max(0, aIdx-size), aIdx}, false, true
+		return single([2]int{max(0, aIdx-size), aIdx}, aCount)
 	default:
 		return span, false, true
 	}
@@ -850,8 +908,10 @@ func (s *service) laterEditedPaths(ctx context.Context, projectKey string, creat
 	rows, err := s.q.ListLaterTurnEditPaths(ctx, db.ListLaterTurnEditPathsParams{
 		ProjectKey: projectKey,
 		CreatedAt:  createdAt,
-		// Best-effort bound — a settling row whose flag would need
-		// more later rows than this is deep in backfill history.
+		// Best-effort bound — ASC means a deep-backfill row (a
+		// winLo far behind the batch) can see only rows too early
+		// to flag it, silently under-flagging. Those same rows are
+		// the ones the stale flag already marks.
 		Limit: laterEditRowsLimit,
 	})
 	if err != nil {

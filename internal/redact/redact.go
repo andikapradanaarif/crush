@@ -47,7 +47,10 @@ var credentialPrefixPatterns = []*regexp.Regexp{
 	// URL-embedded credentials: scheme://user:pass@host — connection
 	// strings carry no sensitive key name for the generic rule to
 	// catch, but the user:pass authority is always credential-shaped.
-	regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^\s/:@]+:[^\s/@]+@`),
+	// The password match is @-greedy (excludes only space and the
+	// path slash) so an unencoded @ inside the password — u:p@ss@h —
+	// redacts to the LAST @, not the first.
+	regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^\s/:@]+:[^\s/]+@`),
 }
 
 // Secrets scrubs credential-shaped substrings from text bound for a

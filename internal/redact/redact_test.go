@@ -19,6 +19,7 @@ func TestRedactSecrets(t *testing.T) {
 	}{
 		{"env assignment", "DATABASE_URL=postgres://u:p@h/db\nAPI_KEY=abc123secret", "abc123secret", "DATABASE_URL"},
 		{"bare url credentials", "db=postgres://admin:hunter2@db.internal:5432/prod", "hunter2", "postgres://[REDACTED]@db.internal"},
+		{"url creds with @ in password", "db=postgres://u:p@ss@h/db", "p@ss", "postgres://[REDACTED]@h"},
 		{"jwt", "auth eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVadQssw5c", "eyJzdWIiOiIxMjM0In0", "auth"},
 		{"json field", `{"password": "hunter2", "user": "me"}`, "hunter2", `"user": "me"`},
 		{"bearer header", "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig", "eyJhbGciOiJIUzI1NiJ9", "Authorization"},
