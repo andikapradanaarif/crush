@@ -491,6 +491,12 @@ func editEvidence(tool, input string, skip map[int]bool, metadata string) (path 
 		}
 		return in.FilePath, added, edits, spans
 	default:
+		if in.OldString == "" && in.NewString == "" {
+			// A mutation-shaped call with no edit fields — the
+			// path still records, but an empty pair is not
+			// evidence.
+			return in.FilePath, nil, nil, spans
+		}
 		return in.FilePath, introducedLines(in.NewString, in.OldString),
 			[]cmdlog.HunkEdit{{Old: in.OldString, New: in.NewString}}, spans
 	}
@@ -522,12 +528,17 @@ func hunkSpansFromUnified(unified, newContent string) []cmdlog.HunkSpan {
 			return
 		}
 		start, end := spanStart, max(spanEnd, spanStart)
+		end = min(end, len(lines))
 		b, bc := spanAnchor(lines, start-1, -1)
-		a, ac := spanAnchor(lines, min(end, len(lines)), +1)
+		a, ac := spanAnchor(lines, end, +1)
 		out = append(out, cmdlog.HunkSpan{
-			Start: start, End: min(end, len(lines)),
+			Start: start, End: end,
 			Before: b, BeforeCapped: bc,
 			After: a, AfterCapped: ac,
+			// A mid-file span with no anchors is a guess at settle —
+			// mark it so it can't pass for a whole-file span,
+			// whose absolute numbers are the definition.
+			NoAnchors: b == "" && a == "" && (start > 0 || end < len(lines)),
 		})
 		spanStart, spanEnd = -1, -1
 	}

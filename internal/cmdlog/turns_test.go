@@ -796,6 +796,73 @@ func TestSettleTurnOutcomes_HunkAfterAnchorsDropped(t *testing.T) {
 	require.False(t, m["x.go"].Relocated)
 }
 
+// A contained span's After anchors a line INSIDE the merged region
+// — only a span that reaches the merged end may donate one, and an
+// extending span with no After clears the now-interior anchor.
+func TestMergeSpanRecs_AfterBoundary(t *testing.T) {
+	t.Parallel()
+	// Write-then-edit: the write's whole-file span absorbs the
+	// edit's inner span — "inner" sits at line 42, not the end.
+	got := mergeSpanRecs([]HunkSpan{
+		{Start: 0, End: 100},
+		{Start: 40, End: 42, After: "inner"},
+	})
+	require.Equal(t, []HunkSpan{{Start: 0, End: 100, NoAnchors: false}},
+		got, "a contained span's after-anchor points inside the merge")
+
+	// An extending span's After is the new boundary.
+	got = mergeSpanRecs([]HunkSpan{
+		{Start: 0, End: 10, After: "a"},
+		{Start: 5, End: 20, After: "b"},
+	})
+	require.Equal(t, "b", got[0].After)
+
+	// An extending span with no After strands the old anchor
+	// inside — it must be cleared, not kept.
+	got = mergeSpanRecs([]HunkSpan{
+		{Start: 0, End: 10, After: "a"},
+		{Start: 5, End: 20},
+	})
+	require.Empty(t, got[0].After,
+		"the old after-anchor no longer sits at the merged end")
+
+	// Equal-end merge prefers the later span's non-empty After;
+	// equal-start merges are input-order stable.
+	got = mergeSpanRecs([]HunkSpan{
+		{Start: 0, End: 10, Before: "first", After: "a"},
+		{Start: 0, End: 10, Before: "second", After: "b"},
+	})
+	require.Equal(t, "first", got[0].Before)
+	require.Equal(t, "b", got[0].After)
+}
+
+// A mid-file span whose boundary search found nothing must flag
+// drifted — it's not a whole-file span whose absolute numbers are
+// the definition.
+func TestSettleTurnOutcomes_HunkAfterNoAnchors(t *testing.T) {
+	env := setupLabelsTest(t)
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "x.go"),
+		[]byte("a\nREGION\nb\n"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string][]HunkEdit{"x.go": {{New: "REGION"}}},
+		HunkSpans: map[string][]HunkSpan{
+			"x.go": {{Start: 1, End: 2, NoAnchors: true}},
+		},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.Equal(t, hunkOK, m["x.go"].State)
+	require.True(t, m["x.go"].Drifted,
+		"a searched-but-empty anchor set is an unverified position")
+	require.False(t, m["x.go"].Relocated)
+}
+
 // A capped anchor re-matches by prefix; a complete 160-rune anchor
 // must match whole — a longer same-prefix line is an impostor, not
 // the anchor. Single-anchor spans isolate the Before decision.

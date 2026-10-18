@@ -360,7 +360,8 @@ const (
 // credentials, webhook secrets, connection strings), so these paths
 // record a state instead of text — on both sides of the pair.
 var sensitiveBasenames = []string{
-	".env", ".env.*", ".envrc", ".git-credentials", ".netrc",
+	// *.env covers the dotless convention — prod.env, staging.env.
+	".env", ".env.*", "*.env", ".envrc", ".git-credentials", ".netrc",
 	".npmrc", ".pypirc", ".htpasswd", ".pgpass", "my.cnf",
 	"*.pem", "*.key", "*.p8", "*.ppk", "*.p12", "*.pfx", "*.keystore",
 	"*.ovpn",
@@ -436,12 +437,20 @@ type HunkSpan struct {
 	// span confidently.
 	BeforeCapped bool `json:"before_capped,omitempty"`
 	AfterCapped  bool `json:"after_capped,omitempty"`
+	// NoAnchors marks a mid-file span whose boundary search found
+	// no usable line (blank or redacted surroundings) — distinct
+	// from a whole-file span, whose absolute numbers are the
+	// definition. Settle flags it drifted, not silently ok.
+	NoAnchors bool `json:"no_anchors,omitempty"`
 }
 
 // hunkAddedEntry is one path's record-time cell in hunk_added: the
 // turn's verbatim edits, plus the execution-time spans and boundary
 // anchors that let settlement slice the same region's post-window
-// content instead of the whole file.
+// content instead of the whole file. The edits record the model's
+// REQUESTED input while the spans anchor the applied result — a
+// PreToolUse input rewrite makes them diverge by design (the result
+// metadata carries hook.input_rewrite for joiners that care).
 type hunkAddedEntry struct {
 	V         int        `json:"v"`
 	Edits     []HunkEdit `json:"edits,omitempty"`
@@ -648,11 +657,20 @@ func mergeSpanRecs(spans []HunkSpan) []HunkSpan {
 	for _, s := range spans[1:] {
 		last := &out[len(out)-1]
 		if s.Start <= last.End {
-			last.End = max(last.End, s.End)
-			if s.After != "" {
-				last.After, last.AfterCapped = s.After, s.AfterCapped
+			// Only a span reaching the merged end contributes an
+			// after-anchor — a contained span's After points inside
+			// the merged region, and an extending span with no
+			// After leaves the old anchor stranded inside too.
+			if s.End >= last.End {
+				if s.After != "" {
+					last.After, last.AfterCapped = s.After, s.AfterCapped
+				} else if s.End > last.End {
+					last.After, last.AfterCapped = "", false
+				}
+				last.End = s.End
 			}
 			last.AnchorsDropped = last.AnchorsDropped || s.AnchorsDropped
+			last.NoAnchors = last.NoAnchors || s.NoAnchors
 		} else {
 			out = append(out, s)
 		}
@@ -665,6 +683,8 @@ func mergeSpanRecs(spans []HunkSpan) []HunkSpan {
 			AfterCapped:  out[len(out)-1].AfterCapped,
 			AnchorsDropped: out[0].AnchorsDropped ||
 				out[len(out)-1].AnchorsDropped,
+			NoAnchors: out[0].NoAnchors ||
+				out[len(out)-1].NoAnchors,
 		}}
 	}
 	return out
@@ -702,10 +722,10 @@ func mergeLineSpans(spans [][2]int) [][2]int {
 func reanchorSpan(lines []string, rec HunkSpan) (span [2]int, moved, drifted bool) {
 	span = [2]int{rec.Start, rec.End}
 	if rec.Before == "" && rec.After == "" {
-		if rec.AnchorsDropped {
-			// Anchors existed at record and were shed for the row
-			// cap — unlike a whole-file span, this position is a
-			// guess, so it must not read as verified.
+		if rec.AnchorsDropped || rec.NoAnchors {
+			// Anchors were shed for the row cap, or the boundary
+			// search found none — unlike a whole-file span, this
+			// position is a guess, so it must not read as verified.
 			return span, false, true
 		}
 		// No anchors recorded (a whole-file span) — the absolute
