@@ -45,6 +45,18 @@ func TestEditEvidence(t *testing.T) {
 			[]cmdlog.HunkSpan{{Start: 1, End: 3, Before: "head", After: "mid"}},
 		},
 		{
+			// The edit tools store new_content after restoring the
+			// file's CRLF endings, while old_content is LF at load —
+			// diffing raw marks every line changed and the span
+			// degenerates to whole-file.
+			"edit spans normalize crlf metadata", `{"file_path":"a.go","old_string":"x","new_string":"y"}`,
+			`{"old_content":"head\nx\nmid\ntail\n","new_content":"head\r\ny\r\nmid\r\ntail\r\n"}`,
+			"a.go",
+			[]string{"y"},
+			[]cmdlog.HunkEdit{{Old: "x", New: "y"}},
+			[]cmdlog.HunkSpan{{Start: 1, End: 2, Before: "head", After: "mid"}},
+		},
+		{
 			// Context lines carried over from old_string were not
 			// introduced by this edit — they must not pad the
 			// survival numerator. The edits keep them: verbatim
@@ -276,9 +288,11 @@ func TestExtractTurnOutcome_PartialMultieditFingerprint(t *testing.T) {
 	t.Parallel()
 	a, _ := referentAgent(t)
 
+	// FailedEdit.Index is 1-based — the second edit is position 2
+	// (the tool reports it for humans, see multiedit_test.go).
 	meta, err := json.Marshal(tools.MultiEditResponseMetadata{
 		EditsApplied: 1,
-		EditsFailed:  []tools.FailedEdit{{Index: 1, Error: "no match"}},
+		EditsFailed:  []tools.FailedEdit{{Index: 2, Error: "no match"}},
 	})
 	require.NoError(t, err)
 
@@ -297,6 +311,9 @@ func TestExtractTurnOutcome_PartialMultieditFingerprint(t *testing.T) {
 	o := extractTurnOutcome(t.Context(), a.turnOutcomeDeps(), "s1", msgs, 0)
 	require.Equal(t, []string{"landed"}, o.EditHunks["x.go"],
 		"the failed edit's lines are not surviving-line candidates")
+	require.Equal(t, []cmdlog.HunkEdit{{Old: "a", New: "landed"}},
+		o.HunkAdded["x.go"],
+		"the failed edit's verbatim pair is not agent output either")
 }
 
 // The live path records the judged turn at the next prompt with that

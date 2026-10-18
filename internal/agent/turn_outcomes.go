@@ -36,6 +36,7 @@ import (
 	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/diff"
+	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/params"
 	"github.com/charmbracelet/crush/internal/redact"
@@ -381,7 +382,10 @@ func cleanCallResults(ms []message.Message) map[string]message.ToolResult {
 // failedEditIndexes returns the edits[] positions a partial
 // multiedit reported as failed in its result metadata — those
 // edits' new_string lines never landed and must not mint
-// fingerprint lines (#358).
+// fingerprint lines (#358). FailedEdit.Index is 1-based — the tool
+// reports the human-facing position (multiedit_test.go asserts 2
+// and 3 for the 2nd/3rd edits) — while the consumer's range over
+// edits[] is 0-based.
 func failedEditIndexes(metadata string) map[int]bool {
 	if metadata == "" {
 		return nil
@@ -392,7 +396,7 @@ func failedEditIndexes(metadata string) map[int]bool {
 	}
 	skip := map[int]bool{}
 	for _, f := range meta.EditsFailed {
-		skip[f.Index] = true
+		skip[f.Index-1] = true
 	}
 	return skip
 }
@@ -454,7 +458,13 @@ func editEvidence(input string, skip map[int]bool, metadata string) (path string
 		unified = meta.Diff
 		newContent = in.Content
 	case meta.OldContent != "" || meta.NewContent != "":
-		unified, _, _ = diff.GenerateDiff(meta.OldContent, meta.NewContent, in.FilePath)
+		// new_content is the file as written — the edit tools
+		// restore CRLF endings before storing it, while
+		// old_content stays LF-normalized at load. Diffing raw
+		// marks every line changed and collapses the span to
+		// whole-file on CRLF files.
+		newContent, _ = fsext.ToUnixLineEndings(meta.NewContent)
+		unified, _, _ = diff.GenerateDiff(meta.OldContent, newContent, in.FilePath)
 	}
 	spans = hunkSpansFromUnified(unified, newContent)
 	if len(spans) == 0 && in.Content != "" {
