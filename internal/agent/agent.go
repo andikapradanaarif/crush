@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -758,14 +759,26 @@ func NewSessionAgent(
 // NewSessionAgent) has no shared group — fall back to an untracked
 // spawn, the pre-drain behavior.
 func (a *sessionAgent) spawnDetached(f func()) {
+	// A panic in detached work is fatal — goroutine panics crash
+	// the process, and these goroutines carry recording paths whose
+	// index math keeps growing. Recover and log instead.
+	run := func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("Detached agent work panicked",
+					"panic", r, "stack", string(debug.Stack()))
+			}
+		}()
+		f()
+	}
 	if a.detachedWork == nil {
-		go f()
+		go run()
 		return
 	}
 	a.detachedWork.Add(1)
 	go func() {
 		defer a.detachedWork.Done()
-		f()
+		run()
 	}()
 }
 

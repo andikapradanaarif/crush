@@ -543,7 +543,12 @@ func TestSettleTurnOutcomes_HunkRowCap(t *testing.T) {
 		paths = append(paths, p)
 		hunks[p] = []HunkEdit{{New: line}}
 		finger[p] = []string{"M"}
-		spans[p] = []HunkSpan{{Start: 0, End: 1}}
+		// Anchors ride the row cap too — the tail path's shed,
+		// flagged, while the geometry survives.
+		spans[p] = []HunkSpan{{
+			Start: 0, End: 1,
+			Before: "before " + p, After: "after " + p,
+		}}
 	}
 	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
 		SessionID: "s1", TurnID: "t0",
@@ -560,9 +565,21 @@ func TestSettleTurnOutcomes_HunkRowCap(t *testing.T) {
 		for _, ed := range e.Edits {
 			addedTotal += len([]rune(ed.Old)) + len([]rune(ed.New))
 		}
+		for _, sp := range e.Spans {
+			// Shed anchors contribute zero — they're the empty
+			// string by the time they persist.
+			addedTotal += len([]rune(sp.Before)) + len([]rune(sp.After))
+		}
 	}
 	require.LessOrEqual(t, addedTotal, maxHunkRowRunes,
 		"the added column never exceeds the row bound")
+	require.Equal(t, "before c0.txt", added["c0.txt"].Spans[0].Before,
+		"a path under the cap keeps its anchors")
+	require.True(t, added["c3.txt"].Spans[0].AnchorsDropped,
+		"the tail path sheds anchor text but keeps geometry")
+	require.Empty(t, added["c3.txt"].Spans[0].Before)
+	require.True(t, added["c4.txt"].Spans[0].AnchorsDropped,
+		"over_cap keeps span geometry, anchors shed")
 
 	dueViaNewerSession(t, env, "s2")
 	c := settleTurnRow(t, env, "s1", "t0")
@@ -777,6 +794,61 @@ func TestSettleTurnOutcomes_HunkAfterAnchorsDropped(t *testing.T) {
 	require.True(t, m["x.go"].Drifted,
 		"shed anchors are not whole-file semantics — flag the guess")
 	require.False(t, m["x.go"].Relocated)
+}
+
+// A capped anchor re-matches by prefix; a complete 160-rune anchor
+// must match whole — a longer same-prefix line is an impostor, not
+// the anchor. Single-anchor spans isolate the Before decision.
+func TestSettleTurnOutcomes_HunkAfterCappedAnchor(t *testing.T) {
+	env := setupLabelsTest(t)
+	dir := env.workingDir
+	long := strings.Repeat("a", 200)
+	prefix := long[:HunkAnchorRunes]
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "x.go"),
+		[]byte(long+"more\nREGION\ntail\n"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string][]HunkEdit{"x.go": {{New: "REGION"}}},
+		HunkSpans: map[string][]HunkSpan{
+			// The recorded Before is the 160-rune prefix of the
+			// real anchor line — capped at record, so its prefix
+			// finds the 204-rune line.
+			"x.go": {{
+				Start: 1, End: 2, Before: prefix,
+				BeforeCapped: true,
+			}},
+		},
+	}))
+	// y.go carries a line that shares the prefix but is longer —
+	// the same 160-rune anchor WITHOUT the capped bit must not
+	// prefix-match it.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "y.go"),
+		[]byte(long+"impostor\nREGION\ntail\n"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t1",
+		EditedPaths: []string{"y.go"},
+		HunkAdded:   map[string][]HunkEdit{"y.go": {{New: "REGION"}}},
+		HunkSpans: map[string][]HunkSpan{
+			"y.go": {{Start: 5, End: 6, Before: prefix}},
+		},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.Equal(t, hunkOK, m["x.go"].State)
+	require.False(t, m["x.go"].Drifted,
+		"a capped anchor's prefix finds its line")
+
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t1").hunkAfter), &m))
+	require.True(t, m["y.go"].Drifted,
+		"an uncapped anchor must not prefix-match an impostor line")
+	require.False(t, m["y.go"].Relocated)
 }
 
 // An edited path outside the workspace carries no survival evidence

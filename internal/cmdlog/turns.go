@@ -219,7 +219,11 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 	var added map[string]hunkAddedEntry
 	// hunk_added columns written by this package are JSON-or-empty;
 	// a corrupt cell degrades to no spans — settle marks the path's
-	// region unknown rather than guessing at it.
+	// region unknown rather than guessing at it. Note this is the
+	// list-time snapshot: a placeholder-repair landing between the
+	// batch list and SettleTurnOutcome freezes hunk_after off stale
+	// spans while hunk_added stores the repaired ones. The same
+	// gap pre-exists for edit_hunks/verdict — the pair inherits it.
 	_ = json.Unmarshal([]byte(r.HunkAdded), &added)
 	later := map[string]bool{}
 	for _, lr := range laterRows {
@@ -425,6 +429,13 @@ type HunkSpan struct {
 	// unverified, so settle flags it drifted rather than trust the
 	// absolute numbers.
 	AnchorsDropped bool `json:"anchors_dropped,omitempty"`
+	// BeforeCapped/AfterCapped mark anchors truncated at
+	// HunkAnchorRunes. Only a truly-capped anchor re-matches by
+	// prefix — an uncapped 160-rune line is complete, and prefix
+	// matching it would let a same-prefix impostor relocate the
+	// span confidently.
+	BeforeCapped bool `json:"before_capped,omitempty"`
+	AfterCapped  bool `json:"after_capped,omitempty"`
 }
 
 // hunkAddedEntry is one path's record-time cell in hunk_added: the
@@ -628,15 +639,18 @@ func mergeSpanRecs(spans []HunkSpan) []HunkSpan {
 	// Clone before sorting — spans is the caller's
 	// TurnOutcome.HunkSpans backing array, and reordering it in
 	// place is a side effect the record path shouldn't pay for.
+	// Stable too: two edits can hit the same Start, and an unstable
+	// merge would let either's Before win — nondeterministic cells
+	// for identical input.
 	spans = slices.Clone(spans)
-	slices.SortFunc(spans, func(a, b HunkSpan) int { return a.Start - b.Start })
+	slices.SortStableFunc(spans, func(a, b HunkSpan) int { return a.Start - b.Start })
 	out := []HunkSpan{spans[0]}
 	for _, s := range spans[1:] {
 		last := &out[len(out)-1]
 		if s.Start <= last.End {
 			last.End = max(last.End, s.End)
 			if s.After != "" {
-				last.After = s.After
+				last.After, last.AfterCapped = s.After, s.AfterCapped
 			}
 			last.AnchorsDropped = last.AnchorsDropped || s.AnchorsDropped
 		} else {
@@ -647,6 +661,8 @@ func mergeSpanRecs(spans []HunkSpan) []HunkSpan {
 		return []HunkSpan{{
 			Start: out[0].Start, End: out[len(out)-1].End,
 			Before: out[0].Before, After: out[len(out)-1].After,
+			BeforeCapped: out[0].BeforeCapped,
+			AfterCapped:  out[len(out)-1].AfterCapped,
 			AnchorsDropped: out[0].AnchorsDropped ||
 				out[len(out)-1].AnchorsDropped,
 		}}
@@ -697,15 +713,16 @@ func reanchorSpan(lines []string, rec HunkSpan) (span [2]int, moved, drifted boo
 		return span, false, false
 	}
 	// matchAnchor compares a trimmed line to the stored anchor —
-	// exactly, or as a prefix when the anchor hit HunkAnchorRunes (a
-	// capped anchor IS a line prefix, never the whole line).
-	matchAnchor := func(line, anchor string) bool {
+	// exactly, or as a prefix when the anchor was actually capped at
+	// record (the capped flag, not rune length: a complete 160-rune
+	// line must still match whole or a same-prefix impostor could
+	// claim the position).
+	matchAnchor := func(line, anchor string, capped bool) bool {
 		l := strings.TrimSpace(line)
 		if l == anchor {
 			return true
 		}
-		return len([]rune(anchor)) == HunkAnchorRunes &&
-			strings.HasPrefix(l, anchor)
+		return capped && strings.HasPrefix(l, anchor)
 	}
 	// Each anchor counts its matches: the nearest occurrence wins
 	// the position, but a count over one means "nearest" was a
@@ -714,7 +731,7 @@ func reanchorSpan(lines []string, rec HunkSpan) (span [2]int, moved, drifted boo
 	bIdx, aIdx, bCount, aCount := -1, -1, 0, 0
 	if rec.Before != "" {
 		for i, l := range lines {
-			if !matchAnchor(l, rec.Before) {
+			if !matchAnchor(l, rec.Before, rec.BeforeCapped) {
 				continue
 			}
 			bCount++
@@ -725,7 +742,7 @@ func reanchorSpan(lines []string, rec HunkSpan) (span [2]int, moved, drifted boo
 	}
 	if rec.After != "" {
 		for i, l := range lines {
-			if !matchAnchor(l, rec.After) {
+			if !matchAnchor(l, rec.After, rec.AfterCapped) {
 				continue
 			}
 			aCount++
@@ -908,10 +925,10 @@ func (s *service) laterEditedPaths(ctx context.Context, projectKey string, creat
 	rows, err := s.q.ListLaterTurnEditPaths(ctx, db.ListLaterTurnEditPathsParams{
 		ProjectKey: projectKey,
 		CreatedAt:  createdAt,
-		// Best-effort bound — ASC means a deep-backfill row (a
-		// winLo far behind the batch) can see only rows too early
-		// to flag it, silently under-flagging. Those same rows are
-		// the ones the stale flag already marks.
+		// Best-effort bound — DESC keeps the newest rows, where a
+		// settling row's later turns actually live; a deep-backfill
+		// row can still miss mid-history touches, which stale
+		// already discounts.
 		Limit: laterEditRowsLimit,
 	})
 	if err != nil {

@@ -484,7 +484,7 @@ func (q *Queries) ListFailuresByKey(ctx context.Context, projectKey string) ([]L
 const listLaterTurnEditPaths = `-- name: ListLaterTurnEditPaths :many
 SELECT created_at, edited_paths FROM turn_outcomes
 WHERE project_key = ? AND created_at > ?
-ORDER BY created_at ASC
+ORDER BY created_at DESC
 LIMIT ?
 `
 
@@ -506,6 +506,12 @@ type ListLaterTurnEditPathsRow struct {
 // before settlement runs. The flag marks paths a later recorded
 // turn also touched, so the preference pair isn't misread as a
 // user revision when a later agent turn rewrote the region.
+// Under the LIMIT, DESC order is the right bias: a settling row's
+// later turns live at the timeline tail, so the newest rows are the
+// ones worth keeping. ASC would fill the budget with the ancient
+// row's earliest successors and under-flag exactly the fresh rows
+// this flag exists for. Mid-history touches still get missed for
+// ancient rows; the stale flag already discounts those.
 func (q *Queries) ListLaterTurnEditPaths(ctx context.Context, arg ListLaterTurnEditPathsParams) ([]ListLaterTurnEditPathsRow, error) {
 	rows, err := q.query(ctx, q.listLaterTurnEditPathsStmt, listLaterTurnEditPaths, arg.ProjectKey, arg.CreatedAt, arg.Limit)
 	if err != nil {
@@ -1349,7 +1355,7 @@ func (q *Queries) ListUnsettledReferentLabels(ctx context.Context, arg ListUnset
 }
 
 const listUnsettledTurnOutcomes = `-- name: ListUnsettledTurnOutcomes :many
-SELECT id, session_id, turn_id, project_key, edited_paths, edit_hunks,
+SELECT id, session_id, turn_id, edited_paths, edit_hunks,
     commands, hunk_added, next_verdict, settle_at, created_at
 FROM turn_outcomes
 WHERE turn_outcomes.project_key = ?
@@ -1385,7 +1391,6 @@ type ListUnsettledTurnOutcomesRow struct {
 	ID          int64  `json:"id"`
 	SessionID   string `json:"session_id"`
 	TurnID      string `json:"turn_id"`
-	ProjectKey  string `json:"project_key"`
 	EditedPaths string `json:"edited_paths"`
 	EditHunks   string `json:"edit_hunks"`
 	Commands    string `json:"commands"`
@@ -1411,7 +1416,6 @@ func (q *Queries) ListUnsettledTurnOutcomes(ctx context.Context, arg ListUnsettl
 			&i.ID,
 			&i.SessionID,
 			&i.TurnID,
-			&i.ProjectKey,
 			&i.EditedPaths,
 			&i.EditHunks,
 			&i.Commands,

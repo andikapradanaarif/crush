@@ -215,6 +215,12 @@ type Querier interface {
 	// before settlement runs. The flag marks paths a later recorded
 	// turn also touched, so the preference pair isn't misread as a
 	// user revision when a later agent turn rewrote the region.
+	// Under the LIMIT, DESC order is the right bias: a settling row's
+	// later turns live at the timeline tail, so the newest rows are the
+	// ones worth keeping. ASC would fill the budget with the ancient
+	// row's earliest successors and under-flag exactly the fresh rows
+	// this flag exists for. Mid-history touches still get missed for
+	// ancient rows; the stale flag already discounts those.
 	ListLaterTurnEditPaths(ctx context.Context, arg ListLaterTurnEditPathsParams) ([]ListLaterTurnEditPathsRow, error)
 	ListLatestSessionFiles(ctx context.Context, sessionID string) ([]File, error)
 	ListMCPDisabledServers(ctx context.Context) ([]string, error)

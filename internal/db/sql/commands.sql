@@ -589,7 +589,7 @@ WHERE turn_outcomes.settled_at IS NULL
 -- Turn rows whose window closed without settling (#340): the same
 -- dual trigger as episodes -- the +24h cap elapsed or a newer session
 -- exists. Oldest first.
-SELECT id, session_id, turn_id, project_key, edited_paths, edit_hunks,
+SELECT id, session_id, turn_id, edited_paths, edit_hunks,
     commands, hunk_added, next_verdict, settle_at, created_at
 FROM turn_outcomes
 WHERE turn_outcomes.project_key = ?
@@ -630,9 +630,15 @@ UPDATE turn_outcomes SET verdict = ?, settled_at = ?, hunk_after = ? WHERE id = 
 -- before settlement runs. The flag marks paths a later recorded
 -- turn also touched, so the preference pair isn't misread as a
 -- user revision when a later agent turn rewrote the region.
+-- Under the LIMIT, DESC order is the right bias: a settling row's
+-- later turns live at the timeline tail, so the newest rows are the
+-- ones worth keeping. ASC would fill the budget with the ancient
+-- row's earliest successors and under-flag exactly the fresh rows
+-- this flag exists for. Mid-history touches still get missed for
+-- ancient rows; the stale flag already discounts those.
 SELECT created_at, edited_paths FROM turn_outcomes
 WHERE project_key = ? AND created_at > ?
-ORDER BY created_at ASC
+ORDER BY created_at DESC
 LIMIT ?;
 
 -- name: ListRecentSessions :many

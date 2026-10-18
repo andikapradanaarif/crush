@@ -522,11 +522,12 @@ func hunkSpansFromUnified(unified, newContent string) []cmdlog.HunkSpan {
 			return
 		}
 		start, end := spanStart, max(spanEnd, spanStart)
+		b, bc := spanAnchor(lines, start-1, -1)
+		a, ac := spanAnchor(lines, min(end, len(lines)), +1)
 		out = append(out, cmdlog.HunkSpan{
-			Start:  start,
-			End:    min(end, len(lines)),
-			Before: spanAnchor(lines, start-1, -1),
-			After:  spanAnchor(lines, min(end, len(lines)), +1),
+			Start: start, End: min(end, len(lines)),
+			Before: b, BeforeCapped: bc,
+			After: a, AfterCapped: ac,
 		})
 		spanStart, spanEnd = -1, -1
 	}
@@ -584,8 +585,9 @@ func hunkSpansFromUnified(unified, newContent string) []cmdlog.HunkSpan {
 // the window a line unique in the file is preferred over a generic
 // repeated one ("}", "return") — a duplicated anchor can silently
 // re-attach to the wrong occurrence at settle.
-func spanAnchor(lines []string, pos, dir int) string {
+func spanAnchor(lines []string, pos, dir int) (anchor string, capped bool) {
 	var fallback string
+	var fbCapped bool
 	for i := pos; i >= 0 && i < len(lines) && abs(i-pos) < 8; i += dir {
 		cand := strings.TrimSpace(lines[i])
 		if cand == "" {
@@ -595,28 +597,28 @@ func spanAnchor(lines []string, pos, dir int) string {
 		if a == "[REDACTED]" {
 			continue
 		}
+		capped := false
 		if r := []rune(a); len(r) > cmdlog.HunkAnchorRunes {
-			a = string(r[:cmdlog.HunkAnchorRunes])
+			a, capped = string(r[:cmdlog.HunkAnchorRunes]), true
 		}
 		if fallback == "" {
-			fallback = a
+			fallback, fbCapped = a, capped
 		}
 		switch {
 		case a == cand && anchorUnique(lines, cand):
 			// A clean line unique in the file — the settle match
 			// names one position unambiguously.
-			return a
-		case a != cand && len([]rune(a)) == cmdlog.HunkAnchorRunes &&
-			anchorPrefixUnique(lines, a):
+			return a, false
+		case capped && anchorPrefixUnique(lines, a):
 			// A capped anchor re-matches by prefix — uniqueness
 			// must hold for the prefix, not the full raw line.
-			return a
-			// A partially scrubbed line ("a != cand" under the cap)
-			// stores redacted text whose collisions can't be
-			// counted on raw lines — fallback only.
+			return a, true
+			// A partially scrubbed line stores redacted text whose
+			// collisions can't be counted on raw lines — fallback
+			// only.
 		}
 	}
-	return fallback
+	return fallback, fbCapped
 }
 
 // anchorUnique reports whether the trimmed line occurs exactly once
