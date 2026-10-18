@@ -813,13 +813,3 @@ func marshalNoEscape(v any) string {
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
-
-// encodeLines re-marshals a hunk's line slice for hunkDiverged's
-// JSON-input shape.
-func encodeLines(lines []string) string {
-	if len(lines) == 0 {
-		return ""
-	}
-	b, _ := json.Marshal(lines)
-	return string(b)
-}

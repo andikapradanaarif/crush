@@ -558,7 +558,7 @@ func hunkSpansFromUnified(unified, newContent string) []cmdlog.HunkSpan {
 // length-bounded. A line that scrubs whole is skipped — a
 // "[REDACTED]" anchor would re-anchor to any secret line.
 func spanAnchor(lines []string, pos, dir int) string {
-	for i := pos; i >= 0 && i < len(lines) && abs2(i-pos) < 8; i += dir {
+	for i := pos; i >= 0 && i < len(lines) && abs(i-pos) < 8; i += dir {
 		a := redact.Secrets(strings.TrimSpace(lines[i]))
 		if a == "" || a == "[REDACTED]" {
 			continue
@@ -571,7 +571,7 @@ func spanAnchor(lines []string, pos, dir int) string {
 	return ""
 }
 
-func abs2(x int) int {
+func abs(x int) int {
 	if x < 0 {
 		return -x
 	}
