@@ -188,7 +188,7 @@ func referentTargets(ctx context.Context, d turnOutcomeDeps, msgs []message.Mess
 				if !referentMutationTools[tc.Name] || tc.Input == "" || !executed {
 					continue
 				}
-				path, added, _ := editEvidence(tc.Input, failedEditIndexes(res.Metadata))
+				path, added, _, _ := editEvidence(tc.Input, failedEditIndexes(res.Metadata), res.Metadata)
 				if path == "" {
 					continue
 				}

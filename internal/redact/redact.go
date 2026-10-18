@@ -1,6 +1,9 @@
 package redact
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // redactedPlaceholder replaces a secret-shaped match in outbound
 // text. The match is removed whole rather than masked in place so no
@@ -59,4 +62,35 @@ func Secrets(s string) string {
 		s = p.ReplaceAllString(s, "${1}"+redactedPlaceholder+"@")
 	}
 	return s
+}
+
+var (
+	pemBeginLine = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----`)
+	pemEndLine   = regexp.MustCompile(`-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----`)
+)
+
+// SecretsLinePreserving redacts like Secrets but keeps the line
+// count: multi-line matches (PEM blocks) are scrubbed line by line,
+// so positions computed against the unscrubbed text still hold.
+// hunk_after slices windows AFTER redaction — a whole-text scrub
+// would let a window cut inside a key block and leak the middle
+// lines past the BEGIN-less region (#400).
+func SecretsLinePreserving(s string) string {
+	lines := strings.Split(s, "\n")
+	inPEM := false
+	for i, l := range lines {
+		switch {
+		case inPEM:
+			lines[i] = redactedPlaceholder
+			if pemEndLine.MatchString(l) {
+				inPEM = false
+			}
+		case pemBeginLine.MatchString(l):
+			lines[i] = redactedPlaceholder
+			inPEM = true
+		default:
+			lines[i] = Secrets(l)
+		}
+	}
+	return strings.Join(lines, "\n")
 }

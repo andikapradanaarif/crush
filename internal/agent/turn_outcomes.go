@@ -27,13 +27,18 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/csync"
+	"github.com/charmbracelet/crush/internal/diff"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/params"
+	"github.com/charmbracelet/crush/internal/redact"
 	"github.com/charmbracelet/crush/internal/session"
 )
 
@@ -265,6 +270,7 @@ func extractTurnOutcome(ctx context.Context, d turnOutcomeDeps, sessionID string
 		TurnID:    msgs[userIdx].ID,
 		EditHunks: map[string][]string{},
 		HunkAdded: map[string][]cmdlog.HunkEdit{},
+		HunkSpans: map[string][]cmdlog.HunkSpan{},
 	}
 	if msgs[userIdx].CreatedAt > 0 {
 		// Messages stamp seconds; the store's clocks are millis.
@@ -297,7 +303,7 @@ func extractTurnOutcome(ctx context.Context, d turnOutcomeDeps, sessionID string
 						scan(childMsgs, 0)
 					}
 				case referentMutationTools[tc.Name] && executed:
-					path, added, edits := editEvidence(tc.Input, failedEditIndexes(res.Metadata))
+					path, added, edits, spans := editEvidence(tc.Input, failedEditIndexes(res.Metadata), res.Metadata)
 					if path == "" {
 						continue
 					}
@@ -318,6 +324,9 @@ func extractTurnOutcome(ctx context.Context, d turnOutcomeDeps, sessionID string
 					// everything the turn wrote into the path,
 					// kept per-edit so self-corrections split.
 					o.HunkAdded[rel] = append(o.HunkAdded[rel], edits...)
+					// And the execution-time spans the same —
+					// anchors for the settle-time window slice.
+					o.HunkSpans[rel] = append(o.HunkSpans[rel], spans...)
 				case tc.Name == tools.BashToolName && executed:
 					if cmd := bashCommand(tc.Input); cmd != "" {
 						o.Commands = append(o.Commands, cmdlog.NormalizeOutcomeCommand(cmd))
@@ -389,15 +398,15 @@ func failedEditIndexes(metadata string) map[int]bool {
 }
 
 // editEvidence pulls the mutated path, the added-lines fingerprint,
-// and the raw written text out of a mutation tool call's input. The
-// fingerprint keeps its introduced-lines rule: edit and multiedit
-// count new_string minus old_string, so context lines carried over
-// from the replaced text don't pad the survival numerator; write
-// fingerprints its whole content, the old file being unknowable
-// from the call. The fingerprint is per-file: lines added by any of
-// the turn's edits to that file join one survival set. skip
-// excludes edits[] positions a partial multiedit reported as
-// failed.
+// the raw written text, and the execution-time line spans out of a
+// mutation tool call. The fingerprint keeps its introduced-lines
+// rule: edit and multiedit count new_string minus old_string, so
+// context lines carried over from the replaced text don't pad the
+// survival numerator; write fingerprints its whole content, the old
+// file being unknowable from the call. The fingerprint is per-file:
+// lines added by any of the turn's edits to that file join one
+// survival set. skip excludes edits[] positions a partial multiedit
+// reported as failed.
 //
 // The edits return is the unreduced agent output for the hunk_added
 // column (#394): per-edit {old, new} pairs verbatim — not
@@ -405,7 +414,16 @@ func failedEditIndexes(metadata string) map[int]bool {
 // wrote, what the region became); re-emitted context lines are part
 // of what it wrote, and old both preserves the pre-edit text and
 // helps locate the region. A write contributes {new: content}.
-func editEvidence(input string, skip map[int]bool) (path string, added []string, edits []cmdlog.HunkEdit) {
+//
+// The spans return anchors the region at execution time: the tool
+// result metadata carries the file's before/after content (edit,
+// multiedit) or a unified diff (write), so the touched lines are
+// diffed — never string-searched in a file the user may have
+// already changed. Spans survive whitespace correction,
+// replace_all, deletions, and edits the user made before the row
+// recorded; a tool result without metadata yields no spans and the
+// settle side marks the region unknown.
+func editEvidence(input string, skip map[int]bool, metadata string) (path string, added []string, edits []cmdlog.HunkEdit, spans []cmdlog.HunkSpan) {
 	var in struct {
 		FilePath  string `json:"file_path"`
 		OldString string `json:"old_string"`
@@ -417,12 +435,38 @@ func editEvidence(input string, skip map[int]bool) (path string, added []string,
 		} `json:"edits"`
 	}
 	if json.Unmarshal([]byte(input), &in) != nil || in.FilePath == "" {
-		return "", nil, nil
+		return "", nil, nil, nil
+	}
+	var meta struct {
+		OldContent string `json:"old_content"`
+		NewContent string `json:"new_content"`
+		Diff       string `json:"diff"`
+	}
+	if metadata != "" {
+		_ = json.Unmarshal([]byte(metadata), &meta)
+	}
+	newContent := meta.NewContent
+	var unified string
+	switch {
+	case in.Content != "":
+		// A write's metadata ships a ready-made unified diff;
+		// the written content is the new file itself.
+		unified = meta.Diff
+		newContent = in.Content
+	case meta.OldContent != "" || meta.NewContent != "":
+		unified, _, _ = diff.GenerateDiff(meta.OldContent, meta.NewContent, in.FilePath)
+	}
+	spans = hunkSpansFromUnified(unified, newContent)
+	if len(spans) == 0 && in.Content != "" {
+		// Write with no diff metadata — the file IS the region.
+		spans = []cmdlog.HunkSpan{
+			{Start: 0, End: len(strings.Split(newContent, "\n"))},
+		}
 	}
 	switch {
 	case in.Content != "":
 		return in.FilePath, cmdlog.NormalizeAddedLines(in.Content),
-			[]cmdlog.HunkEdit{{New: in.Content}}
+			[]cmdlog.HunkEdit{{New: in.Content}}, spans
 	case len(in.Edits) > 0:
 		for i, e := range in.Edits {
 			if skip[i] {
@@ -431,11 +475,107 @@ func editEvidence(input string, skip map[int]bool) (path string, added []string,
 			added = append(added, introducedLines(e.NewString, e.OldString)...)
 			edits = append(edits, cmdlog.HunkEdit{Old: e.OldString, New: e.NewString})
 		}
-		return in.FilePath, added, edits
+		return in.FilePath, added, edits, spans
 	default:
 		return in.FilePath, introducedLines(in.NewString, in.OldString),
-			[]cmdlog.HunkEdit{{Old: in.OldString, New: in.NewString}}
+			[]cmdlog.HunkEdit{{Old: in.OldString, New: in.NewString}}, spans
 	}
+}
+
+// unifiedHunkHeader matches a unified diff's hunk header — the
+// new-side range "+ns,nc" is the span the hunk covers.
+var unifiedHunkHeader = regexp.MustCompile(`^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@`)
+
+// hunkSpansFromUnified converts a unified diff into line spans in
+// the new file — the changed lines inside each hunk, not the hunk's
+// whole context range — each carrying the nearest non-blank
+// boundary lines as re-anchors. An anchor is stored trimmed and
+// scrubbed — settle compares in the same space — and a line that
+// scrubs whole is skipped: "[REDACTED]" matches every secret line.
+func hunkSpansFromUnified(unified, newContent string) []cmdlog.HunkSpan {
+	if unified == "" {
+		return nil
+	}
+	lines := strings.Split(newContent, "\n")
+	var out []cmdlog.HunkSpan
+	// pos tracks the hunk's new-side cursor (0-based); the span is
+	// the run of new lines the hunk actually adds — context lines
+	// around a small change must not stretch it.
+	var pos, spanStart, spanEnd int
+	flush := func() {
+		if spanStart < 0 {
+			return
+		}
+		start, end := spanStart, max(spanEnd, spanStart)
+		out = append(out, cmdlog.HunkSpan{
+			Start:  start,
+			End:    min(end, len(lines)),
+			Before: spanAnchor(lines, start-1, -1),
+			After:  spanAnchor(lines, min(end, len(lines)), +1),
+		})
+		spanStart = -1
+	}
+	spanStart = -1
+	for _, l := range strings.Split(unified, "\n") {
+		if m := unifiedHunkHeader.FindStringSubmatch(l); m != nil {
+			flush()
+			ns, _ := strconv.Atoi(m[1])
+			nc := 1
+			if m[2] != "" {
+				nc, _ = strconv.Atoi(m[2])
+			}
+			// "+N,0" is a pure deletion — its position is after
+			// line N in the new file, not at N-1.
+			pos = max(ns-1, 0)
+			if nc == 0 {
+				pos = ns
+			}
+			continue
+		}
+		switch {
+		case strings.HasPrefix(l, "+") && !strings.HasPrefix(l, "+++"):
+			if spanStart < 0 {
+				spanStart = pos
+			}
+			pos++
+			spanEnd = pos
+		case strings.HasPrefix(l, "-") && !strings.HasPrefix(l, "---"):
+			// A removed line advances nothing in the new file —
+			// a deletion-only hunk records an empty span at pos.
+			if spanStart < 0 {
+				spanStart = pos
+			}
+		case strings.HasPrefix(l, " "):
+			pos++
+		}
+	}
+	flush()
+	return out
+}
+
+// spanAnchor picks the nearest non-blank line in direction dir from
+// position pos (a few lines at most), stored trimmed, scrubbed, and
+// length-bounded. A line that scrubs whole is skipped — a
+// "[REDACTED]" anchor would re-anchor to any secret line.
+func spanAnchor(lines []string, pos, dir int) string {
+	for i := pos; i >= 0 && i < len(lines) && abs2(i-pos) < 8; i += dir {
+		a := redact.Secrets(strings.TrimSpace(lines[i]))
+		if a == "" || a == "[REDACTED]" {
+			continue
+		}
+		if r := []rune(a); len(r) > 160 {
+			a = string(r[:160])
+		}
+		return a
+	}
+	return ""
+}
+
+func abs2(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 // introducedLines reduces one edit's new_text to the lines it

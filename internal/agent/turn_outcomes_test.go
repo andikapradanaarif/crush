@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -20,59 +21,98 @@ func TestEditEvidence(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		input     string
+		metadata  string
 		wantPath  string
 		wantAdded []string
 		wantEdits []cmdlog.HunkEdit
+		wantSpans []cmdlog.HunkSpan
 	}{
 		{
-			"edit new_string", `{"file_path":"a.go","old_string":"x","new_string":"y\nz"}`,
+			"edit new_string", `{"file_path":"a.go","old_string":"x","new_string":"y\nz"}`, "",
 			"a.go",
 			[]string{"y", "z"},
 			[]cmdlog.HunkEdit{{Old: "x", New: "y\nz"}},
+			nil,
+		},
+		{
+			// The execution-time content pair gives exact spans —
+			// independent of whatever the file says later.
+			"edit spans from metadata", `{"file_path":"a.go","old_string":"x","new_string":"y\nz"}`,
+			`{"old_content":"head\nx\nmid\ntail\n","new_content":"head\ny\nz\nmid\ntail\n"}`,
+			"a.go",
+			[]string{"y", "z"},
+			[]cmdlog.HunkEdit{{Old: "x", New: "y\nz"}},
+			[]cmdlog.HunkSpan{{Start: 1, End: 3, Before: "head", After: "mid"}},
 		},
 		{
 			// Context lines carried over from old_string were not
 			// introduced by this edit — they must not pad the
 			// survival numerator. The edits keep them: verbatim
 			// agent output, not net-new lines.
-			"edit drops carried context", `{"file_path":"a.go","old_string":"x\nctx","new_string":"y\nctx"}`,
+			"edit drops carried context", `{"file_path":"a.go","old_string":"x\nctx","new_string":"y\nctx"}`, "",
 			"a.go",
 			[]string{"y"},
 			[]cmdlog.HunkEdit{{Old: "x\nctx", New: "y\nctx"}},
+			nil,
 		},
 		{
-			"deletion introduces nothing", `{"file_path":"d.go","old_string":"x","new_string":""}`,
+			"deletion introduces nothing", `{"file_path":"d.go","old_string":"x","new_string":""}`, "",
 			"d.go",
 			nil,
 			[]cmdlog.HunkEdit{{Old: "x"}},
+			nil,
 		},
 		{
-			"write content", `{"file_path":"b.go","content":"line1\n\nline2"}`,
+			// A pure deletion yields an empty span at the position —
+			// the boundary anchors still bracket where it happened.
+			"deletion spans empty", `{"file_path":"d.go","old_string":"x","new_string":""}`,
+			`{"old_content":"a\nx\nb\n","new_content":"a\nb\n"}`,
+			"d.go",
+			nil,
+			[]cmdlog.HunkEdit{{Old: "x"}},
+			[]cmdlog.HunkSpan{{Start: 1, End: 1, Before: "a", After: "b"}},
+		},
+		{
+			"write content", `{"file_path":"b.go","content":"line1\n\nline2"}`, "",
 			"b.go",
 			[]string{"line1", "line2"},
 			[]cmdlog.HunkEdit{{New: "line1\n\nline2"}},
+			[]cmdlog.HunkSpan{{Start: 0, End: 3}},
 		},
 		{
-			"multiedit joins", `{"file_path":"c.go","edits":[{"new_string":"p"},{"new_string":"q"}]}`,
+			// A write's result metadata ships a ready-made diff —
+			// the hunk header gives the region directly.
+			"write diff metadata", `{"file_path":"b.go","content":"head\nnew body\nfoot"}`,
+			`{"diff":"--- a/b.go\n+++ b/b.go\n@@ -2,1 +2,1 @@\n-old\n+new body\n"}`,
+			"b.go",
+			[]string{"head", "new body", "foot"},
+			[]cmdlog.HunkEdit{{New: "head\nnew body\nfoot"}},
+			[]cmdlog.HunkSpan{{Start: 1, End: 2, Before: "head", After: "foot"}},
+		},
+		{
+			"multiedit joins", `{"file_path":"c.go","edits":[{"new_string":"p"},{"new_string":"q"}]}`, "",
 			"c.go",
 			[]string{"p", "q"},
 			[]cmdlog.HunkEdit{{New: "p"}, {New: "q"}},
+			nil,
 		},
 		{
-			"multiedit subtracts per edit", `{"file_path":"c.go","edits":[{"old_string":"keep","new_string":"keep\np"},{"old_string":"z","new_string":"q\nkeep"}]}`,
+			"multiedit subtracts per edit", `{"file_path":"c.go","edits":[{"old_string":"keep","new_string":"keep\np"},{"old_string":"z","new_string":"q\nkeep"}]}`, "",
 			"c.go",
 			[]string{"p", "q", "keep"},
 			[]cmdlog.HunkEdit{{Old: "keep", New: "keep\np"}, {Old: "z", New: "q\nkeep"}},
+			nil,
 		},
-		{"malformed", `not json`, "", nil, nil},
-		{"no path", `{"new_string":"x"}`, "", nil, nil},
+		{"malformed", `not json`, "", "", nil, nil, nil},
+		{"no path", `{"new_string":"x"}`, "", "", nil, nil, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			path, added, edits := editEvidence(tc.input, nil)
+			path, added, edits, spans := editEvidence(tc.input, nil, tc.metadata)
 			require.Equal(t, tc.wantPath, path)
 			require.Equal(t, tc.wantAdded, added)
 			require.Equal(t, tc.wantEdits, edits)
+			require.Equal(t, tc.wantSpans, spans)
 		})
 	}
 }
@@ -121,6 +161,17 @@ func TestExtractTurnOutcome(t *testing.T) {
 		}}},
 		referentUserMsg("u2", "next turn starts"),
 	})
+	// The edit's execution-time before/after pair is the span
+	// source — a second clean result overrides toolOK's bare one.
+	// It must sit inside the turn's span (before u2), where a real
+	// transcript keeps its results.
+	msgs = slices.Insert(msgs, msgIdx(msgs, "u2"), message.Message{
+		Role: message.Tool,
+		Parts: []message.ContentPart{message.ToolResult{
+			ToolCallID: "tc-edit", Name: tools.EditToolName, Content: "ok",
+			Metadata: `{"old_content":"head\nx\nfoot\n","new_content":"head\nnew line\nfoot\n"}`,
+		}},
+	})
 
 	o := extractTurnOutcome(t.Context(), a.turnOutcomeDeps(), "s1", msgs, msgIdx(msgs, "u1"))
 	require.Equal(t, "u1", o.TurnID, "the turn keys on its boundary message")
@@ -134,6 +185,13 @@ func TestExtractTurnOutcome(t *testing.T) {
 	}, o.HunkAdded["x.go"],
 		"the edits cell keeps the turn's verbatim writes, per-edit")
 	require.Equal(t, []cmdlog.HunkEdit{{New: "y"}}, o.HunkAdded["y.go"])
+	require.Equal(t, []cmdlog.HunkSpan{
+		{Start: 1, End: 2, Before: "head", After: "foot"},
+	}, o.HunkSpans["x.go"],
+		"the metadata's content pair gives the execution-time region")
+	require.Equal(t, []cmdlog.HunkSpan{{Start: 0, End: 1}},
+		o.HunkSpans["y.go"],
+		"a write with no diff falls back to the whole file as region")
 	require.Equal(t, []string{"go test ./..."}, o.Commands,
 		"bash invocations record in ledger-normal form; reads do not")
 }

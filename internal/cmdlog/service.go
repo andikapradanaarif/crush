@@ -1772,6 +1772,9 @@ func firstContentLine(s string) string {
 }
 
 func truncateRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
 	runes := []rune(s)
 	if len(runes) <= max {
 		return s

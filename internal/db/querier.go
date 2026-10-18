@@ -208,11 +208,13 @@ type Querier interface {
 	// working set, not heat; a file only this session read would carry
 	// a sessions count of 1 noise-signal anyway.
 	ListHotReadFiles(ctx context.Context, arg ListHotReadFilesParams) ([]ListHotReadFilesRow, error)
-	// Edited-path lists of the turn rows that follow this one in the
-	// same session (#394): hunk_after for turn N physically contains
-	// turns N+1..end -- the flag marks which paths a later recorded turn
-	// also touched, so the preference pair isn't misread as a user
-	// revision when a later agent turn rewrote the region.
+	// Edited-path lists of the turn rows that follow this one on the
+	// same project (#394): hunk_after for turn N physically contains
+	// turns N+1..end across sessions too -- the newer-session settle
+	// trigger means the NEXT session's first-turn edits often land
+	// before settlement runs. The flag marks paths a later recorded
+	// turn also touched, so the preference pair isn't misread as a
+	// user revision when a later agent turn rewrote the region.
 	ListLaterTurnEditPaths(ctx context.Context, arg ListLaterTurnEditPathsParams) ([]string, error)
 	ListLatestSessionFiles(ctx context.Context, sessionID string) ([]File, error)
 	ListMCPDisabledServers(ctx context.Context) ([]string, error)

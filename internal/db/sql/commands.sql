@@ -589,8 +589,8 @@ WHERE turn_outcomes.settled_at IS NULL
 -- Turn rows whose window closed without settling (#340): the same
 -- dual trigger as episodes -- the +24h cap elapsed or a newer session
 -- exists. Oldest first.
-SELECT id, session_id, turn_id, edited_paths, edit_hunks, commands,
-    hunk_added, next_verdict, settle_at, created_at
+SELECT id, session_id, turn_id, project_key, edited_paths, edit_hunks,
+    commands, hunk_added, next_verdict, settle_at, created_at
 FROM turn_outcomes
 WHERE turn_outcomes.project_key = ?
     AND turn_outcomes.settled_at IS NULL
@@ -623,13 +623,15 @@ LIMIT ?;
 UPDATE turn_outcomes SET verdict = ?, settled_at = ?, hunk_after = ? WHERE id = ? AND settled_at IS NULL;
 
 -- name: ListLaterTurnEditPaths :many
--- Edited-path lists of the turn rows that follow this one in the
--- same session (#394): hunk_after for turn N physically contains
--- turns N+1..end -- the flag marks which paths a later recorded turn
--- also touched, so the preference pair isn't misread as a user
--- revision when a later agent turn rewrote the region.
+-- Edited-path lists of the turn rows that follow this one on the
+-- same project (#394): hunk_after for turn N physically contains
+-- turns N+1..end across sessions too -- the newer-session settle
+-- trigger means the NEXT session's first-turn edits often land
+-- before settlement runs. The flag marks paths a later recorded
+-- turn also touched, so the preference pair isn't misread as a
+-- user revision when a later agent turn rewrote the region.
 SELECT edited_paths FROM turn_outcomes
-WHERE session_id = ? AND created_at > ?;
+WHERE project_key = ? AND created_at > ?;
 
 -- name: ListRecentSessions :many
 -- Sessions other than the live one, newest first -- the backfill

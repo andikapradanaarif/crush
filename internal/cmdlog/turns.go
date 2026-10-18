@@ -12,6 +12,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -61,8 +63,13 @@ type TurnOutcome struct {
 	// HunkAdded maps each edited path to the turn's verbatim edits
 	// there (#394) — the agent-output half of the (output,
 	// what-the-region-became) pair the preference tier mines. The
-	// store bounds, redacts, and locates spans at write.
+	// store bounds and redacts at write.
 	HunkAdded map[string][]HunkEdit
+	// HunkSpans maps each edited path to the line spans the turn's
+	// edits touched, computed at extraction from the tool results'
+	// own before/after content — execution-time truth, immune to
+	// whatever the user types or edits before the row records.
+	HunkSpans map[string][]HunkSpan
 	// Commands are the turn's bash invocations in ledger-normal form
 	// (NormalizeOutcomeCommand).
 	Commands []string
@@ -92,7 +99,7 @@ func (s *service) RecordTurnOutcome(ctx context.Context, o TurnOutcome) error {
 	}
 	paths, _ := json.Marshal(o.EditedPaths)
 	hunks, _ := json.Marshal(o.EditHunks)
-	added := marshalNoEscape(s.buildHunkAdded(o.HunkAdded, o.EditedPaths))
+	added := marshalNoEscape(s.buildHunkAdded(o.HunkAdded, o.HunkSpans, o.EditedPaths))
 	cmds, _ := json.Marshal(o.Commands)
 	now := s.now().UnixMilli()
 	createdAt := o.CreatedAt
@@ -106,7 +113,7 @@ func (s *service) RecordTurnOutcome(ctx context.Context, o TurnOutcome) error {
 		EditedPaths:  string(paths),
 		EditHunks:    string(hunks),
 		Commands:     string(cmds),
-		HunkAdded:    string(added),
+		HunkAdded:    added,
 		NextVerdict:  o.NextVerdict,
 		SettleAt:     createdAt + settleWindowMillis,
 		ParamVersion: s.paramVersion,
@@ -210,7 +217,11 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 	// a corrupt cell degrades to no spans — settle marks the path's
 	// region unknown rather than guessing at it.
 	_ = json.Unmarshal([]byte(r.HunkAdded), &added)
-	later := s.laterEditedPaths(ctx, r.SessionID, r.CreatedAt)
+	later := s.laterEditedPaths(ctx, r.ProjectKey, r.CreatedAt)
+	// A row settling far past its own window — almost always a
+	// backfilled historical turn — produces a stale pair: the
+	// windows are real but the "post-window" state is not.
+	stale := now-r.CreatedAt > 2*settleWindowMillis
 
 	diverged := false
 	// decidable marks "at least one fingerprint produced a readable
@@ -222,39 +233,39 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 	afterTotal := 0
 	for _, p := range paths {
 		fr := s.readHunkSource(p)
-		var spans [][2]int
+		var recs []HunkSpan
 		if e, ok := added[p]; ok {
-			spans = e.Spans
+			recs = e.Spans
 		}
-		after[p] = captureHunkCell(fr, p, spans, later[p], &afterTotal)
-		switch fr.state {
-		case hunkMissing:
-			// The file is gone — nothing survived, when there was
-			// a fingerprint to survive. An empty fingerprint (a
-			// pure deletion, or a pre-fingerprint row) abstains
-			// like the old reader: absence is no evidence. An
-			// escaping symlink reports out_of_workspace above and
-			// abstains like a textual escape, not a deletion.
-			if len(hunks[p]) > 0 {
-				decidable, diverged = true, true
-			}
-		case hunkOK:
-			if d := fingerprintDiverged(fr.data, hunks[p]); d.Valid {
+		after[p] = captureHunkCell(fr, p, recs, later[p], stale, &afterTotal)
+		if len(hunks[p]) == 0 {
+			// An empty fingerprint (a pure deletion, or a
+			// pre-fingerprint row) abstains — absence is no
+			// evidence.
+			continue
+		}
+		// Verdict parity with the pre-capture reader: the
+		// fingerprint check reads ANY readable file — a file the
+		// capture gates as too_large or binary still yields a
+		// survival verdict, same as before #394.
+		data, ok := fr.data, fr.state == hunkOK
+		if !ok && workspacePathSafe(p) && !s.pathEscapesWorkspace(p) {
+			data, ok = s.readWorkspaceFile(p)
+		}
+		switch {
+		case ok:
+			if d := fingerprintDiverged(data, hunks[p]); d.Valid {
 				decidable = true
 				if d.Int64 == 1 {
 					diverged = true
 				}
 			}
-		case hunkUnreadable:
-			// Exists but refused the read — same "gone" evidence
-			// shape a deletion presents.
-			if len(hunks[p]) > 0 {
-				decidable, diverged = true, true
-			}
+		case !s.pathEscapesWorkspace(p):
+			// The file is gone or refused the read — nothing
+			// survived. An escape (textual or symlink) abstains,
+			// not a deletion.
+			decidable, diverged = true, true
 		}
-		// too_large/binary paths abstain — presence-matching a binary
-		// is meaningless, and paying a multi-MB read+scan for a
-		// fingerprint is not worth the verdict.
 	}
 	committed := s.hasRepo && len(paths) > 0 &&
 		ev.inWindow(paths, r.CreatedAt, winEnd)
@@ -304,10 +315,6 @@ const (
 	// generated blob over this abstains rather than paying a
 	// whole-file scan for the fingerprint and the capture.
 	maxHunkReadBytes = 1 << 20
-	// maxHunkLocateBytes gates the record-time span search the same
-	// way — beyond it the region stays unknown rather than pinning a
-	// big read to the record pass.
-	maxHunkLocateBytes = 4 << 20
 	// hunkContextLines is the slack kept on each side of a stored
 	// span when hunk_after slices it — enough to catch the user's
 	// local rewrite without dragging unrelated file in.
@@ -323,41 +330,91 @@ const (
 // credentials, webhook secrets, connection strings), so these paths
 // record a state instead of text — on both sides of the pair.
 var sensitiveBasenames = []string{
-	".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx",
-	"*.keystore", "id_*", "credentials*", "secrets.*",
-	".netrc", ".npmrc", ".pypirc",
+	".env", ".env.*", ".envrc", ".git-credentials", ".netrc",
+	".npmrc", ".pypirc", ".htpasswd",
+	"*.pem", "*.key", "*.p12", "*.pfx", "*.keystore",
+	"*.tfvars", "*.tfvars.json", "*.tfstate", "*.tfstate.*",
+	"id_rsa*", "id_dsa*", "id_ecdsa*", "id_ed25519*",
+	"credentials*", "secrets.*", "kubeconfig", "kubeconfig.*",
+	"service-account*.json", "service_account*.json",
+}
+
+// sensitiveSourceExts are file extensions that exempt a name from
+// the credentials*/secrets.* patterns — credentials.go and
+// secrets.go are ordinary source files, not credential stores.
+var sensitiveSourceExts = map[string]bool{
+	".go": true, ".rs": true, ".py": true, ".js": true, ".ts": true,
+	".tsx": true, ".jsx": true, ".java": true, ".kt": true,
+	".c": true, ".h": true, ".cc": true, ".cpp": true, ".hpp": true,
+	".cs": true, ".rb": true, ".php": true, ".swift": true,
+	".m": true, ".scala": true, ".clj": true, ".ex": true,
+	".exs": true, ".erl": true, ".hrl": true, ".lua": true,
+	".r": true, ".jl": true, ".sh": true, ".pl": true, ".pm": true,
+	".md": true,
 }
 
 func sensitivePath(path string) bool {
 	base := strings.ToLower(filepath.Base(path))
 	for _, pat := range sensitiveBasenames {
-		if ok, _ := filepath.Match(pat, base); ok {
-			return true
+		if ok, _ := filepath.Match(pat, base); !ok {
+			continue
 		}
+		if (strings.HasPrefix(pat, "credentials") || strings.HasPrefix(pat, "secrets.")) &&
+			sensitiveSourceExts[filepath.Ext(base)] {
+			return false
+		}
+		return true
 	}
 	return false
 }
 
+// HunkSpan locates one mutation call's touched lines in new-file
+// coordinates at execution time — derived by extraction from the
+// tool result's own before/after evidence, never by re-searching
+// the file. Before and After are the nearest non-blank lines
+// flanking the span (trimmed, scrubbed): settlement re-anchors
+// through them when the absolute numbers drift under later edits.
+type HunkSpan struct {
+	Start  int    `json:"start"`
+	End    int    `json:"end"`
+	Before string `json:"before,omitempty"`
+	After  string `json:"after,omitempty"`
+}
+
 // hunkAddedEntry is one path's record-time cell in hunk_added: the
-// turn's verbatim edits, plus the line spans each edit's new text
-// occupied in the file at record time — the anchor that lets
-// settlement slice the same region's post-window content instead of
-// the whole file. Empty spans means the region could not be located.
+// turn's verbatim edits, plus the execution-time spans and boundary
+// anchors that let settlement slice the same region's post-window
+// content instead of the whole file.
 type hunkAddedEntry struct {
+	V         int        `json:"v"`
 	Edits     []HunkEdit `json:"edits,omitempty"`
-	Spans     [][2]int   `json:"spans,omitempty"`
+	Spans     []HunkSpan `json:"spans,omitempty"`
 	State     string     `json:"state,omitempty"`
 	Truncated bool       `json:"truncated,omitempty"`
 }
 
+// hunkWindow is one captured region slice: Start is its first line
+// number in the file as captured, so consumers can line windows up
+// with the recorded spans.
+type hunkWindow struct {
+	Start int    `json:"start"`
+	Text  string `json:"text"`
+}
+
 // hunkAfterEntry is one path's settle-time cell in hunk_after:
 // per-span windows of the post-window file, or the state naming why
-// no content was captured.
+// no content was captured. relocated/drifted mark whether settle
+// could re-anchor the recorded spans; stale marks settlement far
+// past the turn's own window (typically a backfilled row).
 type hunkAfterEntry struct {
-	State            string   `json:"state"`
-	Windows          []string `json:"windows,omitempty"`
-	Truncated        bool     `json:"truncated,omitempty"`
-	LaterTurnTouched bool     `json:"later_turn_touched,omitempty"`
+	V                int          `json:"v"`
+	State            string       `json:"state"`
+	Windows          []hunkWindow `json:"windows,omitempty"`
+	Truncated        bool         `json:"truncated,omitempty"`
+	LaterTurnTouched bool         `json:"later_turn_touched,omitempty"`
+	Relocated        bool         `json:"relocated,omitempty"`
+	Drifted          bool         `json:"drifted,omitempty"`
+	Stale            bool         `json:"stale,omitempty"`
 }
 
 // Hunk-content states — why an entry carries no text.
@@ -393,7 +450,10 @@ func (s *service) readHunkSource(path string) hunkFileRead {
 		return hunkFileRead{state: hunkOutOfWorkspace}
 	}
 	if _, err := os.Lstat(filepath.Join(s.workingDir, filepath.FromSlash(path))); err != nil {
-		return hunkFileRead{state: hunkMissing}
+		if errors.Is(err, fs.ErrNotExist) {
+			return hunkFileRead{state: hunkMissing}
+		}
+		return hunkFileRead{state: hunkUnreadable}
 	}
 	root, err := os.OpenRoot(s.workingDir)
 	if err != nil {
@@ -418,23 +478,23 @@ func (s *service) readHunkSource(path string) hunkFileRead {
 }
 
 // buildHunkAdded writes each path's record-time cell (#394): the
-// verbatim edits — redacted, bounded at whole-edit granularity — and
-// the line spans those edits occupy in the file NOW, located before
-// the next turn's writes can move them. Sensitive paths store only
-// their state. Iteration follows edited_paths order so the row cap
-// cuts tail paths deterministically; dropped entries carry over_cap
-// rather than vanishing.
-func (s *service) buildHunkAdded(raw map[string][]HunkEdit, order []string) map[string]hunkAddedEntry {
+// verbatim edits — redacted, bounded at whole-edit granularity —
+// plus the execution-time spans and boundary anchors extraction
+// derived from the tool results' own before/after content. Sensitive
+// paths store only their state. Iteration follows edited_paths
+// order so the row cap cuts tail paths deterministically; dropped
+// entries carry over_cap rather than vanishing.
+func (s *service) buildHunkAdded(raw map[string][]HunkEdit, spans map[string][]HunkSpan, order []string) map[string]hunkAddedEntry {
 	out := make(map[string]hunkAddedEntry, len(raw))
 	total := 0
 	for _, p := range order {
-		e := hunkAddedEntry{}
+		e := hunkAddedEntry{V: 1}
 		switch {
 		case sensitivePath(p):
 			e.State = hunkSensitive
-		case len(raw[p]) == 0:
-			// No recorded edits — the path carries no cell rather
-			// than an empty one a miner could misread.
+		case len(raw[p]) == 0 && len(spans[p]) == 0:
+			// Nothing recorded for the path — no cell rather than
+			// an empty one a miner could misread.
 			continue
 		case total >= maxHunkRowRunes:
 			e.State = hunkOverCap
@@ -448,11 +508,14 @@ func (s *service) buildHunkAdded(raw map[string][]HunkEdit, order []string) map[
 			for _, ed := range e.Edits {
 				total += len([]rune(ed.Old)) + len([]rune(ed.New))
 			}
-			// Spans locate the ORIGINAL text in the file — the
-			// stored copy is redacted, and a [REDACTED] marker can
-			// never match. boundHunkEdits returns a prefix, so the
-			// kept count indexes raw.
-			e.Spans = s.locateHunkSpans(p, raw[p][:len(e.Edits)])
+		}
+		if e.State != hunkSensitive {
+			// Spans ride along under every state — over_cap drops
+			// text, not the anchors the after side still needs.
+			e.Spans = mergeSpanRecs(spans[p])
+			for _, sp := range e.Spans {
+				total += len([]rune(sp.Before)) + len([]rune(sp.After))
+			}
 		}
 		out[p] = e
 	}
@@ -464,8 +527,7 @@ func (s *service) buildHunkAdded(raw map[string][]HunkEdit, order []string) map[
 // flags truncation and stops at the boundary, so every stored
 // {old,new} pair stays whole for the miner; a first edit bigger than
 // the entire budget keeps its new truncated rather than storing
-// nothing. The result is always a prefix of the input — the caller
-// indexes raw for span location.
+// nothing. The result is always a prefix of the input.
 func boundHunkEdits(edits []HunkEdit, budget int) ([]HunkEdit, bool) {
 	var kept []HunkEdit
 	for _, e := range edits {
@@ -491,73 +553,39 @@ func boundHunkEdits(edits []HunkEdit, budget int) ([]HunkEdit, bool) {
 	return kept, false
 }
 
-// locateHunkSpans finds each edit's new text in the file as it
-// stands at record time and converts it to line spans — the anchors
-// settlement slices around. An edit whose text can't be found (the
-// user or a folded-in turn already rewrote it) contributes no span;
-// a pure deletion likewise. Spans are merged and bounded, so a
-// scattered multiedit can't pin unbounded windows.
-func (s *service) locateHunkSpans(path string, edits []HunkEdit) [][2]int {
-	if sensitivePath(path) {
+// mergeSpanRecs sorts and merges overlapping or touching half-open
+// span records — the merged record keeps the earliest before-anchor
+// and the latest after-anchor. More than maxHunkSpans fragments
+// collapse into the single min–max envelope.
+func mergeSpanRecs(spans []HunkSpan) []HunkSpan {
+	if len(spans) == 0 {
 		return nil
 	}
-	if fi, err := os.Lstat(filepath.Join(s.workingDir, filepath.FromSlash(path))); err != nil ||
-		fi.Size() > maxHunkLocateBytes {
-		return nil
-	}
-	data, ok := s.readWorkspaceFile(path)
-	if !ok {
-		return nil
-	}
-	content := strings.ReplaceAll(string(data), "\r\n", "\n")
-	var spans [][2]int
-	var claimed [][2]int // byte ranges already attributed to an edit
-	for _, e := range edits {
-		if e.New == "" {
-			continue
-		}
-		// First occurrence not already claimed by an earlier edit:
-		// two calls writing identical text must not share one anchor.
-		idx := -1
-		for from := 0; ; {
-			i := strings.Index(content[from:], e.New)
-			if i < 0 {
-				break
+	slices.SortFunc(spans, func(a, b HunkSpan) int { return a.Start - b.Start })
+	out := []HunkSpan{spans[0]}
+	for _, s := range spans[1:] {
+		last := &out[len(out)-1]
+		if s.Start <= last.End {
+			last.End = max(last.End, s.End)
+			if s.After != "" {
+				last.After = s.After
 			}
-			i += from
-			end := i + len(e.New)
-			clash := false
-			for _, c := range claimed {
-				if i < c[1] && end > c[0] {
-					clash = true
-					break
-				}
-			}
-			if !clash {
-				idx = i
-				break
-			}
-			from = end
+		} else {
+			out = append(out, s)
 		}
-		if idx < 0 {
-			idx = strings.Index(content, e.New)
-		}
-		if idx < 0 {
-			continue
-		}
-		claimed = append(claimed, [2]int{idx, idx + len(e.New)})
-		start := strings.Count(content[:idx], "\n")
-		end := start + strings.Count(e.New, "\n") + 1
-		spans = append(spans, [2]int{start, end})
 	}
-	return mergeSpans(spans)
+	if len(out) > maxHunkSpans {
+		return []HunkSpan{{
+			Start: out[0].Start, End: out[len(out)-1].End,
+			Before: out[0].Before, After: out[len(out)-1].After,
+		}}
+	}
+	return out
 }
 
-// mergeSpans sorts and merges overlapping or touching half-open
-// line spans. More than maxHunkSpans fragments collapse into the
-// single min–max envelope — still bounded, still honest about which
-// file region the turn wrote.
-func mergeSpans(spans [][2]int) [][2]int {
+// mergeLineSpans sorts and merges overlapping or touching half-open
+// [start,end) line spans.
+func mergeLineSpans(spans [][2]int) [][2]int {
 	if len(spans) == 0 {
 		return nil
 	}
@@ -571,20 +599,80 @@ func mergeSpans(spans [][2]int) [][2]int {
 			out = append(out, s)
 		}
 	}
-	if len(out) > maxHunkSpans {
-		return [][2]int{{out[0][0], out[len(out)-1][1]}}
-	}
 	return out
 }
 
+// reanchorSpan re-locates a recorded span in the file as captured
+// at settle. Absolute line numbers drift under later edits — more
+// than hunkContextLines inserted above the region would push it out
+// of the window — so the span's boundary lines re-anchor it first.
+// Lines are compared in already-scrubbed space, matching the
+// anchors' stored form. Returns the adjusted span and flags: moved
+// when both anchors landed elsewhere, drifted when the position
+// couldn't be verified (partial or no anchor hit).
+func reanchorSpan(lines []string, rec HunkSpan) (span [2]int, moved, drifted bool) {
+	span = [2]int{rec.Start, rec.End}
+	if rec.Before == "" && rec.After == "" {
+		// No anchors recorded (a whole-file span) — the absolute
+		// numbers are the definition, not a guess.
+		return span, false, false
+	}
+	bIdx, aIdx, bFound, aFound := -1, -1, rec.Before == "", rec.After == ""
+	if rec.Before != "" {
+		for i, l := range lines {
+			if strings.TrimSpace(l) == rec.Before &&
+				(bIdx < 0 || abs(i-(rec.Start-1)) < abs(bIdx-(rec.Start-1))) {
+				bIdx = i
+			}
+		}
+		bFound = bIdx >= 0
+	}
+	if rec.After != "" {
+		for i, l := range lines {
+			if strings.TrimSpace(l) == rec.After &&
+				(aIdx < 0 || abs(i-rec.End) < abs(aIdx-rec.End)) {
+				aIdx = i
+			}
+		}
+		aFound = aIdx >= 0
+	}
+	size := rec.End - rec.Start
+	switch {
+	case bFound && aFound:
+		start := 0
+		if rec.Before != "" {
+			start = bIdx + 1
+		}
+		end := len(lines)
+		if rec.After != "" {
+			end = aIdx
+		}
+		if end > start {
+			return [2]int{start, end}, start != rec.Start || end != rec.End, false
+		}
+		// Anchors crossed — the file is too mangled to trust.
+		return span, false, true
+	case bFound:
+		return [2]int{bIdx + 1, min(bIdx+1+size, len(lines))}, false, true
+	case aFound:
+		return [2]int{max(0, aIdx-size), aIdx}, false, true
+	default:
+		return span, false, true
+	}
+}
+
 // captureHunkCell slices the post-window content of one edited path
-// around the record-time spans (#394). The cell records an explicit
-// state for every non-content outcome; when the region was never
-// located, region_unknown is written rather than a misleading file
-// head. Later-turn touch is flagged so the preference pair isn't
-// read as a user revision when the next turn rewrote the region.
-func captureHunkCell(fr hunkFileRead, path string, spans [][2]int, later bool, rowTotal *int) hunkAfterEntry {
-	e := hunkAfterEntry{State: fr.state, LaterTurnTouched: later}
+// around the recorded spans (#394). Content is scrubbed line-wise
+// BEFORE slicing — a window cut inside a PEM block can't leak its
+// middle lines — then each span re-anchors through its boundary
+// lines. The cell records an explicit state for every non-content
+// outcome and flags relocated/drifted positions rather than
+// presenting drifted windows as exact.
+func captureHunkCell(fr hunkFileRead, path string, recs []HunkSpan, later, stale bool, rowTotal *int) hunkAfterEntry {
+	e := hunkAfterEntry{
+		V: 1, State: fr.state,
+		LaterTurnTouched: later, Stale: stale,
+	}
 	if fr.state != hunkOK {
 		return e
 	}
@@ -595,22 +683,29 @@ func captureHunkCell(fr hunkFileRead, path string, spans [][2]int, later bool, r
 		// The row is full — over_cap names why nothing was even
 		// attempted, ahead of the no-spans case.
 		e.State = hunkOverCap
-	case len(spans) == 0:
+	case len(recs) == 0:
 		e.State = hunkRegionUnknown
 	default:
-		lines := strings.Split(string(fr.data), "\n")
+		lines := strings.Split(
+			redact.SecretsLinePreserving(string(fr.data)), "\n")
+		var adj [][2]int
+		for _, r := range recs {
+			span, moved, drifted := reanchorSpan(lines, r)
+			e.Relocated = e.Relocated || moved
+			e.Drifted = e.Drifted || drifted
+			adj = append(adj, span)
+		}
 		budget := min(maxHunkPathRunes, maxHunkRowRunes-*rowTotal)
-		for _, w := range spanWindows(lines, spans) {
-			text := redact.Secrets(w)
-			if len([]rune(text)) > budget {
+		for _, w := range spanWindows(lines, adj) {
+			if len([]rune(w.Text)) > budget {
 				e.Truncated = true
 				if budget <= 0 {
 					break
 				}
-				text = truncateRunes(text, budget)
+				w.Text = truncateRunes(w.Text, budget)
 			}
-			e.Windows = append(e.Windows, text)
-			used := len([]rune(text))
+			e.Windows = append(e.Windows, w)
+			used := len([]rune(w.Text))
 			budget -= used
 			*rowTotal += used
 		}
@@ -622,14 +717,18 @@ func captureHunkCell(fr hunkFileRead, path string, spans [][2]int, later bool, r
 }
 
 // spanWindows expands each span by the context slack, clamps to the
-// file, merges overlaps, and returns the windowed text chunks.
-func spanWindows(lines []string, spans [][2]int) []string {
-	var out []string
-	for _, s := range mergeSpans(expandSpans(spans, hunkContextLines)) {
+// file, merges overlaps, and returns the windowed chunks with their
+// first line number in the captured file.
+func spanWindows(lines []string, spans [][2]int) []hunkWindow {
+	var out []hunkWindow
+	for _, s := range mergeLineSpans(expandSpans(spans, hunkContextLines)) {
 		s[0] = max(s[0], 0)
 		s[1] = min(s[1], len(lines))
 		if s[0] < s[1] {
-			out = append(out, strings.Join(lines[s[0]:s[1]], "\n"))
+			out = append(out, hunkWindow{
+				Start: s[0],
+				Text:  strings.Join(lines[s[0]:s[1]], "\n"),
+			})
 		}
 	}
 	return out
@@ -641,6 +740,13 @@ func expandSpans(spans [][2]int, ctx int) [][2]int {
 		out[i] = [2]int{s[0] - ctx, s[1] + ctx}
 	}
 	return out
+}
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 // fingerprintDiverged is the survival check over already-read file
@@ -669,15 +775,17 @@ func fingerprintDiverged(data []byte, fingerprint []string) sql.NullInt64 {
 }
 
 // laterEditedPaths unions the edited_paths of the turn rows recorded
-// after this one in the same session — the flag that separates "user
+// after this one on the same project — the flag that separates "user
 // revised the region" from "a later agent turn rewrote it" (#400
-// review). Best-effort: a later turn whose row hasn't opened yet
-// can't mark the flag.
-func (s *service) laterEditedPaths(ctx context.Context, sessionID string, createdAt int64) map[string]bool {
+// review). Cross-session because the newer-session settle trigger
+// means the next session's first-turn edits often land before
+// settlement runs. Best-effort: a later turn whose row hasn't opened
+// yet can't mark the flag.
+func (s *service) laterEditedPaths(ctx context.Context, projectKey string, createdAt int64) map[string]bool {
 	out := map[string]bool{}
 	rows, err := s.q.ListLaterTurnEditPaths(ctx, db.ListLaterTurnEditPathsParams{
-		SessionID: sessionID,
-		CreatedAt: createdAt,
+		ProjectKey: projectKey,
+		CreatedAt:  createdAt,
 	})
 	if err != nil {
 		return out

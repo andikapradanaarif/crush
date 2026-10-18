@@ -389,6 +389,11 @@ CREATE TABLE turn_outcomes (
   edited_paths TEXT NOT NULL DEFAULT '[]',  -- JSON repo-relpaths
   edit_hunks   TEXT NOT NULL DEFAULT '{}',  -- JSON path→added-lines map
   commands     TEXT NOT NULL DEFAULT '[]',  -- JSON normalized cmds
+  hunk_added   TEXT NOT NULL DEFAULT '{}',  -- #394: path→{edits,spans}
+                                            -- agent output + exec-time
+                                            -- region, record-time
+  hunk_after   TEXT NOT NULL DEFAULT '{}',  -- #394: path→{state,windows}
+                                            -- post-window region content
   next_verdict TEXT NOT NULL DEFAULT '',    -- cue verdict of next prompt
   verdict      TEXT,                        -- NULL=unsettled; settled:
                                             -- accepted|revised|failed|unknown
