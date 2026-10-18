@@ -590,7 +590,7 @@ WHERE turn_outcomes.settled_at IS NULL
 -- dual trigger as episodes -- the +24h cap elapsed or a newer session
 -- exists. Oldest first.
 SELECT id, session_id, turn_id, edited_paths, edit_hunks, commands,
-    next_verdict, settle_at, created_at
+    hunk_added, next_verdict, settle_at, created_at
 FROM turn_outcomes
 WHERE turn_outcomes.project_key = ?
     AND turn_outcomes.settled_at IS NULL
@@ -621,6 +621,15 @@ LIMIT ?;
 -- second crush instance sharing the DB from re-freezing the row --
 -- labelMu only serializes in-process.
 UPDATE turn_outcomes SET verdict = ?, settled_at = ?, hunk_after = ? WHERE id = ? AND settled_at IS NULL;
+
+-- name: ListLaterTurnEditPaths :many
+-- Edited-path lists of the turn rows that follow this one in the
+-- same session (#394): hunk_after for turn N physically contains
+-- turns N+1..end -- the flag marks which paths a later recorded turn
+-- also touched, so the preference pair isn't misread as a user
+-- revision when a later agent turn rewrote the region.
+SELECT edited_paths FROM turn_outcomes
+WHERE session_id = ? AND created_at > ?;
 
 -- name: ListRecentSessions :many
 -- Sessions other than the live one, newest first -- the backfill

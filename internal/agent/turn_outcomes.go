@@ -264,7 +264,7 @@ func extractTurnOutcome(ctx context.Context, d turnOutcomeDeps, sessionID string
 		SessionID: sessionID,
 		TurnID:    msgs[userIdx].ID,
 		EditHunks: map[string][]string{},
-		HunkAdded: map[string]string{},
+		HunkAdded: map[string][]cmdlog.HunkEdit{},
 	}
 	if msgs[userIdx].CreatedAt > 0 {
 		// Messages stamp seconds; the store's clocks are millis.
@@ -297,7 +297,7 @@ func extractTurnOutcome(ctx context.Context, d turnOutcomeDeps, sessionID string
 						scan(childMsgs, 0)
 					}
 				case referentMutationTools[tc.Name] && executed:
-					path, added, raw := editEvidence(tc.Input, failedEditIndexes(res.Metadata))
+					path, added, edits := editEvidence(tc.Input, failedEditIndexes(res.Metadata))
 					if path == "" {
 						continue
 					}
@@ -313,10 +313,11 @@ func extractTurnOutcome(ctx context.Context, d turnOutcomeDeps, sessionID string
 					// numerator and denominator together (and a
 					// pathological edit loop grows the JSON).
 					o.EditHunks[rel] = appendNewLines(o.EditHunks[rel], seen, added)
-					// The raw text joins the same way (#394) — the
-					// pair's agent-output half is everything the
-					// turn wrote into the path, unreduced.
-					o.HunkAdded[rel] = joinHunkText(o.HunkAdded[rel], raw)
+					// The verbatim edits append the same way
+					// (#394) — the pair's agent-output half is
+					// everything the turn wrote into the path,
+					// kept per-edit so self-corrections split.
+					o.HunkAdded[rel] = append(o.HunkAdded[rel], edits...)
 				case tc.Name == tools.BashToolName && executed:
 					if cmd := bashCommand(tc.Input); cmd != "" {
 						o.Commands = append(o.Commands, cmdlog.NormalizeOutcomeCommand(cmd))
@@ -398,12 +399,13 @@ func failedEditIndexes(metadata string) map[int]bool {
 // excludes edits[] positions a partial multiedit reported as
 // failed.
 //
-// The raw return is the unreduced agent output for the hunk_added
-// column (#394): the new_string text verbatim — not new-minus-old —
-// because the preference pair is (what the agent wrote, what the
-// region became); re-emitted context lines are part of what it
-// wrote. A write contributes its whole content.
-func editEvidence(input string, skip map[int]bool) (path string, added []string, raw string) {
+// The edits return is the unreduced agent output for the hunk_added
+// column (#394): per-edit {old, new} pairs verbatim — not
+// new-minus-old — because the preference pair is (what the agent
+// wrote, what the region became); re-emitted context lines are part
+// of what it wrote, and old both preserves the pre-edit text and
+// helps locate the region. A write contributes {new: content}.
+func editEvidence(input string, skip map[int]bool) (path string, added []string, edits []cmdlog.HunkEdit) {
 	var in struct {
 		FilePath  string `json:"file_path"`
 		OldString string `json:"old_string"`
@@ -415,36 +417,25 @@ func editEvidence(input string, skip map[int]bool) (path string, added []string,
 		} `json:"edits"`
 	}
 	if json.Unmarshal([]byte(input), &in) != nil || in.FilePath == "" {
-		return "", nil, ""
+		return "", nil, nil
 	}
 	switch {
 	case in.Content != "":
-		return in.FilePath, cmdlog.NormalizeAddedLines(in.Content), in.Content
+		return in.FilePath, cmdlog.NormalizeAddedLines(in.Content),
+			[]cmdlog.HunkEdit{{New: in.Content}}
 	case len(in.Edits) > 0:
 		for i, e := range in.Edits {
 			if skip[i] {
 				continue
 			}
 			added = append(added, introducedLines(e.NewString, e.OldString)...)
-			raw = joinHunkText(raw, e.NewString)
+			edits = append(edits, cmdlog.HunkEdit{Old: e.OldString, New: e.NewString})
 		}
-		return in.FilePath, added, raw
+		return in.FilePath, added, edits
 	default:
-		return in.FilePath, introducedLines(in.NewString, in.OldString), in.NewString
+		return in.FilePath, introducedLines(in.NewString, in.OldString),
+			[]cmdlog.HunkEdit{{Old: in.OldString, New: in.NewString}}
 	}
-}
-
-// joinHunkText concatenates per-edit raw text into a path's
-// hunk_added cell — a blank line keeps boundaries visible without
-// imposing structure downstream.
-func joinHunkText(dst, next string) string {
-	if next == "" {
-		return dst
-	}
-	if dst == "" {
-		return next
-	}
-	return dst + "\n\n" + next
 }
 
 // introducedLines reduces one edit's new_text to the lines it

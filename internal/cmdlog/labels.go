@@ -323,6 +323,12 @@ func (s *service) hunkDiverged(target, addedJSON string) sql.NullInt64 {
 	}
 	data, ok := s.readWorkspaceFile(target)
 	if !ok {
+		if s.pathEscapesWorkspace(target) {
+			// A symlink resolving outside the workspace abstains like
+			// a textual escape — the target exists but is out of
+			// scope, not deleted (#400).
+			return sql.NullInt64{}
+		}
 		// The file is gone — nothing survived.
 		return sql.NullInt64{Int64: 1, Valid: true}
 	}
@@ -408,17 +414,42 @@ func workspacePathSafe(target string) bool {
 
 // readWorkspaceFile reads a workspace-relative path, refusing
 // escapes — label targets come from tool-call paths, and a stored
-// "../x" must not read outside.
+// "../x" must not read outside. os.Root closes the textual check's
+// symlink hole: a link inside the workspace pointing out now fails
+// the read race-free (#400).
 func (s *service) readWorkspaceFile(target string) ([]byte, bool) {
 	if !workspacePathSafe(target) {
 		return nil, false
 	}
-	clean := filepath.Clean(filepath.FromSlash(target))
-	data, err := os.ReadFile(filepath.Join(s.workingDir, clean))
+	root, err := os.OpenRoot(s.workingDir)
+	if err != nil {
+		return nil, false
+	}
+	defer root.Close()
+	data, err := root.ReadFile(filepath.FromSlash(target))
 	if err != nil {
 		return nil, false
 	}
 	return data, true
+}
+
+// pathEscapesWorkspace reports whether target exists but resolves —
+// through any symlink in its path — to a location outside the
+// workspace. Settlement treats that like a textual escape (abstain),
+// not a deletion. Best-effort: an unresolvable path (missing,
+// permission) reports false and the read failure decides.
+func (s *service) pathEscapesWorkspace(target string) bool {
+	resolved, err := filepath.EvalSymlinks(
+		filepath.Join(s.workingDir, filepath.FromSlash(target)))
+	if err != nil {
+		return false
+	}
+	base, err := filepath.EvalSymlinks(s.workingDir)
+	if err != nil {
+		return false
+	}
+	return resolved != base &&
+		!strings.HasPrefix(resolved, base+string(filepath.Separator))
 }
 
 // sessionTestsGreen folds the judged session's last-run test

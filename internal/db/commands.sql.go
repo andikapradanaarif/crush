@@ -481,6 +481,44 @@ func (q *Queries) ListFailuresByKey(ctx context.Context, projectKey string) ([]L
 	return items, nil
 }
 
+const listLaterTurnEditPaths = `-- name: ListLaterTurnEditPaths :many
+SELECT edited_paths FROM turn_outcomes
+WHERE session_id = ? AND created_at > ?
+`
+
+type ListLaterTurnEditPathsParams struct {
+	SessionID string `json:"session_id"`
+	CreatedAt int64  `json:"created_at"`
+}
+
+// Edited-path lists of the turn rows that follow this one in the
+// same session (#394): hunk_after for turn N physically contains
+// turns N+1..end -- the flag marks which paths a later recorded turn
+// also touched, so the preference pair isn't misread as a user
+// revision when a later agent turn rewrote the region.
+func (q *Queries) ListLaterTurnEditPaths(ctx context.Context, arg ListLaterTurnEditPathsParams) ([]string, error) {
+	rows, err := q.query(ctx, q.listLaterTurnEditPathsStmt, listLaterTurnEditPaths, arg.SessionID, arg.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var edited_paths string
+		if err := rows.Scan(&edited_paths); err != nil {
+			return nil, err
+		}
+		items = append(items, edited_paths)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listOpenFailures = `-- name: ListOpenFailures :many
 SELECT signature, cmd, cwd, headline, files, first_seen, last_seen, resolved_in, session_id, tool_call_id, repo_state, suggested, project_key, param_version, resolved_call FROM failure_memory WHERE resolved_in = '' AND project_key = ?1 ORDER BY last_seen DESC, rowid DESC LIMIT ?2
 `
@@ -1302,7 +1340,7 @@ func (q *Queries) ListUnsettledReferentLabels(ctx context.Context, arg ListUnset
 
 const listUnsettledTurnOutcomes = `-- name: ListUnsettledTurnOutcomes :many
 SELECT id, session_id, turn_id, edited_paths, edit_hunks, commands,
-    next_verdict, settle_at, created_at
+    hunk_added, next_verdict, settle_at, created_at
 FROM turn_outcomes
 WHERE turn_outcomes.project_key = ?
     AND turn_outcomes.settled_at IS NULL
@@ -1340,6 +1378,7 @@ type ListUnsettledTurnOutcomesRow struct {
 	EditedPaths string `json:"edited_paths"`
 	EditHunks   string `json:"edit_hunks"`
 	Commands    string `json:"commands"`
+	HunkAdded   string `json:"hunk_added"`
 	NextVerdict string `json:"next_verdict"`
 	SettleAt    int64  `json:"settle_at"`
 	CreatedAt   int64  `json:"created_at"`
@@ -1364,6 +1403,7 @@ func (q *Queries) ListUnsettledTurnOutcomes(ctx context.Context, arg ListUnsettl
 			&i.EditedPaths,
 			&i.EditHunks,
 			&i.Commands,
+			&i.HunkAdded,
 			&i.NextVerdict,
 			&i.SettleAt,
 			&i.CreatedAt,

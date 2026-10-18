@@ -31,6 +31,20 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`),
 	// PEM private key blocks.
 	regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----`),
+	// JWTs: header.payload.signature in base64url. Every real JWT's
+	// header starts "eyJ" ({"…), so the anchor keeps false positives
+	// rare without an entropy check.
+	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b`),
+}
+
+// credentialPrefixPatterns keep their first capture group so the
+// scrubbed text still reads as what it was: "postgres://…@host"
+// stays a postgres URL instead of an anonymous [REDACTED] gap.
+var credentialPrefixPatterns = []*regexp.Regexp{
+	// URL-embedded credentials: scheme://user:pass@host — connection
+	// strings carry no sensitive key name for the generic rule to
+	// catch, but the user:pass authority is always credential-shaped.
+	regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^\s/:@]+:[^\s/@]+@`),
 }
 
 // Secrets scrubs credential-shaped substrings from text bound for a
@@ -40,6 +54,9 @@ var secretPatterns = []*regexp.Regexp{
 func Secrets(s string) string {
 	for _, p := range secretPatterns {
 		s = p.ReplaceAllString(s, redactedPlaceholder)
+	}
+	for _, p := range credentialPrefixPatterns {
+		s = p.ReplaceAllString(s, "${1}"+redactedPlaceholder+"@")
 	}
 	return s
 }
