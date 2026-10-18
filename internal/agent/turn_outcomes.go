@@ -36,6 +36,7 @@ import (
 	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/diff"
+	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/params"
 	"github.com/charmbracelet/crush/internal/redact"
@@ -392,7 +393,9 @@ func failedEditIndexes(metadata string) map[int]bool {
 	}
 	skip := map[int]bool{}
 	for _, f := range meta.EditsFailed {
-		skip[f.Index] = true
+		// FailedEdit.Index is 1-based (applyEditsToContent emits
+		// startIndex+i+1); edits[] is 0-based.
+		skip[f.Index-1] = true
 	}
 	return skip
 }
@@ -428,8 +431,11 @@ func editEvidence(input string, skip map[int]bool, metadata string) (path string
 		FilePath  string `json:"file_path"`
 		OldString string `json:"old_string"`
 		NewString string `json:"new_string"`
-		Content   string `json:"content"`
-		Edits     []struct {
+		// A write detects by key presence, not emptiness — an
+		// empty-content write truncates the file, which is a real
+		// (if rare) mutation, not an absent field.
+		Content *string `json:"content"`
+		Edits   []struct {
 			OldString string `json:"old_string"`
 			NewString string `json:"new_string"`
 		} `json:"edits"`
@@ -445,28 +451,33 @@ func editEvidence(input string, skip map[int]bool, metadata string) (path string
 	if metadata != "" {
 		_ = json.Unmarshal([]byte(metadata), &meta)
 	}
-	newContent := meta.NewContent
+	// The tools store new_content CRLF-restored against an
+	// LF-normalized old_content — diff raw and every line differs
+	// textually, degenerating spans to whole-file on CRLF files.
+	// Normalize both sides into the same space first.
+	oldContent, _ := fsext.ToUnixLineEndings(meta.OldContent)
+	newContent, _ := fsext.ToUnixLineEndings(meta.NewContent)
 	var unified string
 	switch {
-	case in.Content != "":
+	case in.Content != nil:
 		// A write's metadata ships a ready-made unified diff;
 		// the written content is the new file itself.
 		unified = meta.Diff
-		newContent = in.Content
+		newContent, _ = fsext.ToUnixLineEndings(*in.Content)
 	case meta.OldContent != "" || meta.NewContent != "":
-		unified, _, _ = diff.GenerateDiff(meta.OldContent, meta.NewContent, in.FilePath)
+		unified, _, _ = diff.GenerateDiff(oldContent, newContent, in.FilePath)
 	}
 	spans = hunkSpansFromUnified(unified, newContent)
-	if len(spans) == 0 && in.Content != "" {
+	if len(spans) == 0 && in.Content != nil {
 		// Write with no diff metadata — the file IS the region.
 		spans = []cmdlog.HunkSpan{
 			{Start: 0, End: len(strings.Split(newContent, "\n"))},
 		}
 	}
 	switch {
-	case in.Content != "":
-		return in.FilePath, cmdlog.NormalizeAddedLines(in.Content),
-			[]cmdlog.HunkEdit{{New: in.Content}}, spans
+	case in.Content != nil:
+		return in.FilePath, cmdlog.NormalizeAddedLines(*in.Content),
+			[]cmdlog.HunkEdit{{New: *in.Content}}, spans
 	case len(in.Edits) > 0:
 		for i, e := range in.Edits {
 			if skip[i] {
@@ -573,8 +584,8 @@ func spanAnchor(lines []string, pos, dir int) string {
 		if a == "" || a == "[REDACTED]" {
 			continue
 		}
-		if r := []rune(a); len(r) > 160 {
-			a = string(r[:160])
+		if r := []rune(a); len(r) > cmdlog.HunkAnchorRunes {
+			a = string(r[:cmdlog.HunkAnchorRunes])
 		}
 		return a
 	}

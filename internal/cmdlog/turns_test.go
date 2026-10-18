@@ -140,10 +140,11 @@ func TestRecordTurnOutcome_JudgedUnknownKeepsEvidence(t *testing.T) {
 // the tool results' own before/after content (#394).
 func TestRecordTurnOutcome_HunkAdded(t *testing.T) {
 	env := setupLabelsTest(t)
+	outside := filepath.Join(t.TempDir(), "outside.go")
 	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
 		SessionID:   "s1",
 		TurnID:      "t0",
-		EditedPaths: []string{"x.go", ".env", "big.go", "id_rsa", "id_generator.go", "credentials.go", "sub/.env/config", "secrets.md"},
+		EditedPaths: []string{"x.go", ".env", "big.go", "id_rsa", "id_generator.go", "credentials.go", "sub/.env/config", "secrets.md", outside, "../esc.go"},
 		HunkAdded: map[string][]HunkEdit{
 			"x.go":            {{Old: "old", New: "key := \"val\"\nAPI_KEY=abc123"}},
 			".env":            {{New: "DATABASE_URL=postgres://u:p@h/db"}},
@@ -153,9 +154,12 @@ func TestRecordTurnOutcome_HunkAdded(t *testing.T) {
 			"credentials.go":  {{New: "code"}},
 			"sub/.env/config": {{New: "x"}},
 			"secrets.md":      {{New: "x"}},
+			outside:           {{Old: "secret outside text", New: "outside"}},
+			"../esc.go":       {{Old: "old", New: "new"}},
 		},
 		HunkSpans: map[string][]HunkSpan{
-			"x.go": {{Start: 1, End: 3, Before: "head", After: "tail"}},
+			"x.go":  {{Start: 1, End: 3, Before: "head", After: "tail"}},
+			outside: {{Start: 0, End: 1, Before: "outside line"}},
 		},
 	}))
 
@@ -183,6 +187,14 @@ func TestRecordTurnOutcome_HunkAdded(t *testing.T) {
 		"docs can hold pasted secrets — .md is not a source ext")
 	require.True(t, m["big.go"].Truncated,
 		"an edit past the per-path bound is cut and flagged")
+	require.Equal(t, hunkOutOfWorkspace, m[outside].State,
+		"an absolute path outside the workspace stores state only")
+	require.Empty(t, m[outside].Edits,
+		"outside content must not persist on the added side")
+	require.Empty(t, m[outside].Spans,
+		"anchors are outside-file lines — they drop with the content")
+	require.Equal(t, hunkOutOfWorkspace, m["../esc.go"].State,
+		"a textual escape stores state only")
 }
 
 // The placeholder-repair arm refreshes hunk_added along with the
@@ -201,7 +213,7 @@ func TestRecordTurnOutcome_PlaceholderRepairsHunkAdded(t *testing.T) {
 		NextVerdict: ReferentAccepted,
 	}))
 	require.JSONEq(t,
-		`{"x.go":{"v":1,"edits":[{"new":"added text"}],"spans":[{"start":0,"end":1}]}}`,
+		`{"x.go":{"v":1,"edits":[{"new":"added text"}],"spans":[{"start":0,"end":1}],"state":"ok"}}`,
 		readTurn(t, env, "s1", "t0").hunkAdded)
 }
 

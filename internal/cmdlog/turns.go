@@ -97,10 +97,10 @@ func (s *service) RecordTurnOutcome(ctx context.Context, o TurnOutcome) error {
 	if o.SessionID == "" || o.TurnID == "" {
 		return nil
 	}
-	paths, _ := json.Marshal(o.EditedPaths)
-	hunks, _ := json.Marshal(o.EditHunks)
+	paths := marshalNoEscape(o.EditedPaths)
+	hunks := marshalNoEscape(o.EditHunks)
 	added := marshalNoEscape(s.buildHunkAdded(o.HunkAdded, o.HunkSpans, o.EditedPaths))
-	cmds, _ := json.Marshal(o.Commands)
+	cmds := marshalNoEscape(o.Commands)
 	now := s.now().UnixMilli()
 	createdAt := o.CreatedAt
 	if createdAt <= 0 {
@@ -261,7 +261,7 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 		// capture gates as too_large or binary still yields a
 		// survival verdict, same as before #394.
 		data, ok := fr.data, fr.state == hunkOK
-		if !ok && workspacePathSafe(p) && !s.pathEscapesWorkspace(p) {
+		if !ok && !fr.escaped {
 			data, ok = s.readWorkspaceFile(p)
 		}
 		switch {
@@ -272,9 +272,10 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 					diverged = true
 				}
 			}
-		case !workspacePathSafe(p) || s.pathEscapesWorkspace(p):
-			// Out-of-scope targets — textual or symlink escapes —
-			// abstain, same as the pre-capture reader.
+		case fr.escaped:
+			// Out-of-scope targets abstain, same as the
+			// pre-capture reader's textual-escape rule; symlink
+			// escapes are this column's narrowing.
 		default:
 			// A safe path that still doesn't read is gone or
 			// refused — nothing survived.
@@ -333,9 +334,17 @@ const (
 	// span when hunk_after slices it — enough to catch the user's
 	// local rewrite without dragging unrelated file in.
 	hunkContextLines = 32
+	// HunkAnchorRunes caps a stored span anchor (the extractor and
+	// the re-anchor share it — an anchor at the cap is a truncated
+	// line prefix, not the line). Exported for the agent package's
+	// span derivation.
+	HunkAnchorRunes = 160
 	// maxHunkSpans bounds located spans per path; beyond it the set
 	// collapses to the min-max envelope.
 	maxHunkSpans = 32
+	// laterEditRowsLimit bounds the per-batch later-turns read —
+	// best-effort flagging, not an exhaustive history scan.
+	laterEditRowsLimit = 512
 )
 
 // sensitiveBasenames are file names whose content never persists in
@@ -345,10 +354,17 @@ const (
 // record a state instead of text — on both sides of the pair.
 var sensitiveBasenames = []string{
 	".env", ".env.*", ".envrc", ".git-credentials", ".netrc",
-	".npmrc", ".pypirc", ".htpasswd",
-	"*.pem", "*.key", "*.p12", "*.pfx", "*.keystore",
+	".npmrc", ".pypirc", ".htpasswd", ".pgpass", "my.cnf",
+	"*.pem", "*.key", "*.p8", "*.p12", "*.pfx", "*.keystore", "*.ovpn",
 	"*.tfvars", "*.tfvars.json", "*.tfstate", "*.tfstate.*",
+	// *_id_* covers my_id_rsa-style prefixed names the bare
+	// id_* prefixes miss (the underscore separator keeps
+	// avoid_rsa.go out).
 	"id_rsa*", "id_dsa*", "id_ecdsa*", "id_ed25519*",
+	"*_id_rsa*", "*_id_dsa*", "*_id_ecdsa*", "*_id_ed25519*",
+	// .kube/ and .docker/ directories carry credential configs —
+	// segment matching marks everything under them.
+	".kube", ".docker",
 	"credentials*", "secrets.*", "kubeconfig", "kubeconfig.*",
 	"service-account*.json", "service_account*.json",
 }
@@ -453,8 +469,9 @@ const (
 // hunkFileRead is one settle-time read of an edited path: the state
 // the capture records, and the content when the state carries it.
 type hunkFileRead struct {
-	data  []byte
-	state string
+	data    []byte
+	state   string
+	escaped bool // the path resolves out of scope — text or symlink
 }
 
 // readHunkSource performs the one-per-path settle read: workspace
@@ -464,7 +481,7 @@ type hunkFileRead struct {
 // and the snapshot can never disagree.
 func (s *service) readHunkSource(path string) hunkFileRead {
 	if !workspacePathSafe(path) || s.pathEscapesWorkspace(path) {
-		return hunkFileRead{state: hunkOutOfWorkspace}
+		return hunkFileRead{state: hunkOutOfWorkspace, escaped: true}
 	}
 	if _, err := os.Lstat(filepath.Join(s.workingDir, filepath.FromSlash(path))); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -474,7 +491,9 @@ func (s *service) readHunkSource(path string) hunkFileRead {
 	}
 	root, err := os.OpenRoot(s.workingDir)
 	if err != nil {
-		return hunkFileRead{state: hunkMissing}
+		// A workspace-root failure isn't a missing file — the
+		// read was refused before the path was even reached.
+		return hunkFileRead{state: hunkUnreadable}
 	}
 	defer root.Close()
 	fi, err := root.Stat(filepath.FromSlash(path))
@@ -505,8 +524,13 @@ func (s *service) buildHunkAdded(raw map[string][]HunkEdit, spans map[string][]H
 	out := make(map[string]hunkAddedEntry, len(raw))
 	total := 0
 	for _, p := range order {
-		e := hunkAddedEntry{V: 1}
+		e := hunkAddedEntry{V: 1, State: hunkOK}
 		switch {
+		case !workspacePathSafe(p) || s.pathEscapesWorkspace(p):
+			// Same scope gate as the settle side — an outside file's
+			// pre-edit content doesn't persist in the project DB,
+			// even though it's the agent's own output.
+			e.State = hunkOutOfWorkspace
 		case sensitivePath(p):
 			e.State = hunkSensitive
 		case len(raw[p]) == 0 && len(spans[p]) == 0:
@@ -518,17 +542,15 @@ func (s *service) buildHunkAdded(raw map[string][]HunkEdit, spans map[string][]H
 		default:
 			e.Edits, e.Truncated = boundHunkEdits(raw[p],
 				min(maxHunkPathRunes, maxHunkRowRunes-total))
-			if len(e.Edits) == 0 && len(raw[p]) > 0 {
-				e.State = hunkOverCap
-				break
-			}
 			for _, ed := range e.Edits {
 				total += len([]rune(ed.Old)) + len([]rune(ed.New))
 			}
 		}
-		if e.State != hunkSensitive {
-			// Spans ride along under every state — over_cap drops
-			// text, not the anchors the after side still needs.
+		if e.State == hunkOK || e.State == hunkOverCap {
+			// Spans ride along where content is in scope — over_cap
+			// drops text, not the anchors the after side still needs.
+			// Out-of-scope anchors would be lines from a file the
+			// gate refuses, so the geometry goes with the content.
 			e.Spans = mergeSpanRecs(spans[p])
 			for i, sp := range e.Spans {
 				c := len([]rune(sp.Before)) + len([]rune(sp.After))
@@ -643,10 +665,21 @@ func reanchorSpan(lines []string, rec HunkSpan) (span [2]int, moved, drifted boo
 		// numbers are the definition, not a guess.
 		return span, false, false
 	}
+	// matchAnchor compares a trimmed line to the stored anchor —
+	// exactly, or as a prefix when the anchor hit HunkAnchorRunes (a
+	// capped anchor IS a line prefix, never the whole line).
+	matchAnchor := func(line, anchor string) bool {
+		l := strings.TrimSpace(line)
+		if l == anchor {
+			return true
+		}
+		return len([]rune(anchor)) == HunkAnchorRunes &&
+			strings.HasPrefix(l, anchor)
+	}
 	bIdx, aIdx := -1, -1
 	if rec.Before != "" {
 		for i, l := range lines {
-			if strings.TrimSpace(l) == rec.Before &&
+			if matchAnchor(l, rec.Before) &&
 				(bIdx < 0 || abs(i-(rec.Start-1)) < abs(bIdx-(rec.Start-1))) {
 				bIdx = i
 			}
@@ -654,7 +687,7 @@ func reanchorSpan(lines []string, rec HunkSpan) (span [2]int, moved, drifted boo
 	}
 	if rec.After != "" {
 		for i, l := range lines {
-			if strings.TrimSpace(l) == rec.After &&
+			if matchAnchor(l, rec.After) &&
 				(aIdx < 0 || abs(i-rec.End) < abs(aIdx-rec.End)) {
 				aIdx = i
 			}
@@ -817,6 +850,9 @@ func (s *service) laterEditedPaths(ctx context.Context, projectKey string, creat
 	rows, err := s.q.ListLaterTurnEditPaths(ctx, db.ListLaterTurnEditPathsParams{
 		ProjectKey: projectKey,
 		CreatedAt:  createdAt,
+		// Best-effort bound — a settling row whose flag would need
+		// more later rows than this is deep in backfill history.
+		Limit: laterEditRowsLimit,
 	})
 	if err != nil {
 		return nil

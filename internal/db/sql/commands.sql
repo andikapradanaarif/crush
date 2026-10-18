@@ -631,7 +631,9 @@ UPDATE turn_outcomes SET verdict = ?, settled_at = ?, hunk_after = ? WHERE id = 
 -- turn also touched, so the preference pair isn't misread as a
 -- user revision when a later agent turn rewrote the region.
 SELECT created_at, edited_paths FROM turn_outcomes
-WHERE project_key = ? AND created_at > ?;
+WHERE project_key = ? AND created_at > ?
+ORDER BY created_at ASC
+LIMIT ?;
 
 -- name: ListRecentSessions :many
 -- Sessions other than the live one, newest first -- the backfill

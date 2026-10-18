@@ -484,11 +484,14 @@ func (q *Queries) ListFailuresByKey(ctx context.Context, projectKey string) ([]L
 const listLaterTurnEditPaths = `-- name: ListLaterTurnEditPaths :many
 SELECT created_at, edited_paths FROM turn_outcomes
 WHERE project_key = ? AND created_at > ?
+ORDER BY created_at ASC
+LIMIT ?
 `
 
 type ListLaterTurnEditPathsParams struct {
 	ProjectKey string `json:"project_key"`
 	CreatedAt  int64  `json:"created_at"`
+	Limit      int64  `json:"limit"`
 }
 
 type ListLaterTurnEditPathsRow struct {
@@ -504,7 +507,7 @@ type ListLaterTurnEditPathsRow struct {
 // turn also touched, so the preference pair isn't misread as a
 // user revision when a later agent turn rewrote the region.
 func (q *Queries) ListLaterTurnEditPaths(ctx context.Context, arg ListLaterTurnEditPathsParams) ([]ListLaterTurnEditPathsRow, error) {
-	rows, err := q.query(ctx, q.listLaterTurnEditPathsStmt, listLaterTurnEditPaths, arg.ProjectKey, arg.CreatedAt)
+	rows, err := q.query(ctx, q.listLaterTurnEditPathsStmt, listLaterTurnEditPaths, arg.ProjectKey, arg.CreatedAt, arg.Limit)
 	if err != nil {
 		return nil, err
 	}

@@ -45,6 +45,18 @@ func TestEditEvidence(t *testing.T) {
 			[]cmdlog.HunkSpan{{Start: 1, End: 3, Before: "head", After: "mid"}},
 		},
 		{
+			// The tools persist old_content LF-normalized but
+			// new_content CRLF-restored — the diff normalizes
+			// before comparing, or every line looks changed.
+			"crlf metadata narrows the span",
+			`{"file_path":"a.go","old_string":"x","new_string":"y"}`,
+			`{"old_content":"head\nx\nmid\ntail\n","new_content":"head\r\ny\r\nmid\r\ntail\r\n"}`,
+			"a.go",
+			[]string{"y"},
+			[]cmdlog.HunkEdit{{Old: "x", New: "y"}},
+			[]cmdlog.HunkSpan{{Start: 1, End: 2, Before: "head", After: "mid"}},
+		},
+		{
 			// Context lines carried over from old_string were not
 			// introduced by this edit — they must not pad the
 			// survival numerator. The edits keep them: verbatim
@@ -276,9 +288,11 @@ func TestExtractTurnOutcome_PartialMultieditFingerprint(t *testing.T) {
 	t.Parallel()
 	a, _ := referentAgent(t)
 
+	// FailedEdit.Index is 1-based — index 2 is the SECOND edit's
+	// failure, matching applyEditsToContent's startIndex+i+1.
 	meta, err := json.Marshal(tools.MultiEditResponseMetadata{
 		EditsApplied: 1,
-		EditsFailed:  []tools.FailedEdit{{Index: 1, Error: "no match"}},
+		EditsFailed:  []tools.FailedEdit{{Index: 2, Error: "no match"}},
 	})
 	require.NoError(t, err)
 
