@@ -500,14 +500,14 @@ func TestSettleTurnOutcomes_HunkAfterWithoutSpans(t *testing.T) {
 	require.Empty(t, m["x.go"].Windows)
 }
 
-// A file past maxHunkReadBytes never gets read or scanned for the
+// A file past MaxHunkReadBytes never gets read or scanned for the
 // capture — the state names the skip. The verdict keeps the
 // pre-capture behavior: an unbounded read still matches the
 // fingerprint, so labels don't shift under the new column.
 func TestSettleTurnOutcomes_HunkAfterTooLarge(t *testing.T) {
 	env := setupLabelsTest(t)
 	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "lock.txt"),
-		[]byte(strings.Repeat("x", maxHunkReadBytes+1)), 0o644))
+		[]byte(strings.Repeat("x", MaxHunkReadBytes+1)), 0o644))
 	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
 		SessionID: "s1", TurnID: "t0",
 		EditedPaths: []string{"lock.txt"},
@@ -522,6 +522,58 @@ func TestSettleTurnOutcomes_HunkAfterTooLarge(t *testing.T) {
 	require.Equal(t, TurnRevised, c.verdict.String,
 		"the fingerprint still reads an oversized file — capture "+
 			"skips it, the verdict doesn't change")
+}
+
+// A before-anchor that verifies at the recorded start while the
+// file shrank under the span reports drifted, not relocated — the
+// end is EOF-clipped, not confirmed elsewhere.
+func TestSettleTurnOutcomes_HunkAfterClipIsDrift(t *testing.T) {
+	env := setupLabelsTest(t)
+	// The anchor "a" still sits where recorded, but the file ends
+	// at line 2 — the recorded {1,8} span's tail no longer exists.
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "x.go"),
+		[]byte("a\nREGION\n"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string][]HunkEdit{"x.go": {{New: "REGION"}}},
+		HunkSpans: map[string][]HunkSpan{
+			"x.go": {{Start: 1, End: 8, Before: "a"}},
+		},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.Equal(t, hunkOK, m["x.go"].State)
+	require.True(t, m["x.go"].Drifted,
+		"an EOF-clipped span must not read as a verified relocation")
+	require.False(t, m["x.go"].Relocated)
+}
+
+// Verdict parity runs both ways for an oversized file — the capture
+// abstains but the fingerprint still reads it, so a surviving edit
+// settles accepted exactly as before the column existed.
+func TestSettleTurnOutcomes_TooLargeVerdictAccepted(t *testing.T) {
+	env := setupLabelsTest(t)
+	content := "needle\n" + strings.Repeat("x", MaxHunkReadBytes)
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "lock.txt"),
+		[]byte(content), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID: "s1", TurnID: "t0",
+		EditedPaths: []string{"lock.txt"},
+		EditHunks:   map[string][]string{"lock.txt": {"needle"}},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	c := settleTurnRow(t, env, "s1", "t0")
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal([]byte(c.hunkAfter), &m))
+	require.Equal(t, hunkTooLarge, m["lock.txt"].State)
+	require.Equal(t, TurnAccepted, c.verdict.String,
+		"the unbounded verdict read sees the surviving fingerprint")
 }
 
 // The row cap is a hard bound on both columns: enough full-size

@@ -333,10 +333,12 @@ const (
 	// exceed 16K effective when many spans ride along.
 	maxHunkPathRunes = 16 * 1024 // per path, per column
 	maxHunkRowRunes  = 64 * 1024 // per row, per column
-	// maxHunkReadBytes gates the settle-time read: a lockfile or
+	// MaxHunkReadBytes gates the settle-time read: a lockfile or
 	// generated blob over this abstains rather than paying a
-	// whole-file scan for the fingerprint and the capture.
-	maxHunkReadBytes = 1 << 20
+	// whole-file scan for the fingerprint and the capture. The
+	// record side reuses it to skip span work on files settle
+	// will never read.
+	MaxHunkReadBytes = 1 << 20
 	// hunkContextLines is the slack kept on each side of a stored
 	// span when hunk_after slices it — enough to catch the user's
 	// local rewrite without dragging unrelated file in.
@@ -533,7 +535,7 @@ func (s *service) readHunkSource(path string) hunkFileRead {
 	if err != nil {
 		return hunkFileRead{state: hunkUnreadable}
 	}
-	if fi.Size() > maxHunkReadBytes {
+	if fi.Size() > MaxHunkReadBytes {
 		return hunkFileRead{state: hunkTooLarge}
 	}
 	data, err := root.ReadFile(filepath.FromSlash(path))
@@ -623,7 +625,7 @@ func boundHunkEdits(edits []HunkEdit, budget int) ([]HunkEdit, bool) {
 			kept = append(kept, e)
 			continue
 		}
-		if len(kept) == 0 {
+		if len(kept) == 0 && budget > 0 {
 			// The first edit may not exceed the budget either —
 			// split it evenly so the agent's new text keeps at
 			// least half while the pair stays within the cap.
@@ -806,9 +808,20 @@ func reanchorSpan(lines []string, rec HunkSpan) (span [2]int, moved, drifted boo
 		}
 		return span, false, true
 	case bFound:
-		return single([2]int{bIdx + 1, min(bIdx+1+size, len(lines))}, bCount)
+		ns := [2]int{bIdx + 1, min(bIdx+1+size, len(lines))}
+		// An EOF clip is not a relocation — the region's tail no
+		// longer exists wherever the start anchors.
+		if ns != span && ns[1] < bIdx+1+size {
+			return ns, false, true
+		}
+		return single(ns, bCount)
 	case aFound:
-		return single([2]int{max(0, aIdx-size), aIdx}, aCount)
+		ns := [2]int{max(0, aIdx-size), aIdx}
+		// Same clip on the head side — the region's front is gone.
+		if ns != span && ns[0] > aIdx-size {
+			return ns, false, true
+		}
+		return single(ns, aCount)
 	default:
 		return span, false, true
 	}

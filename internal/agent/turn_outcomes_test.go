@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -123,6 +124,31 @@ func TestEditEvidence(t *testing.T) {
 			`{"file_path":"a.go","old_string":"x","new_string":"y","content":"z"}`,
 			"",
 			"a.go",
+			[]string{"y"},
+			[]cmdlog.HunkEdit{{Old: "x", New: "y"}},
+			nil,
+		},
+		{
+			// Same scoping on the edits key — a stray edits array on
+			// an edit call records the applied old/new pair, not
+			// the hallucinated list.
+			"edit ignores stray edits", tools.EditToolName,
+			`{"file_path":"a.go","old_string":"x","new_string":"y","edits":[{"old_string":"p","new_string":"q"}]}`,
+			"",
+			"a.go",
+			[]string{"y"},
+			[]cmdlog.HunkEdit{{Old: "x", New: "y"}},
+			nil,
+		},
+		{
+			// Past the read-size gate the diff is skipped — the
+			// path keeps its pair but records no spans, settling
+			// region_unknown rather than paying a whole-file Myers
+			// pass for evidence settle won't read.
+			"over-gate metadata yields no spans", tools.EditToolName,
+			`{"file_path":"big.go","old_string":"x","new_string":"y"}`,
+			`{"old_content":"` + strings.Repeat("o", cmdlog.MaxHunkReadBytes) + `","new_content":"` + strings.Repeat("n", cmdlog.MaxHunkReadBytes+1) + `"}`,
+			"big.go",
 			[]string{"y"},
 			[]cmdlog.HunkEdit{{Old: "x", New: "y"}},
 			nil,

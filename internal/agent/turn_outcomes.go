@@ -468,7 +468,13 @@ func editEvidence(tool, input string, skip map[int]bool, metadata string) (path 
 		unified = meta.Diff
 		newContent, _ = fsext.ToUnixLineEndings(*in.Content)
 	case meta.OldContent != "" || meta.NewContent != "":
-		unified, _, _ = diff.GenerateDiff(oldContent, newContent, in.FilePath)
+		// Same size gate as the settle read: past it the spans
+		// would almost never be consumed — a Myers diff over the
+		// whole file is extraction's most expensive step. The
+		// path degrades to no spans and settles region_unknown.
+		if len(oldContent)+len(newContent) <= 2*cmdlog.MaxHunkReadBytes {
+			unified, _, _ = diff.GenerateDiff(oldContent, newContent, in.FilePath)
+		}
 	}
 	spans = hunkSpansFromUnified(unified, newContent)
 	if len(spans) == 0 && write {
@@ -481,7 +487,7 @@ func editEvidence(tool, input string, skip map[int]bool, metadata string) (path 
 	case write:
 		return in.FilePath, cmdlog.NormalizeAddedLines(*in.Content),
 			[]cmdlog.HunkEdit{{New: *in.Content}}, spans
-	case len(in.Edits) > 0:
+	case tool == tools.MultiEditToolName && len(in.Edits) > 0:
 		for i, e := range in.Edits {
 			if skip[i] {
 				continue
@@ -517,6 +523,12 @@ func hunkSpansFromUnified(unified, newContent string) []cmdlog.HunkSpan {
 		return nil
 	}
 	lines := strings.Split(newContent, "\n")
+	// lineCount gives each anchor's uniqueness check O(1) lookup
+	// instead of a whole-file scan per candidate.
+	lineCount := make(map[string]int, len(lines))
+	for _, l := range lines {
+		lineCount[strings.TrimSpace(l)]++
+	}
 	var out []cmdlog.HunkSpan
 	// pos tracks the hunk's new-side cursor (0-based); the span is
 	// the run of new lines the hunk actually adds — context lines
@@ -529,8 +541,8 @@ func hunkSpansFromUnified(unified, newContent string) []cmdlog.HunkSpan {
 		}
 		start, end := spanStart, max(spanEnd, spanStart)
 		end = min(end, len(lines))
-		b, bc := spanAnchor(lines, start-1, -1)
-		a, ac := spanAnchor(lines, end, +1)
+		b, bc := spanAnchor(lines, lineCount, start-1, -1)
+		a, ac := spanAnchor(lines, lineCount, end, +1)
 		out = append(out, cmdlog.HunkSpan{
 			Start: start, End: end,
 			Before: b, BeforeCapped: bc,
@@ -596,7 +608,7 @@ func hunkSpansFromUnified(unified, newContent string) []cmdlog.HunkSpan {
 // the window a line unique in the file is preferred over a generic
 // repeated one ("}", "return") — a duplicated anchor can silently
 // re-attach to the wrong occurrence at settle.
-func spanAnchor(lines []string, pos, dir int) (anchor string, capped bool) {
+func spanAnchor(lines []string, lineCount map[string]int, pos, dir int) (anchor string, capped bool) {
 	var fallback string
 	var fbCapped bool
 	for i := pos; i >= 0 && i < len(lines) && abs(i-pos) < 8; i += dir {
@@ -616,7 +628,7 @@ func spanAnchor(lines []string, pos, dir int) (anchor string, capped bool) {
 			fallback, fbCapped = a, capped
 		}
 		switch {
-		case a == cand && anchorUnique(lines, cand):
+		case a == cand && lineCount[cand] == 1:
 			// A clean line unique in the file — the settle match
 			// names one position unambiguously.
 			return a, false
@@ -632,23 +644,9 @@ func spanAnchor(lines []string, pos, dir int) (anchor string, capped bool) {
 	return fallback, fbCapped
 }
 
-// anchorUnique reports whether the trimmed line occurs exactly once
-// in the file — the property that lets a settle-time anchor match
-// name one position unambiguously.
-func anchorUnique(lines []string, cand string) bool {
-	n := 0
-	for _, l := range lines {
-		if strings.TrimSpace(l) == cand {
-			if n++; n > 1 {
-				return false
-			}
-		}
-	}
-	return n == 1
-}
-
-// anchorPrefixUnique is anchorUnique for a capped anchor, which
-// re-matches by prefix rather than equality.
+// anchorPrefixUnique reports whether exactly one trimmed line
+// carries the capped anchor as a prefix — the uniqueness a
+// prefix-matched settle needs.
 func anchorPrefixUnique(lines []string, prefix string) bool {
 	n := 0
 	for _, l := range lines {

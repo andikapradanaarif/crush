@@ -444,8 +444,9 @@ CREATE TABLE turn_outcomes (
 --
 -- Caveat on rule changes: edit_hunks fingerprints for partial
 -- multiedits changed meaning with the 1-based FailedEdit.Index fix
--- (#394/#358) — rows recorded before it carry phantom lines from
--- the failed edit's successor. param_version stamps channel knobs,
+-- (#394/#358) — rows recorded before it can include the failed
+-- edit's lines (never applied) and miss its successor's (which did
+-- land). param_version stamps channel knobs,
 -- not extraction rules, so mixed-era rows coexist unmarked; miners
 -- comparing eras should treat partial-multiedit fingerprints as
 -- lower-confidence.
