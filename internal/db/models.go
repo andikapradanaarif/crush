@@ -259,4 +259,6 @@ type TurnOutcome struct {
 	SettledAt    sql.NullInt64  `json:"settled_at"`
 	ParamVersion string         `json:"param_version"`
 	CreatedAt    int64          `json:"created_at"`
+	HunkAdded    string         `json:"hunk_added"`
+	HunkAfter    string         `json:"hunk_after"`
 }

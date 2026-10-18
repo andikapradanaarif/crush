@@ -264,6 +264,7 @@ func extractTurnOutcome(ctx context.Context, d turnOutcomeDeps, sessionID string
 		SessionID: sessionID,
 		TurnID:    msgs[userIdx].ID,
 		EditHunks: map[string][]string{},
+		HunkAdded: map[string]string{},
 	}
 	if msgs[userIdx].CreatedAt > 0 {
 		// Messages stamp seconds; the store's clocks are millis.
@@ -296,7 +297,7 @@ func extractTurnOutcome(ctx context.Context, d turnOutcomeDeps, sessionID string
 						scan(childMsgs, 0)
 					}
 				case referentMutationTools[tc.Name] && executed:
-					path, added := editEvidence(tc.Input, failedEditIndexes(res.Metadata))
+					path, added, raw := editEvidence(tc.Input, failedEditIndexes(res.Metadata))
 					if path == "" {
 						continue
 					}
@@ -312,6 +313,10 @@ func extractTurnOutcome(ctx context.Context, d turnOutcomeDeps, sessionID string
 					// numerator and denominator together (and a
 					// pathological edit loop grows the JSON).
 					o.EditHunks[rel] = appendNewLines(o.EditHunks[rel], seen, added)
+					// The raw text joins the same way (#394) — the
+					// pair's agent-output half is everything the
+					// turn wrote into the path, unreduced.
+					o.HunkAdded[rel] = joinHunkText(o.HunkAdded[rel], raw)
 				case tc.Name == tools.BashToolName && executed:
 					if cmd := bashCommand(tc.Input); cmd != "" {
 						o.Commands = append(o.Commands, cmdlog.NormalizeOutcomeCommand(cmd))
@@ -382,16 +387,23 @@ func failedEditIndexes(metadata string) map[int]bool {
 	return skip
 }
 
-// editEvidence pulls the mutated path and the added-lines
-// fingerprint out of a mutation tool call's input — the lines the
-// edit introduced: edit and multiedit count new_string minus
-// old_string, so context lines carried over from the replaced text
-// don't pad the survival numerator; write fingerprints its whole
-// content, the old file being unknowable from the call. The
-// fingerprint is per-file: lines added by any of the turn's edits to
-// that file join one survival set. skip excludes edits[] positions
-// a partial multiedit reported as failed.
-func editEvidence(input string, skip map[int]bool) (path string, added []string) {
+// editEvidence pulls the mutated path, the added-lines fingerprint,
+// and the raw written text out of a mutation tool call's input. The
+// fingerprint keeps its introduced-lines rule: edit and multiedit
+// count new_string minus old_string, so context lines carried over
+// from the replaced text don't pad the survival numerator; write
+// fingerprints its whole content, the old file being unknowable
+// from the call. The fingerprint is per-file: lines added by any of
+// the turn's edits to that file join one survival set. skip
+// excludes edits[] positions a partial multiedit reported as
+// failed.
+//
+// The raw return is the unreduced agent output for the hunk_added
+// column (#394): the new_string text verbatim — not new-minus-old —
+// because the preference pair is (what the agent wrote, what the
+// region became); re-emitted context lines are part of what it
+// wrote. A write contributes its whole content.
+func editEvidence(input string, skip map[int]bool) (path string, added []string, raw string) {
 	var in struct {
 		FilePath  string `json:"file_path"`
 		OldString string `json:"old_string"`
@@ -403,22 +415,36 @@ func editEvidence(input string, skip map[int]bool) (path string, added []string)
 		} `json:"edits"`
 	}
 	if json.Unmarshal([]byte(input), &in) != nil || in.FilePath == "" {
-		return "", nil
+		return "", nil, ""
 	}
 	switch {
 	case in.Content != "":
-		return in.FilePath, cmdlog.NormalizeAddedLines(in.Content)
+		return in.FilePath, cmdlog.NormalizeAddedLines(in.Content), in.Content
 	case len(in.Edits) > 0:
 		for i, e := range in.Edits {
 			if skip[i] {
 				continue
 			}
 			added = append(added, introducedLines(e.NewString, e.OldString)...)
+			raw = joinHunkText(raw, e.NewString)
 		}
-		return in.FilePath, added
+		return in.FilePath, added, raw
 	default:
-		return in.FilePath, introducedLines(in.NewString, in.OldString)
+		return in.FilePath, introducedLines(in.NewString, in.OldString), in.NewString
 	}
+}
+
+// joinHunkText concatenates per-edit raw text into a path's
+// hunk_added cell — a blank line keeps boundaries visible without
+// imposing structure downstream.
+func joinHunkText(dst, next string) string {
+	if next == "" {
+		return dst
+	}
+	if dst == "" {
+		return next
+	}
+	return dst + "\n\n" + next
 }
 
 // introducedLines reduces one edit's new_text to the lines it

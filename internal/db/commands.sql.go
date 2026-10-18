@@ -281,13 +281,15 @@ func (q *Queries) InsertReferentEpisodeLabeled(ctx context.Context, arg InsertRe
 const insertTurnOutcome = `-- name: InsertTurnOutcome :exec
 INSERT INTO turn_outcomes
     (session_id, turn_id, project_key, edited_paths, edit_hunks,
-     commands, next_verdict, settle_at, param_version, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     commands, hunk_added, next_verdict, settle_at, param_version,
+     created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(session_id, turn_id) DO UPDATE SET
     next_verdict  = excluded.next_verdict,
     edited_paths  = excluded.edited_paths,
     edit_hunks    = excluded.edit_hunks,
-    commands      = excluded.commands
+    commands      = excluded.commands,
+    hunk_added    = excluded.hunk_added
 WHERE turn_outcomes.settled_at IS NULL
     AND turn_outcomes.next_verdict = ''
 `
@@ -299,6 +301,7 @@ type InsertTurnOutcomeParams struct {
 	EditedPaths  string `json:"edited_paths"`
 	EditHunks    string `json:"edit_hunks"`
 	Commands     string `json:"commands"`
+	HunkAdded    string `json:"hunk_added"`
 	NextVerdict  string `json:"next_verdict"`
 	SettleAt     int64  `json:"settle_at"`
 	ParamVersion string `json:"param_version"`
@@ -327,6 +330,7 @@ func (q *Queries) InsertTurnOutcome(ctx context.Context, arg InsertTurnOutcomePa
 		arg.EditedPaths,
 		arg.EditHunks,
 		arg.Commands,
+		arg.HunkAdded,
 		arg.NextVerdict,
 		arg.SettleAt,
 		arg.ParamVersion,
@@ -1605,21 +1609,28 @@ func (q *Queries) SettleReferentEpisode(ctx context.Context, arg SettleReferentE
 }
 
 const settleTurnOutcome = `-- name: SettleTurnOutcome :exec
-UPDATE turn_outcomes SET verdict = ?, settled_at = ? WHERE id = ? AND settled_at IS NULL
+UPDATE turn_outcomes SET verdict = ?, settled_at = ?, hunk_after = ? WHERE id = ? AND settled_at IS NULL
 `
 
 type SettleTurnOutcomeParams struct {
 	Verdict   sql.NullString `json:"verdict"`
 	SettledAt sql.NullInt64  `json:"settled_at"`
+	HunkAfter string         `json:"hunk_after"`
 	ID        int64          `json:"id"`
 }
 
-// Freeze one turn row's verdict (#340). Same contract as episodes:
-// written once, never re-derived. The WHERE guard keeps a second
-// crush instance sharing the DB from re-freezing the row -- labelMu
-// only serializes in-process.
+// Freeze one turn row's verdict (#340) and write its post-window
+// hunk content (#394) in the same once-only pass. Same contract as
+// episodes: written once, never re-derived. The WHERE guard keeps a
+// second crush instance sharing the DB from re-freezing the row --
+// labelMu only serializes in-process.
 func (q *Queries) SettleTurnOutcome(ctx context.Context, arg SettleTurnOutcomeParams) error {
-	_, err := q.exec(ctx, q.settleTurnOutcomeStmt, settleTurnOutcome, arg.Verdict, arg.SettledAt, arg.ID)
+	_, err := q.exec(ctx, q.settleTurnOutcomeStmt, settleTurnOutcome,
+		arg.Verdict,
+		arg.SettledAt,
+		arg.HunkAfter,
+		arg.ID,
+	)
 	return err
 }
 

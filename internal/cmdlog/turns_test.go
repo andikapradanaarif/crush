@@ -2,9 +2,11 @@ package cmdlog
 
 import (
 	"database/sql"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,16 +22,20 @@ type turnCols struct {
 	settleAt    int64
 	nextVerdict string
 	editedPaths string
+	hunkAdded   string
+	hunkAfter   string
 }
 
 func readTurn(t *testing.T, env *labelEnv, sessionID, turnID string) turnCols {
 	t.Helper()
 	var c turnCols
 	require.NoError(t, env.conn.QueryRowContext(t.Context(),
-		`SELECT verdict, settled_at, settle_at, next_verdict, edited_paths
+		`SELECT verdict, settled_at, settle_at, next_verdict, edited_paths,
+		        hunk_added, hunk_after
 		 FROM turn_outcomes
 		 WHERE session_id = ? AND turn_id = ?`, sessionID, turnID).
-		Scan(&c.verdict, &c.settledAt, &c.settleAt, &c.nextVerdict, &c.editedPaths))
+		Scan(&c.verdict, &c.settledAt, &c.settleAt, &c.nextVerdict,
+			&c.editedPaths, &c.hunkAdded, &c.hunkAfter))
 	return c
 }
 
@@ -126,6 +132,120 @@ func TestRecordTurnOutcome_JudgedUnknownKeepsEvidence(t *testing.T) {
 	require.Equal(t, ReferentUnknown, c.nextVerdict)
 	require.JSONEq(t, `["x.go"]`, c.editedPaths,
 		"a judged-unknown row keeps its evidence")
+}
+
+// hunk_added records the raw agent output per path — redacted and
+// bounded like every other durable string the store writes (#394).
+func TestRecordTurnOutcome_HunkAdded(t *testing.T) {
+	env := setupLabelsTest(t)
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go", "big.go"},
+		HunkAdded: map[string]string{
+			"x.go":   "key := \"val\"\nAPI_KEY=sk-abcdef0123456789",
+			"big.go": strings.Repeat("b", maxHunkContentRunes+10),
+		},
+	}))
+
+	var m map[string]hunkAddedEntry
+	require.NoError(t, json.Unmarshal([]byte(readTurn(t, env, "s1", "t0").hunkAdded), &m))
+	require.Equal(t, "key := \"val\"\n[REDACTED]", m["x.go"].Text,
+		"a credential assignment must not persist verbatim")
+	require.True(t, m["big.go"].Truncated,
+		"a blob past the per-path bound records its truncation")
+	require.LessOrEqual(t, len([]rune(m["big.go"].Text)), maxHunkContentRunes)
+}
+
+// The placeholder-repair arm refreshes hunk_added along with the
+// rest of the evidence.
+func TestRecordTurnOutcome_PlaceholderRepairsHunkAdded(t *testing.T) {
+	env := setupLabelsTest(t)
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID: "s1", TurnID: "t0",
+	}))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string]string{"x.go": "added text"},
+		NextVerdict: ReferentAccepted,
+	}))
+	require.JSONEq(t, `{"x.go":{"text":"added text"}}`,
+		readTurn(t, env, "s1", "t0").hunkAdded)
+}
+
+// hunk_after snapshots the post-window content of each edited path
+// at settlement — the "what the region became" half of the pair.
+func TestSettleTurnOutcomes_HunkAfter(t *testing.T) {
+	env := setupLabelsTest(t)
+	dir := env.workingDir
+	write := func(p, content string) {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, p), []byte(content), 0o644))
+	}
+	write("x.go", "final content\nline2")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "bin.dat"),
+		[]byte{'a', 0, 'b'}, 0o644))
+
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go", "gone.go", "bin.dat", "../esc.go"},
+	}))
+	dueViaNewerSession(t, env, "s2")
+	c := settleTurnRow(t, env, "s1", "t0")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal([]byte(c.hunkAfter), &m))
+	require.Equal(t, hunkAfterOK, m["x.go"].State)
+	require.Equal(t, "final content\nline2", m["x.go"].Text)
+	require.True(t, m["x.go"].CapturedAt > 0, "the snapshot stamps its read time")
+	require.Equal(t, hunkAfterMissing, m["gone.go"].State,
+		"a file that no longer reads records its state, not content")
+	require.Equal(t, hunkAfterBinary, m["bin.dat"].State,
+		"a NUL byte marks binary content — never persisted as text")
+	require.Equal(t, hunkAfterOutOfWorktree, m["../esc.go"].State,
+		"a path escaping the workspace is out of scope, not missing")
+}
+
+// hunk_after content is redacted and bounded like every other
+// durable string; a file past the per-path bound flags truncation.
+func TestSettleTurnOutcomes_HunkAfterBoundAndRedact(t *testing.T) {
+	env := setupLabelsTest(t)
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "big.txt"),
+		[]byte(strings.Repeat("data line\n", maxHunkContentRunes)), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "s.txt"),
+		[]byte("password=hunter2\nrest"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID: "s1", TurnID: "t0", EditedPaths: []string{"big.txt", "s.txt"},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal([]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.True(t, m["big.txt"].Truncated)
+	require.LessOrEqual(t, len([]rune(m["big.txt"].Text)), maxHunkContentRunes)
+	require.Equal(t, "[REDACTED]\nrest", m["s.txt"].Text,
+		"no credential survives the capture")
+}
+
+// A row recorded before this channel existed — edited_paths but no
+// hunk_added — still captures its post-window content.
+func TestSettleTurnOutcomes_HunkAfterWithoutAdded(t *testing.T) {
+	env := setupLabelsTest(t)
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "x.go"), []byte("v1"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		EditHunks:   map[string][]string{"x.go": {"v1"}},
+	}))
+	dueViaNewerSession(t, env, "s2")
+	c := settleTurnRow(t, env, "s1", "t0")
+	require.JSONEq(t, `{}`, c.hunkAdded, "no added text was recorded")
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal([]byte(c.hunkAfter), &m))
+	require.Equal(t, "v1", m["x.go"].Text)
 }
 
 // A frozen row refuses even the placeholder-repair arm.

@@ -22,48 +22,57 @@ func TestEditEvidence(t *testing.T) {
 		input     string
 		wantPath  string
 		wantAdded []string
+		wantRaw   string
 	}{
 		{
 			"edit new_string", `{"file_path":"a.go","old_string":"x","new_string":"y\nz"}`,
 			"a.go",
 			[]string{"y", "z"},
+			"y\nz",
 		},
 		{
 			// Context lines carried over from old_string were not
 			// introduced by this edit — they must not pad the
-			// survival numerator.
+			// survival numerator. The raw cell keeps them: it is
+			// the verbatim agent output, not the net-new lines.
 			"edit drops carried context", `{"file_path":"a.go","old_string":"x\nctx","new_string":"y\nctx"}`,
 			"a.go",
 			[]string{"y"},
+			"y\nctx",
 		},
 		{
 			"deletion introduces nothing", `{"file_path":"d.go","old_string":"x","new_string":""}`,
 			"d.go",
 			nil,
+			"",
 		},
 		{
 			"write content", `{"file_path":"b.go","content":"line1\n\nline2"}`,
 			"b.go",
 			[]string{"line1", "line2"},
+			"line1\n\nline2",
 		},
 		{
 			"multiedit joins", `{"file_path":"c.go","edits":[{"new_string":"p"},{"new_string":"q"}]}`,
 			"c.go",
 			[]string{"p", "q"},
+			"p\n\nq",
 		},
 		{
 			"multiedit subtracts per edit", `{"file_path":"c.go","edits":[{"old_string":"keep","new_string":"keep\np"},{"old_string":"z","new_string":"q\nkeep"}]}`,
 			"c.go",
 			[]string{"p", "q", "keep"},
+			"keep\np\n\nq\nkeep",
 		},
-		{"malformed", `not json`, "", nil},
-		{"no path", `{"new_string":"x"}`, "", nil},
+		{"malformed", `not json`, "", nil, ""},
+		{"no path", `{"new_string":"x"}`, "", nil, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			path, added := editEvidence(tc.input, nil)
+			path, added, raw := editEvidence(tc.input, nil)
 			require.Equal(t, tc.wantPath, path)
 			require.Equal(t, tc.wantAdded, added)
+			require.Equal(t, tc.wantRaw, raw)
 		})
 	}
 }
@@ -120,6 +129,9 @@ func TestExtractTurnOutcome(t *testing.T) {
 	require.Equal(t, []string{"new line", "another"}, o.EditHunks["x.go"],
 		"the added-lines fingerprint joins the file's row, deduped")
 	require.Equal(t, []string{"y"}, o.EditHunks["y.go"])
+	require.Equal(t, "new line\n\nnew line\nanother", o.HunkAdded["x.go"],
+		"the raw cell keeps the turn's verbatim writes, unreduced")
+	require.Equal(t, "y", o.HunkAdded["y.go"])
 	require.Equal(t, []string{"go test ./..."}, o.Commands,
 		"bash invocations record in ledger-normal form; reads do not")
 }

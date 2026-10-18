@@ -8,11 +8,13 @@
 package cmdlog
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 
 	"github.com/charmbracelet/crush/internal/db"
+	"github.com/charmbracelet/crush/internal/redact"
 )
 
 // Turn outcome verdicts — the closed vocabulary settled rows carry.
@@ -40,6 +42,11 @@ type TurnOutcome struct {
 	// EditHunks maps each edited path to the normalized added lines
 	// its edits introduced — the survival fingerprint.
 	EditHunks map[string][]string
+	// HunkAdded maps each edited path to the raw text the turn's
+	// edits wrote there (#394) — the agent-output half of the
+	// (output, what-the-region-became) pair the preference tier
+	// mines. The store bounds and redacts it at write.
+	HunkAdded map[string]string
 	// Commands are the turn's bash invocations in ledger-normal form
 	// (NormalizeOutcomeCommand).
 	Commands []string
@@ -69,6 +76,7 @@ func (s *service) RecordTurnOutcome(ctx context.Context, o TurnOutcome) error {
 	}
 	paths, _ := json.Marshal(o.EditedPaths)
 	hunks, _ := json.Marshal(o.EditHunks)
+	added, _ := json.Marshal(boundHunkAdded(o.HunkAdded, o.EditedPaths))
 	cmds, _ := json.Marshal(o.Commands)
 	now := s.now().UnixMilli()
 	createdAt := o.CreatedAt
@@ -82,6 +90,7 @@ func (s *service) RecordTurnOutcome(ctx context.Context, o TurnOutcome) error {
 		EditedPaths:  string(paths),
 		EditHunks:    string(hunks),
 		Commands:     string(cmds),
+		HunkAdded:    string(added),
 		NextVerdict:  o.NextVerdict,
 		SettleAt:     createdAt + settleWindowMillis,
 		ParamVersion: s.paramVersion,
@@ -229,8 +238,119 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 	return s.q.SettleTurnOutcome(ctx, db.SettleTurnOutcomeParams{
 		Verdict:   sql.NullString{String: verdict, Valid: true},
 		SettledAt: sql.NullInt64{Int64: now, Valid: true},
+		HunkAfter: s.captureHunkAfter(paths, now),
 		ID:        r.ID,
 	})
+}
+
+// Per-path and per-row content bounds for the hunk-content columns
+// (#394): a generated blob or a large file cannot pin unbounded text
+// in a durable row. Entries past the row cap record an explicit
+// over_cap state rather than vanishing silently.
+const (
+	maxHunkContentRunes = 16 * 1024
+	maxHunkTotalRunes   = 64 * 1024
+)
+
+// hunkAddedEntry is one path's record-time content cell in
+// hunk_added — the raw text the turn's edits wrote there.
+type hunkAddedEntry struct {
+	Text      string `json:"text"`
+	Truncated bool   `json:"truncated,omitempty"`
+}
+
+// hunkAfterEntry is one path's settle-time content cell in
+// hunk_after: what the file contained when the observation window
+// closed, or why no content could be captured.
+type hunkAfterEntry struct {
+	State      string `json:"state"`
+	Text       string `json:"text,omitempty"`
+	Truncated  bool   `json:"truncated,omitempty"`
+	CapturedAt int64  `json:"captured_at"`
+}
+
+// Hunk-after states — why an entry carries no text. missing also
+// covers any other read failure; a deleted file and an unreadable
+// one are the same evidence shape downstream.
+const (
+	hunkAfterOK            = "ok"
+	hunkAfterMissing       = "missing"
+	hunkAfterBinary        = "binary"
+	hunkAfterOutOfWorktree = "out_of_workspace"
+	hunkAfterOverCap       = "over_cap"
+)
+
+// boundHunkAdded redacts and bounds the agent-output half of each
+// hunk pair before it touches a durable row — same contract as
+// normalizeCommand: a credential written into a file must not
+// persist verbatim in project memory. Iteration follows the row's
+// edited_paths order so the row cap cuts tail paths
+// deterministically; dropped paths still appear in
+// edited_paths/edit_hunks, so absence reads as "not captured",
+// never "not edited".
+func boundHunkAdded(raw map[string]string, order []string) map[string]hunkAddedEntry {
+	out := make(map[string]hunkAddedEntry, len(raw))
+	total := 0
+	for _, p := range order {
+		text, ok := raw[p]
+		if !ok || total >= maxHunkTotalRunes {
+			continue
+		}
+		text = redact.Secrets(text)
+		e := hunkAddedEntry{Text: text}
+		if len([]rune(text)) > maxHunkContentRunes {
+			e.Text = truncateRunes(text, maxHunkContentRunes)
+			e.Truncated = true
+		}
+		total += len([]rune(e.Text))
+		out[p] = e
+	}
+	return out
+}
+
+// captureHunkAfter snapshots each edited path's post-window content
+// at settle time (#394) — the "what the region became" half of the
+// pair, so the preference tier can diff agent output against the
+// user's final state without re-reading the file. Content is
+// redacted and bounded exactly like hunk_added; a binary file, a
+// path escaping the workspace, and a file that no longer reads each
+// record their state instead of content. Iteration follows the
+// row's edited_paths order (first-edit order), so the row cap cuts
+// tail paths deterministically.
+func (s *service) captureHunkAfter(paths []string, now int64) string {
+	if len(paths) == 0 {
+		return "{}"
+	}
+	out := make(map[string]hunkAfterEntry, len(paths))
+	total := 0
+	for _, p := range paths {
+		e := hunkAfterEntry{CapturedAt: now}
+		switch {
+		case total >= maxHunkTotalRunes:
+			e.State = hunkAfterOverCap
+		case !workspacePathSafe(p):
+			e.State = hunkAfterOutOfWorktree
+		default:
+			data, ok := s.readWorkspaceFile(p)
+			switch {
+			case !ok:
+				e.State = hunkAfterMissing
+			case bytes.IndexByte(data, 0) >= 0:
+				e.State = hunkAfterBinary
+			default:
+				text := redact.Secrets(string(data))
+				if len([]rune(text)) > maxHunkContentRunes {
+					text = truncateRunes(text, maxHunkContentRunes)
+					e.Truncated = true
+				}
+				e.State, e.Text = hunkAfterOK, text
+				total += len([]rune(text))
+			}
+		}
+		out[p] = e
+	}
+	b, _ := json.Marshal(out)
+	return string(b)
 }
 
 // encodeLines re-marshals a hunk's line slice for hunkDiverged's

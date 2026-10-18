@@ -455,10 +455,11 @@ type Querier interface {
 	// a second crush instance sharing the DB from re-freezing the row --
 	// labelMu only serializes in-process.
 	SettleReferentEpisode(ctx context.Context, arg SettleReferentEpisodeParams) error
-	// Freeze one turn row's verdict (#340). Same contract as episodes:
-	// written once, never re-derived. The WHERE guard keeps a second
-	// crush instance sharing the DB from re-freezing the row -- labelMu
-	// only serializes in-process.
+	// Freeze one turn row's verdict (#340) and write its post-window
+	// hunk content (#394) in the same once-only pass. Same contract as
+	// episodes: written once, never re-derived. The WHERE guard keeps a
+	// second crush instance sharing the DB from re-freezing the row --
+	// labelMu only serializes in-process.
 	SettleTurnOutcome(ctx context.Context, arg SettleTurnOutcomeParams) error
 	UpdateMessage(ctx context.Context, arg UpdateMessageParams) error
 	UpdateNotebookCompression(ctx context.Context, arg UpdateNotebookCompressionParams) error

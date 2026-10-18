@@ -573,13 +573,15 @@ ORDER BY id ASC;
 -- are likewise never rewritten.
 INSERT INTO turn_outcomes
     (session_id, turn_id, project_key, edited_paths, edit_hunks,
-     commands, next_verdict, settle_at, param_version, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     commands, hunk_added, next_verdict, settle_at, param_version,
+     created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(session_id, turn_id) DO UPDATE SET
     next_verdict  = excluded.next_verdict,
     edited_paths  = excluded.edited_paths,
     edit_hunks    = excluded.edit_hunks,
-    commands      = excluded.commands
+    commands      = excluded.commands,
+    hunk_added    = excluded.hunk_added
 WHERE turn_outcomes.settled_at IS NULL
     AND turn_outcomes.next_verdict = '';
 
@@ -613,11 +615,12 @@ ORDER BY created_at ASC
 LIMIT ?;
 
 -- name: SettleTurnOutcome :exec
--- Freeze one turn row's verdict (#340). Same contract as episodes:
--- written once, never re-derived. The WHERE guard keeps a second
--- crush instance sharing the DB from re-freezing the row -- labelMu
--- only serializes in-process.
-UPDATE turn_outcomes SET verdict = ?, settled_at = ? WHERE id = ? AND settled_at IS NULL;
+-- Freeze one turn row's verdict (#340) and write its post-window
+-- hunk content (#394) in the same once-only pass. Same contract as
+-- episodes: written once, never re-derived. The WHERE guard keeps a
+-- second crush instance sharing the DB from re-freezing the row --
+-- labelMu only serializes in-process.
+UPDATE turn_outcomes SET verdict = ?, settled_at = ?, hunk_after = ? WHERE id = ? AND settled_at IS NULL;
 
 -- name: ListRecentSessions :many
 -- Sessions other than the live one, newest first -- the backfill
