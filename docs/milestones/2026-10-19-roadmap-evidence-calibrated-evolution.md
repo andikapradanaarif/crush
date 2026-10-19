@@ -84,22 +84,30 @@ Loop 2 may enable, tune via `params.Memory`, or prune. LTT,
 
 ### Loop 2 — offline regularized evolution (`crush evolve`)
 
-**Mutable surface v1 (enforced allow-list):**
+**Mutable surface v1 (enforced allow-list).** Each item names the
+engine mechanism that carries it (see [Engine fit](#engine-fit-code-audit-10-19)):
 
-1. A gated **lessons file** loaded as context (the AHE "long-term
-   memory" analogue): every entry has a rule, an applicability
+1. A gated **lessons file** (the AHE "long-term memory" analogue) via
+   `options.context_paths` — every entry has a rule, an applicability
    clause, and provenance; no task IDs, paths, or symbols from the
-   evolve set.
-2. **Tool descriptions and tool behavior parameters** that are config,
-   not code (timeouts, output caps, defaults).
-3. **Hook configurations** (`PreToolUse`, `PreCompact` via crushrc —
-   the middleware analogue); the hook *engine* stays immutable.
-4. **`params.Memory`** values and memory-channel flags.
-5. **Skill bodies** (verified-trace provenance only).
-6. System prompt templates — allowed, deprioritized; any prompt edit
-   is its own single-edit candidate (never bundled).
+   evolve set. *Native.*
+2. **`params.Memory`** values and memory-channel flags via
+   `options.memory_params` + option bools. *Native.*
+3. **Skill bodies** via `options.skills_paths` (verified-trace
+   provenance only). *Native.*
+4. **Run-edge thresholds and per-edge enables** (verification, todos,
+   stall, verify-loop, burn-watch, reconcile — the existing middleware
+   layer) via bounded params. *After #408.*
+5. **Hook configurations** (`PreToolUse`, `PreCompact`; top-level
+   `hooks`) and **tool limits** (`tools.{ls,grep,glob}`) via arm
+   config blocks. *After #409.* The hook *engine* stays immutable;
+   there is no post-tool/stop hook event.
+6. **Tool descriptions and system prompt templates** via a runtime
+   override directory (`prompt_overrides`) — compiled-in today. *After
+   #406.* Prompt edits are deprioritized and always single-edit
+   candidates.
 
-**v2 (after #78 phase D+A and 2–3 clean rounds):** run-edge Go code.
+**v2 (after #78 phase D+A and 2–3 clean rounds):** new run-edge Go code.
 
 **Immutable:** safety ordering, veto precedence, project partition,
 verdict vocabulary, `internal/permission`, `internal/hooks` (engine),
