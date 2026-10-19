@@ -117,6 +117,10 @@ func TestGatherTrend(t *testing.T) {
 		`{"gone.go":{"v":1,"state":"region_unknown"}}`)
 	insertTurnOutcome(t, conn, key, "s2", "t7", "accepted", weekBms+1000, true,
 		`[".env"]`, `{".env":{"v":1,"state":"sensitive"}}`, `{".env":{"v":1,"state":"sensitive"}}`)
+	// Pre-capture row: both hunk maps empty — exclusion is
+	// pre_capture, not no_cell.
+	insertTurnOutcome(t, conn, key, "s2", "t8", "accepted", weekBms+2000, true,
+		`["old.go"]`, `{}`, `{}`)
 
 	// Sessions: two in week A (10 user turns, 1000 tokens), one in
 	// week B (4 user turns, 400 tokens).
@@ -134,8 +138,9 @@ func TestGatherTrend(t *testing.T) {
 	insertCmdRun(t, conn, key, "s1", "make lint", "", 1, weekAms+100)
 	insertCmdRun(t, conn, key, "s1b", "make lint", "", 1, weekAms+600)
 
-	rows, err := gatherTrend(t.Context(), conn, trendProject{path: "/p", key: key}, 0)
+	rows, missing, err := gatherTrend(t.Context(), conn, trendProject{path: "/p", key: key}, 0)
 	require.NoError(t, err)
+	require.Empty(t, missing)
 	require.Len(t, rows, 2)
 
 	a := rows[0]
@@ -150,7 +155,7 @@ func TestGatherTrend(t *testing.T) {
 	require.Equal(t, 1, a.EditTurns)
 	require.Equal(t, 1, a.EditCostLines)
 	require.Equal(t, map[string]int{"later_turn_touched": 1}, a.EditCostExcluded)
-	require.InDelta(t, 0.5, *a.EditCostPerTurn, 1e-9) // 1 line / 2 acc+rev turns
+	require.InDelta(t, 1.0, *a.EditCostPerTurn, 1e-9) // 1 line / 1 measured turn
 	require.Equal(t, 2, a.Sessions)
 	require.Equal(t, 10, a.UserTurns)
 	require.EqualValues(t, 1000, a.TokensTotal)
@@ -161,9 +166,14 @@ func TestGatherTrend(t *testing.T) {
 
 	b := rows[1]
 	require.Equal(t, "2026-10-12", b.Week)
-	require.Equal(t, 2, b.Accepted)
+	require.Equal(t, 3, b.Accepted)
 	require.Equal(t, 0, b.EditPairs)
-	require.Equal(t, map[string]int{"after_region_unknown": 1, "sensitive": 1}, b.EditCostExcluded)
+	require.Nil(t, b.EditCostPerTurn)
+	require.Equal(t, map[string]int{
+		"after_region_unknown": 1,
+		"sensitive":            1,
+		"pre_capture":          1,
+	}, b.EditCostExcluded)
 	require.Equal(t, 1, b.CmdFailures)
 	require.Equal(t, 1, b.RepeatFailures)
 	require.InDelta(t, 1.0, *b.RepeatFailureRate, 1e-9)
@@ -184,7 +194,7 @@ func TestGatherTrendSharedStore(t *testing.T) {
 	insertSession(t, conn, "sa", weekAms/1000, 100, 2)
 	insertSession(t, conn, "sb", weekAms/1000, 900, 2)
 
-	rows, err := gatherTrend(t.Context(), conn, trendProject{path: "/p", key: "mine"}, 0)
+	rows, _, err := gatherTrend(t.Context(), conn, trendProject{path: "/p", key: "mine"}, 0)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	require.Equal(t, 1, rows[0].Sessions)

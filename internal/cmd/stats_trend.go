@@ -18,11 +18,14 @@ package cmd
 //     stale, relocated or drifted. cost = line-level Levenshtein
 //     between the turn's recorded `new` text and the post-window
 //     region content (context padding stripped via the recorded
-//     spans). edit_cost_per_turn divides by accepted+revised turns
-//     and stays null when no pair measured (absent data is not zero
-//     cost); edit_turns counts turns with >= 1 pair; excluded paths
-//     are counted per reason. Tables or columns a project's schema
-//     predates are reported under `missing`, not read as zeros.
+//     spans). edit_cost_per_turn divides by edit_turns — turns that
+//     produced >= 1 comparable pair — so coverage can't masquerade
+//     as cheap edits (coverage reads as edit_turns/(accepted+revised));
+//     null when nothing measured. Excluded paths are counted per
+//     reason; a row whose hunk maps are both empty predates the
+//     capture columns and excludes as pre_capture, not no_cell.
+//     Tables or columns a project's schema predates are reported
+//     under `missing`, not read as zeros.
 //   - tokens per user turn: sessions created in the window
 //     (parent_session_id IS NULL) — sum(prompt+completion tokens) /
 //     user-role messages in those sessions. In a shared data dir
@@ -69,6 +72,7 @@ const (
 
 var trendCmd = &cobra.Command{
 	Use:   "trend",
+	Args:  cobra.NoArgs,
 	Short: "Weekly personal trend report",
 	Long: "Print and record one trend row per week per project: turn verdict mix, " +
 		"revision rate, edit cost over captured hunks, tokens per user turn, " +
@@ -179,13 +183,13 @@ func runStatsTrend(cmd *cobra.Command, _ []string) error {
 			fmt.Fprintf(os.Stderr, "warn: skipping %s: %v\n", dbPath, err)
 			continue
 		}
-		rows, err := gatherTrend(ctx, conn, tp, since)
+		rows, missing, err := gatherTrend(ctx, conn, tp, since)
 		conn.Close()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warn: trend failed for %s: %v\n", tp.path, err)
 			continue
 		}
-		printTrendTable(os.Stdout, tp.path, rows)
+		printTrendTable(os.Stdout, tp.path, rows, missing)
 		if !noAppend && len(rows) > 0 {
 			ledger := outOverride
 			if ledger == "" {
@@ -384,11 +388,11 @@ func sharedStore(ctx context.Context, conn *sql.DB, keyed []string) (bool, error
 	return n > 1, err
 }
 
-func gatherTrend(ctx context.Context, conn *sql.DB, tp trendProject, sinceMs int64) ([]trendRow, error) {
+func gatherTrend(ctx context.Context, conn *sql.DB, tp trendProject, sinceMs int64) ([]trendRow, []string, error) {
 	schema := probeTrendSchema(ctx, conn)
 	shared, err := sharedStore(ctx, conn, schema.memberTables)
 	if err != nil {
-		return nil, fmt.Errorf("detect partitions: %w", err)
+		return nil, nil, fmt.Errorf("detect partitions: %w", err)
 	}
 	var missing []string
 	if !schema.turns {
@@ -419,15 +423,15 @@ func gatherTrend(ctx context.Context, conn *sql.DB, tp trendProject, sinceMs int
 
 	if schema.turns {
 		if err := trendTurns(ctx, conn, tp.key, sinceMs, schema.hunkCells, bucket); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	if err := trendTokens(ctx, conn, tp.key, shared, schema.memberTables, sinceMs, bucket); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if schema.cmdRuns {
 		if err := trendFailures(ctx, conn, tp.key, sinceMs, bucket); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
@@ -441,7 +445,7 @@ func gatherTrend(ctx context.Context, conn *sql.DB, tp trendProject, sinceMs int
 		finalizeTrendRow(weeks[k])
 		rows = append(rows, *weeks[k])
 	}
-	return rows, nil
+	return rows, missing, nil
 }
 
 // trendTurns buckets settled turn_outcomes and runs the edit-cost
@@ -526,6 +530,16 @@ func trendEditCost(r *trendRow, pathsJSON, addedJSON, afterJSON string) bool {
 			r.EditCostExcluded = map[string]int{}
 		}
 		r.EditCostExcluded[reason]++
+	}
+
+	if len(added) == 0 && len(after) == 0 {
+		// Settlement always writes an after-cell per edited path, so
+		// both maps empty means the row predates the capture columns
+		// — report that era, not a key miss.
+		for range paths {
+			excl("pre_capture")
+		}
+		return false
 	}
 
 	any := false
@@ -750,10 +764,11 @@ func finalizeTrendRow(r *trendRow) {
 		rev := float64(r.Revised) / float64(n)
 		r.RevisionRate = &rev
 	}
-	// cost/turn stays null when no pair measured — absent data is
-	// not zero cost, and pairs/edit_turns carry the coverage.
-	if r.EditPairs > 0 {
-		cost := float64(r.EditCostLines) / float64(r.Accepted+r.Revised)
+	// cost/turn is per measured turn — dividing by all eligible turns
+	// would fold coverage into the cost signal; coverage reads as
+	// edit_turns/(accepted+revised). Null when nothing measured.
+	if r.EditTurns > 0 {
+		cost := float64(r.EditCostLines) / float64(r.EditTurns)
 		r.EditCostPerTurn = &cost
 	}
 	if r.UserTurns > 0 {
@@ -813,12 +828,21 @@ func appendTrendLedger(path, key string, rows []trendRow) error {
 			return err
 		}
 	}
-	return os.WriteFile(path, []byte(b.String()), 0o600)
+	// tmp+rename: the ledger is the durable artifact, so a mid-write
+	// crash must not leave it torn.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
-func printTrendTable(w io.Writer, project string, rows []trendRow) {
+func printTrendTable(w io.Writer, project string, rows []trendRow, missing []string) {
 	if len(rows) == 0 {
 		fmt.Fprintf(w, "Trend — %s: no rows in window\n", project)
+		if len(missing) > 0 {
+			fmt.Fprintf(w, "  missing sources: %s\n\n", strings.Join(missing, ", "))
+		}
 		return
 	}
 	fmt.Fprintf(w, "Trend — %s\n", project)
@@ -852,8 +876,8 @@ func printTrendTable(w io.Writer, project string, rows []trendRow) {
 		}
 		fmt.Fprintf(w, "  edit-cost exclusions: %s\n", strings.Join(parts, "  "))
 	}
-	if len(rows[0].Missing) > 0 {
-		fmt.Fprintf(w, "  missing sources: %s\n", strings.Join(rows[0].Missing, ", "))
+	if len(missing) > 0 {
+		fmt.Fprintf(w, "  missing sources: %s\n", strings.Join(missing, ", "))
 	}
 	fmt.Fprintln(w)
 }
