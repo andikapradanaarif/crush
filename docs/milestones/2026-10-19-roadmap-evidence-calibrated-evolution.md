@@ -55,7 +55,7 @@ Read in full unless marked. "→" is the design consequence.
 | Paper | Key finding | → Design consequence |
 |---|---|---|
 | **RRSI** (2609.24972) | Regularizers (edit budget, critic, noise floor, cost rule, pruning) are what make gains transfer: ablating both groups drops OOD 43.6→40.3, tokens 2.42M→3.80M. Two independent searches agree within CI | Keep all five regularizers; replicate the search (P4) |
-| **Rethinking** (2607.12227) | On TB2.1, harness evolution < parallel sampling at matched budget; disjoint 45/10/34 split: Opus +1.2, GPT-5.4 +0.0. TB may be harness-insensitive for strong models | Matched-budget arm (#new); efficiency endpoint; mid-tier solver |
+| **Rethinking** (2607.12227) | On TB2.1, harness evolution < parallel sampling at matched budget; disjoint 45/10/34 split: Opus +1.2, GPT-5.4 +0.0. TB may be harness-insensitive for strong models | Matched-budget arm (#405); efficiency endpoint; mid-tier solver |
 | **AHE** (2604.25850) | TB2 69.7→77.0 (in-sample); SWE-V transfer +0.4 pass, −12% tokens; prompt-only component −2.3; proposer predicts fixes (33.7% precision) but not regressions (11.8%) | Surface v1 (correction 3); record predictions, never trust them |
 | **HarnessCompass** (2608.01918) | 50/450 split, bash-only seed: held-out 51.6→60.4. Generalization gate alone: held-out 58.4 in 2 turns. Self-feedback without merge: held-out fell to 55.8. Ungated memory = answer keys; gated = principles with applicability clauses | Critic becomes a generalization gate; every lesson carries an applicability clause |
 | **Harness-Updating ≠ Benefit** (2605.30621) | Evolver capability flat (≤3.1pp spread; 9B ≈ Opus) **when evolving skills**; benefit peaks at mid-tier solvers; weak models fail to load/follow artifacts | Mid-tier production solver; measure artifact load/adherence |
@@ -157,8 +157,8 @@ changing one after seeing data requires a dated amendment.
 |---|---|---|
 | T0.1 | ≥ 1 nexus session on a binary ≥ `6494cc0`; `turn_outcomes.hunk_added` present; ≥ 20 turns with non-empty captured hunks | #293 |
 | T0.2 | ≥ 250 settled `turn_outcomes` on nexus; verdict mix reported (baseline 10-19: 196 settled — failed 89 / accepted 61 / unknown 42 / revised 4) | #293 |
-| T0.3 | 50 settled turns hand-labeled; agreement with `turn_outcomes` reported per verdict; **≥ 80% precision on `accepted`** before #298 may mine it | new: label validation set |
-| T0.4 | Weekly personal trend report runs from `crush.db` (edit cost, revision rate, tokens/turn, repeat-failure rate); first 2 weekly baselines recorded | new: trend report |
+| T0.3 | 50 settled turns hand-labeled; agreement with `turn_outcomes` reported per verdict; **≥ 80% precision on `accepted`** before #298 may mine it | #402 |
+| T0.4 | Weekly personal trend report runs from `crush.db` (edit cost, revision rate, tokens/turn, repeat-failure rate); first 2 weekly baselines recorded | #403 |
 | T0.5 | Label-pipeline freeze holds: no label PRs except fixes for defects seen in real rows | — |
 
 **Kill:** T0.3 accepted-precision < 60% → `turn_outcomes` is not
@@ -172,10 +172,10 @@ hunks only.
 | ID | Target | Issue |
 |---|---|---|
 | T1.1 | Harbor installed agent runs `crush run` headless: ≥ 85/89 TB2.1 tasks and ≥ 95% of a 100-task SWE-bench Pro V2 sample complete without infra error; per-trial session DB returned and analyzed | #388 |
-| T1.2 | Base characterization on `deepseek-v4.1-flash`: TB2.1 × 3 passes (k = 2): pass rate, δ, tokens-to-done CV, `c_min`; SWE-Pro sample × 2: σ_d, tokens CV | new: base characterization |
-| T1.3 | TB2.1 base pass in **0.30–0.80**; **δ ≤ 3pp** | new: base characterization |
-| T1.4 | Sizing: N_OOD for (a) 10% tokens-to-done reduction at 80% power and (b) pass non-inferiority margin −3pp; **both ≤ 642** | #389 |
-| T1.5 | Matched-budget best-of-k arm runs once on TB2.1 (k = 3) | new: baseline arm |
+| T1.2 | Base characterization on `deepseek-v4.1-flash`: TB2.1 × 3 passes (k = 2): pass rate, δ, tokens-to-done CV, `c_min`; SWE-Pro sample × 2: σ_d, tokens CV | #404 |
+| T1.3 | TB2.1 base pass in **0.30–0.80**; **δ ≤ 3pp** | #404 |
+| T1.4 | Sizing: N_OOD for (a) 10% tokens-to-done reduction at 80% power and (b) pass non-inferiority margin −3pp; **both ≤ 542** (642 minus the 100-task characterization sample) | #389 |
+| T1.5 | Matched-budget best-of-k arm runs once on TB2.1 (k = 3) | #405 |
 | T1.6 | Contamination probe: issue-text-only file localization on 30 SWE-Pro vs 30 TB tasks for the production solver; recorded, not gating | #226 |
 | T1.7 | Projected spend for P2–P4 ≤ owner budget written in #397 | #397 |
 
@@ -270,10 +270,10 @@ excluding policy rollouts.
 | #397 | P1 — Gate G1 revised thresholds |
 | #390, #391, #392, #395, #78 | P2 — rewritten per corrections 3/4 and Evo-Bench/DGM integrity |
 | #393 | P3 — strong proposer, raw traces, cheap-proposer ablation |
-| #396, #224 | P4 |
+| #396, #224 | P4 — #224 rescoped to a Crush-specific memory-channel regression guard |
 | #229, #298, #399 | P5 — constrained designs |
 | #360 | Open, low — affects only shared `data_directory` setups |
-| New | label validation set (P0), personal trend report (P0), base characterization (P1), matched-budget baseline arm (P1) |
+| New | #402 label validation set (P0), #403 personal trend report (P0), #404 base characterization (P1), #405 matched-budget baseline arm (P1) |
 | Closed (not planned) | #297, #299, #342, #223, #216, #166, #140, #139, #110, #107, #3, #398 — reasons on each issue |
 
 ## Standing rules
