@@ -27,8 +27,7 @@ type Status struct {
 	help     help.Model
 	helpKm   help.KeyMap
 	msg      util.InfoMsg
-	// msgSeq increments on every SetInfoMsg so a delayed clear can
-	// tell "the message I was scheduled for" from a newer one.
+	// msgSeq identifies the message on screen; expiry timers carry it.
 	msgSeq uint64
 
 	// inputMode and yolo drive the mode badge shown before the help hints.
@@ -46,20 +45,26 @@ func NewStatus(com *common.Common, km help.KeyMap) *Status {
 	return s
 }
 
-// SetInfoMsg sets the status info message.
-func (s *Status) SetInfoMsg(msg util.InfoMsg) {
-	s.msgSeq++
+// Show puts msg on screen and returns the command that retires it once its
+// TTL, or [DefaultStatusTTL] if unset, has passed.
+func (s *Status) Show(msg util.InfoMsg) tea.Cmd {
+	ttl := msg.TTL
+	if ttl <= 0 {
+		ttl = DefaultStatusTTL
+	}
 	s.msg = msg
+	s.msgSeq++
+	seq := s.msgSeq
+	return tea.Tick(ttl, func(time.Time) tea.Msg {
+		return util.ClearStatusMsg{Seq: seq}
+	})
 }
 
-// MsgSeq returns the current message generation.
-func (s *Status) MsgSeq() uint64 {
-	return s.msgSeq
-}
-
-// ClearInfoMsg clears the status info message.
-func (s *Status) ClearInfoMsg() {
-	s.msg = util.InfoMsg{}
+// ClearInfoMsg clears the message on screen if seq still identifies it.
+func (s *Status) ClearInfoMsg(seq uint64) {
+	if seq == s.msgSeq {
+		s.msg = util.InfoMsg{}
+	}
 }
 
 // InfoMsg returns the currently displayed info message.
@@ -67,12 +72,11 @@ func (s *Status) InfoMsg() util.InfoMsg {
 	return s.msg
 }
 
-// ClearInfoMsgIf clears the info message only when seq still matches
-// the current generation — the delayed clear for an older message.
-func (s *Status) ClearInfoMsgIf(seq uint64) {
-	if s.msgSeq == seq {
-		s.msg = util.InfoMsg{}
-	}
+// set puts msg on screen without scheduling a retire — for messages
+// that persist until replaced or explicitly cleared.
+func (s *Status) set(msg util.InfoMsg) {
+	s.msg = msg
+	s.msgSeq++
 }
 
 // SetMode sets the input mode and YOLO state used for the mode badge.
@@ -191,12 +195,4 @@ func (s *Status) Draw(scr uv.Screen, area uv.Rectangle) {
 
 	// Draw the info message over the help view
 	uv.NewStyledString(strings.Repeat(" ", indInset)+ind+info).Draw(scr, area)
-}
-
-// clearInfoMsgCmd returns a command that clears the info message after the
-// given TTL.
-func clearInfoMsgCmd(ttl time.Duration, seq uint64) tea.Cmd {
-	return tea.Tick(ttl, func(time.Time) tea.Msg {
-		return util.ClearStatusMsg{Seq: seq}
-	})
 }

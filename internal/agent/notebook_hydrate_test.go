@@ -23,7 +23,7 @@ func hydrateTestConfig(t *testing.T) *config.ConfigStore {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(isolated, ".local", "share"))
 	t.Setenv("CRUSH_GLOBAL_CONFIG", filepath.Join(isolated, ".config", "crush"))
 	t.Setenv("CRUSH_GLOBAL_DATA", filepath.Join(isolated, ".local", "share", "crush"))
-	store, err := config.Load(t.TempDir(), t.TempDir(), false)
+	store, err := config.Load(t.Context(), t.TempDir(), t.TempDir(), false)
 	require.NoError(t, err)
 	store.Config().MCP = map[string]config.MCPConfig{"mem0": {}}
 	return store

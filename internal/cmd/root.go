@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -209,12 +210,24 @@ func Execute() {
 		_, _ = w.WriteString(heartbit.String())
 		rootCmd.SetVersionTemplate(b.String() + "\n" + defaultVersionTemplate)
 	}
-	if err := fang.Execute(
-		context.Background(),
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	err := fang.Execute(
+		ctx,
 		rootCmd,
 		fang.WithVersion(version.Version),
-		fang.WithNotifySignal(os.Interrupt),
-	); err != nil {
+		fang.WithErrorHandler(func(w io.Writer, styles fang.Styles, err error) {
+			if ctx.Err() == nil {
+				fang.DefaultErrorHandler(w, styles, err)
+			}
+		}),
+	)
+	interrupted := ctx.Err() != nil
+	stop()
+	switch {
+	case interrupted:
+		// An interrupt is not a failure worth printing; exit like a shell would.
+		os.Exit(130)
+	case err != nil:
 		os.Exit(1)
 	}
 }
@@ -280,7 +293,7 @@ func setupLocalWorkspace(cmd *cobra.Command) (workspace.Workspace, func(), error
 		return nil, nil, err
 	}
 
-	store, err := config.Init(cwd, dataDir, debug)
+	store, err := config.Init(ctx, cwd, dataDir, debug)
 	if err != nil {
 		return nil, nil, err
 	}

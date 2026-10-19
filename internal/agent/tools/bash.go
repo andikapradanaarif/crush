@@ -204,7 +204,7 @@ func blockFuncs() []shell.BlockFunc {
 	}
 }
 
-func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workingDir, spillDir string, attribution *config.Attribution, modelID string, cmdLog cmdlog.Service) fantasy.AgentTool {
+func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workingDir, spillDir string, attribution *config.Attribution, modelID string, maxBackgroundJobs int, cmdLog cmdlog.Service) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		BashToolName,
 		string(bashDescription(attribution, modelID)),
@@ -259,12 +259,11 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 			if params.RunInBackground {
 				startTime := time.Now()
 				bgManager := shell.GetBackgroundShellManager()
-				bgManager.Cleanup()
 				// The pre-exec stamp rides the job to whichever path
 				// records it — sync fast-exit, job_output, or kill.
 				headBefore := preRunHead(ctx, cmdLog)
 				// Use background context so it continues after tool returns
-				bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), params.Command, params.Description, headBefore)
+				bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), params.Command, params.Description, maxBackgroundJobs, headBefore)
 				if err != nil {
 					return fantasy.ToolResponse{}, fmt.Errorf("error starting background shell: %w", err)
 				}
@@ -337,9 +336,8 @@ func NewBashTool(lspManager *lsp.Manager, permissions permission.Service, workin
 
 			// Start with detached context so it can survive if moved to background
 			bgManager := shell.GetBackgroundShellManager()
-			bgManager.Cleanup()
 			headBefore := preRunHead(ctx, cmdLog)
-			bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), params.Command, params.Description, headBefore)
+			bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), params.Command, params.Description, maxBackgroundJobs, headBefore)
 			if err != nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("error starting shell: %w", err)
 			}

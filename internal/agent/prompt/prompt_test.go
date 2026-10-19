@@ -13,7 +13,7 @@ import (
 
 func newTestStore(t *testing.T, workingDir string) *config.ConfigStore {
 	t.Helper()
-	store, err := config.Init(workingDir, filepath.Join(t.TempDir(), "data"), false)
+	store, err := config.Init(t.Context(), workingDir, filepath.Join(t.TempDir(), "data"), false)
 	require.NoError(t, err)
 	return store
 }

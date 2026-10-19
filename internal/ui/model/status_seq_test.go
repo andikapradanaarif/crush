@@ -17,16 +17,16 @@ func TestStatusStaleClearKeepsNewerMessage(t *testing.T) {
 	t.Parallel()
 
 	m := newPrismTestUI()
-	m.status.SetInfoMsg(util.InfoMsg{Msg: "first"})
-	seqA := m.status.MsgSeq()
-	m.status.SetInfoMsg(util.InfoMsg{Msg: "second"})
+	m.status.Show(util.InfoMsg{Msg: "first"})
+	seqA := m.status.msgSeq
+	m.status.Show(util.InfoMsg{Msg: "second"})
 
 	// The tick scheduled for "first" fires late — "second" survives.
 	m.Update(util.ClearStatusMsg{Seq: seqA})
 	require.Equal(t, "second", m.status.InfoMsg().Msg)
 
 	// The tick scheduled for "second" clears it.
-	m.Update(util.ClearStatusMsg{Seq: m.status.MsgSeq()})
+	m.Update(util.ClearStatusMsg{Seq: m.status.msgSeq})
 	require.True(t, m.status.InfoMsg().IsEmpty())
 }
 
@@ -43,7 +43,7 @@ func TestNotebookStallResolveScopedToSessionAndMessage(t *testing.T) {
 
 	// A newer unrelated message replaced the warning — the resolve
 	// must not clear it.
-	m.status.SetInfoMsg(util.InfoMsg{Msg: "unrelated"})
+	m.status.Show(util.InfoMsg{Msg: "unrelated"})
 	m.handleAgentNotification(notify.Notification{
 		Type: notify.TypeNotebookStallResolved, SessionID: "s1",
 	})

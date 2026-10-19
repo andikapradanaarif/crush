@@ -17,7 +17,7 @@ import (
 func TestCoderPrompt_ModeAware(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	store, err := config.Init(dir, "", false)
+	store, err := config.Init(t.Context(), dir, "", false)
 	require.NoError(t, err)
 
 	interactive, err := coderPrompt(
@@ -50,7 +50,7 @@ func TestCoderPrompt_MapHint(t *testing.T) {
 	dir := t.TempDir()
 
 	render := func(enabled bool) string {
-		store, err := config.Init(dir, "", false)
+		store, err := config.Init(t.Context(), dir, "", false)
 		require.NoError(t, err)
 		store.Config().Options.ProjectIndex = &enabled
 		p, err := coderPrompt(prompt.WithWorkingDir(dir))
@@ -73,7 +73,7 @@ func TestCoderPrompt_NotebookToolGating(t *testing.T) {
 	dir := t.TempDir()
 
 	render := func(drop ...string) string {
-		store, err := config.Init(dir, "", false)
+		store, err := config.Init(t.Context(), dir, "", false)
 		require.NoError(t, err)
 		// Neutralize ambient global config — a developer's
 		// disabled_tools, agent overrides, or notebook toggle would
