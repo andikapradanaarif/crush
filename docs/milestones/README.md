@@ -16,17 +16,21 @@ information to `crush.db` but never effectively read it back across
 sessions — memory was a write-only ledger. This milestone series exists
 to turn "it learns" from a claim into a measurement.
 
-**Direction (10-17): regularized harness evolution.** Plan of record:
-[2026-10-17-roadmap-regularized-evolution](2026-10-17-roadmap-regularized-evolution.md).
+**Direction (10-19): evidence-calibrated harness evolution.** Plan of
+record:
+[2026-10-19-roadmap-evidence-calibrated-evolution](2026-10-19-roadmap-evidence-calibrated-evolution.md).
 The learning-loop machinery is correct but has no data at single-user
-volume (348 real turns, 0 `referent_episodes`, 0 `project_rates`), and
-the eval corpus sits at the pass ceiling. The bet moves to an offline
-RRSI-style loop that evolves prompts, tool descriptions, edges, and
-memory settings, judged on tasks it never tuned on, with every kept
-change landing as a reviewed PR. Gate G1 — Terminal-Bench 2.1 evolve
-set, SWE-bench Verified OOD gate, δ ≤ 3pp — decides whether transfer
-is measurable at all; if not, the fallback keeps the ledger discipline
-without self-evolving claims.
+volume (0 `referent_episodes`, 0 `project_rates`), and the eval corpus
+sits at the pass ceiling. The bet is an offline RRSI-style loop that
+evolves a gated lessons file, tool behavior, hook configs, and memory
+settings — judged on tasks it never tuned on, every kept change landing
+as a reviewed PR. Evolve set: Terminal-Bench 2.1. OOD gate: SWE-bench
+Pro V2 (SWE-bench Verified is contaminated). Primary endpoint:
+tokens-to-done at pass-rate non-inferiority, against a matched-budget
+best-of-k arm. Solver: the production model (`deepseek-v4.1-flash`).
+Gate G1 decides whether transfer is measurable at all; if not, the
+fallback keeps the ledger discipline without self-evolving claims.
+`turn_outcomes` now carries data (nexus 10-19: 196 settled turns).
 
 **Failure memory — existence proof: DONE and armored.** A durable failure
 record written in session N provably changes behavior in session N+1, measured
@@ -144,4 +148,5 @@ record the plan that followed from it.
 | 2026-10-09 | roadmap | [Value and use](2026-10-09-roadmap-value-and-use.md) — superseded 10-15: phases mirror milestones; memory off-instrument-building onto real use |
 | 2026-10-15 | exp | [Verify-loop + resolver chain](2026-10-15-exp-verify-loop-and-resolver.md) — edge validated in-sample (86/88 vs 78/88, cross-invocation), resolver made live, engagement-conditional coverage — pool relabeled validation per #343 |
 | 2026-10-15 | roadmap | [Honest evidence before new capability](2026-10-15-roadmap-honest-evidence.md) — superseded 10-17: two reviews found label instability + in-sample claims; integrity work (#340–#348) precedes procedural Phase A |
-| 2026-10-17 | roadmap | [Regularized harness evolution](2026-10-17-roadmap-regularized-evolution.md) — **plan of record**: learning loop parked (no data at single-user volume); RRSI-style evolution loop with Gate G1 (Terminal-Bench evolve, SWE-bench Verified OOD); memory channels become evolvable components; edit capture for user-level memory |
+| 2026-10-17 | roadmap | [Regularized harness evolution](2026-10-17-roadmap-regularized-evolution.md) — superseded 10-19: learning loop parked (no data at single-user volume); RRSI-style evolution loop with Gate G1; memory channels become evolvable components; edit capture for user-level memory |
+| 2026-10-19 | roadmap | [Evidence-calibrated harness evolution](2026-10-19-roadmap-evidence-calibrated-evolution.md) — **plan of record**: 19 papers read (17 in full); OOD gate → SWE-bench Pro V2; primary endpoint → tokens-to-done at pass non-inferiority; v1 surface → lessons/tools/hooks/params; matched-budget baseline; production-model solver; numbered targets per phase |

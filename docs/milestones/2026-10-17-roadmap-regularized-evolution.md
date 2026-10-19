@@ -1,5 +1,11 @@
 # 2026-10-17 — Roadmap: regularized harness evolution
 
+**Superseded by [2026-10-19-roadmap-evidence-calibrated-evolution](2026-10-19-roadmap-evidence-calibrated-evolution.md)**
+— same direction; a full-text read of the literature replaced the OOD
+gate (SWE-bench Verified → SWE-bench Pro V2), the primary endpoint
+(pass rate → tokens-to-done at pass non-inferiority), the v1 mutable
+surface, and added a matched-budget baseline arm.
+
 **Plan of record.** Supersedes
 [2026-10-15-roadmap-honest-evidence](2026-10-15-roadmap-honest-evidence.md),
 whose integrity rules all carry forward. This plan changes *what the
