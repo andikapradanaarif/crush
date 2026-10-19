@@ -799,6 +799,15 @@
             0
           ]
         },
+        "max_background_jobs": {
+          "type": "integer",
+          "description": "How many background shell jobs may run at once. Jobs that have finished never count against it. 0 or negative restores the default.",
+          "default": 50,
+          "examples": [
+            10,
+            200
+          ]
+        },
         "turn_context": {
           "type": "string",
           "enum": [
@@ -848,15 +857,7 @@
         },
         "project_key": {
           "type": "string",
-          "description": "Pin the command/failure memory partition identity instead of deriving it from the repo remote + common dir. Workspaces sharing a key share memory rows — for eval snapshots and deliberate cross-checkout sharing. Experimental.",
-        "max_background_jobs": {
-          "type": "integer",
-          "description": "How many background shell jobs may run at once. Jobs that have finished never count against it. 0 or negative restores the default.",
-          "default": 50,
-          "examples": [
-            10,
-            200
-          ]
+          "description": "Pin the command/failure memory partition identity instead of deriving it from the repo remote + common dir. Workspaces sharing a key share memory rows — for eval snapshots and deliberate cross-checkout sharing. Experimental."
         }
       },
       "additionalProperties": false,
