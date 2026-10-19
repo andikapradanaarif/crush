@@ -143,6 +143,36 @@ failures → evolve-task candidates (#399); (c) procedural memory from
 verified traces (#298). All additions pass an evaluator; all stores
 are size-capped and pruned.
 
+## Engine fit (code audit, 10-19)
+
+The plan was checked against the code. Every evolution candidate must
+be expressible as an **arm delta the existing eval engine can run on
+one build** — `ArmConfig.Options` materialized into `.crush.json`
+(`internal/eval/materialize.go`), both arms on the same binary
+(`driver.go:126`, `RunRecord.Invocation`).
+
+| Plan element | Engine reality | Fit |
+|---|---|---|
+| Lessons file | `options.context_paths` → rendered in `<project_context>` (stable cache class) by `prompt.promptData` | **Native** — options delta, no code |
+| Skill bodies | `options.skills_paths` → `skills.Discover`, user overrides builtin | **Native** |
+| `params.Memory`, channel flags | `options.memory_params` overlay + `optionSpecs` bools | **Native** |
+| Primary endpoint | `DecisionRule.Primary.Metric = "tokens_to_done"`; `Guardrail{Metric: "pass_rate", MinDelta}` = non-inferiority | **Native** |
+| Middleware | Run-boundary edges already exist (`runEdgeSet`: verification, todos, stall, verify-loop, burn-watch, reconcile) — the AHE finish-hook layer. Thresholds are Go constants (`maxRepairAttempts=2`, `burnWatchStepsThreshold=30`, `verifyLoopMinSteps=8`, `loopDetectionMaxRepeats=5`, `scopeGateMinExploration=8`, …) | **Gap → #408**: move thresholds into a bounded, versioned `params` block so edges become an options-delta surface without opening Go code |
+| Hooks | `PreToolUse` (deny/allow/`updated_input`/context), `PreCompact`; config is top-level `hooks`, not `options` | **Gap → #409**: arms can only carry `options` |
+| Tool behavior | Top-level `tools.{ls,grep,glob}` limits/timeouts exist; bash `MaxOutputLength=30000` and `toolResultMaxContentBytes=50_000` are constants | **Gap → #409** (tools block); bash cap optional |
+| Prompts, tool descriptions | `//go:embed` + `template.Must` at package init (`prompts.go`, `tools/*.go`) — compile-time | **Gap → #406**: a runtime override dir set by an option keeps one binary per invocation and keeps upstream-owned embedded files untouched until a change lands |
+| OOD statistics | `compare.go`: BCa over pairs **resampled within trajectory**; `requiredPairs` skips trajectories with < 2 pairs. SWE-Pro OOD runs k = 1 per task → within-stratum variance is degenerate | **Gap → #407**: task-level (cluster) resampling mode, required before any OOD read |
+| Best-of-k arm | Comparator pairs only `treatment` vs `control` | **Gap → #405**: run as its own treatment-vs-control comparison or add multi-arm compare |
+| Harbor trials | Runner only runs local git-fixture trajectories + `check.sh`; containers can't go through it | **Plan**: Harbor drives, an ingester writes `RunRecord`s (Experiment, TrajectoryID = task id, Arm, Invocation, RunIndex, Outcome, Tokens, Steps, SessionDB, BaselineKey) so `LoadExperimentRecords` / compare / gate run unchanged (#388) |
+| Headless run | `RunNonInteractive` auto-approves the session (`app.go:494`); `--data-dir` persistent; `CGO_ENABLED=0` → static `GOOS=linux` build | **Native** |
+
+**Consequence for sequencing:** P2 manual rounds can start on the
+native surfaces (lessons file, skills, `memory_params`, channel flags)
+while the four gaps land; prompt/tool-description candidates wait for
+the override layer, edge-threshold candidates for the params move,
+hook/tool-block candidates for the arm-config extension, and **no OOD
+read happens before the cluster bootstrap**.
+
 ## Phases, targets, exits
 
 Every phase has numbered targets. A phase exits when all its targets
@@ -178,8 +208,9 @@ hunks only.
 | T1.5 | Matched-budget best-of-k arm runs once on TB2.1 (k = 3) | #405 |
 | T1.6 | Contamination probe: issue-text-only file localization on 30 SWE-Pro vs 30 TB tasks for the production solver; recorded, not gating | #226 |
 | T1.7 | Projected spend for P2–P4 ≤ owner budget written in #397 | #397 |
+| T1.8 | Task-level (cluster) bootstrap mode implemented and required by the gate for OOD decision rules | #407 |
 
-**Gate G1 (#397):** commit iff T1.1, T1.3, T1.4, T1.7 hold.
+**Gate G1 (#397):** commit iff T1.1, T1.3, T1.4, T1.7, T1.8 hold.
 **Fallback:** ledger + gate as discipline for hand-made mechanism
 changes; no self-evolving or transfer claims; Loop 3 proceeds.
 
@@ -196,6 +227,7 @@ changes; no self-evolving or transfer claims; Loop 3 proceeds.
 | T2.5 | 2–3 owner-written rounds through the ledger with **zero manual overrides** of gate/selector decisions | #390 |
 | T2.6 | Cost rule constants (β₀, β₁, δ, `c_min`) committed from P1 data | #395 |
 | T2.7 | #78 phase D (workspace confinement) merged before any unattended proposer run | #78 |
+| T2.8 | Engine enablers merged: prompt/description override layer (#406), edge thresholds → params (#408), arm config carries hooks + tools (#409); each surface opens to candidates only after its enabler lands | #406 #408 #409 |
 
 **Kill:** T2.3 fails twice after fixes → the selector cannot separate
 known effects; stop before automation.
@@ -273,7 +305,7 @@ excluding policy rollouts.
 | #396, #224 | P4 — #224 rescoped to a Crush-specific memory-channel regression guard |
 | #229, #298, #399 | P5 — constrained designs |
 | #360 | Open, low — affects only shared `data_directory` setups |
-| New | #402 label validation set (P0), #403 personal trend report (P0), #404 base characterization (P1), #405 matched-budget baseline arm (P1) |
+| New | #402 label validation set (P0), #403 personal trend report (P0), #404 base characterization (P1), #405 matched-budget baseline arm (P1); engine fit: #407 cluster bootstrap (P1), #406 override layer, #408 edge params, #409 arm config (P2) |
 | Closed (not planned) | #297, #299, #342, #223, #216, #166, #140, #139, #110, #107, #3, #398 — reasons on each issue |
 
 ## Standing rules
