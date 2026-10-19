@@ -329,16 +329,17 @@ func hasColumn(ctx context.Context, conn *sql.DB, table, col string) bool {
 		return false
 	}
 	defer rows.Close()
+	found := false
 	for rows.Next() {
 		var cid int
 		var name, typ string
 		var notnull, pk int
 		var dflt any
 		if rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk) == nil && name == col {
-			return true
+			found = true
 		}
 	}
-	return false
+	return found && rows.Err() == nil
 }
 
 func probeTrendSchema(ctx context.Context, conn *sql.DB) trendSchema {
