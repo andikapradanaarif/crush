@@ -208,6 +208,20 @@ type Querier interface {
 	// working set, not heat; a file only this session read would carry
 	// a sessions count of 1 noise-signal anyway.
 	ListHotReadFiles(ctx context.Context, arg ListHotReadFilesParams) ([]ListHotReadFilesRow, error)
+	// Edited-path lists of the turn rows that follow this one on the
+	// same project (#394): hunk_after for turn N physically contains
+	// turns N+1..end across sessions too -- the newer-session settle
+	// trigger means the NEXT session's first-turn edits often land
+	// before settlement runs. The flag marks paths a later recorded
+	// turn also touched, so the preference pair isn't misread as a
+	// user revision when a later agent turn rewrote the region.
+	// Under the LIMIT, DESC order is the right bias: a settling row's
+	// later turns live at the timeline tail, so the newest rows are the
+	// ones worth keeping. ASC would fill the budget with the ancient
+	// row's earliest successors and under-flag exactly the fresh rows
+	// this flag exists for. Mid-history touches still get missed for
+	// ancient rows; the stale flag already discounts those.
+	ListLaterTurnEditPaths(ctx context.Context, arg ListLaterTurnEditPathsParams) ([]ListLaterTurnEditPathsRow, error)
 	ListLatestSessionFiles(ctx context.Context, sessionID string) ([]File, error)
 	ListMCPDisabledServers(ctx context.Context) ([]string, error)
 	ListMCPEnabledServers(ctx context.Context) ([]string, error)
@@ -455,10 +469,11 @@ type Querier interface {
 	// a second crush instance sharing the DB from re-freezing the row --
 	// labelMu only serializes in-process.
 	SettleReferentEpisode(ctx context.Context, arg SettleReferentEpisodeParams) error
-	// Freeze one turn row's verdict (#340). Same contract as episodes:
-	// written once, never re-derived. The WHERE guard keeps a second
-	// crush instance sharing the DB from re-freezing the row -- labelMu
-	// only serializes in-process.
+	// Freeze one turn row's verdict (#340) and write its post-window
+	// hunk content (#394) in the same once-only pass. Same contract as
+	// episodes: written once, never re-derived. The WHERE guard keeps a
+	// second crush instance sharing the DB from re-freezing the row --
+	// labelMu only serializes in-process.
 	SettleTurnOutcome(ctx context.Context, arg SettleTurnOutcomeParams) error
 	UpdateMessage(ctx context.Context, arg UpdateMessageParams) error
 	UpdateNotebookCompression(ctx context.Context, arg UpdateNotebookCompressionParams) error

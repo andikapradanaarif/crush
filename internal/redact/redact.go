@@ -1,6 +1,9 @@
 package redact
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // redactedPlaceholder replaces a secret-shaped match in outbound
 // text. The match is removed whole rather than masked in place so no
@@ -31,6 +34,23 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`),
 	// PEM private key blocks.
 	regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----`),
+	// JWTs: header.payload.signature in base64url. Every real JWT's
+	// header starts "eyJ" ({"…), so the anchor keeps false positives
+	// rare without an entropy check.
+	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b`),
+}
+
+// credentialPrefixPatterns keep their first capture group so the
+// scrubbed text still reads as what it was: "postgres://…@host"
+// stays a postgres URL instead of an anonymous [REDACTED] gap.
+var credentialPrefixPatterns = []*regexp.Regexp{
+	// URL-embedded credentials: scheme://user:pass@host — connection
+	// strings carry no sensitive key name for the generic rule to
+	// catch, but the user:pass authority is always credential-shaped.
+	// The password match is @-greedy (excludes only space and the
+	// path slash) so an unencoded @ inside the password — u:p@ss@h —
+	// redacts to the LAST @, not the first.
+	regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^\s/:@]+:[^\s/]+@`),
 }
 
 // Secrets scrubs credential-shaped substrings from text bound for a
@@ -41,5 +61,39 @@ func Secrets(s string) string {
 	for _, p := range secretPatterns {
 		s = p.ReplaceAllString(s, redactedPlaceholder)
 	}
+	for _, p := range credentialPrefixPatterns {
+		s = p.ReplaceAllString(s, "${1}"+redactedPlaceholder+"@")
+	}
 	return s
+}
+
+var (
+	pemBeginLine = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----`)
+	pemEndLine   = regexp.MustCompile(`-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----`)
+)
+
+// SecretsLinePreserving redacts like Secrets but keeps the line
+// count: multi-line matches (PEM blocks) are scrubbed line by line,
+// so positions computed against the unscrubbed text still hold.
+// hunk_after slices windows AFTER redaction — a whole-text scrub
+// would let a window cut inside a key block and leak the middle
+// lines past the BEGIN-less region (#400).
+func SecretsLinePreserving(s string) string {
+	lines := strings.Split(s, "\n")
+	inPEM := false
+	for i, l := range lines {
+		switch {
+		case inPEM:
+			lines[i] = redactedPlaceholder
+			if pemEndLine.MatchString(l) {
+				inPEM = false
+			}
+		case pemBeginLine.MatchString(l):
+			lines[i] = redactedPlaceholder
+			inPEM = true
+		default:
+			lines[i] = Secrets(l)
+		}
+	}
+	return strings.Join(lines, "\n")
 }

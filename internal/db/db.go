@@ -270,6 +270,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listHotReadFilesStmt, err = db.PrepareContext(ctx, listHotReadFiles); err != nil {
 		return nil, fmt.Errorf("error preparing query ListHotReadFiles: %w", err)
 	}
+	if q.listLaterTurnEditPathsStmt, err = db.PrepareContext(ctx, listLaterTurnEditPaths); err != nil {
+		return nil, fmt.Errorf("error preparing query ListLaterTurnEditPaths: %w", err)
+	}
 	if q.listLatestSessionFilesStmt, err = db.PrepareContext(ctx, listLatestSessionFiles); err != nil {
 		return nil, fmt.Errorf("error preparing query ListLatestSessionFiles: %w", err)
 	}
@@ -871,6 +874,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listHotReadFilesStmt: %w", cerr)
 		}
 	}
+	if q.listLaterTurnEditPathsStmt != nil {
+		if cerr := q.listLaterTurnEditPathsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listLaterTurnEditPathsStmt: %w", cerr)
+		}
+	}
 	if q.listLatestSessionFilesStmt != nil {
 		if cerr := q.listLatestSessionFilesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listLatestSessionFilesStmt: %w", cerr)
@@ -1302,6 +1310,7 @@ type Queries struct {
 	listFilesByPathStmt                     *sql.Stmt
 	listFilesBySessionStmt                  *sql.Stmt
 	listHotReadFilesStmt                    *sql.Stmt
+	listLaterTurnEditPathsStmt              *sql.Stmt
 	listLatestSessionFilesStmt              *sql.Stmt
 	listMCPDisabledServersStmt              *sql.Stmt
 	listMCPEnabledServersStmt               *sql.Stmt
@@ -1452,6 +1461,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listFilesByPathStmt:                     q.listFilesByPathStmt,
 		listFilesBySessionStmt:                  q.listFilesBySessionStmt,
 		listHotReadFilesStmt:                    q.listHotReadFilesStmt,
+		listLaterTurnEditPathsStmt:              q.listLaterTurnEditPathsStmt,
 		listLatestSessionFilesStmt:              q.listLatestSessionFilesStmt,
 		listMCPDisabledServersStmt:              q.listMCPDisabledServersStmt,
 		listMCPEnabledServersStmt:               q.listMCPEnabledServersStmt,

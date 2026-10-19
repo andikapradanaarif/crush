@@ -573,13 +573,15 @@ ORDER BY id ASC;
 -- are likewise never rewritten.
 INSERT INTO turn_outcomes
     (session_id, turn_id, project_key, edited_paths, edit_hunks,
-     commands, next_verdict, settle_at, param_version, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     commands, hunk_added, next_verdict, settle_at, param_version,
+     created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(session_id, turn_id) DO UPDATE SET
     next_verdict  = excluded.next_verdict,
     edited_paths  = excluded.edited_paths,
     edit_hunks    = excluded.edit_hunks,
-    commands      = excluded.commands
+    commands      = excluded.commands,
+    hunk_added    = excluded.hunk_added
 WHERE turn_outcomes.settled_at IS NULL
     AND turn_outcomes.next_verdict = '';
 
@@ -587,8 +589,8 @@ WHERE turn_outcomes.settled_at IS NULL
 -- Turn rows whose window closed without settling (#340): the same
 -- dual trigger as episodes -- the +24h cap elapsed or a newer session
 -- exists. Oldest first.
-SELECT id, session_id, turn_id, edited_paths, edit_hunks, commands,
-    next_verdict, settle_at, created_at
+SELECT id, session_id, turn_id, edited_paths, edit_hunks,
+    commands, hunk_added, next_verdict, settle_at, created_at
 FROM turn_outcomes
 WHERE turn_outcomes.project_key = ?
     AND turn_outcomes.settled_at IS NULL
@@ -613,11 +615,31 @@ ORDER BY created_at ASC
 LIMIT ?;
 
 -- name: SettleTurnOutcome :exec
--- Freeze one turn row's verdict (#340). Same contract as episodes:
--- written once, never re-derived. The WHERE guard keeps a second
--- crush instance sharing the DB from re-freezing the row -- labelMu
--- only serializes in-process.
-UPDATE turn_outcomes SET verdict = ?, settled_at = ? WHERE id = ? AND settled_at IS NULL;
+-- Freeze one turn row's verdict (#340) and write its post-window
+-- hunk content (#394) in the same once-only pass. Same contract as
+-- episodes: written once, never re-derived. The WHERE guard keeps a
+-- second crush instance sharing the DB from re-freezing the row --
+-- labelMu only serializes in-process.
+UPDATE turn_outcomes SET verdict = ?, settled_at = ?, hunk_after = ? WHERE id = ? AND settled_at IS NULL;
+
+-- name: ListLaterTurnEditPaths :many
+-- Edited-path lists of the turn rows that follow this one on the
+-- same project (#394): hunk_after for turn N physically contains
+-- turns N+1..end across sessions too -- the newer-session settle
+-- trigger means the NEXT session's first-turn edits often land
+-- before settlement runs. The flag marks paths a later recorded
+-- turn also touched, so the preference pair isn't misread as a
+-- user revision when a later agent turn rewrote the region.
+-- Under the LIMIT, DESC order is the right bias: a settling row's
+-- later turns live at the timeline tail, so the newest rows are the
+-- ones worth keeping. ASC would fill the budget with the ancient
+-- row's earliest successors and under-flag exactly the fresh rows
+-- this flag exists for. Mid-history touches still get missed for
+-- ancient rows; the stale flag already discounts those.
+SELECT created_at, edited_paths FROM turn_outcomes
+WHERE project_key = ? AND created_at > ?
+ORDER BY created_at DESC
+LIMIT ?;
 
 -- name: ListRecentSessions :many
 -- Sessions other than the live one, newest first -- the backfill

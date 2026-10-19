@@ -2,9 +2,12 @@ package cmdlog
 
 import (
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,16 +23,20 @@ type turnCols struct {
 	settleAt    int64
 	nextVerdict string
 	editedPaths string
+	hunkAdded   string
+	hunkAfter   string
 }
 
 func readTurn(t *testing.T, env *labelEnv, sessionID, turnID string) turnCols {
 	t.Helper()
 	var c turnCols
 	require.NoError(t, env.conn.QueryRowContext(t.Context(),
-		`SELECT verdict, settled_at, settle_at, next_verdict, edited_paths
+		`SELECT verdict, settled_at, settle_at, next_verdict, edited_paths,
+		        hunk_added, hunk_after
 		 FROM turn_outcomes
 		 WHERE session_id = ? AND turn_id = ?`, sessionID, turnID).
-		Scan(&c.verdict, &c.settledAt, &c.settleAt, &c.nextVerdict, &c.editedPaths))
+		Scan(&c.verdict, &c.settledAt, &c.settleAt, &c.nextVerdict,
+			&c.editedPaths, &c.hunkAdded, &c.hunkAfter))
 	return c
 }
 
@@ -126,6 +133,920 @@ func TestRecordTurnOutcome_JudgedUnknownKeepsEvidence(t *testing.T) {
 	require.Equal(t, ReferentUnknown, c.nextVerdict)
 	require.JSONEq(t, `["x.go"]`, c.editedPaths,
 		"a judged-unknown row keeps its evidence")
+}
+
+// hunk_added records the verbatim per-edit pairs — redacted,
+// bounded — with the execution-time spans extraction derived from
+// the tool results' own before/after content (#394).
+func TestRecordTurnOutcome_HunkAdded(t *testing.T) {
+	env := setupLabelsTest(t)
+	outside := filepath.Join(t.TempDir(), "outside.go")
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go", ".env", "big.go", "id_rsa", "id_generator.go", "credentials.go", "sub/.env/config", "secrets.md", outside, "../esc.go"},
+		HunkAdded: map[string][]HunkEdit{
+			"x.go":            {{Old: "old", New: "key := \"val\"\nAPI_KEY=abc123"}},
+			".env":            {{New: "DATABASE_URL=postgres://u:p@h/db"}},
+			"big.go":          {{New: strings.Repeat("b", maxHunkPathRunes+10)}},
+			"id_rsa":          {{New: "-----BEGIN"}},
+			"id_generator.go": {{New: "code"}},
+			"credentials.go":  {{New: "code"}},
+			"sub/.env/config": {{New: "x"}},
+			"secrets.md":      {{New: "x"}},
+			outside:           {{Old: "secret outside text", New: "outside"}},
+			"../esc.go":       {{Old: "old", New: "new"}},
+		},
+		HunkSpans: map[string][]HunkSpan{
+			"x.go":  {{Start: 1, End: 3, Before: "head", After: "tail"}},
+			outside: {{Start: 0, End: 1, Before: "outside line"}},
+		},
+	}))
+
+	var m map[string]hunkAddedEntry
+	require.NoError(t, json.Unmarshal([]byte(readTurn(t, env, "s1", "t0").hunkAdded), &m))
+	require.Equal(t, "key := \"val\"\n[REDACTED]",
+		m["x.go"].Edits[0].New,
+		"a credential assignment must not persist verbatim")
+	require.Equal(t, "old", m["x.go"].Edits[0].Old,
+		"the pre-edit text is preserved for region location")
+	require.Equal(t, []HunkSpan{{Start: 1, End: 3, Before: "head", After: "tail"}},
+		m["x.go"].Spans, "the execution-time span and anchors persist")
+	require.Equal(t, 1, m["x.go"].V, "the cell is versioned")
+	require.Equal(t, hunkSensitive, m[".env"].State,
+		"a credential-carrying path stores a state, never content")
+	require.Equal(t, hunkSensitive, m["id_rsa"].State,
+		"key material by name is sensitive")
+	require.NotEqual(t, hunkSensitive, m["id_generator.go"].State,
+		"id_* is narrowed to key names, not every id_ prefix")
+	require.NotEqual(t, hunkSensitive, m["credentials.go"].State,
+		"a source file named credentials* is ordinary code")
+	require.Equal(t, hunkSensitive, m["sub/.env/config"].State,
+		"a .env directory marks its contents, not just the file")
+	require.Equal(t, hunkSensitive, m["secrets.md"].State,
+		"docs can hold pasted secrets — .md is not a source ext")
+	require.True(t, m["big.go"].Truncated,
+		"an edit past the per-path bound is cut and flagged")
+	require.Equal(t, hunkOutOfWorkspace, m[outside].State,
+		"an absolute path outside the workspace stores state only")
+	require.Empty(t, m[outside].Edits,
+		"outside content must not persist on the added side")
+	require.Empty(t, m[outside].Spans,
+		"anchors are outside-file lines — they drop with the content")
+	require.Equal(t, hunkOutOfWorkspace, m["../esc.go"].State,
+		"a textual escape stores state only")
+}
+
+// The placeholder-repair arm refreshes hunk_added along with the
+// rest of the evidence.
+func TestRecordTurnOutcome_PlaceholderRepairsHunkAdded(t *testing.T) {
+	env := setupLabelsTest(t)
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID: "s1", TurnID: "t0",
+	}))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string][]HunkEdit{"x.go": {{New: "added text"}}},
+		HunkSpans:   map[string][]HunkSpan{"x.go": {{Start: 0, End: 1}}},
+		NextVerdict: ReferentAccepted,
+	}))
+	require.JSONEq(t,
+		`{"x.go":{"v":1,"edits":[{"new":"added text"}],"spans":[{"start":0,"end":1}],"state":"ok"}}`,
+		readTurn(t, env, "s1", "t0").hunkAdded)
+}
+
+// hunk_after slices the post-window content around the
+// execution-time spans — the "what the region became" half of the
+// pair. States name every non-content outcome.
+func TestSettleTurnOutcomes_HunkAfter(t *testing.T) {
+	env := setupLabelsTest(t)
+	dir := env.workingDir
+	write := func(p, content string) {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, p), []byte(content), 0o644))
+	}
+	write("x.go", "head\nuser rewrote it\nmid\ntail\n")
+	write(".env", "SECRET=x")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "bin.dat"),
+		[]byte{'a', 0, 'b'}, 0o644))
+
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID: "s1",
+		TurnID:    "t0",
+		EditedPaths: []string{
+			"x.go", "gone.go", "bin.dat", "../esc.go", ".env",
+		},
+		HunkAdded: map[string][]HunkEdit{
+			"x.go":    {{New: "agent wrote this"}},
+			"gone.go": {{New: "was there"}},
+		},
+		HunkSpans: map[string][]HunkSpan{
+			"x.go": {{Start: 1, End: 2, Before: "head", After: "mid"}},
+		},
+	}))
+
+	dueViaNewerSession(t, env, "s2")
+	c := settleTurnRow(t, env, "s1", "t0")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal([]byte(c.hunkAfter), &m))
+	require.Equal(t, hunkOK, m["x.go"].State)
+	require.Len(t, m["x.go"].Windows, 1)
+	require.Contains(t, m["x.go"].Windows[0].Text, "user rewrote it",
+		"the window holds what the region became, not the head")
+	require.Contains(t, m["x.go"].Windows[0].Text, "head",
+		"context slack keeps the region's surroundings")
+	require.Equal(t, 1, m["x.go"].V, "the cell is versioned")
+	require.Equal(t, hunkMissing, m["gone.go"].State,
+		"a file that no longer reads records its state, not content")
+	require.Equal(t, hunkBinary, m["bin.dat"].State,
+		"a NUL byte marks binary content — never persisted as text")
+	require.Equal(t, hunkOutOfWorkspace, m["../esc.go"].State,
+		"a path escaping the workspace is out of scope, not missing")
+	require.Equal(t, hunkSensitive, m[".env"].State)
+}
+
+// The span survives a full rewrite of the region — the boundary
+// anchors re-locate it, not any matching text. This is the revised
+// case the fingerprint can never anchor.
+func TestSettleTurnOutcomes_HunkAfterRewrittenRegion(t *testing.T) {
+	env := setupLabelsTest(t)
+	dir := env.workingDir
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string][]HunkEdit{"x.go": {{New: "AGENT FUNCTION"}}},
+		HunkSpans: map[string][]HunkSpan{
+			"x.go": {{Start: 60, End: 61, Before: "prelude line", After: "tail line"}},
+		},
+	}))
+
+	// The region is fully rewritten — no agent text remains. The
+	// boundary anchors still cut the right lines.
+	body := strings.Repeat("prelude line\n", 60) +
+		"USER REWRITE\n" + strings.Repeat("tail line\n", 60)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "x.go"), []byte(body), 0o644))
+
+	dueViaNewerSession(t, env, "s2")
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.Equal(t, hunkOK, m["x.go"].State)
+	require.Len(t, m["x.go"].Windows, 1)
+	require.Contains(t, m["x.go"].Windows[0].Text, "USER REWRITE",
+		"the anchors cut the rewritten region even when nothing "+
+			"matches the fingerprint")
+	require.NotContains(t, m["x.go"].Windows[0].Text, "prelude line\n\n",
+		"the window is the region ±context, not the whole file")
+}
+
+// More than the context slack inserted above the region drifts the
+// absolute span — the boundary anchors re-locate it and the cell
+// flags relocated.
+func TestSettleTurnOutcomes_HunkAfterRelocates(t *testing.T) {
+	env := setupLabelsTest(t)
+	dir := env.workingDir
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string][]HunkEdit{"x.go": {{New: "fn work()"}}},
+		HunkSpans: map[string][]HunkSpan{
+			"x.go": {{Start: 10, End: 11, Before: "prev();", After: "next();"}},
+		},
+	}))
+	// 80 new lines landed above the region — the recorded [10,11)
+	// is stale, the anchors still sit beside it.
+	body := "hdr\n" + strings.Repeat("inserted\n", 80) +
+		"prev();\nfn work()\nnext();\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "x.go"), []byte(body), 0o644))
+	dueViaNewerSession(t, env, "s2")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.Equal(t, hunkOK, m["x.go"].State)
+	require.True(t, m["x.go"].Relocated,
+		"the anchors moved the span — the cell says so")
+	require.Len(t, m["x.go"].Windows, 1)
+	require.Contains(t, m["x.go"].Windows[0].Text, "fn work()")
+	require.Equal(t, 50, m["x.go"].Windows[0].Start,
+		"the window carries its line number — 82−32")
+}
+
+// No usable anchors at settle marks the position unverifiable —
+// drifted, not silently ok.
+func TestSettleTurnOutcomes_HunkAfterDrifted(t *testing.T) {
+	env := setupLabelsTest(t)
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string][]HunkEdit{"x.go": {{New: "fn work()"}}},
+		HunkSpans: map[string][]HunkSpan{
+			"x.go": {{Start: 1, End: 2, Before: "GONE BEFORE", After: "GONE AFTER"}},
+		},
+	}))
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "x.go"),
+		[]byte("l0\nl1\nl2\nl3\nl4\n"), 0o644))
+	dueViaNewerSession(t, env, "s2")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.Equal(t, hunkOK, m["x.go"].State)
+	require.True(t, m["x.go"].Drifted,
+		"no anchor hit — the recorded span is kept but flagged")
+}
+
+// A PEM block straddling a window edge leaks nothing: content is
+// scrubbed line-wise before slicing, so each block line is gone.
+func TestSettleTurnOutcomes_HunkAfterPEMEdge(t *testing.T) {
+	env := setupLabelsTest(t)
+	dir := env.workingDir
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string][]HunkEdit{"x.go": {{New: "tail func"}}},
+		HunkSpans: map[string][]HunkSpan{
+			// The region is 20 lines below the key block — its
+			// ±32 window reaches into the middle of it.
+			"x.go": {{Start: 25, End: 26, Before: "func a()", After: "end"}},
+		},
+	}))
+	pem := "-----BEGIN RSA PRIVATE KEY-----\n" +
+		strings.Repeat("MIIBSECRETKEYLINE\n", 10) +
+		"-----END RSA PRIVATE KEY-----\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "x.go"),
+		[]byte(pem+"func a()\n"+strings.Repeat("f\n", 20)+"tail func\nend\n"), 0o644))
+	dueViaNewerSession(t, env, "s2")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.Equal(t, hunkOK, m["x.go"].State)
+	require.Len(t, m["x.go"].Windows, 1)
+	require.NotContains(t, m["x.go"].Windows[0].Text, "MIIBSECRETKEYLINE",
+		"no key line survives the window cut")
+	require.Contains(t, m["x.go"].Windows[0].Text, "tail func")
+}
+
+// A symlink inside the workspace resolving outside is out of scope,
+// not readable content — the read goes through os.Root.
+func TestSettleTurnOutcomes_HunkAfterSymlinkEscape(t *testing.T) {
+	env := setupLabelsTest(t)
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	require.NoError(t, os.WriteFile(outside, []byte("escaped"), 0o644))
+	require.NoError(t, os.Symlink(outside, filepath.Join(env.workingDir, "link.txt")))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID: "s1", TurnID: "t0", EditedPaths: []string{"link.txt"},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.Equal(t, hunkOutOfWorkspace, m["link.txt"].State,
+		"a symlink escape is out of scope — the target is never read")
+}
+
+// hunk_after windows are redacted and bounded like every other
+// durable string; a region line past the path bound flags
+// truncation.
+func TestSettleTurnOutcomes_HunkAfterBoundAndRedact(t *testing.T) {
+	env := setupLabelsTest(t)
+	dir := env.workingDir
+	// One giant line: the window is span±context, so only an
+	// oversized region line can push past the path bound.
+	bigLine := "MARKER" + strings.Repeat("x", maxHunkPathRunes+10)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "big.txt"),
+		[]byte(bigLine+"\nrest\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "s.txt"),
+		[]byte("password=hunter2\nrest"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"big.txt", "s.txt"},
+		HunkAdded: map[string][]HunkEdit{
+			"big.txt": {{New: bigLine}},
+			"s.txt":   {{New: "password=hunter2"}},
+		},
+		HunkSpans: map[string][]HunkSpan{
+			"big.txt": {{Start: 0, End: 1}},
+			"s.txt":   {{Start: 0, End: 1}},
+		},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.True(t, m["big.txt"].Truncated,
+		"a window past the per-path bound flags truncation")
+	total := 0
+	for _, w := range m["big.txt"].Windows {
+		total += len([]rune(w.Text))
+	}
+	require.LessOrEqual(t, total, maxHunkPathRunes)
+	require.Equal(t, "[REDACTED]\nrest", m["s.txt"].Windows[0].Text,
+		"the credential never persists; the rest of the region does")
+}
+
+// The URL-credentials pattern scrubs connection strings even though
+// no sensitive key name is present.
+func TestSettleTurnOutcomes_HunkAfterURLCredentials(t *testing.T) {
+	env := setupLabelsTest(t)
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "cfg.txt"),
+		[]byte("db=postgres://admin:hunter2@db.internal:5432/prod"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"cfg.txt"},
+		HunkAdded:   map[string][]HunkEdit{"cfg.txt": {{New: "db="}}},
+		HunkSpans:   map[string][]HunkSpan{"cfg.txt": {{Start: 0, End: 1}}},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.Len(t, m["cfg.txt"].Windows, 1)
+	require.NotContains(t, m["cfg.txt"].Windows[0].Text, "hunter2")
+	require.Contains(t, m["cfg.txt"].Windows[0].Text, "postgres://[REDACTED]@db.internal",
+		"the scheme and host survive; the user:pass does not")
+}
+
+// A row recorded before this channel existed — edited_paths but no
+// hunk_added — has no span to slice: region_unknown, not a file head.
+func TestSettleTurnOutcomes_HunkAfterWithoutSpans(t *testing.T) {
+	env := setupLabelsTest(t)
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "x.go"), []byte("v1"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		EditHunks:   map[string][]string{"x.go": {"v1"}},
+	}))
+	dueViaNewerSession(t, env, "s2")
+	c := settleTurnRow(t, env, "s1", "t0")
+	require.JSONEq(t, `{}`, c.hunkAdded, "no added text was recorded")
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal([]byte(c.hunkAfter), &m))
+	require.Equal(t, hunkRegionUnknown, m["x.go"].State,
+		"no record-time span means no region — never a misleading head")
+	require.Empty(t, m["x.go"].Windows)
+}
+
+// A file past MaxHunkReadBytes never gets read or scanned for the
+// capture — the state names the skip. The verdict keeps the
+// pre-capture behavior: an unbounded read still matches the
+// fingerprint, so labels don't shift under the new column.
+func TestSettleTurnOutcomes_HunkAfterTooLarge(t *testing.T) {
+	env := setupLabelsTest(t)
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "lock.txt"),
+		[]byte(strings.Repeat("x", MaxHunkReadBytes+1)), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID: "s1", TurnID: "t0",
+		EditedPaths: []string{"lock.txt"},
+		EditHunks:   map[string][]string{"lock.txt": {"x"}},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	c := settleTurnRow(t, env, "s1", "t0")
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal([]byte(c.hunkAfter), &m))
+	require.Equal(t, hunkTooLarge, m["lock.txt"].State)
+	require.Equal(t, TurnRevised, c.verdict.String,
+		"the fingerprint still reads an oversized file — capture "+
+			"skips it, the verdict doesn't change")
+}
+
+// A before-anchor that verifies at the recorded start while the
+// file shrank under the span reports drifted, not relocated — the
+// end is EOF-clipped, not confirmed elsewhere.
+func TestSettleTurnOutcomes_HunkAfterClipIsDrift(t *testing.T) {
+	env := setupLabelsTest(t)
+	// The anchor "a" still sits where recorded, but the file ends
+	// at line 2 — the recorded {1,8} span's tail no longer exists.
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "x.go"),
+		[]byte("a\nREGION\n"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string][]HunkEdit{"x.go": {{New: "REGION"}}},
+		HunkSpans: map[string][]HunkSpan{
+			"x.go": {{Start: 1, End: 8, Before: "a"}},
+		},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.Equal(t, hunkOK, m["x.go"].State)
+	require.True(t, m["x.go"].Drifted,
+		"an EOF-clipped span must not read as a verified relocation")
+	require.False(t, m["x.go"].Relocated)
+}
+
+// Verdict parity runs both ways for an oversized file — the capture
+// abstains but the fingerprint still reads it, so a surviving edit
+// settles accepted exactly as before the column existed.
+func TestSettleTurnOutcomes_TooLargeVerdictAccepted(t *testing.T) {
+	env := setupLabelsTest(t)
+	content := "needle\n" + strings.Repeat("x", MaxHunkReadBytes)
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "lock.txt"),
+		[]byte(content), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID: "s1", TurnID: "t0",
+		EditedPaths: []string{"lock.txt"},
+		EditHunks:   map[string][]string{"lock.txt": {"needle"}},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	c := settleTurnRow(t, env, "s1", "t0")
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal([]byte(c.hunkAfter), &m))
+	require.Equal(t, hunkTooLarge, m["lock.txt"].State)
+	require.Equal(t, TurnAccepted, c.verdict.String,
+		"the unbounded verdict read sees the surviving fingerprint")
+}
+
+// The row cap is a hard bound on both columns: enough full-size
+// paths push the last one to an explicit over_cap state rather than
+// silently dropping it or exceeding the limit.
+func TestSettleTurnOutcomes_HunkRowCap(t *testing.T) {
+	env := setupLabelsTest(t)
+	dir := env.workingDir
+	var paths []string
+	hunks := map[string][]HunkEdit{}
+	finger := map[string][]string{}
+	spans := map[string][]HunkSpan{}
+	// Five paths, one oversized line each: every window truncates
+	// at the per-path bound, so four paths exhaust the row cap.
+	for i := range 5 {
+		p := fmt.Sprintf("c%d.txt", i)
+		line := "M" + strings.Repeat("x", maxHunkPathRunes+10)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, p), []byte(line), 0o644))
+		paths = append(paths, p)
+		hunks[p] = []HunkEdit{{New: line}}
+		finger[p] = []string{"M"}
+		// Anchors ride the row cap too — the tail path's shed,
+		// flagged, while the geometry survives.
+		spans[p] = []HunkSpan{{
+			Start: 0, End: 1,
+			Before: "before " + p, After: "after " + p,
+		}}
+	}
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID: "s1", TurnID: "t0",
+		EditedPaths: paths, EditHunks: finger, HunkAdded: hunks,
+		HunkSpans: spans,
+	}))
+	addedRow := readTurn(t, env, "s1", "t0").hunkAdded
+	var added map[string]hunkAddedEntry
+	require.NoError(t, json.Unmarshal([]byte(addedRow), &added))
+	require.Equal(t, hunkOverCap, added["c4.txt"].State,
+		"the path past the row cap records over_cap, not silence")
+	addedTotal := 0
+	for _, e := range added {
+		for _, ed := range e.Edits {
+			addedTotal += len([]rune(ed.Old)) + len([]rune(ed.New))
+		}
+		for _, sp := range e.Spans {
+			// Shed anchors contribute zero — they're the empty
+			// string by the time they persist.
+			addedTotal += len([]rune(sp.Before)) + len([]rune(sp.After))
+		}
+	}
+	require.LessOrEqual(t, addedTotal, maxHunkRowRunes,
+		"the added column never exceeds the row bound")
+	require.Equal(t, "before c0.txt", added["c0.txt"].Spans[0].Before,
+		"a path under the cap keeps its anchors")
+	require.True(t, added["c3.txt"].Spans[0].AnchorsDropped,
+		"the tail path sheds anchor text but keeps geometry")
+	require.Empty(t, added["c3.txt"].Spans[0].Before)
+	require.True(t, added["c4.txt"].Spans[0].AnchorsDropped,
+		"over_cap keeps span geometry, anchors shed")
+
+	dueViaNewerSession(t, env, "s2")
+	c := settleTurnRow(t, env, "s1", "t0")
+	var after map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal([]byte(c.hunkAfter), &after))
+	require.Equal(t, hunkOverCap, after["c4.txt"].State)
+	afterTotal := 0
+	for _, e := range after {
+		for _, w := range e.Windows {
+			afterTotal += len([]rune(w.Text))
+		}
+	}
+	require.LessOrEqual(t, afterTotal, maxHunkRowRunes,
+		"the after column never exceeds the row bound")
+}
+
+// Source text stores literally — no < > & escaping — so the cell
+// stays readable in sqlite3.
+func TestSettleTurnOutcomes_HunkAfterNoHTMLEscape(t *testing.T) {
+	env := setupLabelsTest(t)
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "x.go"),
+		[]byte("if a < b && c {\n}\n"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID: "s1", TurnID: "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string][]HunkEdit{"x.go": {{New: "if a < b && c {"}}},
+		HunkSpans:   map[string][]HunkSpan{"x.go": {{Start: 0, End: 1}}},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	c := settleTurnRow(t, env, "s1", "t0")
+	require.Contains(t, c.hunkAfter, "if a < b && c {")
+	require.NotContains(t, c.hunkAfter, "\\u003c",
+		"json.Marshal would escape the angle bracket")
+}
+
+// A later turn touching the same path flags the after cell — the
+// region's content isn't necessarily a user edit. Cross-session:
+// the settle trigger is a newer session, whose own edits usually
+// land first.
+func TestSettleTurnOutcomes_LaterTurnTouched(t *testing.T) {
+	env := setupLabelsTest(t)
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "x.go"),
+		[]byte("v1\n"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID: "s1", TurnID: "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string][]HunkEdit{"x.go": {{New: "v1"}}},
+		HunkSpans:   map[string][]HunkSpan{"x.go": {{Start: 0, End: 1}}},
+	}))
+	// A DIFFERENT session's later turn on the same project.
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID: "s9", TurnID: "t0",
+		EditedPaths: []string{"x.go"},
+		CreatedAt:   time.Now().UnixMilli() + 1,
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.True(t, m["x.go"].LaterTurnTouched,
+		"a later turn on the same path marks the cell, "+
+			"whatever session it ran in")
+}
+
+// A zero-width span — a pure deletion — verifies on adjacent
+// anchors; end == start is its shape, not crossed anchors.
+func TestSettleTurnOutcomes_HunkAfterDeletionSpan(t *testing.T) {
+	env := setupLabelsTest(t)
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "x.go"),
+		[]byte("a\nb\nc\n"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string][]HunkEdit{"x.go": {{Old: "removed"}}},
+		HunkSpans: map[string][]HunkSpan{
+			"x.go": {{Start: 1, End: 1, Before: "a", After: "b"}},
+		},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.Equal(t, hunkOK, m["x.go"].State)
+	require.False(t, m["x.go"].Drifted,
+		"adjacent anchors verify a deletion span — nothing crossed")
+}
+
+// A span with only one recorded anchor (≥8 blank lines above the
+// region) reconstructs the missing side from the found one — not
+// from a file edge, and not flagged as moved.
+func TestSettleTurnOutcomes_HunkAfterSingleAnchor(t *testing.T) {
+	env := setupLabelsTest(t)
+	dir := env.workingDir
+	var lines []string
+	for range 100 {
+		lines = append(lines, "head filler")
+	}
+	lines = append(lines, "REGION", "tail filler", "tail filler")
+	body := strings.Join(lines, "\n") + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "x.go"), []byte(body), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string][]HunkEdit{"x.go": {{New: "REGION"}}},
+		HunkSpans: map[string][]HunkSpan{
+			// No Before anchor — the lines above are indistinct.
+			"x.go": {{Start: 100, End: 101, After: "tail filler"}},
+		},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.Equal(t, hunkOK, m["x.go"].State)
+	require.False(t, m["x.go"].Relocated,
+		"a single anchor reconstructs the span — not a move")
+	require.Len(t, m["x.go"].Windows, 1)
+	require.Contains(t, m["x.go"].Windows[0].Text, "REGION")
+	require.Less(t, m["x.go"].Windows[0].Start, 100,
+		"the window is the region ±context, not from the file head")
+}
+
+// A moved span whose anchor text repeats in the file is a guess,
+// not a verified relocation — the duplicated match flags drifted,
+// not relocated.
+func TestSettleTurnOutcomes_HunkAfterAmbiguousAnchor(t *testing.T) {
+	env := setupLabelsTest(t)
+	dir := env.workingDir
+	// "common" and "mid" each occur twice — nearest occurrence wins
+	// a non-crossing but wrong position for the recorded span.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "x.go"),
+		[]byte("common\nmid\ncommon\nREGION\nmid\ntail\n"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string][]HunkEdit{"x.go": {{New: "REGION"}}},
+		HunkSpans: map[string][]HunkSpan{
+			"x.go": {{Start: 5, End: 6, Before: "common", After: "mid"}},
+		},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.Equal(t, hunkOK, m["x.go"].State)
+	require.False(t, m["x.go"].Relocated,
+		"a duplicated anchor can't certify the new position")
+	require.True(t, m["x.go"].Drifted,
+		"the nearest occurrence may be the wrong one — drift, not relocation")
+}
+
+// A single-anchor span CAN relocate — when the anchor is unique in
+// the file the reposition is verified on that side.
+func TestSettleTurnOutcomes_HunkAfterSingleAnchorRelocates(t *testing.T) {
+	env := setupLabelsTest(t)
+	dir := env.workingDir
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "x.go"),
+		[]byte(strings.Repeat("filler\n", 80)+"REGION\none anchor\n"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string][]HunkEdit{"x.go": {{New: "REGION"}}},
+		HunkSpans: map[string][]HunkSpan{
+			// No Before — the region's file-head neighborhood gave
+			// none. 80 inserted lines moved the span; the unique
+			// After still finds it.
+			"x.go": {{Start: 5, End: 6, After: "one anchor"}},
+		},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.Equal(t, hunkOK, m["x.go"].State)
+	require.True(t, m["x.go"].Relocated,
+		"a unique single anchor verifies the moved position")
+	require.False(t, m["x.go"].Drifted)
+	require.Contains(t, m["x.go"].Windows[0].Text, "REGION")
+}
+
+// A span whose anchors were shed for the row cap must not read as
+// a whole-file span — the position is unverifiable, so it drifts.
+func TestSettleTurnOutcomes_HunkAfterAnchorsDropped(t *testing.T) {
+	env := setupLabelsTest(t)
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "x.go"),
+		[]byte("a\nREGION\nb\n"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string][]HunkEdit{"x.go": {{New: "REGION"}}},
+		HunkSpans: map[string][]HunkSpan{
+			"x.go": {{Start: 1, End: 2, AnchorsDropped: true}},
+		},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.Equal(t, hunkOK, m["x.go"].State)
+	require.True(t, m["x.go"].Drifted,
+		"shed anchors are not whole-file semantics — flag the guess")
+	require.False(t, m["x.go"].Relocated)
+}
+
+// A contained span's After anchors a line INSIDE the merged region
+// — only a span that reaches the merged end may donate one, and an
+// extending span with no After clears the now-interior anchor.
+func TestMergeSpanRecs_AfterBoundary(t *testing.T) {
+	t.Parallel()
+	// Write-then-edit: the write's whole-file span absorbs the
+	// edit's inner span — "inner" sits at line 42, not the end.
+	got := mergeSpanRecs([]HunkSpan{
+		{Start: 0, End: 100},
+		{Start: 40, End: 42, After: "inner"},
+	})
+	require.Equal(t, []HunkSpan{{Start: 0, End: 100, NoAnchors: false}},
+		got, "a contained span's after-anchor points inside the merge")
+
+	// An extending span's After is the new boundary.
+	got = mergeSpanRecs([]HunkSpan{
+		{Start: 0, End: 10, After: "a"},
+		{Start: 5, End: 20, After: "b"},
+	})
+	require.Equal(t, "b", got[0].After)
+
+	// An extending span with no After strands the old anchor
+	// inside — it must be cleared, not kept.
+	got = mergeSpanRecs([]HunkSpan{
+		{Start: 0, End: 10, After: "a"},
+		{Start: 5, End: 20},
+	})
+	require.Empty(t, got[0].After,
+		"the old after-anchor no longer sits at the merged end")
+
+	// Equal-end merge prefers the later span's non-empty After;
+	// equal-start merges are input-order stable.
+	got = mergeSpanRecs([]HunkSpan{
+		{Start: 0, End: 10, Before: "first", After: "a"},
+		{Start: 0, End: 10, Before: "second", After: "b"},
+	})
+	require.Equal(t, "first", got[0].Before)
+	require.Equal(t, "b", got[0].After)
+}
+
+// A mid-file span whose boundary search found nothing must flag
+// drifted — it's not a whole-file span whose absolute numbers are
+// the definition.
+func TestSettleTurnOutcomes_HunkAfterNoAnchors(t *testing.T) {
+	env := setupLabelsTest(t)
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "x.go"),
+		[]byte("a\nREGION\nb\n"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string][]HunkEdit{"x.go": {{New: "REGION"}}},
+		HunkSpans: map[string][]HunkSpan{
+			"x.go": {{Start: 1, End: 2, NoAnchors: true}},
+		},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.Equal(t, hunkOK, m["x.go"].State)
+	require.True(t, m["x.go"].Drifted,
+		"a searched-but-empty anchor set is an unverified position")
+	require.False(t, m["x.go"].Relocated)
+}
+
+// A capped anchor re-matches by prefix; a complete 160-rune anchor
+// must match whole — a longer same-prefix line is an impostor, not
+// the anchor. Single-anchor spans isolate the Before decision.
+func TestSettleTurnOutcomes_HunkAfterCappedAnchor(t *testing.T) {
+	env := setupLabelsTest(t)
+	dir := env.workingDir
+	long := strings.Repeat("a", 200)
+	prefix := long[:HunkAnchorRunes]
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "x.go"),
+		[]byte(long+"more\nREGION\ntail\n"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string][]HunkEdit{"x.go": {{New: "REGION"}}},
+		HunkSpans: map[string][]HunkSpan{
+			// The recorded Before is the 160-rune prefix of the
+			// real anchor line — capped at record, so its prefix
+			// finds the 204-rune line.
+			"x.go": {{
+				Start: 1, End: 2, Before: prefix,
+				BeforeCapped: true,
+			}},
+		},
+	}))
+	// y.go carries a line that shares the prefix but is longer —
+	// the same 160-rune anchor WITHOUT the capped bit must not
+	// prefix-match it.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "y.go"),
+		[]byte(long+"impostor\nREGION\ntail\n"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t1",
+		EditedPaths: []string{"y.go"},
+		HunkAdded:   map[string][]HunkEdit{"y.go": {{New: "REGION"}}},
+		HunkSpans: map[string][]HunkSpan{
+			"y.go": {{Start: 5, End: 6, Before: prefix}},
+		},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.Equal(t, hunkOK, m["x.go"].State)
+	require.False(t, m["x.go"].Drifted,
+		"a capped anchor's prefix finds its line")
+
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t1").hunkAfter), &m))
+	require.True(t, m["y.go"].Drifted,
+		"an uncapped anchor must not prefix-match an impostor line")
+	require.False(t, m["y.go"].Relocated)
+}
+
+// An edited path outside the workspace carries no survival evidence
+// — a fingerprint for an out-of-scope file abstains, never revised.
+func TestSettleTurnOutcomes_UnsafePathFingerprintAbstains(t *testing.T) {
+	env := setupLabelsTest(t)
+	outside := filepath.Join(t.TempDir(), "abs.go")
+	require.NoError(t, os.WriteFile(outside, []byte("content"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{outside},
+		EditHunks:   map[string][]string{outside: {"content"}},
+	}))
+	dueViaNewerSession(t, env, "s2")
+
+	c := settleTurnRow(t, env, "s1", "t0")
+	require.NotEqual(t, TurnRevised, c.verdict.String,
+		"an out-of-scope path is not diverged evidence")
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal([]byte(c.hunkAfter), &m))
+	require.Equal(t, hunkOutOfWorkspace, m[outside].State)
+}
+
+// A row settling far past its own window — the backfill case —
+// flags stale: the windows are real but they are not "the state
+// after this turn's observation window".
+func TestSettleTurnOutcomes_HunkAfterStale(t *testing.T) {
+	env := setupLabelsTest(t)
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "x.go"),
+		[]byte("v1\n"), 0o644))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID: "s1", TurnID: "t0",
+		EditedPaths: []string{"x.go"},
+		HunkAdded:   map[string][]HunkEdit{"x.go": {{New: "v1"}}},
+		HunkSpans:   map[string][]HunkSpan{"x.go": {{Start: 0, End: 1}}},
+		// Three windows old — past the stale threshold.
+		CreatedAt: time.Now().Add(-3 * 24 * time.Hour).UnixMilli(),
+	}))
+
+	var m map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(settleTurnRow(t, env, "s1", "t0").hunkAfter), &m))
+	require.True(t, m["x.go"].Stale,
+		"a pair mined long after the window says so")
+}
+
+// The budget==1 edge: a nearly-full row followed by an edit whose
+// old text is non-empty used to panic in truncateRunes (runes[:-1]).
+func TestRecordTurnOutcome_BudgetOneNoPanic(t *testing.T) {
+	env := setupLabelsTest(t)
+	paths := []string{"a1.go", "a2.go", "a3.go", "a4.go", "b.go"}
+	hunks := map[string][]HunkEdit{
+		// 3×16384 + 16383 leaves exactly one rune of row budget.
+		"a1.go": {{New: strings.Repeat("a", maxHunkPathRunes)}},
+		"a2.go": {{New: strings.Repeat("a", maxHunkPathRunes)}},
+		"a3.go": {{New: strings.Repeat("a", maxHunkPathRunes)}},
+		"a4.go": {{New: strings.Repeat("a", maxHunkPathRunes-1)}},
+		"b.go":  {{Old: "x", New: "y"}},
+	}
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: paths,
+		HunkAdded:   hunks,
+	}))
+	var m map[string]hunkAddedEntry
+	require.NoError(t, json.Unmarshal(
+		[]byte(readTurn(t, env, "s1", "t0").hunkAdded), &m))
+	require.True(t, m["b.go"].Truncated,
+		"the edit that overflowed flags truncation")
+	total := 0
+	for _, e := range m {
+		for _, ed := range e.Edits {
+			total += len([]rune(ed.Old)) + len([]rune(ed.New))
+		}
+	}
+	require.LessOrEqual(t, total, maxHunkRowRunes,
+		"the row bound is never exceeded — even by one rune")
 }
 
 // A frozen row refuses even the placeholder-repair arm.

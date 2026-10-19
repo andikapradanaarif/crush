@@ -389,6 +389,11 @@ CREATE TABLE turn_outcomes (
   edited_paths TEXT NOT NULL DEFAULT '[]',  -- JSON repo-relpaths
   edit_hunks   TEXT NOT NULL DEFAULT '{}',  -- JSON path→added-lines map
   commands     TEXT NOT NULL DEFAULT '[]',  -- JSON normalized cmds
+  hunk_added   TEXT NOT NULL DEFAULT '{}',  -- #394: path→{edits,spans}
+                                            -- agent output + exec-time
+                                            -- region, record-time
+  hunk_after   TEXT NOT NULL DEFAULT '{}',  -- #394: path→{state,windows}
+                                            -- post-window region content
   next_verdict TEXT NOT NULL DEFAULT '',    -- cue verdict of next prompt
   verdict      TEXT,                        -- NULL=unsettled; settled:
                                             -- accepted|revised|failed|unknown
@@ -436,6 +441,15 @@ CREATE TABLE turn_outcomes (
 -- the honest reporting unit. Per-turn re-derivation stays possible
 -- — the transcripts and the command ledger are stored — but it is
 -- a semantics change of its own, not a label fix.
+--
+-- Caveat on rule changes: edit_hunks fingerprints for partial
+-- multiedits changed meaning with the 1-based FailedEdit.Index fix
+-- (#394/#358) — rows recorded before it can include the failed
+-- edit's lines (never applied) and miss its successor's (which did
+-- land). param_version stamps channel knobs,
+-- not extraction rules, so mixed-era rows coexist unmarked; miners
+-- comparing eras should treat partial-multiedit fingerprints as
+-- lower-confidence.
 
 -- One row per (signature, version) mined candidate.
 CREATE TABLE skills (
