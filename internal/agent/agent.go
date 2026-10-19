@@ -223,6 +223,7 @@ type SessionAgent interface {
 	CancelAll()
 	IsSessionBusy(sessionID string) bool
 	IsBusy() bool
+	ListSettledMessages(ctx context.Context, sessionID string) ([]message.Message, error)
 	QueuedPrompts(sessionID string) int
 	QueuedPromptsList(sessionID string) []string
 	ClearQueue(sessionID string)
@@ -1432,6 +1433,8 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 	// the cap. Written only from the sequential streaming callbacks
 	// and read after Stream returns, same as completedToolCalls.
 	var runActions []TailAction
+	// Calls that got a reply this turn; the rest are settled when it ends.
+	answeredToolCalls := csync.NewMap[string, struct{}]()
 	// Don't send MaxOutputTokens if 0 — some providers (e.g. LM Studio) reject it
 	var maxOutputTokens *int64
 	if call.MaxOutputTokens > 0 {
@@ -1512,6 +1515,7 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 				}
 			}
 
+			prepared.Messages = dropEmptyToolMedia(prepared.Messages)
 			prepared.Messages = a.workaroundProviderMediaLimitations(prepared.Messages, largeModel)
 
 			// Ephemeral tail augmentation: the turn-context blob and
@@ -1725,6 +1729,9 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 					toolResult,
 				},
 			})
+			if createMsgErr == nil {
+				answeredToolCalls.Set(result.ToolCallID, struct{}{})
+			}
 			return createMsgErr
 		},
 		OnStepFinish: func(stepResult fantasy.StepResult) error {
@@ -1872,6 +1879,22 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 
 	a.eventPromptResponded(call.SessionID, time.Since(startTime).Truncate(time.Second))
 
+	// Final writes use a context detached from the run: workspace shutdown
+	// cancels ctx before agent goroutines finish, and the turn's ending
+	// must still land.
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cleanupCancel()
+	if currentAssistant != nil {
+		answered := func(id string) bool {
+			_, ok := answeredToolCalls.Get(id)
+			return ok
+		}
+		if settleErr := a.settleTurn(cleanupCtx, currentAssistant, answered, err); settleErr != nil {
+			slog.Error("Failed to settle unanswered tool calls",
+				"session_id", call.SessionID, "error", settleErr)
+		}
+	}
+
 	if err != nil {
 		// A terminal error after PrepareStep but before OnStepFinish
 		// leaves the failed request's attribution in Pending — fold it
@@ -1918,72 +1941,8 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 			}
 			return result, nil, err
 		}
-		// Persist final state with a context detached from the run
-		// context. The run context (ctx) is derived from the
-		// workspace context, which workspace shutdown cancels before
-		// agent goroutines finish; using ctx here would drop the
-		// final assistant state. WithoutCancel keeps the values
-		// (e.g. session ID) while ignoring cancellation, and a short
-		// timeout bounds the cleanup writes.
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cleanupCancel()
 		// Ensure we finish thinking on error to close the reasoning state.
-		// No block id is in scope here — finish the last open part.
 		currentAssistant.FinishThinking("")
-		toolCalls := currentAssistant.ToolCalls()
-		// INFO: we use the cleanup context here because the genCtx has been cancelled.
-		msgs, createErr := a.messages.List(cleanupCtx, currentAssistant.SessionID)
-		if createErr != nil {
-			return nil, nil, createErr
-		}
-		for _, tc := range toolCalls {
-			if !tc.Finished {
-				tc.Finished = true
-				tc.Input = "{}"
-				currentAssistant.AddToolCall(tc)
-				updateErr := a.messages.Update(cleanupCtx, *currentAssistant)
-				if updateErr != nil {
-					return nil, nil, updateErr
-				}
-			}
-
-			found := false
-			for _, msg := range msgs {
-				if msg.Role == message.Tool {
-					for _, tr := range msg.ToolResults() {
-						if tr.ToolCallID == tc.ID {
-							found = true
-							break
-						}
-					}
-				}
-				if found {
-					break
-				}
-			}
-			if found {
-				continue
-			}
-			content := "There was an error while executing the tool"
-			if isCancelErr {
-				content = "Error: user cancelled assistant tool calling"
-			}
-			toolResult := message.ToolResult{
-				ToolCallID: tc.ID,
-				Name:       tc.Name,
-				Content:    content,
-				IsError:    true,
-			}
-			_, createErr = a.messages.Create(cleanupCtx, currentAssistant.SessionID, message.CreateMessageParams{
-				Role: message.Tool,
-				Parts: []message.ContentPart{
-					toolResult,
-				},
-			})
-			if createErr != nil {
-				return nil, nil, createErr
-			}
-		}
 		var fantasyErr *fantasy.Error
 		var providerErr *fantasy.ProviderError
 		var requestTimedOutErr *requestTimeoutError
@@ -2017,8 +1976,6 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 		} else {
 			currentAssistant.AddFinish(message.FinishReasonError, defaultTitle, err.Error())
 		}
-		// Note: we use the cleanup context here because the genCtx has been
-		// cancelled.
 		updateErr := a.messages.Update(cleanupCtx, *currentAssistant)
 		if updateErr != nil {
 			return nil, nil, updateErr
@@ -3210,42 +3167,6 @@ func filterFileParts(parts []fantasy.MessagePart) []fantasy.MessagePart {
 	return filtered
 }
 
-// toolResultsForCalls builds the tool message that must immediately follow
-// an assistant message with tool calls. LLM APIs require every tool call to
-// be followed by its results before any other message; strict-adjacency
-// providers reject the request otherwise. Results are taken from
-// toolResultsByCall and consumed, so a result stored in a message that also
-// holds results for calls of other assistant messages is emitted exactly
-// once, next to the assistant that requested it. Tool calls without any
-// stored result (e.g. an interrupted session) receive a synthetic error
-// response so the conversation keeps working.
-func toolResultsForCalls(m message.Message, toolResultsByCall map[string][]fantasy.MessagePart) fantasy.Message {
-	content := make([]fantasy.MessagePart, 0, len(m.ToolCalls()))
-	for _, tc := range m.ToolCalls() {
-		parts := toolResultsByCall[tc.ID]
-		delete(toolResultsByCall, tc.ID)
-		if len(parts) > 0 {
-			content = append(content, parts...)
-			continue
-		}
-		slog.Warn(
-			"Injecting synthetic tool result for orphaned tool call",
-			"tool_call_id", tc.ID,
-			"tool_name", tc.Name,
-		)
-		content = append(content, fantasy.ToolResultPart{
-			ToolCallID: tc.ID,
-			Output: fantasy.ToolResultOutputContentError{
-				Error: errors.New("tool call was interrupted and did not produce a result, you may retry this call if the result is still needed"),
-			},
-		})
-	}
-	return fantasy.Message{
-		Role:    fantasy.MessageRoleTool,
-		Content: content,
-	}
-}
-
 func (a *sessionAgent) getSessionMessages(ctx context.Context, session session.Session) ([]message.Message, error) {
 	var msgs []message.Message
 	var err error
@@ -3785,7 +3706,12 @@ func (a *sessionAgent) convertToToolResult(result fantasy.ToolResultContent) mes
 		}
 	case fantasy.ToolResultContentTypeMedia:
 		if r, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentMedia](result.Result); ok {
-			if !stringext.IsValidBase64(r.Data) {
+			switch {
+			case r.Data == "":
+				slog.Warn("Tool returned media with no data, storing a note instead",
+					"tool", result.ToolName, "tool_call_id", result.ToolCallID)
+				baseResult.Content = emptyMediaText(r.Text)
+			case !stringext.IsValidBase64(r.Data):
 				slog.Warn(
 					"Tool returned media with invalid base64 data, discarding image",
 					"tool", result.ToolName,
@@ -3793,7 +3719,7 @@ func (a *sessionAgent) convertToToolResult(result fantasy.ToolResultContent) mes
 				)
 				baseResult.Content = "Tool returned image data with invalid encoding"
 				baseResult.IsError = true
-			} else {
+			default:
 				content := r.Text
 				if content == "" {
 					content = fmt.Sprintf("Loaded %s content", r.MediaType)

@@ -61,7 +61,7 @@ func TestPatchCoderCassettes(t *testing.T) {
 		)
 		require.NoError(t, err)
 
-		cfg, err := config.Init(workingDir, "", false)
+		cfg, err := config.Init(t.Context(), workingDir, "", false)
 		require.NoError(t, err)
 		pinCassetteConfig(cfg)
 
@@ -71,7 +71,7 @@ func TestPatchCoderCassettes(t *testing.T) {
 
 		// Render the new bash description exactly as the test tool list does.
 		perms := permission.NewPermissionService(workingDir, true, []string{})
-		bashTool := tools.NewBashTool(nil, perms, workingDir, workingDir, cfg.Config().Options.Attribution, "", nil)
+		bashTool := tools.NewBashTool(nil, perms, workingDir, workingDir, cfg.Config().Options.Attribution, "", cfg.Config().Options.GetMaxBackgroundJobs(), nil)
 		newBashDesc := bashTool.Info().Description
 
 		// Patch every interaction's request body.

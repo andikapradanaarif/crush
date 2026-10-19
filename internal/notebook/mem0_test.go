@@ -25,7 +25,7 @@ func mem0TestStore(t *testing.T, workDir string) *config.ConfigStore {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(isolated, ".local", "share"))
 	t.Setenv("CRUSH_GLOBAL_CONFIG", filepath.Join(isolated, ".config", "crush"))
 	t.Setenv("CRUSH_GLOBAL_DATA", filepath.Join(isolated, ".local", "share", "crush"))
-	store, err := config.Load(workDir, t.TempDir(), false)
+	store, err := config.Load(t.Context(), workDir, t.TempDir(), false)
 	require.NoError(t, err)
 	return store
 }

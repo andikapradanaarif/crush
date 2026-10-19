@@ -164,3 +164,7 @@ func TestRunAgent_CancellationPublishesNoErrorTerminal(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 }
+
+func (*errorCoordinator) ListSettledMessages(context.Context, string) ([]message.Message, error) {
+	return nil, nil
+}

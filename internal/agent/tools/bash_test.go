@@ -127,7 +127,7 @@ func (m *recordingPermissionService) SubscribeNotifications(ctx context.Context)
 func newBashToolForTest(workingDir string) fantasy.AgentTool {
 	permissions := &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
 	attribution := &config.Attribution{TrailerStyle: config.TrailerStyleNone}
-	return NewBashTool(nil, permissions, workingDir, workingDir, attribution, "test-model", nil)
+	return NewBashTool(nil, permissions, workingDir, workingDir, attribution, "test-model", config.DefaultMaxBackgroundJobs, nil)
 }
 
 func newBashToolWithRecordingPerms(workingDir string, allow bool) (fantasy.AgentTool, *recordingPermissionService) {
@@ -136,7 +136,7 @@ func newBashToolWithRecordingPerms(workingDir string, allow bool) (fantasy.Agent
 		allow:  allow,
 	}
 	attribution := &config.Attribution{TrailerStyle: config.TrailerStyleNone}
-	return NewBashTool(nil, perms, workingDir, workingDir, attribution, "test-model", nil), perms
+	return NewBashTool(nil, perms, workingDir, workingDir, attribution, "test-model", config.DefaultMaxBackgroundJobs, nil), perms
 }
 
 func TestBashTool_ChainedCommandsRequirePermission(t *testing.T) {
@@ -408,7 +408,7 @@ func TestBashTool_RecordsRunToCmdLog(t *testing.T) {
 	perms := &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
 	attribution := &config.Attribution{TrailerStyle: config.TrailerStyleNone}
 	log := &recordingCmdLog{}
-	tool := NewBashTool(nil, perms, workingDir, workingDir, attribution, "test-model", log)
+	tool := NewBashTool(nil, perms, workingDir, workingDir, attribution, "test-model", config.DefaultMaxBackgroundJobs, log)
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	resp := runBashTool(t, tool, ctx, BashParams{
@@ -433,7 +433,7 @@ func TestBashTool_RecordsComponents(t *testing.T) {
 	perms := &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
 	attribution := &config.Attribution{TrailerStyle: config.TrailerStyleNone}
 	log := &recordingCmdLog{}
-	tool := NewBashTool(nil, perms, workingDir, workingDir, attribution, "test-model", log)
+	tool := NewBashTool(nil, perms, workingDir, workingDir, attribution, "test-model", config.DefaultMaxBackgroundJobs, log)
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	// The whole #185 chain in one pin: the pipe's clean final code
@@ -469,7 +469,7 @@ func TestBashTool_BlockedCommandNotAProjectFailure(t *testing.T) {
 	perms := &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
 	attribution := &config.Attribution{TrailerStyle: config.TrailerStyleNone}
 	log := &recordingCmdLog{}
-	tool := NewBashTool(nil, perms, workingDir, workingDir, attribution, "test-model", log)
+	tool := NewBashTool(nil, perms, workingDir, workingDir, attribution, "test-model", config.DefaultMaxBackgroundJobs, log)
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	resp := runBashTool(t, tool, ctx, BashParams{
@@ -494,7 +494,7 @@ func TestBashTool_StampsPreRunHead(t *testing.T) {
 	perms := &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
 	attribution := &config.Attribution{TrailerStyle: config.TrailerStyleNone}
 	log := &recordingCmdLog{headBefore: "pre-sha"}
-	tool := NewBashTool(nil, perms, workingDir, workingDir, attribution, "test-model", log)
+	tool := NewBashTool(nil, perms, workingDir, workingDir, attribution, "test-model", config.DefaultMaxBackgroundJobs, log)
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	resp := runBashTool(t, tool, ctx, BashParams{
@@ -517,7 +517,7 @@ func TestJobOutput_CarriesPreRunHead(t *testing.T) {
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	bgManager := shell.GetBackgroundShellManager()
-	bgShell, err := bgManager.Start(ctx, workingDir, nil, "echo done", "", "pre-sha")
+	bgShell, err := bgManager.Start(ctx, workingDir, nil, "echo done", "", config.DefaultMaxBackgroundJobs, "pre-sha")
 	require.NoError(t, err)
 	bgShell.Wait()
 	defer func() { _ = bgManager.Remove(bgShell.ID) }()

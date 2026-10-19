@@ -156,7 +156,7 @@ func coderAgent(r *vcr.Recorder, env fakeEnv, large, small fantasy.LanguageModel
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := config.Init(env.workingDir, "", false)
+	cfg, err := config.Init(context.Background(), env.workingDir, "", false)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +175,7 @@ func coderAgent(r *vcr.Recorder, env fakeEnv, large, small fantasy.LanguageModel
 	}
 
 	allTools := []fantasy.AgentTool{
-		tools.NewBashTool(nil, env.permissions, env.workingDir, cfg.Config().Options.DataDirectory, cfg.Config().Options.Attribution, modelName, env.cmdlog),
+		tools.NewBashTool(nil, env.permissions, env.workingDir, cfg.Config().Options.DataDirectory, cfg.Config().Options.Attribution, modelName, cfg.Config().Options.GetMaxBackgroundJobs(), env.cmdlog),
 		tools.NewDownloadTool(env.permissions, env.workingDir, r.GetDefaultClient()),
 		tools.NewEditTool(env.permissions, env.history, *env.filetracker, env.workingDir),
 		tools.NewMultiEditTool(env.permissions, env.history, *env.filetracker, env.workingDir),

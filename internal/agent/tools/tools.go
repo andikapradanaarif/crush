@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"html/template"
 	"os/exec"
 	"testing"
@@ -78,6 +79,11 @@ func GetModelNameFromContext(ctx context.Context) string {
 // call did not originate inside a Run (tests, direct tool use).
 func GetRunStampFromContext(ctx context.Context) uint64 {
 	return getContextValue(ctx, RunStampContextKey, uint64(0))
+}
+
+// UnsupportedMediaResponse tells the model it cannot receive a tool's media.
+func UnsupportedMediaResponse(modelName string) fantasy.ToolResponse {
+	return fantasy.NewTextErrorResponse(fmt.Sprintf("This model (%s) does not support image data.", modelName))
 }
 
 // NewPermissionDeniedResponse returns a tool response indicating the user

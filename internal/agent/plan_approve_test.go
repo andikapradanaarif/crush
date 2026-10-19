@@ -21,7 +21,7 @@ func approveEnv(t *testing.T) (*coordinator, fakeEnv, session.Session) {
 	env := testEnv(t)
 	sess, err := env.sessions.Create(t.Context(), "test")
 	require.NoError(t, err)
-	cfg, err := config.Init(env.workingDir, "", false)
+	cfg, err := config.Init(t.Context(), env.workingDir, "", false)
 	require.NoError(t, err)
 	coord := &coordinator{
 		cfg:       cfg,
@@ -248,4 +248,8 @@ func (s *busyStubAgent) Model() Model                                  { return 
 func (s *busyStubAgent) GenerateTitle(context.Context, string, string) {}
 func (s *busyStubAgent) Summarize(context.Context, string, fantasy.ProviderOptions, func(context.Context, *fantasy.ProviderError) error) error {
 	return nil
+}
+
+func (s *busyStubAgent) ListSettledMessages(context.Context, string) ([]message.Message, error) {
+	return nil, nil
 }

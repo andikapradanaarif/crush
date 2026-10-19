@@ -34,6 +34,7 @@ import (
 //	option auto-lsp false
 //	option request-timeout 300
 //	option request-timeout 0
+//	option max-background-jobs 200
 //
 // Boolean shortcuts: for boolean fields, omitting the value sets it to true.
 func handleOption(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -242,8 +243,9 @@ var optionSpecs = map[string]optionSpec{
 	"notebook-prior-turns":   {jsonKey: "notebook_prior_turns", kind: optEnum, values: []string{"verbatim", "stub", "digest", "summarize"}},
 	"notebook-generate":      {jsonKey: "notebook_generate", kind: optEnum, values: []string{"always", "under_pressure", "never"}},
 
-	// Integer fields, in seconds.
-	"request-timeout": {jsonKey: "request_timeout", kind: optInt},
+	// Integer fields.
+	"request-timeout":     {jsonKey: "request_timeout", kind: optInt},
+	"max-background-jobs": {jsonKey: "max_background_jobs", kind: optInt},
 
 	// List fields. Keys are singular because each call appends one value.
 	"context-path":        {jsonKey: "context_paths", kind: optList},

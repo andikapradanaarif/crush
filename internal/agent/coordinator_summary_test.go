@@ -34,7 +34,7 @@ func newSummaryTestCoordinatorAt(t *testing.T, crushJSON string, keepSummary boo
 
 	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "crush.json"), []byte(crushJSON), 0o644))
 
-	cfg, err := config.Init(env.workingDir, "", false)
+	cfg, err := config.Init(t.Context(), env.workingDir, "", false)
 	require.NoError(t, err)
 	if !keepSummary {
 		delete(cfg.Config().Models, config.SelectedModelTypeSummary)
