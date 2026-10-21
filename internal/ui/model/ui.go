@@ -466,6 +466,14 @@ type UI struct {
 	// chat are derived from it by syncPendingItem.
 	pending pendingTurn
 
+	// pendingToolResults holds tool results that arrived before their
+	// tool-call item existed — a result event can overtake the
+	// assistant-message update that creates the item. They are applied
+	// the next time the item is built; without the stash the item would
+	// render "Waiting for tool response..." even though the result is
+	// stored.
+	pendingToolResults map[string]message.ToolResult
+
 	// preThemeStyles stores the styles before a theme preview so we can revert.
 	preThemeStyles *styles.Styles
 
@@ -1706,6 +1714,10 @@ func (m *UI) setSessionMessages(msgs []message.Message) tea.Cmd {
 
 	// Load nested tool calls for agent/agentic_fetch tools.
 	m.loadNestedToolCalls(items)
+	m.applyPendingToolResults(items)
+	// A rebuild pairs every stored result via toolResultMap; anything
+	// still stashed has no item and cannot arrive later — drop it.
+	clear(m.pendingToolResults)
 	m.setMessagePlanFlags(items)
 
 	// If the user switches between sessions while the agent is working we
@@ -1884,6 +1896,7 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 		m.chat.ScrollToBottom()
 	case message.Assistant:
 		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil, m.com.Workspace.WorkingDir())
+		m.applyPendingToolResults(items)
 		m.setMessagePlanFlags(items)
 		m.chat.AppendMessages(items...)
 		if m.chat.Follow() {
@@ -1900,7 +1913,9 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 		for _, tr := range msg.ToolResults() {
 			toolItem := m.chat.MessageItem(tr.ToolCallID)
 			if toolItem == nil {
-				// we should have an item!
+				// The item is built from an assistant update that can
+				// arrive after the result — keep it until then.
+				m.stashToolResult(tr)
 				continue
 			}
 			if toolMsgItem, ok := toolItem.(chat.ToolMessageItem); ok {
@@ -2023,7 +2038,7 @@ func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 			}
 		}
 		if existingToolItem == nil {
-			items = append(items, chat.NewToolMessageItem(m.com.Styles, msg.ID, tc, nil, false, m.com.Workspace.WorkingDir()))
+			items = append(items, chat.NewToolMessageItem(m.com.Styles, msg.ID, tc, m.takePendingToolResult(tc.ID), false, m.com.Workspace.WorkingDir()))
 		}
 	}
 
@@ -2093,7 +2108,7 @@ func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.
 		}
 		if !found {
 			// Create a new nested tool item.
-			nestedItem := chat.NewToolMessageItem(m.com.Styles, event.Payload.ID, tc, nil, false, m.com.Workspace.WorkingDir())
+			nestedItem := chat.NewToolMessageItem(m.com.Styles, event.Payload.ID, tc, m.takePendingToolResult(tc.ID), false, m.com.Workspace.WorkingDir())
 			if simplifiable, ok := nestedItem.(chat.Compactable); ok {
 				simplifiable.SetCompact(true)
 			}
@@ -2103,11 +2118,16 @@ func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.
 
 	// Update nested tool results.
 	for _, tr := range event.Payload.ToolResults() {
+		matched := false
 		for _, nestedTool := range nestedTools {
 			if nestedTool.ToolCall().ID == tr.ToolCallID {
 				nestedTool.SetResult(&tr)
+				matched = true
 				break
 			}
+		}
+		if !matched {
+			m.stashToolResult(tr)
 		}
 	}
 
@@ -5103,6 +5123,49 @@ func (m *UI) syncPendingItem() bool {
 	}
 	m.chat.AppendMessages(m.pending.spinner)
 	return true
+}
+
+// maxPendingToolResults bounds the early-result stash; a result whose
+// call never appears is dropped at the cap — the same outcome as
+// before the stash existed, without an unbounded map.
+const maxPendingToolResults = 256
+
+// stashToolResult records a result whose tool-call item is not in the
+// chat yet; takePendingToolResult hands it to the item when built.
+func (m *UI) stashToolResult(tr message.ToolResult) {
+	if m.pendingToolResults == nil {
+		m.pendingToolResults = map[string]message.ToolResult{}
+	}
+	if len(m.pendingToolResults) >= maxPendingToolResults {
+		clear(m.pendingToolResults)
+	}
+	m.pendingToolResults[tr.ToolCallID] = tr
+}
+
+// takePendingToolResult returns and removes a stashed result for id.
+func (m *UI) takePendingToolResult(id string) *message.ToolResult {
+	tr, ok := m.pendingToolResults[id]
+	if !ok {
+		return nil
+	}
+	delete(m.pendingToolResults, id)
+	return &tr
+}
+
+// applyPendingToolResults hands stashed results to freshly built items.
+func (m *UI) applyPendingToolResults(items []chat.MessageItem) {
+	if len(m.pendingToolResults) == 0 {
+		return
+	}
+	for _, item := range items {
+		ti, ok := item.(chat.ToolMessageItem)
+		if !ok {
+			continue
+		}
+		if tr := m.takePendingToolResult(ti.ToolCall().ID); tr != nil {
+			ti.SetResult(tr)
+		}
+	}
 }
 
 // hasSession returns true if there is an active session with a valid ID.
