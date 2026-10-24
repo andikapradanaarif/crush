@@ -1123,3 +1123,44 @@ func TestRun_SoftWindowCap(t *testing.T) {
 		require.Contains(t, wire, "result result result")
 	})
 }
+
+// TestRun_SoftWindowCapGuards pins the opt-outs: the soft cap only
+// exists where the legacy summarize path can absorb it. With
+// auto-summarize disabled the verbatim render must ride to the
+// provider — nothing local can shrink it, so an abort would loop or
+// die. With the notebook on, its machinery owns compaction and the
+// legacy path stays out of the render's way.
+func TestRun_SoftWindowCapGuards(t *testing.T) {
+	t.Parallel()
+
+	t.Run("disableAutoSummarize rides verbatim to the provider", func(t *testing.T) {
+		t.Parallel()
+		env, sessionID := newProcessEnv(t, &countingGen{})
+		windowCapSeed(t, env, sessionID)
+
+		m := &captureModel{usage: 2_000}
+		a := windowCapAgent(env, m, false, false)
+		a.disableAutoSummarize = true
+
+		_, err := a.Run(t.Context(), SessionAgentCall{SessionID: sessionID, Prompt: "turn two"})
+		require.NoError(t, err)
+		a.detachedWork.Wait()
+
+		require.NotEmpty(t, m.prompts, "the soft cap must not abort what summarize cannot fix")
+		require.Contains(t, m.prompts[len(m.prompts)-1], "result result result")
+	})
+
+	t.Run("notebook-enabled leaves compaction to its own machinery", func(t *testing.T) {
+		t.Parallel()
+		env, sessionID := newProcessEnv(t, &countingGen{})
+		windowCapSeed(t, env, sessionID)
+
+		m := &captureModel{usage: 2_000}
+		a := windowCapAgent(env, m, true, false)
+
+		_, err := a.Run(t.Context(), SessionAgentCall{SessionID: sessionID, Prompt: "turn two"})
+		require.NoError(t, err)
+		a.detachedWork.Wait()
+		require.NotEmpty(t, m.prompts, "the run completes through the notebook path, not the soft cap")
+	})
+}
