@@ -408,10 +408,17 @@ func (m *Message) ThinkingDuration() time.Duration {
 // FinishToolCall marks a tool call as finished.
 func (m *Message) FinishToolCall(toolCallID string) {
 	for i, part := range m.Parts {
-		if c, ok := part.(ToolCall); ok && c.ID == toolCallID {
-			c.Finished = true
-			m.Parts[i] = c
-			return
+		if c, ok := part.(ToolCall); ok {
+			if c.ID == toolCallID {
+				m.Parts[i] = ToolCall{
+					ID:       c.ID,
+					Name:     c.Name,
+					Input:    c.Input,
+					Type:     c.Type,
+					Finished: true,
+				}
+				return
+			}
 		}
 	}
 }

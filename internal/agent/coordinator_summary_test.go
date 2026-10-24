@@ -155,40 +155,36 @@ func TestUpdateModelsResolvesSummaryModel(t *testing.T) {
 	require.Equal(t, "mock-model", sm.ModelCfg.Model)
 }
 
-func TestBuildSelectedModelReturnsErrModelNotFoundInProvider(t *testing.T) {
+func TestBuildModelReturnsErrModelNotFound(t *testing.T) {
 	crushJSON := `{
   "options": {"disable_default_providers": true, "disable_provider_auto_update": true},
   "providers": {"mock": {"id": "mock", "name": "Mock", "type": "openai",
     "base_url": "http://127.0.0.1:9/v1", "api_key": "test-key",
     "models": [{"id": "mock-model", "name": "Mock", "context_window": 8192, "default_max_tokens": 128}]}},
   "models": {"large": {"provider": "mock", "model": "mock-model"},
-             "small": {"provider": "mock", "model": "mock-model"}}
+             "small": {"provider": "mock", "model": "mock-model"},
+             "missing": {"provider": "mock", "model": "nonexistent-model"}}
 }`
 	coord := newSummaryTestCoordinator(t, crushJSON)
 
 	// Request a model that doesn't exist in the provider catalog.
-	_, err := coord.buildSelectedModel(context.Background(), config.SelectedModel{
-		Provider: "mock",
-		Model:    "nonexistent-model",
-	}, true)
-	require.ErrorIs(t, err, errModelNotFoundInProvider)
+	_, err := coord.buildModel(context.Background(), "missing", true)
+	require.ErrorIs(t, err, errModelNotFound)
 }
 
-func TestBuildSelectedModelReturnsErrModelProviderNotConfigured(t *testing.T) {
+func TestBuildModelReturnsErrModelProviderNotConfigured(t *testing.T) {
 	crushJSON := `{
   "options": {"disable_default_providers": true, "disable_provider_auto_update": true},
   "providers": {"mock": {"id": "mock", "name": "Mock", "type": "openai",
     "base_url": "http://127.0.0.1:9/v1", "api_key": "test-key",
     "models": [{"id": "mock-model", "name": "Mock", "context_window": 8192, "default_max_tokens": 128}]}},
   "models": {"large": {"provider": "mock", "model": "mock-model"},
-             "small": {"provider": "mock", "model": "mock-model"}}
+             "small": {"provider": "mock", "model": "mock-model"},
+             "ghost": {"provider": "nonexistent-provider", "model": "some-model"}}
 }`
 	coord := newSummaryTestCoordinator(t, crushJSON)
 
 	// Request a provider that doesn't exist.
-	_, err := coord.buildSelectedModel(context.Background(), config.SelectedModel{
-		Provider: "nonexistent-provider",
-		Model:    "some-model",
-	}, true)
+	_, err := coord.buildModel(context.Background(), "ghost", true)
 	require.ErrorIs(t, err, errModelProviderNotConfigured)
 }

@@ -152,7 +152,7 @@ func (a *sessionAgent) scopeResolverFor(workDir, sessionID string, mp params.Mem
 	if mp.ResolverCalls <= 0 || a.isSubAgent || sessionID == "" || a.resolverStates == nil {
 		return nil
 	}
-	if a.smallModel.Get().Model == nil && a.largeModel.Get().Model == nil {
+	if ms := a.models(); ms.Small.Model == nil && ms.Large.Model == nil {
 		return nil
 	}
 	state := a.resolverStates.GetOrSet(sessionID, func() *resolverState {
@@ -193,8 +193,9 @@ func (r *llmScopeResolver) call(ctx context.Context, prompt string, cands []Reso
 	// zero credits) must not pin the layer off — a single abstain
 	// outcome per consult, but the consult should still be tried on
 	// the model that demonstrably works in this session.
-	models := []Model{r.a.smallModel.Get()}
-	if large := r.a.largeModel.Get(); large.Model != nil &&
+	ms := r.a.models()
+	models := []Model{ms.Small}
+	if large := ms.Large; large.Model != nil &&
 		(models[0].Model == nil ||
 			large.ModelCfg.Provider != models[0].ModelCfg.Provider ||
 			large.ModelCfg.Model != models[0].ModelCfg.Model) {

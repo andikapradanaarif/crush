@@ -132,8 +132,7 @@ func testSessionAgent(env fakeEnv, large, small fantasy.LanguageModel, systemPro
 		},
 	}
 	agent := NewSessionAgent(SessionAgentOptions{
-		LargeModel:   largeModel,
-		SmallModel:   smallModel,
+		Models:       fixedModels(largeModel, smallModel),
 		SystemPrompt: systemPrompt,
 		IsYolo:       true,
 		Sessions:     env.sessions,
@@ -238,3 +237,11 @@ func main() {
 	err = os.WriteFile(dir+"/main.go", []byte(mainGo), 0o644)
 	require.NoError(t, err)
 }
+
+// fixedModels returns a model source that always hands out the same pair.
+func fixedModels(large, small Model) func() ModelSet {
+	return func() ModelSet { return ModelSet{Large: large, Small: small} }
+}
+
+// noModels is the model source for tests that never reach a provider.
+func noModels() ModelSet { return ModelSet{} }

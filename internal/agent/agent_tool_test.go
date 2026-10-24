@@ -55,9 +55,9 @@ func TestAgentToolLazyBuildWithMissingProvider(t *testing.T) {
 	require.Contains(t, resp.Content, `"ghost"`)
 }
 
-// buildAgentModels names the failing agent slot instead of blindly
-// claiming "large" when an agent pins a custom model slot.
-func TestBuildAgentModelsNamesNonLargeSlot(t *testing.T) {
+// buildModel names the failing slot instead of blindly claiming "large"
+// when an agent pins a custom model slot.
+func TestBuildModelNamesNonLargeSlot(t *testing.T) {
 	crushJSON := `{
   "options": {"disable_default_providers": true, "disable_provider_auto_update": true},
   "providers": {"mock": {"id": "mock", "name": "Mock", "type": "openai",
@@ -71,8 +71,8 @@ func TestBuildAgentModelsNamesNonLargeSlot(t *testing.T) {
 	coord := newSummaryTestCoordinator(t, crushJSON)
 
 	taskCfg := coord.cfg.Config().Agents[config.AgentTask]
-	_, _, err := coord.buildAgentModels(context.Background(), taskCfg, true)
+	_, err := coord.buildModel(context.Background(), taskCfg.Model, true)
 	require.ErrorIs(t, err, errModelProviderNotConfigured)
 	require.Contains(t, err.Error(), `"ghost"`)
-	require.Contains(t, err.Error(), `slot "task"`)
+	require.Contains(t, err.Error(), `task`)
 }

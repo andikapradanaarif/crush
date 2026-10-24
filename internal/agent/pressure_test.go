@@ -21,10 +21,10 @@ import (
 // map like the coordinator's shared one.
 func pressureTestAgent(cw, maxOut int64) *sessionAgent {
 	return &sessionAgent{
-		largeModel: csync.NewValue(Model{CatwalkCfg: catwalk.Model{
+		models: fixedModels(Model{CatwalkCfg: catwalk.Model{
 			ContextWindow:    cw,
 			DefaultMaxTokens: maxOut,
-		}}),
+		}}, Model{}),
 		reqStats:     csync.NewMap[string, requestStats](),
 		pressureGate: true,
 	}
@@ -188,10 +188,10 @@ func TestPreparePrompt_PressureGateDisengagedVerbatim(t *testing.T) {
 	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
 	a.priorTurns = priorTurnsStub
 	a.pressureGate = true
-	a.largeModel = csync.NewValue(Model{CatwalkCfg: catwalk.Model{
+	a.models = fixedModels(Model{CatwalkCfg: catwalk.Model{
 		ContextWindow:    1_000_000,
 		DefaultMaxTokens: 8_000,
-	}})
+	}}, Model{})
 	a.reqStats = csync.NewMap[string, requestStats]()
 	msgs := priorTurnFixture(t, svc, sessionID)
 
@@ -220,10 +220,10 @@ func TestPreparePrompt_PressureGateEngagedCollapses(t *testing.T) {
 	a.pressureGate = true
 	// margin (8K reserve + 50K jump) exceeds the 40K window — the
 	// gate engages on the first estimate.
-	a.largeModel = csync.NewValue(Model{CatwalkCfg: catwalk.Model{
+	a.models = fixedModels(Model{CatwalkCfg: catwalk.Model{
 		ContextWindow:    40_000,
 		DefaultMaxTokens: 8_000,
-	}})
+	}}, Model{})
 	a.reqStats = csync.NewMap[string, requestStats]()
 	msgs := priorTurnFixture(t, svc, sessionID)
 	// First pass fires coverage; the render's own pass observes the
@@ -271,10 +271,10 @@ func TestPreparePrompt_EmptyCoverageDefersFreeze(t *testing.T) {
 	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
 	a.priorTurns = priorTurnsStub
 	a.pressureGate = true
-	a.largeModel = csync.NewValue(Model{CatwalkCfg: catwalk.Model{
+	a.models = fixedModels(Model{CatwalkCfg: catwalk.Model{
 		ContextWindow:    40_000,
 		DefaultMaxTokens: 8_000,
-	}})
+	}}, Model{})
 	a.reqStats = csync.NewMap[string, requestStats]()
 
 	// Turn 0 unclosed: store everything up to (not including) the
@@ -400,8 +400,7 @@ func TestRun_PressureGateWireProof(t *testing.T) {
 	mk := func(m fantasy.LanguageModel) *sessionAgent {
 		model := Model{Model: m, CatwalkCfg: catwalk.Model{ContextWindow: 64_000, DefaultMaxTokens: 4_000}}
 		return NewSessionAgent(SessionAgentOptions{
-			LargeModel:         model,
-			SmallModel:         model,
+			Models:             fixedModels(model, model),
 			SystemPrompt:       "system",
 			IsYolo:             true,
 			Sessions:           env.sessions,
@@ -480,10 +479,10 @@ func TestPreparePrompt_PressureGateIntraProcessTransition(t *testing.T) {
 	a.pressureGate = true
 	// 64K window, 4K reserve → margin 54K → engage threshold ≈ 10K
 	// estimated tokens ≈ 40K chars of render.
-	a.largeModel = csync.NewValue(Model{CatwalkCfg: catwalk.Model{
+	a.models = fixedModels(Model{CatwalkCfg: catwalk.Model{
 		ContextWindow:    64_000,
 		DefaultMaxTokens: 4_000,
-	}})
+	}}, Model{})
 	// A huge raw budget keeps the boundary at 0 so engagement shows as
 	// in-place collapse, not eviction — the mechanism this test pins.
 	a.rawTokenBudget = 1_000_000
@@ -527,10 +526,10 @@ func TestPreparePrompt_SummarizeRenderSkipsGateState(t *testing.T) {
 	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
 	a.priorTurns = priorTurnsStub
 	a.pressureGate = true
-	a.largeModel = csync.NewValue(Model{CatwalkCfg: catwalk.Model{
+	a.models = fixedModels(Model{CatwalkCfg: catwalk.Model{
 		ContextWindow:    40_000,
 		DefaultMaxTokens: 8_000,
-	}})
+	}}, Model{})
 	a.reqStats = csync.NewMap[string, requestStats]()
 	msgs := priorTurnFixture(t, svc, sessionID)
 	a.reqStats.Set(sessionID, requestStats{LastPromptTokens: 5_000, renderedMsgs: 2, pressureEstimate: 5_500})
@@ -764,10 +763,10 @@ func TestPreparePrompt_PressureGateVerbatimModeEvaluates(t *testing.T) {
 	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
 	a.priorTurns = priorTurnsVerbatim // the default — nil collapse.
 	a.pressureGate = true
-	a.largeModel = csync.NewValue(Model{CatwalkCfg: catwalk.Model{
+	a.models = fixedModels(Model{CatwalkCfg: catwalk.Model{
 		ContextWindow:    64_000,
 		DefaultMaxTokens: 4_000,
-	}})
+	}}, Model{})
 	a.reqStats = csync.NewMap[string, requestStats]()
 	msgs := priorTurnFixture(t, svc, sessionID)
 	ctx := t.Context()
@@ -934,8 +933,7 @@ func TestRun_EnforceContextWindowCap(t *testing.T) {
 	mk := func(env *processEnv, m fantasy.LanguageModel, notebookOn bool) *sessionAgent {
 		model := Model{Model: m, CatwalkCfg: catwalk.Model{ContextWindow: 64_000, DefaultMaxTokens: 4_000}}
 		opts := SessionAgentOptions{
-			LargeModel:           model,
-			SmallModel:           model,
+			Models:               fixedModels(model, model),
 			SystemPrompt:         "system",
 			IsYolo:               true,
 			Sessions:             env.sessions,

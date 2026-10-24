@@ -141,8 +141,7 @@ func newProcessEnv(t *testing.T, gen notebook.Generator) (*processEnv, string) {
 func (e *processEnv) agent(model fantasy.LanguageModel, priorTurns string) *sessionAgent {
 	m := Model{Model: model, CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 10000}}
 	return NewSessionAgent(SessionAgentOptions{
-		LargeModel:         m,
-		SmallModel:         m,
+		Models:             fixedModels(m, m),
 		SystemPrompt:       "system",
 		IsYolo:             true,
 		Sessions:           e.sessions,

@@ -140,9 +140,8 @@ func NewDownloadTool(permissions permission.Service, workingDir string, client *
 				)), nil
 			}
 
-			// Create parent directories if they don't exist
-			if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
-				return fantasy.NewTextErrorResponse("Failed to create parent directories: " + err.Error()), nil
+			if err := ensureParentDir(filePath); err != nil {
+				return fantasy.NewTextErrorResponse("Download failed: " + err.Error()), nil
 			}
 
 			// Create the output file

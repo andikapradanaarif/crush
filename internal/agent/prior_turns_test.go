@@ -749,10 +749,10 @@ func TestSummarize_RendersVerbatim(t *testing.T) {
 	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
 	a.priorTurns = priorTurnsStub
 	model := &summarizeCaptureModel{}
-	a.largeModel = csync.NewValue(Model{
+	a.models = fixedModels(Model{
 		Model:    model,
 		ModelCfg: config.SelectedModel{Model: "fake-model", Provider: "fake"},
-	})
+	}, Model{})
 	a.systemPromptPrefix = csync.NewValue("")
 	a.activeRequests = csync.NewMap[string, *activeCancel]()
 	a.messageQueue = csync.NewMap[string, []SessionAgentCall]()

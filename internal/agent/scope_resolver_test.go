@@ -324,8 +324,7 @@ func textModelStreams(text string, calls *atomic.Int32) *fakeLanguageModel {
 
 func resolverTestAgent(lm fantasy.LanguageModel) *sessionAgent {
 	return &sessionAgent{
-		smallModel:     csync.NewValue(Model{Model: lm}),
-		largeModel:     csync.NewValue(Model{Model: lm}),
+		models:         fixedModels(Model{Model: lm}, Model{Model: lm}),
 		resolverStates: csync.NewMap[string, *resolverState](),
 	}
 }
@@ -474,13 +473,12 @@ func TestLLMScopeResolver_FallsBackToLarge(t *testing.T) {
 	var largeCalls atomic.Int32
 	large := textModelStreams(`{"about_failure":false}`, &largeCalls)
 	a := &sessionAgent{
-		smallModel: csync.NewValue(Model{
-			Model:    small,
-			ModelCfg: config.SelectedModel{Provider: "anthropic", Model: "haiku"},
-		}),
-		largeModel: csync.NewValue(Model{
+		models: fixedModels(Model{
 			Model:    large,
 			ModelCfg: config.SelectedModel{Provider: "opencode-go", Model: "muse"},
+		}, Model{
+			Model:    small,
+			ModelCfg: config.SelectedModel{Provider: "anthropic", Model: "haiku"},
 		}),
 		resolverStates: csync.NewMap[string, *resolverState](),
 	}
@@ -551,7 +549,7 @@ func TestLLMScopeResolver_TokenFloor(t *testing.T) {
 		t.Helper()
 		lm := textModelStreams(`{"about_failure":true}`, nil)
 		a := resolverTestAgent(lm)
-		a.smallModel = csync.NewValue(Model{Model: lm, CatwalkCfg: cfg})
+		a.models = fixedModels(Model{Model: lm}, Model{Model: lm, CatwalkCfg: cfg})
 		r := resolverForSession(a, "", 8)
 		_, err := r.ResolveScope(context.Background(), jaPrompt, jaCands)
 		require.NoError(t, err)

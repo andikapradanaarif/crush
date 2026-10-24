@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"charm.land/fantasy"
@@ -152,12 +151,6 @@ func processMultiEditWithCreation(edit editContext, params MultiEditParams, call
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to access file: %w", err)
 	}
 
-	// Create parent directories
-	dir := filepath.Dir(params.FilePath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fantasy.ToolResponse{}, fmt.Errorf("failed to create parent directories: %w", err)
-	}
-
 	currentContent, failedEdits, whitespaceCorrected := applyEditsToContent(firstEdit.NewString, params.Edits[1:], 1)
 
 	// Get session and message IDs
@@ -205,10 +198,8 @@ func processMultiEditWithCreation(edit editContext, params MultiEditParams, call
 		return resp, nil
 	}
 
-	// Write the file
-	err = os.WriteFile(params.FilePath, []byte(currentContent), 0o644)
-	if err != nil {
-		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
+	if err = writeFileWithParents(params.FilePath, []byte(currentContent)); err != nil {
+		return fantasy.ToolResponse{}, err
 	}
 
 	// Update file history

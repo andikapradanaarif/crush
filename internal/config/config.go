@@ -344,7 +344,7 @@ type LSPConfig struct {
 type TUIOptions struct {
 	CompactMode bool        `json:"compact_mode,omitempty" jsonschema:"description=Enable compact mode for the TUI interface,default=false"`
 	DiffMode    string      `json:"diff_mode,omitempty" jsonschema:"description=Diff mode for the TUI interface,enum=unified,enum=split"`
-	ActiveTheme string      `json:"active_theme,omitempty" jsonschema:"description=Name of the currently active theme,default=charmtone-panther,example=charmtone-panther,example=gruvbox-dark"`
+	ActiveTheme string      `json:"active_theme,omitempty" jsonschema:"description=Name of the currently active theme,default=charmtone-panther,example=charmtone-panther,example=gruvbox-dark,example=keanu"`
 	Completions Completions `json:"completions,omitzero" jsonschema:"description=Completions UI options"`
 	Transparent *bool       `json:"transparent,omitempty" jsonschema:"description=Enable transparent background for the TUI interface,default=false"`
 	Scrollbar   string      `json:"scrollbar,omitempty" jsonschema:"description=Chat scrollbar visibility,enum=default,enum=always,enum=never,default=default"`
@@ -529,7 +529,7 @@ type Options struct {
 	Progress             *bool    `json:"progress,omitempty" jsonschema:"description=Show indeterminate progress updates during long operations,default=true"`
 	Notifications        string   `json:"notifications,omitempty" jsonschema:"description=Notification style to use. Options: auto (default)\\, native\\, osc\\, bell\\, disabled. Auto selects based on environment: native for local sessions\\, osc for SSH (with automatic OSC 99/777 detection).,enum=auto,enum=native,enum=osc,enum=bell,enum=disabled,default=auto"`
 	DisabledSkills       []string `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=crush-config"`
-	RequestTimeout       *int     `json:"request_timeout,omitempty" jsonschema:"description=Timeout in seconds for each LLM API request. Streaming responses are aborted only after this much inactivity\\, so slow but active streams are never killed. 0 disables it\\, negative values are invalid.,default=120,example=120,example=300,example=0"`
+	RequestTimeout       *int     `json:"request_timeout,omitempty" jsonschema:"description=Timeout in seconds for each LLM API request. Streaming responses are aborted only after this much inactivity between tokens\\, so slow but active streams are never killed; the wait for the first token gets at least five minutes for prompt prefill. 0 disables it\\, negative values are invalid.,default=60,example=120,example=300,example=0"`
 	MaxBackgroundJobs    *int     `json:"max_background_jobs,omitempty" jsonschema:"description=How many background shell jobs may run at once. Jobs that have finished never count against it. 0 or negative restores the default.,default=50,example=10,example=200"`
 	// TurnContext selects the per-turn context augmentation tier:
 	// off (default) or session (deterministic session signals —
@@ -659,15 +659,15 @@ func (o *Options) GetMaxBackgroundJobs() int {
 // DefaultRequestTimeout bounds each LLM API request when the user has not
 // configured a timeout. Slow or unreachable providers fail after it instead
 // of blocking a session forever; streamed responses are only aborted after
-// this much inactivity, and users running slow local models can raise or
-// disable it via options.request_timeout.
+// this much inactivity between tokens, and users running slow local models
+// can raise or disable it via options.request_timeout.
 const DefaultRequestTimeout = 2 * time.Minute
 
 // GetRequestTimeout returns the per-request timeout for LLM API calls (a
 // hard deadline for non-streaming requests and an idle timeout for
-// streams), or zero when disabled. The nil receiver and the unset field
-// both mean DefaultRequestTimeout, so callers can ask without unwrapping
-// either.
+// streams, with a more generous budget for the first streamed token), or
+// zero when disabled. The nil receiver and the unset field both mean
+// DefaultRequestTimeout, so callers can ask without unwrapping either.
 func (o *Options) GetRequestTimeout() time.Duration {
 	if o == nil || o.RequestTimeout == nil {
 		return DefaultRequestTimeout

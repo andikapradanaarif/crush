@@ -216,7 +216,6 @@ func filterToolsForChannel(agentTools []fantasy.AgentTool, channel string, state
 type SessionAgent interface {
 	Run(context.Context, SessionAgentCall) (*fantasy.AgentResult, error)
 	BeginAccepted(sessionID string) *AcceptedRun
-	SetModels(large Model, small Model)
 	SetTools(tools []fantasy.AgentTool)
 	SetSystemPrompt(systemPrompt prompt.BuiltPrompt)
 	Cancel(sessionID string)
@@ -237,6 +236,11 @@ type Model struct {
 	CatwalkCfg catwalk.Model
 	ModelCfg   config.SelectedModel
 	FlatRate   bool
+	// OAuth is true when the provider signs in by OAuth, so a rejected
+	// credential calls for a new sign-in rather than a config change.
+	OAuth bool
+	// ProviderName is the provider's display name, such as "GitHub Copilot".
+	ProviderName string
 }
 
 // activeCancel wraps a context.CancelFunc with a unique pointer identity.
@@ -249,8 +253,7 @@ type activeCancel struct {
 }
 
 type sessionAgent struct {
-	largeModel         *csync.Value[Model]
-	smallModel         *csync.Value[Model]
+	models             func() ModelSet
 	systemPromptPrefix *csync.Value[string]
 	systemPrompt       *csync.Value[string]
 	tools              *csync.Slice[fantasy.AgentTool]
@@ -518,8 +521,9 @@ type sessionAgent struct {
 }
 
 type SessionAgentOptions struct {
-	LargeModel           Model
-	SmallModel           Model
+	// Models hands out the agent's current models on every call, so a
+	// credential refresh reaches requests already in flight.
+	Models               func() ModelSet
 	SystemPromptPrefix   string
 	SystemPrompt         string
 	IsSubAgent           bool
@@ -684,8 +688,7 @@ func NewSessionAgent(
 	opts SessionAgentOptions,
 ) SessionAgent {
 	a := &sessionAgent{
-		largeModel:             csync.NewValue(opts.LargeModel),
-		smallModel:             csync.NewValue(opts.SmallModel),
+		models:                 opts.Models,
 		systemPromptPrefix:     csync.NewValue(opts.SystemPromptPrefix),
 		systemPrompt:           csync.NewValue(opts.SystemPrompt),
 		promptSections:         csync.NewSlice[prompt.PromptSection](),
@@ -1060,7 +1063,7 @@ func (a *sessionAgent) persistCanceledTurn(ctx context.Context, call SessionAgen
 			return err
 		}
 	}
-	largeModel := a.largeModel.Get()
+	largeModel := a.models().Large
 	assistant, err := a.messages.Create(writeCtx, call.SessionID, message.CreateMessageParams{
 		Role:     message.Assistant,
 		Parts:    []message.ContentPart{},
@@ -1293,9 +1296,9 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 		a.publishRunComplete(ctx, call, complete)
 	}()
 
-	// Copy mutable fields under lock to avoid races with SetTools/SetModels.
+	// Copy mutable fields under lock to avoid races with SetTools.
 	agentTools := filterToolsForChannel(a.tools.Copy(), call.Channel, mcp.GetStates())
-	largeModel := a.largeModel.Get()
+	largeModel := a.models().Large
 	systemPrompt := a.systemPrompt.Get()
 	promptPrefix := a.systemPromptPrefix.Get()
 	mcpInstructions := collectMCPInstructions()
@@ -1420,12 +1423,15 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 
 	var stepMessages []fantasy.Message
 	var shouldSummarize bool
-	sanitizedToolCalls := make(map[string]bool)
+	// Written from OnToolCall and read from OnToolResult, which fantasy
+	// invokes concurrently for parallel tool calls.
+	sanitizedToolCalls := csync.NewMap[string, bool]()
 	// Full names of tool calls that completed without error this turn.
-	// Written only from the streaming callbacks (which run sequentially)
-	// and read after Stream returns, where sendChannelReply uses it to
-	// tell whether the model already replied on the originating channel.
-	completedToolCalls := make(map[string]struct{})
+	// Written from OnToolResult, which runs concurrently for parallel
+	// tool calls, and read after Stream returns, where sendChannelReply
+	// uses it to tell whether the model already replied on the
+	// originating channel.
+	completedToolCalls := csync.NewMap[string, struct{}]()
 	// runActions records the run's first target-bearing tool calls —
 	// name plus extracted referent — for the tail audit's "what the
 	// agent acted on after the tail rendered" evidence (#221).
@@ -1677,16 +1683,15 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 		},
 		OnAuthRefresh: call.OnAuthRefresh,
 		ModelProvider: func() fantasy.LanguageModel {
-			m := a.largeModel.Get()
 			slog.Info("ModelProvider called",
-				"provider", m.ModelCfg.Provider,
-				"model", m.ModelCfg.Model)
-			return m.Model
+				"provider", largeModel.ModelCfg.Provider,
+				"model", largeModel.ModelCfg.Model)
+			return a.currentBuildOf(largeModel)
 		},
 		OnToolCall: func(tc fantasy.ToolCallContent) error {
 			input, wasSanitized := sanitizeToolInput(tc.ToolName, tc.ToolCallID, tc.Input)
 			if wasSanitized {
-				sanitizedToolCalls[tc.ToolCallID] = true
+				sanitizedToolCalls.Set(tc.ToolCallID, true)
 			}
 			if len(runActions) < tailActionsMax {
 				if target := toolActionTarget(input); target != "" {
@@ -1713,13 +1718,13 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 		},
 		OnToolResult: func(result fantasy.ToolResultContent) error {
 			toolResult := a.convertToToolResult(result)
-			if sanitizedToolCalls[result.ToolCallID] {
+			if _, ok := sanitizedToolCalls.Get(result.ToolCallID); ok {
 				toolResult.Content = "Tool call failed: arguments were not valid JSON. Please check your tool call format and try again."
 				toolResult.IsError = true
 			}
 			a.stampReadMtime(&toolResult, currentAssistant.ToolCalls())
 			if !toolResult.IsError && toolResult.Name != "" {
-				completedToolCalls[toolResult.Name] = struct{}{}
+				completedToolCalls.Set(toolResult.Name, struct{}{})
 			}
 			// Use parent ctx instead of genCtx to ensure the message is created
 			// even if the request is canceled mid-stream
@@ -1919,12 +1924,11 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 				a.reqStats.Set(call.SessionID, rs)
 			}
 		}
-		isHyper := largeModel.ModelCfg.Provider == hyper.Name
 		isCancelErr := errors.Is(err, context.Canceled)
 		slog.Info("Agent stream returned error",
 			"error", err.Error(),
 			"error_type", fmt.Sprintf("%T", err),
-			"is_hyper", isHyper,
+			"oauth", largeModel.OAuth,
 			"is_cancel", isCancelErr)
 		if currentAssistant == nil {
 			// Cancel-before-assistant-creation window: the run was
@@ -1954,8 +1958,8 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 			// Checked before the provider branches so a deadline our own
 			// request timeout imposed is never reported as a provider error.
 			currentAssistant.AddFinish(message.FinishReasonError, "Request timed out", requestTimedOutErr.userMessage())
-		} else if isHyper && errors.As(err, &providerErr) && providerErr.StatusCode == http.StatusUnauthorized {
-			currentAssistant.AddFinish(message.FinishReasonError, "Unauthorized", `Please re-authenticate with Hyper. You can also run "crush auth" to re-authenticate.`)
+		} else if largeModel.OAuth && errors.As(err, &providerErr) && providerErr.StatusCode == http.StatusUnauthorized {
+			currentAssistant.AddFinish(message.FinishReasonError, "Unauthorized", signInAgainMessage(largeModel))
 		} else if errors.As(err, &providerErr) {
 			if providerErr.Message == "The requested model is not supported." {
 				url := "https://github.com/settings/copilot/features"
@@ -1987,7 +1991,7 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 		if channelErrorReplyWanted(call.Channel, err) {
 			a.sendChannelReply(ctx, call,
 				"Something went wrong while handling your message. Please try again.",
-				completedToolCalls)
+				completedToolCalls.Copy())
 		}
 		return nil, nil, err
 	}
@@ -2108,7 +2112,7 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 	// released so a follow-up push queued behind this turn cannot
 	// overtake its reply.
 	if currentAssistant != nil && (!shouldSummarize || len(currentAssistant.ToolCalls()) == 0) {
-		a.sendChannelReply(ctx, call, currentAssistant.Content().String(), completedToolCalls)
+		a.sendChannelReply(ctx, call, currentAssistant.Content().String(), completedToolCalls.Copy())
 	}
 
 	// Release active request before publishing the notification.
@@ -2239,8 +2243,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		return ErrSessionBusy
 	}
 
-	// Copy mutable fields under lock to avoid races with SetModels.
-	largeModel := a.largeModel.Get()
+	largeModel := a.models().Large
 	systemPromptPrefix := a.systemPromptPrefix.Get()
 
 	currentSession, err := a.sessions.Get(ctx, sessionID)
@@ -2298,7 +2301,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		ProviderOptions: opts,
 		OnAuthRefresh:   onAuthRefresh,
 		ModelProvider: func() fantasy.LanguageModel {
-			return a.largeModel.Get().Model
+			return a.currentBuildOf(largeModel)
 		},
 		PrepareStep: func(callContext context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
 			prepared.Messages = options.Messages
@@ -2349,14 +2352,10 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		return err
 	}
 
-	summaryMessage.AddFinish(message.FinishReasonEndTurn, "", "")
-	err = a.messages.Update(genCtx, summaryMessage)
-	if err != nil {
-		return err
-	}
-
 	var openrouterCost *float64
 	for _, step := range resp.Steps {
+		summaryMessage.PrismModelID, summaryMessage.PrismModelName = extractPrismModel(step.ProviderMetadata)
+		summaryMessage.PrismHypercreditSavings, summaryMessage.PrismDollarSavings = extractPrismSavings(step.ProviderMetadata)
 		stepCost := a.openrouterCost(step.ProviderMetadata)
 		if stepCost != nil {
 			newCost := *stepCost
@@ -2365,6 +2364,12 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 			}
 			openrouterCost = &newCost
 		}
+	}
+
+	summaryMessage.AddFinish(message.FinishReasonEndTurn, "", "")
+	err = a.messages.Update(genCtx, summaryMessage)
+	if err != nil {
+		return err
 	}
 
 	a.updateSessionUsage(largeModel, &currentSession, resp.TotalUsage, openrouterCost, false)
@@ -3297,8 +3302,8 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 		}
 	}()
 
-	smallModel := a.smallModel.Get()
-	largeModel := a.largeModel.Get()
+	models := a.models()
+	smallModel, largeModel := models.Small, models.Large
 	systemPromptPrefix := a.systemPromptPrefix.Get()
 
 	newAgent := func(m fantasy.LanguageModel, p []byte, tok int64) fantasy.Agent {
@@ -3659,11 +3664,6 @@ func (a *sessionAgent) QueuedPromptsList(sessionID string) []string {
 	return prompts
 }
 
-func (a *sessionAgent) SetModels(large Model, small Model) {
-	a.largeModel.Set(large)
-	a.smallModel.Set(small)
-}
-
 func (a *sessionAgent) SetTools(tools []fantasy.AgentTool) {
 	a.tools.SetSlice(tools)
 }
@@ -3674,7 +3674,7 @@ func (a *sessionAgent) SetSystemPrompt(systemPrompt prompt.BuiltPrompt) {
 }
 
 func (a *sessionAgent) Model() Model {
-	return a.largeModel.Get()
+	return a.models().Large
 }
 
 // toolResultMaxContentBytes is the universal write-time cap on a
@@ -3893,4 +3893,12 @@ func sanitizeToolInput(toolName, toolCallID, input string) (string, bool) {
 		return "{}", true
 	}
 	return input, false
+}
+
+// signInAgainMessage tells the user how to replace a credential the provider
+// refused after a refresh.
+func signInAgainMessage(m Model) string {
+	name := cmp.Or(m.ProviderName, m.ModelCfg.Provider)
+	return fmt.Sprintf("Please sign in to %s again. You can also run \"crush login %s --force\".",
+		name, m.ModelCfg.Provider)
 }

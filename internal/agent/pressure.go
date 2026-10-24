@@ -45,7 +45,7 @@ func pressureMargin(outputReserve int64) int64 {
 // call-site max output isn't reachable from the render path, so the
 // catalog default stands in, floored at defaultOutputReserve.
 func (a *sessionAgent) outputReserve() int64 {
-	if v := a.largeModel.Get().CatwalkCfg.DefaultMaxTokens; v > 0 {
+	if v := a.models().Large.CatwalkCfg.DefaultMaxTokens; v > 0 {
 		return v
 	}
 	return defaultOutputReserve
@@ -97,7 +97,7 @@ func (a *sessionAgent) pressureEngaged(sessionID string, msgs []message.Message)
 	// render's growth. Self-correcting on the next success and
 	// priced into the step-jump margin.
 	rs.renderedMsgs = len(msgs)
-	cw := int64(a.largeModel.Get().CatwalkCfg.ContextWindow)
+	cw := int64(a.models().Large.CatwalkCfg.ContextWindow)
 	if cw == 0 {
 		// No declared window means no margin to cross — machinery
 		// stays on without latching or counting an activation
@@ -147,7 +147,7 @@ func (a *sessionAgent) enforceWindowCap(msgs []fantasy.Message, agentTools []fan
 	if !a.enforceContextWindow {
 		return nil
 	}
-	cw := int64(a.largeModel.Get().CatwalkCfg.ContextWindow)
+	cw := int64(a.models().Large.CatwalkCfg.ContextWindow)
 	if cw <= 0 {
 		return nil
 	}

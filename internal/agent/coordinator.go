@@ -66,17 +66,12 @@ import (
 
 // Coordinator errors.
 var (
-	errCoderAgentNotConfigured         = errors.New("coder agent not configured")
-	errPlanAgentNotConfigured          = errors.New("plan agent not configured")
-	errMainAgentNotFound               = errors.New("main agent not found")
-	errModelProviderNotConfigured      = errors.New("model provider not configured")
-	errModelNotFoundInProvider         = errors.New("model not found in provider config")
-	errLargeModelNotSelected           = errors.New("large model not selected")
-	errSmallModelNotSelected           = errors.New("small model not selected")
-	errLargeModelProviderNotConfigured = errors.New("large model provider not configured")
-	errSmallModelProviderNotConfigured = errors.New("small model provider not configured")
-	errLargeModelNotFound              = errors.New("large model not found in provider config")
-	errSmallModelNotFound              = errors.New("small model not found in provider config")
+	errCoderAgentNotConfigured    = errors.New("coder agent not configured")
+	errPlanAgentNotConfigured     = errors.New("plan agent not configured")
+	errMainAgentNotFound          = errors.New("main agent not found")
+	errModelProviderNotConfigured = errors.New("model provider not configured")
+	errModelNotSelected           = errors.New("model not selected")
+	errModelNotFound              = errors.New("model not found in provider config")
 )
 
 // Copilot models that use the Responses API instead of Chat Completions.
@@ -274,6 +269,9 @@ type coordinator struct {
 	// handed to every built agent so the selector's caps and the
 	// param_version cmdlog stamps describe the same snapshot.
 	memParams params.Memory
+	// models is shared by every agent; rebuildMu serializes rebuilds of it.
+	models    csync.Value[coordinatorModels]
+	rebuildMu sync.Mutex
 
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
@@ -782,6 +780,9 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 
 	mergedOptions, temp, topP, topK, freqPenalty, presPenalty := mergeCallOptions(model, providerCfg)
 
+	// Inject session_id for OpenRouter sticky routing (no-op for other providers).
+	injectOpenrouterSessionID(mergedOptions, sessionID)
+
 	if err := c.refreshTokenIfExpired(ctx, providerCfg); err != nil {
 		// NOTE(@andreynering): We don't return here because the event handling to ask the user to reauthenticate
 		// depends on the flow below. If refresh fails, proceed with the token we have.
@@ -838,16 +839,7 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 	result, originalErr := run()
 	logTurnSkillUsage(sessionID, prompt, c.activeSkills, c.skillTracker, beforeLoaded)
 
-	// Notify only if still unauthorized after retry — a successful
-	// retry means the user doesn't need to re-authenticate. AWS SSO is
-	// handled transparently inside OnAuthRefresh, so it needs no post-run
-	// notification here.
-	if originalErr != nil && isUnauthorized(originalErr) && c.notify != nil && model.ModelCfg.Provider == hyper.Name {
-		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
-			Type:       notify.TypeReAuthenticate,
-			ProviderID: model.ModelCfg.Provider,
-		})
-	}
+	c.askToSignInAgain(originalErr, model)
 
 	if hasLatest && c.runComplete != nil {
 		c.runComplete.PublishMustDeliver(ctx, pubsub.UpdatedEvent, latest)
@@ -1206,6 +1198,19 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 	return options
 }
 
+// injectOpenrouterSessionID adds session_id to OpenRouter ProviderOptions
+// ExtraBody for sticky routing and upstream session grouping.
+func injectOpenrouterSessionID(opts fantasy.ProviderOptions, sessionID string) {
+	if o, ok := opts[openrouter.Name].(*openrouter.ProviderOptions); ok {
+		if o.ExtraBody == nil {
+			o.ExtraBody = make(map[string]any)
+		}
+		if _, exists := o.ExtraBody["session_id"]; !exists {
+			o.ExtraBody["session_id"] = session.HashID(sessionID)
+		}
+	}
+}
+
 func mergeCallOptions(model Model, cfg config.ProviderConfig) (fantasy.ProviderOptions, *float64, *float64, *int64, *float64, *float64) {
 	modelOptions := getProviderOptions(model, cfg)
 	temp := cmp.Or(model.ModelCfg.Temperature, model.CatwalkCfg.Options.Temperature)
@@ -1217,10 +1222,32 @@ func mergeCallOptions(model Model, cfg config.ProviderConfig) (fantasy.ProviderO
 }
 
 func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, agent config.Agent, isSubAgent bool) (SessionAgent, error) {
-	large, small, err := c.buildAgentModels(ctx, agent, isSubAgent)
-	if err != nil {
-		return nil, err
+	if c.models.Get().large.Model == nil {
+		if err := c.rebuildModels(ctx); err != nil {
+			return nil, err
+		}
 	}
+	models := c.mainModels
+	if isSubAgent {
+		models = c.subAgentModels
+	}
+	// An agent can pin its large slot to any key in the models config
+	// (agent.Model); an unknown or empty key falls back to the shared
+	// large selection. A pinned model rebuilds with the agent rather
+	// than on credential refresh, same as pre-shared-models.
+	if _, ok := c.cfg.Config().Models[agent.Model]; ok && agent.Model != config.SelectedModelTypeLarge {
+		pinned, err := c.buildModel(ctx, agent.Model, isSubAgent)
+		if err != nil {
+			return nil, fmt.Errorf("agent %s model %q: %w", agent.ID, agent.Model, err)
+		}
+		shared := models
+		models = func() ModelSet {
+			s := shared()
+			s.Large = pinned
+			return s
+		}
+	}
+	large := models().Large
 
 	largeProviderCfg, _ := c.cfg.Config().Providers.Get(large.ModelCfg.Provider)
 	// Prior-turn collapse and supersession stubs both print
@@ -1240,8 +1267,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		memTelemetry = c.memoryTelemetry
 	}
 	result := NewSessionAgent(SessionAgentOptions{
-		LargeModel:           large,
-		SmallModel:           small,
+		Models:               models,
 		SystemPromptPrefix:   largeProviderCfg.SystemPromptPrefix,
 		SystemPrompt:         "",
 		IsSubAgent:           isSubAgent,
@@ -1315,9 +1341,9 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 	// sub-agent builds share the same coordinator and must not
 	// overwrite the notebook model.
 	if !isSubAgent {
-		summary := small // fallback to small when slot absent
+		summary := models().Small // fallback to small when slot absent
 		if sel, ok := c.cfg.Config().Models[config.SelectedModelTypeSummary]; ok {
-			if m, err := c.buildSelectedModel(ctx, sel, true); err == nil {
+			if m, err := c.buildModel(ctx, config.SelectedModelTypeSummary, true); err == nil {
 				summary = m
 			} else {
 				slog.Warn("Failed to resolve configured summary model, using small",
@@ -1563,26 +1589,18 @@ func partitionToolsForCacheStability(all []fantasy.AgentTool) []fantasy.AgentToo
 	return append(builtinTools, mcpTools...)
 }
 
-// buildSelectedModel resolves a single model from a SelectedModel
-// config entry. It validates the model exists in the provider
-// catalog, applies provider-specific transformations (e.g.
-// OpenRouter :exacto), wraps with the request timeout, and returns
-// the fully constructed Model. Shared between buildAgentModels
-// (large/small) and the summary model resolver.
-func (c *coordinator) buildSelectedModel(
-	ctx context.Context,
-	sel config.SelectedModel,
-	isSubAgent bool,
-) (Model, error) {
-	cfg := c.cfg.Config()
-
-	providerCfg, ok := cfg.Providers.Get(sel.Provider)
+// buildModel builds the model selected for one slot from the live config.
+// isSubAgent marks requests as agent-initiated for providers that bill on it.
+func (c *coordinator) buildModel(ctx context.Context, slot config.SelectedModelType, isSubAgent bool) (Model, error) {
+	modelCfg, ok := c.cfg.Config().Models[slot]
 	if !ok {
-		return Model{}, fmt.Errorf("provider %q for model %q: %w",
-			sel.Provider, sel.Model, errModelProviderNotConfigured)
+		return Model{}, fmt.Errorf("%s %w", slot, errModelNotSelected)
 	}
-
-	provider, err := c.buildProvider(providerCfg, sel, isSubAgent)
+	providerCfg, ok := c.cfg.Config().Providers.Get(modelCfg.Provider)
+	if !ok {
+		return Model{}, fmt.Errorf("%s provider %q %w", slot, modelCfg.Provider, errModelProviderNotConfigured)
+	}
+	provider, err := c.buildProvider(providerCfg, modelCfg, isSubAgent)
 	if err != nil {
 		return Model{}, err
 	}
@@ -1591,89 +1609,39 @@ func (c *coordinator) buildSelectedModel(
 	// API-key model, a ChatGPT subscription model, or a Grok one. The
 	// subscription catalogs live outside Models, so looking only there
 	// strands a Grok/ChatGPT model that catwalk doesn't also publish.
-	catwalkModel := cfg.GetModel(sel.Provider, sel.Model)
+	catwalkModel := c.cfg.Config().GetModel(modelCfg.Provider, modelCfg.Model)
 	if catwalkModel == nil {
-		return Model{}, errModelNotFoundInProvider
+		return Model{}, fmt.Errorf("%s model %q %w", slot, modelCfg.Model, errModelNotFound)
 	}
 
-	// Apply provider-specific model-ID transformations.
-	modelID := sel.Model
-	if sel.Provider == openrouter.Name && isExactoSupported(modelID) {
+	modelID := modelCfg.Model
+	if modelCfg.Provider == openrouter.Name && isExactoSupported(modelID) {
 		modelID += ":exacto"
 	}
-
-	model, err := provider.LanguageModel(ctx, modelID)
+	languageModel, err := provider.LanguageModel(ctx, modelID)
 	if err != nil {
 		return Model{}, err
 	}
 
-	// Wrap with the configured request timeout.
-	requestTimeout := cfg.Options.GetRequestTimeout()
-	model = newRequestTimeoutModel(model, requestTimeout)
+	// Bound each request with the configured timeout so unreachable or hung
+	// providers fail instead of blocking a session forever. The wrapper is
+	// applied per request, so retries get a fresh budget each attempt.
+	languageModel = newRequestTimeoutModel(languageModel, c.cfg.Config().Options.GetRequestTimeout())
 
-	// Hyper completions no longer report the hypercredit balance, so
-	// wrap Hyper models to fetch it from /v1/credits on every request.
-	if sel.Provider == hyper.Name {
-		model = newHyperCreditsModel(model, c.hyperAPIKey)
+	// Hyper completions no longer report the hypercredit balance, so wrap
+	// the Hyper models to fetch it from /v1/credits on every request.
+	if modelCfg.Provider == hyper.Name {
+		languageModel = newHyperCreditsModel(languageModel, c.hyperAPIKey)
 	}
 
 	return Model{
-		Model:      model,
-		CatwalkCfg: *catwalkModel,
-		ModelCfg:   sel,
-		FlatRate:   providerCfg.FlatRate,
+		Model:        languageModel,
+		CatwalkCfg:   *catwalkModel,
+		ModelCfg:     modelCfg,
+		FlatRate:     providerCfg.FlatRate,
+		OAuth:        providerCfg.OAuthToken != nil,
+		ProviderName: providerCfg.Name,
 	}, nil
-}
-
-func (c *coordinator) buildAgentModels(ctx context.Context, agent config.Agent, isSubAgent bool) (Model, Model, error) {
-	// An agent can pin its own model via Agent.Model: either a built-in
-	// selection (large/small) or a custom key from the models config.
-	// Unknown or empty keys fall back to the global large selection.
-	largeModelCfg, ok := c.cfg.Config().Models[agent.Model]
-	if !ok {
-		largeModelCfg, ok = c.cfg.Config().Models[config.SelectedModelTypeLarge]
-	}
-	if !ok {
-		return Model{}, Model{}, errLargeModelNotSelected
-	}
-	smallModelCfg, ok := c.cfg.Config().Models[config.SelectedModelTypeSmall]
-	if !ok {
-		return Model{}, Model{}, errSmallModelNotSelected
-	}
-
-	large, err := c.buildSelectedModel(ctx, largeModelCfg, isSubAgent)
-	if err != nil {
-		// Translate generic helper errors back to sentinels while
-		// keeping the provider/model detail that identifies the real
-		// culprit. agent.Model can name any slot — when it isn't the
-		// large slot, say so instead of mislabeling it "large".
-		slot := cmp.Or(string(agent.Model), string(config.SelectedModelTypeLarge))
-		if errors.Is(err, errModelProviderNotConfigured) {
-			if slot == string(config.SelectedModelTypeLarge) {
-				return Model{}, Model{}, fmt.Errorf("%w: %w", errLargeModelProviderNotConfigured, err)
-			}
-			return Model{}, Model{}, fmt.Errorf("agent %s model slot %q: %w", agent.ID, slot, err)
-		}
-		if errors.Is(err, errModelNotFoundInProvider) {
-			if slot == string(config.SelectedModelTypeLarge) {
-				return Model{}, Model{}, fmt.Errorf("%w: %w", errLargeModelNotFound, err)
-			}
-			return Model{}, Model{}, fmt.Errorf("agent %s model slot %q: %w", agent.ID, slot, err)
-		}
-		return Model{}, Model{}, err
-	}
-	small, err := c.buildSelectedModel(ctx, smallModelCfg, true)
-	if err != nil {
-		if errors.Is(err, errModelProviderNotConfigured) {
-			return Model{}, Model{}, fmt.Errorf("%w: %w", errSmallModelProviderNotConfigured, err)
-		}
-		if errors.Is(err, errModelNotFoundInProvider) {
-			return Model{}, Model{}, fmt.Errorf("%w: %w", errSmallModelNotFound, err)
-		}
-		return Model{}, Model{}, err
-	}
-
-	return large, small, nil
 }
 
 // hyperAPIKey resolves the Hyper API key from the live config, so an
@@ -1748,6 +1716,15 @@ func (c *coordinator) buildOpenaiProvider(baseURL, apiKey string, headers map[st
 }
 
 func (c *coordinator) buildOpenrouterProvider(_, apiKey string, headers map[string]string) (fantasy.Provider, error) {
+	if headers == nil {
+		headers = make(map[string]string)
+	}
+	if _, ok := headers["HTTP-Referer"]; !ok {
+		headers["HTTP-Referer"] = "https://charm.land/crush"
+	}
+	if _, ok := headers["X-Title"]; !ok {
+		headers["X-Title"] = "Crush"
+	}
 	opts := []openrouter.Option{
 		openrouter.WithAPIKey(apiKey),
 	}
@@ -2060,26 +2037,24 @@ func (c *coordinator) UpdateModels(ctx context.Context) error {
 	return c.updateAgentModels(ctx, agent, name)
 }
 
-// updateAgentModels rebuilds the model and tool configuration for the
-// given agent from the current config.
+// updateAgentModels rebuilds the shared models and the given agent's tools
+// from the current config.
 func (c *coordinator) updateAgentModels(ctx context.Context, agent SessionAgent, name string) error {
 	agentCfg, ok := c.cfg.Config().Agents[name]
 	if !ok {
 		return fmt.Errorf("%w: %s", errMainAgentNotFound, name)
 	}
 
-	// build the models again so we make sure we get the latest config
-	large, small, err := c.buildAgentModels(ctx, agentCfg, false)
-	if err != nil {
+	// Rebuild the shared models so they reflect the latest config.
+	if err := c.rebuildModels(ctx); err != nil {
 		return err
 	}
-	agent.SetModels(large, small)
 
 	// Resolve summary model. Failures are logged but never block
 	// the primary agent — the summary model is auxiliary.
 	cfg := c.cfg.Config()
 	if sel, ok := cfg.Models[config.SelectedModelTypeSummary]; ok {
-		summary, err := c.buildSelectedModel(ctx, sel, true)
+		summary, err := c.buildModel(ctx, config.SelectedModelTypeSummary, true)
 		if err != nil {
 			c.logSummaryFailureOnce(sel, err)
 		} else {
@@ -2088,7 +2063,7 @@ func (c *coordinator) updateAgentModels(ctx context.Context, agent SessionAgent,
 		}
 	} else {
 		// Summary slot absent — fall back to small (existing behavior).
-		c.summaryModel.Set(small)
+		c.summaryModel.Set(c.models.Get().small)
 		c.clearSummaryFailure()
 	}
 
@@ -2139,7 +2114,7 @@ func (c *coordinator) clearSummaryFailure() {
 func (c *coordinator) UpdateSummaryModel(ctx context.Context) error {
 	cfg := c.cfg.Config()
 	if sel, ok := cfg.Models[config.SelectedModelTypeSummary]; ok {
-		summary, err := c.buildSelectedModel(ctx, sel, true)
+		summary, err := c.buildModel(ctx, config.SelectedModelTypeSummary, true)
 		if err != nil {
 			return fmt.Errorf("summary model %s/%s: %w", sel.Provider, sel.Model, err)
 		}
@@ -2148,8 +2123,8 @@ func (c *coordinator) UpdateSummaryModel(ctx context.Context) error {
 		return nil
 	}
 	// Slot absent — fall back to the configured small model only.
-	if smallCfg, ok := cfg.Models[config.SelectedModelTypeSmall]; ok {
-		small, err := c.buildSelectedModel(ctx, smallCfg, true)
+	if _, ok := cfg.Models[config.SelectedModelTypeSmall]; ok {
+		small, err := c.buildModel(ctx, config.SelectedModelTypeSmall, true)
 		if err != nil {
 			// Small model also invalid — preserve the current live
 			// summary model rather than failing. Return nil since
@@ -2184,7 +2159,9 @@ func (c *coordinator) Summarize(ctx context.Context, sessionID string) error {
 
 	// Auth failures during summarize flow through fantasy's OnAuthRefresh,
 	// the same path used by regular turns.
-	return agent.Summarize(ctx, sessionID, getProviderOptions(agent.Model(), providerCfg), c.makeAuthRefreshCallback(providerCfg))
+	opts := getProviderOptions(agent.Model(), providerCfg)
+	injectOpenrouterSessionID(opts, sessionID)
+	return agent.Summarize(ctx, sessionID, opts, c.makeAuthRefreshCallback(providerCfg))
 }
 
 // GenerateTitle generates a session title using the current agent.
@@ -2268,7 +2245,7 @@ func (c *coordinator) waitForInteractiveReauth(ctx context.Context, providerID s
 		return ctx.Err()
 	}
 	// Rebuild models so ModelProvider picks up the fresh credentials.
-	if updateErr := c.UpdateModels(waitCtx); updateErr != nil {
+	if updateErr := c.rebuildModels(waitCtx); updateErr != nil {
 		slog.Error("Failed to update models after re-authentication", "error", updateErr)
 		return updateErr
 	}
@@ -2301,10 +2278,7 @@ func (c *coordinator) refreshOAuth2Token(ctx context.Context, providerCfg config
 		slog.Error("Failed to refresh OAuth token after 401 error", "provider", providerCfg.ID, "error", err)
 		return err
 	}
-	if err := c.UpdateModels(ctx); err != nil {
-		return err
-	}
-	return nil
+	return c.rebuildModels(ctx)
 }
 
 func (c *coordinator) refreshApiKeyTemplate(ctx context.Context, providerCfg config.ProviderConfig) error {
@@ -2319,11 +2293,19 @@ func (c *coordinator) refreshApiKeyTemplate(ctx context.Context, providerCfg con
 
 	providerCfg.APIKey = newAPIKey
 	c.cfg.Config().Providers.Set(providerCfg.ID, providerCfg)
+	return c.rebuildModels(ctx)
+}
 
-	if err := c.UpdateModels(ctx); err != nil {
-		return err
+// askToSignInAgain asks the user to sign in again when an OAuth credential
+// is still refused after the refresh-and-retry.
+func (c *coordinator) askToSignInAgain(err error, model Model) {
+	if err == nil || !isUnauthorized(err) || c.notify == nil || !model.OAuth {
+		return
 	}
-	return nil
+	c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
+		Type:       notify.TypeReAuthenticate,
+		ProviderID: model.ModelCfg.Provider,
+	})
 }
 
 // subAgentParams holds the parameters for running a sub-agent.
@@ -2380,11 +2362,13 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 
 	// Run the agent
 	run := func() (*fantasy.AgentResult, error) {
+		subOpts := getProviderOptions(model, providerCfg)
+		injectOpenrouterSessionID(subOpts, session.ID)
 		return params.Agent.Run(ctx, SessionAgentCall{
 			SessionID:        session.ID,
 			Prompt:           params.Prompt,
 			MaxOutputTokens:  maxTokens,
-			ProviderOptions:  getProviderOptions(model, providerCfg),
+			ProviderOptions:  subOpts,
 			Temperature:      model.ModelCfg.Temperature,
 			TopP:             model.ModelCfg.TopP,
 			TopK:             callTopK(providerCfg, model.ModelCfg.TopK),
@@ -2395,14 +2379,7 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		})
 	}
 	result, err := run()
-	// Notify only if still unauthorized after retry. AWS SSO is handled
-	// transparently inside OnAuthRefresh, so it needs no post-run notice.
-	if err != nil && isUnauthorized(err) && c.notify != nil && model.ModelCfg.Provider == hyper.Name {
-		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
-			Type:       notify.TypeReAuthenticate,
-			ProviderID: model.ModelCfg.Provider,
-		})
-	}
+	c.askToSignInAgain(err, model)
 	if err != nil {
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to generate response: %s", err)), nil
 	}
