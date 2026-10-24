@@ -179,6 +179,13 @@ type SessionAgentCall struct {
 	// arrives as a new SessionAgentCall, so the bound is "one nag per
 	// question round-trip", not per session.
 	burnWatched bool
+	// softWindowRetried marks a call chain that already consumed its
+	// one summarize-and-continue compaction after a window-overflow
+	// abort — stamped on the requeued clone by the summarize path.
+	// Without it a post-compact render still over the window would
+	// soft-cap forever: the guard bounds the chain at one attempt,
+	// after which the request rides to the provider as before.
+	softWindowRetried bool
 	// channelMeta holds the attributes of the <channel> element a
 	// channel-originated turn was started with, parsed once at Run
 	// entry. It survives the auto-summarize continuation, whose Prompt
@@ -1577,6 +1584,20 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 				return callContext, prepared, err
 			}
 
+			// The soft cap applies the same estimate without
+			// enforcement: when the legacy summarize path is live and
+			// this call hasn't already consumed its one
+			// compact-and-retry, abort the step — the terminal path
+			// converts the sentinel into summarize-and-continue
+			// rather than sending a request the provider is
+			// estimated to overflow. A post-compact render still
+			// over the window rides to the provider as before: the
+			// retry flag bounds the loop at one attempt.
+			if !a.disableAutoSummarize && !a.notebookEnabled && !call.softWindowRetried &&
+				a.windowOverflow(prepared.Messages, prepared.Tools, call.MaxOutputTokens) {
+				return callContext, prepared, errWindowSoftCap
+			}
+
 			stats, _ := a.stubStats.Get(call.SessionID)
 			nbStats, _ := a.nbStats.Get(call.SessionID)
 			comp := logStepComposition(call.SessionID, prepared.Messages, prepared.Tools, stats, nbStats)
@@ -1843,12 +1864,11 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 				}
 				tokens := currentSession.CompletionTokens + currentSession.PromptTokens
 				remaining := cw - tokens
-				var threshold int64
-				if cw > largeContextWindowThreshold {
-					threshold = largeContextWindowBuffer
-				} else {
-					threshold = int64(float64(cw) * smallContextWindowRatio)
+				outReserve := call.MaxOutputTokens
+				if outReserve <= 0 {
+					outReserve = a.outputReserve()
 				}
+				threshold := summarizeThreshold(cw, outReserve)
 				if (remaining <= threshold) && !a.disableAutoSummarize && !a.notebookEnabled {
 					shouldSummarize = true
 					return true
@@ -1883,6 +1903,18 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 	}()
 
 	a.eventPromptResponded(call.SessionID, time.Since(startTime).Truncate(time.Second))
+
+	// The soft window cap's sentinel is control flow, not a failure:
+	// the step aborted before its request reached the provider, so
+	// take the same summarize-and-continue path a StopWhen trigger
+	// produces. Settle, the pending-attribution fold, and the
+	// error-finish branch below must not see it — a stale
+	// currentAssistant from a prior step would otherwise carry a
+	// phantom error finish.
+	if errors.Is(err, errWindowSoftCap) {
+		shouldSummarize = true
+		err = nil
+	}
 
 	// Final writes use a context detached from the run: workspace shutdown
 	// cancels ctx before agent goroutines finish, and the turn's ending
@@ -2093,13 +2125,17 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 		if summarizeErr := a.Summarize(genCtx, call.SessionID, call.ProviderOptions, call.OnAuthRefresh); summarizeErr != nil {
 			return nil, nil, summarizeErr
 		}
-		// If the agent wasn't done...
-		if len(currentAssistant.ToolCalls()) > 0 {
+		// If the agent wasn't done — or a soft-cap abort left no
+		// assistant message to check — requeue the call so the
+		// compacted session still answers the prompt. The retry flag
+		// bounds the soft cap to one compaction per call chain.
+		if currentAssistant == nil || len(currentAssistant.ToolCalls()) > 0 {
 			existing, ok := a.messageQueue.Get(call.SessionID)
 			if !ok {
 				existing = []SessionAgentCall{}
 			}
 			call.Prompt = fmt.Sprintf("The previous session was interrupted because it got too long, the initial user request was: `%s`", call.Prompt)
+			call.softWindowRetried = true
 			existing = append(existing, call)
 			a.messageQueue.Set(call.SessionID, existing)
 		}

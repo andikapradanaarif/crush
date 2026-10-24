@@ -907,6 +907,52 @@ func TestEnforceWindowCap(t *testing.T) {
 	})
 }
 
+// windowCapSeed plants a covered turn carrying a ~280KB tool result:
+// ~70K estimated tokens — over a 64K window verbatim, a stub line
+// collapsed.
+func windowCapSeed(t *testing.T, env *processEnv, sessionID string) []message.Message {
+	t.Helper()
+	mkMsg(t, env.messages, sessionID, message.User, message.TextContent{Text: "first prompt"})
+	mkMsg(t, env.messages, sessionID, message.Assistant,
+		message.ToolCall{ID: "tc-big", Name: "bash", Input: `{"command":"cat huge.log"}`, Finished: true})
+	mkMsg(t, env.messages, sessionID, message.Tool,
+		message.ToolResult{ToolCallID: "tc-big", Name: "bash", Content: strings.Repeat("result ", 40_000)})
+	mkMsg(t, env.messages, sessionID, message.Assistant, message.TextContent{Text: "turn zero answer"})
+	mkMsg(t, env.messages, sessionID, message.User, message.TextContent{Text: "second prompt"})
+	msgs, err := env.messages.List(t.Context(), sessionID)
+	require.NoError(t, err)
+	return msgs
+}
+
+// windowCapAgent builds a 64K-window agent: enforcement on simulates
+// the provider's overflow rejection, off leaves the runtime path —
+// the soft cap plus the legacy summarize — to handle the overflow.
+func windowCapAgent(env *processEnv, m fantasy.LanguageModel, notebookOn, enforce bool) *sessionAgent {
+	model := Model{Model: m, CatwalkCfg: catwalk.Model{ContextWindow: 64_000, DefaultMaxTokens: 4_000}}
+	opts := SessionAgentOptions{
+		Models:               fixedModels(model, model),
+		SystemPrompt:         "system",
+		IsYolo:               true,
+		Sessions:             env.sessions,
+		Messages:             env.messages,
+		NotebookEnabled:      notebookOn,
+		NotebookPriorTurns:   priorTurnsStub,
+		PressureGate:         true,
+		EnforceContextWindow: enforce,
+		RawTokenBudget:       1_000_000,
+		DetachedWork:         &sync.WaitGroup{},
+		Tools: []fantasy.AgentTool{
+			&fakeTool{name: "bash", resp: fantasy.NewTextResponse("ok")},
+			&fakeTool{name: notebooktool.RecallToolName, resp: fantasy.NewTextResponse("recalled")},
+			&fakeTool{name: notebooktool.SearchToolName, resp: fantasy.NewTextResponse("")},
+		},
+	}
+	if notebookOn {
+		opts.Notebook = env.notebook
+	}
+	return NewSessionAgent(opts).(*sessionAgent)
+}
+
 // TestRun_EnforceContextWindowCap pins the two-arm contract #112 needs:
 // with a manifest-pinned 64K window and enforcement on, a verbatim
 // (notebook-off) run dies exactly like a small-window endpoint would
@@ -915,45 +961,9 @@ func TestEnforceWindowCap(t *testing.T) {
 func TestRun_EnforceContextWindowCap(t *testing.T) {
 	t.Parallel()
 
-	// A covered turn carrying a ~280KB tool result: ~70K estimated
-	// tokens — over a 64K window verbatim, a stub line collapsed.
-	seed := func(t *testing.T, env *processEnv, sessionID string) []message.Message {
-		t.Helper()
-		mkMsg(t, env.messages, sessionID, message.User, message.TextContent{Text: "first prompt"})
-		mkMsg(t, env.messages, sessionID, message.Assistant,
-			message.ToolCall{ID: "tc-big", Name: "bash", Input: `{"command":"cat huge.log"}`, Finished: true})
-		mkMsg(t, env.messages, sessionID, message.Tool,
-			message.ToolResult{ToolCallID: "tc-big", Name: "bash", Content: strings.Repeat("result ", 40_000)})
-		mkMsg(t, env.messages, sessionID, message.Assistant, message.TextContent{Text: "turn zero answer"})
-		mkMsg(t, env.messages, sessionID, message.User, message.TextContent{Text: "second prompt"})
-		msgs, err := env.messages.List(t.Context(), sessionID)
-		require.NoError(t, err)
-		return msgs
-	}
+	seed := windowCapSeed
 	mk := func(env *processEnv, m fantasy.LanguageModel, notebookOn bool) *sessionAgent {
-		model := Model{Model: m, CatwalkCfg: catwalk.Model{ContextWindow: 64_000, DefaultMaxTokens: 4_000}}
-		opts := SessionAgentOptions{
-			Models:               fixedModels(model, model),
-			SystemPrompt:         "system",
-			IsYolo:               true,
-			Sessions:             env.sessions,
-			Messages:             env.messages,
-			NotebookEnabled:      notebookOn,
-			NotebookPriorTurns:   priorTurnsStub,
-			PressureGate:         true,
-			EnforceContextWindow: true,
-			RawTokenBudget:       1_000_000,
-			DetachedWork:         &sync.WaitGroup{},
-			Tools: []fantasy.AgentTool{
-				&fakeTool{name: "bash", resp: fantasy.NewTextResponse("ok")},
-				&fakeTool{name: notebooktool.RecallToolName, resp: fantasy.NewTextResponse("recalled")},
-				&fakeTool{name: notebooktool.SearchToolName, resp: fantasy.NewTextResponse("")},
-			},
-		}
-		if notebookOn {
-			opts.Notebook = env.notebook
-		}
-		return NewSessionAgent(opts).(*sessionAgent)
+		return windowCapAgent(env, m, notebookOn, true)
 	}
 
 	t.Run("control dies at the cap like a real endpoint", func(t *testing.T) {
@@ -1007,5 +1017,150 @@ func TestRun_EnforceContextWindowCap(t *testing.T) {
 		require.Contains(t, wire, `{"_collapsed":"prior turn 0"}`)
 		require.NotContains(t, wire, "result result result",
 			"the giant result must not reach the wire — it is what would have overflowed")
+	})
+}
+
+func TestWindowOverflow(t *testing.T) {
+	t.Parallel()
+
+	big := []fantasy.Message{fantasy.NewUserMessage(strings.Repeat("x", 240_000))} // ~60K est.
+	small := []fantasy.Message{fantasy.NewUserMessage("hi")}
+
+	t.Run("under window fits", func(t *testing.T) {
+		t.Parallel()
+		a := pressureTestAgent(64_000, 4_000)
+		require.False(t, a.windowOverflow(small, nil, 4_000))
+	})
+	t.Run("input plus output over window trips", func(t *testing.T) {
+		t.Parallel()
+		// ~60K input fits with a 4K completion but not an 8K one.
+		a := pressureTestAgent(64_000, 4_000)
+		require.False(t, a.windowOverflow(big, nil, 3_000))
+		require.True(t, a.windowOverflow(big, nil, 8_000))
+	})
+	t.Run("unknown window never trips", func(t *testing.T) {
+		t.Parallel()
+		a := pressureTestAgent(0, 4_000)
+		require.False(t, a.windowOverflow(big, nil, 4_000))
+	})
+	t.Run("unset output budget uses catalog default", func(t *testing.T) {
+		t.Parallel()
+		a := pressureTestAgent(64_000, 8_000)
+		require.True(t, a.windowOverflow(big, nil, 0))
+	})
+	t.Run("tool schemas count against the window", func(t *testing.T) {
+		t.Parallel()
+		a := pressureTestAgent(64_000, 4_000)
+		tool := fantasy.NewAgentTool("big_tool", strings.Repeat("d", 80_000),
+			func(context.Context, struct{}, fantasy.ToolCall) (fantasy.ToolResponse, error) {
+				return fantasy.ToolResponse{}, nil
+			})
+		require.False(t, a.windowOverflow(big, nil, 3_000))
+		require.True(t, a.windowOverflow(big, []fantasy.AgentTool{tool}, 3_000))
+	})
+}
+
+func TestSummarizeThreshold(t *testing.T) {
+	t.Parallel()
+
+	// Small windows keep the proportional reserve — unchanged.
+	require.Equal(t, int64(12_800), summarizeThreshold(64_000, 4_000))
+	// Large windows reserve the output budget plus one step-jump's
+	// growth: the flat 20K buffer would let input+output overflow.
+	require.Equal(t, int64(384_000+4*12_500), summarizeThreshold(1_000_000, 384_000))
+	require.Equal(t, int64(65_536+4*12_500), summarizeThreshold(1_000_000, 65_536))
+	// Catalog-normal output budgets still clear the flat buffer via
+	// the step-jump margin — the old 20K was never enough.
+	require.Equal(t, int64(4_096+4*12_500), summarizeThreshold(1_000_000, 4_096))
+	// An output budget larger than the window is capped below it: a
+	// minimal input slice, not a fire-every-step trigger.
+	require.Equal(t, int64(250_000-largeContextWindowBuffer), summarizeThreshold(250_000, 384_000))
+}
+
+// TestRun_SoftWindowCap pins the runtime contract: with the same
+// over-window history the enforced arm dies on, a notebook-off run
+// under the soft cap compacts and continues — summarize, requeue,
+// then a request that fits reaches the wire. The retry flag bounds
+// the loop: a post-compact render still over the window rides to
+// the provider rather than soft-capping again.
+func TestRun_SoftWindowCap(t *testing.T) {
+	t.Parallel()
+
+	t.Run("over-window run compacts and completes", func(t *testing.T) {
+		t.Parallel()
+		env, sessionID := newProcessEnv(t, &countingGen{})
+		windowCapSeed(t, env, sessionID)
+
+		m := &captureModel{usage: 2_000}
+		a := windowCapAgent(env, m, false, false)
+
+		_, err := a.Run(t.Context(), SessionAgentCall{SessionID: sessionID, Prompt: "turn two"})
+		require.NoError(t, err)
+		a.detachedWork.Wait()
+
+		require.NotEmpty(t, m.prompts, "the post-compact render must reach the wire")
+		wire := m.prompts[len(m.prompts)-1]
+		require.NotContains(t, wire, "result result result",
+			"the summarized history must not carry the giant result verbatim")
+	})
+
+	t.Run("retry flag lets a still-over render ride to the provider", func(t *testing.T) {
+		t.Parallel()
+		env, sessionID := newProcessEnv(t, &countingGen{})
+		windowCapSeed(t, env, sessionID)
+
+		m := &captureModel{usage: 2_000}
+		a := windowCapAgent(env, m, false, false)
+
+		// Stamped as a post-compact retry: the soft cap must not
+		// abort again — the request goes to the wire as before.
+		_, err := a.Run(t.Context(), SessionAgentCall{SessionID: sessionID, Prompt: "turn two", softWindowRetried: true})
+		require.NoError(t, err)
+		a.detachedWork.Wait()
+
+		require.NotEmpty(t, m.prompts, "the retry-flagged request must reach the wire verbatim")
+		wire := m.prompts[len(m.prompts)-1]
+		require.Contains(t, wire, "result result result")
+	})
+}
+
+// TestRun_SoftWindowCapGuards pins the opt-outs: the soft cap only
+// exists where the legacy summarize path can absorb it. With
+// auto-summarize disabled the verbatim render must ride to the
+// provider — nothing local can shrink it, so an abort would loop or
+// die. With the notebook on, its machinery owns compaction and the
+// legacy path stays out of the render's way.
+func TestRun_SoftWindowCapGuards(t *testing.T) {
+	t.Parallel()
+
+	t.Run("disableAutoSummarize rides verbatim to the provider", func(t *testing.T) {
+		t.Parallel()
+		env, sessionID := newProcessEnv(t, &countingGen{})
+		windowCapSeed(t, env, sessionID)
+
+		m := &captureModel{usage: 2_000}
+		a := windowCapAgent(env, m, false, false)
+		a.disableAutoSummarize = true
+
+		_, err := a.Run(t.Context(), SessionAgentCall{SessionID: sessionID, Prompt: "turn two"})
+		require.NoError(t, err)
+		a.detachedWork.Wait()
+
+		require.NotEmpty(t, m.prompts, "the soft cap must not abort what summarize cannot fix")
+		require.Contains(t, m.prompts[len(m.prompts)-1], "result result result")
+	})
+
+	t.Run("notebook-enabled leaves compaction to its own machinery", func(t *testing.T) {
+		t.Parallel()
+		env, sessionID := newProcessEnv(t, &countingGen{})
+		windowCapSeed(t, env, sessionID)
+
+		m := &captureModel{usage: 2_000}
+		a := windowCapAgent(env, m, true, false)
+
+		_, err := a.Run(t.Context(), SessionAgentCall{SessionID: sessionID, Prompt: "turn two"})
+		require.NoError(t, err)
+		a.detachedWork.Wait()
+		require.NotEmpty(t, m.prompts, "the run completes through the notebook path, not the soft cap")
 	})
 }

@@ -14,4 +14,11 @@ var (
 	// otherwise never trip the provider, so the agent rejects the
 	// rendered request locally instead.
 	ErrContextWindowExceeded = errors.New("rendered request exceeds the declared context window")
+	// errWindowSoftCap aborts a step whose rendered request is
+	// estimated to overflow the declared context window while
+	// enforce_context_window is off. It is control flow, not a
+	// failure: the terminal path converts it into the same
+	// summarize-and-continue a StopWhen trigger produces, so it is
+	// never user-visible.
+	errWindowSoftCap = errors.New("request estimate exceeds the declared context window")
 )
