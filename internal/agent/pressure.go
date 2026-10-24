@@ -41,6 +41,25 @@ func pressureMargin(outputReserve int64) int64 {
 	return outputReserve + pressureParallelResults*int64(toolResultMaxContentBytes/4)
 }
 
+// summarizeThreshold is the auto-summarize trigger's remaining-window
+// reserve — the trigger engages when cw - tokens <= threshold. Small
+// windows keep the proportional rule: it approximates output headroom
+// for catalog-normal budgets. Large windows reserve the request's
+// output budget plus one step-jump's growth — the pressure gate's
+// margin — because a flat buffer ignores default_max_tokens and lets
+// input+output overflow a window whose output budget eats a third of
+// it. Capped below the window so an output budget larger than the
+// window leaves a minimal input slice rather than firing every step.
+func summarizeThreshold(cw, outputReserve int64) int64 {
+	if cw > largeContextWindowThreshold {
+		return min(
+			max(largeContextWindowBuffer, pressureMargin(outputReserve)),
+			cw-largeContextWindowBuffer,
+		)
+	}
+	return int64(float64(cw) * smallContextWindowRatio)
+}
+
 // outputReserve is the completion headroom the margin carries —
 // call-site max output isn't reachable from the render path, so the
 // catalog default stands in, floored at defaultOutputReserve.
@@ -151,16 +170,41 @@ func (a *sessionAgent) enforceWindowCap(msgs []fantasy.Message, agentTools []fan
 	if cw <= 0 {
 		return nil
 	}
+	est, out := a.windowEstimate(msgs, agentTools, maxOutputTokens)
+	if est+out <= cw {
+		return nil
+	}
+	return fmt.Errorf("%w: ~%d estimated input + %d output > %d declared window",
+		ErrContextWindowExceeded, est, out, cw)
+}
+
+// windowEstimate sizes a wire-bound request the way providers count
+// it: chars/4 over the message list plus the tool schemas, and the
+// resolved output budget — the call's max output, the catalog
+// default standing in when unset (the same fallback the hard cap
+// uses). Shared by enforceWindowCap's rejection and the soft cap's
+// compact-and-continue abort. The under-counts the hard cap's
+// comment lists apply here too — a simulation bound, not a
+// wire-exact count.
+func (a *sessionAgent) windowEstimate(msgs []fantasy.Message, agentTools []fantasy.AgentTool, maxOutputTokens int64) (est, out int64) {
 	if maxOutputTokens <= 0 {
 		maxOutputTokens = a.outputReserve()
 	}
 	builtinSchemas, mcpSchemas := toolSchemaBytes(agentTools)
-	est := estimateMessageTokens(msgs) + (builtinSchemas+mcpSchemas)/4
-	if est+maxOutputTokens <= cw {
-		return nil
+	return estimateMessageTokens(msgs) + (builtinSchemas+mcpSchemas)/4, maxOutputTokens
+}
+
+// windowOverflow is the soft cap's trip condition: the rendered
+// request is estimated to overflow the declared window. Unlike the
+// hard cap it carries no option gate — callers decide what a trip
+// means (compact-and-continue in Run, fatal under enforcement).
+func (a *sessionAgent) windowOverflow(msgs []fantasy.Message, agentTools []fantasy.AgentTool, maxOutputTokens int64) bool {
+	cw := int64(a.models().Large.CatwalkCfg.ContextWindow)
+	if cw <= 0 {
+		return false
 	}
-	return fmt.Errorf("%w: ~%d estimated input + %d output > %d declared window",
-		ErrContextWindowExceeded, est, maxOutputTokens, cw)
+	est, out := a.windowEstimate(msgs, agentTools, maxOutputTokens)
+	return est+out > cw
 }
 
 // clearPressureState drops the gate's session state after a write
