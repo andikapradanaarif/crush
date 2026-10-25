@@ -11,6 +11,28 @@
 
 <p align="center"><img width="800" alt="Crush Demo" src="https://github.com/user-attachments/assets/58280caf-851b-470a-b6f7-d5c4ea8a1968" /></p>
 
+> **This is a working fork** of [charmbracelet/crush](https://github.com/charmbracelet/crush).
+> Goal: an agent harness that gets smarter every time it is used — and can
+> *prove* it, through an evidence-calibrated, offline evolution loop with
+> matched-budget baselines and pre-registered gates.
+>
+> Docs: [VISION.md](VISION.md) for the direction,
+> [docs/milestones/](docs/milestones/) for dated positions and the plan of
+> record, [docs/design/](docs/design/) for the machinery.
+>
+> Divergences from upstream:
+>
+> - **Memory & context machinery** — per-session notebook, failure/referent/
+>   session digests (`cmdlog`), project index, turn outcomes
+> - **Context-window accounting** — pressure gate, output-aware summarize
+>   trigger, soft window cap (compact instead of stall)
+> - **Eval & measurement** — experiment arms and pre-registered gates
+>   (`eval/`), `crush stats trend` for the personal feedback loop
+> - **Run-boundary edges** — verification / todos / stall detection with
+>   bounded retries
+>
+> Everything below this block is the upstream README.
+
 ## Features
 
 - **Multi-Model:** choose from a wide range of LLMs or add your own via OpenAI- or Anthropic-compatible APIs
