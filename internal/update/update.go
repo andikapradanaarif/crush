@@ -12,7 +12,12 @@ import (
 )
 
 const (
-	githubApiUrl = "https://api.github.com/repos/charmbracelet/crush/releases/latest"
+	// This is a fork (andikapradanaarif/crush): the check queries the
+	// repo the binary was built from so upstream releases never prompt
+	// an "update" that would replace a fork build. The fork currently
+	// publishes no releases, so the call 404s and stays silent until
+	// it does.
+	githubApiUrl = "https://api.github.com/repos/andikapradanaarif/crush/releases/latest"
 	userAgent    = "crush/1.0"
 )
 
