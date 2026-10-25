@@ -30,7 +30,8 @@
 > - **Run-boundary edges** — verification / todos / stall detection with
 >   bounded retries
 >
-> Everything below this block is the upstream README.
+> Except where noted (the fork-authored install instructions and version
+> note below), everything past this point is the upstream README.
 
 ## Features
 
@@ -1072,7 +1073,11 @@ Installing an extra tool might be needed on Unix-like environments.
 
 ## Contributing
 
-See the [contributing guide](https://github.com/andikapradanaarif/crush?tab=contributing-ov-file#contributing).
+For this fork, open an issue or pull request on
+[andikapradanaarif/crush](https://github.com/andikapradanaarif/crush) — the
+development conventions live in [AGENTS.md](AGENTS.md). For changes meant to
+land in Charm's repository, see the upstream
+[contributing guide](https://github.com/charmbracelet/crush?tab=contributing-ov-file#contributing).
 
 ## Whatcha think?
 
