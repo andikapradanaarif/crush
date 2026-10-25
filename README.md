@@ -2,8 +2,7 @@
 
 <p align="center">
     <a href="https://stuff.charm.sh/crush/charm-crush.png"><img width="450" alt="Charm Crush Logo" src="https://github.com/user-attachments/assets/cf8ca3ce-8b02-43f0-9d0f-5a331488da4b" /></a><br />
-    <a href="https://github.com/charmbracelet/crush/releases"><img src="https://img.shields.io/github/release/charmbracelet/crush" alt="Latest Release"></a>
-    <a href="https://github.com/charmbracelet/crush/actions"><img src="https://github.com/charmbracelet/crush/actions/workflows/build.yml/badge.svg" alt="Build Status"></a>
+    <a href="https://github.com/andikapradanaarif/crush/actions"><img src="https://github.com/andikapradanaarif/crush/actions/workflows/build.yml/badge.svg" alt="Build Status"></a>
 </p>
 
 <p align="center">Your new coding bestie, now available in your favourite terminal.<br />Your tools, your code, and your workflows, wired into your LLM of choice.</p>
@@ -44,6 +43,33 @@
 - **Industrial Grade:** built on the Charm ecosystem, powering 25k+ applications, from leading open source projects to business-critical infrastructure
 
 ## Installation
+
+Build this fork from source — it is not published to any package manager:
+
+```bash
+git clone https://github.com/andikapradanaarif/crush.git
+cd crush
+go install .
+```
+
+or `go build -o ~/.local/bin/crush .` to drop the binary directly.
+
+`go install github.com/andikapradanaarif/crush@latest` does **not** work: the
+module path stays `github.com/charmbracelet/crush` for mergeability with
+upstream, and Go refuses to install a module whose path doesn't match the
+repo URL.
+
+### About `crush --version`
+
+A fork build reports a pseudo-version like `v0.98.3-fork.0.<date>-<sha>` —
+the `-fork` marker comes from the `v0.98.3-fork` tag namespace this repo
+uses; the numeric base is the nearest tag (which may still be an upstream
+release tag), not proof of upstream provenance. `go version -m` similarly
+shows the upstream module path — that path is kept intentionally (see
+AGENTS.md) and is not a sign you installed the wrong thing.
+
+<details>
+<summary><strong>Upstream install methods</strong> — these install <em>upstream</em> crush, not this fork</summary>
 
 Use a package manager:
 
@@ -196,6 +222,8 @@ the local database uses dot-file locking:
 ```
 go install -tags sqlite3_dotlk github.com/charmbracelet/crush@latest
 ```
+
+</details>
 
 > [!WARNING]
 > Productivity may increase when using Crush and you may find yourself nerd
