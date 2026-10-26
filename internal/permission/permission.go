@@ -236,7 +236,49 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 		return true, nil
 	}
 
+	fileInfo, err := os.Stat(opts.Path)
+	dir := opts.Path
+	if err == nil {
+		if fileInfo.IsDir() {
+			dir = opts.Path
+		} else {
+			dir = filepath.Dir(opts.Path)
+		}
+	}
+
+	if dir == "." {
+		dir = s.workingDir
+	}
+
+	entry, approved := s.registerRequest(opts, dir)
+	if approved {
+		return true, nil
+	}
+	defer s.pendingRequests.Del(entry.req.ID)
+
+	// registerRequest returns with requestMu already released, so the
+	// caller parks without serializing other requests: several tool
+	// calls may await decisions concurrently, and every parked request
+	// stays listed in pendingRequests for replay and enumeration.
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case granted := <-entry.respCh:
+		return granted, nil
+	}
+}
+
+// registerRequest performs the locked section of Request: it publishes
+// the request-start notification, applies the inline-approval checks
+// (auto-approve and remembered session grant), and — when approval is
+// not short-circuited — builds, registers, and publishes the pending
+// request. requestMu is held for the whole section so notification,
+// registration, and request events stay in deterministic order across
+// concurrent callers. It returns the parked entry, or approved=true
+// when the request was granted inline and nothing parked.
+func (s *permissionService) registerRequest(opts CreatePermissionRequest, dir string) (pendingRequest, bool) {
 	s.requestMu.Lock()
+	defer s.requestMu.Unlock()
 
 	// tell the UI that a permission was requested
 	s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
@@ -254,23 +296,9 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 			ToolCallID: opts.ToolCallID,
 			Granted:    true,
 		})
-		s.requestMu.Unlock()
-		return true, nil
+		return pendingRequest{}, true
 	}
 
-	fileInfo, err := os.Stat(opts.Path)
-	dir := opts.Path
-	if err == nil {
-		if fileInfo.IsDir() {
-			dir = opts.Path
-		} else {
-			dir = filepath.Dir(opts.Path)
-		}
-	}
-
-	if dir == "." {
-		dir = s.workingDir
-	}
 	permission := PermissionRequest{
 		ID:          uuid.New().String(),
 		Path:        dir,
@@ -293,8 +321,7 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 			ToolCallID: opts.ToolCallID,
 			Granted:    true,
 		})
-		s.requestMu.Unlock()
-		return true, nil
+		return pendingRequest{}, true
 	}
 
 	s.activeRequestMu.Lock()
@@ -302,23 +329,11 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 	s.activeRequestMu.Unlock()
 
 	respCh := make(chan bool, 1)
-	s.pendingRequests.Set(permission.ID, pendingRequest{req: permission, respCh: respCh})
-	defer s.pendingRequests.Del(permission.ID)
+	entry := pendingRequest{req: permission, respCh: respCh}
+	s.pendingRequests.Set(permission.ID, entry)
 
-	// Publish the request while still holding requestMu so concurrent
-	// calls register and publish in the same order. The mutex is
-	// released before parking: several tool calls may await decisions
-	// concurrently, and every parked request stays listed in
-	// pendingRequests for replay and enumeration.
 	s.Publish(pubsub.CreatedEvent, permission)
-	s.requestMu.Unlock()
-
-	select {
-	case <-ctx.Done():
-		return false, ctx.Err()
-	case granted := <-respCh:
-		return granted, nil
-	}
+	return entry, false
 }
 
 // ActiveRequest returns the request that is currently awaiting a
