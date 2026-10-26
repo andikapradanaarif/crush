@@ -154,6 +154,8 @@ func wrapEvent(ev any) *pubsub.Payload {
 		})
 	case pubsub.Event[proto.ConfigChanged]:
 		return envelope(pubsub.PayloadTypeConfigChanged, e)
+	case pubsub.Event[proto.PermissionsSkipChanged]:
+		return envelope(pubsub.PayloadTypePermissionsSkipChanged, e)
 	case app.UpdateAvailableMsg:
 		return envelope(pubsub.PayloadTypeUpdateAvailable, pubsub.Event[proto.UpdateAvailable]{
 			Type: pubsub.UpdatedEvent,
@@ -191,6 +193,8 @@ func sessionScopedEventID(ev any) (string, bool) {
 	case pubsub.Event[question.Request]:
 		id = e.Payload.SessionID
 	case pubsub.Event[question.Notification]:
+		id = e.Payload.SessionID
+	case pubsub.Event[proto.PermissionsSkipChanged]:
 		id = e.Payload.SessionID
 	default:
 		return "", false

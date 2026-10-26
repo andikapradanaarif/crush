@@ -1,8 +1,11 @@
 package backend
 
 import (
+	"context"
+
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/proto"
+	"github.com/charmbracelet/crush/internal/pubsub"
 )
 
 // GrantPermission grants, denies, or persistently grants a permission
@@ -38,6 +41,27 @@ func (b *Backend) GrantPermission(workspaceID string, req proto.PermissionGrant)
 	}
 }
 
+// publishPermissionsSkipChanged broadcasts a permission-skip state
+// change on the workspace's event broker so connected clients keep
+// their cached flags in sync. An empty sessionID marks the
+// workspace-global flag; a non-empty sessionID scopes the event to
+// that session's viewers via the server's session-scoped event
+// filter.
+func publishPermissionsSkipChanged(ws *Workspace, sessionID string, skip bool) {
+	if ws == nil || ws.App == nil {
+		return
+	}
+
+	ws.SendEvent(pubsub.Event[proto.PermissionsSkipChanged]{
+		Type: pubsub.UpdatedEvent,
+		Payload: proto.PermissionsSkipChanged{
+			WorkspaceID: ws.ID,
+			SessionID:   sessionID,
+			Skip:        skip,
+		},
+	})
+}
+
 // SetPermissionsSkip sets whether permission prompts are skipped.
 func (b *Backend) SetPermissionsSkip(workspaceID string, skip bool) error {
 	ws, err := b.GetWorkspace(workspaceID)
@@ -46,6 +70,7 @@ func (b *Backend) SetPermissionsSkip(workspaceID string, skip bool) error {
 	}
 
 	ws.Permissions.SetSkipRequests(skip)
+	publishPermissionsSkipChanged(ws, "", skip)
 	return nil
 }
 
@@ -57,4 +82,35 @@ func (b *Backend) GetPermissionsSkip(workspaceID string) (bool, error) {
 	}
 
 	return ws.Permissions.SkipRequests(), nil
+}
+
+// SetSessionPermissionsSkip sets whether permission prompts are
+// skipped for a single session, independently of the workspace-global
+// flag. One session can run auto-approved while others still prompt.
+func (b *Backend) SetSessionPermissionsSkip(ctx context.Context, workspaceID, sessionID string, skip bool) error {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return err
+	}
+	if _, err := ws.Sessions.Get(ctx, sessionID); err != nil {
+		return err
+	}
+
+	ws.Permissions.SetSessionAutoApprove(sessionID, skip)
+	publishPermissionsSkipChanged(ws, sessionID, skip)
+	return nil
+}
+
+// GetSessionPermissionsSkip returns whether permission prompts are
+// skipped for a single session.
+func (b *Backend) GetSessionPermissionsSkip(ctx context.Context, workspaceID, sessionID string) (bool, error) {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return false, err
+	}
+	if _, err := ws.Sessions.Get(ctx, sessionID); err != nil {
+		return false, err
+	}
+
+	return ws.Permissions.SessionAutoApproves(sessionID), nil
 }

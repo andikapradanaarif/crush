@@ -267,6 +267,24 @@ func (c *controllerV1) endpoints() []apigen.Endpoint {
 			Fails(400, 404, 500).
 			Handle(c.handlePostWorkspacePermissionsSkip),
 
+		apigen.Get("/v1/workspaces/{id}/sessions/{sid}/permissions/skip").
+			Summary("Get session skip permissions status").
+			Tags("permissions").
+			PathParam("id", "Workspace ID").
+			PathParam("sid", "Session ID").
+			Responds(proto.PermissionSkipRequest{}).
+			Fails(404, 500).
+			Handle(c.handleGetWorkspaceSessionPermissionsSkip),
+
+		apigen.Post("/v1/workspaces/{id}/sessions/{sid}/permissions/skip").
+			Summary("Set session skip permissions").
+			Tags("permissions").
+			PathParam("id", "Workspace ID").
+			PathParam("sid", "Session ID").
+			Accepts(proto.PermissionSkipRequest{}).
+			Fails(400, 404, 500).
+			Handle(c.handlePostWorkspaceSessionPermissionsSkip),
+
 		apigen.Post("/v1/workspaces/{id}/permissions/grant").
 			Summary("Grant permission").
 			Tags("permissions").

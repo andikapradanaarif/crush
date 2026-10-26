@@ -683,6 +683,105 @@ func TestActiveRequest(t *testing.T) {
 	})
 }
 
+// TestSessionAutoApprove covers the session-scoped auto-approve toggle:
+// set/unset/read, scoping to a single session, and orthogonality with
+// the workspace-global skip flag.
+func TestSessionAutoApprove(t *testing.T) {
+	t.Parallel()
+
+	newRequest := func(sessionID, callID string) CreatePermissionRequest {
+		return CreatePermissionRequest{
+			SessionID:   sessionID,
+			ToolCallID:  callID,
+			ToolName:    "bash",
+			Action:      "execute",
+			Description: "run a command",
+			Path:        "/tmp",
+		}
+	}
+
+	t.Run("set and unset round-trips through Request", func(t *testing.T) {
+		t.Parallel()
+		service := NewPermissionService("/tmp", false, nil)
+
+		require.False(t, service.SessionAutoApproves("s-yolo"))
+		service.SetSessionAutoApprove("s-yolo", true)
+		require.True(t, service.SessionAutoApproves("s-yolo"))
+
+		granted, err := service.Request(t.Context(), newRequest("s-yolo", "call-1"))
+		require.NoError(t, err)
+		assert.True(t, granted, "flagged session must auto-approve")
+
+		service.SetSessionAutoApprove("s-yolo", false)
+		require.False(t, service.SessionAutoApproves("s-yolo"))
+
+		// After unsetting, the next request must prompt again: it
+		// publishes a pending request instead of short-circuiting.
+		events := service.Subscribe(t.Context())
+		done := make(chan bool, 1)
+		go func() {
+			granted, _ := service.Request(t.Context(), newRequest("s-yolo", "call-2"))
+			done <- granted
+		}()
+		select {
+		case ev := <-events:
+			assert.True(t, service.Deny(ev.Payload))
+		case <-time.After(2 * time.Second):
+			t.Fatal("cleared session auto-approved instead of prompting")
+		}
+		assert.False(t, <-done)
+	})
+
+	t.Run("flag does not leak to other sessions", func(t *testing.T) {
+		t.Parallel()
+		service := NewPermissionService("/tmp", false, nil)
+
+		service.SetSessionAutoApprove("s-yolo", true)
+		require.True(t, service.SessionAutoApproves("s-yolo"))
+		require.False(t, service.SessionAutoApproves("s-other"))
+
+		events := service.Subscribe(t.Context())
+		done := make(chan bool, 1)
+		go func() {
+			granted, _ := service.Request(t.Context(), newRequest("s-other", "call-1"))
+			done <- granted
+		}()
+		select {
+		case ev := <-events:
+			assert.True(t, service.Deny(ev.Payload))
+		case <-time.After(2 * time.Second):
+			t.Fatal("unflagged session auto-approved; flag leaked across sessions")
+		}
+		assert.False(t, <-done)
+	})
+
+	t.Run("AutoApproveSession remains a set-true shim", func(t *testing.T) {
+		t.Parallel()
+		service := NewPermissionService("/tmp", false, nil)
+
+		service.AutoApproveSession("s-yolo")
+		require.True(t, service.SessionAutoApproves("s-yolo"))
+
+		granted, err := service.Request(t.Context(), newRequest("s-yolo", "call-1"))
+		require.NoError(t, err)
+		assert.True(t, granted)
+	})
+
+	t.Run("global skip stays orthogonal to the per-session flag", func(t *testing.T) {
+		t.Parallel()
+		service := NewPermissionService("/tmp", false, nil)
+
+		service.SetSkipRequests(true)
+		// Global skip approves every session without arming the
+		// per-session flag.
+		granted, err := service.Request(t.Context(), newRequest("s-plain", "call-1"))
+		require.NoError(t, err)
+		assert.True(t, granted, "global skip must approve unflagged sessions")
+		assert.False(t, service.SessionAutoApproves("s-plain"),
+			"global skip must not flip the per-session flag")
+	})
+}
+
 func TestNotificationsCarrySessionID(t *testing.T) {
 	t.Parallel()
 	service := NewPermissionService("/tmp", false, nil)

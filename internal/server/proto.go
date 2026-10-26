@@ -778,6 +778,38 @@ func (c *controllerV1) handleGetWorkspacePermissionsSkip(w http.ResponseWriter, 
 	jsonEncode(w, proto.PermissionSkipRequest{Skip: skip})
 }
 
+// handlePostWorkspaceSessionPermissionsSkip sets whether permission
+// prompts are skipped for a single session.
+func (c *controllerV1) handlePostWorkspaceSessionPermissionsSkip(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sid := r.PathValue("sid")
+
+	var req proto.PermissionSkipRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		c.server.logError(r, "Failed to decode request", "error", err)
+		jsonError(w, http.StatusBadRequest, "failed to decode request")
+		return
+	}
+
+	if err := c.backend.SetSessionPermissionsSkip(r.Context(), id, sid, req.Skip); err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+}
+
+// handleGetWorkspaceSessionPermissionsSkip returns whether permission
+// prompts are skipped for a single session.
+func (c *controllerV1) handleGetWorkspaceSessionPermissionsSkip(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sid := r.PathValue("sid")
+	skip, err := c.backend.GetSessionPermissionsSkip(r.Context(), id, sid)
+	if err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	jsonEncode(w, proto.PermissionSkipRequest{Skip: skip})
+}
+
 // handleError maps backend errors to HTTP status codes and writes the
 // JSON error response.
 //
