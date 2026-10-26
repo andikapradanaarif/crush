@@ -215,12 +215,20 @@ func (s *permissionService) GrantPersistent(permission PermissionRequest) bool {
 	// re-prompting for an action class just approved for the session.
 	// Entries resolved concurrently lose their Take inside resolve and
 	// are skipped.
+	//
+	// requestMu serializes the sweep against registerRequest's
+	// check-and-insert, so a same-key request cannot slip between the
+	// grant being recorded and the sweep reading the map: it either
+	// registered first (the sweep resolves it) or registers after (its
+	// sessionPermissions check hits and it is approved inline).
 	key := permissionKey(permission)
+	s.requestMu.Lock()
 	for _, entry := range s.pendingRequests.Seq2() {
 		if permissionKey(entry.req) == key {
 			s.resolve(entry.req, true, false, nil)
 		}
 	}
+	s.requestMu.Unlock()
 	return true
 }
 
