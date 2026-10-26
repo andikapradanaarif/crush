@@ -782,6 +782,79 @@ func TestSessionAutoApprove(t *testing.T) {
 	})
 }
 
+// TestPendingRequests covers multi-request parking: several tool calls
+// can await decisions concurrently, every parked request is enumerable
+// via PendingRequests, and resolution or cancellation removes only the
+// resolved request.
+func TestPendingRequests(t *testing.T) {
+	t.Parallel()
+	service := NewPermissionService("/tmp", false, nil)
+
+	events := service.Subscribe(t.Context())
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	park := func(callID string) chan bool {
+		done := make(chan bool, 1)
+		go func() {
+			granted, _ := service.Request(ctx, CreatePermissionRequest{
+				SessionID:   "s1",
+				ToolCallID:  callID,
+				ToolName:    "bash",
+				Action:      "execute",
+				Description: "run a command",
+				Path:        "/tmp",
+			})
+			done <- granted
+		}()
+		return done
+	}
+
+	done1 := park("call-1")
+	done2 := park("call-2")
+
+	// Both requests must publish and park — previously the second call
+	// blocked on requestMu until the first resolved, leaving it
+	// invisible and unanswerable.
+	var reqs []PermissionRequest
+	for range 2 {
+		select {
+		case ev := <-events:
+			reqs = append(reqs, ev.Payload)
+		case <-time.After(2 * time.Second):
+			t.Fatal("second request never published; requests cannot park concurrently")
+		}
+	}
+
+	pending := service.PendingRequests()
+	require.Len(t, pending, 2, "both parked requests must be enumerable")
+
+	// Resolving one leaves the other parked.
+	require.True(t, service.Grant(reqs[0]))
+	var parkedCall string
+	if reqs[0].ToolCallID == "call-1" {
+		require.True(t, <-done1)
+		parkedCall = "call-2"
+	} else {
+		require.True(t, <-done2)
+		parkedCall = "call-1"
+	}
+	pending = service.PendingRequests()
+	require.Len(t, pending, 1)
+	require.Equal(t, parkedCall, pending[0].ToolCallID)
+
+	// Cancelling the remaining waiter empties the list.
+	cancel()
+	if parkedCall == "call-2" {
+		require.False(t, <-done2)
+	} else {
+		require.False(t, <-done1)
+	}
+	require.Eventually(t, func() bool {
+		return len(service.PendingRequests()) == 0
+	}, 2*time.Second, 5*time.Millisecond)
+}
+
 func TestNotificationsCarrySessionID(t *testing.T) {
 	t.Parallel()
 	service := NewPermissionService("/tmp", false, nil)

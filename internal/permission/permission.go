@@ -82,8 +82,14 @@ type Service interface {
 	// ActiveRequest returns the request that is currently awaiting a
 	// decision, or false when no request is pending. A request is only
 	// reported while it can still be resolved; a request whose waiter
-	// was cancelled is not returned.
+	// was cancelled is not returned. When several requests are parked
+	// the most recently published one is preferred; if it has already
+	// been resolved, any still-pending request is returned.
 	ActiveRequest() (PermissionRequest, bool)
+	// PendingRequests returns every request currently parked awaiting a
+	// decision. Requests are only listed while they can still be
+	// resolved; a request whose waiter was cancelled is not returned.
+	PendingRequests() []PermissionRequest
 	AutoApproveSession(sessionID string)
 	// SetSessionAutoApprove enables or disables blanket auto-approval
 	// for all permission requests raised on the given session. Unlike
@@ -109,19 +115,29 @@ type PermissionKey struct {
 	Path      string
 }
 
+// pendingRequest is a parked permission request: the full request as
+// published plus the channel its waiter blocks on.
+type pendingRequest struct {
+	req    PermissionRequest
+	respCh chan bool
+}
+
 type permissionService struct {
 	*pubsub.Broker[PermissionRequest]
 
 	notificationBroker    *pubsub.Broker[PermissionNotification]
 	workingDir            string
 	sessionPermissions    *csync.Map[PermissionKey, bool]
-	pendingRequests       *csync.Map[string, chan bool]
+	pendingRequests       *csync.Map[string, pendingRequest]
 	autoApproveSessions   map[string]bool
 	autoApproveSessionsMu sync.RWMutex
 	skip                  atomic.Bool
 	allowedTools          []string
 
-	// used to make sure we only process one request at a time
+	// requestMu serializes request registration and publishing so
+	// concurrent calls emit events in a deterministic order. It is
+	// released before the caller parks, so several tool calls can
+	// await decisions concurrently.
 	requestMu       sync.Mutex
 	activeRequest   *PermissionRequest
 	activeRequestMu sync.Mutex
@@ -144,7 +160,7 @@ type permissionService struct {
 // route through this helper so multi-subscriber UIs can race safely:
 // the first caller wins, the rest become no-ops.
 func (s *permissionService) resolve(permission PermissionRequest, granted, denied bool, onResolve func()) bool {
-	respCh, ok := s.pendingRequests.Take(permission.ID)
+	entry, ok := s.pendingRequests.Take(permission.ID)
 	if !ok {
 		return false
 	}
@@ -163,7 +179,7 @@ func (s *permissionService) resolve(permission PermissionRequest, granted, denie
 	// respCh is buffered (cap 1) and only ever has at most one sender
 	// per request because Take removes the entry under the map lock,
 	// so this send never blocks.
-	respCh <- granted
+	entry.respCh <- granted
 
 	s.activeRequestMu.Lock()
 	if s.activeRequest != nil && s.activeRequest.ID == permission.ID {
@@ -221,7 +237,6 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 	}
 
 	s.requestMu.Lock()
-	defer s.requestMu.Unlock()
 
 	// tell the UI that a permission was requested
 	s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
@@ -239,6 +254,7 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 			ToolCallID: opts.ToolCallID,
 			Granted:    true,
 		})
+		s.requestMu.Unlock()
 		return true, nil
 	}
 
@@ -277,6 +293,7 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 			ToolCallID: opts.ToolCallID,
 			Granted:    true,
 		})
+		s.requestMu.Unlock()
 		return true, nil
 	}
 
@@ -285,11 +302,16 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 	s.activeRequestMu.Unlock()
 
 	respCh := make(chan bool, 1)
-	s.pendingRequests.Set(permission.ID, respCh)
+	s.pendingRequests.Set(permission.ID, pendingRequest{req: permission, respCh: respCh})
 	defer s.pendingRequests.Del(permission.ID)
 
-	// Publish the request
+	// Publish the request while still holding requestMu so concurrent
+	// calls register and publish in the same order. The mutex is
+	// released before parking: several tool calls may await decisions
+	// concurrently, and every parked request stays listed in
+	// pendingRequests for replay and enumeration.
 	s.Publish(pubsub.CreatedEvent, permission)
+	s.requestMu.Unlock()
 
 	select {
 	case <-ctx.Done():
@@ -303,18 +325,32 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 // decision. The active pointer can outlive the waiter that published
 // it (Request leaves it behind when its context is cancelled), so a
 // request is only reported while its ID is still registered in
-// pendingRequests, i.e. while Grant/Deny can actually resolve it.
+// pendingRequests, i.e. while Grant/Deny can actually resolve it. When
+// the recorded request is gone but others remain parked — possible now
+// that requests park concurrently — a still-pending one is returned.
 func (s *permissionService) ActiveRequest() (PermissionRequest, bool) {
 	s.activeRequestMu.Lock()
 	active := s.activeRequest
 	s.activeRequestMu.Unlock()
-	if active == nil {
-		return PermissionRequest{}, false
+	if active != nil {
+		if _, ok := s.pendingRequests.Get(active.ID); ok {
+			return *active, true
+		}
 	}
-	if _, ok := s.pendingRequests.Get(active.ID); !ok {
-		return PermissionRequest{}, false
+	for _, entry := range s.pendingRequests.Seq2() {
+		return entry.req, true
 	}
-	return *active, true
+	return PermissionRequest{}, false
+}
+
+// PendingRequests returns every request currently parked awaiting a
+// decision.
+func (s *permissionService) PendingRequests() []PermissionRequest {
+	var out []PermissionRequest
+	for _, entry := range s.pendingRequests.Seq2() {
+		out = append(out, entry.req)
+	}
+	return out
 }
 
 func (s *permissionService) AutoApproveSession(sessionID string) {
@@ -357,7 +393,7 @@ func NewPermissionService(workingDir string, skip bool, allowedTools []string) S
 		sessionPermissions:  csync.NewMap[PermissionKey, bool](),
 		autoApproveSessions: make(map[string]bool),
 		allowedTools:        allowedTools,
-		pendingRequests:     csync.NewMap[string, chan bool](),
+		pendingRequests:     csync.NewMap[string, pendingRequest](),
 	}
 	svc.skip.Store(skip)
 	return svc

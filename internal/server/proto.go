@@ -810,6 +810,32 @@ func (c *controllerV1) handleGetWorkspaceSessionPermissionsSkip(w http.ResponseW
 	jsonEncode(w, proto.PermissionSkipRequest{Skip: skip})
 }
 
+// handleGetWorkspaceSessionPermissionsPending returns the permission
+// requests currently parked awaiting a decision for a single session.
+func (c *controllerV1) handleGetWorkspaceSessionPermissionsPending(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sid := r.PathValue("sid")
+	pending, err := c.backend.GetSessionPendingPermissions(r.Context(), id, sid)
+	if err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	out := make([]proto.PermissionRequest, len(pending))
+	for i, p := range pending {
+		out[i] = proto.PermissionRequest{
+			ID:          p.ID,
+			SessionID:   p.SessionID,
+			ToolCallID:  p.ToolCallID,
+			ToolName:    p.ToolName,
+			Description: p.Description,
+			Action:      p.Action,
+			Path:        p.Path,
+			Params:      p.Params,
+		}
+	}
+	jsonEncode(w, out)
+}
+
 // handleError maps backend errors to HTTP status codes and writes the
 // JSON error response.
 //

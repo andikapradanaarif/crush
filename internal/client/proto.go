@@ -843,6 +843,25 @@ func (c *Client) GetSessionPermissionsSkip(ctx context.Context, id, sid string) 
 	return skip.Skip, nil
 }
 
+// GetSessionPendingPermissions retrieves the permission requests
+// currently parked awaiting a decision for a single session in a
+// workspace.
+func (c *Client) GetSessionPendingPermissions(ctx context.Context, id, sid string) ([]proto.PermissionRequest, error) {
+	rsp, err := c.get(ctx, fmt.Sprintf("/workspaces/%s/sessions/%s/permissions/pending", id, sid), nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get session pending permissions: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to get session pending permissions: status code %d", rsp.StatusCode)
+	}
+	var pending []proto.PermissionRequest
+	if err := json.NewDecoder(rsp.Body).Decode(&pending); err != nil {
+		return nil, fmt.Errorf("failed to decode session pending permissions: %w", err)
+	}
+	return pending, nil
+}
+
 // GetConfig retrieves the workspace-specific configuration.
 func (c *Client) GetConfig(ctx context.Context, id string) (*config.Config, error) {
 	rsp, err := c.get(ctx, fmt.Sprintf("/workspaces/%s/config", id), nil, nil)

@@ -45,6 +45,10 @@ func (m *mockBashPermissionService) ActiveRequest() (permission.PermissionReques
 	return permission.PermissionRequest{}, false
 }
 
+func (m *mockBashPermissionService) PendingRequests() []permission.PermissionRequest {
+	return nil
+}
+
 func (m *mockBashPermissionService) SetSkipRequests(skip bool) {}
 
 func (m *mockBashPermissionService) SkipRequests() bool {
@@ -124,6 +128,10 @@ func (m *recordingPermissionService) SessionAutoApproves(sessionID string) bool 
 
 func (m *recordingPermissionService) ActiveRequest() (permission.PermissionRequest, bool) {
 	return permission.PermissionRequest{}, false
+}
+
+func (m *recordingPermissionService) PendingRequests() []permission.PermissionRequest {
+	return nil
 }
 
 func (m *recordingPermissionService) SetSkipRequests(skip bool) {}
