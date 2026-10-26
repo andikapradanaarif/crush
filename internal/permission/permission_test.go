@@ -855,6 +855,72 @@ func TestPendingRequests(t *testing.T) {
 	}, 2*time.Second, 5*time.Millisecond)
 }
 
+// TestGrantPersistent_ResolvesParkedSameKeyRequests pins the "allow for
+// session" sweep: a second call carrying the same PermissionKey can park
+// before the first is answered, so the persistent grant must flush
+// already-parked matching requests rather than re-prompting for an
+// action class the user just approved.
+func TestGrantPersistent_ResolvesParkedSameKeyRequests(t *testing.T) {
+	t.Parallel()
+	service := NewPermissionService("/tmp", false, nil)
+
+	events := service.Subscribe(t.Context())
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	park := func(sessionID, callID string) chan bool {
+		done := make(chan bool, 1)
+		go func() {
+			granted, _ := service.Request(ctx, CreatePermissionRequest{
+				SessionID:   sessionID,
+				ToolCallID:  callID,
+				ToolName:    "bash",
+				Action:      "execute",
+				Description: "run a command",
+				Path:        "/tmp",
+			})
+			done <- granted
+		}()
+		return done
+	}
+
+	done1 := park("s1", "call-1")
+	done2 := park("s1", "call-2")
+	done3 := park("s2", "call-3") // Different session: different key.
+
+	var reqs []PermissionRequest
+	for range 3 {
+		select {
+		case ev := <-events:
+			reqs = append(reqs, ev.Payload)
+		case <-time.After(2 * time.Second):
+			t.Fatal("expected three published requests")
+		}
+	}
+	require.Len(t, service.PendingRequests(), 3)
+
+	// "Allow for session" on a call-1 request resolves both same-key
+	// s1 parked calls and leaves the s2 one parked.
+	var req1 PermissionRequest
+	for _, r := range reqs {
+		if r.ToolCallID == "call-1" {
+			req1 = r
+		}
+	}
+	require.NotEmpty(t, req1.ID)
+	require.True(t, service.GrantPersistent(req1))
+
+	require.True(t, <-done1)
+	require.True(t, <-done2, "same-key parked request must be granted by the persistent sweep")
+
+	pending := service.PendingRequests()
+	require.Len(t, pending, 1)
+	require.Equal(t, "call-3", pending[0].ToolCallID)
+
+	cancel()
+	require.False(t, <-done3)
+}
+
 func TestNotificationsCarrySessionID(t *testing.T) {
 	t.Parallel()
 	service := NewPermissionService("/tmp", false, nil)

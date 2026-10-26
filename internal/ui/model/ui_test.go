@@ -168,9 +168,11 @@ func (w *testWorkspace) PermissionSetSkipRequests(skip bool) { w.yolo = skip }
 // PermissionGrant, PermissionGrantPersistent, and PermissionDeny are
 // no-ops returning false — a silent non-resolution, which is exactly
 // the grant-failure path the permission queue must survive.
-func (w *testWorkspace) PermissionGrant(permission.PermissionRequest) bool           { return false }
+func (w *testWorkspace) PermissionGrant(permission.PermissionRequest) bool { return false }
+
 func (w *testWorkspace) PermissionGrantPersistent(permission.PermissionRequest) bool { return false }
-func (w *testWorkspace) PermissionDeny(permission.PermissionRequest) bool            { return false }
+
+func (w *testWorkspace) PermissionDeny(permission.PermissionRequest) bool { return false }
 
 func (w *testWorkspace) AgentIsReady() bool {
 	return w.agentReady

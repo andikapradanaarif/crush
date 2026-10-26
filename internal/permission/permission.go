@@ -115,6 +115,16 @@ type PermissionKey struct {
 	Path      string
 }
 
+// permissionKey builds the remembered-grant lookup key for a request.
+func permissionKey(r PermissionRequest) PermissionKey {
+	return PermissionKey{
+		SessionID: r.SessionID,
+		ToolName:  r.ToolName,
+		Action:    r.Action,
+		Path:      r.Path,
+	}
+}
+
 // pendingRequest is a parked permission request: the full request as
 // published plus the channel its waiter blocks on.
 type pendingRequest struct {
@@ -194,14 +204,24 @@ func (s *permissionService) GrantPersistent(permission PermissionRequest) bool {
 	// pending-request race. Otherwise a losing GrantPersistent that
 	// lost to a Deny would still leave an auto-approve entry behind,
 	// silently flipping later denied calls to allowed.
-	return s.resolve(permission, true, false, func() {
-		s.sessionPermissions.Set(PermissionKey{
-			SessionID: permission.SessionID,
-			ToolName:  permission.ToolName,
-			Action:    permission.Action,
-			Path:      permission.Path,
-		}, true)
-	})
+	if !s.resolve(permission, true, false, func() {
+		s.sessionPermissions.Set(permissionKey(permission), true)
+	}) {
+		return false
+	}
+	// A persistent grant also covers requests already parked with the
+	// same key: with concurrent parking, a second same-key call can
+	// register before the grant lands. Resolve them here rather than
+	// re-prompting for an action class just approved for the session.
+	// Entries resolved concurrently lose their Take inside resolve and
+	// are skipped.
+	key := permissionKey(permission)
+	for _, entry := range s.pendingRequests.Seq2() {
+		if permissionKey(entry.req) == key {
+			s.resolve(entry.req, true, false, nil)
+		}
+	}
+	return true
 }
 
 func (s *permissionService) Grant(permission PermissionRequest) bool {
@@ -310,12 +330,7 @@ func (s *permissionService) registerRequest(opts CreatePermissionRequest, dir st
 		Params:      opts.Params,
 	}
 
-	if _, ok := s.sessionPermissions.Get(PermissionKey{
-		SessionID: permission.SessionID,
-		ToolName:  permission.ToolName,
-		Action:    permission.Action,
-		Path:      permission.Path,
-	}); ok {
+	if _, ok := s.sessionPermissions.Get(permissionKey(permission)); ok {
 		s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
 			SessionID:  opts.SessionID,
 			ToolCallID: opts.ToolCallID,
