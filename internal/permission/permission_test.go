@@ -964,6 +964,65 @@ func TestRequest_CancelPublishesWithdrawal(t *testing.T) {
 	require.Empty(t, service.PendingRequests())
 }
 
+// TestRequest_CancelAfterGrantEmitsNoWithdrawal pins the select race:
+// when ctx.Done fires while a buffered resolution is already in
+// respCh, Request must return the real outcome and must not publish a
+// spurious Cancelled notification after the Granted one.
+func TestRequest_CancelAfterGrantEmitsNoWithdrawal(t *testing.T) {
+	t.Parallel()
+	service := NewPermissionService("/tmp", false, nil)
+
+	notifs := service.SubscribeNotifications(t.Context())
+	ctx, cancel := context.WithCancel(t.Context())
+
+	type result struct {
+		granted bool
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		granted, err := service.Request(ctx, CreatePermissionRequest{
+			SessionID:   "s1",
+			ToolCallID:  "call-1",
+			ToolName:    "bash",
+			Action:      "execute",
+			Description: "run a command",
+			Path:        "/tmp",
+		})
+		done <- result{granted, err}
+	}()
+
+	// Consume the request-start notification, then resolve.
+	select {
+	case <-notifs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request-start notification never published")
+	}
+	pending := service.PendingRequests()
+	require.Len(t, pending, 1)
+	require.True(t, service.Grant(pending[0]))
+
+	// Consume the Granted notification, then cancel. Whichever select
+	// arm fires, the resolution must win.
+	select {
+	case n := <-notifs:
+		require.True(t, n.Payload.Granted)
+	case <-time.After(2 * time.Second):
+		t.Fatal("grant notification never published")
+	}
+	cancel()
+	r := <-done
+	require.NoError(t, r.err)
+	require.True(t, r.granted)
+
+	// No Cancelled notification may follow the resolution.
+	select {
+	case n := <-notifs:
+		t.Fatalf("spurious notification after resolution: %+v", n.Payload)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 func TestNotificationsCarrySessionID(t *testing.T) {
 	t.Parallel()
 	service := NewPermissionService("/tmp", false, nil)

@@ -292,10 +292,17 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 	// stays listed in pendingRequests for replay and enumeration.
 	select {
 	case <-ctx.Done():
-		// The waiter is leaving without an answer. Drop the pending
-		// entry and publish a withdrawal so UIs can dismiss the prompt
-		// (or purge a queued copy) instead of surfacing a dead request.
-		s.pendingRequests.Del(entry.req.ID)
+		// The waiter is leaving without an answer, but cancellation
+		// races resolution: Take arbitrates. If the entry is already
+		// gone, a resolver won and its buffered send on respCh is
+		// guaranteed — consume the real outcome rather than publish a
+		// spurious withdrawal after a Granted/Denied notification.
+		if _, ok := s.pendingRequests.Take(entry.req.ID); !ok {
+			return <-entry.respCh, nil
+		}
+		// We won the withdrawal: drop the pending entry and publish so
+		// UIs can dismiss the prompt (or purge a queued copy) instead
+		// of surfacing a dead request.
 		s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
 			SessionID:  entry.req.SessionID,
 			ToolCallID: entry.req.ToolCallID,
