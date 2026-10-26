@@ -3,6 +3,7 @@ package model
 import (
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/ui/dialog"
@@ -173,4 +174,34 @@ func TestHandlePermissionNotification_RemoteResolveDropsQueue(t *testing.T) {
 	pd, ok := d.(*dialog.Permissions)
 	require.True(t, ok)
 	require.Equal(t, "call-1", pd.ToolCallID())
+}
+
+// TestPermissionResponse_SilentGrantDrainsQueue pins the stranded-queue
+// hole: the user answers the displayed request but the grant resolves
+// nothing (the waiter already cancelled), so no resolution notification
+// ever arrives. The queued request must still surface.
+func TestPermissionResponse_SilentGrantDrainsQueue(t *testing.T) {
+	t.Parallel()
+
+	u := newTestUIForPermissions()
+	first := permission.PermissionRequest{ID: "perm-1", ToolCallID: "call-1", ToolName: "bash"}
+	second := permission.PermissionRequest{ID: "perm-2", ToolCallID: "call-2", ToolName: "bash"}
+
+	// Open the first dialog without grace so the answer keypress below
+	// is not absorbed; the second request queues behind it.
+	u.dialog.OpenDialog(dialog.NewPermissions(u.com, first))
+	u.openPermissionsDialog(second)
+	require.Len(t, u.pendingPermissions, 1)
+
+	// The user presses "a" (allow): the dialog produces the response
+	// action, the dialog closes, and the stub workspace's grant returns
+	// false — no resolution notification will ever drain the queue.
+	u.handleDialogMsg(tea.KeyPressMsg{Code: 'a', Text: "a"})
+
+	d := u.dialog.Dialog(dialog.PermissionsID)
+	require.NotNil(t, d, "queued request must surface even without a resolution notification")
+	pd, ok := d.(*dialog.Permissions)
+	require.True(t, ok)
+	require.Equal(t, "call-2", pd.ToolCallID())
+	require.Empty(t, u.pendingPermissions)
 }

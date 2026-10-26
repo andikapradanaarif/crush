@@ -1055,6 +1055,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case closeDialogMsg:
 		m.dialog.CloseFrontDialog()
+		m.showNextQueuedPermission()
 
 	case pubsub.Event[session.Session]:
 		if msg.Type == pubsub.DeletedEvent {
@@ -2621,6 +2622,11 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		case dialog.PermissionDeny:
 			m.com.Workspace.PermissionDeny(msg.Permission)
 		}
+		// A grant that resolves nothing (the request was already
+		// resolved or its waiter cancelled) publishes no notification,
+		// so the queue cannot rely on the notification path alone to
+		// surface the next request.
+		m.showNextQueuedPermission()
 
 	case dialog.ActionFilePickerSelected:
 		cmds = append(cmds, tea.Sequence(
@@ -5979,11 +5985,21 @@ func (m *UI) handlePermissionNotification(notification permission.PermissionNoti
 	}
 	// Requests are still parked but nothing is on screen — surface the
 	// next queued request so its tool call stays answerable.
-	if m.dialog.Dialog(dialog.PermissionsID) == nil && len(m.pendingPermissions) > 0 {
-		next := m.pendingPermissions[0]
-		m.pendingPermissions = m.pendingPermissions[1:]
-		m.openPermissionsDialog(next)
+	m.showNextQueuedPermission()
+}
+
+// showNextQueuedPermission opens the next queued permission request
+// when no permissions dialog is on screen. The queue drains here rather
+// than only on resolution notifications, so a dialog closed without an
+// answer — or an answer whose grant silently resolved nothing — cannot
+// strand still-parked requests invisibly.
+func (m *UI) showNextQueuedPermission() {
+	if m.dialog.Dialog(dialog.PermissionsID) != nil || len(m.pendingPermissions) == 0 {
+		return
 	}
+	next := m.pendingPermissions[0]
+	m.pendingPermissions = m.pendingPermissions[1:]
+	m.openPermissionsDialog(next)
 }
 
 // handlePlanHandoff checks whether a completed run in plan mode contained the
