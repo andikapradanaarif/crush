@@ -176,6 +176,47 @@ func TestHandlePermissionNotification_RemoteResolveDropsQueue(t *testing.T) {
 	require.Equal(t, "call-1", pd.ToolCallID())
 }
 
+// TestPermissionNotification_CancelledPurgesPrompts covers the
+// withdrawal path: a request whose waiter was cancelled publishes a
+// Cancelled notification, which must purge queued copies and close the
+// displayed dialog — a dead request must never prompt.
+func TestPermissionNotification_CancelledPurgesPrompts(t *testing.T) {
+	t.Parallel()
+
+	u := newTestUIForPermissions()
+	first := permission.PermissionRequest{ID: "perm-1", ToolCallID: "call-1", ToolName: "bash"}
+	second := permission.PermissionRequest{ID: "perm-2", ToolCallID: "call-2", ToolName: "bash"}
+	third := permission.PermissionRequest{ID: "perm-3", ToolCallID: "call-3", ToolName: "bash"}
+
+	u.openPermissionsDialog(first)
+	u.openPermissionsDialog(second)
+	u.openPermissionsDialog(third)
+	require.Len(t, u.pendingPermissions, 2)
+
+	// The queued request's waiter is cancelled: its entry is dropped
+	// without touching the displayed dialog or the remaining queue.
+	u.handlePermissionNotification(permission.PermissionNotification{
+		ToolCallID: "call-2",
+		Cancelled:  true,
+	})
+	require.Len(t, u.pendingPermissions, 1)
+	require.Equal(t, "perm-3", u.pendingPermissions[0].ID)
+	require.NotNil(t, u.dialog.Dialog(dialog.PermissionsID))
+
+	// The displayed request's waiter is cancelled: its dialog closes
+	// and the remaining live queued request surfaces.
+	u.handlePermissionNotification(permission.PermissionNotification{
+		ToolCallID: "call-1",
+		Cancelled:  true,
+	})
+	d := u.dialog.Dialog(dialog.PermissionsID)
+	require.NotNil(t, d, "a cancelled displayed request must surface the next live one")
+	pd, ok := d.(*dialog.Permissions)
+	require.True(t, ok)
+	require.Equal(t, "call-3", pd.ToolCallID())
+	require.Empty(t, u.pendingPermissions)
+}
+
 // TestPermissionResponse_SilentGrantDrainsQueue pins the stranded-queue
 // hole: the user answers the displayed request but the grant resolves
 // nothing (the waiter already cancelled), so no resolution notification

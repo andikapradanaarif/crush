@@ -921,6 +921,49 @@ func TestGrantPersistent_ResolvesParkedSameKeyRequests(t *testing.T) {
 	require.False(t, <-done3)
 }
 
+// TestRequest_CancelPublishesWithdrawal pins the withdrawal signal: a
+// waiter whose context is cancelled must publish a Cancelled
+// notification so UIs can dismiss the prompt or purge queued copies.
+func TestRequest_CancelPublishesWithdrawal(t *testing.T) {
+	t.Parallel()
+	service := NewPermissionService("/tmp", false, nil)
+
+	notifs := service.SubscribeNotifications(t.Context())
+	ctx, cancel := context.WithCancel(t.Context())
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := service.Request(ctx, CreatePermissionRequest{
+			SessionID:   "s1",
+			ToolCallID:  "call-1",
+			ToolName:    "bash",
+			Action:      "execute",
+			Description: "run a command",
+			Path:        "/tmp",
+		})
+		done <- err
+	}()
+
+	// The request-start notification arrives first, then cancel.
+	select {
+	case <-notifs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request-start notification never published")
+	}
+	cancel()
+	require.ErrorIs(t, <-done, context.Canceled)
+
+	select {
+	case n := <-notifs:
+		require.True(t, n.Payload.Cancelled)
+		require.False(t, n.Payload.Granted || n.Payload.Denied)
+		require.Equal(t, "call-1", n.Payload.ToolCallID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("no withdrawal notification published on context cancel")
+	}
+	require.Empty(t, service.PendingRequests())
+}
+
 func TestNotificationsCarrySessionID(t *testing.T) {
 	t.Parallel()
 	service := NewPermissionService("/tmp", false, nil)

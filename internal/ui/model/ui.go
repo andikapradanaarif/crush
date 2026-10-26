@@ -5963,19 +5963,22 @@ func (m *UI) handlePermissionNotification(notification permission.PermissionNoti
 		if permItem, ok := toolItem.(chat.ToolMessageItem); ok {
 			if notification.Granted {
 				permItem.SetStatus(chat.ToolStatusRunning)
-			} else {
+			} else if !notification.Cancelled {
 				permItem.SetStatus(chat.ToolStatusAwaitingPermission)
 			}
 		}
 	}
 
-	// If this notification reflects a final resolution (granted or denied),
-	// dismiss any open permissions dialog whose tool call ID matches. This
-	// covers the case where another client resolved the request remotely.
-	if !notification.Granted && !notification.Denied {
+	// If this notification reflects a final outcome — granted, denied,
+	// or a withdrawal because the waiter was cancelled — dismiss any
+	// open permissions dialog whose tool call ID matches. This covers
+	// the case where another client resolved the request remotely.
+	if !notification.Granted && !notification.Denied && !notification.Cancelled {
 		return
 	}
-	// A queued request resolved elsewhere must never be shown.
+	// A queued request resolved or withdrawn elsewhere must never be
+	// shown — surfacing it would prompt for a tool call that can no
+	// longer proceed.
 	m.pendingPermissions = slices.DeleteFunc(m.pendingPermissions,
 		func(p permission.PermissionRequest) bool { return p.ToolCallID == notification.ToolCallID })
 	if d := m.dialog.Dialog(dialog.PermissionsID); d != nil {

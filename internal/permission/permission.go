@@ -50,6 +50,11 @@ type PermissionNotification struct {
 	ToolCallID string `json:"tool_call_id"`
 	Granted    bool   `json:"granted"`
 	Denied     bool   `json:"denied"`
+	// Cancelled marks a request whose waiter left without an answer
+	// (context cancelled) — a withdrawal, not a resolution. UIs use it
+	// to dismiss or purge prompts for requests that can no longer
+	// proceed.
+	Cancelled bool `json:"cancelled,omitempty"`
 }
 
 type PermissionRequest struct {
@@ -156,32 +161,23 @@ type permissionService struct {
 // resolve atomically removes the pending request entry for the given
 // permission and, if it was still pending, publishes exactly one
 // PermissionNotification and forwards the outcome to the waiter on
-// respCh. It returns true if this call resolved the request, false if
-// it had already been resolved (e.g., by another concurrent caller) or
-// the request ID is unknown.
-//
-// If onResolve is non-nil it runs after the pending entry has been
-// taken but before the notification is published or the waiter is
-// unblocked. This lets GrantPersistent record the session permission
-// only when it actually wins the race, so a losing GrantPersistent
-// that lost to a Deny does not leak an auto-approve entry.
+// respCh. It returns the stored entry — the canonical request, not the
+// caller-supplied copy — and true if this call resolved the request,
+// or a zero entry and false if it had already been resolved (e.g., by
+// another concurrent caller) or the request ID is unknown.
 //
 // All three public resolution methods (Grant, GrantPersistent, Deny)
 // route through this helper so multi-subscriber UIs can race safely:
 // the first caller wins, the rest become no-ops.
-func (s *permissionService) resolve(permission PermissionRequest, granted, denied bool, onResolve func()) bool {
+func (s *permissionService) resolve(permission PermissionRequest, granted, denied bool) (pendingRequest, bool) {
 	entry, ok := s.pendingRequests.Take(permission.ID)
 	if !ok {
-		return false
-	}
-
-	if onResolve != nil {
-		onResolve()
+		return pendingRequest{}, false
 	}
 
 	s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
-		SessionID:  permission.SessionID,
-		ToolCallID: permission.ToolCallID,
+		SessionID:  entry.req.SessionID,
+		ToolCallID: entry.req.ToolCallID,
 		Granted:    granted,
 		Denied:     denied,
 	})
@@ -196,19 +192,23 @@ func (s *permissionService) resolve(permission PermissionRequest, granted, denie
 		s.activeRequest = nil
 	}
 	s.activeRequestMu.Unlock()
-	return true
+	return entry, true
 }
 
 func (s *permissionService) GrantPersistent(permission PermissionRequest) bool {
 	// Record the persistent grant only if this call wins the
-	// pending-request race. Otherwise a losing GrantPersistent that
-	// lost to a Deny would still leave an auto-approve entry behind,
-	// silently flipping later denied calls to allowed.
-	if !s.resolve(permission, true, false, func() {
-		s.sessionPermissions.Set(permissionKey(permission), true)
-	}) {
+	// pending-request race, and key it off the stored request rather
+	// than the caller-supplied one — a stale caller payload must not
+	// skew which calls get auto-approved. Otherwise a losing
+	// GrantPersistent that lost to a Deny would still leave an
+	// auto-approve entry behind, silently flipping later denied calls
+	// to allowed.
+	entry, ok := s.resolve(permission, true, false)
+	if !ok {
 		return false
 	}
+	s.sessionPermissions.Set(permissionKey(entry.req), true)
+
 	// A persistent grant also covers requests already parked with the
 	// same key: with concurrent parking, a second same-key call can
 	// register before the grant lands. Resolve them here rather than
@@ -221,11 +221,11 @@ func (s *permissionService) GrantPersistent(permission PermissionRequest) bool {
 	// grant being recorded and the sweep reading the map: it either
 	// registered first (the sweep resolves it) or registers after (its
 	// sessionPermissions check hits and it is approved inline).
-	key := permissionKey(permission)
+	key := permissionKey(entry.req)
 	s.requestMu.Lock()
-	for _, entry := range s.pendingRequests.Seq2() {
-		if permissionKey(entry.req) == key {
-			s.resolve(entry.req, true, false, nil)
+	for _, queued := range s.pendingRequests.Seq2() {
+		if permissionKey(queued.req) == key {
+			s.resolve(queued.req, true, false)
 		}
 	}
 	s.requestMu.Unlock()
@@ -233,11 +233,13 @@ func (s *permissionService) GrantPersistent(permission PermissionRequest) bool {
 }
 
 func (s *permissionService) Grant(permission PermissionRequest) bool {
-	return s.resolve(permission, true, false, nil)
+	_, ok := s.resolve(permission, true, false)
+	return ok
 }
 
 func (s *permissionService) Deny(permission PermissionRequest) bool {
-	return s.resolve(permission, false, true, nil)
+	_, ok := s.resolve(permission, false, true)
+	return ok
 }
 
 func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRequest) (bool, error) {
@@ -290,6 +292,15 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 	// stays listed in pendingRequests for replay and enumeration.
 	select {
 	case <-ctx.Done():
+		// The waiter is leaving without an answer. Drop the pending
+		// entry and publish a withdrawal so UIs can dismiss the prompt
+		// (or purge a queued copy) instead of surfacing a dead request.
+		s.pendingRequests.Del(entry.req.ID)
+		s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
+			SessionID:  entry.req.SessionID,
+			ToolCallID: entry.req.ToolCallID,
+			Cancelled:  true,
+		})
 		return false, ctx.Err()
 	case granted := <-entry.respCh:
 		return granted, nil
