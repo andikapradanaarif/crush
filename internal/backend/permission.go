@@ -101,6 +101,32 @@ func (b *Backend) SetSessionPermissionsSkip(ctx context.Context, workspaceID, se
 	return nil
 }
 
+// GetSessionPendingPermissions returns the permission requests
+// currently parked awaiting a decision for the given session. Requests
+// raised by sub-agent sessions are included: sessionMatches resolves
+// them to the top-level session, so a parent session's list shows every
+// prompt its viewers may need to answer.
+func (b *Backend) GetSessionPendingPermissions(ctx context.Context, workspaceID, sessionID string) ([]permission.PermissionRequest, error) {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := ws.Sessions.Get(ctx, sessionID); err != nil {
+		return nil, err
+	}
+	if ws.Permissions == nil {
+		return nil, nil
+	}
+
+	var out []permission.PermissionRequest
+	for _, req := range ws.Permissions.PendingRequests() {
+		if b.sessionMatches(ctx, ws, req.SessionID, sessionID) {
+			out = append(out, req)
+		}
+	}
+	return out, nil
+}
+
 // GetSessionPermissionsSkip returns whether permission prompts are
 // skipped for a single session.
 func (b *Backend) GetSessionPermissionsSkip(ctx context.Context, workspaceID, sessionID string) (bool, error) {

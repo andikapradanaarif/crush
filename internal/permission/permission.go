@@ -50,6 +50,11 @@ type PermissionNotification struct {
 	ToolCallID string `json:"tool_call_id"`
 	Granted    bool   `json:"granted"`
 	Denied     bool   `json:"denied"`
+	// Cancelled marks a request whose waiter left without an answer
+	// (context cancelled) — a withdrawal, not a resolution. UIs use it
+	// to dismiss or purge prompts for requests that can no longer
+	// proceed.
+	Cancelled bool `json:"cancelled,omitempty"`
 }
 
 type PermissionRequest struct {
@@ -82,8 +87,14 @@ type Service interface {
 	// ActiveRequest returns the request that is currently awaiting a
 	// decision, or false when no request is pending. A request is only
 	// reported while it can still be resolved; a request whose waiter
-	// was cancelled is not returned.
+	// was cancelled is not returned. When several requests are parked
+	// the most recently published one is preferred; if it has already
+	// been resolved, any still-pending request is returned.
 	ActiveRequest() (PermissionRequest, bool)
+	// PendingRequests returns every request currently parked awaiting a
+	// decision. Requests are only listed while they can still be
+	// resolved; a request whose waiter was cancelled is not returned.
+	PendingRequests() []PermissionRequest
 	AutoApproveSession(sessionID string)
 	// SetSessionAutoApprove enables or disables blanket auto-approval
 	// for all permission requests raised on the given session. Unlike
@@ -109,19 +120,39 @@ type PermissionKey struct {
 	Path      string
 }
 
+// permissionKey builds the remembered-grant lookup key for a request.
+func permissionKey(r PermissionRequest) PermissionKey {
+	return PermissionKey{
+		SessionID: r.SessionID,
+		ToolName:  r.ToolName,
+		Action:    r.Action,
+		Path:      r.Path,
+	}
+}
+
+// pendingRequest is a parked permission request: the full request as
+// published plus the channel its waiter blocks on.
+type pendingRequest struct {
+	req    PermissionRequest
+	respCh chan bool
+}
+
 type permissionService struct {
 	*pubsub.Broker[PermissionRequest]
 
 	notificationBroker    *pubsub.Broker[PermissionNotification]
 	workingDir            string
 	sessionPermissions    *csync.Map[PermissionKey, bool]
-	pendingRequests       *csync.Map[string, chan bool]
+	pendingRequests       *csync.Map[string, pendingRequest]
 	autoApproveSessions   map[string]bool
 	autoApproveSessionsMu sync.RWMutex
 	skip                  atomic.Bool
 	allowedTools          []string
 
-	// used to make sure we only process one request at a time
+	// requestMu serializes request registration and publishing so
+	// concurrent calls emit events in a deterministic order. It is
+	// released before the caller parks, so several tool calls can
+	// await decisions concurrently.
 	requestMu       sync.Mutex
 	activeRequest   *PermissionRequest
 	activeRequestMu sync.Mutex
@@ -130,32 +161,23 @@ type permissionService struct {
 // resolve atomically removes the pending request entry for the given
 // permission and, if it was still pending, publishes exactly one
 // PermissionNotification and forwards the outcome to the waiter on
-// respCh. It returns true if this call resolved the request, false if
-// it had already been resolved (e.g., by another concurrent caller) or
-// the request ID is unknown.
-//
-// If onResolve is non-nil it runs after the pending entry has been
-// taken but before the notification is published or the waiter is
-// unblocked. This lets GrantPersistent record the session permission
-// only when it actually wins the race, so a losing GrantPersistent
-// that lost to a Deny does not leak an auto-approve entry.
+// respCh. It returns the stored entry — the canonical request, not the
+// caller-supplied copy — and true if this call resolved the request,
+// or a zero entry and false if it had already been resolved (e.g., by
+// another concurrent caller) or the request ID is unknown.
 //
 // All three public resolution methods (Grant, GrantPersistent, Deny)
 // route through this helper so multi-subscriber UIs can race safely:
 // the first caller wins, the rest become no-ops.
-func (s *permissionService) resolve(permission PermissionRequest, granted, denied bool, onResolve func()) bool {
-	respCh, ok := s.pendingRequests.Take(permission.ID)
+func (s *permissionService) resolve(permission PermissionRequest, granted, denied bool) (pendingRequest, bool) {
+	entry, ok := s.pendingRequests.Take(permission.ID)
 	if !ok {
-		return false
-	}
-
-	if onResolve != nil {
-		onResolve()
+		return pendingRequest{}, false
 	}
 
 	s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
-		SessionID:  permission.SessionID,
-		ToolCallID: permission.ToolCallID,
+		SessionID:  entry.req.SessionID,
+		ToolCallID: entry.req.ToolCallID,
 		Granted:    granted,
 		Denied:     denied,
 	})
@@ -163,37 +185,61 @@ func (s *permissionService) resolve(permission PermissionRequest, granted, denie
 	// respCh is buffered (cap 1) and only ever has at most one sender
 	// per request because Take removes the entry under the map lock,
 	// so this send never blocks.
-	respCh <- granted
+	entry.respCh <- granted
 
 	s.activeRequestMu.Lock()
 	if s.activeRequest != nil && s.activeRequest.ID == permission.ID {
 		s.activeRequest = nil
 	}
 	s.activeRequestMu.Unlock()
-	return true
+	return entry, true
 }
 
 func (s *permissionService) GrantPersistent(permission PermissionRequest) bool {
 	// Record the persistent grant only if this call wins the
-	// pending-request race. Otherwise a losing GrantPersistent that
-	// lost to a Deny would still leave an auto-approve entry behind,
-	// silently flipping later denied calls to allowed.
-	return s.resolve(permission, true, false, func() {
-		s.sessionPermissions.Set(PermissionKey{
-			SessionID: permission.SessionID,
-			ToolName:  permission.ToolName,
-			Action:    permission.Action,
-			Path:      permission.Path,
-		}, true)
-	})
+	// pending-request race, and key it off the stored request rather
+	// than the caller-supplied one — a stale caller payload must not
+	// skew which calls get auto-approved. Otherwise a losing
+	// GrantPersistent that lost to a Deny would still leave an
+	// auto-approve entry behind, silently flipping later denied calls
+	// to allowed.
+	entry, ok := s.resolve(permission, true, false)
+	if !ok {
+		return false
+	}
+	s.sessionPermissions.Set(permissionKey(entry.req), true)
+
+	// A persistent grant also covers requests already parked with the
+	// same key: with concurrent parking, a second same-key call can
+	// register before the grant lands. Resolve them here rather than
+	// re-prompting for an action class just approved for the session.
+	// Entries resolved concurrently lose their Take inside resolve and
+	// are skipped.
+	//
+	// requestMu serializes the sweep against registerRequest's
+	// check-and-insert, so a same-key request cannot slip between the
+	// grant being recorded and the sweep reading the map: it either
+	// registered first (the sweep resolves it) or registers after (its
+	// sessionPermissions check hits and it is approved inline).
+	key := permissionKey(entry.req)
+	s.requestMu.Lock()
+	for _, queued := range s.pendingRequests.Seq2() {
+		if permissionKey(queued.req) == key {
+			s.resolve(queued.req, true, false)
+		}
+	}
+	s.requestMu.Unlock()
+	return true
 }
 
 func (s *permissionService) Grant(permission PermissionRequest) bool {
-	return s.resolve(permission, true, false, nil)
+	_, ok := s.resolve(permission, true, false)
+	return ok
 }
 
 func (s *permissionService) Deny(permission PermissionRequest) bool {
-	return s.resolve(permission, false, true, nil)
+	_, ok := s.resolve(permission, false, true)
+	return ok
 }
 
 func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRequest) (bool, error) {
@@ -220,6 +266,63 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 		return true, nil
 	}
 
+	fileInfo, err := os.Stat(opts.Path)
+	dir := opts.Path
+	if err == nil {
+		if fileInfo.IsDir() {
+			dir = opts.Path
+		} else {
+			dir = filepath.Dir(opts.Path)
+		}
+	}
+
+	if dir == "." {
+		dir = s.workingDir
+	}
+
+	entry, approved := s.registerRequest(opts, dir)
+	if approved {
+		return true, nil
+	}
+	defer s.pendingRequests.Del(entry.req.ID)
+
+	// registerRequest returns with requestMu already released, so the
+	// caller parks without serializing other requests: several tool
+	// calls may await decisions concurrently, and every parked request
+	// stays listed in pendingRequests for replay and enumeration.
+	select {
+	case <-ctx.Done():
+		// The waiter is leaving without an answer, but cancellation
+		// races resolution: Take arbitrates. If the entry is already
+		// gone, a resolver won and its buffered send on respCh is
+		// guaranteed — consume the real outcome rather than publish a
+		// spurious withdrawal after a Granted/Denied notification.
+		if _, ok := s.pendingRequests.Take(entry.req.ID); !ok {
+			return <-entry.respCh, nil
+		}
+		// We won the withdrawal: drop the pending entry and publish so
+		// UIs can dismiss the prompt (or purge a queued copy) instead
+		// of surfacing a dead request.
+		s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
+			SessionID:  entry.req.SessionID,
+			ToolCallID: entry.req.ToolCallID,
+			Cancelled:  true,
+		})
+		return false, ctx.Err()
+	case granted := <-entry.respCh:
+		return granted, nil
+	}
+}
+
+// registerRequest performs the locked section of Request: it publishes
+// the request-start notification, applies the inline-approval checks
+// (auto-approve and remembered session grant), and — when approval is
+// not short-circuited — builds, registers, and publishes the pending
+// request. requestMu is held for the whole section so notification,
+// registration, and request events stay in deterministic order across
+// concurrent callers. It returns the parked entry, or approved=true
+// when the request was granted inline and nothing parked.
+func (s *permissionService) registerRequest(opts CreatePermissionRequest, dir string) (pendingRequest, bool) {
 	s.requestMu.Lock()
 	defer s.requestMu.Unlock()
 
@@ -239,22 +342,9 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 			ToolCallID: opts.ToolCallID,
 			Granted:    true,
 		})
-		return true, nil
+		return pendingRequest{}, true
 	}
 
-	fileInfo, err := os.Stat(opts.Path)
-	dir := opts.Path
-	if err == nil {
-		if fileInfo.IsDir() {
-			dir = opts.Path
-		} else {
-			dir = filepath.Dir(opts.Path)
-		}
-	}
-
-	if dir == "." {
-		dir = s.workingDir
-	}
 	permission := PermissionRequest{
 		ID:          uuid.New().String(),
 		Path:        dir,
@@ -266,18 +356,13 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 		Params:      opts.Params,
 	}
 
-	if _, ok := s.sessionPermissions.Get(PermissionKey{
-		SessionID: permission.SessionID,
-		ToolName:  permission.ToolName,
-		Action:    permission.Action,
-		Path:      permission.Path,
-	}); ok {
+	if _, ok := s.sessionPermissions.Get(permissionKey(permission)); ok {
 		s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
 			SessionID:  opts.SessionID,
 			ToolCallID: opts.ToolCallID,
 			Granted:    true,
 		})
-		return true, nil
+		return pendingRequest{}, true
 	}
 
 	s.activeRequestMu.Lock()
@@ -285,36 +370,43 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 	s.activeRequestMu.Unlock()
 
 	respCh := make(chan bool, 1)
-	s.pendingRequests.Set(permission.ID, respCh)
-	defer s.pendingRequests.Del(permission.ID)
+	entry := pendingRequest{req: permission, respCh: respCh}
+	s.pendingRequests.Set(permission.ID, entry)
 
-	// Publish the request
 	s.Publish(pubsub.CreatedEvent, permission)
-
-	select {
-	case <-ctx.Done():
-		return false, ctx.Err()
-	case granted := <-respCh:
-		return granted, nil
-	}
+	return entry, false
 }
 
 // ActiveRequest returns the request that is currently awaiting a
 // decision. The active pointer can outlive the waiter that published
 // it (Request leaves it behind when its context is cancelled), so a
 // request is only reported while its ID is still registered in
-// pendingRequests, i.e. while Grant/Deny can actually resolve it.
+// pendingRequests, i.e. while Grant/Deny can actually resolve it. When
+// the recorded request is gone but others remain parked — possible now
+// that requests park concurrently — a still-pending one is returned.
 func (s *permissionService) ActiveRequest() (PermissionRequest, bool) {
 	s.activeRequestMu.Lock()
 	active := s.activeRequest
 	s.activeRequestMu.Unlock()
-	if active == nil {
-		return PermissionRequest{}, false
+	if active != nil {
+		if _, ok := s.pendingRequests.Get(active.ID); ok {
+			return *active, true
+		}
 	}
-	if _, ok := s.pendingRequests.Get(active.ID); !ok {
-		return PermissionRequest{}, false
+	for _, entry := range s.pendingRequests.Seq2() {
+		return entry.req, true
 	}
-	return *active, true
+	return PermissionRequest{}, false
+}
+
+// PendingRequests returns every request currently parked awaiting a
+// decision.
+func (s *permissionService) PendingRequests() []PermissionRequest {
+	var out []PermissionRequest
+	for _, entry := range s.pendingRequests.Seq2() {
+		out = append(out, entry.req)
+	}
+	return out
 }
 
 func (s *permissionService) AutoApproveSession(sessionID string) {
@@ -357,7 +449,7 @@ func NewPermissionService(workingDir string, skip bool, allowedTools []string) S
 		sessionPermissions:  csync.NewMap[PermissionKey, bool](),
 		autoApproveSessions: make(map[string]bool),
 		allowedTools:        allowedTools,
-		pendingRequests:     csync.NewMap[string, chan bool](),
+		pendingRequests:     csync.NewMap[string, pendingRequest](),
 	}
 	svc.skip.Store(skip)
 	return svc

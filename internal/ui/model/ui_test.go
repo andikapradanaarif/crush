@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/ui/attachments"
 	"github.com/charmbracelet/crush/internal/ui/chat"
@@ -163,6 +164,15 @@ func (w *testWorkspace) UpdateAgentModel(context.Context) error {
 func (w *testWorkspace) PermissionSkipRequests() bool { return w.yolo }
 
 func (w *testWorkspace) PermissionSetSkipRequests(skip bool) { w.yolo = skip }
+
+// PermissionGrant, PermissionGrantPersistent, and PermissionDeny are
+// no-ops returning false — a silent non-resolution, which is exactly
+// the grant-failure path the permission queue must survive.
+func (w *testWorkspace) PermissionGrant(permission.PermissionRequest) bool { return false }
+
+func (w *testWorkspace) PermissionGrantPersistent(permission.PermissionRequest) bool { return false }
+
+func (w *testWorkspace) PermissionDeny(permission.PermissionRequest) bool { return false }
 
 func (w *testWorkspace) AgentIsReady() bool {
 	return w.agentReady

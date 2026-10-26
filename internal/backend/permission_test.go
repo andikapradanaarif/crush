@@ -5,6 +5,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/stretchr/testify/require"
@@ -109,4 +110,121 @@ func TestSessionPermissionsSkip_UnknownSession(t *testing.T) {
 		}
 	case <-time.After(100 * time.Millisecond):
 	}
+}
+
+// TestRepublishPendingPrompts_ReplaysAll covers the multi-park case:
+// two requests parked on session A plus one on session B — reporting
+// session A must re-publish both of A's requests and none of B's.
+func TestRepublishPendingPrompts_ReplaysAll(t *testing.T) {
+	b, ws, evc := newPublishingWorkspace(t)
+	ctx := t.Context()
+
+	sessA, err := ws.Sessions.Create(ctx, "session a")
+	require.NoError(t, err)
+	sessB, err := ws.Sessions.Create(ctx, "session b")
+	require.NoError(t, err)
+
+	park := func(sessionID, callID string) {
+		go func() {
+			_, _ = ws.Permissions.Request(ctx, permission.CreatePermissionRequest{
+				SessionID:   sessionID,
+				ToolCallID:  callID,
+				ToolName:    "bash",
+				Action:      "execute",
+				Description: "park for replay",
+				Path:        "/tmp",
+			})
+		}()
+	}
+	park(sessA.ID, "a-1")
+	park(sessA.ID, "a-2")
+	park(sessB.ID, "b-1")
+
+	require.Eventually(t, func() bool {
+		return len(ws.Permissions.PendingRequests()) == 3
+	}, 2*time.Second, 5*time.Millisecond, "all three requests must park concurrently")
+
+	// Flush the original publish and session-creation events so the
+	// channel only carries what republishPendingPrompts re-emits.
+	drainEvents(evc, 200*time.Millisecond)
+
+	b.republishPendingPrompts(ctx, ws, sessA.ID)
+
+	got := map[string]bool{}
+	deadline := time.After(2 * time.Second)
+	for len(got) < 2 {
+		select {
+		case ev, ok := <-evc:
+			if !ok {
+				t.Fatal("event channel closed before replay events arrived")
+			}
+			pe, ok := ev.Payload.(pubsub.Event[permission.PermissionRequest])
+			if !ok {
+				continue
+			}
+			require.Equal(t, sessA.ID, pe.Payload.SessionID,
+				"a parked request for another session must not replay")
+			got[pe.Payload.ToolCallID] = true
+		case <-deadline:
+			t.Fatalf("expected both parked requests to replay, got %v", got)
+		}
+	}
+	require.True(t, got["a-1"], "first parked request must replay")
+	require.True(t, got["a-2"], "second parked request must replay")
+
+	// Nothing else should follow: session B's parked request stays out
+	// of A's replay.
+	select {
+	case ev := <-evc:
+		if pe, ok := ev.Payload.(pubsub.Event[permission.PermissionRequest]); ok {
+			t.Fatalf("unexpected extra replay: %+v", pe.Payload)
+		}
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestGetSessionPendingPermissions verifies the pending-list backend
+// read: parked requests for the session are returned, other sessions'
+// requests are excluded, and an unknown session errors.
+func TestGetSessionPendingPermissions(t *testing.T) {
+	b, ws, _ := newPublishingWorkspace(t)
+	ctx := t.Context()
+
+	sessA, err := ws.Sessions.Create(ctx, "session a")
+	require.NoError(t, err)
+	sessB, err := ws.Sessions.Create(ctx, "session b")
+	require.NoError(t, err)
+
+	go func() {
+		_, _ = ws.Permissions.Request(ctx, permission.CreatePermissionRequest{
+			SessionID:   sessA.ID,
+			ToolCallID:  "a-1",
+			ToolName:    "bash",
+			Action:      "execute",
+			Description: "park for listing",
+			Path:        "/tmp",
+		})
+	}()
+	go func() {
+		_, _ = ws.Permissions.Request(ctx, permission.CreatePermissionRequest{
+			SessionID:   sessB.ID,
+			ToolCallID:  "b-1",
+			ToolName:    "bash",
+			Action:      "execute",
+			Description: "park for listing",
+			Path:        "/tmp",
+		})
+	}()
+
+	require.Eventually(t, func() bool {
+		return len(ws.Permissions.PendingRequests()) == 2
+	}, 2*time.Second, 5*time.Millisecond)
+
+	pending, err := b.GetSessionPendingPermissions(ctx, ws.ID, sessA.ID)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	require.Equal(t, "a-1", pending[0].ToolCallID)
+
+	_, err = b.GetSessionPendingPermissions(ctx, ws.ID, "no-such-session")
+	require.Error(t, err)
 }

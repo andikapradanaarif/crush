@@ -21,6 +21,9 @@ type PermissionNotification struct {
 	ToolCallID string `json:"tool_call_id"`
 	Granted    bool   `json:"granted"`
 	Denied     bool   `json:"denied"`
+	// Cancelled marks a request whose waiter left without an answer
+	// (context cancelled) — a withdrawal, not a resolution.
+	Cancelled bool `json:"cancelled,omitempty"`
 }
 
 // PermissionRequest represents a pending permission request.

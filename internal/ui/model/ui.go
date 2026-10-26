@@ -474,6 +474,12 @@ type UI struct {
 	// stored.
 	pendingToolResults map[string]message.ToolResult
 
+	// pendingPermissions queues permission requests that arrived while
+	// a permissions dialog is already open. The dialog shows one
+	// request at a time; without the queue, a second request would
+	// replace the first's dialog and strand its parked tool call.
+	pendingPermissions []permission.PermissionRequest
+
 	// preThemeStyles stores the styles before a theme preview so we can revert.
 	preThemeStyles *styles.Styles
 
@@ -1049,6 +1055,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case closeDialogMsg:
 		m.dialog.CloseFrontDialog()
+		m.showNextQueuedPermission()
 
 	case pubsub.Event[session.Session]:
 		if msg.Type == pubsub.DeletedEvent {
@@ -2615,6 +2622,11 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		case dialog.PermissionDeny:
 			m.com.Workspace.PermissionDeny(msg.Permission)
 		}
+		// A grant that resolves nothing (the request was already
+		// resolved or its waiter cancelled) publishes no notification,
+		// so the queue cannot rely on the notification path alone to
+		// surface the next request.
+		m.showNextQueuedPermission()
 
 	case dialog.ActionFilePickerSelected:
 		cmds = append(cmds, tea.Sequence(
@@ -5851,10 +5863,27 @@ func (m *UI) openFilesDialog() tea.Cmd {
 	return cmd
 }
 
-// openPermissionsDialog opens the permissions dialog for a permission request.
+// openPermissionsDialog opens the permissions dialog for a permission
+// request. Several requests can be parked concurrently, but the dialog
+// shows one at a time: a request arriving while another is displayed is
+// queued rather than replacing it (which would strand the earlier
+// request's tool call), and handlePermissionNotification dequeues the
+// next request when the displayed one resolves. Replayed events for an
+// already-displayed or already-queued request are dropped.
 func (m *UI) openPermissionsDialog(perm permission.PermissionRequest) tea.Cmd {
-	// Close any existing permissions dialog first.
-	m.dialog.CloseDialog(dialog.PermissionsID)
+	if d := m.dialog.Dialog(dialog.PermissionsID); d != nil {
+		if pd, ok := d.(*dialog.Permissions); ok && pd.ToolCallID() == perm.ToolCallID {
+			// Replayed request for the request already on screen.
+			return nil
+		}
+		for _, q := range m.pendingPermissions {
+			if q.ID == perm.ID {
+				return nil
+			}
+		}
+		m.pendingPermissions = append(m.pendingPermissions, perm)
+		return nil
+	}
 
 	// Get diff mode from config.
 	var opts []dialog.PermissionsOption
@@ -5934,23 +5963,46 @@ func (m *UI) handlePermissionNotification(notification permission.PermissionNoti
 		if permItem, ok := toolItem.(chat.ToolMessageItem); ok {
 			if notification.Granted {
 				permItem.SetStatus(chat.ToolStatusRunning)
-			} else {
+			} else if !notification.Cancelled {
 				permItem.SetStatus(chat.ToolStatusAwaitingPermission)
 			}
 		}
 	}
 
-	// If this notification reflects a final resolution (granted or denied),
-	// dismiss any open permissions dialog whose tool call ID matches. This
-	// covers the case where another client resolved the request remotely.
-	if !notification.Granted && !notification.Denied {
+	// If this notification reflects a final outcome — granted, denied,
+	// or a withdrawal because the waiter was cancelled — dismiss any
+	// open permissions dialog whose tool call ID matches. This covers
+	// the case where another client resolved the request remotely.
+	if !notification.Granted && !notification.Denied && !notification.Cancelled {
 		return
 	}
+	// A queued request resolved or withdrawn elsewhere must never be
+	// shown — surfacing it would prompt for a tool call that can no
+	// longer proceed.
+	m.pendingPermissions = slices.DeleteFunc(m.pendingPermissions,
+		func(p permission.PermissionRequest) bool { return p.ToolCallID == notification.ToolCallID })
 	if d := m.dialog.Dialog(dialog.PermissionsID); d != nil {
 		if perm, ok := d.(*dialog.Permissions); ok && perm.ToolCallID() == notification.ToolCallID {
 			m.dialog.CloseDialog(dialog.PermissionsID)
 		}
 	}
+	// Requests are still parked but nothing is on screen — surface the
+	// next queued request so its tool call stays answerable.
+	m.showNextQueuedPermission()
+}
+
+// showNextQueuedPermission opens the next queued permission request
+// when no permissions dialog is on screen. The queue drains here rather
+// than only on resolution notifications, so a dialog closed without an
+// answer — or an answer whose grant silently resolved nothing — cannot
+// strand still-parked requests invisibly.
+func (m *UI) showNextQueuedPermission() {
+	if m.dialog.Dialog(dialog.PermissionsID) != nil || len(m.pendingPermissions) == 0 {
+		return
+	}
+	next := m.pendingPermissions[0]
+	m.pendingPermissions = m.pendingPermissions[1:]
+	m.openPermissionsDialog(next)
 }
 
 // handlePlanHandoff checks whether a completed run in plan mode contained the

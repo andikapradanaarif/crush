@@ -76,12 +76,12 @@ func rootSessionID(ctx context.Context, ws *Workspace, sessionID string) (string
 }
 
 // republishPendingPrompts re-publishes the workspace's pending
-// permission request and question batch when their session matches the
-// one a client just switched to. Without this, a prompt raised while
+// permission requests and question batch when their session matches the
+// one a client just switched to. Without this, prompts raised while
 // nobody viewed the session would remain invisible — and therefore
 // unanswerable — until the run was cancelled. Delivery is still scoped
 // by the per-client SSE filter, so only the session's viewers (re)see
-// the prompt.
+// the prompts.
 func (b *Backend) republishPendingPrompts(ctx context.Context, ws *Workspace, sessionID string) {
 	if ws.App == nil {
 		return
@@ -89,11 +89,15 @@ func (b *Backend) republishPendingPrompts(ctx context.Context, ws *Workspace, se
 	// The individual services are nil on workspaces with a stubbed app
 	// (tests); treat those as having no pending prompts.
 	if ws.Permissions != nil {
-		if req, ok := ws.Permissions.ActiveRequest(); ok && b.sessionMatches(ctx, ws, req.SessionID, sessionID) {
-			ws.SendEvent(pubsub.Event[permission.PermissionRequest]{
-				Type:    pubsub.CreatedEvent,
-				Payload: req,
-			})
+		// Several tool calls can park concurrently, so replay every
+		// matching request, not just the latest.
+		for _, req := range ws.Permissions.PendingRequests() {
+			if b.sessionMatches(ctx, ws, req.SessionID, sessionID) {
+				ws.SendEvent(pubsub.Event[permission.PermissionRequest]{
+					Type:    pubsub.CreatedEvent,
+					Payload: req,
+				})
+			}
 		}
 	}
 	if ws.Questions != nil {

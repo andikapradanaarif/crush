@@ -285,6 +285,16 @@ func (c *controllerV1) endpoints() []apigen.Endpoint {
 			Fails(400, 404, 500).
 			Handle(c.handlePostWorkspaceSessionPermissionsSkip),
 
+		apigen.Get("/v1/workspaces/{id}/sessions/{sid}/permissions/pending").
+			Summary("List pending permission requests").
+			Description("Returns every permission request currently parked awaiting a decision for the session, including requests raised by its sub-agent sessions.").
+			Tags("permissions").
+			PathParam("id", "Workspace ID").
+			PathParam("sid", "Session ID").
+			Responds([]proto.PermissionRequest{}).
+			Fails(404, 500).
+			Handle(c.handleGetWorkspaceSessionPermissionsPending),
+
 		apigen.Post("/v1/workspaces/{id}/permissions/grant").
 			Summary("Grant permission").
 			Tags("permissions").

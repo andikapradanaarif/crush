@@ -782,6 +782,247 @@ func TestSessionAutoApprove(t *testing.T) {
 	})
 }
 
+// TestPendingRequests covers multi-request parking: several tool calls
+// can await decisions concurrently, every parked request is enumerable
+// via PendingRequests, and resolution or cancellation removes only the
+// resolved request.
+func TestPendingRequests(t *testing.T) {
+	t.Parallel()
+	service := NewPermissionService("/tmp", false, nil)
+
+	events := service.Subscribe(t.Context())
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	park := func(callID string) chan bool {
+		done := make(chan bool, 1)
+		go func() {
+			granted, _ := service.Request(ctx, CreatePermissionRequest{
+				SessionID:   "s1",
+				ToolCallID:  callID,
+				ToolName:    "bash",
+				Action:      "execute",
+				Description: "run a command",
+				Path:        "/tmp",
+			})
+			done <- granted
+		}()
+		return done
+	}
+
+	done1 := park("call-1")
+	done2 := park("call-2")
+
+	// Both requests must publish and park — previously the second call
+	// blocked on requestMu until the first resolved, leaving it
+	// invisible and unanswerable.
+	var reqs []PermissionRequest
+	for range 2 {
+		select {
+		case ev := <-events:
+			reqs = append(reqs, ev.Payload)
+		case <-time.After(2 * time.Second):
+			t.Fatal("second request never published; requests cannot park concurrently")
+		}
+	}
+
+	pending := service.PendingRequests()
+	require.Len(t, pending, 2, "both parked requests must be enumerable")
+
+	// Resolving one leaves the other parked.
+	require.True(t, service.Grant(reqs[0]))
+	var parkedCall string
+	if reqs[0].ToolCallID == "call-1" {
+		require.True(t, <-done1)
+		parkedCall = "call-2"
+	} else {
+		require.True(t, <-done2)
+		parkedCall = "call-1"
+	}
+	pending = service.PendingRequests()
+	require.Len(t, pending, 1)
+	require.Equal(t, parkedCall, pending[0].ToolCallID)
+
+	// Cancelling the remaining waiter empties the list.
+	cancel()
+	if parkedCall == "call-2" {
+		require.False(t, <-done2)
+	} else {
+		require.False(t, <-done1)
+	}
+	require.Eventually(t, func() bool {
+		return len(service.PendingRequests()) == 0
+	}, 2*time.Second, 5*time.Millisecond)
+}
+
+// TestGrantPersistent_ResolvesParkedSameKeyRequests pins the "allow for
+// session" sweep: a second call carrying the same PermissionKey can park
+// before the first is answered, so the persistent grant must flush
+// already-parked matching requests rather than re-prompting for an
+// action class the user just approved.
+func TestGrantPersistent_ResolvesParkedSameKeyRequests(t *testing.T) {
+	t.Parallel()
+	service := NewPermissionService("/tmp", false, nil)
+
+	events := service.Subscribe(t.Context())
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	park := func(sessionID, callID string) chan bool {
+		done := make(chan bool, 1)
+		go func() {
+			granted, _ := service.Request(ctx, CreatePermissionRequest{
+				SessionID:   sessionID,
+				ToolCallID:  callID,
+				ToolName:    "bash",
+				Action:      "execute",
+				Description: "run a command",
+				Path:        "/tmp",
+			})
+			done <- granted
+		}()
+		return done
+	}
+
+	done1 := park("s1", "call-1")
+	done2 := park("s1", "call-2")
+	done3 := park("s2", "call-3") // Different session: different key.
+
+	var reqs []PermissionRequest
+	for range 3 {
+		select {
+		case ev := <-events:
+			reqs = append(reqs, ev.Payload)
+		case <-time.After(2 * time.Second):
+			t.Fatal("expected three published requests")
+		}
+	}
+	require.Len(t, service.PendingRequests(), 3)
+
+	// "Allow for session" on a call-1 request resolves both same-key
+	// s1 parked calls and leaves the s2 one parked.
+	var req1 PermissionRequest
+	for _, r := range reqs {
+		if r.ToolCallID == "call-1" {
+			req1 = r
+		}
+	}
+	require.NotEmpty(t, req1.ID)
+	require.True(t, service.GrantPersistent(req1))
+
+	require.True(t, <-done1)
+	require.True(t, <-done2, "same-key parked request must be granted by the persistent sweep")
+
+	pending := service.PendingRequests()
+	require.Len(t, pending, 1)
+	require.Equal(t, "call-3", pending[0].ToolCallID)
+
+	cancel()
+	require.False(t, <-done3)
+}
+
+// TestRequest_CancelPublishesWithdrawal pins the withdrawal signal: a
+// waiter whose context is cancelled must publish a Cancelled
+// notification so UIs can dismiss the prompt or purge queued copies.
+func TestRequest_CancelPublishesWithdrawal(t *testing.T) {
+	t.Parallel()
+	service := NewPermissionService("/tmp", false, nil)
+
+	notifs := service.SubscribeNotifications(t.Context())
+	ctx, cancel := context.WithCancel(t.Context())
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := service.Request(ctx, CreatePermissionRequest{
+			SessionID:   "s1",
+			ToolCallID:  "call-1",
+			ToolName:    "bash",
+			Action:      "execute",
+			Description: "run a command",
+			Path:        "/tmp",
+		})
+		done <- err
+	}()
+
+	// The request-start notification arrives first, then cancel.
+	select {
+	case <-notifs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request-start notification never published")
+	}
+	cancel()
+	require.ErrorIs(t, <-done, context.Canceled)
+
+	select {
+	case n := <-notifs:
+		require.True(t, n.Payload.Cancelled)
+		require.False(t, n.Payload.Granted || n.Payload.Denied)
+		require.Equal(t, "call-1", n.Payload.ToolCallID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("no withdrawal notification published on context cancel")
+	}
+	require.Empty(t, service.PendingRequests())
+}
+
+// TestRequest_CancelAfterGrantEmitsNoWithdrawal pins the select race:
+// when ctx.Done fires while a buffered resolution is already in
+// respCh, Request must return the real outcome and must not publish a
+// spurious Cancelled notification after the Granted one.
+func TestRequest_CancelAfterGrantEmitsNoWithdrawal(t *testing.T) {
+	t.Parallel()
+	service := NewPermissionService("/tmp", false, nil)
+
+	notifs := service.SubscribeNotifications(t.Context())
+	ctx, cancel := context.WithCancel(t.Context())
+
+	type result struct {
+		granted bool
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		granted, err := service.Request(ctx, CreatePermissionRequest{
+			SessionID:   "s1",
+			ToolCallID:  "call-1",
+			ToolName:    "bash",
+			Action:      "execute",
+			Description: "run a command",
+			Path:        "/tmp",
+		})
+		done <- result{granted, err}
+	}()
+
+	// Consume the request-start notification, then resolve.
+	select {
+	case <-notifs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request-start notification never published")
+	}
+	pending := service.PendingRequests()
+	require.Len(t, pending, 1)
+	require.True(t, service.Grant(pending[0]))
+
+	// Consume the Granted notification, then cancel. Whichever select
+	// arm fires, the resolution must win.
+	select {
+	case n := <-notifs:
+		require.True(t, n.Payload.Granted)
+	case <-time.After(2 * time.Second):
+		t.Fatal("grant notification never published")
+	}
+	cancel()
+	r := <-done
+	require.NoError(t, r.err)
+	require.True(t, r.granted)
+
+	// No Cancelled notification may follow the resolution.
+	select {
+	case n := <-notifs:
+		t.Fatalf("spurious notification after resolution: %+v", n.Payload)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 func TestNotificationsCarrySessionID(t *testing.T) {
 	t.Parallel()
 	service := NewPermissionService("/tmp", false, nil)

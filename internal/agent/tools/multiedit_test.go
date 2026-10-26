@@ -44,6 +44,10 @@ func (m *mockPermissionService) ActiveRequest() (permission.PermissionRequest, b
 	return permission.PermissionRequest{}, false
 }
 
+func (m *mockPermissionService) PendingRequests() []permission.PermissionRequest {
+	return nil
+}
+
 func (m *mockPermissionService) SetSkipRequests(skip bool) {}
 
 func (m *mockPermissionService) SkipRequests() bool {
