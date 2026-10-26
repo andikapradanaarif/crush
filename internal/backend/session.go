@@ -175,6 +175,10 @@ func (b *Backend) DeleteSession(ctx context.Context, workspaceID, sessionID stri
 		return err
 	}
 
+	// Drop the session's auto-approve flag so the map doesn't leak
+	// an entry per deleted session.
+	ws.Permissions.SetSessionAutoApprove(sessionID, false)
+
 	return ws.Sessions.Delete(ctx, sessionID)
 }
 

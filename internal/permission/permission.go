@@ -89,6 +89,9 @@ type Service interface {
 	// for all permission requests raised on the given session. Unlike
 	// GrantPersistent it takes effect without answering a pending
 	// request, so remote clients can arm or disarm a session directly.
+	// The flag is checked at Request() entry — arming does not resolve
+	// a request that is already awaiting a decision; that request
+	// still needs a Grant/Deny (same semantics as the global skip).
 	SetSessionAutoApprove(sessionID string, approve bool)
 	// SessionAutoApproves reports whether the given session currently
 	// auto-approves every permission request.
