@@ -271,6 +271,18 @@ type PermissionSkipRequest struct {
 	Skip bool `json:"skip"`
 }
 
+// PermissionsSkipChanged is published when a permission skip flag
+// changes. An empty SessionID marks the workspace-global skip flag; a
+// non-empty SessionID scopes the change to that session's auto-approve
+// flag. The server's session-scoped event filter uses the SessionID, so
+// workspace-global changes broadcast while session changes only reach
+// the session's viewers.
+type PermissionsSkipChanged struct {
+	WorkspaceID string `json:"workspace_id"`
+	SessionID   string `json:"session_id,omitempty"`
+	Skip        bool   `json:"skip"`
+}
+
 // LSPEventType represents the type of LSP event.
 type LSPEventType string
 

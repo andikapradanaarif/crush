@@ -85,6 +85,17 @@ type Service interface {
 	// was cancelled is not returned.
 	ActiveRequest() (PermissionRequest, bool)
 	AutoApproveSession(sessionID string)
+	// SetSessionAutoApprove enables or disables blanket auto-approval
+	// for all permission requests raised on the given session. Unlike
+	// GrantPersistent it takes effect without answering a pending
+	// request, so remote clients can arm or disarm a session directly.
+	// The flag is checked at Request() entry — arming does not resolve
+	// a request that is already awaiting a decision; that request
+	// still needs a Grant/Deny (same semantics as the global skip).
+	SetSessionAutoApprove(sessionID string, approve bool)
+	// SessionAutoApproves reports whether the given session currently
+	// auto-approves every permission request.
+	SessionAutoApproves(sessionID string) bool
 	SetSkipRequests(skip bool)
 	SkipRequests() bool
 	SubscribeNotifications(ctx context.Context) <-chan pubsub.Event[PermissionNotification]
@@ -307,9 +318,23 @@ func (s *permissionService) ActiveRequest() (PermissionRequest, bool) {
 }
 
 func (s *permissionService) AutoApproveSession(sessionID string) {
+	s.SetSessionAutoApprove(sessionID, true)
+}
+
+func (s *permissionService) SetSessionAutoApprove(sessionID string, approve bool) {
 	s.autoApproveSessionsMu.Lock()
-	s.autoApproveSessions[sessionID] = true
+	if approve {
+		s.autoApproveSessions[sessionID] = true
+	} else {
+		delete(s.autoApproveSessions, sessionID)
+	}
 	s.autoApproveSessionsMu.Unlock()
+}
+
+func (s *permissionService) SessionAutoApproves(sessionID string) bool {
+	s.autoApproveSessionsMu.RLock()
+	defer s.autoApproveSessionsMu.RUnlock()
+	return s.autoApproveSessions[sessionID]
 }
 
 func (s *permissionService) SubscribeNotifications(ctx context.Context) <-chan pubsub.Event[PermissionNotification] {

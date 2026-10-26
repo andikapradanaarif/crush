@@ -237,6 +237,12 @@ func (c *Client) SubscribeEvents(ctx context.Context, id string) (<-chan any, er
 				if !sendEvent(ctx, events, e) {
 					return
 				}
+			case pubsub.PayloadTypePermissionsSkipChanged:
+				var e pubsub.Event[proto.PermissionsSkipChanged]
+				_ = json.Unmarshal(p.Payload, &e)
+				if !sendEvent(ctx, events, e) {
+					return
+				}
 			case pubsub.PayloadTypeSkillsEvent:
 				var e pubsub.Event[proto.SkillsEvent]
 				_ = json.Unmarshal(p.Payload, &e)
@@ -801,6 +807,38 @@ func (c *Client) GetPermissionsSkipRequests(ctx context.Context, id string) (boo
 	var skip proto.PermissionSkipRequest
 	if err := json.NewDecoder(rsp.Body).Decode(&skip); err != nil {
 		return false, fmt.Errorf("failed to decode permissions skip requests: %w", err)
+	}
+	return skip.Skip, nil
+}
+
+// SetSessionPermissionsSkip sets the auto-approve flag for a single
+// session in a workspace.
+func (c *Client) SetSessionPermissionsSkip(ctx context.Context, id, sid string, skip bool) error {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/sessions/%s/permissions/skip", id, sid), nil, jsonBody(proto.PermissionSkipRequest{Skip: skip}), http.Header{"Content-Type": []string{"application/json"}})
+	if err != nil {
+		return fmt.Errorf("failed to set session permissions skip: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to set session permissions skip: status code %d", rsp.StatusCode)
+	}
+	return nil
+}
+
+// GetSessionPermissionsSkip retrieves the auto-approve flag for a
+// single session in a workspace.
+func (c *Client) GetSessionPermissionsSkip(ctx context.Context, id, sid string) (bool, error) {
+	rsp, err := c.get(ctx, fmt.Sprintf("/workspaces/%s/sessions/%s/permissions/skip", id, sid), nil, nil)
+	if err != nil {
+		return false, fmt.Errorf("failed to get session permissions skip: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("failed to get session permissions skip: status code %d", rsp.StatusCode)
+	}
+	var skip proto.PermissionSkipRequest
+	if err := json.NewDecoder(rsp.Body).Decode(&skip); err != nil {
+		return false, fmt.Errorf("failed to decode session permissions skip: %w", err)
 	}
 	return skip.Skip, nil
 }

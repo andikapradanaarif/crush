@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/crush/internal/backend"
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
@@ -29,6 +30,7 @@ func TestSessionScopedEventID(t *testing.T) {
 		{"permission notification", pubsub.Event[permission.PermissionNotification]{Payload: permission.PermissionNotification{SessionID: "s2"}}, "s2"},
 		{"question request", pubsub.Event[question.Request]{Payload: question.Request{SessionID: "s3"}}, "s3"},
 		{"question notification", pubsub.Event[question.Notification]{Payload: question.Notification{SessionID: "s4"}}, "s4"},
+		{"session skip changed", pubsub.Event[proto.PermissionsSkipChanged]{Payload: proto.PermissionsSkipChanged{SessionID: "s5"}}, "s5"},
 	}
 	for _, tc := range scoped {
 		t.Run(tc.name, func(t *testing.T) {
@@ -50,6 +52,7 @@ func TestSessionScopedEventID(t *testing.T) {
 		{"empty permission notification", pubsub.Event[permission.PermissionNotification]{}},
 		{"empty question request", pubsub.Event[question.Request]{}},
 		{"empty question notification", pubsub.Event[question.Notification]{}},
+		{"workspace-wide skip changed", pubsub.Event[proto.PermissionsSkipChanged]{Payload: proto.PermissionsSkipChanged{WorkspaceID: "w1"}}},
 	}
 	for _, tc := range unscoped {
 		t.Run("unscoped/"+tc.name, func(t *testing.T) {
