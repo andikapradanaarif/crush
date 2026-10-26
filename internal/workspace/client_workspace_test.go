@@ -273,6 +273,26 @@ func TestNewClientWorkspace_SeedsSkillsCache(t *testing.T) {
 	require.Equal(t, "seeded", got[0].Name)
 }
 
+// TestTranslateEvent_PermissionsSkipChanged verifies the per-session
+// and workspace-global skip events pass through translateEvent
+// unchanged rather than hitting the unknown-type warn branch.
+func TestTranslateEvent_PermissionsSkipChanged(t *testing.T) {
+	t.Parallel()
+
+	w := NewClientWorkspace(nil, proto.Workspace{})
+	ev := pubsub.Event[proto.PermissionsSkipChanged]{
+		Type:    pubsub.UpdatedEvent,
+		Payload: proto.PermissionsSkipChanged{WorkspaceID: "ws-1", SessionID: "sess-9", Skip: true},
+	}
+
+	out := w.translateEvent(ev)
+	got, ok := out.(pubsub.Event[proto.PermissionsSkipChanged])
+	require.True(t, ok, "expected pubsub.Event[proto.PermissionsSkipChanged], got %T", out)
+	require.Equal(t, "ws-1", got.Payload.WorkspaceID)
+	require.Equal(t, "sess-9", got.Payload.SessionID)
+	require.True(t, got.Payload.Skip)
+}
+
 // TestTranslateEvent_UpdateAvailable verifies that an incoming
 // proto.UpdateAvailable event is converted back into the
 // app.UpdateAvailableMsg that the TUI expects, so client/server mode

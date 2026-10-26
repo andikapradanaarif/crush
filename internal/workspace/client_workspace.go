@@ -1264,6 +1264,16 @@ func (w *ClientWorkspace) translateEvent(ev any) tea.Msg {
 				Cancelled: e.Payload.Cancelled,
 			},
 		}
+	case pubsub.Event[proto.PermissionsSkipChanged]:
+		// Pass the proto event through unchanged: the TUI does not
+		// act on it yet, but converting silently keeps the workspace
+		// event bridge symmetric with the server-side wrapEvent —
+		// without this case every skip toggle logs an unknown-type
+		// warning in server mode.
+		return pubsub.Event[proto.PermissionsSkipChanged]{
+			Type:    e.Type,
+			Payload: e.Payload,
+		}
 	case pubsub.Event[proto.SkillsEvent]:
 		states := protoToSkillStates(e.Payload.States)
 		if w.skills != nil {
