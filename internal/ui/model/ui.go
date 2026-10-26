@@ -474,6 +474,12 @@ type UI struct {
 	// stored.
 	pendingToolResults map[string]message.ToolResult
 
+	// pendingPermissions queues permission requests that arrived while
+	// a permissions dialog is already open. The dialog shows one
+	// request at a time; without the queue, a second request would
+	// replace the first's dialog and strand its parked tool call.
+	pendingPermissions []permission.PermissionRequest
+
 	// preThemeStyles stores the styles before a theme preview so we can revert.
 	preThemeStyles *styles.Styles
 
@@ -5851,10 +5857,27 @@ func (m *UI) openFilesDialog() tea.Cmd {
 	return cmd
 }
 
-// openPermissionsDialog opens the permissions dialog for a permission request.
+// openPermissionsDialog opens the permissions dialog for a permission
+// request. Several requests can be parked concurrently, but the dialog
+// shows one at a time: a request arriving while another is displayed is
+// queued rather than replacing it (which would strand the earlier
+// request's tool call), and handlePermissionNotification dequeues the
+// next request when the displayed one resolves. Replayed events for an
+// already-displayed or already-queued request are dropped.
 func (m *UI) openPermissionsDialog(perm permission.PermissionRequest) tea.Cmd {
-	// Close any existing permissions dialog first.
-	m.dialog.CloseDialog(dialog.PermissionsID)
+	if d := m.dialog.Dialog(dialog.PermissionsID); d != nil {
+		if pd, ok := d.(*dialog.Permissions); ok && pd.ToolCallID() == perm.ToolCallID {
+			// Replayed request for the request already on screen.
+			return nil
+		}
+		for _, q := range m.pendingPermissions {
+			if q.ID == perm.ID {
+				return nil
+			}
+		}
+		m.pendingPermissions = append(m.pendingPermissions, perm)
+		return nil
+	}
 
 	// Get diff mode from config.
 	var opts []dialog.PermissionsOption
@@ -5946,10 +5969,20 @@ func (m *UI) handlePermissionNotification(notification permission.PermissionNoti
 	if !notification.Granted && !notification.Denied {
 		return
 	}
+	// A queued request resolved elsewhere must never be shown.
+	m.pendingPermissions = slices.DeleteFunc(m.pendingPermissions,
+		func(p permission.PermissionRequest) bool { return p.ToolCallID == notification.ToolCallID })
 	if d := m.dialog.Dialog(dialog.PermissionsID); d != nil {
 		if perm, ok := d.(*dialog.Permissions); ok && perm.ToolCallID() == notification.ToolCallID {
 			m.dialog.CloseDialog(dialog.PermissionsID)
 		}
+	}
+	// Requests are still parked but nothing is on screen — surface the
+	// next queued request so its tool call stays answerable.
+	if m.dialog.Dialog(dialog.PermissionsID) == nil && len(m.pendingPermissions) > 0 {
+		next := m.pendingPermissions[0]
+		m.pendingPermissions = m.pendingPermissions[1:]
+		m.openPermissionsDialog(next)
 	}
 }
 
