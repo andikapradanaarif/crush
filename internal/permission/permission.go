@@ -277,6 +277,12 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 		return true, nil
 	}
 
+	// The explicit-off override governs only this blanket-skip layer.
+	// Narrower, deliberate approvals still bypass prompts under it:
+	// the allowlist below, remembered per-session grants, and hook
+	// approvals. "Force prompts" means no blanket approval, not "no
+	// approval mechanism may fire."
+
 	// Check if the tool/action combination is in the allowlist
 	commandKey := opts.ToolName + ":" + opts.Action
 	if slices.Contains(s.allowedTools, commandKey) || slices.Contains(s.allowedTools, opts.ToolName) {
@@ -476,8 +482,11 @@ func (s *permissionService) sessionAutoApproveOverride(sessionID string) (bool, 
 	persisted, err := s.sessionOverride(sessionID)
 	if err != nil {
 		// Transient failure — retry next request rather than
-		// tombstone a suppression until restart.
-		return false, false
+		// tombstone a suppression until restart. Fail closed while
+		// it's unreadable: reporting an explicit-off prompts, where
+		// reporting "no override" would let a workspace skip
+		// auto-approve a session that may be pinned restrictive.
+		return false, true
 	}
 	// Seed under the write lock so the store can't interleave with a
 	// concurrent Set/Clear — both hold the same mutex. If a writer

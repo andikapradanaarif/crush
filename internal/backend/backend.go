@@ -877,6 +877,13 @@ func (b *Backend) teardown(ws *Workspace) {
 	// Closing it fully would mean latching closing before the busy
 	// check and un-latching on defer — the remaining window is
 	// sub-millisecond and self-limiting.
+	//
+	// Deliberately unbounded: there is no deferral cap, so a wedged
+	// run keeps its workspace (LSP/MCP/DB) alive forever — "busy
+	// forever = alive forever". That trade is intentional: killing a
+	// live run is the bug this guard exists to fix, and a wedged run
+	// is visible to the user who can cancel it. An escape hatch would
+	// reintroduce mid-run cancellation under a timer.
 	if ws.App != nil && ws.AgentCoordinator != nil && ws.AgentCoordinator.IsBusy() {
 		b.mu.Unlock()
 		slog.Debug("Workspace busy, deferring teardown",

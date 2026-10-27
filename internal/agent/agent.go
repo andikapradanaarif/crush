@@ -2290,9 +2290,22 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 }
 
 func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fantasy.ProviderOptions, onAuthRefresh func(context.Context, *fantasy.ProviderError) error) error {
+	// Check-and-register under sessionMu: Run's busy check holds the
+	// same mutex, so no Run can slip active into the gap between the
+	// check and registration (the window that previously let an
+	// incoming prompt's cancel registration get clobbered).
+	mu := a.sessionMu(sessionID)
+	mu.Lock()
 	if a.IsSessionBusy(sessionID) {
+		mu.Unlock()
 		return ErrSessionBusy
 	}
+	genCtx, cancel := context.WithCancel(ctx)
+	ac := &activeCancel{cancel: cancel}
+	a.activeRequests.Set(sessionID, ac)
+	mu.Unlock()
+	defer a.activeRequests.CompareAndDelete(sessionID, ac)
+	defer cancel()
 
 	// Every exit below this point that doesn't reach the queue drain
 	// strands queued prompts — they hold IsBusy true forever and wedge
@@ -2330,11 +2343,6 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	// summary floor also applies, so a re-summarize sends the tail.
 	aiMsgs, _ := a.preparePrompt(ctx, msgs, largeModel.CatwalkCfg.SupportsImages, nil, true)
 
-	genCtx, cancel := context.WithCancel(ctx)
-	ac := &activeCancel{cancel: cancel}
-	a.activeRequests.Set(sessionID, ac)
-	defer a.activeRequests.CompareAndDelete(sessionID, ac)
-	defer cancel()
 	defer func() {
 		if flushErr := a.messages.FlushAll(ctx); flushErr != nil {
 			slog.Error("Failed to flush pending message updates after summarize", "error", flushErr)
@@ -2458,7 +2466,6 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	// the per-session dispatch mutex, mirroring runTurn's dequeue tail:
 	// a concurrent enqueue or Cancel must not interleave with the pop,
 	// and calls covered by a pending cancel drop instead of running.
-	mu := a.sessionMu(sessionID)
 	mu.Lock()
 	queuedMessages, _ := a.messageQueue.Get(sessionID)
 	if mark, ok := a.cancelMark.Get(sessionID); ok && mark > 0 && len(queuedMessages) > 0 {

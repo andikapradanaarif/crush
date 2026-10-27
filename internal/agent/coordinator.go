@@ -2111,6 +2111,13 @@ func (c *coordinator) ClearSessionModelOverride(sessionID string) {
 // stay shared regardless. Sub-agent model sets skip overrides
 // entirely — a pinned override builds with isSubAgent=false, which
 // would mis-attribute billing for providers that flag it.
+//
+// Known limitation: SystemPromptPrefix is bound to the base large
+// provider at agent construction, so a session override that swaps
+// providers keeps the base provider's prefix (and vice versa, an
+// attribution prefix could leak to a provider that shouldn't carry
+// it). Most prefixes are empty; per-run prefix resolution is a
+// possible follow-up.
 func (c *coordinator) sessionModels(base func() ModelSet, isSubAgent bool) func(string) ModelSet {
 	return func(sessionID string) ModelSet {
 		s := base()
