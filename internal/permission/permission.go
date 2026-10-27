@@ -157,8 +157,14 @@ type permissionService struct {
 	// unflagged session would re-read the session row. Guarded by
 	// autoApproveSessionsMu alongside the map it complements.
 	sessionOverrideMisses map[string]struct{}
-	skip                  atomic.Bool
-	allowedTools          []string
+	// sessionOverrideGen counts Set/Clear mutations per session. A
+	// lazy seed captures it before the store read and re-verifies
+	// under the write lock — a bump means a writer interleaved, so the
+	// stale store read must not be seeded (the resurrect-race: read
+	// old row → writer persists+clears → seed resurrects it).
+	sessionOverrideGen map[string]uint64
+	skip               atomic.Bool
+	allowedTools       []string
 
 	// requestMu serializes request registration and publishing so
 	// concurrent calls emit events in a deterministic order. It is
@@ -441,6 +447,7 @@ func (s *permissionService) SetSessionAutoApprove(sessionID string, approve bool
 	s.autoApproveSessionsMu.Lock()
 	s.autoApproveSessions[sessionID] = approve
 	delete(s.sessionOverrideMisses, sessionID)
+	s.sessionOverrideGen[sessionID]++
 	s.autoApproveSessionsMu.Unlock()
 }
 
@@ -448,6 +455,7 @@ func (s *permissionService) ClearSessionAutoApprove(sessionID string) {
 	s.autoApproveSessionsMu.Lock()
 	delete(s.autoApproveSessions, sessionID)
 	delete(s.sessionOverrideMisses, sessionID)
+	s.sessionOverrideGen[sessionID]++
 	s.autoApproveSessionsMu.Unlock()
 }
 
@@ -460,6 +468,7 @@ func (s *permissionService) sessionAutoApproveOverride(sessionID string) (bool, 
 	s.autoApproveSessionsMu.RLock()
 	v, ok := s.autoApproveSessions[sessionID]
 	_, missed := s.sessionOverrideMisses[sessionID]
+	gen := s.sessionOverrideGen[sessionID]
 	s.autoApproveSessionsMu.RUnlock()
 	if ok || missed || s.sessionOverride == nil {
 		return v, ok
@@ -481,6 +490,14 @@ func (s *permissionService) sessionAutoApproveOverride(sessionID string) (bool, 
 		return v, true
 	}
 	if _, ok := s.sessionOverrideMisses[sessionID]; ok {
+		return false, false
+	}
+	if s.sessionOverrideGen[sessionID] != gen {
+		// A Set/Clear interleaved with our store read — `persisted`
+		// may describe the row before it. The map is the final writer's
+		// state and it's empty, so the writer was a Clear: tombstone
+		// is the fresh verdict (the row is NULL).
+		s.sessionOverrideMisses[sessionID] = struct{}{}
 		return false, false
 	}
 	if persisted == nil {
@@ -531,6 +548,7 @@ func NewPermissionService(workingDir string, skip bool, allowedTools []string, o
 		sessionPermissions:    csync.NewMap[PermissionKey, bool](),
 		autoApproveSessions:   make(map[string]bool),
 		sessionOverrideMisses: make(map[string]struct{}),
+		sessionOverrideGen:    make(map[string]uint64),
 		allowedTools:          allowedTools,
 		pendingRequests:       csync.NewMap[string, pendingRequest](),
 	}

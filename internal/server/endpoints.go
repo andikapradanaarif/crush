@@ -269,6 +269,7 @@ func (c *controllerV1) endpoints() []apigen.Endpoint {
 
 		apigen.Get("/v1/workspaces/{id}/sessions/{sid}/permissions/skip").
 			Summary("Get session skip permissions status").
+			Description("Reports the effective resolution — the session's explicit override if set, otherwise the workspace flag. The raw tri-state override lives on the session resource's permission_skip field.").
 			Tags("permissions").
 			PathParam("id", "Workspace ID").
 			PathParam("sid", "Session ID").

@@ -1133,6 +1133,17 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		var next *SessionAgentCall
 		result, next, retErr = a.runTurn(ctx, call)
 		if next == nil {
+			if retErr != nil {
+				// A turn ending in error never reached its queue
+				// drain — anything still queued is stranded (and
+				// IsBusy counts it). Resolve the leftovers the way
+				// Cancel does so RunID waiters get a terminal
+				// cancelled RunComplete and the session can idle.
+				mu := a.sessionMu(call.SessionID)
+				mu.Lock()
+				a.clearQueueAndNotify(call.SessionID)
+				mu.Unlock()
+			}
 			return result, retErr
 		}
 		call = *next
@@ -2430,18 +2441,47 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	// and the next render re-engages only if still over margin.
 	a.clearPressureState(sessionID)
 
-	// Process any messages that were queued while summarizing. The
-	// accept reservation is taken before the active request drops so
-	// the dequeue -> re-register window never reads as idle — the same
-	// handoff runTurn performs for its queued prompts.
-	queuedMessages, ok := a.messageQueue.Get(sessionID)
+	// Process any messages that were queued while summarizing — under
+	// the per-session dispatch mutex, mirroring runTurn's dequeue tail:
+	// a concurrent enqueue or Cancel must not interleave with the pop,
+	// and calls covered by a pending cancel drop instead of running.
+	mu := a.sessionMu(sessionID)
+	mu.Lock()
+	queuedMessages, _ := a.messageQueue.Get(sessionID)
+	if mark, ok := a.cancelMark.Get(sessionID); ok && mark > 0 && len(queuedMessages) > 0 {
+		var kept, drops []SessionAgentCall
+		for _, q := range queuedMessages {
+			if q.acceptSeq == 0 || q.acceptSeq <= mark {
+				if q.RunID != "" {
+					drops = append(drops, q)
+				}
+				continue
+			}
+			kept = append(kept, q)
+		}
+		queuedMessages = kept
+		a.messageQueue.Set(sessionID, kept)
+		a.publishCanceledQueueDrops(drops)
+	}
 	var firstQueuedMessage SessionAgentCall
-	hasQueued := ok && len(queuedMessages) > 0
+	hasQueued := len(queuedMessages) > 0
 	if hasQueued {
 		firstQueuedMessage = queuedMessages[0]
 		a.messageQueue.Set(sessionID, queuedMessages[1:])
+		// The accept reservation spans the dequeue -> re-register gap
+		// so the handoff never reads as idle — the same coverage
+		// runTurn gives its queued prompts.
 		firstQueuedMessage.Accepted = a.BeginAccepted(sessionID)
+	} else {
+		a.messageQueue.Del(sessionID)
+		a.acceptedMu.Lock()
+		inFlight, _ := a.acceptedRuns.Get(sessionID)
+		a.acceptedMu.Unlock()
+		if inFlight == 0 {
+			a.cancelMark.Del(sessionID)
+		}
 	}
+	mu.Unlock()
 
 	// Release the active request before processing queued messages so that
 	// Run() does not see the session as busy.
@@ -3665,10 +3705,18 @@ func (a *sessionAgent) CancelAll() {
 	for key := range a.activeRequests.Seq2() {
 		a.Cancel(key) // key is sessionID
 	}
+	// Accepted-but-not-yet-registered runs get the mark too — the
+	// pending cancel produces a cancel-on-entry at dispatch.
+	for sessionID := range a.acceptedRuns.Seq2() {
+		a.Cancel(sessionID)
+	}
 	// Queue-only sessions get no Cancel — drop their queued prompts or
 	// IsBusy (which counts them) would spin this loop to its timeout.
 	for sessionID := range a.messageQueue.Seq2() {
+		mu := a.sessionMu(sessionID)
+		mu.Lock()
 		a.clearQueueAndNotify(sessionID)
+		mu.Unlock()
 	}
 
 	timeout := time.After(5 * time.Second)

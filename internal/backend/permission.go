@@ -96,11 +96,13 @@ func (b *Backend) SetSessionPermissionsSkip(ctx context.Context, workspaceID, se
 	if err != nil {
 		return err
 	}
-	// Persist before the in-memory update: a Request landing between
-	// the two resolves on the previous override for a sub-millisecond
-	// window. That direction fails safe — a prompt either way — while
-	// the reverse (map first, persist second) could briefly approve
-	// requests the row says should prompt.
+	// Persist before the in-memory update. No ordering wins both
+	// directions: persist-first leaves a sub-millisecond window where
+	// a disarm still approves against the stale map value — bounded,
+	// self-correcting, and the row stays the source of truth. The
+	// reverse order risks the map saying cleared while the row says
+	// armed if the persist fails — a divergence that survives until
+	// the next write.
 	if _, err := ws.Sessions.SetPermissionSkip(ctx, sessionID, skip); err != nil {
 		return err
 	}

@@ -290,6 +290,10 @@ type coordinator struct {
 	// agent.Model pinning, an override is built once and keeps its
 	// provider across shared rebuilds until the override is reset.
 	modelOverrides *csync.Map[string, Model]
+	// modelOverrideGen counts pin/clear mutations per session under
+	// modelOverrideMu — the lazy seed's resurrect-race guard: a bump
+	// between the store read and the recheck discards the stale row.
+	modelOverrideGen map[string]uint64
 
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
@@ -389,6 +393,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		detachedWork:          &sync.WaitGroup{},
 		memParams:             opts.MemParams.OrDefault(),
 		modelOverrides:        csync.NewMap[string, Model](),
+		modelOverrideGen:      make(map[string]uint64),
 	}
 
 	// Share per-session bookkeeping maps across all built agents and
@@ -533,7 +538,11 @@ func (c *coordinator) watchSessionDeletions() {
 		}
 		if c.modelOverrides != nil {
 			c.modelOverrideMu.Lock()
+			if c.modelOverrideGen == nil {
+				c.modelOverrideGen = make(map[string]uint64)
+			}
 			c.modelOverrides.Del(ev.Payload.ID)
+			c.modelOverrideGen[ev.Payload.ID]++
 			c.modelOverrideMu.Unlock()
 		}
 		if c.edgeStats != nil {
@@ -2074,7 +2083,11 @@ func (c *coordinator) SetSessionModelOverride(ctx context.Context, sessionID str
 		return err
 	}
 	c.modelOverrideMu.Lock()
+	if c.modelOverrideGen == nil {
+		c.modelOverrideGen = make(map[string]uint64)
+	}
 	c.modelOverrides.Set(sessionID, built)
+	c.modelOverrideGen[sessionID]++
 	c.modelOverrideMu.Unlock()
 	return nil
 }
@@ -2084,7 +2097,11 @@ func (c *coordinator) ClearSessionModelOverride(sessionID string) {
 		return
 	}
 	c.modelOverrideMu.Lock()
+	if c.modelOverrideGen == nil {
+		c.modelOverrideGen = make(map[string]uint64)
+	}
 	c.modelOverrides.Del(sessionID)
+	c.modelOverrideGen[sessionID]++
 	c.modelOverrideMu.Unlock()
 }
 
@@ -2120,6 +2137,12 @@ func (c *coordinator) sessionModelOverride(sessionID string) (Model, bool) {
 	if ok {
 		return override, override.Model != nil
 	}
+	// Capture the generation before the store read: a Set/Clear
+	// landing between the read and the publish below bumps it, and
+	// the recheck discards our now-stale row.
+	c.modelOverrideMu.Lock()
+	gen := c.modelOverrideGen[sessionID]
+	c.modelOverrideMu.Unlock()
 	sess, err := c.sessions.Get(context.Background(), sessionID)
 	if err != nil {
 		// Transient failure — retry next time rather than pin the
@@ -2151,6 +2174,14 @@ func (c *coordinator) sessionModelOverride(sessionID string) (Model, bool) {
 	if override, ok := c.modelOverrides.Get(sessionID); ok {
 		// A writer landed while we were reading — keep its entry.
 		return override, override.Model != nil
+	}
+	if c.modelOverrideGen[sessionID] != gen {
+		// A Set/Clear interleaved with the store read — the verdict
+		// may describe the row before it. The map holds the final
+		// writer's state and it's empty, so the writer was a Clear:
+		// seed the no-override marker (the row is NULL).
+		c.modelOverrides.Set(sessionID, Model{})
+		return Model{}, false
 	}
 	c.modelOverrides.Set(sessionID, verdict)
 	return verdict, verdict.Model != nil
@@ -2193,11 +2224,13 @@ func (c *coordinator) updateAgentModels(ctx context.Context, agent SessionAgent,
 	// override" verdicts so persisted rows re-evaluate against the new
 	// config. Positive pins survive: they're the point of the feature.
 	if c.modelOverrides != nil {
+		c.modelOverrideMu.Lock()
 		for sessionID, m := range c.modelOverrides.Seq2() {
 			if m.Model == nil {
 				c.modelOverrides.Del(sessionID)
 			}
 		}
+		c.modelOverrideMu.Unlock()
 	}
 
 	// Resolve summary model. Failures are logged but never block
