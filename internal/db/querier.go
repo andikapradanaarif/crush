@@ -459,6 +459,8 @@ type Querier interface {
 	// two are equivalent here.
 	SearchSessionDigests(ctx context.Context, arg SearchSessionDigestsParams) ([]SessionDigest, error)
 	SetSessionChannel(ctx context.Context, arg SetSessionChannelParams) (Session, error)
+	SetSessionModelOverride(ctx context.Context, arg SetSessionModelOverrideParams) (Session, error)
+	SetSessionPermissionSkip(ctx context.Context, arg SetSessionPermissionSkipParams) (Session, error)
 	// labeled_at re-stamps to the settle time: it is the last label
 	// computation, so it intentionally converges with settled_at.
 	// Freeze one episode's label (#340): the write happens once, at

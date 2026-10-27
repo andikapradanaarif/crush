@@ -267,8 +267,19 @@ type QuestionNotification struct {
 }
 
 // PermissionSkipRequest represents a request to skip permission prompts.
+// Skip is a pointer so session-scoped callers can send null to clear a
+// session override and inherit the workspace flag; the workspace-level
+// endpoint rejects null since the workspace flag itself has no
+// "inherit" state.
 type PermissionSkipRequest struct {
-	Skip bool `json:"skip"`
+	Skip *bool `json:"skip"`
+}
+
+// SessionModelRequest sets or clears a session's large-model override.
+// A null model clears the override so the session follows the shared
+// config selection again.
+type SessionModelRequest struct {
+	Model *config.SelectedModel `json:"model"`
 }
 
 // PermissionsSkipChanged is published when a permission skip flag

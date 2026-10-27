@@ -63,8 +63,8 @@ func summarizeThreshold(cw, outputReserve int64) int64 {
 // outputReserve is the completion headroom the margin carries —
 // call-site max output isn't reachable from the render path, so the
 // catalog default stands in, floored at defaultOutputReserve.
-func (a *sessionAgent) outputReserve() int64 {
-	if v := a.models().Large.CatwalkCfg.DefaultMaxTokens; v > 0 {
+func (a *sessionAgent) outputReserve(sessionID string) int64 {
+	if v := a.models(sessionID).Large.CatwalkCfg.DefaultMaxTokens; v > 0 {
 		return v
 	}
 	return defaultOutputReserve
@@ -116,7 +116,7 @@ func (a *sessionAgent) pressureEngaged(sessionID string, msgs []message.Message)
 	// render's growth. Self-correcting on the next success and
 	// priced into the step-jump margin.
 	rs.renderedMsgs = len(msgs)
-	cw := int64(a.models().Large.CatwalkCfg.ContextWindow)
+	cw := int64(a.models(sessionID).Large.CatwalkCfg.ContextWindow)
 	if cw == 0 {
 		// No declared window means no margin to cross — machinery
 		// stays on without latching or counting an activation
@@ -126,7 +126,7 @@ func (a *sessionAgent) pressureEngaged(sessionID string, msgs []message.Message)
 		a.reqStats.Set(sessionID, rs)
 		return true
 	}
-	if !rs.pressureEngaged && est >= cw-pressureMargin(a.outputReserve()) {
+	if !rs.pressureEngaged && est >= cw-pressureMargin(a.outputReserve(sessionID)) {
 		rs.pressureEngaged = true
 		rs.pressureActivations++
 		if a.notebook != nil {
@@ -162,15 +162,15 @@ func (a *sessionAgent) pressureEngaged(sessionID string, msgs []message.Message)
 // uncounted, headers and other provider envelopes are uncounted, and
 // chars/4 drifts from real tokenization — the cap is a simulation of
 // the provider's check, not a wire-exact bound.
-func (a *sessionAgent) enforceWindowCap(msgs []fantasy.Message, agentTools []fantasy.AgentTool, maxOutputTokens int64) error {
+func (a *sessionAgent) enforceWindowCap(sessionID string, msgs []fantasy.Message, agentTools []fantasy.AgentTool, maxOutputTokens int64) error {
 	if !a.enforceContextWindow {
 		return nil
 	}
-	cw := int64(a.models().Large.CatwalkCfg.ContextWindow)
+	cw := int64(a.models(sessionID).Large.CatwalkCfg.ContextWindow)
 	if cw <= 0 {
 		return nil
 	}
-	est, out := a.windowEstimate(msgs, agentTools, maxOutputTokens)
+	est, out := a.windowEstimate(sessionID, msgs, agentTools, maxOutputTokens)
 	if est+out <= cw {
 		return nil
 	}
@@ -186,9 +186,9 @@ func (a *sessionAgent) enforceWindowCap(msgs []fantasy.Message, agentTools []fan
 // compact-and-continue abort. The under-counts the hard cap's
 // comment lists apply here too — a simulation bound, not a
 // wire-exact count.
-func (a *sessionAgent) windowEstimate(msgs []fantasy.Message, agentTools []fantasy.AgentTool, maxOutputTokens int64) (est, out int64) {
+func (a *sessionAgent) windowEstimate(sessionID string, msgs []fantasy.Message, agentTools []fantasy.AgentTool, maxOutputTokens int64) (est, out int64) {
 	if maxOutputTokens <= 0 {
-		maxOutputTokens = a.outputReserve()
+		maxOutputTokens = a.outputReserve(sessionID)
 	}
 	builtinSchemas, mcpSchemas := toolSchemaBytes(agentTools)
 	return estimateMessageTokens(msgs) + (builtinSchemas+mcpSchemas)/4, maxOutputTokens
@@ -198,12 +198,12 @@ func (a *sessionAgent) windowEstimate(msgs []fantasy.Message, agentTools []fanta
 // request is estimated to overflow the declared window. Unlike the
 // hard cap it carries no option gate — callers decide what a trip
 // means (compact-and-continue in Run, fatal under enforcement).
-func (a *sessionAgent) windowOverflow(msgs []fantasy.Message, agentTools []fantasy.AgentTool, maxOutputTokens int64) bool {
-	cw := int64(a.models().Large.CatwalkCfg.ContextWindow)
+func (a *sessionAgent) windowOverflow(sessionID string, msgs []fantasy.Message, agentTools []fantasy.AgentTool, maxOutputTokens int64) bool {
+	cw := int64(a.models(sessionID).Large.CatwalkCfg.ContextWindow)
 	if cw <= 0 {
 		return false
 	}
-	est, out := a.windowEstimate(msgs, agentTools, maxOutputTokens)
+	est, out := a.windowEstimate(sessionID, msgs, agentTools, maxOutputTokens)
 	return est+out > cw
 }
 

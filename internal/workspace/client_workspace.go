@@ -1321,6 +1321,7 @@ func protoToMCPEventType(t proto.MCPEventType) mcp.EventType {
 // should either extend session.Session or read them from the proto
 // payload directly before this conversion runs.
 func protoToSession(s proto.Session) session.Session {
+	modelOverride, _ := proto.SelectedModelJSON(s.ModelOverride)
 	return session.Session{
 		ID:               s.ID,
 		ParentSessionID:  s.ParentSessionID,
@@ -1332,6 +1333,8 @@ func protoToSession(s proto.Session) session.Session {
 		Cost:             s.Cost,
 		Todos:            protoToTodos(s.Todos),
 		Channel:          s.Channel,
+		PermissionSkip:   s.PermissionSkip,
+		ModelOverride:    modelOverride,
 		CreatedAt:        s.CreatedAt,
 		UpdatedAt:        s.UpdatedAt,
 	}
@@ -1456,6 +1459,7 @@ func protoToFiles(files []proto.File) []history.File {
 }
 
 func sessionToProto(s session.Session) proto.Session {
+	modelOverride, _ := proto.SelectedModelFromJSON(s.ModelOverride)
 	return proto.Session{
 		ID:               s.ID,
 		ParentSessionID:  s.ParentSessionID,
@@ -1467,6 +1471,8 @@ func sessionToProto(s session.Session) proto.Session {
 		Cost:             s.Cost,
 		Todos:            todosToProto(s.Todos),
 		Channel:          s.Channel,
+		PermissionSkip:   s.PermissionSkip,
+		ModelOverride:    modelOverride,
 		CreatedAt:        s.CreatedAt,
 		UpdatedAt:        s.UpdatedAt,
 	}

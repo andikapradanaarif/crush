@@ -814,6 +814,12 @@ func (b *Backend) detachStream(ws *Workspace, clientID string) {
 	}
 }
 
+// busyTeardownRecheck is how long a busy workspace's deferred
+// teardown waits before re-checking. The run finishing is the event
+// being waited on, so the interval only bounds detection latency —
+// kept short, since each pass is two map reads.
+const busyTeardownRecheck = 250 * time.Millisecond
+
 // teardown removes the workspace from the index, shuts down its
 // underlying [app.App], and triggers a server shutdown if it was the
 // last workspace alive.
@@ -825,8 +831,22 @@ func (b *Backend) detachStream(ws *Workspace, clientID string) {
 // so it is mutually exclusive with this critical section). teardown
 // re-checks under both locks (in the canonical b.mu -> ws.clientsMu
 // order) and aborts if the workspace has been re-claimed.
+//
+// A workspace with a run in flight is NOT torn down: invokeShutdown
+// cancels the workspace context, which would abort the run mid-turn
+// (surfacing to the run as a spurious user cancellation). Instead
+// teardown re-arms a re-check and returns — the workspace stays
+// registered and the deferred pass tears it down once the run
+// finishes. The membership check keeps a re-armed pass from
+// double-shutting-down against a concurrent successful teardown.
 func (b *Backend) teardown(ws *Workspace) {
 	b.mu.Lock()
+	if _, ok := b.workspaces.Get(ws.ID); !ok {
+		// Already removed by a concurrent teardown — teardown is
+		// idempotent.
+		b.mu.Unlock()
+		return
+	}
 	ws.clientsMu.Lock()
 	if len(ws.clients) > 0 {
 		// Race: a CreateWorkspace re-registered a client
@@ -837,6 +857,16 @@ func (b *Backend) teardown(ws *Workspace) {
 		return
 	}
 	ws.clientsMu.Unlock()
+	if ws.App != nil && ws.AgentCoordinator != nil && ws.AgentCoordinator.IsBusy() {
+		b.mu.Unlock()
+		slog.Debug("Workspace busy, deferring teardown",
+			"workspace_id", ws.ID,
+			"recheck", busyTeardownRecheck)
+		time.AfterFunc(busyTeardownRecheck, func() {
+			b.teardown(ws)
+		})
+		return
+	}
 	if existing, ok := b.pathIndex[ws.resolvedPath]; ok && existing == ws.ID {
 		delete(b.pathIndex, ws.resolvedPath)
 	}

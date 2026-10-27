@@ -285,6 +285,16 @@ func (c *controllerV1) endpoints() []apigen.Endpoint {
 			Fails(400, 404, 500).
 			Handle(c.handlePostWorkspaceSessionPermissionsSkip),
 
+		apigen.Post("/v1/workspaces/{id}/sessions/{sid}/model").
+			Summary("Set session model override").
+			Description("Sets or clears the session's large-model override. A null model clears the override so the session follows the shared config selection. Applies to the next run in the session; writes no global config.").
+			Tags("agent").
+			PathParam("id", "Workspace ID").
+			PathParam("sid", "Session ID").
+			Accepts(proto.SessionModelRequest{}).
+			Fails(400, 404, 500).
+			Handle(c.handlePostWorkspaceSessionModel),
+
 		apigen.Get("/v1/workspaces/{id}/sessions/{sid}/permissions/pending").
 			Summary("List pending permission requests").
 			Description("Returns every permission request currently parked awaiting a decision for the session, including requests raised by its sub-agent sessions.").

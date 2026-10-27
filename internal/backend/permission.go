@@ -87,17 +87,28 @@ func (b *Backend) GetPermissionsSkip(workspaceID string) (bool, error) {
 // SetSessionPermissionsSkip sets whether permission prompts are
 // skipped for a single session, independently of the workspace-global
 // flag. One session can run auto-approved while others still prompt.
-func (b *Backend) SetSessionPermissionsSkip(ctx context.Context, workspaceID, sessionID string, skip bool) error {
+// A nil skip clears the session's override so it inherits the
+// workspace flag again. The setting persists on the session row, so
+// it survives workspace process restarts; the in-memory override is
+// updated for hot reads.
+func (b *Backend) SetSessionPermissionsSkip(ctx context.Context, workspaceID, sessionID string, skip *bool) error {
 	ws, err := b.GetWorkspace(workspaceID)
 	if err != nil {
 		return err
 	}
-	if _, err := ws.Sessions.Get(ctx, sessionID); err != nil {
+	if _, err := ws.Sessions.SetPermissionSkip(ctx, sessionID, skip); err != nil {
 		return err
 	}
 
-	ws.Permissions.SetSessionAutoApprove(sessionID, skip)
-	publishPermissionsSkipChanged(ws, sessionID, skip)
+	if skip == nil {
+		ws.Permissions.ClearSessionAutoApprove(sessionID)
+	} else {
+		ws.Permissions.SetSessionAutoApprove(sessionID, *skip)
+	}
+	// The event carries the effective flag, not the raw tri-state —
+	// consumers toggling prompt behavior need the resolution result,
+	// and the raw override ships on the session resource itself.
+	publishPermissionsSkipChanged(ws, sessionID, ws.Permissions.SessionAutoApproves(sessionID))
 	return nil
 }
 

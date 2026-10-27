@@ -260,7 +260,10 @@ type activeCancel struct {
 }
 
 type sessionAgent struct {
-	models             func() ModelSet
+	// models resolves the agent's model set for a run on the given
+	// sessionID — a session model override (large slot) wins over the
+	// shared/pinned selection; an empty sessionID means no override.
+	models             func(sessionID string) ModelSet
 	systemPromptPrefix *csync.Value[string]
 	systemPrompt       *csync.Value[string]
 	tools              *csync.Slice[fantasy.AgentTool]
@@ -528,9 +531,10 @@ type sessionAgent struct {
 }
 
 type SessionAgentOptions struct {
-	// Models hands out the agent's current models on every call, so a
-	// credential refresh reaches requests already in flight.
-	Models               func() ModelSet
+	// Models hands out the agent's models for a run on the given
+	// session on every call, so a credential refresh or a session
+	// override reaches the request that asks next.
+	Models               func(sessionID string) ModelSet
 	SystemPromptPrefix   string
 	SystemPrompt         string
 	IsSubAgent           bool
@@ -1070,7 +1074,7 @@ func (a *sessionAgent) persistCanceledTurn(ctx context.Context, call SessionAgen
 			return err
 		}
 	}
-	largeModel := a.models().Large
+	largeModel := a.models(call.SessionID).Large
 	assistant, err := a.messages.Create(writeCtx, call.SessionID, message.CreateMessageParams{
 		Role:     message.Assistant,
 		Parts:    []message.ContentPart{},
@@ -1305,7 +1309,7 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 
 	// Copy mutable fields under lock to avoid races with SetTools.
 	agentTools := filterToolsForChannel(a.tools.Copy(), call.Channel, mcp.GetStates())
-	largeModel := a.models().Large
+	largeModel := a.models(call.SessionID).Large
 	systemPrompt := a.systemPrompt.Get()
 	promptPrefix := a.systemPromptPrefix.Get()
 	mcpInstructions := collectMCPInstructions()
@@ -1580,7 +1584,7 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 			// a rejection here plays exactly like a provider's own
 			// overflow response: PrepareStep aborts the stream and the
 			// error lands on the run's terminal path.
-			if err := a.enforceWindowCap(prepared.Messages, prepared.Tools, call.MaxOutputTokens); err != nil {
+			if err := a.enforceWindowCap(call.SessionID, prepared.Messages, prepared.Tools, call.MaxOutputTokens); err != nil {
 				return callContext, prepared, err
 			}
 
@@ -1594,7 +1598,7 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 			// over the window rides to the provider as before: the
 			// retry flag bounds the loop at one attempt.
 			if !a.disableAutoSummarize && !a.notebookEnabled && !call.softWindowRetried &&
-				a.windowOverflow(prepared.Messages, prepared.Tools, call.MaxOutputTokens) {
+				a.windowOverflow(call.SessionID, prepared.Messages, prepared.Tools, call.MaxOutputTokens) {
 				return callContext, prepared, errWindowSoftCap
 			}
 
@@ -1707,7 +1711,7 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 			slog.Info("ModelProvider called",
 				"provider", largeModel.ModelCfg.Provider,
 				"model", largeModel.ModelCfg.Model)
-			return a.currentBuildOf(largeModel)
+			return a.currentBuildOf(call.SessionID, largeModel)
 		},
 		OnToolCall: func(tc fantasy.ToolCallContent) error {
 			input, wasSanitized := sanitizeToolInput(tc.ToolName, tc.ToolCallID, tc.Input)
@@ -1866,7 +1870,7 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 				remaining := cw - tokens
 				outReserve := call.MaxOutputTokens
 				if outReserve <= 0 {
-					outReserve = a.outputReserve()
+					outReserve = a.outputReserve(call.SessionID)
 				}
 				threshold := summarizeThreshold(cw, outReserve)
 				if (remaining <= threshold) && !a.disableAutoSummarize && !a.notebookEnabled {
@@ -2279,7 +2283,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		return ErrSessionBusy
 	}
 
-	largeModel := a.models().Large
+	largeModel := a.models(sessionID).Large
 	systemPromptPrefix := a.systemPromptPrefix.Get()
 
 	currentSession, err := a.sessions.Get(ctx, sessionID)
@@ -2337,14 +2341,14 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		ProviderOptions: opts,
 		OnAuthRefresh:   onAuthRefresh,
 		ModelProvider: func() fantasy.LanguageModel {
-			return a.currentBuildOf(largeModel)
+			return a.currentBuildOf(sessionID, largeModel)
 		},
 		PrepareStep: func(callContext context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
 			prepared.Messages = options.Messages
 			if systemPromptPrefix != "" {
 				prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(systemPromptPrefix)}, prepared.Messages...)
 			}
-			if err := a.enforceWindowCap(prepared.Messages, prepared.Tools, 0); err != nil {
+			if err := a.enforceWindowCap(sessionID, prepared.Messages, prepared.Tools, 0); err != nil {
 				return callContext, prepared, err
 			}
 			return callContext, prepared, nil
@@ -3338,7 +3342,7 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 		}
 	}()
 
-	models := a.models()
+	models := a.models(sessionID)
 	smallModel, largeModel := models.Small, models.Large
 	systemPromptPrefix := a.systemPromptPrefix.Get()
 
@@ -3710,7 +3714,9 @@ func (a *sessionAgent) SetSystemPrompt(systemPrompt prompt.BuiltPrompt) {
 }
 
 func (a *sessionAgent) Model() Model {
-	return a.models().Large
+	// No session context here — the shared selection is reported;
+	// session overrides only engage per run via models(sessionID).
+	return a.models("").Large
 }
 
 // toolResultMaxContentBytes is the universal write-time cap on a

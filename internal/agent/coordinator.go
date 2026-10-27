@@ -154,6 +154,13 @@ type Coordinator interface {
 	UpdateModels(ctx context.Context) error
 	UpdateSummaryModel(ctx context.Context) error
 	GenerateTitle(ctx context.Context, sessionID, prompt string)
+	// SetSessionModelOverride pins the session's large model slot to
+	// the given selection. It applies to the next run on that
+	// session; in-flight runs keep the model they started with.
+	SetSessionModelOverride(ctx context.Context, sessionID string, model config.SelectedModel) error
+	// ClearSessionModelOverride removes a session's model override so
+	// it follows the shared selection again.
+	ClearSessionModelOverride(sessionID string)
 }
 
 type coordinator struct {
@@ -273,6 +280,12 @@ type coordinator struct {
 	models    csync.Value[coordinatorModels]
 	rebuildMu sync.Mutex
 
+	// modelOverrides pins the large model slot per session: a session
+	// with an entry resolves it instead of the shared selection. Like
+	// agent.Model pinning, an override is built once and keeps its
+	// provider across shared rebuilds until the override is reset.
+	modelOverrides *csync.Map[string, Model]
+
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
 	activeSkills []*skills.Skill // Post-filter: active skills only.
@@ -370,6 +383,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		tailAudit:             csync.NewMap[string, TailAudit](),
 		detachedWork:          &sync.WaitGroup{},
 		memParams:             opts.MemParams.OrDefault(),
+		modelOverrides:        csync.NewMap[string, Model](),
 	}
 
 	// Share per-session bookkeeping maps across all built agents and
@@ -511,6 +525,9 @@ func (c *coordinator) watchSessionDeletions() {
 		}
 		if c.cmdlog != nil {
 			c.cmdlog.ForgetSession(ev.Payload.ID)
+		}
+		if c.modelOverrides != nil {
+			c.modelOverrides.Del(ev.Payload.ID)
 		}
 		if c.edgeStats != nil {
 			c.edgeStats.Del(ev.Payload.ID)
@@ -1248,6 +1265,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		}
 	}
 	large := models().Large
+	sessionModels := c.sessionModels(models)
 
 	largeProviderCfg, _ := c.cfg.Config().Providers.Get(large.ModelCfg.Provider)
 	// Prior-turn collapse and supersession stubs both print
@@ -1267,7 +1285,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		memTelemetry = c.memoryTelemetry
 	}
 	result := NewSessionAgent(SessionAgentOptions{
-		Models:               models,
+		Models:               sessionModels,
 		SystemPromptPrefix:   largeProviderCfg.SystemPromptPrefix,
 		SystemPrompt:         "",
 		IsSubAgent:           isSubAgent,
@@ -1596,9 +1614,17 @@ func (c *coordinator) buildModel(ctx context.Context, slot config.SelectedModelT
 	if !ok {
 		return Model{}, fmt.Errorf("%s %w", slot, errModelNotSelected)
 	}
+	return c.buildSelectedModel(ctx, slot.String(), modelCfg, isSubAgent)
+}
+
+// buildSelectedModel builds a Model from an explicit selection — the
+// shared slot resolution lives in buildModel; callers that already
+// hold a SelectedModel (session overrides) build through here.
+// label is only used in error messages.
+func (c *coordinator) buildSelectedModel(ctx context.Context, label string, modelCfg config.SelectedModel, isSubAgent bool) (Model, error) {
 	providerCfg, ok := c.cfg.Config().Providers.Get(modelCfg.Provider)
 	if !ok {
-		return Model{}, fmt.Errorf("%s provider %q %w", slot, modelCfg.Provider, errModelProviderNotConfigured)
+		return Model{}, fmt.Errorf("%s provider %q %w", label, modelCfg.Provider, errModelProviderNotConfigured)
 	}
 	provider, err := c.buildProvider(providerCfg, modelCfg, isSubAgent)
 	if err != nil {
@@ -1611,7 +1637,7 @@ func (c *coordinator) buildModel(ctx context.Context, slot config.SelectedModelT
 	// strands a Grok/ChatGPT model that catwalk doesn't also publish.
 	catwalkModel := c.cfg.Config().GetModel(modelCfg.Provider, modelCfg.Model)
 	if catwalkModel == nil {
-		return Model{}, fmt.Errorf("%s model %q %w", slot, modelCfg.Model, errModelNotFound)
+		return Model{}, fmt.Errorf("%s model %q %w", label, modelCfg.Model, errModelNotFound)
 	}
 
 	modelID := modelCfg.Model
@@ -2009,12 +2035,107 @@ func (c *coordinator) ClearQueue(sessionID string) {
 	c.currentAgent().ClearQueue(sessionID)
 }
 
+// IsBusy reports whether any agent has a run in flight. Teardown and
+// shutdown paths consult it so a busy workspace is never torn down
+// from under a running session — checking only the current agent
+// would miss a run stranded by a mid-flight SetMainAgent switch.
 func (c *coordinator) IsBusy() bool {
-	return c.currentAgent().IsBusy()
+	c.agentMu.RLock()
+	defer c.agentMu.RUnlock()
+	for _, agent := range c.agents {
+		if agent.IsBusy() {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *coordinator) IsSessionBusy(sessionID string) bool {
 	return c.currentAgent().IsSessionBusy(sessionID)
+}
+
+// SetSessionModelOverride builds the selected model and pins it for
+// the session. The entry is consulted by the models() resolver each
+// agent carries, so the override applies from the next run — an
+// in-flight run keeps the model it started with.
+func (c *coordinator) SetSessionModelOverride(ctx context.Context, sessionID string, model config.SelectedModel) error {
+	if c.modelOverrides == nil {
+		return errors.New("session model overrides unavailable")
+	}
+	built, err := c.buildSelectedModel(ctx, "session override", model, false)
+	if err != nil {
+		return err
+	}
+	c.modelOverrides.Set(sessionID, built)
+	return nil
+}
+
+func (c *coordinator) ClearSessionModelOverride(sessionID string) {
+	if c.modelOverrides == nil {
+		return
+	}
+	c.modelOverrides.Del(sessionID)
+}
+
+// sessionModels wraps a shared model source with per-session
+// override resolution: a session that pins its large slot wins over
+// both the shared selection and an agent pin. Small (and summary)
+// stay shared regardless.
+func (c *coordinator) sessionModels(base func() ModelSet) func(string) ModelSet {
+	return func(sessionID string) ModelSet {
+		s := base()
+		if sessionID != "" {
+			if override, ok := c.sessionModelOverride(sessionID); ok {
+				s.Large = override
+			}
+		}
+		return s
+	}
+}
+
+// sessionModelOverride resolves a session's pinned large model,
+// rehydrating the in-memory map from the persisted session row on a
+// miss — a restarted process finds overrides set before it died
+// without a startup scan. A hit of Model{} is the cached "no
+// override" verdict; ok reports whether an override actually applies.
+func (c *coordinator) sessionModelOverride(sessionID string) (Model, bool) {
+	// A nil map means this coordinator carries no override support
+	// (test fixtures and partial constructions) — every session
+	// resolves the shared selection.
+	if c.modelOverrides == nil {
+		return Model{}, false
+	}
+	override, ok := c.modelOverrides.Get(sessionID)
+	if ok {
+		return override, override.Model != nil
+	}
+	sess, err := c.sessions.Get(context.Background(), sessionID)
+	if err != nil || len(sess.ModelOverride) == 0 {
+		if err == nil {
+			// Cache the miss so later lookups skip the store read;
+			// SetSessionModelOverride writes through this map, so the
+			// marker cannot go stale.
+			c.modelOverrides.Set(sessionID, Model{})
+		}
+		return Model{}, false
+	}
+	var sel config.SelectedModel
+	if err := json.Unmarshal(sess.ModelOverride, &sel); err != nil {
+		slog.Error("Failed to unmarshal persisted session model override",
+			"session_id", sessionID, "error", err)
+		return Model{}, false
+	}
+	built, err := c.buildSelectedModel(context.Background(), "session override", sel, false)
+	if err != nil {
+		slog.Error("Failed to build persisted session model override",
+			"session_id", sessionID,
+			"provider", sel.Provider,
+			"model", sel.Model,
+			"error", err)
+		return Model{}, false
+	}
+	c.modelOverrides.Set(sessionID, built)
+	return built, true
 }
 
 func (c *coordinator) ListSettledMessages(ctx context.Context, sessionID string) ([]message.Message, error) {

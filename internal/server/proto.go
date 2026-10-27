@@ -761,7 +761,14 @@ func (c *controllerV1) handlePostWorkspacePermissionsSkip(w http.ResponseWriter,
 		return
 	}
 
-	if err := c.backend.SetPermissionsSkip(id, req.Skip); err != nil {
+	if req.Skip == nil {
+		// The workspace flag is the inherited default itself — it has
+		// no "inherit" state, so null is meaningless here.
+		jsonError(w, http.StatusBadRequest, "skip is required")
+		return
+	}
+
+	if err := c.backend.SetPermissionsSkip(id, *req.Skip); err != nil {
 		c.handleError(w, r, err)
 		return
 	}
@@ -775,11 +782,12 @@ func (c *controllerV1) handleGetWorkspacePermissionsSkip(w http.ResponseWriter, 
 		c.handleError(w, r, err)
 		return
 	}
-	jsonEncode(w, proto.PermissionSkipRequest{Skip: skip})
+	jsonEncode(w, proto.PermissionSkipRequest{Skip: &skip})
 }
 
-// handlePostWorkspaceSessionPermissionsSkip sets whether permission
-// prompts are skipped for a single session.
+// handlePostWorkspaceSessionPermissionsSkip sets, clears, or restores
+// the per-session permission skip override. A null skip clears the
+// override so the session inherits the workspace flag.
 func (c *controllerV1) handlePostWorkspaceSessionPermissionsSkip(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	sid := r.PathValue("sid")
@@ -807,7 +815,28 @@ func (c *controllerV1) handleGetWorkspaceSessionPermissionsSkip(w http.ResponseW
 		c.handleError(w, r, err)
 		return
 	}
-	jsonEncode(w, proto.PermissionSkipRequest{Skip: skip})
+	jsonEncode(w, proto.PermissionSkipRequest{Skip: &skip})
+}
+
+// handlePostWorkspaceSessionModel sets or clears a session's
+// large-model override. A null model clears the override so the
+// session follows the shared config selection; the change applies to
+// the next run and writes no global config.
+func (c *controllerV1) handlePostWorkspaceSessionModel(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sid := r.PathValue("sid")
+
+	var req proto.SessionModelRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		c.server.logError(r, "Failed to decode request", "error", err)
+		jsonError(w, http.StatusBadRequest, "failed to decode request")
+		return
+	}
+
+	if err := c.backend.SetSessionModel(r.Context(), id, sid, req.Model); err != nil {
+		c.handleError(w, r, err)
+		return
+	}
 }
 
 // handleGetWorkspaceSessionPermissionsPending returns the permission

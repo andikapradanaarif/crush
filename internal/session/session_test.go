@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/db"
@@ -46,6 +47,69 @@ func TestEstimatedUsageStateSurvivesFetchModifySave(t *testing.T) {
 	refetched, err := sessions.Get(t.Context(), created.ID)
 	require.NoError(t, err)
 	require.True(t, refetched.EstimatedUsage)
+}
+
+// TestSessionOverridesPersistAcrossServiceRestart covers both new
+// session-owned settings: permission_skip (tri-state) and
+// model_override (JSON). A fresh service instance on the same
+// database must read back what the previous instance wrote — that is
+// the restart path the lazy rehydration in permission/agent relies on.
+func TestSessionOverridesPersistAcrossServiceRestart(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Cleanup(func() {
+		require.NoError(t, db.Release(dataDir))
+		db.ResetPool()
+	})
+
+	conn, err := db.Connect(t.Context(), dataDir)
+	require.NoError(t, err)
+	sessions := NewService(db.New(conn), conn)
+	ctx := t.Context()
+
+	created, err := sessions.Create(ctx, "overrides")
+	require.NoError(t, err)
+	require.Nil(t, created.PermissionSkip)
+	require.Nil(t, created.ModelOverride)
+
+	// Explicit off and an override selection round-trip.
+	raw, err := json.Marshal(map[string]string{"provider": "openai", "model": "gpt-4"})
+	require.NoError(t, err)
+	off := false
+	updated, err := sessions.SetPermissionSkip(ctx, created.ID, &off)
+	require.NoError(t, err)
+	require.NotNil(t, updated.PermissionSkip)
+	require.False(t, *updated.PermissionSkip)
+	updated, err = sessions.SetModelOverride(ctx, created.ID, raw)
+	require.NoError(t, err)
+	require.JSONEq(t, string(raw), string(updated.ModelOverride))
+
+	// A new service instance — the process-restart stand-in — reads
+	// the persisted columns without the writer's in-memory state.
+	restarted := NewService(db.New(conn), conn)
+	fetched, err := restarted.Get(ctx, created.ID)
+	require.NoError(t, err)
+	require.NotNil(t, fetched.PermissionSkip)
+	require.False(t, *fetched.PermissionSkip)
+	require.JSONEq(t, string(raw), string(fetched.ModelOverride))
+
+	// Explicit on round-trips too (0/1 are both distinct from NULL).
+	on := true
+	_, err = sessions.SetPermissionSkip(ctx, created.ID, &on)
+	require.NoError(t, err)
+	fetched, err = restarted.Get(ctx, created.ID)
+	require.NoError(t, err)
+	require.NotNil(t, fetched.PermissionSkip)
+	require.True(t, *fetched.PermissionSkip)
+
+	// Clearing both writes NULL back — inherit mode survives restart.
+	_, err = sessions.SetPermissionSkip(ctx, created.ID, nil)
+	require.NoError(t, err)
+	_, err = sessions.SetModelOverride(ctx, created.ID, nil)
+	require.NoError(t, err)
+	fetched, err = restarted.Get(ctx, created.ID)
+	require.NoError(t, err)
+	require.Nil(t, fetched.PermissionSkip)
+	require.Nil(t, fetched.ModelOverride)
 }
 
 // Legacy rows carry no ids — the shim mints them deterministically on

@@ -88,8 +88,20 @@ type Session struct {
 	Cost             float64
 	Todos            []PlanItem
 	Channel          string
-	CreatedAt        int64
-	UpdatedAt        int64
+	// PermissionSkip is the session-scoped permission auto-approve
+	// tri-state: nil inherits the workspace flag, non-nil forces
+	// prompts off (true) or on (false) for this session only.
+	PermissionSkip *bool
+	// ModelOverride pins this session's large model slot, stored as
+	// the serialized config.SelectedModel JSON. session stays
+	// leaf-light — it cannot import config (config → shell → message
+	// would cycle back through session's test consumers) — so the
+	// domain type carries the raw JSON and typed conversion lives at
+	// the proto/coordinator boundary. nil means the session follows
+	// the shared config selection; a set value is resolved per run.
+	ModelOverride json.RawMessage
+	CreatedAt     int64
+	UpdatedAt     int64
 }
 
 type Service interface {
@@ -102,6 +114,15 @@ type Service interface {
 	List(ctx context.Context) ([]Session, error)
 	Save(ctx context.Context, session Session) (Session, error)
 	SetChannel(ctx context.Context, sessionID, channel string) (Session, error)
+	// SetPermissionSkip persists the session's permission auto-approve
+	// tri-state: nil clears the override (inherit the workspace flag),
+	// non-nil forces prompts off or on for this session.
+	SetPermissionSkip(ctx context.Context, sessionID string, skip *bool) (Session, error)
+	// SetModelOverride persists the session's large-model override:
+	// nil clears it so the session follows the shared selection. The
+	// value is the serialized config.SelectedModel JSON — the caller
+	// marshals; the service stores verbatim.
+	SetModelOverride(ctx context.Context, sessionID string, model json.RawMessage) (Session, error)
 	UpdateTitleAndUsage(ctx context.Context, sessionID, title string, promptTokens, completionTokens int64, cost float64) error
 	Rename(ctx context.Context, id string, title string) error
 	Delete(ctx context.Context, id string) error
@@ -283,6 +304,51 @@ func (s *service) SetChannel(ctx context.Context, sessionID, channel string) (Se
 	return session, nil
 }
 
+// SetPermissionSkip persists the session's permission auto-approve
+// tri-state without touching other fields.
+func (s *service) SetPermissionSkip(ctx context.Context, sessionID string, skip *bool) (Session, error) {
+	var col sql.NullInt64
+	if skip != nil {
+		var v int64
+		if *skip {
+			v = 1
+		}
+		col = sql.NullInt64{Int64: v, Valid: true}
+	}
+	dbSession, err := s.q.SetSessionPermissionSkip(ctx, db.SetSessionPermissionSkipParams{
+		PermissionSkip: col,
+		ID:             sessionID,
+	})
+	if err != nil {
+		return Session{}, err
+	}
+	session := s.fromDBItem(dbSession)
+	s.applyEstimatedUsageState(&session)
+	s.Publish(pubsub.UpdatedEvent, session)
+	return session, nil
+}
+
+// SetModelOverride persists the session's large-model override as JSON,
+// or clears it when model is nil or empty. The value is stored
+// verbatim — callers marshal the typed selection.
+func (s *service) SetModelOverride(ctx context.Context, sessionID string, model json.RawMessage) (Session, error) {
+	var col sql.NullString
+	if len(model) > 0 {
+		col = sql.NullString{String: string(model), Valid: true}
+	}
+	dbSession, err := s.q.SetSessionModelOverride(ctx, db.SetSessionModelOverrideParams{
+		ModelOverride: col,
+		ID:            sessionID,
+	})
+	if err != nil {
+		return Session{}, err
+	}
+	session := s.fromDBItem(dbSession)
+	s.applyEstimatedUsageState(&session)
+	s.Publish(pubsub.UpdatedEvent, session)
+	return session, nil
+}
+
 // UpdateTitleAndUsage updates only the title and usage fields atomically.
 // This is safer than fetching, modifying, and saving the entire session.
 func (s *service) UpdateTitleAndUsage(ctx context.Context, sessionID, title string, promptTokens, completionTokens int64, cost float64) error {
@@ -363,6 +429,15 @@ func (s *service) fromDBItem(item db.Session) Session {
 	if err != nil {
 		slog.Error("Failed to unmarshal todos", "session_id", item.ID, "error", err)
 	}
+	var permissionSkip *bool
+	if item.PermissionSkip.Valid {
+		v := item.PermissionSkip.Int64 != 0
+		permissionSkip = &v
+	}
+	var modelOverride json.RawMessage
+	if item.ModelOverride.Valid && item.ModelOverride.String != "" {
+		modelOverride = json.RawMessage(item.ModelOverride.String)
+	}
 	return Session{
 		ID:               item.ID,
 		ParentSessionID:  item.ParentSessionID.String,
@@ -374,6 +449,8 @@ func (s *service) fromDBItem(item db.Session) Session {
 		Cost:             item.Cost,
 		Todos:            todos,
 		Channel:          item.Channel.String,
+		PermissionSkip:   permissionSkip,
+		ModelOverride:    modelOverride,
 		CreatedAt:        item.CreatedAt,
 		UpdatedAt:        item.UpdatedAt,
 	}

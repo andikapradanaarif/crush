@@ -141,10 +141,19 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 	}
 
 	app := &App{
-		Sessions:    sessions,
-		Messages:    messages,
-		History:     files,
-		Permissions: permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, allowedTools),
+		Sessions: sessions,
+		Messages: messages,
+		History:  files,
+		Permissions: permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, allowedTools,
+			// Persisted per-session auto-approve overrides hydrate the
+			// hot-read map lazily on first use after a restart.
+			permission.WithSessionOverride(func(sessionID string) *bool {
+				sess, err := sessions.Get(ctx, sessionID)
+				if err != nil {
+					return nil
+				}
+				return sess.PermissionSkip
+			})),
 		Questions:   question.NewService(),
 		FileTracker: filetracker.NewService(q, store.WorkingDir()),
 		CmdLog:      cmdlog.NewService(q, store.WorkingDir(), memParams, cmdlog.WithProjectKey(cfg.Options.ProjectKey)),

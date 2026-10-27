@@ -1,5 +1,11 @@
 package proto
 
+import (
+	"encoding/json"
+
+	"github.com/charmbracelet/crush/internal/config"
+)
+
 // Session represents a session in the proto layer.
 //
 // IsBusy is computed on read (it is not persisted with the session) and
@@ -28,6 +34,36 @@ type Session struct {
 	UpdatedAt        int64   `json:"updated_at"`
 	IsBusy           bool    `json:"is_busy"`
 	AttachedClients  int     `json:"attached_clients"`
+	// PermissionSkip is the session's persisted auto-approve tri-state:
+	// nil means it inherits the workspace flag, non-nil forces prompts
+	// off (true) or on (false). Additive/omitempty.
+	PermissionSkip *bool `json:"permission_skip,omitempty"`
+	// ModelOverride pins the session's large model slot; nil means the
+	// session follows the shared config selection. Additive/omitempty.
+	ModelOverride *config.SelectedModel `json:"model_override,omitempty"`
+}
+
+// SelectedModelFromJSON decodes a persisted session model override —
+// the domain's raw storage form, a serialized SelectedModel — into
+// the typed wire value. nil/empty input yields (nil, nil).
+func SelectedModelFromJSON(raw json.RawMessage) (*config.SelectedModel, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var m config.SelectedModel
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+// SelectedModelJSON encodes a typed selection for domain storage —
+// the inverse of SelectedModelFromJSON. nil input yields nil.
+func SelectedModelJSON(m *config.SelectedModel) (json.RawMessage, error) {
+	if m == nil {
+		return nil, nil
+	}
+	return json.Marshal(m)
 }
 
 // Todo represents a single plan item on a session in the proto layer.

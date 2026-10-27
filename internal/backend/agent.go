@@ -300,6 +300,50 @@ func (b *Backend) QueuedPromptsList(workspaceID, sessionID string) ([]string, er
 	return ws.AgentCoordinator.QueuedPromptsList(sessionID), nil
 }
 
+// SetSessionModel sets or clears a session's large-model override.
+// The selection persists on the session row — it survives workspace
+// process restarts — and is resolved lazily per run, so the override
+// applies to the next run while an in-flight run keeps the model it
+// started with. Only the large slot is pinned; small and summary stay
+// shared. A nil model clears the override so the session follows the
+// shared config selection. No global config is written.
+func (b *Backend) SetSessionModel(ctx context.Context, workspaceID, sessionID string, model *config.SelectedModel) error {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return err
+	}
+
+	if ws.AgentCoordinator == nil {
+		return ErrAgentNotInitialized
+	}
+	// Reject unknown sessions before touching the runtime pin —
+	// otherwise the coordinator would cache an override for a session
+	// SetModelOverride then refuses to persist.
+	if _, err := ws.Sessions.Get(ctx, sessionID); err != nil {
+		return err
+	}
+	// Pin first: a model that fails to build must not persist —
+	// otherwise the row would point at an override every restart
+	// also fails to build.
+	if model != nil {
+		if err := ws.AgentCoordinator.SetSessionModelOverride(ctx, sessionID, *model); err != nil {
+			return err
+		}
+	} else {
+		ws.AgentCoordinator.ClearSessionModelOverride(sessionID)
+	}
+	raw, err := proto.SelectedModelJSON(model)
+	if err != nil {
+		return err
+	}
+	if _, err := ws.Sessions.SetModelOverride(ctx, sessionID, raw); err != nil {
+		// Roll the runtime pin back so it can't diverge from the row.
+		ws.AgentCoordinator.ClearSessionModelOverride(sessionID)
+		return err
+	}
+	return nil
+}
+
 // GetDefaultSmallModel returns the default small model for a provider.
 func (b *Backend) GetDefaultSmallModel(workspaceID, providerID string) (config.SelectedModel, error) {
 	ws, err := b.GetWorkspace(workspaceID)

@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/backend"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/session"
@@ -56,6 +57,10 @@ func (s *stubCoordinator) UpdateSummaryModel(context.Context) error      { retur
 func (s *stubCoordinator) ApprovePlan(context.Context, string) error     { return nil }
 func (s *stubCoordinator) SetMainAgent(string) error                     { return nil }
 func (s *stubCoordinator) GenerateTitle(context.Context, string, string) {}
+func (s *stubCoordinator) SetSessionModelOverride(context.Context, string, config.SelectedModel) error {
+	return nil
+}
+func (s *stubCoordinator) ClearSessionModelOverride(string) {}
 
 // stubSessions is a minimal session.Service that returns a fixed list
 // (and supports Get by ID). All other methods return zero values; the

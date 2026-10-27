@@ -277,6 +277,9 @@ func mcpEventTypeToProto(t mcp.EventType) proto.MCPEventType {
 }
 
 func sessionToProto(s session.Session) proto.Session {
+	// A row carrying malformed JSON loses its override on the wire —
+	// the run path logs the same failure on rehydration.
+	modelOverride, _ := proto.SelectedModelFromJSON(s.ModelOverride)
 	return proto.Session{
 		ID:               s.ID,
 		ParentSessionID:  s.ParentSessionID,
@@ -288,6 +291,8 @@ func sessionToProto(s session.Session) proto.Session {
 		Cost:             s.Cost,
 		Todos:            todosToProto(s.Todos),
 		Channel:          s.Channel,
+		PermissionSkip:   s.PermissionSkip,
+		ModelOverride:    modelOverride,
 		CreatedAt:        s.CreatedAt,
 		UpdatedAt:        s.UpdatedAt,
 	}
