@@ -42,6 +42,7 @@ var (
 	ErrServerNotIdle           = errors.New("server is hosting live workspaces")
 	ErrClientRetired           = errors.New("client has been retired")
 	ErrChannelOptInMismatch    = errors.New("requested channels differ from the existing workspace; channels are an explicit opt-in and are not shared across duplicate creates")
+	ErrInvalidModelSelection   = errors.New("model selection could not be built")
 )
 
 // DefaultCreateGrace is the window in which a client must open an SSE
@@ -221,6 +222,12 @@ type Workspace struct {
 	// leave the in-memory pin and the row pointing at different
 	// selections.
 	modelOverrideMu sync.Mutex
+
+	// permOverrideMu serializes SetSessionPermissionsSkip calls —
+	// same ordering requirement as modelOverrideMu: two writers
+	// interleaving persist/map-update could diverge the map from
+	// the row until the next write.
+	permOverrideMu sync.Mutex
 
 	// shutdownFn is the function invoked by [Backend.teardown] to
 	// release the workspace's underlying resources. It defaults to the
@@ -863,6 +870,13 @@ func (b *Backend) teardown(ws *Workspace) {
 		return
 	}
 	ws.clientsMu.Unlock()
+	// Residual TOCTOU (best-effort): IsBusy is sampled under b.mu but
+	// ws.closing is only latched later inside invokeShutdown. A
+	// SendMessage that resolved ws before workspaces.Del can slip a
+	// BeginAccepted into that gap and get cancelled by the shutdown.
+	// Closing it fully would mean latching closing before the busy
+	// check and un-latching on defer — the remaining window is
+	// sub-millisecond and self-limiting.
 	if ws.App != nil && ws.AgentCoordinator != nil && ws.AgentCoordinator.IsBusy() {
 		b.mu.Unlock()
 		slog.Debug("Workspace busy, deferring teardown",

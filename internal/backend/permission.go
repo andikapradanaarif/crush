@@ -103,6 +103,10 @@ func (b *Backend) SetSessionPermissionsSkip(ctx context.Context, workspaceID, se
 	// reverse order risks the map saying cleared while the row says
 	// armed if the persist fails — a divergence that survives until
 	// the next write.
+	// Serialized: persist + map update must stay ordered against a
+	// concurrent call or the map and row diverge until the next write.
+	ws.permOverrideMu.Lock()
+	defer ws.permOverrideMu.Unlock()
 	if _, err := ws.Sessions.SetPermissionSkip(ctx, sessionID, skip); err != nil {
 		return err
 	}

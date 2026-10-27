@@ -1281,7 +1281,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		}
 	}
 	large := models().Large
-	sessionModels := c.sessionModels(models)
+	sessionModels := c.sessionModels(models, isSubAgent)
 
 	largeProviderCfg, _ := c.cfg.Config().Providers.Get(large.ModelCfg.Provider)
 	// Prior-turn collapse and supersession stubs both print
@@ -2108,11 +2108,13 @@ func (c *coordinator) ClearSessionModelOverride(sessionID string) {
 // sessionModels wraps a shared model source with per-session
 // override resolution: a session that pins its large slot wins over
 // both the shared selection and an agent pin. Small (and summary)
-// stay shared regardless.
-func (c *coordinator) sessionModels(base func() ModelSet) func(string) ModelSet {
+// stay shared regardless. Sub-agent model sets skip overrides
+// entirely — a pinned override builds with isSubAgent=false, which
+// would mis-attribute billing for providers that flag it.
+func (c *coordinator) sessionModels(base func() ModelSet, isSubAgent bool) func(string) ModelSet {
 	return func(sessionID string) ModelSet {
 		s := base()
-		if sessionID != "" {
+		if sessionID != "" && !isSubAgent {
 			if override, ok := c.sessionModelOverride(sessionID); ok {
 				s.Large = override
 			}
@@ -2145,6 +2147,17 @@ func (c *coordinator) sessionModelOverride(sessionID string) (Model, bool) {
 	c.modelOverrideMu.Unlock()
 	sess, err := c.sessions.Get(context.Background(), sessionID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// Session is gone — tombstone it like the permission
+			// path does instead of re-reading the row on every
+			// models() call.
+			c.modelOverrideMu.Lock()
+			if _, ok := c.modelOverrides.Get(sessionID); !ok {
+				c.modelOverrides.Set(sessionID, Model{})
+			}
+			c.modelOverrideMu.Unlock()
+			return Model{}, false
+		}
 		// Transient failure — retry next time rather than pin the
 		// shared selection until restart.
 		return Model{}, false

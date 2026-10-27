@@ -251,6 +251,10 @@ func (s *service) GetLast(ctx context.Context) (Session, error) {
 	return session, nil
 }
 
+// Save persists the mutable session fields via UpdateSession. It does
+// NOT write PermissionSkip or ModelOverride — those columns are
+// excluded so a fetch-modify-save can't clobber a concurrent setter;
+// use SetPermissionSkip/SetModelOverride for them.
 func (s *service) Save(ctx context.Context, session Session) (Session, error) {
 	todosJSON, err := marshalTodos(session.Todos)
 	if err != nil {

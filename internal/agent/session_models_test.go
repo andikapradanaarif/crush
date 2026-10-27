@@ -66,7 +66,7 @@ func TestSessionModels_OverrideResolutionOrder(t *testing.T) {
 	sharedSmall := Model{ModelCfg: config.SelectedModel{Provider: "shared", Model: "shared-small"}}
 	resolve := env.coord.sessionModels(func() ModelSet {
 		return ModelSet{Large: sharedLarge, Small: sharedSmall}
-	})
+	}, false)
 
 	// No override: the session resolves the shared set.
 	got := resolve(sess.ID)
@@ -114,7 +114,7 @@ func TestSessionModelOverride_RehydratesFromSessionRow(t *testing.T) {
 	sharedLarge := Model{ModelCfg: config.SelectedModel{Provider: "shared", Model: "shared-large"}}
 	resolve := env.coord.sessionModels(func() ModelSet {
 		return ModelSet{Large: sharedLarge, Small: sharedLarge}
-	})
+	}, false)
 	got := resolve(sess.ID)
 	require.Equal(t, "override-model", got.Large.ModelCfg.Model,
 		"a persisted override must apply after a restart")

@@ -2294,6 +2294,19 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		return ErrSessionBusy
 	}
 
+	// Every exit below this point that doesn't reach the queue drain
+	// strands queued prompts — they hold IsBusy true forever and wedge
+	// teardown. Cancel them so RunID waiters terminate too.
+	queueDrained := false
+	defer func() {
+		if !queueDrained {
+			mu := a.sessionMu(sessionID)
+			mu.Lock()
+			a.clearQueueAndNotify(sessionID)
+			mu.Unlock()
+		}
+	}()
+
 	largeModel := a.models(sessionID).Large
 	systemPromptPrefix := a.systemPromptPrefix.Get()
 
@@ -2481,6 +2494,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 			a.cancelMark.Del(sessionID)
 		}
 	}
+	queueDrained = true
 	mu.Unlock()
 
 	// Release the active request before processing queued messages so that
@@ -3652,12 +3666,6 @@ func (a *sessionAgent) Cancel(sessionID string) {
 	// The defer in processRequest will clean up the entry.
 	if ac, ok := a.activeRequests.Get(sessionID); ok && ac != nil {
 		slog.Debug("Request cancellation initiated", "session_id", sessionID)
-		ac.cancel()
-	}
-
-	// Also check for summarize requests.
-	if ac, ok := a.activeRequests.Get(sessionID + "-summarize"); ok && ac != nil {
-		slog.Debug("Summarize cancellation initiated", "session_id", sessionID)
 		ac.cancel()
 	}
 

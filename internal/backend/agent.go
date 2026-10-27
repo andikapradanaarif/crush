@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 
 	"github.com/charmbracelet/crush/internal/agent"
@@ -347,7 +348,9 @@ func (b *Backend) SetSessionModel(ctx context.Context, workspaceID, sessionID st
 	// the row — otherwise the row would point at an override every
 	// restart also fails to build.
 	if err := ws.AgentCoordinator.SetSessionModelOverride(ctx, sessionID, *model); err != nil {
-		return err
+		// A selection that fails to build is a bad request (unknown
+		// provider/model, unconfigured creds), not a server fault.
+		return fmt.Errorf("%w: %w", ErrInvalidModelSelection, err)
 	}
 	if _, err := ws.Sessions.SetModelOverride(ctx, sessionID, raw); err != nil {
 		// Roll the pin back: the next miss rehydrates whatever the row
