@@ -17,6 +17,12 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    # macos-latest jobs were being cancelled at ~15m; bound the leg
+    # explicitly instead of relying on the platform default. 30m
+    # leaves headroom over the 20m go-test budget plus build/setup so
+    # a slow-but-healthy run is not cancelled at the same ceiling the
+    # test step reports.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
