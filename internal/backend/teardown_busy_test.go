@@ -124,9 +124,9 @@ func TestTeardown_IdleWorkspaceShutsDownImmediately(t *testing.T) {
 	require.False(t, ok)
 }
 
-// TestTeardown_IdempotentBusyRecheck proves a workspace removed while
-// busy-deferred does not get a second shutdown — the membership check
-// makes the re-armed pass a no-op.
+// TestTeardown_ConcurrentCallsShutDownOnce proves a workspace removed
+// by one teardown pass does not get a second shutdown from another —
+// the membership check makes teardown idempotent.
 func TestTeardown_ConcurrentCallsShutDownOnce(t *testing.T) {
 	t.Parallel()
 	b, _ := newTestBackend(t)

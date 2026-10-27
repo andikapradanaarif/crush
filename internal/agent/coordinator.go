@@ -279,6 +279,11 @@ type coordinator struct {
 	// models is shared by every agent; rebuildMu serializes rebuilds of it.
 	models    csync.Value[coordinatorModels]
 	rebuildMu sync.Mutex
+	// modelOverrideMu serializes modelOverrides writes so a lazy
+	// rehydrate can't clobber a pin that landed during its store read:
+	// the seed path rechecks under this mutex, and the set/clear/delete
+	// writers hold it across their map mutation.
+	modelOverrideMu sync.Mutex
 
 	// modelOverrides pins the large model slot per session: a session
 	// with an entry resolves it instead of the shared selection. Like
@@ -527,7 +532,9 @@ func (c *coordinator) watchSessionDeletions() {
 			c.cmdlog.ForgetSession(ev.Payload.ID)
 		}
 		if c.modelOverrides != nil {
+			c.modelOverrideMu.Lock()
 			c.modelOverrides.Del(ev.Payload.ID)
+			c.modelOverrideMu.Unlock()
 		}
 		if c.edgeStats != nil {
 			c.edgeStats.Del(ev.Payload.ID)
@@ -2066,7 +2073,9 @@ func (c *coordinator) SetSessionModelOverride(ctx context.Context, sessionID str
 	if err != nil {
 		return err
 	}
+	c.modelOverrideMu.Lock()
 	c.modelOverrides.Set(sessionID, built)
+	c.modelOverrideMu.Unlock()
 	return nil
 }
 
@@ -2074,7 +2083,9 @@ func (c *coordinator) ClearSessionModelOverride(sessionID string) {
 	if c.modelOverrides == nil {
 		return
 	}
+	c.modelOverrideMu.Lock()
 	c.modelOverrides.Del(sessionID)
+	c.modelOverrideMu.Unlock()
 }
 
 // sessionModels wraps a shared model source with per-session
@@ -2110,38 +2121,39 @@ func (c *coordinator) sessionModelOverride(sessionID string) (Model, bool) {
 		return override, override.Model != nil
 	}
 	sess, err := c.sessions.Get(context.Background(), sessionID)
-	if err != nil || len(sess.ModelOverride) == 0 {
-		if err == nil {
-			// Cache the miss so later lookups skip the store read;
-			// SetSessionModelOverride writes through this map, so the
-			// marker cannot go stale. A Get error stays uncached —
-			// transient failures should retry rather than pin the
-			// shared selection until restart.
-			c.modelOverrides.Set(sessionID, Model{})
-		}
-		return Model{}, false
-	}
-	var sel config.SelectedModel
-	if err := json.Unmarshal(sess.ModelOverride, &sel); err != nil {
-		slog.Error("Failed to unmarshal persisted session model override",
-			"session_id", sessionID, "error", err)
-		// Deterministic failure — same bytes, same result. Cache the
-		// miss so this doesn't log on every models() call.
-		c.modelOverrides.Set(sessionID, Model{})
-		return Model{}, false
-	}
-	built, err := c.buildSelectedModel(context.Background(), "session override", sel, false)
 	if err != nil {
-		slog.Error("Failed to build persisted session model override",
-			"session_id", sessionID,
-			"provider", sel.Provider,
-			"model", sel.Model,
-			"error", err)
-		c.modelOverrides.Set(sessionID, Model{})
+		// Transient failure — retry next time rather than pin the
+		// shared selection until restart.
 		return Model{}, false
 	}
-	c.modelOverrides.Set(sessionID, built)
-	return built, true
+	// Resolve the verdict off the mutex: store reads and model builds
+	// are too slow to hold it across. The publish section below
+	// rechecks under modelOverrideMu so a SetSessionModelOverride pin
+	// that landed during the read is never clobbered.
+	verdict := Model{}
+	if len(sess.ModelOverride) > 0 {
+		var sel config.SelectedModel
+		if err := json.Unmarshal(sess.ModelOverride, &sel); err != nil {
+			slog.Error("Failed to unmarshal persisted session model override",
+				"session_id", sessionID, "error", err)
+		} else if built, err := c.buildSelectedModel(context.Background(), "session override", sel, false); err != nil {
+			slog.Error("Failed to build persisted session model override",
+				"session_id", sessionID,
+				"provider", sel.Provider,
+				"model", sel.Model,
+				"error", err)
+		} else {
+			verdict = built
+		}
+	}
+	c.modelOverrideMu.Lock()
+	defer c.modelOverrideMu.Unlock()
+	if override, ok := c.modelOverrides.Get(sessionID); ok {
+		// A writer landed while we were reading — keep its entry.
+		return override, override.Model != nil
+	}
+	c.modelOverrides.Set(sessionID, verdict)
+	return verdict, verdict.Model != nil
 }
 
 func (c *coordinator) ListSettledMessages(ctx context.Context, sessionID string) ([]message.Message, error) {
@@ -2175,6 +2187,17 @@ func (c *coordinator) updateAgentModels(ctx context.Context, agent SessionAgent,
 	// Rebuild the shared models so they reflect the latest config.
 	if err := c.rebuildModels(ctx); err != nil {
 		return err
+	}
+	// A rebuild can change what's buildable — a provider added since a
+	// session's override last failed to build. Drop the cached "no
+	// override" verdicts so persisted rows re-evaluate against the new
+	// config. Positive pins survive: they're the point of the feature.
+	if c.modelOverrides != nil {
+		for sessionID, m := range c.modelOverrides.Seq2() {
+			if m.Model == nil {
+				c.modelOverrides.Del(sessionID)
+			}
+		}
 	}
 
 	// Resolve summary model. Failures are logged but never block

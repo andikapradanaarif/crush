@@ -172,7 +172,7 @@ type permissionService struct {
 	// override on a map miss — restart rehydration without a startup
 	// scan. Nil disables lookup; a nil return means the row carries
 	// no override (or the session is unknown).
-	sessionOverride func(sessionID string) *bool
+	sessionOverride func(sessionID string) (*bool, error)
 }
 
 // resolve atomically removes the pending request entry for the given
@@ -262,23 +262,11 @@ func (s *permissionService) Deny(permission PermissionRequest) bool {
 func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRequest) (bool, error) {
 	// Resolution order: the session's persisted override wins over the
 	// workspace flag — an explicit off forces prompts even under a
-	// workspace skip, an explicit on approves even without one, and an
-	// absent override inherits the flag. Resolved once: the override
-	// lookup can hit the session store on a cold miss.
-	override, hasOverride := s.sessionAutoApproveOverride(opts.SessionID)
-	if hasOverride && override {
-		s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
-			SessionID:  opts.SessionID,
-			ToolCallID: opts.ToolCallID,
-			Granted:    true,
-		})
-		return true, nil
-	}
-	// The workspace skip stays silent — it predates the notification
-	// surface, and publishing granted without a matching request-start
-	// would leave subscribers pairing half a flow. The session-on path
-	// above publishes because it shares the auto-approve machinery
-	// that always notified. (Asymmetric, inherited, intentional.)
+	// workspace skip, and an absent override inherits the flag. An
+	// explicit on falls through to registerRequest's auto-approve path
+	// (the lookup already seeded the map) so it still emits
+	// request-start + granted like any live approval.
+	_, hasOverride := s.sessionAutoApproveOverride(opts.SessionID)
 	if !hasOverride && s.skip.Load() {
 		return true, nil
 	}
@@ -476,7 +464,12 @@ func (s *permissionService) sessionAutoApproveOverride(sessionID string) (bool, 
 	if ok || missed || s.sessionOverride == nil {
 		return v, ok
 	}
-	persisted := s.sessionOverride(sessionID)
+	persisted, err := s.sessionOverride(sessionID)
+	if err != nil {
+		// Transient failure — retry next request rather than
+		// tombstone a suppression until restart.
+		return false, false
+	}
 	// Seed under the write lock so the store can't interleave with a
 	// concurrent Set/Clear — both hold the same mutex. If a writer
 	// landed first the seeded value is stale: re-check and keep the
@@ -524,7 +517,7 @@ type Option func(*permissionService)
 // persisted auto-approve override on a map miss — the restart
 // rehydration path. The lookup returns the row's tri-state: nil for
 // no override, non-nil for an explicit on/off.
-func WithSessionOverride(lookup func(sessionID string) *bool) Option {
+func WithSessionOverride(lookup func(sessionID string) (*bool, error)) Option {
 	return func(s *permissionService) {
 		s.sessionOverride = lookup
 	}

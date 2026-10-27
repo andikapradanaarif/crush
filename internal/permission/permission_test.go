@@ -1078,7 +1078,7 @@ func TestNotificationsCarrySessionID(t *testing.T) {
 func TestSessionOverride_PersistedLookupRestart(t *testing.T) {
 	t.Parallel()
 	persisted := map[string]*bool{"s1": ptrBool(true), "s2": ptrBool(false)}
-	lookup := func(sessionID string) *bool { return persisted[sessionID] }
+	lookup := func(sessionID string) (*bool, error) { return persisted[sessionID], nil }
 
 	// "Restart": a new service whose in-memory map is empty.
 	svc := NewPermissionService("/tmp", false, nil, WithSessionOverride(lookup))
@@ -1098,7 +1098,7 @@ func TestSessionOverride_ResolutionOrder(t *testing.T) {
 
 	// Session on + workspace off → auto-approve.
 	svc := NewPermissionService("/tmp", false, nil,
-		WithSessionOverride(func(string) *bool { return ptrBool(true) }))
+		WithSessionOverride(func(string) (*bool, error) { return ptrBool(true), nil }))
 	granted, err := svc.Request(t.Context(), CreatePermissionRequest{
 		SessionID: "s1", ToolCallID: "c1", ToolName: "bash",
 		Action: "execute", Path: "/tmp",
@@ -1108,7 +1108,7 @@ func TestSessionOverride_ResolutionOrder(t *testing.T) {
 
 	// Session off + workspace on → prompts (the request must park).
 	svc2 := NewPermissionService("/tmp", true, nil,
-		WithSessionOverride(func(string) *bool { return ptrBool(false) }))
+		WithSessionOverride(func(string) (*bool, error) { return ptrBool(false), nil }))
 	done := make(chan struct{})
 	go func() {
 		_, _ = svc2.Request(t.Context(), CreatePermissionRequest{
@@ -1129,7 +1129,7 @@ func TestSessionOverride_ResolutionOrder(t *testing.T) {
 
 	// No override + workspace on → auto-approve via inheritance.
 	svc3 := NewPermissionService("/tmp", true, nil,
-		WithSessionOverride(func(string) *bool { return nil }))
+		WithSessionOverride(func(string) (*bool, error) { return nil, nil }))
 	granted, err = svc3.Request(t.Context(), CreatePermissionRequest{
 		SessionID: "s1", ToolCallID: "c3", ToolName: "bash",
 		Action: "execute", Path: "/tmp",
@@ -1147,9 +1147,9 @@ func TestSessionOverride_NegativeCaches(t *testing.T) {
 	t.Parallel()
 	var calls atomic.Int32
 	svc := NewPermissionService("/tmp", false, nil,
-		WithSessionOverride(func(string) *bool {
+		WithSessionOverride(func(string) (*bool, error) {
 			calls.Add(1)
-			return nil
+			return nil, nil
 		}))
 
 	svc.SessionAutoApproves("s1")

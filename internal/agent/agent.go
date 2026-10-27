@@ -2430,18 +2430,27 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	// and the next render re-engages only if still over margin.
 	a.clearPressureState(sessionID)
 
+	// Process any messages that were queued while summarizing. The
+	// accept reservation is taken before the active request drops so
+	// the dequeue -> re-register window never reads as idle — the same
+	// handoff runTurn performs for its queued prompts.
+	queuedMessages, ok := a.messageQueue.Get(sessionID)
+	var firstQueuedMessage SessionAgentCall
+	hasQueued := ok && len(queuedMessages) > 0
+	if hasQueued {
+		firstQueuedMessage = queuedMessages[0]
+		a.messageQueue.Set(sessionID, queuedMessages[1:])
+		firstQueuedMessage.Accepted = a.BeginAccepted(sessionID)
+	}
+
 	// Release the active request before processing queued messages so that
 	// Run() does not see the session as busy.
 	a.activeRequests.Del(sessionID)
 	cancel()
 
-	// Process any messages that were queued while summarizing.
-	queuedMessages, ok := a.messageQueue.Get(sessionID)
-	if !ok || len(queuedMessages) == 0 {
+	if !hasQueued {
 		return nil
 	}
-	firstQueuedMessage := queuedMessages[0]
-	a.messageQueue.Set(sessionID, queuedMessages[1:])
 	_, qErr := a.Run(ctx, firstQueuedMessage)
 	return qErr
 }
@@ -3656,6 +3665,11 @@ func (a *sessionAgent) CancelAll() {
 	for key := range a.activeRequests.Seq2() {
 		a.Cancel(key) // key is sessionID
 	}
+	// Queue-only sessions get no Cancel — drop their queued prompts or
+	// IsBusy (which counts them) would spin this loop to its timeout.
+	for sessionID := range a.messageQueue.Seq2() {
+		a.clearQueueAndNotify(sessionID)
+	}
 
 	timeout := time.After(5 * time.Second)
 	for a.IsBusy() {
@@ -3678,6 +3692,14 @@ func (a *sessionAgent) IsBusy() bool {
 	// counts — tearing down in that window would silently drop it.
 	for calls := range a.messageQueue.Seq() {
 		if len(calls) > 0 {
+			return true
+		}
+	}
+	// Dispatched-but-not-yet-active runs are tracked only by
+	// acceptedRuns between BeginAccepted and their activeRequests
+	// registration — the same signal Cancel relies on for that window.
+	for n := range a.acceptedRuns.Seq() {
+		if n > 0 {
 			return true
 		}
 	}
