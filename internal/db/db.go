@@ -426,6 +426,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.setSessionChannelStmt, err = db.PrepareContext(ctx, setSessionChannel); err != nil {
 		return nil, fmt.Errorf("error preparing query SetSessionChannel: %w", err)
 	}
+	if q.setSessionModelOverrideStmt, err = db.PrepareContext(ctx, setSessionModelOverride); err != nil {
+		return nil, fmt.Errorf("error preparing query SetSessionModelOverride: %w", err)
+	}
+	if q.setSessionPermissionSkipStmt, err = db.PrepareContext(ctx, setSessionPermissionSkip); err != nil {
+		return nil, fmt.Errorf("error preparing query SetSessionPermissionSkip: %w", err)
+	}
 	if q.settleReferentEpisodeStmt, err = db.PrepareContext(ctx, settleReferentEpisode); err != nil {
 		return nil, fmt.Errorf("error preparing query SettleReferentEpisode: %w", err)
 	}
@@ -1134,6 +1140,16 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing setSessionChannelStmt: %w", cerr)
 		}
 	}
+	if q.setSessionModelOverrideStmt != nil {
+		if cerr := q.setSessionModelOverrideStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing setSessionModelOverrideStmt: %w", cerr)
+		}
+	}
+	if q.setSessionPermissionSkipStmt != nil {
+		if cerr := q.setSessionPermissionSkipStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing setSessionPermissionSkipStmt: %w", cerr)
+		}
+	}
 	if q.settleReferentEpisodeStmt != nil {
 		if cerr := q.settleReferentEpisodeStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing settleReferentEpisodeStmt: %w", cerr)
@@ -1362,6 +1378,8 @@ type Queries struct {
 	searchNotebookByTextStmt                *sql.Stmt
 	searchSessionDigestsStmt                *sql.Stmt
 	setSessionChannelStmt                   *sql.Stmt
+	setSessionModelOverrideStmt             *sql.Stmt
+	setSessionPermissionSkipStmt            *sql.Stmt
 	settleReferentEpisodeStmt               *sql.Stmt
 	settleTurnOutcomeStmt                   *sql.Stmt
 	updateMessageStmt                       *sql.Stmt
@@ -1513,6 +1531,8 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		searchNotebookByTextStmt:                q.searchNotebookByTextStmt,
 		searchSessionDigestsStmt:                q.searchSessionDigestsStmt,
 		setSessionChannelStmt:                   q.setSessionChannelStmt,
+		setSessionModelOverrideStmt:             q.setSessionModelOverrideStmt,
+		setSessionPermissionSkipStmt:            q.setSessionPermissionSkipStmt,
 		settleReferentEpisodeStmt:               q.settleReferentEpisodeStmt,
 		settleTurnOutcomeStmt:                   q.settleTurnOutcomeStmt,
 		updateMessageStmt:                       q.updateMessageStmt,

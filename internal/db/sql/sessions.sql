@@ -59,6 +59,18 @@ SET channel = ?
 WHERE id = ?
 RETURNING *;
 
+-- name: SetSessionPermissionSkip :one
+UPDATE sessions
+SET permission_skip = ?
+WHERE id = ?
+RETURNING *;
+
+-- name: SetSessionModelOverride :one
+UPDATE sessions
+SET model_override = ?
+WHERE id = ?
+RETURNING *;
+
 -- name: UpdateSessionTitleAndUsage :exec
 UPDATE sessions
 SET

@@ -10,6 +10,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/app"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/google/uuid"
@@ -64,7 +65,11 @@ func (c *blockingCoordinator) Model() agent.Model                               
 func (c *blockingCoordinator) UpdateModels(context.Context) error                { return nil }
 func (c *blockingCoordinator) UpdateSummaryModel(context.Context) error          { return nil }
 func (c *blockingCoordinator) GenerateTitle(context.Context, string, string)     {}
-func (c *blockingCoordinator) ApprovePlan(context.Context, string) error         { return nil }
+func (c *blockingCoordinator) SetSessionModelOverride(context.Context, string, config.SelectedModel) error {
+	return nil
+}
+func (c *blockingCoordinator) ClearSessionModelOverride(string)          {}
+func (c *blockingCoordinator) ApprovePlan(context.Context, string) error { return nil }
 func (c *blockingCoordinator) SetMainAgent(agentName string) error {
 	c.lastMainAgentSet.Store(agentName)
 	return c.setMainAgentErr

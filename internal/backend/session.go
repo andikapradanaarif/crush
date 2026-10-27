@@ -175,11 +175,15 @@ func (b *Backend) DeleteSession(ctx context.Context, workspaceID, sessionID stri
 		return err
 	}
 
-	// Drop the session's auto-approve flag so the map doesn't leak
-	// an entry per deleted session.
-	ws.Permissions.SetSessionAutoApprove(sessionID, false)
-
-	return ws.Sessions.Delete(ctx, sessionID)
+	// Delete the row first, then drop the in-memory override. The
+	// reverse order lets a lazy rehydrate starting between the two
+	// read the still-present row and re-seed the map for a dead
+	// session — the leak this cleanup exists to prevent.
+	if err := ws.Sessions.Delete(ctx, sessionID); err != nil {
+		return err
+	}
+	ws.Permissions.ClearSessionAutoApprove(sessionID)
+	return nil
 }
 
 // ListUserMessages returns user-role messages for a session.

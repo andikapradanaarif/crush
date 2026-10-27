@@ -852,25 +852,25 @@ func TestEnforceWindowCap(t *testing.T) {
 	t.Run("flag off never rejects", func(t *testing.T) {
 		t.Parallel()
 		a := pressureTestAgent(64_000, 4_000)
-		require.NoError(t, a.enforceWindowCap(big, nil, 4_000))
+		require.NoError(t, a.enforceWindowCap("", big, nil, 4_000))
 	})
 	t.Run("unknown window never rejects", func(t *testing.T) {
 		t.Parallel()
 		a := pressureTestAgent(0, 4_000)
 		a.enforceContextWindow = true
-		require.NoError(t, a.enforceWindowCap(big, nil, 4_000))
+		require.NoError(t, a.enforceWindowCap("", big, nil, 4_000))
 	})
 	t.Run("under cap passes", func(t *testing.T) {
 		t.Parallel()
 		a := pressureTestAgent(64_000, 4_000)
 		a.enforceContextWindow = true
-		require.NoError(t, a.enforceWindowCap(small, nil, 4_000))
+		require.NoError(t, a.enforceWindowCap("", small, nil, 4_000))
 	})
 	t.Run("over cap rejects with sentinel", func(t *testing.T) {
 		t.Parallel()
 		a := pressureTestAgent(64_000, 4_000)
 		a.enforceContextWindow = true
-		err := a.enforceWindowCap(big, nil, 4_000)
+		err := a.enforceWindowCap("", big, nil, 4_000)
 		require.ErrorIs(t, err, ErrContextWindowExceeded)
 		require.Contains(t, err.Error(), "declared window")
 	})
@@ -880,8 +880,8 @@ func TestEnforceWindowCap(t *testing.T) {
 		// with an 8K one — the provider contract is input + output.
 		a := pressureTestAgent(64_000, 4_000)
 		a.enforceContextWindow = true
-		require.NoError(t, a.enforceWindowCap(big, nil, 3_000))
-		require.ErrorIs(t, a.enforceWindowCap(big, nil, 8_000), ErrContextWindowExceeded)
+		require.NoError(t, a.enforceWindowCap("", big, nil, 3_000))
+		require.ErrorIs(t, a.enforceWindowCap("", big, nil, 8_000), ErrContextWindowExceeded)
 	})
 	t.Run("unset output budget falls back to catalog default", func(t *testing.T) {
 		t.Parallel()
@@ -889,7 +889,7 @@ func TestEnforceWindowCap(t *testing.T) {
 		a.enforceContextWindow = true
 		// ~60K input + 8K catalog default > 64K — the same failure
 		// a real endpoint returns when max_tokens pushes over.
-		require.ErrorIs(t, a.enforceWindowCap(big, nil, 0), ErrContextWindowExceeded)
+		require.ErrorIs(t, a.enforceWindowCap("", big, nil, 0), ErrContextWindowExceeded)
 	})
 	t.Run("tool schemas count against the window", func(t *testing.T) {
 		t.Parallel()
@@ -902,8 +902,8 @@ func TestEnforceWindowCap(t *testing.T) {
 			func(context.Context, struct{}, fantasy.ToolCall) (fantasy.ToolResponse, error) {
 				return fantasy.ToolResponse{}, nil
 			})
-		require.NoError(t, a.enforceWindowCap(big, nil, 3_000))
-		require.ErrorIs(t, a.enforceWindowCap(big, []fantasy.AgentTool{tool}, 3_000), ErrContextWindowExceeded)
+		require.NoError(t, a.enforceWindowCap("", big, nil, 3_000))
+		require.ErrorIs(t, a.enforceWindowCap("", big, []fantasy.AgentTool{tool}, 3_000), ErrContextWindowExceeded)
 	})
 }
 
@@ -1029,24 +1029,24 @@ func TestWindowOverflow(t *testing.T) {
 	t.Run("under window fits", func(t *testing.T) {
 		t.Parallel()
 		a := pressureTestAgent(64_000, 4_000)
-		require.False(t, a.windowOverflow(small, nil, 4_000))
+		require.False(t, a.windowOverflow("", small, nil, 4_000))
 	})
 	t.Run("input plus output over window trips", func(t *testing.T) {
 		t.Parallel()
 		// ~60K input fits with a 4K completion but not an 8K one.
 		a := pressureTestAgent(64_000, 4_000)
-		require.False(t, a.windowOverflow(big, nil, 3_000))
-		require.True(t, a.windowOverflow(big, nil, 8_000))
+		require.False(t, a.windowOverflow("", big, nil, 3_000))
+		require.True(t, a.windowOverflow("", big, nil, 8_000))
 	})
 	t.Run("unknown window never trips", func(t *testing.T) {
 		t.Parallel()
 		a := pressureTestAgent(0, 4_000)
-		require.False(t, a.windowOverflow(big, nil, 4_000))
+		require.False(t, a.windowOverflow("", big, nil, 4_000))
 	})
 	t.Run("unset output budget uses catalog default", func(t *testing.T) {
 		t.Parallel()
 		a := pressureTestAgent(64_000, 8_000)
-		require.True(t, a.windowOverflow(big, nil, 0))
+		require.True(t, a.windowOverflow("", big, nil, 0))
 	})
 	t.Run("tool schemas count against the window", func(t *testing.T) {
 		t.Parallel()
@@ -1055,8 +1055,8 @@ func TestWindowOverflow(t *testing.T) {
 			func(context.Context, struct{}, fantasy.ToolCall) (fantasy.ToolResponse, error) {
 				return fantasy.ToolResponse{}, nil
 			})
-		require.False(t, a.windowOverflow(big, nil, 3_000))
-		require.True(t, a.windowOverflow(big, []fantasy.AgentTool{tool}, 3_000))
+		require.False(t, a.windowOverflow("", big, nil, 3_000))
+		require.True(t, a.windowOverflow("", big, []fantasy.AgentTool{tool}, 3_000))
 	})
 }
 

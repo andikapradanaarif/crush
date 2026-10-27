@@ -42,6 +42,7 @@ var (
 	ErrServerNotIdle           = errors.New("server is hosting live workspaces")
 	ErrClientRetired           = errors.New("client has been retired")
 	ErrChannelOptInMismatch    = errors.New("requested channels differ from the existing workspace; channels are an explicit opt-in and are not shared across duplicate creates")
+	ErrInvalidModelSelection   = errors.New("model selection could not be built")
 )
 
 // DefaultCreateGrace is the window in which a client must open an SSE
@@ -215,6 +216,18 @@ type Workspace struct {
 	// never go stale; the cache keeps a DB read per event per client
 	// off the SSE hot path.
 	rootCache sync.Map // map[string]string
+
+	// modelOverrideMu serializes SetSessionModel calls — the
+	// pin/persist pair must stay ordered or a concurrent call can
+	// leave the in-memory pin and the row pointing at different
+	// selections.
+	modelOverrideMu sync.Mutex
+
+	// permOverrideMu serializes SetSessionPermissionsSkip calls —
+	// same ordering requirement as modelOverrideMu: two writers
+	// interleaving persist/map-update could diverge the map from
+	// the row until the next write.
+	permOverrideMu sync.Mutex
 
 	// shutdownFn is the function invoked by [Backend.teardown] to
 	// release the workspace's underlying resources. It defaults to the
@@ -814,6 +827,12 @@ func (b *Backend) detachStream(ws *Workspace, clientID string) {
 	}
 }
 
+// busyTeardownRecheck is how long a busy workspace's deferred
+// teardown waits before re-checking. The run finishing is the event
+// being waited on, so the interval only bounds detection latency —
+// kept short, since each pass is two map reads.
+const busyTeardownRecheck = 250 * time.Millisecond
+
 // teardown removes the workspace from the index, shuts down its
 // underlying [app.App], and triggers a server shutdown if it was the
 // last workspace alive.
@@ -825,8 +844,22 @@ func (b *Backend) detachStream(ws *Workspace, clientID string) {
 // so it is mutually exclusive with this critical section). teardown
 // re-checks under both locks (in the canonical b.mu -> ws.clientsMu
 // order) and aborts if the workspace has been re-claimed.
+//
+// A workspace with a run in flight is NOT torn down: invokeShutdown
+// cancels the workspace context, which would abort the run mid-turn
+// (surfacing to the run as a spurious user cancellation). Instead
+// teardown re-arms a re-check and returns — the workspace stays
+// registered and the deferred pass tears it down once the run
+// finishes. The membership check keeps a re-armed pass from
+// double-shutting-down against a concurrent successful teardown.
 func (b *Backend) teardown(ws *Workspace) {
 	b.mu.Lock()
+	if _, ok := b.workspaces.Get(ws.ID); !ok {
+		// Already removed by a concurrent teardown — teardown is
+		// idempotent.
+		b.mu.Unlock()
+		return
+	}
 	ws.clientsMu.Lock()
 	if len(ws.clients) > 0 {
 		// Race: a CreateWorkspace re-registered a client
@@ -837,6 +870,30 @@ func (b *Backend) teardown(ws *Workspace) {
 		return
 	}
 	ws.clientsMu.Unlock()
+	// Residual TOCTOU (best-effort): IsBusy is sampled under b.mu but
+	// ws.closing is only latched later inside invokeShutdown. A
+	// SendMessage that resolved ws before workspaces.Del can slip a
+	// BeginAccepted into that gap and get cancelled by the shutdown.
+	// Closing it fully would mean latching closing before the busy
+	// check and un-latching on defer — the remaining window is
+	// sub-millisecond and self-limiting.
+	//
+	// Deliberately unbounded: there is no deferral cap, so a wedged
+	// run keeps its workspace (LSP/MCP/DB) alive forever — "busy
+	// forever = alive forever". That trade is intentional: killing a
+	// live run is the bug this guard exists to fix, and a wedged run
+	// is visible to the user who can cancel it. An escape hatch would
+	// reintroduce mid-run cancellation under a timer.
+	if ws.App != nil && ws.AgentCoordinator != nil && ws.AgentCoordinator.IsBusy() {
+		b.mu.Unlock()
+		slog.Debug("Workspace busy, deferring teardown",
+			"workspace_id", ws.ID,
+			"recheck", busyTeardownRecheck)
+		time.AfterFunc(busyTeardownRecheck, func() {
+			b.teardown(ws)
+		})
+		return
+	}
 	if existing, ok := b.pathIndex[ws.resolvedPath]; ok && existing == ws.ID {
 		delete(b.pathIndex, ws.resolvedPath)
 	}

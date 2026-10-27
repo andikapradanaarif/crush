@@ -5,11 +5,15 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/stretchr/testify/require"
 )
+
+// ptr returns a *bool for the tri-state session override API.
+func ptr(v bool) *bool { return &v }
 
 // awaitPermissionsSkipChanged drains events until a
 // PermissionsSkipChanged is received for the given workspace ID, or
@@ -63,7 +67,7 @@ func TestSetSessionPermissionsSkip_PublishesEvent(t *testing.T) {
 
 	// Arm the session flag: event carries the session ID and the
 	// readback reports it armed.
-	require.NoError(t, b.SetSessionPermissionsSkip(ctx, ws.ID, sess.ID, true))
+	require.NoError(t, b.SetSessionPermissionsSkip(ctx, ws.ID, sess.ID, ptr(true)))
 	payload := awaitPermissionsSkipChanged(t, evc, ws.ID, sess.ID)
 	require.True(t, payload.Skip)
 
@@ -72,7 +76,7 @@ func TestSetSessionPermissionsSkip_PublishesEvent(t *testing.T) {
 	require.True(t, skip)
 
 	// Disarm: the flag flips back and the event follows.
-	require.NoError(t, b.SetSessionPermissionsSkip(ctx, ws.ID, sess.ID, false))
+	require.NoError(t, b.SetSessionPermissionsSkip(ctx, ws.ID, sess.ID, ptr(false)))
 	payload = awaitPermissionsSkipChanged(t, evc, ws.ID, sess.ID)
 	require.False(t, payload.Skip)
 
@@ -80,15 +84,37 @@ func TestSetSessionPermissionsSkip_PublishesEvent(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, skip)
 
-	// The workspace-global flag is orthogonal: arming it neither
-	// flips nor reports through the per-session readback.
+	// Clear: a nil override returns the session to inherit mode —
+	// the persisted row must read NULL again. The clear publishes
+	// the effective state like any other transition.
+	require.NoError(t, b.SetSessionPermissionsSkip(ctx, ws.ID, sess.ID, nil))
+	payload = awaitPermissionsSkipChanged(t, evc, ws.ID, sess.ID)
+	require.False(t, payload.Skip, "cleared override inherits the unset workspace flag")
+	reloaded, err := ws.Sessions.Get(ctx, sess.ID)
+	require.NoError(t, err)
+	require.Nil(t, reloaded.PermissionSkip, "cleared override must persist as NULL")
+
+	// The workspace-global flag is orthogonal to the persisted
+	// override: with no override the readback reports the effective
+	// state (true under workspace skip), and disarming the workspace
+	// flag shows nothing was persisted per-session.
 	require.NoError(t, b.SetPermissionsSkip(ws.ID, true))
 	payload = awaitPermissionsSkipChanged(t, evc, ws.ID, "")
 	require.True(t, payload.Skip)
 
 	skip, err = b.GetSessionPermissionsSkip(ctx, ws.ID, sess.ID)
 	require.NoError(t, err)
-	require.False(t, skip, "global skip must not leak into the per-session flag")
+	require.True(t, skip, "unflagged session inherits the workspace flag")
+
+	require.NoError(t, b.SetPermissionsSkip(ws.ID, false))
+	payload = awaitPermissionsSkipChanged(t, evc, ws.ID, "")
+	require.False(t, payload.Skip)
+	skip, err = b.GetSessionPermissionsSkip(ctx, ws.ID, sess.ID)
+	require.NoError(t, err)
+	require.False(t, skip, "workspace skip must not leave the session flag armed")
+	reloaded, err = ws.Sessions.Get(ctx, sess.ID)
+	require.NoError(t, err)
+	require.Nil(t, reloaded.PermissionSkip, "workspace skip must not persist a session override")
 }
 
 // TestSessionPermissionsSkip_UnknownSession verifies the
@@ -98,7 +124,7 @@ func TestSessionPermissionsSkip_UnknownSession(t *testing.T) {
 	b, ws, evc := newPublishingWorkspace(t)
 	ctx := t.Context()
 
-	require.Error(t, b.SetSessionPermissionsSkip(ctx, ws.ID, "no-such-session", true))
+	require.Error(t, b.SetSessionPermissionsSkip(ctx, ws.ID, "no-such-session", ptr(true)))
 	_, err := b.GetSessionPermissionsSkip(ctx, ws.ID, "no-such-session")
 	require.Error(t, err)
 
@@ -227,4 +253,37 @@ func TestGetSessionPendingPermissions(t *testing.T) {
 
 	_, err = b.GetSessionPendingPermissions(ctx, ws.ID, "no-such-session")
 	require.Error(t, err)
+}
+
+// TestSetSessionModel covers the session-scoped model override:
+// unknown sessions are rejected, a valid selection persists as JSON
+// and a nil selection clears the row back to inherit.
+func TestSetSessionModel(t *testing.T) {
+	b, ws, _ := newPublishingWorkspace(t)
+	ctx := t.Context()
+
+	// The publishing fixture has no agent config, so its coordinator
+	// is nil — stub one. Runtime model building is covered by the
+	// agent-level override tests; here the persist/clear path and
+	// session filtering are under test.
+	ws.AgentCoordinator = &busyCoordinator{}
+
+	sel := &config.SelectedModel{Provider: "openai", Model: "gpt-4o"}
+	require.Error(t, b.SetSessionModel(ctx, ws.ID, "no-such-session", sel),
+		"unknown session must be rejected")
+
+	sess, err := ws.Sessions.Create(ctx, "model session")
+	require.NoError(t, err)
+
+	require.NoError(t, b.SetSessionModel(ctx, ws.ID, sess.ID, sel))
+	reloaded, err := ws.Sessions.Get(ctx, sess.ID)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"provider":"openai","model":"gpt-4o"}`,
+		string(reloaded.ModelOverride))
+
+	// Clearing restores inherit: the row reads NULL again.
+	require.NoError(t, b.SetSessionModel(ctx, ws.ID, sess.ID, nil))
+	reloaded, err = ws.Sessions.Get(ctx, sess.ID)
+	require.NoError(t, err)
+	require.Nil(t, reloaded.ModelOverride)
 }

@@ -783,7 +783,7 @@ func (c *Client) CancelQuestionBatch(ctx context.Context, id string) (bool, erro
 
 // SetPermissionsSkipRequests sets the skip-requests flag for a workspace.
 func (c *Client) SetPermissionsSkipRequests(ctx context.Context, id string, skip bool) error {
-	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/permissions/skip", id), nil, jsonBody(proto.PermissionSkipRequest{Skip: skip}), http.Header{"Content-Type": []string{"application/json"}})
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/permissions/skip", id), nil, jsonBody(proto.PermissionSkipRequest{Skip: &skip}), http.Header{"Content-Type": []string{"application/json"}})
 	if err != nil {
 		return fmt.Errorf("failed to set permissions skip requests: %w", err)
 	}
@@ -808,12 +808,13 @@ func (c *Client) GetPermissionsSkipRequests(ctx context.Context, id string) (boo
 	if err := json.NewDecoder(rsp.Body).Decode(&skip); err != nil {
 		return false, fmt.Errorf("failed to decode permissions skip requests: %w", err)
 	}
-	return skip.Skip, nil
+	return skip.Skip != nil && *skip.Skip, nil
 }
 
-// SetSessionPermissionsSkip sets the auto-approve flag for a single
-// session in a workspace.
-func (c *Client) SetSessionPermissionsSkip(ctx context.Context, id, sid string, skip bool) error {
+// SetSessionPermissionsSkip sets or clears the auto-approve override
+// for a single session in a workspace. A nil skip clears the override
+// so the session inherits the workspace flag.
+func (c *Client) SetSessionPermissionsSkip(ctx context.Context, id, sid string, skip *bool) error {
 	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/sessions/%s/permissions/skip", id, sid), nil, jsonBody(proto.PermissionSkipRequest{Skip: skip}), http.Header{"Content-Type": []string{"application/json"}})
 	if err != nil {
 		return fmt.Errorf("failed to set session permissions skip: %w", err)
@@ -840,7 +841,23 @@ func (c *Client) GetSessionPermissionsSkip(ctx context.Context, id, sid string) 
 	if err := json.NewDecoder(rsp.Body).Decode(&skip); err != nil {
 		return false, fmt.Errorf("failed to decode session permissions skip: %w", err)
 	}
-	return skip.Skip, nil
+	return skip.Skip != nil && *skip.Skip, nil
+}
+
+// SetSessionModel sets or clears a session's large-model override. A
+// nil model clears the override so the session follows the shared
+// config selection. The change applies to the next run in that
+// session and writes no global config.
+func (c *Client) SetSessionModel(ctx context.Context, id, sid string, model *config.SelectedModel) error {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/sessions/%s/model", id, sid), nil, jsonBody(proto.SessionModelRequest{Model: model}), http.Header{"Content-Type": []string{"application/json"}})
+	if err != nil {
+		return fmt.Errorf("failed to set session model: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to set session model: status code %d", rsp.StatusCode)
+	}
+	return nil
 }
 
 // GetSessionPendingPermissions retrieves the permission requests

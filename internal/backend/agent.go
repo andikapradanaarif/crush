@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 
 	"github.com/charmbracelet/crush/internal/agent"
@@ -298,6 +299,66 @@ func (b *Backend) QueuedPromptsList(workspaceID, sessionID string) ([]string, er
 	}
 
 	return ws.AgentCoordinator.QueuedPromptsList(sessionID), nil
+}
+
+// SetSessionModel sets or clears a session's large-model override.
+// The selection persists on the session row — it survives workspace
+// process restarts — and is resolved lazily per run, so the override
+// applies to the next run while an in-flight run keeps the model it
+// started with. Only the large slot is pinned; small and summary stay
+// shared. A nil model clears the override so the session follows the
+// shared config selection. No global config is written.
+func (b *Backend) SetSessionModel(ctx context.Context, workspaceID, sessionID string, model *config.SelectedModel) error {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return err
+	}
+
+	// Serialize the pin/persist pair — concurrent calls must not
+	// interleave map and row writes in different orders.
+	ws.modelOverrideMu.Lock()
+	defer ws.modelOverrideMu.Unlock()
+
+	if ws.AgentCoordinator == nil {
+		return ErrAgentNotInitialized
+	}
+	// Reject unknown sessions before touching the runtime pin —
+	// otherwise the coordinator would cache an override for a session
+	// SetModelOverride then refuses to persist.
+	if _, err := ws.Sessions.Get(ctx, sessionID); err != nil {
+		return err
+	}
+	raw, err := proto.SelectedModelJSON(model)
+	if err != nil {
+		return err
+	}
+	if model == nil {
+		// Clear path: persist NULL before dropping the pin. The other
+		// order leaves a window where a concurrent models() miss
+		// rehydrates the still-present row and re-caches the cleared
+		// override — pinned until restart. Persist-first bounds the
+		// staleness to the map hit until the Del lands.
+		if _, err := ws.Sessions.SetModelOverride(ctx, sessionID, raw); err != nil {
+			return err
+		}
+		ws.AgentCoordinator.ClearSessionModelOverride(sessionID)
+		return nil
+	}
+	// Set path: pin first so a model that fails to build never reaches
+	// the row — otherwise the row would point at an override every
+	// restart also fails to build.
+	if err := ws.AgentCoordinator.SetSessionModelOverride(ctx, sessionID, *model); err != nil {
+		// A selection that fails to build is a bad request (unknown
+		// provider/model, unconfigured creds), not a server fault.
+		return fmt.Errorf("%w: %w", ErrInvalidModelSelection, err)
+	}
+	if _, err := ws.Sessions.SetModelOverride(ctx, sessionID, raw); err != nil {
+		// Roll the pin back: the next miss rehydrates whatever the row
+		// still holds, restoring the pre-set state.
+		ws.AgentCoordinator.ClearSessionModelOverride(sessionID)
+		return err
+	}
+	return nil
 }
 
 // GetDefaultSmallModel returns the default small model for a provider.

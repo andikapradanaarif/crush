@@ -239,9 +239,9 @@ func main() {
 }
 
 // fixedModels returns a model source that always hands out the same pair.
-func fixedModels(large, small Model) func() ModelSet {
-	return func() ModelSet { return ModelSet{Large: large, Small: small} }
+func fixedModels(large, small Model) func(string) ModelSet {
+	return func(string) ModelSet { return ModelSet{Large: large, Small: small} }
 }
 
 // noModels is the model source for tests that never reach a provider.
-func noModels() ModelSet { return ModelSet{} }
+func noModels(string) ModelSet { return ModelSet{} }

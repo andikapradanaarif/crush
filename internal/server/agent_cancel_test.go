@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/backend"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/google/uuid"
@@ -89,6 +90,10 @@ func (s *runCoordinator) Model() agent.Model                            { return
 func (s *runCoordinator) UpdateModels(context.Context) error            { return nil }
 func (s *runCoordinator) UpdateSummaryModel(context.Context) error      { return nil }
 func (s *runCoordinator) GenerateTitle(context.Context, string, string) {}
+func (s *runCoordinator) SetSessionModelOverride(context.Context, string, config.SelectedModel) error {
+	return nil
+}
+func (s *runCoordinator) ClearSessionModelOverride(string) {}
 func (s *runCoordinator) ApprovePlan(_ context.Context, sessionID string) error {
 	s.approvedSession.Store(sessionID)
 	return s.approvePlanErr

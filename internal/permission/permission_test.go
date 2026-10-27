@@ -777,8 +777,14 @@ func TestSessionAutoApprove(t *testing.T) {
 		granted, err := service.Request(t.Context(), newRequest("s-plain", "call-1"))
 		require.NoError(t, err)
 		assert.True(t, granted, "global skip must approve unflagged sessions")
+		// With no session override, SessionAutoApproves reports the
+		// effective state — true while skip is on. Turning skip off
+		// proves no per-session flag was armed by the skipped request.
+		assert.True(t, service.SessionAutoApproves("s-plain"),
+			"effective state follows the workspace flag for unflagged sessions")
+		service.SetSkipRequests(false)
 		assert.False(t, service.SessionAutoApproves("s-plain"),
-			"global skip must not flip the per-session flag")
+			"global skip must not leave a per-session flag armed")
 	})
 }
 
@@ -998,8 +1004,13 @@ func TestRequest_CancelAfterGrantEmitsNoWithdrawal(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("request-start notification never published")
 	}
-	pending := service.PendingRequests()
-	require.Len(t, pending, 1)
+	// The notification precedes the pending-map insert, so wait for the
+	// entry rather than asserting immediately.
+	var pending []PermissionRequest
+	require.Eventually(t, func() bool {
+		pending = service.PendingRequests()
+		return len(pending) == 1
+	}, 2*time.Second, 5*time.Millisecond)
 	require.True(t, service.Grant(pending[0]))
 
 	// Consume the Granted notification, then cancel. Whichever select
@@ -1057,4 +1068,119 @@ func TestNotificationsCarrySessionID(t *testing.T) {
 	second := <-notifications
 	assert.Equal(t, "s-notify", second.Payload.SessionID)
 	assert.True(t, second.Payload.Granted)
+}
+
+// TestSessionOverride_PersistedLookupRestart proves a persisted
+// per-session override is honored by a fresh service instance: the
+// hot-read map starts empty and the WithSessionOverride lookup
+// rehydrates the tri-state on first use. The lookup stands in for the
+// session row read app wires in production.
+func TestSessionOverride_PersistedLookupRestart(t *testing.T) {
+	t.Parallel()
+	persisted := map[string]*bool{"s1": ptrBool(true), "s2": ptrBool(false)}
+	lookup := func(sessionID string) (*bool, error) { return persisted[sessionID], nil }
+
+	// "Restart": a new service whose in-memory map is empty.
+	svc := NewPermissionService("/tmp", false, nil, WithSessionOverride(lookup))
+	require.True(t, svc.SessionAutoApproves("s1"),
+		"persisted on-override must auto-approve without workspace skip")
+	require.False(t, svc.SessionAutoApproves("s2"),
+		"persisted off-override must prompt without workspace skip")
+	require.False(t, svc.SessionAutoApproves("s3"),
+		"no override inherits the workspace flag")
+}
+
+// TestSessionOverride_ResolutionOrder pins the precedence: session
+// override → workspace skip → prompt. Explicit on beats a workspace
+// prompt; explicit off beats a workspace skip.
+func TestSessionOverride_ResolutionOrder(t *testing.T) {
+	t.Parallel()
+
+	// Session on + workspace off → auto-approve.
+	svc := NewPermissionService("/tmp", false, nil,
+		WithSessionOverride(func(string) (*bool, error) { return ptrBool(true), nil }))
+	granted, err := svc.Request(t.Context(), CreatePermissionRequest{
+		SessionID: "s1", ToolCallID: "c1", ToolName: "bash",
+		Action: "execute", Path: "/tmp",
+	})
+	require.NoError(t, err)
+	require.True(t, granted)
+
+	// Session off + workspace on → prompts (the request must park).
+	svc2 := NewPermissionService("/tmp", true, nil,
+		WithSessionOverride(func(string) (*bool, error) { return ptrBool(false), nil }))
+	done := make(chan struct{})
+	go func() {
+		_, _ = svc2.Request(t.Context(), CreatePermissionRequest{
+			SessionID: "s1", ToolCallID: "c2", ToolName: "bash",
+			Action: "execute", Path: "/tmp",
+		})
+		close(done)
+	}()
+	require.Eventually(t, func() bool {
+		return len(svc2.PendingRequests()) == 1
+	}, 2*time.Second, 10*time.Millisecond,
+		"explicit session off must force a prompt under workspace skip")
+	select {
+	case <-done:
+		t.Fatal("request must stay parked awaiting a decision")
+	default:
+	}
+
+	// No override + workspace on → auto-approve via inheritance.
+	svc3 := NewPermissionService("/tmp", true, nil,
+		WithSessionOverride(func(string) (*bool, error) { return nil, nil }))
+	granted, err = svc3.Request(t.Context(), CreatePermissionRequest{
+		SessionID: "s1", ToolCallID: "c3", ToolName: "bash",
+		Action: "execute", Path: "/tmp",
+	})
+	require.NoError(t, err)
+	require.True(t, granted)
+}
+
+func ptrBool(v bool) *bool { return &v }
+
+// TestSessionOverride_NegativeCaches pins the tombstone: a session
+// with no persisted override must not re-read the store on every
+// resolution — the nil verdict caches like a set value does.
+func TestSessionOverride_NegativeCaches(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	svc := NewPermissionService("/tmp", false, nil,
+		WithSessionOverride(func(string) (*bool, error) {
+			calls.Add(1)
+			return nil, nil
+		}))
+
+	svc.SessionAutoApproves("s1")
+	svc.SessionAutoApproves("s1")
+	require.Equal(t, int32(1), calls.Load(),
+		"a nil lookup must tombstone so repeat resolutions stay in memory")
+
+	// The Request path consults the same cache — a parked request on
+	// an unflagged session must not reach the store at all after the
+	// first resolution.
+	done := make(chan bool, 1)
+	go func() {
+		granted, _ := svc.Request(t.Context(), CreatePermissionRequest{
+			SessionID: "s1", ToolCallID: "c1", ToolName: "bash",
+			Action: "execute", Path: "/tmp",
+		})
+		done <- granted
+	}()
+	require.Eventually(t, func() bool {
+		return len(svc.PendingRequests()) == 1
+	}, 2*time.Second, 10*time.Millisecond)
+	require.True(t, svc.Grant(svc.PendingRequests()[0]))
+	require.True(t, <-done)
+	require.Equal(t, int32(1), calls.Load())
+
+	// A Set clears the tombstone so a changed row is re-read — the
+	// tombstone only lives while nothing overrides it.
+	svc.SetSessionAutoApprove("s1", false)
+	require.True(t, svc.SessionAutoApproves("s1") == false)
+	svc.ClearSessionAutoApprove("s1")
+	svc.SessionAutoApproves("s1")
+	require.Equal(t, int32(2), calls.Load(),
+		"clearing the in-memory state must invalidate the tombstone")
 }

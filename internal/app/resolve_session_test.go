@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -62,6 +63,14 @@ func (m *mockSessionService) Save(_ context.Context, s session.Session) (session
 
 func (m *mockSessionService) SetChannel(_ context.Context, sessionID, channel string) (session.Session, error) {
 	return session.Session{ID: sessionID, Channel: channel}, nil
+}
+
+func (m *mockSessionService) SetPermissionSkip(_ context.Context, sessionID string, skip *bool) (session.Session, error) {
+	return session.Session{ID: sessionID, PermissionSkip: skip}, nil
+}
+
+func (m *mockSessionService) SetModelOverride(_ context.Context, sessionID string, model json.RawMessage) (session.Session, error) {
+	return session.Session{ID: sessionID, ModelOverride: model}, nil
 }
 
 func (m *mockSessionService) UpdateTitleAndUsage(context.Context, string, string, int64, int64, float64) error {

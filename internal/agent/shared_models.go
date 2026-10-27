@@ -65,8 +65,8 @@ func (c *coordinator) smallOnlyModels() ModelSet {
 // currentBuildOf returns the latest build of the model a turn started with, so
 // a retry gets a refreshed credential but a model switch waits for the next
 // turn.
-func (a *sessionAgent) currentBuildOf(started Model) fantasy.LanguageModel {
-	m := a.models().Large
+func (a *sessionAgent) currentBuildOf(sessionID string, started Model) fantasy.LanguageModel {
+	m := a.models(sessionID).Large
 	if m.ModelCfg.Provider != started.ModelCfg.Provider || m.ModelCfg.Model != started.ModelCfg.Model {
 		return started.Model
 	}

@@ -172,6 +172,10 @@ func (c *recordingCoordinator) SetMainAgent(string) error                     { 
 func (c *recordingCoordinator) ApprovePlan(context.Context, string) error     { return nil }
 func (c *recordingCoordinator) UpdateSummaryModel(context.Context) error      { return nil }
 func (c *recordingCoordinator) GenerateTitle(context.Context, string, string) {}
+func (c *recordingCoordinator) SetSessionModelOverride(context.Context, string, config.SelectedModel) error {
+	return nil
+}
+func (c *recordingCoordinator) ClearSessionModelOverride(string) {}
 
 // fullFakeSessions adapts fakeChannelSessions to the full session.Service
 // interface by embedding it; only the channelSessionStore subset is

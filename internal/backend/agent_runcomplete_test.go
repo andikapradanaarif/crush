@@ -9,6 +9,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/app"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/google/uuid"
@@ -51,6 +52,10 @@ func (c *errorCoordinator) UpdateSummaryModel(context.Context) error          { 
 func (c *errorCoordinator) ApprovePlan(context.Context, string) error         { return nil }
 func (c *errorCoordinator) SetMainAgent(string) error                         { return nil }
 func (c *errorCoordinator) GenerateTitle(context.Context, string, string)     {}
+func (c *errorCoordinator) SetSessionModelOverride(context.Context, string, config.SelectedModel) error {
+	return nil
+}
+func (c *errorCoordinator) ClearSessionModelOverride(string) {}
 
 // insertRunCompleteWorkspace installs a workspace backed by a real
 // app.App (so the runCompletions broker exists) with the given

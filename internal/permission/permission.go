@@ -96,16 +96,22 @@ type Service interface {
 	// resolved; a request whose waiter was cancelled is not returned.
 	PendingRequests() []PermissionRequest
 	AutoApproveSession(sessionID string)
-	// SetSessionAutoApprove enables or disables blanket auto-approval
-	// for all permission requests raised on the given session. Unlike
-	// GrantPersistent it takes effect without answering a pending
-	// request, so remote clients can arm or disarm a session directly.
-	// The flag is checked at Request() entry — arming does not resolve
-	// a request that is already awaiting a decision; that request
-	// still needs a Grant/Deny (same semantics as the global skip).
+	// SetSessionAutoApprove sets the session's auto-approve override.
+	// Unlike GrantPersistent it takes effect without answering a
+	// pending request, so remote clients can arm or disarm a session
+	// directly. The flag is checked at Request() entry — arming does
+	// not resolve a request that is already awaiting a decision; that
+	// request still needs a Grant/Deny (same semantics as the global
+	// skip). approve=false is an explicit "prompt even if the
+	// workspace skips" override, not a cleared flag — use
+	// ClearSessionAutoApprove to return the session to inherit mode.
 	SetSessionAutoApprove(sessionID string, approve bool)
-	// SessionAutoApproves reports whether the given session currently
-	// auto-approves every permission request.
+	// ClearSessionAutoApprove removes the session's override so its
+	// requests follow the workspace-level skip flag again.
+	ClearSessionAutoApprove(sessionID string)
+	// SessionAutoApproves reports whether permission requests on the
+	// given session resolve without prompting: the session's override
+	// when one is set, otherwise the workspace-level skip flag.
 	SessionAutoApproves(sessionID string) bool
 	SetSkipRequests(skip bool)
 	SkipRequests() bool
@@ -146,8 +152,19 @@ type permissionService struct {
 	pendingRequests       *csync.Map[string, pendingRequest]
 	autoApproveSessions   map[string]bool
 	autoApproveSessionsMu sync.RWMutex
-	skip                  atomic.Bool
-	allowedTools          []string
+	// sessionOverrideMisses tombstones sessions whose persisted
+	// override lookup came back nil — without it every Request on an
+	// unflagged session would re-read the session row. Guarded by
+	// autoApproveSessionsMu alongside the map it complements.
+	sessionOverrideMisses map[string]struct{}
+	// sessionOverrideGen counts Set/Clear mutations per session. A
+	// lazy seed captures it before the store read and re-verifies
+	// under the write lock — a bump means a writer interleaved, so the
+	// stale store read must not be seeded (the resurrect-race: read
+	// old row → writer persists+clears → seed resurrects it).
+	sessionOverrideGen map[string]uint64
+	skip               atomic.Bool
+	allowedTools       []string
 
 	// requestMu serializes request registration and publishing so
 	// concurrent calls emit events in a deterministic order. It is
@@ -156,6 +173,12 @@ type permissionService struct {
 	requestMu       sync.Mutex
 	activeRequest   *PermissionRequest
 	activeRequestMu sync.Mutex
+
+	// sessionOverride resolves a session's persisted auto-approve
+	// override on a map miss — restart rehydration without a startup
+	// scan. Nil disables lookup; a nil return means the row carries
+	// no override (or the session is unknown).
+	sessionOverride func(sessionID string) (*bool, error)
 }
 
 // resolve atomically removes the pending request entry for the given
@@ -243,9 +266,22 @@ func (s *permissionService) Deny(permission PermissionRequest) bool {
 }
 
 func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRequest) (bool, error) {
-	if s.skip.Load() {
+	// Resolution order: the session's persisted override wins over the
+	// workspace flag — an explicit off forces prompts even under a
+	// workspace skip, and an absent override inherits the flag. An
+	// explicit on falls through to registerRequest's auto-approve path
+	// (the lookup already seeded the map) so it still emits
+	// request-start + granted like any live approval.
+	_, hasOverride := s.sessionAutoApproveOverride(opts.SessionID)
+	if !hasOverride && s.skip.Load() {
 		return true, nil
 	}
+
+	// The explicit-off override governs only this blanket-skip layer.
+	// Narrower, deliberate approvals still bypass prompts under it:
+	// the allowlist below, remembered per-session grants, and hook
+	// approvals. "Force prompts" means no blanket approval, not "no
+	// approval mechanism may fire."
 
 	// Check if the tool/action combination is in the allowlist
 	commandKey := opts.ToolName + ":" + opts.Action
@@ -415,18 +451,77 @@ func (s *permissionService) AutoApproveSession(sessionID string) {
 
 func (s *permissionService) SetSessionAutoApprove(sessionID string, approve bool) {
 	s.autoApproveSessionsMu.Lock()
-	if approve {
-		s.autoApproveSessions[sessionID] = true
-	} else {
-		delete(s.autoApproveSessions, sessionID)
-	}
+	s.autoApproveSessions[sessionID] = approve
+	delete(s.sessionOverrideMisses, sessionID)
+	s.sessionOverrideGen[sessionID]++
 	s.autoApproveSessionsMu.Unlock()
 }
 
-func (s *permissionService) SessionAutoApproves(sessionID string) bool {
+func (s *permissionService) ClearSessionAutoApprove(sessionID string) {
+	s.autoApproveSessionsMu.Lock()
+	delete(s.autoApproveSessions, sessionID)
+	delete(s.sessionOverrideMisses, sessionID)
+	s.sessionOverrideGen[sessionID]++
+	s.autoApproveSessionsMu.Unlock()
+}
+
+// sessionAutoApproveOverride returns the session's explicit override
+// and whether one is set; absent means inherit the workspace flag. On
+// a map miss the persisted row is consulted (when a lookup is wired)
+// and the result seeded, so a restart honors overrides set before the
+// process died without a startup scan.
+func (s *permissionService) sessionAutoApproveOverride(sessionID string) (bool, bool) {
 	s.autoApproveSessionsMu.RLock()
-	defer s.autoApproveSessionsMu.RUnlock()
-	return s.autoApproveSessions[sessionID]
+	v, ok := s.autoApproveSessions[sessionID]
+	_, missed := s.sessionOverrideMisses[sessionID]
+	gen := s.sessionOverrideGen[sessionID]
+	s.autoApproveSessionsMu.RUnlock()
+	if ok || missed || s.sessionOverride == nil {
+		return v, ok
+	}
+	persisted, err := s.sessionOverride(sessionID)
+	if err != nil {
+		// Transient failure — retry next request rather than
+		// tombstone a suppression until restart. Fail closed while
+		// it's unreadable: reporting an explicit-off prompts, where
+		// reporting "no override" would let a workspace skip
+		// auto-approve a session that may be pinned restrictive.
+		return false, true
+	}
+	// Seed under the write lock so the store can't interleave with a
+	// concurrent Set/Clear — both hold the same mutex. If a writer
+	// landed first the seeded value is stale: re-check and keep the
+	// fresh one. A nil lookup seeds a tombstone instead so later
+	// requests skip the store read entirely.
+	s.autoApproveSessionsMu.Lock()
+	defer s.autoApproveSessionsMu.Unlock()
+	if v, ok := s.autoApproveSessions[sessionID]; ok {
+		return v, true
+	}
+	if _, ok := s.sessionOverrideMisses[sessionID]; ok {
+		return false, false
+	}
+	if s.sessionOverrideGen[sessionID] != gen {
+		// A Set/Clear interleaved with our store read — `persisted`
+		// may describe the row before it. The map is the final writer's
+		// state and it's empty, so the writer was a Clear: tombstone
+		// is the fresh verdict (the row is NULL).
+		s.sessionOverrideMisses[sessionID] = struct{}{}
+		return false, false
+	}
+	if persisted == nil {
+		s.sessionOverrideMisses[sessionID] = struct{}{}
+		return false, false
+	}
+	s.autoApproveSessions[sessionID] = *persisted
+	return *persisted, true
+}
+
+func (s *permissionService) SessionAutoApproves(sessionID string) bool {
+	if override, ok := s.sessionAutoApproveOverride(sessionID); ok {
+		return override
+	}
+	return s.skip.Load()
 }
 
 func (s *permissionService) SubscribeNotifications(ctx context.Context) <-chan pubsub.Event[PermissionNotification] {
@@ -441,15 +536,33 @@ func (s *permissionService) SkipRequests() bool {
 	return s.skip.Load()
 }
 
-func NewPermissionService(workingDir string, skip bool, allowedTools []string) Service {
+// Option configures a permissionService at construction.
+type Option func(*permissionService)
+
+// WithSessionOverride wires a lookup that resolves a session's
+// persisted auto-approve override on a map miss — the restart
+// rehydration path. The lookup returns the row's tri-state: nil for
+// no override, non-nil for an explicit on/off.
+func WithSessionOverride(lookup func(sessionID string) (*bool, error)) Option {
+	return func(s *permissionService) {
+		s.sessionOverride = lookup
+	}
+}
+
+func NewPermissionService(workingDir string, skip bool, allowedTools []string, opts ...Option) Service {
 	svc := &permissionService{
-		Broker:              pubsub.NewBroker[PermissionRequest](),
-		notificationBroker:  pubsub.NewBroker[PermissionNotification](),
-		workingDir:          workingDir,
-		sessionPermissions:  csync.NewMap[PermissionKey, bool](),
-		autoApproveSessions: make(map[string]bool),
-		allowedTools:        allowedTools,
-		pendingRequests:     csync.NewMap[string, pendingRequest](),
+		Broker:                pubsub.NewBroker[PermissionRequest](),
+		notificationBroker:    pubsub.NewBroker[PermissionNotification](),
+		workingDir:            workingDir,
+		sessionPermissions:    csync.NewMap[PermissionKey, bool](),
+		autoApproveSessions:   make(map[string]bool),
+		sessionOverrideMisses: make(map[string]struct{}),
+		sessionOverrideGen:    make(map[string]uint64),
+		allowedTools:          allowedTools,
+		pendingRequests:       csync.NewMap[string, pendingRequest](),
+	}
+	for _, opt := range opts {
+		opt(svc)
 	}
 	svc.skip.Store(skip)
 	return svc
