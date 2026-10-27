@@ -96,6 +96,11 @@ func (b *Backend) SetSessionPermissionsSkip(ctx context.Context, workspaceID, se
 	if err != nil {
 		return err
 	}
+	// Persist before the in-memory update: a Request landing between
+	// the two resolves on the previous override for a sub-millisecond
+	// window. That direction fails safe — a prompt either way — while
+	// the reverse (map first, persist second) could briefly approve
+	// requests the row says should prompt.
 	if _, err := ws.Sessions.SetPermissionSkip(ctx, sessionID, skip); err != nil {
 		return err
 	}

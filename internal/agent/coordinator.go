@@ -2114,7 +2114,9 @@ func (c *coordinator) sessionModelOverride(sessionID string) (Model, bool) {
 		if err == nil {
 			// Cache the miss so later lookups skip the store read;
 			// SetSessionModelOverride writes through this map, so the
-			// marker cannot go stale.
+			// marker cannot go stale. A Get error stays uncached —
+			// transient failures should retry rather than pin the
+			// shared selection until restart.
 			c.modelOverrides.Set(sessionID, Model{})
 		}
 		return Model{}, false
@@ -2123,6 +2125,9 @@ func (c *coordinator) sessionModelOverride(sessionID string) (Model, bool) {
 	if err := json.Unmarshal(sess.ModelOverride, &sel); err != nil {
 		slog.Error("Failed to unmarshal persisted session model override",
 			"session_id", sessionID, "error", err)
+		// Deterministic failure — same bytes, same result. Cache the
+		// miss so this doesn't log on every models() call.
+		c.modelOverrides.Set(sessionID, Model{})
 		return Model{}, false
 	}
 	built, err := c.buildSelectedModel(context.Background(), "session override", sel, false)
@@ -2132,6 +2137,7 @@ func (c *coordinator) sessionModelOverride(sessionID string) (Model, bool) {
 			"provider", sel.Provider,
 			"model", sel.Model,
 			"error", err)
+		c.modelOverrides.Set(sessionID, Model{})
 		return Model{}, false
 	}
 	c.modelOverrides.Set(sessionID, built)

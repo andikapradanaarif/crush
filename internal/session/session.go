@@ -331,6 +331,11 @@ func (s *service) SetPermissionSkip(ctx context.Context, sessionID string, skip 
 // SetModelOverride persists the session's large-model override as JSON,
 // or clears it when model is nil or empty. The value is stored
 // verbatim — callers marshal the typed selection.
+//
+// Callers must go through backend.SetSessionModel rather than calling
+// this directly: the coordinator negative-caches "no override" per
+// session, and a write that bypasses it leaves that cached verdict
+// stale until restart.
 func (s *service) SetModelOverride(ctx context.Context, sessionID string, model json.RawMessage) (Session, error) {
 	var col sql.NullString
 	if len(model) > 0 {

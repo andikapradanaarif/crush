@@ -313,6 +313,11 @@ func (b *Backend) SetSessionModel(ctx context.Context, workspaceID, sessionID st
 		return err
 	}
 
+	// Serialize the pin/persist pair — concurrent calls must not
+	// interleave map and row writes in different orders.
+	ws.modelOverrideMu.Lock()
+	defer ws.modelOverrideMu.Unlock()
+
 	if ws.AgentCoordinator == nil {
 		return ErrAgentNotInitialized
 	}
@@ -322,22 +327,31 @@ func (b *Backend) SetSessionModel(ctx context.Context, workspaceID, sessionID st
 	if _, err := ws.Sessions.Get(ctx, sessionID); err != nil {
 		return err
 	}
-	// Pin first: a model that fails to build must not persist —
-	// otherwise the row would point at an override every restart
-	// also fails to build.
-	if model != nil {
-		if err := ws.AgentCoordinator.SetSessionModelOverride(ctx, sessionID, *model); err != nil {
-			return err
-		}
-	} else {
-		ws.AgentCoordinator.ClearSessionModelOverride(sessionID)
-	}
 	raw, err := proto.SelectedModelJSON(model)
 	if err != nil {
 		return err
 	}
+	if model == nil {
+		// Clear path: persist NULL before dropping the pin. The other
+		// order leaves a window where a concurrent models() miss
+		// rehydrates the still-present row and re-caches the cleared
+		// override — pinned until restart. Persist-first bounds the
+		// staleness to the map hit until the Del lands.
+		if _, err := ws.Sessions.SetModelOverride(ctx, sessionID, raw); err != nil {
+			return err
+		}
+		ws.AgentCoordinator.ClearSessionModelOverride(sessionID)
+		return nil
+	}
+	// Set path: pin first so a model that fails to build never reaches
+	// the row — otherwise the row would point at an override every
+	// restart also fails to build.
+	if err := ws.AgentCoordinator.SetSessionModelOverride(ctx, sessionID, *model); err != nil {
+		return err
+	}
 	if _, err := ws.Sessions.SetModelOverride(ctx, sessionID, raw); err != nil {
-		// Roll the runtime pin back so it can't diverge from the row.
+		// Roll the pin back: the next miss rehydrates whatever the row
+		// still holds, restoring the pre-set state.
 		ws.AgentCoordinator.ClearSessionModelOverride(sessionID)
 		return err
 	}

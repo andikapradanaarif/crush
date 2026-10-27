@@ -216,6 +216,12 @@ type Workspace struct {
 	// off the SSE hot path.
 	rootCache sync.Map // map[string]string
 
+	// modelOverrideMu serializes SetSessionModel calls — the
+	// pin/persist pair must stay ordered or a concurrent call can
+	// leave the in-memory pin and the row pointing at different
+	// selections.
+	modelOverrideMu sync.Mutex
+
 	// shutdownFn is the function invoked by [Backend.teardown] to
 	// release the workspace's underlying resources. It defaults to the
 	// embedded [app.App.Shutdown]; tests may override it to avoid

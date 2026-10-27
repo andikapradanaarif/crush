@@ -1321,7 +1321,11 @@ func protoToMCPEventType(t proto.MCPEventType) mcp.EventType {
 // should either extend session.Session or read them from the proto
 // payload directly before this conversion runs.
 func protoToSession(s proto.Session) session.Session {
-	modelOverride, _ := proto.SelectedModelJSON(s.ModelOverride)
+	modelOverride, err := proto.SelectedModelJSON(s.ModelOverride)
+	if err != nil {
+		slog.Error("Failed to marshal session model override from wire",
+			"session_id", s.ID, "error", err)
+	}
 	return session.Session{
 		ID:               s.ID,
 		ParentSessionID:  s.ParentSessionID,
@@ -1459,7 +1463,11 @@ func protoToFiles(files []proto.File) []history.File {
 }
 
 func sessionToProto(s session.Session) proto.Session {
-	modelOverride, _ := proto.SelectedModelFromJSON(s.ModelOverride)
+	modelOverride, err := proto.SelectedModelFromJSON(s.ModelOverride)
+	if err != nil {
+		slog.Error("Failed to unmarshal session model override for wire",
+			"session_id", s.ID, "error", err)
+	}
 	return proto.Session{
 		ID:               s.ID,
 		ParentSessionID:  s.ParentSessionID,

@@ -3669,14 +3669,19 @@ func (a *sessionAgent) CancelAll() {
 }
 
 func (a *sessionAgent) IsBusy() bool {
-	var busy bool
 	for ac := range a.activeRequests.Seq() {
 		if ac != nil {
-			busy = true
-			break
+			return true
 		}
 	}
-	return busy
+	// A queued prompt not yet promoted to an active request still
+	// counts — tearing down in that window would silently drop it.
+	for calls := range a.messageQueue.Seq() {
+		if len(calls) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *sessionAgent) IsSessionBusy(sessionID string) bool {

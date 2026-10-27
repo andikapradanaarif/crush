@@ -1139,3 +1139,48 @@ func TestSessionOverride_ResolutionOrder(t *testing.T) {
 }
 
 func ptrBool(v bool) *bool { return &v }
+
+// TestSessionOverride_NegativeCaches pins the tombstone: a session
+// with no persisted override must not re-read the store on every
+// resolution — the nil verdict caches like a set value does.
+func TestSessionOverride_NegativeCaches(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	svc := NewPermissionService("/tmp", false, nil,
+		WithSessionOverride(func(string) *bool {
+			calls.Add(1)
+			return nil
+		}))
+
+	svc.SessionAutoApproves("s1")
+	svc.SessionAutoApproves("s1")
+	require.Equal(t, int32(1), calls.Load(),
+		"a nil lookup must tombstone so repeat resolutions stay in memory")
+
+	// The Request path consults the same cache — a parked request on
+	// an unflagged session must not reach the store at all after the
+	// first resolution.
+	done := make(chan bool, 1)
+	go func() {
+		granted, _ := svc.Request(t.Context(), CreatePermissionRequest{
+			SessionID: "s1", ToolCallID: "c1", ToolName: "bash",
+			Action: "execute", Path: "/tmp",
+		})
+		done <- granted
+	}()
+	require.Eventually(t, func() bool {
+		return len(svc.PendingRequests()) == 1
+	}, 2*time.Second, 10*time.Millisecond)
+	require.True(t, svc.Grant(svc.PendingRequests()[0]))
+	require.True(t, <-done)
+	require.Equal(t, int32(1), calls.Load())
+
+	// A Set clears the tombstone so a changed row is re-read — the
+	// tombstone only lives while nothing overrides it.
+	svc.SetSessionAutoApprove("s1", false)
+	require.True(t, svc.SessionAutoApproves("s1") == false)
+	svc.ClearSessionAutoApprove("s1")
+	svc.SessionAutoApproves("s1")
+	require.Equal(t, int32(2), calls.Load(),
+		"clearing the in-memory state must invalidate the tombstone")
+}
