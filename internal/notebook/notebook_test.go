@@ -891,9 +891,9 @@ func TestCompact_PreCompactHookDeny(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	runner := hooks.NewRunner([]config.HookConfig{
-		{Command: `echo '{"decision":"deny","reason":"paused"}'`, Name: "blocker"},
-	}, dataDir, dataDir)
+	runner := hooks.NewRunner(hooks.Static(map[string][]config.HookConfig{
+		hooks.EventPreCompact: {{Command: `echo '{"decision":"deny","reason":"paused"}'`, Name: "blocker"}},
+	}), dataDir, dataDir)
 	svc := NewService(q, &mockGenerator{echo: true}, Options{
 		MaxEntryTokens:    10000,
 		MaxNotebookTokens: 5,
@@ -1051,9 +1051,9 @@ func TestCompact_StallWarnsAfterThreshold(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	runner := hooks.NewRunner([]config.HookConfig{
-		{Command: `echo '{"decision":"deny","reason":"paused"}'`, Name: "blocker"},
-	}, dataDir, dataDir)
+	runner := hooks.NewRunner(hooks.Static(map[string][]config.HookConfig{
+		hooks.EventPreCompact: {{Command: `echo '{"decision":"deny","reason":"paused"}'`, Name: "blocker"}},
+	}), dataDir, dataDir)
 	var reasons []string
 	svc := NewService(q, &mockGenerator{echo: true}, Options{
 		MaxEntryTokens: 10000,

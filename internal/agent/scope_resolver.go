@@ -236,7 +236,7 @@ func (r *llmScopeResolver) consult(ctx context.Context, model Model, prompt stri
 	// budget must survive a reasoning preamble plus the small JSON
 	// verdict.
 	tok := int64(1024)
-	if model.CatwalkCfg.CanReason {
+	if model.CatwalkCfg.CanReason() {
 		tok = max(tok, model.CatwalkCfg.DefaultMaxTokens)
 	}
 	resAgent := fantasy.NewAgent(

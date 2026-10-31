@@ -1,6 +1,7 @@
 package dialog
 
 import (
+	"cmp"
 	"errors"
 
 	"charm.land/bubbles/v2/help"
@@ -266,16 +267,17 @@ func (r *Reasoning) setReasoningItems() error {
 		return errors.New("model configuration not found")
 	}
 
-	if len(model.ReasoningLevels) == 0 {
+	levels := model.Reasoning.EffortLevels
+	if len(levels) == 0 {
 		return errors.New("no reasoning levels available")
 	}
 
 	currentEffort := selectedModel.ReasoningEffort
 	if currentEffort == "" {
-		currentEffort = model.DefaultReasoningEffort
+		currentEffort = model.Reasoning.DefaultEffortLevel
 	}
 
-	items := make([]list.FilterableItem, 0, len(model.ReasoningLevels)+1)
+	items := make([]list.FilterableItem, 0, len(levels)+1)
 	selectedIndex := 0
 	if r.sessionModel != nil {
 		// Revert entry: clears the effort on the session pin so runs
@@ -294,15 +296,16 @@ func (r *Reasoning) setReasoningItems() error {
 			selectedIndex = len(items) - 1
 		}
 	}
-	for _, effort := range model.ReasoningLevels {
+	for _, level := range levels {
+		display := cmp.Or(level.Display, common.FormatReasoningEffort(level.Value))
 		items = append(items, &ReasoningItem{
 			Versioned: list.NewVersioned(),
-			effort:    effort,
-			title:     common.FormatReasoningEffort(effort),
-			isCurrent: effort == currentEffort,
+			effort:    level.Value,
+			title:     display,
+			isCurrent: level.Value == currentEffort,
 			t:         r.com.Styles,
 		})
-		if effort == currentEffort {
+		if level.Value == currentEffort {
 			selectedIndex = len(items) - 1
 		}
 	}

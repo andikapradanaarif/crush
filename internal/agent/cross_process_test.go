@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"charm.land/fantasy"
 	notebooktool "github.com/charmbracelet/crush/internal/agent/tools/notebook"
 	"github.com/charmbracelet/crush/internal/db"
@@ -143,7 +143,6 @@ func (e *processEnv) agent(model fantasy.LanguageModel, priorTurns string) *sess
 	return NewSessionAgent(SessionAgentOptions{
 		Models:             fixedModels(m, m),
 		SystemPrompt:       "system",
-		IsYolo:             true,
 		Sessions:           e.sessions,
 		Messages:           e.messages,
 		Notebook:           e.notebook,

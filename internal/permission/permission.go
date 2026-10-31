@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
-	"sync/atomic"
 
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -35,6 +34,28 @@ func hookApproved(ctx context.Context, toolCallID string) bool {
 	return v == toolCallID
 }
 
+// PermissionMode represents the current permission mode.
+type PermissionMode int
+
+const (
+	// PermissionModeNormal prompts for all non-safe commands.
+	PermissionModeNormal PermissionMode = iota
+	// PermissionModeYolo auto-approves every request, including dangerous
+	// commands, but keeps the exec-time block list armed so a dangerous
+	// command that only surfaces once the shell runs it is still caught.
+	PermissionModeYolo
+	// PermissionModeSysadmin auto-approves every request and drops the
+	// exec-time block list as well, so nothing is checked at any point.
+	PermissionModeSysadmin
+)
+
+// SkipsPrompts reports whether the mode answers requests itself instead of
+// putting them in front of the user. Yolo and sysadmin both do; they part
+// ways only later, at exec time, over the block list.
+func (m PermissionMode) SkipsPrompts() bool {
+	return m == PermissionModeYolo || m == PermissionModeSysadmin
+}
+
 type CreatePermissionRequest struct {
 	SessionID   string `json:"session_id"`
 	ToolCallID  string `json:"tool_call_id"`
@@ -43,6 +64,11 @@ type CreatePermissionRequest struct {
 	Action      string `json:"action"`
 	Params      any    `json:"params"`
 	Path        string `json:"path"`
+	Danger      string `json:"danger,omitempty"`
+	// GrantKey narrows what "allow for this session" covers. Leave it empty
+	// when Path already says what is being acted on; set it when it does
+	// not, as for a shell command, where Path is only the directory.
+	GrantKey string `json:"grant_key,omitempty"`
 }
 
 type PermissionNotification struct {
@@ -50,11 +76,32 @@ type PermissionNotification struct {
 	ToolCallID string `json:"tool_call_id"`
 	Granted    bool   `json:"granted"`
 	Denied     bool   `json:"denied"`
-	// Cancelled marks a request whose waiter left without an answer
-	// (context cancelled) — a withdrawal, not a resolution. UIs use it
-	// to dismiss or purge prompts for requests that can no longer
-	// proceed.
-	Cancelled bool `json:"cancelled,omitempty"`
+	// Cancelled is set when the request was abandoned before a decision
+	// (the turn was cancelled while the prompt was open).
+	Cancelled bool `json:"cancelled"`
+}
+
+// Outcome is how a permission prompt the user saw was resolved.
+type Outcome string
+
+const (
+	OutcomeGranted   Outcome = "granted"
+	OutcomeDenied    Outcome = "denied"
+	OutcomeCancelled Outcome = "cancelled"
+)
+
+// PromptObserver hears about every prompt the user is shown and how it
+// was resolved, in that order. Auto-approved calls show no prompt and
+// are not reported. Calls run off the requesting goroutine, so a slow
+// observer never delays the prompt or the tool.
+type PromptObserver interface {
+	PromptShown(ctx context.Context, req PermissionRequest)
+	PromptResolved(ctx context.Context, req PermissionRequest, outcome Outcome)
+}
+
+// ModeChangedEvent is published whenever the permission mode changes.
+type ModeChangedEvent struct {
+	Mode PermissionMode `json:"mode"`
 }
 
 type PermissionRequest struct {
@@ -66,6 +113,10 @@ type PermissionRequest struct {
 	Action      string `json:"action"`
 	Params      any    `json:"params"`
 	Path        string `json:"path"`
+	Danger      string `json:"danger,omitempty"`
+	// GrantKey narrows what a session grant covers. See
+	// [CreatePermissionRequest.GrantKey].
+	GrantKey string `json:"grant_key,omitempty"`
 }
 
 type Service interface {
@@ -101,21 +152,22 @@ type Service interface {
 	// pending request, so remote clients can arm or disarm a session
 	// directly. The flag is checked at Request() entry — arming does
 	// not resolve a request that is already awaiting a decision; that
-	// request still needs a Grant/Deny (same semantics as the global
-	// skip). approve=false is an explicit "prompt even if the
-	// workspace skips" override, not a cleared flag — use
+	// request still needs a Grant/Deny (same semantics as the
+	// workspace mode). approve=false is an explicit "prompt even if the
+	// workspace mode skips" override, not a cleared flag — use
 	// ClearSessionAutoApprove to return the session to inherit mode.
 	SetSessionAutoApprove(sessionID string, approve bool)
 	// ClearSessionAutoApprove removes the session's override so its
-	// requests follow the workspace-level skip flag again.
+	// requests follow the workspace permission mode again.
 	ClearSessionAutoApprove(sessionID string)
 	// SessionAutoApproves reports whether permission requests on the
 	// given session resolve without prompting: the session's override
-	// when one is set, otherwise the workspace-level skip flag.
+	// when one is set, otherwise the workspace permission mode.
 	SessionAutoApproves(sessionID string) bool
-	SetSkipRequests(skip bool)
-	SkipRequests() bool
+	SetPermissionMode(mode PermissionMode)
+	PermissionMode() PermissionMode
 	SubscribeNotifications(ctx context.Context) <-chan pubsub.Event[PermissionNotification]
+	SubscribeModeChanges(ctx context.Context) <-chan pubsub.Event[ModeChangedEvent]
 }
 
 // PermissionKey is a composite key for session permission lookups.
@@ -124,20 +176,21 @@ type PermissionKey struct {
 	ToolName  string
 	Action    string
 	Path      string
+	// Grant narrows a session grant to one specific operation. For tools
+	// whose Path already identifies what is being touched, such as reading
+	// or editing a file, it is empty and the path carries the meaning. For
+	// bash it holds the command, because there the path is only the working
+	// directory: without this, approving `ls` for the session would approve
+	// every later command run in the same directory, `sudo` included.
+	Grant string
 }
 
-// permissionKey builds the remembered-grant lookup key for a request.
-func permissionKey(r PermissionRequest) PermissionKey {
-	return PermissionKey{
-		SessionID: r.SessionID,
-		ToolName:  r.ToolName,
-		Action:    r.Action,
-		Path:      r.Path,
-	}
-}
-
-// pendingRequest is a parked permission request: the full request as
-// published plus the channel its waiter blocks on.
+// pendingRequest couples a request with the channel its caller waits on.
+//
+// Keeping the request rather than only the channel means a resolution is
+// recorded against what the server actually asked, not against whatever the
+// answering client says it was answering. Those are the same thing when the
+// client is honest and the difference matters when it is not.
 type pendingRequest struct {
 	req    PermissionRequest
 	respCh chan bool
@@ -147,6 +200,7 @@ type permissionService struct {
 	*pubsub.Broker[PermissionRequest]
 
 	notificationBroker    *pubsub.Broker[PermissionNotification]
+	modeBroker            *pubsub.Broker[ModeChangedEvent]
 	workingDir            string
 	sessionPermissions    *csync.Map[PermissionKey, bool]
 	pendingRequests       *csync.Map[string, pendingRequest]
@@ -163,8 +217,10 @@ type permissionService struct {
 	// stale store read must not be seeded (the resurrect-race: read
 	// old row → writer persists+clears → seed resurrects it).
 	sessionOverrideGen map[string]uint64
-	skip               atomic.Bool
 	allowedTools       []string
+	observer           PromptObserver
+	mode               PermissionMode
+	modeMu             sync.RWMutex
 
 	// requestMu serializes request registration and publishing so
 	// concurrent calls emit events in a deterministic order. It is
@@ -184,23 +240,39 @@ type permissionService struct {
 // resolve atomically removes the pending request entry for the given
 // permission and, if it was still pending, publishes exactly one
 // PermissionNotification and forwards the outcome to the waiter on
-// respCh. It returns the stored entry — the canonical request, not the
-// caller-supplied copy — and true if this call resolved the request,
-// or a zero entry and false if it had already been resolved (e.g., by
-// another concurrent caller) or the request ID is unknown.
+// respCh. It returns true if this call resolved the request, false if
+// it had already been resolved (e.g., by another concurrent caller) or
+// the request ID is unknown.
+//
+// If onResolve is non-nil it runs after the pending entry has been
+// taken but before the notification is published or the waiter is
+// unblocked. This lets GrantPersistent record the session permission
+// only when it actually wins the race, so a losing GrantPersistent
+// that lost to a Deny does not leak an auto-approve entry.
 //
 // All three public resolution methods (Grant, GrantPersistent, Deny)
 // route through this helper so multi-subscriber UIs can race safely:
 // the first caller wins, the rest become no-ops.
-func (s *permissionService) resolve(permission PermissionRequest, granted, denied bool) (pendingRequest, bool) {
-	entry, ok := s.pendingRequests.Take(permission.ID)
+func (s *permissionService) resolve(permission PermissionRequest, granted, denied bool, onResolve func(PermissionRequest)) bool {
+	pending, ok := s.pendingRequests.Take(permission.ID)
 	if !ok {
-		return pendingRequest{}, false
+		return false
+	}
+
+	// Everything below describes the request the server issued, not the copy
+	// the answer arrived with. Only the ID is taken from the caller, and it
+	// is unguessable and single-use. A client that echoed back a different
+	// session, tool, action or path would otherwise have that echo recorded
+	// as the thing being approved.
+	req := pending.req
+
+	if onResolve != nil {
+		onResolve(req)
 	}
 
 	s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
-		SessionID:  entry.req.SessionID,
-		ToolCallID: entry.req.ToolCallID,
+		SessionID:  req.SessionID,
+		ToolCallID: req.ToolCallID,
 		Granted:    granted,
 		Denied:     denied,
 	})
@@ -208,29 +280,39 @@ func (s *permissionService) resolve(permission PermissionRequest, granted, denie
 	// respCh is buffered (cap 1) and only ever has at most one sender
 	// per request because Take removes the entry under the map lock,
 	// so this send never blocks.
-	entry.respCh <- granted
+	pending.respCh <- granted
 
 	s.activeRequestMu.Lock()
-	if s.activeRequest != nil && s.activeRequest.ID == permission.ID {
+	if s.activeRequest != nil && s.activeRequest.ID == req.ID {
 		s.activeRequest = nil
 	}
 	s.activeRequestMu.Unlock()
-	return entry, true
+	return true
+}
+
+// permissionKeyFor builds the session-grant key for a request.
+func permissionKeyFor(req PermissionRequest) PermissionKey {
+	return PermissionKey{
+		SessionID: req.SessionID,
+		ToolName:  req.ToolName,
+		Action:    req.Action,
+		Path:      req.Path,
+		Grant:     req.GrantKey,
+	}
 }
 
 func (s *permissionService) GrantPersistent(permission PermissionRequest) bool {
 	// Record the persistent grant only if this call wins the
-	// pending-request race, and key it off the stored request rather
-	// than the caller-supplied one — a stale caller payload must not
-	// skew which calls get auto-approved. Otherwise a losing
-	// GrantPersistent that lost to a Deny would still leave an
-	// auto-approve entry behind, silently flipping later denied calls
-	// to allowed.
-	entry, ok := s.resolve(permission, true, false)
-	if !ok {
+	// pending-request race. Otherwise a losing GrantPersistent that
+	// lost to a Deny would still leave an auto-approve entry behind,
+	// silently flipping later denied calls to allowed.
+	var req PermissionRequest
+	if !s.resolve(permission, true, false, func(r PermissionRequest) {
+		req = r
+		s.sessionPermissions.Set(permissionKeyFor(r), true)
+	}) {
 		return false
 	}
-	s.sessionPermissions.Set(permissionKey(entry.req), true)
 
 	// A persistent grant also covers requests already parked with the
 	// same key: with concurrent parking, a second same-key call can
@@ -244,11 +326,11 @@ func (s *permissionService) GrantPersistent(permission PermissionRequest) bool {
 	// grant being recorded and the sweep reading the map: it either
 	// registered first (the sweep resolves it) or registers after (its
 	// sessionPermissions check hits and it is approved inline).
-	key := permissionKey(entry.req)
+	key := permissionKeyFor(req)
 	s.requestMu.Lock()
 	for _, queued := range s.pendingRequests.Seq2() {
-		if permissionKey(queued.req) == key {
-			s.resolve(queued.req, true, false)
+		if permissionKeyFor(queued.req) == key {
+			s.resolve(queued.req, true, false, nil)
 		}
 	}
 	s.requestMu.Unlock()
@@ -256,25 +338,32 @@ func (s *permissionService) GrantPersistent(permission PermissionRequest) bool {
 }
 
 func (s *permissionService) Grant(permission PermissionRequest) bool {
-	_, ok := s.resolve(permission, true, false)
-	return ok
+	return s.resolve(permission, true, false, nil)
 }
 
 func (s *permissionService) Deny(permission PermissionRequest) bool {
-	_, ok := s.resolve(permission, false, true)
-	return ok
+	return s.resolve(permission, false, true, nil)
 }
 
 func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRequest) (bool, error) {
 	// Resolution order: the session's persisted override wins over the
-	// workspace flag — an explicit off forces prompts even under a
-	// workspace skip, and an absent override inherits the flag. An
-	// explicit on falls through to registerRequest's auto-approve path
-	// (the lookup already seeded the map) so it still emits
+	// workspace mode — an explicit off forces prompts even under a
+	// prompt-skipping mode, and an absent override inherits the mode.
+	// An explicit on falls through to registerRequest's auto-approve
+	// path (the lookup already seeded the map) so it still emits
 	// request-start + granted like any live approval.
 	_, hasOverride := s.sessionAutoApproveOverride(opts.SessionID)
-	if !hasOverride && s.skip.Load() {
-		return true, nil
+	if !hasOverride {
+		mode := s.PermissionMode()
+		// Both yolo and sysadmin mean "stop asking me", so neither
+		// prompts, not even for a dangerous command. They part ways
+		// after this, at exec time: yolo keeps the block list armed
+		// for commands the static check did not flag, and sysadmin
+		// disarms it entirely. Normal mode is the only one that still
+		// puts a dangerous command in front of the user.
+		if mode.SkipsPrompts() {
+			return true, nil
+		}
 	}
 
 	// The explicit-off override governs only this blanket-skip layer.
@@ -322,30 +411,30 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 	}
 	defer s.pendingRequests.Del(entry.req.ID)
 
+	resolved := s.observe(ctx, entry.req)
+
 	// registerRequest returns with requestMu already released, so the
 	// caller parks without serializing other requests: several tool
 	// calls may await decisions concurrently, and every parked request
 	// stays listed in pendingRequests for replay and enumeration.
 	select {
 	case <-ctx.Done():
-		// The waiter is leaving without an answer, but cancellation
-		// races resolution: Take arbitrates. If the entry is already
-		// gone, a resolver won and its buffered send on respCh is
-		// guaranteed — consume the real outcome rather than publish a
-		// spurious withdrawal after a Granted/Denied notification.
-		if _, ok := s.pendingRequests.Take(entry.req.ID); !ok {
-			return <-entry.respCh, nil
+		// The prompt is abandoned without a decision; tell subscribers
+		// so the request they saw is not left open.
+		if _, ok := s.pendingRequests.Take(entry.req.ID); ok {
+			s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
+				SessionID:  opts.SessionID,
+				ToolCallID: opts.ToolCallID,
+				Cancelled:  true,
+			})
+			resolved(OutcomeCancelled)
+			return false, ctx.Err()
 		}
-		// We won the withdrawal: drop the pending entry and publish so
-		// UIs can dismiss the prompt (or purge a queued copy) instead
-		// of surfacing a dead request.
-		s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
-			SessionID:  entry.req.SessionID,
-			ToolCallID: entry.req.ToolCallID,
-			Cancelled:  true,
-		})
+		// A decision won the race; resolve always delivers it.
+		resolved(outcomeOf(<-entry.respCh))
 		return false, ctx.Err()
 	case granted := <-entry.respCh:
+		resolved(outcomeOf(granted))
 		return granted, nil
 	}
 }
@@ -390,9 +479,11 @@ func (s *permissionService) registerRequest(opts CreatePermissionRequest, dir st
 		Description: opts.Description,
 		Action:      opts.Action,
 		Params:      opts.Params,
+		Danger:      opts.Danger,
+		GrantKey:    opts.GrantKey,
 	}
 
-	if _, ok := s.sessionPermissions.Get(permissionKey(permission)); ok {
+	if _, ok := s.sessionPermissions.Get(permissionKeyFor(permission)); ok {
 		s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
 			SessionID:  opts.SessionID,
 			ToolCallID: opts.ToolCallID,
@@ -411,6 +502,30 @@ func (s *permissionService) registerRequest(opts CreatePermissionRequest, dir st
 
 	s.Publish(pubsub.CreatedEvent, permission)
 	return entry, false
+}
+
+// observe reports the prompt to the observer and returns the function
+// that reports its outcome. Both run on one goroutine so the observer
+// always hears them in order, and outlive ctx so a cancelled turn still
+// reports the cancellation.
+func (s *permissionService) observe(ctx context.Context, req PermissionRequest) func(Outcome) {
+	if s.observer == nil {
+		return func(Outcome) {}
+	}
+	ctx = context.WithoutCancel(ctx)
+	outcome := make(chan Outcome, 1)
+	go func() {
+		s.observer.PromptShown(ctx, req)
+		s.observer.PromptResolved(ctx, req, <-outcome)
+	}()
+	return func(o Outcome) { outcome <- o }
+}
+
+func outcomeOf(granted bool) Outcome {
+	if granted {
+		return OutcomeGranted
+	}
+	return OutcomeDenied
 }
 
 // ActiveRequest returns the request that is currently awaiting a
@@ -466,7 +581,7 @@ func (s *permissionService) ClearSessionAutoApprove(sessionID string) {
 }
 
 // sessionAutoApproveOverride returns the session's explicit override
-// and whether one is set; absent means inherit the workspace flag. On
+// and whether one is set; absent means inherit the workspace mode. On
 // a map miss the persisted row is consulted (when a lookup is wired)
 // and the result seeded, so a restart honors overrides set before the
 // process died without a startup scan.
@@ -484,7 +599,7 @@ func (s *permissionService) sessionAutoApproveOverride(sessionID string) (bool, 
 		// Transient failure — retry next request rather than
 		// tombstone a suppression until restart. Fail closed while
 		// it's unreadable: reporting an explicit-off prompts, where
-		// reporting "no override" would let a workspace skip
+		// reporting "no override" would let a workspace mode
 		// auto-approve a session that may be pinned restrictive.
 		return false, true
 	}
@@ -521,19 +636,28 @@ func (s *permissionService) SessionAutoApproves(sessionID string) bool {
 	if override, ok := s.sessionAutoApproveOverride(sessionID); ok {
 		return override
 	}
-	return s.skip.Load()
+	return s.PermissionMode().SkipsPrompts()
 }
 
 func (s *permissionService) SubscribeNotifications(ctx context.Context) <-chan pubsub.Event[PermissionNotification] {
 	return s.notificationBroker.Subscribe(ctx)
 }
 
-func (s *permissionService) SetSkipRequests(skip bool) {
-	s.skip.Store(skip)
+func (s *permissionService) SetPermissionMode(mode PermissionMode) {
+	s.modeMu.Lock()
+	s.mode = mode
+	s.modeMu.Unlock()
+	s.modeBroker.Publish(pubsub.UpdatedEvent, ModeChangedEvent{Mode: mode})
 }
 
-func (s *permissionService) SkipRequests() bool {
-	return s.skip.Load()
+func (s *permissionService) SubscribeModeChanges(ctx context.Context) <-chan pubsub.Event[ModeChangedEvent] {
+	return s.modeBroker.Subscribe(ctx)
+}
+
+func (s *permissionService) PermissionMode() PermissionMode {
+	s.modeMu.RLock()
+	defer s.modeMu.RUnlock()
+	return s.mode
 }
 
 // Option configures a permissionService at construction.
@@ -549,21 +673,23 @@ func WithSessionOverride(lookup func(sessionID string) (*bool, error)) Option {
 	}
 }
 
-func NewPermissionService(workingDir string, skip bool, allowedTools []string, opts ...Option) Service {
+func NewPermissionService(workingDir string, allowedTools []string, observer PromptObserver, opts ...Option) Service {
 	svc := &permissionService{
 		Broker:                pubsub.NewBroker[PermissionRequest](),
 		notificationBroker:    pubsub.NewBroker[PermissionNotification](),
+		modeBroker:            pubsub.NewBroker[ModeChangedEvent](),
 		workingDir:            workingDir,
 		sessionPermissions:    csync.NewMap[PermissionKey, bool](),
 		autoApproveSessions:   make(map[string]bool),
 		sessionOverrideMisses: make(map[string]struct{}),
 		sessionOverrideGen:    make(map[string]uint64),
+		mode:                  PermissionModeNormal,
 		allowedTools:          allowedTools,
 		pendingRequests:       csync.NewMap[string, pendingRequest](),
+		observer:              observer,
 	}
 	for _, opt := range opts {
 		opt(svc)
 	}
-	svc.skip.Store(skip)
 	return svc
 }

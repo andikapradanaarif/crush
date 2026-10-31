@@ -980,7 +980,7 @@ func (a *sessionAgent) notebookPrefix(ctx context.Context, sessionID string, msg
 // re-attach the leading system message from the request's own message
 // list. Returns false on any failure — the caller keeps Fantasy's
 // accumulated messages, which is always a safe fallback.
-func (a *sessionAgent) rebuildStepMessages(ctx context.Context, sessionID string, optionsMsgs []fantasy.Message, supportsImages bool, collapse *turnCollapse) ([]fantasy.Message, bool) {
+func (a *sessionAgent) rebuildStepMessages(ctx context.Context, sessionID string, optionsMsgs []fantasy.Message, supportsImages, supportsAudio bool, collapse *turnCollapse) ([]fantasy.Message, bool) {
 	// Update is debounced; List reads storage. Flush first so the
 	// boundary never computes against a stale view.
 	if err := a.messages.FlushAll(ctx); err != nil {
@@ -991,7 +991,7 @@ func (a *sessionAgent) rebuildStepMessages(ctx context.Context, sessionID string
 	if err != nil || len(msgs) == 0 {
 		return nil, false
 	}
-	history, _ := a.preparePrompt(ctx, msgs, supportsImages, collapse, false)
+	history, _ := a.preparePrompt(ctx, msgs, supportsImages, supportsAudio, collapse, false)
 	out := history
 	if a.systemPrompt.Get() != "" && len(optionsMsgs) > 0 && optionsMsgs[0].Role == fantasy.MessageRoleSystem {
 		out = make([]fantasy.Message, 0, len(history)+1)

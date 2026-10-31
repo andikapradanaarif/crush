@@ -32,7 +32,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"charm.land/fantasy"
 	"charm.land/fantasy/providers/anthropic"
 	"charm.land/fantasy/providers/bedrock"
@@ -51,10 +51,13 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/filetracker"
+	"github.com/charmbracelet/crush/internal/hooks"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/notebook"
 	"github.com/charmbracelet/crush/internal/params"
+	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/stringext"
@@ -109,6 +112,11 @@ type SessionAgentCall struct {
 	FrequencyPenalty  *float64
 	PresencePenalty   *float64
 	NonInteractive    bool
+
+	// HostContext is what the host application had in view when the
+	// prompt was sent. The model sees it with this prompt only; it is
+	// not stored with the message.
+	HostContext proto.HostContext
 	// OnComplete, when non-nil, replaces the default RunComplete
 	// publish path: the inner Run hands the terminal payload to this
 	// callback instead of emitting it on the RunComplete broker. The
@@ -233,6 +241,7 @@ type SessionAgent interface {
 	QueuedPrompts(sessionID string) int
 	QueuedPromptsList(sessionID string) []string
 	ClearQueue(sessionID string)
+	AddNote(sessionID, text string)
 	Summarize(context.Context, string, fantasy.ProviderOptions, func(context.Context, *fantasy.ProviderError) error) error
 	Model() Model
 	GenerateTitle(ctx context.Context, sessionID, userPrompt string)
@@ -279,9 +288,12 @@ type sessionAgent struct {
 	// turns; sendChannelReply treats nil as "routing disabled".
 	cfg                  *config.ConfigStore
 	disableAutoSummarize bool
-	isYolo               bool
-	notify               pubsub.Publisher[notify.Notification]
-	runComplete          pubsub.Publisher[notify.RunComplete]
+	// permissions answers whether the user is being asked about tool
+	// calls at all. Nil in tests and anywhere that never needs to know.
+	permissions permission.Service
+	notify      pubsub.Publisher[notify.Notification]
+	runComplete pubsub.Publisher[notify.RunComplete]
+	hooks       *hooks.Runner
 
 	// notebook provides per-event context summarization. Nil when
 	// notebook is disabled.
@@ -491,6 +503,9 @@ type sessionAgent struct {
 
 	messageQueue   *csync.Map[string, []SessionAgentCall]
 	activeRequests *csync.Map[string, *activeCancel]
+	// notes are what the host told the agent since its last turn, by
+	// session, to add to the next prompt. They are not chat messages.
+	notes *csync.Map[string, []string]
 
 	// dispatchMu holds a per-session mutex that serializes the
 	// accepted -> (cancel-on-entry | queued | active) transition in
@@ -539,9 +554,9 @@ type SessionAgentOptions struct {
 	SystemPrompt         string
 	IsSubAgent           bool
 	DisableAutoSummarize bool
-	IsYolo               bool
 	Sessions             session.Service
 	Messages             message.Service
+	Permissions          permission.Service
 	Cfg                  *config.ConfigStore
 	Tools                []fantasy.AgentTool
 	Notify               pubsub.Publisher[notify.Notification]
@@ -693,6 +708,8 @@ type SessionAgentOptions struct {
 	// selector and tail renderer consult. Zero value falls back to
 	// the shipped defaults.
 	MemParams params.Memory
+	// Hooks runs lifecycle hooks for turns and compaction. Nil runs none.
+	Hooks *hooks.Runner
 }
 
 func NewSessionAgent(
@@ -708,8 +725,10 @@ func NewSessionAgent(
 		messages:               opts.Messages,
 		cfg:                    opts.Cfg,
 		disableAutoSummarize:   opts.DisableAutoSummarize,
+		permissions:            opts.Permissions,
+		hooks:                  opts.Hooks,
+		notes:                  csync.NewMap[string, []string](),
 		tools:                  csync.NewSliceFrom(opts.Tools),
-		isYolo:                 opts.IsYolo,
 		notify:                 opts.Notify,
 		runComplete:            opts.RunComplete,
 		messageQueue:           csync.NewMap[string, []SessionAgentCall](),
@@ -1422,7 +1441,7 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 	// set freezes inside this first render — later coverage commits
 	// can't flip a turn mid-window.
 	collapse := a.newTurnCollapse(int64(countUserMessages(msgs)))
-	history, files := a.preparePrompt(ctx, msgs, largeModel.CatwalkCfg.SupportsImages, collapse, false, call.Attachments...)
+	history, files := a.preparePrompt(ctx, msgs, largeModel.CatwalkCfg.Capabilities.Vision, largeModel.CatwalkCfg.Capabilities.Audio, collapse, false, call.Attachments...)
 
 	// Per-turn tail augmentation: the turn-context blob and the
 	// vagueness pre-filter's clarify directive. Computed once here —
@@ -1432,6 +1451,7 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 
 	startTime := time.Now()
 	a.eventPromptSent(call.SessionID)
+	a.fireTurnHook(genCtx, call, hooks.Event{Name: hooks.EventTurnStart})
 
 	// loopStopped records that the loop detector's StopWhen ended the
 	// run — the stall edge's trigger at the run boundary.
@@ -1469,7 +1489,7 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 		maxOutputTokens = &call.MaxOutputTokens
 	}
 	result, err = agent.Stream(genCtx, fantasy.AgentStreamCall{
-		Prompt:           message.PromptWithTextAttachments(call.Prompt, call.Attachments),
+		Prompt:           hostContextPrompt(call.HostContext) + notesPrompt(a.takeNotes(call.SessionID)) + message.PromptWithTextAttachments(call.Prompt, call.Attachments),
 		Files:            files,
 		Messages:         history,
 		Headers:          sessionHeaders(call.SessionID),
@@ -1532,7 +1552,7 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 			// persisted (and form hard segment boundaries) before the
 			// rebuild lists messages.
 			if notebookOn {
-				if rebuilt, ok := a.rebuildStepMessages(callContext, call.SessionID, prepared.Messages, largeModel.CatwalkCfg.SupportsImages, collapse); ok {
+				if rebuilt, ok := a.rebuildStepMessages(callContext, call.SessionID, prepared.Messages, largeModel.CatwalkCfg.Capabilities.Vision, largeModel.CatwalkCfg.Capabilities.Audio, collapse); ok {
 					prepared.Messages = rebuilt
 				} else {
 					// Rebuild failed — fall back to Fantasy's list and
@@ -1650,7 +1670,7 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 			}
 			callContext = context.WithValue(callContext, tools.MessageIDContextKey, assistantMsg.ID)
 			callContext = context.WithValue(callContext, tools.ChannelContextKey, call.Channel)
-			callContext = context.WithValue(callContext, tools.SupportsImagesContextKey, largeModel.CatwalkCfg.SupportsImages)
+			callContext = context.WithValue(callContext, tools.SupportsImagesContextKey, largeModel.CatwalkCfg.Capabilities.Vision)
 			callContext = context.WithValue(callContext, tools.ModelNameContextKey, largeModel.CatwalkCfg.Name)
 			currentAssistant = &assistantMsg
 			return callContext, prepared, err
@@ -1977,6 +1997,9 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 			"error_type", fmt.Sprintf("%T", err),
 			"oauth", largeModel.OAuth,
 			"is_cancel", isCancelErr)
+		// Fire once the turn's final state is written, whichever return
+		// below is taken, and outlive the cancelled run context.
+		defer a.fireTurnHook(context.WithoutCancel(ctx), call, turnEndEvent(err, currentAssistant))
 		if currentAssistant == nil {
 			// Cancel-before-assistant-creation window: the run was
 			// canceled after activeRequests.Set but before PrepareStep
@@ -2135,34 +2158,38 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 		})
 	}
 
+	// A turn cut short for compaction with tool calls still pending is
+	// continued by a queued follow-up, which replies and fires TurnEnd
+	// when it actually finishes.
+	continued := false
 	if shouldSummarize {
 		a.activeRequests.Del(call.SessionID)
-		if summarizeErr := a.Summarize(genCtx, call.SessionID, call.ProviderOptions, call.OnAuthRefresh); summarizeErr != nil {
+		summarizeErr := a.summarize(genCtx, call.SessionID, compactTriggerAuto, call.ProviderOptions, call.OnAuthRefresh)
+		switch {
+		case errors.Is(summarizeErr, ErrCompactionBlocked):
+			// Uncompacted, the next step would only hit the limit
+			// again, so the turn ends here.
+			slog.Info("PreCompact hook blocked compaction", "session_id", call.SessionID)
+		case summarizeErr != nil:
 			return nil, nil, summarizeErr
-		}
 		// If the agent wasn't done — or a soft-cap abort left no
 		// assistant message to check — requeue the call so the
 		// compacted session still answers the prompt. The retry flag
 		// bounds the soft cap to one compaction per call chain.
-		if currentAssistant == nil || len(currentAssistant.ToolCalls()) > 0 {
-			existing, ok := a.messageQueue.Get(call.SessionID)
-			if !ok {
-				existing = []SessionAgentCall{}
-			}
+		case currentAssistant == nil || len(currentAssistant.ToolCalls()) > 0:
+			existing, _ := a.messageQueue.Get(call.SessionID)
 			call.Prompt = fmt.Sprintf("The previous session was interrupted because it got too long, the initial user request was: `%s`", call.Prompt)
 			call.softWindowRetried = true
-			existing = append(existing, call)
-			a.messageQueue.Set(call.SessionID, existing)
+			a.messageQueue.Set(call.SessionID, append(existing, call))
+			continued = true
 		}
 	}
+	finished := currentAssistant != nil && !continued
 
 	// Route the finished turn's response back to the channel it came
-	// from, unless the turn was cut short for summarization with work
-	// still pending — the queued continuation carries the channel and
-	// replies when it actually finishes. Runs before the busy state is
-	// released so a follow-up push queued behind this turn cannot
-	// overtake its reply.
-	if currentAssistant != nil && (!shouldSummarize || len(currentAssistant.ToolCalls()) == 0) {
+	// from. Runs before the busy state is released so a follow-up push
+	// queued behind this turn cannot overtake its reply.
+	if finished {
 		a.sendChannelReply(ctx, call, currentAssistant.Content().String(), completedToolCalls.Copy())
 	}
 
@@ -2172,6 +2199,10 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 	// subscribers see stale busy state at the moment of receipt.
 	a.activeRequests.Del(call.SessionID)
 	cancel()
+
+	if finished {
+		a.fireTurnHook(ctx, call, turnEndEvent(nil, currentAssistant))
+	}
 
 	// Send notification that agent has finished its turn (skip for
 	// nested/non-interactive sessions, and when a gate retry is queued —
@@ -2289,7 +2320,13 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 	return result, &firstQueuedMessage, nil
 }
 
+// Summarize compacts the session on the user's request. It returns
+// ErrCompactionBlocked when a PreCompact hook blocks it.
 func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fantasy.ProviderOptions, onAuthRefresh func(context.Context, *fantasy.ProviderError) error) error {
+	return a.summarize(ctx, sessionID, compactTriggerManual, opts, onAuthRefresh)
+}
+
+func (a *sessionAgent) summarize(ctx context.Context, sessionID, trigger string, opts fantasy.ProviderOptions, onAuthRefresh func(context.Context, *fantasy.ProviderError) error) error {
 	// Check-and-register under sessionMu: Run's busy check holds the
 	// same mutex, so no Run can slip active into the gap between the
 	// check and registration (the window that previously let an
@@ -2336,12 +2373,16 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		return nil
 	}
 
+	if pre := a.hooks.Run(ctx, hooks.Event{Name: hooks.EventPreCompact, SessionID: sessionID, Trigger: trigger}); pre.Blocked() {
+		return fmt.Errorf("%w: %s", ErrCompactionBlocked, pre.Reason)
+	}
+
 	// Summarize renders through the full notebook machinery with the
 	// session's gate state skipped — the call is one-shot, an
 	// over-margin render still has to fit, but it must not move the
 	// watermark or trip the latch for renders after it. A prior
 	// summary floor also applies, so a re-summarize sends the tail.
-	aiMsgs, _ := a.preparePrompt(ctx, msgs, largeModel.CatwalkCfg.SupportsImages, nil, true)
+	aiMsgs, _ := a.preparePrompt(ctx, msgs, largeModel.CatwalkCfg.Capabilities.Vision, largeModel.CatwalkCfg.Capabilities.Audio, nil, true)
 
 	defer func() {
 		if flushErr := a.messages.FlushAll(ctx); flushErr != nil {
@@ -2456,6 +2497,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	if err != nil {
 		return err
 	}
+	a.hooks.Run(ctx, hooks.Event{Name: hooks.EventPostCompact, SessionID: sessionID, Trigger: trigger})
 
 	// Compaction breaks the gate's append-only premise — the latch
 	// and its anchors describe pre-compact history, so they reset
@@ -2571,7 +2613,7 @@ func (a *sessionAgent) createUserMessage(ctx context.Context, call SessionAgentC
 // Run-path callers always pass false — including verbatim mode, whose
 // nil collapse must NOT skip the gate: the gate covers boundary and
 // prefix churn in every mode, not just collapse.
-func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message, supportsImages bool, collapse *turnCollapse, skipPressureGate bool, attachments ...message.Attachment) ([]fantasy.Message, []fantasy.FilePart) {
+func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message, supportsImages, supportsAudio bool, collapse *turnCollapse, skipPressureGate bool, attachments ...message.Attachment) ([]fantasy.Message, []fantasy.FilePart) {
 	var history []fantasy.Message
 
 	// When notebook is enabled, split messages into notebook (closed
@@ -2930,7 +2972,11 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 		if attachment.IsText() {
 			continue
 		}
-		if !supportsImages {
+		if attachment.IsAudio() {
+			if !supportsAudio {
+				continue
+			}
+		} else if !supportsImages {
 			continue
 		}
 		files = append(files, fantasy.FilePart{
@@ -3454,7 +3500,7 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 	var success bool
 	for _, attempt := range attempts {
 		tok := int64(40)
-		if attempt.model.CatwalkCfg.CanReason {
+		if attempt.model.CatwalkCfg.CanReason() {
 			tok = attempt.model.CatwalkCfg.DefaultMaxTokens
 		}
 		agent := newAgent(attempt.model.Model, titlePrompt, tok)
@@ -3514,10 +3560,10 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 	}
 
 	modelConfig := model.CatwalkCfg
-	cost := modelConfig.CostPer1MInCached/1e6*float64(resp.TotalUsage.CacheCreationTokens) +
-		modelConfig.CostPer1MOutCached/1e6*float64(resp.TotalUsage.CacheReadTokens) +
-		modelConfig.CostPer1MIn/1e6*float64(resp.TotalUsage.InputTokens) +
-		modelConfig.CostPer1MOut/1e6*float64(resp.TotalUsage.OutputTokens)
+	cost := modelConfig.Pricing.CacheCreate/1e6*float64(resp.TotalUsage.CacheCreationTokens) +
+		modelConfig.Pricing.CacheHit/1e6*float64(resp.TotalUsage.CacheReadTokens) +
+		modelConfig.Pricing.Input/1e6*float64(resp.TotalUsage.InputTokens) +
+		modelConfig.Pricing.Output/1e6*float64(resp.TotalUsage.OutputTokens)
 
 	// Use override cost if available (e.g., from OpenRouter).
 	if openrouterCost != nil {
@@ -3606,10 +3652,10 @@ func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session,
 	}
 
 	modelConfig := model.CatwalkCfg
-	cost := modelConfig.CostPer1MInCached/1e6*float64(usage.CacheCreationTokens) +
-		modelConfig.CostPer1MOutCached/1e6*float64(usage.CacheReadTokens) +
-		modelConfig.CostPer1MIn/1e6*float64(usage.InputTokens) +
-		modelConfig.CostPer1MOut/1e6*float64(usage.OutputTokens)
+	cost := modelConfig.Pricing.CacheCreate/1e6*float64(usage.CacheCreationTokens) +
+		modelConfig.Pricing.CacheHit/1e6*float64(usage.CacheReadTokens) +
+		modelConfig.Pricing.Input/1e6*float64(usage.InputTokens) +
+		modelConfig.Pricing.Output/1e6*float64(usage.OutputTokens)
 
 	if !estimated {
 		a.eventTokensUsed(session.ID, model, usage, cost)
@@ -3713,6 +3759,23 @@ func (a *sessionAgent) ClearQueue(sessionID string) {
 	}
 }
 
+// AddNote keeps text for the session's next prompt, which the agent reads
+// with it. Nothing runs and nothing is shown in the chat.
+func (a *sessionAgent) AddNote(sessionID, text string) {
+	if text == "" {
+		return
+	}
+	existing, _ := a.notes.Get(sessionID)
+	a.notes.Set(sessionID, append(existing, text))
+}
+
+// takeNotes returns and forgets the session's notes, for the prompt about to run.
+func (a *sessionAgent) takeNotes(sessionID string) []string {
+	notes, _ := a.notes.Get(sessionID)
+	a.notes.Del(sessionID)
+	return notes
+}
+
 func (a *sessionAgent) CancelAll() {
 	if !a.IsBusy() {
 		return
@@ -3738,6 +3801,7 @@ func (a *sessionAgent) CancelAll() {
 	for a.IsBusy() {
 		select {
 		case <-timeout:
+			slog.Warn("Gave up waiting for agent runs to cancel; their final state may not be recorded")
 			return
 		default:
 			time.Sleep(200 * time.Millisecond)
@@ -3900,7 +3964,7 @@ func (a *sessionAgent) workaroundProviderMediaLimitations(messages []fantasy.Mes
 		return messages
 	}
 
-	supportsImages := largeModel.CatwalkCfg.SupportsImages
+	supportsImages := largeModel.CatwalkCfg.Capabilities.Vision
 
 	convertedMessages := make([]fantasy.Message, 0, len(messages))
 

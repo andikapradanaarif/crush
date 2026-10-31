@@ -48,6 +48,7 @@ func (s *stubCoordinator) IsSessionBusy(id string) bool {
 func (s *stubCoordinator) QueuedPrompts(string) int          { return 0 }
 func (s *stubCoordinator) QueuedPromptsList(string) []string { return nil }
 func (s *stubCoordinator) ClearQueue(string)                 {}
+func (s *stubCoordinator) AddNote(string, string)            {}
 func (s *stubCoordinator) Summarize(context.Context, string) error {
 	return nil
 }
@@ -61,6 +62,8 @@ func (s *stubCoordinator) SetSessionModelOverride(context.Context, string, confi
 	return nil
 }
 func (s *stubCoordinator) ClearSessionModelOverride(string) {}
+func (s *stubCoordinator) SetHostContext(proto.HostContext) {}
+func (s *stubCoordinator) HostContext() proto.HostContext   { return proto.HostContext{} }
 
 // stubSessions is a minimal session.Service that returns a fixed list
 // (and supports Get by ID). All other methods return zero values; the
