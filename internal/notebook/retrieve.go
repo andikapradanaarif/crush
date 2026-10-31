@@ -198,11 +198,12 @@ func (s *service) Compact(ctx context.Context, sessionID string) error {
 
 	// Fire PreCompact hooks; a deny or halt skips this round.
 	if s.opts.PreCompactRunner != nil {
-		input := fmt.Sprintf(`{"token_count":%d,"max_tokens":%d}`, total, s.opts.MaxNotebookTokens)
-		result, err := s.opts.PreCompactRunner.Run(ctx, hooks.EventPreCompact, sessionID, "compact", input)
-		if err != nil {
-			slog.Warn("PreCompact hook failed; proceeding", "session_id", sessionID, "error", err)
-		} else if result.Decision == hooks.DecisionDeny || result.Halt {
+		result := s.opts.PreCompactRunner.Run(ctx, hooks.Event{
+			Name:      hooks.EventPreCompact,
+			SessionID: sessionID,
+			Trigger:   "auto",
+		})
+		if result.Blocked() {
 			slog.Info("PreCompact hook blocked compaction", "session_id", sessionID, "reason", result.Reason)
 			s.noteCompactStall(sessionID,
 				"PreCompact hook permanently blocking compaction; notebook DB grows unbounded — prompt unaffected")

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"charm.land/fantasy"
 	"charm.land/fantasy/providers/openaicompat"
 	"charm.land/x/vcr"
@@ -90,7 +90,10 @@ func testEnv(t *testing.T) fakeEnv {
 	sessions := session.NewService(q, conn)
 	messages := message.NewService(q)
 
-	permissions := permission.NewPermissionService(workingDir, true, []string{})
+	permissions := permission.NewPermissionService(workingDir, []string{}, nil)
+	// Auto-approve every tool call so headless test/record runs never block
+	// on a permission prompt.
+	permissions.SetPermissionMode(permission.PermissionModeSysadmin)
 	history := history.NewService(q, conn)
 	filetrackerService := filetracker.NewService(q, workingDir)
 	cmdlogService := cmdlog.NewService(q, workingDir, params.DefaultMemory())
@@ -134,7 +137,6 @@ func testSessionAgent(env fakeEnv, large, small fantasy.LanguageModel, systemPro
 	agent := NewSessionAgent(SessionAgentOptions{
 		Models:       fixedModels(largeModel, smallModel),
 		SystemPrompt: systemPrompt,
-		IsYolo:       true,
 		Sessions:     env.sessions,
 		Messages:     env.messages,
 		Tools:        tools,
@@ -174,7 +176,7 @@ func coderAgent(r *vcr.Recorder, env fakeEnv, large, small fantasy.LanguageModel
 	}
 
 	allTools := []fantasy.AgentTool{
-		tools.NewBashTool(nil, env.permissions, env.workingDir, cfg.Config().Options.DataDirectory, cfg.Config().Options.Attribution, modelName, cfg.Config().Options.GetMaxBackgroundJobs(), env.cmdlog),
+		tools.NewBashTool(nil, env.permissions, env.workingDir, cfg.Config().Options.DataDirectory, cfg.Config().Options.Attribution, modelName, cfg.Config().Options.GetMaxBackgroundJobs(), cfg.Config().Permissions, env.cmdlog),
 		tools.NewDownloadTool(env.permissions, env.workingDir, r.GetDefaultClient()),
 		tools.NewEditTool(env.permissions, env.history, *env.filetracker, env.workingDir),
 		tools.NewMultiEditTool(env.permissions, env.history, *env.filetracker, env.workingDir),

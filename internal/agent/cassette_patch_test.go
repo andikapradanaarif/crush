@@ -70,8 +70,8 @@ func TestPatchCoderCassettes(t *testing.T) {
 		newPrompt := built.Text
 
 		// Render the new bash description exactly as the test tool list does.
-		perms := permission.NewPermissionService(workingDir, true, []string{})
-		bashTool := tools.NewBashTool(nil, perms, workingDir, workingDir, cfg.Config().Options.Attribution, "", cfg.Config().Options.GetMaxBackgroundJobs(), nil)
+		perms := permission.NewPermissionService(workingDir, []string{}, nil)
+		bashTool := tools.NewBashTool(nil, perms, workingDir, workingDir, cfg.Config().Options.Attribution, "", cfg.Config().Options.GetMaxBackgroundJobs(), nil, nil)
 		newBashDesc := bashTool.Info().Description
 
 		// Patch every interaction's request body.
@@ -169,7 +169,7 @@ func TestPatchCoderCassetteEditResults(t *testing.T) {
 		require.NoError(t, err)
 		hist := history.NewService(q, conn)
 		tracker := filetracker.NewService(q, workingDir)
-		perms := permission.NewPermissionService(workingDir, true, []string{})
+		perms := permission.NewPermissionService(workingDir, []string{}, nil)
 
 		editTool := tools.NewEditTool(perms, hist, tracker, workingDir)
 		multiTool := tools.NewMultiEditTool(perms, hist, tracker, workingDir)

@@ -27,6 +27,7 @@ func (b *Backend) GrantPermission(workspaceID string, req proto.PermissionGrant)
 		Action:      req.Permission.Action,
 		Params:      req.Permission.Params,
 		Path:        req.Permission.Path,
+		Danger:      req.Permission.Danger,
 	}
 
 	switch req.Action {
@@ -43,10 +44,10 @@ func (b *Backend) GrantPermission(workspaceID string, req proto.PermissionGrant)
 
 // publishPermissionsSkipChanged broadcasts a permission-skip state
 // change on the workspace's event broker so connected clients keep
-// their cached flags in sync. An empty sessionID marks the
-// workspace-global flag; a non-empty sessionID scopes the event to
-// that session's viewers via the server's session-scoped event
-// filter.
+// their cached flags in sync. The event is session-scoped: sessionID
+// names the session whose auto-approve flag changed, so only that
+// session's viewers are notified via the server's session-scoped
+// event filter.
 func publishPermissionsSkipChanged(ws *Workspace, sessionID string, skip bool) {
 	if ws == nil || ws.App == nil {
 		return
@@ -62,35 +63,32 @@ func publishPermissionsSkipChanged(ws *Workspace, sessionID string, skip bool) {
 	})
 }
 
-// SetPermissionsSkip sets whether permission prompts are skipped.
-func (b *Backend) SetPermissionsSkip(workspaceID string, skip bool) error {
+// SetPermissionMode sets the permission mode for a workspace.
+//
+// Only the permission service is updated; the config override is left
+// holding the startup flag on purpose. The override is a seed that
+// app.New reads once at construction, and config.Overrides() hands
+// back a bare pointer with no locking, so writing it here would race
+// the readers on the CreateWorkspace path for no benefit. Leaving the
+// service as the single writable source of truth is what keeps the
+// enforced mode and the mode reported to clients from drifting apart.
+func (b *Backend) SetPermissionMode(workspaceID string, mode permission.PermissionMode) error {
 	ws, err := b.GetWorkspace(workspaceID)
 	if err != nil {
 		return err
 	}
 
-	ws.Permissions.SetSkipRequests(skip)
-	publishPermissionsSkipChanged(ws, "", skip)
+	ws.Permissions.SetPermissionMode(mode)
 	return nil
 }
 
-// GetPermissionsSkip returns whether permission prompts are skipped.
-func (b *Backend) GetPermissionsSkip(workspaceID string) (bool, error) {
-	ws, err := b.GetWorkspace(workspaceID)
-	if err != nil {
-		return false, err
-	}
-
-	return ws.Permissions.SkipRequests(), nil
-}
-
 // SetSessionPermissionsSkip sets whether permission prompts are
-// skipped for a single session, independently of the workspace-global
-// flag. One session can run auto-approved while others still prompt.
-// A nil skip clears the session's override so it inherits the
-// workspace flag again. The setting persists on the session row, so
-// it survives workspace process restarts; the in-memory override is
-// updated for hot reads.
+// skipped for a single session, independently of the workspace
+// permission mode. One session can run auto-approved while others
+// still prompt. A nil skip clears the session's override so it
+// inherits the workspace mode again. The setting persists on the
+// session row, so it survives workspace process restarts; the
+// in-memory override is updated for hot reads.
 func (b *Backend) SetSessionPermissionsSkip(ctx context.Context, workspaceID, sessionID string, skip *bool) error {
 	ws, err := b.GetWorkspace(workspaceID)
 	if err != nil {

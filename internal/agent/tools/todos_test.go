@@ -243,3 +243,28 @@ func TestTodosToolDescriptionSurfacesCheckNames(t *testing.T) {
 	bare := NewTodosTool(sessions2, nil, t.TempDir())
 	require.NotContains(t, bare.Info().Description, "verify:")
 }
+
+// A todo with a bogus status is a model mistake the model can fix, so it must
+// come back as a failed tool result. Returning a Go error instead ends the
+// whole agent turn.
+func TestTodosToolReportsInvalidStatusAsToolError(t *testing.T) {
+	t.Parallel()
+
+	sessions, sessionID := newTodosTestSession(t)
+	ctx := context.WithValue(t.Context(), SessionIDContextKey, sessionID)
+	tool := NewTodosTool(sessions, nil, t.TempDir())
+
+	input, err := json.Marshal(TodosParams{Todos: []TodoItem{
+		{Content: "do the thing", Status: "in-progress"},
+	}})
+	require.NoError(t, err)
+
+	resp, err := tool.Run(ctx, fantasy.ToolCall{
+		ID:    "todos-call",
+		Name:  TodosToolName,
+		Input: string(input),
+	})
+	require.NoError(t, err)
+	require.True(t, resp.IsError)
+	require.Contains(t, resp.Content, `invalid status "in-progress"`)
+}

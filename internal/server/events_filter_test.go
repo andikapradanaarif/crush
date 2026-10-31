@@ -47,6 +47,7 @@ func TestSessionScopedEventID(t *testing.T) {
 	}{
 		{"session event", pubsub.Event[session.Session]{Payload: session.Session{ID: "s1"}}},
 		{"config changed", pubsub.Event[struct{}]{}},
+		{"host theme", pubsub.Event[proto.HostThemeState]{Payload: proto.HostThemeState{WorkspaceID: "w1", Theme: &proto.HostTheme{Name: "t"}}}},
 		{"string", "not an event"},
 		{"empty permission request", pubsub.Event[permission.PermissionRequest]{}},
 		{"empty permission notification", pubsub.Event[permission.PermissionNotification]{}},

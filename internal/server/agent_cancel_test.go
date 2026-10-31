@@ -83,6 +83,7 @@ func (s *runCoordinator) IsSessionBusy(string) bool {
 func (s *runCoordinator) QueuedPrompts(string) int          { return 0 }
 func (s *runCoordinator) QueuedPromptsList(string) []string { return nil }
 func (s *runCoordinator) ClearQueue(string)                 {}
+func (s *runCoordinator) AddNote(string, string)            {}
 func (s *runCoordinator) Summarize(context.Context, string) error {
 	return nil
 }
@@ -98,6 +99,8 @@ func (s *runCoordinator) ApprovePlan(_ context.Context, sessionID string) error 
 	s.approvedSession.Store(sessionID)
 	return s.approvePlanErr
 }
+func (s *runCoordinator) SetHostContext(proto.HostContext) {}
+func (s *runCoordinator) HostContext() proto.HostContext   { return proto.HostContext{} }
 
 func (s *runCoordinator) SetMainAgent(agentName string) error {
 	s.lastMainAgentSet.Store(agentName)

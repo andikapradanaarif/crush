@@ -239,6 +239,7 @@ func (s *busyStubAgent) SetTools([]fantasy.AgentTool)                  {}
 func (s *busyStubAgent) SetSystemPrompt(prompt.BuiltPrompt)            {}
 func (s *busyStubAgent) Cancel(string)                                 {}
 func (s *busyStubAgent) CancelAll()                                    {}
+func (s *busyStubAgent) AddNote(string, string)                        {}
 func (s *busyStubAgent) IsSessionBusy(string) bool                     { return s.sessionBusy }
 func (s *busyStubAgent) IsBusy() bool                                  { return s.sessionBusy }
 func (s *busyStubAgent) QueuedPrompts(string) int                      { return 0 }

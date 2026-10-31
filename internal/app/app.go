@@ -12,10 +12,11 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/notify"
@@ -36,11 +37,13 @@ import (
 	"github.com/charmbracelet/crush/internal/notebook"
 	"github.com/charmbracelet/crush/internal/params"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/pinentry"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/skills"
+	"github.com/charmbracelet/crush/internal/sshaskpass"
 	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/crush/internal/update"
@@ -78,6 +81,8 @@ type App struct {
 	// edge-firing store — the services wrap it but don't expose it.
 	queries *db.Queries
 
+	Pinentry *pinentry.Service
+
 	AgentCoordinator agent.Coordinator
 
 	LSPManager *lsp.Manager
@@ -112,6 +117,14 @@ type App struct {
 	// to every built agent so the selector and the row versions
 	// never disagree about which parameters were in force.
 	memParams params.Memory
+
+	// hookRunner runs user hooks for every event; it reads the config
+	// store on each event so reloads need no extra wiring.
+	hookRunner *hooks.Runner
+
+	// currentSessionID is the session the user is working in, reported
+	// by the TUI and the non-interactive runner, for SessionEnd.
+	currentSessionID atomic.Value
 }
 
 // New initializes a new application instance. skillsMgr carries the
@@ -124,7 +137,6 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 	messages := message.NewService(q)
 	files := history.NewService(q, conn)
 	cfg := store.Config()
-	skipPermissionsRequests := store.Overrides().SkipPermissionRequests
 	var allowedTools []string
 	if cfg.Permissions != nil && cfg.Permissions.AllowedTools != nil {
 		allowedTools = cfg.Permissions.AllowedTools
@@ -140,40 +152,51 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		return nil, fmt.Errorf("options.memory_params: %w", err)
 	}
 
-	app := &App{
-		Sessions: sessions,
-		Messages: messages,
-		History:  files,
-		Permissions: permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, allowedTools,
-			// Persisted per-session auto-approve overrides hydrate the
-			// hot-read map lazily on first use after a restart.
-			permission.WithSessionOverride(func(sessionID string) (*bool, error) {
-				sess, err := sessions.Get(ctx, sessionID)
-				if err != nil {
-					// A missing row is a real "no override" verdict;
-					// anything else is a transient failure the caller
-					// should retry rather than cache.
-					if errors.Is(err, sql.ErrNoRows) {
-						return nil, nil
-					}
-					return nil, err
+	hookRunner := hooks.NewRunner(func() map[string][]config.HookConfig {
+		return store.Config().Hooks
+	}, store.WorkingDir(), store.WorkingDir())
+
+	permSvc := permission.NewPermissionService(store.WorkingDir(), allowedTools, permissionHooks{hookRunner},
+		// Persisted per-session auto-approve overrides hydrate the
+		// hot-read map lazily on first use after a restart.
+		permission.WithSessionOverride(func(sessionID string) (*bool, error) {
+			sess, err := sessions.Get(ctx, sessionID)
+			if err != nil {
+				// A missing row is a real "no override" verdict;
+				// anything else is a transient failure the caller
+				// should retry rather than cache.
+				if errors.Is(err, sql.ErrNoRows) {
+					return nil, nil
 				}
-				return sess.PermissionSkip, nil
-			})),
+				return nil, err
+			}
+			return sess.PermissionSkip, nil
+		}))
+	if store.Overrides().PermissionMode != permission.PermissionModeNormal {
+		permSvc.SetPermissionMode(store.Overrides().PermissionMode)
+	}
+
+	app := &App{
+		Sessions:    sessions,
+		Messages:    messages,
+		History:     files,
+		Permissions: permSvc,
 		Questions:   question.NewService(),
 		FileTracker: filetracker.NewService(q, store.WorkingDir()),
 		CmdLog:      cmdlog.NewService(q, store.WorkingDir(), memParams, cmdlog.WithProjectKey(cfg.Options.ProjectKey)),
+		Pinentry:    pinentry.DefaultService(),
 		LSPManager:  lsp.NewManager(store),
 		Skills:      skillsMgr,
 		queries:     q,
 
-		globalCtx: ctx,
+		globalCtx:  ctx,
+		hookRunner: hookRunner,
 
 		config: store,
 
 		memParams: memParams,
 
-		events:             pubsub.NewBroker[tea.Msg](),
+		events:             pubsub.NewCoalescingBroker(eventCoalesceKey),
 		serviceEventsWG:    &sync.WaitGroup{},
 		tuiWG:              &sync.WaitGroup{},
 		agentNotifications: pubsub.NewBroker[notify.Notification](),
@@ -190,10 +213,10 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		WorkingDir:        store.WorkingDir(),
 		GeneratePolicy:    cfg.Options.NotebookGenerateMode(),
 	}
-	// Fire PreCompact hooks before entry compression when configured.
-	if preCompactHooks := cfg.Hooks[hooks.EventPreCompact]; len(preCompactHooks) > 0 {
-		notebookOpts.PreCompactRunner = hooks.NewRunner(preCompactHooks, store.WorkingDir(), store.WorkingDir())
-	}
+	// Fire PreCompact hooks before entry compression. The shared
+	// runner reads live config, so hook reloads reach the notebook
+	// path without extra wiring.
+	notebookOpts.PreCompactRunner = hookRunner
 	// Surface repeated no-progress compaction rounds as a user-visible
 	// notification — a hook denying forever or all-pinned stalls grow
 	// the notebook DB unbounded otherwise invisible.
@@ -228,6 +251,45 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 	app.notebookModelResolver = &notebookModelResolver
 
 	app.setupEvents()
+
+	// Start the pinentry watcher so terminal-based GPG passphrase prompts
+	// (pinentry-curses/pinentry-tty) get exclusive terminal access while a
+	// shell command runs. It only polls while commands are executing, and
+	// stops with the events pipeline.
+	app.Pinentry.Start(app.eventsCtx)
+
+	// Enable the integrated pinentry: GPG passphrase/PIN prompts are
+	// rendered as native dialogs (loopback pinentry) for Crush-spawned
+	// processes without touching GPG or git configuration. The
+	// terminal-handover watcher above remains the fallback.
+	if cfg.Options.GetPinentryIntegrated() {
+		if executable, err := os.Executable(); err != nil {
+			slog.Warn("Integrated pinentry unavailable", "error", err)
+		} else if cleanup, err := pinentry.StartIntegration(ctx, executable, cfg.Options.GetPinentryCacheTimeout()); err != nil {
+			slog.Warn("Integrated pinentry unavailable", "error", err)
+		} else {
+			app.cleanupFuncs = append(app.cleanupFuncs, func(context.Context) error {
+				cleanup()
+				return nil
+			})
+		}
+	}
+
+	// Enable the integrated ssh askpass: OpenSSH credential and
+	// confirmation prompts (passwords, key passphrases, security key
+	// touches) for Crush-spawned commands are rendered as native
+	// dialogs. The redirect is environment-scoped; no ssh configuration
+	// or files are modified.
+	if executable, err := os.Executable(); err != nil {
+		slog.Warn("Integrated ssh prompts unavailable", "error", err)
+	} else if cleanup, err := sshaskpass.StartIntegration(ctx, executable); err != nil {
+		slog.Warn("Integrated ssh prompts unavailable", "error", err)
+	} else {
+		app.cleanupFuncs = append(app.cleanupFuncs, func(context.Context) error {
+			cleanup()
+			return nil
+		})
+	}
 
 	// Initialize clipboard support. This is best-effort; if it fails
 	// (e.g., headless environment), clipboard operations will return nil.
@@ -364,44 +426,22 @@ func (app *App) RunCompletions() *pubsub.Broker[notify.RunComplete] {
 // is nil-safe. Call this whenever the active session changes (load,
 // new, or select).
 func (app *App) ReportCurrentSession(sessionID string) {
+	app.currentSessionID.Store(sessionID)
 	app.herdrClient.SetSessionID(sessionID)
-}
-
-// resolveSession resolves which session to use for a non-interactive run
-// If continueSessionID is set, it looks up that session by ID
-// If useLast is set, it returns the most recently updated top-level session
-// Otherwise, it creates a new session
-func (app *App) resolveSession(ctx context.Context, continueSessionID string, useLast bool) (session.Session, error) {
-	switch {
-	case continueSessionID != "":
-		if app.Sessions.IsAgentToolSession(continueSessionID) {
-			return session.Session{}, fmt.Errorf("cannot continue an agent tool session: %s", continueSessionID)
-		}
-		sess, err := app.Sessions.Get(ctx, continueSessionID)
-		if err != nil {
-			return session.Session{}, fmt.Errorf("session not found: %s", continueSessionID)
-		}
-		if sess.ParentSessionID != "" {
-			return session.Session{}, fmt.Errorf("cannot continue a child session: %s", continueSessionID)
-		}
-		return sess, nil
-
-	case useLast:
-		sess, err := app.Sessions.GetLast(ctx)
-		if err != nil {
-			return session.Session{}, fmt.Errorf("no sessions found to continue")
-		}
-		return sess, nil
-
-	default:
-		return app.Sessions.Create(ctx, agent.DefaultSessionName)
-	}
 }
 
 // RunNonInteractive runs the application in non-interactive mode with the
 // given prompt, printing to stdout.
 func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt, largeModel, smallModel, reasoningEffort string, hideSpinner bool, continueSessionID string, useLast bool) error {
 	slog.Info("Running in non-interactive mode")
+
+	// No dialog can answer an integrated pinentry prompt here, so GPG
+	// would wait forever: let the agent's own pinentry ask instead.
+	pinentry.DisableIntegration()
+
+	// No dialog can answer an ssh prompt here, so ssh would wait forever:
+	// let it fail instead.
+	sshaskpass.DisableIntegration()
 
 	// Re-initialize the coder agent without interactive-only tools.
 	if err := app.InitCoderAgentNonInteractive(ctx); err != nil {
@@ -855,7 +895,7 @@ func (app *App) GetDefaultSmallModel(providerID string) config.SelectedModel {
 						Provider:        providerID,
 						Model:           small.ID,
 						MaxTokens:       small.DefaultMaxTokens,
-						ReasoningEffort: small.DefaultReasoningEffort,
+						ReasoningEffort: small.Reasoning.DefaultEffortLevel,
 					}
 				}
 				return largeModelCfg
@@ -868,7 +908,7 @@ func (app *App) GetDefaultSmallModel(providerID string) config.SelectedModel {
 		Provider:        providerID,
 		Model:           defaultSmallModelID,
 		MaxTokens:       model.DefaultMaxTokens,
-		ReasoningEffort: model.DefaultReasoningEffort,
+		ReasoningEffort: model.Reasoning.DefaultEffortLevel,
 	}
 }
 
@@ -915,8 +955,20 @@ func (app *App) setupEvents() {
 	app.subscribeMustDeliver(ctx, "permissions-notifications", app.Permissions.SubscribeNotifications)
 	app.subscribeMustDeliver(ctx, "question-batches", app.Questions.Subscribe)
 	app.subscribeMustDeliver(ctx, "question-notifications", app.Questions.SubscribeNotifications)
+	// SSH credential prompts hang a running ssh command if lost, so
+	// the fan-in must not drop them.
+	app.subscribeMustDeliver(ctx, "ssh-prompts", sshaskpass.DefaultPrompts().Subscribe)
+	app.subscribeMustDeliver(ctx, "ssh-notifications", sshaskpass.DefaultPrompts().SubscribeNotifications)
+	app.subscribeMustDeliver(ctx, "permissions-mode", app.Permissions.SubscribeModeChanges)
 	app.subscribe(ctx, "history", app.History.Subscribe)
 	app.subscribe(ctx, "agent-notifications", app.agentNotifications.Subscribe)
+	// Pinentry transitions are rare and drive the terminal handover, so
+	// they must not be dropped: a lost release/restore would leave the
+	// terminal in the wrong state. The same goes for integrated pinentry
+	// credential prompts, which hang a GPG command if lost.
+	app.subscribeMustDeliver(ctx, "pinentry", app.Pinentry.Subscribe)
+	app.subscribeMustDeliver(ctx, "pinentry-prompts", pinentry.DefaultPrompts().Subscribe)
+	app.subscribeMustDeliver(ctx, "pinentry-notifications", pinentry.DefaultPrompts().SubscribeNotifications)
 	app.subscribeMustDeliver(ctx, "run-completions", app.runCompletions.Subscribe)
 	app.subscribe(ctx, "mcp", mcp.SubscribeEvents)
 	app.subscribe(ctx, "mcp-channels", app.subscribeScopedChannelEvents)
@@ -964,11 +1016,21 @@ func (app *App) subscribeScopedChannelEvents(ctx context.Context) <-chan pubsub.
 	return scoped
 }
 
+// eventCoalesceKey keeps at most one pending message update per message
+// for each slow app.events subscriber.
+func eventCoalesceKey(ev pubsub.Event[tea.Msg]) string {
+	if e, ok := ev.Payload.(pubsub.Event[message.Message]); ok {
+		return message.CoalesceKey(e)
+	}
+	return ""
+}
+
 // subscribe fans a service's event stream into the shared app.events
 // broker on app.serviceEventsWG, re-publishing each upstream event as a
-// tea.Msg. The goroutine exits when ctx is cancelled or the upstream
-// channel closes. It is a generic method (Go 1.27) so it can live in the
-// App namespace while still inferring the upstream event type T.
+// tea.Msg. Upstream must-deliver events stay must-deliver. The goroutine
+// exits when ctx is cancelled or the upstream channel closes. It is a
+// generic method (Go 1.27) so it can live in the App namespace while still
+// inferring the upstream event type T.
 func (app *App) subscribe[T any](
 	ctx context.Context,
 	name string,
@@ -983,7 +1045,11 @@ func (app *App) subscribe[T any](
 					slog.Debug("Subscription channel closed", "name", name)
 					return
 				}
-				app.events.Publish(pubsub.UpdatedEvent, tea.Msg(event))
+				if event.MustDeliver {
+					app.events.PublishMustDeliver(ctx, pubsub.UpdatedEvent, tea.Msg(event))
+				} else {
+					app.events.Publish(pubsub.UpdatedEvent, tea.Msg(event))
+				}
 			case <-ctx.Done():
 				slog.Debug("Subscription cancelled", "name", name)
 				return
@@ -1056,6 +1122,7 @@ func (app *App) initCoderAgent(ctx context.Context, interactive bool) error {
 		NotebookModelResolver: app.notebookModelResolver,
 		EdgeStore:             app.queries,
 		MemParams:             app.memParams,
+		HookRunner:            app.hookRunner,
 	})
 	if err != nil {
 		slog.Error("Failed to create coder agent", "err", err)
@@ -1107,6 +1174,7 @@ func (app *App) Shutdown() {
 	if app.AgentCoordinator != nil {
 		app.AgentCoordinator.CancelAll()
 	}
+	app.fireSessionEnd()
 
 	// Shared shutdown context for all timeout-bounded cleanup.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -40,19 +42,38 @@ func awaitPermissionsSkipChanged(t *testing.T, evc <-chan pubsub.Event[tea.Msg],
 	}
 }
 
-// TestSetPermissionsSkip_PublishesEvent covers the workspace-global
-// flag: the change must reach SSE subscribers, and the event carries
-// an empty SessionID so it broadcasts workspace-wide.
-func TestSetPermissionsSkip_PublishesEvent(t *testing.T) {
+// awaitPermissionModeChanged drains events until a ModeChangedEvent
+// arrives, or fails the test on timeout. Other event types are ignored.
+func awaitPermissionModeChanged(t *testing.T, evc <-chan pubsub.Event[tea.Msg]) permission.PermissionMode {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev, ok := <-evc:
+			if !ok {
+				t.Fatal("event channel closed before ModeChangedEvent arrived")
+			}
+			pmc, ok := ev.Payload.(pubsub.Event[permission.ModeChangedEvent])
+			if !ok {
+				continue
+			}
+			return pmc.Payload.Mode
+		case <-deadline:
+			t.Fatal("timed out waiting for ModeChangedEvent")
+		}
+	}
+}
+
+// TestSetPermissionMode_PublishesEvent covers the workspace-global
+// mode: the change must reach SSE subscribers so connected clients
+// keep their cached mode in sync, and the service reports the mode
+// it was just given.
+func TestSetPermissionMode_PublishesEvent(t *testing.T) {
 	b, ws, evc := newPublishingWorkspace(t)
 
-	require.NoError(t, b.SetPermissionsSkip(ws.ID, true))
-	payload := awaitPermissionsSkipChanged(t, evc, ws.ID, "")
-	require.True(t, payload.Skip)
-
-	skip, err := b.GetPermissionsSkip(ws.ID)
-	require.NoError(t, err)
-	require.True(t, skip)
+	require.NoError(t, b.SetPermissionMode(ws.ID, permission.PermissionModeYolo))
+	require.Equal(t, permission.PermissionModeYolo, awaitPermissionModeChanged(t, evc))
+	require.Equal(t, permission.PermissionModeYolo, ws.Permissions.PermissionMode())
 }
 
 // TestSetSessionPermissionsSkip_PublishesEvent covers the per-session
@@ -94,27 +115,25 @@ func TestSetSessionPermissionsSkip_PublishesEvent(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, reloaded.PermissionSkip, "cleared override must persist as NULL")
 
-	// The workspace-global flag is orthogonal to the persisted
-	// override: with no override the readback reports the effective
-	// state (true under workspace skip), and disarming the workspace
-	// flag shows nothing was persisted per-session.
-	require.NoError(t, b.SetPermissionsSkip(ws.ID, true))
-	payload = awaitPermissionsSkipChanged(t, evc, ws.ID, "")
-	require.True(t, payload.Skip)
+	// The workspace mode is orthogonal to the persisted override:
+	// with no override the readback reports the effective state (true
+	// under a skipping mode), and dropping back to normal shows
+	// nothing was persisted per-session.
+	require.NoError(t, b.SetPermissionMode(ws.ID, permission.PermissionModeYolo))
+	require.Equal(t, permission.PermissionModeYolo, awaitPermissionModeChanged(t, evc))
 
 	skip, err = b.GetSessionPermissionsSkip(ctx, ws.ID, sess.ID)
 	require.NoError(t, err)
-	require.True(t, skip, "unflagged session inherits the workspace flag")
+	require.True(t, skip, "unflagged session inherits the workspace mode")
 
-	require.NoError(t, b.SetPermissionsSkip(ws.ID, false))
-	payload = awaitPermissionsSkipChanged(t, evc, ws.ID, "")
-	require.False(t, payload.Skip)
+	require.NoError(t, b.SetPermissionMode(ws.ID, permission.PermissionModeNormal))
+	require.Equal(t, permission.PermissionModeNormal, awaitPermissionModeChanged(t, evc))
 	skip, err = b.GetSessionPermissionsSkip(ctx, ws.ID, sess.ID)
 	require.NoError(t, err)
-	require.False(t, skip, "workspace skip must not leave the session flag armed")
+	require.False(t, skip, "workspace mode must not leave the session flag armed")
 	reloaded, err = ws.Sessions.Get(ctx, sess.ID)
 	require.NoError(t, err)
-	require.Nil(t, reloaded.PermissionSkip, "workspace skip must not persist a session override")
+	require.Nil(t, reloaded.PermissionSkip, "workspace mode must not persist a session override")
 }
 
 // TestSessionPermissionsSkip_UnknownSession verifies the
@@ -286,4 +305,58 @@ func TestSetSessionModel(t *testing.T) {
 	reloaded, err = ws.Sessions.Get(ctx, sess.ID)
 	require.NoError(t, err)
 	require.Nil(t, reloaded.ModelOverride)
+}
+
+// TestSetPermissionMode_ReportedInWorkspaceProto pins the invariant
+// that the mode a client is shown is the mode the server enforces.
+// The workspace snapshot used to be built from the startup flag, so
+// any runtime toggle left every client reading a stale value forever.
+// The dangerous direction is a client displaying "normal" while the
+// server auto-approves everything, so both directions are asserted.
+func TestSetPermissionMode_ReportedInWorkspaceProto(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+
+	b := New(context.Background(), nil, func() {})
+	b.SetCreateGrace(2 * time.Second)
+	t.Cleanup(func() { drainBackend(t, b) })
+
+	// Start in yolo so that toggling down to normal is just as much a
+	// real assertion as toggling up; a workspace started in normal
+	// would make the down-toggle pass by accident.
+	args := protoWS(t.TempDir(), t.TempDir(), uuid.New().String())
+	args.PermissionMode = proto.WorkspacePermissionModeYolo
+	ws, created, err := b.CreateWorkspace(args)
+	require.NoError(t, err)
+	require.Equal(t, proto.WorkspacePermissionModeYolo, created.PermissionMode)
+
+	for _, tc := range []struct {
+		name string
+		mode permission.PermissionMode
+		want proto.WorkspacePermissionMode
+	}{
+		{"yolo to normal", permission.PermissionModeNormal, proto.WorkspacePermissionModeNormal},
+		{"normal to sysadmin", permission.PermissionModeSysadmin, proto.WorkspacePermissionModeSysadmin},
+		{"sysadmin to yolo", permission.PermissionModeYolo, proto.WorkspacePermissionModeYolo},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, b.SetPermissionMode(ws.ID, tc.mode))
+			require.Equal(t, tc.mode, ws.Permissions.PermissionMode(),
+				"the server must enforce the mode it was just given")
+
+			got, err := b.GetWorkspaceProto(ws.ID)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got.PermissionMode,
+				"workspace snapshot must report the enforced mode")
+
+			// ListWorkspaces is a second client-facing path onto the
+			// same snapshot; a fix that misses it still lies to clients.
+			list := b.ListWorkspaces()
+			require.Len(t, list, 1)
+			require.Equal(t, tc.want, list[0].PermissionMode,
+				"workspace listing must report the enforced mode")
+		})
+	}
 }

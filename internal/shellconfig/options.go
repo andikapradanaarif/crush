@@ -35,6 +35,8 @@ import (
 //	option request-timeout 300
 //	option request-timeout 0
 //	option max-background-jobs 200
+//	option pinentry-integrated false
+//	option pinentry-cache-timeout 300
 //
 // Boolean shortcuts: for boolean fields, omitting the value sets it to true.
 func handleOption(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -227,6 +229,7 @@ var optionSpecs = map[string]optionSpec{
 	"notebook-checkpoint":      {jsonKey: "notebook_checkpoint", kind: optBool},
 	"notebook-stub-superseded": {jsonKey: "notebook_stub_superseded", kind: optBool},
 	"notebook-hydration":       {jsonKey: "notebook_hydration", kind: optBool},
+	"pinentry-integrated":      {jsonKey: "pinentry_integrated", kind: optBool},
 
 	// Boolean fields exposed positively but stored as their negation.
 	"metrics":              {jsonKey: "disable_metrics", kind: optBool, inverted: true},
@@ -244,8 +247,9 @@ var optionSpecs = map[string]optionSpec{
 	"notebook-generate":      {jsonKey: "notebook_generate", kind: optEnum, values: []string{"always", "under_pressure", "never"}},
 
 	// Integer fields.
-	"request-timeout":     {jsonKey: "request_timeout", kind: optInt},
-	"max-background-jobs": {jsonKey: "max_background_jobs", kind: optInt},
+	"request-timeout":        {jsonKey: "request_timeout", kind: optInt},
+	"max-background-jobs":    {jsonKey: "max_background_jobs", kind: optInt},
+	"pinentry-cache-timeout": {jsonKey: "pinentry_cache_timeout", kind: optInt},
 
 	// List fields. Keys are singular because each call appends one value.
 	"context-path":        {jsonKey: "context_paths", kind: optList},
