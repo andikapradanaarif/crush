@@ -74,6 +74,41 @@ model add openai/gpt-x --cost-per-1m-in 1`))
 	require.Contains(t, err.Error(), "unknown flag")
 }
 
+// TestModelAddReasoningLevel verifies that repeatable --reasoning-level
+// flags land as effort-level objects under the reasoning schema and
+// imply toggleable thinking when no --thinking is declared.
+func TestModelAddReasoningLevel(t *testing.T) {
+	t.Parallel()
+
+	result := loadScript(t, `provider add openai --api-key k
+model add openai/gpt-x --reasoning-level low --reasoning-level high --reasoning-level xhigh --reasoning-effort high`)
+
+	model := result["providers"].(map[string]any)["openai"].(map[string]any)["models"].([]any)[0].(map[string]any)
+	reasoning := model["reasoning"].(map[string]any)
+	require.Equal(t, "toggleable", reasoning["thinking"])
+	require.Equal(t, "high", reasoning["default_effort_level"])
+	levels := reasoning["effort_levels"].([]any)
+	require.Len(t, levels, 3)
+	require.Equal(t, "low", levels[0].(map[string]any)["value"])
+	require.Equal(t, "high", levels[1].(map[string]any)["value"])
+	require.Equal(t, "xhigh", levels[2].(map[string]any)["value"])
+	require.NotContains(t, model, "reasoning_levels",
+		"the staging key must not leak into the built config")
+}
+
+// TestModelAddReasoningLevelKeepsExplicitThinking verifies that an
+// explicit --thinking is not overwritten by --reasoning-level.
+func TestModelAddReasoningLevelKeepsExplicitThinking(t *testing.T) {
+	t.Parallel()
+
+	result := loadScript(t, `provider add anthropic --api-key k
+model add anthropic/claude-x --thinking always --reasoning-level high`)
+
+	reasoning := result["providers"].(map[string]any)["anthropic"].(map[string]any)["models"].([]any)[0].(map[string]any)["reasoning"].(map[string]any)
+	require.Equal(t, "always", reasoning["thinking"])
+	require.Len(t, reasoning["effort_levels"].([]any), 1)
+}
+
 func TestModelSelectRejectsInvalidTopP(t *testing.T) {
 	t.Parallel()
 
