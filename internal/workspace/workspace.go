@@ -182,6 +182,13 @@ type Workspace interface {
 	AgentSummarize(ctx context.Context, sessionID string) error
 	UpdateAgentModel(ctx context.Context) error
 	UpdateSummaryModel(ctx context.Context) error
+	// SetSessionModel sets or clears a session's large-model override:
+	// a non-nil model pins the session to that selection (including
+	// per-session tweaks like ReasoningEffort), nil clears the pin so
+	// the session follows the shared selection again. The override
+	// persists on the session row and applies to the next run — an
+	// in-flight run keeps the model it started with.
+	SetSessionModel(ctx context.Context, sessionID string, model *config.SelectedModel) error
 	InitCoderAgent(ctx context.Context) error
 	InitCoderAgentNonInteractive(ctx context.Context) error
 	GetDefaultSmallModel(providerID string) config.SelectedModel

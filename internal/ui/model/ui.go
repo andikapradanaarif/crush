@@ -2641,11 +2641,6 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			cmds = append(cmds, cmd)
 		}
 	case dialog.ActionSelectReasoningEffort:
-		if m.isAgentBusy() {
-			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait..."))
-			break
-		}
-
 		cfg := m.com.Config()
 		if cfg == nil {
 			cmds = append(cmds, util.ReportError(errors.New("configuration not found")))
@@ -2655,6 +2650,46 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		agentCfg, ok := cfg.Agents[config.AgentCoder]
 		if !ok {
 			cmds = append(cmds, util.ReportError(errors.New("agent configuration not found")))
+			break
+		}
+
+		if m.session != nil {
+			// Session-scoped write: the effort pins on the session's
+			// model override — applies to the next run, so it is safe
+			// while the agent is busy.
+			configured := cfg.Models[agentCfg.Model]
+			sel := configured
+			if override := common.SessionModelOverride(m.session); override != nil {
+				sel = *override
+			}
+			sel.ReasoningEffort = msg.Effort
+			sessionID := m.session.ID
+			if m.session.ModelOverride == nil && sel.ReasoningEffort == configured.ReasoningEffort {
+				// Already resolves to this effort — persisting would
+				// only pin the configured model for no effect.
+				effort := common.FormatReasoningEffort(msg.Effort)
+				cmds = append(cmds, func() tea.Msg {
+					return util.NewInfoMsg("Reasoning effort is already " + effort)
+				})
+			} else {
+				cmds = append(cmds, func() tea.Msg {
+					if err := m.com.Workspace.SetSessionModel(context.TODO(), sessionID, &sel); err != nil {
+						return util.ReportError(err)()
+					}
+					if msg.Effort == "" {
+						return util.NewInfoMsg("Reasoning effort reset to model default for this session")
+					}
+					return util.NewInfoMsg("Reasoning effort set to " + common.FormatReasoningEffort(msg.Effort) + " for this session")
+				})
+			}
+			m.dialog.CloseDialog(dialog.ReasoningID)
+			break
+		}
+
+		// Global fallback: no session — writes the configured model
+		// slot and rebuilds agents (pre-session-override behavior).
+		if m.isAgentBusy() {
+			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait..."))
 			break
 		}
 
@@ -5921,7 +5956,7 @@ func (m *UI) openCommandsDialog() tea.Cmd {
 	hasTodos := hasSession && hasIncompleteTodos(m.session.Todos)
 	hasQueue := m.promptQueue > 0
 
-	commands, err := dialog.NewCommands(m.com, sessionID, hasSession, hasTodos, hasQueue, m.isTransparent, m.customCommands, m.mcpPrompts)
+	commands, err := dialog.NewCommands(m.com, sessionID, hasSession, hasTodos, hasQueue, m.isTransparent, m.customCommands, m.mcpPrompts, common.SessionModelOverride(m.session))
 	if err != nil {
 		return util.ReportError(err)
 	}
@@ -5938,7 +5973,11 @@ func (m *UI) openReasoningDialog() tea.Cmd {
 		return nil
 	}
 
-	reasoningDialog, err := dialog.NewReasoning(m.com)
+	var sessionID string
+	if m.session != nil {
+		sessionID = m.session.ID
+	}
+	reasoningDialog, err := dialog.NewReasoning(m.com, sessionID, common.SessionModelOverride(m.session))
 	if err != nil {
 		return util.ReportError(err)
 	}

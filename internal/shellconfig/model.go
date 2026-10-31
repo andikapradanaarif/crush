@@ -18,7 +18,7 @@ import (
 //	    [--supports-images true|false] [--price-input F]
 //	    [--price-output F] [--price-cache-create F]
 //	    [--price-cache-hit F] [--reasoning-effort low|medium|high]
-//	    [--max-attachments N]
+//	    [--reasoning-level LEVEL ...] [--max-attachments N]
 //	model remove <provider>/<id>   (alias: rm)
 //	model large [<provider>/<id>] [--think] [--reasoning-effort L]
 //	    [--max-tokens N] [--temperature F] [--top-p F] [--top-k N]
@@ -81,12 +81,18 @@ var modelAddFlags = []flagSpec{
 	{name: "--price-cache-create", jsonKey: "cache_create", child: "pricing", kind: flagFloat, op: opSetInChild},
 	{name: "--price-cache-hit", jsonKey: "cache_hit", child: "pricing", kind: flagFloat, op: opSetInChild},
 	{name: "--reasoning-effort", jsonKey: "default_effort_level", child: "reasoning", kind: flagString, op: opSetInChild},
+	// --reasoning-level is repeatable: each occurrence appends one
+	// accepted effort label. modelAdd translates them into
+	// reasoning.effort_levels, letting a custom model declare its own
+	// effort ceiling (e.g. xhigh/max) which effective-effort resolution
+	// then applies per model selection.
+	{name: "--reasoning-level", jsonKey: "reasoning_levels", kind: flagString, op: opAppend},
 	{name: "--max-attachments", jsonKey: "max_attachments", kind: flagInt, op: opSet},
 }
 
 func modelAdd(b *ConfigBuilder, args []string, stderr io.Writer) error {
 	if len(args) < 3 {
-		return usage(stderr, "usage: model add <provider>/<id> [--name NAME] [--context-window N] [--default-max-tokens N] [--thinking always|never|toggleable] [--supports-images true|false] [--price-input F] [--price-output F] [--price-cache-create F] [--price-cache-hit F] [--reasoning-effort low|medium|high] [--max-attachments N]")
+		return usage(stderr, "usage: model add <provider>/<id> [--name NAME] [--context-window N] [--default-max-tokens N] [--thinking always|never|toggleable] [--supports-images true|false] [--price-input F] [--price-output F] [--price-cache-create F] [--price-cache-hit F] [--reasoning-effort low|medium|high] [--reasoning-level LEVEL ...] [--max-attachments N]")
 	}
 	provider, id, ok := splitProviderModel(args[2])
 	if !ok {
@@ -111,6 +117,27 @@ func modelAdd(b *ConfigBuilder, args []string, stderr io.Writer) error {
 			thinking = "toggleable"
 		}
 		childMap(model, "reasoning")["thinking"] = thinking
+	}
+
+	// Translate --reasoning-level strings into effort-level objects
+	// under the reasoning schema. Levels without an explicit --thinking
+	// imply toggleable thinking, matching how the load-time legacy
+	// migration treats declared levels.
+	if raw, ok := model["reasoning_levels"].([]any); ok {
+		delete(model, "reasoning_levels")
+		reasoning := childMap(model, "reasoning")
+		levels, _ := reasoning["effort_levels"].([]any)
+		for _, item := range raw {
+			if value, ok := item.(string); ok && value != "" {
+				levels = append(levels, map[string]any{"value": value})
+			}
+		}
+		if len(levels) > 0 {
+			reasoning["effort_levels"] = levels
+			if _, declared := reasoning["thinking"]; !declared {
+				reasoning["thinking"] = "toggleable"
+			}
+		}
 	}
 
 	p := childMap(providers, provider)

@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/logo"
+	"github.com/charmbracelet/crush/internal/workspace"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/ultraviolet/layout"
 )
@@ -19,6 +20,13 @@ import (
 // settings and context usage/cost for the sidebar.
 func (m *UI) modelInfo(width int) string {
 	model := m.selectedLargeModel()
+	if override := common.SessionModelOverride(m.session); override != nil {
+		// The session's pinned selection is what its runs resolve —
+		// display it (and its effort) rather than the shared slot.
+		if catwalkModel := m.com.Config().GetModel(override.Provider, override.Model); catwalkModel != nil {
+			model = &workspace.AgentModel{CatwalkCfg: *catwalkModel, ModelCfg: *override}
+		}
+	}
 	reasoningInfo := ""
 	providerName := ""
 
