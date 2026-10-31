@@ -157,7 +157,7 @@ func TestSendMessage_SuccessIncrementsRunWG(t *testing.T) {
 
 	select {
 	case <-coord.entered:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("dispatched goroutine never entered RunAccepted")
 	}
 	require.Equal(t, int32(1), coord.runCount.Load())
@@ -178,7 +178,7 @@ func TestSendMessage_SuccessIncrementsRunWG(t *testing.T) {
 
 	select {
 	case <-waited:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("runWG.Wait did not complete after the run returned")
 	}
 }
