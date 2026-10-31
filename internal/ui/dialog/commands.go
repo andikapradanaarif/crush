@@ -70,6 +70,11 @@ type Commands struct {
 
 	customCommands []commands.CustomCommand
 	mcpPrompts     []commands.MCPPrompt
+	// sessionModel is the active session's persisted model override —
+	// nil when the session follows the shared selection (or there is
+	// no session). Session-scoped commands gate on the effective
+	// model it resolves to, not the configured slot.
+	sessionModel *config.SelectedModel
 
 	dockerMCPAvailable     *bool
 	dockerMCPCheckInFlight bool
@@ -78,7 +83,7 @@ type Commands struct {
 var _ Dialog = (*Commands)(nil)
 
 // NewCommands creates a new commands dialog.
-func NewCommands(com *common.Common, sessionID string, hasSession, hasTodos, hasQueue bool, customCommands []commands.CustomCommand, mcpPrompts []commands.MCPPrompt) (*Commands, error) {
+func NewCommands(com *common.Common, sessionID string, hasSession, hasTodos, hasQueue bool, customCommands []commands.CustomCommand, mcpPrompts []commands.MCPPrompt, sessionModel *config.SelectedModel) (*Commands, error) {
 	c := &Commands{
 		com:            com,
 		selected:       SystemCommands,
@@ -88,6 +93,7 @@ func NewCommands(com *common.Common, sessionID string, hasSession, hasTodos, has
 		hasQueue:       hasQueue,
 		customCommands: customCommands,
 		mcpPrompts:     mcpPrompts,
+		sessionModel:   sessionModel,
 	}
 
 	help := help.New()
@@ -466,7 +472,8 @@ func (c *Commands) defaultCommands() []*CommandItem {
 		if providerCfg != nil && model != nil && model.CanReason {
 			selectedModel := cfg.Models[agentCfg.Model]
 
-			// Anthropic models: thinking toggle
+			// Anthropic models: thinking toggle — writes the global
+			// model slot, so it gates on the configured model.
 			if model.CanReason && len(model.ReasoningLevels) == 0 {
 				status := "Enable"
 				if selectedModel.Think {
@@ -474,13 +481,21 @@ func (c *Commands) defaultCommands() []*CommandItem {
 				}
 				commands = append(commands, NewCommandItem(c.com.Styles, "toggle_thinking", status+" Thinking Mode", "", ActionToggleThinking{}))
 			}
+		}
 
-			// OpenAI models: reasoning effort dialog
-			if len(model.ReasoningLevels) > 0 {
-				commands = append(commands, NewCommandItem(c.com.Styles, "select_reasoning_effort", "Select Reasoning Effort", "", ActionOpenDialog{
-					DialogID: ReasoningID,
-				}))
-			}
+		// Reasoning effort writes the session's model override, so it
+		// gates on the session's effective model — an override pinned
+		// to a reasoning model gets the command even when the shared
+		// model can't reason (and vice versa).
+		effortModel := cfg.Models[agentCfg.Model]
+		if c.sessionModel != nil {
+			effortModel = *c.sessionModel
+		}
+		if m := cfg.GetModel(effortModel.Provider, effortModel.Model); m != nil &&
+			m.CanReason && len(m.ReasoningLevels) > 0 {
+			commands = append(commands, NewCommandItem(c.com.Styles, "select_reasoning_effort", "Select Reasoning Effort", "", ActionOpenDialog{
+				DialogID: ReasoningID,
+			}))
 		}
 	}
 
