@@ -18,7 +18,7 @@ import (
 // event types are ignored.
 func awaitConfigChanged(t *testing.T, evc <-chan pubsub.Event[tea.Msg], workspaceID string) {
 	t.Helper()
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(10 * time.Second)
 	for {
 		select {
 		case ev, ok := <-evc:

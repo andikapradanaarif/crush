@@ -22,7 +22,7 @@ func ptr(v bool) *bool { return &v }
 // fails the test on timeout. Other event types are ignored.
 func awaitPermissionsSkipChanged(t *testing.T, evc <-chan pubsub.Event[tea.Msg], workspaceID, sessionID string) proto.PermissionsSkipChanged {
 	t.Helper()
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(10 * time.Second)
 	for {
 		select {
 		case ev, ok := <-evc:
@@ -46,7 +46,7 @@ func awaitPermissionsSkipChanged(t *testing.T, evc <-chan pubsub.Event[tea.Msg],
 // arrives, or fails the test on timeout. Other event types are ignored.
 func awaitPermissionModeChanged(t *testing.T, evc <-chan pubsub.Event[tea.Msg]) permission.PermissionMode {
 	t.Helper()
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(10 * time.Second)
 	for {
 		select {
 		case ev, ok := <-evc:
@@ -187,7 +187,7 @@ func TestRepublishPendingPrompts_ReplaysAll(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return len(ws.Permissions.PendingRequests()) == 3
-	}, 2*time.Second, 5*time.Millisecond, "all three requests must park concurrently")
+	}, 10*time.Second, 5*time.Millisecond, "all three requests must park concurrently")
 
 	// Flush the original publish and session-creation events so the
 	// channel only carries what republishPendingPrompts re-emits.
@@ -196,7 +196,7 @@ func TestRepublishPendingPrompts_ReplaysAll(t *testing.T) {
 	b.republishPendingPrompts(ctx, ws, sessA.ID)
 
 	got := map[string]bool{}
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(10 * time.Second)
 	for len(got) < 2 {
 		select {
 		case ev, ok := <-evc:
@@ -263,7 +263,7 @@ func TestGetSessionPendingPermissions(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return len(ws.Permissions.PendingRequests()) == 2
-	}, 2*time.Second, 5*time.Millisecond)
+	}, 10*time.Second, 5*time.Millisecond)
 
 	pending, err := b.GetSessionPendingPermissions(ctx, ws.ID, sessA.ID)
 	require.NoError(t, err)

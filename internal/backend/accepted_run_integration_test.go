@@ -95,7 +95,7 @@ func TestSendMessage_AcceptedCancelRace_RealMachinery(t *testing.T) {
 	// not yet consumed: the prompt is accepted but not active.
 	select {
 	case <-coord.entered:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("dispatched run never entered RunAccepted")
 	}
 

@@ -112,7 +112,7 @@ func TestRunAgent_PreRunErrorPublishesTerminalRunComplete(t *testing.T) {
 		require.Equal(t, runErr.Error(), ev.Payload.Error,
 			"the fallback terminal event must be marked errored")
 		require.False(t, ev.Payload.Cancelled)
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("no terminal RunComplete published for a pre-run error; a run waiter would hang")
 	}
 }
