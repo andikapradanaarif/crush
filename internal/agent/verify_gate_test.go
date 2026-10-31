@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/notify"
@@ -772,17 +773,32 @@ func TestRunGate_EndToEnd(t *testing.T) {
 	model.mu.Unlock()
 
 	// Exactly one RunComplete for the shared RunID — the outer turn's
-	// publish is suppressed while the retry is queued.
+	// publish is suppressed while the retry is queued. The broker
+	// publishes asynchronously, so collect until the run's event lands
+	// (bounded), then settle-drain briefly so a duplicate terminal
+	// publish is still observed.
 	var completes []notify.RunComplete
-drain:
+	deadline := time.After(10 * time.Second)
+	for len(completes) == 0 {
+		select {
+		case ev := <-events:
+			if ev.Payload.RunID == "run-e2e" {
+				completes = append(completes, ev.Payload)
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for the run's RunComplete")
+		}
+	}
+	settle := time.After(300 * time.Millisecond)
+settleDrain:
 	for {
 		select {
 		case ev := <-events:
 			if ev.Payload.RunID == "run-e2e" {
 				completes = append(completes, ev.Payload)
 			}
-		default:
-			break drain
+		case <-settle:
+			break settleDrain
 		}
 	}
 	require.Len(t, completes, 1)
