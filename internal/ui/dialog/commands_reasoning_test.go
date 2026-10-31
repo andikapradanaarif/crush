@@ -3,7 +3,7 @@ package dialog
 import (
 	"testing"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/ui/common"
@@ -20,7 +20,10 @@ func reasoningTestConfig(slot config.SelectedModelType, sel config.SelectedModel
 		ID:   "test",
 		Name: "Test",
 		Models: []catwalk.Model{
-			{ID: "reasoning-model", CanReason: true, ReasoningLevels: []string{"low", "medium", "high"}},
+			{ID: "reasoning-model", Reasoning: catwalk.Reasoning{
+				Thinking:     catwalk.ThinkingToggleable,
+				EffortLevels: catwalk.NewEffortLevels("low", "medium", "high"),
+			}},
 			{ID: "plain-model"},
 		},
 	})
@@ -48,7 +51,7 @@ func newReasoningTestCommands(t *testing.T, cfg *config.Config, sessionModel *co
 	t.Helper()
 	s := styles.CharmtonePantera()
 	com := &common.Common{Styles: &s, Workspace: &stubWorkspace{cfg: cfg}}
-	cmds, err := NewCommands(com, "sess", true, false, false, nil, nil, sessionModel)
+	cmds, err := NewCommands(com, "sess", true, false, false, false, nil, nil, sessionModel)
 	require.NoError(t, err)
 	return cmds
 }
