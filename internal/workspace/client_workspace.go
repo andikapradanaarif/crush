@@ -347,6 +347,10 @@ func (w *ClientWorkspace) UpdateSummaryModel(ctx context.Context) error {
 	return w.client.UpdateSummaryModel(ctx, w.workspaceID())
 }
 
+func (w *ClientWorkspace) SetSessionModel(ctx context.Context, sessionID string, model *config.SelectedModel) error {
+	return w.client.SetSessionModel(ctx, w.workspaceID(), sessionID, model)
+}
+
 func (w *ClientWorkspace) InitCoderAgent(ctx context.Context) error {
 	return w.client.InitiateAgentProcessing(ctx, w.workspaceID(), true)
 }

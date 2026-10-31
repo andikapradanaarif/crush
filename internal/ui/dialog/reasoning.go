@@ -31,6 +31,13 @@ type Reasoning struct {
 	list  *list.FilterableList
 	input textinput.Model
 
+	// sessionID/sessionModel scope the dialog to a session: the write
+	// pins the session's model override rather than the global slot.
+	// sessionModel is the session's persisted override — nil when the
+	// session follows the shared selection.
+	sessionID    string
+	sessionModel *config.SelectedModel
+
 	keyMap struct {
 		Select   key.Binding
 		Next     key.Binding
@@ -63,9 +70,10 @@ var (
 	_ ListItem = (*ReasoningItem)(nil)
 )
 
-// NewReasoning creates a new reasoning effort dialog.
-func NewReasoning(com *common.Common) (*Reasoning, error) {
-	r := &Reasoning{com: com}
+// NewReasoning creates a new reasoning effort dialog. A non-empty
+// sessionID scopes the selection to that session's model override.
+func NewReasoning(com *common.Common, sessionID string, sessionModel *config.SelectedModel) (*Reasoning, error) {
+	r := &Reasoning{com: com, sessionID: sessionID, sessionModel: sessionModel}
 
 	help := help.New()
 	help.Styles = com.Styles.DialogHelpStyles()
@@ -188,6 +196,11 @@ func (r *Reasoning) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 
 	rc := NewRenderContext(t, width)
 	rc.Title = "Select Reasoning Effort"
+	if r.sessionID != "" {
+		// Marks the scope so a session write isn't mistaken for the
+		// global model slot.
+		rc.Title += " (this session)"
+	}
 	inputView := t.Dialog.InputPrompt.Render(r.input.View())
 	rc.AddPart(inputView)
 
@@ -242,8 +255,14 @@ func (r *Reasoning) setReasoningItems() error {
 		return errors.New("agent configuration not found")
 	}
 
+	// The session's effective model drives both the offered levels
+	// and the current marker — a session override can point at a
+	// different model than the configured slot.
 	selectedModel := cfg.Models[agentCfg.Model]
-	model := cfg.GetModelByType(agentCfg.Model)
+	if r.sessionModel != nil {
+		selectedModel = *r.sessionModel
+	}
+	model := cfg.GetModel(selectedModel.Provider, selectedModel.Model)
 	if model == nil {
 		return errors.New("model configuration not found")
 	}
@@ -258,20 +277,36 @@ func (r *Reasoning) setReasoningItems() error {
 		currentEffort = model.Reasoning.DefaultEffortLevel
 	}
 
-	items := make([]list.FilterableItem, 0, len(levels))
+	items := make([]list.FilterableItem, 0, len(levels)+1)
 	selectedIndex := 0
-	for i, level := range levels {
+	if r.sessionModel != nil {
+		// Revert entry: clears the effort on the session pin so runs
+		// fall back to the model's own default. Only meaningful when
+		// an override exists — without one, "default" would just pin
+		// the configured model for no effect.
+		isCurrent := r.sessionModel.ReasoningEffort == ""
+		items = append(items, &ReasoningItem{
+			Versioned: list.NewVersioned(),
+			effort:    "",
+			title:     "Model default",
+			isCurrent: isCurrent,
+			t:         r.com.Styles,
+		})
+		if isCurrent {
+			selectedIndex = len(items) - 1
+		}
+	}
+	for _, level := range levels {
 		display := cmp.Or(level.Display, common.FormatReasoningEffort(level.Value))
-		item := &ReasoningItem{
+		items = append(items, &ReasoningItem{
 			Versioned: list.NewVersioned(),
 			effort:    level.Value,
 			title:     display,
 			isCurrent: level.Value == currentEffort,
 			t:         r.com.Styles,
-		}
-		items = append(items, item)
+		})
 		if level.Value == currentEffort {
-			selectedIndex = i
+			selectedIndex = len(items) - 1
 		}
 	}
 

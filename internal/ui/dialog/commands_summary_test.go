@@ -41,7 +41,7 @@ func TestSummaryCommandDescriptionWhenAbsent(t *testing.T) {
 	cfg := &config.Config{Models: map[config.SelectedModelType]config.SelectedModel{}}
 	com := &common.Common{Styles: &s, Workspace: &stubWorkspace{cfg: cfg}}
 
-	cmds, err := NewCommands(com, "", false, false, false, false, nil, nil)
+	cmds, err := NewCommands(com, "", false, false, false, false, nil, nil, nil)
 	require.NoError(t, err)
 
 	summaryCmd := findSummaryCommand(cmds.defaultCommands())
@@ -63,7 +63,7 @@ func TestSummaryCommandDescriptionWhenConfigured(t *testing.T) {
 	}
 	com := &common.Common{Styles: &s, Workspace: &stubWorkspace{cfg: cfg}}
 
-	cmds, err := NewCommands(com, "", false, false, false, false, nil, nil)
+	cmds, err := NewCommands(com, "", false, false, false, false, nil, nil, nil)
 	require.NoError(t, err)
 
 	summaryCmd := findSummaryCommand(cmds.defaultCommands())

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -35,6 +36,10 @@ import (
 type AppWorkspace struct {
 	app   *app.App
 	store *config.ConfigStore
+	// modelOverrideMu serializes the pin/persist pair in
+	// SetSessionModel — the same role backend's per-workspace mutex
+	// plays on the server path.
+	modelOverrideMu sync.Mutex
 }
 
 // NewAppWorkspace creates a new AppWorkspace wrapping the given app
@@ -283,6 +288,43 @@ func (w *AppWorkspace) AgentSummarize(ctx context.Context, sessionID string) err
 
 func (w *AppWorkspace) UpdateAgentModel(ctx context.Context) error {
 	return w.app.UpdateAgentModel(ctx)
+}
+
+// SetSessionModel sets or clears the session's large-model override.
+// Mirrors Backend.SetSessionModel's ordering: the clear path persists
+// before dropping the runtime pin so a concurrent models() lookup
+// can't rehydrate the cleared row into a permanent stale pin; the set
+// path pins first so an unbuildable selection never reaches the row.
+func (w *AppWorkspace) SetSessionModel(ctx context.Context, sessionID string, model *config.SelectedModel) error {
+	if w.app.AgentCoordinator == nil {
+		return errors.New("agent coordinator not initialized")
+	}
+
+	w.modelOverrideMu.Lock()
+	defer w.modelOverrideMu.Unlock()
+
+	if _, err := w.app.Sessions.Get(ctx, sessionID); err != nil {
+		return err
+	}
+	raw, err := proto.SelectedModelJSON(model)
+	if err != nil {
+		return err
+	}
+	if model == nil {
+		if _, err := w.app.Sessions.SetModelOverride(ctx, sessionID, raw); err != nil {
+			return err
+		}
+		w.app.AgentCoordinator.ClearSessionModelOverride(sessionID)
+		return nil
+	}
+	if err := w.app.AgentCoordinator.SetSessionModelOverride(ctx, sessionID, *model); err != nil {
+		return err
+	}
+	if _, err := w.app.Sessions.SetModelOverride(ctx, sessionID, raw); err != nil {
+		w.app.AgentCoordinator.ClearSessionModelOverride(sessionID)
+		return err
+	}
+	return nil
 }
 
 func (w *AppWorkspace) UpdateSummaryModel(ctx context.Context) error {
