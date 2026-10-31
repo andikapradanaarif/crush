@@ -1036,8 +1036,13 @@ func (app *App) subscribe[T any](
 	name string,
 	subscriber func(context.Context) <-chan pubsub.Event[T],
 ) {
+	// Subscribe eagerly: the upstream channel must exist before New
+	// returns. Deferring it into the fan-in goroutine opens a window
+	// where a source broker publish lands on zero subscribers and the
+	// event is dropped silently — e.g. a SetPermissionMode racing
+	// workspace startup loses the ModeChangedEvent entirely.
+	subCh := subscriber(ctx)
 	app.serviceEventsWG.Go(func() {
-		subCh := subscriber(ctx)
 		for {
 			select {
 			case event, ok := <-subCh:
@@ -1070,8 +1075,10 @@ func (app *App) subscribeMustDeliver[T any](
 	name string,
 	subscriber func(context.Context) <-chan pubsub.Event[T],
 ) {
+	// Same eager-subscribe invariant as subscribe — must-deliver events
+	// are exactly the ones a startup-window drop cannot afford to lose.
+	subCh := subscriber(ctx)
 	app.serviceEventsWG.Go(func() {
-		subCh := subscriber(ctx)
 		for {
 			select {
 			case event, ok := <-subCh:
