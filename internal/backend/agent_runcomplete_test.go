@@ -45,6 +45,7 @@ func (c *errorCoordinator) IsSessionBusy(string) bool                         { 
 func (c *errorCoordinator) QueuedPrompts(string) int                          { return 0 }
 func (c *errorCoordinator) QueuedPromptsList(string) []string                 { return nil }
 func (c *errorCoordinator) ClearQueue(string)                                 {}
+func (c *errorCoordinator) AddNote(string, string)                            {}
 func (c *errorCoordinator) Summarize(context.Context, string) error           { return nil }
 func (c *errorCoordinator) Model() agent.Model                                { return agent.Model{} }
 func (c *errorCoordinator) UpdateModels(context.Context) error                { return nil }
@@ -56,6 +57,8 @@ func (c *errorCoordinator) SetSessionModelOverride(context.Context, string, conf
 	return nil
 }
 func (c *errorCoordinator) ClearSessionModelOverride(string) {}
+func (c *errorCoordinator) SetHostContext(proto.HostContext) {}
+func (c *errorCoordinator) HostContext() proto.HostContext   { return proto.HostContext{} }
 
 // insertRunCompleteWorkspace installs a workspace backed by a real
 // app.App (so the runCompletions broker exists) with the given

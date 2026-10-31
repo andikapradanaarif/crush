@@ -240,6 +240,12 @@ func decodeSSEEnvelope(p pubsub.Payload) (any, bool) {
 			return nil, false
 		}
 		return e, true
+	case pubsub.PayloadTypeClientSession:
+		var e pubsub.Event[proto.ClientSession]
+		if err := json.Unmarshal(p.Payload, &e); err != nil {
+			return nil, false
+		}
+		return e, true
 	case pubsub.PayloadTypeMessage:
 		var e pubsub.Event[proto.Message]
 		if err := json.Unmarshal(p.Payload, &e); err != nil {
@@ -254,6 +260,12 @@ func decodeSSEEnvelope(p pubsub.Payload) (any, bool) {
 		return e, true
 	case pubsub.PayloadTypeRunComplete:
 		var e pubsub.Event[proto.RunComplete]
+		if err := json.Unmarshal(p.Payload, &e); err != nil {
+			return nil, false
+		}
+		return e, true
+	case pubsub.PayloadTypeHostTheme:
+		var e pubsub.Event[proto.HostThemeState]
 		if err := json.Unmarshal(p.Payload, &e); err != nil {
 			return nil, false
 		}
@@ -410,6 +422,17 @@ func TestE2E_TwoClientsReceiveSameMessage(t *testing.T) {
 		_ = db.Release(wsDataDir)
 		close(released)
 	}))
+	// Registered before the stream cancels so LIFO cleanup runs it
+	// after both streams have dropped. The workspace is only torn
+	// down once its detach grace expires, and the data directory
+	// cannot be removed on Windows until that release happens.
+	t.Cleanup(func() {
+		select {
+		case <-released:
+		case <-time.After(10 * time.Second):
+			t.Error("workspace was not released after both clients detached")
+		}
+	})
 
 	evcA, cancelA := h.subscribeSSE(t, ctx, ws.ID, cidA)
 	t.Cleanup(cancelA)

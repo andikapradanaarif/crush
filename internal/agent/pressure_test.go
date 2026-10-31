@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"charm.land/fantasy"
 	notebooktool "github.com/charmbracelet/crush/internal/agent/tools/notebook"
 	"github.com/charmbracelet/crush/internal/csync"
@@ -196,7 +196,7 @@ func TestPreparePrompt_PressureGateDisengagedVerbatim(t *testing.T) {
 	msgs := priorTurnFixture(t, svc, sessionID)
 
 	collapse := a.newTurnCollapse(1)
-	history, _ := a.preparePrompt(t.Context(), msgs, false, collapse, false)
+	history, _ := a.preparePrompt(t.Context(), msgs, false, false, collapse, false)
 
 	require.Nil(t, collapse.Set, "disengaged render must not freeze a collapse set")
 	res := renderedResultText(t, history, "tc-bash")
@@ -231,7 +231,7 @@ func TestPreparePrompt_PressureGateEngagedCollapses(t *testing.T) {
 	a.detectSegments(t.Context(), sessionID, msgs)
 
 	collapse := a.newTurnCollapse(1)
-	history, _ := a.preparePrompt(t.Context(), msgs, false, collapse, false)
+	history, _ := a.preparePrompt(t.Context(), msgs, false, false, collapse, false)
 
 	require.NotEmpty(t, collapse.Set)
 	res := renderedResultText(t, history, "tc-bash")
@@ -255,7 +255,7 @@ func TestPreparePrompt_GateOffCollapsesUnconditionally(t *testing.T) {
 	a.detectSegments(t.Context(), sessionID, msgs)
 
 	collapse := a.newTurnCollapse(1)
-	history, _ := a.preparePrompt(t.Context(), msgs, false, collapse, false)
+	history, _ := a.preparePrompt(t.Context(), msgs, false, false, collapse, false)
 
 	require.NotEmpty(t, collapse.Set)
 	res := renderedResultText(t, history, "tc-bash")
@@ -284,18 +284,18 @@ func TestPreparePrompt_EmptyCoverageDefersFreeze(t *testing.T) {
 	ctx := t.Context()
 
 	collapse := a.newTurnCollapse(1)
-	_, _ = a.preparePrompt(ctx, unclosed, false, collapse, false)
+	_, _ = a.preparePrompt(ctx, unclosed, false, false, collapse, false)
 	require.Nil(t, collapse.Set, "empty coverage must not freeze the set")
 
 	// The closing user message lands. This render fires turn 0's
 	// coverage but reads the registry pre-commit — still uncovered,
 	// still unfrozen.
-	_, _ = a.preparePrompt(ctx, msgs, false, collapse, false)
+	_, _ = a.preparePrompt(ctx, msgs, false, false, collapse, false)
 	require.Nil(t, collapse.Set)
 
 	// The next render observes the committed coverage — the same
 	// run's collapse set activates late rather than never.
-	history, _ := a.preparePrompt(ctx, msgs, false, collapse, false)
+	history, _ := a.preparePrompt(ctx, msgs, false, false, collapse, false)
 	require.NotNil(t, collapse.Set)
 	require.True(t, collapse.Set[0])
 	res := renderedResultText(t, history, "tc-bash")
@@ -402,7 +402,6 @@ func TestRun_PressureGateWireProof(t *testing.T) {
 		return NewSessionAgent(SessionAgentOptions{
 			Models:             fixedModels(model, model),
 			SystemPrompt:       "system",
-			IsYolo:             true,
 			Sessions:           env.sessions,
 			Messages:           env.messages,
 			Notebook:           env.notebook,
@@ -491,7 +490,7 @@ func TestPreparePrompt_PressureGateIntraProcessTransition(t *testing.T) {
 	ctx := t.Context()
 
 	collapse := a.newTurnCollapse(1)
-	history, _ := a.preparePrompt(ctx, msgs, false, collapse, false)
+	history, _ := a.preparePrompt(ctx, msgs, false, false, collapse, false)
 	require.Nil(t, collapse.Set, "below pressure the set stays unfrozen")
 	require.Contains(t, renderedResultText(t, history, "tc-bash"), "file content line")
 	rs, _ := a.reqStats.Get(sessionID)
@@ -505,7 +504,7 @@ func TestPreparePrompt_PressureGateIntraProcessTransition(t *testing.T) {
 	msgs, err = svc.List(ctx, sessionID)
 	require.NoError(t, err)
 
-	history, _ = a.preparePrompt(ctx, msgs, false, collapse, false)
+	history, _ = a.preparePrompt(ctx, msgs, false, false, collapse, false)
 	require.True(t, collapse.Set[0], "the engaged render collapses the covered prior turn")
 	res := renderedResultText(t, history, "tc-bash")
 	require.Contains(t, res, `recall("result:tc-bash")`)
@@ -534,7 +533,7 @@ func TestPreparePrompt_SummarizeRenderSkipsGateState(t *testing.T) {
 	msgs := priorTurnFixture(t, svc, sessionID)
 	a.reqStats.Set(sessionID, requestStats{LastPromptTokens: 5_000, renderedMsgs: 2, pressureEstimate: 5_500})
 
-	history, _ := a.preparePrompt(t.Context(), msgs, false, nil, true)
+	history, _ := a.preparePrompt(t.Context(), msgs, false, false, nil, true)
 	require.NotEmpty(t, history)
 
 	rs, _ := a.reqStats.Get(sessionID)
@@ -573,7 +572,7 @@ func TestPreparePrompt_SummaryFloorInNotebookMode(t *testing.T) {
 	msgs, err := svc.List(t.Context(), sessionID)
 	require.NoError(t, err)
 
-	history, _ := a.preparePrompt(t.Context(), msgs, false, nil, false)
+	history, _ := a.preparePrompt(t.Context(), msgs, false, false, nil, false)
 	text := renderedText(history)
 	require.Contains(t, text, "SUMMARY-BODY")
 	require.Contains(t, text, "after summary")
@@ -616,7 +615,7 @@ func TestPreparePrompt_FailedSummaryDoesNotFloor(t *testing.T) {
 	msgs, err := svc.List(t.Context(), sessionID)
 	require.NoError(t, err)
 
-	history, _ := a.preparePrompt(t.Context(), msgs, false, nil, false)
+	history, _ := a.preparePrompt(t.Context(), msgs, false, false, nil, false)
 	text := renderedText(history)
 	require.Contains(t, text, "start", "pre-summary history must survive a failed summary")
 	require.Contains(t, text, "after failed summary")
@@ -643,7 +642,7 @@ func TestPreparePrompt_UnfinishedSummaryDoesNotFloor(t *testing.T) {
 	msgs, err := svc.List(t.Context(), sessionID)
 	require.NoError(t, err)
 
-	history, _ := a.preparePrompt(t.Context(), msgs, false, nil, false)
+	history, _ := a.preparePrompt(t.Context(), msgs, false, false, nil, false)
 	text := renderedText(history)
 	require.Contains(t, text, "start", "an unfinished summary must not evict pre-summary history")
 	require.Contains(t, text, "after partial summary")
@@ -691,14 +690,14 @@ func TestPreparePrompt_PrefixFailureRollsBackBoundary(t *testing.T) {
 
 	// A small raw budget pushes the boundary onto covered segments.
 	a.rawTokenBudget = 20
-	engagedHistory, _ := a.preparePrompt(ctx, msgs, false, nil, true)
+	engagedHistory, _ := a.preparePrompt(ctx, msgs, false, false, nil, true)
 	require.False(t, callPresent(engagedHistory, "tc-EARLYTURN-a"),
 		"sanity check: covered history is evicted when the prefix renders")
 
 	// Same render under a failing prefix read: verbatim fallback — the
 	// covered span's raw history is back in the prompt.
 	a.notebook = failingEntriesNotebook{Service: nb, err: errors.New("db read failed")}
-	fallbackHistory, _ := a.preparePrompt(ctx, msgs, false, nil, true)
+	fallbackHistory, _ := a.preparePrompt(ctx, msgs, false, false, nil, true)
 	text := renderedText(fallbackHistory)
 	require.True(t, callPresent(fallbackHistory, "tc-EARLYTURN-a"),
 		"prefix failure must keep the covered span's raw history")
@@ -742,7 +741,7 @@ func TestPreparePrompt_EmptyCoverageRollsBackBoundary(t *testing.T) {
 	// A small raw budget pushes the boundary onto the covered-but-
 	// entryless segments — the empty render must not evict them.
 	a.rawTokenBudget = 20
-	history, _ := a.preparePrompt(ctx, msgs, false, nil, true)
+	history, _ := a.preparePrompt(ctx, msgs, false, false, nil, true)
 	text := renderedText(history)
 	require.Contains(t, text, "EARLYTEXT",
 		"empty prefix render must not evict the covered span")
@@ -772,7 +771,7 @@ func TestPreparePrompt_PressureGateVerbatimModeEvaluates(t *testing.T) {
 	ctx := t.Context()
 
 	// Below the margin: evaluated (estimate lands), no latch.
-	_, _ = a.preparePrompt(ctx, msgs, false, nil, false)
+	_, _ = a.preparePrompt(ctx, msgs, false, false, nil, false)
 	rs, ok := a.reqStats.Get(sessionID)
 	require.True(t, ok, "verbatim renders must still record gate state")
 	require.Positive(t, rs.pressureEstimate)
@@ -785,7 +784,7 @@ func TestPreparePrompt_PressureGateVerbatimModeEvaluates(t *testing.T) {
 	var err error
 	msgs, err = svc.List(ctx, sessionID)
 	require.NoError(t, err)
-	_, _ = a.preparePrompt(ctx, msgs, false, nil, false)
+	_, _ = a.preparePrompt(ctx, msgs, false, false, nil, false)
 	rs, _ = a.reqStats.Get(sessionID)
 	require.True(t, rs.pressureEngaged)
 	require.Equal(t, 1, rs.pressureActivations)
@@ -932,7 +931,6 @@ func windowCapAgent(env *processEnv, m fantasy.LanguageModel, notebookOn, enforc
 	opts := SessionAgentOptions{
 		Models:               fixedModels(model, model),
 		SystemPrompt:         "system",
-		IsYolo:               true,
 		Sessions:             env.sessions,
 		Messages:             env.messages,
 		NotebookEnabled:      notebookOn,

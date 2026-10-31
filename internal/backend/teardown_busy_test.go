@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/stretchr/testify/require"
 
 	"charm.land/fantasy"
@@ -54,6 +55,9 @@ func (c *busyCoordinator) SetSessionModelOverride(context.Context, string, confi
 	return nil
 }
 func (c *busyCoordinator) ClearSessionModelOverride(string) {}
+func (c *busyCoordinator) AddNote(string, string)           {}
+func (c *busyCoordinator) SetHostContext(proto.HostContext) {}
+func (c *busyCoordinator) HostContext() proto.HostContext   { return proto.HostContext{} }
 func (c *busyCoordinator) ListSettledMessages(context.Context, string) ([]message.Message, error) {
 	return nil, nil
 }

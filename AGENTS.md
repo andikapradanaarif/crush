@@ -82,6 +82,10 @@ internal/
   ui/                              Bubble Tea v2 TUI (see internal/ui/AGENTS.md)
   permission/                      Tool permission checking and allow-lists
   question/                        Ask-the-user service over pubsub
+  pinentry/                        GPG pinentry: terminal handover watcher, plus the integrated
+                                   pinentry (native passphrase dialogs via loopback pinentry)
+  sshaskpass/                      Integrated SSH askpass: OpenSSH credential prompts and security key
+                                   touches rendered as native dialogs and warnings
   skills/                          Skill file discovery and loading (incl. builtin/)
   shell/                           Bash command execution with background job support
   commands/                        Custom slash commands and MCP prompts

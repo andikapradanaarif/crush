@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/config"
@@ -565,14 +565,14 @@ func TestLLMScopeResolver_TokenFloor(t *testing.T) {
 	t.Run("reasoning model keeps its larger default", func(t *testing.T) {
 		t.Parallel()
 		require.Equal(t, int64(8192), run(t, catwalk.Model{
-			CanReason:        true,
+			Reasoning:        catwalk.Reasoning{Thinking: catwalk.ThinkingAlways},
 			DefaultMaxTokens: 8192,
 		}))
 	})
 	t.Run("reasoning model with a small default gets the floor", func(t *testing.T) {
 		t.Parallel()
 		require.Equal(t, int64(1024), run(t, catwalk.Model{
-			CanReason:        true,
+			Reasoning:        catwalk.Reasoning{Thinking: catwalk.ThinkingAlways},
 			DefaultMaxTokens: 64,
 		}))
 	})
