@@ -48,7 +48,11 @@ func newPublishingWorkspace(t *testing.T) (*Backend, *Workspace, <-chan pubsub.E
 	dataDir := t.TempDir()
 
 	b := New(context.Background(), nil, func() {})
-	b.SetCreateGrace(2 * time.Second)
+	// Generous create grace: the direct ws.Events subscription never
+	// attaches a client stream, so a short hold lets the create grace
+	// expire mid-test on slow runners and tears the workspace's app
+	// down under the subscription. drainBackend releases it at cleanup.
+	b.SetCreateGrace(time.Hour)
 	t.Cleanup(func() { drainBackend(t, b) })
 
 	cid := uuid.New().String()
