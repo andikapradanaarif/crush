@@ -125,6 +125,12 @@ What this means in practice:
   warning, and treats the result as "no opinion" so the agent can proceed.
   Long-running work should honor context cancellation or run in a
   subprocess via a shebang.
+- **Turn-ending delivery**: `TurnEnd`, `StopFailure`, and `Interrupt`
+  outlive caller cancellation and deadlines. They keep the caller's context
+  values and still run under their configured per-hook timeout. This keeps
+  cancellation racing a successful finish from suppressing `TurnEnd`.
+  `TurnStart` keeps the caller context, and non-interactive turns continue
+  to skip turn hooks.
 
 ## Configuration
 
