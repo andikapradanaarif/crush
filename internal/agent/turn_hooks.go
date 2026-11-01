@@ -26,6 +26,13 @@ func (a *sessionAgent) fireTurnHook(ctx context.Context, call SessionAgentCall, 
 	if call.NonInteractive {
 		return
 	}
+	// Ending notifications outlive the run that produced them. In particular,
+	// cancellation racing successful completion must not suppress TurnEnd.
+	// Runner still applies the configured timeout to each hook.
+	switch ev.Name {
+	case hooks.EventTurnEnd, hooks.EventStopFailure, hooks.EventInterrupt:
+		ctx = context.WithoutCancel(ctx)
+	}
 	ev.SessionID = call.SessionID
 	a.hooks.Run(ctx, ev)
 }

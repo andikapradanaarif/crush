@@ -1999,7 +1999,7 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 			"is_cancel", isCancelErr)
 		// Fire once the turn's final state is written, whichever return
 		// below is taken, and outlive the cancelled run context.
-		defer a.fireTurnHook(context.WithoutCancel(ctx), call, turnEndEvent(err, currentAssistant))
+		defer a.fireTurnHook(ctx, call, turnEndEvent(err, currentAssistant))
 		if currentAssistant == nil {
 			// Cancel-before-assistant-creation window: the run was
 			// canceled after activeRequests.Set but before PrepareStep
