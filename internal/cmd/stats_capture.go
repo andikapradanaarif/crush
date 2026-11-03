@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -19,21 +20,21 @@ import (
 // Pending turns expose record-time capture before settlement, while
 // comparable turns require the existing settled-pair checks.
 type captureHealth struct {
-	Project         string         `json:"project"`
-	DataDir         string         `json:"data_dir"`
-	SinceMS         int64          `json:"since_ms"`
-	EditedTurns     int            `json:"edited_turns"`
-	CapturedTurns   int            `json:"captured_turns"`
-	PositionedTurns int            `json:"positioned_turns"`
-	PendingTurns    int            `json:"pending_turns"`
-	SettledTurns    int            `json:"settled_turns"`
-	ComparableTurns int            `json:"comparable_turns"`
-	EditedPaths     int            `json:"edited_paths"`
-	CapturedPaths   int            `json:"captured_paths"`
-	PositionedPaths int            `json:"positioned_paths"`
-	Excluded        map[string]int `json:"capture_excluded,omitempty"`
-	PairExcluded    map[string]int `json:"pair_excluded,omitempty"`
-	Missing         []string       `json:"missing,omitempty"`
+	Project                 string         `json:"project"`
+	DataDir                 string         `json:"data_dir"`
+	SinceMS                 int64          `json:"since_ms"`
+	EditedTurns             int            `json:"edited_turns"`
+	CapturedTurns           int            `json:"captured_turns"`
+	PositionedTurns         int            `json:"positioned_turns"`
+	PendingTurns            int            `json:"pending_turns"`
+	SettledTurns            int            `json:"settled_turns"`
+	ComparableTurns         int            `json:"comparable_turns"`
+	EditedPathInstances     int            `json:"edited_path_instances"`
+	CapturedPathInstances   int            `json:"captured_path_instances"`
+	PositionedPathInstances int            `json:"positioned_path_instances"`
+	Excluded                map[string]int `json:"capture_excluded,omitempty"`
+	PairExcluded            map[string]int `json:"pair_excluded,omitempty"`
+	Missing                 []string       `json:"missing,omitempty"`
 }
 
 func init() {
@@ -47,7 +48,8 @@ func newStatsCaptureCmd() *cobra.Command {
 		Short: "Check edit capture health",
 		Long: "Check recorded edit content and positions across all turn verdicts, " +
 			"including pending turns. Reads project databases without migrating or settling them.",
-		RunE: runStatsCapture,
+		RunE:         runStatsCapture,
+		SilenceUsage: true,
 	}
 	cmd.Flags().String("project", "", "Limit to one registered project (path or basename)")
 	cmd.Flags().Bool("all", false, "Report on all registered projects")
@@ -67,22 +69,26 @@ func runStatsCapture(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	reports := make([]captureHealth, 0, len(targets))
-	type source struct{ dataDir, key string }
-	seen := map[source]bool{}
+	var failures []error
+	type partition struct{ dataDir, key string }
+	seen := map[partition]bool{}
 	for _, tp := range targets {
-		partition := source{filepathext.Canonical(tp.dataDir), tp.key}
-		if seen[partition] {
+		id := partition{filepathext.Canonical(tp.dataDir), tp.key}
+		if seen[id] {
 			continue
 		}
-		seen[partition] = true
+		seen[id] = true
 		conn, err := db.ConnectReadOnly(cmd.Context(), filepath.Join(tp.dataDir, "crush.db"))
-		if err != nil {
-			return fmt.Errorf("capture health for %s: %w", tp.path, err)
+		var report captureHealth
+		if err == nil {
+			report, err = gatherCaptureHealth(cmd.Context(), conn, tp, since)
+			conn.Close()
 		}
-		report, err := gatherCaptureHealth(cmd.Context(), conn, tp, since)
-		conn.Close()
 		if err != nil {
-			return fmt.Errorf("capture health for %s: %w", tp.path, err)
+			failure := fmt.Errorf("capture health for %s: %w", tp.path, err)
+			fmt.Fprintf(cmd.ErrOrStderr(), "warn: %v\n", failure)
+			failures = append(failures, failure)
+			continue
 		}
 		reports = append(reports, report)
 	}
@@ -90,15 +96,18 @@ func runStatsCapture(cmd *cobra.Command, _ []string) error {
 	if jsonOutput {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
-		return enc.Encode(reports)
+		if err := enc.Encode(reports); err != nil {
+			return err
+		}
+	} else {
+		for _, report := range reports {
+			fmt.Fprintf(cmd.OutOrStdout(), "Capture — %s\n", report.Project)
+			fmt.Fprintf(cmd.OutOrStdout(), "  data directory: %s\n", report.DataDir)
+			printCaptureHealth(cmd.OutOrStdout(), report)
+			fmt.Fprintln(cmd.OutOrStdout())
+		}
 	}
-	for _, report := range reports {
-		fmt.Fprintf(cmd.OutOrStdout(), "Capture — %s\n", report.Project)
-		fmt.Fprintf(cmd.OutOrStdout(), "  data directory: %s\n", report.DataDir)
-		printCaptureHealth(cmd.OutOrStdout(), report)
-		fmt.Fprintln(cmd.OutOrStdout())
-	}
-	return nil
+	return errors.Join(failures...)
 }
 
 func gatherCaptureHealth(ctx context.Context, conn *sql.DB, tp trendProject, sinceMS int64) (captureHealth, error) {
@@ -126,6 +135,8 @@ func gatherCaptureHealth(ctx context.Context, conn *sql.DB, tp trendProject, sin
 			return report, err
 		}
 		var paths []string
+		// Invalid record-time evidence is a diagnostic failure, not zero
+		// capture. Settled pairs retain trend's missing-evidence rules.
 		if err := json.Unmarshal([]byte(pathsJSON), &paths); err != nil {
 			return report, fmt.Errorf("decode edited paths: %w", err)
 		}
@@ -139,7 +150,7 @@ func gatherCaptureHealth(ctx context.Context, conn *sql.DB, tp trendProject, sin
 			}
 		}
 		report.EditedTurns++
-		report.EditedPaths += len(paths)
+		report.EditedPathInstances += len(paths)
 		captured, positioned := false, false
 		for _, path := range paths {
 			cell, exists := added[path]
@@ -164,10 +175,11 @@ func gatherCaptureHealth(ctx context.Context, conn *sql.DB, tp trendProject, sin
 				continue
 			}
 			captured = true
-			report.CapturedPaths++
+			report.CapturedPathInstances++
+			// A zero-length span locates a pure deletion's boundary.
 			if slices.ContainsFunc(cell.Spans, func(s trendHunkSpan) bool { return s.Start >= 0 && s.End >= s.Start }) {
 				positioned = true
-				report.PositionedPaths++
+				report.PositionedPathInstances++
 			}
 		}
 		if captured {
@@ -198,6 +210,11 @@ func gatherCaptureHealth(ctx context.Context, conn *sql.DB, tp trendProject, sin
 func printCaptureHealth(w io.Writer, r captureHealth) {
 	if len(r.Missing) > 0 {
 		fmt.Fprintf(w, "  capture health unavailable: missing %s\n", strings.Join(r.Missing, ", "))
+		if !slices.Contains(r.Missing, "turn_outcomes") {
+			fmt.Fprintf(w, "  recorded edit turns: %d (%d pending, %d settled); path instances: %d\n",
+				r.EditedTurns, r.PendingTurns, r.SettledTurns, r.EditedPathInstances)
+			printStatExclusions(w, "record-time exclusions", r.Excluded)
+		}
 		return
 	}
 	fmt.Fprintf(w, "  capture: %d/%d edited turns have content; %d have positions (%d pending, %d settled)\n",

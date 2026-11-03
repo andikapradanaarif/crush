@@ -49,9 +49,10 @@ func TestGatherCaptureHealthAllVerdictsAndPending(t *testing.T) {
 	require.Equal(t, 4, r.PendingTurns)
 	require.Equal(t, 3, r.SettledTurns)
 	require.Equal(t, 1, r.ComparableTurns)
-	require.Equal(t, 7, r.EditedPaths)
-	require.Equal(t, 4, r.CapturedPaths)
-	require.Equal(t, 3, r.PositionedPaths)
+	// These count repeated x.go instances across distinct turns.
+	require.Equal(t, 7, r.EditedPathInstances)
+	require.Equal(t, 4, r.CapturedPathInstances)
+	require.Equal(t, 3, r.PositionedPathInstances)
 	require.Equal(t, map[string]int{"out_of_workspace": 2, "sensitive": 1}, r.Excluded)
 	require.Equal(t, map[string]int{"added_out_of_workspace": 1, "sensitive": 1}, r.PairExcluded)
 	var pending int
@@ -87,6 +88,12 @@ func TestGatherCaptureHealthLegacy(t *testing.T) {
 			printCaptureHealth(&output, r)
 			require.Contains(t, output.String(), "capture health unavailable")
 			require.NotContains(t, output.String(), "0/0 edited turns")
+			if !noTurns {
+				require.Contains(t, output.String(), "recorded edit turns: 1 (0 pending, 1 settled); path instances: 1")
+				require.Contains(t, output.String(), "pre_capture:1")
+			} else {
+				require.NotContains(t, output.String(), "recorded edit turns:")
+			}
 		})
 	}
 }
@@ -146,6 +153,7 @@ func TestStatsCaptureCommand(t *testing.T) {
 	require.Equal(t, dataDir, reports[0].DataDir)
 	require.Equal(t, 1, reports[0].EditedTurns)
 	require.Equal(t, 1, reports[0].PendingTurns)
+	require.Contains(t, output.String(), `"edited_path_instances": 1`)
 	require.Equal(t, map[string]int{"out_of_workspace": 1}, reports[0].Excluded)
 	_, err = os.Stat(filepath.Join(dataDir, trendLedgerName))
 	require.True(t, os.IsNotExist(err), "capture diagnostics must not append a trend ledger")
@@ -166,4 +174,65 @@ func TestStatsCaptureCommand(t *testing.T) {
 	require.NoError(t, cmd.Execute())
 	require.NoError(t, json.Unmarshal(output.Bytes(), &reports))
 	require.Len(t, reports, 1, "aliases of the same database partition must not duplicate counts")
+}
+
+func TestGatherCaptureHealthCorruptRecordTime(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, paths, added, wantError string
+	}{
+		{"paths", `{`, `{}`, "decode edited paths"},
+		{"edits", `["x.go"]`, `{`, "decode captured edits"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			conn, err := db.Connect(t.Context(), t.TempDir())
+			require.NoError(t, err)
+			t.Cleanup(func() { conn.Close() })
+			insertTurnOutcome(t, conn, "mine", "s", "corrupt", "", weekAms, false, tc.paths, tc.added, `{}`)
+			_, err = gatherCaptureHealth(t.Context(), conn, trendProject{key: "mine"}, 0)
+			require.ErrorContains(t, err, tc.wantError)
+		})
+	}
+}
+
+func TestStatsCaptureCommandContinuesAfterFailure(t *testing.T) {
+	for _, openFailure := range []bool{true, false} {
+		t.Run(map[bool]string{true: "database open failure", false: "corrupt record"}[openFailure], func(t *testing.T) {
+			t.Setenv("CRUSH_GLOBAL_DATA", t.TempDir())
+			badProject, goodProject := t.TempDir(), t.TempDir()
+			badData, goodData := t.TempDir(), t.TempDir()
+			if openFailure {
+				// A directory exists for selection but cannot open as SQLite.
+				require.NoError(t, os.Mkdir(filepath.Join(badData, "crush.db"), 0o755))
+			} else {
+				conn, err := db.Connect(t.Context(), badData)
+				require.NoError(t, err)
+				t.Cleanup(func() { conn.Close() })
+				insertTurnOutcome(t, conn, cmdlog.ProjectKeyForDir(badProject), "s", "bad", "", weekAms, false, `{`, `{}`, `{}`)
+			}
+			conn, err := db.Connect(t.Context(), goodData)
+			require.NoError(t, err)
+			t.Cleanup(func() { conn.Close() })
+			insertTurnOutcome(t, conn, cmdlog.ProjectKeyForDir(goodProject), "s", "good", "", weekAms, false,
+				`["x.go"]`, `{"x.go":{"state":"ok","edits":[{"new":"kept"}],"spans":[{"start":0,"end":1}]}}`, `{}`)
+			require.NoError(t, projects.Save(&projects.ProjectList{Projects: []projects.Project{
+				{Path: badProject, DataDir: badData},
+				{Path: goodProject, DataDir: goodData},
+			}}))
+			cmd := newStatsCaptureCmd()
+			cmd.SetContext(t.Context())
+			cmd.SetArgs([]string{"--all", "--since", "all", "--json"})
+			var output, warnings bytes.Buffer
+			cmd.SetOut(&output)
+			cmd.SetErr(&warnings)
+			require.ErrorContains(t, cmd.Execute(), badProject)
+			require.Contains(t, warnings.String(), "warn: capture health for "+badProject)
+			var reports []captureHealth
+			require.NoError(t, json.Unmarshal(output.Bytes(), &reports), "partial output must remain valid JSON")
+			require.Len(t, reports, 1)
+			require.Equal(t, goodProject, reports[0].Project)
+			require.Equal(t, 1, reports[0].CapturedTurns)
+		})
+	}
 }

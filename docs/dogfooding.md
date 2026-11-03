@@ -41,12 +41,17 @@ The report reads all recorded edit turns, including failed, unknown, and
 pending turns. It shows:
 
 - **Content:** turns with a non-empty captured edit, including deletions.
-- **Positions:** turns with content and recorded line spans.
+- **Positions:** turns with content and recorded line spans. A pure
+  deletion has a valid zero-length span at its boundary.
 - **Pending/settled:** whether the observation window has closed.
 - **Comparable settled turns:** turns with at least one pair that passes
   the existing edit-cost checks. These are capture-health counts across
   all verdicts, not an acceptance rate or admission to memory mining.
 - **Exclusions:** why content or a settled pair is unavailable.
+
+The JSON `edited_path_instances`, `captured_path_instances`, and
+`positioned_path_instances` fields count paths per turn. The same file
+edited in three turns contributes three instances, not one unique file.
 
 Recorded content can still be truncated, and stored positions can later
 drift. Comparable pairs additionally require untruncated content, valid
@@ -65,8 +70,17 @@ including a sibling worktree or an escaping symlink. Start the next
 session in the checkout being edited, with its own data directory.
 
 Sensitive paths remain excluded. Missing tables or capture columns are
-reported as unavailable. A window with no recorded edit turns is distinct
-from failed capture; continue the session or inspect a wider time window.
+reported as unavailable; legacy databases still show their known edit,
+pending/settled, and path-instance counts. A window with no recorded edit
+turns is distinct from failed capture; continue the session or inspect a
+wider time window.
+
+An unreadable database or malformed recorded paths/edits produces a
+project warning. Other projects still report, and the command exits
+nonzero when any project fails; JSON output remains valid and contains
+the successful reports. Record-time diagnostics decode strictly so
+corruption cannot masquerade as zero capture. Settled-pair checks retain
+the existing trend decoder and exclusion rules.
 
 The report is read-only: it does not migrate databases, force settlement,
 rewrite historical labels, or recover previously discarded edit text.
