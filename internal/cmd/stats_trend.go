@@ -132,6 +132,7 @@ type trendProject struct {
 // Mirror of cmdlog's hunk cells (its types are unexported; the JSON
 // shape is the contract — marshalNoEscape wrote it).
 type trendHunkEdit struct {
+	Old string `json:"old,omitempty"`
 	New string `json:"new"`
 }
 
@@ -184,12 +185,20 @@ func runStatsTrend(cmd *cobra.Command, _ []string) error {
 			continue
 		}
 		rows, missing, err := gatherTrend(ctx, conn, tp, since)
-		conn.Close()
 		if err != nil {
+			conn.Close()
 			fmt.Fprintf(os.Stderr, "warn: trend failed for %s: %v\n", tp.path, err)
 			continue
 		}
+		capture, captureErr := gatherCaptureHealth(ctx, conn, tp, since)
+		conn.Close()
 		printTrendTable(os.Stdout, tp.path, rows, missing)
+		if captureErr != nil {
+			fmt.Fprintf(os.Stderr, "warn: capture health failed for %s: %v\n", tp.path, captureErr)
+		} else {
+			printCaptureHealth(os.Stdout, capture)
+			fmt.Fprintln(os.Stdout)
+		}
 		if !noAppend && len(rows) > 0 {
 			ledger := outOverride
 			if ledger == "" {
@@ -865,18 +874,7 @@ func printTrendTable(w io.Writer, project string, rows []trendRow, missing []str
 			excl[reason] += n
 		}
 	}
-	if len(excl) > 0 {
-		reasons := make([]string, 0, len(excl))
-		for reason := range excl {
-			reasons = append(reasons, reason)
-		}
-		slices.Sort(reasons)
-		parts := make([]string, 0, len(reasons))
-		for _, reason := range reasons {
-			parts = append(parts, fmt.Sprintf("%s:%d", reason, excl[reason]))
-		}
-		fmt.Fprintf(w, "  edit-cost exclusions: %s\n", strings.Join(parts, "  "))
-	}
+	printStatExclusions(w, "edit-cost exclusions", excl)
 	if len(missing) > 0 {
 		fmt.Fprintf(w, "  missing sources: %s\n", strings.Join(missing, ", "))
 	}
