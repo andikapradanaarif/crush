@@ -18,6 +18,8 @@
 > Docs: [VISION.md](VISION.md) for the direction,
 > [docs/milestones/](docs/milestones/) for dated positions and the plan of
 > record, [docs/design/](docs/design/) for the machinery.
+> [Dogfooding and edit capture](docs/dogfooding.md) explains the worktree
+> workflow and `crush stats capture` checks.
 >
 > Divergences from upstream:
 >
