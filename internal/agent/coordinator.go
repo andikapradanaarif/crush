@@ -301,6 +301,10 @@ type coordinator struct {
 	readyWg errgroup.Group
 
 	hostContext csync.Value[proto.HostContext]
+
+	// titles is shared by every agent built here, sub-agents included, so
+	// CancelAll on the current agent drains all title generation.
+	titles titleTracker
 }
 
 // summaryFailureState records the last logged summary model resolution
@@ -1389,6 +1393,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		DetachedWork:           c.detachedWork,
 		MemParams:              c.memParams,
 		Hooks:                  c.hookRunner,
+		titles:                 &c.titles,
 	})
 
 	// Warn only for main agents — sub-agent builds happen per run via
