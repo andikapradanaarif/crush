@@ -12,15 +12,16 @@ It has 50 rows: 20 accepted (10 nexus, 10 vishnu), 10 revised (vishnu),
 All rows have a stored user message for review. Selection ranks rows by
 SHA-256 of the fixed seed `p0-turn-outcomes-2026-11-08`, project, session ID,
 and turn ID. The draft manifest's hash is recorded in the 11-08 milestone
-audit; keep the draft files local because they identify private
-sessions.
+audit. The blank review sheet is tracked for owner review; it contains
+session and turn IDs but no prompt text. The machine-verdict manifest stays
+local and ignored so labeling remains blind.
 
 ```sh
 python3 eval/labels/turn_outcomes.py sample
 ```
 
-This writes ignored `*.draft.jsonl` files: a blind review sheet and a
-manifest with the settled verdicts. Do not regenerate the sample after
+This writes the tracked blind review sheet and an ignored local manifest
+with the settled verdicts. Do not regenerate the sample after
 labeling begins. For each review row, inspect the session with
 `crush --data-dir <project-data-dir> session show <session_id> --json` and
 the project's git history. Fill `gold_label` with `accepted` (kept as-is),
