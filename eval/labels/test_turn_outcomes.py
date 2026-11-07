@@ -96,14 +96,27 @@ class TurnOutcomeLabelsTest(unittest.TestCase):
                            project_key TEXT, session_id TEXT, turn_id TEXT,
                            verdict TEXT, settled_at INTEGER
                        );
-                       CREATE TABLE messages (id TEXT, session_id TEXT);"""
+                       CREATE TABLE messages (id TEXT, session_id TEXT, parts TEXT);"""
                 )
-                for name, settled in (("before", 100), ("after", 300), ("open", None)):
+                for name, settled in (
+                    ("before", 100),
+                    ("after", 300),
+                    ("open", None),
+                    ("repair", 100),
+                ):
                     conn.execute(
                         "INSERT INTO turn_outcomes VALUES (?, ?, ?, ?, ?)",
                         ("project-key", name, name, "accepted", settled),
                     )
-                    conn.execute("INSERT INTO messages VALUES (?, ?)", (name, name))
+                    text = (
+                        labels.RECONCILE_RETRY_PREFIX + " — retry"
+                        if name == "repair"
+                        else "User request"
+                    )
+                    conn.execute(
+                        "INSERT INTO messages VALUES (?, ?, ?)",
+                        (name, name, json.dumps([{"type": "text", "data": {"text": text}}])),
+                    )
             rows = labels.read_candidates({"nexus": db_path}, 200)
             self.assertEqual([row["turn_id"] for row in rows], ["before"])
 

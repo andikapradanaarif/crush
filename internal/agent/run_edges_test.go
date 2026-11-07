@@ -286,6 +286,10 @@ func TestRepairPromptPrefixes_Stable(t *testing.T) {
 	require.True(t, strings.HasPrefix(
 		burnWatchRetrySection(&edgeTrigger{inputTokens: 250000, steps: make([]fantasy.StepResult, 40)}),
 		burnWatchPrefix))
+	require.True(t, strings.HasPrefix(
+		reconcileRetrySection(&edgeTrigger{openFailures: []cmdlog.Failure{{Cmd: "go test ./..."}}}),
+		reconcileRetryPrefix))
+	require.True(t, isRepairPrompt(reconcileRetryPrefix+" — pending failure"))
 	// No prefix is a prefix of another — a merged prompt reads as its
 	// leading edge only.
 	for i, p := range RepairPromptPrefixes {

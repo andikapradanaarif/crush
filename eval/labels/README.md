@@ -7,7 +7,7 @@ history; the sampler hides the machine verdict until scoring.
 ## Frozen sample
 
 The 2026-11-08 sample uses turns settled before `2026-11-08T00:00:00Z`.
-It has 50 rows: 20 accepted (10 nexus, 10 vishnu), 10 revised (vishnu),
+It has 50 rows: 20 accepted (9 nexus, 11 vishnu), 10 revised (vishnu),
 10 failed and 10 unknown (3 each nexus/vishnu, 2 each valo-backend/kiosk).
 All rows have a stored user message for review. Selection ranks rows by
 SHA-256 of the fixed seed `p0-turn-outcomes-2026-11-08`, project, session ID,
@@ -15,6 +15,12 @@ and turn ID. The draft manifest's hash is recorded in the 11-08 milestone
 audit. The blank review sheet is tracked for owner review; it contains
 session and turn IDs but no prompt text. The machine-verdict manifest stays
 local and ignored so labeling remains blind.
+
+The sampler excludes historical reconcile repair prompts beginning
+`Observed failures still open`. A missing repair-prefix entry previously
+let those harness-authored messages mint `turn_outcomes` rows. The first
+50-row sheet was invalidated before labeling and replaced; use only the
+manifest hash recorded in the audit.
 
 ```sh
 python3 eval/labels/turn_outcomes.py sample

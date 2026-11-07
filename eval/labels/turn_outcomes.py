@@ -16,7 +16,7 @@ from pathlib import Path
 # Fifty rows: preserve the accepted-precision target, include revised turns,
 # and cover all four projects with settled rows. Revised exists only in vishnu.
 QUOTAS = {
-    "accepted": {"nexus": 10, "vishnu": 10},
+    "accepted": {"nexus": 9, "vishnu": 11},
     "revised": {"vishnu": 10},
     "failed": {"nexus": 3, "vishnu": 3, "valo-backend": 2, "kiosk": 2},
     "unknown": {"nexus": 3, "vishnu": 3, "valo-backend": 2, "kiosk": 2},
@@ -30,8 +30,9 @@ PREDICTED_LABEL = {
 }
 DEFAULT_SEED = "p0-turn-outcomes-2026-11-08"
 DEFAULT_CUTOFF = "2026-11-08T00:00:00Z"
+RECONCILE_RETRY_PREFIX = "Observed failures still open"
 FROZEN_MANIFEST_SHA256 = (
-    "59c9311cf6561174ee379b6f64ee1a3ab293d7c90ebe6ffeaf0de7af29f94f1a"
+    "e7686a428c819073cf32c872dac44c3c6919ac474bcc26fce3a750f9f52add90"
 )
 
 
@@ -85,7 +86,7 @@ def read_candidates(databases, cutoff):
                     f"{project}: expected one project partition, found {len(project_keys)}"
                 )
             rows = conn.execute(
-                """SELECT t.session_id, t.turn_id, t.verdict
+                """SELECT t.session_id, t.turn_id, t.verdict, m.parts
                    FROM turn_outcomes t
                    JOIN messages m ON m.id = t.turn_id AND m.session_id = t.session_id
                    WHERE t.project_key = ? AND t.settled_at IS NOT NULL
@@ -93,7 +94,11 @@ def read_candidates(databases, cutoff):
                    ORDER BY t.session_id, t.turn_id""",
                 (project_keys[0], cutoff),
             )
-            for session_id, turn_id, verdict in rows:
+            for session_id, turn_id, verdict, parts in rows:
+                # The old turn-boundary filter omitted the reconcile edge.
+                # Its persisted repair prompts are not owner-labelable turns.
+                if message_text(parts).startswith(RECONCILE_RETRY_PREFIX):
+                    continue
                 if verdict not in QUOTAS:
                     raise ValueError(f"{project}: unexpected settled verdict {verdict!r}")
                 candidates.append(

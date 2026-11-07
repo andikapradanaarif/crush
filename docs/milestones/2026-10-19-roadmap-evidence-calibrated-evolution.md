@@ -224,16 +224,20 @@ therefore met under the amendment; the P0 remainder is T0.3
 labeling, T0.4 baselines, and the T0.5 freeze.
 
 **Correction and sample amendment 2026-11-08.** A read of the live
-`crush.db` files found 344 settled turns, not 350: niceday's six rows
-are unsettled. The corrected mix is 86 accepted / 15 revised / 108
-failed / 135 unknown. The 103 nonempty `hunk_added` maps include
-`out_of_workspace` capture failures; 40 turns have actual captured
-content and positions, still above T0.1's 20-turn floor. T0.1/T0.2
-remain met. For T0.3, the 50-turn sample is now cross-project and
-blind to machine verdicts during owner labeling; its strata and frozen
-manifest hash are in the [11-08 audit](2026-11-08-exp-p0-data-audit.md).
-T0.4 has weekly rows recorded, but only one week has comparable
-edit-cost evidence, so its P5 baseline is not yet usable.
+`crush.db` files found niceday's six rows were unsettled, reducing the
+raw settled count from 350 to 344. A second audit found 142 of those
+344 rows were harness-authored reconcile repair prompts, misclassified
+as user turns because `reconcileRetryPrefix` was missing from
+`RepairPromptPrefixes`. Excluding them leaves **202 real-user settled
+turns, 43 accepted**, and 37 turns with captured edit content and
+positions. T0.1 remains met; **T0.2 is not met** under either the
+settled or accepted floor. The original 50-turn T0.3 sample contained
+22 repair rows and was replaced before labeling with a blind
+cross-project sample that excludes them. Its strata and frozen hash are
+in the [11-08 audit](2026-11-08-exp-p0-data-audit.md). Existing T0.4
+trend rows include the historical repair rows and are not valid
+baselines; P0 remains open pending clean real-user volume, labels, and
+a usable baseline.
 
 ### P1 — Feasibility → Gate G1
 
