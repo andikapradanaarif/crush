@@ -19,8 +19,9 @@ to turn "it learns" from a claim into a measurement.
 **Direction (10-19): evidence-calibrated harness evolution.** Plan of
 record:
 [2026-10-19-roadmap-evidence-calibrated-evolution](2026-10-19-roadmap-evidence-calibrated-evolution.md).
-The learning-loop machinery is correct but has no data at single-user
-volume (0 `referent_episodes`, 0 `project_rates`), and the eval corpus
+The learning-loop machinery still has negligible data at single-user
+volume (one `referent_episodes` row and one `project_rates` row across
+the four active project DBs on 11-08), and the eval corpus
 sits at the pass ceiling. The bet is an offline RRSI-style loop that
 evolves a gated lessons file, tool behavior, hook configs, and memory
 settings — judged on tasks it never tuned on, every kept change landing
@@ -31,6 +32,11 @@ best-of-k arm. Solver: the production model (`deepseek-v4.1-flash`).
 Gate G1 decides whether transfer is measurable at all; if not, the
 fallback keeps the ledger discipline without self-evolving claims.
 `turn_outcomes` now carries data (nexus 10-19: 196 settled turns).
+
+The [11-08 P0 audit](2026-11-08-exp-p0-data-audit.md) corrects the
+dogfood read to 344 settled turns (86 accepted) and distinguishes
+40 content-captured turns from 103 nonempty hunk maps; the P0 volume
+targets still hold, while labeling and a usable edit-cost baseline remain.
 
 **Failure memory — existence proof: DONE and armored.** A durable failure
 record written in session N provably changes behavior in session N+1, measured
@@ -150,3 +156,4 @@ record the plan that followed from it.
 | 2026-10-15 | roadmap | [Honest evidence before new capability](2026-10-15-roadmap-honest-evidence.md) — superseded 10-17: two reviews found label instability + in-sample claims; integrity work (#340–#348) precedes procedural Phase A |
 | 2026-10-17 | roadmap | [Regularized harness evolution](2026-10-17-roadmap-regularized-evolution.md) — superseded 10-19: learning loop parked (no data at single-user volume); RRSI-style evolution loop with Gate G1; memory channels become evolvable components; edit capture for user-level memory |
 | 2026-10-19 | roadmap | [Evidence-calibrated harness evolution](2026-10-19-roadmap-evidence-calibrated-evolution.md) — **plan of record**: 19 papers read (17 in full); OOD gate → SWE-bench Pro V2; primary endpoint → tokens-to-done at pass non-inferiority; v1 surface → lessons/tools/hooks/params; matched-budget baseline; production-model solver; numbered targets per phase |
+| 2026-11-08 | exp | [P0 data audit and label-sample freeze](2026-11-08-exp-p0-data-audit.md) — correct settled and verdict counts; separate actual edit capture from hunk maps; freeze a blind cross-project sample; record sparse trend baselines |

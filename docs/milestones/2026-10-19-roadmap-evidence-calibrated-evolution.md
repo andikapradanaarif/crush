@@ -223,6 +223,18 @@ niceday 6); accepted = 86 (vishnu 56, nexus 30); hunk-captured = 103
 therefore met under the amendment; the P0 remainder is T0.3
 labeling, T0.4 baselines, and the T0.5 freeze.
 
+**Correction and sample amendment 2026-11-08.** A read of the live
+`crush.db` files found 344 settled turns, not 350: niceday's six rows
+are unsettled. The corrected mix is 86 accepted / 15 revised / 108
+failed / 135 unknown. The 103 nonempty `hunk_added` maps include
+`out_of_workspace` capture failures; 40 turns have actual captured
+content and positions, still above T0.1's 20-turn floor. T0.1/T0.2
+remain met. For T0.3, the 50-turn sample is now cross-project and
+blind to machine verdicts during owner labeling; its strata and frozen
+manifest hash are in the [11-08 audit](2026-11-08-exp-p0-data-audit.md).
+T0.4 has weekly rows recorded, but only one week has comparable
+edit-cost evidence, so its P5 baseline is not yet usable.
+
 ### P1 — Feasibility → Gate G1
 
 *Milestone 10. Decides commit vs fallback.*
