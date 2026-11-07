@@ -38,7 +38,7 @@ class TurnOutcomeLabelsTest(unittest.TestCase):
         )
         self.assertEqual(len({row["sample_id"] for row in first}), 50)
 
-    def test_score_requires_complete_blind_labels_and_evidence_notes(self):
+    def test_score_requires_complete_blind_labels(self):
         manifest = [
             {
                 "sample_id": "a",
@@ -76,11 +76,9 @@ class TurnOutcomeLabelsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing or invalid gold label"):
             labels.score(manifest, review)
         review[1]["gold_label"] = "rejected"
-        with self.assertRaisesRegex(ValueError, "disagreement requires a note"):
-            labels.score(manifest, review)
-        review[1]["note"] = "The owner reverted the edit."
         gold, matrix = labels.score(manifest, review)
         self.assertEqual(len(gold), 2)
+        self.assertEqual(gold[1]["note"], "")
         self.assertEqual(matrix["accepted", "accepted"], 1)
         self.assertEqual(matrix["revised", "rejected"], 1)
 

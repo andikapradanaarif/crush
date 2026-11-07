@@ -24,11 +24,23 @@ This writes the tracked blind review sheet and an ignored local manifest
 with the settled verdicts. Do not regenerate the sample after
 labeling begins. For each review row, inspect the session with
 `crush --data-dir <project-data-dir> session show <session_id> --json` and
-the project's git history. Fill `gold_label` with `accepted` (kept as-is),
-`revised` (kept but changed by the owner), `rejected` (discarded or
-reverted), or `unclear`. Add a note when the gold label disagrees with the
-machine verdict; the scorer requires it. The note should describe evidence
-without copying private prompts or source code into the eventual gold file.
+the project's git history. `gold_label` is **your judgment**, made without
+seeing the machine verdict:
+
+| Label | Use it when |
+|---|---|
+| `accepted` | You kept or used the result without changing it. |
+| `revised` | You kept the result but later changed or corrected it yourself. |
+| `rejected` | You discarded or reverted the result. |
+| `unclear` | The transcript and git history do not show what you did with it. |
+
+For a turn with no lasting artifact, use `unclear` unless you can tell
+from the next interaction that the result was used or rejected. The
+`note` field is **optional**: leave it as `""` for a clear case. If you
+want to explain a judgment, write a brief reason such as `"kept the fix,
+then changed its validation check"`. Do not copy private prompts or
+source code into notes. Keep the separate manifest closed until all 50
+labels are filled.
 
 ```sh
 python3 eval/labels/turn_outcomes.py score \

@@ -177,8 +177,6 @@ def score(manifest, review):
         if label not in GOLD_LABELS:
             raise ValueError(f"{row['sample_id']}: missing or invalid gold label {label!r}")
         note = row.get("note", "").strip()
-        if label != PREDICTED_LABEL[source["settled_verdict"]] and not note:
-            raise ValueError(f"{row['sample_id']}: disagreement requires a note")
         gold.append({**source, "gold_label": label, "note": note})
 
     matrix = Counter((row["settled_verdict"], row["gold_label"]) for row in gold)
