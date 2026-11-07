@@ -203,6 +203,26 @@ changing one after seeing data requires a dated amendment.
 trusted for mining; #298 stays blocked; Loop 3 relies on captured
 hunks only.
 
+**Amendment 2026-11-07 — T0.1/T0.2 accumulate across projects.**
+The owner moved daily work off nexus (kiosk, aurum, borneo); a
+nexus-scoped settled count would stall at ~100 while the settle and
+label pipeline under test is project-agnostic. T0.2 is amended to:
+**≥ 250 settled `turn_outcomes` across registered projects AND
+≥ 80 `accepted` pooled; verdict mix reported per-project and
+pooled.** The `accepted` floor is kept because #298 mines per
+project — raw settled count alone would mask a thin mining corpus.
+T0.1's ≥ 20 hunk-captured turns pools likewise; the binary floor
+(≥ `6494cc0`) is unchanged and per-row provable by `hunk_added`
+presence. Baseline discontinuity noted honestly: the nexus `.crush`
+was recreated 10-28, voiding the 10-19 baseline (196 settled); the
+accumulation window opens 10-12 (earliest retained rows,
+valo-backend). Standing at amendment time, from live `crush.db`s:
+settled = 350 (vishnu 177, nexus 100, valo-backend 45, kiosk 22,
+niceday 6); accepted = 86 (vishnu 56, nexus 30); hunk-captured = 103
+(vishnu 60, nexus 19, kiosk 15, valo-backend 9). T0.1 and T0.2 are
+therefore met under the amendment; the P0 remainder is T0.3
+labeling, T0.4 baselines, and the T0.5 freeze.
+
 ### P1 — Feasibility → Gate G1
 
 *Milestone 10. Decides commit vs fallback.*
