@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -112,6 +113,54 @@ class TurnOutcomeLabelsTest(unittest.TestCase):
             path.write_text('{"sample_id":"changed"}\n')
             with self.assertRaisesRegex(ValueError, "pre-registered sample"):
                 labels.verify_frozen_manifest(path)
+
+    def test_review_context_shows_turn_without_machine_verdict(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "crush.db"
+
+            def text(value):
+                return json.dumps([{"type": "text", "data": {"text": value}}])
+
+            with sqlite3.connect(db_path) as conn:
+                conn.executescript(
+                    """CREATE TABLE messages (
+                           id TEXT, session_id TEXT, role TEXT, parts TEXT
+                       );
+                       CREATE TABLE turn_outcomes (
+                           session_id TEXT, turn_id TEXT, edited_paths TEXT,
+                           verdict TEXT
+                       );"""
+                )
+                conn.executemany(
+                    "INSERT INTO messages VALUES (?, ?, ?, ?)",
+                    [
+                        ("u1", "session", "user", text("Fix the timeout.")),
+                        ("a1", "session", "assistant", text("I changed it.")),
+                        ("u2", "session", "user", text("Please adjust the check.")),
+                    ],
+                )
+                conn.execute(
+                    "INSERT INTO turn_outcomes VALUES (?, ?, ?, ?)",
+                    ("session", "u1", '["timeout.go"]', "accepted"),
+                )
+            context = labels.review_context(
+                db_path, {"sample_id": "sample", "session_id": "session", "turn_id": "u1"}
+            )
+            self.assertEqual(context["prompt"], "Fix the timeout.")
+            self.assertEqual(context["answer"], "I changed it.")
+            self.assertEqual(context["next_user"], "Please adjust the check.")
+            self.assertEqual(context["edited_paths"], ["timeout.go"])
+            self.assertNotIn("verdict", context)
+
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("UPDATE turn_outcomes SET edited_paths = 'null'")
+            self.assertEqual(
+                labels.review_context(
+                    db_path,
+                    {"sample_id": "sample", "session_id": "session", "turn_id": "u1"},
+                )["edited_paths"],
+                [],
+            )
 
 
 if __name__ == "__main__":

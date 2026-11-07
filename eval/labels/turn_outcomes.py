@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import shlex
 import sqlite3
 from collections import Counter
 from contextlib import closing
@@ -151,6 +152,76 @@ def load_jsonl(path):
         return [json.loads(line) for line in source if line.strip()]
 
 
+def message_text(parts_json):
+    parts = json.loads(parts_json)
+    return "\n".join(
+        part.get("data", {}).get("text", "")
+        for part in parts
+        if part.get("type") == "text"
+    ).strip()
+
+
+def review_context(db_path, row):
+    with closing(sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True)) as conn:
+        messages = conn.execute(
+            "SELECT id, role, parts FROM messages WHERE session_id = ? ORDER BY rowid",
+            (row["session_id"],),
+        ).fetchall()
+        selected = next(
+            (i for i, message in enumerate(messages) if message[0] == row["turn_id"]),
+            None,
+        )
+        if selected is None or messages[selected][1] != "user":
+            raise ValueError(f"{row['sample_id']}: user turn missing from session")
+        edited = conn.execute(
+            "SELECT edited_paths FROM turn_outcomes WHERE session_id = ? AND turn_id = ?",
+            (row["session_id"], row["turn_id"]),
+        ).fetchone()
+        if edited is None:
+            raise ValueError(f"{row['sample_id']}: outcome row missing")
+
+    assistant_texts = []
+    next_user = ""
+    for _, role, parts in messages[selected + 1 :]:
+        if role == "user":
+            next_user = message_text(parts)
+            break
+        if role == "assistant":
+            text = message_text(parts)
+            if text:
+                assistant_texts.append(text)
+    edited_paths = json.loads(edited[0] or "[]")
+    if not isinstance(edited_paths, list):
+        edited_paths = []
+    return {
+        "prompt": message_text(messages[selected][2]),
+        "answer": assistant_texts[-1] if assistant_texts else "",
+        "next_user": next_user,
+        "edited_paths": edited_paths,
+    }
+
+
+def print_review(index, total, row, db_path, context):
+    def excerpt(value, limit=3000):
+        if not value:
+            return "(none recorded)"
+        return value if len(value) <= limit else value[:limit] + "\n[truncated]"
+
+    print(f"\n=== {index}/{total}: {row['sample_id']} ({row['project']}) ===")
+    print(f"session_id: {row['session_id']}")
+    print(f"turn_id: {row['turn_id']}")
+    print(f"edited paths: {', '.join(context['edited_paths']) or '(none)'}")
+    print(f"\nUSER PROMPT\n{excerpt(context['prompt'])}")
+    print(f"\nLAST ASSISTANT TEXT BEFORE NEXT USER MESSAGE\n{excerpt(context['answer'])}")
+    print(f"\nNEXT USER-ROLE MESSAGE (MAY BE A HARNESS FOLLOW-UP)\n{excerpt(context['next_user'], 1500)}")
+    command = (
+        f"crush --data-dir {shlex.quote(str(db_path.parent))} "
+        f"session show {shlex.quote(row['session_id'])} --json"
+    )
+    print(f"\nFull transcript: {command}")
+    print("Choose accepted, revised, rejected, or unclear; an empty note is fine.")
+
+
 def verify_frozen_manifest(path):
     actual = hashlib.sha256(path.read_bytes()).hexdigest()
     if actual != FROZEN_MANIFEST_SHA256:
@@ -217,6 +288,12 @@ def main():
     sample.add_argument("--cutoff", default=DEFAULT_CUTOFF)
     sample.add_argument("--seed", default=DEFAULT_SEED)
     sample.add_argument("--out-dir", type=Path, default=Path(__file__).parent)
+    inspect = commands.add_parser("review", help="show evidence for blind owner labeling")
+    inspect.add_argument("--registry", type=Path, default=default_registry())
+    inspect.add_argument(
+        "--review", type=Path, default=Path(__file__).parent / "turn_outcomes_review.draft.jsonl"
+    )
+    inspect.add_argument("--index", type=int, help="1-based row number; omit to show all")
     report = commands.add_parser("score", help="score completed owner labels")
     report.add_argument("--manifest", type=Path, required=True)
     report.add_argument("--review", type=Path, required=True)
@@ -246,6 +323,16 @@ def main():
             print(f"blind review: {review_path}")
             print(f"manifest: {manifest_path}")
             print(f"manifest SHA-256: {hashlib.sha256(manifest_path.read_bytes()).hexdigest()}")
+        elif args.command == "review":
+            rows = load_jsonl(args.review)
+            if args.index is not None and not 1 <= args.index <= len(rows):
+                raise ValueError(f"index must be between 1 and {len(rows)}")
+            databases = project_databases(args.registry)
+            indices = [args.index - 1] if args.index is not None else range(len(rows))
+            for index in indices:
+                row = rows[index]
+                db_path = databases[row["project"]]
+                print_review(index + 1, len(rows), row, db_path, review_context(db_path, row))
         else:
             verify_frozen_manifest(args.manifest)
             gold, matrix = score(load_jsonl(args.manifest), load_jsonl(args.review))

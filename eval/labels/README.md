@@ -27,6 +27,21 @@ labeling begins. For each review row, inspect the session with
 the project's git history. `gold_label` is **your judgment**, made without
 seeing the machine verdict:
 
+To see the evidence for row 1 without opening a full session, run:
+
+```sh
+python3 eval/labels/turn_outcomes.py review --index 1
+```
+
+Use `--index 2` for the next row. Omitting `--index` prints all 50; you can
+save that private output locally with
+`python3 eval/labels/turn_outcomes.py review > eval/labels/turn_outcomes_context.draft.txt`.
+The helper shows the selected user prompt, the last assistant text before
+the next user-role message, that next message, edited paths, and a command
+for the full transcript. It does not show the machine verdict. The next
+user-role message may be a harness follow-up, so inspect the full session
+and git history when the short view does not settle the question.
+
 | Label | Use it when |
 |---|---|
 | `accepted` | You kept or used the result without changing it. |
