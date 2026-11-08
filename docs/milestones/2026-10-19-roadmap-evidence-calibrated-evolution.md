@@ -1,6 +1,12 @@
 # 2026-10-19 — Roadmap: evidence-calibrated harness evolution
 
-**Plan of record.** Supersedes
+> **Superseded 2026-11-09** by
+> [2026-11-09-roadmap-improves-with-use](2026-11-09-roadmap-improves-with-use.md).
+> The regularized-evolution machinery here is retained there as R4 and
+> R5. Phase mapping: P0–P5 → R0–R5 (see §10 and §13 of the new
+> roadmap).
+
+**Plan of record (until 2026-11-09).** Supersedes
 [2026-10-17-roadmap-regularized-evolution](2026-10-17-roadmap-regularized-evolution.md).
 The direction is unchanged — an offline, gated loop that evolves the
 harness and lands every kept change as a reviewed PR, with memory as
