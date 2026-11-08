@@ -99,7 +99,7 @@ func (s *service) RecordTurnOutcome(ctx context.Context, o TurnOutcome) error {
 	}
 	paths := marshalNoEscape(o.EditedPaths)
 	hunks := marshalNoEscape(o.EditHunks)
-	added := marshalNoEscape(s.buildHunkAdded(o.HunkAdded, o.HunkSpans, o.EditedPaths))
+	added := marshalNoEscape(s.buildHunkAdded(s.captureRoots(ctx), o.HunkAdded, o.HunkSpans, o.EditedPaths))
 	cmds := marshalNoEscape(o.Commands)
 	now := s.now().UnixMilli()
 	createdAt := o.CreatedAt
@@ -118,6 +118,7 @@ func (s *service) RecordTurnOutcome(ctx context.Context, o TurnOutcome) error {
 		SettleAt:     createdAt + settleWindowMillis,
 		ParamVersion: s.paramVersion,
 		CreatedAt:    createdAt,
+		Workdir:      s.workingDir,
 	})
 }
 
@@ -171,7 +172,10 @@ func (s *service) SettleTurnOutcomes(ctx context.Context, limit int) error {
 		return err
 	}
 	// Same batching as the episode pass: one git log + one ledger
-	// read over the union window, then per-row filtering.
+	// read over the union window, then per-row filtering. The
+	// capture-root set is per pass: worktrees created or removed
+	// mid-batch resolve at the pass's own discovery.
+	roots := s.captureRoots(ctx)
 	winLo, winHi := now, int64(0)
 	winEnds := make([]int64, len(rows))
 	for i, r := range rows {
@@ -189,7 +193,7 @@ func (s *service) SettleTurnOutcomes(ctx context.Context, limit int) error {
 	// query per settling row.
 	later := s.laterEditedPaths(ctx, s.projectKey, winLo)
 	for i, r := range rows {
-		if err := s.settleTurn(ctx, r, winEnds[i], ev, now, later); err != nil {
+		if err := s.settleTurn(ctx, r, winEnds[i], ev, now, later, roots); err != nil {
 			return err
 		}
 	}
@@ -206,7 +210,7 @@ func (s *service) SettleTurnOutcomes(ctx context.Context, limit int) error {
 // artifact order: an episode's claim is path-scoped, so the file's
 // own survival/commit evidence outranks a cue that may object to a
 // different file in the same turn.
-func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomesRow, winEnd int64, ev commitEvidence, now int64, laterRows []laterEditRow) error {
+func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomesRow, winEnd int64, ev commitEvidence, now int64, laterRows []laterEditRow, roots []string) error {
 	var paths []string
 	var hunks map[string][]string
 	var cmds []string
@@ -239,6 +243,13 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 	// windows are real but the "post-window" state is not.
 	stale := now-r.CreatedAt > 2*settleWindowMillis
 
+	// Reads route through the row's stamped workdir (#360) — under a
+	// shared store the settling service's own checkout is the wrong
+	// place to look.
+	base := r.Workdir
+	if base == "" {
+		base = s.workingDir
+	}
 	diverged := false
 	// decidable marks "at least one fingerprint produced a readable
 	// survival verdict" — either way it read. A diverged read is
@@ -247,12 +258,30 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 	decidable := false
 	after := make(map[string]hunkAfterEntry, len(paths))
 	afterTotal := 0
+	var repoPaths []string
 	for _, p := range paths {
-		fr := s.readHunkSource(p)
+		hint := ""
 		var recs []HunkSpan
 		if e, ok := added[p]; ok {
 			recs = e.Spans
+			hint = e.RepoPath
 		}
+		// The commit-evidence keyspace is repo-relative: the
+		// recorded repo path when there is one, else the path
+		// resolved under a capture root, else the stored spelling
+		// under the workspace prefix — the legacy lookup form.
+		rp := hint
+		if rp == "" {
+			if _, sub, _, ok := resolveTarget(p, base, roots); ok {
+				rp = repoPath(sub)
+			} else if workspacePathSafe(p) {
+				rp = s.repoPrefix + p
+			}
+		}
+		if rp != "" {
+			repoPaths = append(repoPaths, rp)
+		}
+		fr := s.readHunkSource(ctx, p, base, roots, hint)
 		after[p] = captureHunkCell(fr, p, recs, later[p], stale, &afterTotal)
 		if len(hunks[p]) == 0 {
 			// An empty fingerprint (a pure deletion, or a
@@ -266,7 +295,11 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 		// survival verdict, same as before #394.
 		data, ok := fr.data, fr.state == hunkOK
 		if !ok && !fr.escaped {
-			data, ok = s.readWorkspaceFile(p)
+			if root, sub, _, rok := resolveTarget(p, base, roots); rok {
+				data, _, ok = s.readCaptureData(ctx, root, sub, rp)
+			} else {
+				data, _, ok = s.readCaptureData(ctx, "", "", rp)
+			}
 		}
 		switch {
 		case ok:
@@ -286,8 +319,8 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 			decidable, diverged = true, true
 		}
 	}
-	committed := s.hasRepo && len(paths) > 0 &&
-		ev.inWindow(paths, r.CreatedAt, winEnd)
+	committed := s.hasRepo && len(repoPaths) > 0 &&
+		ev.inWindow(repoPaths, r.CreatedAt, winEnd)
 	green := s.sessionTestsGreen(ctx, r.SessionID)
 
 	var verdict string
@@ -459,6 +492,10 @@ type hunkAddedEntry struct {
 	Spans     []HunkSpan `json:"spans,omitempty"`
 	State     string     `json:"state,omitempty"`
 	Truncated bool       `json:"truncated,omitempty"`
+	// RepoPath is the target's path inside its own worktree root
+	// (#360, R8) — the address that survives the worktree's removal,
+	// letting settle fall back to the merged default-branch content.
+	RepoPath string `json:"repo_path,omitempty"`
 }
 
 // hunkWindow is one captured region slice: Start is its first line
@@ -483,6 +520,10 @@ type hunkAfterEntry struct {
 	Relocated        bool         `json:"relocated,omitempty"`
 	Drifted          bool         `json:"drifted,omitempty"`
 	Stale            bool         `json:"stale,omitempty"`
+	// Merged marks content read from the default branch — the
+	// recorded checkout was gone, so this is the merged worktree's
+	// file, not a live filesystem read (#360, R8).
+	Merged bool `json:"merged,omitempty"`
 }
 
 // Hunk-content states — why an entry carries no text.
@@ -507,38 +548,60 @@ type hunkFileRead struct {
 	data    []byte
 	state   string
 	escaped bool // the path resolves out of scope — text or symlink
+	merged  bool // content came from the default branch, not the fs
 }
 
-// readHunkSource performs the one-per-path settle read: workspace
-// and symlink gates, a size stat before the content read so a huge
-// file never pays the scan, then binary detection. The same content
-// feeds the survival check and the window capture, so the verdict
-// and the snapshot can never disagree.
-func (s *service) readHunkSource(path string) hunkFileRead {
-	if !workspacePathSafe(path) || s.pathEscapesWorkspace(path) {
+// readHunkSource performs the one-per-path settle read: scope
+// resolution against the repo's capture roots, a size stat before
+// the content read so a huge file never pays the scan, then binary
+// detection. The same content feeds the survival check and the
+// window capture, so the verdict and the snapshot can never
+// disagree. base is the row's stamped workdir (#360); targets under
+// no live root — or under a root whose file is gone — fall back to
+// the merged default-branch content at their recorded repo path
+// (R8), which is the only way dropped-worktree work still reads.
+func (s *service) readHunkSource(ctx context.Context, path, base string, roots []string, repoHint string) hunkFileRead {
+	root, sub, abs, ok := resolveTarget(path, base, roots)
+	if !ok {
+		// Under no live root: a removed worktree's path. The
+		// recorded repo path is the only address left — merged
+		// content still reads, anything else means the work
+		// survived nowhere (missing → diverged, not abstained).
+		if repoHint != "" {
+			if data, merged, rok := s.readCaptureData(ctx, "", "", repoHint); rok {
+				return hunkFileRead{data: data, state: hunkOK, merged: merged}
+			}
+			return hunkFileRead{state: hunkMissing}
+		}
 		return hunkFileRead{state: hunkOutOfWorkspace, escaped: true}
 	}
-	if _, err := os.Lstat(filepath.Join(s.workingDir, filepath.FromSlash(path))); err != nil {
+	if repoHint == "" {
+		repoHint = repoPath(sub)
+	}
+	if _, err := os.Lstat(abs); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
+			if data, merged, rok := s.readCaptureData(ctx, "", "", repoHint); rok {
+				return hunkFileRead{data: data, state: hunkOK, merged: merged}
+			}
 			return hunkFileRead{state: hunkMissing}
 		}
 		return hunkFileRead{state: hunkUnreadable}
 	}
-	root, err := os.OpenRoot(s.workingDir)
+	r, err := os.OpenRoot(root)
 	if err != nil {
-		// A workspace-root failure isn't a missing file — the
-		// read was refused before the path was even reached.
+		// A root failure isn't a missing file — the read was
+		// refused before the path was even reached.
 		return hunkFileRead{state: hunkUnreadable}
 	}
-	defer root.Close()
-	fi, err := root.Stat(filepath.FromSlash(path))
+	defer r.Close()
+	fi, err := r.Stat(sub)
 	if err != nil {
 		return hunkFileRead{state: hunkUnreadable}
 	}
 	if fi.Size() > MaxHunkReadBytes {
 		return hunkFileRead{state: hunkTooLarge}
 	}
-	data, err := root.ReadFile(filepath.FromSlash(path))
+	data, err := r.ReadFile(sub)
 	if err != nil {
 		return hunkFileRead{state: hunkUnreadable}
 	}
@@ -555,16 +618,19 @@ func (s *service) readHunkSource(path string) hunkFileRead {
 // paths store only their state. Iteration follows edited_paths
 // order so the row cap cuts tail paths deterministically; dropped
 // entries carry over_cap rather than vanishing.
-func (s *service) buildHunkAdded(raw map[string][]HunkEdit, spans map[string][]HunkSpan, order []string) map[string]hunkAddedEntry {
+func (s *service) buildHunkAdded(roots []string, raw map[string][]HunkEdit, spans map[string][]HunkSpan, order []string) map[string]hunkAddedEntry {
 	out := make(map[string]hunkAddedEntry, len(raw))
 	total := 0
 	for _, p := range order {
 		e := hunkAddedEntry{V: 1, State: hunkOK}
+		_, sub, _, inScope := resolveTarget(p, s.workingDir, roots)
 		switch {
-		case !workspacePathSafe(p) || s.pathEscapesWorkspace(p):
+		case !inScope:
 			// Same scope gate as the settle side — an outside file's
 			// pre-edit content doesn't persist in the project DB,
-			// even though it's the agent's own output.
+			// even though it's the agent's own output. In-scope
+			// means under a worktree root of this repo now, not
+			// just the workspace (#360, R8).
 			e.State = hunkOutOfWorkspace
 		case sensitivePath(p):
 			e.State = hunkSensitive
@@ -582,6 +648,10 @@ func (s *service) buildHunkAdded(raw map[string][]HunkEdit, spans map[string][]H
 			}
 		}
 		if e.State == hunkOK || e.State == hunkOverCap {
+			// The repo-relative path is the file's durable address —
+			// it survives the worktree's removal into the merged
+			// fallback.
+			e.RepoPath = repoPath(sub)
 			// Spans ride along where content is in scope — over_cap
 			// drops text, not the anchors the after side still needs.
 			// Out-of-scope anchors would be lines from a file the
@@ -836,7 +906,7 @@ func reanchorSpan(lines []string, rec HunkSpan) (span [2]int, moved, drifted boo
 // presenting drifted windows as exact.
 func captureHunkCell(fr hunkFileRead, path string, recs []HunkSpan, later, stale bool, rowTotal *int) hunkAfterEntry {
 	e := hunkAfterEntry{
-		V: 1, State: fr.state,
+		V: 1, State: fr.state, Merged: fr.merged,
 		LaterTurnTouched: later, Stale: stale,
 	}
 	if fr.state != hunkOK {

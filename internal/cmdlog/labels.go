@@ -17,7 +17,6 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -82,7 +81,7 @@ func (s *service) LabelReferentEpisode(ctx context.Context, ep ReferentEpisode, 
 	added, _ := json.Marshal(in.AddedLines)
 	now := s.now().UnixMilli()
 	return s.q.LabelReferentEpisode(ctx, db.LabelReferentEpisodeParams{
-		LabelTargetHash:  s.fileHash(ep.Target),
+		LabelTargetHash:  s.fileHash(ctx, ep.Target),
 		LabelWrongTarget: in.WrongTarget,
 		LabelSteps:       in.Steps,
 		LabelTokens:      in.Tokens,
@@ -146,8 +145,9 @@ func (s *service) SettleReferentLabels(ctx context.Context, limit int) error {
 		}
 	}
 	ev := s.prefetchCommitEvidence(ctx, winLo, winHi)
+	roots := s.captureRoots(ctx)
 	for i, r := range rows {
-		if err := s.settleReferent(ctx, r, winEnds[i], ev, now); err != nil {
+		if err := s.settleReferent(ctx, r, winEnds[i], ev, now, roots); err != nil {
 			return err
 		}
 	}
@@ -263,15 +263,30 @@ func (ev commitEvidence) inWindow(paths []string, createdAt, winEnd int64) bool 
 
 // settleReferent computes and freezes one episode's label inside its
 // closed window.
-func (s *service) settleReferent(ctx context.Context, r db.ListUnsettledReferentLabelsRow, winEnd int64, ev commitEvidence, now int64) error {
+func (s *service) settleReferent(ctx context.Context, r db.ListUnsettledReferentLabelsRow, winEnd int64, ev commitEvidence, now int64, roots []string) error {
+	// Reads route through the row's stamped workdir (#360); the
+	// commit keyspace is repo-relative — the recorded repo_path when
+	// there is one, else the workspace-prefixed target form.
+	base := r.Workdir
+	if base == "" {
+		base = s.workingDir
+	}
+	rp := r.RepoPath
+	if rp == "" {
+		if _, sub, _, ok := resolveTarget(r.Target, base, roots); ok {
+			rp = repoPath(sub)
+		} else if workspacePathSafe(r.Target) {
+			rp = s.repoPrefix + r.Target
+		}
+	}
 	var committed sql.NullInt64
 	if s.hasRepo {
 		committed = sql.NullInt64{Int64: 0, Valid: true}
-		if ev.inWindow([]string{r.Target}, r.CreatedAt, winEnd) {
+		if rp != "" && ev.inWindow([]string{rp}, r.CreatedAt, winEnd) {
 			committed.Int64 = 1
 		}
 	}
-	changed := s.hunkDiverged(r.Target, r.LabelAddedLines)
+	changed := s.hunkDiverged(ctx, r.Target, r.LabelAddedLines, base, roots, r.RepoPath)
 	green := s.sessionTestsGreen(ctx, r.SessionID)
 	if err := s.q.SettleReferentEpisode(ctx, db.SettleReferentEpisodeParams{
 		LabelCommitted:   committed,
@@ -296,40 +311,49 @@ func (s *service) settleReferent(ctx context.Context, r db.ListUnsettledReferent
 }
 
 // hunkDiverged reads the survival signal (#340): the recorded added
-// lines' presence in the file NOW. Diverged when the file is
-// unreadable (deleted edits did not survive) or when fewer than
-// survivalMajority of the fingerprint lines remain — unrelated edits
-// elsewhere in the file no longer count as revision. An empty
-// fingerprint keeps the signal NULL: rows predating the column and
-// edits whose lines were never captured carry no survival evidence.
-// Late settlement reads a later file state — a bounded bias toward
-// revised, documented rather than hidden.
+// lines' presence in the file NOW — resolved against the row's
+// stamped workdir and the repo's worktree roots (#360, R8), with the
+// recorded repo path's merged-content fallback when the checkout is
+// gone. Diverged when the file is unreadable (deleted edits did not
+// survive) or when fewer than survivalMajority of the fingerprint
+// lines remain — unrelated edits elsewhere in the file no longer
+// count as revision. An empty fingerprint keeps the signal NULL:
+// rows predating the column and edits whose lines were never
+// captured carry no survival evidence. Late settlement reads a
+// later file state — a bounded bias toward revised, documented
+// rather than hidden.
 //
 // Both sides compare in NormalizeAddedLines' space — trimmed,
 // empty-dropped, deduped — because the fingerprint stores trimmed
 // text while files carry indentation: probing raw content for
 // "\n"+line+"\n" only ever matches column-0 lines and would read
 // nearly every real edit as diverged.
-func (s *service) hunkDiverged(target, addedJSON string) sql.NullInt64 {
+func (s *service) hunkDiverged(ctx context.Context, target, addedJSON, base string, roots []string, repoHint string) sql.NullInt64 {
 	var lines []string
 	if addedJSON == "" || json.Unmarshal([]byte(addedJSON), &lines) != nil || len(lines) == 0 {
 		return sql.NullInt64{}
 	}
-	if !workspacePathSafe(target) {
-		// An absolute or escaping path is out of scope, not deleted —
-		// abstain rather than minting diverged evidence for an edit
-		// outside this workspace.
+	root, sub, _, ok := resolveTarget(target, base, roots)
+	if !ok {
+		if repoHint != "" {
+			// A removed worktree's path: the repo address is the
+			// only one left — merged content still reads, and
+			// without it the work survived nowhere.
+			if data, _, rok := s.readCaptureData(ctx, "", "", repoHint); rok {
+				return fingerprintDiverged(data, lines)
+			}
+			return sql.NullInt64{Int64: 1, Valid: true}
+		}
+		// An absolute or escaping path is out of scope, not
+		// deleted — abstain rather than minting diverged evidence
+		// for an edit outside this workspace (symlink escapes land
+		// here too, #400).
 		return sql.NullInt64{}
 	}
-	data, ok := s.readWorkspaceFile(target)
-	if !ok {
-		if s.pathEscapesWorkspace(target) {
-			// A symlink resolving outside the workspace abstains like
-			// a textual escape — the target exists but is out of
-			// scope, not deleted (#400).
-			return sql.NullInt64{}
-		}
-		// The file is gone — nothing survived.
+	data, _, rok := s.readCaptureData(ctx, root, sub, repoPath(sub))
+	if !rok {
+		// The file is gone and the merged fallback has nothing —
+		// nothing survived.
 		return sql.NullInt64{Int64: 1, Valid: true}
 	}
 	return fingerprintDiverged(data, lines)
@@ -372,12 +396,16 @@ func NormalizeAddedLines(text string) []string {
 // for diagnostics; settlement no longer reads it — whole-file
 // equality counted unrelated edits as divergence (#340). Empty when
 // the file is unreadable. Paths escaping the workspace refuse.
-func (s *service) fileHash(target string) string {
+func (s *service) fileHash(ctx context.Context, target string) string {
 	if target == "" {
 		return ""
 	}
-	data, ok := s.readWorkspaceFile(target)
+	root, sub, _, ok := resolveTarget(target, s.workingDir, s.captureRoots(ctx))
 	if !ok {
+		return ""
+	}
+	data, _, rok := s.readCaptureData(ctx, root, sub, repoPath(sub))
+	if !rok {
 		return ""
 	}
 	sum := sha256.Sum256(data)
@@ -397,45 +425,10 @@ func workspacePathSafe(target string) bool {
 		!strings.HasPrefix(clean, ".."+string(filepath.Separator))
 }
 
-// readWorkspaceFile reads a workspace-relative path, refusing
-// escapes — label targets come from tool-call paths, and a stored
-// "../x" must not read outside. os.Root closes the textual check's
-// symlink hole: a link inside the workspace pointing out now fails
-// the read race-free (#400).
-func (s *service) readWorkspaceFile(target string) ([]byte, bool) {
-	if !workspacePathSafe(target) {
-		return nil, false
-	}
-	root, err := os.OpenRoot(s.workingDir)
-	if err != nil {
-		return nil, false
-	}
-	defer root.Close()
-	data, err := root.ReadFile(filepath.FromSlash(target))
-	if err != nil {
-		return nil, false
-	}
-	return data, true
-}
-
-// pathEscapesWorkspace reports whether target exists but resolves —
-// through any symlink in its path — to a location outside the
-// workspace. Settlement treats that like a textual escape (abstain),
-// not a deletion. Best-effort: an unresolvable path (missing,
-// permission) reports false and the read failure decides.
-func (s *service) pathEscapesWorkspace(target string) bool {
-	resolved, err := filepath.EvalSymlinks(
-		filepath.Join(s.workingDir, filepath.FromSlash(target)))
-	if err != nil {
-		return false
-	}
-	base, err := filepath.EvalSymlinks(s.workingDir)
-	if err != nil {
-		return false
-	}
-	return resolved != base &&
-		!strings.HasPrefix(resolved, base+string(filepath.Separator))
-}
+// readCaptureFile and resolveTarget (worktree.go) replace the
+// workspace-scoped file gate this file used to carry: paths now
+// resolve against every worktree root of the repo, and reads go
+// through the row's stamped workdir (#360, R8).
 
 // sessionTestsGreen folds the judged session's last-run test
 // verdicts into the tri-state signal: every observed kind='test'
@@ -472,16 +465,13 @@ func (s *service) sessionTestsGreen(ctx context.Context, sessionID string) sql.N
 // ends (#340). Commit headers are NUL-prefixed
 // "\x00commit\t<sec>\t<sha>": filenames cannot contain NUL, so a
 // path literally named "commit <digits>" can never fake a boundary.
-// git emits repo-root-relative paths while ledger targets are
-// workspace-relative — repoPrefix strips the prefix and drops
-// commits outside the workspace entirely (without it, commit
-// evidence is silently blind in a repo subdirectory). --all covers
+// Keys are repo-root-relative — the same form settle computes for
+// stored targets (recorded repo_path, resolved-under-root, or
+// repoPrefix+target), so a commit made inside ANY worktree of the
+// repo matches the rows that named it (#360, R8). --all covers
 // commits on every reachable ref, not just the checked-out HEAD, so
 // a user commit made on another branch inside the window still
-// counts (#360) — bounded the same way by since/until. Known
-// misses: worktrees sharing one data_directory still read evidence
-// from whichever checkout a worktree's HEAD points at (partition-
-// vs-checkout mismatch is a design problem, not a patch); and git
+// counts — bounded the same way by since/until. Known miss: git
 // C-quotes paths with tabs/newlines/non-ASCII (core.quotePath)
 // while the ledger stores them raw, so commit evidence silently
 // misses for such files — a `-c core.quotePath=false -z` read is the
@@ -511,12 +501,6 @@ func (s *service) commitsTouchingPaths(ctx context.Context, sinceRFC3339, untilR
 			}
 			have = false
 		case line != "" && have:
-			if s.repoPrefix != "" {
-				if !strings.HasPrefix(line, s.repoPrefix) {
-					continue // committed path outside this workspace
-				}
-				line = strings.TrimPrefix(line, s.repoPrefix)
-			}
 			out[line] = append(out[line], cur)
 		}
 	}

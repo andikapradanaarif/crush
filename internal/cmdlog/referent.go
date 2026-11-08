@@ -118,6 +118,11 @@ func (s *service) RecordReferentEpisode(ctx context.Context, ep ReferentEpisode,
 		// pass landing between this insert and LabelReferentEpisode's
 		// re-stamp would otherwise freeze it fingerprintless.
 		SettleAt: created + settleWindowMillis,
+		// The provenance pair: the recording checkout the target is
+		// relative to (#360) and its repo-relative form for the
+		// merged-worktree fallback (R8).
+		Workdir:  s.workingDir,
+		RepoPath: s.targetRepoPath(ctx, ep.Target),
 	}); err != nil {
 		return err
 	}
@@ -162,7 +167,9 @@ func (s *service) RecordReferentEpisodeLabeled(ctx context.Context, ep ReferentE
 		ParamVersion:     s.paramVersion,
 		CreatedAt:        created,
 		SettleAt:         created + settleWindowMillis,
-		LabelTargetHash:  s.fileHash(ep.Target),
+		Workdir:          s.workingDir,
+		RepoPath:         s.targetRepoPath(ctx, ep.Target),
+		LabelTargetHash:  s.fileHash(ctx, ep.Target),
 		LabelWrongTarget: in.WrongTarget,
 		LabelSteps:       in.Steps,
 		LabelTokens:      in.Tokens,
