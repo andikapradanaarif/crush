@@ -16,22 +16,34 @@ information to `crush.db` but never effectively read it back across
 sessions — memory was a write-only ledger. This milestone series exists
 to turn "it learns" from a claim into a measurement.
 
-**Direction (10-19): evidence-calibrated harness evolution.** Plan of
-record:
+**Direction (11-09): a long-horizon harness that measurably improves
+with use.** Plan of record:
+[2026-11-09-roadmap-improves-with-use](2026-11-09-roadmap-improves-with-use.md)
+(supersedes 10-19). Target: the best harness for a fixed mid-tier model
+on long-horizon coding work, with performance that rises on held-out
+tasks as the owner uses it.
+
+Phases:
+
+- **R0 — signal integrity:** capture health, plus measured precision for
+  every verdict class used.
+- **R1 — anchor + cheap levers:** Harbor anchor vs Terminus 2; advisor
+  on edge fire, evidence gates, Goldfish verifier, reversible folding.
+- **R2 — long-horizon core:** sandbox, LoopsBench, edge params, EGM
+  experiment.
+- **R3 — learning from use:** path-scoped rules with checks;
+  RSR-verified procedures; memory reform.
+- **R4 — regularized evolution:** the RRSI ledger and gate from 10-19.
+- **R5 — replicate + land.**
+
+Held-out evidence comes from a sealed TB2.1 split, a LoopsBench subset
+and in-domain replay. SWE-Pro V2 public is demoted to a
+contamination-gated guard. Selection uses pass rate with the RRSI cost
+rule; efficiency claims get their own path.
+
+*Previous direction (10-19): evidence-calibrated harness evolution* —
 [2026-10-19-roadmap-evidence-calibrated-evolution](2026-10-19-roadmap-evidence-calibrated-evolution.md).
-The learning-loop machinery still has negligible data at single-user
-volume (one `referent_episodes` row and one `project_rates` row across
-the four active project DBs on 11-08), and the eval corpus
-sits at the pass ceiling. The bet is an offline RRSI-style loop that
-evolves a gated lessons file, tool behavior, hook configs, and memory
-settings — judged on tasks it never tuned on, every kept change landing
-as a reviewed PR. Evolve set: Terminal-Bench 2.1. OOD gate: SWE-bench
-Pro V2 (SWE-bench Verified is contaminated). Primary endpoint:
-tokens-to-done at pass-rate non-inferiority, against a matched-budget
-best-of-k arm. Solver: the production model (`deepseek-v4.1-flash`).
-Gate G1 decides whether transfer is measurable at all; if not, the
-fallback keeps the ledger discipline without self-evolving claims.
-`turn_outcomes` now carries data (nexus 10-19: 196 settled turns).
+Its machinery is retained in R4 and R5.
 
 The [11-08 P0 audit](2026-11-08-exp-p0-data-audit.md) found 142
 harness-authored repair rows among 344 raw settled outcomes. Excluding
@@ -156,6 +168,7 @@ record the plan that followed from it.
 | 2026-10-15 | exp | [Verify-loop + resolver chain](2026-10-15-exp-verify-loop-and-resolver.md) — edge validated in-sample (86/88 vs 78/88, cross-invocation), resolver made live, engagement-conditional coverage — pool relabeled validation per #343 |
 | 2026-10-15 | roadmap | [Honest evidence before new capability](2026-10-15-roadmap-honest-evidence.md) — superseded 10-17: two reviews found label instability + in-sample claims; integrity work (#340–#348) precedes procedural Phase A |
 | 2026-10-17 | roadmap | [Regularized harness evolution](2026-10-17-roadmap-regularized-evolution.md) — superseded 10-19: learning loop parked (no data at single-user volume); RRSI-style evolution loop with Gate G1; memory channels become evolvable components; edit capture for user-level memory |
-| 2026-10-19 | roadmap | [Evidence-calibrated harness evolution](2026-10-19-roadmap-evidence-calibrated-evolution.md) — **plan of record**: 19 papers read (17 in full); OOD gate → SWE-bench Pro V2; primary endpoint → tokens-to-done at pass non-inferiority; v1 surface → lessons/tools/hooks/params; matched-budget baseline; production-model solver; numbered targets per phase |
+| 2026-10-19 | roadmap | [Evidence-calibrated harness evolution](2026-10-19-roadmap-evidence-calibrated-evolution.md) — superseded 11-09: 19 papers read (17 in full); OOD gate → SWE-bench Pro V2; primary endpoint → tokens-to-done at pass non-inferiority; v1 surface → lessons/tools/hooks/params; matched-budget baseline; production-model solver; numbered targets per phase |
 | 2026-11-08 | exp | [P0 data audit and label-sample correction](2026-11-08-exp-p0-data-audit.md) — exclude 142 historical reconcile repair rows; T0.2 volume falls below target; replace the invalid blind sample; invalidate raw trend baselines |
 | 2026-11-08 | report | [Position, research, and direction](2026-11-08-report-harness-direction.md) — analysis, not plan of record: edit capture blind to sibling worktrees on nexus/kiosk/valo (and aurum/borneo); competitive position; 30+ papers by evidence level; roadmap risks (OOD saturation, endpoint vs selector, stale engine-fit); proposed targets; build order (worktree capture, run-control advisor, reversible folding, sandbox, replay-gated scoped rules) |
+| 2026-11-09 | roadmap | [A long-horizon harness that measurably improves with use](2026-11-09-roadmap-improves-with-use.md) — **plan of record**: R0 signal integrity (capture health H0, verdict precision L1) ∥ R1 Harbor anchor + cheap levers (advisor on edge fire, evidence gates, Goldfish verifier, reversible folding) → R2 long-horizon core (sandbox, LoopsBench) → R3 learning from use (scoped rules with checks, RSR procedures) → R4 regularized evolution → R5 replicate; sealed TB2.1 + LoopsBench + in-domain replay replace SWE-Pro as held-out; endpoint resolved |
