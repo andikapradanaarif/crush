@@ -9,6 +9,13 @@ come from the
 report are *proposed*; per the roadmap's standing rule they become
 pre-registered only through a dated roadmap amendment.
 
+**Status changes after publication** are recorded in
+[§13 Addendum](#13-addendum--status-after-publication-egm-and-terminal-rsi):
+- R8 was fixed by #433.
+- T0.3 met at 95% accepted precision, but with low accepted recall.
+- Run-edge defects were fixed in #432.
+- Analyses of the Elephant-Goldfish Model and Terminal-RSI were added.
+
 **Question answered:** how does this fork become a top-tier harness that
 (a) completes long-horizon tasks and (b) gets measurably smarter every
 time the owner uses it?
@@ -458,10 +465,155 @@ edits.**
   they inform a pre-registered target.
 - All personal-usage numbers are single-user trends, not certified
   claims.
-- The worktree-capture diagnosis rests on stored path strings and the
-  scope-gate code. A live repro in a worktree session should confirm it
-  before the fix is designed.
+- The worktree-capture diagnosis rested on stored path strings and the
+  scope-gate code. #433 pinned it with a linked-worktree repro test
+  before fixing it. Confirmation on real turns is pending (§13.1).
 - No new experiments were run for this report.
+
+## 13. Addendum — status after publication, EGM, and Terminal-RSI
+
+### 13.1 Status since publication
+
+| Item | Was (§2, §5) | Now | Evidence |
+|---|---|---|---|
+| R8 worktree capture | Critical, open | **Fixed in code.** Capture roots are every worktree of the repo. Settlement reads the recorded checkout and falls back to the default branch after merge. Commit evidence is keyed by repo-relative paths. #360 closed | #433 (merged 2026-11-08), installed binary `c5567a31b` |
+| H0 capture health | Not met (0 `ok` on 3 projects) | **Unverified.** 0 turns recorded on any project since #433 landed; aurum and borneo still have no `crush.db` | Live DB read, 2026-11-08 |
+| T0.3 label validation | Sample frozen | **Met: accepted precision 19/20 = 95%** (≥ 80% bar). #298 mining may proceed | #429, `eval/labels/turn_outcomes_gold.jsonl` |
+| Run-edge defects | Not identified | Found while labeling: premature completion summaries, stall-stop killing turns with no closing text, the todos edge overriding an explicit owner `stop`. Fixed in #432 | #430, #432 |
+| T0.4 trend baseline | No usable baseline | Still open. Needs post-#433 / post-#432 data | — |
+
+**New finding: accepted recall is low, and the non-accepted verdicts
+are unreliable.** In the 50-row gold sample (stratified 20 accepted /
+10 revised / 10 failed / 10 unknown):
+
+| Settled verdict | Gold accepted | Gold unclear | Gold not-accepted |
+|---|---:|---:|---:|
+| accepted (20) | 19 | 1 | 0 |
+| revised (10) | **10** | 0 | 0 |
+| failed (10) | **10** | 0 | 0 |
+| unknown (10) | **9** | 1 | 0 |
+
+Every sampled `revised` and `failed` turn, and 9 of 10 `unknown` turns,
+was owner-accepted. #430 traces most of these to stall-killed turns,
+premature summaries, and harness-authored messages. The artifacts
+shipped regardless.
+
+The strata hold only 10 rows each, so read these consequences as
+directional:
+
+1. **T0.2's accepted floor is limited by label recall, not usage.**
+   Settled-accepted is 43 of 202. If the stratum rates hold, most of the
+   159 non-accepted real-user turns are owner-accepted.
+2. **Revision rate currently measures nothing.** It is VISION's
+   gate-calibration metric, T5.2's guard, and #229's weighting input. In
+   this sample, no settled `revised` turn was a real revision.
+3. **Precision is fine; negatives are not.** `accepted` is safe to mine
+   (#298). `revised` and `failed` are not safe to learn from until a
+   second label pass on post-#432 rows shows non-accepted precision.
+
+### 13.2 Elephant-Goldfish Model (google/elephant-goldfish-model) [repo docs]
+
+**What it is.** A plugin of skills and reviewer personas for Claude
+Code, Codex, Antigravity and others. It is not a harness.
+
+- **Elephant** holds project context and drafts a specification.
+- **Goldfish** reviewers run in fresh subagent contexts and see only the
+  document and the source it references, never the earlier
+  conversation.
+- **The owner** resolves trade-offs and approves the spec before
+  implementation.
+- **Skills:** brainstorm, draft, resolve, review (five stages), review
+  loop, bootstrap (docs for an existing codebase), and drift report
+  (checked-in docs vs current code).
+- **Outputs:** design doc, implementation checklist, and README
+  hierarchies kept next to the code.
+
+**Evidence: none measured.** The FAQ states that completing the
+workflow "does not demonstrate a productivity improvement." The
+verification folder covers skill discovery only. EGM also notes that
+fresh conversation context does not exclude host instruction files:
+Codex supplied AGENTS.md to reviewers (issue #237).
+
+| Crush VISION / design | EGM | Fit |
+|---|---|---|
+| Pillar 1: "documentation is an output, not a side effect" (least mature; `PLAN_ARTIFACT.md` parked) | Design doc + checklist + context docs as primary outputs | **Direct** |
+| "Ask at commitment points — confirm before the first write" | Spec approval required before implementation | **Direct** |
+| Confirmation is where the owner's taste enters the artifact | Owner makes the architectural trade-offs | Same principle |
+| Docs "must name who reads what, or it rots" | Drift report | Addresses rot |
+| Verify gate runs in the worker's context and sees its self-report | Fresh-context review | **Fills a measured weakness** (below) |
+
+**Why the Goldfish principle has support even though EGM is
+unmeasured:**
+
+- Same-context self-verification catches only 61% of wrong candidates
+  (2609.38812 [abs]).
+- Post-execution self-assessment is badly overconfident (2602.06948
+  [abs]).
+- Withholding the agent's own success report from the judge improved
+  detection of false success claims by **13–43pp**
+  (2610.29609 [abs]).
+
+**Adoption:**
+
+1. **EGM dogfood experiment (cheap, parallel to Phase 1).** Add EGM's
+   `skills/`, `agents/` and `resources/` to `options.skills_paths` and
+   run `/egm-review` through the synchronous `agent` tool. EGM's
+   general-purpose fallback reads the persona file. **Not yet
+   verified:** whether Crush's task agent inherits parent context or
+   context files, and whether skill-relative resource reads resolve.
+2. **Measure with existing instruments.** An approved spec is a
+   checkpoint, and post-approval revision rate inside its
+   implementation is VISION's calibration metric. This only becomes
+   valid once §13.1 point 3 is fixed and H0 holds.
+3. **Goldfish verifier arm (Phase 1).** A fresh-context reviewer that
+   sees the task, the diff and the test output, but not the worker's
+   transcript or completion claim. A/B it against the current
+   same-context verify gate. It is a natural implementation of the
+   "advisor on edge fire" for the verification and premature-completion
+   edges — the defect class #430 found.
+
+### 13.3 Terminal-RSI (arXiv:2610.22192) [full]
+
+**What it is.** RL training of Qwen3.8-27B. It alternates Recursive
+Self-Rewrite (verified trajectories → runbook → leakage review → fresh
+re-execution → actor-only supervision) with critic-inheriting PPO
+refinement. It adds Turn-Boundary Skip-Observation GAE, family-calibrated
+dense reward, and a success-prioritized reward.
+
+- **Self-reported results:** TB2.1 86.52%, TB4.0 19.84%, TB3.0 16.95%,
+  TB-Hard 79.00%; LHTB strict 5/46; SWR100 3%→6%.
+
+**Direct fit: low.** Crush consumes API models and does not train
+weights.
+
+**Read the headline cautiously:**
+
+- Mean@3 over three evaluations.
+- The kept checkpoint (RPR-2 step 18) was chosen among branches with
+  visible benchmark curves. The limitations section says selection
+  "requires protected validation."
+- Training used 3,000 terminal tasks. Only SWR100 is confirmed
+  training-disjoint; benchmark and pretraining overlap is "incompletely
+  audited."
+- Continuing training kept TB2.1 but lost 2.4–3.0 points on TB3.0, TB4.0
+  and Hard.
+
+| Idea | Crush application | Seam |
+|---|---|---|
+| **RSR recipe:** keep a trajectory only if the verifier passes; rewrite it into a runbook without harness-control messages; a reviewer seeing only the public task and runbook screens it for leakage; fresh re-execution under the target harness must pass | The strictest published recipe for turning experience into reusable procedure. It matches Cortex's replay gate and SkillsBench's verified-trace rule. Adopt it as the #298 pipeline | #298, Phase 3 gate |
+| **Partial credit masks failure.** Under the early reward, failed runs received 50.09% of reward mass, and some passed every scenario check but missed the final gate | Rank strict end-to-end success above partial progress in labels, selectors and the learning gate | `turn_outcomes`, verify gate, #390 |
+| **Cross-suite trade-offs** | Select on several suites and held-out sets, never one | Same as RRSI / HarnessDev |
+| A 27B open model at this level | A *possible* mid-tier solver if weights are released (not confirmed) | Model choice |
+
+### 13.4 Changes to §7
+
+| Section | Change |
+|---|---|
+| §7.3 Phase 0 | R8 is done; **verify H0 on real worktree turns.** Add **non-accepted verdict precision:** a second blind label pass on post-#432 rows (revised / failed / unknown strata) before revision rate or failed rows feed any metric or learner |
+| §7.3 Phase 1 | Add the **Goldfish verifier** arm. Run the **EGM dogfood experiment** in parallel |
+| §7.3 Phase 3 | #298 adopts the **RSR recipe** (verified → runbook → leakage review → fresh replay → keep) |
+| §7.4 new issues | (1) eval: second label pass — non-accepted verdict precision on post-#432 rows; (2) stats: H0 capture-health read after #433; (3) verify: Goldfish fresh-context verifier arm (no self-report); (4) docs: EGM dogfood experiment via `skills_paths`; (5) memory: #298 pipeline per the RSR recipe |
+| §7.5 | #360: closed by #433. #298: unblocked on precision; sources only `accepted` |
 
 ## References
 
@@ -476,6 +628,9 @@ Read in full or results-level:
 - Giampieri. Cortex. arXiv:2610.14216.
 - Li et al. When Sub-Agents Work in Parallel. arXiv:2610.10263.
 - Scale Labs. SWE-Bench Pro V2 (blog, 2026-09-22).
+- Yang et al. Terminal-RSI. arXiv:2610.22192 (v3).
+- Google. Elephant-Goldfish Model (github.com/google/elephant-goldfish-model):
+  README, harnesses, FAQ.
 
 Abstract-level or secondary:
 
@@ -487,6 +642,7 @@ Abstract-level or secondary:
 - Self-verification in terminal agents arXiv:2609.38812
 - Agentic overconfidence arXiv:2602.06948
 - ImpasseBench arXiv:2610.31895
+- Self-report leakage in completion judging arXiv:2610.29609
 - Cadence arXiv:2610.12269
 - HiSentinel arXiv:2609.39957
 - Source-Judged Compaction arXiv:2610.20927
