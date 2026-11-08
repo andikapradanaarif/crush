@@ -337,6 +337,39 @@ func TestWorktreeCapture_MergedContentUntrimmed(t *testing.T) {
 		"the merged fallback hashes the blob's exact bytes")
 }
 
+// A worktree nested INSIDE the main checkout (repo/wt) resolves
+// under the outer root once removed — the target wt/f.go would read
+// main:wt/f.go (miss → diverged) where the stamped f.go hits. The
+// recorded repo path must win the merged arm, matching settleTurn's
+// hint-first rule (review).
+func TestWorktreeCapture_NestedWorktreeEpisode(t *testing.T) {
+	env, _, git := setupWorktreeRepo(t)
+	nested := filepath.Join(env.workingDir, "wt")
+	git("worktree", "add", "-b", "nested", "wt")
+	require.NoError(t, os.WriteFile(filepath.Join(nested, "f.go"),
+		[]byte("v1\n"), 0o644))
+
+	recordLabeledEpisode(t, env, "s1", "m1", "wt/f.go",
+		ReferentEpisodeLabelInputs{AddedLines: []string{"v1"}})
+
+	// The work merges to the default branch, then the nested
+	// worktree is removed — wt/f.go still resolves, but under the
+	// main root now; the stamped f.go is the durable address.
+	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "f.go"),
+		[]byte("v1\n"), 0o644))
+	git("add", "f.go")
+	git("commit", "-m", "merge nested work")
+	git("worktree", "remove", "--force", "wt")
+
+	dueViaNewerSession(t, env, "s2")
+	require.NoError(t, env.svc.SettleReferentLabels(t.Context(), 10))
+	c := readLabels(t, env, "s1", "wt/f.go")
+	require.True(t, c.hashChanged.Valid)
+	require.EqualValues(t, 0, c.hashChanged.Int64,
+		"the stamped repo path f.go reads the merged blob — "+
+			"computing wt/f.go under the outer root would miss")
+}
+
 // The merged fallback obeys the same MaxHunkReadBytes stat gate as
 // the fs arm — a giant blob is too_large, not an unbounded read
 // feeding the capture scan (review).

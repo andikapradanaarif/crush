@@ -350,10 +350,18 @@ func (s *service) hunkDiverged(ctx context.Context, target, addedJSON, base stri
 		// here too, #400).
 		return sql.NullInt64{}
 	}
-	// The live-resolution arm derives the repo path itself — for a
-	// sensitive target the merged arm refuses inside mergedRead,
-	// so git never becomes a secret-read channel.
-	data, _, rok := s.readCaptureData(ctx, v, root, sub, repoPath(sub))
+	// The recorded repo path is the merged arm's address when it
+	// exists — it was resolved while the target's own worktree was
+	// live, so a nested worktree removed since (repo/wt/f.go now
+	// resolving as wt/f.go under the outer root) still reads
+	// default:f.go, matching settleTurn's hint-first rule. The
+	// sensitive gate inside mergedRead keeps git from becoming a
+	// secret-read channel either way.
+	rp := repoHint
+	if rp == "" {
+		rp = repoPath(sub)
+	}
+	data, _, rok := s.readCaptureData(ctx, v, root, sub, rp)
 	if !rok {
 		// The file is gone and the merged fallback has nothing —
 		// nothing survived.

@@ -62,8 +62,10 @@ func TestTurnOutcomeCaptureInLinkedWorktree(t *testing.T) {
 		state  string
 		edited string // the stored edited_paths form
 	}{
-		{"parent session captures sibling", repo, "parent.txt", "ok",
-			filepath.Join(linked, "parent.txt")},
+		{
+			"parent session captures sibling", repo, "parent.txt", "ok",
+			filepath.Join(linked, "parent.txt"),
+		},
 		{"worktree session captures edit", linked, "worktree.txt", "ok", "worktree.txt"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
