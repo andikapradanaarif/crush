@@ -18,8 +18,10 @@ import (
 	"io"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
+	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/spf13/cobra"
@@ -58,13 +60,16 @@ type fleetHealth struct {
 	H0 string `json:"h0"`
 }
 
-// fleetSummary counts projects per H0 status.
+// fleetSummary counts projects per H0 status. Failed counts
+// partitions whose DB could not be opened or read — reported as
+// warnings, but the fleet total should not silently absorb them.
 type fleetSummary struct {
 	Projects  int `json:"projects"`
 	Pass      int `json:"pass"`
 	Fail      int `json:"fail"`
 	Pending   int `json:"pending"`
 	PreSchema int `json:"pre_schema"`
+	Failed    int `json:"failed_targets,omitempty"`
 }
 
 type fleetReport struct {
@@ -136,7 +141,7 @@ func runStatsFleet(cmd *cobra.Command, _ []string) error {
 			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 			SinceMS:     since,
 			Projects:    reports,
-			Summary:     summarizeFleet(reports),
+			Summary:     summarizeFleet(reports, len(failures)),
 		}
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
@@ -150,7 +155,7 @@ func runStatsFleet(cmd *cobra.Command, _ []string) error {
 			printFleetHealth(cmd.OutOrStdout(), report)
 			fmt.Fprintln(cmd.OutOrStdout())
 		}
-		printFleetSummary(cmd.OutOrStdout(), summarizeFleet(reports))
+		printFleetSummary(cmd.OutOrStdout(), summarizeFleet(reports, len(failures)))
 	}
 	return errors.Join(failures...)
 }
@@ -210,11 +215,11 @@ func gatherFleetHealth(ctx context.Context, conn *sql.DB, tp trendProject, since
 		if settled.Valid {
 			r.SettledTurns++
 			switch verdict {
-			case "accepted":
+			case cmdlog.TurnAccepted:
 				r.Accepted++
-			case "revised":
+			case cmdlog.TurnRevised:
 				r.Revised++
-			case "failed":
+			case cmdlog.TurnFailed:
 				r.Failed++
 			default:
 				r.Unknown++
@@ -289,8 +294,8 @@ func gatherFleetHealth(ctx context.Context, conn *sql.DB, tp trendProject, since
 	return r, nil
 }
 
-func summarizeFleet(reports []fleetHealth) fleetSummary {
-	s := fleetSummary{Projects: len(reports)}
+func summarizeFleet(reports []fleetHealth, failed int) fleetSummary {
+	s := fleetSummary{Projects: len(reports), Failed: failed}
 	for _, r := range reports {
 		switch r.H0 {
 		case "pass":
@@ -311,6 +316,9 @@ func printFleetHealth(w io.Writer, r fleetHealth) {
 		fmt.Fprintln(w, "  fleet health unavailable: missing turn_outcomes")
 		fmt.Fprintln(w, "  H0: pre-schema — this database predates turn outcomes")
 		return
+	}
+	if len(r.Missing) > 0 {
+		fmt.Fprintf(w, "  missing: %s\n", strings.Join(r.Missing, ", "))
 	}
 	fmt.Fprintf(w, "  real-user settled: %d   verdict mix: A %d · R %d · F %d · U %d\n",
 		r.SettledTurns, r.Accepted, r.Revised, r.Failed, r.Unknown)
@@ -355,6 +363,10 @@ func printFleetHealth(w io.Writer, r fleetHealth) {
 
 func printFleetSummary(w io.Writer, s fleetSummary) {
 	fmt.Fprintf(w, "Fleet summary — H0 ≥ %.0f%% ok share on post-#433 rows:\n", h0OKShare*100)
-	fmt.Fprintf(w, "  %d projects: pass %d · fail %d · pending %d · pre-schema %d\n",
+	fmt.Fprintf(w, "  %d projects: pass %d · fail %d · pending %d · pre-schema %d",
 		s.Projects, s.Pass, s.Fail, s.Pending, s.PreSchema)
+	if s.Failed > 0 {
+		fmt.Fprintf(w, " · errors %d", s.Failed)
+	}
+	fmt.Fprintln(w)
 }
