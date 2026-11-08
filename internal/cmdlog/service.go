@@ -1023,13 +1023,20 @@ func normalizeRemote(remote string) string {
 // not -C: argv stays all literals so nothing derived from
 // configuration reaches command construction.
 func gitOut(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
-	out, err := cmd.Output()
+	out, err := gitOutRaw(ctx, dir, args...)
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// gitOutRaw is gitOut without the trim — file-content payloads
+// (`cat-file blob`, `show`) carry exact bytes to hashing and line
+// numbering, where dropped edge whitespace shifts the evidence.
+func gitOutRaw(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	return cmd.Output()
 }
 
 // HeadSHA is the repo state anchor: HEAD right now, best-effort —

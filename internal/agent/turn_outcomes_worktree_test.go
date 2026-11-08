@@ -23,8 +23,10 @@ import (
 )
 
 // Exercise a real mutation and its persisted result through extraction,
-// recording, and settlement. A sibling checkout is captureable only when
-// the session is rooted there, even though both share a Git common dir.
+// recording, and settlement. Linked worktrees of one repository are all
+// capture roots (#360, R8): a session rooted in the main checkout
+// captures edits inside the sibling, and a session rooted in the
+// sibling captures its own.
 func TestTurnOutcomeCaptureInLinkedWorktree(t *testing.T) {
 	t.Parallel()
 	parent, err := filepath.EvalSymlinks(t.TempDir())
@@ -54,13 +56,17 @@ func TestTurnOutcomeCaptureInLinkedWorktree(t *testing.T) {
 	require.Equal(t, cmdlog.ProjectKeyForDir(repo), cmdlog.ProjectKeyForDir(linked))
 
 	for _, tc := range []struct {
-		name  string
-		root  string
-		file  string
-		state string
+		name   string
+		root   string
+		file   string
+		state  string
+		edited string // the stored edited_paths form
 	}{
-		{"parent session excludes sibling", repo, "parent.txt", "out_of_workspace"},
-		{"worktree session captures edit", linked, "worktree.txt", "ok"},
+		{
+			"parent session captures sibling", repo, "parent.txt", "ok",
+			filepath.Join(linked, "parent.txt"),
+		},
+		{"worktree session captures edit", linked, "worktree.txt", "ok", "worktree.txt"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -124,7 +130,7 @@ func TestTurnOutcomeCaptureInLinkedWorktree(t *testing.T) {
 			captured := added[outcome.EditedPaths[0]]
 			require.Equal(t, tc.state, captured.State)
 			if tc.state == "ok" {
-				require.Equal(t, []string{tc.file}, outcome.EditedPaths)
+				require.Equal(t, []string{tc.edited}, outcome.EditedPaths)
 				require.Equal(t, []cmdlog.HunkEdit{{Old: "before", New: "after"}}, captured.Edits)
 				require.Equal(t, []cmdlog.HunkSpan{{Start: 1, End: 2, Before: "head", After: "foot"}}, captured.Spans)
 			} else {

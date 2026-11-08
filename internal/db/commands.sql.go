@@ -168,8 +168,8 @@ const insertReferentEpisode = `-- name: InsertReferentEpisode :exec
 INSERT OR IGNORE INTO referent_episodes (
     phrase, target, session_id, source_message_id, tool_call_id,
     repo_state, memory_suggested, verdict, project_key, param_version,
-    created_at, settle_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    created_at, settle_at, workdir, repo_path
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertReferentEpisodeParams struct {
@@ -185,6 +185,8 @@ type InsertReferentEpisodeParams struct {
 	ParamVersion    string `json:"param_version"`
 	CreatedAt       int64  `json:"created_at"`
 	SettleAt        int64  `json:"settle_at"`
+	Workdir         string `json:"workdir"`
+	RepoPath        string `json:"repo_path"`
 }
 
 // One judged vague-prompt observation (#165). INSERT OR IGNORE makes
@@ -211,6 +213,8 @@ func (q *Queries) InsertReferentEpisode(ctx context.Context, arg InsertReferentE
 		arg.ParamVersion,
 		arg.CreatedAt,
 		arg.SettleAt,
+		arg.Workdir,
+		arg.RepoPath,
 	)
 	return err
 }
@@ -219,10 +223,10 @@ const insertReferentEpisodeLabeled = `-- name: InsertReferentEpisodeLabeled :exe
 INSERT OR IGNORE INTO referent_episodes (
     phrase, target, session_id, source_message_id, tool_call_id,
     repo_state, memory_suggested, verdict, project_key, param_version,
-    created_at, settle_at,
+    created_at, settle_at, workdir, repo_path,
     label_target_hash, label_wrong_target, label_steps, label_tokens,
     label_tests_green, labeled_at, label_added_lines
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertReferentEpisodeLabeledParams struct {
@@ -238,6 +242,8 @@ type InsertReferentEpisodeLabeledParams struct {
 	ParamVersion     string        `json:"param_version"`
 	CreatedAt        int64         `json:"created_at"`
 	SettleAt         int64         `json:"settle_at"`
+	Workdir          string        `json:"workdir"`
+	RepoPath         string        `json:"repo_path"`
 	LabelTargetHash  string        `json:"label_target_hash"`
 	LabelWrongTarget int64         `json:"label_wrong_target"`
 	LabelSteps       int64         `json:"label_steps"`
@@ -267,6 +273,8 @@ func (q *Queries) InsertReferentEpisodeLabeled(ctx context.Context, arg InsertRe
 		arg.ParamVersion,
 		arg.CreatedAt,
 		arg.SettleAt,
+		arg.Workdir,
+		arg.RepoPath,
 		arg.LabelTargetHash,
 		arg.LabelWrongTarget,
 		arg.LabelSteps,
@@ -282,14 +290,19 @@ const insertTurnOutcome = `-- name: InsertTurnOutcome :exec
 INSERT INTO turn_outcomes
     (session_id, turn_id, project_key, edited_paths, edit_hunks,
      commands, hunk_added, next_verdict, settle_at, param_version,
-     created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     created_at, workdir)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(session_id, turn_id) DO UPDATE SET
     next_verdict  = excluded.next_verdict,
     edited_paths  = excluded.edited_paths,
     edit_hunks    = excluded.edit_hunks,
     commands      = excluded.commands,
-    hunk_added    = excluded.hunk_added
+    hunk_added    = excluded.hunk_added,
+    -- The inserting service's checkout is the basis its relative
+    -- spellings resolve against (#360): a placeholder minted by a
+    -- shared-store sibling's backfill carries its workdir, and the
+    -- repair must re-stamp or settle reads the wrong checkout.
+    workdir       = excluded.workdir
 WHERE turn_outcomes.settled_at IS NULL
     AND turn_outcomes.next_verdict = ''
 `
@@ -306,6 +319,7 @@ type InsertTurnOutcomeParams struct {
 	SettleAt     int64  `json:"settle_at"`
 	ParamVersion string `json:"param_version"`
 	CreatedAt    int64  `json:"created_at"`
+	Workdir      string `json:"workdir"`
 }
 
 // Open one turn's outcome row (#340), idempotent on the
@@ -335,6 +349,7 @@ func (q *Queries) InsertTurnOutcome(ctx context.Context, arg InsertTurnOutcomePa
 		arg.SettleAt,
 		arg.ParamVersion,
 		arg.CreatedAt,
+		arg.Workdir,
 	)
 	return err
 }
@@ -1266,7 +1281,7 @@ func (q *Queries) ListUnclaimedFailures(ctx context.Context) ([]ListUnclaimedFai
 
 const listUnsettledReferentLabels = `-- name: ListUnsettledReferentLabels :many
 SELECT id, phrase, target, session_id, verdict, memory_suggested,
-    created_at, settle_at, label_added_lines
+    created_at, settle_at, label_added_lines, workdir, repo_path
 FROM referent_episodes
 WHERE referent_episodes.project_key = ?
     AND referent_episodes.settled_at IS NULL
@@ -1307,6 +1322,8 @@ type ListUnsettledReferentLabelsRow struct {
 	CreatedAt       int64  `json:"created_at"`
 	SettleAt        int64  `json:"settle_at"`
 	LabelAddedLines string `json:"label_added_lines"`
+	Workdir         string `json:"workdir"`
+	RepoPath        string `json:"repo_path"`
 }
 
 // Episodes whose observation window has closed but whose label has
@@ -1340,6 +1357,8 @@ func (q *Queries) ListUnsettledReferentLabels(ctx context.Context, arg ListUnset
 			&i.CreatedAt,
 			&i.SettleAt,
 			&i.LabelAddedLines,
+			&i.Workdir,
+			&i.RepoPath,
 		); err != nil {
 			return nil, err
 		}
@@ -1356,7 +1375,7 @@ func (q *Queries) ListUnsettledReferentLabels(ctx context.Context, arg ListUnset
 
 const listUnsettledTurnOutcomes = `-- name: ListUnsettledTurnOutcomes :many
 SELECT id, session_id, turn_id, edited_paths, edit_hunks,
-    commands, hunk_added, next_verdict, settle_at, created_at
+    commands, hunk_added, next_verdict, settle_at, created_at, workdir
 FROM turn_outcomes
 WHERE turn_outcomes.project_key = ?
     AND turn_outcomes.settled_at IS NULL
@@ -1398,6 +1417,7 @@ type ListUnsettledTurnOutcomesRow struct {
 	NextVerdict string `json:"next_verdict"`
 	SettleAt    int64  `json:"settle_at"`
 	CreatedAt   int64  `json:"created_at"`
+	Workdir     string `json:"workdir"`
 }
 
 // Turn rows whose window closed without settling (#340): the same
@@ -1423,6 +1443,7 @@ func (q *Queries) ListUnsettledTurnOutcomes(ctx context.Context, arg ListUnsettl
 			&i.NextVerdict,
 			&i.SettleAt,
 			&i.CreatedAt,
+			&i.Workdir,
 		); err != nil {
 			return nil, err
 		}

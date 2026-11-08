@@ -278,8 +278,8 @@ SELECT * FROM failure_memory WHERE resolved_in != '' AND project_key = sqlc.arg(
 INSERT OR IGNORE INTO referent_episodes (
     phrase, target, session_id, source_message_id, tool_call_id,
     repo_state, memory_suggested, verdict, project_key, param_version,
-    created_at, settle_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    created_at, settle_at, workdir, repo_path
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: InsertReferentEpisodeLabeled :exec
 -- The episode plus its artifact labels in one insert. Required when
@@ -291,10 +291,10 @@ INSERT OR IGNORE INTO referent_episodes (
 INSERT OR IGNORE INTO referent_episodes (
     phrase, target, session_id, source_message_id, tool_call_id,
     repo_state, memory_suggested, verdict, project_key, param_version,
-    created_at, settle_at,
+    created_at, settle_at, workdir, repo_path,
     label_target_hash, label_wrong_target, label_steps, label_tokens,
     label_tests_green, labeled_at, label_added_lines
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: CountCleanReferentAcceptances :one
 -- Evidence for a phrase->target mapping: accepted episodes the memory
@@ -415,7 +415,7 @@ WHERE c.project_key = sqlc.arg(project_key)
 -- written a project-keyed ledger row; a session with none is not a
 -- boundary (the window stays open -- delayed, never wrong).
 SELECT id, phrase, target, session_id, verdict, memory_suggested,
-    created_at, settle_at, label_added_lines
+    created_at, settle_at, label_added_lines, workdir, repo_path
 FROM referent_episodes
 WHERE referent_episodes.project_key = ?
     AND referent_episodes.settled_at IS NULL
@@ -574,14 +574,19 @@ ORDER BY id ASC;
 INSERT INTO turn_outcomes
     (session_id, turn_id, project_key, edited_paths, edit_hunks,
      commands, hunk_added, next_verdict, settle_at, param_version,
-     created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     created_at, workdir)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(session_id, turn_id) DO UPDATE SET
     next_verdict  = excluded.next_verdict,
     edited_paths  = excluded.edited_paths,
     edit_hunks    = excluded.edit_hunks,
     commands      = excluded.commands,
-    hunk_added    = excluded.hunk_added
+    hunk_added    = excluded.hunk_added,
+    -- The inserting service's checkout is the basis its relative
+    -- spellings resolve against (#360): a placeholder minted by a
+    -- shared-store sibling's backfill carries its workdir, and the
+    -- repair must re-stamp or settle reads the wrong checkout.
+    workdir       = excluded.workdir
 WHERE turn_outcomes.settled_at IS NULL
     AND turn_outcomes.next_verdict = '';
 
@@ -590,7 +595,7 @@ WHERE turn_outcomes.settled_at IS NULL
 -- dual trigger as episodes -- the +24h cap elapsed or a newer session
 -- exists. Oldest first.
 SELECT id, session_id, turn_id, edited_paths, edit_hunks,
-    commands, hunk_added, next_verdict, settle_at, created_at
+    commands, hunk_added, next_verdict, settle_at, created_at, workdir
 FROM turn_outcomes
 WHERE turn_outcomes.project_key = ?
     AND turn_outcomes.settled_at IS NULL

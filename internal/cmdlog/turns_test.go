@@ -213,7 +213,7 @@ func TestRecordTurnOutcome_PlaceholderRepairsHunkAdded(t *testing.T) {
 		NextVerdict: ReferentAccepted,
 	}))
 	require.JSONEq(t,
-		`{"x.go":{"v":1,"edits":[{"new":"added text"}],"spans":[{"start":0,"end":1}],"state":"ok"}}`,
+		`{"x.go":{"v":1,"edits":[{"new":"added text"}],"spans":[{"start":0,"end":1}],"state":"ok","repo_path":"x.go"}}`,
 		readTurn(t, env, "s1", "t0").hunkAdded)
 }
 

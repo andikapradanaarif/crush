@@ -1000,11 +1000,13 @@ func TestReferentEpisodeOutcome_DivergenceBeatsCommit(t *testing.T) {
 func TestFileHash_TraversalGuard(t *testing.T) {
 	env := setupLabelsTest(t)
 	svc := env.svc.(*service)
-	require.Empty(t, svc.fileHash("../escape"))
-	require.Empty(t, svc.fileHash("/abs/path"))
-	require.Empty(t, svc.fileHash(""))
+	ctx := t.Context()
+	v := svc.captureView(ctx)
+	require.Empty(t, svc.fileHash(ctx, v, "../escape"))
+	require.Empty(t, svc.fileHash(ctx, v, "/abs/path"))
+	require.Empty(t, svc.fileHash(ctx, v, ""))
 	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "x.go"), []byte("v"), 0o644))
-	require.NotEmpty(t, svc.fileHash("x.go"))
+	require.NotEmpty(t, svc.fileHash(ctx, svc.captureView(ctx), "x.go"))
 }
 
 // The settle pass is project-scoped — another partition's due rows

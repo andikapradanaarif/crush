@@ -188,6 +188,8 @@ type ReferentEpisode struct {
 	LabelAddedLines  string        `json:"label_added_lines"`
 	SettleAt         int64         `json:"settle_at"`
 	SettledAt        sql.NullInt64 `json:"settled_at"`
+	Workdir          string        `json:"workdir"`
+	RepoPath         string        `json:"repo_path"`
 }
 
 type ReferentMemory struct {
@@ -264,4 +266,5 @@ type TurnOutcome struct {
 	CreatedAt    int64          `json:"created_at"`
 	HunkAdded    string         `json:"hunk_added"`
 	HunkAfter    string         `json:"hunk_after"`
+	Workdir      string         `json:"workdir"`
 }
