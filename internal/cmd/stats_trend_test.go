@@ -232,6 +232,32 @@ func TestGatherTrendExcludesHistoricalRepairPrompts(t *testing.T) {
 	require.InDelta(t, 100, *r.TokensPerTurn, 1e-9)
 }
 
+// trendNonUserTurn mirrors isRealUserMsg on raw parts JSON (#437):
+// every harness-persisted user-role row — repair prompts, bang-shell
+// outputs, subagent reports — is excluded from turn counts, while
+// real prompts and attachment-only messages still count. The merged
+// retry's outro fingerprint is pinned in the agent package.
+func TestTrendNonUserTurn(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		parts string
+		want  bool
+	}{
+		{"repair prefix", `[{"type":"text","data":{"text":"Observed failures still open: rerun"}}]`, true},
+		{"shell output", `[{"type":"shell_command","data":{"command":"ls","output":"x","exit_code":0}}]`, true},
+		{"subagent report", `[{"type":"sub_agent_report","data":{"label":"w","output":"done"}}]`, true},
+		{"text plus report", `[{"type":"text","data":{"text":"hi"}},{"type":"sub_agent_report","data":{"label":"w","output":"y"}}]`, true},
+		{"real prompt", `[{"type":"text","data":{"text":"fix the build"}}]`, false},
+		{"attachment only", `[{"type":"binary","data":{"path":"p.png"}}]`, false},
+		{"malformed parts", `not-json`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, trendNonUserTurn(tc.parts))
+		})
+	}
+}
+
 func TestTrendPairCostRegionSlicing(t *testing.T) {
 	t.Parallel()
 

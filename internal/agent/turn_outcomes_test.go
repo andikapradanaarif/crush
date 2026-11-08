@@ -527,6 +527,92 @@ func TestExtractTurnOutcome_SummaryIsNotBoundary(t *testing.T) {
 		"work on both sides of a compaction belongs to the same turn")
 }
 
+// The turn-boundary predicate admits only what the user typed (#437):
+// harness-persisted user-role rows — repair prompts, bang-shell
+// outputs, subagent reports, the rewritten summary — never mint a
+// turn, while real prompts and attachment-only messages still do.
+func TestIsRealUserMsg(t *testing.T) {
+	t.Parallel()
+	text := func(s string) message.Message {
+		return message.Message{
+			Role:  message.User,
+			Parts: []message.ContentPart{message.TextContent{Text: s}},
+		}
+	}
+	require.True(t, isRealUserMsg(text("fix the build")))
+	require.True(t, isRealUserMsg(message.Message{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.BinaryContent{Path: "p.png"}},
+	}), "an attachment-only prompt is a real turn")
+	require.True(t, isRealUserMsg(message.Message{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.TextContent{Text: "queued", Hidden: true}},
+	}), "hidden API prompts are real turns")
+
+	require.False(t, isRealUserMsg(text(verificationRetryPrefix+" — check failed")),
+		"repair prompt")
+	require.False(t, isRealUserMsg(text("unprefixed text"+repairRetryOutro)),
+		"merged retry that lost its leading prefix still fingerprints")
+	require.False(t, isRealUserMsg(message.Message{
+		Role:             message.User,
+		IsSummaryMessage: true,
+		Parts:            []message.ContentPart{message.TextContent{Text: "s"}},
+	}), "rewritten summary")
+	require.False(t, isRealUserMsg(message.Message{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.SubAgentReport{Label: "w", Output: "done"}},
+	}), "subagent report")
+	require.False(t, isRealUserMsg(message.Message{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.ShellCommand{Command: "ls", Output: "x", ExitCode: 0}},
+	}), "bang-shell output")
+	require.False(t, isRealUserMsg(text2msg(message.Assistant, "assistant text")),
+		"assistant role")
+}
+
+func text2msg(role message.MessageRole, s string) message.Message {
+	return message.Message{
+		Role:  role,
+		Parts: []message.ContentPart{message.TextContent{Text: s}},
+	}
+}
+
+// A stored subagent report or bang-shell row sitting inside a turn is
+// evidence context, not a boundary — the sweep mints rows only for the
+// real prompts and the harness rows stay inside the spanning turn.
+func TestBackfillSession_HarnessRowsNotBoundaries(t *testing.T) {
+	t.Parallel()
+	a, env := referentAgent(t)
+	sess, err := env.sessions.Create(t.Context(), "s1")
+	require.NoError(t, err)
+
+	msgs := toolOK([]message.Message{
+		referentUserMsg("u1", "add file"),
+		referentEditMsg("tc1", tools.WriteToolName, filepath.Join(env.workingDir, "a.go")),
+		{ID: "rep", Role: message.User, Parts: []message.ContentPart{
+			message.SubAgentReport{Label: "worker", Output: "done"},
+		}},
+		referentEditMsg("tc2", tools.WriteToolName, filepath.Join(env.workingDir, "b.go")),
+		{ID: "sh", Role: message.User, Parts: []message.ContentPart{
+			message.ShellCommand{Command: "ls", Output: "a.go", ExitCode: 0},
+		}},
+		referentUserMsg("u2", "next"),
+	})
+
+	backfillSession(t.Context(), a.turnOutcomeDeps(), sess.ID, msgs, "")
+
+	for _, id := range []string{"u1", "u2"} {
+		has, err := a.cmdlog.HasTurnOutcome(t.Context(), sess.ID, id)
+		require.NoError(t, err)
+		require.True(t, has, "real user boundary %s mints", id)
+	}
+	for _, id := range []string{"rep", "sh"} {
+		has, err := a.cmdlog.HasTurnOutcome(t.Context(), sess.ID, id)
+		require.NoError(t, err)
+		require.False(t, has, "harness row %s must not mint a turn", id)
+	}
+}
+
 // A post-compaction first turn: the tail carries only the summary
 // message, so the judged turn lives in the full transcript — the
 // live path lists it and still records the row with this prompt's

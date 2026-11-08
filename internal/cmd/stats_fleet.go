@@ -204,7 +204,7 @@ func gatherFleetHealth(ctx context.Context, conn *sql.DB, tp trendProject, since
 		if err := rows.Scan(&verdict, &settled, &pathsJSON, &addedJSON, &workdir, &parts); err != nil {
 			return r, err
 		}
-		if parts.Valid && trendRepairPrompt(parts.String) {
+		if parts.Valid && trendNonUserTurn(parts.String) {
 			r.RepairExcluded++
 			continue
 		}

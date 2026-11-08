@@ -497,7 +497,7 @@ func trendTurns(ctx context.Context, conn *sql.DB, key string, sinceMs int64, hu
 			return fmt.Errorf("turn outcomes scan: %w", scanErr)
 		}
 		r := bucket(created)
-		if parts.Valid && trendRepairPrompt(parts.String) {
+		if parts.Valid && trendNonUserTurn(parts.String) {
 			r.RepairTurnsExcluded++
 			continue
 		}
@@ -531,10 +531,14 @@ func trendTurns(ctx context.Context, conn *sql.DB, key string, sinceMs int64, hu
 	return rows.Err()
 }
 
-// trendRepairPrompt reads only the text parts needed to recognize a
-// stored harness retry. Malformed or missing parts remain visible in
-// the report rather than silently removing evidence.
-func trendRepairPrompt(partsJSON string) bool {
+// trendNonUserTurn reports whether a stored user-role message is not
+// a real user turn — a repair prompt (text fingerprint) or another
+// harness-persisted row that carries no typed prompt (bang-shell
+// output, subagent report). It mirrors message.Message.IsPrompt plus
+// the agent's repair fingerprint on the raw parts JSON (#437).
+// Malformed or missing parts remain visible in the report rather
+// than silently removing evidence.
+func trendNonUserTurn(partsJSON string) bool {
 	var parts []struct {
 		Type string `json:"type"`
 		Data struct {
@@ -546,17 +550,14 @@ func trendRepairPrompt(partsJSON string) bool {
 	}
 	var texts []string
 	for _, part := range parts {
-		if part.Type == "text" {
+		switch part.Type {
+		case "shell_command", "sub_agent_report":
+			return true
+		case "text":
 			texts = append(texts, part.Data.Text)
 		}
 	}
-	text := strings.TrimSpace(strings.Join(texts, "\n"))
-	for _, prefix := range agent.RepairPromptPrefixes {
-		if strings.HasPrefix(text, prefix) {
-			return true
-		}
-	}
-	return false
+	return agent.IsRepairPrompt(strings.TrimSpace(strings.Join(texts, "\n")))
 }
 
 // trendEditCost accumulates the per-path line-Levenshtein of one
@@ -781,7 +782,7 @@ func trendTokens(ctx context.Context, conn *sql.DB, key string, shared bool, mem
 		if r == nil {
 			continue
 		}
-		if trendRepairPrompt(parts) {
+		if trendNonUserTurn(parts) {
 			r.RepairMessagesExcluded++
 		} else {
 			r.UserTurns++
