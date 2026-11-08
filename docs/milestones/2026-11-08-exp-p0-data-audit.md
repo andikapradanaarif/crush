@@ -62,3 +62,23 @@ also assigns whole-session token counters to the session-creation week,
 so its tokens-per-turn figure is a weekly session average. A corrected
 trend read and new real work in the checkout being edited are needed
 before T0.4 can provide a usable P5 comparison.
+
+The corrected `crush stats trend` read was rerun for these four projects.
+It excludes stored repair prompts from settled-turn metrics and from the
+user-message denominator of tokens per turn. The session token numerator
+still includes repair work because tokens are stored per session, not per
+message. Each local ledger now contains version 2 rows; copies of the
+invalid version 1 ledgers remain alongside them as
+`trend.pre-repair-filter.jsonl`.
+
+| Project | Weekly rows | Real settled | Historical repair rows excluded | Weeks with measured edit cost |
+|---|---:|---:|---:|---:|
+| nexus | 2 | 58 | 42 | 0 |
+| vishnu | 3 | 108 | 69 | 1 |
+| valo-backend | 7 | 20 | 25 | 0 |
+| kiosk | 2 | 16 | 6 | 0 |
+
+Vishnu's sole measured week (2026-10-19) has six comparable turns,
+ten edit pairs, and 7.67 changed lines per measured turn. These
+corrected rows establish the current read, but T0.4 remains open: it
+still lacks two comparable weekly edit-cost baselines before P5.

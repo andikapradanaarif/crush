@@ -201,6 +201,37 @@ func TestGatherTrendSharedStore(t *testing.T) {
 	require.EqualValues(t, 100, rows[0].TokensTotal)
 }
 
+func TestGatherTrendExcludesHistoricalRepairPrompts(t *testing.T) {
+	t.Parallel()
+
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+
+	insertSession(t, conn, "s1", weekAms/1000, 100, 2)
+	trendExec(t, conn, `UPDATE messages SET parts = ? WHERE id = ?`,
+		`[{"type":"text","data":{"text":"Observed failures still open: rerun the check"}}]`, "s1-u0")
+	trendExec(t, conn, `UPDATE messages SET parts = ? WHERE id = ?`,
+		`[{"type":"text","data":{"text":"Please fix the check"}}]`, "s1-u1")
+	insertTurnOutcome(t, conn, "proj", "s1", "s1-u0", "accepted", weekAms, true,
+		`[]`, `{}`, `{}`)
+	insertTurnOutcome(t, conn, "proj", "s1", "s1-u1", "accepted", weekAms+1000, true,
+		`[]`, `{}`, `{}`)
+
+	rows, _, err := gatherTrend(t.Context(), conn, trendProject{path: "/p", key: "proj"}, 0)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	r := rows[0]
+	require.Equal(t, 2, r.V)
+	require.Equal(t, 1, r.SettledTurns)
+	require.Equal(t, 1, r.Accepted)
+	require.Equal(t, 1, r.RepairTurnsExcluded)
+	require.Equal(t, 1, r.UserTurns)
+	require.Equal(t, 1, r.RepairMessagesExcluded)
+	require.EqualValues(t, 100, r.TokensTotal)
+	require.InDelta(t, 100, *r.TokensPerTurn, 1e-9)
+}
+
 func TestTrendPairCostRegionSlicing(t *testing.T) {
 	t.Parallel()
 
