@@ -943,6 +943,7 @@ var RepairPromptPrefixes = []string{
 	burnWatchPrefix,
 	verifyLoopReplanPrefix,
 	verifyLoopEscalatePrefix,
+	reconcileRetryPrefix,
 }
 
 // failedCheckGroups merges failed entries minted by one write into a

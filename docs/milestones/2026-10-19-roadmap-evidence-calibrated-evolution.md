@@ -223,6 +223,22 @@ niceday 6); accepted = 86 (vishnu 56, nexus 30); hunk-captured = 103
 therefore met under the amendment; the P0 remainder is T0.3
 labeling, T0.4 baselines, and the T0.5 freeze.
 
+**Correction and sample amendment 2026-11-08.** A read of the live
+`crush.db` files found niceday's six rows were unsettled, reducing the
+raw settled count from 350 to 344. A second audit found 142 of those
+344 rows were harness-authored reconcile repair prompts, misclassified
+as user turns because `reconcileRetryPrefix` was missing from
+`RepairPromptPrefixes`. Excluding them leaves **202 real-user settled
+turns, 43 accepted**, and 37 turns with captured edit content and
+positions. T0.1 remains met; **T0.2 is not met** under either the
+settled or accepted floor. The original 50-turn T0.3 sample contained
+22 repair rows and was replaced before labeling with a blind
+cross-project sample that excludes them. Its strata and frozen hash are
+in the [11-08 audit](2026-11-08-exp-p0-data-audit.md). Existing T0.4
+trend rows include the historical repair rows and are not valid
+baselines; P0 remains open pending clean real-user volume, labels, and
+a usable baseline.
+
 ### P1 — Feasibility → Gate G1
 
 *Milestone 10. Decides commit vs fallback.*
