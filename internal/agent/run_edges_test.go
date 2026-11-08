@@ -287,9 +287,35 @@ func TestRepairPromptPrefixes_Stable(t *testing.T) {
 		burnWatchRetrySection(&edgeTrigger{inputTokens: 250000, steps: make([]fantasy.StepResult, 40)}),
 		burnWatchPrefix))
 	require.True(t, strings.HasPrefix(
+		verifyLoopReplanSection(&edgeTrigger{report: "Stopped: x"}),
+		verifyLoopReplanPrefix))
+	require.True(t, strings.HasPrefix(verifyLoopEscalateSection(nil), verifyLoopEscalatePrefix))
+	require.NotEqual(t, verifyLoopReplanPrefix, verifyLoopEscalatePrefix)
+	require.True(t, strings.HasPrefix(
 		reconcileRetrySection(&edgeTrigger{openFailures: []cmdlog.Failure{{Cmd: "go test ./..."}}}),
 		reconcileRetryPrefix))
 	require.True(t, isRepairPrompt(reconcileRetryPrefix+" — pending failure"))
+	// Every firing edge's rendered prompt must fingerprint as a
+	// repair turn — a section that renders without its exported
+	// prefix mints mislabeled turn rows (#427 regression) and
+	// breaks the analyzer's turn segmentation.
+	sections := []string{
+		(&sessionAgent{}).verificationRetrySection(&edgeTrigger{failed: []gateCheckOutcome{{
+			check: message.VerificationCheck{Check: "c"}, output: "out",
+		}}}),
+		todosRetrySection(&edgeTrigger{plan: []planVerdict{{
+			item: session.PlanItem{Content: "x", Status: session.PlanItemPending},
+		}}}),
+		stallRetrySection(nil),
+		stallReplanSection(&edgeTrigger{report: "Stopped: x"}),
+		verifyLoopReplanSection(&edgeTrigger{report: "Stopped: x"}),
+		verifyLoopEscalateSection(nil),
+		burnWatchRetrySection(&edgeTrigger{inputTokens: 250000, steps: make([]fantasy.StepResult, 40)}),
+		reconcileRetrySection(&edgeTrigger{openFailures: []cmdlog.Failure{{Cmd: "go test ./..."}}}),
+	}
+	for _, s := range sections {
+		require.True(t, isRepairPrompt(s), "edge prompt not fingerprinted: %.40q", s)
+	}
 	// No prefix is a prefix of another — a merged prompt reads as its
 	// leading edge only.
 	for i, p := range RepairPromptPrefixes {
@@ -1820,4 +1846,127 @@ func TestReconcileRetrySection(t *testing.T) {
 		require.Contains(t, note, "no longer block finishing")
 		require.Contains(t, note, "finish")
 	})
+}
+
+func TestIsOwnerStopPrompt(t *testing.T) {
+	t.Parallel()
+
+	for _, p := range []string{
+		"stop", "Stop", "STOP", "stop.", "stop!", "please stop", "cancel",
+		"abort", "halt", "enough", "that's enough", "never mind", "nevermind",
+		"  stop  it  ",
+	} {
+		require.True(t, isOwnerStopPrompt(p), p)
+	}
+	for _, p := range []string{
+		"", "stop the server", "can you stop", "stopped", "don't stop",
+		"stopwords", "restart", "please stop the music", "stop it later",
+		"unstoppable",
+	} {
+		require.False(t, isOwnerStopPrompt(p), p)
+	}
+}
+
+func TestOwnerStopBoundary(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a firing edge records owner-stop and queues nothing", func(t *testing.T) {
+		t.Parallel()
+		a, conn, sessionID := interactiveEdgeAgent(t)
+		queued := runEdgesForTest(a, t.Context(),
+			SessionAgentCall{SessionID: sessionID, Prompt: "stop"},
+			edgeInput{result: stallResult(), stalled: true})
+		require.False(t, queued, "an explicit stop cannot mint a resume")
+		q, _ := a.messageQueue.Get(sessionID)
+		require.Empty(t, q)
+		require.Equal(t, "owner-stop", firingOutcome(t, conn, sessionID, "stall"))
+	})
+
+	t.Run("a gated trigger keeps its gated verdict", func(t *testing.T) {
+		t.Parallel()
+		// ambiguityClarification off — the verify-loop trigger scans
+		// gated, and owner-stop must not rewrite that verdict.
+		a, conn, sessionID := newEdgeTestAgent(t, &config.Config{})
+		queued := runEdgesForTest(a, t.Context(),
+			SessionAgentCall{SessionID: sessionID, Prompt: "cancel"},
+			edgeInput{result: verifyLoopResult(), verifyLoop: true})
+		require.False(t, queued)
+		require.Equal(t, "gated", firingOutcome(t, conn, sessionID, "verify-loop"))
+	})
+
+	t.Run("task content mentioning stop is unaffected", func(t *testing.T) {
+		t.Parallel()
+		a, conn, sessionID := interactiveEdgeAgent(t)
+		queued := runEdgesForTest(a, t.Context(),
+			SessionAgentCall{SessionID: sessionID, Prompt: "stop the server on port 8080"},
+			edgeInput{result: stallResult(), stalled: true})
+		require.True(t, queued, "task prompts that mention 'stop' still repair")
+		q, _ := a.messageQueue.Get(sessionID)
+		require.Len(t, q, 1)
+		require.Equal(t, "fired", firingOutcome(t, conn, sessionID, "stall"))
+	})
+
+	t.Run("a carried trigger clears when its edge scans nil", func(t *testing.T) {
+		t.Parallel()
+		a, conn, sessionID := interactiveEdgeAgent(t)
+		call := SessionAgentCall{
+			SessionID: sessionID,
+			Prompt:    "stop",
+			deferred: []deferredTrigger{{
+				edge:    a.runEdgeSet()[1], // Todos.
+				trigger: &edgeTrigger{sessionState: true, plan: []planVerdict{}},
+			}},
+		}
+		// A clean result scans nil for every edge — the carried
+		// todos trigger's evidence no longer holds, so it clears
+		// rather than dying silently or minting a retry.
+		queued := runEdgesForTest(a, t.Context(), call, edgeInput{result: cleanResult()})
+		require.False(t, queued)
+		q, _ := a.messageQueue.Get(sessionID)
+		require.Empty(t, q)
+		require.Equal(t, "cleared", firingOutcome(t, conn, sessionID, "todos"))
+	})
+
+	t.Run("a carried trigger under a fresh trigger is superseded", func(t *testing.T) {
+		t.Parallel()
+		a, conn, sessionID := interactiveEdgeAgent(t)
+		call := SessionAgentCall{
+			SessionID: sessionID,
+			Prompt:    "stop",
+			deferred: []deferredTrigger{{
+				edge:    a.runEdgeSet()[2], // Stall.
+				trigger: &edgeTrigger{report: "carried"},
+			}},
+		}
+		// The stall edge scans a fresh trigger on the same boundary —
+		// one owner-stop row for the edge, not two.
+		queued := runEdgesForTest(a, t.Context(), call,
+			edgeInput{result: stallResult(), stalled: true})
+		require.False(t, queued)
+		require.Equal(t, "owner-stop", firingOutcome(t, conn, sessionID, "stall"))
+		rows := firingRows(t, conn, sessionID)
+		stall := 0
+		for _, r := range rows {
+			if r.edge == "stall" {
+				stall++
+			}
+		}
+		require.Equal(t, 1, stall, "the carried twin dies superseded, not double-recorded")
+	})
+}
+
+func TestRepairRetryOutro(t *testing.T) {
+	t.Parallel()
+
+	// The boundary's run already produced a summary the repair
+	// invalidates — every merged retry prompt must direct the repair
+	// turn to restate final state, or the stale summary stands (#430).
+	a, _, sessionID := interactiveEdgeAgent(t)
+	queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+		edgeInput{result: stallResult(), stalled: true})
+	require.True(t, queued)
+	q, _ := a.messageQueue.Get(sessionID)
+	require.Len(t, q, 1)
+	require.Contains(t, q[0].Prompt, "end the turn with an updated summary")
+	require.Contains(t, q[0].Prompt, "summary was written before this repair")
 }
