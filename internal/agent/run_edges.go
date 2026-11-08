@@ -71,6 +71,11 @@ const (
 	// carried trigger landing on a StopTurn-ended boundary, where the
 	// carrier can't take a retry slot.
 	edgeOutcomeCancelled edgeOutcome = "cancelled"
+	// edgeOutcomeOwnerStop means the boundary's initiating prompt was
+	// an explicit owner stop command — edges scan for telemetry but
+	// no trigger may enqueue a retry: a resume edge would restart
+	// work the owner just halted.
+	edgeOutcomeOwnerStop edgeOutcome = "owner-stop"
 )
 
 // edgeFamily splits prompt contention: an escalation-family prompt wins
@@ -337,6 +342,46 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		return false, call
 	}
 
+	if isOwnerStopPrompt(call.Prompt) {
+		// The owner told the run to stop. Edges still scan so the
+		// would-have-fired verdict lands in telemetry, but resolve
+		// never runs and no trigger takes a retry slot — a resume
+		// edge here restarts work the owner just halted.
+		for i, edge := range edges {
+			t := edge.scan(ctx, call, in)
+			if ctx.Err() != nil {
+				a.recordEdgeFiring(ctx, call, in, edge.name, t, edgeOutcomeCancelled)
+				a.recordCancelledBoundary(ctx, call, in, edges[i+1:], nil, nil, carried)
+				return false, call
+			}
+			d, carriedOne := carried[edge.name]
+			delete(carried, edge.name)
+			if t == nil {
+				if carriedOne {
+					// The fresh scan re-derived the evidence and it
+					// no longer holds — the carried trigger clears
+					// rather than dying silently.
+					a.recordEdgeFiring(ctx, call, in, edge.name, d.trigger, edgeOutcomeCleared)
+				}
+				continue
+			}
+			// A fresh trigger supersedes its carried twin. The
+			// verdict is owner-stop unless the scan itself flagged
+			// the trigger gated or suppressed.
+			outcome := edgeOutcomeOwnerStop
+			if t.hint == edgeOutcomeGated || t.hint == edgeOutcomeSuppressed {
+				outcome = t.hint
+			}
+			a.recordEdgeFiring(ctx, call, in, edge.name, t, outcome)
+		}
+		for _, d := range carried {
+			// Leftover carried entries name an edge no longer in the
+			// set — cleared, matching the normal path's convention.
+			a.recordEdgeFiring(ctx, call, in, d.edge.name, d.trigger, edgeOutcomeCleared)
+		}
+		return false, call
+	}
+
 	var contenders []contender
 	// stillDeferred holds carried triggers that land on a non-clean
 	// boundary — they can't take a retry slot here, but they ride the
@@ -537,7 +582,7 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 	// the retry non-foldable and suppresses the premature RunComplete;
 	// Accepted/acceptSeq are cleared so a cancel mark drops it.
 	retry := call
-	retry.Prompt = strings.Join(prompts, "\n")
+	retry.Prompt = strings.Join(prompts, "\n") + repairRetryOutro
 	retry.RepairAttempts++
 	retry.Accepted = nil
 	retry.acceptSeq = 0
@@ -793,6 +838,42 @@ func cleanStop(in edgeInput) bool {
 	return true
 }
 
+// ownerStopPrompts is the explicit stop vocabulary — normalized
+// whole-prompt matches only. Anything longer ("stop the server",
+// "stop nginx") is task content, not a stop command, so exact-match
+// against a small set keeps false positives at zero at the cost of
+// missing phrasings outside the list — suppression is a courtesy,
+// not a safety gate.
+var ownerStopPrompts = map[string]bool{
+	"stop":            true,
+	"stop it":         true,
+	"stop now":        true,
+	"stop working":    true,
+	"stop everything": true,
+	"please stop":     true,
+	"cancel":          true,
+	"cancel it":       true,
+	"abort":           true,
+	"abort it":        true,
+	"halt":            true,
+	"enough":          true,
+	"that's enough":   true,
+	"thats enough":    true,
+	"never mind":      true,
+	"nevermind":       true,
+}
+
+// isOwnerStopPrompt reports whether the run's initiating prompt is a
+// bare stop command — the owner telling the agent to halt, not task
+// content. Normalization lowercases, collapses whitespace, and strips
+// trailing punctuation so "Stop!" and "stop." both match.
+func isOwnerStopPrompt(prompt string) bool {
+	p := strings.ToLower(strings.TrimSpace(prompt))
+	p = strings.TrimRight(p, ".!…")
+	p = strings.Join(strings.Fields(p), " ")
+	return ownerStopPrompts[p]
+}
+
 // endedOnStopTurn reports whether the run's terminal step carries a
 // tool result flagged StopTurn — the question tool's pause-for-input.
 func endedOnStopTurn(r *fantasy.AgentResult) bool {
@@ -931,6 +1012,13 @@ const (
 	verifyLoopReplanPrefix   = "The previous attempt kept verifying the same fix"
 	verifyLoopEscalatePrefix = "This run kept verifying the same fix without converging"
 )
+
+// repairRetryOutro closes every merged repair prompt: the summary the
+// boundary's run already produced was premature — the repair turn ends
+// by restating the task's real final state, not by echoing it. Without
+// the directive a compliant model reports the repair's evidence and
+// leaves the stale summary standing (#430).
+const repairRetryOutro = "\n\nWhen this repair is done — resolved or explained — end the turn with an updated summary of the task's actual state. The previous turn's summary was written before this repair ran; do not repeat it as-is."
 
 // RepairPromptPrefixes is every repair-prompt leading literal — the
 // eval analyzer fingerprints these to distinguish harness-authored
@@ -1608,9 +1696,11 @@ func verifyLoopReport(streak int, steps []fantasy.StepResult) string {
 		tools = fmt.Sprintf(" (%s)", strings.Join(names, ", "))
 	}
 	return fmt.Sprintf("Stopped: %d consecutive verification step(s)%s after the last write produced no new edit. "+
-		"What's blocking: the check keeps reporting the same failure, so verifying again cannot change the outcome. "+
+		"What's blocking: the check keeps reporting the same failure — either the fix did not take, or the check "+
+		"fails for a reason outside this fix's scope. "+
 		"Ways forward: state what the failed check proves about the current diagnosis and change the fix, "+
-		"test a different hypothesis, or name the missing piece if the task is genuinely blocked.",
+		"test a different hypothesis, say why the failing check is outside this fix's scope and move on, "+
+		"or name the missing piece if the task is genuinely blocked.",
 		streak, tools)
 }
 
@@ -1649,10 +1739,12 @@ func verifyLoopReplanSection(t *edgeTrigger) string {
 	if t.mapSlice != "" {
 		b.WriteString("Project map over the touched directories:\n" + t.mapSlice + "\n\n")
 	}
-	b.WriteString("Re-running the same check confirms what is already known — the fix did not take; it cannot " +
-		"move the work forward. State in one line what the failed check proves about the current diagnosis, " +
-		"then act on it: change the fix, test a different hypothesis, or name what is missing if the task is " +
-		"genuinely blocked. Do not spend another step verifying an outcome that is already known.")
+	b.WriteString("Re-running the same check confirms what is already known — either the fix did not take or the " +
+		"check fails for a reason outside this fix's scope; neither is moved by another verification. State in " +
+		"one line what the failed check proves about the current diagnosis, then act on it: change the fix, " +
+		"test a different hypothesis, say why the check is outside the fix's scope and move on, or name what " +
+		"is missing if the task is genuinely blocked. Do not spend another step verifying an outcome that is " +
+		"already known.")
 	return b.String()
 }
 
