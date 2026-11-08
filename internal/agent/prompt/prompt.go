@@ -29,6 +29,8 @@ type Prompt struct {
 	platform    string
 	workingDir  string
 	interactive bool
+	canWrite    bool
+	toolNames   []string
 }
 
 type PromptDat struct {
@@ -67,6 +69,12 @@ type PromptDat struct {
 	// tools — a model that hallucinates a `question` call it doesn't
 	// have burns turns on tool-not-found errors.
 	Interactive bool
+	// CanWrite marks an agent that may edit files — the task template
+	// renders its write-capable clauses only under it.
+	CanWrite bool
+	// ToolNames are the tools the agent is actually given, which is not
+	// always its whole configured set: some tools depend on the run mode.
+	ToolNames []string
 }
 
 type ContextFile struct {
@@ -85,6 +93,21 @@ func WithTimeFunc(fn func() time.Time) Option {
 func WithPlatform(platform string) Option {
 	return func(p *Prompt) {
 		p.platform = platform
+	}
+}
+
+// WithCanWrite marks the prompt as belonging to an agent that can edit files.
+func WithCanWrite(canWrite bool) Option {
+	return func(p *Prompt) {
+		p.canWrite = canWrite
+	}
+}
+
+// WithToolNames sets the tools the agent is actually given, so a prompt that
+// advertises its tools cannot promise one that was never attached.
+func WithToolNames(names []string) Option {
+	return func(p *Prompt) {
+		p.toolNames = names
 	}
 }
 
@@ -277,11 +300,13 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 		NotebookEnabled:     cfg.Options.NotebookIsEnabled(),
 		ProjectIndexEnabled: cfg.Options.ProjectIndexEnabled(),
 		Interactive:         p.interactive,
+		CanWrite:            p.canWrite,
+		ToolNames:           p.toolNames,
 	}
-	// AgentTools resolves unconditionally — plan.md.tpl renders it as
-	// the tool list outside any notebook section. The notebook tools
-	// register only when the notebook is on, so templates gate
-	// recall/search guidance behind NotebookEnabled as well.
+	// AgentTools resolves unconditionally — templates render it as the
+	// tool list outside any gated section. The notebook tools register
+	// only when the notebook is on, so templates gate recall/search
+	// guidance behind NotebookEnabled as well.
 	if agent, ok := cfg.Agents[p.name]; ok {
 		data.AgentTools = agent.AllowedTools
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/errgroup"
 )
 
 // newSummaryTestCoordinator builds a coordinator with a summary model
@@ -56,7 +57,7 @@ func newSummaryTestCoordinatorAt(t *testing.T, crushJSON string, keepSummary boo
 	require.NoError(t, err)
 	agentCfg := cfg.Config().Agents[config.AgentCoder]
 
-	agent, err := coord.buildAgent(context.Background(), p, agentCfg, false)
+	agent, err := coord.buildAgent(context.Background(), new(errgroup.Group), p, agentCfg, false)
 	require.NoError(t, err)
 	coord.mainAgent = agent
 	coord.mainAgentName = config.AgentCoder

@@ -28,13 +28,13 @@ func TestAgentToolLazyBuildWithMissingProvider(t *testing.T) {
 	coord := newSummaryTestCoordinator(t, crushJSON)
 
 	// Tool construction must not resolve the task agent's provider.
-	tool, err := coord.agentTool(context.Background())
+	tool, err := coord.agentTool(context.Background(), string(config.AgentCoder))
 	require.NoError(t, err)
 	require.Equal(t, AgentToolName, tool.Info().Name)
 
 	// The whole tool list for the coder agent must still build.
 	agentCfg := coord.cfg.Config().Agents[config.AgentCoder]
-	built, err := coord.buildTools(context.Background(), agentCfg, false)
+	built, err := coord.buildTools(context.Background(), agentCfg, false, func() Model { return Model{} })
 	require.NoError(t, err)
 	var names []string
 	for _, bt := range built {

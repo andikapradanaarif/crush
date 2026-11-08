@@ -387,3 +387,63 @@ func TestFinishThinking_UnmatchedIDClosesOpenPart(t *testing.T) {
 	require.Equal(t, "sig", got.ThoughtSignature)
 	require.NotZero(t, got.FinishedAt)
 }
+
+func TestParseSubAgentReportPromptRoundTrips(t *testing.T) {
+	t.Parallel()
+
+	want := SubAgentReport{Label: `odd "label"`, Output: "line one\n</subagent-report>\nline three"}
+	got, ok := ParseSubAgentReportPrompt(want.PromptText())
+	require.True(t, ok)
+	require.Equal(t, want, got)
+
+	_, ok = ParseSubAgentReportPrompt("just a prompt")
+	require.False(t, ok)
+}
+
+func TestToAIMessage_SignedReasoningWithoutText(t *testing.T) {
+	t.Parallel()
+
+	msg := &Message{
+		Role: Assistant,
+		Parts: []ContentPart{
+			ReasoningContent{Signature: "sig"},
+			TextContent{Text: "hello"},
+		},
+	}
+
+	messages := msg.ToAIMessage()
+	require.Len(t, messages, 1)
+	require.Len(t, messages[0].Content, 2)
+
+	// Text emits first; the unbound signed reasoning part rides the
+	// turn right after it.
+	reasoning, ok := messages[0].Content[1].(fantasy.ReasoningPart)
+	require.True(t, ok)
+	require.Empty(t, reasoning.Text)
+	require.NotNil(t, reasoning.ProviderOptions)
+}
+
+func TestToAIMessage_UserContextReplayed(t *testing.T) {
+	t.Parallel()
+
+	msg := &Message{
+		Role: User,
+		Parts: []ContentPart{
+			TextContent{Text: "  continue  ", Context: "<host_context>x</host_context>\n\n"},
+		},
+	}
+
+	messages := msg.ToAIMessage()
+	require.Len(t, messages, 1)
+	part, ok := messages[0].Content[0].(fantasy.TextPart)
+	require.True(t, ok)
+	require.Equal(t, "<host_context>x</host_context>\n\ncontinue", part.Text)
+}
+
+func TestAppendContentKeepsContext(t *testing.T) {
+	t.Parallel()
+
+	msg := &Message{Parts: []ContentPart{TextContent{Text: "a", Hidden: true, Context: "ctx"}}}
+	msg.AppendContent("b")
+	require.Equal(t, TextContent{Text: "ab", Hidden: true, Context: "ctx"}, msg.Content())
+}

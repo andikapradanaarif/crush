@@ -12,9 +12,10 @@ import (
 )
 
 // TestPlanPromptListsConfiguredTools verifies the plan system prompt
-// advertises the tools the plan agent is actually configured with. The
-// list is generated from the agent's AllowedTools rather than hard-coded,
-// so the prompt can never promise a tool the user disabled.
+// advertises the tools the plan agent is actually given. The list is
+// generated from the effective tool names rather than hard-coded, so the
+// prompt can never promise a tool the user disabled or the run mode
+// withheld.
 func TestPlanPromptListsConfiguredTools(t *testing.T) {
 	env := testEnv(t)
 
@@ -34,13 +35,33 @@ func TestPlanPromptListsConfiguredTools(t *testing.T) {
 	require.NoError(t, err)
 	cfg.SetupAgents()
 
-	p, err := planPrompt(prompt.WithWorkingDir(env.workingDir))
-	require.NoError(t, err)
+	// buildPrompt renders the plan prompt as the coordinator would for the
+	// given run mode, so the advertised list goes through the same gate
+	// that decides which tools are attached.
+	buildPrompt := func(t *testing.T, interactive bool) string {
+		t.Helper()
+		c := &coordinator{interactive: interactive}
+		planCfg := cfg.Config().Agents[config.AgentPlan]
+		p, err := planPrompt(
+			prompt.WithWorkingDir(env.workingDir),
+			prompt.WithInteractive(interactive),
+			prompt.WithToolNames(c.effectiveToolNames(planCfg, false)),
+		)
+		require.NoError(t, err)
+		systemPrompt, err := p.Build(context.Background(), "mock", "mock-model", cfg)
+		require.NoError(t, err)
+		return systemPrompt.Text
+	}
 
-	systemPrompt, err := p.Build(context.Background(), "mock", "mock-model", cfg)
-	require.NoError(t, err)
-	require.Contains(t, systemPrompt.Text,
-		"Your available tools are: agent, lsp_symbols, lsp_definition, lsp_call_hierarchy, glob, grep, ls, map, question, sourcegraph, view, recall, notebook_search.")
+	// Interactive: subagents report back on their own, so the detached
+	// pair is advertised and the blocking tool is not.
+	require.Contains(t, buildPrompt(t, true),
+		"Your available tools are: agent_dispatch, agent_send, agent_status, agent_stop, lsp_symbols, lsp_definition, lsp_call_hierarchy, glob, grep, ls, map, question, sourcegraph, view, recall, notebook_search.")
+
+	// Headless: nothing is left to receive a later report, so delegation
+	// blocks instead, and there is nobody to answer a question.
+	require.Contains(t, buildPrompt(t, false),
+		"Your available tools are: agent, lsp_symbols, lsp_definition, lsp_call_hierarchy, glob, grep, ls, map, sourcegraph, view, recall, notebook_search.")
 
 	// A tool the user disabled disappears from the advertised list.
 	// (The word "question" still appears elsewhere in the prompt's rules,
@@ -51,11 +72,11 @@ func TestPlanPromptListsConfiguredTools(t *testing.T) {
 	cfg.Config().Options.DisabledTools = []string{"question"}
 	cfg.Config().Agents = nil
 	cfg.SetupAgents()
-	systemPrompt, err = p.Build(context.Background(), "mock", "mock-model", cfg)
-	require.NoError(t, err)
-	require.Contains(t, systemPrompt.Text,
-		"Your available tools are: agent, lsp_symbols, lsp_definition, lsp_call_hierarchy, glob, grep, ls, map, sourcegraph, view, recall, notebook_search.")
-	require.NotContains(t, systemPrompt.Text, "ls, question,")
+
+	systemPrompt := buildPrompt(t, true)
+	require.Contains(t, systemPrompt,
+		"Your available tools are: agent_dispatch, agent_send, agent_status, agent_stop, lsp_symbols, lsp_definition, lsp_call_hierarchy, glob, grep, ls, map, sourcegraph, view, recall, notebook_search.")
+	require.NotContains(t, systemPrompt, "ls, question,")
 }
 
 // TestPlanPromptListsBindableCheckNames verifies the plan prompt

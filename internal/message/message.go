@@ -24,6 +24,7 @@ type CreateMessageParams struct {
 	Role             MessageRole
 	Parts            []ContentPart
 	Model            string
+	ModelName        string
 	Provider         string
 	IsSummaryMessage bool
 }
@@ -231,6 +232,7 @@ func (s *service) Create(ctx context.Context, sessionID string, params CreateMes
 		Role:             string(params.Role),
 		Parts:            string(partsJSON),
 		Model:            sql.NullString{String: string(params.Model), Valid: true},
+		ModelName:        sql.NullString{String: params.ModelName, Valid: params.ModelName != ""},
 		Provider:         sql.NullString{String: params.Provider, Valid: params.Provider != ""},
 		IsSummaryMessage: isSummary,
 	})
@@ -463,6 +465,7 @@ func (s *service) write(ctx context.Context, msg Message) error {
 	if err := s.q.UpdateMessage(ctx, db.UpdateMessageParams{
 		ID:                      msg.ID,
 		Parts:                   string(parts),
+		ModelName:               sql.NullString{String: msg.ModelName, Valid: msg.ModelName != ""},
 		PrismModelID:            sql.NullString{String: msg.PrismModelID, Valid: msg.PrismModelID != ""},
 		PrismModelName:          sql.NullString{String: msg.PrismModelName, Valid: msg.PrismModelName != ""},
 		PrismHypercreditSavings: nullableFloat(msg.PrismHypercreditSavings),
@@ -626,6 +629,7 @@ func (s *service) fromDBItem(item db.Message) (Message, error) {
 		Role:                    MessageRole(item.Role),
 		Parts:                   parts,
 		Model:                   item.Model.String,
+		ModelName:               item.ModelName.String,
 		Provider:                item.Provider.String,
 		CreatedAt:               item.CreatedAt,
 		UpdatedAt:               item.UpdatedAt,
@@ -640,14 +644,15 @@ func (s *service) fromDBItem(item db.Message) (Message, error) {
 type partType string
 
 const (
-	reasoningType    partType = "reasoning"
-	textType         partType = "text"
-	imageURLType     partType = "image_url"
-	binaryType       partType = "binary"
-	toolCallType     partType = "tool_call"
-	toolResultType   partType = "tool_result"
-	finishType       partType = "finish"
-	shellCommandType partType = "shell_command"
+	reasoningType      partType = "reasoning"
+	textType           partType = "text"
+	imageURLType       partType = "image_url"
+	binaryType         partType = "binary"
+	toolCallType       partType = "tool_call"
+	toolResultType     partType = "tool_result"
+	finishType         partType = "finish"
+	shellCommandType   partType = "shell_command"
+	subAgentReportType partType = "sub_agent_report"
 )
 
 type partWrapper struct {
@@ -678,6 +683,8 @@ func marshalParts(parts []ContentPart) ([]byte, error) {
 			typ = finishType
 		case ShellCommand:
 			typ = shellCommandType
+		case SubAgentReport:
+			typ = subAgentReportType
 		default:
 			return nil, fmt.Errorf("unknown part type: %T", part)
 		}
@@ -736,6 +743,8 @@ func unmarshalPart(typ partType, data json.RawMessage) (ContentPart, error) {
 		return decodePart[Finish](data)
 	case shellCommandType:
 		return decodePart[ShellCommand](data)
+	case subAgentReportType:
+		return decodePart[SubAgentReport](data)
 	default:
 		return nil, fmt.Errorf("unknown part type: %s", typ)
 	}

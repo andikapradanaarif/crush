@@ -52,6 +52,17 @@ func TestPatchCoderCassettes(t *testing.T) {
 		base := strings.TrimSuffix(filepath.Base(file), ".yaml")
 		workingDir := filepath.Join("/tmp/crush-test/TestCoderAgent/deepseek-v4", base)
 		require.NoError(t, os.MkdirAll(workingDir, 0o755))
+		// Hermetic config: ambient providers make Init stall on catalog
+		// fetches, and the rendered prompt must not depend on them.
+		require.NoError(t, os.WriteFile(filepath.Join(workingDir, "crush.json"), []byte(`{
+  "options": {"disable_default_providers": true, "disable_provider_auto_update": true},
+  "providers": {"hyper": {"id": "hyper", "name": "Hyper", "type": "openai-compat",
+    "base_url": "https://hyper.charm.land/v1", "api_key": "cassette",
+    "models": [{"id": "deepseek-v4-pro-0813", "name": "DeepSeek V4 Pro",
+                "context_window": 200000, "default_max_tokens": 10000}]}},
+  "models": {"large": {"provider": "hyper", "model": "deepseek-v4-pro-0813"},
+             "small": {"provider": "hyper", "model": "deepseek-v4-pro-0813"}}
+}`), 0o644))
 
 		// Render the new system prompt exactly as coderAgent does.
 		p, err := coderPrompt(

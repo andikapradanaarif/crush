@@ -5,9 +5,11 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	"charm.land/fantasy"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/tools"
@@ -19,50 +21,138 @@ var agentToolDescription string
 
 type AgentParams struct {
 	Prompt string `json:"prompt" description:"The task for the agent to perform"`
+	Access string `json:"access,omitempty" description:"\"read\" (default) for a subagent that can only inspect the codebase, or \"write\" for one that can also edit files"`
 }
 
 const (
 	AgentToolName = "agent"
+
+	accessRead  = "read"
+	accessWrite = "write"
 )
 
-func (c *coordinator) agentTool(ctx context.Context) (fantasy.AgentTool, error) {
-	agentCfg, ok := c.cfg.Config().Agents[config.AgentTask]
-	if !ok {
+// writeAgentConfig derives the read-write variant of the task agent: the same
+// agent, given the coder's tools. Subagents never get the delegation tools;
+// effectiveToolNames strips them.
+func writeAgentConfig(cfg *config.Config) config.Agent {
+	task := cfg.Agents[config.AgentTask]
+	if coder, ok := cfg.Agents[config.AgentCoder]; ok {
+		task.AllowedTools = slices.Clone(coder.AllowedTools)
+	}
+	return task
+}
+
+// accessOrRead defaults an unset access level to read-only.
+func accessOrRead(access string) string {
+	if access == "" {
+		return accessRead
+	}
+	return access
+}
+
+// readOnlyParent reports whether a parent agent may only delegate to
+// read-only subagents. Plan mode promises it cannot change files, and that
+// promise has to cover the work it hands off as well as the work it does
+// itself.
+func readOnlyParent(parentAgentID string) bool {
+	return parentAgentID == config.AgentPlan
+}
+
+// resolveSubAgent picks the subagent variant for a requested access level,
+// returning a message for the model when there is no such variant.
+func resolveSubAgent(agents map[string]SessionAgent, access string, readOnly bool) (SessionAgent, string) {
+	access = accessOrRead(access)
+	if agent, ok := agents[access]; ok {
+		return agent, ""
+	}
+	if readOnly && access == accessWrite {
+		return nil, `plan mode subagents are read-only; omit access or pass "read"`
+	}
+	return nil, `access must be "read" or "write"`
+}
+
+// taskAgents builds the variants of the task subagent. Both the synchronous
+// agent tool and the detached dispatch tool draw from these. A read-only
+// parent gets only the read variant, so the write one is never built rather
+// than built and withheld.
+func (c *coordinator) taskAgents(ctx context.Context, readOnly bool) (map[string]SessionAgent, error) {
+	if _, ok := c.cfg.Config().Agents[config.AgentTask]; !ok {
 		return nil, errors.New("task agent not configured")
 	}
-	prompt, err := taskPrompt(prompt.WithWorkingDir(c.cfg.WorkingDir()))
+	accesses := []string{accessRead, accessWrite}
+	if readOnly {
+		accesses = accesses[:1]
+	}
+
+	// The variants share a readiness group of their own and are fully set
+	// up before this returns. This runs on every turn, concurrently with
+	// other runs waiting on the coordinator's group, so joining that group
+	// would race its Wait.
+	var ready errgroup.Group
+	agents := map[string]SessionAgent{}
+	for _, access := range accesses {
+		agentCfg, canWrite := c.taskAgentConfig(access)
+		agent, err := c.buildTaskAgent(ctx, &ready, agentCfg, canWrite, nil)
+		if err != nil {
+			return nil, err
+		}
+		agents[access] = agent
+	}
+	if err := ready.Wait(); err != nil {
+		return nil, err
+	}
+	return agents, nil
+}
+
+// taskAgentConfig returns the task agent's config for an access level, and
+// whether it may write.
+func (c *coordinator) taskAgentConfig(access string) (config.Agent, bool) {
+	if access == accessWrite {
+		return writeAgentConfig(c.cfg.Config()), true
+	}
+	return c.cfg.Config().Agents[config.AgentTask], false
+}
+
+// buildTaskAgent schedules one variant of the task subagent into ready; the
+// caller waits on the group, so several variants can build concurrently.
+// modelsFn, when set, replaces the shared subagent model set; a dispatch
+// with a model override uses it to run the variant on the overridden model.
+func (c *coordinator) buildTaskAgent(ctx context.Context, ready *errgroup.Group, agentCfg config.Agent, canWrite bool, modelsFn func() ModelSet) (SessionAgent, error) {
+	pr, err := taskPrompt(
+		prompt.WithWorkingDir(c.cfg.WorkingDir()),
+		prompt.WithCanWrite(canWrite),
+	)
 	if err != nil {
 		return nil, err
 	}
+	return c.buildAgentWithModels(ctx, ready, pr, agentCfg, true, modelsFn)
+}
 
-	// The task sub-agent is built lazily on first use: its configured
-	// model slot may reference a provider that failed to configure, and
-	// a stale secondary selection must not brick the parent agent's
-	// readiness. A build failure surfaces at call time as a tool error
-	// naming the provider/model, and rebuilds retry on later calls so a
-	// config reload can fix it without restarting.
+func (c *coordinator) agentTool(ctx context.Context, parentAgentID string) (fantasy.AgentTool, error) {
+	readOnly := readOnlyParent(parentAgentID)
+
+	// The task sub-agent variants are built lazily on first use: a
+	// configured model slot may reference a provider that failed to
+	// configure, and a stale secondary selection must not brick the
+	// parent agent's readiness. A build failure surfaces at call time
+	// as a tool error naming the provider/model, and rebuilds retry on
+	// later calls so a config reload can fix it without restarting.
 	var (
-		buildMu  sync.Mutex
-		subAgent SessionAgent
+		buildMu sync.Mutex
+		agents  map[string]SessionAgent
 	)
-	build := func() error {
-		built, err := c.buildAgent(ctx, prompt, agentCfg, true)
-		if err != nil {
-			return fmt.Errorf("task agent unavailable: %w", err)
-		}
-		subAgent = built
-		return nil
-	}
-	ensureAgent := func() (SessionAgent, error) {
+	ensureAgents := func(callCtx context.Context) (map[string]SessionAgent, error) {
 		buildMu.Lock()
 		defer buildMu.Unlock()
-		if subAgent != nil {
-			return subAgent, nil
+		if agents != nil {
+			return agents, nil
 		}
-		if err := build(); err != nil {
-			return nil, err
+		built, err := c.taskAgents(callCtx, readOnly)
+		if err != nil {
+			return nil, fmt.Errorf("task agent unavailable: %w", err)
 		}
-		return subAgent, nil
+		agents = built
+		return agents, nil
 	}
 
 	return fantasy.NewParallelAgentTool(
@@ -71,6 +161,16 @@ func (c *coordinator) agentTool(ctx context.Context) (fantasy.AgentTool, error) 
 		func(ctx context.Context, params AgentParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			if params.Prompt == "" {
 				return fantasy.NewTextErrorResponse("prompt is required"), nil
+			}
+
+			agents, err := ensureAgents(ctx)
+			if err != nil {
+				return fantasy.NewTextErrorResponse(err.Error()), nil
+			}
+
+			agent, refusal := resolveSubAgent(agents, params.Access, readOnly)
+			if refusal != "" {
+				return fantasy.NewTextErrorResponse(refusal), nil
 			}
 
 			sessionID := tools.GetSessionFromContext(ctx)
@@ -83,13 +183,8 @@ func (c *coordinator) agentTool(ctx context.Context) (fantasy.AgentTool, error) 
 				return fantasy.ToolResponse{}, errors.New("agent message id missing from context")
 			}
 
-			subAgent, err := ensureAgent()
-			if err != nil {
-				return fantasy.NewTextErrorResponse(err.Error()), nil
-			}
-
-			return c.runSubAgent(ctx, subAgentParams{
-				Agent:          subAgent,
+			return c.runSubAgentMaybeBackground(ctx, AgentToolName, params.Access, subAgentParams{
+				Agent:          agent,
 				SessionID:      sessionID,
 				AgentMessageID: agentMessageID,
 				ToolCallID:     call.ID,

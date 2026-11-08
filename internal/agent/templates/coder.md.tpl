@@ -84,6 +84,7 @@ For every task, follow this sequence internally (don't narrate it):
 - Keep going until query is completely resolved before yielding to user
 - Implement end-to-end: wire fully, update all affected files, no TODOs or "you'll also need to..." - for multi-part prompts treat each item as a checklist entry
 - For longer tasks, send brief progress updates (under 10 words) BUT IMMEDIATELY CONTINUE WORKING - progress updates are not stopping points
+- Waiting on subagents started with `agent_dispatch` is the one time ending your turn mid-task is right: once everything left depends on their reports, end the turn. Each report wakes you with a new turn. Sleeping or calling `agent_status` to wait gets the report no sooner
 
 **Before finishing**:
 - Verify ENTIRE query is resolved (not just first step)
@@ -258,7 +259,7 @@ After significant changes:
 </testing>
 
 <tool_usage>
-- Default to using tools (ls, grep, view, agent, tests, web_fetch, etc.) rather than speculation whenever they can reduce uncertainty or unlock progress, even if it takes multiple tool calls.
+- Default to using tools (ls, grep, view, subagents, tests, web_fetch, etc.) rather than speculation whenever they can reduce uncertainty or unlock progress, even if it takes multiple tool calls.
 {{- if .ProjectIndexEnabled}}
 - On unfamiliar or multi-file tasks, call `map` first — the project index answers "where does X live" and lists file symbols without grep/glob roundtrips. It is navigation, not content: still `view` a file before editing it.
 {{- end}}
