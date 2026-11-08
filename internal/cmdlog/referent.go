@@ -122,7 +122,7 @@ func (s *service) RecordReferentEpisode(ctx context.Context, ep ReferentEpisode,
 		// relative to (#360) and its repo-relative form for the
 		// merged-worktree fallback (R8).
 		Workdir:  s.workingDir,
-		RepoPath: s.targetRepoPath(ctx, ep.Target),
+		RepoPath: s.targetRepoPath(ctx, s.captureView(ctx), ep.Target),
 	}); err != nil {
 		return err
 	}
@@ -154,6 +154,10 @@ func (s *service) RecordReferentEpisodeLabeled(ctx context.Context, ep ReferentE
 		created = s.now().UnixMilli()
 	}
 	added, _ := json.Marshal(in.AddedLines)
+	// One capture view per record: the worktree listing probe is
+	// shared between the repo-path stamp and the label hash rather
+	// than run twice.
+	v := s.captureView(ctx)
 	if err := s.q.InsertReferentEpisodeLabeled(ctx, db.InsertReferentEpisodeLabeledParams{
 		Phrase:           ep.Phrase,
 		Target:           ep.Target,
@@ -168,8 +172,8 @@ func (s *service) RecordReferentEpisodeLabeled(ctx context.Context, ep ReferentE
 		CreatedAt:        created,
 		SettleAt:         created + settleWindowMillis,
 		Workdir:          s.workingDir,
-		RepoPath:         s.targetRepoPath(ctx, ep.Target),
-		LabelTargetHash:  s.fileHash(ctx, ep.Target),
+		RepoPath:         s.targetRepoPath(ctx, v, ep.Target),
+		LabelTargetHash:  s.fileHash(ctx, v, ep.Target),
 		LabelWrongTarget: in.WrongTarget,
 		LabelSteps:       in.Steps,
 		LabelTokens:      in.Tokens,

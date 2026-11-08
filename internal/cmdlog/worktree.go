@@ -35,42 +35,66 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/crush/internal/filepathext"
 )
 
-// captureRoots lists the in-scope read roots for one pass: every
+// captureView is one pass's capture surface: the repo's worktree
+// roots and the main checkout's branch — both from the same
+// `git worktree list` probe — plus a memo slot for the default
+// branch ref. One view per record or settle pass means a batch of
+// merged-fallback reads resolves the ref once instead of paying
+// the symbolic-ref probe per missing path per row.
+type captureView struct {
+	roots      []string
+	mainBranch string
+	ref        string
+	refSet     bool
+}
+
+// captureView lists the in-scope read roots for one pass: every
 // worktree root of this repository, canonicalized. The main
 // checkout's root comes from the same listing, so a workspace rooted
 // in a repo subdirectory is scoped at worktree granularity like the
 // siblings — symmetric roots keep a sibling directory of the
 // workspace inside the checkout readable, matching the worktree
 // semantics. Outside a repository (or when git fails) the set is
-// the workspace alone — pre-worktree behavior.
-func (s *service) captureRoots(ctx context.Context) []string {
+// the workspace alone — pre-worktree behavior. The listing's first
+// block is the main checkout; its branch rides along as the
+// default-ref fallback for repos whose default is neither
+// origin/HEAD nor main/master (trunk, develop, ...).
+func (s *service) captureView(ctx context.Context) *captureView {
+	v := &captureView{roots: []string{s.workingDir}}
 	if !s.hasRepo {
-		return []string{s.workingDir}
+		return v
 	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	raw, err := gitOut(ctx, s.workingDir, "worktree", "list", "--porcelain")
 	if err != nil || raw == "" {
-		return []string{s.workingDir}
+		return v
 	}
 	var roots []string
+	block := 0
 	for line := range strings.SplitSeq(raw, "\n") {
-		p, ok := strings.CutPrefix(line, "worktree ")
-		if !ok {
+		if p, ok := strings.CutPrefix(line, "worktree "); ok {
+			block++
+			roots = append(roots, filepathext.Canonical(filepath.Clean(p)))
 			continue
 		}
-		roots = append(roots, filepathext.Canonical(filepath.Clean(p)))
+		if block == 1 && v.mainBranch == "" {
+			if b, ok := strings.CutPrefix(line, "branch refs/heads/"); ok {
+				v.mainBranch = b
+			}
+		}
 	}
-	if len(roots) == 0 {
-		return []string{s.workingDir}
+	if len(roots) > 0 {
+		v.roots = roots
 	}
-	return roots
+	return v
 }
 
 // resolveTarget maps a stored target to its location: the capture
@@ -127,9 +151,14 @@ func repoPath(sub string) string {
 // targetRepoPath computes one target's repo-relative form at record
 // time — "" when the target resolves under no capture root. One
 // resolution per record keeps the stamp honest: it is provable only
-// while the file's worktree still exists.
-func (s *service) targetRepoPath(ctx context.Context, target string) string {
-	_, sub, _, ok := resolveTarget(target, s.workingDir, s.captureRoots(ctx))
+// while the file's worktree still exists. Sensitive targets store
+// no address, the same asymmetry hunk cells keep: git is not a
+// back door around the sensitive gate.
+func (s *service) targetRepoPath(ctx context.Context, v *captureView, target string) string {
+	if sensitivePath(target) {
+		return ""
+	}
+	_, sub, _, ok := resolveTarget(target, s.workingDir, v.roots)
 	if !ok {
 		return ""
 	}
@@ -152,61 +181,99 @@ func readCaptureFile(root, sub string) ([]byte, bool) {
 	return data, true
 }
 
-// defaultBranchRef names the ref settle reads merged worktree
-// content from — origin/HEAD when the remote tracks one, else the
-// local main/master, else nothing (no fallback evidence).
-func (s *service) defaultBranchRef(ctx context.Context) string {
+// defaultRef resolves the ref merged-fallback reads come from,
+// memoized on the view: origin/HEAD when the remote tracks one,
+// else local main/master, else the main checkout's branch — the
+// trunk/develop case. A repo with none of those gets no fallback
+// (the honest absent arm), and the probe runs at most once per
+// pass no matter how many paths miss.
+func (s *service) defaultRef(ctx context.Context, v *captureView) string {
+	if v.refSet {
+		return v.ref
+	}
+	v.refSet = true
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	if ref, err := gitOut(ctx, s.workingDir,
 		"symbolic-ref", "--short", "refs/remotes/origin/HEAD"); err == nil && ref != "" {
-		return ref
+		v.ref = ref
+		return v.ref
 	}
 	for _, br := range []string{"main", "master"} {
 		if _, err := gitOut(ctx, s.workingDir,
 			"rev-parse", "--verify", "--quiet", "refs/heads/"+br); err == nil {
-			return br
+			v.ref = br
+			return v.ref
 		}
 	}
-	return ""
+	v.ref = v.mainBranch
+	return v.ref
 }
 
-// mergedFileContent reads repoPath at the repository's default
-// branch — the merged-worktree fallback: when the recorded checkout
-// no longer reads, the work counts only if it landed somewhere
-// durable. A deleted-unmerged worktree produces no content and the
-// caller's missing-state decides.
-func (s *service) mergedFileContent(ctx context.Context, path string) ([]byte, bool) {
-	if !s.hasRepo || path == "" {
-		return nil, false
+// mergedRead fetches path's content at the repository's default
+// branch — the merged-worktree fallback (R8): when the recorded
+// checkout no longer reads, the work counts only if it landed
+// somewhere durable. bounded applies the MaxHunkReadBytes stat
+// gate via cat-file -s before the content read — the capture arm
+// passes it so a giant blob pays no scan, matching the fs arm's
+// stat-before-read; the verdict arm skips it, matching the fs
+// arm's read-anything-readable parity. The returned state names
+// the failure (missing, too_large, sensitive) so the capture cell
+// records why rather than guessing missing. Raw cat-file, never
+// the trimmed gitOut: hashing and line numbering run on these
+// bytes, and `cat-file blob` refuses non-blob specs where
+// `git show` would emit a tree listing as if it were content.
+func (s *service) mergedRead(ctx context.Context, v *captureView, path string, bounded bool) ([]byte, string, bool) {
+	switch {
+	case path == "":
+		return nil, hunkMissing, false
+	case sensitivePath(path):
+		// No repo-relative address is stamped for sensitive
+		// targets either — this path only arrives pre-migration
+		// or via the computed-sub arm, and refuses the same way.
+		return nil, hunkSensitive, false
+	case !s.hasRepo:
+		return nil, hunkMissing, false
 	}
-	ref := s.defaultBranchRef(ctx)
+	ref := s.defaultRef(ctx, v)
 	if ref == "" {
-		return nil, false
+		return nil, hunkMissing, false
 	}
+	spec := ref + ":" + path
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	out, err := gitOut(ctx, s.workingDir, "show", ref+":"+path)
-	if err != nil {
-		return nil, false
+	if bounded {
+		sz, err := gitOut(ctx, s.workingDir, "cat-file", "-s", spec)
+		if err != nil {
+			return nil, hunkMissing, false
+		}
+		if n, perr := strconv.ParseInt(sz, 10, 64); perr != nil || n > MaxHunkReadBytes {
+			return nil, hunkTooLarge, false
+		}
 	}
-	return []byte(out), true
+	out, err := gitOutRaw(ctx, s.workingDir, "cat-file", "blob", spec)
+	if err != nil {
+		return nil, hunkMissing, false
+	}
+	return out, hunkOK, true
 }
 
-// readCaptureData returns file content for the verdict/capture pair:
-// the target under its containing worktree root when that reads,
-// else the merged default-branch content at its repo path. merged
-// marks the second source so cells can flag provenance. root=""
-// skips the disk arm — a target under no live root whose only
-// remaining address is the repo path.
-func (s *service) readCaptureData(ctx context.Context, root, sub, rp string) (data []byte, merged, ok bool) {
+// readCaptureData returns file content for the verdict pair: the
+// target under its containing worktree root when that reads, else
+// the merged default-branch content at its repo path. merged marks
+// the second source so cells can flag provenance. root="" skips
+// the disk arm — a target under no live root whose only remaining
+// address is the repo path. The merged arm reads unbounded, parity
+// with readCaptureFile: the verdict checks any readable file; the
+// capture path applies the size gate itself via mergedRead.
+func (s *service) readCaptureData(ctx context.Context, v *captureView, root, sub, rp string) (data []byte, merged, ok bool) {
 	if root != "" {
 		if data, ok := readCaptureFile(root, sub); ok {
 			return data, false, true
 		}
 	}
 	if rp != "" {
-		if data, ok := s.mergedFileContent(ctx, rp); ok {
+		if data, _, ok := s.mergedRead(ctx, v, rp, false); ok {
 			return data, true, true
 		}
 	}

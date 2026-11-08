@@ -81,7 +81,7 @@ func (s *service) LabelReferentEpisode(ctx context.Context, ep ReferentEpisode, 
 	added, _ := json.Marshal(in.AddedLines)
 	now := s.now().UnixMilli()
 	return s.q.LabelReferentEpisode(ctx, db.LabelReferentEpisodeParams{
-		LabelTargetHash:  s.fileHash(ctx, ep.Target),
+		LabelTargetHash:  s.fileHash(ctx, s.captureView(ctx), ep.Target),
 		LabelWrongTarget: in.WrongTarget,
 		LabelSteps:       in.Steps,
 		LabelTokens:      in.Tokens,
@@ -145,9 +145,9 @@ func (s *service) SettleReferentLabels(ctx context.Context, limit int) error {
 		}
 	}
 	ev := s.prefetchCommitEvidence(ctx, winLo, winHi)
-	roots := s.captureRoots(ctx)
+	v := s.captureView(ctx)
 	for i, r := range rows {
-		if err := s.settleReferent(ctx, r, winEnds[i], ev, now, roots); err != nil {
+		if err := s.settleReferent(ctx, r, winEnds[i], ev, now, v); err != nil {
 			return err
 		}
 	}
@@ -263,7 +263,7 @@ func (ev commitEvidence) inWindow(paths []string, createdAt, winEnd int64) bool 
 
 // settleReferent computes and freezes one episode's label inside its
 // closed window.
-func (s *service) settleReferent(ctx context.Context, r db.ListUnsettledReferentLabelsRow, winEnd int64, ev commitEvidence, now int64, roots []string) error {
+func (s *service) settleReferent(ctx context.Context, r db.ListUnsettledReferentLabelsRow, winEnd int64, ev commitEvidence, now int64, v *captureView) error {
 	// Reads route through the row's stamped workdir (#360); the
 	// commit keyspace is repo-relative — the recorded repo_path when
 	// there is one, else the workspace-prefixed target form.
@@ -273,7 +273,7 @@ func (s *service) settleReferent(ctx context.Context, r db.ListUnsettledReferent
 	}
 	rp := r.RepoPath
 	if rp == "" {
-		if _, sub, _, ok := resolveTarget(r.Target, base, roots); ok {
+		if _, sub, _, ok := resolveTarget(r.Target, base, v.roots); ok {
 			rp = repoPath(sub)
 		} else if workspacePathSafe(r.Target) {
 			rp = s.repoPrefix + r.Target
@@ -286,7 +286,7 @@ func (s *service) settleReferent(ctx context.Context, r db.ListUnsettledReferent
 			committed.Int64 = 1
 		}
 	}
-	changed := s.hunkDiverged(ctx, r.Target, r.LabelAddedLines, base, roots, r.RepoPath)
+	changed := s.hunkDiverged(ctx, r.Target, r.LabelAddedLines, base, v, r.RepoPath)
 	green := s.sessionTestsGreen(ctx, r.SessionID)
 	if err := s.q.SettleReferentEpisode(ctx, db.SettleReferentEpisodeParams{
 		LabelCommitted:   committed,
@@ -328,18 +328,18 @@ func (s *service) settleReferent(ctx context.Context, r db.ListUnsettledReferent
 // text while files carry indentation: probing raw content for
 // "\n"+line+"\n" only ever matches column-0 lines and would read
 // nearly every real edit as diverged.
-func (s *service) hunkDiverged(ctx context.Context, target, addedJSON, base string, roots []string, repoHint string) sql.NullInt64 {
+func (s *service) hunkDiverged(ctx context.Context, target, addedJSON, base string, v *captureView, repoHint string) sql.NullInt64 {
 	var lines []string
 	if addedJSON == "" || json.Unmarshal([]byte(addedJSON), &lines) != nil || len(lines) == 0 {
 		return sql.NullInt64{}
 	}
-	root, sub, _, ok := resolveTarget(target, base, roots)
+	root, sub, _, ok := resolveTarget(target, base, v.roots)
 	if !ok {
 		if repoHint != "" {
 			// A removed worktree's path: the repo address is the
 			// only one left — merged content still reads, and
 			// without it the work survived nowhere.
-			if data, _, rok := s.readCaptureData(ctx, "", "", repoHint); rok {
+			if data, _, rok := s.readCaptureData(ctx, v, "", "", repoHint); rok {
 				return fingerprintDiverged(data, lines)
 			}
 			return sql.NullInt64{Int64: 1, Valid: true}
@@ -350,7 +350,10 @@ func (s *service) hunkDiverged(ctx context.Context, target, addedJSON, base stri
 		// here too, #400).
 		return sql.NullInt64{}
 	}
-	data, _, rok := s.readCaptureData(ctx, root, sub, repoPath(sub))
+	// The live-resolution arm derives the repo path itself — for a
+	// sensitive target the merged arm refuses inside mergedRead,
+	// so git never becomes a secret-read channel.
+	data, _, rok := s.readCaptureData(ctx, v, root, sub, repoPath(sub))
 	if !rok {
 		// The file is gone and the merged fallback has nothing —
 		// nothing survived.
@@ -396,15 +399,15 @@ func NormalizeAddedLines(text string) []string {
 // for diagnostics; settlement no longer reads it — whole-file
 // equality counted unrelated edits as divergence (#340). Empty when
 // the file is unreadable. Paths escaping the workspace refuse.
-func (s *service) fileHash(ctx context.Context, target string) string {
+func (s *service) fileHash(ctx context.Context, v *captureView, target string) string {
 	if target == "" {
 		return ""
 	}
-	root, sub, _, ok := resolveTarget(target, s.workingDir, s.captureRoots(ctx))
+	root, sub, _, ok := resolveTarget(target, s.workingDir, v.roots)
 	if !ok {
 		return ""
 	}
-	data, _, rok := s.readCaptureData(ctx, root, sub, repoPath(sub))
+	data, _, rok := s.readCaptureData(ctx, v, root, sub, repoPath(sub))
 	if !rok {
 		return ""
 	}

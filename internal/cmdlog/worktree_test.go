@@ -1,13 +1,17 @@
 package cmdlog
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/db"
+	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/params"
 	"github.com/stretchr/testify/require"
 )
@@ -253,4 +257,113 @@ func TestWorktreeCapture_EpisodeLabels(t *testing.T) {
 	require.True(t, c.hashChanged.Valid)
 	require.EqualValues(t, 0, c.hashChanged.Int64,
 		"the worktree file still carries the added line")
+}
+
+// #360 review: the placeholder-repair upsert must re-stamp workdir.
+// Under a shared store, A's backfill can mint a placeholder for B's
+// in-flight turn — carrying A's workdir. B's live record refreshes
+// the evidence columns, and the stamp must move with them or settle
+// resolves B-relative spellings against A's checkout — the
+// wrong-checkout read this fix exists to remove.
+func TestWorktreeCapture_PlaceholderRepairRestampsWorkdir(t *testing.T) {
+	env, wt, _ := setupWorktreeRepo(t)
+
+	// A's backfill mints the placeholder for B's in-flight turn.
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "sb",
+		TurnID:      "t0",
+		EditedPaths: []string{"feat.go"},
+		EditHunks:   map[string][]string{"feat.go": {"// from b"}},
+	}))
+
+	// B's own record lands under the same (session, turn) — the
+	// upsert repairs evidence and re-stamps the recorder's
+	// checkout.
+	svcB := NewService(db.New(env.conn), wt, params.DefaultMemory())
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "feat.go"),
+		[]byte("// from b\n"), 0o644))
+	require.NoError(t, svcB.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "sb",
+		TurnID:      "t0",
+		EditedPaths: []string{"feat.go"},
+		EditHunks:   map[string][]string{"feat.go": {"// from b"}},
+		HunkAdded:   map[string][]HunkEdit{"feat.go": {{New: "// from b"}}},
+		HunkSpans:   map[string][]HunkSpan{"feat.go": {{Start: 0, End: 1}}},
+	}))
+
+	var workdir string
+	require.NoError(t, env.conn.QueryRowContext(t.Context(),
+		`SELECT workdir FROM turn_outcomes
+		 WHERE session_id = 'sb' AND turn_id = 't0'`).Scan(&workdir))
+	require.Equal(t, filepathext.Canonical(wt), filepathext.Canonical(workdir),
+		"the repair re-stamps the recording checkout — the excluded "+
+			"row's spellings resolve against it")
+
+	// A's settle pass reads B's checkout via the re-stamped
+	// workdir; feat.go exists only there.
+	dueViaNewerSession(t, env, "s2")
+	c := settleTurnRow(t, env, "sb", "t0")
+	require.Equal(t, TurnAccepted, c.verdict.String,
+		"the re-stamped workdir routes the read to B")
+}
+
+// The merged fallback returns exact bytes — hashing and window
+// coordinates run on them, so a blob with leading blank lines must
+// not come back whitespace-trimmed (review: gitOut's TrimSpace
+// corrupted both consumers).
+func TestWorktreeCapture_MergedContentUntrimmed(t *testing.T) {
+	env, _, git := setupWorktreeRepo(t)
+	raw := "\n\n\npackage lead\n\n// code\n"
+	require.NoError(t, os.WriteFile(
+		filepath.Join(env.workingDir, "lead.go"), []byte(raw), 0o644))
+	git("add", "lead.go")
+	git("commit", "-m", "lead")
+
+	require.NoError(t, env.svc.RecordReferentEpisode(t.Context(), ReferentEpisode{
+		Phrase: "it", Target: "lead.go", SessionID: "s1",
+		SourceMessageID: "m1", ToolCallID: "c1", Verdict: ReferentAccepted,
+	}, 0))
+	// The file leaves the checkout uncommitted — the label pass's
+	// hash read falls to the merged blob.
+	require.NoError(t, os.Remove(filepath.Join(env.workingDir, "lead.go")))
+	require.NoError(t, env.svc.LabelReferentEpisode(t.Context(), ReferentEpisode{
+		Phrase: "it", Target: "lead.go", SessionID: "s1",
+		SourceMessageID: "m1", ToolCallID: "c1", Verdict: ReferentAccepted,
+	}, ReferentEpisodeLabelInputs{}))
+
+	sum := sha256.Sum256([]byte(raw))
+	require.Equal(t, hex.EncodeToString(sum[:]),
+		readLabels(t, env, "s1", "lead.go").targetHash,
+		"the merged fallback hashes the blob's exact bytes")
+}
+
+// The merged fallback obeys the same MaxHunkReadBytes stat gate as
+// the fs arm — a giant blob is too_large, not an unbounded read
+// feeding the capture scan (review).
+func TestWorktreeCapture_MergedTooLarge(t *testing.T) {
+	env, wt, git := setupWorktreeRepo(t)
+	target := filepath.Join(wt, "big.go")
+	big := "// " + strings.Repeat("x", MaxHunkReadBytes) + "\n"
+	require.NoError(t, os.WriteFile(target, []byte(big), 0o644))
+
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{target},
+		HunkAdded:   map[string][]HunkEdit{target: {{New: "// big"}}},
+		HunkSpans:   map[string][]HunkSpan{target: {{Start: 0, End: 1}}},
+	}))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(env.workingDir, "big.go"), []byte(big), 0o644))
+	git("add", "big.go")
+	git("commit", "-m", "big")
+	git("worktree", "remove", "--force", wt)
+
+	dueViaNewerSession(t, env, "s2")
+	c := settleTurnRow(t, env, "s1", "t0")
+	var after map[string]hunkAfterEntry
+	require.NoError(t, json.Unmarshal([]byte(c.hunkAfter), &after))
+	require.Equal(t, hunkTooLarge, after[target].State,
+		"an over-cap merged blob reports too_large like the fs arm")
+	require.Empty(t, after[target].Windows)
 }

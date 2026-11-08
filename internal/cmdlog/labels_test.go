@@ -1001,11 +1001,12 @@ func TestFileHash_TraversalGuard(t *testing.T) {
 	env := setupLabelsTest(t)
 	svc := env.svc.(*service)
 	ctx := t.Context()
-	require.Empty(t, svc.fileHash(ctx, "../escape"))
-	require.Empty(t, svc.fileHash(ctx, "/abs/path"))
-	require.Empty(t, svc.fileHash(ctx, ""))
+	v := svc.captureView(ctx)
+	require.Empty(t, svc.fileHash(ctx, v, "../escape"))
+	require.Empty(t, svc.fileHash(ctx, v, "/abs/path"))
+	require.Empty(t, svc.fileHash(ctx, v, ""))
 	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "x.go"), []byte("v"), 0o644))
-	require.NotEmpty(t, svc.fileHash(ctx, "x.go"))
+	require.NotEmpty(t, svc.fileHash(ctx, svc.captureView(ctx), "x.go"))
 }
 
 // The settle pass is project-scoped — another partition's due rows

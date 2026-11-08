@@ -99,7 +99,7 @@ func (s *service) RecordTurnOutcome(ctx context.Context, o TurnOutcome) error {
 	}
 	paths := marshalNoEscape(o.EditedPaths)
 	hunks := marshalNoEscape(o.EditHunks)
-	added := marshalNoEscape(s.buildHunkAdded(s.captureRoots(ctx), o.HunkAdded, o.HunkSpans, o.EditedPaths))
+	added := marshalNoEscape(s.buildHunkAdded(s.captureView(ctx), o.HunkAdded, o.HunkSpans, o.EditedPaths))
 	cmds := marshalNoEscape(o.Commands)
 	now := s.now().UnixMilli()
 	createdAt := o.CreatedAt
@@ -168,14 +168,17 @@ func (s *service) SettleTurnOutcomes(ctx context.Context, limit int) error {
 		SettleAt:   now,
 		Limit:      int64(limit),
 	})
-	if err != nil {
+	if err != nil || len(rows) == 0 {
+		// No due rows: skip the worktree-listing probe and the
+		// evidence prefetch entirely — the pass costs the query
+		// alone.
 		return err
 	}
 	// Same batching as the episode pass: one git log + one ledger
 	// read over the union window, then per-row filtering. The
-	// capture-root set is per pass: worktrees created or removed
+	// capture view is per pass: worktrees created or removed
 	// mid-batch resolve at the pass's own discovery.
-	roots := s.captureRoots(ctx)
+	v := s.captureView(ctx)
 	winLo, winHi := now, int64(0)
 	winEnds := make([]int64, len(rows))
 	for i, r := range rows {
@@ -193,7 +196,7 @@ func (s *service) SettleTurnOutcomes(ctx context.Context, limit int) error {
 	// query per settling row.
 	later := s.laterEditedPaths(ctx, s.projectKey, winLo)
 	for i, r := range rows {
-		if err := s.settleTurn(ctx, r, winEnds[i], ev, now, later, roots); err != nil {
+		if err := s.settleTurn(ctx, r, winEnds[i], ev, now, later, v); err != nil {
 			return err
 		}
 	}
@@ -210,7 +213,7 @@ func (s *service) SettleTurnOutcomes(ctx context.Context, limit int) error {
 // artifact order: an episode's claim is path-scoped, so the file's
 // own survival/commit evidence outranks a cue that may object to a
 // different file in the same turn.
-func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomesRow, winEnd int64, ev commitEvidence, now int64, laterRows []laterEditRow, roots []string) error {
+func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomesRow, winEnd int64, ev commitEvidence, now int64, laterRows []laterEditRow, v *captureView) error {
 	var paths []string
 	var hunks map[string][]string
 	var cmds []string
@@ -272,7 +275,7 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 		// under the workspace prefix — the legacy lookup form.
 		rp := hint
 		if rp == "" {
-			if _, sub, _, ok := resolveTarget(p, base, roots); ok {
+			if _, sub, _, ok := resolveTarget(p, base, v.roots); ok {
 				rp = repoPath(sub)
 			} else if workspacePathSafe(p) {
 				rp = s.repoPrefix + p
@@ -281,7 +284,7 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 		if rp != "" {
 			repoPaths = append(repoPaths, rp)
 		}
-		fr := s.readHunkSource(ctx, p, base, roots, hint)
+		fr := s.readHunkSource(ctx, p, base, v, hint)
 		after[p] = captureHunkCell(fr, p, recs, later[p], stale, &afterTotal)
 		if len(hunks[p]) == 0 {
 			// An empty fingerprint (a pure deletion, or a
@@ -295,10 +298,10 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 		// survival verdict, same as before #394.
 		data, ok := fr.data, fr.state == hunkOK
 		if !ok && !fr.escaped {
-			if root, sub, _, rok := resolveTarget(p, base, roots); rok {
-				data, _, ok = s.readCaptureData(ctx, root, sub, rp)
+			if root, sub, _, rok := resolveTarget(p, base, v.roots); rok {
+				data, _, ok = s.readCaptureData(ctx, v, root, sub, rp)
 			} else {
-				data, _, ok = s.readCaptureData(ctx, "", "", rp)
+				data, _, ok = s.readCaptureData(ctx, v, "", "", rp)
 			}
 		}
 		switch {
@@ -560,18 +563,22 @@ type hunkFileRead struct {
 // no live root — or under a root whose file is gone — fall back to
 // the merged default-branch content at their recorded repo path
 // (R8), which is the only way dropped-worktree work still reads.
-func (s *service) readHunkSource(ctx context.Context, path, base string, roots []string, repoHint string) hunkFileRead {
-	root, sub, abs, ok := resolveTarget(path, base, roots)
+// The merged arm is bounded like the fs arm: a giant blob reports
+// too_large rather than paying the scan the stat gate exists to
+// avoid.
+func (s *service) readHunkSource(ctx context.Context, path, base string, v *captureView, repoHint string) hunkFileRead {
+	root, sub, abs, ok := resolveTarget(path, base, v.roots)
 	if !ok {
 		// Under no live root: a removed worktree's path. The
 		// recorded repo path is the only address left — merged
 		// content still reads, anything else means the work
 		// survived nowhere (missing → diverged, not abstained).
 		if repoHint != "" {
-			if data, merged, rok := s.readCaptureData(ctx, "", "", repoHint); rok {
-				return hunkFileRead{data: data, state: hunkOK, merged: merged}
+			if data, state, rok := s.mergedRead(ctx, v, repoHint, true); rok {
+				return hunkFileRead{data: data, state: hunkOK, merged: true}
+			} else {
+				return hunkFileRead{state: state}
 			}
-			return hunkFileRead{state: hunkMissing}
 		}
 		return hunkFileRead{state: hunkOutOfWorkspace, escaped: true}
 	}
@@ -580,10 +587,11 @@ func (s *service) readHunkSource(ctx context.Context, path, base string, roots [
 	}
 	if _, err := os.Lstat(abs); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			if data, merged, rok := s.readCaptureData(ctx, "", "", repoHint); rok {
-				return hunkFileRead{data: data, state: hunkOK, merged: merged}
+			if data, state, rok := s.mergedRead(ctx, v, repoHint, true); rok {
+				return hunkFileRead{data: data, state: hunkOK, merged: true}
+			} else {
+				return hunkFileRead{state: state}
 			}
-			return hunkFileRead{state: hunkMissing}
 		}
 		return hunkFileRead{state: hunkUnreadable}
 	}
@@ -618,12 +626,12 @@ func (s *service) readHunkSource(ctx context.Context, path, base string, roots [
 // paths store only their state. Iteration follows edited_paths
 // order so the row cap cuts tail paths deterministically; dropped
 // entries carry over_cap rather than vanishing.
-func (s *service) buildHunkAdded(roots []string, raw map[string][]HunkEdit, spans map[string][]HunkSpan, order []string) map[string]hunkAddedEntry {
+func (s *service) buildHunkAdded(v *captureView, raw map[string][]HunkEdit, spans map[string][]HunkSpan, order []string) map[string]hunkAddedEntry {
 	out := make(map[string]hunkAddedEntry, len(raw))
 	total := 0
 	for _, p := range order {
 		e := hunkAddedEntry{V: 1, State: hunkOK}
-		_, sub, _, inScope := resolveTarget(p, s.workingDir, roots)
+		_, sub, _, inScope := resolveTarget(p, s.workingDir, v.roots)
 		switch {
 		case !inScope:
 			// Same scope gate as the settle side — an outside file's

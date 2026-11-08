@@ -581,7 +581,12 @@ ON CONFLICT(session_id, turn_id) DO UPDATE SET
     edited_paths  = excluded.edited_paths,
     edit_hunks    = excluded.edit_hunks,
     commands      = excluded.commands,
-    hunk_added    = excluded.hunk_added
+    hunk_added    = excluded.hunk_added,
+    -- The inserting service's checkout is the basis its relative
+    -- spellings resolve against (#360): a placeholder minted by a
+    -- shared-store sibling's backfill carries its workdir, and the
+    -- repair must re-stamp or settle reads the wrong checkout.
+    workdir       = excluded.workdir
 WHERE turn_outcomes.settled_at IS NULL
     AND turn_outcomes.next_verdict = '';
 
