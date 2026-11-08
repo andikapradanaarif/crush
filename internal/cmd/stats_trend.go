@@ -10,8 +10,9 @@ package cmd
 // = Monday-start UTC):
 //
 //   - settled turn mix / revision rate: turn_outcomes rows with
-//     settled_at IS NOT NULL, bucketed by created_at. revision_rate
-//     = revised / (accepted + revised); null when empty.
+//     settled_at IS NOT NULL and a real user prompt, bucketed by
+//     created_at. Historical harness repair prompts are excluded.
+//     revision_rate = revised / (accepted + revised); null when empty.
 //   - edit cost: for verdicts accepted|revised, per edited path a
 //     comparable pair = hunk_added state ok + untruncated AND
 //     hunk_after state ok + untruncated + not later_turn_touched,
@@ -28,7 +29,9 @@ package cmd
 //     under `missing`, not read as zeros.
 //   - tokens per user turn: sessions created in the window
 //     (parent_session_id IS NULL) — sum(prompt+completion tokens) /
-//     user-role messages in those sessions. In a shared data dir
+//     real user messages in those sessions. Session token counters
+//     include repair work because per-message token counts do not
+//     exist. In a shared data dir
 //     (#360) sessions are scoped to ones carrying this project's
 //     ledger key; a single-tenant store counts all.
 //   - repeat-failure rate: session_command_runs with last_exit != 0
@@ -54,6 +57,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/db"
@@ -93,29 +97,31 @@ func init() {
 // pointers so an empty denominator marshals as null, never a
 // false zero.
 type trendRow struct {
-	V                 int            `json:"v"`
-	Project           string         `json:"project"`
-	ProjectKey        string         `json:"project_key"`
-	Week              string         `json:"week"`
-	SettledTurns      int            `json:"settled_turns"`
-	Accepted          int            `json:"accepted"`
-	Revised           int            `json:"revised"`
-	Failed            int            `json:"failed"`
-	Unknown           int            `json:"unknown"`
-	RevisionRate      *float64       `json:"revision_rate"`
-	EditPairs         int            `json:"edit_pairs"`
-	EditTurns         int            `json:"edit_turns"`
-	EditCostLines     int            `json:"edit_cost_lines"`
-	EditCostPerTurn   *float64       `json:"edit_cost_per_turn"`
-	EditCostExcluded  map[string]int `json:"edit_cost_excluded,omitempty"`
-	Sessions          int            `json:"sessions"`
-	UserTurns         int            `json:"user_turns"`
-	TokensTotal       int64          `json:"tokens_total"`
-	TokensPerTurn     *float64       `json:"tokens_per_turn"`
-	CmdFailures       int            `json:"cmd_failures"`
-	RepeatFailures    int            `json:"repeat_failures"`
-	RepeatFailureRate *float64       `json:"repeat_failure_rate"`
-	HarnessBytes      int            `json:"harness_bytes"`
+	V                      int            `json:"v"`
+	Project                string         `json:"project"`
+	ProjectKey             string         `json:"project_key"`
+	Week                   string         `json:"week"`
+	SettledTurns           int            `json:"settled_turns"`
+	Accepted               int            `json:"accepted"`
+	Revised                int            `json:"revised"`
+	Failed                 int            `json:"failed"`
+	Unknown                int            `json:"unknown"`
+	RepairTurnsExcluded    int            `json:"repair_turns_excluded"`
+	RevisionRate           *float64       `json:"revision_rate"`
+	EditPairs              int            `json:"edit_pairs"`
+	EditTurns              int            `json:"edit_turns"`
+	EditCostLines          int            `json:"edit_cost_lines"`
+	EditCostPerTurn        *float64       `json:"edit_cost_per_turn"`
+	EditCostExcluded       map[string]int `json:"edit_cost_excluded,omitempty"`
+	Sessions               int            `json:"sessions"`
+	UserTurns              int            `json:"user_turns"`
+	RepairMessagesExcluded int            `json:"repair_messages_excluded"`
+	TokensTotal            int64          `json:"tokens_total"`
+	TokensPerTurn          *float64       `json:"tokens_per_turn"`
+	CmdFailures            int            `json:"cmd_failures"`
+	RepeatFailures         int            `json:"repeat_failures"`
+	RepeatFailureRate      *float64       `json:"repeat_failure_rate"`
+	HarnessBytes           int            `json:"harness_bytes"`
 	// Missing names the metric sources absent from this DB — a
 	// project whose schema predates a table reports the rest and
 	// says so, rather than failing or reading zeros as data.
@@ -420,7 +426,7 @@ func gatherTrend(ctx context.Context, conn *sql.DB, tp trendProject, sinceMs int
 		r, ok := weeks[w]
 		if !ok {
 			r = &trendRow{
-				V:          1,
+				V:          2,
 				Project:    tp.path,
 				ProjectKey: tp.key,
 				Week:       w,
@@ -467,10 +473,11 @@ func trendTurns(ctx context.Context, conn *sql.DB, key string, sinceMs int64, hu
 	if !hunkCells {
 		hunkCols = ""
 	}
-	rows, err := conn.QueryContext(ctx, `SELECT created_at, verdict, edited_paths`+hunkCols+`
-		FROM turn_outcomes
-		WHERE project_key = ? AND settled_at IS NOT NULL AND created_at >= ?
-		ORDER BY created_at ASC`, key, sinceMs)
+	rows, err := conn.QueryContext(ctx, `SELECT t.created_at, t.verdict, t.edited_paths`+hunkCols+`, m.parts
+		FROM turn_outcomes t
+		LEFT JOIN messages m ON m.id = t.turn_id AND m.session_id = t.session_id
+		WHERE t.project_key = ? AND t.settled_at IS NOT NULL AND t.created_at >= ?
+		ORDER BY t.created_at ASC`, key, sinceMs)
 	if err != nil {
 		return fmt.Errorf("turn outcomes: %w", err)
 	}
@@ -479,16 +486,21 @@ func trendTurns(ctx context.Context, conn *sql.DB, key string, sinceMs int64, hu
 	for rows.Next() {
 		var created int64
 		var verdict, pathsJSON, addedJSON, afterJSON string
+		var parts sql.NullString
 		var scanErr error
 		if hunkCells {
-			scanErr = rows.Scan(&created, &verdict, &pathsJSON, &addedJSON, &afterJSON)
+			scanErr = rows.Scan(&created, &verdict, &pathsJSON, &addedJSON, &afterJSON, &parts)
 		} else {
-			scanErr = rows.Scan(&created, &verdict, &pathsJSON)
+			scanErr = rows.Scan(&created, &verdict, &pathsJSON, &parts)
 		}
 		if scanErr != nil {
 			return fmt.Errorf("turn outcomes scan: %w", scanErr)
 		}
 		r := bucket(created)
+		if parts.Valid && trendRepairPrompt(parts.String) {
+			r.RepairTurnsExcluded++
+			continue
+		}
 		r.SettledTurns++
 		switch verdict {
 		case cmdlog.TurnAccepted:
@@ -517,6 +529,34 @@ func trendTurns(ctx context.Context, conn *sql.DB, key string, sinceMs int64, hu
 		}
 	}
 	return rows.Err()
+}
+
+// trendRepairPrompt reads only the text parts needed to recognize a
+// stored harness retry. Malformed or missing parts remain visible in
+// the report rather than silently removing evidence.
+func trendRepairPrompt(partsJSON string) bool {
+	var parts []struct {
+		Type string `json:"type"`
+		Data struct {
+			Text string `json:"text"`
+		} `json:"data"`
+	}
+	if json.Unmarshal([]byte(partsJSON), &parts) != nil {
+		return false
+	}
+	var texts []string
+	for _, part := range parts {
+		if part.Type == "text" {
+			texts = append(texts, part.Data.Text)
+		}
+	}
+	text := strings.TrimSpace(strings.Join(texts, "\n"))
+	for _, prefix := range agent.RepairPromptPrefixes {
+		if strings.HasPrefix(text, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // trendEditCost accumulates the per-path line-Levenshtein of one
@@ -687,8 +727,7 @@ func levenshteinLines(a, b []string) (int, bool) {
 // shared store only sessions carrying this project's ledger key
 // count; in a single-tenant store every top-level session does.
 func trendTokens(ctx context.Context, conn *sql.DB, key string, shared bool, memberTables []string, sinceMs int64, bucket func(int64) *trendRow) error {
-	query := `SELECT s.created_at, s.prompt_tokens + s.completion_tokens,
-		(SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id AND m.role = 'user')
+	query := `SELECT s.id, s.created_at, s.prompt_tokens + s.completion_tokens
 		FROM sessions s
 		WHERE s.parent_session_id IS NULL AND s.created_at >= ?`
 	args := []any{sinceMs / 1000}
@@ -707,18 +746,48 @@ func trendTokens(ctx context.Context, conn *sql.DB, key string, shared bool, mem
 	if err != nil {
 		return fmt.Errorf("sessions: %w", err)
 	}
-	defer rows.Close()
+	sessions := map[string]*trendRow{}
 	for rows.Next() {
-		var createdSec, tokens, userTurns int64
-		if err := rows.Scan(&createdSec, &tokens, &userTurns); err != nil {
+		var id string
+		var createdSec, tokens int64
+		if err := rows.Scan(&id, &createdSec, &tokens); err != nil {
+			rows.Close()
 			return fmt.Errorf("sessions scan: %w", err)
 		}
 		r := bucket(createdSec * 1000)
 		r.Sessions++
-		r.UserTurns += int(userTurns)
 		r.TokensTotal += tokens
+		sessions[id] = r
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	messages, err := conn.QueryContext(ctx, `SELECT m.session_id, m.parts
+		FROM messages m JOIN sessions s ON s.id = m.session_id
+		WHERE m.role = 'user' AND s.parent_session_id IS NULL AND s.created_at >= ?`, sinceMs/1000)
+	if err != nil {
+		return fmt.Errorf("user messages: %w", err)
+	}
+	defer messages.Close()
+	for messages.Next() {
+		var id, parts string
+		if err := messages.Scan(&id, &parts); err != nil {
+			return fmt.Errorf("user messages scan: %w", err)
+		}
+		r := sessions[id]
+		if r == nil {
+			continue
+		}
+		if trendRepairPrompt(parts) {
+			r.RepairMessagesExcluded++
+		} else {
+			r.UserTurns++
+		}
+	}
+	return messages.Err()
 }
 
 // trendFailures walks session_command_runs per (cmd_norm, cwd)
@@ -875,6 +944,15 @@ func printTrendTable(w io.Writer, project string, rows []trendRow, missing []str
 		}
 	}
 	printStatExclusions(w, "edit-cost exclusions", excl)
+	var repairTurns, repairMessages int
+	for _, r := range rows {
+		repairTurns += r.RepairTurnsExcluded
+		repairMessages += r.RepairMessagesExcluded
+	}
+	if repairTurns > 0 || repairMessages > 0 {
+		fmt.Fprintf(w, "  repair prompts excluded: %d settled rows, %d user messages\n",
+			repairTurns, repairMessages)
+	}
 	if len(missing) > 0 {
 		fmt.Fprintf(w, "  missing sources: %s\n", strings.Join(missing, ", "))
 	}
