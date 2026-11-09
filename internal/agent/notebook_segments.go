@@ -179,13 +179,15 @@ func segmentBoundaries(msgs []message.Message, tokenThreshold, maxSteps int) []s
 			break
 		}
 		resolvedBefore(cut)
-		if msgs[cut].Role == message.User {
-			// A user message is a hard boundary and wins over the
-			// pending guard: a call whose results straddle the fold
-			// cannot block it, or the segment would swallow the user
-			// message and mislabel every following segment's turn.
-			// The straggler result lands in the next segment as an
-			// orphan, which the renderer drops gracefully.
+		if isRealUserMsg(msgs[cut]) {
+			// A real user message is a hard boundary and wins over
+			// the pending guard: a call whose results straddle the
+			// fold cannot block it, or the segment would swallow the
+			// user message and mislabel every following segment's
+			// turn. Harness rows (repair prompts, shell outputs,
+			// reports) are inside a turn — the straggler result
+			// lands in the next segment as an orphan, which the
+			// renderer drops gracefully.
 			segs = append(segs, segment{turn: curTurn, number: segNum, start: start, end: cut})
 			start = cut
 			acc, steps = 0, 0

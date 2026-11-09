@@ -155,21 +155,25 @@ func (rc *recallContext) recallToolResult(ctx context.Context, sessionID, toolCa
 	if err != nil {
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("failed to list messages: %v", err)), nil
 	}
-	// Turn numbers are positional — the count of user messages before
-	// the message, so the current turn is the last one's index. A
-	// result sitting in an earlier turn is a prior-turn recall: the
-	// feasible approximation of "recall into a collapsed turn", since
-	// collapse leaves no stored mark to read.
+	// Turn numbers are positional — the count of user-typed prompts
+	// before the message, so the current turn is the last one's
+	// index. A result sitting in an earlier turn is a prior-turn
+	// recall: the feasible approximation of "recall into a collapsed
+	// turn", since collapse leaves no stored mark to read.
+	// IsPrompt excludes the harness rows that never start turns
+	// (bang-shell outputs, subagent reports); repair prompts still
+	// count as run boundaries here — this package cannot reach the
+	// agent's repair fingerprint without an import cycle (#458).
 	userCount := 0
 	for _, m := range msgs {
-		if m.Role == message.User {
+		if m.IsPrompt() {
 			userCount++
 		}
 	}
 	currentTurn := int64(userCount - 1)
 	var turn int64 = -1
 	for _, m := range msgs {
-		if m.Role == message.User {
+		if m.IsPrompt() {
 			turn++
 		}
 		for _, tr := range m.ToolResults() {

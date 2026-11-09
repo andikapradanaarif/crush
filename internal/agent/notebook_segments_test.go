@@ -205,6 +205,35 @@ func TestSegmentBoundaries_FoldedUserMessageIsHardBoundary(t *testing.T) {
 	require.Equal(t, int64(1), segs[1].turn)
 }
 
+// Harness-persisted user-role rows are inside a turn, not segment
+// boundaries (#458): a subagent report, a repair prompt, or a
+// bang-shell output between real prompts neither cuts a segment nor
+// bumps its turn index.
+func TestSegmentBoundaries_HarnessRowsNotBoundaries(t *testing.T) {
+	t.Parallel()
+
+	msgs := []message.Message{
+		segUser("first"),
+		segAssistant("a"),
+		{Role: message.User, Parts: []message.ContentPart{
+			message.SubAgentReport{Label: "w", Output: "done"},
+		}},
+		segAssistant("b"),
+		segUser(verificationRetryPrefix + " — retry"),
+		segAssistant("c"),
+		{Role: message.User, Parts: []message.ContentPart{
+			message.ShellCommand{Command: "ls"},
+		}},
+		segUser("second"),
+		segAssistant("d"),
+	}
+	segs := segmentBoundaries(msgs, 1<<30, 100)
+	require.Len(t, segs, 2)
+	require.Equal(t, 7, segs[1].start, "only the second real prompt opens a segment")
+	require.Equal(t, int64(0), segs[0].turn)
+	require.Equal(t, int64(1), segs[1].turn)
+}
+
 func TestSegmentBoundaries_EmptyAssistantTailDoesNotFreeze(t *testing.T) {
 	t.Parallel()
 

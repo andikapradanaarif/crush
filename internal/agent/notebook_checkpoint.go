@@ -18,9 +18,13 @@ func checkpointRunTag(stamp uint64) string {
 	return fmt.Sprintf("run:%d", stamp)
 }
 
-// runStartIndex returns the index just past the last user message —
+// runStartIndex returns the index just past the last user-ROLE row —
 // this run's calls start there, so a previous run's writes can never
-// trip this run's boundary pre-scan. Caveat: drainQueueForStep folds
+// trip this run's boundary pre-scan. Deliberately raw role, not
+// isRealUserMsg (#458): a repair retry's calls begin after its repair
+// row, and bounding past the last *real* prompt instead would slip
+// the previous run's calls (between that prompt and the repair row)
+// into this run's scan. Caveat: drainQueueForStep folds
 // no-RunID prompts into the SAME run — the stamp survives a fold —
 // so post-fold the scan bounds to the folded turn and a write
 // boundary crossed just before the fold becomes invisible to mid-run
@@ -263,6 +267,8 @@ func (a *sessionAgent) generateRunEndCheckpoint(ctx context.Context, sessionID s
 		// first user message in history.
 		if lastAsst >= 0 {
 			for i := lastAsst + 1; i < len(msgs); i++ {
+				// Any user-role row after the final assistant message is
+				// next-run input, even if it is not a real user prompt.
 				if msgs[i].Role == message.User {
 					msgs = msgs[:i]
 					break
