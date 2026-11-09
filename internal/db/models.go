@@ -38,6 +38,10 @@ type CrushCommit struct {
 	CreatedAt  int64  `json:"created_at"`
 }
 
+type DisabledSkill struct {
+	Name string `json:"name"`
+}
+
 type EdgeFiring struct {
 	SessionID      string `json:"session_id"`
 	TurnSeq        int64  `json:"turn_seq"`
@@ -48,6 +52,10 @@ type EdgeFiring struct {
 	Outcome        string `json:"outcome"`
 	RunStamp       int64  `json:"run_stamp"`
 	CreatedAt      int64  `json:"created_at"`
+}
+
+type EnabledSkill struct {
+	Name string `json:"name"`
 }
 
 type FailureMemory struct {

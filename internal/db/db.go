@@ -96,6 +96,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.deleteSessionRunConflictsStmt, err = db.PrepareContext(ctx, deleteSessionRunConflicts); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteSessionRunConflicts: %w", err)
 	}
+	if q.deleteSkillsDisabledStmt, err = db.PrepareContext(ctx, deleteSkillsDisabled); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteSkillsDisabled: %w", err)
+	}
+	if q.deleteSkillsEnabledStmt, err = db.PrepareContext(ctx, deleteSkillsEnabled); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteSkillsEnabled: %w", err)
+	}
 	if q.evictPendingAttributionStmt, err = db.PrepareContext(ctx, evictPendingAttribution); err != nil {
 		return nil, fmt.Errorf("error preparing query EvictPendingAttribution: %w", err)
 	}
@@ -234,6 +240,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.insertReferentEpisodeLabeledStmt, err = db.PrepareContext(ctx, insertReferentEpisodeLabeled); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertReferentEpisodeLabeled: %w", err)
 	}
+	if q.insertSkillsDisabledStmt, err = db.PrepareContext(ctx, insertSkillsDisabled); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertSkillsDisabled: %w", err)
+	}
+	if q.insertSkillsEnabledStmt, err = db.PrepareContext(ctx, insertSkillsEnabled); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertSkillsEnabled: %w", err)
+	}
 	if q.insertTurnOutcomeStmt, err = db.PrepareContext(ctx, insertTurnOutcome); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertTurnOutcome: %w", err)
 	}
@@ -350,6 +362,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.listSessionsStmt, err = db.PrepareContext(ctx, listSessions); err != nil {
 		return nil, fmt.Errorf("error preparing query ListSessions: %w", err)
+	}
+	if q.listSkillsDisabledStmt, err = db.PrepareContext(ctx, listSkillsDisabled); err != nil {
+		return nil, fmt.Errorf("error preparing query ListSkillsDisabled: %w", err)
+	}
+	if q.listSkillsEnabledStmt, err = db.PrepareContext(ctx, listSkillsEnabled); err != nil {
+		return nil, fmt.Errorf("error preparing query ListSkillsEnabled: %w", err)
 	}
 	if q.listStaleDigestSessionsStmt, err = db.PrepareContext(ctx, listStaleDigestSessions); err != nil {
 		return nil, fmt.Errorf("error preparing query ListStaleDigestSessions: %w", err)
@@ -590,6 +608,16 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing deleteSessionRunConflictsStmt: %w", cerr)
 		}
 	}
+	if q.deleteSkillsDisabledStmt != nil {
+		if cerr := q.deleteSkillsDisabledStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteSkillsDisabledStmt: %w", cerr)
+		}
+	}
+	if q.deleteSkillsEnabledStmt != nil {
+		if cerr := q.deleteSkillsEnabledStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteSkillsEnabledStmt: %w", cerr)
+		}
+	}
 	if q.evictPendingAttributionStmt != nil {
 		if cerr := q.evictPendingAttributionStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing evictPendingAttributionStmt: %w", cerr)
@@ -820,6 +848,16 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing insertReferentEpisodeLabeledStmt: %w", cerr)
 		}
 	}
+	if q.insertSkillsDisabledStmt != nil {
+		if cerr := q.insertSkillsDisabledStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertSkillsDisabledStmt: %w", cerr)
+		}
+	}
+	if q.insertSkillsEnabledStmt != nil {
+		if cerr := q.insertSkillsEnabledStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertSkillsEnabledStmt: %w", cerr)
+		}
+	}
 	if q.insertTurnOutcomeStmt != nil {
 		if cerr := q.insertTurnOutcomeStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertTurnOutcomeStmt: %w", cerr)
@@ -1013,6 +1051,16 @@ func (q *Queries) Close() error {
 	if q.listSessionsStmt != nil {
 		if cerr := q.listSessionsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listSessionsStmt: %w", cerr)
+		}
+	}
+	if q.listSkillsDisabledStmt != nil {
+		if cerr := q.listSkillsDisabledStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listSkillsDisabledStmt: %w", cerr)
+		}
+	}
+	if q.listSkillsEnabledStmt != nil {
+		if cerr := q.listSkillsEnabledStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listSkillsEnabledStmt: %w", cerr)
 		}
 	}
 	if q.listStaleDigestSessionsStmt != nil {
@@ -1268,6 +1316,8 @@ type Queries struct {
 	deleteSessionFilesStmt                  *sql.Stmt
 	deleteSessionMessagesStmt               *sql.Stmt
 	deleteSessionRunConflictsStmt           *sql.Stmt
+	deleteSkillsDisabledStmt                *sql.Stmt
+	deleteSkillsEnabledStmt                 *sql.Stmt
 	evictPendingAttributionStmt             *sql.Stmt
 	getAverageResponseTimeStmt              *sql.Stmt
 	getCollapsedTurnStatsStmt               *sql.Stmt
@@ -1314,6 +1364,8 @@ type Queries struct {
 	insertPendingAttributionStmt            *sql.Stmt
 	insertReferentEpisodeStmt               *sql.Stmt
 	insertReferentEpisodeLabeledStmt        *sql.Stmt
+	insertSkillsDisabledStmt                *sql.Stmt
+	insertSkillsEnabledStmt                 *sql.Stmt
 	insertTurnOutcomeStmt                   *sql.Stmt
 	labelReferentEpisodeStmt                *sql.Stmt
 	lastRecordedRepoHeadStmt                *sql.Stmt
@@ -1353,6 +1405,8 @@ type Queries struct {
 	listSessionTestVerdictsStmt             *sql.Stmt
 	listSessionTouchedPathsStmt             *sql.Stmt
 	listSessionsStmt                        *sql.Stmt
+	listSkillsDisabledStmt                  *sql.Stmt
+	listSkillsEnabledStmt                   *sql.Stmt
 	listStaleDigestSessionsStmt             *sql.Stmt
 	listUnclaimedFailuresStmt               *sql.Stmt
 	listUnsettledReferentLabelsStmt         *sql.Stmt
@@ -1421,6 +1475,8 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		deleteSessionFilesStmt:                  q.deleteSessionFilesStmt,
 		deleteSessionMessagesStmt:               q.deleteSessionMessagesStmt,
 		deleteSessionRunConflictsStmt:           q.deleteSessionRunConflictsStmt,
+		deleteSkillsDisabledStmt:                q.deleteSkillsDisabledStmt,
+		deleteSkillsEnabledStmt:                 q.deleteSkillsEnabledStmt,
 		evictPendingAttributionStmt:             q.evictPendingAttributionStmt,
 		getAverageResponseTimeStmt:              q.getAverageResponseTimeStmt,
 		getCollapsedTurnStatsStmt:               q.getCollapsedTurnStatsStmt,
@@ -1467,6 +1523,8 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		insertPendingAttributionStmt:            q.insertPendingAttributionStmt,
 		insertReferentEpisodeStmt:               q.insertReferentEpisodeStmt,
 		insertReferentEpisodeLabeledStmt:        q.insertReferentEpisodeLabeledStmt,
+		insertSkillsDisabledStmt:                q.insertSkillsDisabledStmt,
+		insertSkillsEnabledStmt:                 q.insertSkillsEnabledStmt,
 		insertTurnOutcomeStmt:                   q.insertTurnOutcomeStmt,
 		labelReferentEpisodeStmt:                q.labelReferentEpisodeStmt,
 		lastRecordedRepoHeadStmt:                q.lastRecordedRepoHeadStmt,
@@ -1506,6 +1564,8 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listSessionTestVerdictsStmt:             q.listSessionTestVerdictsStmt,
 		listSessionTouchedPathsStmt:             q.listSessionTouchedPathsStmt,
 		listSessionsStmt:                        q.listSessionsStmt,
+		listSkillsDisabledStmt:                  q.listSkillsDisabledStmt,
+		listSkillsEnabledStmt:                   q.listSkillsEnabledStmt,
 		listStaleDigestSessionsStmt:             q.listStaleDigestSessionsStmt,
 		listUnclaimedFailuresStmt:               q.listUnclaimedFailuresStmt,
 		listUnsettledReferentLabelsStmt:         q.listUnsettledReferentLabelsStmt,

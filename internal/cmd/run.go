@@ -111,7 +111,9 @@ crush run --continue "Follow up on your last response"
 		// Turns-file mode is a local-app contract — a leftover
 		// CRUSH_CLIENT_SERVER must not reroute it into the one-shot
 		// client path.
-		if useClientServer() && turnsFile == "" {
+		// Only attach to a server that is already running; a one-shot
+		// run should not leave a detached server behind.
+		if useClientServer() && turnsFile == "" && serverRunning(ctx) {
 			c, ws, cleanup, err := connectToServer(cmd)
 			if err != nil {
 				return err

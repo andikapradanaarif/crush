@@ -24,6 +24,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	fang "charm.land/fang/v2"
 	"charm.land/lipgloss/v2"
+	"charm.land/tone"
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/client"
@@ -46,7 +47,6 @@ import (
 	"github.com/charmbracelet/crush/internal/workspace"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/charmbracelet/x/exp/charmtone"
 	xstrings "github.com/charmbracelet/x/exp/strings"
 	"github.com/charmbracelet/x/term"
 	"github.com/pkg/browser"
@@ -180,7 +180,7 @@ crush --continue
 	},
 }
 
-var heartbit = lipgloss.NewStyle().Foreground(charmtone.Dolly).SetString(`
+var heartbit = lipgloss.NewStyle().Foreground(tone.Dolly).SetString(`
     ▄▄▄▄▄▄▄▄    ▄▄▄▄▄▄▄▄
   ███████████  ███████████
 ████████████████████████████
@@ -759,6 +759,22 @@ func waitForServerReady(ctx context.Context, hostURL *url.URL) error {
 		case <-time.After(perAttempt):
 		}
 	}
+}
+
+// serverRunning reports whether a server is already answering on the
+// configured host, without spawning one.
+func serverRunning(ctx context.Context) bool {
+	hostURL, err := server.ParseHostURL(clientHost)
+	if err != nil {
+		return false
+	}
+	httpClient, reqURL, err := readinessHTTPClient(hostURL)
+	if err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	return probeHealth(ctx, httpClient, reqURL, hostURL) == nil
 }
 
 // readinessHTTPClient builds an *http.Client whose transport dials the

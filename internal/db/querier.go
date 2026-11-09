@@ -55,6 +55,8 @@ type Querier interface {
 	// Same re-key collision shape as command_memory: the (session_id,
 	// cmd_norm, cwd, target) twin wins, the stale row goes first.
 	DeleteSessionRunConflicts(ctx context.Context, arg DeleteSessionRunConflictsParams) error
+	DeleteSkillsDisabled(ctx context.Context, name string) error
+	DeleteSkillsEnabled(ctx context.Context, name string) error
 	// Cap the pending set -- beyond it the newest rows win and the oldest
 	// are abandoned (a bounded miss, not a pile-up of deterministic
 	// failures re-queued forever). Rows tied at the boundary tick all
@@ -158,6 +160,8 @@ type Querier interface {
 	// session) -- a label write landing in a second statement could
 	// freeze the row fingerprintless if a settle pass interleaves.
 	InsertReferentEpisodeLabeled(ctx context.Context, arg InsertReferentEpisodeLabeledParams) error
+	InsertSkillsDisabled(ctx context.Context, name string) error
+	InsertSkillsEnabled(ctx context.Context, name string) error
 	// Open one turn's outcome row (#340), idempotent on the
 	// (session_id, turn_id) unique key -- turn_id is the turn's
 	// user-message ID, stable under compaction where an ordinal would
@@ -369,6 +373,8 @@ type Querier interface {
 	// path the tool passed, relativized service-side when needed.
 	ListSessionTouchedPaths(ctx context.Context, arg ListSessionTouchedPathsParams) ([]string, error)
 	ListSessions(ctx context.Context) ([]Session, error)
+	ListSkillsDisabled(ctx context.Context) ([]string, error)
+	ListSkillsEnabled(ctx context.Context) ([]string, error)
 	// Sessions whose digest is missing or older than their last update ---
 	// the lazy-refresh worklist. Sub-agent sessions (parent_session_id
 	// set) are internal machinery, not user work, so they stay out.

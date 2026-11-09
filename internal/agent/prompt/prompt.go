@@ -31,6 +31,11 @@ type Prompt struct {
 	interactive bool
 	canWrite    bool
 	toolNames   []string
+
+	// skillOverrides fetches the repository-scoped skill toggle state at
+	// Build time: which skills the repository disabled and which it
+	// re-enabled over the config. Nil means no overrides.
+	skillOverrides func(ctx context.Context) (disabled, enabled []string)
 }
 
 type PromptDat struct {
@@ -123,6 +128,24 @@ func WithWorkingDir(workingDir string) Option {
 func WithInteractive(interactive bool) Option {
 	return func(p *Prompt) {
 		p.interactive = interactive
+	}
+}
+
+// WithSkillOverrides supplies the repository-scoped skill toggle state,
+// evaluated when the prompt is built. disabled lists skills turned off
+// for the repository; enabled lists config-disabled skills turned back
+// on for it.
+func WithSkillOverrides(disabled, enabled func(ctx context.Context) []string) Option {
+	return func(p *Prompt) {
+		p.skillOverrides = func(ctx context.Context) (d, e []string) {
+			if disabled != nil {
+				d = disabled(ctx)
+			}
+			if enabled != nil {
+				e = enabled(ctx)
+			}
+			return d, e
+		}
 	}
 }
 
@@ -282,6 +305,28 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 
 	// Filter out disabled skills.
 	allSkills = skills.Filter(allSkills, cfg.Options.DisabledSkills)
+
+	// Apply repository-scoped toggle overrides on top: repo-disabled
+	// skills hide too, and config-disabled skills with a repository
+	// enabled override come back for this repository.
+	if p.skillOverrides != nil {
+		repoDisabled, repoEnabled := p.skillOverrides(ctx)
+		effective := make(map[string]bool, len(repoDisabled))
+		for _, name := range repoDisabled {
+			effective[name] = true
+		}
+		for _, name := range repoEnabled {
+			delete(effective, name)
+		}
+		if len(effective) > 0 {
+			disabled := make([]string, 0, len(effective))
+			for name := range effective {
+				disabled = append(disabled, name)
+			}
+			slices.Sort(disabled)
+			allSkills = skills.Filter(allSkills, disabled)
+		}
+	}
 
 	if len(allSkills) > 0 {
 		availSkillXML = skills.ToPromptXML(allSkills)
