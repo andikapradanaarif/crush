@@ -521,7 +521,10 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		config.AgentCoder: coderPrompt,
 		config.AgentPlan:  planSystemPrompt,
 	}
-	key := c.skillToggleKey(ctx)
+	key, err := c.skillToggleKey(ctx)
+	if err != nil {
+		slog.Error("Failed to read skill toggle state; first turn will retry", "error", err)
+	}
 	c.skillKeys = map[string]string{
 		config.AgentCoder: key,
 		config.AgentPlan:  key,
@@ -1372,15 +1375,21 @@ func (c *coordinator) skillOverrideOptions() []prompt.Option {
 
 // skillToggleKey fingerprints everything that decides which skills the
 // system prompt lists: the config's disabled list and the repository
-// overrides.
-func (c *coordinator) skillToggleKey(ctx context.Context) string {
+// overrides. %q keeps names with separators unambiguous.
+func (c *coordinator) skillToggleKey(ctx context.Context) (string, error) {
 	var configDisabled []string
 	if opts := c.cfg.Config().Options; opts != nil {
 		configDisabled = opts.DisabledSkills
 	}
-	repoDisabled, _ := c.sessions.SkillsDisabled(ctx)
-	repoEnabled, _ := c.sessions.SkillsEnabled(ctx)
-	return fmt.Sprint(configDisabled, repoDisabled, repoEnabled)
+	repoDisabled, err := c.sessions.SkillsDisabled(ctx)
+	if err != nil {
+		return "", fmt.Errorf("list disabled skills: %w", err)
+	}
+	repoEnabled, err := c.sessions.SkillsEnabled(ctx)
+	if err != nil {
+		return "", fmt.Errorf("list enabled skills: %w", err)
+	}
+	return fmt.Sprintf("%q|%q|%q", configDisabled, repoDisabled, repoEnabled), nil
 }
 
 // refreshSkillPrompt rebuilds the agent's system prompt when the skill
@@ -1392,7 +1401,10 @@ func (c *coordinator) refreshSkillPrompt(ctx context.Context, agent SessionAgent
 	if !ok {
 		return nil
 	}
-	key := c.skillToggleKey(ctx)
+	key, err := c.skillToggleKey(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve skill toggle state: %w", err)
+	}
 
 	c.skillKeysMu.Lock()
 	defer c.skillKeysMu.Unlock()
@@ -2053,6 +2065,8 @@ func (c *coordinator) buildOpenaiCompatProvider(baseURL, apiKey string, headers 
 			openaicompat.WithLanguageModelOptions(
 				openai.WithLanguageModelHeaderFunc(hyper.HeaderFunc),
 			),
+			// Hyper has support for Gzip-compressed requests.
+			openaicompat.WithRequestCompression(),
 		)
 	}
 	if httpClient == nil && c.cfg.Config().Options.Debug {

@@ -66,7 +66,7 @@ func (m *UI) skillStatusItems() []skillStatusItem {
 
 	disabledSet := make(map[string]bool)
 	if m.com != nil && m.com.Workspace != nil {
-		if cfg := m.com.Config(); cfg != nil {
+		if cfg := m.com.Config(); cfg != nil && cfg.Options != nil {
 			for _, name := range cfg.Options.DisabledSkills {
 				disabledSet[name] = true
 			}
@@ -213,7 +213,7 @@ func (m *UI) skillsTogglesList() []dialog.SkillToggleItem {
 // disabledSet returns the config's disabled-skills set.
 func disabledSet(cfg *config.Config) map[string]struct{} {
 	set := make(map[string]struct{})
-	if cfg == nil {
+	if cfg == nil || cfg.Options == nil {
 		return set
 	}
 	for _, name := range cfg.Options.DisabledSkills {
