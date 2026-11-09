@@ -294,7 +294,11 @@ func TestRepairPromptPrefixes_Stable(t *testing.T) {
 	require.True(t, strings.HasPrefix(
 		reconcileRetrySection(&edgeTrigger{openFailures: []cmdlog.Failure{{Cmd: "go test ./..."}}}),
 		reconcileRetryPrefix))
-	require.True(t, isRepairPrompt(reconcileRetryPrefix+" — pending failure"))
+	require.True(t, IsRepairPrompt(reconcileRetryPrefix+" — pending failure"))
+	// The merged retry's outro is the second fingerprint — a merged
+	// prompt that ever loses its leading prefix still fingerprints.
+	require.True(t, IsRepairPrompt("unprefixed harness text"+repairRetryOutro))
+	require.False(t, IsRepairPrompt("a real user prompt"))
 	// Every firing edge's rendered prompt must fingerprint as a
 	// repair turn — a section that renders without its exported
 	// prefix mints mislabeled turn rows (#427 regression) and
@@ -314,7 +318,7 @@ func TestRepairPromptPrefixes_Stable(t *testing.T) {
 		reconcileRetrySection(&edgeTrigger{openFailures: []cmdlog.Failure{{Cmd: "go test ./..."}}}),
 	}
 	for _, s := range sections {
-		require.True(t, isRepairPrompt(s), "edge prompt not fingerprinted: %.40q", s)
+		require.True(t, IsRepairPrompt(s), "edge prompt not fingerprinted: %.40q", s)
 	}
 	// No prefix is a prefix of another — a merged prompt reads as its
 	// leading edge only.

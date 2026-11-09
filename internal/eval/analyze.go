@@ -683,13 +683,10 @@ func matchTurn(text string, turns []string, nextTurn int) int {
 // isRepairPrompt reports whether a user message is a harness-authored
 // repair prompt — the fingerprint fallback when the trajectory's turn
 // texts aren't known (standalone `eval analyze` without --trajectory).
+// The fingerprint itself lives in the agent package (#437): prefix
+// match or merged-retry outro.
 func isRepairPrompt(text string) bool {
-	for _, p := range agent.RepairPromptPrefixes {
-		if strings.HasPrefix(text, p) {
-			return true
-		}
-	}
-	return false
+	return agent.IsRepairPrompt(text)
 }
 
 // Placeholder dispositions — none count as real calls.

@@ -204,28 +204,33 @@ func referentTargets(ctx context.Context, d turnOutcomeDeps, msgs []message.Mess
 }
 
 // isRealUserMsg reports whether a stored message is a turn boundary:
-// user role, not a harness repair prompt, and not the summary message
-// — getSessionMessages rewrites a compaction summary's role to User
-// for the model, and treating it as a turn would mint a phantom turn
-// that swallows the whole post-compaction span. Hidden user
-// continuations (TextContent.Hidden — programmatic runs via the API
-// or UI hidden AgentRun) DO count as boundaries: they are real
-// instructions that drove work, distinct from a retry of the same
-// turn.
+// something the user actually typed (IsPrompt excludes bang-shell
+// outputs and subagent reports — user-role rows the harness persists
+// that carry no typed text), not a harness repair prompt, and not the
+// summary message — getSessionMessages rewrites a compaction
+// summary's role to User for the model, and treating it as a turn
+// would mint a phantom turn that swallows the whole post-compaction
+// span. Hidden user continuations (TextContent.Hidden — programmatic
+// runs via the API or UI hidden AgentRun) DO count as boundaries:
+// they are real instructions that drove work, distinct from a retry
+// of the same turn.
 func isRealUserMsg(m message.Message) bool {
-	return m.Role == message.User && !m.IsSummaryMessage && !isRepairPrompt(m.JoinedText())
+	return m.IsPrompt() && !m.IsSummaryMessage && !IsRepairPrompt(m.JoinedText())
 }
 
-// isRepairPrompt reports whether a stored user message is
+// IsRepairPrompt reports whether a stored user message is
 // harness-authored — a repair retry persists its prompt as a real
 // user row, so the backward scan for the judged turn must skip it.
-func isRepairPrompt(text string) bool {
+// Two fingerprints: the leading edge-section prefix, or the merged
+// retry's outro — a merged prompt that ever loses its leading
+// prefix still fingerprints (#437).
+func IsRepairPrompt(text string) bool {
 	for _, p := range RepairPromptPrefixes {
 		if strings.HasPrefix(text, p) {
 			return true
 		}
 	}
-	return false
+	return strings.Contains(text, repairRetryOutro)
 }
 
 // recordReferentEpisodes is the observation pass — runs once per Run
