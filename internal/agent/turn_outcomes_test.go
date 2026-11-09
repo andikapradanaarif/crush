@@ -613,6 +613,71 @@ func TestBackfillSession_HarnessRowsNotBoundaries(t *testing.T) {
 	}
 }
 
+// Turn indexing shares the boundary predicate (#458): harness rows
+// interposed between real prompts neither bump the per-message turn
+// index nor count toward the turn total.
+func TestMessageTurns_HarnessRowsDoNotBump(t *testing.T) {
+	t.Parallel()
+	msgs := []message.Message{
+		referentUserMsg("u1", "first"),
+		{Role: message.Assistant},
+		{Role: message.User, Parts: []message.ContentPart{
+			message.SubAgentReport{Label: "w", Output: "done"},
+		}},
+		{Role: message.User, Parts: []message.ContentPart{
+			message.TextContent{Text: verificationRetryPrefix + " — retry"},
+		}},
+		{Role: message.User, IsSummaryMessage: true, Parts: []message.ContentPart{
+			message.TextContent{Text: "summary"},
+		}},
+		{Role: message.User, Parts: []message.ContentPart{
+			message.ShellCommand{Command: "ls"},
+		}},
+		referentUserMsg("u2", "second"),
+		{Role: message.Assistant},
+	}
+	require.Equal(t, []int64{0, 0, 0, 0, 0, 0, 1, 1}, messageTurns(msgs))
+	require.Equal(t, 2, countUserMessages(msgs))
+}
+
+// The substantive check measures the user's text — a long repair
+// prompt must not count as substance for them (#458).
+func TestHasSubstantiveUserMessage_HarnessTextNotSubstance(t *testing.T) {
+	t.Parallel()
+	require.False(t, hasSubstantiveUserMessage([]message.Message{
+		{Role: message.User, Parts: []message.ContentPart{
+			message.TextContent{Text: verificationRetryPrefix +
+				" the check failed again with plenty of words and internal/auth.go"},
+		}},
+		{Role: message.User, Parts: []message.ContentPart{
+			message.ShellCommand{Command: "cat internal/auth.go"},
+		}},
+	}))
+	require.True(t, hasSubstantiveUserMessage([]message.Message{
+		referentUserMsg("u1", "please refactor internal/auth.go and its callers"),
+	}))
+}
+
+// Relevance refs come from the latest real prompt — a harness row
+// stored after it must not anchor the file refs (#458).
+func TestNotebookRelevanceRefs_SkipsHarnessRows(t *testing.T) {
+	t.Parallel()
+	_, env := referentAgent(t)
+	msgs := []message.Message{
+		referentUserMsg("u1", "fix internal/auth.go"),
+		{Role: message.User, Parts: []message.ContentPart{
+			message.TextContent{Text: verificationRetryPrefix + " internal/bait.go"},
+		}},
+		{Role: message.User, Parts: []message.ContentPart{
+			message.SubAgentReport{Label: "w", Output: "internal/bait.go"},
+		}},
+	}
+	refs := notebookRelevanceRefs(t.Context(), env.sessions, "", msgs)
+	require.Contains(t, refs, "file:internal/auth.go")
+	require.NotContains(t, refs, "file:internal/bait.go")
+	require.NotContains(t, refs, "file:bait.go")
+}
+
 // A post-compaction first turn: the tail carries only the summary
 // message, so the judged turn lives in the full transcript — the
 // live path lists it and still records the row with this prompt's

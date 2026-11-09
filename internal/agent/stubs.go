@@ -84,13 +84,15 @@ type stubStats struct {
 }
 
 // messageTurns returns the turn index of each message: the number of
-// user messages strictly before it. Turn numbering matches
-// countUserMessages — the first user message starts turn 0.
+// real user messages strictly before it. Turn numbering shares
+// countUserMessages' boundary predicate — the first real user
+// message starts turn 0, and harness-persisted user-role rows stay
+// inside their turn (#458).
 func messageTurns(msgs []message.Message) []int64 {
 	turns := make([]int64, len(msgs))
 	var turn int64
 	for i, m := range msgs {
-		if i > 0 && m.Role == message.User {
+		if i > 0 && isRealUserMsg(m) {
 			turn++
 		}
 		turns[i] = turn

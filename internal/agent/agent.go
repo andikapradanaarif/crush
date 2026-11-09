@@ -3124,7 +3124,7 @@ func notebookRelevanceRefs(ctx context.Context, sessions session.Service, sessio
 		}
 	}
 	for i := len(rawMsgs) - 1; i >= 0; i-- {
-		if rawMsgs[i].Role == message.User {
+		if isRealUserMsg(rawMsgs[i]) {
 			add(rawMsgs[i].Content().Text)
 			break
 		}
@@ -3191,7 +3191,7 @@ func (a *sessionAgent) maybeAutoInject(ctx context.Context, msgs []message.Messa
 	// Find the latest user message text.
 	var userText string
 	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == message.User {
+		if isRealUserMsg(msgs[i]) {
 			userText = msgs[i].Content().Text
 			break
 		}
@@ -3499,11 +3499,13 @@ func summaryCommitted(m message.Message) bool {
 }
 
 // countUserMessages counts the number of user messages in the slice.
-// Each user message starts a new turn.
+// Each user message starts a new turn — harness-persisted user-role
+// rows (repair prompts, bang-shell outputs, subagent reports, the
+// rewritten summary) are inside a turn, not boundaries (#458).
 func countUserMessages(msgs []message.Message) int {
 	count := 0
 	for _, msg := range msgs {
-		if msg.Role == message.User {
+		if isRealUserMsg(msg) {
 			count++
 		}
 	}
@@ -3518,7 +3520,7 @@ func countUserMessages(msgs []message.Message) int {
 // suppress downstream context checks.
 func hasSubstantiveUserMessage(msgs []message.Message) bool {
 	for _, msg := range msgs {
-		if msg.Role != message.User {
+		if !isRealUserMsg(msg) {
 			continue
 		}
 		for _, part := range msg.Parts {
