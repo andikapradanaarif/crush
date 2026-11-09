@@ -80,7 +80,7 @@ func TestGatherFleetHealth(t *testing.T) {
 	require.Equal(t, 1, r.Failed)
 	require.Equal(t, 1, r.Unknown)
 	require.Equal(t, 1, r.PendingTurns)
-	require.Equal(t, 1, r.RepairExcluded)
+	require.Equal(t, 1, r.NonPromptTurnsExcluded)
 	require.Equal(t, 6, r.EditedPaths)
 	require.Equal(t, 3, r.OKPaths)
 	require.InDelta(t, 0.5, *r.OKShare, 0.001)

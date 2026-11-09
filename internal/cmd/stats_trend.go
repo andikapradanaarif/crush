@@ -97,31 +97,31 @@ func init() {
 // pointers so an empty denominator marshals as null, never a
 // false zero.
 type trendRow struct {
-	V                      int            `json:"v"`
-	Project                string         `json:"project"`
-	ProjectKey             string         `json:"project_key"`
-	Week                   string         `json:"week"`
-	SettledTurns           int            `json:"settled_turns"`
-	Accepted               int            `json:"accepted"`
-	Revised                int            `json:"revised"`
-	Failed                 int            `json:"failed"`
-	Unknown                int            `json:"unknown"`
-	RepairTurnsExcluded    int            `json:"repair_turns_excluded"`
-	RevisionRate           *float64       `json:"revision_rate"`
-	EditPairs              int            `json:"edit_pairs"`
-	EditTurns              int            `json:"edit_turns"`
-	EditCostLines          int            `json:"edit_cost_lines"`
-	EditCostPerTurn        *float64       `json:"edit_cost_per_turn"`
-	EditCostExcluded       map[string]int `json:"edit_cost_excluded,omitempty"`
-	Sessions               int            `json:"sessions"`
-	UserTurns              int            `json:"user_turns"`
-	RepairMessagesExcluded int            `json:"repair_messages_excluded"`
-	TokensTotal            int64          `json:"tokens_total"`
-	TokensPerTurn          *float64       `json:"tokens_per_turn"`
-	CmdFailures            int            `json:"cmd_failures"`
-	RepeatFailures         int            `json:"repeat_failures"`
-	RepeatFailureRate      *float64       `json:"repeat_failure_rate"`
-	HarnessBytes           int            `json:"harness_bytes"`
+	V                         int            `json:"v"`
+	Project                   string         `json:"project"`
+	ProjectKey                string         `json:"project_key"`
+	Week                      string         `json:"week"`
+	SettledTurns              int            `json:"settled_turns"`
+	Accepted                  int            `json:"accepted"`
+	Revised                   int            `json:"revised"`
+	Failed                    int            `json:"failed"`
+	Unknown                   int            `json:"unknown"`
+	NonPromptTurnsExcluded    int            `json:"non_prompt_turns_excluded"`
+	RevisionRate              *float64       `json:"revision_rate"`
+	EditPairs                 int            `json:"edit_pairs"`
+	EditTurns                 int            `json:"edit_turns"`
+	EditCostLines             int            `json:"edit_cost_lines"`
+	EditCostPerTurn           *float64       `json:"edit_cost_per_turn"`
+	EditCostExcluded          map[string]int `json:"edit_cost_excluded,omitempty"`
+	Sessions                  int            `json:"sessions"`
+	UserTurns                 int            `json:"user_turns"`
+	NonPromptMessagesExcluded int            `json:"non_prompt_messages_excluded"`
+	TokensTotal               int64          `json:"tokens_total"`
+	TokensPerTurn             *float64       `json:"tokens_per_turn"`
+	CmdFailures               int            `json:"cmd_failures"`
+	RepeatFailures            int            `json:"repeat_failures"`
+	RepeatFailureRate         *float64       `json:"repeat_failure_rate"`
+	HarnessBytes              int            `json:"harness_bytes"`
 	// Missing names the metric sources absent from this DB — a
 	// project whose schema predates a table reports the rest and
 	// says so, rather than failing or reading zeros as data.
@@ -498,7 +498,7 @@ func trendTurns(ctx context.Context, conn *sql.DB, key string, sinceMs int64, hu
 		}
 		r := bucket(created)
 		if parts.Valid && trendNonUserTurn(parts.String) {
-			r.RepairTurnsExcluded++
+			r.NonPromptTurnsExcluded++
 			continue
 		}
 		r.SettledTurns++
@@ -783,7 +783,7 @@ func trendTokens(ctx context.Context, conn *sql.DB, key string, shared bool, mem
 			continue
 		}
 		if trendNonUserTurn(parts) {
-			r.RepairMessagesExcluded++
+			r.NonPromptMessagesExcluded++
 		} else {
 			r.UserTurns++
 		}
@@ -945,14 +945,14 @@ func printTrendTable(w io.Writer, project string, rows []trendRow, missing []str
 		}
 	}
 	printStatExclusions(w, "edit-cost exclusions", excl)
-	var repairTurns, repairMessages int
+	var nonPromptTurns, nonPromptMessages int
 	for _, r := range rows {
-		repairTurns += r.RepairTurnsExcluded
-		repairMessages += r.RepairMessagesExcluded
+		nonPromptTurns += r.NonPromptTurnsExcluded
+		nonPromptMessages += r.NonPromptMessagesExcluded
 	}
-	if repairTurns > 0 || repairMessages > 0 {
-		fmt.Fprintf(w, "  repair prompts excluded: %d settled rows, %d user messages\n",
-			repairTurns, repairMessages)
+	if nonPromptTurns > 0 || nonPromptMessages > 0 {
+		fmt.Fprintf(w, "  non-prompt rows excluded: %d settled rows, %d user messages\n",
+			nonPromptTurns, nonPromptMessages)
 	}
 	if len(missing) > 0 {
 		fmt.Fprintf(w, "  missing sources: %s\n", strings.Join(missing, ", "))

@@ -35,25 +35,25 @@ const h0OKShare = 0.8
 // Share fields are pointers so an empty denominator marshals as
 // null rather than a false zero — the trend convention.
 type fleetHealth struct {
-	Project        string         `json:"project"`
-	DataDir        string         `json:"data_dir"`
-	SinceMS        int64          `json:"since_ms"`
-	SettledTurns   int            `json:"settled_turns"`
-	PendingTurns   int            `json:"pending_turns"`
-	Accepted       int            `json:"accepted"`
-	Revised        int            `json:"revised"`
-	Failed         int            `json:"failed"`
-	Unknown        int            `json:"unknown"`
-	RepairExcluded int            `json:"repair_turns_excluded"`
-	EditedPaths    int            `json:"edited_path_instances"`
-	OKPaths        int            `json:"ok_path_instances"`
-	OKShare        *float64       `json:"ok_share"`
-	PostFixTurns   int            `json:"post_fix_turns"`
-	PostFixPaths   int            `json:"post_fix_path_instances"`
-	PostFixOKPaths int            `json:"post_fix_ok_paths"`
-	PostFixOKShare *float64       `json:"post_fix_ok_share"`
-	Excluded       map[string]int `json:"excluded,omitempty"`
-	Missing        []string       `json:"missing,omitempty"`
+	Project                string         `json:"project"`
+	DataDir                string         `json:"data_dir"`
+	SinceMS                int64          `json:"since_ms"`
+	SettledTurns           int            `json:"settled_turns"`
+	PendingTurns           int            `json:"pending_turns"`
+	Accepted               int            `json:"accepted"`
+	Revised                int            `json:"revised"`
+	Failed                 int            `json:"failed"`
+	Unknown                int            `json:"unknown"`
+	NonPromptTurnsExcluded int            `json:"non_prompt_turns_excluded"`
+	EditedPaths            int            `json:"edited_path_instances"`
+	OKPaths                int            `json:"ok_path_instances"`
+	OKShare                *float64       `json:"ok_share"`
+	PostFixTurns           int            `json:"post_fix_turns"`
+	PostFixPaths           int            `json:"post_fix_path_instances"`
+	PostFixOKPaths         int            `json:"post_fix_ok_paths"`
+	PostFixOKShare         *float64       `json:"post_fix_ok_share"`
+	Excluded               map[string]int `json:"excluded,omitempty"`
+	Missing                []string       `json:"missing,omitempty"`
 	// H0 is pass | fail | pending | pre-schema. Pending covers
 	// "no post-#433 rows" and "post-#433 turns but no edits yet" —
 	// the states the H0 gate must not misread as failure.
@@ -205,7 +205,7 @@ func gatherFleetHealth(ctx context.Context, conn *sql.DB, tp trendProject, since
 			return r, err
 		}
 		if parts.Valid && trendNonUserTurn(parts.String) {
-			r.RepairExcluded++
+			r.NonPromptTurnsExcluded++
 			continue
 		}
 		postFix := workdir != ""
@@ -322,8 +322,8 @@ func printFleetHealth(w io.Writer, r fleetHealth) {
 	}
 	fmt.Fprintf(w, "  real-user settled: %d   verdict mix: A %d · R %d · F %d · U %d\n",
 		r.SettledTurns, r.Accepted, r.Revised, r.Failed, r.Unknown)
-	fmt.Fprintf(w, "  pending real-user turns: %d   repair-prompt rows excluded: %d\n",
-		r.PendingTurns, r.RepairExcluded)
+	fmt.Fprintf(w, "  pending real-user turns: %d   non-prompt rows excluded: %d\n",
+		r.PendingTurns, r.NonPromptTurnsExcluded)
 	if r.OKShare == nil {
 		fmt.Fprintf(w, "  edited paths: %d instances — no edited paths recorded\n", r.EditedPaths)
 	} else {

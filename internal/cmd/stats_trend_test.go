@@ -225,9 +225,9 @@ func TestGatherTrendExcludesHistoricalRepairPrompts(t *testing.T) {
 	require.Equal(t, 2, r.V)
 	require.Equal(t, 1, r.SettledTurns)
 	require.Equal(t, 1, r.Accepted)
-	require.Equal(t, 1, r.RepairTurnsExcluded)
+	require.Equal(t, 1, r.NonPromptTurnsExcluded)
 	require.Equal(t, 1, r.UserTurns)
-	require.Equal(t, 1, r.RepairMessagesExcluded)
+	require.Equal(t, 1, r.NonPromptMessagesExcluded)
 	require.EqualValues(t, 100, r.TokensTotal)
 	require.InDelta(t, 100, *r.TokensPerTurn, 1e-9)
 }
