@@ -25,7 +25,7 @@ func TestSkillTogglesAffectServerCatalog(t *testing.T) {
 
 	assertVisible := func(visible bool) {
 		t.Helper()
-		remoteEntries, err := b.ListSkills(ws.ID)
+		remoteEntries, err := b.ListSkills(t.Context(), ws.ID)
 		require.NoError(t, err)
 		var remoteNames []string
 		for _, entry := range remoteEntries {

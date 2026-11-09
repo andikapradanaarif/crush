@@ -168,7 +168,7 @@ func (c *controllerV1) handleGetWorkspaceProjectInitPrompt(w http.ResponseWriter
 // handleGetWorkspaceSkills returns the effective visible skills for a workspace.
 func (c *controllerV1) handleGetWorkspaceSkills(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	skills, err := c.backend.ListSkills(id)
+	skills, err := c.backend.ListSkills(r.Context(), id)
 	if err != nil {
 		c.handleError(w, r, err)
 		return

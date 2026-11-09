@@ -126,7 +126,9 @@ func TestRefreshSkillPromptRebuildsOnlyAfterToggle(t *testing.T) {
 	p, err := coderPrompt(coord.skillOverrideOptions()...)
 	require.NoError(t, err)
 	coord.prompts = map[string]*prompt.Prompt{config.AgentCoder: p}
-	coord.skillKeys = map[string]string{config.AgentCoder: coord.skillToggleKey(t.Context())}
+	key, err := coord.skillToggleKey(t.Context())
+	require.NoError(t, err)
+	coord.skillKeys = map[string]string{config.AgentCoder: key}
 
 	agent := coord.mainAgent.(*sessionAgent)
 	agent.SetSystemPrompt(prompt.BuiltPrompt{Text: "stale"})

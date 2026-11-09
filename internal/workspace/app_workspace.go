@@ -529,7 +529,11 @@ func (w *AppWorkspace) InitializePrompt() (string, error) {
 
 func (w *AppWorkspace) ListSkills(ctx context.Context) ([]skills.CatalogEntry, error) {
 	mgr := w.app.Skills
-	active, err := skills.ResolveActive(ctx, mgr.AllSkills(), w.store.Config().Options.DisabledSkills, w.app.Sessions)
+	var configDisabled []string
+	if opts := w.store.Config().Options; opts != nil {
+		configDisabled = opts.DisabledSkills
+	}
+	active, err := skills.ResolveActive(ctx, mgr.AllSkills(), configDisabled, w.app.Sessions)
 	if err != nil {
 		return nil, err
 	}
@@ -538,7 +542,11 @@ func (w *AppWorkspace) ListSkills(ctx context.Context) ([]skills.CatalogEntry, e
 
 func (w *AppWorkspace) ReadSkill(ctx context.Context, skillID string) ([]byte, skills.SkillReadResult, error) {
 	mgr := w.app.Skills
-	active, err := skills.ResolveActive(ctx, mgr.AllSkills(), w.store.Config().Options.DisabledSkills, w.app.Sessions)
+	var configDisabled []string
+	if opts := w.store.Config().Options; opts != nil {
+		configDisabled = opts.DisabledSkills
+	}
+	active, err := skills.ResolveActive(ctx, mgr.AllSkills(), configDisabled, w.app.Sessions)
 	if err != nil {
 		return nil, skills.SkillReadResult{}, err
 	}
