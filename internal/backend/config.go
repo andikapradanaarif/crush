@@ -230,8 +230,12 @@ func (b *Backend) ReadSkill(ctx context.Context, workspaceID, skillID string) ([
 	}
 
 	mgr := ws.Skills
+	active, err := skills.ResolveActive(ctx, mgr.AllSkills(), ws.Cfg.Config().Options.DisabledSkills, ws.Sessions)
+	if err != nil {
+		return nil, proto.SkillReadResult{}, err
+	}
 	content, result, err := skills.ReadContent(
-		mgr.ActiveSkills(), mgr.ResolvedPaths(), mgr.WorkingDir(), skillID,
+		active, mgr.ResolvedPaths(), mgr.WorkingDir(), skillID,
 	)
 	if err != nil {
 		return nil, proto.SkillReadResult{}, err
@@ -251,7 +255,11 @@ func (b *Backend) ListSkills(workspaceID string) ([]proto.SkillInfo, error) {
 		return nil, err
 	}
 	mgr := ws.Skills
-	entries := skills.Catalog(mgr.ActiveSkills(), mgr.ResolvedPaths(), mgr.WorkingDir())
+	active, err := skills.ResolveActive(ws.ctx, mgr.AllSkills(), ws.Cfg.Config().Options.DisabledSkills, ws.Sessions)
+	if err != nil {
+		return nil, err
+	}
+	entries := skills.Catalog(active, mgr.ResolvedPaths(), mgr.WorkingDir())
 	result := make([]proto.SkillInfo, len(entries))
 	for i, entry := range entries {
 		result[i] = proto.SkillInfo{

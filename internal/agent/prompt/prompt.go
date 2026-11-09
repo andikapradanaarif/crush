@@ -31,6 +31,11 @@ type Prompt struct {
 	interactive bool
 	canWrite    bool
 	toolNames   []string
+
+	// skillOverrides fetches the repository-scoped skill toggle state at
+	// Build time: which skills the repository disabled and which it
+	// re-enabled over the config. Nil means no overrides.
+	skillOverrides func(ctx context.Context) (disabled, enabled []string)
 }
 
 type PromptDat struct {
@@ -123,6 +128,24 @@ func WithWorkingDir(workingDir string) Option {
 func WithInteractive(interactive bool) Option {
 	return func(p *Prompt) {
 		p.interactive = interactive
+	}
+}
+
+// WithSkillOverrides supplies the repository-scoped skill toggle state,
+// evaluated when the prompt is built. disabled lists skills turned off
+// for the repository; enabled lists config-disabled skills turned back
+// on for it.
+func WithSkillOverrides(disabled, enabled func(ctx context.Context) []string) Option {
+	return func(p *Prompt) {
+		p.skillOverrides = func(ctx context.Context) (d, e []string) {
+			if disabled != nil {
+				d = disabled(ctx)
+			}
+			if enabled != nil {
+				e = enabled(ctx)
+			}
+			return d, e
+		}
 	}
 }
 
@@ -280,8 +303,13 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 	// Deduplicate: user skills override builtins with the same name.
 	allSkills = skills.Deduplicate(allSkills)
 
-	// Filter out disabled skills.
-	allSkills = skills.Filter(allSkills, cfg.Options.DisabledSkills)
+	// Resolve overrides before filtering so a repository can re-enable
+	// a skill disabled by config.
+	var repoDisabled, repoEnabled []string
+	if p.skillOverrides != nil {
+		repoDisabled, repoEnabled = p.skillOverrides(ctx)
+	}
+	allSkills = skills.FilterWithOverrides(allSkills, cfg.Options.DisabledSkills, repoDisabled, repoEnabled)
 
 	if len(allSkills) > 0 {
 		availSkillXML = skills.ToPromptXML(allSkills)
