@@ -19,7 +19,8 @@ to turn "it learns" from a claim into a measurement.
 **Direction (11-09): a long-horizon harness that measurably improves
 with use.** Plan of record:
 [2026-11-09-roadmap-improves-with-use](2026-11-09-roadmap-improves-with-use.md)
-(supersedes 10-19). Target: the best harness for a fixed mid-tier model
+(supersedes 10-19; stable pointer: [roadmap.md](roadmap.md)). Target:
+the best harness for a fixed mid-tier model
 on long-horizon coding work, with performance that rises on held-out
 tasks as the owner uses it.
 
