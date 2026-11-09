@@ -230,7 +230,11 @@ func (b *Backend) ReadSkill(ctx context.Context, workspaceID, skillID string) ([
 	}
 
 	mgr := ws.Skills
-	active, err := skills.ResolveActive(ctx, mgr.AllSkills(), ws.Cfg.Config().Options.DisabledSkills, ws.Sessions)
+	var configDisabled []string
+	if opts := ws.Cfg.Config().Options; opts != nil {
+		configDisabled = opts.DisabledSkills
+	}
+	active, err := skills.ResolveActive(ctx, mgr.AllSkills(), configDisabled, ws.Sessions)
 	if err != nil {
 		return nil, proto.SkillReadResult{}, err
 	}
@@ -249,13 +253,17 @@ func (b *Backend) ReadSkill(ctx context.Context, workspaceID, skillID string) ([
 }
 
 // ListSkills returns the effective visible skills for a workspace.
-func (b *Backend) ListSkills(workspaceID string) ([]proto.SkillInfo, error) {
+func (b *Backend) ListSkills(ctx context.Context, workspaceID string) ([]proto.SkillInfo, error) {
 	ws, err := b.GetWorkspace(workspaceID)
 	if err != nil {
 		return nil, err
 	}
 	mgr := ws.Skills
-	active, err := skills.ResolveActive(ws.ctx, mgr.AllSkills(), ws.Cfg.Config().Options.DisabledSkills, ws.Sessions)
+	var configDisabled []string
+	if opts := ws.Cfg.Config().Options; opts != nil {
+		configDisabled = opts.DisabledSkills
+	}
+	active, err := skills.ResolveActive(ctx, mgr.AllSkills(), configDisabled, ws.Sessions)
 	if err != nil {
 		return nil, err
 	}
