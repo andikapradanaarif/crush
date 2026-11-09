@@ -267,6 +267,8 @@ func (a *sessionAgent) generateRunEndCheckpoint(ctx context.Context, sessionID s
 		// first user message in history.
 		if lastAsst >= 0 {
 			for i := lastAsst + 1; i < len(msgs); i++ {
+				// Any user-role row after the final assistant message is
+				// next-run input, even if it is not a real user prompt.
 				if msgs[i].Role == message.User {
 					msgs = msgs[:i]
 					break
