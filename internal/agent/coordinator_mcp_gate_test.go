@@ -129,7 +129,7 @@ func TestRefreshSkillPromptRebuildsOnlyAfterToggle(t *testing.T) {
 	coord.skillKeys = map[string]string{config.AgentCoder: coord.skillToggleKey(t.Context())}
 
 	agent := coord.mainAgent.(*sessionAgent)
-	agent.SetSystemPrompt("stale")
+	agent.SetSystemPrompt(prompt.BuiltPrompt{Text: "stale"})
 
 	require.NoError(t, coord.refreshSkillPrompt(t.Context(), agent, config.AgentCoder))
 	require.Equal(t, "stale", agent.systemPrompt.Get(), "unchanged toggles must keep the prompt")
@@ -138,4 +138,6 @@ func TestRefreshSkillPromptRebuildsOnlyAfterToggle(t *testing.T) {
 	require.NoError(t, coord.refreshSkillPrompt(t.Context(), agent, config.AgentCoder))
 	require.NotEqual(t, "stale", agent.systemPrompt.Get(), "a toggle must rebuild the prompt")
 	require.NotContains(t, agent.systemPrompt.Get(), "<name>crush-config</name>")
+	require.Contains(t, agent.systemPrompt.Get(), "Ask one focused question ONLY when")
+	require.NotEmpty(t, agent.promptSections.Copy(), "prompt refresh must preserve section metadata")
 }

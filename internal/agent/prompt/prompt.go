@@ -303,30 +303,13 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 	// Deduplicate: user skills override builtins with the same name.
 	allSkills = skills.Deduplicate(allSkills)
 
-	// Filter out disabled skills.
-	allSkills = skills.Filter(allSkills, cfg.Options.DisabledSkills)
-
-	// Apply repository-scoped toggle overrides on top: repo-disabled
-	// skills hide too, and config-disabled skills with a repository
-	// enabled override come back for this repository.
+	// Resolve overrides before filtering so a repository can re-enable
+	// a skill disabled by config.
+	var repoDisabled, repoEnabled []string
 	if p.skillOverrides != nil {
-		repoDisabled, repoEnabled := p.skillOverrides(ctx)
-		effective := make(map[string]bool, len(repoDisabled))
-		for _, name := range repoDisabled {
-			effective[name] = true
-		}
-		for _, name := range repoEnabled {
-			delete(effective, name)
-		}
-		if len(effective) > 0 {
-			disabled := make([]string, 0, len(effective))
-			for name := range effective {
-				disabled = append(disabled, name)
-			}
-			slices.Sort(disabled)
-			allSkills = skills.Filter(allSkills, disabled)
-		}
+		repoDisabled, repoEnabled = p.skillOverrides(ctx)
 	}
+	allSkills = skills.FilterWithOverrides(allSkills, cfg.Options.DisabledSkills, repoDisabled, repoEnabled)
 
 	if len(allSkills) > 0 {
 		availSkillXML = skills.ToPromptXML(allSkills)

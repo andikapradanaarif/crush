@@ -527,14 +527,22 @@ func (w *AppWorkspace) InitializePrompt() (string, error) {
 	return agent.InitializePrompt(w.store)
 }
 
-func (w *AppWorkspace) ListSkills(_ context.Context) ([]skills.CatalogEntry, error) {
+func (w *AppWorkspace) ListSkills(ctx context.Context) ([]skills.CatalogEntry, error) {
 	mgr := w.app.Skills
-	return skills.Catalog(mgr.ActiveSkills(), mgr.ResolvedPaths(), mgr.WorkingDir()), nil
+	active, err := skills.ResolveActive(ctx, mgr.AllSkills(), w.store.Config().Options.DisabledSkills, w.app.Sessions)
+	if err != nil {
+		return nil, err
+	}
+	return skills.Catalog(active, mgr.ResolvedPaths(), mgr.WorkingDir()), nil
 }
 
-func (w *AppWorkspace) ReadSkill(_ context.Context, skillID string) ([]byte, skills.SkillReadResult, error) {
+func (w *AppWorkspace) ReadSkill(ctx context.Context, skillID string) ([]byte, skills.SkillReadResult, error) {
 	mgr := w.app.Skills
-	return skills.ReadContent(mgr.ActiveSkills(), mgr.ResolvedPaths(), mgr.WorkingDir(), skillID)
+	active, err := skills.ResolveActive(ctx, mgr.AllSkills(), w.store.Config().Options.DisabledSkills, w.app.Sessions)
+	if err != nil {
+		return nil, skills.SkillReadResult{}, err
+	}
+	return skills.ReadContent(active, mgr.ResolvedPaths(), mgr.WorkingDir(), skillID)
 }
 
 // -- MCP operations --
