@@ -448,6 +448,11 @@ type sessionAgent struct {
 	// interactive records whether the run can ask the user — the
 	// mode the clarification gates degrade on.
 	interactive bool
+	// advisorModel resolves the edge advisor's model per call —
+	// nil when options.edge_advisor is off. The deterministic judge
+	// still decides when an edge fires; the advisor only runs on a
+	// fire and never on its own (#440).
+	advisorModel func(sessionID string) Model
 	// lspManager backs the plan-evidence scan's live diagnostics
 	// re-check — a fix landing outside a covered write's window
 	// (in-place bash edits, external tools) mints no resolution
@@ -684,6 +689,10 @@ type SessionAgentOptions struct {
 	// coordinator's interactive flag threaded through for the gate
 	// degrade branches.
 	Interactive bool
+	// AdvisorModel resolves the edge advisor's model per call — the
+	// coordinator serves the configured edge_advisor_model key or the
+	// session's large slot when unset. Nil disables the advisor.
+	AdvisorModel func(sessionID string) Model
 	// LSPManager lets the plan-evidence scan re-check attributed
 	// diagnostics against the live snapshot — a fix landing outside a
 	// covered write's window mints no resolution entry otherwise. May
@@ -788,6 +797,7 @@ func NewSessionAgent(
 		agentID:                opts.AgentID,
 		ambiguityClarification: opts.AmbiguityClarification,
 		interactive:            opts.Interactive,
+		advisorModel:           opts.AdvisorModel,
 		lspManager:             opts.LSPManager,
 		edgeStore:              opts.EdgeStore,
 		edgeStats:              cmp.Or(opts.EdgeStats, csync.NewMap[string, map[string]int]()),

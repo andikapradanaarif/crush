@@ -122,6 +122,39 @@ func (c *coordinator) overrideModel(sel config.SelectedModel) (*overrideModel, e
 	return entry, nil
 }
 
+// advisorModelFn resolves the edge advisor's model per call (#440).
+// options.edge_advisor off returns nil — the advisor never fires on
+// its own. A configured edge_advisor_model key serves the shared
+// override build (the stronger-than-solver default hypothesis); the
+// session's large slot is the fallback for unset or unknown keys. A
+// named build failure skips advice rather than silently switching the
+// arm to the solver model.
+func (c *coordinator) advisorModelFn(sessionModels func(string) ModelSet, opts *config.Options) func(string) Model {
+	if opts == nil || !opts.EdgeAdvisorEnabled() {
+		return nil
+	}
+	largeSlot := func(sessionID string) Model {
+		return sessionModels(sessionID).Large
+	}
+	key := config.SelectedModelType(opts.EdgeAdvisorModel)
+	if key == "" {
+		return largeSlot
+	}
+	sel, ok := c.cfg.Config().Models[key]
+	if !ok {
+		slog.Warn("Option edge_advisor_model names no configured model; advisor uses the session large slot", "key", key)
+		return largeSlot
+	}
+	return func(_ string) Model {
+		om, err := c.overrideModel(sel)
+		if err != nil {
+			slog.Warn("Edge advisor model build failed; advice skipped", "key", key, "error", err)
+			return Model{}
+		}
+		return om.current(c)
+	}
+}
+
 func (c *coordinator) mainModels() ModelSet {
 	m := c.models.Get()
 	return ModelSet{Large: m.large, Small: m.small}

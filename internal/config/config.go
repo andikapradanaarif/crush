@@ -547,6 +547,18 @@ type Options struct {
 	// the gate can be silenced (or armed) independently of the other
 	// calibrated-autonomy gates.
 	ScopeGate *bool `json:"scope_gate,omitempty" jsonschema:"description=Override the first-write scope gate independently of ambiguity_clarification: unset follows it\\, true or false wins. Experimental.,default=unset"`
+	// EdgeAdvisor enables the LLM advisor on edge fire (R1.5 L1): the
+	// deterministic judge still decides when an edge fires; a
+	// configurable advisor model then reads the trigger's evidence and
+	// proposes one next-step correction folded into the repair prompt.
+	// The advisor never fires on its own — no trigger, no call.
+	// Experimental.
+	EdgeAdvisor *bool `json:"edge_advisor,omitempty" jsonschema:"description=Call an advisor model when a run edge fires: the deterministic judge decides when\\, the advisor proposes one next-step correction for the repair prompt. Experimental.,default=false"`
+	// EdgeAdvisorModel names a key in the models map for the advisor
+	// — the default hypothesis is a model stronger than the solver.
+	// Empty falls back to the session's large slot; an unknown key
+	// warns and falls back the same way.
+	EdgeAdvisorModel string `json:"edge_advisor_model,omitempty" jsonschema:"description=Models-map key for the edge advisor — the default hypothesis is a model stronger than the solver. Empty falls back to the session's large slot."`
 	// FailureMemory injects the <open_failures> tail — commands that
 	// failed in this workspace and have not passed since — independent
 	// of the turn_context tier so its contribution can be measured on
@@ -1770,6 +1782,17 @@ func (o *Options) ScopeGateEnabled() bool {
 		return *o.ScopeGate
 	}
 	return o.AmbiguityClarificationEnabled()
+}
+
+// EdgeAdvisorEnabled returns the resolved edge-advisor setting,
+// defaulting to false — the advisor is its own experiment arm (R1.5
+// L1), independent of the ambiguity-clarification bundle, and stays
+// opt-in until the paired dev-split read decides it.
+func (o *Options) EdgeAdvisorEnabled() bool {
+	if o == nil || o.EdgeAdvisor == nil {
+		return false
+	}
+	return *o.EdgeAdvisor
 }
 
 // NotebookMemoryServerName returns the resolved memory server name,

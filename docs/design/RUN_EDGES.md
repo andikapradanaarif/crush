@@ -97,6 +97,19 @@ than the model's summary of them; the degrade path appends the same
 payload to the final assistant message where `RunComplete.Text`
 surfaces it.
 
+**The judge stays deterministic; the advisor is the only model the
+edge layer may call** (#440, R1.5 L1). When `options.edge_advisor` is
+on, a boundary that produced a retry makes one bounded advisor call
+(`options.edge_advisor_model`, defaulting to the session's large
+slot): the call carries the winning triggers' evidence — edge name,
+firing detail, and the #444 run-state handoff — and returns one
+high-level next-step correction folded into the repair prompt as an
+"Advisor note". LivePlan's monitor+advisor split is the evidence
+(+9.9pp avg): the deterministic trigger decides _when_, the advisor
+only proposes _what next_. Failure, timeout, and off states all
+degrade to the unannotated repair — advice never gates the
+deterministic path.
+
 **Ordering and scope.** `runEdgeSet` order is load-bearing —
 verification's resolve must precede todos' scan (resolved checks
 feed the done-definition); new rows declare where they sit rather

@@ -595,7 +595,15 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 	// the retry non-foldable and suppresses the premature RunComplete;
 	// Accepted/acceptSeq are cleared so a cancel mark drops it.
 	retry := call
-	retry.Prompt = strings.Join(prompts, "\n") + repairRetryOutro
+	retryPrompt := strings.Join(prompts, "\n")
+	// The edge advisor (#440): the deterministic judge already decided
+	// this edge fired; the advisor reads the same evidence and
+	// proposes one correction. Advisory only — a failed or empty call
+	// changes nothing.
+	if advice := a.adviseOnEdge(ctx, call, winners); advice != "" {
+		retryPrompt += "\n\n" + advice
+	}
+	retry.Prompt = retryPrompt + repairRetryOutro
 	retry.RepairAttempts++
 	retry.Accepted = nil
 	retry.acceptSeq = 0
