@@ -153,12 +153,19 @@ func runStatsFleet(cmd *cobra.Command, _ []string) error {
 		}
 		seen[id] = true
 		if settle {
-			n, serr := drainProjectSettlements(cmd.Context(), tp)
+			n, due, serr := drainProjectSettlements(cmd.Context(), tp)
 			switch {
 			case serr != nil:
+				// An explicitly requested write failing is a
+				// failure, not a warning — joins the report's
+				// error list while other targets still drain.
+				failures = append(failures, fmt.Errorf("settle drain for %s: %w", tp.path, serr))
 				fmt.Fprintf(cmd.ErrOrStderr(), "warn: settle drain for %s: %v\n", tp.path, serr)
 			case n > 0:
 				fmt.Fprintf(cmd.ErrOrStderr(), "settled %d due turn rows in %s\n", n, tp.path)
+			}
+			if serr == nil && due > 0 {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warn: %d due turn rows remain in %s (drain capped at %d)\n", due, tp.path, settleDrainLimit)
 			}
 		}
 		conn, err := db.ConnectReadOnly(cmd.Context(), filepath.Join(tp.dataDir, "crush.db"))
@@ -209,31 +216,43 @@ func runStatsFleet(cmd *cobra.Command, _ []string) error {
 // idempotent ones the live pass makes — this changes when they
 // happen, not what they compute. Returns the number of turn rows
 // newly settled.
-func drainProjectSettlements(ctx context.Context, tp trendProject) (int, error) {
+func drainProjectSettlements(ctx context.Context, tp trendProject) (settled, remainingDue int, err error) {
 	conn, err := db.Connect(ctx, tp.dataDir)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	defer conn.Close()
+	// Connect returns a ref-counted pooled handle — Release, never
+	// Close, or every other holder (a live session, a sibling
+	// partition sharing this dataDir) loses its connection.
+	defer db.Release(tp.dataDir)
 	before, err := countUnsettledTurns(ctx, conn, tp.key)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	if before == 0 {
-		return 0, nil
-	}
-	svc := cmdlog.NewService(db.New(conn), tp.path, params.Memory{}, cmdlog.WithProjectKey(tp.key))
-	if err := svc.SettleTurnOutcomes(ctx, settleDrainLimit); err != nil {
-		return 0, fmt.Errorf("settle turn outcomes: %w", err)
-	}
+	svc := cmdlog.NewService(db.New(conn), tp.path, params.DefaultMemory(), cmdlog.WithProjectKey(tp.key))
+	// The live pass's order — referents, turns, then the rate fold —
+	// so a quiet project's rates refresh with its labels rather than
+	// staying stale until the next live turn (#474 review). Each
+	// pass self-skips on an empty due set, so an all-settled
+	// turn_outcomes table must not gate the referent drain.
 	if err := svc.SettleReferentLabels(ctx, settleDrainLimit); err != nil {
-		return 0, fmt.Errorf("settle referent labels: %w", err)
+		return 0, 0, fmt.Errorf("settle referent labels: %w", err)
+	}
+	if err := svc.SettleTurnOutcomes(ctx, settleDrainLimit); err != nil {
+		return 0, 0, fmt.Errorf("settle turn outcomes: %w", err)
+	}
+	if err := svc.UpdateProjectRates(ctx, params.DefaultMemory().RateDecay); err != nil {
+		return 0, 0, fmt.Errorf("rate fold: %w", err)
 	}
 	after, err := countUnsettledTurns(ctx, conn, tp.key)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return before - after, nil
+	due, err := countDueTurns(ctx, conn, tp.key, time.Now().UnixMilli())
+	if err != nil {
+		return 0, 0, err
+	}
+	return max(before-after, 0), due, nil
 }
 
 // countUnsettledTurns is the drain's delta probe — all unsettled
@@ -244,6 +263,17 @@ func countUnsettledTurns(ctx context.Context, conn *sql.DB, key string) (int, er
 	err := conn.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM turn_outcomes WHERE project_key = ? AND settled_at IS NULL`,
 		key).Scan(&n)
+	return n, err
+}
+
+// countDueTurns counts rows still inside their window as NOT due —
+// a positive count after a drain means the cap truncated the
+// backlog, not that in-window rows are waiting.
+func countDueTurns(ctx context.Context, conn *sql.DB, key string, now int64) (int, error) {
+	var n int
+	err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM turn_outcomes WHERE project_key = ? AND settled_at IS NULL AND settle_at <= ?`,
+		key, now).Scan(&n)
 	return n, err
 }
 

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/db"
@@ -330,4 +331,34 @@ func TestStatsFleetCommandContinuesAfterFailure(t *testing.T) {
 	require.NoError(t, json.Unmarshal(output.Bytes(), &report), "partial output must stay valid JSON")
 	require.Len(t, report.Projects, 1)
 	require.Equal(t, goodProject, report.Projects[0].Project)
+}
+
+// The --settle drain settles a due turn row through the same service
+// the live pass uses — n counts what froze, due counts what remains
+// past its window.
+func TestDrainProjectSettlements(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	conn, err := db.Connect(t.Context(), dataDir)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	// A due row: settle_at in the past. An in-window row stays
+	// untouched — the drain must not mint a false settled count.
+	seedRepairMessage(t, conn, "s1", "m1")
+	old := int64(1)
+	insertFleetTurn(t, conn, "k1", "s1", "t-old", "accepted", old, false, "/w", `["x.go"]`, `{}`)
+	insertFleetTurn(t, conn, "k1", "s1", "t-new", "accepted",
+		time.Now().UnixMilli(), false, "/w", `["y.go"]`, `{}`)
+
+	tp := trendProject{path: t.TempDir(), dataDir: dataDir, key: "k1"}
+	settled, due, err := drainProjectSettlements(t.Context(), tp)
+	require.NoError(t, err)
+	require.Equal(t, 1, settled, "one due row froze")
+	require.Equal(t, 0, due, "the in-window row is pending, not due")
+
+	var settledAt sql.NullInt64
+	require.NoError(t, conn.QueryRowContext(t.Context(),
+		`SELECT settled_at FROM turn_outcomes WHERE turn_id = 't-old'`).Scan(&settledAt))
+	require.True(t, settledAt.Valid, "the due row froze")
 }
