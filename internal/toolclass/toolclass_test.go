@@ -65,6 +65,88 @@ func TestBashRedirectTargets(t *testing.T) {
 	}
 }
 
+func TestBashEditTargets(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		command string
+		want    []string
+	}{
+		// Redirects come through the shared scan.
+		{name: "redirect", command: "go build > out.log", want: []string{"out.log"}},
+		{name: "redirect and sed", command: "sed -i 's/a/b/' f.go > log", want: []string{"log", "f.go"}},
+
+		// sed -i forms.
+		{name: "sed -i", command: "sed -i 's/a/b/' f.go", want: []string{"f.go"}},
+		{name: "sed -i bundled", command: "sed -ni 's/a/b/' f.go", want: []string{"f.go"}},
+		{name: "sed --in-place", command: "sed --in-place 's/a/b/' f.go", want: []string{"f.go"}},
+		{name: "sed -i suffix attached", command: "sed -i.bak 's/a/b/' f.go", want: []string{"f.go"}},
+		{name: "sed -i BSD empty suffix", command: "sed -i '' 's/a/b/' f.go", want: []string{"f.go"}},
+		{name: "sed -i BSD named suffix", command: "sed -i .bak 's/a/b/' f.go", want: []string{"f.go"}},
+		{name: "sed -e script flag", command: "sed -i -e 's/a/b/' -e 's/c/d/' f.go", want: []string{"f.go"}},
+		{name: "sed multiple files", command: "sed -i 's/a/b/' a.go b.go", want: []string{"a.go", "b.go"}},
+		{name: "sed no -i is stream-only", command: "sed -n 's/a/b/p' f.go", want: nil},
+		{name: "sed -i script only", command: "sed -i 's/a/b/'", want: nil},
+		{name: "sed -i after pipe", command: "grep -l foo *.go | xargs cat; sed -i 's/a/b/' f.go", want: []string{"f.go"}},
+		{name: "sed in quoted span is not a command", command: "echo 'sed -i s/a/b/ f.go'", want: nil},
+		{name: "sed -i with redirect", command: "sed -i 's/a/b/' f.go 2> err.log", want: []string{"err.log", "f.go"}},
+
+		// perl -i forms.
+		{name: "perl -pi -e", command: "perl -pi -e 's/a/b/' f.go", want: []string{"f.go"}},
+		{name: "perl -i -e", command: "perl -i -e 's/a/b/' f.go", want: []string{"f.go"}},
+		{name: "perl -pi script operand", command: "perl -pi 's/a/b/' f.go", want: []string{"f.go"}},
+		{name: "perl -pi.bak", command: "perl -pi.bak -e 's/a/b/' f.go", want: []string{"f.go"}},
+		{name: "perl no -i", command: "perl -ne 'print' f.go", want: nil},
+
+		// tee forms.
+		{name: "tee", command: "cmd | tee out.log", want: []string{"out.log"}},
+		{name: "tee -a", command: "cmd | tee -a out.log", want: []string{"out.log"}},
+		{name: "tee multiple", command: "cmd | tee a.log b.log", want: []string{"a.log", "b.log"}},
+		{name: "tee with redirect", command: "cmd | tee out.log 2> err.log", want: []string{"err.log", "out.log"}},
+
+		// Mutations that author no content carry no evidence target.
+		{name: "rm", command: "rm -rf dist", want: nil},
+		{name: "cp", command: "cp a.go b.go", want: nil},
+		{name: "mv", command: "mv a.go b.go", want: nil},
+		{name: "chmod", command: "chmod +x f.sh", want: nil},
+		{name: "mkdir", command: "mkdir -p out", want: nil},
+		{name: "git commit", command: "git commit -m x", want: nil},
+		{name: "patch diff names its own targets", command: "patch -p1 < fix.diff", want: nil},
+
+		// Non-concrete targets are dropped.
+		{name: "redirect to variable", command: "cmd > $OUT", want: nil},
+		{name: "sed -i glob", command: "sed -i 's/a/b/' *.go", want: nil},
+		{name: "tee variable", command: "cmd | tee $LOG", want: nil},
+		{name: "tee behind sudo", command: "cmd | sudo tee /etc/app.conf", want: []string{"/etc/app.conf"}},
+		{name: "tee behind pipe-stderr", command: "cmd |& tee out.log", want: []string{"out.log"}},
+		{name: "sed behind env assignment", command: "env LC_ALL=C sed -i 's/a/b/' f.go", want: []string{"f.go"}},
+		{name: "sed behind env plus flag arg", command: "env LC_ALL=C nice -n 5 sed -i 's/a/b/' f.go", want: nil}, // Flag arity after a prefix stays un-gated.
+		{name: "sed behind time", command: "time sed -i 's/a/b/' f.go", want: []string{"f.go"}},
+
+		// Comments manufacture no targets — a separator or `>`
+		// inside one is literal text, and comment words never
+		// become operands.
+		{name: "comment hides writer", command: "go build # TODO: try sed -i 's/x/y/' main.go; tee log", want: nil},
+		{name: "comment hides redirect", command: "cmd #> f", want: nil},
+		{name: "comment words not operands", command: "sed -i 's/a/b/' f.go # then ; tee log", want: []string{"f.go"}},
+		{name: "redirect before comment", command: "cmd > f # and also ; tee g", want: []string{"f"}},
+		{name: "whole-line comment", command: "# sed -i 's/a/b/' f.go", want: nil},
+		{name: "mid-word hash not comment", command: "cmd a#b; tee g", want: []string{"g"}},
+		{name: "quote-glued hash not comment", command: `cmd "x"#; tee g`, want: []string{"g"}},
+		{name: "quoted hash not comment", command: "cmd '#still runs' | tee g", want: []string{"g"}},
+
+		// Dedup across routes.
+		{name: "same file twice", command: "sed -i 's/a/b/' f.go && cmd > f.go", want: []string{"f.go"}},
+		{name: "same file redirect and tee", command: "cmd | tee log && cmd > log", want: []string{"log"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, BashEditTargets(tc.command))
+		})
+	}
+}
+
 func TestCommandKind(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

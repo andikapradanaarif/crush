@@ -843,6 +843,20 @@
           "type": "boolean",
           "description": "Override the first-write scope gate independently of ambiguity_clarification: unset follows it, true or false wins. Experimental."
         },
+        "edge_advisor": {
+          "type": "boolean",
+          "description": "Call an advisor model when a run edge fires: the deterministic judge decides when, the advisor proposes one next-step correction for the repair prompt. Experimental.",
+          "default": false
+        },
+        "edge_advisor_model": {
+          "type": "string",
+          "description": "Models-map key for the edge advisor — the default hypothesis is a model stronger than the solver. Empty falls back to the session's large slot."
+        },
+        "evidence_gate": {
+          "type": "boolean",
+          "description": "Arm the evidence-conditioned gate: a mutating bash call writing an existing file the run never read bounces until the run holds read evidence for it. Experimental.",
+          "default": false
+        },
         "failure_memory": {
           "type": "boolean",
           "description": "Read unresolved command/failure memory: inject the \u003copen_failures\u003e tail section and arm the reconcile run-edge (open failures the run observed still open block done-ness). Recording happens regardless; this gates the read side. Experimental.",
@@ -875,6 +889,7 @@
         "project_key": {
           "type": "string",
           "description": "Pin the command/failure memory partition identity instead of deriving it from the repo remote + common dir. Workspaces sharing a key share memory rows — for eval snapshots and deliberate cross-checkout sharing. Experimental."
+        },
         "pinentry_integrated": {
           "type": "boolean",
           "description": "Render GPG passphrase prompts as a native Crush dialog instead of an external pinentry program. Works with file-based keys and security keys and never modifies GPG or git configuration.",

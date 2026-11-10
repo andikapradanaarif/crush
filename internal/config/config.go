@@ -561,6 +561,14 @@ type Options struct {
 	// session's model override — the arm tests the advisor model,
 	// not whichever solver the session picked.
 	EdgeAdvisorModel string `json:"edge_advisor_model,omitempty" jsonschema:"description=Models-map key for the edge advisor — the default hypothesis is a model stronger than the solver. Empty falls back to the session's large slot."`
+	// EvidenceGate arms the evidence-conditioned gate (R1.5 L2): a
+	// mutating bash call whose concrete write targets are existing
+	// files the run never read bounces until the evidence arrives —
+	// the same read-before-write the file tools enforce themselves,
+	// applied to the bash writes that bypass it. Its own experiment
+	// arm, independent of the calibrated-autonomy bundle — opt-in
+	// until the paired dev-split read decides it.
+	EvidenceGate *bool `json:"evidence_gate,omitempty" jsonschema:"description=Arm the evidence-conditioned gate: a mutating bash call writing an existing file the run never read bounces until the run holds read evidence for it. Experimental.,default=false"`
 	// FailureMemory injects the <open_failures> tail — commands that
 	// failed in this workspace and have not passed since — independent
 	// of the turn_context tier so its contribution can be measured on
@@ -1795,6 +1803,17 @@ func (o *Options) EdgeAdvisorEnabled() bool {
 		return false
 	}
 	return *o.EdgeAdvisor
+}
+
+// EvidenceGateEnabled returns the resolved evidence-gate setting,
+// defaulting to false — the arm is its own experiment (R1.5 L2),
+// independent of the ambiguity-clarification bundle, and stays
+// opt-in until the paired dev-split read decides it.
+func (o *Options) EvidenceGateEnabled() bool {
+	if o == nil || o.EvidenceGate == nil {
+		return false
+	}
+	return *o.EvidenceGate
 }
 
 // NotebookMemoryServerName returns the resolved memory server name,
