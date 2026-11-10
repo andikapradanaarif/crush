@@ -131,6 +131,22 @@ a bound plan costs more than reading one file, but if bounce
 telemetry shows models routing around reads by declaring, the arm
 tightens to per-path injection instead of global resolve.
 
+**Completion is judged with fresh eyes** (#442, R1.5 L3). The
+`fresh-review` edge fires on a clean stop over real writes: the
+solver model reviews {task, changed-file list, `git diff HEAD` plus
+untracked heads, observed check output} in a context that never
+holds the worker's transcript or its completion claim — the
+same-context self-verification gap (61% catch rate) made a
+declared transition. The solver — not a configured stronger model —
+reviews, so the A/B arm isolates freshness as the variable. The
+contract is mechanical: `VERDICT: PASS` clears, `VERDICT: ISSUES`
+fires a fingerprinted repair carrying the findings, and every
+failure shape — model error, timeout, unparseable reply — degrades
+rather than blocking a completion claim. `options.fresh_review`
+gates it; the gated row records would-have-fired verdicts for the
+paired read. It runs last in the edge set, judging the
+would-be-final state after every other edge's resolve.
+
 **Ordering and scope.** `runEdgeSet` order is load-bearing —
 verification's resolve must precede todos' scan (resolved checks
 feed the done-definition); new rows declare where they sit rather

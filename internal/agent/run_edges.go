@@ -284,7 +284,7 @@ func (a *sessionAgent) runEdgeSet() []runEdge {
 			note:    burnWatchExhaustNote,
 		},
 		{
-			// Reconcile runs last so its open-failure join observes
+			// Reconcile runs late so its open-failure join observes
 			// memory state after verification's resolve — a pending
 			// check that passes writes through cmdlog and resolves
 			// the row before the edge reads it.
@@ -292,6 +292,18 @@ func (a *sessionAgent) runEdgeSet() []runEdge {
 			scan:   a.scanReconcileEdge,
 			prompt: reconcileRetrySection,
 			note:   reconcileExhaustNote,
+		},
+		{
+			// Fresh-review runs last: it judges the would-be-final
+			// state — task, diff, check output — so it must see the
+			// workspace after every other edge's resolve, and its
+			// findings merge harmlessly into whatever repair turn
+			// the boundary produces.
+			name:    "fresh-review",
+			scan:    a.scanFreshReviewEdge,
+			resolve: a.resolveFreshReviewEdge,
+			prompt:  freshReviewPromptSection,
+			note:    freshReviewExhaustNote,
 		},
 	}
 }
@@ -1053,6 +1065,7 @@ var RepairPromptPrefixes = []string{
 	verifyLoopReplanPrefix,
 	verifyLoopEscalatePrefix,
 	reconcileRetryPrefix,
+	freshReviewPrefix,
 }
 
 // failedCheckGroups merges failed entries minted by one write into a

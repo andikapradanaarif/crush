@@ -314,10 +314,11 @@ func TestRepairPromptPrefixes_Stable(t *testing.T) {
 			item: session.PlanItem{Content: "x", Status: session.PlanItemPending},
 		}}}},
 		// The variant-dispatched sections render once per arm.
-		"stall":       {{variant: "escalate"}, {variant: "replan", report: "Stopped: x"}},
-		"verify-loop": {{variant: "escalate"}, {variant: "replan", report: "Stopped: x"}},
-		"burn-watch":  {{inputTokens: 250000, steps: make([]fantasy.StepResult, 40)}},
-		"reconcile":   {{openFailures: []cmdlog.Failure{{Cmd: "go test ./..."}}}},
+		"stall":        {{variant: "escalate"}, {variant: "replan", report: "Stopped: x"}},
+		"verify-loop":  {{variant: "escalate"}, {variant: "replan", report: "Stopped: x"}},
+		"burn-watch":   {{inputTokens: 250000, steps: make([]fantasy.StepResult, 40)}},
+		"reconcile":    {{openFailures: []cmdlog.Failure{{Cmd: "go test ./..."}}}},
+		"fresh-review": {{report: "f.go — off-by-one — the loop misses the last element"}},
 	}
 	for _, e := range (&sessionAgent{}).runEdgeSet() {
 		ts, ok := triggers[e.name]
