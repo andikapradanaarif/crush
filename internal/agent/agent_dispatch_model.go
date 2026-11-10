@@ -183,7 +183,7 @@ func (c *coordinator) overrideDispatchAgent(ctx context.Context, access string, 
 // current build, so a model refresh reaches a running subagent on its next
 // turn.
 func (c *coordinator) overrideTaskAgent(ctx context.Context, access string, sel config.SelectedModel) (SessionAgent, string) {
-	entry, err := c.overrideModel(sel)
+	entry, err := c.overrideModel(ctx, sel)
 	if err != nil {
 		return nil, "failed to set up the requested model: " + err.Error()
 	}
@@ -192,7 +192,9 @@ func (c *coordinator) overrideTaskAgent(ctx context.Context, access string, sel 
 	// before the dispatch registers the subagent.
 	var ready errgroup.Group
 	agent, err := c.buildTaskAgent(ctx, &ready, agentCfg, canWrite, func() ModelSet {
-		return ModelSet{Large: entry.current(c), Small: c.subAgentModels().Small}
+		// Background: this resolver outlives the dispatch call — a
+		// refresh on a later turn must not inherit its deadline.
+		return ModelSet{Large: entry.current(context.Background(), c), Small: c.subAgentModels().Small}
 	})
 	if err != nil {
 		return nil, "failed to start a subagent on the requested model: " + err.Error()

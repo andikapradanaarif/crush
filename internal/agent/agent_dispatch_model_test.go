@@ -257,14 +257,14 @@ func TestOverrideModelRefreshedOnRebuild(t *testing.T) {
 	c, _ := newOverrideTestCoordinator(t)
 	ctx := t.Context()
 
-	entry, err := c.overrideModel(config.SelectedModel{Provider: "other", Model: "other-model"})
+	entry, err := c.overrideModel(ctx, config.SelectedModel{Provider: "other", Model: "other-model"})
 	require.NoError(t, err)
-	first := entry.current(c)
+	first := entry.current(ctx, c)
 	require.Equal(t, "other-model", first.ModelCfg.Model)
-	require.Equal(t, fmt.Sprintf("%p", first.Model), fmt.Sprintf("%p", entry.current(c).Model), "no rebuild without a refresh")
+	require.Equal(t, fmt.Sprintf("%p", first.Model), fmt.Sprintf("%p", entry.current(ctx, c).Model), "no rebuild without a refresh")
 
 	require.NoError(t, c.rebuildModels(ctx))
-	second := entry.current(c)
+	second := entry.current(ctx, c)
 	require.Equal(t, "other-model", second.ModelCfg.Model)
 	require.NotEqual(t, fmt.Sprintf("%p", first.Model), fmt.Sprintf("%p", second.Model),
 		"a rebuild must produce a fresh build, not the pre-rebuild one")
@@ -275,7 +275,7 @@ func TestOverrideModelFailureIsNotCached(t *testing.T) {
 	t.Parallel()
 	c, _ := newOverrideTestCoordinator(t)
 
-	_, err := c.overrideModel(config.SelectedModel{Provider: "nope", Model: "x"})
+	_, err := c.overrideModel(t.Context(), config.SelectedModel{Provider: "nope", Model: "x"})
 	require.Error(t, err)
 	require.Empty(t, c.overrideModels)
 }
