@@ -64,12 +64,38 @@ type turnCollapse struct {
 	summaries   map[int64]string
 }
 
+// foldChunkTurns is the ReFold k=3 frontier quantum (#445): the fold
+// set may only grow in three-turn chunks, so a boundary that would
+// fold turn T waits for T's whole chunk — the folded prefix stays
+// byte-stable for the chunk's interior boundaries and prompt caching
+// survives folding (a per-turn fold frontier would re-render the
+// folded region every boundary, the masking-style variant ReFold
+// measured dropping cache hits 84%→23%).
+const foldChunkTurns = 3
+
+// foldFrontier returns the largest turn boundary at or below before
+// that is a whole number of chunks — turns strictly below it are
+// fold-eligible (coverage still gates each). before=3..5 → 3,
+// before=6..8 → 6: the frontier advances once per chunk.
+func foldFrontier(before int64) int64 {
+	return before - before%foldChunkTurns
+}
+
 // resolvePriorTurns applies the mode gates at agent construction:
 // stub/digest print recall pointers and need the recall tool live;
 // summarize renders the entries inline and needs only the notebook.
-// Anything else — including a disabled notebook — resolves verbatim.
-func resolvePriorTurns(mode string, notebookOn, recallOn bool) string {
+// The fold arm (#445) coerces a verbatim resolve to stub — its
+// collapse shape — under the same prerequisites; an explicit
+// stub/digest/summarize mode keeps its own shape and only gains the
+// quantized frontier. Anything else — including a disabled notebook
+// — resolves verbatim.
+func resolvePriorTurns(mode string, notebookOn, recallOn, foldTurns bool) string {
 	if notebookOn && (recallOn || mode == priorTurnsSummarize) {
+		if mode == priorTurnsVerbatim && foldTurns && recallOn {
+			// The fold arm is self-contained: no explicit collapse
+			// mode resolves to stub's shape — pointers need recall.
+			return priorTurnsStub
+		}
 		return mode
 	}
 	return priorTurnsVerbatim

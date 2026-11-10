@@ -344,6 +344,13 @@ type sessionAgent struct {
 	// same way and additionally consolidates each finished turn into
 	// a granularity:turn notebook entry at run end.
 	priorTurns string
+	// foldTurns arms the ReFold-style frontier (#445, options.fold_turns):
+	// the collapsible set quantizes to foldChunkTurns boundaries so the
+	// folded prompt prefix stays byte-stable for the chunk's interior
+	// boundaries — the cache-awareness a per-turn frontier would break.
+	// The arm also runs the fold regardless of pressure engagement —
+	// steady-state token savings are the point, not overflow insurance.
+	foldTurns bool
 	// pressureGate gates the notebook render path — boundary
 	// eviction, the prefix render, and prior-turn collapse — on
 	// estimated request pressure vs. the context window. Below the
@@ -706,6 +713,11 @@ type SessionAgentOptions struct {
 	// — the L4 framing arm: same evidence, same contract, adversarial
 	// frame.
 	FindBugsReview bool
+	// FoldTurns arms the ReFold-style frontier (#445, options.fold_turns):
+	// covered turns fold on a quantized three-turn frontier so the
+	// folded prefix stays byte-stable between moves, and the fold runs
+	// regardless of pressure — steady-state savings, not insurance.
+	FoldTurns bool
 	// Interactive reports whether the run can ask the user —
 	// coordinator's interactive flag threaded through for the gate
 	// degrade branches.
@@ -820,6 +832,7 @@ func NewSessionAgent(
 		ambiguityClarification: opts.AmbiguityClarification,
 		freshReview:            opts.FreshReview,
 		findBugsReview:         opts.FindBugsReview,
+		foldTurns:              opts.FoldTurns,
 		interactive:            opts.Interactive,
 		advisorModel:           opts.AdvisorModel,
 		lspManager:             opts.LSPManager,
@@ -2808,47 +2821,59 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 		a.countNotebookReViews(sessionID, msgs)
 		if engaged {
 			boundary = findSegmentBoundaryByTokenBudget(msgs, budget, segs, processed)
-			// Resolve the collapsible-turn set on this pipeline's
-			// first engaged render holding coverage, then freeze
-			// it: a mid-run coverage commit must not flip a turn
-			// from raw to stub mid-window. The len guard keeps a
-			// pressure-before-coverage render from freezing an
-			// empty set — collapse would otherwise stay locked
-			// out for the run no matter what later commits.
-			// Summarize mode's render payload freezes with it —
-			// same rule for mid-run entry commits, and one entry
-			// query per run rather than per render.
-			if collapse != nil && collapse.Set == nil {
-				if covered := coveredPriorTurns(segs, processed, collapse.Before); len(covered) > 0 {
-					collapse.Set = covered
-					if a.priorTurns == priorTurnsSummarize {
-						// minTurn is the turn AT the boundary —
-						// turns fully below the raw-window floor
-						// never emit a summary, so their entries
-						// are not worth joining. messageTurns
-						// numbering, not a raw user-message
-						// count: a straddled turn keeps its
-						// entries.
-						var minTurn int64
-						if mts := messageTurns(msgs); len(mts) > 0 {
-							if boundary < len(mts) {
-								minTurn = mts[boundary]
-							} else {
-								minTurn = mts[len(mts)-1] + 1
-							}
+		}
+		// Resolve the collapsible-turn set on this pipeline's
+		// first render holding coverage, then freeze it: a
+		// mid-run coverage commit must not flip a turn from raw
+		// to stub mid-window. The len guard keeps a
+		// pressure-before-coverage render from freezing an
+		// empty set — collapse would otherwise stay locked
+		// out for the run no matter what later commits.
+		// Summarize mode's render payload freezes with it —
+		// same rule for mid-run entry commits, and one entry
+		// query per run rather than per render. The fold arm
+		// (#445) widens the gate past engaged — its savings are
+		// steady-state, not overflow insurance — and quantizes
+		// the frontier to whole foldChunkTurns chunks so the
+		// folded prefix stays byte-stable between frontier
+		// moves; a per-turn frontier is the masking variant
+		// whose cache hit ReFold measured collapsing.
+		if collapse != nil && collapse.Set == nil && (engaged || a.foldTurns) {
+			frontier := collapse.Before
+			if a.foldTurns {
+				frontier = foldFrontier(frontier)
+			}
+			if covered := coveredPriorTurns(segs, processed, frontier); len(covered) > 0 {
+				collapse.Set = covered
+				if a.priorTurns == priorTurnsSummarize {
+					// minTurn is the turn AT the boundary —
+					// turns fully below the raw-window floor
+					// never emit a summary, so their entries
+					// are not worth joining. messageTurns
+					// numbering, not a raw user-message
+					// count: a straddled turn keeps its
+					// entries.
+					var minTurn int64
+					if mts := messageTurns(msgs); len(mts) > 0 {
+						if boundary < len(mts) {
+							minTurn = mts[boundary]
+						} else {
+							minTurn = mts[len(mts)-1] + 1
 						}
-						var ok bool
-						collapse.summaries, ok = a.turnSummaries(ctx, sessionID, collapse.Set, minTurn)
-						if !ok && a.stubStats != nil {
-							// A failed fetch renders verbatim —
-							// mark it so a control-shaped prompt
-							// can't pass as a summarize sample in
-							// telemetry.
-							a.stubStats.Update(sessionID, func(s *stubStats) { s.SummaryFetchFailed = true })
-						}
+					}
+					var ok bool
+					collapse.summaries, ok = a.turnSummaries(ctx, sessionID, collapse.Set, minTurn)
+					if !ok && a.stubStats != nil {
+						// A failed fetch renders verbatim —
+						// mark it so a control-shaped prompt
+						// can't pass as a summarize sample in
+						// telemetry.
+						a.stubStats.Update(sessionID, func(s *stubStats) { s.SummaryFetchFailed = true })
 					}
 				}
 			}
+		}
+		if engaged {
 			prefix, perr := a.notebookPrefix(ctx, sessionID, msgs, boundary, boundarySegmentKey(segs, boundary), segs, collapse)
 			history = append(history, prefix...)
 			if perr != nil {

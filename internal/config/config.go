@@ -583,6 +583,13 @@ type Options struct {
 	// (#443). Same evidence set and verdict contract; only the frame
 	// changes. Applies only when fresh_review is armed.
 	FindBugsReview *bool `json:"find_bugs_review,omitempty" jsonschema:"description=Swap the fresh-context reviewer to the adversarial find-bugs framing: same evidence and verdict contract but the reviewer hunts for ways the work fails instead of confirming completeness. Experimental.,default=false"`
+	// FoldTurns arms the ReFold-style reversible fold of finished
+	// turns (#445, R1.5 L6): covered turns collapse to recall-backed
+	// stubs on a k=3 quantized frontier so the folded prefix stays
+	// byte-stable between frontier moves — the cache-aware rendering
+	// a per-turn fold would destroy (ReFold's masking variant dropped
+	// hits 84%→23%). Needs notebook + recall live, same as stub mode.
+	FoldTurns *bool `json:"fold_turns,omitempty" jsonschema:"description=Fold finished covered turns into recall-backed stubs on a quantized three-turn frontier so the folded prompt prefix stays stable and hot for prompt caching. Requires notebook and recall. Experimental.,default=false"`
 	// FailureMemory injects the <open_failures> tail — commands that
 	// failed in this workspace and have not passed since — independent
 	// of the turn_context tier so its contribution can be measured on
@@ -1850,6 +1857,18 @@ func (o *Options) FindBugsReviewEnabled() bool {
 		return false
 	}
 	return *o.FindBugsReview
+}
+
+// FoldTurnsEnabled returns the resolved turn-folding setting,
+// defaulting to false — the ReFold arm (#445, R1.5 L6) is its own
+// experiment and stays opt-in until the paired dev-split read
+// decides it (expectation: tokens −15% to −40% at equal pass with
+// cache hits intact).
+func (o *Options) FoldTurnsEnabled() bool {
+	if o == nil || o.FoldTurns == nil {
+		return false
+	}
+	return *o.FoldTurns
 }
 
 // NotebookMemoryServerName returns the resolved memory server name,

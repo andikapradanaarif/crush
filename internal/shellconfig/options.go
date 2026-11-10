@@ -224,6 +224,7 @@ var optionSpecs = map[string]optionSpec{
 	"evidence-gate":            {jsonKey: "evidence_gate", kind: optBool},
 	"fresh-review":             {jsonKey: "fresh_review", kind: optBool},
 	"find-bugs-review":         {jsonKey: "find_bugs_review", kind: optBool},
+	"fold-turns":               {jsonKey: "fold_turns", kind: optBool},
 	"referent-memory":          {jsonKey: "referent_memory", kind: optBool},
 	"session-memory":           {jsonKey: "session_memory", kind: optBool},
 	"memory-telemetry":         {jsonKey: "memory_telemetry", kind: optBool},
