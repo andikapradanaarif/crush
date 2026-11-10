@@ -189,6 +189,10 @@ type edgeTrigger struct {
 	// — the verify-loop's kept-failing check, or whatever verdict
 	// the run last produced before tripping. Nil when no check ran.
 	lastCheck *observedBash
+	// checkFallback is a decorator-minted check outcome (write-tool
+	// verification metadata) used when no bash verdict exists — a
+	// verify-loop that tripped on a decorator-run check.
+	checkFallback *gateCheckOutcome
 }
 
 // deferredTrigger is a firing trigger that lost its boundary's prompt
@@ -1321,13 +1325,13 @@ func (a *sessionAgent) resolveStallEdge(ctx context.Context, call SessionAgentCa
 	}
 	// Headless degrade — the question can't be asked, so the same
 	// deterministic handoff payload lands on the final message where
-	// RunComplete.Text picks it up.
-	a.pullEscalationHandoff(ctx, call, t)
-	t.assistant.AppendContent("\n\nRun state:\n" + escalationHandoffLines(t))
-	// Detached like the firing rows — the blocker report is terminal
-	// evidence and must land even on a dead run context.
+	// RunComplete.Text picks it up. The pull shares the write's
+	// detached context — the blocker report is terminal evidence and
+	// must land even on a dead run context.
 	wctx, cancel := detachedWriteCtx(ctx)
 	defer cancel()
+	a.pullEscalationHandoff(wctx, call, t)
+	t.assistant.AppendContent("\n\nRun state:\n" + escalationHandoffLines(t))
 	if err := a.messages.Update(wctx, *t.assistant); err != nil {
 		slog.Error("Failed to record stall blocker report", "error", err, "session_id", call.SessionID)
 	} else if err := a.messages.FlushAll(wctx); err != nil {
@@ -1677,13 +1681,13 @@ func (a *sessionAgent) resolveVerifyLoopEdge(ctx context.Context, call SessionAg
 		return
 	}
 	// Headless degrade — same deterministic handoff payload lands on
-	// the final message where RunComplete.Text picks it up.
-	a.pullEscalationHandoff(ctx, call, t)
-	t.assistant.AppendContent("\n\nRun state:\n" + escalationHandoffLines(t))
-	// Detached like the firing rows — the blocker report is terminal
-	// evidence and must land even on a dead run context.
+	// the final message where RunComplete.Text picks it up. The pull
+	// shares the write's detached context: terminal evidence must
+	// land even on a dead run context.
 	wctx, cancel := detachedWriteCtx(ctx)
 	defer cancel()
+	a.pullEscalationHandoff(wctx, call, t)
+	t.assistant.AppendContent("\n\nRun state:\n" + escalationHandoffLines(t))
 	if err := a.messages.Update(wctx, *t.assistant); err != nil {
 		slog.Error("Failed to record verify-loop blocker report", "error", err, "session_id", call.SessionID)
 	} else if err := a.messages.FlushAll(wctx); err != nil {
@@ -1870,12 +1874,13 @@ func (a *sessionAgent) resolveBurnWatchEdge(ctx context.Context, call SessionAge
 	if t.hint != edgeOutcomeDegraded || t.assistant == nil {
 		return
 	}
-	a.pullEscalationHandoff(ctx, call, t)
-	t.assistant.AppendContent("\n\n" + burnWatchAssumption(t) + "\n\nRun state:\n" + escalationHandoffLines(t))
-	// Detached like the firing rows — the assumption is terminal
-	// evidence and must land even on a dead run context.
+	// The pull shares the write's detached context — the assumption
+	// and handoff are terminal evidence and must land even on a dead
+	// run context.
 	wctx, cancel := detachedWriteCtx(ctx)
 	defer cancel()
+	a.pullEscalationHandoff(wctx, call, t)
+	t.assistant.AppendContent("\n\n" + burnWatchAssumption(t) + "\n\nRun state:\n" + escalationHandoffLines(t))
 	if err := a.messages.Update(wctx, *t.assistant); err != nil {
 		slog.Error("Failed to record burn-watch assumption", "error", err, "session_id", call.SessionID)
 	} else if err := a.messages.FlushAll(wctx); err != nil {

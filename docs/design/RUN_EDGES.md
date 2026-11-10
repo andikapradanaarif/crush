@@ -89,7 +89,13 @@ Escalation frequency is budgeted like repairs — one per distinct
 blocker — because an unbudgeted escalation edge is nagging with a
 type signature. Headless (`crush run`) degrades both rows to
 "state the blocker + chosen option, proceed": the edge still fires,
-the question becomes a logged assumption.
+the question becomes a logged assumption. Every escalation prompt
+carries a deterministic run-state handoff (#444) — goal, progress,
+what was tried, verification state, blocker — pulled in resolve from
+the transcript and step evidence, so the question relays facts rather
+than the model's summary of them; the degrade path appends the same
+payload to the final assistant message where `RunComplete.Text`
+surfaces it.
 
 **Ordering and scope.** `runEdgeSet` order is load-bearing —
 verification's resolve must precede todos' scan (resolved checks

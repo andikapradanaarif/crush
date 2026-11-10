@@ -42,7 +42,7 @@ func TestEscalationHandoffLines(t *testing.T) {
 		lastCheck: &observedBash{
 			command: "go test ./internal/parse",
 			isError: true,
-			output:  "--- FAIL: TestLex\nexpected token, got EOF",
+			output:  "=== RUN TestLex\n=== RUN TestLex/case_1\n=== RUN TestLex/case_2\n=== RUN TestParse\n=== RUN TestParse/case_1\n=== RUN TestParse/case_2\n=== RUN TestParse/case_3\n--- FAIL: TestLex (0.02s)\n    lex_test.go:41: expected token, got EOF\nFAIL\tgithub.com/x/parse",
 		},
 	}
 	out := escalationHandoffLines(tr)
@@ -51,10 +51,57 @@ func TestEscalationHandoffLines(t *testing.T) {
 	require.Contains(t, out, "- Tried: edit ×1")
 	require.Contains(t, out, "bash ×")
 	require.Contains(t, out, "- Verification: `go test ./internal/parse` failed")
-	require.Contains(t, out, "tail: --- FAIL: TestLex")
+	// The tail is the output's END — the failure summary — with the
+	// head's early RUN banners cut.
+	require.Contains(t, out, "expected token, got EOF")
+	require.NotContains(t, out, "=== RUN TestLex")
 	require.Contains(t, out, "- Blocker: Stopped: bash repeated")
 	// The prompt-side section prepends its relay framing.
 	require.True(t, strings.HasPrefix(escalationHandoffSection(tr), "Run state for the handoff"))
+}
+
+func TestEscalationHandoffLinesSanitizes(t *testing.T) {
+	t.Parallel()
+
+	tr := &edgeTrigger{
+		lastCheck: &observedBash{
+			// A multi-line command flattens into the bullet — it must
+			// not shatter the run-state block's line structure.
+			command: "for f in parse lex; do\n  go test ./$f\ndone",
+			isError: true,
+			output:  "line one\nline two",
+		},
+		writeSet: []string{
+			"f0.go", "f1.go", "f2.go", "f3.go", "f4.go",
+			"f5.go", "f6.go", "f7.go", "f8.go", "f9.go",
+		},
+	}
+	out := escalationHandoffLines(tr)
+	require.Contains(t, out, "for f in parse lex; do   go test ./$f done")
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		require.True(t, strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "  "),
+			"payload line shattered: %q", line)
+	}
+	// A wide write-set caps at eight shown paths.
+	require.Contains(t, out, "+2 more")
+	require.Contains(t, out, "f7.go")
+	require.NotContains(t, out, "f8.go")
+	require.NotContains(t, out, "f9.go")
+}
+
+func TestEscalationHandoffLinesCheckFallback(t *testing.T) {
+	t.Parallel()
+
+	// A decorator-minted check outcome renders when no bash verdict
+	// ran — the verify-loop case where the write tool reported the
+	// failing check itself.
+	tr := &edgeTrigger{
+		checkFallback: &gateCheckOutcome{
+			check: message.VerificationCheck{Check: "verify:build", State: "failed", Detail: "exit 1"},
+		},
+	}
+	out := escalationHandoffLines(tr)
+	require.Contains(t, out, "- Verification: check `verify:build` failed — exit 1")
 }
 
 func TestEscalationHandoffLinesSparse(t *testing.T) {
@@ -144,6 +191,75 @@ func TestStallEscalatePromptCarriesHandoff(t *testing.T) {
 	require.Contains(t, p, "- Verification: no check ran this run")
 	require.Contains(t, p, "- Blocker: Stopped:")
 	require.Contains(t, p, "question-tool")
+}
+
+func TestVerifyLoopEscalatePromptCarriesHandoff(t *testing.T) {
+	t.Parallel()
+
+	a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+	a.ambiguityClarification = true
+	a.interactive = true
+	a.tools = csync.NewSliceFrom([]fantasy.AgentTool{
+		&fakeTool{name: tools.TodosToolName},
+		&fakeTool{name: tools.QuestionToolName},
+	})
+	_, err := svc.Create(t.Context(), sessionID, message.CreateMessageParams{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.TextContent{Text: "unblock the release build"}},
+	})
+	require.NoError(t, err)
+
+	queued := runEdgesForTest(a, t.Context(),
+		SessionAgentCall{SessionID: sessionID, RepairAttempts: 1},
+		edgeInput{result: verifyLoopResult(), verifyLoop: true})
+	require.True(t, queued)
+	q, _ := a.messageQueue.Get(sessionID)
+	require.Len(t, q, 1)
+	p := q[0].Prompt
+	require.True(t, strings.HasPrefix(p, verifyLoopEscalatePrefix))
+	require.Contains(t, p, "- Goal: unblock the release build")
+	require.Contains(t, p, "wrote: main.go")
+	require.Contains(t, p, "- Blocker: Stopped:")
+}
+
+func TestBurnWatchDegradeCarriesHandoff(t *testing.T) {
+	t.Parallel()
+
+	a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+	a.ambiguityClarification = true
+	_, err := svc.Create(t.Context(), sessionID, message.CreateMessageParams{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.TextContent{Text: "survey the auth flow"}},
+	})
+	require.NoError(t, err)
+
+	// A write-less high-spend run: enough steps to trip burn-watch on
+	// step count alone, ending on a clean stop.
+	var steps []fantasy.StepResult
+	for i := 0; i <= burnWatchStepsThreshold; i++ {
+		steps = append(steps, stepWith(fantasy.FinishReasonToolCalls,
+			fantasy.ToolCallContent{
+				ToolCallID: fmt.Sprintf("tc-v%d", i), ToolName: "view",
+				Input: `{"file_path":"main.go"}`,
+			},
+			fantasy.ToolResultContent{
+				ToolCallID: fmt.Sprintf("tc-v%d", i), ToolName: "view",
+				Result: fantasy.ToolResultOutputContentText{Text: "content"},
+			},
+		))
+	}
+	steps = append(steps, stepWith(fantasy.FinishReasonStop, fantasy.TextContent{Text: "done"}))
+
+	asst := &message.Message{Role: message.Assistant}
+	queued := runEdgesForTest(a, t.Context(),
+		SessionAgentCall{SessionID: sessionID, NonInteractive: true},
+		edgeInput{result: &fantasy.AgentResult{Steps: steps}, currentAssistant: asst})
+	require.False(t, queued)
+	text := asst.Content().Text
+	require.Contains(t, text, "Burn-watch:")
+	require.Contains(t, text, "Run state:")
+	require.Contains(t, text, "- Goal: survey the auth flow")
+	require.Contains(t, text, "no file writes")
 }
 
 func TestStallEscalateDegradeCarriesHandoff(t *testing.T) {
