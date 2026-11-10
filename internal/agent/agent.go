@@ -450,6 +450,11 @@ type sessionAgent struct {
 	// reviewer model is always the session's own large slot so the
 	// A/B isolates context freshness, not model strength (#442).
 	freshReview bool
+	// findBugsReview swaps the reviewer's stance from confirming
+	// completeness to hunting failure (options.find_bugs_review,
+	// #443) — the L4 framing arm. Evidence and contract stay
+	// identical so the paired read isolates the frame.
+	findBugsReview bool
 	// interactive records whether the run can ask the user — the
 	// mode the clarification gates degrade on.
 	interactive bool
@@ -696,6 +701,11 @@ type SessionAgentOptions struct {
 	// judged by the solver model in a context that never saw the
 	// transcript or the completion claim (options.fresh_review).
 	FreshReview bool
+	// FindBugsReview swaps the reviewer's stance from confirming
+	// completeness to hunting failure (#443, options.find_bugs_review)
+	// — the L4 framing arm: same evidence, same contract, adversarial
+	// frame.
+	FindBugsReview bool
 	// Interactive reports whether the run can ask the user —
 	// coordinator's interactive flag threaded through for the gate
 	// degrade branches.
@@ -809,6 +819,7 @@ func NewSessionAgent(
 		agentID:                opts.AgentID,
 		ambiguityClarification: opts.AmbiguityClarification,
 		freshReview:            opts.FreshReview,
+		findBugsReview:         opts.FindBugsReview,
 		interactive:            opts.Interactive,
 		advisorModel:           opts.AdvisorModel,
 		lspManager:             opts.LSPManager,

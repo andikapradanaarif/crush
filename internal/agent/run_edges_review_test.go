@@ -208,6 +208,35 @@ func TestFreshReviewVerdicts(t *testing.T) {
 	})
 }
 
+func TestFreshReviewFraming(t *testing.T) {
+	t.Parallel()
+
+	t.Run("find-bugs arm sends the adversarial prompt", func(t *testing.T) {
+		t.Parallel()
+		spy := &advisorSpyModel{text: "VERDICT: PASS"}
+		a, _, sessionID := reviewAgent(t, spy)
+		a.findBugsReview = true
+		v := a.reviewFreshEyes(t.Context(), SessionAgentCall{SessionID: sessionID},
+			&edgeTrigger{steps: writeResult().Steps})
+		require.True(t, v.passed)
+		require.Contains(t, spy.prompt, "hunting for the ways")
+		require.NotContains(t, spy.prompt, "judging whether")
+		require.Contains(t, v.detail, "framing=findbugs")
+	})
+
+	t.Run("default arm sends the confirm prompt", func(t *testing.T) {
+		t.Parallel()
+		spy := &advisorSpyModel{text: "VERDICT: PASS"}
+		a, _, sessionID := reviewAgent(t, spy)
+		v := a.reviewFreshEyes(t.Context(), SessionAgentCall{SessionID: sessionID},
+			&edgeTrigger{steps: writeResult().Steps})
+		require.True(t, v.passed)
+		require.Contains(t, spy.prompt, "judging whether")
+		require.NotContains(t, spy.prompt, "hunting for the ways")
+		require.Contains(t, v.detail, "framing=confirm")
+	})
+}
+
 func TestParseFreshVerdict(t *testing.T) {
 	t.Parallel()
 	require.True(t, parseFreshVerdict("VERDICT: PASS").passed)

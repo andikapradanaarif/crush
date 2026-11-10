@@ -53,6 +53,21 @@ const freshReviewSystemPrompt = "You are a fresh-context reviewer judging whethe
 	"first line. For ISSUES follow with one finding per line: file — what is wrong — why it fails " +
 	"the task."
 
+// freshReviewFindBugsPrompt is the L4 adversarial arm (#443): the
+// same reviewer, evidence set, and verdict contract — reframed from
+// confirming completeness to hunting failure. The find-bugs frame
+// is the measured treatment for agentic overconfidence (up to
+// −15pp); the A/B holds everything but the stance constant, so the
+// paired read attributes any PASS-rate shift to framing alone.
+const freshReviewFindBugsPrompt = "You are a fresh-context reviewer hunting for the ways a coding " +
+	"task's work fails. You see only the task, the file list, the workspace diff, and the check " +
+	"output the run observed — never the worker's transcript or its report of done. Assume the " +
+	"work is wrong until the evidence proves it right: look for wrong behavior, missing " +
+	"requirements, failing checks, incomplete work. No style nits and no speculative " +
+	"improvements. Reply with VERDICT: PASS on the first line only if you find nothing that " +
+	"fails the task; otherwise VERDICT: ISSUES. For ISSUES follow with one finding per " +
+	"line: file — what is wrong — why it fails the task."
+
 // freshVerdict is the deterministic parse of the reviewer's reply.
 type freshVerdict struct {
 	// issues is the rendered findings text — non-empty fires the edge.
@@ -169,7 +184,20 @@ func (a *sessionAgent) markDisproofExit(ctx context.Context, _ SessionAgentCall,
 // review bundle and returns the parsed verdict. The solver — not a
 // configured stronger model — is deliberate: the A/B arm isolates
 // context freshness as the variable, not model strength.
-func (a *sessionAgent) reviewFreshEyes(ctx context.Context, call SessionAgentCall, t *edgeTrigger) freshVerdict {
+func (a *sessionAgent) reviewFreshEyes(ctx context.Context, call SessionAgentCall, t *edgeTrigger) (v freshVerdict) {
+	// The L4 arm (#443) swaps only the reviewer's stance — the
+	// evidence bundle and the verdict contract stay identical so
+	// the paired read isolates framing. framing= lands in the
+	// firing row's trigger_detail on every outcome — verdict or
+	// degrade — for the arm-split count.
+	framing := "confirm"
+	systemPrompt := freshReviewSystemPrompt
+	if a.findBugsReview {
+		framing = "findbugs"
+		systemPrompt = freshReviewFindBugsPrompt
+	}
+	defer func() { v.detail = "framing=" + framing + " " + v.detail }()
+
 	if a.models == nil {
 		return freshVerdict{degraded: true, detail: "verdict=degraded reason=no-models"}
 	}
@@ -187,7 +215,7 @@ func (a *sessionAgent) reviewFreshEyes(ctx context.Context, call SessionAgentCal
 	}
 	ag := fantasy.NewAgent(
 		model.Model,
-		fantasy.WithSystemPrompt(freshReviewSystemPrompt),
+		fantasy.WithSystemPrompt(systemPrompt),
 		fantasy.WithMaxOutputTokens(tok),
 		fantasy.WithUserAgent(userAgent),
 	)

@@ -862,6 +862,11 @@
           "description": "Arm the fresh-context completion review: a clean-stopping run over real writes gets its task plus workspace diff plus observed check output judged by the solver model without the transcript or completion claim. Experimental.",
           "default": false
         },
+        "find_bugs_review": {
+          "type": "boolean",
+          "description": "Swap the fresh-context reviewer to the adversarial find-bugs framing: same evidence and verdict contract but the reviewer hunts for ways the work fails instead of confirming completeness. Experimental.",
+          "default": false
+        },
         "failure_memory": {
           "type": "boolean",
           "description": "Read unresolved command/failure memory: inject the \u003copen_failures\u003e tail section and arm the reconcile run-edge (open failures the run observed still open block done-ness). Recording happens regardless; this gates the read side. Experimental.",

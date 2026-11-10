@@ -147,6 +147,21 @@ gates it; the gated row records would-have-fired verdicts for the
 paired read. It runs last in the edge set, judging the
 would-be-final state after every other edge's resolve.
 
+**The verify-gate's frame is itself an arm** (#443, R1.5 L4). The
+reviewer's job is stated two ways behind `options.find_bugs_review`:
+the control prompt asks it to judge whether the work *is complete* —
+a success-confirmation stance — and the treatment prompt tells it to
+hunt for the ways the work *fails*. The agentic-overconfidence
+evidence (find-bugs framing cuts self-reported success up to 15pp)
+predicts the treatment's ISSUES rate rises on genuinely wrong
+completions while matching on clean ones. The A/B is deliberately
+minimal: identical evidence bundle, identical verdict contract,
+identical degrade ladder — only the stance sentence changes, and
+every firing row's `trigger_detail` records `framing=confirm|findbugs`
+so the paired read splits verdicts by arm. The arm applies only when
+`fresh_review` is on; off-arm sessions run the control framing by
+default.
+
 **Ordering and scope.** `runEdgeSet` order is load-bearing —
 verification's resolve must precede todos' scan (resolved checks
 feed the done-definition); new rows declare where they sit rather

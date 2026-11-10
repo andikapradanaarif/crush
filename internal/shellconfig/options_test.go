@@ -120,6 +120,23 @@ func TestOption_FreshReview(t *testing.T) {
 	require.Equal(t, true, opts["fresh_review"])
 }
 
+func TestOption_FindBugsReview(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	script := `option find-bugs-review true`
+	path := filepath.Join(dir, "crushrc")
+
+	jsonBytes, err := LoadShellConfig(t.Context(), path, []byte(script))
+	require.NoError(t, err)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(jsonBytes, &result))
+
+	opts := result["options"].(map[string]any)
+	require.Equal(t, true, opts["find_bugs_review"])
+}
+
 func TestOption_List(t *testing.T) {
 	t.Parallel()
 
