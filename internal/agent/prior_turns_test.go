@@ -1021,22 +1021,71 @@ func TestResolvePriorTurns_Gates(t *testing.T) {
 		mode       string
 		notebookOn bool
 		recallOn   bool
+		foldTurns  bool
 		want       string
 	}{
-		{"summarize without recall survives", priorTurnsSummarize, true, false, priorTurnsSummarize},
-		{"stub without recall degrades", priorTurnsStub, true, false, priorTurnsVerbatim},
-		{"digest without recall degrades", priorTurnsDigest, true, false, priorTurnsVerbatim},
-		{"summarize with recall", priorTurnsSummarize, true, true, priorTurnsSummarize},
-		{"stub with recall", priorTurnsStub, true, true, priorTurnsStub},
-		{"summarize without notebook degrades", priorTurnsSummarize, false, true, priorTurnsVerbatim},
-		{"verbatim stays verbatim", priorTurnsVerbatim, true, true, priorTurnsVerbatim},
+		{"summarize without recall survives", priorTurnsSummarize, true, false, false, priorTurnsSummarize},
+		{"stub without recall degrades", priorTurnsStub, true, false, false, priorTurnsVerbatim},
+		{"digest without recall degrades", priorTurnsDigest, true, false, false, priorTurnsVerbatim},
+		{"summarize with recall", priorTurnsSummarize, true, true, false, priorTurnsSummarize},
+		{"stub with recall", priorTurnsStub, true, true, false, priorTurnsStub},
+		{"summarize without notebook degrades", priorTurnsSummarize, false, true, false, priorTurnsVerbatim},
+		{"verbatim stays verbatim", priorTurnsVerbatim, true, true, false, priorTurnsVerbatim},
+		{"fold arm coerces verbatim to stub", priorTurnsVerbatim, true, true, true, priorTurnsStub},
+		{"fold arm needs recall", priorTurnsVerbatim, true, false, true, priorTurnsVerbatim},
+		{"fold arm needs the notebook", priorTurnsVerbatim, false, true, true, priorTurnsVerbatim},
+		{"fold arm keeps an explicit mode", priorTurnsDigest, true, true, true, priorTurnsDigest},
+		{"fold arm keeps summarize", priorTurnsSummarize, true, true, true, priorTurnsSummarize},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tc.want, resolvePriorTurns(tc.mode, tc.notebookOn, tc.recallOn))
+			require.Equal(t, tc.want, resolvePriorTurns(tc.mode, tc.notebookOn, tc.recallOn, tc.foldTurns))
 		})
 	}
+}
+
+// The fold frontier quantizes to whole chunks — the set can only
+// grow when a full foldChunkTurns of new turns completes, so the
+// folded prefix stays byte-stable for the chunk's interior
+// boundaries.
+func TestFoldFrontier_Quantizes(t *testing.T) {
+	t.Parallel()
+	for before, want := range map[int64]int64{
+		0: 0, 1: 0, 2: 0,
+		3: 3, 4: 3, 5: 3,
+		6: 6, 7: 6, 8: 6,
+		9: 9,
+	} {
+		require.Equal(t, want, foldFrontier(before), "before=%d", before)
+	}
+}
+
+// A covered turn inside the frontier folds; one at or above it waits
+// for its chunk — the frontier, not coverage, decides fold timing.
+func TestCoveredPriorTurns_FoldFrontier(t *testing.T) {
+	t.Parallel()
+	// Turns 1..5 all covered — coverage is not the variable under
+	// test, the frontier is.
+	segs := make([]segment, 0, 5)
+	processed := make(map[segmentKey]bool)
+	for turn := int64(1); turn <= 5; turn++ {
+		segs = append(segs, segment{turn: turn, number: 0})
+		processed[segmentKey{turn: turn, segment: 0}] = true
+	}
+
+	// before=5 holds the frontier at 3: turns 1-2 fold, 3-5 wait.
+	covered := coveredPriorTurns(segs, processed, foldFrontier(5))
+	require.Equal(t, map[int64]bool{1: true, 2: true}, covered)
+
+	// before=6 completes the chunk: turns 3-5 join the fold.
+	covered = coveredPriorTurns(segs, processed, foldFrontier(6))
+	require.Equal(t, map[int64]bool{1: true, 2: true, 3: true, 4: true, 5: true}, covered)
+
+	// The unquantized path folds every covered turn below before —
+	// the per-turn frontier the arm replaces.
+	covered = coveredPriorTurns(segs, processed, 5)
+	require.Equal(t, map[int64]bool{1: true, 2: true, 3: true, 4: true}, covered)
 }
 
 // A result landing in a collapsed turn whose call sits in a verbatim

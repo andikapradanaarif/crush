@@ -29,6 +29,24 @@ shipped architecture diverged in ways that matter to readers:
   `notebook_prior_turns`: `verbatim` (default), `stub`, `digest`,
   `summarize` (experimental — replaces the turn span with its entries
   inline; PR #96).
+- **Chunked fold frontier** (`fold_turns`, #445 — R1.5 L6, experimental).
+  The ReFold arm folds covered finished turns on a *quantized* frontier:
+  turns below `foldFrontier(before) = before − before mod 3` are
+  fold-eligible, so the fold set advances only once per three-turn chunk
+  and the folded prefix stays byte-stable for the chunk's interior
+  boundaries. A per-turn frontier re-renders the folded region every
+  boundary — ReFold's masking variant measured cache hits collapsing
+  84%→23%, the exact failure the quantum exists to prevent. The fold
+  also runs regardless of pressure engagement (steady-state savings are
+  the point, not overflow insurance); coverage still gates each turn
+  individually, and stubs keep their `recall("result:<id>")` recovery
+  path — reversible by construction. With no explicit
+  `notebook_prior_turns` mode the arm coerces to `stub`; an explicit
+  `stub`/`digest`/`summarize` keeps its collapse shape and gains only
+  the quantized frontier. Acceptance is a paired dev-split read:
+  tokens −15% to −40% at equal pass *with the cache-hit rate reported*
+  — a variant that buys tokens by killing prefix cache is a rejected
+  variant.
 - **Adaptive raw window.** The verbatim tail is bounded by
   `notebook_raw_token_budget` (default 25K), the rendered prefix by
   `notebook_max_tokens` (default 100K) — see "adaptive by token budget"

@@ -867,6 +867,11 @@
           "description": "Swap the fresh-context reviewer to the adversarial find-bugs framing: same evidence and verdict contract but the reviewer hunts for ways the work fails instead of confirming completeness. Experimental.",
           "default": false
         },
+        "fold_turns": {
+          "type": "boolean",
+          "description": "Fold finished covered turns into recall-backed stubs on a quantized three-turn frontier so the folded prompt prefix stays stable and hot for prompt caching. Requires notebook and recall. Experimental.",
+          "default": false
+        },
         "failure_memory": {
           "type": "boolean",
           "description": "Read unresolved command/failure memory: inject the \u003copen_failures\u003e tail section and arm the reconcile run-edge (open failures the run observed still open block done-ness). Recording happens regardless; this gates the read side. Experimental.",

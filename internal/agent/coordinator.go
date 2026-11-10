@@ -1473,7 +1473,8 @@ func (c *coordinator) buildAgentWithModels(ctx context.Context, ready *errgroup.
 	// notebook.
 	notebookOn := c.cfg.Config().Options.NotebookIsEnabled()
 	recallOn := slices.Contains(agent.AllowedTools, notebooktool.RecallToolName)
-	priorTurns := resolvePriorTurns(c.cfg.Config().Options.NotebookPriorTurnsMode(), notebookOn, recallOn)
+	foldTurns := c.cfg.Config().Options.FoldTurnsEnabled()
+	priorTurns := resolvePriorTurns(c.cfg.Config().Options.NotebookPriorTurnsMode(), notebookOn, recallOn, foldTurns)
 	// Sub-agents get no telemetry writer — the call site re-checks
 	// isSubAgent, so this only avoids handing them a writer they
 	// never use.
@@ -1532,6 +1533,7 @@ func (c *coordinator) buildAgentWithModels(ctx context.Context, ready *errgroup.
 		AmbiguityClarification: c.cfg.Config().Options.AmbiguityClarificationEnabled(),
 		FreshReview:            c.cfg.Config().Options.FreshReviewEnabled(),
 		FindBugsReview:         c.cfg.Config().Options.FindBugsReviewEnabled(),
+		FoldTurns:              foldTurns,
 		Interactive:            c.interactive,
 		AdvisorModel:           c.advisorModelFn(sessionModels, c.cfg.Config().Options),
 		LSPManager:             c.lspManager,
