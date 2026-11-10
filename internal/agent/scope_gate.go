@@ -521,8 +521,13 @@ func (g *scopeGate) confirm(ctx context.Context, obs gateObservation) (proceed b
 	switch {
 	case len(obs.missing) > 0:
 		label = "Evidence check"
-		text = fmt.Sprintf("The agent tried to write files it had not read — %s — and bounced %d times on the read-evidence requirement. Allow the write anyway?",
-			strings.Join(obs.missing, ", "), obs.evBounces)
+		shown, suffix := obs.missing, ""
+		if len(shown) > 3 {
+			suffix = fmt.Sprintf(", and %d more", len(shown)-3)
+			shown = shown[:3]
+		}
+		text = fmt.Sprintf("The agent tried to write files it had not read — %s%s — and bounced %d times on the read-evidence requirement. Allow the write anyway?",
+			strings.Join(shown, ", "), suffix, obs.evBounces)
 		description = "An evidence-conditioned write kept missing its evidence — the files were never read this session. " +
 			"Allowing runs the write anyway; you can also narrow the scope or stop to restate the task."
 	default:
@@ -600,7 +605,15 @@ func (t *scopeGateTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy
 		if err == nil && !resp.IsError {
 			// A plan declaration satisfies the gate only once a
 			// validating list has actually landed — a write the tool
-			// rejected must not count as a declaration.
+			// rejected must not count as a declaration. The resolve
+			// is global, covering the evidence arm too — a declared
+			// plan is the explicit evidence commitment, and
+			// declaring every item's evidence_paths costs more than
+			// reading one file. Deliberate escape, named for the
+			// experiment: if bounce telemetry shows models
+			// route around reads by declaring instead, the arm
+			// tightens to per-path injection of evidence_paths
+			// into the authored set.
 			if call.Name == tools.TodosToolName && planCallResolves(call.Input) {
 				t.gate.resolve(ctx)
 			}

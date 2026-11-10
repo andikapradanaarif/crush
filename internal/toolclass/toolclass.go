@@ -98,6 +98,38 @@ func maskCommand(command string) string {
 	return maskHeredocBodies(command, masked)
 }
 
+// commentStripped blanks unquoted comments — `#` to end of line —
+// position-preserving like maskCommand. A `#` that survives
+// maskCommand is unquoted by construction; bash comments start only
+// at word start (position 0, after whitespace, or after a
+// metachar), so mid-word forms (`a#b`, `${x#y}`, `$#`) and
+// quote-glued forms (`"x"#y`) survive. Without this a separator
+// inside a comment (`go build # TODO: sed -i …; tee log`) splits a
+// phantom segment and comments feed the operand scans — both
+// manufacture targets for writes that never happen.
+func commentStripped(command string) string {
+	masked := maskCommand(command)
+	out := []byte(command)
+	for i := 0; i < len(masked); i++ {
+		if masked[i] != '#' {
+			continue
+		}
+		if i > 0 {
+			// Boundary check on the original: a blanked quote span
+			// looks like whitespace in masked, but `"x"#y` glues
+			// mid-word all the same.
+			prev := command[i-1]
+			if !strings.ContainsRune(" \t\n;|&()<>", rune(prev)) {
+				continue
+			}
+		}
+		for j := i; j < len(masked) && masked[j] != '\n'; j++ {
+			out[j] = ' '
+		}
+	}
+	return string(out)
+}
+
 // maskHeredocBodies blanks each heredoc body — from the line after
 // the << token to its delimiter line — so a `>` inside body text is
 // not a redirect. An unterminated heredoc masks to end of command,
@@ -208,6 +240,10 @@ func BashRedirectTargets(command string) []string {
 // that was actually written. Without it every real target counts —
 // `> $OUT` is still a mutation even when its path can't be bound.
 func bashRedirectTargets(command string, concreteOnly bool) []string {
+	// `>` inside a comment is literal text (`cmd #> f` writes
+	// nothing); strip before the mask so the operator scan never
+	// sees it.
+	command = commentStripped(command)
 	masked := maskCommand(command)
 	var out []string
 	for _, loc := range redirectOpRe.FindAllStringIndex(masked, -1) {
@@ -283,7 +319,8 @@ func concreteRedirectTarget(target string) bool {
 // mv, rm, chmod, git plumbing — carry no read-evidence expectation
 // and yield no targets. The scan is deliberately conservative: a
 // writer it cannot see (patch diffs, make targets, `bash -c`
-// scripts, variable file lists) passes un-gated rather than guess.
+// scripts, `xargs`/`find -exec` operand feeds, variable file
+// lists) passes un-gated rather than guess.
 func BashEditTargets(command string) []string {
 	out := bashRedirectTargets(command, true)
 	seen := make(map[string]bool, len(out))
@@ -357,24 +394,27 @@ func isEnvAssign(word string) bool {
 
 // maskedSegments splits a command into simple-command segments on
 // unquoted ; | & and newlines. Positions come from the quote-masked
-// form so separators inside literals (`echo 'a; b'`) never split;
-// the returned segments slice the ORIGINAL command text. Command
-// substitutions like `$(sed -i 's/x/y/' f)` survive unmasked, so
-// writers nested in substitutions still surface as segments.
+// form so separators inside literals (`echo 'a; b'`) never split,
+// and comments strip first so a `#` inside one manufactures no
+// segment or operands; the returned segments slice the
+// comment-stripped text. Command substitutions like
+// `$(sed -i 's/x/y/' f)` survive unmasked, so writers nested in
+// substitutions still surface as segments.
 func maskedSegments(command string) []string {
-	masked := maskCommand(command)
+	stripped := commentStripped(command)
+	masked := maskCommand(stripped)
 	var segs []string
 	start := 0
 	for i := 0; i < len(masked); i++ {
 		switch masked[i] {
 		case '|', '&', ';', '\n':
-			if seg := strings.TrimSpace(command[start:i]); seg != "" {
+			if seg := strings.TrimSpace(stripped[start:i]); seg != "" {
 				segs = append(segs, seg)
 			}
 			start = i + 1
 		}
 	}
-	if seg := strings.TrimSpace(command[start:]); seg != "" {
+	if seg := strings.TrimSpace(stripped[start:]); seg != "" {
 		segs = append(segs, seg)
 	}
 	return segs

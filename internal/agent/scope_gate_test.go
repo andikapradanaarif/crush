@@ -856,13 +856,19 @@ func TestScopeGateEvidence(t *testing.T) {
 		require.True(t, bash.called)
 	})
 
-	t.Run("a declared plan resolves the evidence condition", func(t *testing.T) {
+	t.Run("a declared plan resolves the evidence condition globally", func(t *testing.T) {
+		// Pins the deliberate escape: a validating declaration
+		// resolves the whole gate, so the post-plan write here
+		// targets g.go — a path the plan never bound — and still
+		// passes. If the arm ever tightens to per-path injection
+		// of evidence_paths, this test flips: g.go must bounce.
 		t.Parallel()
 		tracker := &fakeFileTracker{reads: map[string]time.Time{}}
 		bash := &fakeTool{name: "bash", resp: fantasy.NewTextResponse("done")}
 		todos := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextResponse("ok")}
 		wd := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(wd, "f.go"), []byte("x"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(wd, "g.go"), []byte("y"), 0o644))
 		wrapped := newScopeGate(nil, false, nil, tracker, wd, false, true).wrap([]fantasy.AgentTool{todos, bash})
 		ctx := gateCtx("s1", 1)
 		resp, err := wrapped[1].Run(ctx, bashCall("b", "sed -i 's/a/b/' f.go"))
@@ -876,7 +882,7 @@ func TestScopeGateEvidence(t *testing.T) {
 		require.NoError(t, err)
 		require.False(t, resp.IsError)
 
-		resp, err = wrapped[1].Run(ctx, bashCall("b2", "sed -i 's/a/b/' f.go"))
+		resp, err = wrapped[1].Run(ctx, bashCall("b2", "sed -i 's/a/b/' g.go"))
 		require.NoError(t, err)
 		require.False(t, resp.IsError)
 		require.True(t, bash.called)

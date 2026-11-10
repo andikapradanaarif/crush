@@ -123,6 +123,18 @@ func TestBashEditTargets(t *testing.T) {
 		{name: "sed behind env plus flag arg", command: "env LC_ALL=C nice -n 5 sed -i 's/a/b/' f.go", want: nil}, // Flag arity after a prefix stays un-gated.
 		{name: "sed behind time", command: "time sed -i 's/a/b/' f.go", want: []string{"f.go"}},
 
+		// Comments manufacture no targets — a separator or `>`
+		// inside one is literal text, and comment words never
+		// become operands.
+		{name: "comment hides writer", command: "go build # TODO: try sed -i 's/x/y/' main.go; tee log", want: nil},
+		{name: "comment hides redirect", command: "cmd #> f", want: nil},
+		{name: "comment words not operands", command: "sed -i 's/a/b/' f.go # then ; tee log", want: []string{"f.go"}},
+		{name: "redirect before comment", command: "cmd > f # and also ; tee g", want: []string{"f"}},
+		{name: "whole-line comment", command: "# sed -i 's/a/b/' f.go", want: nil},
+		{name: "mid-word hash not comment", command: "cmd a#b; tee g", want: []string{"g"}},
+		{name: "quote-glued hash not comment", command: `cmd "x"#; tee g`, want: []string{"g"}},
+		{name: "quoted hash not comment", command: "cmd '#still runs' | tee g", want: []string{"g"}},
+
 		// Dedup across routes.
 		{name: "same file twice", command: "sed -i 's/a/b/' f.go && cmd > f.go", want: []string{"f.go"}},
 		{name: "same file redirect and tee", command: "cmd | tee log && cmd > log", want: []string{"log"}},

@@ -124,7 +124,12 @@ enforce at their own layer, applied to the bash writes that bypass
 it. The two conditions arm independently: `evidence_gate` alone
 never asks the scope question, and ECLoop's +4.8–11.8pp is the
 evidence — requiring explicit evidence before the write, not a
-larger model.
+larger model. One deliberate escape, named for the experiment: a
+validating plan declaration resolves the whole gate, so
+`evidence_paths` frees writes it names without a read — declaring
+a bound plan costs more than reading one file, but if bounce
+telemetry shows models routing around reads by declaring, the arm
+tightens to per-path injection instead of global resolve.
 
 **Ordering and scope.** `runEdgeSet` order is load-bearing —
 verification's resolve must precede todos' scan (resolved checks
