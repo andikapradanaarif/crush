@@ -110,6 +110,22 @@ only proposes _what next_. Failure, timeout, and off states all
 degrade to the unannotated repair — advice never gates the
 deterministic path.
 
+**The write boundary generalizes to evidence conditions** (#441,
+R1.5 L2). The scope gate's single armed threshold becomes a set of
+named conditions, each holding a gated action to evidence the run
+must already hold — decided in the judge layer, never by a model.
+The first new condition, behind `options.evidence_gate`, holds a
+mutating bash call's concrete write targets (redirects, `sed -i`,
+`tee` — `toolclass.BashEditTargets`) to read evidence: a session
+read, a path the run itself authored, or a not-yet-existing file
+passes; an existing file the run never saw bounces, then escalates
+after a bounded budget — the same read-before-write the file tools
+enforce at their own layer, applied to the bash writes that bypass
+it. The two conditions arm independently: `evidence_gate` alone
+never asks the scope question, and ECLoop's +4.8–11.8pp is the
+evidence — requiring explicit evidence before the write, not a
+larger model.
+
 **Ordering and scope.** `runEdgeSet` order is load-bearing —
 verification's resolve must precede todos' scan (resolved checks
 feed the done-definition); new rows declare where they sit rather

@@ -415,7 +415,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		activeSkills:          activeSkills,
 		skillTracker:          skillTracker,
 		interactive:           opts.Interactive,
-		scopeGate:             newScopeGate(opts.Questions, opts.Interactive, opts.Sessions),
+		scopeGate:             newScopeGate(opts.Questions, opts.Interactive, opts.Sessions, opts.FileTracker, opts.Config.WorkingDir(), opts.Config.Config().Options.ScopeGateEnabled(), opts.Config.Config().Options.EvidenceGateEnabled()),
 		notebook:              opts.Notebook,
 		notebookModelResolver: opts.NotebookModelResolver,
 		summaryModel:          csync.NewValue(Model{}),
@@ -1815,8 +1815,10 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	// see every call, and a confirmed write then flows through hooks,
 	// permissions, and verification unchanged. Headless wraps too —
 	// the degrade branch is proceed-with-logged-assumption, since a
-	// question nobody can answer must never stall.
-	if !isSubAgent && cfg.Options.ScopeGateEnabled() && c.scopeGate != nil {
+	// question nobody can answer must never stall. The wrap applies
+	// when either gate arm is enabled — the scope question or the
+	// evidence conditions (#441).
+	if !isSubAgent && (cfg.Options.ScopeGateEnabled() || cfg.Options.EvidenceGateEnabled()) && c.scopeGate != nil {
 		filteredTools = c.scopeGate.wrap(filteredTools)
 	}
 

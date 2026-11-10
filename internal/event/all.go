@@ -75,6 +75,19 @@ func PlanDeclarationEscalated(props ...any) {
 	send("plan declaration escalated", props...)
 }
 
+// EvidenceGateBounced records an evidence-gate write rejection — a
+// mutating bash call whose concrete targets lacked held read
+// evidence. The bounce rate is the arm's conformance signal.
+func EvidenceGateBounced(props ...any) {
+	send("evidence gate bounced", props...)
+}
+
+// EvidenceGateEscalated records the evidence bounce-budget
+// exhaustion that turns a stuck write loop into the scope question.
+func EvidenceGateEscalated(props ...any) {
+	send("evidence gate escalated", props...)
+}
+
 func SessionListed(json bool) {
 	send("session listed", "json", json)
 }

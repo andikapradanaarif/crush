@@ -27,7 +27,7 @@ func approveEnv(t *testing.T) (*coordinator, fakeEnv, session.Session) {
 		cfg:       cfg,
 		messages:  env.messages,
 		sessions:  env.sessions,
-		scopeGate: newScopeGate(nil, false, env.sessions),
+		scopeGate: newScopeGate(nil, false, env.sessions, nil, "", true, false),
 	}
 	return coord, env, sess
 }

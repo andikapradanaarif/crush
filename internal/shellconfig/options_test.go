@@ -86,6 +86,23 @@ option edge-advisor-model advisor-key`
 	require.Equal(t, "advisor-key", opts["edge_advisor_model"])
 }
 
+func TestOption_EvidenceGate(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	script := `option evidence-gate true`
+	path := filepath.Join(dir, "crushrc")
+
+	jsonBytes, err := LoadShellConfig(t.Context(), path, []byte(script))
+	require.NoError(t, err)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(jsonBytes, &result))
+
+	opts := result["options"].(map[string]any)
+	require.Equal(t, true, opts["evidence_gate"])
+}
+
 func TestOption_List(t *testing.T) {
 	t.Parallel()
 
