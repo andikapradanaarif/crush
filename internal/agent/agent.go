@@ -445,6 +445,11 @@ type sessionAgent struct {
 	// the turn-zero vagueness pre-filter and the first-write scope
 	// gate (options.ambiguity_clarification).
 	ambiguityClarification bool
+	// freshReview arms the fresh-review edge's completion check
+	// (options.fresh_review) — the flag gates the edge's scan; the
+	// reviewer model is always the session's own large slot so the
+	// A/B isolates context freshness, not model strength (#442).
+	freshReview bool
 	// interactive records whether the run can ask the user — the
 	// mode the clarification gates degrade on.
 	interactive bool
@@ -686,6 +691,11 @@ type SessionAgentOptions struct {
 	// AmbiguityClarification enables the calibrated-autonomy gates
 	// (options.ambiguity_clarification).
 	AmbiguityClarification bool
+	// FreshReview arms the fresh-context completion review (#442): a
+	// clean stop over real writes gets its {task, diff, check output}
+	// judged by the solver model in a context that never saw the
+	// transcript or the completion claim (options.fresh_review).
+	FreshReview bool
 	// Interactive reports whether the run can ask the user —
 	// coordinator's interactive flag threaded through for the gate
 	// degrade branches.
@@ -798,6 +808,7 @@ func NewSessionAgent(
 		memoryTelemetry:        opts.MemoryTelemetry,
 		agentID:                opts.AgentID,
 		ambiguityClarification: opts.AmbiguityClarification,
+		freshReview:            opts.FreshReview,
 		interactive:            opts.Interactive,
 		advisorModel:           opts.AdvisorModel,
 		lspManager:             opts.LSPManager,

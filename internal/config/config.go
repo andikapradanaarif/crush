@@ -569,6 +569,15 @@ type Options struct {
 	// arm, independent of the calibrated-autonomy bundle — opt-in
 	// until the paired dev-split read decides it.
 	EvidenceGate *bool `json:"evidence_gate,omitempty" jsonschema:"description=Arm the evidence-conditioned gate: a mutating bash call writing an existing file the run never read bounces until the run holds read evidence for it. Experimental.,default=false"`
+	// FreshReview arms the fresh-context completion review (R1.5 L3):
+	// when a run claims done over real writes, the solver model judges
+	// {task, changed files, diff, check output} in a context that never
+	// saw the worker's transcript or its completion claim — the
+	// same-context self-verification gap made mechanical. The solver —
+	// not a configured stronger model — reviews, so the A/B isolates
+	// freshness. Its own experiment arm, opt-in until the paired
+	// dev-split read decides it.
+	FreshReview *bool `json:"fresh_review,omitempty" jsonschema:"description=Arm the fresh-context completion review: a clean-stopping run over real writes gets its task, diff, and check output judged by the solver model without the transcript or completion claim. Experimental.,default=false"`
 	// FailureMemory injects the <open_failures> tail — commands that
 	// failed in this workspace and have not passed since — independent
 	// of the turn_context tier so its contribution can be measured on
@@ -1814,6 +1823,17 @@ func (o *Options) EvidenceGateEnabled() bool {
 		return false
 	}
 	return *o.EvidenceGate
+}
+
+// FreshReviewEnabled returns the resolved fresh-review setting,
+// defaulting to false — the arm is its own experiment (R1.5 L3),
+// independent of the advisor and evidence-gate arms, and stays
+// opt-in until the paired dev-split read decides it.
+func (o *Options) FreshReviewEnabled() bool {
+	if o == nil || o.FreshReview == nil {
+		return false
+	}
+	return *o.FreshReview
 }
 
 // NotebookMemoryServerName returns the resolved memory server name,
