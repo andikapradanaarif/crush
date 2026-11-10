@@ -578,6 +578,11 @@ type Options struct {
 	// freshness. Its own experiment arm, opt-in until the paired
 	// dev-split read decides it.
 	FreshReview *bool `json:"fresh_review,omitempty" jsonschema:"description=Arm the fresh-context completion review: a clean-stopping run over real writes gets its task plus workspace diff plus observed check output judged by the solver model without the transcript or completion claim. Experimental.,default=false"`
+	// FindBugsReview swaps the fresh-review verifier's stance from
+	// confirming completeness to hunting failure — the L4 framing arm
+	// (#443). Same evidence set and verdict contract; only the frame
+	// changes. Applies only when fresh_review is armed.
+	FindBugsReview *bool `json:"find_bugs_review,omitempty" jsonschema:"description=Swap the fresh-context reviewer to the adversarial find-bugs framing: same evidence and verdict contract but the reviewer hunts for ways the work fails instead of confirming completeness. Experimental.,default=false"`
 	// FailureMemory injects the <open_failures> tail — commands that
 	// failed in this workspace and have not passed since — independent
 	// of the turn_context tier so its contribution can be measured on
@@ -1834,6 +1839,17 @@ func (o *Options) FreshReviewEnabled() bool {
 		return false
 	}
 	return *o.FreshReview
+}
+
+// FindBugsReviewEnabled returns the resolved find-bugs framing
+// setting, defaulting to false — the L4 framing arm (#443) is its
+// own experiment, applied only when fresh_review is armed, and
+// stays opt-in until the paired dev-split read decides it.
+func (o *Options) FindBugsReviewEnabled() bool {
+	if o == nil || o.FindBugsReview == nil {
+		return false
+	}
+	return *o.FindBugsReview
 }
 
 // NotebookMemoryServerName returns the resolved memory server name,

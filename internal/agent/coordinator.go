@@ -1531,6 +1531,7 @@ func (c *coordinator) buildAgentWithModels(ctx context.Context, ready *errgroup.
 		AgentID:                agent.ID,
 		AmbiguityClarification: c.cfg.Config().Options.AmbiguityClarificationEnabled(),
 		FreshReview:            c.cfg.Config().Options.FreshReviewEnabled(),
+		FindBugsReview:         c.cfg.Config().Options.FindBugsReviewEnabled(),
 		Interactive:            c.interactive,
 		AdvisorModel:           c.advisorModelFn(sessionModels, c.cfg.Config().Options),
 		LSPManager:             c.lspManager,
