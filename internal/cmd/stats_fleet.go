@@ -24,12 +24,17 @@ import (
 	"github.com/charmbracelet/crush/internal/cmdlog"
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/filepathext"
+	"github.com/charmbracelet/crush/internal/params"
 	"github.com/spf13/cobra"
 )
 
 // h0OKShare is the roadmap §4 H0 threshold: the share of real-user
 // edited paths whose hunk cells are `ok` on post-#433 rows.
 const h0OKShare = 0.8
+
+// settleDrainLimit bounds one --settle pass per project — generous
+// against any realistic due backlog so a single drain clears it.
+const settleDrainLimit = 512
 
 // h0AbstainStates are cell states where the capture model makes no
 // claim — a designed abstention, not a failed capture. They leave
@@ -122,6 +127,7 @@ func newStatsFleetCmd() *cobra.Command {
 	cmd.Flags().Bool("all", false, "Report on all registered projects")
 	cmd.Flags().String("since", "all", "Lower bound: 7d, 4w, 720h, YYYY-MM-DD, or all")
 	cmd.Flags().Bool("json", false, "Print the fleet report as JSON")
+	cmd.Flags().Bool("settle", false, "Drain due label settlements in each target before reporting — writes settled turn/referent rows the per-turn pass would have produced on the next turn")
 	return cmd
 }
 
@@ -139,12 +145,29 @@ func runStatsFleet(cmd *cobra.Command, _ []string) error {
 	var failures []error
 	type partition struct{ dataDir, key string }
 	seen := map[partition]bool{}
+	settle, _ := cmd.Flags().GetBool("settle")
 	for _, tp := range targets {
 		id := partition{filepathext.Canonical(tp.dataDir), tp.key}
 		if seen[id] {
 			continue
 		}
 		seen[id] = true
+		if settle {
+			n, due, serr := drainProjectSettlements(cmd.Context(), tp)
+			switch {
+			case serr != nil:
+				// An explicitly requested write failing is a
+				// failure, not a warning — joins the report's
+				// error list while other targets still drain.
+				failures = append(failures, fmt.Errorf("settle drain for %s: %w", tp.path, serr))
+				fmt.Fprintf(cmd.ErrOrStderr(), "warn: settle drain for %s: %v\n", tp.path, serr)
+			case n > 0:
+				fmt.Fprintf(cmd.ErrOrStderr(), "settled %d due turn rows in %s\n", n, tp.path)
+			}
+			if serr == nil && due > 0 {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warn: %d due turn rows remain in %s (drain capped at %d)\n", due, tp.path, settleDrainLimit)
+			}
+		}
 		conn, err := db.ConnectReadOnly(cmd.Context(), filepath.Join(tp.dataDir, "crush.db"))
 		var report fleetHealth
 		if err == nil {
@@ -182,6 +205,76 @@ func runStatsFleet(cmd *cobra.Command, _ []string) error {
 		printFleetSummary(cmd.OutOrStdout(), summarizeFleet(reports, len(failures)))
 	}
 	return errors.Join(failures...)
+}
+
+// drainProjectSettlements runs the due-window label settlement the
+// per-turn pass would run on this project's next turn — the R0
+// backlog drain: settlement is turn-driven by design, so a project's
+// due rows otherwise wait for usage that may never come, and every
+// settled-denominator read (#438's precision sample, #403's edit
+// cost) silently skips the backlog. The writes are the same
+// idempotent ones the live pass makes — this changes when they
+// happen, not what they compute. Returns the number of turn rows
+// newly settled.
+func drainProjectSettlements(ctx context.Context, tp trendProject) (settled, remainingDue int, err error) {
+	conn, err := db.Connect(ctx, tp.dataDir)
+	if err != nil {
+		return 0, 0, err
+	}
+	// Connect returns a ref-counted pooled handle — Release, never
+	// Close, or every other holder (a live session, a sibling
+	// partition sharing this dataDir) loses its connection.
+	defer db.Release(tp.dataDir)
+	before, err := countUnsettledTurns(ctx, conn, tp.key)
+	if err != nil {
+		return 0, 0, err
+	}
+	svc := cmdlog.NewService(db.New(conn), tp.path, params.DefaultMemory(), cmdlog.WithProjectKey(tp.key))
+	// The live pass's order — referents, turns, then the rate fold —
+	// so a quiet project's rates refresh with its labels rather than
+	// staying stale until the next live turn (#474 review). Each
+	// pass self-skips on an empty due set, so an all-settled
+	// turn_outcomes table must not gate the referent drain.
+	if err := svc.SettleReferentLabels(ctx, settleDrainLimit); err != nil {
+		return 0, 0, fmt.Errorf("settle referent labels: %w", err)
+	}
+	if err := svc.SettleTurnOutcomes(ctx, settleDrainLimit); err != nil {
+		return 0, 0, fmt.Errorf("settle turn outcomes: %w", err)
+	}
+	if err := svc.UpdateProjectRates(ctx, params.DefaultMemory().RateDecay); err != nil {
+		return 0, 0, fmt.Errorf("rate fold: %w", err)
+	}
+	after, err := countUnsettledTurns(ctx, conn, tp.key)
+	if err != nil {
+		return 0, 0, err
+	}
+	due, err := countDueTurns(ctx, conn, tp.key, time.Now().UnixMilli())
+	if err != nil {
+		return 0, 0, err
+	}
+	return max(before-after, 0), due, nil
+}
+
+// countUnsettledTurns is the drain's delta probe — all unsettled
+// rows, repair-prompt or not; the read-side filters stay in the
+// report where they belong.
+func countUnsettledTurns(ctx context.Context, conn *sql.DB, key string) (int, error) {
+	var n int
+	err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM turn_outcomes WHERE project_key = ? AND settled_at IS NULL`,
+		key).Scan(&n)
+	return n, err
+}
+
+// countDueTurns counts rows still inside their window as NOT due —
+// a positive count after a drain means the cap truncated the
+// backlog, not that in-window rows are waiting.
+func countDueTurns(ctx context.Context, conn *sql.DB, key string, now int64) (int, error) {
+	var n int
+	err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM turn_outcomes WHERE project_key = ? AND settled_at IS NULL AND settle_at <= ?`,
+		key, now).Scan(&n)
+	return n, err
 }
 
 // gatherFleetHealth reads one partition's turn rows once: verdict
