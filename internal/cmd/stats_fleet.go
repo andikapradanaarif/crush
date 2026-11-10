@@ -31,6 +31,18 @@ import (
 // edited paths whose hunk cells are `ok` on post-#433 rows.
 const h0OKShare = 0.8
 
+// h0AbstainStates are cell states where the capture model makes no
+// claim — a designed abstention, not a failed capture. They leave
+// the ok-share denominator (#466) but stay visible as their own
+// counts: cross_repo belongs to another repo's partition,
+// out_of_workspace sits under no repository, sensitive is refused
+// by the safety gate.
+var h0AbstainStates = map[string]bool{
+	"cross_repo":       true,
+	"out_of_workspace": true,
+	"sensitive":        true,
+}
+
 // fleetHealth is one project partition's capture-health row.
 // Share fields are pointers so an empty denominator marshals as
 // null rather than a false zero — the trend convention.
@@ -46,10 +58,14 @@ type fleetHealth struct {
 	Unknown                int            `json:"unknown"`
 	NonPromptTurnsExcluded int            `json:"non_prompt_turns_excluded"`
 	EditedPaths            int            `json:"edited_path_instances"`
+	InScopePaths           int            `json:"in_scope_path_instances"`
+	AbstainedPaths         int            `json:"abstained_path_instances"`
 	OKPaths                int            `json:"ok_path_instances"`
 	OKShare                *float64       `json:"ok_share"`
 	PostFixTurns           int            `json:"post_fix_turns"`
 	PostFixPaths           int            `json:"post_fix_path_instances"`
+	PostFixInScopePaths    int            `json:"post_fix_in_scope_path_instances"`
+	PostFixAbstainedPaths  int            `json:"post_fix_abstained_path_instances"`
 	PostFixOKPaths         int            `json:"post_fix_ok_paths"`
 	PostFixOKShare         *float64       `json:"post_fix_ok_share"`
 	Excluded               map[string]int `json:"excluded,omitempty"`
@@ -264,27 +280,40 @@ func gatherFleetHealth(ctx context.Context, conn *sql.DB, tp trendProject, since
 					r.Excluded = map[string]int{}
 				}
 				r.Excluded[reason]++
-				continue
 			}
-			r.OKPaths++
-			if postFix {
-				r.PostFixOKPaths++
+			switch {
+			case h0AbstainStates[reason]:
+				r.AbstainedPaths++
+				if postFix {
+					r.PostFixAbstainedPaths++
+				}
+			default:
+				r.InScopePaths++
+				if postFix {
+					r.PostFixInScopePaths++
+				}
+				if reason == "" {
+					r.OKPaths++
+					if postFix {
+						r.PostFixOKPaths++
+					}
+				}
 			}
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return r, err
 	}
-	if r.EditedPaths > 0 {
-		share := float64(r.OKPaths) / float64(r.EditedPaths)
+	if r.InScopePaths > 0 {
+		share := float64(r.OKPaths) / float64(r.InScopePaths)
 		r.OKShare = &share
 	}
-	if r.PostFixPaths > 0 {
-		share := float64(r.PostFixOKPaths) / float64(r.PostFixPaths)
+	if r.PostFixInScopePaths > 0 {
+		share := float64(r.PostFixOKPaths) / float64(r.PostFixInScopePaths)
 		r.PostFixOKShare = &share
 	}
 	switch {
-	case r.PostFixPaths == 0:
+	case r.PostFixInScopePaths == 0:
 		r.H0 = "pending"
 	case *r.PostFixOKShare >= h0OKShare:
 		r.H0 = "pass"
@@ -325,10 +354,11 @@ func printFleetHealth(w io.Writer, r fleetHealth) {
 	fmt.Fprintf(w, "  pending real-user turns: %d   non-prompt rows excluded: %d\n",
 		r.PendingTurns, r.NonPromptTurnsExcluded)
 	if r.OKShare == nil {
-		fmt.Fprintf(w, "  edited paths: %d instances — no edited paths recorded\n", r.EditedPaths)
+		fmt.Fprintf(w, "  edited paths: %d instances (%d in scope) — no in-scope paths\n",
+			r.EditedPaths, r.InScopePaths)
 	} else {
-		fmt.Fprintf(w, "  edited paths: %d instances, ok %d (%.1f%%)\n",
-			r.EditedPaths, r.OKPaths, *r.OKShare*100)
+		fmt.Fprintf(w, "  edited paths: %d instances (%d in scope), ok %d (%.1f%%)\n",
+			r.EditedPaths, r.InScopePaths, r.OKPaths, *r.OKShare*100)
 	}
 	switch {
 	case r.PostFixTurns == 0 && slices.Contains(r.Missing, "turn_outcomes.workdir"):
@@ -340,10 +370,11 @@ func printFleetHealth(w io.Writer, r fleetHealth) {
 		if r.PostFixOKShare != nil {
 			share = fmt.Sprintf("%.1f%%", *r.PostFixOKShare*100)
 		}
-		fmt.Fprintf(w, "  post-#433: %d turns · %d edited paths · ok %d (%s)\n",
-			r.PostFixTurns, r.PostFixPaths, r.PostFixOKPaths, share)
+		fmt.Fprintf(w, "  post-#433: %d turns · %d edited paths (%d in scope) · ok %d (%s)\n",
+			r.PostFixTurns, r.PostFixPaths, r.PostFixInScopePaths, r.PostFixOKPaths, share)
 	}
-	printStatExclusions(w, "non-ok reasons", r.Excluded)
+	printStatExclusions(w, "non-ok in-scope", filterReasons(r.Excluded, false))
+	printStatExclusions(w, "outside scope (abstained)", filterReasons(r.Excluded, true))
 	switch r.H0 {
 	case "pass":
 		fmt.Fprintf(w, "  H0: pass — ok share %.1f%% ≥ %.0f%% on post-#433 rows\n",
@@ -357,8 +388,29 @@ func printFleetHealth(w io.Writer, r fleetHealth) {
 			fmt.Fprintln(w, "  H0: pending — needs post-#433 rows with edits")
 		case r.PostFixPaths == 0:
 			fmt.Fprintln(w, "  H0: pending — post-#433 turns recorded, no edited paths yet")
+		default:
+			fmt.Fprintf(w, "  H0: pending — post-#433 paths are all outside scope (%d abstained)\n",
+				r.PostFixAbstainedPaths)
 		}
 	}
+}
+
+// filterReasons splits the exclusion tally into the two families the
+// share math uses (#466): abstain=true keeps the designed abstentions
+// (cross_repo, out_of_workspace, sensitive), abstain=false keeps the
+// in-scope capture misses.
+func filterReasons(excluded map[string]int, abstain bool) map[string]int {
+	var out map[string]int
+	for reason, n := range excluded {
+		if h0AbstainStates[reason] != abstain {
+			continue
+		}
+		if out == nil {
+			out = map[string]int{}
+		}
+		out[reason] = n
+	}
+	return out
 }
 
 func printFleetSummary(w io.Writer, s fleetSummary) {

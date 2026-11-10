@@ -166,6 +166,50 @@ func TestWorktreeCapture_SettleDroppedWorktree(t *testing.T) {
 		"unmerged work nowhere durable reads as divergence")
 }
 
+// #466: a target under a different repository records cross_repo —
+// a designed abstention the fleet share must not price as failure —
+// while a path under no repository at all keeps out_of_workspace.
+func TestCrossRepoState(t *testing.T) {
+	env, _, _ := setupWorktreeRepo(t)
+
+	// A second, unrelated repository with a real file inside.
+	other := filepath.Join(t.TempDir(), "other-repo")
+	gitInOther := func(args ...string) {
+		full := append([]string{"-C", other}, args...)
+		require.NoError(t, exec.CommandContext(t.Context(), "git", full...).Run())
+	}
+	require.NoError(t, os.MkdirAll(other, 0o755))
+	gitInOther("init", "-b", "main")
+	gitInOther("config", "user.email", "t@t")
+	gitInOther("config", "user.name", "t")
+	foreign := filepath.Join(other, "f.go")
+	require.NoError(t, os.WriteFile(foreign, []byte("package f\n"), 0o644))
+	gitInOther("add", ".")
+	gitInOther("commit", "-m", "base")
+
+	// A path under no repository — a plain scratch dir.
+	unscoped := filepath.Join(t.TempDir(), "scratch.go")
+	require.NoError(t, os.WriteFile(unscoped, []byte("x"), 0o644))
+
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID:   "s1",
+		TurnID:      "t0",
+		EditedPaths: []string{foreign, unscoped},
+		HunkAdded: map[string][]HunkEdit{
+			foreign:  {{New: "package f"}},
+			unscoped: {{New: "x"}},
+		},
+	}))
+	var m map[string]hunkAddedEntry
+	require.NoError(t, json.Unmarshal([]byte(readTurn(t, env, "s1", "t0").hunkAdded), &m))
+	require.Equal(t, hunkCrossRepo, m[foreign].State,
+		"a path inside another repository is a designed abstention — "+
+			"that repo's partition owns its evidence")
+	require.Equal(t, hunkOutOfWorkspace, m[unscoped].State,
+		"a path under no repository keeps the plain abstention")
+	require.Empty(t, m[foreign].Edits, "abstentions store no content either way")
+}
+
 // #360: under a shared data_directory a row recorded by worktree B's
 // service settles in worktree A's pass — reads route by the row's
 // stamped workdir, not the settling service's checkout.

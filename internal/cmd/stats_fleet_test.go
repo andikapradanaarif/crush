@@ -82,13 +82,19 @@ func TestGatherFleetHealth(t *testing.T) {
 	require.Equal(t, 1, r.PendingTurns)
 	require.Equal(t, 1, r.NonPromptTurnsExcluded)
 	require.Equal(t, 6, r.EditedPaths)
+	// Designed abstentions leave the denominator (#466): the three
+	// out_of_workspace cells report as their own share instead.
+	require.Equal(t, 3, r.InScopePaths)
+	require.Equal(t, 3, r.AbstainedPaths)
 	require.Equal(t, 3, r.OKPaths)
-	require.InDelta(t, 0.5, *r.OKShare, 0.001)
+	require.InDelta(t, 1.0, *r.OKShare, 0.001)
 	require.Equal(t, 2, r.PostFixTurns)
 	require.Equal(t, 3, r.PostFixPaths)
+	require.Equal(t, 2, r.PostFixInScopePaths)
+	require.Equal(t, 1, r.PostFixAbstainedPaths)
 	require.Equal(t, 2, r.PostFixOKPaths)
-	require.InDelta(t, 2.0/3.0, *r.PostFixOKShare, 0.001)
-	require.Equal(t, "fail", r.H0)
+	require.InDelta(t, 1.0, *r.PostFixOKShare, 0.001)
+	require.Equal(t, "pass", r.H0)
 	require.Equal(t, map[string]int{"out_of_workspace": 3}, r.Excluded)
 }
 
@@ -114,10 +120,41 @@ func TestGatherFleetHealthPostFixPass(t *testing.T) {
 	require.Equal(t, 3, r.PostFixOKPaths)
 	require.InDelta(t, 1.0, *r.PostFixOKShare, 0.001)
 	require.Equal(t, "pass", r.H0)
-	// The all-time share still reports the pre-fix damage honestly.
+	// The all-time share measures in-scope paths only — the pre-fix
+	// out_of_workspace cell abstains (visible in Excluded), so the
+	// share no longer prices designed abstentions as failures.
 	require.Equal(t, 4, r.EditedPaths)
+	require.Equal(t, 3, r.InScopePaths)
+	require.Equal(t, 1, r.AbstainedPaths)
 	require.Equal(t, 3, r.OKPaths)
-	require.InDelta(t, 0.75, *r.OKShare, 0.001)
+	require.InDelta(t, 1.0, *r.OKShare, 0.001)
+}
+
+// A post-fix turn whose edits are all designed abstentions yields no
+// in-scope denominator — pending, not a 0% fail (#466).
+func TestGatherFleetHealthAllAbstained(t *testing.T) {
+	t.Parallel()
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+
+	insertFleetTurn(t, conn, "mine", "s", "t1", "accepted", weekAms, true, "/repo",
+		`["x.go","y.go"]`,
+		`{"x.go":{"state":"cross_repo"},"y.go":{"state":"out_of_workspace"}}`)
+
+	r, err := gatherFleetHealth(t.Context(), conn, trendProject{key: "mine"}, 0)
+	require.NoError(t, err)
+	require.Equal(t, 1, r.PostFixTurns)
+	require.Equal(t, 2, r.PostFixPaths)
+	require.Zero(t, r.PostFixInScopePaths)
+	require.Equal(t, 2, r.PostFixAbstainedPaths)
+	require.Nil(t, r.PostFixOKShare)
+	require.Equal(t, "pending", r.H0)
+
+	var output bytes.Buffer
+	printFleetHealth(&output, r)
+	require.Contains(t, output.String(), "all outside scope")
+	require.Contains(t, output.String(), "cross_repo:1")
 }
 
 func TestGatherFleetHealthPendingEra(t *testing.T) {

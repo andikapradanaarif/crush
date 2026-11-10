@@ -112,6 +112,15 @@ func TestPrintCaptureHealth(t *testing.T) {
 	require.Contains(t, output.String(), "Selected project directory: /repo")
 	require.Contains(t, output.String(), "checkout being edited")
 	output.Reset()
+	// Cross-repo abstentions point at the other repo's partition, not a
+	// relaunch hint (#466).
+	printCaptureHealth(&output, captureHealth{
+		EditedTurns: 1, Excluded: map[string]int{"cross_repo": 1},
+	})
+	require.Contains(t, output.String(), "other repositories")
+	require.Contains(t, output.String(), "partitions")
+	require.NotContains(t, output.String(), "checkout being edited")
+	output.Reset()
 	printCaptureHealth(&output, captureHealth{EditedTurns: 1, CapturedTurns: 1, PendingTurns: 1})
 	require.Contains(t, output.String(), "captured edits have no positions")
 	output.Reset()
