@@ -557,7 +557,9 @@ type Options struct {
 	// EdgeAdvisorModel names a key in the models map for the advisor
 	// — the default hypothesis is a model stronger than the solver.
 	// Empty falls back to the session's large slot; an unknown key
-	// warns and falls back the same way.
+	// warns and falls back the same way. A named key wins over the
+	// session's model override — the arm tests the advisor model,
+	// not whichever solver the session picked.
 	EdgeAdvisorModel string `json:"edge_advisor_model,omitempty" jsonschema:"description=Models-map key for the edge advisor — the default hypothesis is a model stronger than the solver. Empty falls back to the session's large slot."`
 	// FailureMemory injects the <open_failures> tail — commands that
 	// failed in this workspace and have not passed since — independent

@@ -12,10 +12,16 @@ import (
 
 const (
 	// advisorCallTimeout bounds the advisor's model call — an edge
-	// boundary must not hang on advice, which is advisory only.
+	// boundary must not hang on advice, which is advisory only. It
+	// wraps model resolution too: a named model's fire-time provider
+	// build must not stall the run boundary.
 	advisorCallTimeout = 10 * time.Second
-	// advisorMaxTokens keeps the note to a short correction.
-	advisorMaxTokens = 300
+	// advisorMinTokens is the output floor for the note. Reasoning
+	// models spend output tokens on reasoning_content before any
+	// text — a small cap returns empty (the scope resolver documents
+	// the observed truncation on deepseek-flash), so they get their
+	// own default budget below.
+	advisorMinTokens = 1024
 )
 
 // advisorSystemPrompt frames the advisor's job (#440): read the
@@ -34,11 +40,17 @@ func (a *sessionAgent) adviseOnEdge(ctx context.Context, call SessionAgentCall, 
 	if a.advisorModel == nil {
 		return ""
 	}
-	model := a.advisorModel(call.SessionID)
+	// The timeout starts before model resolution: a named model's
+	// first provider build runs inside the resolver, and the run
+	// boundary must not stall on it (the wiring-time pre-warm makes
+	// this the fallback path, not the common one).
+	actx, cancel := context.WithTimeout(ctx, advisorCallTimeout)
+	defer cancel()
+	model := a.advisorModel(actx, call.SessionID)
 	if model.Model == nil {
 		return ""
 	}
-	evidence := a.advisorEvidence(ctx, call, winners)
+	evidence := a.advisorEvidence(actx, call, winners)
 	if evidence == "" {
 		return ""
 	}
@@ -48,12 +60,10 @@ func (a *sessionAgent) adviseOnEdge(ctx context.Context, call SessionAgentCall, 
 	// resolver documents the observed truncation on deepseek-flash).
 	// Mirror its floor: the model's own default budget, so the note
 	// survives a reasoning preamble.
-	tok := int64(advisorMaxTokens)
+	tok := int64(advisorMinTokens)
 	if model.CatwalkCfg.CanReason() {
 		tok = max(tok, model.CatwalkCfg.DefaultMaxTokens)
 	}
-	actx, cancel := context.WithTimeout(ctx, advisorCallTimeout)
-	defer cancel()
 	ag := fantasy.NewAgent(
 		model.Model,
 		fantasy.WithSystemPrompt(advisorSystemPrompt),

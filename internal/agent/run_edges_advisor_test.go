@@ -80,8 +80,8 @@ func (m *advisorSpyModel) StreamObject(ctx context.Context, call fantasy.ObjectC
 
 // spyAdvisor wires an advisorSpyModel into a test agent's resolver —
 // the advisor runs whenever an edge fires.
-func spyAdvisor(m *advisorSpyModel) func(string) Model {
-	return func(string) Model {
+func spyAdvisor(m *advisorSpyModel) func(context.Context, string) Model {
+	return func(context.Context, string) Model {
 		return Model{Model: m}
 	}
 }
@@ -188,7 +188,7 @@ func TestEdgeAdvisorReasoningBudget(t *testing.T) {
 	// reply comes back empty (the scope resolver's documented
 	// truncation).
 	a, spy, sessionID, svc := build()
-	a.advisorModel = func(string) Model {
+	a.advisorModel = func(context.Context, string) Model {
 		return Model{Model: spy, CatwalkCfg: catwalk.Model{
 			DefaultMaxTokens: 4096,
 			Reasoning:        catwalk.Reasoning{Thinking: catwalk.ThinkingAlways},
@@ -204,13 +204,14 @@ func TestEdgeAdvisorReasoningBudget(t *testing.T) {
 		edgeInput{result: stallResult(), stalled: true}))
 	require.Equal(t, int64(4096), spy.maxTokens)
 
-	// A plain advisor model keeps the tight note-sized cap.
+	// A plain advisor model gets the 1024 floor — the same bound the
+	// scope resolver sets as its minimum.
 	a, spy, sessionID, _ = build()
-	a.advisorModel = func(string) Model { return Model{Model: spy} }
+	a.advisorModel = func(context.Context, string) Model { return Model{Model: spy} }
 	require.True(t, runEdgesForTest(a, t.Context(),
 		SessionAgentCall{SessionID: sessionID, RepairAttempts: 1},
 		edgeInput{result: stallResult(), stalled: true}))
-	require.Equal(t, int64(advisorMaxTokens), spy.maxTokens)
+	require.Equal(t, int64(advisorMinTokens), spy.maxTokens)
 }
 
 func TestEdgeAdvisorLengthFinishSkips(t *testing.T) {
@@ -306,11 +307,47 @@ func TestAdvisorModelFnResolution(t *testing.T) {
 	// Enabled with no key: the session's large slot serves.
 	fn := c.advisorModelFn(sessionModels, &config.Options{EdgeAdvisor: &on})
 	require.NotNil(t, fn)
-	require.Equal(t, large.Model, fn("s").Model)
+	require.Equal(t, large.Model, fn(context.Background(), "s").Model)
 
 	// Enabled with an unknown key: warns and still serves large.
 	fn = c.advisorModelFn(sessionModels,
 		&config.Options{EdgeAdvisor: &on, EdgeAdvisorModel: "no-such-key"})
 	require.NotNil(t, fn)
-	require.Equal(t, large.Model, fn("s").Model)
+	require.Equal(t, large.Model, fn(context.Background(), "s").Model)
+}
+
+func TestAdvisorModelFnNamedKeyBuilds(t *testing.T) {
+	t.Parallel()
+
+	c, _ := newOverrideTestCoordinator(t)
+	c.cfg.Config().Models["advisor-x"] = config.SelectedModel{Provider: "mock", Model: "mock-model"}
+
+	large := Model{Model: &advisorSpyModel{}}
+	sessionModels := func(string) ModelSet { return ModelSet{Large: large} }
+
+	on := true
+	fn := c.advisorModelFn(sessionModels,
+		&config.Options{EdgeAdvisor: &on, EdgeAdvisorModel: "advisor-x"})
+	require.NotNil(t, fn)
+
+	// The named key builds its own model — the session's large slot
+	// is not consulted, whatever sessionID arrives.
+	m := fn(t.Context(), "s")
+	require.NotNil(t, m.Model)
+	require.Equal(t, "mock-model", m.ModelCfg.Model)
+	require.Equal(t, "mock-model", fn(t.Context(), "other").ModelCfg.Model)
+}
+
+func TestAdvisorModelFnNamedKeyUnknownFallsBack(t *testing.T) {
+	t.Parallel()
+
+	c, _ := newOverrideTestCoordinator(t)
+	large := Model{Model: &advisorSpyModel{}}
+	sessionModels := func(string) ModelSet { return ModelSet{Large: large} }
+
+	on := true
+	fn := c.advisorModelFn(sessionModels,
+		&config.Options{EdgeAdvisor: &on, EdgeAdvisorModel: "not-a-model"})
+	require.NotNil(t, fn)
+	require.Equal(t, large.Model, fn(t.Context(), "s").Model)
 }

@@ -72,19 +72,19 @@ type overrideModel struct {
 // current returns the build, rebuilding it first if the shared models were
 // rebuilt since. A failed rebuild keeps the old build rather than moving a
 // running subagent onto the session default.
-func (o *overrideModel) current(c *coordinator) Model {
-	model, _ := o.refresh(c)
+func (o *overrideModel) current(ctx context.Context, c *coordinator) Model {
+	model, _ := o.refresh(ctx, c)
 	return model
 }
 
-func (o *overrideModel) refresh(c *coordinator) (Model, error) {
+func (o *overrideModel) refresh(ctx context.Context, c *coordinator) (Model, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	gen := c.modelsGen.Load()
 	if o.gen == gen {
 		return o.model, nil
 	}
-	model, err := c.buildModelFromSelection(context.Background(), o.sel, true)
+	model, err := c.buildModelFromSelection(ctx, o.sel, true)
 	if err != nil {
 		if o.model.Model != nil {
 			slog.Warn("Failed to refresh an overridden subagent model",
@@ -98,7 +98,7 @@ func (o *overrideModel) refresh(c *coordinator) (Model, error) {
 
 // overrideModel returns the shared, built model for a selection. A selection
 // that fails its first build is not cached, so a later dispatch tries afresh.
-func (c *coordinator) overrideModel(sel config.SelectedModel) (*overrideModel, error) {
+func (c *coordinator) overrideModel(ctx context.Context, sel config.SelectedModel) (*overrideModel, error) {
 	key := overrideModelKey{provider: sel.Provider, model: sel.Model, think: sel.Think, effort: sel.ReasoningEffort}
 	c.overrideModelsMu.Lock()
 	if c.overrideModels == nil {
@@ -111,7 +111,7 @@ func (c *coordinator) overrideModel(sel config.SelectedModel) (*overrideModel, e
 	}
 	c.overrideModelsMu.Unlock()
 
-	if model, err := entry.refresh(c); model.Model == nil {
+	if model, err := entry.refresh(ctx, c); model.Model == nil {
 		c.overrideModelsMu.Lock()
 		if c.overrideModels[key] == entry {
 			delete(c.overrideModels, key)
@@ -128,12 +128,13 @@ func (c *coordinator) overrideModel(sel config.SelectedModel) (*overrideModel, e
 // override build (the stronger-than-solver default hypothesis); the
 // session's large slot is the fallback for unset or unknown keys. A
 // named build failure skips advice rather than silently switching the
-// arm to the solver model.
-func (c *coordinator) advisorModelFn(sessionModels func(string) ModelSet, opts *config.Options) func(string) Model {
+// arm to the solver model. The resolver's ctx bounds a fire-time
+// provider build — the caller passes the advisor's timeout context.
+func (c *coordinator) advisorModelFn(sessionModels func(string) ModelSet, opts *config.Options) func(context.Context, string) Model {
 	if opts == nil || !opts.EdgeAdvisorEnabled() {
 		return nil
 	}
-	largeSlot := func(sessionID string) Model {
+	largeSlot := func(_ context.Context, sessionID string) Model {
 		return sessionModels(sessionID).Large
 	}
 	key := config.SelectedModelType(opts.EdgeAdvisorModel)
@@ -147,17 +148,17 @@ func (c *coordinator) advisorModelFn(sessionModels func(string) ModelSet, opts *
 	}
 	// Warm the shared build now so the first edge fire never stalls a
 	// run boundary on a provider build. A failed warm is not cached —
-	// the closure below retries at fire time.
-	if _, err := c.overrideModel(sel); err != nil {
+	// the closure below retries at fire time under the caller's ctx.
+	if _, err := c.overrideModel(context.Background(), sel); err != nil {
 		slog.Warn("Edge advisor model pre-build failed; build retries at fire time", "key", key, "error", err)
 	}
-	return func(_ string) Model {
-		om, err := c.overrideModel(sel)
+	return func(ctx context.Context, _ string) Model {
+		om, err := c.overrideModel(ctx, sel)
 		if err != nil {
 			slog.Warn("Edge advisor model build failed; advice skipped", "key", key, "error", err)
 			return Model{}
 		}
-		return om.current(c)
+		return om.current(ctx, c)
 	}
 }
 

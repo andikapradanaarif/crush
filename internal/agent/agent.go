@@ -451,8 +451,9 @@ type sessionAgent struct {
 	// advisorModel resolves the edge advisor's model per call —
 	// nil when options.edge_advisor is off. The deterministic judge
 	// still decides when an edge fires; the advisor only runs on a
-	// fire and never on its own (#440).
-	advisorModel func(sessionID string) Model
+	// fire and never on its own (#440). The ctx bounds a named
+	// model's fire-time provider build.
+	advisorModel func(ctx context.Context, sessionID string) Model
 	// lspManager backs the plan-evidence scan's live diagnostics
 	// re-check — a fix landing outside a covered write's window
 	// (in-place bash edits, external tools) mints no resolution
@@ -691,8 +692,9 @@ type SessionAgentOptions struct {
 	Interactive bool
 	// AdvisorModel resolves the edge advisor's model per call — the
 	// coordinator serves the configured edge_advisor_model key or the
-	// session's large slot when unset. Nil disables the advisor.
-	AdvisorModel func(sessionID string) Model
+	// session's large slot when unset. Nil disables the advisor. The
+	// ctx bounds a named model's fire-time provider build.
+	AdvisorModel func(ctx context.Context, sessionID string) Model
 	// LSPManager lets the plan-evidence scan re-check attributed
 	// diagnostics against the live snapshot — a fix landing outside a
 	// covered write's window mints no resolution entry otherwise. May
