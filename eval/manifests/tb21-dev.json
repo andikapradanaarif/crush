@@ -8,6 +8,7 @@
 	},
 	"split": "dev",
 	"seed": 439,
+	"dev_count": 59,
 	"task_sha256": "4e3c0cd8267358ea3b268c9de02e0f5a1fd0baeea804c36626966dfbbe2af9b0",
 	"access_protocol": "unrestricted",
 	"tasks": [
