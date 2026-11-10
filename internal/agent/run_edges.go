@@ -180,6 +180,19 @@ type edgeTrigger struct {
 	// slice over the touched dirs, pulled in resolve.
 	checkpoint string
 	mapSlice   string
+	// goal is the escalation handoff's task line — the last
+	// real-user prompt on the stored transcript, never the repair
+	// prompt driving the escalate turn itself. Pulled in resolve
+	// (#444).
+	goal string
+	// lastCheck is the last verdict-bearing check the run observed
+	// — the verify-loop's kept-failing check, or whatever verdict
+	// the run last produced before tripping. Nil when no check ran.
+	lastCheck *observedBash
+	// checkFallback is a decorator-minted check outcome (write-tool
+	// verification metadata) used when no bash verdict exists — a
+	// verify-loop that tripped on a decorator-run check.
+	checkFallback *gateCheckOutcome
 }
 
 // deferredTrigger is a firing trigger that lost its boundary's prompt
@@ -1303,14 +1316,22 @@ func (a *sessionAgent) resolveStallEdge(ctx context.Context, call SessionAgentCa
 		a.pullReplanHandoff(ctx, call, t)
 		return
 	}
+	if t.variant == "escalate" && t.fire {
+		a.pullEscalationHandoff(ctx, call, t)
+		return
+	}
 	if t.fire || t.assistant == nil || t.report == "" {
 		return
 	}
-	t.assistant.AppendContent("\n\n" + t.report)
-	// Detached like the firing rows — the blocker report is terminal
-	// evidence and must land even on a dead run context.
+	// Headless degrade — the question can't be asked, so the same
+	// deterministic handoff payload lands on the final message where
+	// RunComplete.Text picks it up. The pull shares the write's
+	// detached context — the blocker report is terminal evidence and
+	// must land even on a dead run context.
 	wctx, cancel := detachedWriteCtx(ctx)
 	defer cancel()
+	a.pullEscalationHandoff(wctx, call, t)
+	t.assistant.AppendContent("\n\nRun state:\n" + escalationHandoffLines(t))
 	if err := a.messages.Update(wctx, *t.assistant); err != nil {
 		slog.Error("Failed to record stall blocker report", "error", err, "session_id", call.SessionID)
 	} else if err := a.messages.FlushAll(wctx); err != nil {
@@ -1552,11 +1573,12 @@ func stallReplanSection(t *edgeTrigger) string {
 // stallRetrySection renders the escalation prompt for a loop-stopped
 // interactive run — what was tried, what's blocking, options with
 // tradeoffs via the question tool's single_choice.
-func stallRetrySection(_ *edgeTrigger) string {
-	return stallRetryPrefix + ": the same tool calls repeated without making progress. " +
+func stallRetrySection(t *edgeTrigger) string {
+	return stallRetryPrefix + ": the same tool calls repeated without making progress.\n\n" +
+		escalationHandoffSection(t) + "\n" +
 		"Do not retry the same approach. Escalate with ONE question-tool call — a single_choice question " +
-		"naming what you tried and what is blocking, with each choice describing the tradeoff of that " +
-		"way forward. If the user cannot answer, proceed with your stated-best option."
+		"that presents the run state above and asks how to proceed, each choice describing the tradeoff of " +
+		"that way forward. If the user cannot answer, proceed with your stated-best option."
 }
 
 // stallExhaustNote renders the budget-exhausted line for a run that
@@ -1651,14 +1673,21 @@ func (a *sessionAgent) resolveVerifyLoopEdge(ctx context.Context, call SessionAg
 		a.pullReplanHandoff(ctx, call, t)
 		return
 	}
+	if t.variant == "escalate" && t.fire {
+		a.pullEscalationHandoff(ctx, call, t)
+		return
+	}
 	if t.fire || t.assistant == nil || t.report == "" {
 		return
 	}
-	t.assistant.AppendContent("\n\n" + t.report)
-	// Detached like the firing rows — the blocker report is terminal
-	// evidence and must land even on a dead run context.
+	// Headless degrade — same deterministic handoff payload lands on
+	// the final message where RunComplete.Text picks it up. The pull
+	// shares the write's detached context: terminal evidence must
+	// land even on a dead run context.
 	wctx, cancel := detachedWriteCtx(ctx)
 	defer cancel()
+	a.pullEscalationHandoff(wctx, call, t)
+	t.assistant.AppendContent("\n\nRun state:\n" + escalationHandoffLines(t))
 	if err := a.messages.Update(wctx, *t.assistant); err != nil {
 		slog.Error("Failed to record verify-loop blocker report", "error", err, "session_id", call.SessionID)
 	} else if err := a.messages.FlushAll(wctx); err != nil {
@@ -1751,11 +1780,12 @@ func verifyLoopReplanSection(t *edgeTrigger) string {
 // verifyLoopEscalateSection renders the escalation prompt for a
 // verify-loop-stopped interactive run — what kept failing, plus
 // options with tradeoffs via the question tool's single_choice.
-func verifyLoopEscalateSection(_ *edgeTrigger) string {
-	return verifyLoopEscalatePrefix + ": the check keeps producing the same failure after the write. " +
+func verifyLoopEscalateSection(t *edgeTrigger) string {
+	return verifyLoopEscalatePrefix + ": the check keeps producing the same failure after the write.\n\n" +
+		escalationHandoffSection(t) + "\n" +
 		"Do not re-run the same check. Escalate with ONE question-tool call — a single_choice question " +
-		"naming what you fixed and what keeps failing, with each choice describing the tradeoff of that " +
-		"way forward. If the user cannot answer, proceed with your stated-best option."
+		"that presents the run state above and asks how to proceed, each choice describing the tradeoff of " +
+		"that way forward. If the user cannot answer, proceed with your stated-best option."
 }
 
 // verifyLoopExhaustNote renders the budget-exhausted line for a run
@@ -1837,14 +1867,20 @@ func (a *sessionAgent) scanBurnWatchEdge(_ context.Context, call SessionAgentCal
 // message — the degrade path has no carrier, so no marker stamps and a
 // later write-less run may append another note.
 func (a *sessionAgent) resolveBurnWatchEdge(ctx context.Context, call SessionAgentCall, t *edgeTrigger) {
-	if t.fire || t.hint != edgeOutcomeDegraded || t.assistant == nil {
+	if t.fire {
+		a.pullEscalationHandoff(ctx, call, t)
 		return
 	}
-	t.assistant.AppendContent("\n\n" + burnWatchAssumption(t))
-	// Detached like the firing rows — the assumption is terminal
-	// evidence and must land even on a dead run context.
+	if t.hint != edgeOutcomeDegraded || t.assistant == nil {
+		return
+	}
+	// The pull shares the write's detached context — the assumption
+	// and handoff are terminal evidence and must land even on a dead
+	// run context.
 	wctx, cancel := detachedWriteCtx(ctx)
 	defer cancel()
+	a.pullEscalationHandoff(wctx, call, t)
+	t.assistant.AppendContent("\n\n" + burnWatchAssumption(t) + "\n\nRun state:\n" + escalationHandoffLines(t))
 	if err := a.messages.Update(wctx, *t.assistant); err != nil {
 		slog.Error("Failed to record burn-watch assumption", "error", err, "session_id", call.SessionID)
 	} else if err := a.messages.FlushAll(wctx); err != nil {
@@ -1890,11 +1926,11 @@ func runHasMutatingCall(steps []fantasy.StepResult) bool {
 // high-spend run — a single_choice question reporting the spend and
 // asking how to proceed.
 func burnWatchRetrySection(t *edgeTrigger) string {
-	return fmt.Sprintf("%s %s over %d steps without producing any file writes. "+
-		"Escalate with ONE question-tool call — a single_choice question reporting the spend and asking "+
-		"how to proceed, with choices covering continue as-is, replan toward a concrete write target, and "+
+	return fmt.Sprintf("%s %s over %d steps without producing any file writes.\n\n%s\n"+
+		"Escalate with ONE question-tool call — a single_choice question presenting the run state above and "+
+		"asking how to proceed, with choices covering continue as-is, replan toward a concrete write target, and "+
 		"stop. If the user cannot answer, proceed with your stated-best option.",
-		burnWatchPrefix, humanTokens(t.inputTokens), len(t.steps))
+		burnWatchPrefix, humanTokens(t.inputTokens), len(t.steps), escalationHandoffSection(t))
 }
 
 // burnWatchAssumption is the headless degrade line — the run spent
