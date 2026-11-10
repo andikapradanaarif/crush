@@ -1371,6 +1371,44 @@ trajectories. Non-conclusive records never sample, and trajectories
 missing a cell are listed as `incomplete` rather than silently
 dropped.
 
+## Resampling unit — stratified vs cluster (#407)
+
+```json
+{"resample": "stratified" | "cluster"}
+```
+
+The compare CI's variance model, pinned per experiment. `"stratified"`
+(default, `""`) resamples `(c,t)` pairs within their own trajectory —
+right for the in-house corpus (few trajectories × many runs), where
+task-to-task spread is a nuisance, not the estimand's uncertainty.
+`"cluster"` resamples *whole trajectories* with replacement and
+recomputes θ over each draw — the unit a task-sampling (OOD) claim
+must carry. At k = 1 pair per task the stratified resample is
+degenerate (every replicate equals θ̂); at any k it conditions on the
+realized task set, which is exactly the uncertainty a generalization
+read must include (RRSI E.2 resamples tasks, not trials).
+
+Under cluster the decision-rule aggregate metrics gain intervals of
+their own — `pass_rate` becomes the paired-binary task read (each
+task contributes its conclusive pass fraction per arm, a bare bit at
+k = 1) and `tokens_to_done` the paired-continuous ratio read (each
+task carries (cost, passes) per arm; the replicate recomputes the
+ratio-of-sums over the resampled set — a ratio estimator redraws its
+denominator). Both refuse to a criterion-level `inconclusive` below
+two paired tasks rather than report a naked point estimate. The
+inconclusive sizing hint switches unit too: `requiredPairs`' within-
+trajectory variance is undefined at k = 1, so `requiredTasksCluster`
+prices the between-task spread of θ̄_j and prints `n≈… tasks`.
+
+**The gate.** `decision_rule.ood: true` declares a held-out
+generalization claim; `ValidateExperiment` refuses it unless
+`resample: "cluster"`. `ood` is part of the snapshotted rule (the
+claim's unit of inference is pre-registration material), and
+`resample` itself is pinned into the alarm snapshot — a mode flip
+after the run suppresses the rule result the same way a rewritten
+criterion does. `""` and `"stratified"` normalize equal, so pinning
+is drift-free for pre-#407 invocations.
+
 ## Lifecycle contract — when coverage commits
 
 Each `task.turns[i]` runs as its own `crush run` subprocess

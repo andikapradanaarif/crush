@@ -3,6 +3,7 @@ package eval
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"math/rand/v2"
 	"os"
@@ -1121,4 +1122,174 @@ func TestCompare_DecisionRule(t *testing.T) {
 		require.Equal(t, "absent", rep.RuleResult)
 		require.Contains(t, rep.Summary(), "decision rule: absent")
 	})
+}
+
+// k = 1 per task is the OOD shape: within-trajectory resampling has
+// nothing to resample — every stratified replicate equals θ̂ and the
+// CI collapses to the point. The cluster resample draws tasks, so
+// task-level spread produces a real interval bracketing θ̂.
+func TestClusterCI_K1NonDegenerate(t *testing.T) {
+	rng := rand.New(rand.NewPCG(7, 8))
+	// 20 tasks, one pair each — c=10, t = 10·(1+d_j) with d_j spread.
+	diffs := []float64{
+		-0.30, -0.20, -0.10, -0.05, 0.0, 0.05, 0.10, 0.15,
+		-0.25, -0.15, -0.08, 0.02, 0.07, 0.12, 0.20, 0.25, -0.12, 0.08, -0.02, 0.0,
+	}
+	var trajs []trajPairs
+	for _, d := range diffs {
+		trajs = append(trajs, tp([]float64{10}, []float64{10 * (1 + d)}))
+	}
+	theta := thetaMeanRaw(trajs)
+	loS, hiS := bcaCI(trajs, 2000, rand.New(rand.NewPCG(7, 8)))
+	require.InDelta(t, theta, loS, 1e-9, "stratified resample is degenerate at k=1")
+	require.InDelta(t, theta, hiS, 1e-9)
+	lo, hi := clusterCI(trajs, 2000, rng)
+	require.Less(t, lo, theta, "cluster interval must bracket θ̂")
+	require.Greater(t, hi, theta)
+	require.Greater(t, hi-lo, 0.01, "task-level spread must produce real width")
+}
+
+// Coverage on simulated nulls: draw k=1 task diffs ~N(0,σ²) so the
+// true estimand is 0 — a calibrated 95% interval contains it ~95% of
+// the time.
+func TestClusterCI_Coverage(t *testing.T) {
+	const datasets, tasks, reps = 150, 40, 800
+	rng := rand.New(rand.NewPCG(11, 12))
+	covers := 0
+	for i := 0; i < datasets; i++ {
+		var trajs []trajPairs
+		for j := 0; j < tasks; j++ {
+			d := rng.NormFloat64() * 0.15
+			trajs = append(trajs, tp([]float64{10}, []float64{10 * (1 + d)}))
+		}
+		lo, hi := clusterCI(trajs, reps, rng)
+		if lo <= 0 && 0 <= hi {
+			covers++
+		}
+	}
+	rate := float64(covers) / datasets
+	require.Greater(t, rate, 0.85, "coverage %.3f far below the 0.95 mark", rate)
+	require.Less(t, rate, 1.0, "coverage %.3f suspiciously perfect", rate)
+}
+
+// An OOD decision rule declares inference over the task distribution
+// — the gate refuses it unless the experiment resamples at the
+// cluster unit.
+func TestValidateDecisionRule_OODRequiresCluster(t *testing.T) {
+	mk := func(resample string, ood bool) *Experiment {
+		temp := 0.7
+		return &Experiment{
+			Name:              "e",
+			Model:             "hyper/m",
+			Temperature:       &temp,
+			Resample:          resample,
+			Corpus:            []string{"*"},
+			RunsPerTrajectory: map[Band]int{BandStable: 1},
+			Arms:              map[string]Arm{ArmControl: {}, ArmTreatment: {}},
+			DecisionRule: &DecisionRule{
+				Hypothesis: "h",
+				OOD:        ood,
+				Primary: &RulePrimary{
+					Metric: "steps", Arm: ArmTreatment, Vs: ArmControl,
+					Direction: PrimaryDecrease, MinImprovement: 0.10,
+				},
+			},
+		}
+	}
+	require.ErrorContains(t, mk("", true).validateDecisionRule(), "resample")
+	require.ErrorContains(t, mk(ResampleStratified, true).validateDecisionRule(), "resample")
+	require.NoError(t, mk(ResampleCluster, true).validateDecisionRule())
+	require.NoError(t, mk("", false).validateDecisionRule(),
+		"non-OOD rules keep the default stratified mode")
+	// And the resample field itself validates.
+	require.ErrorContains(t, ValidateExperiment(mk("bogus", false)), "resample")
+}
+
+// A resample-mode flip after the run is the same post-hoc hole as a
+// rewritten rule — the snapshot pin suppresses the result.
+func TestCompare_ResampleDriftSuppressesRule(t *testing.T) {
+	dir := t.TempDir()
+	exp := &Experiment{
+		Name:     "e",
+		Resample: ResampleCluster,
+		Arms:     map[string]Arm{ArmControl: {}, ArmTreatment: {}},
+		DecisionRule: &DecisionRule{
+			Hypothesis: "h",
+			Primary: &RulePrimary{
+				Metric: "steps", Arm: ArmTreatment, Vs: ArmControl,
+				Direction: PrimaryDecrease, MinImprovement: 0.01,
+			},
+		},
+	}
+	opts := map[string]any{"f": 1}
+	var recs []RunRecord
+	for i := 1; i <= 5; i++ {
+		recs = append(recs,
+			compareRecord("e", "t", ArmControl, "i1", i, 100, opts),
+			compareRecord("e", "t", ArmTreatment, "i1", i, 90, opts))
+	}
+	writeCompareRecords(t, dir, recs...)
+	r := seededRunner(dir)
+	// Persist the snapshot under stratified, then flip the manifest
+	// — the rule must read suppressed, not re-estimated.
+	strat := *exp
+	strat.Resample = ""
+	require.NoError(t, r.persistAlarms(&strat, "i1", Report{}, nil))
+	rep, err := r.Compare(exp, "i1")
+	require.NoError(t, err)
+	require.Equal(t, "inconclusive", rep.RuleResult)
+	require.Contains(t, rep.RuleNote, "resample drifted")
+}
+
+// The aggregate criteria carry task-level intervals under cluster
+// mode: pass_rate diffs per task resample into a bounded criterion.
+func TestRuleCriterion_PassRateClusterBounded(t *testing.T) {
+	var recs []RunRecord
+	// Treatment passes on 7/10 tasks, control on 5/10 — paired
+	// task diffs: +1 on 2, 0 on 7, -1 on 1 → θ = +0.1.
+	out := []bool{true, true, false, true, true, true, false, true, true, true}
+	tf := func(arm string, traj int, pass bool) RunRecord {
+		r := compareRecord("e", fmt.Sprintf("task%02d", traj), arm, "i1", 1, 100, map[string]any{"f": 1})
+		if !pass {
+			r.Outcome = OutcomeFail
+		}
+		return r
+	}
+	_ = out
+	ctrl := []bool{true, true, true, true, false, true, false, true, false, true}
+	treat := []bool{true, true, true, true, true, true, true, true, true, false}
+	for j := range ctrl {
+		recs = append(recs, tf(ArmControl, j, ctrl[j]), tf(ArmTreatment, j, treat[j]))
+	}
+	rep := &CompareReport{Resample: ResampleCluster}
+	rng := rand.New(rand.NewPCG(13, 14))
+	v, det := rep.ruleCriterion(&Experiment{}, "pass_rate", ArmTreatment, ArmControl,
+		PrimaryIncrease, -0.5, "guardrail", recs, 2000, rng)
+	require.Equal(t, "satisfied", v)
+	require.Contains(t, det, "guardrail pass_rate")
+}
+
+// Fewer than two paired tasks can't express task-level variance —
+// inconclusive, never a naked point estimate.
+func TestRuleCriterion_PassRateClusterOneTask(t *testing.T) {
+	recs := []RunRecord{
+		compareRecord("e", "only", ArmControl, "i1", 1, 100, map[string]any{"f": 1}),
+		compareRecord("e", "only", ArmTreatment, "i1", 1, 100, map[string]any{"f": 1}),
+	}
+	rep := &CompareReport{Resample: ResampleCluster}
+	v, det := rep.ruleCriterion(&Experiment{}, "pass_rate", ArmTreatment, ArmControl,
+		PrimaryIncrease, -0.5, "guardrail", recs, 500, rand.New(rand.NewPCG(15, 16)))
+	require.Equal(t, "inconclusive", v)
+	require.Contains(t, det, "≥2 paired tasks")
+}
+
+// requiredTasksCluster prices the between-task spread — degenerate
+// under requiredPairs' within-trajectory unit at k=1.
+func TestRequiredTasksCluster_BetweenTaskVariance(t *testing.T) {
+	// Per-task mean diffs: Var({0, .1, -.1}) = 0.02/2 = 0.01.
+	trajs := [][]float64{{0.0}, {0.1}, {-0.1}}
+	expN := int(math.Ceil(6.186 * 0.01 / (0.10 * 0.10)))
+	require.Equal(t, expN, requiredTasksCluster(trajs, 0.10, 0))
+	// requiredPairs sees len(d)<2 everywhere → no within variance.
+	require.Equal(t, 0, requiredPairs(trajs, 0.10, 0))
 }
