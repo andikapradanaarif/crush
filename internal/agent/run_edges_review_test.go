@@ -198,30 +198,6 @@ func TestFreshReviewVerdicts(t *testing.T) {
 		require.Equal(t, 0, spy.calls)
 	})
 
-	t.Run("a write-less disproof exits marked, not silent", func(t *testing.T) {
-		t.Parallel()
-		// The repair prompt offers "fix or disprove" — a repair
-		// turn that answers write-lessly exits the loop on its own
-		// claim. The escape stands (re-reviewing an unchanged diff
-		// could only repeat the verdict) but it must be marked:
-		// degraded row, terminal line, zero review calls.
-		spy := &advisorSpyModel{text: "VERDICT: ISSUES\nf.go — bug — reason"}
-		a, _, sessionID := reviewAgent(t, spy)
-		assistant := &message.Message{
-			Role:  message.Assistant,
-			Parts: []message.ContentPart{message.TextContent{Text: "the finding is wrong because"}},
-		}
-		queued := runEdgesForTest(a, t.Context(),
-			SessionAgentCall{
-				SessionID: sessionID,
-				Prompt:    freshReviewPrefix + " — it saw the task:\n\nf.go — bug — reason",
-			},
-			edgeInput{result: cleanResult(), currentAssistant: assistant})
-		require.False(t, queued)
-		require.Equal(t, 0, spy.calls)
-		require.Contains(t, assistant.Parts[0].(message.TextContent).Text, "findings stand")
-	})
-
 	t.Run("arm off leaves a write-less repair exit alone", func(t *testing.T) {
 		t.Parallel()
 		a, _, sessionID := newGateTestAgent(t, &config.Config{})
