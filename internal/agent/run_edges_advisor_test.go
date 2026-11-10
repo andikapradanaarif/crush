@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
@@ -18,10 +19,12 @@ import (
 // reply while recording call count and the joined prompt text — the
 // assertion surface for what evidence the advisor saw.
 type advisorSpyModel struct {
-	text   string
-	err    error
-	calls  int
-	prompt string
+	text      string
+	err       error
+	finish    fantasy.FinishReason
+	calls     int
+	prompt    string
+	maxTokens int64
 }
 
 func (m *advisorSpyModel) Provider() string { return "fake" }
@@ -42,10 +45,17 @@ func (m *advisorSpyModel) Stream(ctx context.Context, call fantasy.Call) (fantas
 		}
 	}
 	m.prompt = sb.String()
+	if call.MaxOutputTokens != nil {
+		m.maxTokens = *call.MaxOutputTokens
+	}
 	if m.err != nil {
 		return nil, m.err
 	}
 	text := m.text
+	finish := m.finish
+	if finish == "" {
+		finish = fantasy.FinishReasonStop
+	}
 	return func(yield func(fantasy.StreamPart) bool) {
 		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextStart, ID: "1"}) {
 			return
@@ -56,7 +66,7 @@ func (m *advisorSpyModel) Stream(ctx context.Context, call fantasy.Call) (fantas
 		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextEnd, ID: "1"}) {
 			return
 		}
-		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonStop})
+		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: finish})
 	}, nil
 }
 
@@ -156,6 +166,96 @@ func TestEdgeAdvisorFailOpen(t *testing.T) {
 	require.Len(t, q, 1)
 	require.NotContains(t, q[0].Prompt, "Advisor note")
 	require.True(t, strings.HasPrefix(q[0].Prompt, stallRetryPrefix))
+}
+
+func TestEdgeAdvisorReasoningBudget(t *testing.T) {
+	t.Parallel()
+
+	build := func() (*sessionAgent, *advisorSpyModel, string, message.Service) {
+		a, svc, sessionID := newGateTestAgent(t, &config.Config{})
+		a.ambiguityClarification = true
+		a.interactive = true
+		a.tools = csync.NewSliceFrom([]fantasy.AgentTool{
+			&fakeTool{name: tools.TodosToolName},
+			&fakeTool{name: tools.QuestionToolName},
+		})
+		spy := &advisorSpyModel{text: "try a different hypothesis."}
+		return a, spy, sessionID, svc
+	}
+
+	// A reasoning-capable advisor model gets the catwalk default
+	// budget — a small cap is spent on reasoning_content and the
+	// reply comes back empty (the scope resolver's documented
+	// truncation).
+	a, spy, sessionID, svc := build()
+	a.advisorModel = func(string) Model {
+		return Model{Model: spy, CatwalkCfg: catwalk.Model{
+			DefaultMaxTokens: 4096,
+			Reasoning:        catwalk.Reasoning{Thinking: catwalk.ThinkingAlways},
+		}}
+	}
+	_, err := svc.Create(t.Context(), sessionID, message.CreateMessageParams{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.TextContent{Text: "goal"}},
+	})
+	require.NoError(t, err)
+	require.True(t, runEdgesForTest(a, t.Context(),
+		SessionAgentCall{SessionID: sessionID, RepairAttempts: 1},
+		edgeInput{result: stallResult(), stalled: true}))
+	require.Equal(t, int64(4096), spy.maxTokens)
+
+	// A plain advisor model keeps the tight note-sized cap.
+	a, spy, sessionID, _ = build()
+	a.advisorModel = func(string) Model { return Model{Model: spy} }
+	require.True(t, runEdgesForTest(a, t.Context(),
+		SessionAgentCall{SessionID: sessionID, RepairAttempts: 1},
+		edgeInput{result: stallResult(), stalled: true}))
+	require.Equal(t, int64(advisorMaxTokens), spy.maxTokens)
+}
+
+func TestEdgeAdvisorLengthFinishSkips(t *testing.T) {
+	t.Parallel()
+
+	a, _, sessionID := newGateTestAgent(t, &config.Config{})
+	a.ambiguityClarification = true
+	a.interactive = true
+	a.tools = csync.NewSliceFrom([]fantasy.AgentTool{
+		&fakeTool{name: tools.TodosToolName},
+		&fakeTool{name: tools.QuestionToolName},
+	})
+	// A length-truncated reply is no advice — annotating a
+	// mid-sentence fragment is worse than the bare prompt.
+	spy := &advisorSpyModel{text: "first try the", finish: fantasy.FinishReasonLength}
+	a.advisorModel = spyAdvisor(spy)
+
+	queued := runEdgesForTest(a, t.Context(),
+		SessionAgentCall{SessionID: sessionID, RepairAttempts: 1},
+		edgeInput{result: stallResult(), stalled: true})
+	require.True(t, queued)
+	q, _ := a.messageQueue.Get(sessionID)
+	require.Len(t, q, 1)
+	require.NotContains(t, q[0].Prompt, "Advisor note")
+}
+
+func TestAdvisorEvidenceDedupesFallbackCheck(t *testing.T) {
+	t.Parallel()
+
+	a, _, sessionID := newGateTestAgent(t, &config.Config{})
+	failed := []gateCheckOutcome{{
+		check: message.VerificationCheck{
+			Check:  "diagnostics",
+			State:  "failed",
+			Detail: "2 new error(s)",
+		},
+	}}
+	trigger := &edgeTrigger{failed: failed, checkFallback: &failed[0]}
+	evidence := a.advisorEvidence(t.Context(), SessionAgentCall{SessionID: sessionID},
+		[]contender{{edge: runEdge{name: "verification"}, t: trigger}})
+
+	// The handoff's verification line already names the latest
+	// verdict — the check list must not print it a second time.
+	require.Contains(t, evidence, "- Verification: check `diagnostics` failed")
+	require.Equal(t, 1, strings.Count(evidence, "diagnostics"))
 }
 
 func TestEdgeAdvisorNilResolverSkips(t *testing.T) {

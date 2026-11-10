@@ -145,6 +145,12 @@ func (c *coordinator) advisorModelFn(sessionModels func(string) ModelSet, opts *
 		slog.Warn("Option edge_advisor_model names no configured model; advisor uses the session large slot", "key", key)
 		return largeSlot
 	}
+	// Warm the shared build now so the first edge fire never stalls a
+	// run boundary on a provider build. A failed warm is not cached —
+	// the closure below retries at fire time.
+	if _, err := c.overrideModel(sel); err != nil {
+		slog.Warn("Edge advisor model pre-build failed; build retries at fire time", "key", key, "error", err)
+	}
 	return func(_ string) Model {
 		om, err := c.overrideModel(sel)
 		if err != nil {

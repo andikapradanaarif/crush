@@ -220,6 +220,7 @@ var optionSpecs = map[string]optionSpec{
 	"scope-gate":               {jsonKey: "scope_gate", kind: optBool},
 	"failure-memory":           {jsonKey: "failure_memory", kind: optBool},
 	"failure-memory-edges":     {jsonKey: "failure_memory_edges", kind: optBool},
+	"edge-advisor":             {jsonKey: "edge_advisor", kind: optBool},
 	"referent-memory":          {jsonKey: "referent_memory", kind: optBool},
 	"session-memory":           {jsonKey: "session_memory", kind: optBool},
 	"memory-telemetry":         {jsonKey: "memory_telemetry", kind: optBool},
@@ -243,6 +244,7 @@ var optionSpecs = map[string]optionSpec{
 	"initialize-as":          {jsonKey: "initialize_as", kind: optString},
 	"turn-context":           {jsonKey: "turn_context", kind: optString},
 	"notebook-memory-server": {jsonKey: "notebook_memory_server", kind: optString},
+	"edge-advisor-model":     {jsonKey: "edge_advisor_model", kind: optString},
 	"notebook-prior-turns":   {jsonKey: "notebook_prior_turns", kind: optEnum, values: []string{"verbatim", "stub", "digest", "summarize"}},
 	"notebook-generate":      {jsonKey: "notebook_generate", kind: optEnum, values: []string{"always", "under_pressure", "never"}},
 

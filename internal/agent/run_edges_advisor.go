@@ -43,12 +43,21 @@ func (a *sessionAgent) adviseOnEdge(ctx context.Context, call SessionAgentCall, 
 		return ""
 	}
 
+	// Reasoning models spend output tokens on reasoning_content
+	// before any text — a small cap returns empty (the scope
+	// resolver documents the observed truncation on deepseek-flash).
+	// Mirror its floor: the model's own default budget, so the note
+	// survives a reasoning preamble.
+	tok := int64(advisorMaxTokens)
+	if model.CatwalkCfg.CanReason() {
+		tok = max(tok, model.CatwalkCfg.DefaultMaxTokens)
+	}
 	actx, cancel := context.WithTimeout(ctx, advisorCallTimeout)
 	defer cancel()
 	ag := fantasy.NewAgent(
 		model.Model,
 		fantasy.WithSystemPrompt(advisorSystemPrompt),
-		fantasy.WithMaxOutputTokens(advisorMaxTokens),
+		fantasy.WithMaxOutputTokens(tok),
 		fantasy.WithUserAgent(userAgent),
 	)
 	resp, err := ag.Stream(actx, fantasy.AgentStreamCall{
@@ -60,6 +69,11 @@ func (a *sessionAgent) adviseOnEdge(ctx context.Context, call SessionAgentCall, 
 	a.recordUsage(call.SessionID, resp)
 	if err != nil {
 		slog.Warn("Edge advisor call failed; proceeding without advice", "error", err, "session_id", call.SessionID)
+		return ""
+	}
+	// Defensive parity with the scope resolver — a nil or
+	// length-truncated response is no advice worth annotating.
+	if resp == nil || resp.Response.FinishReason == fantasy.FinishReasonLength {
 		return ""
 	}
 	advice := strings.TrimSpace(resp.Response.Content.Text())
@@ -80,7 +94,7 @@ func (a *sessionAgent) advisorEvidence(ctx context.Context, call SessionAgentCal
 	b.WriteString("A deterministic tripwire stopped this coding run. The run's evidence follows.\n\n")
 	for _, c := range winners {
 		t := c.t
-		if t.goal == "" && t.lastCheck == nil {
+		if t.goal == "" && t.lastCheck == nil && t.checkFallback == nil {
 			a.pullEscalationHandoff(ctx, call, t)
 		}
 		fmt.Fprintf(&b, "Edge: %s", c.edge.name)
@@ -92,12 +106,24 @@ func (a *sessionAgent) advisorEvidence(ctx context.Context, call SessionAgentCal
 			fmt.Fprintf(&b, "Detail: %s\n", t.detail)
 		}
 		b.WriteString(escalationHandoffLines(t))
+		// The handoff's verification line already names the latest
+		// verdict — skip its duplicate in the check lists below.
+		fbID := ""
+		if t.checkFallback != nil {
+			fbID = t.checkFallback.check.Identity()
+		}
 		for _, f := range t.failed {
+			if fbID != "" && f.check.Identity() == fbID {
+				continue
+			}
 			fmt.Fprintf(&b, "- Failed check: `%s` — %s\n",
 				truncateTailText(tailSafeText(f.check.Check), 80),
 				truncateTailText(tailSafeText(f.check.Detail), 120))
 		}
 		for _, p := range t.pending {
+			if fbID != "" && p.check.Identity() == fbID {
+				continue
+			}
 			fmt.Fprintf(&b, "- Pending check: `%s`\n",
 				truncateTailText(tailSafeText(p.check.Check), 80))
 		}

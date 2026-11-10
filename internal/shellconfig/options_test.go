@@ -67,6 +67,25 @@ option notifications osc`
 	require.Equal(t, "osc", opts["notifications"])
 }
 
+func TestOption_EdgeAdvisor(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	script := `option edge-advisor true
+option edge-advisor-model advisor-key`
+	path := filepath.Join(dir, "crushrc")
+
+	jsonBytes, err := LoadShellConfig(t.Context(), path, []byte(script))
+	require.NoError(t, err)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(jsonBytes, &result))
+
+	opts := result["options"].(map[string]any)
+	require.Equal(t, true, opts["edge_advisor"])
+	require.Equal(t, "advisor-key", opts["edge_advisor_model"])
+}
+
 func TestOption_List(t *testing.T) {
 	t.Parallel()
 
