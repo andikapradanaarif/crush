@@ -1,0 +1,14 @@
+{
+	"dataset": "terminal-bench",
+	"version": "2.0",
+	"source": {
+		"registry_url": "https://raw.githubusercontent.com/laude-institute/harbor/main/registry.json",
+		"git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+		"commit": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+	},
+	"split": "sealed",
+	"seed": 439,
+	"dev_count": 59,
+	"task_sha256": "a276d1fd19047903af69c9dc4f1325a31c425e1396bf8656c55be76a6923aa5b",
+	"access_protocol": "phase-exit only: do not enumerate during lever development"
+}
