@@ -50,29 +50,34 @@ var h0AbstainStates = func() map[string]bool {
 // Share fields are pointers so an empty denominator marshals as
 // null rather than a false zero — the trend convention.
 type fleetHealth struct {
-	Project                string         `json:"project"`
-	DataDir                string         `json:"data_dir"`
-	SinceMS                int64          `json:"since_ms"`
-	SettledTurns           int            `json:"settled_turns"`
-	PendingTurns           int            `json:"pending_turns"`
-	Accepted               int            `json:"accepted"`
-	Revised                int            `json:"revised"`
-	Failed                 int            `json:"failed"`
-	Unknown                int            `json:"unknown"`
-	NonPromptTurnsExcluded int            `json:"non_prompt_turns_excluded"`
-	EditedPaths            int            `json:"edited_path_instances"`
-	InScopePaths           int            `json:"in_scope_path_instances"`
-	AbstainedPaths         int            `json:"abstained_path_instances"`
-	OKPaths                int            `json:"ok_path_instances"`
-	OKShare                *float64       `json:"ok_share"`
-	PostFixTurns           int            `json:"post_fix_turns"`
-	PostFixPaths           int            `json:"post_fix_path_instances"`
-	PostFixInScopePaths    int            `json:"post_fix_in_scope_path_instances"`
-	PostFixAbstainedPaths  int            `json:"post_fix_abstained_path_instances"`
-	PostFixOKPaths         int            `json:"post_fix_ok_paths"`
-	PostFixOKShare         *float64       `json:"post_fix_ok_share"`
-	Excluded               map[string]int `json:"excluded,omitempty"`
-	Missing                []string       `json:"missing,omitempty"`
+	Project                string `json:"project"`
+	DataDir                string `json:"data_dir"`
+	SinceMS                int64  `json:"since_ms"`
+	SettledTurns           int    `json:"settled_turns"`
+	PendingTurns           int    `json:"pending_turns"`
+	Accepted               int    `json:"accepted"`
+	Revised                int    `json:"revised"`
+	Failed                 int    `json:"failed"`
+	Unknown                int    `json:"unknown"`
+	NonPromptTurnsExcluded int    `json:"non_prompt_turns_excluded"`
+	// PostFixNonPromptTurns is the #437 audit: turn rows minted on
+	// harness-authored boundaries after the #432 guard shipped must
+	// be zero — the pre-fix count stays visible in
+	// NonPromptTurnsExcluded as frozen history.
+	PostFixNonPromptTurns int            `json:"post_fix_non_prompt_turns"`
+	EditedPaths           int            `json:"edited_path_instances"`
+	InScopePaths          int            `json:"in_scope_path_instances"`
+	AbstainedPaths        int            `json:"abstained_path_instances"`
+	OKPaths               int            `json:"ok_path_instances"`
+	OKShare               *float64       `json:"ok_share"`
+	PostFixTurns          int            `json:"post_fix_turns"`
+	PostFixPaths          int            `json:"post_fix_path_instances"`
+	PostFixInScopePaths   int            `json:"post_fix_in_scope_path_instances"`
+	PostFixAbstainedPaths int            `json:"post_fix_abstained_path_instances"`
+	PostFixOKPaths        int            `json:"post_fix_ok_paths"`
+	PostFixOKShare        *float64       `json:"post_fix_ok_share"`
+	Excluded              map[string]int `json:"excluded,omitempty"`
+	Missing               []string       `json:"missing,omitempty"`
 	// H0 is pass | fail | pending | pre-schema. Pending covers
 	// "no post-#433 rows" and "post-#433 turns but no edits yet" —
 	// the states the H0 gate must not misread as failure.
@@ -223,11 +228,14 @@ func gatherFleetHealth(ctx context.Context, conn *sql.DB, tp trendProject, since
 		if err := rows.Scan(&verdict, &settled, &pathsJSON, &addedJSON, &workdir, &parts); err != nil {
 			return r, err
 		}
+		postFix := workdir != ""
 		if parts.Valid && trendNonUserTurn(parts.String) {
 			r.NonPromptTurnsExcluded++
+			if postFix {
+				r.PostFixNonPromptTurns++
+			}
 			continue
 		}
-		postFix := workdir != ""
 		if postFix {
 			r.PostFixTurns++
 		}
@@ -354,8 +362,11 @@ func printFleetHealth(w io.Writer, r fleetHealth) {
 	}
 	fmt.Fprintf(w, "  real-user settled: %d   verdict mix: A %d · R %d · F %d · U %d\n",
 		r.SettledTurns, r.Accepted, r.Revised, r.Failed, r.Unknown)
-	fmt.Fprintf(w, "  pending real-user turns: %d   non-prompt rows excluded: %d\n",
-		r.PendingTurns, r.NonPromptTurnsExcluded)
+	fmt.Fprintf(w, "  pending real-user turns: %d   non-prompt rows excluded: %d (post-#433: %d)\n",
+		r.PendingTurns, r.NonPromptTurnsExcluded, r.PostFixNonPromptTurns)
+	if r.PostFixNonPromptTurns > 0 {
+		fmt.Fprintln(w, "  ⚠ #437 audit: post-#433 rows minted on harness-authored boundaries — the fingerprint guard is leaking")
+	}
 	if r.OKShare == nil {
 		fmt.Fprintf(w, "  edited paths: %d instances (%d in scope) — no in-scope paths\n",
 			r.EditedPaths, r.InScopePaths)

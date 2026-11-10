@@ -36,7 +36,7 @@ func insertFleetTurn(t *testing.T, conn *sql.DB, key, sid, tid, verdict string,
 
 func seedRepairMessage(t *testing.T, conn *sql.DB, sid, mid string) {
 	t.Helper()
-	trendExec(t, conn, `INSERT INTO sessions
+	trendExec(t, conn, `INSERT OR IGNORE INTO sessions
 		(id, title, prompt_tokens, completion_tokens, cost, created_at, updated_at)
 		VALUES (?, 's', 0, 0, 0, 1, 1)`, sid)
 	trendExec(t, conn, `INSERT INTO messages
@@ -68,6 +68,9 @@ func TestGatherFleetHealth(t *testing.T) {
 	// A repair-prompt minted row is excluded, not a settled user turn.
 	seedRepairMessage(t, conn, "s", "s-u0")
 	insertFleetTurn(t, conn, "mine", "s", "s-u0", "accepted", weekAms, true, "", paths, okCell)
+	// The same mint on a post-#433 row trips the #437 audit counter.
+	seedRepairMessage(t, conn, "s", "s-u1")
+	insertFleetTurn(t, conn, "mine", "s", "s-u1", "accepted", weekAms, true, "/repo", paths, okCell)
 	// A foreign partition stays out.
 	insertFleetTurn(t, conn, "other", "s", "t-x", "accepted", weekAms, true, "/repo", paths, okCell)
 
@@ -80,7 +83,9 @@ func TestGatherFleetHealth(t *testing.T) {
 	require.Equal(t, 1, r.Failed)
 	require.Equal(t, 1, r.Unknown)
 	require.Equal(t, 1, r.PendingTurns)
-	require.Equal(t, 1, r.NonPromptTurnsExcluded)
+	require.Equal(t, 2, r.NonPromptTurnsExcluded)
+	require.Equal(t, 1, r.PostFixNonPromptTurns,
+		"a post-#433 row minted on a repair boundary is the #437 violation the audit counts")
 	require.Equal(t, 6, r.EditedPaths)
 	// Designed abstentions leave the denominator (#466): the three
 	// out_of_workspace cells report as their own share instead.

@@ -302,23 +302,36 @@ func TestRepairPromptPrefixes_Stable(t *testing.T) {
 	// Every firing edge's rendered prompt must fingerprint as a
 	// repair turn — a section that renders without its exported
 	// prefix mints mislabeled turn rows (#427 regression) and
-	// breaks the analyzer's turn segmentation.
-	sections := []string{
-		(&sessionAgent{}).verificationRetrySection(&edgeTrigger{failed: []gateCheckOutcome{{
+	// breaks the analyzer's turn segmentation. The iteration follows
+	// the registered edge set itself: an edge added without a
+	// fingerprinted prompt — or without a fixture here — fails the
+	// guard (#437).
+	triggers := map[string][]*edgeTrigger{
+		"verification": {{failed: []gateCheckOutcome{{
 			check: message.VerificationCheck{Check: "c"}, output: "out",
-		}}}),
-		todosRetrySection(&edgeTrigger{plan: []planVerdict{{
+		}}}},
+		"todos": {{plan: []planVerdict{{
 			item: session.PlanItem{Content: "x", Status: session.PlanItemPending},
-		}}}),
-		stallRetrySection(nil),
-		stallReplanSection(&edgeTrigger{report: "Stopped: x"}),
-		verifyLoopReplanSection(&edgeTrigger{report: "Stopped: x"}),
-		verifyLoopEscalateSection(nil),
-		burnWatchRetrySection(&edgeTrigger{inputTokens: 250000, steps: make([]fantasy.StepResult, 40)}),
-		reconcileRetrySection(&edgeTrigger{openFailures: []cmdlog.Failure{{Cmd: "go test ./..."}}}),
+		}}}},
+		// The variant-dispatched sections render once per arm.
+		"stall":       {{}, {variant: "replan", report: "Stopped: x"}},
+		"verify-loop": {{}, {variant: "replan", report: "Stopped: x"}},
+		"burn-watch":  {{inputTokens: 250000, steps: make([]fantasy.StepResult, 40)}},
+		"reconcile":   {{openFailures: []cmdlog.Failure{{Cmd: "go test ./..."}}}},
 	}
-	for _, s := range sections {
-		require.True(t, IsRepairPrompt(s), "edge prompt not fingerprinted: %.40q", s)
+	for _, e := range (&sessionAgent{}).runEdgeSet() {
+		ts, ok := triggers[e.name]
+		require.True(t, ok,
+			"edge %q has no firing-trigger fixture — the fingerprint guard must cover every registered edge", e.name)
+		require.NotNil(t, e.prompt, "edge %q renders no prompt", e.name)
+		for _, trig := range ts {
+			s := e.prompt(trig)
+			require.NotEmpty(t, s, "edge %q rendered empty", e.name)
+			require.True(t, IsRepairPrompt(s), "edge %q prompt not fingerprinted: %.40q", e.name, s)
+			// The stored message is the merged form — section(s) +
+			// outro — so the mint-side predicate must fire on it too.
+			require.True(t, IsRepairPrompt(s+repairRetryOutro))
+		}
 	}
 	// No prefix is a prefix of another — a merged prompt reads as its
 	// leading edge only.
