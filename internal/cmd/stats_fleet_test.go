@@ -101,6 +101,11 @@ func TestGatherFleetHealth(t *testing.T) {
 	require.InDelta(t, 1.0, *r.PostFixOKShare, 0.001)
 	require.Equal(t, "pass", r.H0)
 	require.Equal(t, map[string]int{"out_of_workspace": 3}, r.Excluded)
+
+	var output bytes.Buffer
+	printFleetHealth(&output, r)
+	require.Contains(t, output.String(), "post-#433: 1")
+	require.Contains(t, output.String(), "Warning: #437 audit")
 }
 
 func TestGatherFleetHealthPostFixPass(t *testing.T) {

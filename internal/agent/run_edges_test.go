@@ -314,8 +314,8 @@ func TestRepairPromptPrefixes_Stable(t *testing.T) {
 			item: session.PlanItem{Content: "x", Status: session.PlanItemPending},
 		}}}},
 		// The variant-dispatched sections render once per arm.
-		"stall":       {{}, {variant: "replan", report: "Stopped: x"}},
-		"verify-loop": {{}, {variant: "replan", report: "Stopped: x"}},
+		"stall":       {{variant: "escalate"}, {variant: "replan", report: "Stopped: x"}},
+		"verify-loop": {{variant: "escalate"}, {variant: "replan", report: "Stopped: x"}},
 		"burn-watch":  {{inputTokens: 250000, steps: make([]fantasy.StepResult, 40)}},
 		"reconcile":   {{openFailures: []cmdlog.Failure{{Cmd: "go test ./..."}}}},
 	}
@@ -328,9 +328,10 @@ func TestRepairPromptPrefixes_Stable(t *testing.T) {
 			s := e.prompt(trig)
 			require.NotEmpty(t, s, "edge %q rendered empty", e.name)
 			require.True(t, IsRepairPrompt(s), "edge %q prompt not fingerprinted: %.40q", e.name, s)
-			// The stored message is the merged form — section(s) +
-			// outro — so the mint-side predicate must fire on it too.
-			require.True(t, IsRepairPrompt(s+repairRetryOutro))
+			// No section may embed the outro early — a bare section
+			// fingerprinting via Contains rather than HasPrefix would
+			// mask a lost leading prefix.
+			require.False(t, strings.Contains(s, repairRetryOutro))
 		}
 	}
 	// No prefix is a prefix of another — a merged prompt reads as its

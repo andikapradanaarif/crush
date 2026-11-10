@@ -61,8 +61,8 @@ type fleetHealth struct {
 	Unknown                int    `json:"unknown"`
 	NonPromptTurnsExcluded int    `json:"non_prompt_turns_excluded"`
 	// PostFixNonPromptTurns is the #437 audit: turn rows minted on
-	// harness-authored boundaries after the #432 guard shipped must
-	// be zero — the pre-fix count stays visible in
+	// harness-authored boundaries in the post-#433 era (the workdir
+	// stamp) must be zero — the pre-fix count stays visible in
 	// NonPromptTurnsExcluded as frozen history.
 	PostFixNonPromptTurns int            `json:"post_fix_non_prompt_turns"`
 	EditedPaths           int            `json:"edited_path_instances"`
@@ -365,7 +365,7 @@ func printFleetHealth(w io.Writer, r fleetHealth) {
 	fmt.Fprintf(w, "  pending real-user turns: %d   non-prompt rows excluded: %d (post-#433: %d)\n",
 		r.PendingTurns, r.NonPromptTurnsExcluded, r.PostFixNonPromptTurns)
 	if r.PostFixNonPromptTurns > 0 {
-		fmt.Fprintln(w, "  ⚠ #437 audit: post-#433 rows minted on harness-authored boundaries — the fingerprint guard is leaking")
+		fmt.Fprintln(w, "  Warning: #437 audit — post-#433 rows minted on harness-authored boundaries; the fingerprint guard is leaking")
 	}
 	if r.OKShare == nil {
 		fmt.Fprintf(w, "  edited paths: %d instances (%d in scope) — no in-scope paths\n",
