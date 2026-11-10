@@ -549,6 +549,13 @@ const (
 	hunkRegionUnknown = "region_unknown"
 )
 
+// HunkAbstentionStates are the cell states where the capture model
+// makes no claim — designed abstentions, not failed captures
+// (#466). Consumers computing ok-share denominators must exclude
+// these; the set lives next to the state constants so a rename or
+// addition can't desync.
+var HunkAbstentionStates = []string{hunkCrossRepo, hunkOutOfWorkspace, hunkSensitive}
+
 // hunkFileRead is one settle-time read of an edited path: the state
 // the capture records, and the content when the state carries it.
 type hunkFileRead struct {

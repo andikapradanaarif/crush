@@ -36,12 +36,15 @@ const h0OKShare = 0.8
 // the ok-share denominator (#466) but stay visible as their own
 // counts: cross_repo belongs to another repo's partition,
 // out_of_workspace sits under no repository, sensitive is refused
-// by the safety gate.
-var h0AbstainStates = map[string]bool{
-	"cross_repo":       true,
-	"out_of_workspace": true,
-	"sensitive":        true,
-}
+// by the safety gate. The set comes from cmdlog so state renames
+// can't desync the two sides.
+var h0AbstainStates = func() map[string]bool {
+	out := make(map[string]bool, len(cmdlog.HunkAbstentionStates))
+	for _, s := range cmdlog.HunkAbstentionStates {
+		out[s] = true
+	}
+	return out
+}()
 
 // fleetHealth is one project partition's capture-health row.
 // Share fields are pointers so an empty denominator marshals as

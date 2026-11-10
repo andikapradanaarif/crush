@@ -56,7 +56,8 @@ type captureView struct {
 	// foreignRepo memoizes each out-of-scope ancestor dir's own git
 	// common-dir ("" = under no repository) — the cross_repo
 	// sub-state's probe (#466). One entry per edited directory, not
-	// per path.
+	// per path; the memo mutates, which is safe only because the
+	// record and settle passes run their path loops sequentially.
 	foreignRepo map[string]string
 }
 
@@ -156,6 +157,13 @@ func resolveTarget(target, base string, roots []string) (root, sub, abs string, 
 // or a removed worktree leaves no dir to ask — and memoizes per dir,
 // so a batch of paths under one foreign tree probes once.
 func (s *service) outOfScopeState(ctx context.Context, v *captureView, abs string) string {
+	if abs == "" {
+		// An unresolvable target — a relative path on a row with
+		// no stamped workdir — is under no provable repository.
+		// Without this guard the walk lands on "." and probes the
+		// process CWD, which knows nothing about the row.
+		return hunkOutOfWorkspace
+	}
 	dir := abs
 	for {
 		if st, err := os.Stat(dir); err == nil {
