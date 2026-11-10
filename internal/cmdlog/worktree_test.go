@@ -210,6 +210,36 @@ func TestCrossRepoState(t *testing.T) {
 	require.Empty(t, m[foreign].Edits, "abstentions store no content either way")
 }
 
+// #466: the settle read names the same abstention for a foreign-repo
+// path — escaped, not missing — while an unresolvable relative
+// target (no stamped workdir) abstains as out_of_workspace rather
+// than probing the process CWD.
+func TestCrossRepoSettleRead(t *testing.T) {
+	env, _, _ := setupWorktreeRepo(t)
+
+	other := filepath.Join(t.TempDir(), "other-repo")
+	gitInOther := func(args ...string) {
+		full := append([]string{"-C", other}, args...)
+		require.NoError(t, exec.CommandContext(t.Context(), "git", full...).Run())
+	}
+	require.NoError(t, os.MkdirAll(other, 0o755))
+	gitInOther("init", "-b", "main")
+	foreign := filepath.Join(other, "f.go")
+	require.NoError(t, os.WriteFile(foreign, []byte("package f\n"), 0o644))
+
+	svc := env.svc.(*service)
+	v := svc.captureView(t.Context())
+	fr := svc.readHunkSource(t.Context(), foreign, env.workingDir, v, "")
+	require.Equal(t, hunkCrossRepo, fr.state,
+		"a foreign-repo path abstains at settle like it did at record")
+	require.True(t, fr.escaped,
+		"escaped skips the missing-means-diverged arm")
+
+	require.Equal(t, hunkOutOfWorkspace,
+		svc.outOfScopeState(t.Context(), v, ""),
+		"an empty resolved path never probes the process CWD")
+}
+
 // #360: under a shared data_directory a row recorded by worktree B's
 // service settles in worktree A's pass — reads route by the row's
 // stamped workdir, not the settling service's checkout.
