@@ -231,6 +231,10 @@ func printCaptureHealth(w io.Writer, r captureHealth) {
 			fmt.Fprintf(w, "  Selected project directory: %s\n", r.Project)
 			fmt.Fprintln(w, "  Start a new Crush session in the checkout being edited, with that checkout's own .crush directory.")
 		}
+		if r.Excluded["cross_repo"] > 0 {
+			fmt.Fprintf(w, "  %d edits belong to other repositories — their evidence lives in those repos' partitions, not this project's.\n",
+				r.Excluded["cross_repo"])
+		}
 	} else if r.CapturedTurns > 0 && r.PositionedTurns == 0 {
 		fmt.Fprintln(w, "  Warning: captured edits have no positions; settled regions cannot be compared yet.")
 	}

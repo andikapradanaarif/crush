@@ -53,6 +53,12 @@ type captureView struct {
 	mainBranch string
 	ref        string
 	refSet     bool
+	// foreignRepo memoizes each out-of-scope ancestor dir's own git
+	// common-dir ("" = under no repository) — the cross_repo
+	// sub-state's probe (#466). One entry per edited directory, not
+	// per path; the memo mutates, which is safe only because the
+	// record and settle passes run their path loops sequentially.
+	foreignRepo map[string]string
 }
 
 // captureView lists the in-scope read roots for one pass: every
@@ -137,6 +143,61 @@ func resolveTarget(target, base string, roots []string) (root, sub, abs string, 
 		return "", "", abs, false
 	}
 	return root, rel, abs, true
+}
+
+// outOfScopeState names why a target resolved under no capture root
+// (#466): cross_repo when the path's own repository is provable and
+// differs from the session's — a designed abstention, since that
+// repo's partition owns its evidence — while out_of_workspace keeps
+// meaning "under no repository we can prove". The same-repo case
+// (a path inside the session's own repo that missed the roots
+// listing — a worktree born between view and record) keeps
+// out_of_workspace: it is the same abstention, not a foreign claim.
+// The probe runs on the deepest existing ancestor — a planned write
+// or a removed worktree leaves no dir to ask — and memoizes per dir,
+// so a batch of paths under one foreign tree probes once.
+func (s *service) outOfScopeState(ctx context.Context, v *captureView, abs string) string {
+	if abs == "" {
+		// An unresolvable target — a relative path on a row with
+		// no stamped workdir — is under no provable repository.
+		// Without this guard the walk lands on "." and probes the
+		// process CWD, which knows nothing about the row.
+		return hunkOutOfWorkspace
+	}
+	dir := abs
+	for {
+		if st, err := os.Stat(dir); err == nil {
+			if !st.IsDir() {
+				dir = filepath.Dir(dir)
+			}
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return hunkOutOfWorkspace
+		}
+		dir = parent
+	}
+	if v.foreignRepo == nil {
+		v.foreignRepo = map[string]string{}
+	}
+	common, probed := v.foreignRepo[dir]
+	if !probed {
+		pctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		out, err := gitOut(pctx, dir, "rev-parse", "--git-common-dir")
+		cancel()
+		if err == nil && out != "" {
+			if !filepath.IsAbs(out) {
+				out = filepath.Join(dir, out)
+			}
+			common = filepathext.Canonical(out)
+		}
+		v.foreignRepo[dir] = common
+	}
+	if common != "" && common != s.commonDir {
+		return hunkCrossRepo
+	}
+	return hunkOutOfWorkspace
 }
 
 // repoPath is the target's position inside its repository — the path

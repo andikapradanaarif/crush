@@ -99,7 +99,7 @@ func (s *service) RecordTurnOutcome(ctx context.Context, o TurnOutcome) error {
 	}
 	paths := marshalNoEscape(o.EditedPaths)
 	hunks := marshalNoEscape(o.EditHunks)
-	added := marshalNoEscape(s.buildHunkAdded(s.captureView(ctx), o.HunkAdded, o.HunkSpans, o.EditedPaths))
+	added := marshalNoEscape(s.buildHunkAdded(ctx, s.captureView(ctx), o.HunkAdded, o.HunkSpans, o.EditedPaths))
 	cmds := marshalNoEscape(o.Commands)
 	now := s.now().UnixMilli()
 	createdAt := o.CreatedAt
@@ -538,12 +538,23 @@ const (
 	hunkTooLarge       = "too_large"
 	hunkSensitive      = "sensitive"
 	hunkOutOfWorkspace = "out_of_workspace"
-	hunkOverCap        = "over_cap"
+	// cross_repo: the target sits under a different git repository —
+	// a designed abstention whose evidence belongs to that repo's
+	// partition, distinct from a path under no repo at all (#466).
+	hunkCrossRepo = "cross_repo"
+	hunkOverCap   = "over_cap"
 	// region_unknown: the file read fine but the record pass located
 	// no span — the region the agent wrote can't be identified at
 	// settle (already rewritten, legacy row, pure deletion).
 	hunkRegionUnknown = "region_unknown"
 )
+
+// HunkAbstentionStates are the cell states where the capture model
+// makes no claim — designed abstentions, not failed captures
+// (#466). Consumers computing ok-share denominators must exclude
+// these; the set lives next to the state constants so a rename or
+// addition can't desync.
+var HunkAbstentionStates = []string{hunkCrossRepo, hunkOutOfWorkspace, hunkSensitive}
 
 // hunkFileRead is one settle-time read of an edited path: the state
 // the capture records, and the content when the state carries it.
@@ -580,7 +591,7 @@ func (s *service) readHunkSource(ctx context.Context, path, base string, v *capt
 				return hunkFileRead{state: state}
 			}
 		}
-		return hunkFileRead{state: hunkOutOfWorkspace, escaped: true}
+		return hunkFileRead{state: s.outOfScopeState(ctx, v, abs), escaped: true}
 	}
 	if repoHint == "" {
 		repoHint = repoPath(sub)
@@ -626,20 +637,21 @@ func (s *service) readHunkSource(ctx context.Context, path, base string, v *capt
 // paths store only their state. Iteration follows edited_paths
 // order so the row cap cuts tail paths deterministically; dropped
 // entries carry over_cap rather than vanishing.
-func (s *service) buildHunkAdded(v *captureView, raw map[string][]HunkEdit, spans map[string][]HunkSpan, order []string) map[string]hunkAddedEntry {
+func (s *service) buildHunkAdded(ctx context.Context, v *captureView, raw map[string][]HunkEdit, spans map[string][]HunkSpan, order []string) map[string]hunkAddedEntry {
 	out := make(map[string]hunkAddedEntry, len(raw))
 	total := 0
 	for _, p := range order {
 		e := hunkAddedEntry{V: 1, State: hunkOK}
-		_, sub, _, inScope := resolveTarget(p, s.workingDir, v.roots)
+		_, sub, abs, inScope := resolveTarget(p, s.workingDir, v.roots)
 		switch {
 		case !inScope:
 			// Same scope gate as the settle side — an outside file's
 			// pre-edit content doesn't persist in the project DB,
 			// even though it's the agent's own output. In-scope
 			// means under a worktree root of this repo now, not
-			// just the workspace (#360, R8).
-			e.State = hunkOutOfWorkspace
+			// just the workspace (#360, R8). The state names which
+			// abstention it was (#466).
+			e.State = s.outOfScopeState(ctx, v, abs)
 		case sensitivePath(p):
 			e.State = hunkSensitive
 		case len(raw[p]) == 0 && len(spans[p]) == 0:
