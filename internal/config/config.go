@@ -577,7 +577,7 @@ type Options struct {
 	// not a configured stronger model — reviews, so the A/B isolates
 	// freshness. Its own experiment arm, opt-in until the paired
 	// dev-split read decides it.
-	FreshReview *bool `json:"fresh_review,omitempty" jsonschema:"description=Arm the fresh-context completion review: a clean-stopping run over real writes gets its task, diff, and check output judged by the solver model without the transcript or completion claim. Experimental.,default=false"`
+	FreshReview *bool `json:"fresh_review,omitempty" jsonschema:"description=Arm the fresh-context completion review: a clean-stopping run over real writes gets its task plus workspace diff plus observed check output judged by the solver model without the transcript or completion claim. Experimental.,default=false"`
 	// FailureMemory injects the <open_failures> tail — commands that
 	// failed in this workspace and have not passed since — independent
 	// of the turn_context tier so its contribution can be measured on

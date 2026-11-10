@@ -859,7 +859,7 @@
         },
         "fresh_review": {
           "type": "boolean",
-          "description": "Arm the fresh-context completion review: a clean-stopping run over real writes gets its task",
+          "description": "Arm the fresh-context completion review: a clean-stopping run over real writes gets its task plus workspace diff plus observed check output judged by the solver model without the transcript or completion claim. Experimental.",
           "default": false
         },
         "failure_memory": {

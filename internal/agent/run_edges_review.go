@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -72,11 +73,31 @@ type freshVerdict struct {
 // review, and StopWhen-ended runs (stalled, verifyLoop) belong to
 // their own edges. Opt-in via options.fresh_review — the gated row
 // records the would-have-fired verdict for the paired A/B read.
-func (a *sessionAgent) scanFreshReviewEdge(_ context.Context, _ SessionAgentCall, in edgeInput) *edgeTrigger {
+// The one exit that must not be silent: a repair turn that
+// "disproves" the findings without writing has no mutating call to
+// scan — re-reviewing an unchanged diff could only repeat the
+// verdict, so the loop ends on a degraded row plus a terminal
+// "findings stand" line the A/B read can count separately.
+func (a *sessionAgent) scanFreshReviewEdge(_ context.Context, call SessionAgentCall, in edgeInput) *edgeTrigger {
 	if !cleanStop(in) || in.stalled || in.verifyLoop || a.isSubAgent {
 		return nil
 	}
 	if !runHasMutatingCall(in.result.Steps) {
+		// A write-less stop on a fresh-review repair turn exits the
+		// review loop on the model's own disproof — the exact claim
+		// shape the edge distrusts. Re-reviewing an unchanged diff
+		// can only repeat the verdict, so the escape stands — but
+		// it must not be silent: mark it degraded so the A/B read
+		// counts disproof-exits separately from real passes, and
+		// resolve appends the terminal "findings stand" line.
+		if a.freshReview && strings.Contains(call.Prompt, freshReviewPrefix) {
+			return &edgeTrigger{
+				steps:     in.result.Steps,
+				assistant: in.currentAssistant,
+				detail:    "writes=0 disproof=unreviewed",
+				hint:      edgeOutcomeDegraded,
+			}
+		}
 		return nil
 	}
 	writeSet := stepWriteSet(in.result.Steps)
@@ -101,6 +122,12 @@ func (a *sessionAgent) scanFreshReviewEdge(_ context.Context, _ SessionAgentCall
 // with the findings as the report; anything else degrades — a broken
 // reviewer never blocks completion.
 func (a *sessionAgent) resolveFreshReviewEdge(ctx context.Context, call SessionAgentCall, t *edgeTrigger) {
+	if !runHasMutatingCall(t.steps) {
+		// The write-less disproof exit — no model call, just the
+		// terminal mark that the flagged diff stands unanswered.
+		a.markDisproofExit(ctx, call, t)
+		return
+	}
 	// The handoff pull fills goal, the run's observed check, and
 	// workingDir-relative write paths — the same evidence the
 	// escalation prompts relay.
@@ -115,6 +142,26 @@ func (a *sessionAgent) resolveFreshReviewEdge(ctx context.Context, call SessionA
 		t.hint = edgeOutcomeDegraded
 	default:
 		t.report = v.issues
+	}
+}
+
+// markDisproofExit appends the terminal line for a fresh-review
+// repair turn that ended write-less: the findings it was asked to
+// fix or disprove stand unanswered — the disproof claim lives in
+// the transcript the reviewer never sees, so the loop closes on the
+// visible mark, not on a re-review that could only repeat.
+func (a *sessionAgent) markDisproofExit(ctx context.Context, _ SessionAgentCall, t *edgeTrigger) {
+	if t.assistant == nil || a.messages == nil {
+		return
+	}
+	wctx, cancel := detachedWriteCtx(ctx)
+	defer cancel()
+	t.assistant.AppendContent("\n\nFresh-review: the findings stand — the repair turn answered " +
+		"without writes and the flagged diff is unchanged.")
+	if err := a.messages.Update(wctx, *t.assistant); err != nil {
+		slog.Error("Failed to record fresh-review disproof exit", "error", err)
+	} else if err := a.messages.FlushAll(wctx); err != nil {
+		slog.Error("Failed to flush fresh-review disproof exit", "error", err)
 	}
 }
 
@@ -168,7 +215,9 @@ func parseFreshVerdict(text string) freshVerdict {
 	head, rest, _ := strings.Cut(strings.TrimSpace(text), "\n")
 	head = strings.ToUpper(strings.TrimSpace(head))
 	switch {
-	case strings.HasPrefix(head, "VERDICT: PASS"):
+	case head == "VERDICT: PASS":
+		// Exact match — a prefix read would also take "VERDICT:
+		// PASSWORD"-shaped noise as a clear.
 		return freshVerdict{passed: true, detail: "verdict=pass"}
 	case strings.HasPrefix(head, "VERDICT: ISSUES"):
 		issues := strings.TrimSpace(rest)
@@ -267,20 +316,65 @@ func freshReviewDiff(ctx context.Context, dir string) string {
 			fmt.Fprintf(&b, "…and %d more new file(s) not shown\n", len(newFiles)-3)
 			break
 		}
-		content, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(p)))
+		// Lstat, not Stat — an untracked symlink must not pull its
+		// target's content into the reviewer bundle, and a `?? dir/`
+		// entry is not a readable file either.
+		abs := filepath.Join(dir, filepath.FromSlash(p))
+		info, err := os.Lstat(abs)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		content, err := readCapped(abs, freshReviewUntrackedCap)
 		if err != nil {
 			continue
 		}
-		fmt.Fprintf(&b, "--- new file: %s ---\n%s\n", p, capHeadText(string(content), freshReviewUntrackedCap))
+		fmt.Fprintf(&b, "--- new file: %s ---\n%s\n", p, content)
 	}
 	return b.String()
 }
 
 // freshReviewGit runs a read-only git command against the workspace.
+// Output is capped at capture — a giant worktree diff must not
+// buffer unbounded into memory at the boundary; the head is what
+// the reviewer reads anyway.
 func freshReviewGit(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
-	out, err := cmd.Output()
-	return string(out), err
+	var b cappedBuilder
+	cmd.Stdout = &b
+	err := cmd.Run()
+	return b.String(), err
+}
+
+// cappedBuilder accepts all writes but keeps only the head — git
+// sees a full write so it never blocks on a dead pipe, while the
+// captured text stays bounded. Four times the diff cap leaves room
+// for the status listing on the same budget.
+type cappedBuilder struct {
+	b strings.Builder
+}
+
+func (w *cappedBuilder) Write(p []byte) (int, error) {
+	if rem := freshReviewDiffCap*4 - w.b.Len(); rem > 0 {
+		w.b.Write(p[:min(rem, len(p))])
+	}
+	return len(p), nil
+}
+
+func (w *cappedBuilder) String() string { return w.b.String() }
+
+// readCapped reads at most maxRunes worth of a file's head — a
+// 500MB untracked artifact must not land in memory for a 2KB slot.
+func readCapped(path string, maxRunes int) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, int64(maxRunes)*4))
+	if err != nil {
+		return "", err
+	}
+	return capHeadText(string(data), maxRunes), nil
 }
 
 // capHeadText bounds a block for the review bundle — the head names
