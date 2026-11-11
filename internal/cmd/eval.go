@@ -370,6 +370,103 @@ paired-cell index for a single-trial ingest.`,
 	},
 }
 
+var evalNoiseCmd = &cobra.Command{
+	Use:   "noise <experiment.json>",
+	Short: "Compute the harbor base characterization into eval/noise.json (#404)",
+	Long: `Computes the externally executed noise floor over ingested
+harbor records — the quantities the selection rules price against
+(RRSI E.1: measured once, never retuned):
+
+  --passes inv1,inv2,...   multi-pass characterization: per-pass
+                           pass rate, δ (solved-count spread /
+                           trials-per-pass), c_min (relative
+                           tokens spread), tokens CV
+  --pair invA[,invB]       paired two-run characterization: σ_d
+                           (SD of per-task paired pass diff),
+                           tokens σ_d, tokens CV. One invocation
+                           pairs its run_index 0 vs 1 cells; two
+                           pair each's run 0.
+
+Both also report per-trial tokens, wall time, and USD cost.
+--write merges the result into eval/noise.json's harbor block
+(without it the report prints only).`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		exp, err := eval.LoadExperiment(args[0])
+		if err != nil {
+			return err
+		}
+		if exp.Harbor == nil {
+			return fmt.Errorf("noise: experiment %q declares no harbor block — characterization reads externally executed records", exp.Name)
+		}
+		arm, _ := cmd.Flags().GetString("arm")
+		dataset, _ := cmd.Flags().GetString("dataset")
+		passes, _ := cmd.Flags().GetString("passes")
+		pair, _ := cmd.Flags().GetString("pair")
+		model, _ := cmd.Flags().GetString("model")
+		write, _ := cmd.Flags().GetBool("write")
+		force, _ := cmd.Flags().GetBool("force")
+		// Labels default from the manifest — a free-flag typo
+		// shouldn't record a divergent dataset/model next to the
+		// experiment's own records.
+		if dataset == "" {
+			dataset = exp.Harbor.Dataset
+		}
+		if model == "" {
+			model = exp.Model
+		}
+		var passInvs, pairInvs []string
+		if passes != "" {
+			passInvs = strings.Split(passes, ",")
+		}
+		if pair != "" {
+			pairInvs = strings.Split(pair, ",")
+		}
+		if len(passInvs) == 0 && len(pairInvs) == 0 {
+			return fmt.Errorf("noise: --passes or --pair is required — characterization needs measured invocations")
+		}
+		r, err := evalRunner(cmd)
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		records, err := r.LoadExperimentRecords(exp.Name)
+		if err != nil {
+			return err
+		}
+		evalDir, _ := cmd.Flags().GetString("eval-dir")
+		harbor := &eval.NoiseHarbor{Model: model, MeasuredAt: time.Now().UTC()}
+		if len(passInvs) > 0 {
+			harbor.Passes, err = eval.ComputePassNoise(records, exp, evalDir, arm, dataset, passInvs)
+			if err != nil {
+				return err
+			}
+		}
+		if len(pairInvs) > 0 {
+			harbor.OOD, err = eval.ComputePairNoise(records, exp, evalDir, arm, dataset, pairInvs)
+			if err != nil {
+				return err
+			}
+		}
+		out, err := json.MarshalIndent(harbor, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(out))
+		if !write {
+			return nil
+		}
+		noise, err := eval.LoadNoise(evalDir)
+		if err != nil {
+			return err
+		}
+		if err := noise.MergeHarbor(harbor, force); err != nil {
+			return err
+		}
+		return noise.Save(evalDir)
+	},
+}
+
 var evalCompareCmd = &cobra.Command{
 	Use:   "compare <experiment.json>",
 	Short: "Paired continuous-metric estimator over one invocation's records",
@@ -955,8 +1052,15 @@ func init() {
 	evalCalibrateCmd.Flags().Float64("delta", 0.05, "family-wise error level")
 	evalCalibrateCmd.Flags().String("grid", "5,4,3,2,1", "candidate values, any order — tested most-conservative first")
 	evalCalibrateCmd.Flags().String("out", "", "write the certificate JSON here (also printed)")
+	evalNoiseCmd.Flags().String("arm", "control", "arm whose records the characterization reads")
+	evalNoiseCmd.Flags().String("dataset", "", "dataset label recorded in the noise block (e.g. terminal-bench@2.1)")
+	evalNoiseCmd.Flags().String("passes", "", "comma-separated invocations, one per pass over the corpus")
+	evalNoiseCmd.Flags().String("pair", "", "comma-separated invocations — one pairs run_index within it, two pair across")
+	evalNoiseCmd.Flags().String("model", "", "solver model label recorded in the noise block")
+	evalNoiseCmd.Flags().Bool("write", false, "merge the result into eval/noise.json (default prints only)")
+	evalNoiseCmd.Flags().Bool("force", false, "overwrite an already-recorded noise sub-block (retune — exceptional)")
 	evalIngestCmd.Flags().String("arm", "", "arm whose config produced the trials (required)")
 	evalIngestCmd.Flags().String("invocation", "", "invocation ID scoping the paired record set (required)")
 	evalIngestCmd.Flags().Int("run-index", 0, "explicit run_index for a single-trial ingest")
-	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd, evalProbeCmd, evalProbeCacheCmd, evalCompareCmd, evalIngestCmd, evalGenCmd, evalSelectCmd, evalCurveCmd, evalInteractionCmd, evalCalibrateCmd)
+	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd, evalProbeCmd, evalProbeCacheCmd, evalCompareCmd, evalIngestCmd, evalNoiseCmd, evalGenCmd, evalSelectCmd, evalCurveCmd, evalInteractionCmd, evalCalibrateCmd)
 }

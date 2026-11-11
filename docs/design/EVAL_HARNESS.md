@@ -1845,6 +1845,27 @@ n=3/trajectory scheduling can only ever produce a vacuous readout.
 An absent CV entry fails closed with instructions (seed noise.json
 or run `--aa`), so an unmeasured metric can't slip the gate.
 
+`crush eval noise <experiment.json>` writes the file's second
+block — `"harbor"` — from ingested external records (#404). Two
+measurement shapes, both over one arm's conclusive records:
+`--passes inv1,inv2,...` computes the multi-pass base floor
+(per-pass pass rates, **δ** = solved-count spread ÷
+trials-per-pass in both `delta` and `delta_trials` forms, **c_min**
+= relative spread of per-pass mean tokens, across-task
+`tokens_cv`); `--pair invA[,invB]` computes the paired two-run
+read (**σ_d** = SD of per-task paired pass diffs, `tokens_sigma_d`,
+`tokens_cv`) — one invocation pairs run_index 0 vs 1 cells, two
+pair each's run 0. Per-trial tokens, wall time, and USD cost land
+on every block (`cost_usd` is a RunRecord field only harbor trials
+populate). Without `--write` the report prints only; with it the
+block merges **field-wise** (a `--pair`-only write can't erase a
+recorded `passes` block) and an already-recorded sub-block refuses
+overwrite without `--force` — measured once, never retuned is the
+discipline, so retuning is the explicit exception. `tasks_source`
+on each block says whether the task count came from the declared
+corpus or the recorded union — a `recorded` read on a partial
+corpus under-reports tasks by construction.
+
 ### `crush eval run --aa` — the calibration arm
 
 `--aa` clones the control arm in-memory as a third arm named `aa`

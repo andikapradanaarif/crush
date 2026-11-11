@@ -12,8 +12,11 @@ import (
 // NoiseFile is eval/noise.json: the per-metric coefficients of
 // variation the power gate schedules against. Seeded from A/A
 // measurements; every --aa run refreshes the metrics it observed.
+// Harbor carries the externally executed base characterization —
+// δ, c_min, σ_d the OOD gate and cost rules price against (#404).
 type NoiseFile struct {
-	CV map[string]float64 `json:"cv"`
+	CV     map[string]float64 `json:"cv"`
+	Harbor *NoiseHarbor       `json:"harbor,omitempty"`
 }
 
 // LoadNoise reads evalDir/noise.json. A missing file is an empty
@@ -40,6 +43,35 @@ func LoadNoise(evalDir string) (*NoiseFile, error) {
 		}
 	}
 	return &n, nil
+}
+
+// MergeHarbor folds a freshly computed harbor characterization
+// into the recorded block field-wise — a later --pair-only write
+// mustn't erase a recorded passes block. A non-empty sub-block
+// refuses overwrite without force: measured once, never retuned
+// is the discipline, so retuning is an explicit exception.
+func (n *NoiseFile) MergeHarbor(h *NoiseHarbor, force bool) error {
+	if n.Harbor == nil {
+		n.Harbor = h
+		return nil
+	}
+	if h.Passes != nil {
+		if n.Harbor.Passes != nil && !force {
+			return fmt.Errorf("noise: harbor.passes already recorded — --force to retune the base floor")
+		}
+		n.Harbor.Passes = h.Passes
+	}
+	if h.OOD != nil {
+		if n.Harbor.OOD != nil && !force {
+			return fmt.Errorf("noise: harbor.ood already recorded — --force to retune the base floor")
+		}
+		n.Harbor.OOD = h.OOD
+	}
+	if h.Model != "" {
+		n.Harbor.Model = h.Model
+	}
+	n.Harbor.MeasuredAt = h.MeasuredAt
+	return nil
 }
 
 // Save writes the noise file atomically-ish (rename after write).
