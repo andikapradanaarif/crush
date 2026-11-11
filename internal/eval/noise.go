@@ -70,7 +70,12 @@ func (n *NoiseFile) MergeHarbor(h *NoiseHarbor, force bool) error {
 	if h.Model != "" {
 		n.Harbor.Model = h.Model
 	}
-	n.Harbor.MeasuredAt = h.MeasuredAt
+	// MeasuredAt is the measurement's timestamp — a metadata-only
+	// merge (Model, or a no-op write) mustn't redate a sub-block it
+	// didn't touch.
+	if h.Passes != nil || h.OOD != nil {
+		n.Harbor.MeasuredAt = h.MeasuredAt
+	}
 	return nil
 }
 
@@ -95,6 +100,7 @@ func (n *NoiseFile) Save(evalDir string) error {
 // primary declares a direction) and power 0.80.
 const (
 	zAlphaOneSided = 1.6449
+	zAlphaTwoSided = 1.96
 	zBeta80        = 0.8416
 )
 
@@ -119,6 +125,151 @@ func RequiredSamples(cv, mde float64) int {
 		return math.MaxInt32
 	}
 	return int(math.Ceil(n))
+}
+
+// OOD endpoint sizings (#389) — the task-count requirements for the
+// held-out claim. Three endpoints, priced independently:
+//
+//	(a) efficiency  N_a = (z₁₋α/2 + z₁₋β)² · CV_d² / Δ_c²
+//	    CV_d = SD of the per-task paired log-ratio of tokens
+//	    (noise.harbor.ood.tokens_log_ratio_sd), Δ_c = the primary's
+//	    declared min_improvement.
+//	(b) pass non-inferiority
+//	    N_b = (z₁₋α + z₁₋β)² · σ_d² / (Δ_true − m)²
+//	    σ_d = SD of per-task paired pass diffs (noise.harbor.ood.
+//	    sigma_d), m = the guardrail's min_delta (< 0), Δ_true = 0
+//	    (conservative — the claim is "no worse than m").
+//	(c) pass superiority — reported, not required:
+//	    N_c = (z₁₋α/2 + z₁₋β)² · σ_d² / Δ², Δ = declared improvement.
+//
+// Non-inferiority is the one-sided test (z₁₋α); superiority and
+// efficiency price both tails.
+type OODSizing struct {
+	// NEfficiency is N_a — tasks needed for the continuous
+	// primary's declared improvement at CV_d.
+	NEfficiency int `json:"n_efficiency,omitempty"`
+	// NNonInferiority is N_b — tasks needed to bound pass
+	// regression inside the declared margin.
+	NNonInferiority int `json:"n_noninferiority,omitempty"`
+	// NSuperiority is N_c — tasks for the declared pass_rate
+	// improvement; reported alongside the binding endpoints, binding
+	// only when it's the sole declared claim.
+	NSuperiority int `json:"n_superiority,omitempty"`
+	// Required is N_OOD = max of the required endpoints — and the
+	// superiority count when that's the only endpoint declared, so a
+	// superiority-only read can't sail through unpowered.
+	Required int `json:"required"`
+}
+
+// RequiredNEfficiency prices the paired continuous endpoint:
+// (z₁₋α/2 + z₁₋β)² · (CV_d/Δ_c)².
+func RequiredNEfficiency(cvD, deltaC float64) int {
+	if cvD <= 0 || deltaC <= 0 {
+		return 0
+	}
+	r := cvD / deltaC
+	n := (zAlphaTwoSided + zBeta80) * (zAlphaTwoSided + zBeta80) * r * r
+	if n >= math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return int(math.Ceil(n))
+}
+
+// RequiredNNonInferiority prices the paired binary non-inferiority
+// endpoint: (z₁₋α + z₁₋β)² · σ_d²/(Δ_true−m)². Δ_true is the
+// planning true-difference (0 conservative); m < 0 is the margin.
+func RequiredNNonInferiority(sigmaD, margin, deltaTrue float64) int {
+	gap := deltaTrue - margin
+	if sigmaD <= 0 || gap <= 0 {
+		return 0
+	}
+	n := (zAlphaOneSided + zBeta80) * (zAlphaOneSided + zBeta80) * sigmaD * sigmaD / (gap * gap)
+	if n >= math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return int(math.Ceil(n))
+}
+
+// RequiredNSuperiority prices the paired binary superiority
+// endpoint: (z₁₋α/2 + z₁₋β)² · σ_d²/Δ².
+func RequiredNSuperiority(sigmaD, delta float64) int {
+	if sigmaD <= 0 || delta <= 0 {
+		return 0
+	}
+	n := (zAlphaTwoSided + zBeta80) * (zAlphaTwoSided + zBeta80) * sigmaD * sigmaD / (delta * delta)
+	if n >= math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return int(math.Ceil(n))
+}
+
+// HarborOODSizing computes the task-count requirements for an OOD
+// decision rule against the measured harbor noise floor. nil rule
+// or non-OOD claims return nil — nothing to size. Missing measured
+// inputs error: an OOD claim that can't be sized is underpowered
+// by construction (inconclusive, never null). A recorded SD of 0
+// errors identically — a genuinely zero-variance pair read would
+// need infinitely many tasks either way, so fail-closed is the
+// only honest answer.
+func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
+	rule := exp.DecisionRule
+	if rule == nil || !rule.OOD {
+		return nil, nil
+	}
+	if noise == nil || noise.Harbor == nil || noise.Harbor.OOD == nil {
+		return nil, fmt.Errorf("OOD sizing needs measured harbor noise — run #404 characterization first (noise.json has no harbor.ood block)")
+	}
+	ood := noise.Harbor.OOD
+	out := &OODSizing{}
+	sized := false
+	if p := rule.Primary; p != nil && p.Metric != "pass_rate" {
+		// The noise input is a SD of per-task log token ratios, so
+		// any continuous primary prices against the token floor as a
+		// proxy — wall_s and cost share its shape closely enough for
+		// a planning number, and the token read is the only paired
+		// continuous variance the base characterization measures.
+		// Δ_c is used raw rather than |log(1−Δ)|: for small declared
+		// effects the approximation is tight, and the residual bias
+		// is conservative for improvements (overstates N slightly).
+		if ood.TokensLogRatioSD <= 0 {
+			return nil, fmt.Errorf("OOD sizing: primary %q needs tokens_log_ratio_sd — the #404 pair read didn't measure it", p.Metric)
+		}
+		if p.MinImprovement <= 0 {
+			return nil, fmt.Errorf("OOD sizing: primary %q needs min_improvement > 0 — the declared efficiency effect is the Δ_c being powered", p.Metric)
+		}
+		out.NEfficiency = RequiredNEfficiency(ood.TokensLogRatioSD, p.MinImprovement)
+		sized = true
+	}
+	if p := rule.Primary; p != nil && p.Metric == "pass_rate" && p.MinImprovement > 0 {
+		if ood.SigmaD <= 0 {
+			return nil, fmt.Errorf("OOD sizing: pass_rate primary needs sigma_d — the #404 pair read didn't measure it")
+		}
+		out.NSuperiority = RequiredNSuperiority(ood.SigmaD, p.MinImprovement)
+		sized = true
+	}
+	if g := rule.Guardrail; g != nil && g.Metric == "pass_rate" {
+		if ood.SigmaD <= 0 {
+			return nil, fmt.Errorf("OOD sizing: pass_rate guardrail needs sigma_d — the #404 pair read didn't measure it")
+		}
+		if g.MinDelta < 0 {
+			out.NNonInferiority = RequiredNNonInferiority(ood.SigmaD, g.MinDelta, 0)
+			sized = true
+		} else if g.MinDelta > 0 {
+			out.NSuperiority = max(out.NSuperiority, RequiredNSuperiority(ood.SigmaD, g.MinDelta))
+			sized = true
+		}
+	}
+	if !sized {
+		return nil, fmt.Errorf("OOD sizing: the rule declares no sizable endpoint — a continuous primary (min_improvement) or a pass_rate primary/guardrail")
+	}
+	out.Required = max(out.NEfficiency, out.NNonInferiority)
+	if out.Required == 0 {
+		// A superiority-only claim has no binding endpoint to hide
+		// behind — its own count is the floor, or the power gate is
+		// vacuous for exactly the claim being powered.
+		out.Required = out.NSuperiority
+	}
+	return out, nil
 }
 
 // checkPower is the scheduling refusal: an experiment with a

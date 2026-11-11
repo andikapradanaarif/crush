@@ -406,6 +406,7 @@ Both also report per-trial tokens, wall time, and USD cost.
 		model, _ := cmd.Flags().GetString("model")
 		write, _ := cmd.Flags().GetBool("write")
 		force, _ := cmd.Flags().GetBool("force")
+		size, _ := cmd.Flags().GetBool("size")
 		// Labels default from the manifest — a free-flag typo
 		// shouldn't record a divergent dataset/model next to the
 		// experiment's own records.
@@ -422,7 +423,7 @@ Both also report per-trial tokens, wall time, and USD cost.
 		if pair != "" {
 			pairInvs = strings.Split(pair, ",")
 		}
-		if len(passInvs) == 0 && len(pairInvs) == 0 {
+		if len(passInvs) == 0 && len(pairInvs) == 0 && !size {
 			return fmt.Errorf("noise: --passes or --pair is required — characterization needs measured invocations")
 		}
 		r, err := evalRunner(cmd)
@@ -446,6 +447,42 @@ Both also report per-trial tokens, wall time, and USD cost.
 			harbor.OOD, err = eval.ComputePairNoise(records, exp, evalDir, arm, dataset, pairInvs)
 			if err != nil {
 				return err
+			}
+		}
+		if size {
+			// The task-count requirement for this manifest's OOD
+			// read, priced against the noise block just computed or
+			// the one on disk — the #397 recording input.
+			var n *eval.NoiseFile
+			if harbor.OOD != nil {
+				n = &eval.NoiseFile{Harbor: harbor}
+			} else {
+				var lerr error
+				if n, lerr = eval.LoadNoise(evalDir); lerr != nil {
+					return lerr
+				}
+			}
+			sizing, serr := eval.HarborOODSizing(exp, n)
+			if serr != nil {
+				return serr
+			}
+			rep := map[string]any{"experiment": exp.Name}
+			if sizing != nil {
+				rep["sizing"] = sizing
+				if ids, terr := eval.HarborTaskSet(evalDir, exp.Harbor); terr == nil {
+					rep["declared_tasks"] = len(ids)
+					rep["powered"] = len(ids) >= sizing.Required
+				}
+			} else {
+				rep["sizing"] = "no OOD decision rule declared"
+			}
+			out, merr := json.MarshalIndent(rep, "", "  ")
+			if merr != nil {
+				return merr
+			}
+			fmt.Println(string(out))
+			if len(passInvs) == 0 && len(pairInvs) == 0 {
+				return nil
 			}
 		}
 		out, err := json.MarshalIndent(harbor, "", "  ")
@@ -1059,6 +1096,7 @@ func init() {
 	evalNoiseCmd.Flags().String("model", "", "solver model label recorded in the noise block")
 	evalNoiseCmd.Flags().Bool("write", false, "merge the result into eval/noise.json (default prints only)")
 	evalNoiseCmd.Flags().Bool("force", false, "overwrite an already-recorded noise sub-block (retune — exceptional)")
+	evalNoiseCmd.Flags().Bool("size", false, "print the OOD task-count requirement for this manifest's declared endpoints (#389)")
 	evalIngestCmd.Flags().String("arm", "", "arm whose config produced the trials (required)")
 	evalIngestCmd.Flags().String("invocation", "", "invocation ID scoping the paired record set (required)")
 	evalIngestCmd.Flags().Int("run-index", 0, "explicit run_index for a single-trial ingest")
