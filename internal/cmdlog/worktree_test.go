@@ -162,8 +162,9 @@ func TestWorktreeCapture_SettleDroppedWorktree(t *testing.T) {
 
 	dueViaNewerSession(t, env, "s2")
 	c := settleTurnRow(t, env, "s1", "t0")
-	require.Equal(t, TurnRevised, c.verdict.String,
-		"unmerged work nowhere durable reads as divergence")
+	require.Equal(t, TurnUnknown, c.verdict.String,
+		"unmerged work nowhere durable reads as divergence — "+
+			"unknown without a revised cue")
 }
 
 // #466: a target under a different repository records cross_repo —
@@ -279,7 +280,7 @@ func TestWorktreeCapture_SharedStoreRouting(t *testing.T) {
 	}))
 	dueViaNewerSession(t, env, "s3")
 	c = settleTurnRow(t, env, "sa", "t0")
-	require.Equal(t, TurnRevised, c.verdict.String,
+	require.Equal(t, TurnUnknown, c.verdict.String,
 		"A's own missing file still reads diverged — the stamp "+
 			"routes reads, not the project")
 }

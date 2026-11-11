@@ -1163,6 +1163,65 @@ func (q *Queries) ListSessionRunPartitionKeys(ctx context.Context) ([]string, er
 	return items, nil
 }
 
+const listSessionTestCommandVerdicts = `-- name: ListSessionTestCommandVerdicts :many
+SELECT cmd_norm, last_exit FROM (
+    SELECT r.cmd_norm, r.last_exit, ROW_NUMBER() OVER (
+        PARTITION BY r.cmd_norm, r.cwd
+        ORDER BY r.last_at DESC, r.session_id
+    ) AS rn
+    FROM session_command_runs r
+    WHERE r.project_key = ?1
+        AND r.kind = 'test'
+        AND r.last_exit >= 0
+        AND r.session_id IN (
+            SELECT s.id FROM sessions s
+            WHERE s.id = ?2 OR s.parent_session_id = ?2
+        )
+) WHERE rn = 1
+UNION
+SELECT c.cmd_norm, c.last_exit FROM command_memory c
+WHERE c.project_key = ?1
+    AND c.kind = 'test'
+    AND c.last_exit >= 0
+    AND c.last_session_id IN (
+        SELECT s.id FROM sessions s
+        WHERE s.id = ?2 OR s.parent_session_id = ?2
+    )
+`
+
+type ListSessionTestCommandVerdictsParams struct {
+	ProjectKey string `json:"project_key"`
+	SessionID  string `json:"session_id"`
+}
+
+type ListSessionTestCommandVerdictsRow struct {
+	CmdNorm  string `json:"cmd_norm"`
+	LastExit int64  `json:"last_exit"`
+}
+
+func (q *Queries) ListSessionTestCommandVerdicts(ctx context.Context, arg ListSessionTestCommandVerdictsParams) ([]ListSessionTestCommandVerdictsRow, error) {
+	rows, err := q.query(ctx, q.listSessionTestCommandVerdictsStmt, listSessionTestCommandVerdicts, arg.ProjectKey, arg.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSessionTestCommandVerdictsRow{}
+	for rows.Next() {
+		var i ListSessionTestCommandVerdictsRow
+		if err := rows.Scan(&i.CmdNorm, &i.LastExit); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSessionTestVerdicts = `-- name: ListSessionTestVerdicts :many
 SELECT last_exit FROM (
     SELECT r.last_exit, ROW_NUMBER() OVER (

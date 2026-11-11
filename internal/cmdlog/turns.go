@@ -21,6 +21,7 @@ import (
 
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/redact"
+	"github.com/charmbracelet/crush/internal/toolclass"
 )
 
 // Turn outcome verdicts — the closed vocabulary settled rows carry.
@@ -32,6 +33,13 @@ const (
 	TurnRevised  = "revised"
 	TurnFailed   = "failed"
 	TurnUnknown  = "unknown"
+	// TurnNotApplicable marks a turn that carried no verdict-bearing
+	// artifact at all — no edited paths and no test-kind command —
+	// so there is nothing the evidence could have decided (r03: 13
+	// of 14 settled 'unknown's were exactly this — Q&A, diagnostic,
+	// and gh-poll turns the owner judged accepted). Kept out of
+	// 'unknown' so the undecidable class holds only real ambiguity.
+	TurnNotApplicable = "not_applicable"
 )
 
 // HunkEdit is one applied mutation's verbatim input pair (#394):
@@ -206,12 +214,19 @@ func (s *service) SettleTurnOutcomes(ctx context.Context, limit int) error {
 // settleTurn computes one row's verdict inside its closed window and
 // freezes it. The order encodes the review's rules: a revision cue
 // leads — it is scoped to this very turn, so it judges the unit the
-// row certifies — and divergence shares the failure arm; a red
-// session-end test state fails a turn whose edits survived;
-// acceptance requires survival or external-commit evidence — never a
-// default. ReferentEpisodeOutcome intentionally inverts the cue-vs-
-// artifact order: an episode's claim is path-scoped, so the file's
-// own survival/commit evidence outranks a cue that may object to a
+// row certifies — and it is the ONLY revised evidence (r03: the six
+// drifted-hunk 'revised' calls the owner disputed were post-apply
+// polish, not direction corrections — divergence alone now falls
+// through to commit-or-unknown). A turn with no verdict-bearing
+// artifact settles not_applicable rather than unknown. A red test
+// verdict fails only a turn that RAN the red command — the
+// session-grain read failed every turn when any turn's test went
+// red, minting 'failed' on unrelated PR-ops turns (#353's
+// acknowledged smear, r03's two disputed 'failed' rows). Acceptance
+// requires survival or external-commit evidence — never a default.
+// ReferentEpisodeOutcome intentionally inverts the cue-vs-artifact
+// order: an episode's claim is path-scoped, so the file's own
+// survival/commit evidence outranks a cue that may object to a
 // different file in the same turn.
 func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomesRow, winEnd int64, ev commitEvidence, now int64, laterRows []laterEditRow, v *captureView) error {
 	var paths []string
@@ -324,30 +339,39 @@ func (s *service) settleTurn(ctx context.Context, r db.ListUnsettledTurnOutcomes
 	}
 	committed := s.hasRepo && len(repoPaths) > 0 &&
 		ev.inWindow(repoPaths, r.CreatedAt, winEnd)
-	green := s.sessionTestsGreen(ctx, r.SessionID)
+	hasTestCmd := slices.ContainsFunc(cmds, func(c string) bool {
+		return toolclass.CommandKind(c) == toolclass.CommandKindTest
+	})
+	green := s.turnTestsGreen(ctx, r.SessionID, cmds)
 
 	var verdict string
 	switch {
-	case len(paths) == 0 && len(cmds) == 0:
-		// Nothing happened — a read-only or chat turn is not
-		// evidence either way.
-		verdict = TurnUnknown
-	case diverged || r.NextVerdict == ReferentRevised:
+	case r.NextVerdict == ReferentRevised:
+		// The re-scope cue is the only revised evidence: a user
+		// redirect is what gold calls revision; hunk drift without
+		// it is polish the owner still judged right (r03: 6/8
+		// disputed 'revised' calls were exactly that).
 		verdict = TurnRevised
+	case len(paths) == 0 && !hasTestCmd:
+		// No edits and nothing the ledger could verdict — a Q&A,
+		// diagnostic, or gh-poll turn. Not 'unknown': unknown is
+		// for ambiguity among real evidence.
+		verdict = TurnNotApplicable
 	case green.Valid && green.Int64 == 0:
-		// Session-grain by design: the ledger has no per-turn
-		// last-exit, so a red session end fails every non-empty
-		// turn in it — "failed" means the session ended red, not
-		// that this turn's work failed (#353).
+		// Turn-grain: one of THIS turn's test commands ended red —
+		// "failed" means this turn's own verification failed, not
+		// that some other turn's did (#353's smear, fixed for the
+		// turn channel).
 		verdict = TurnFailed
 	case committed || (decidable && !diverged):
 		verdict = TurnAccepted
-	case len(paths) == 0 && len(cmds) > 0 && green.Valid && green.Int64 == 1:
-		// A command-only turn whose session ended green. Edit-only
-		// turns can't reach this arm — a pure deletion leaves no
-		// fingerprint to read, so decidable stays false and the row
-		// can only accept via commit evidence. Asymmetric by design:
-		// missing evidence is never acceptance.
+	case len(paths) == 0 && green.Valid && green.Int64 == 1:
+		// A command-only turn whose own test commands all ended
+		// green. Edit-only turns can't reach this arm — a pure
+		// deletion leaves no fingerprint to read, so decidable
+		// stays false and the row can only accept via commit
+		// evidence. Asymmetric by design: missing evidence is
+		// never acceptance.
 		verdict = TurnAccepted
 	default:
 		verdict = TurnUnknown

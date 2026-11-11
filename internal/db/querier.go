@@ -353,6 +353,7 @@ type Querier interface {
 	ListSessionOpenFailures(ctx context.Context, arg ListSessionOpenFailuresParams) ([]FailureMemory, error)
 	ListSessionReadFiles(ctx context.Context, sessionID string) ([]ReadFile, error)
 	ListSessionRunPartitionKeys(ctx context.Context) ([]string, error)
+	ListSessionTestCommandVerdicts(ctx context.Context, arg ListSessionTestCommandVerdictsParams) ([]ListSessionTestCommandVerdictsRow, error)
 	// kind='test' evidence the session (or a task-tool child) provably
 	// ran -- the session-end test signal (#294). Two sources, unioned:
 	// session_command_runs is the session's own last verdict per

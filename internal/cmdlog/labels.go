@@ -470,6 +470,53 @@ func (s *service) sessionTestsGreen(ctx context.Context, sessionID string) sql.N
 	return sql.NullInt64{Int64: 1, Valid: true}
 }
 
+// turnTestsGreen folds the same latest-per-command test verdicts
+// over only the commands THIS turn ran — the turn-scoped session-end
+// signal settle uses (r03: the session-grain read minted 'failed'
+// on turns whose own work never touched the red run, e.g. gh-poll
+// turns in a session whose other turns' integration tests ended
+// red). 1 = every recorded test verdict attributable to this turn
+// ended clean, 0 = any ended red, NULL = no recorded verdict names
+// a command this turn ran — unobserved, not green. The row's stored
+// Commands are already normalized, so they join cmd_norm directly.
+// Residual: a later turn re-running the same normalized command
+// supersedes its verdict, which then describes a run this turn did
+// not own — cmd_norm keys cannot separate same-command turns.
+func (s *service) turnTestsGreen(ctx context.Context, sessionID string, cmds []string) sql.NullInt64 {
+	if len(cmds) == 0 {
+		return sql.NullInt64{}
+	}
+	rows, err := s.q.ListSessionTestCommandVerdicts(ctx, db.ListSessionTestCommandVerdictsParams{
+		ProjectKey: s.projectKey,
+		SessionID:  sessionID,
+	})
+	if err != nil {
+		return sql.NullInt64{}
+	}
+	ran := make(map[string]struct{}, len(cmds))
+	for _, c := range cmds {
+		ran[c] = struct{}{}
+	}
+	seen, green := false, true
+	for _, r := range rows {
+		if _, ok := ran[r.CmdNorm]; !ok {
+			continue
+		}
+		seen = true
+		if r.LastExit != 0 {
+			green = false
+		}
+	}
+	if !seen {
+		return sql.NullInt64{}
+	}
+	v := int64(1)
+	if !green {
+		v = 0
+	}
+	return sql.NullInt64{Int64: v, Valid: true}
+}
+
 // commitsTouchingPaths maps each path a commit in the window touched
 // to the refs of the commits that touched it — {sha, unix-second
 // committer time} — one git call for the whole batch, bounded both

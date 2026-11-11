@@ -519,9 +519,9 @@ func TestSettleTurnOutcomes_HunkAfterTooLarge(t *testing.T) {
 	var m map[string]hunkAfterEntry
 	require.NoError(t, json.Unmarshal([]byte(c.hunkAfter), &m))
 	require.Equal(t, hunkTooLarge, m["lock.txt"].State)
-	require.Equal(t, TurnRevised, c.verdict.String,
+	require.Equal(t, TurnUnknown, c.verdict.String,
 		"the fingerprint still reads an oversized file — capture "+
-			"skips it, the verdict doesn't change")
+			"skips it; drift without a revised cue is unknown, not revised")
 }
 
 // A before-anchor that verifies at the recorded start while the
@@ -1081,10 +1081,13 @@ func TestSettleTurnOutcomes_NotDue(t *testing.T) {
 	require.False(t, c.settledAt.Valid, "window open — no settlement")
 }
 
-// Verdict rules, one row each: read-only is unknown; a revision cue
-// is revised even when nothing else fired; surviving edits accept;
-// diverged edits revise; red session tests fail; a commit-evidenced
-// edit accepts; frozen rows never re-derive.
+// Verdict rules, one row each: a no-artifact turn is not_applicable;
+// a revision cue is revised even when nothing else fired; surviving
+// edits accept; divergence WITHOUT a revised cue is unknown — cue-
+// only revision (r03: the six disputed 'revised' calls were drift
+// the owner still judged right); a command-only turn that ran no
+// test is not_applicable; a turn that ran the session's green test
+// accepts; frozen rows never re-derive.
 func TestSettleTurnOutcomes_VerdictMatrix(t *testing.T) {
 	env := setupLabelsTest(t)
 	dir := env.workingDir
@@ -1097,7 +1100,7 @@ func TestSettleTurnOutcomes_VerdictMatrix(t *testing.T) {
 	require.NoError(t, os.Remove(filepath.Join(dir, "gone.go")))
 
 	rows := []TurnOutcome{
-		{SessionID: "s1", TurnID: "t0"}, // nothing produced — unknown
+		{SessionID: "s1", TurnID: "t0"}, // nothing produced — not_applicable
 		{
 			SessionID: "s1", TurnID: "t1", // revision cue beats survival
 			EditedPaths: []string{"kept.go"}, EditHunks: map[string][]string{"kept.go": {"v1"}},
@@ -1109,18 +1112,23 @@ func TestSettleTurnOutcomes_VerdictMatrix(t *testing.T) {
 			NextVerdict: ReferentAccepted,
 		},
 		{
-			SessionID: "s1", TurnID: "t3", // diverged edit revises
+			SessionID: "s1", TurnID: "t3", // diverged, no cue — unknown, not revised
 			EditedPaths: []string{"gone.go"}, EditHunks: map[string][]string{"gone.go": {"v1"}},
 			NextVerdict: ReferentAccepted,
 		},
-		{SessionID: "s1", TurnID: "t4", // command-only in a green session
+		{SessionID: "s1", TurnID: "t4", // build-only — no verdict-bearing artifact
 			Commands: []string{"go build ./..."}, NextVerdict: ReferentAccepted},
+		{SessionID: "s1", TurnID: "t5", // ran the session's green test itself
+			Commands: []string{"go test ./..."}, NextVerdict: ReferentAccepted},
+		{SessionID: "s1", TurnID: "t6", // gh-poll turn — the r03 shape
+			Commands: []string{"gh pr view 12"}, NextVerdict: ReferentAccepted},
 	}
 	for _, o := range rows {
 		require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), o))
 	}
 
-	// s1's green test run is the session-end state every row reads.
+	// s1's green test run is the session-end state turns that ran it
+	// read — turns that never ran it do not.
 	seedLabelSession(t, env, "s1", "")
 	env.svc.RecordRun(t.Context(), Run{
 		SessionID: "s1", Command: "go test ./...", CWD: dir,
@@ -1129,8 +1137,9 @@ func TestSettleTurnOutcomes_VerdictMatrix(t *testing.T) {
 
 	dueViaNewerSession(t, env, "s2")
 	want := map[string]string{
-		"t0": TurnUnknown, "t1": TurnRevised, "t2": TurnAccepted,
-		"t3": TurnRevised, "t4": TurnAccepted,
+		"t0": TurnNotApplicable, "t1": TurnRevised, "t2": TurnAccepted,
+		"t3": TurnUnknown, "t4": TurnNotApplicable, "t5": TurnAccepted,
+		"t6": TurnNotApplicable,
 	}
 	for id, v := range want {
 		require.Equal(t, v, settleTurnRow(t, env, "s1", id).verdict.String,
@@ -1138,7 +1147,10 @@ func TestSettleTurnOutcomes_VerdictMatrix(t *testing.T) {
 	}
 }
 
-// A red session-end test state fails a turn whose edits survived.
+// A red test verdict fails only the turn that ran the red command —
+// the same session's other turns read their own evidence (r03: the
+// session-grain smear minted 'failed' on PR-ops turns whose work
+// never touched the red run).
 func TestSettleTurnOutcomes_RedTestsFail(t *testing.T) {
 	env := setupLabelsTest(t)
 	require.NoError(t, os.WriteFile(filepath.Join(env.workingDir, "x.go"), []byte("v1"), 0o644))
@@ -1150,11 +1162,20 @@ func TestSettleTurnOutcomes_RedTestsFail(t *testing.T) {
 	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
 		SessionID: "s1", TurnID: "t0",
 		EditedPaths: []string{"x.go"}, EditHunks: map[string][]string{"x.go": {"v1"}},
+		Commands:    []string{"go test ./..."},
+		NextVerdict: ReferentAccepted,
+	}))
+	require.NoError(t, env.svc.RecordTurnOutcome(t.Context(), TurnOutcome{
+		SessionID: "s1", TurnID: "t1",
+		EditedPaths: []string{"x.go"}, EditHunks: map[string][]string{"x.go": {"v1"}},
+		Commands:    []string{"go build ./..."},
 		NextVerdict: ReferentAccepted,
 	}))
 	dueViaNewerSession(t, env, "s2")
 	require.Equal(t, TurnFailed, settleTurnRow(t, env, "s1", "t0").verdict.String,
-		"survived edits in a red session are failed, not accepted")
+		"a turn whose own test command ended red fails")
+	require.Equal(t, TurnAccepted, settleTurnRow(t, env, "s1", "t1").verdict.String,
+		"another turn's red test no longer smears — surviving edits accept")
 }
 
 // Once settled the verdict freezes: later divergence cannot rewrite
@@ -1230,8 +1251,8 @@ func TestSettleTurnOutcomes_CapSettles(t *testing.T) {
 		WithClock(func() time.Time { return now.Add(25 * time.Hour) }))
 	c := settleTurnRow(t, env, "s1", "t0")
 	require.True(t, c.settledAt.Valid)
-	require.Equal(t, TurnUnknown, c.verdict.String,
-		"a command-only turn with no test evidence is unknown, not accepted by default")
+	require.Equal(t, TurnNotApplicable, c.verdict.String,
+		"a command-only turn with no test evidence is not_applicable, not accepted by default")
 }
 
 // A sub-agent child session is not a settlement boundary for turns

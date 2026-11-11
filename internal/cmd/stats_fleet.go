@@ -64,6 +64,7 @@ type fleetHealth struct {
 	Revised                int    `json:"revised"`
 	Failed                 int    `json:"failed"`
 	Unknown                int    `json:"unknown"`
+	NotApplicable          int    `json:"not_applicable"`
 	NonPromptTurnsExcluded int    `json:"non_prompt_turns_excluded"`
 	// PostFixNonPromptTurns is the #437 audit: turn rows minted on
 	// harness-authored boundaries in the post-#433 era (the workdir
@@ -341,6 +342,8 @@ func gatherFleetHealth(ctx context.Context, conn *sql.DB, tp trendProject, since
 				r.Revised++
 			case cmdlog.TurnFailed:
 				r.Failed++
+			case cmdlog.TurnNotApplicable:
+				r.NotApplicable++
 			default:
 				r.Unknown++
 			}
@@ -453,8 +456,8 @@ func printFleetHealth(w io.Writer, r fleetHealth) {
 	if len(r.Missing) > 0 {
 		fmt.Fprintf(w, "  missing: %s\n", strings.Join(r.Missing, ", "))
 	}
-	fmt.Fprintf(w, "  real-user settled: %d   verdict mix: A %d · R %d · F %d · U %d\n",
-		r.SettledTurns, r.Accepted, r.Revised, r.Failed, r.Unknown)
+	fmt.Fprintf(w, "  real-user settled: %d   verdict mix: A %d · R %d · F %d · U %d · NA %d\n",
+		r.SettledTurns, r.Accepted, r.Revised, r.Failed, r.Unknown, r.NotApplicable)
 	fmt.Fprintf(w, "  pending real-user turns: %d   non-prompt rows excluded: %d (post-#433: %d)\n",
 		r.PendingTurns, r.NonPromptTurnsExcluded, r.PostFixNonPromptTurns)
 	if r.PostFixNonPromptTurns > 0 {
