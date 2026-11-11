@@ -314,6 +314,59 @@ type Experiment struct {
 	// with replacement — the only non-degenerate mode at k=1 per
 	// task, and the unit a task-sampling (OOD) claim must carry).
 	Resample string `json:"resample,omitempty"`
+	// Harbor marks the experiment as externally executed (#388):
+	// the task set is a containerized benchmark corpus (Terminal-
+	// Bench, SWE-bench Pro) driven by the harbor runner, not the
+	// in-house trajectory runner — RunExperiment refuses it and
+	// records arrive via `crush eval ingest`. Same compare/gate/
+	// analyze machinery downstream: trajectory_id carries the
+	// benchmark task id, run_index the per-task trial ordinal.
+	Harbor *HarborSpec `json:"harbor,omitempty"`
+}
+
+// HarborSpec declares an externally executed experiment's task set
+// and provenance (#388). The declared task list is compare's corpus-
+// coverage ground truth: ingest records every task that produced a
+// trial (infra errors included — they are outcomes), and the alarm
+// snapshot's skipped list is declared-minus-recorded, so a partial
+// corpus voids the verdict exactly like an aborted in-house run.
+type HarborSpec struct {
+	// Dataset names the benchmark for provenance only —
+	// "terminal-bench@2.1", "swe-bench-pro-v2", or a local tasks
+	// path. Nothing resolves against it; the task set below does.
+	Dataset string `json:"dataset"`
+	// TB21Split resolves the declared task set from the frozen
+	// Terminal-Bench 2.1 manifests (#439): "dev" or "sealed".
+	// Exactly one of TB21Split / TaskIDs / Sample must be set.
+	TB21Split string `json:"tb21_split,omitempty"`
+	// TaskIDs is the explicit alternative for datasets whose task
+	// list is enumerated directly (a fixed SWE-bench Pro sample).
+	TaskIDs []string `json:"task_ids,omitempty"`
+	// Sample draws N task ids deterministically from a dataset task
+	// list file — the same seeded-draw discipline the tb21 split
+	// uses, for datasets with no frozen manifest in the repo.
+	Sample *HarborSample `json:"sample,omitempty"`
+	// K is the scheduled trials per task — the declared replicate
+	// count ingest keys run_index on.
+	K int `json:"k"`
+	// HarnessRevision pins the build under test — the git SHA the
+	// installed binary was built from. Ingested records stamp it
+	// into env.crush_sha so two builds never pool under one
+	// invocation.
+	HarnessRevision string `json:"harness_revision"`
+}
+
+// HarborSample is a seeded task-list draw for datasets without a
+// vendored manifest: ids are read from TasksFile (one id per line),
+// shuffled under the TB21SplitTasks PCG stream keyed by Seed, and
+// cut at N. The file + seed + n triple is what freezes the sample —
+// regenerating with different inputs is a different declaration.
+type HarborSample struct {
+	// TasksFile is a repo-relative path to the full task-id list
+	// the draw samples from.
+	TasksFile string `json:"tasks_file"`
+	Seed      uint64 `json:"seed"`
+	N         int    `json:"n"`
 }
 
 // Resampling units for the compare estimator (#407). Empty means

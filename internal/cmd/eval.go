@@ -321,6 +321,53 @@ var evalRunCmd = &cobra.Command{
 	},
 }
 
+var evalIngestCmd = &cobra.Command{
+	Use:   "ingest <experiment.json> <trial-dir>...",
+	Short: "Ingest completed harbor trial dirs into run records (#388)",
+	Long: `Converts externally executed harbor trials into run records —
+the only record path for experiments carrying a harbor block. Each
+trial dir holds result.json (task id, verifier reward, exception)
+plus the agent's copied-back crush-data (session DB + telemetry);
+one record lands per trial keyed on (task, arm, run_index), and the
+invocation's alarm snapshot pins the declared task set so a partial
+corpus voids the verdict exactly like an aborted in-house run.
+
+--arm names the arm whose config produced these trials (required —
+the artifacts carry no arm identity); --invocation scopes the paired
+record set. Call once per arm per invocation. --run-index forces the
+paired-cell index for a single-trial ingest.`,
+	Args: cobra.MinimumNArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		exp, err := eval.LoadExperiment(args[0])
+		if err != nil {
+			return err
+		}
+		arm, _ := cmd.Flags().GetString("arm")
+		inv, _ := cmd.Flags().GetString("invocation")
+		var runIndex *int
+		if idx, err := cmd.Flags().GetInt("run-index"); err == nil && cmd.Flags().Changed("run-index") {
+			runIndex = &idx
+		}
+		r, err := evalRunner(cmd)
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		rep, err := r.IngestHarborTrials(ctx, exp, arm, inv, args[1:], runIndex)
+		if err != nil {
+			return err
+		}
+		out, err := json.MarshalIndent(rep, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(out))
+		return nil
+	},
+}
+
 var evalCompareCmd = &cobra.Command{
 	Use:   "compare <experiment.json>",
 	Short: "Paired continuous-metric estimator over one invocation's records",
@@ -906,5 +953,8 @@ func init() {
 	evalCalibrateCmd.Flags().Float64("delta", 0.05, "family-wise error level")
 	evalCalibrateCmd.Flags().String("grid", "5,4,3,2,1", "candidate values, any order — tested most-conservative first")
 	evalCalibrateCmd.Flags().String("out", "", "write the certificate JSON here (also printed)")
-	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd, evalProbeCmd, evalProbeCacheCmd, evalCompareCmd, evalGenCmd, evalSelectCmd, evalCurveCmd, evalInteractionCmd, evalCalibrateCmd)
+	evalIngestCmd.Flags().String("arm", "", "arm whose config produced the trials (required)")
+	evalIngestCmd.Flags().String("invocation", "", "invocation ID scoping the paired record set (required)")
+	evalIngestCmd.Flags().Int("run-index", 0, "explicit run_index for a single-trial ingest")
+	evalCmd.AddCommand(evalQuarantineCmd, evalCharacterizeCmd, evalRunCmd, evalSmokeCmd, evalAnalyzeCmd, evalProbeCmd, evalProbeCacheCmd, evalCompareCmd, evalIngestCmd, evalGenCmd, evalSelectCmd, evalCurveCmd, evalInteractionCmd, evalCalibrateCmd)
 }
