@@ -22,8 +22,23 @@ let those harness-authored messages mint `turn_outcomes` rows. The first
 50-row sheet was invalidated before labeling and replaced; use only the
 manifest hash recorded in the audit.
 
+## Frozen samples
+
+- **p0 (2026-11-08)** — the wave described below: 50 rows, 20 accepted
+  (9 nexus, 11 vishnu), 10 revised (vishnu), 10 failed and 10 unknown
+  (3 each nexus/vishnu, 2 each valo-backend/kiosk).
+- **r03 (2026-11-11, #438)** — the second blind wave: 32 rows, a census
+  of every settled post-#432/#433 real-user row (`workdir`-stamped).
+  Strata adjusted to post-fix volume: 14 unknown, 8 revised, 8
+  accepted, 2 failed — the 10/10/10 shape is unreachable while the
+  failed pool sits at 2. Seed `r03-turn-outcomes-2026-11-11`, cutoff
+  `2026-11-11T06:00:00Z`, manifest SHA-256
+  `722b355789dc3eedb201503d5c0548fc4eefea230315d4cc99bbfb472235ab0f`
+  (pinned in `WAVES["r03"]`).
+
 ```sh
-python3 eval/labels/turn_outcomes.py sample
+python3 eval/labels/turn_outcomes.py sample            # p0 wave
+python3 eval/labels/turn_outcomes.py sample --wave r03 # r03 wave
 ```
 
 This writes the tracked blind review sheet and an ignored local manifest
