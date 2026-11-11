@@ -359,6 +359,9 @@ func (r *Runner) ingestTrial(ctx context.Context, exp *Experiment, arm, invocati
 			rec.DurationS = res.AgentExecution.FinishedAt.Sub(res.AgentExecution.StartedAt).Seconds()
 		}
 	}
+	if res.AgentResult != nil {
+		rec.CostUSD = res.AgentResult.CostUSD
+	}
 	// Telemetry is the same CRUSH_EVAL_TELEMETRY blob the in-house
 	// driver decodes — the copy-back makes the container child's
 	// report readable host-side. A trial that died before writing

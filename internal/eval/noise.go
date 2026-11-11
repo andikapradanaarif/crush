@@ -12,8 +12,11 @@ import (
 // NoiseFile is eval/noise.json: the per-metric coefficients of
 // variation the power gate schedules against. Seeded from A/A
 // measurements; every --aa run refreshes the metrics it observed.
+// Harbor carries the externally executed base characterization —
+// δ, c_min, σ_d the OOD gate and cost rules price against (#404).
 type NoiseFile struct {
-	CV map[string]float64 `json:"cv"`
+	CV     map[string]float64 `json:"cv"`
+	Harbor *NoiseHarbor       `json:"harbor,omitempty"`
 }
 
 // LoadNoise reads evalDir/noise.json. A missing file is an empty

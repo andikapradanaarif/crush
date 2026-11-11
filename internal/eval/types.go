@@ -660,11 +660,15 @@ type RunRecord struct {
 	SeedState map[string]any `json:"seed_state,omitempty"`
 	// Bounded tails of check.sh output — the first forensic stop on
 	// failure is what the check actually said.
-	CheckStdout string      `json:"check_stdout,omitempty"`
-	CheckStderr string      `json:"check_stderr,omitempty"`
-	StartedAt   time.Time   `json:"started_at"`
-	DurationS   float64     `json:"duration_s"`
-	Steps       int         `json:"steps"`
+	CheckStdout string    `json:"check_stdout,omitempty"`
+	CheckStderr string    `json:"check_stderr,omitempty"`
+	StartedAt   time.Time `json:"started_at"`
+	DurationS   float64   `json:"duration_s"`
+	Steps       int       `json:"steps"`
+	// CostUSD is the harness-reported dollar cost of the run —
+	// only externally executed (harbor) records carry it; in-house
+	// cost is priced via cost_weights/weighted_cost.
+	CostUSD     *float64    `json:"cost_usd,omitempty"`
 	Tokens      TokenUsage  `json:"tokens"`
 	StubStats   StubStats   `json:"stub_stats"`
 	PriorTurns  PriorTurns  `json:"prior_turns"`
