@@ -1245,9 +1245,6 @@ func TestCompare_ResampleDriftSuppressesRule(t *testing.T) {
 // mode: pass_rate diffs per task resample into a bounded criterion.
 func TestRuleCriterion_PassRateClusterBounded(t *testing.T) {
 	var recs []RunRecord
-	// Treatment passes on 7/10 tasks, control on 5/10 — paired
-	// task diffs: +1 on 2, 0 on 7, -1 on 1 → θ = +0.1.
-	out := []bool{true, true, false, true, true, true, false, true, true, true}
 	tf := func(arm string, traj int, pass bool) RunRecord {
 		r := compareRecord("e", fmt.Sprintf("task%02d", traj), arm, "i1", 1, 100, map[string]any{"f": 1})
 		if !pass {
@@ -1255,7 +1252,6 @@ func TestRuleCriterion_PassRateClusterBounded(t *testing.T) {
 		}
 		return r
 	}
-	_ = out
 	ctrl := []bool{true, true, true, true, false, true, false, true, false, true}
 	treat := []bool{true, true, true, true, true, true, true, true, true, false}
 	for j := range ctrl {
@@ -1289,7 +1285,13 @@ func TestRequiredTasksCluster_BetweenTaskVariance(t *testing.T) {
 	// Per-task mean diffs: Var({0, .1, -.1}) = 0.02/2 = 0.01.
 	trajs := [][]float64{{0.0}, {0.1}, {-0.1}}
 	expN := int(math.Ceil(6.186 * 0.01 / (0.10 * 0.10)))
-	require.Equal(t, expN, requiredTasksCluster(trajs, 0.10, 0))
+	n, taskPriced := requiredTasksCluster(trajs, 0.10, 0)
+	require.Equal(t, expN, n)
+	require.True(t, taskPriced)
 	// requiredPairs sees len(d)<2 everywhere → no within variance.
 	require.Equal(t, 0, requiredPairs(trajs, 0.10, 0))
+	// Zero between-task spread can't price tasks — the CV fallback
+	// is a pair estimate and must not be labeled as tasks.
+	n, taskPriced = requiredTasksCluster([][]float64{{0.5}, {0.5}}, 0.10, 0.3)
+	require.True(t, n > 0 && !taskPriced)
 }

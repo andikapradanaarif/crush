@@ -168,6 +168,11 @@ type MetricCompare struct {
 	// true effect may sit below the bound, not merely too few runs).
 	Verdict  string
 	Required int
+	// RequiredUnit names what Required counts — "pairs" for the
+	// within-trajectory/pooled-CV estimate, "tasks" for the
+	// cluster between-task price (#407). A CV fallback under
+	// cluster mode still prices pairs, not tasks.
+	RequiredUnit string
 	// Guardrail carries the primary's max_pass_drop outcome:
 	// "ok", "violated (...)", or "unevaluable (...)" — empty when
 	// undeclared.
@@ -786,8 +791,13 @@ func fillPrimaryVerdict(mc *MetricCompare, p *Primary, trajs [][]float64, cv flo
 		mc.Verdict = "no MDE effect"
 	default:
 		mc.Verdict = "inconclusive"
+		mc.RequiredUnit = "pairs"
 		if resample == ResampleCluster {
-			mc.Required = requiredTasksCluster(trajs, p.MDE, cv)
+			n, taskPriced := requiredTasksCluster(trajs, p.MDE, cv)
+			mc.Required = n
+			if taskPriced {
+				mc.RequiredUnit = "tasks"
+			}
 		} else {
 			mc.Required = requiredPairs(trajs, p.MDE, cv)
 		}
@@ -843,9 +853,10 @@ func requiredPairs(trajs [][]float64, mde float64, cv float64) int {
 // normalized diff. Within-trajectory variance — requiredPairs' unit
 // — is undefined at k = 1; the between-task spread of θ̄_j is the
 // only variance an OOD sample can price, and it prices *tasks*,
-// not pairs. Falls back to the pooled-CV estimate when between-task
-// variance can't be measured (single task or zero spread).
-func requiredTasksCluster(trajs [][]float64, mde float64, cv float64) int {
+// not pairs. taskPriced distinguishes the task count from the
+// pooled-CV fallback (a pair estimate — the wrong unit to print as
+// tasks when between-task variance is unmeasurable).
+func requiredTasksCluster(trajs [][]float64, mde float64, cv float64) (n int, taskPriced bool) {
 	if mde > 0 && len(trajs) >= 2 {
 		thetas := make([]float64, len(trajs))
 		for i, d := range trajs {
@@ -858,13 +869,13 @@ func requiredTasksCluster(trajs [][]float64, mde float64, cv float64) int {
 			ss += x * x
 		}
 		if s2 := ss / float64(len(thetas)-1); s2 > 0 {
-			return int(math.Ceil(6.186 * s2 / (mde * mde)))
+			return int(math.Ceil(6.186 * s2 / (mde * mde))), true
 		}
 	}
 	if cv > 0 {
-		return RequiredSamples(cv, mde)
+		return RequiredSamples(cv, mde), false
 	}
-	return 0
+	return 0, false
 }
 
 // directionOf returns the metric's declared direction — the
@@ -1749,6 +1760,10 @@ func (rep *CompareReport) Summary() string {
 			fmt.Sprintf("(ctrl≈%.1f → treat≈%.1f, min-baseline %.2g; %d zero-side, %d no-baseline%s, %d absent)",
 				m.CtrlMean, m.TreatMean, m.MinBaseline, m.Zeroes, m.Dropped,
 				noBaselinePosNote(m.NoBaselinePos), m.Absent))
+		if rep.Resample == ResampleCluster && m.Trajectories < 2 {
+			fmt.Fprintf(&b, "  %-32s %6s\n", "",
+				"(<2 tasks — interval is within-task stratified; task-sampling variance inexpressible)")
+		}
 		if m.LogRatioPairs >= minComparePairs {
 			fmt.Fprintf(&b, "  %-32s %6s\n", "",
 				fmt.Sprintf("(legacy log-ratio %+.1f%% on %d positive pairs)", m.LogRatioPct, m.LogRatioPairs))
@@ -1761,9 +1776,9 @@ func (rep *CompareReport) Summary() string {
 		}
 		if m.Verdict == "inconclusive" {
 			if m.Required > 0 {
-				unit := "pairs"
-				if rep.Resample == ResampleCluster {
-					unit = "tasks"
+				unit := m.RequiredUnit
+				if unit == "" {
+					unit = "pairs"
 				}
 				fmt.Fprintf(&b, "  INCONCLUSIVE — CI spans the MDE boundary: %s needs n≈%d %s to resolve (paired-variance estimate)\n", m.Name, m.Required, unit)
 			} else {

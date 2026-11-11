@@ -1395,10 +1395,17 @@ k = 1) and `tokens_to_done` the paired-continuous ratio read (each
 task carries (cost, passes) per arm; the replicate recomputes the
 ratio-of-sums over the resampled set — a ratio estimator redraws its
 denominator). Both refuse to a criterion-level `inconclusive` below
-two paired tasks rather than report a naked point estimate. The
-inconclusive sizing hint switches unit too: `requiredPairs`' within-
-trajectory variance is undefined at k = 1, so `requiredTasksCluster`
-prices the between-task spread of θ̄_j and prints `n≈… tasks`.
+two paired tasks rather than report a naked point estimate. Note the
+point estimates legitimately *shift* across modes: cluster `pass_rate`
+is the equal-task-weight mean of per-task diffs while the stratified
+read is the run-weighted pooled diff, and tasks lacking either arm
+drop from the paired set — on unbalanced data the two modes disagree
+by construction, not by bug. The inconclusive sizing hint switches
+unit too: `requiredPairs`' within-trajectory variance is undefined at
+k = 1, so `requiredTasksCluster` prices the between-task spread of
+θ̄_j and prints `n≈… tasks`; when that spread is unmeasurable the
+pooled-CV fallback stays labeled `pairs` — a CV-priced n is not a
+task count.
 
 **The gate.** `decision_rule.ood: true` declares a held-out
 generalization claim; `ValidateExperiment` refuses it unless
