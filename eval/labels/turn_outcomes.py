@@ -51,6 +51,8 @@ FROZEN_MANIFEST_SHA256 = (
 # output prefix, and — after the freeze — its manifest hash. post_433
 # restricts candidates to workdir-stamped rows (the post-#433 schema
 # marker), which cleanly excludes every pre-#433 wave-1 candidate.
+# Verified at freeze time: zero unstamped rows settled after the first
+# stamped settle in any fleet DB — the stamp is unconditional post-era.
 WAVES = {
     "p0": {
         "quotas": QUOTAS,
@@ -265,11 +267,11 @@ def print_review(index, total, row, db_path, context):
     print("Choose accepted, revised, rejected, or unclear; an empty note is fine.")
 
 
-def verify_frozen_manifest(path, expected=FROZEN_MANIFEST_SHA256):
+def verify_frozen_manifest(path, expected=FROZEN_MANIFEST_SHA256, wave="p0"):
     actual = hashlib.sha256(path.read_bytes()).hexdigest()
     if actual != expected:
         raise ValueError(
-            "manifest differs from the pre-registered sample "
+            f"manifest differs from wave {wave!r}'s pre-registered sample "
             f"(expected {expected}, got {actual})"
         )
 
@@ -391,7 +393,7 @@ def main():
                 raise ValueError(
                     f"wave {args.wave!r} has no recorded manifest hash — pin it at freeze time"
                 )
-            verify_frozen_manifest(args.manifest, expected)
+            verify_frozen_manifest(args.manifest, expected, args.wave)
             gold, matrix = score(load_jsonl(args.manifest), load_jsonl(args.review))
             print_score(matrix, wave["quotas"])
             if args.gold_out:
