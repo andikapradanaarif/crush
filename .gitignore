@@ -67,3 +67,6 @@ docs/design/SEMANTIC_INDEX.md
 docs/design/SWARM_DEDUP.md
 docs/design/TURN_CONTEXT.md
 /docs-site
+
+# Python bytecode
+__pycache__/
