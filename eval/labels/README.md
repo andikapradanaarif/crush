@@ -41,6 +41,10 @@ python3 eval/labels/turn_outcomes.py sample            # p0 wave
 python3 eval/labels/turn_outcomes.py sample --wave r03 # r03 wave
 ```
 
+`not_applicable` settled rows — turns with no edited paths and no
+test-kind command, so nothing for an owner to judge — are skipped by
+the sampler, not counted as unexpected verdicts.
+
 This writes the tracked blind review sheet and an ignored local manifest
 with the settled verdicts. Do not regenerate the sample after
 labeling begins. For each review row, inspect the session with

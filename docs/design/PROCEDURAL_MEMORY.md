@@ -170,10 +170,8 @@ it clusters:
   spawn, the same contract the settle pass uses.
 
 Mining keeps only `accepted` turns (v1; `failed`/`revised` traces are
-logged for a later ReasoningBank-style pass — where `failed` reads
-session-grain per the `turn_outcomes` contract, never as per-turn
-failure). This is the label the whole channel inherits — its
-correctness is G1.
+logged for a later ReasoningBank-style pass). This is the label the
+whole channel inherits — its correctness is G1.
 
 ## Vocabulary
 
@@ -396,7 +394,8 @@ CREATE TABLE turn_outcomes (
                                             -- post-window region content
   next_verdict TEXT NOT NULL DEFAULT '',    -- cue verdict of next prompt
   verdict      TEXT,                        -- NULL=unsettled; settled:
-                                            -- accepted|revised|failed|unknown
+                                            -- accepted|revised|failed|
+                                            -- unknown|not_applicable
   settle_at    INTEGER NOT NULL,            -- created_at + 24h cap
   settled_at   INTEGER,
   param_version TEXT NOT NULL,
@@ -418,29 +417,40 @@ CREATE TABLE turn_outcomes (
 -- mint turns under this project's key; a real session→project
 -- mapping remains the longer-term answer.
 --
--- Two evidence-scope choices, recorded: sessionTestsGreen is
--- session-scoped by design (the ledger has no per-turn last-exit),
--- so a red session end marks every non-empty turn in it failed and
--- outranks commit evidence; and survival is conjunctive over
--- readable fingerprints — a path without a fingerprint abstains
--- rather than vetoing, so acceptance can rest on the paths the
--- turn provably added. Turn boundaries are real user messages:
--- repair prompts and compaction summaries are not, hidden
--- continuations (programmatic runs) are — they drove work like any
--- other prompt.
+-- Evidence-scope choices, recorded: the turn's test signal is
+-- turn-scoped (turnTestsGreen folds the session tree's
+-- latest-per-command verdicts over only the commands THIS turn
+-- ran), so a red last-exit fails only a turn that ran the red
+-- command — r03's two 'failed' rows were gh-poll turns smeared by
+-- a session-mate's red run (#353's documented smear, retired for
+-- the turn channel). Referent episodes keep the session-grain
+-- read: their claims are path-scoped and the per-turn ledger
+-- still has no episode-to-run join. Residual: a later turn
+-- re-running the same normalized command supersedes the verdict,
+-- which then describes a run this turn did not own — cmd_norm
+-- keys cannot separate same-command turns. Survival is
+-- conjunctive over readable fingerprints — a path without a
+-- fingerprint abstains rather than vetoing, so acceptance can
+-- rest on the paths the turn provably added. Turn boundaries are
+-- real user messages: repair prompts and compaction summaries are
+-- not, hidden continuations (programmatic runs) are — they drove
+-- work like any other prompt.
 --
--- The failed arm is therefore session-grain evidence: read it as
--- "the session ended red and no stronger per-turn artifact
--- contradicted it", never "this turn's work failed" (#353). Two
--- consequences for consumers: the accepted pool is a lower bound —
--- committed turns in red-ending sessions still settle failed — and
--- a failed row carries no per-turn signal, so the census excludes
--- it rather than counting it against a candidate's procedure.
--- Verdict mixes reported per-turn skew toward failed on projects
--- whose sessions habitually end red; session-grain aggregates are
--- the honest reporting unit. Per-turn re-derivation stays possible
--- — the transcripts and the command ledger are stored — but it is
--- a semantics change of its own, not a label fix.
+-- Two more verdict rules, both r03-driven. 'revised' is cue-only:
+-- NextVerdict == 'revised' is the sole revision evidence —
+-- post-apply hunk drift without a re-scope cue is the pattern the
+-- owner judged still-right in 6 of 8 disputed calls, so
+-- divergence alone falls through to commit-or-unknown (and a
+-- commit outranks drift: the shipped outcome was wanted). And a
+-- turn with no verdict-bearing artifact — no edited paths and no
+-- test-kind command — settles not_applicable rather than unknown:
+-- 13 of 14 r03 'unknown's were exactly that (Q&A, diagnostic,
+-- gh-poll turns the owner called accepted). 'unknown' is kept for
+-- real ambiguity among evidence — an undecidable artifact, an
+-- unreadable file, a test the turn ran whose verdict the ledger
+-- never recorded — not the absence of anything to weigh.
+-- not_applicable rows settle but carry no per-turn signal, so the
+-- census and the blind-label sampler exclude them.
 --
 -- Caveat on rule changes: edit_hunks fingerprints for partial
 -- multiedits changed meaning with the 1-based FailedEdit.Index fix

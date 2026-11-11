@@ -106,6 +106,7 @@ type trendRow struct {
 	Revised                   int            `json:"revised"`
 	Failed                    int            `json:"failed"`
 	Unknown                   int            `json:"unknown"`
+	NotApplicable             int            `json:"not_applicable"`
 	NonPromptTurnsExcluded    int            `json:"non_prompt_turns_excluded"`
 	RevisionRate              *float64       `json:"revision_rate"`
 	EditPairs                 int            `json:"edit_pairs"`
@@ -426,7 +427,7 @@ func gatherTrend(ctx context.Context, conn *sql.DB, tp trendProject, sinceMs int
 		r, ok := weeks[w]
 		if !ok {
 			r = &trendRow{
-				V:          2,
+				V:          3,
 				Project:    tp.path,
 				ProjectKey: tp.key,
 				Week:       w,
@@ -509,6 +510,8 @@ func trendTurns(ctx context.Context, conn *sql.DB, key string, sinceMs int64, hu
 			r.Revised++
 		case cmdlog.TurnFailed:
 			r.Failed++
+		case cmdlog.TurnNotApplicable:
+			r.NotApplicable++
 		default:
 			r.Unknown++
 		}
@@ -927,10 +930,10 @@ func printTrendTable(w io.Writer, project string, rows []trendRow, missing []str
 	}
 	fmt.Fprintf(w, "Trend — %s\n", project)
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "week\tsettled\tacc\trev\tfail\tunk\trev%\tcost/turn\tpairs\ttok/turn\tfails\trep%")
+	fmt.Fprintln(tw, "week\tsettled\tacc\trev\tfail\tunk\tna\trev%\tcost/turn\tpairs\ttok/turn\tfails\trep%")
 	for _, r := range rows {
-		fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%d\t%d\t%s\t%s\t%d\t%s\t%d\t%s\n",
-			r.Week, r.SettledTurns, r.Accepted, r.Revised, r.Failed, r.Unknown,
+		fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%s\t%s\t%d\t%s\t%d\t%s\n",
+			r.Week, r.SettledTurns, r.Accepted, r.Revised, r.Failed, r.Unknown, r.NotApplicable,
 			pctStr(r.RevisionRate), numStr(r.EditCostPerTurn), r.EditPairs,
 			numStr(r.TokensPerTurn), r.CmdFailures, pctStr(r.RepeatFailureRate))
 	}

@@ -222,7 +222,7 @@ func TestGatherTrendExcludesHistoricalRepairPrompts(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	r := rows[0]
-	require.Equal(t, 2, r.V)
+	require.Equal(t, 3, r.V)
 	require.Equal(t, 1, r.SettledTurns)
 	require.Equal(t, 1, r.Accepted)
 	require.Equal(t, 1, r.NonPromptTurnsExcluded)

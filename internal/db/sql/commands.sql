@@ -401,6 +401,31 @@ WHERE c.project_key = sqlc.arg(project_key)
         WHERE s.id = sqlc.arg(session_id) OR s.parent_session_id = sqlc.arg(session_id)
     );
 
+-- name: ListSessionTestCommandVerdicts :many
+SELECT cmd_norm, last_exit FROM (
+    SELECT r.cmd_norm, r.last_exit, ROW_NUMBER() OVER (
+        PARTITION BY r.cmd_norm, r.cwd
+        ORDER BY r.last_at DESC, r.session_id
+    ) AS rn
+    FROM session_command_runs r
+    WHERE r.project_key = sqlc.arg(project_key)
+        AND r.kind = 'test'
+        AND r.last_exit >= 0
+        AND r.session_id IN (
+            SELECT s.id FROM sessions s
+            WHERE s.id = sqlc.arg(session_id) OR s.parent_session_id = sqlc.arg(session_id)
+        )
+) WHERE rn = 1
+UNION
+SELECT c.cmd_norm, c.last_exit FROM command_memory c
+WHERE c.project_key = sqlc.arg(project_key)
+    AND c.kind = 'test'
+    AND c.last_exit >= 0
+    AND c.last_session_id IN (
+        SELECT s.id FROM sessions s
+        WHERE s.id = sqlc.arg(session_id) OR s.parent_session_id = sqlc.arg(session_id)
+    );
+
 -- name: ListUnsettledReferentLabels :many
 -- Episodes whose observation window has closed but whose label has
 -- not frozen yet (#340): settle_at elapsed (the +24h cap) or a newer

@@ -354,6 +354,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listSessionRunPartitionKeysStmt, err = db.PrepareContext(ctx, listSessionRunPartitionKeys); err != nil {
 		return nil, fmt.Errorf("error preparing query ListSessionRunPartitionKeys: %w", err)
 	}
+	if q.listSessionTestCommandVerdictsStmt, err = db.PrepareContext(ctx, listSessionTestCommandVerdicts); err != nil {
+		return nil, fmt.Errorf("error preparing query ListSessionTestCommandVerdicts: %w", err)
+	}
 	if q.listSessionTestVerdictsStmt, err = db.PrepareContext(ctx, listSessionTestVerdicts); err != nil {
 		return nil, fmt.Errorf("error preparing query ListSessionTestVerdicts: %w", err)
 	}
@@ -1038,6 +1041,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listSessionRunPartitionKeysStmt: %w", cerr)
 		}
 	}
+	if q.listSessionTestCommandVerdictsStmt != nil {
+		if cerr := q.listSessionTestCommandVerdictsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listSessionTestCommandVerdictsStmt: %w", cerr)
+		}
+	}
 	if q.listSessionTestVerdictsStmt != nil {
 		if cerr := q.listSessionTestVerdictsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listSessionTestVerdictsStmt: %w", cerr)
@@ -1402,6 +1410,7 @@ type Queries struct {
 	listSessionOpenFailuresStmt             *sql.Stmt
 	listSessionReadFilesStmt                *sql.Stmt
 	listSessionRunPartitionKeysStmt         *sql.Stmt
+	listSessionTestCommandVerdictsStmt      *sql.Stmt
 	listSessionTestVerdictsStmt             *sql.Stmt
 	listSessionTouchedPathsStmt             *sql.Stmt
 	listSessionsStmt                        *sql.Stmt
@@ -1561,6 +1570,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listSessionOpenFailuresStmt:             q.listSessionOpenFailuresStmt,
 		listSessionReadFilesStmt:                q.listSessionReadFilesStmt,
 		listSessionRunPartitionKeysStmt:         q.listSessionRunPartitionKeysStmt,
+		listSessionTestCommandVerdictsStmt:      q.listSessionTestCommandVerdictsStmt,
 		listSessionTestVerdictsStmt:             q.listSessionTestVerdictsStmt,
 		listSessionTouchedPathsStmt:             q.listSessionTouchedPathsStmt,
 		listSessionsStmt:                        q.listSessionsStmt,

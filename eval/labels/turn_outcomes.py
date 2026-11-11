@@ -139,6 +139,11 @@ def read_candidates(databases, cutoff, post_433=False, quotas=QUOTAS):
                 # Its persisted repair prompts are not owner-labelable turns.
                 if message_text(parts).startswith(RECONCILE_RETRY_PREFIX):
                     continue
+                # not_applicable rows carry no artifact for an owner
+                # to judge — not candidates, just tolerated in the
+                # settled corpus.
+                if verdict == "not_applicable":
+                    continue
                 if verdict not in quotas:
                     raise ValueError(f"{project}: unexpected settled verdict {verdict!r}")
                 candidates.append(
