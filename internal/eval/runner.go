@@ -783,6 +783,9 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (rep Report
 	if err := ValidateExperiment(exp); err != nil {
 		return Report{}, err
 	}
+	if exp.Harbor != nil {
+		return Report{}, fmt.Errorf("harbor experiment %q executes outside the runner — records arrive via `crush eval ingest`", exp.Name)
+	}
 	// Dry provider resolution before sampling: config-class failures
 	// (unresolved env refs, dropped providers, missing model) abort
 	// here instead of burning error runs.

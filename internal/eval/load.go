@@ -388,6 +388,56 @@ func ValidateExperiment(e *Experiment) error {
 		return fmt.Errorf("resample must be %q or %q, got %q",
 			ResampleStratified, ResampleCluster, e.Resample)
 	}
+	if h := e.Harbor; h != nil {
+		// Externally executed experiments declare their task set in
+		// the harbor block — the corpus slot carries the "harbor"
+		// marker so the declaration is unambiguous and a glob that
+		// silently matched nothing can't read as coverage.
+		if len(e.Corpus) != 1 || e.Corpus[0] != "harbor" {
+			return fmt.Errorf(`harbor experiment requires corpus: ["harbor"] — the task set is declared in the harbor block, not selected from the local corpus`)
+		}
+		if h.Dataset == "" {
+			return fmt.Errorf("harbor.dataset is required — provenance for the external task set")
+		}
+		sources := 0
+		if h.TB21Split != "" {
+			sources++
+			if h.TB21Split != "dev" && h.TB21Split != "sealed" {
+				return fmt.Errorf("harbor.tb21_split must be %q or %q, got %q", "dev", "sealed", h.TB21Split)
+			}
+		}
+		if len(h.TaskIDs) > 0 {
+			sources++
+		}
+		if h.Sample != nil {
+			sources++
+			if h.Sample.TasksFile == "" {
+				return fmt.Errorf("harbor.sample.tasks_file is required")
+			}
+			if h.Sample.N < 1 {
+				return fmt.Errorf("harbor.sample.n must be >= 1, got %d", h.Sample.N)
+			}
+		}
+		if sources != 1 {
+			return fmt.Errorf("harbor task set: exactly one of tb21_split, task_ids, or sample must be set, got %d", sources)
+		}
+		if h.K < 1 {
+			return fmt.Errorf("harbor.k must be >= 1, got %d", h.K)
+		}
+		if h.HarnessRevision == "" {
+			return fmt.Errorf("harbor.harness_revision is required — ingested records must attribute a build")
+		}
+		// Replay and the persistent regime are in-house runner
+		// constructs — harbor trials are one restart-shaped `crush
+		// run` each, so combining them would declare a semantics the
+		// external path can't produce.
+		if e.Replay != nil {
+			return fmt.Errorf("harbor + replay is not supported — forked boundaries are an in-house runner construct")
+		}
+		if e.ProcessModel == ProcessModelPersistent {
+			return fmt.Errorf("harbor + process_model %q is not supported — each trial is one `crush run` process", ProcessModelPersistent)
+		}
+	}
 	for _, name := range e.EnvPassthrough {
 		if err := validatePassthroughName(name); err != nil {
 			return fmt.Errorf("env_passthrough: %w", err)
