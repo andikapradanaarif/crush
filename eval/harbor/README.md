@@ -40,8 +40,8 @@ tests out of the agent's view).
 # the container is the isolation boundary, not the sandbox).
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o crush-linux-amd64 .
 
-harbor run --dataset <tasks-dir-or-registry> \
-    --agent-import-path eval.harbor.crush_agent:Crush \
+PYTHONPATH=$PWD harbor run --dataset <tasks-dir-or-registry> \
+    --agent eval.harbor.crush_agent:Crush \
     --agent-kwarg binary-path="$PWD/crush-linux-amd64" \
     --config arm-control.crush.json \
     --agent-env LLM_API_KEY,LLM_BASE_URL \
