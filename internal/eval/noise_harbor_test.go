@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -62,6 +63,13 @@ func TestMergeHarbor_FieldWiseAndRefusal(t *testing.T) {
 	// retuning the base floor is the explicit exception.
 	require.ErrorContains(t, n.MergeHarbor(p, false), "--force")
 	require.NoError(t, n.MergeHarbor(p, true))
+
+	// A metadata-only merge (labels, no measured block) keeps the
+	// original measurement time — it didn't re-measure anything.
+	at := n.Harbor.MeasuredAt
+	require.NoError(t, n.MergeHarbor(&NoiseHarbor{Model: "other-model", MeasuredAt: at.Add(time.Hour)}, false))
+	require.Equal(t, "other-model", n.Harbor.Model)
+	require.Equal(t, at, n.Harbor.MeasuredAt)
 }
 
 func TestComputePassNoise_DeltaCMin(t *testing.T) {
@@ -178,6 +186,22 @@ func TestHarborOODSizing_Endpoints(t *testing.T) {
 	s, err = HarborOODSizing(exp, noise)
 	require.NoError(t, err)
 	require.Nil(t, s)
+
+	// A superiority-only claim mustn't slip the gate: with no
+	// binding endpoint alongside, its own N_c is the floor —
+	// Required 0 would make the underpowered check vacuous for
+	// exactly the claim being powered.
+	exp.DecisionRule = &DecisionRule{
+		Hypothesis: "treatment passes more",
+		Primary:    &RulePrimary{Metric: "pass_rate", Arm: ArmTreatment, Vs: ArmControl, Direction: PrimaryIncrease, MinImprovement: 0.04},
+		OOD:        true,
+	}
+	s, err = HarborOODSizing(exp, noise)
+	require.NoError(t, err)
+	require.Zero(t, s.NEfficiency)
+	require.Zero(t, s.NNonInferiority)
+	require.InDelta(t, 134, float64(s.NSuperiority), 1)
+	require.Equal(t, s.NSuperiority, s.Required)
 }
 
 func TestValidateExperiment_OODNeedsSizableEndpoint(t *testing.T) {

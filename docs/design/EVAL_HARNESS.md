@@ -1873,7 +1873,9 @@ against them — `n_efficiency = (z₁₋α/2 + z₁₋β)²·(CV_d/Δ_c)²` fro
 `min_improvement`, and `n_noninferiority = (z₁₋α + z₁₋β)²·σ_d²/m²`
 from `sigma_d` against a `pass_rate` guardrail's negative
 `min_delta` (Δ_true = 0 conservative; pass-rate *superiority*
-claims size at `n_superiority`, reported but never binding).
+claims size at `n_superiority` — reported alongside the binding
+endpoints, binding when it's the sole declared claim so a
+superiority-only read can't run unpowered).
 Manifests must declare at least one sizable endpoint or
 `ValidateExperiment` refuses; at compare time an OOD rule whose
 recorded task count falls short of `required` reports
