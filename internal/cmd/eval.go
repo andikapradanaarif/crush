@@ -356,14 +356,16 @@ paired-cell index for a single-trial ingest.`,
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
 		rep, err := r.IngestHarborTrials(ctx, exp, arm, inv, args[1:], runIndex)
+		if rep != nil {
+			// The report survives an error — records appended before
+			// the failure are real, and the operator needs them.
+			if out, merr := json.MarshalIndent(rep, "", "  "); merr == nil {
+				fmt.Fprintln(cmd.ErrOrStderr(), string(out))
+			}
+		}
 		if err != nil {
 			return err
 		}
-		out, err := json.MarshalIndent(rep, "", "  ")
-		if err != nil {
-			return err
-		}
-		fmt.Println(string(out))
 		return nil
 	},
 }

@@ -242,8 +242,51 @@ func TestIngestHarborTrials_SkippedPartialCorpus(t *testing.T) {
 	// task-c never ran — the snapshot's skipped set marks the
 	// corpus uncovered, and compare refuses the partial invocation.
 	require.Equal(t, 2, rep.Records)
+	require.Equal(t, []string{"task-c"}, rep.Skipped)
 	_, err = r.Compare(exp, "inv1")
 	require.ErrorContains(t, err, "skipped")
+}
+
+func TestIngestHarborTrials_IncrementalExtendsK(t *testing.T) {
+	dir := t.TempDir()
+	exp := harborExp("task-a")
+	r := seededRunner(dir)
+	ctx := context.Background()
+	jobs := t.TempDir()
+
+	first := writeTrialDir(t, jobs, "a1", "task-a", 1.0, nil)
+	_, err := r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", []string{first}, nil)
+	require.NoError(t, err)
+
+	// A second trial for the same task continues the arm's
+	// ordinal sequence instead of colliding on run_index 0 —
+	// incremental ingest extends k.
+	second := writeTrialDir(t, jobs, "a2", "task-a", 0.0, nil)
+	rep, err := r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", []string{second}, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, rep.Records)
+
+	recs, err := r.LoadExperimentRecords(exp.Name)
+	require.NoError(t, err)
+	idx := map[int]bool{}
+	for _, rec := range recs {
+		require.Equal(t, ArmControl, rec.Arm)
+		idx[rec.RunIndex] = true
+	}
+	require.Equal(t, map[int]bool{0: true, 1: true}, idx)
+
+	// The other arm's ordinals are unaffected — pairing keys on
+	// (task, run_index) across arms, so treatment starts at 0.
+	trt := writeTrialDir(t, jobs, "t1", "task-a", 1.0, nil)
+	_, err = r.IngestHarborTrials(ctx, exp, ArmTreatment, "inv1", []string{trt}, nil)
+	require.NoError(t, err)
+	recs, err = r.LoadExperimentRecords(exp.Name)
+	require.NoError(t, err)
+	for _, rec := range recs {
+		if rec.Arm == ArmTreatment {
+			require.Equal(t, 0, rec.RunIndex)
+		}
+	}
 }
 
 func TestIngestHarborTrials_RunIndexOrdinals(t *testing.T) {

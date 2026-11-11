@@ -59,6 +59,15 @@ class TestPopulateContext(unittest.TestCase):
         with self.assertRaises(ValueError):
             agent._forward_env()
 
+    def test_extra_env_rejects_harness_names(self):
+        # --agent-env can't smuggle CRUSH_EVAL_FLAGS past the
+        # allowlist — the kwarg isn't the only forwarding channel.
+        agent = crush_agent.Crush.__new__(crush_agent.Crush)
+        agent._extra_env = {"CRUSH_EVAL_FLAGS": "fold-turns"}
+        agent.options = crush_agent.CrushOptions(binary_path="/x")
+        with self.assertRaises(ValueError):
+            agent._forward_env()
+
 
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))

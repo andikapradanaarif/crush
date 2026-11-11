@@ -19,6 +19,10 @@ Agent kwargs (--agent-kwarg name=value):
                 manifest's env admission
   eval-flags    comma-separated manifest flag names the child
                 reports resolved (CRUSH_EVAL_FLAGS)
+  harness-revision  git sha the binary must report — install()
+                runs ``crush --version`` in-container and refuses a
+                mismatched build, since env.crush_sha records what
+                the experiment *declared*, not what actually ran
 
 The built-in ``--config`` / ``config`` agent option carries a
 rendered .crush.json (path or inline JSON): model pins, the arm's
@@ -73,6 +77,10 @@ class CrushOptions(InstalledAgentOptions):
         default=None,
         description="Manifest flag names the child reports resolved.",
     )
+    harness_revision: str | None = Field(
+        default=None,
+        description="Git sha the binary's --version must report.",
+    )
 
 
 class Crush(BaseInstalledAgent):
@@ -95,7 +103,17 @@ class Crush(BaseInstalledAgent):
         is harbor's own declared channel; the env kwarg allowlists
         additional host names. Names only; values never enter
         config or the manifest."""
-        out = dict(self.extra_env)
+        out = {}
+        # --agent-env rides the same allowlist discipline as env:
+        # harness-controlled names can't enter through either
+        # channel — CRUSH_EVAL_FLAGS smuggled via extra_env would
+        # pollute resolved_options.
+        for name, val in (self.extra_env or {}).items():
+            if name.startswith(("CRUSH_", "EVAL_")):
+                raise ValueError(
+                    f"extra_env {name}: harness-controlled names are not passable"
+                )
+            out[name] = val
         allow = self._opts.env or ""
         for name in (n.strip() for n in allow.split(",")):
             if not name:
@@ -128,6 +146,15 @@ class Crush(BaseInstalledAgent):
                     local.write_text(json.dumps(self._config))
                     await environment.upload_file(local, f"{_INSTALL_DIR}/crush.json")
         await environment.exec(f"chmod +x {_INSTALL_DIR}/crush")
+        if self._opts.harness_revision:
+            res = await environment.exec(f"{_INSTALL_DIR}/crush --version")
+            out = getattr(res, "stdout", None) or getattr(res, "output", None) or str(res)
+            if self._opts.harness_revision not in out:
+                raise ValueError(
+                    f"crush --version reports {out.strip()!r} — expected "
+                    f"harness_revision {self._opts.harness_revision}; the "
+                    f"binary at {binary} is not the declared build"
+                )
 
     @override
     @with_prompt_template

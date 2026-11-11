@@ -219,13 +219,25 @@ func (r *Runner) IngestHarborTrials(ctx context.Context, exp *Experiment, arm, i
 		return nil, err
 	}
 	seen := map[string]bool{}
+	dirSeen := map[string]bool{}
 	var invRecords []RunRecord
+	nextIndex := map[string]int{}
 	for _, rec := range existing {
 		if rec.Invocation != invocation {
 			continue
 		}
 		invRecords = append(invRecords, rec)
 		seen[rec.TrajectoryID+"\x00"+rec.Arm+"\x00"+strconv.Itoa(rec.RunIndex)] = true
+		if d, _ := rec.CheckDetail["trial_dir"].(string); d != "" {
+			dirSeen[rec.TrajectoryID+"\x00"+rec.Arm+"\x00"+d] = true
+		}
+		// Ordinals continue past this arm's recorded cells so an
+		// incremental ingest extends k instead of colliding on
+		// index 0. Other arms' cells don't consume ordinals —
+		// pairing keys on (task, run_index) across arms.
+		if rec.Arm == arm && rec.RunIndex+1 > nextIndex[rec.TrajectoryID] {
+			nextIndex[rec.TrajectoryID] = rec.RunIndex + 1
+		}
 	}
 	// Group trials by task so same-task dirs take consecutive
 	// run_index ordinals; dirs sort lexically, so attempt ordering
@@ -241,7 +253,6 @@ func (r *Runner) IngestHarborTrials(ctx context.Context, exp *Experiment, arm, i
 		}
 		taskOf[i] = id
 	}
-	nextIndex := map[string]int{}
 	tempKey := temperatureKey(exp.Temperature)
 	rep := &IngestReport{Experiment: exp.Name, Invocation: invocation, Arm: arm}
 	for i, dir := range dirs {
@@ -262,10 +273,16 @@ func (r *Runner) IngestHarborTrials(ctx context.Context, exp *Experiment, arm, i
 			return rep, fmt.Errorf("ingest %s: %s arm %s run %d already recorded in invocation %s — refuse to duplicate a paired cell",
 				dir, rec.TrajectoryID, rec.Arm, rec.RunIndex, invocation)
 		}
+		dirKey := rec.TrajectoryID + "\x00" + rec.Arm + "\x00" + dir
+		if dirSeen[dirKey] {
+			return rep, fmt.Errorf("ingest %s: this trial is already recorded for %s arm %s in invocation %s — the same run's data can't fill two paired cells",
+				dir, rec.TrajectoryID, rec.Arm, invocation)
+		}
 		if !declaredSet[rec.TrajectoryID] {
 			return rep, fmt.Errorf("ingest %s: task %q is not in the experiment's declared task set — an undeclared task's records would corrupt corpus coverage", dir, rec.TrajectoryID)
 		}
 		seen[key] = true
+		dirSeen[dirKey] = true
 		if err := r.appendRecord(*rec); err != nil {
 			return rep, err
 		}
@@ -276,6 +293,19 @@ func (r *Runner) IngestHarborTrials(ctx context.Context, exp *Experiment, arm, i
 	if err := r.persistIngestAlarms(exp, invocation, declared, invRecords); err != nil {
 		return rep, err
 	}
+	// Mirror the snapshot's skipped set so the operator's ingest
+	// output shows what the declared corpus still owes — a
+	// non-empty list means the invocation's verdict is void.
+	recorded := map[string]bool{}
+	for _, rec := range invRecords {
+		recorded[rec.TrajectoryID] = true
+	}
+	for _, id := range declared {
+		if !recorded[id] {
+			rep.Skipped = append(rep.Skipped, id)
+		}
+	}
+	rep.Tasks = slices.Compact(slices.Clone(rep.Tasks))
 	return rep, nil
 }
 
@@ -311,6 +341,9 @@ func (r *Runner) ingestTrial(ctx context.Context, exp *Experiment, arm, invocati
 		return nil, err
 	}
 	outcome, detail := harborOutcome(&res)
+	// The source dir is provenance — and the dedupe key that keeps
+	// one trial's data from filling two paired cells.
+	detail["trial_dir"] = dir
 	dataDir := filepath.Join(dir, "agent", "crush-data")
 	rec := &RunRecord{
 		Experiment:   exp.Name,
@@ -517,8 +550,4 @@ func (r *Runner) persistIngestAlarms(exp *Experiment, invocation string, declare
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "report-"+invocation+".json"), data, 0o644)
-}
-
-func itoa(n int) string {
-	return strconv.Itoa(n)
 }
