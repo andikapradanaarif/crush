@@ -40,24 +40,30 @@ tests out of the agent's view).
 # the container is the isolation boundary, not the sandbox).
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o crush-linux-amd64 .
 
-harbor run --dataset <tasks-dir-or-registry> \
-    --agent-import-path eval.harbor.crush_agent:Crush \
-    --agent-kwarg binary-path="$PWD/crush-linux-amd64" \
-    --config arm-control.crush.json \
-    --agent-env LLM_API_KEY,LLM_BASE_URL \
+PYTHONPATH=$PWD harbor run --dataset <tasks-dir-or-registry> \
+    --agent eval.harbor.crush_agent:Crush \
+    --agent-kwarg binary_path="$PWD/crush-linux-amd64" \
+    --agent-kwarg harness_revision=<short sha of the build> \
+    --agent-kwarg config="$PWD/arm-control.crush.json" \
+    --agent-kwarg env=LLM_API_KEY,LLM_BASE_URL \
     --model hyper/<model-pin> -n 1 -k 1
 ```
 
-- `binary-path` (required): the pinned binary — its build SHA is the
-  experiment's `harbor.harness_revision`.
-- `--config`: path or inline JSON — the rendered `.crush.json`
+- `binary_path` (required): the pinned binary — its build SHA is the
+  experiment's `harbor.harness_revision`. Kwarg names are the
+  pydantic field names (underscores), and `harness_revision` is the
+  short sha substring `crush --version` reports (e.g. `0075c6e21b0d`),
+  not the full git sha.
+- `config` agent kwarg: path or inline JSON — the rendered `.crush.json`
   (model pins, the arm's `options` under test, a `providers` block
   referencing `$LLM_API_KEY`/`$LLM_BASE_URL`). One job per arm.
-- `--agent-env` / `env` kwarg: declared credential passthrough —
-  names only, matching the eval manifest's env-admission rule.
-- `env` kwarg: comma-separated host env names to forward when
-  `--agent-env` isn't convenient.
-- `eval-flags` kwarg: manifest flag names → `CRUSH_EVAL_FLAGS`, so
+  (Harbor's top-level `--config` is the JobConfig file — the agent's
+  native config travels via `--agent-kwarg config=`.)
+- `env` agent kwarg: comma-separated host env-var names forwarded by
+  name — the declared credential passthrough matching the eval
+  manifest's env-admission rule. (`--agent-env`/`extra_env` takes
+  `KEY=VALUE` pairs; the kwarg form keeps values out of argv.)
+- `eval_flags` kwarg: manifest flag names → `CRUSH_EVAL_FLAGS`, so
   `resolved_options` lands in telemetry and baseline keys self-seed.
 
 ## Declare and ingest
