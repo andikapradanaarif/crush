@@ -1,6 +1,6 @@
 {
 	"name": "tb21-smoke-longcat",
-	"model": "opencode-go/longcat-2.5-free",
+	"model": "opencode-go/beam-free",
 	"temperature": 0,
 	"corpus": [
 		"harbor"
@@ -27,14 +27,14 @@
 			"api_key": "$OPENCODE_API_KEY",
 			"base_url": "https://opencode.ai/zen/go/v1",
 			"extra_headers": {
-				"x-opencode-session": "$(uuidgen)"
+				"x-opencode-session": "$(cat /proc/sys/kernel/random/uuid)"
 			},
 			"models": [
 				{
-					"id": "longcat-2.5-free",
-					"name": "LongCat 2.5 Free",
-					"context_window": 1000000,
-					"default_max_tokens": 262144
+					"id": "beam-free",
+					"name": "Beam Free",
+					"context_window": 1048576,
+					"default_max_tokens": 131072
 				}
 			]
 		}
@@ -47,7 +47,7 @@
 			"circuit-fibsqrt"
 		],
 		"k": 1,
-		"harness_revision": "0075c6e21b0d98e1b26fc1550dc8cf5c0b453070"
+		"harness_revision": "0075c6e21b0d"
 	},
 	"resample": "cluster"
 }
