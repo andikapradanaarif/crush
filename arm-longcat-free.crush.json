@@ -1,0 +1,18 @@
+{
+	"providers": {
+		"opencode-go": {
+			"api_key": "$OPENCODE_API_KEY",
+			"extra_headers": {
+				"x-opencode-session": "$(uuidgen)"
+			},
+			"models": [
+				{
+					"id": "longcat-2.5-free",
+					"name": "LongCat 2.5 Free",
+					"context_window": 1000000,
+					"default_max_tokens": 262144
+				}
+			]
+		}
+	}
+}
