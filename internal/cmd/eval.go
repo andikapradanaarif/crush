@@ -405,6 +405,16 @@ Both also report per-trial tokens, wall time, and USD cost.
 		pair, _ := cmd.Flags().GetString("pair")
 		model, _ := cmd.Flags().GetString("model")
 		write, _ := cmd.Flags().GetBool("write")
+		force, _ := cmd.Flags().GetBool("force")
+		// Labels default from the manifest — a free-flag typo
+		// shouldn't record a divergent dataset/model next to the
+		// experiment's own records.
+		if dataset == "" {
+			dataset = exp.Harbor.Dataset
+		}
+		if model == "" {
+			model = exp.Model
+		}
 		var passInvs, pairInvs []string
 		if passes != "" {
 			passInvs = strings.Split(passes, ",")
@@ -450,7 +460,9 @@ Both also report per-trial tokens, wall time, and USD cost.
 		if err != nil {
 			return err
 		}
-		noise.Harbor = harbor
+		if err := noise.MergeHarbor(harbor, force); err != nil {
+			return err
+		}
 		return noise.Save(evalDir)
 	},
 }
@@ -1046,6 +1058,7 @@ func init() {
 	evalNoiseCmd.Flags().String("pair", "", "comma-separated invocations — one pairs run_index within it, two pair across")
 	evalNoiseCmd.Flags().String("model", "", "solver model label recorded in the noise block")
 	evalNoiseCmd.Flags().Bool("write", false, "merge the result into eval/noise.json (default prints only)")
+	evalNoiseCmd.Flags().Bool("force", false, "overwrite an already-recorded noise sub-block (retune — exceptional)")
 	evalIngestCmd.Flags().String("arm", "", "arm whose config produced the trials (required)")
 	evalIngestCmd.Flags().String("invocation", "", "invocation ID scoping the paired record set (required)")
 	evalIngestCmd.Flags().Int("run-index", 0, "explicit run_index for a single-trial ingest")

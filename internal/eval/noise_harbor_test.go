@@ -33,8 +33,27 @@ func harborNoiseExp() *Experiment {
 			ArmControl:   {Config: ArmConfig{}},
 			ArmTreatment: {Config: ArmConfig{}},
 		},
-		Harbor: &HarborSpec{TaskIDs: []string{"t-a", "t-b"}},
+		Harbor: &HarborSpec{TaskIDs: []string{"t-a", "t-b"}, K: 2},
 	}
+}
+
+func TestMergeHarbor_FieldWiseAndRefusal(t *testing.T) {
+	n := &NoiseFile{}
+	p := &NoiseHarbor{Passes: &HarborPassNoise{Delta: 0.1}}
+	require.NoError(t, n.MergeHarbor(p, false))
+	require.NotNil(t, n.Harbor.Passes)
+	require.Nil(t, n.Harbor.OOD)
+
+	// A --pair-only write fills ood without erasing passes.
+	o := &NoiseHarbor{OOD: &HarborPairNoise{SigmaD: 0.3}}
+	require.NoError(t, n.MergeHarbor(o, false))
+	require.Equal(t, 0.1, n.Harbor.Passes.Delta)
+	require.Equal(t, 0.3, n.Harbor.OOD.SigmaD)
+
+	// Overwriting a recorded sub-block refuses without force —
+	// retuning the base floor is the explicit exception.
+	require.ErrorContains(t, n.MergeHarbor(p, false), "--force")
+	require.NoError(t, n.MergeHarbor(p, true))
 }
 
 func TestComputePassNoise_DeltaCMin(t *testing.T) {
@@ -58,7 +77,8 @@ func TestComputePassNoise_DeltaCMin(t *testing.T) {
 	n, err := ComputePassNoise(recs, exp, "", ArmControl, "tb21", []string{"p1", "p2", "p3"})
 	require.NoError(t, err)
 	require.Equal(t, 2, n.Tasks)
-	require.Equal(t, 4, n.TrialsPerPass)
+	require.Equal(t, "declared", n.TasksSource)
+	require.Equal(t, 4, n.TrialsPerPass) // 2 tasks × declared k=2
 	require.Equal(t, []int{3, 3, 4}, n.SolvedPerPass)
 	require.Equal(t, 1, n.DeltaTrials)
 	require.InDelta(t, 0.25, n.Delta, 1e-9)

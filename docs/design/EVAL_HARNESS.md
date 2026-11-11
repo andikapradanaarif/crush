@@ -1857,8 +1857,14 @@ read (**σ_d** = SD of per-task paired pass diffs, `tokens_sigma_d`,
 `tokens_cv`) — one invocation pairs run_index 0 vs 1 cells, two
 pair each's run 0. Per-trial tokens, wall time, and USD cost land
 on every block (`cost_usd` is a RunRecord field only harbor trials
-populate). Without `--write` the report prints only — measured
-once, never retuned is the discipline, so writing is explicit.
+populate). Without `--write` the report prints only; with it the
+block merges **field-wise** (a `--pair`-only write can't erase a
+recorded `passes` block) and an already-recorded sub-block refuses
+overwrite without `--force` — measured once, never retuned is the
+discipline, so retuning is the explicit exception. `tasks_source`
+on each block says whether the task count came from the declared
+corpus or the recorded union — a `recorded` read on a partial
+corpus under-reports tasks by construction.
 
 ### `crush eval run --aa` — the calibration arm
 

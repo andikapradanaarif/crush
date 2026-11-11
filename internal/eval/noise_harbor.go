@@ -26,20 +26,24 @@ type NoiseHarbor struct {
 // HarborPassNoise is the multi-pass characterization: one
 // invocation per pass over the same declared task set.
 type HarborPassNoise struct {
-	Dataset         string    `json:"dataset"`
-	Tasks           int       `json:"tasks"`
-	TrialsPerPass   int       `json:"trials_per_pass"`
-	Passes          int       `json:"passes"`
-	PassRate        float64   `json:"pass_rate"`
-	PassRates       []float64 `json:"pass_rates"`
-	SolvedPerPass   []int     `json:"solved_per_pass"`
-	Delta           float64   `json:"delta"`
-	DeltaTrials     int       `json:"delta_trials"`
-	CMin            float64   `json:"c_min"`
-	TokensCV        float64   `json:"tokens_cv"`
-	TokensPerTrial  float64   `json:"tokens_per_trial"`
-	WallSPerTrial   float64   `json:"wall_s_per_trial"`
-	CostUSDPerTrial *float64  `json:"cost_usd_per_trial,omitempty"`
+	Dataset           string    `json:"dataset"`
+	Tasks             int       `json:"tasks"`
+	TasksSource       string    `json:"tasks_source"`
+	TrialsPerPass     int       `json:"trials_per_pass"`
+	ConclusivePerPass []int     `json:"conclusive_per_pass"`
+	Passes            int       `json:"passes"`
+	PassRate          float64   `json:"pass_rate"`
+	PassRates         []float64 `json:"pass_rates"`
+	SolvedPerPass     []int     `json:"solved_per_pass"`
+	Delta             float64   `json:"delta"`
+	DeltaTrials       int       `json:"delta_trials"`
+	CMin              float64   `json:"c_min"`
+	TokensCV          float64   `json:"tokens_cv"`
+	TokensPerTrial    float64   `json:"tokens_per_trial"`
+	WallSPerTrial     float64   `json:"wall_s_per_trial"`
+	WallTrials        int       `json:"wall_trials"`
+	CostUSDPerTrial   *float64  `json:"cost_usd_per_trial,omitempty"`
+	CostTrials        int       `json:"cost_trials"`
 }
 
 // HarborPairNoise is the two-run paired characterization: σ_d is
@@ -48,6 +52,7 @@ type HarborPassNoise struct {
 type HarborPairNoise struct {
 	Dataset        string  `json:"dataset"`
 	Tasks          int     `json:"tasks"`
+	TasksSource    string  `json:"tasks_source"`
 	Pairs          int     `json:"pairs"`
 	SigmaD         float64 `json:"sigma_d"`
 	PassRate       float64 `json:"pass_rate"`
@@ -74,15 +79,16 @@ func ComputePassNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 	if len(invs) < 2 {
 		return nil, fmt.Errorf("pass characterization needs ≥2 passes, got %d", len(invs))
 	}
-	tasks, err := HarborTaskSetForRecords(exp, evalDir, records, invs, arm)
+	tasks, source, err := HarborTaskSetForRecords(exp, evalDir, records, invs, arm)
 	if err != nil {
 		return nil, err
 	}
-	out := &HarborPassNoise{Dataset: dataset, Tasks: len(tasks)}
+	out := &HarborPassNoise{Dataset: dataset, Tasks: len(tasks), TasksSource: source}
 	var allCost []float64
 	var wall, tok metricSample
 	taskTok := map[string]*metricSample{}
 	var means []float64
+	maxConclusive := 0
 	for _, inv := range invs {
 		var passTok metricSample
 		solved, conclusive := 0, 0
@@ -98,7 +104,10 @@ func ComputePassNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 			tt := totalTokens(r)
 			passTok.add(tt)
 			tok.add(tt)
-			wall.add(r.DurationS)
+			if r.DurationS > 0 {
+				wall.add(r.DurationS)
+				out.WallTrials++
+			}
 			if r.CostUSD != nil {
 				allCost = append(allCost, *r.CostUSD)
 			}
@@ -114,8 +123,20 @@ func ComputePassNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 		}
 		out.PassRates = append(out.PassRates, float64(solved)/float64(conclusive))
 		out.SolvedPerPass = append(out.SolvedPerPass, solved)
-		out.TrialsPerPass = conclusive
+		out.ConclusivePerPass = append(out.ConclusivePerPass, conclusive)
+		maxConclusive = max(maxConclusive, conclusive)
 		means = append(means, passTok.Mean())
+	}
+	// δ's denominator is the scheduled trials per pass — declared
+	// tasks × k — not whichever pass happened to stay conclusive
+	// longest; infra losses shrink conclusive, not the corpus.
+	k := 0
+	if exp != nil && exp.Harbor != nil {
+		k = exp.Harbor.K
+	}
+	out.TrialsPerPass = len(tasks) * k
+	if out.TrialsPerPass == 0 {
+		out.TrialsPerPass = maxConclusive
 	}
 	// δ is the solved-count spread across passes expressed as a
 	// fraction of a pass's trials — RRSI's "spread in passes/N"
@@ -157,6 +178,7 @@ func ComputePassNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 		m := s.Mean()
 		out.CostUSDPerTrial = &m
 	}
+	out.CostTrials = len(allCost)
 	return out, nil
 }
 
@@ -252,9 +274,11 @@ func ComputePairNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 		TokensPerTrial: tok.Mean(),
 		WallSPerTrial:  wall.Mean(),
 	}
+	out.TasksSource = "recorded"
 	if exp != nil && exp.Harbor != nil {
 		if ids, err := HarborTaskSet(evalDir, exp.Harbor); err == nil {
 			out.Tasks = len(ids)
+			out.TasksSource = "declared"
 		}
 	}
 	if out.Tasks == 0 {
@@ -266,10 +290,12 @@ func ComputePairNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 // HarborTaskSetForRecords resolves the declared task set, falling
 // back to the recorded task union when the spec's source isn't
 // readable (a sample's tasks file lives wherever the operator ran).
-func HarborTaskSetForRecords(exp *Experiment, evalDir string, records []RunRecord, invs []string, arm string) ([]string, error) {
+// The returned source names which won — a "recorded" task set on a
+// partial corpus reports tasks=what ran, not what was declared.
+func HarborTaskSetForRecords(exp *Experiment, evalDir string, records []RunRecord, invs []string, arm string) (ids []string, source string, err error) {
 	if exp != nil && exp.Harbor != nil {
 		if ids, err := HarborTaskSet(evalDir, exp.Harbor); err == nil {
-			return ids, nil
+			return ids, "declared", nil
 		}
 	}
 	invSet := map[string]bool{}
@@ -277,7 +303,6 @@ func HarborTaskSetForRecords(exp *Experiment, evalDir string, records []RunRecor
 		invSet[i] = true
 	}
 	seen := map[string]bool{}
-	var ids []string
 	for _, r := range records {
 		if r.Arm == arm && invSet[r.Invocation] && !seen[r.TrajectoryID] {
 			seen[r.TrajectoryID] = true
@@ -286,7 +311,7 @@ func HarborTaskSetForRecords(exp *Experiment, evalDir string, records []RunRecor
 	}
 	slices.Sort(ids)
 	if len(ids) == 0 {
-		return nil, fmt.Errorf("no %s records found for invocations %v", arm, invs)
+		return nil, "", fmt.Errorf("no %s records found for invocations %v", arm, invs)
 	}
-	return ids, nil
+	return ids, "recorded", nil
 }
