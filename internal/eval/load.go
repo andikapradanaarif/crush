@@ -912,6 +912,19 @@ func (e *Experiment) validateDecisionRule() error {
 	if d.OOD && e.Resample != ResampleCluster {
 		return fmt.Errorf("decision_rule.ood requires resample %q — a held-out claim must carry task-sampling uncertainty; stratified resampling conditions on the task set", ResampleCluster)
 	}
+	if d.OOD {
+		// The held-out read sizes its task count against the
+		// declared endpoints (#389): a primary min_improvement
+		// (efficiency or pass superiority) or a pass_rate guardrail
+		// min_delta (non-inferiority margin). A rule that declares
+		// OOD but no sizable claim can't be powered — refuse it at
+		// load, not at compare.
+		sizable := d.Primary != nil && d.Primary.MinImprovement > 0 ||
+			d.Guardrail != nil && d.Guardrail.Metric == "pass_rate" && d.Guardrail.MinDelta != 0
+		if !sizable {
+			return fmt.Errorf("decision_rule.ood requires a sizable endpoint — a primary min_improvement or a pass_rate guardrail min_delta; the OOD task count prices against the declared margin and effect (#389)")
+		}
+	}
 	checkArms := func(kind, arm, vs string) error {
 		if _, ok := e.Arms[arm]; !ok {
 			return fmt.Errorf("decision_rule.%s.arm %q names no arm in this experiment", kind, arm)

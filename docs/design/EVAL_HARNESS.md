@@ -1866,6 +1866,23 @@ on each block says whether the task count came from the declared
 corpus or the recorded union — a `recorded` read on a partial
 corpus under-reports tasks by construction.
 
+The harbor block's `ood` quantities are the **OOD sizing inputs**
+(#389): a `decision_rule` with `ood: true` sizes its task count
+against them — `n_efficiency = (z₁₋α/2 + z₁₋β)²·(CV_d/Δ_c)²` from
+`tokens_log_ratio_sd` against a continuous primary's
+`min_improvement`, and `n_noninferiority = (z₁₋α + z₁₋β)²·σ_d²/m²`
+from `sigma_d` against a `pass_rate` guardrail's negative
+`min_delta` (Δ_true = 0 conservative; pass-rate *superiority*
+claims size at `n_superiority`, reported but never binding).
+Manifests must declare at least one sizable endpoint or
+`ValidateExperiment` refuses; at compare time an OOD rule whose
+recorded task count falls short of `required` reports
+**inconclusive with the needed N** — underpowered is never a null
+verdict — and an absent measured block fails closed the same way.
+`crush eval noise <exp> --size` prints the requirement (from the
+just-computed block or noise.json) plus declared-task coverage —
+the number #397 records.
+
 ### `crush eval run --aa` — the calibration arm
 
 `--aa` clones the control arm in-memory as a third arm named `aa`

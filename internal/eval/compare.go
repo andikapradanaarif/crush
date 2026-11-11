@@ -481,6 +481,25 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 	noise, noiseErr := LoadNoise(r.EvalDir)
 	var skippedMetrics []string
 
+	// OOD power check (#389): a declared held-out read reports
+	// inconclusive when the recorded task set can't resolve its
+	// declared endpoints at the measured harbor noise floor —
+	// underpowered is inconclusive, never null. Provenance notes
+	// take precedence — an untrusted rule stays suppressed on its
+	// original reason.
+	if exp.DecisionRule != nil && exp.DecisionRule.OOD && ruleTrusted {
+		sizing, serr := HarborOODSizing(exp, noise)
+		switch {
+		case serr != nil:
+			ruleTrusted = false
+			ruleProvNote = "OOD read unpowerable: " + serr.Error()
+		case sizing != nil && len(trajIDs) < sizing.Required:
+			ruleTrusted = false
+			ruleProvNote = fmt.Sprintf("OOD read underpowered: %d tasks recorded, need %d (n_efficiency %d, n_noninferiority %d at the measured σ_d/CV_d)",
+				len(trajIDs), sizing.Required, sizing.NEfficiency, sizing.NNonInferiority)
+		}
+	}
+
 	for _, name := range names {
 		fn, err := primaryMetricFunc(exp, name)
 		if err != nil {

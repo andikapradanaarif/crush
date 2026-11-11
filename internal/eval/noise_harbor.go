@@ -50,16 +50,21 @@ type HarborPassNoise struct {
 // the SD of the per-task paired pass difference — the quantity the
 // OOD sample-size rule needs.
 type HarborPairNoise struct {
-	Dataset        string  `json:"dataset"`
-	Tasks          int     `json:"tasks"`
-	TasksSource    string  `json:"tasks_source"`
-	Pairs          int     `json:"pairs"`
-	SigmaD         float64 `json:"sigma_d"`
-	PassRate       float64 `json:"pass_rate"`
-	TokensCV       float64 `json:"tokens_cv"`
-	TokensSigmaD   float64 `json:"tokens_sigma_d"`
-	TokensPerTrial float64 `json:"tokens_per_trial"`
-	WallSPerTrial  float64 `json:"wall_s_per_trial"`
+	Dataset      string  `json:"dataset"`
+	Tasks        int     `json:"tasks"`
+	TasksSource  string  `json:"tasks_source"`
+	Pairs        int     `json:"pairs"`
+	SigmaD       float64 `json:"sigma_d"`
+	PassRate     float64 `json:"pass_rate"`
+	TokensCV     float64 `json:"tokens_cv"`
+	TokensSigmaD float64 `json:"tokens_sigma_d"`
+	// TokensLogRatioSD is CV_d — the SD of the per-task paired
+	// log-ratio of tokens — the efficiency sizing's noise input
+	// (#389a). Log domain makes the measure scale-free; pairs with
+	// a zero-token side are skipped (log undefined).
+	TokensLogRatioSD float64 `json:"tokens_log_ratio_sd"`
+	TokensPerTrial   float64 `json:"tokens_per_trial"`
+	WallSPerTrial    float64 `json:"wall_s_per_trial"`
 }
 
 // totalTokens is the unpriced tokens-to-done quantity — all billed
@@ -227,7 +232,7 @@ func ComputePairNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 			add(b, r)
 		}
 	}
-	var diffs, tokDiffs metricSample
+	var diffs, tokDiffs, lrDiffs metricSample
 	pairs, passSum := 0, 0
 	for task, ar := range a {
 		br, ok := b[task]
@@ -246,6 +251,9 @@ func ComputePairNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 		}
 		diffs.add(d)
 		tokDiffs.add(ar.tok - br.tok)
+		if ar.tok > 0 && br.tok > 0 {
+			lrDiffs.add(math.Log(br.tok / ar.tok))
+		}
 	}
 	if pairs == 0 {
 		return nil, fmt.Errorf("pair characterization: no (task, run_index) pairs across %v — check invocations and arm %q", invs, arm)
@@ -260,19 +268,25 @@ func ComputePairNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 	if tokDiffs.N >= 2 {
 		tsd = math.Sqrt((tokDiffs.Sum2 - float64(tokDiffs.N)*tmean*tmean) / float64(tokDiffs.N-1))
 	}
+	lrMean := lrDiffs.Mean()
+	lrsd := 0.0
+	if lrDiffs.N >= 2 {
+		lrsd = math.Sqrt((lrDiffs.Sum2 - float64(lrDiffs.N)*lrMean*lrMean) / float64(lrDiffs.N-1))
+	}
 	var taskMeans metricSample
 	for _, ts := range taskTok {
 		taskMeans.add(ts.Mean())
 	}
 	out := &HarborPairNoise{
-		Dataset:        dataset,
-		Pairs:          pairs,
-		SigmaD:         sd,
-		PassRate:       float64(passSum) / float64(2*pairs),
-		TokensCV:       taskMeans.CV(),
-		TokensSigmaD:   tsd,
-		TokensPerTrial: tok.Mean(),
-		WallSPerTrial:  wall.Mean(),
+		Dataset:          dataset,
+		Pairs:            pairs,
+		SigmaD:           sd,
+		PassRate:         float64(passSum) / float64(2*pairs),
+		TokensCV:         taskMeans.CV(),
+		TokensSigmaD:     tsd,
+		TokensLogRatioSD: lrsd,
+		TokensPerTrial:   tok.Mean(),
+		WallSPerTrial:    wall.Mean(),
 	}
 	out.TasksSource = "recorded"
 	if exp != nil && exp.Harbor != nil {
