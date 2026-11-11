@@ -66,6 +66,10 @@ type CompareReport struct {
 	Pairs        int
 	Unmatched    int
 	Metrics      []MetricCompare
+	// Resample names the resampling unit in force — "stratified"
+	// (default) or "cluster" (#407) — so a report can't be re-read
+	// under a different variance model than produced it.
+	Resample string
 	// SkippedMetrics names registry entries with too few measurable
 	// pairs to estimate — absent telemetry is visible, not silent.
 	SkippedMetrics []string
@@ -164,6 +168,11 @@ type MetricCompare struct {
 	// true effect may sit below the bound, not merely too few runs).
 	Verdict  string
 	Required int
+	// RequiredUnit names what Required counts — "pairs" for the
+	// within-trajectory/pooled-CV estimate, "tasks" for the
+	// cluster between-task price (#407). A CV fallback under
+	// cluster mode still prices pairs, not tasks.
+	RequiredUnit string
 	// Guardrail carries the primary's max_pass_drop outcome:
 	// "ok", "violated (...)", or "unevaluable (...)" — empty when
 	// undeclared.
@@ -192,6 +201,12 @@ type alarmSnapshot struct {
 	// criteria are pre-committed exactly so they can't be rewritten
 	// to fit the numbers, so drift suppresses the result.
 	DecisionRule *DecisionRule `json:"decision_rule,omitempty"`
+	// Resample pins the estimator's unit of inference (#407) —
+	// flipping stratified→cluster after the run (or the reverse)
+	// silently re-launders the claim through a different variance
+	// model, so drift suppresses the rule result like the rule's
+	// own criteria.
+	Resample string `json:"resample,omitempty"`
 	// GateVerdict/OutcomeAlarms are context, not refusals: a
 	// catastrophic-collapsed invocation's token table shouldn't read
 	// as a win without its gate result beside it.
@@ -212,6 +227,7 @@ func (r *Runner) persistAlarms(exp *Experiment, inv string, rep Report, retErr e
 		Invocation:   inv,
 		Primary:      exp.Primary,
 		DecisionRule: exp.DecisionRule,
+		Resample:     exp.Resample,
 		Starved:      rep.Starved,
 		Saturated:    rep.Saturated,
 		Tolerated:    rep.Tolerated,
@@ -364,6 +380,14 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		case snap.DecisionRule != nil && exp.DecisionRule == nil:
 			ruleProvNote = "decision_rule was declared at run time and has since been removed"
 		}
+		// The resampling unit is part of the committed claim —
+		// "" and "stratified" are the same mode, so normalize the
+		// pin before comparing.
+		if normResample(snap.Resample) != normResample(exp.Resample) && ruleProvNote == "" {
+			ruleTrusted = false
+			ruleProvNote = fmt.Sprintf("resample drifted since the invocation (ran %q, now %q) — result suppressed",
+				normResample(snap.Resample), normResample(exp.Resample))
+		}
 	}
 
 	rng := r.RNG
@@ -429,6 +453,7 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		return a.idx - b.idx
 	})
 
+	resample := normResample(exp.Resample)
 	rep := &CompareReport{
 		Experiment:   exp.Name,
 		Invocation:   invocation,
@@ -436,6 +461,7 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		Trajectories: trajIDs,
 		Pairs:        len(pairs),
 		Unmatched:    unmatched,
+		Resample:     resample,
 		Provenance:   provNote,
 	}
 	if snap != nil {
@@ -560,7 +586,12 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		}
 		mc.Theta = thetaMeanRaw(raws)
 		mc.DeltaPct = mc.Theta * 100
-		lo, hi := bcaCI(raws, replicates, rng)
+		var lo, hi float64
+		if resample == ResampleCluster {
+			lo, hi = clusterCI(raws, replicates, rng)
+		} else {
+			lo, hi = bcaCI(raws, replicates, rng)
+		}
 		mc.CILoPct, mc.CIHiPct = lo*100, hi*100
 		// The permutation test deliberately normalizes on the
 		// observed baseline: conditioning on μ̂ is defensible under
@@ -570,7 +601,7 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		if exp.Primary != nil && name == exp.Primary.Metric {
 			switch {
 			case primaryTrusted:
-				fillPrimaryVerdict(&mc, exp.Primary, trajs, noiseCV(noise, noiseErr, name))
+				fillPrimaryVerdict(&mc, exp.Primary, trajs, noiseCV(noise, noiseErr, name), resample)
 				if exp.Primary.MaxPassDrop > 0 {
 					mc.Guardrail = passGuardrail(recs, exp.Primary.MaxPassDrop)
 					// A violated guardrail un-stands the verdict —
@@ -602,7 +633,7 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 	if rule == nil && snap != nil {
 		rule = snap.DecisionRule
 	}
-	rep.evalDecisionRule(rule, recs, ruleTrusted, ruleProvNote)
+	rep.evalDecisionRule(exp, rule, recs, ruleTrusted, ruleProvNote, replicates, rng)
 	return rep, nil
 }
 
@@ -739,7 +770,7 @@ func noiseCV(n *NoiseFile, err error, metric string) float64 {
 // spanning it is "inconclusive" — the true effect may simply be
 // below the bound; underpowered is only the case where a powered n
 // would tighten it.
-func fillPrimaryVerdict(mc *MetricCompare, p *Primary, trajs [][]float64, cv float64) {
+func fillPrimaryVerdict(mc *MetricCompare, p *Primary, trajs [][]float64, cv float64, resample string) {
 	var boundary float64
 	if p.Direction == PrimaryDecrease {
 		boundary = -p.MDE
@@ -760,8 +791,26 @@ func fillPrimaryVerdict(mc *MetricCompare, p *Primary, trajs [][]float64, cv flo
 		mc.Verdict = "no MDE effect"
 	default:
 		mc.Verdict = "inconclusive"
-		mc.Required = requiredPairs(trajs, p.MDE, cv)
+		mc.RequiredUnit = "pairs"
+		if resample == ResampleCluster {
+			n, taskPriced := requiredTasksCluster(trajs, p.MDE, cv)
+			mc.Required = n
+			if taskPriced {
+				mc.RequiredUnit = "tasks"
+			}
+		} else {
+			mc.Required = requiredPairs(trajs, p.MDE, cv)
+		}
 	}
+}
+
+// normResample resolves the estimator's resampling unit — "" and
+// "stratified" are the same mode.
+func normResample(s string) string {
+	if s == ResampleCluster {
+		return ResampleCluster
+	}
+	return ResampleStratified
 }
 
 // requiredPairs prices the paired design against its own noise:
@@ -797,6 +846,36 @@ func requiredPairs(trajs [][]float64, mde float64, cv float64) int {
 		return RequiredSamples(cv, mde)
 	}
 	return 0
+}
+
+// requiredTasksCluster is the cluster-mode sizing hook (#389's N):
+// n = ⌈(zα+zβ)²·Var_task(θ̄_j)/δ²⌉ where θ̄_j is the task's own mean
+// normalized diff. Within-trajectory variance — requiredPairs' unit
+// — is undefined at k = 1; the between-task spread of θ̄_j is the
+// only variance an OOD sample can price, and it prices *tasks*,
+// not pairs. taskPriced distinguishes the task count from the
+// pooled-CV fallback (a pair estimate — the wrong unit to print as
+// tasks when between-task variance is unmeasurable).
+func requiredTasksCluster(trajs [][]float64, mde float64, cv float64) (n int, taskPriced bool) {
+	if mde > 0 && len(trajs) >= 2 {
+		thetas := make([]float64, len(trajs))
+		for i, d := range trajs {
+			thetas[i] = mean(d)
+		}
+		m := mean(thetas)
+		var ss float64
+		for _, v := range thetas {
+			x := v - m
+			ss += x * x
+		}
+		if s2 := ss / float64(len(thetas)-1); s2 > 0 {
+			return int(math.Ceil(6.186 * s2 / (mde * mde))), true
+		}
+	}
+	if cv > 0 {
+		return RequiredSamples(cv, mde), false
+	}
+	return 0, false
 }
 
 // directionOf returns the metric's declared direction — the
@@ -896,32 +975,78 @@ func bcaCI(trajs []trajPairs, replicates int, rng *rand.Rand) (lo, hi float64) {
 			below++
 		}
 	}
-	if len(boot) == 0 {
-		// Every replicate resampled an all-zero baseline — no
-		// resample variance is expressible; collapse to the point.
-		return thetaHat, thetaHat
-	}
-	slices.Sort(boot)
+	return bcaTail(thetaHat, boot, below, jackknifeTheta(trajs))
+}
 
-	// Whole-trajectory deletion when ≥2 trajectories exist — the only
-	// unit that sees single-pair-trajectory leverage. A lone
-	// trajectory falls back to pair-level deletion, skipping
-	// deletions that zero the baseline.
+// clusterCI is the task-level counterpart for OOD reads (#407):
+// whole trajectories resample with replacement and the replicate
+// averages their observed θ_j = (Σt−Σc)/Σc — the within-trajectory
+// resample bcaCI draws has nothing to resample at k = 1 and, at any
+// k, conditions on the realized task set rather than carrying the
+// task-sampling uncertainty a generalization claim must include
+// (RRSI E.2 resamples tasks, not trials). Callers exclude non-
+// positive-baseline trajectories upstream, so every θ_j is defined
+// and a replicate can only repeat tasks, never fabricate one.
+func clusterCI(trajs []trajPairs, replicates int, rng *rand.Rand) (lo, hi float64) {
+	if len(trajs) < 2 {
+		// A single task carries no task-sampling variance — within-
+		// task resampling is the only nondegenerate variance left.
+		return bcaCI(trajs, replicates, rng)
+	}
+	thetaHat := thetaMeanRaw(trajs)
+	thetas := make([]float64, len(trajs))
+	for i, tr := range trajs {
+		thetas[i] = (tr.tSum - tr.cSum) / tr.cSum
+	}
+	boot := make([]float64, 0, replicates)
+	var below int
+	for range replicates {
+		var sum float64
+		for range thetas {
+			sum += thetas[rng.IntN(len(thetas))]
+		}
+		theta := sum / float64(len(thetas))
+		boot = append(boot, theta)
+		if theta < thetaHat {
+			below++
+		}
+	}
+	return bcaTail(thetaHat, boot, below, jackknifeTheta(trajs))
+}
+
+// jackknifeTheta deletes whole trajectories when ≥2 exist — the only
+// unit that sees single-pair-trajectory leverage — for the BCa
+// acceleration term. A lone trajectory falls back to pair-level
+// deletion, skipping deletions that zero the baseline.
+func jackknifeTheta(trajs []trajPairs) []float64 {
 	var jk []float64
 	if len(trajs) >= 2 {
 		for i := range trajs {
 			jk = append(jk, thetaMeanRaw(slices.Delete(slices.Clone(trajs), i, i+1)))
 		}
-	} else {
-		tr := trajs[0]
-		for j := range tr.c {
-			cs := tr.cSum - tr.c[j]
-			if cs <= 0 {
-				continue
-			}
-			jk = append(jk, (tr.tSum-tr.t[j]-cs)/cs)
-		}
+		return jk
 	}
+	tr := trajs[0]
+	for j := range tr.c {
+		cs := tr.cSum - tr.c[j]
+		if cs <= 0 {
+			continue
+		}
+		jk = append(jk, (tr.tSum-tr.t[j]-cs)/cs)
+	}
+	return jk
+}
+
+// bcaTail turns a replicate distribution into the BCa 95% interval:
+// bias-correction z0 from the below-θ̂ share, acceleration a from the
+// jackknife, then the adjusted quantiles.
+func bcaTail(thetaHat float64, boot []float64, below int, jk []float64) (lo, hi float64) {
+	if len(boot) == 0 {
+		// Every replicate was degenerate — no resample variance is
+		// expressible; collapse to the point.
+		return thetaHat, thetaHat
+	}
+	slices.Sort(boot)
 	jkMean := mean(jk)
 	var num, den float64
 	for _, v := range jk {
@@ -1121,6 +1246,164 @@ func passGuardrail(recs []RunRecord, maxDrop float64) string {
 	return fmt.Sprintf("ok (pass %.2f vs %.2f)", tRate, cRate)
 }
 
+// scalarClusterCI is the BCa 95% interval for a per-task scalar
+// estimand θ = mean_j θ_j — tasks resample with replacement (#407)
+// and the jackknife deletes whole tasks.
+func scalarClusterCI(thetas []float64, replicates int, rng *rand.Rand) (thetaHat, lo, hi float64) {
+	thetaHat = mean(thetas)
+	boot := make([]float64, 0, replicates)
+	var below int
+	for range replicates {
+		var sum float64
+		for range thetas {
+			sum += thetas[rng.IntN(len(thetas))]
+		}
+		b := sum / float64(len(thetas))
+		boot = append(boot, b)
+		if b < thetaHat {
+			below++
+		}
+	}
+	jk := make([]float64, len(thetas))
+	for i := range thetas {
+		jk[i] = mean(slices.Delete(slices.Clone(thetas), i, i+1))
+	}
+	lo, hi = bcaTail(thetaHat, boot, below, jk)
+	return thetaHat, lo, hi
+}
+
+// passRateClusterCI is the paired-binary task-level interval (#407):
+// each task contributes its conclusive pass fraction per arm — a
+// bare bit at k = 1 — and θ = mean_j (armRate_j − vsRate_j) is
+// already in the criterion's arm orientation. Tasks where either arm
+// produced no conclusive run carry no paired bit and drop; fewer
+// than 2 paired tasks can't express task-sampling variance and error
+// out to inconclusive rather than reporting a naked point estimate.
+func passRateClusterCI(recs []RunRecord, arm, vs string, replicates int, rng *rand.Rand) (theta, lo, hi float64, err error) {
+	type counts struct{ pass, n int }
+	byTask := map[string]map[string]*counts{}
+	for _, rec := range recs {
+		if !rec.Outcome.Conclusive() {
+			continue
+		}
+		arms := byTask[rec.TrajectoryID]
+		if arms == nil {
+			arms = map[string]*counts{}
+			byTask[rec.TrajectoryID] = arms
+		}
+		c := arms[rec.Arm]
+		if c == nil {
+			c = &counts{}
+			arms[rec.Arm] = c
+		}
+		c.n++
+		if rec.Outcome == OutcomePass {
+			c.pass++
+		}
+	}
+	var diffs []float64
+	for _, tr := range slices.Sorted(maps.Keys(byTask)) {
+		a, v := byTask[tr][arm], byTask[tr][vs]
+		if a == nil || v == nil || a.n == 0 || v.n == 0 {
+			continue
+		}
+		diffs = append(diffs, float64(a.pass)/float64(a.n)-float64(v.pass)/float64(v.n))
+	}
+	if len(diffs) < 2 {
+		return 0, 0, 0, fmt.Errorf("pass_rate task-level interval needs ≥2 paired tasks, have %d", len(diffs))
+	}
+	theta, lo, hi = scalarClusterCI(diffs, replicates, rng)
+	return theta, lo, hi, nil
+}
+
+// tokensToDoneClusterCI is the paired-continuous task-level interval
+// (#407): each task carries (cost, passes) per arm over attempted
+// runs — failed runs' spend is real cost — and the replicate
+// recomputes the ratio-of-sums cost-per-pass over a resampled task
+// set. Cost is a ratio estimator, so resampling must redraw the
+// denominator, not the ratio. A replicate where vs passed nothing
+// has no defined baseline and is skipped.
+func tokensToDoneClusterCI(recs []RunRecord, arm, vs string, costFn func(*RunRecord) float64, replicates int, rng *rand.Rand) (theta, lo, hi float64, err error) {
+	type spend struct {
+		cost  float64
+		pass  int
+		tried int
+	}
+	type taskSpend struct{ a, v spend }
+	byTask := map[string]*taskSpend{}
+	for _, rec := range recs {
+		if rec.Arm != arm && rec.Arm != vs {
+			continue
+		}
+		t := byTask[rec.TrajectoryID]
+		if t == nil {
+			t = &taskSpend{}
+			byTask[rec.TrajectoryID] = t
+		}
+		s := &t.a
+		if rec.Arm == vs {
+			s = &t.v
+		}
+		s.tried++
+		s.cost += costFn(&rec)
+		if rec.Outcome == OutcomePass {
+			s.pass++
+		}
+	}
+	var tasks []*taskSpend
+	for _, tr := range slices.Sorted(maps.Keys(byTask)) {
+		t := byTask[tr]
+		if t.a.tried == 0 || t.v.tried == 0 {
+			continue // No paired task-level read without both arms present.
+		}
+		tasks = append(tasks, t)
+	}
+	if len(tasks) < 2 {
+		return 0, 0, 0, fmt.Errorf("tokens_to_done task-level interval needs ≥2 paired tasks, have %d", len(tasks))
+	}
+	ratioOf := func(ts []*taskSpend) (float64, bool) {
+		var ac, ap, vc, vp float64
+		for _, t := range ts {
+			ac += t.a.cost
+			ap += float64(t.a.pass)
+			vc += t.v.cost
+			vp += float64(t.v.pass)
+		}
+		if ap <= 0 || vp <= 0 {
+			return 0, false
+		}
+		return (ac/ap - vc/vp) / (vc / vp), true
+	}
+	thetaHat, ok := ratioOf(tasks)
+	if !ok {
+		return 0, 0, 0, fmt.Errorf("tokens_to_done unmeasurable — an arm passed nothing on paired tasks")
+	}
+	boot := make([]float64, 0, replicates)
+	var below int
+	for range replicates {
+		draw := make([]*taskSpend, len(tasks))
+		for i := range draw {
+			draw[i] = tasks[rng.IntN(len(tasks))]
+		}
+		b, ok := ratioOf(draw)
+		if !ok {
+			continue
+		}
+		boot = append(boot, b)
+		if b < thetaHat {
+			below++
+		}
+	}
+	jk := make([]float64, 0, len(tasks))
+	for i := range tasks {
+		if j, ok := ratioOf(slices.Delete(slices.Clone(tasks), i, i+1)); ok {
+			jk = append(jk, j)
+		}
+	}
+	lo, hi = bcaTail(thetaHat, boot, below, jk)
+	return thetaHat, lo, hi, nil
+}
+
 // applyAcceptance runs the #197 cost-justified acceptance rule on the
 // primary row, after the metric loop has priced every registry entry.
 // Armed when primary pins any of floor/noise_band/base_cost_allowance
@@ -1252,7 +1535,7 @@ func (rep *CompareReport) applyAcceptance(exp *Experiment, recs []RunRecord, pri
 // is "inconclusive". An untrusted or unverifiable declaration is
 // inconclusive — the rule is the anti-post-hoc device, so reading
 // a drifted one defeats its purpose.
-func (rep *CompareReport) evalDecisionRule(rule *DecisionRule, recs []RunRecord, trusted bool, provNote string) {
+func (rep *CompareReport) evalDecisionRule(exp *Experiment, rule *DecisionRule, recs []RunRecord, trusted bool, provNote string, replicates int, rng *rand.Rand) {
 	if rule == nil {
 		rep.RuleResult = "absent"
 		rep.RuleNote = "no decision_rule declared — the run characterizes, it doesn't decide"
@@ -1269,7 +1552,7 @@ func (rep *CompareReport) evalDecisionRule(rule *DecisionRule, recs []RunRecord,
 	var bits []string
 	failed, undecided := false, false
 	if p := rule.Primary; p != nil {
-		v, det := rep.ruleCriterion(p.Metric, p.Arm, p.Vs, p.Direction, p.MinImprovement, "primary", recs)
+		v, det := rep.ruleCriterion(exp, p.Metric, p.Arm, p.Vs, p.Direction, p.MinImprovement, "primary", recs, replicates, rng)
 		bits = append(bits, det)
 		switch v {
 		case "failed":
@@ -1279,7 +1562,7 @@ func (rep *CompareReport) evalDecisionRule(rule *DecisionRule, recs []RunRecord,
 		}
 	}
 	if g := rule.Guardrail; g != nil {
-		v, det := rep.ruleCriterion(g.Metric, g.Arm, g.Vs, g.Direction, g.MinDelta, "guardrail", recs)
+		v, det := rep.ruleCriterion(exp, g.Metric, g.Arm, g.Vs, g.Direction, g.MinDelta, "guardrail", recs, replicates, rng)
 		bits = append(bits, det)
 		switch v {
 		case "failed":
@@ -1304,10 +1587,13 @@ func (rep *CompareReport) evalDecisionRule(rule *DecisionRule, recs []RunRecord,
 // delta is normalized so positive means the arm improved on `vs` in
 // the criterion's direction. Paired metrics carry CI bounds, so the
 // satisfied bar is the conservative bound clearing the threshold;
-// the two aggregate metrics (pass_rate, tokens_to_done) have no
-// interval and evaluate on the measured point — unmeasurable inputs,
-// not near-misses, are their inconclusive case.
-func (rep *CompareReport) ruleCriterion(metric, arm, vs, dir string, thresh float64, kind string, recs []RunRecord) (string, string) {
+// under resample: "cluster" (#407) the two aggregate metrics
+// (pass_rate, tokens_to_done) gain task-level intervals of their
+// own — an OOD claim can't rest on a bare point estimate. In
+// stratified mode the aggregates have no interval and evaluate on
+// the measured point; unmeasurable inputs, not near-misses, are
+// their inconclusive case.
+func (rep *CompareReport) ruleCriterion(exp *Experiment, metric, arm, vs, dir string, thresh float64, kind string, recs []RunRecord, replicates int, rng *rand.Rand) (string, string) {
 	sign := 1.0
 	if dir == PrimaryDecrease {
 		sign = -1
@@ -1329,6 +1615,17 @@ func (rep *CompareReport) ruleCriterion(metric, arm, vs, dir string, thresh floa
 			break
 		}
 		imp = armSign * (tRate - cRate) // Absolute — rates differ in fraction space.
+		if rep.Resample == ResampleCluster {
+			// The task-level read replaces the pooled point: a
+			// generalization claim can't rest on a rate difference
+			// with no task-sampling interval behind it.
+			theta, cl, ch, err := passRateClusterCI(recs, arm, vs, replicates, rng)
+			if err != nil {
+				unmeasurable = err.Error()
+				break
+			}
+			imp, lo, hi, bounded = theta, cl, ch, true
+		}
 	case "tokens_to_done":
 		var armT, vsT *ArmTotal
 		for i := range rep.ArmTotals {
@@ -1346,6 +1643,24 @@ func (rep *CompareReport) ruleCriterion(metric, arm, vs, dir string, thresh floa
 		// The arm-total ratio is already arm-relative to `vs` —
 		// no armSign here; direction alone normalizes to improvement.
 		imp = sign * (armT.CostPerPass - vsT.CostPerPass) / vsT.CostPerPass
+		if rep.Resample == ResampleCluster {
+			costFn, err := primaryMetricFunc(exp, "weighted_cost")
+			if err != nil {
+				unmeasurable = fmt.Sprintf("tokens_to_done cluster interval needs weighted_cost: %v", err)
+				break
+			}
+			theta, cl, ch, err := tokensToDoneClusterCI(recs, arm, vs, costFn, replicates, rng)
+			if err != nil {
+				unmeasurable = err.Error()
+				break
+			}
+			if sign > 0 {
+				imp, lo, hi = theta, cl, ch
+			} else {
+				imp, lo, hi = -theta, -ch, -cl
+			}
+			bounded = true
+		}
 	default:
 		var mc *MetricCompare
 		for i := range rep.Metrics {
@@ -1426,6 +1741,9 @@ func (rep *CompareReport) Summary() string {
 		}
 		fmt.Fprintln(&b)
 	}
+	if rep.Resample == ResampleCluster {
+		fmt.Fprintln(&b, "  resample: cluster — intervals carry task-sampling uncertainty")
+	}
 	fmt.Fprintf(&b, "  pairs: %d conclusive (unmatched: %d) across %d trajectories\n",
 		rep.Pairs, rep.Unmatched, len(rep.Trajectories))
 	fmt.Fprintln(&b, "  Δ% is the mean of per-trajectory normalized diffs — the ctrl≈/treat≈")
@@ -1442,6 +1760,10 @@ func (rep *CompareReport) Summary() string {
 			fmt.Sprintf("(ctrl≈%.1f → treat≈%.1f, min-baseline %.2g; %d zero-side, %d no-baseline%s, %d absent)",
 				m.CtrlMean, m.TreatMean, m.MinBaseline, m.Zeroes, m.Dropped,
 				noBaselinePosNote(m.NoBaselinePos), m.Absent))
+		if rep.Resample == ResampleCluster && m.Trajectories < 2 {
+			fmt.Fprintf(&b, "  %-32s %6s\n", "",
+				"(<2 tasks — interval is within-task stratified; task-sampling variance inexpressible)")
+		}
 		if m.LogRatioPairs >= minComparePairs {
 			fmt.Fprintf(&b, "  %-32s %6s\n", "",
 				fmt.Sprintf("(legacy log-ratio %+.1f%% on %d positive pairs)", m.LogRatioPct, m.LogRatioPairs))
@@ -1454,7 +1776,11 @@ func (rep *CompareReport) Summary() string {
 		}
 		if m.Verdict == "inconclusive" {
 			if m.Required > 0 {
-				fmt.Fprintf(&b, "  INCONCLUSIVE — CI spans the MDE boundary: %s needs n≈%d pairs to resolve (paired-variance estimate)\n", m.Name, m.Required)
+				unit := m.RequiredUnit
+				if unit == "" {
+					unit = "pairs"
+				}
+				fmt.Fprintf(&b, "  INCONCLUSIVE — CI spans the MDE boundary: %s needs n≈%d %s to resolve (paired-variance estimate)\n", m.Name, m.Required, unit)
 			} else {
 				fmt.Fprintf(&b, "  INCONCLUSIVE — CI spans the MDE boundary: %s; required n unknown (no recorded CV)\n", m.Name)
 			}

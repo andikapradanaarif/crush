@@ -307,7 +307,22 @@ type Experiment struct {
 	// per-arm mix. Replay experiments are restart-shaped by
 	// construction — the combination is rejected.
 	ProcessModel string `json:"process_model,omitempty"`
+	// Resample selects the compare estimator's resampling unit
+	// (#407): "stratified" (default — pairs resample within their
+	// trajectory, matching the in-house corpus's few-trajectories ×
+	// many-runs shape) or "cluster" (whole trajectories resample
+	// with replacement — the only non-degenerate mode at k=1 per
+	// task, and the unit a task-sampling (OOD) claim must carry).
+	Resample string `json:"resample,omitempty"`
 }
+
+// Resampling units for the compare estimator (#407). Empty means
+// stratified — the historical default — so pre-#407 manifests and
+// records interpret cleanly.
+const (
+	ResampleStratified = "stratified"
+	ResampleCluster    = "cluster"
+)
 
 // Process-model regimes (#117). Empty means restart — the historical
 // default — so pre-#117 manifests and records interpret cleanly.
@@ -361,6 +376,15 @@ type DecisionRule struct {
 	Hypothesis string         `json:"hypothesis"`
 	Primary    *RulePrimary   `json:"primary,omitempty"`
 	Guardrail  *RuleGuardrail `json:"guardrail,omitempty"`
+	// OOD marks the claim as a held-out generalization read — the
+	// inference target is the task distribution, not this corpus.
+	// The gate refuses an OOD rule unless the experiment resamples
+	// at the task (cluster) unit: within-trajectory resampling is
+	// degenerate at k=1 and, at any k, conditions on the task set —
+	// exactly the uncertainty a generalization claim must carry
+	// (#407). Snapshotted with the rule: the claim's unit of
+	// inference is pre-registration material.
+	OOD bool `json:"ood,omitempty"`
 }
 
 // RulePrimary is the decisive criterion: Arm's Metric must improve
@@ -422,6 +446,7 @@ func sameDecisionRule(a, b *DecisionRule) bool {
 		return *x == *y
 	}
 	return a.Hypothesis == b.Hypothesis &&
+		a.OOD == b.OOD &&
 		samePrimaryRule(a.Primary, b.Primary) &&
 		sameGuardrail(a.Guardrail, b.Guardrail)
 }

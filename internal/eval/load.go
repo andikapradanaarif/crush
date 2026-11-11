@@ -382,6 +382,12 @@ func ValidateExperiment(e *Experiment) error {
 		// semantics for it to mean.
 		return fmt.Errorf("process_model %q cannot combine with replay — forked boundaries restart per turn by construction", ProcessModelPersistent)
 	}
+	switch e.Resample {
+	case "", ResampleStratified, ResampleCluster:
+	default:
+		return fmt.Errorf("resample must be %q or %q, got %q",
+			ResampleStratified, ResampleCluster, e.Resample)
+	}
 	for _, name := range e.EnvPassthrough {
 		if err := validatePassthroughName(name); err != nil {
 			return fmt.Errorf("env_passthrough: %w", err)
@@ -853,6 +859,9 @@ func (e *Experiment) validateDecisionRule() error {
 	if d.Primary == nil && d.Guardrail == nil {
 		return fmt.Errorf("decision_rule requires a primary or guardrail criterion — a rule with no measurable claim is post-hoc freedom, not pre-registration")
 	}
+	if d.OOD && e.Resample != ResampleCluster {
+		return fmt.Errorf("decision_rule.ood requires resample %q — a held-out claim must carry task-sampling uncertainty; stratified resampling conditions on the task set", ResampleCluster)
+	}
 	checkArms := func(kind, arm, vs string) error {
 		if _, ok := e.Arms[arm]; !ok {
 			return fmt.Errorf("decision_rule.%s.arm %q names no arm in this experiment", kind, arm)
@@ -868,7 +877,8 @@ func (e *Experiment) validateDecisionRule() error {
 	// ruleMetricKnown resolves the metric namespace: the paired
 	// registry plus the two arm-aggregate names — pass_rate (the
 	// conclusive-rate read) and tokens_to_done (the ArmTotals
-	// cost-per-pass). Aggregate metrics carry no paired interval;
+	// cost-per-pass). Aggregates carry intervals only under
+	// resample "cluster"; stratified evaluates them on the point —
 	// the docstrings carry that limit.
 	ruleMetricKnown := func(kind, metric string) error {
 		switch metric {
