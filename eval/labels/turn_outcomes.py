@@ -21,6 +21,18 @@ QUOTAS = {
     "failed": {"nexus": 3, "vishnu": 3, "valo-backend": 2, "kiosk": 2},
     "unknown": {"nexus": 3, "vishnu": 3, "valo-backend": 2, "kiosk": 2},
 }
+# R0.3 wave (#438): the second blind sample — settled post-#432/#433
+# rows only (workdir-stamped), strata adjusted to what post-fix
+# volume holds. The 10/10/10 shape is unreachable: failed has 2 and
+# revised 8 rows total, so the wave takes every settled non-accepted
+# row and enough accepted to clear the ≥30 bar — a census of the
+# post-#433 pool.
+R03_QUOTAS = {
+    "accepted": {"aurum": 2, "kiosk": 2, "nexus": 4},
+    "revised": {"kiosk": 3, "nexus": 5},
+    "failed": {"kiosk": 2},
+    "unknown": {"kiosk": 2, "nexus": 11, "valo-backend": 1},
+}
 GOLD_LABELS = ("accepted", "revised", "rejected", "unclear")
 PREDICTED_LABEL = {
     "accepted": "accepted",
@@ -34,6 +46,31 @@ RECONCILE_RETRY_PREFIX = "Observed failures still open"
 FROZEN_MANIFEST_SHA256 = (
     "e7686a428c819073cf32c872dac44c3c6919ac474bcc26fce3a750f9f52add90"
 )
+
+# Each wave pins its own quota table, seed, cutoff, candidate filter,
+# output prefix, and — after the freeze — its manifest hash. post_433
+# restricts candidates to workdir-stamped rows (the post-#433 schema
+# marker), which cleanly excludes every pre-#433 wave-1 candidate.
+WAVES = {
+    "p0": {
+        "quotas": QUOTAS,
+        "seed": DEFAULT_SEED,
+        "cutoff": DEFAULT_CUTOFF,
+        "post_433": False,
+        "prefix": "turn_outcomes",
+        "frozen_sha256": FROZEN_MANIFEST_SHA256,
+    },
+    "r03": {
+        "quotas": R03_QUOTAS,
+        "seed": "r03-turn-outcomes-2026-11-11",
+        "cutoff": "2026-11-11T06:00:00Z",
+        "post_433": True,
+        "prefix": "turn_outcomes_r03",
+        "frozen_sha256": (
+            "722b355789dc3eedb201503d5c0548fc4eefea230315d4cc99bbfb472235ab0f"
+        ),
+    },
+}
 
 
 def default_registry():
@@ -54,9 +91,9 @@ def cutoff_millis(value):
     return int(instant.timestamp() * 1000)
 
 
-def project_databases(registry):
+def project_databases(registry, quotas=QUOTAS):
     entries = json.loads(registry.read_text())["projects"]
-    wanted = {project for by_project in QUOTAS.values() for project in by_project}
+    wanted = {project for by_project in quotas.values() for project in by_project}
     databases = {}
     for entry in entries:
         name = Path(entry["path"]).name
@@ -71,7 +108,7 @@ def project_databases(registry):
     return databases
 
 
-def read_candidates(databases, cutoff):
+def read_candidates(databases, cutoff, post_433=False, quotas=QUOTAS):
     candidates = []
     for project, db_path in sorted(databases.items()):
         if not db_path.is_file():
@@ -85,12 +122,13 @@ def read_candidates(databases, cutoff):
                 raise ValueError(
                     f"{project}: expected one project partition, found {len(project_keys)}"
                 )
+            workdir_clause = "AND t.workdir != ''" if post_433 else ""
             rows = conn.execute(
-                """SELECT t.session_id, t.turn_id, t.verdict, m.parts
+                f"""SELECT t.session_id, t.turn_id, t.verdict, m.parts
                    FROM turn_outcomes t
                    JOIN messages m ON m.id = t.turn_id AND m.session_id = t.session_id
                    WHERE t.project_key = ? AND t.settled_at IS NOT NULL
-                     AND t.settled_at < ?
+                     AND t.settled_at < ? {workdir_clause}
                    ORDER BY t.session_id, t.turn_id""",
                 (project_keys[0], cutoff),
             )
@@ -99,7 +137,7 @@ def read_candidates(databases, cutoff):
                 # Its persisted repair prompts are not owner-labelable turns.
                 if message_text(parts).startswith(RECONCILE_RETRY_PREFIX):
                     continue
-                if verdict not in QUOTAS:
+                if verdict not in quotas:
                     raise ValueError(f"{project}: unexpected settled verdict {verdict!r}")
                 candidates.append(
                     {
@@ -116,9 +154,9 @@ def digest(*parts):
     return hashlib.sha256("\0".join(parts).encode()).hexdigest()
 
 
-def select_sample(candidates, seed=DEFAULT_SEED):
+def select_sample(candidates, quotas=QUOTAS, seed=DEFAULT_SEED):
     chosen = []
-    for verdict, by_project in QUOTAS.items():
+    for verdict, by_project in quotas.items():
         for project, quota in by_project.items():
             pool = [
                 row
@@ -227,12 +265,12 @@ def print_review(index, total, row, db_path, context):
     print("Choose accepted, revised, rejected, or unclear; an empty note is fine.")
 
 
-def verify_frozen_manifest(path):
+def verify_frozen_manifest(path, expected=FROZEN_MANIFEST_SHA256):
     actual = hashlib.sha256(path.read_bytes()).hexdigest()
-    if actual != FROZEN_MANIFEST_SHA256:
+    if actual != expected:
         raise ValueError(
             "manifest differs from the pre-registered sample "
-            f"(expected {FROZEN_MANIFEST_SHA256}, got {actual})"
+            f"(expected {expected}, got {actual})"
         )
 
 
@@ -259,9 +297,9 @@ def score(manifest, review):
     return gold, matrix
 
 
-def print_score(matrix):
+def print_score(matrix, quotas=QUOTAS):
     print("settled \\ gold   " + "  ".join(f"{label:>8}" for label in GOLD_LABELS))
-    for verdict in QUOTAS:
+    for verdict in quotas:
         cells = [matrix[verdict, label] for label in GOLD_LABELS]
         total = sum(cells)
         correct = matrix[verdict, PREDICTED_LABEL[verdict]]
@@ -271,7 +309,7 @@ def print_score(matrix):
             + f"  precision={correct}/{total}"
         )
     for label in GOLD_LABELS:
-        total = sum(matrix[verdict, label] for verdict in QUOTAS)
+        total = sum(matrix[verdict, label] for verdict in quotas)
         matching = next(verdict for verdict, mapped in PREDICTED_LABEL.items() if mapped == label)
         print(f"recall {label}: {matrix[matching, label]}/{total}")
     accepted = sum(matrix["accepted", label] for label in GOLD_LABELS)
@@ -288,60 +326,74 @@ def print_score(matrix):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    sample = commands.add_parser("sample", help="freeze a blind 50-turn review sheet")
+    sample = commands.add_parser("sample", help="freeze a blind review sheet")
+    sample.add_argument("--wave", choices=sorted(WAVES), default="p0")
     sample.add_argument("--registry", type=Path, default=default_registry())
-    sample.add_argument("--cutoff", default=DEFAULT_CUTOFF)
-    sample.add_argument("--seed", default=DEFAULT_SEED)
+    sample.add_argument("--cutoff", help="defaults to the wave's pinned cutoff")
+    sample.add_argument("--seed", help="defaults to the wave's pinned seed")
     sample.add_argument("--out-dir", type=Path, default=Path(__file__).parent)
     inspect = commands.add_parser("review", help="show evidence for blind owner labeling")
+    inspect.add_argument("--wave", choices=sorted(WAVES), default="p0")
     inspect.add_argument("--registry", type=Path, default=default_registry())
-    inspect.add_argument(
-        "--review", type=Path, default=Path(__file__).parent / "turn_outcomes_review.draft.jsonl"
-    )
+    inspect.add_argument("--review", type=Path, help="defaults to the wave's review sheet")
     inspect.add_argument("--index", type=int, help="1-based row number; omit to show all")
     report = commands.add_parser("score", help="score completed owner labels")
+    report.add_argument("--wave", choices=sorted(WAVES), default="p0")
     report.add_argument("--manifest", type=Path, required=True)
     report.add_argument("--review", type=Path, required=True)
     report.add_argument("--gold-out", type=Path)
     args = parser.parse_args()
 
+    wave = WAVES[args.wave]
     try:
         if args.command == "sample":
+            cutoff = args.cutoff or wave["cutoff"]
+            seed = args.seed or wave["seed"]
+            quotas = wave["quotas"]
             candidates = read_candidates(
-                project_databases(args.registry), cutoff_millis(args.cutoff)
+                project_databases(args.registry, quotas),
+                cutoff_millis(cutoff),
+                post_433=wave["post_433"],
+                quotas=quotas,
             )
-            selected = select_sample(candidates, args.seed)
+            selected = select_sample(candidates, quotas, seed)
             review = [
                 {key: row[key] for key in ("sample_id", "project", "session_id", "turn_id")}
                 | {"gold_label": "", "note": ""}
                 for row in selected
             ]
-            review_path = args.out_dir / "turn_outcomes_review.draft.jsonl"
-            manifest_path = args.out_dir / "turn_outcomes_manifest.draft.jsonl"
+            review_path = args.out_dir / f"{wave['prefix']}_review.draft.jsonl"
+            manifest_path = args.out_dir / f"{wave['prefix']}_manifest.draft.jsonl"
             if review_path.exists() or manifest_path.exists():
                 raise ValueError("draft already exists; keep the frozen sample")
             args.out_dir.mkdir(parents=True, exist_ok=True)
             write_jsonl(review_path, review)
             write_jsonl(manifest_path, selected)
             counts = Counter(row["settled_verdict"] for row in selected)
-            print(f"frozen {len(selected)} turns before {args.cutoff}: {dict(counts)}")
+            print(f"frozen {len(selected)} turns before {cutoff}: {dict(counts)}")
             print(f"blind review: {review_path}")
             print(f"manifest: {manifest_path}")
             print(f"manifest SHA-256: {hashlib.sha256(manifest_path.read_bytes()).hexdigest()}")
         elif args.command == "review":
-            rows = load_jsonl(args.review)
+            review_arg = args.review or Path(__file__).parent / f"{wave['prefix']}_review.draft.jsonl"
+            rows = load_jsonl(review_arg)
             if args.index is not None and not 1 <= args.index <= len(rows):
                 raise ValueError(f"index must be between 1 and {len(rows)}")
-            databases = project_databases(args.registry)
+            databases = project_databases(args.registry, wave["quotas"])
             indices = [args.index - 1] if args.index is not None else range(len(rows))
             for index in indices:
                 row = rows[index]
                 db_path = databases[row["project"]]
                 print_review(index + 1, len(rows), row, db_path, review_context(db_path, row))
         else:
-            verify_frozen_manifest(args.manifest)
+            expected = wave["frozen_sha256"]
+            if not expected:
+                raise ValueError(
+                    f"wave {args.wave!r} has no recorded manifest hash — pin it at freeze time"
+                )
+            verify_frozen_manifest(args.manifest, expected)
             gold, matrix = score(load_jsonl(args.manifest), load_jsonl(args.review))
-            print_score(matrix)
+            print_score(matrix, wave["quotas"])
             if args.gold_out:
                 write_jsonl(args.gold_out, gold)
                 print(f"gold rows: {args.gold_out}")
