@@ -70,3 +70,4 @@ docs/design/TURN_CONTEXT.md
 
 # Python bytecode
 __pycache__/
+jobs/

@@ -1,11 +1,62 @@
 {
   "cv": {
     "call_metrics.discovery_calls_before_write": 0.45,
-    "steps": 0.11,
-    "tokens.output": 0.185,
-    "tokens.input": 0.32,
-    "request.prompt_tokens_peak": 0.047,
     "request.history_bytes": 0.073,
+    "request.prompt_tokens_peak": 0.047,
+    "steps": 0.11,
+    "tokens.input": 0.32,
+    "tokens.output": 0.185,
     "weighted_cost": 0.3
+  },
+  "harbor": {
+    "model": "opencode-go/beam-free",
+    "measured_at": "2026-11-12T10:14:22.247405Z",
+    "passes": {
+      "dataset": "terminal-bench@2.1",
+      "tasks": 30,
+      "tasks_source": "declared",
+      "trials_per_pass": 30,
+      "conclusive_per_pass": [
+        19,
+        17,
+        25,
+        24
+      ],
+      "passes": 4,
+      "pass_rate": 0.4740376676986584,
+      "pass_rates": [
+        0.42105263157894735,
+        0.4117647058823529,
+        0.48,
+        0.5833333333333334
+      ],
+      "solved_per_pass": [
+        8,
+        7,
+        12,
+        14
+      ],
+      "delta": 0.23333333333333334,
+      "delta_trials": 7,
+      "c_min": 0.866596211896833,
+      "tokens_cv": 1.4127204726573257,
+      "tokens_per_trial": 760142.1058823529,
+      "wall_s_per_trial": 335.60800789411763,
+      "wall_trials": 85,
+      "cost_trials": 0
+    },
+    "ood": {
+      "dataset": "terminal-bench@2.1",
+      "tasks": 30,
+      "tasks_source": "declared",
+      "pairs": 22,
+      "sigma_d": 0.5602256811793028,
+      "pass_rate": 0.5681818181818182,
+      "tokens_cv": 1.447717908933288,
+      "tokens_sigma_d": 2343924.719252681,
+      "tokens_log_ratio_sd": 1.0524851353064975,
+      "tokens_per_trial": 875419.2040816327,
+      "wall_s_per_trial": 385.2739845918368
+    }
   }
 }
