@@ -311,6 +311,72 @@ func TestIngestHarborTrials_RunIndexOrdinals(t *testing.T) {
 	require.Equal(t, []int{0}, idx["task-b"])
 }
 
+func TestIngestHarborTrials_PendingAndExceptionOnly(t *testing.T) {
+	dir := t.TempDir()
+	exp := harborExp("task-a", "task-b", "task-c")
+	r := seededRunner(dir)
+	jobs := t.TempDir()
+
+	done := writeTrialDir(t, jobs, "a1", "task-a", 1.0, nil)
+
+	// Still in flight: config.json but no terminal artifact —
+	// skipped into pending, not an error.
+	liveDir := filepath.Join(jobs, "task-b__live")
+	require.NoError(t, os.MkdirAll(liveDir, 0o755))
+	liveCfg, _ := json.Marshal(map[string]any{
+		"task":       map[string]any{"path": "task-b"},
+		"trial_name": "task-b__live",
+	})
+	require.NoError(t, os.WriteFile(filepath.Join(liveDir, "config.json"), liveCfg, 0o644))
+
+	// Raised before result.json: exception.txt only — error record,
+	// task id recovered from config.json's task.path.
+	excDir := filepath.Join(jobs, "task-c__dead")
+	require.NoError(t, os.MkdirAll(excDir, 0o755))
+	excCfg, _ := json.Marshal(map[string]any{
+		"task":       map[string]any{"path": "task-c"},
+		"trial_name": "task-c__dead",
+	})
+	require.NoError(t, os.WriteFile(filepath.Join(excDir, "config.json"), excCfg, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(excDir, "exception.txt"),
+		[]byte("Traceback (most recent call last):\nharbor.trial.errors.EnvironmentStartTimeoutError: Environment start timed out after 2400.0 seconds\n"), 0o644))
+
+	rep, err := r.IngestHarborTrials(context.Background(), exp, ArmControl, "inv1",
+		[]string{done, liveDir, excDir}, nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, rep.Records)
+	require.Equal(t, []string{"task-b"}, rep.Pending)
+
+	recs, err := r.LoadExperimentRecords(exp.Name)
+	require.NoError(t, err)
+	got := map[string]Outcome{}
+	var excRec *RunRecord
+	for i := range recs {
+		got[recs[i].TrajectoryID] = recs[i].Outcome
+		if recs[i].TrajectoryID == "task-c" {
+			excRec = &recs[i]
+		}
+	}
+	require.Equal(t, OutcomePass, got["task-a"])
+	require.Equal(t, OutcomeError, got["task-c"])
+	require.NotNil(t, excRec)
+	require.Equal(t, "harbor.trial.errors.EnvironmentStartTimeoutError", excRec.CheckDetail["exception_type"])
+	require.Equal(t, "exception.txt", excRec.CheckDetail["exception_source"])
+
+	// Re-ingesting after the live trial lands its result fills the
+	// cell rather than erroring the whole job on one straggler.
+	liveResult, _ := json.Marshal(map[string]any{
+		"task_id":         map[string]any{"name": "task-b"},
+		"verifier_result": map[string]any{"rewards": map[string]any{"reward": 0.0}},
+	})
+	require.NoError(t, os.WriteFile(filepath.Join(liveDir, "result.json"), liveResult, 0o644))
+	rep, err = r.IngestHarborTrials(context.Background(), exp, ArmControl, "inv1", []string{liveDir}, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, rep.Records)
+	require.Empty(t, rep.Pending)
+	require.Empty(t, rep.Skipped)
+}
+
 func TestIngestHarborTrials_RefusesNonHarbor(t *testing.T) {
 	dir := t.TempDir()
 	exp := harborExp("task-a")

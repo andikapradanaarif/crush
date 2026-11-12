@@ -3,7 +3,9 @@ package eval
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -41,6 +43,10 @@ type IngestReport struct {
 	Records    int      `json:"records"`
 	Tasks      []string `json:"tasks"`
 	Skipped    []string `json:"skipped"`
+	// Pending names trial dirs skipped because they carry no terminal
+	// artifact — the trial is still in flight, not failed; ingest it
+	// again once harbor writes result.json or exception.txt.
+	Pending []string `json:"pending"`
 }
 
 // harborTrialResult is the subset of harbor's TrialResult the
@@ -246,8 +252,13 @@ func (r *Runner) IngestHarborTrials(ctx context.Context, exp *Experiment, arm, i
 	dirs := slices.Clone(trialDirs)
 	sort.Strings(dirs)
 	taskOf := make([]string, len(dirs))
+	pending := make([]bool, len(dirs))
 	for i, dir := range dirs {
 		id, err := peekTrialTask(dir)
+		if errors.Is(err, errTrialPending) {
+			pending[i] = true
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("ingest %s: %w", dir, err)
 		}
@@ -256,6 +267,17 @@ func (r *Runner) IngestHarborTrials(ctx context.Context, exp *Experiment, arm, i
 	tempKey := temperatureKey(exp.Temperature)
 	rep := &IngestReport{Experiment: exp.Name, Invocation: invocation, Arm: arm}
 	for i, dir := range dirs {
+		if pending[i] {
+			// A still-running trial's task is best-effort — its
+			// config.json is written at trial start, the dir
+			// basename is the last resort.
+			if id, err := trialConfigTask(dir); err == nil && id != "" {
+				rep.Pending = append(rep.Pending, id)
+			} else {
+				rep.Pending = append(rep.Pending, filepath.Base(filepath.Clean(dir)))
+			}
+			continue
+		}
 		// The index keys the artifact name — assign before ingest
 		// so k>1 trials don't overwrite each other's preserved DB.
 		runIndex := nextIndex[taskOf[i]]
@@ -313,34 +335,122 @@ func (r *Runner) IngestHarborTrials(ctx context.Context, exp *Experiment, arm, i
 // outcome from result.json, run metrics from the telemetry blob the
 // in-container child wrote, session DB preserved + analyzed through
 // the same path the runner's artifacts take.
+// errTrialPending marks a trial dir with no terminal artifact — the
+// trial is still in flight. Ingest skips it rather than erroring a
+// whole job's worth of finished trials on one live straggler.
+var errTrialPending = errors.New("trial has no terminal artifact")
+
 // peekTrialTask reads just the task id out of a trial's result.json
-// — the grouping key for run_index ordinals.
+// — the grouping key for run_index ordinals. A trial that raised
+// before harbor wrote result.json (older harbor layouts leave
+// exception.txt alone) derives its id from config.json; one still in
+// flight returns errTrialPending.
 func peekTrialTask(dir string) (string, error) {
 	data, err := os.ReadFile(filepath.Join(dir, "result.json"))
+	if err == nil {
+		var res harborTrialResult
+		if err := json.Unmarshal(data, &res); err != nil {
+			return "", err
+		}
+		return harborTaskID(res.TaskID)
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+	if !fileExists(filepath.Join(dir, "exception.txt")) {
+		return "", errTrialPending
+	}
+	return trialConfigTask(dir)
+}
+
+// trialConfigTask recovers the task id for a trial that never wrote
+// result.json — config.json's task.path basename (local/git ids), its
+// task.name (package ids), or the trial_name's "__"-prefix.
+func trialConfigTask(dir string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(dir, "config.json"))
 	if err != nil {
 		return "", err
 	}
-	var res harborTrialResult
-	if err := json.Unmarshal(data, &res); err != nil {
+	var cfg struct {
+		Task struct {
+			Path string `json:"path"`
+			Name string `json:"name"`
+		} `json:"task"`
+		TrialName string `json:"trial_name"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
 		return "", err
 	}
-	return harborTaskID(res.TaskID)
+	switch {
+	case cfg.Task.Path != "":
+		return filepath.Base(filepath.Clean(cfg.Task.Path)), nil
+	case cfg.Task.Name != "":
+		return cfg.Task.Name, nil
+	case cfg.TrialName != "":
+		if i := strings.LastIndex(cfg.TrialName, "__"); i > 0 {
+			return cfg.TrialName[:i], nil
+		}
+		return cfg.TrialName, nil
+	}
+	return "", fmt.Errorf("config.json carries no task id")
+}
+
+// exceptionDetail distills a trial's exception.txt into check_detail
+// fields — the last non-empty line of a harbor traceback carries
+// "some.ErrorType: message".
+func exceptionDetail(dir string) map[string]any {
+	detail := map[string]any{"exception_source": "exception.txt"}
+	data, err := os.ReadFile(filepath.Join(dir, "exception.txt"))
+	if err != nil {
+		detail["exception_type"] = "unknown"
+		return detail
+	}
+	last := ""
+	for line := range strings.Lines(string(data)) {
+		if t := strings.TrimSpace(line); t != "" {
+			last = t
+		}
+	}
+	if i := strings.Index(last, ": "); i > 0 {
+		detail["exception_type"] = last[:i]
+		detail["exception_message"] = last[i+2:]
+	} else if last != "" {
+		detail["exception_type"] = last
+	} else {
+		detail["exception_type"] = "unknown"
+	}
+	return detail
 }
 
 func (r *Runner) ingestTrial(ctx context.Context, exp *Experiment, arm, invocation, dir string, runIndex int, tempKey string, manifest *FlagsManifest) (*RunRecord, error) {
+	var res harborTrialResult
+	var taskID string
+	var outcome Outcome
+	var detail map[string]any
 	data, err := os.ReadFile(filepath.Join(dir, "result.json"))
-	if err != nil {
+	switch {
+	case err == nil:
+		if err := json.Unmarshal(data, &res); err != nil {
+			return nil, fmt.Errorf("parse result.json: %w", err)
+		}
+		taskID, err = harborTaskID(res.TaskID)
+		if err != nil {
+			return nil, err
+		}
+		outcome, detail = harborOutcome(&res)
+	case errors.Is(err, fs.ErrNotExist) && fileExists(filepath.Join(dir, "exception.txt")):
+		// Trial raised before harbor wrote result.json — the
+		// exception file is the terminal artifact; the record is
+		// error by definition, and whatever telemetry/DB landed
+		// before the raise still fills its metrics below.
+		taskID, err = trialConfigTask(dir)
+		if err != nil {
+			return nil, fmt.Errorf("derive task from config.json: %w", err)
+		}
+		outcome, detail = OutcomeError, exceptionDetail(dir)
+	default:
 		return nil, fmt.Errorf("read result.json: %w", err)
 	}
-	var res harborTrialResult
-	if err := json.Unmarshal(data, &res); err != nil {
-		return nil, fmt.Errorf("parse result.json: %w", err)
-	}
-	taskID, err := harborTaskID(res.TaskID)
-	if err != nil {
-		return nil, err
-	}
-	outcome, detail := harborOutcome(&res)
 	// The source dir is provenance — and the dedupe key that keeps
 	// one trial's data from filling two paired cells.
 	detail["trial_dir"] = dir
