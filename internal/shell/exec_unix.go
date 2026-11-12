@@ -4,6 +4,7 @@ package shell
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,12 +20,13 @@ import (
 // so the coupling to upstream is explicit rather than a buried literal.
 const defaultKillTimeout = 2 * time.Second
 
-// liveChildren tracks every spawned child pid so survivors can be reaped
-// at process exit. Script-internal `&` jobs and grandchildren that detach
-// into their own sessions (isolateProcess) escape ctx cancellation and
-// would otherwise outlive the agent — in eval task containers they keep
-// the environment burning CPU after the run command finished.
-var liveChildren sync.Map // pid (int) → struct{}
+// liveChildren tracks every spawned child pid (== its process group id)
+// so survivors can be reaped at process exit. Script-internal `&` jobs
+// stay in the child's group and escape ctx cancellation — including the
+// common orphan shape where the shell itself exits while its `&`
+// grandchildren keep running — so the entry is held while the GROUP is
+// alive, not just while the direct child is.
+var liveChildren sync.Map // pgid (int) → struct{}
 
 // ReapOrphans kills each tracked child's process group. Harness runs
 // only — gated on CRUSH_EVAL_TELEMETRY, since an interactive session's
@@ -103,7 +105,15 @@ func processGroupExecHandler(killTimeout time.Duration) interp.ExecHandlerFunc {
 			defer stopf()
 
 			err = cmd.Wait()
-			liveChildren.Delete(cmd.Process.Pid)
+			// The child exited, but its process group may still host
+			// &-detached grandchildren — the exact orphan shape
+			// ReapOrphans exists for. Keep the pgid tracked while the
+			// group is alive (kill(0) succeeds or EPERMs); delete only
+			// on ESRCH so the entry can't later resolve to a recycled
+			// pgid.
+			if err := syscall.Kill(-cmd.Process.Pid, 0); errors.Is(err, syscall.ESRCH) {
+				liveChildren.Delete(cmd.Process.Pid)
+			}
 		}
 
 		return exitStatusFromError(ctx, hc.Stderr, err)

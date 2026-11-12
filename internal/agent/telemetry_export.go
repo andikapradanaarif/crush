@@ -393,11 +393,12 @@ func (c *coordinator) EdgeFiringDelta(sessionID string) map[string]map[string]in
 // per turn; kept in sync with internal/eval.EvalMaxStepsEnvVar.
 const EvalMaxStepsEnvVar = "CRUSH_EVAL_MAX_STEPS"
 
-// EvalMaxTokensEnvVar caps a single run's cumulative session tokens
-// (prompt + completion) when the eval harness is driving — the
-// run-side boundary that keeps a runaway trial from draining the
-// trajectory budget. The harbor adapter pins it per trial via its
-// max_tokens option.
+// EvalMaxTokensEnvVar caps a single run's cumulative token spend —
+// per-step input+output usage summed in OnStepFinish — when the eval
+// harness is driving. It is deliberately NOT read off the session's
+// token counters, which hold last-request context size (reset on
+// summarize, bounded by the context window) and can't express spend.
+// The harbor adapter pins it per trial via its max_tokens option.
 const EvalMaxTokensEnvVar = "CRUSH_EVAL_MAX_TOKENS"
 
 // EvalFlagsEnvVar carries the eval flag manifest into the child
@@ -442,8 +443,9 @@ func restartVector(sessionID string) RequestVector {
 
 // evalStepCaps returns the eval step/token caps as StopConditions,
 // or nil when the harness isn't driving this process. totalTokens
-// reads the session's cumulative prompt + completion count — the
-// same meter the auto-summarize threshold reads.
+// reads the run's accumulated per-step spend — the caller feeds a
+// counter OnStepFinish folds usage into, so a multi-step burn at
+// stable context still trips the cap.
 func evalStepCaps(totalTokens func() int64) []fantasy.StopCondition {
 	var caps []fantasy.StopCondition
 	if n, err := strconv.Atoi(os.Getenv(EvalMaxStepsEnvVar)); err == nil && n > 0 {

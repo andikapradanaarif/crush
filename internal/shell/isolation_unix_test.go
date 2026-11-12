@@ -5,9 +5,11 @@ package shell
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -113,6 +115,111 @@ func TestProcessIsolation_ZshJobControlDoesNotSuspend(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatalf("zsh -i -c did not complete within 5s; likely suspended on TTY (stderr=%q)", stderr.String())
+	}
+}
+
+// TestReapOrphans_KillsGroupAfterShellExit covers the field-observed
+// orphan shape: a script backgrounds a job with `&` and exits, leaving
+// the grandchild running in the dead child's process group. The pgid
+// must stay tracked after Wait returns, and ReapOrphans must kill the
+// surviving group — a Delete-on-Wait registry misses this case.
+func TestReapOrphans_KillsGroupAfterShellExit(t *testing.T) {
+	t.Setenv("CRUSH_EVAL_TELEMETRY", filepath.Join(t.TempDir(), "tel.json"))
+
+	var stderr bytes.Buffer
+	err := Run(t.Context(), RunOptions{
+		// Redirecting the grandchild's fds matters: unredirected `&`
+		// jobs inherit the stdout/stderr pipes, which makes Run itself
+		// block on pipe EOF until they exit — the stall this registry
+		// exists to prevent would hide inside the test's own Run call.
+		Command: `sh -c 'sleep 60 >/dev/null 2>&1 &'`,
+		Cwd:     t.TempDir(),
+		Env:     os.Environ(),
+		Stderr:  &stderr,
+	})
+	if err != nil {
+		t.Fatalf("run failed: %v (stderr=%q)", err, stderr.String())
+	}
+
+	// The sh child is gone; its group lives on via `sleep 60 &`.
+	var pgid int
+	liveChildren.Range(func(k, _ any) bool {
+		pgid, _ = k.(int)
+		return false
+	})
+	if pgid == 0 {
+		t.Fatal("no pgid tracked after shell exit — orphan group would escape reaping")
+	}
+	if err := syscall.Kill(-pgid, 0); err != nil {
+		t.Fatalf("orphan group %d not alive before reap: %v", pgid, err)
+	}
+
+	ReapOrphans()
+
+	// SIGKILL is not synchronous; poll briefly for the group to drain.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("orphan process group %d still alive after ReapOrphans", pgid)
+}
+
+// TestReapOrphans_NoTelemetryGate verifies reaping stays inert outside
+// eval runs — an interactive user's detached jobs must survive exit.
+func TestReapOrphans_NoTelemetryGate(t *testing.T) {
+	t.Setenv("CRUSH_EVAL_TELEMETRY", "")
+
+	err := Run(t.Context(), RunOptions{
+		Command: `sh -c 'sleep 60 >/dev/null 2>&1 &'`,
+		Cwd:     t.TempDir(),
+		Env:     os.Environ(),
+	})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+
+	var pgid int
+	liveChildren.Range(func(k, _ any) bool {
+		pgid, _ = k.(int)
+		return false
+	})
+	if pgid == 0 {
+		t.Skip("orphan group already drained — nothing to check")
+	}
+	defer func() {
+		// Clean up the test's own orphan without going through the gate.
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		liveChildren.Delete(pgid)
+	}()
+
+	ReapOrphans()
+	if err := syscall.Kill(-pgid, 0); err != nil {
+		t.Fatalf("ReapOrphans fired without CRUSH_EVAL_TELEMETRY: %v", err)
+	}
+}
+
+// TestReapOrphans_GroupDrainedCleansEntry verifies a fully-finished
+// command leaves no registry entry — the entry deletes on ESRCH so a
+// recycled pgid can never be targeted.
+func TestReapOrphans_GroupDrainedCleansEntry(t *testing.T) {
+	t.Setenv("CRUSH_EVAL_TELEMETRY", filepath.Join(t.TempDir(), "tel.json"))
+
+	err := Run(t.Context(), RunOptions{
+		Command: `sh -c 'true'`,
+		Cwd:     t.TempDir(),
+		Env:     os.Environ(),
+	})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+
+	var n int
+	liveChildren.Range(func(_, _ any) bool { n++; return true })
+	if n != 0 {
+		t.Fatalf("%d pgid entries leaked after clean exit", n)
 	}
 }
 
