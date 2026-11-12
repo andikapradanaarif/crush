@@ -6,7 +6,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"sync"
 	"syscall"
 	"time"
 
@@ -16,6 +18,29 @@ import (
 // defaultKillTimeout matches mvdan's DefaultExecHandler default. Extracted
 // so the coupling to upstream is explicit rather than a buried literal.
 const defaultKillTimeout = 2 * time.Second
+
+// liveChildren tracks every spawned child pid so survivors can be reaped
+// at process exit. Script-internal `&` jobs and grandchildren that detach
+// into their own sessions (isolateProcess) escape ctx cancellation and
+// would otherwise outlive the agent — in eval task containers they keep
+// the environment burning CPU after the run command finished.
+var liveChildren sync.Map // pid (int) → struct{}
+
+// ReapOrphans kills each tracked child's process group. Harness runs
+// only — gated on CRUSH_EVAL_TELEMETRY, since an interactive session's
+// deliberately detached jobs are the user's own and should survive exit.
+func ReapOrphans() {
+	if os.Getenv("CRUSH_EVAL_TELEMETRY") == "" {
+		return
+	}
+	liveChildren.Range(func(k, _ any) bool {
+		if pid, ok := k.(int); ok {
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+		}
+		liveChildren.Delete(k)
+		return true
+	})
+}
 
 // isolateProcess sets SysProcAttr so the child runs in its own session,
 // fully detached from Crush's controlling terminal. This prevents shells
@@ -63,6 +88,7 @@ func processGroupExecHandler(killTimeout time.Duration) interp.ExecHandlerFunc {
 
 		err = cmd.Start()
 		if err == nil {
+			liveChildren.Store(cmd.Process.Pid, struct{}{})
 			stopf := context.AfterFunc(ctx, func() {
 				if killTimeout <= 0 {
 					_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
@@ -77,6 +103,7 @@ func processGroupExecHandler(killTimeout time.Duration) interp.ExecHandlerFunc {
 			defer stopf()
 
 			err = cmd.Wait()
+			liveChildren.Delete(cmd.Process.Pid)
 		}
 
 		return exitStatusFromError(ctx, hc.Stderr, err)

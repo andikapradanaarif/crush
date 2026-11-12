@@ -17,6 +17,9 @@ const defaultKillTimeout = 2 * time.Second
 // default handler already handles adequately.
 func isolateProcess(_ *exec.Cmd) {}
 
+// ReapOrphans is a no-op on Windows — process-group reaping is Unix-only.
+func ReapOrphans() {}
+
 // processGroupExecHandler returns interp.DefaultExecHandler on Windows.
 func processGroupExecHandler(killTimeout time.Duration) interp.ExecHandlerFunc {
 	return interp.DefaultExecHandler(killTimeout)

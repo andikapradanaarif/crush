@@ -81,6 +81,9 @@ all show up under load.
   `KEY=VALUE` pairs; the kwarg form keeps values out of argv.)
 - `eval_flags` kwarg: manifest flag names → `CRUSH_EVAL_FLAGS`, so
   `resolved_options` lands in telemetry and baseline keys self-seed.
+- `max_tokens` kwarg: per-trial cumulative token budget →
+  `CRUSH_EVAL_MAX_TOKENS` — a runaway trial stops at the cap instead
+  of burning to the agent timeout (observed: an 11.5M-token run).
 
 ## Declare and ingest
 

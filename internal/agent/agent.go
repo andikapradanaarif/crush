@@ -2057,7 +2057,9 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 				}
 				return false
 			},
-		}, evalStepCaps()...),
+		}, evalStepCaps(func() int64 {
+			return currentSession.PromptTokens + currentSession.CompletionTokens
+		})...),
 	})
 
 	// runResult is this turn's own result — the named return is nil'd
