@@ -46,8 +46,24 @@ PYTHONPATH=$PWD harbor run --dataset <tasks-dir-or-registry> \
     --agent-kwarg harness_revision=<short sha of the build> \
     --agent-kwarg config="$PWD/arm-control.crush.json" \
     --agent-kwarg env=LLM_API_KEY,LLM_BASE_URL \
-    --model hyper/<model-pin> -n 1 -k 1
+    --environment-build-timeout-multiplier 4 \
+    --agent-timeout-multiplier 2 \
+    --verifier-timeout-multiplier 4 \
+    -n 2 -k 1
 ```
+
+Do **not** pass harbor's `--model`: model selection lives in the arm
+config's top-level `models` block (`large` + `small`). Passing
+`--model` makes crush derive the small model from the provider's
+catalog default — silently switching auxiliary calls (compaction,
+titles) to a different model than the arm under test. The `models`
+block also carries the sampling pins (`temperature`, `top_p`) —
+declare them there, not in the provider's `models[]` entry.
+
+The multipliers are field-calibrated: task images that need >600s to
+build, agent runs that exceed per-task timeouts on slow free-tier
+models, and verifiers that re-run heavy workloads (e.g. retraining)
+all show up under load.
 
 - `binary_path` (required): the pinned binary — its build SHA is the
   experiment's `harbor.harness_revision`. Kwarg names are the
@@ -105,6 +121,26 @@ matched pairing the in-house scheduler produces. A task with no
 trial in either arm lands on the snapshot's `skipped` list and
 voids the verdict (the corpus wasn't covered); a task with an
 infra-error trial gets an error record — it ran.
+
+## Ops notes from the field
+
+- **LiteLLM's "could not resolve model" warning is cosmetic.** Harbor
+  passes the model name through; resolution happens inside the agent
+  against `.crush.json`'s `providers` block. No action needed.
+- **Disk accumulates fast** — ~30 GB per 60 trials across images,
+  build cache, and stopped envs. After a job drains:
+  `docker builder prune -f && docker image prune -f`.
+- **Env-start timeouts orphan containers.** Timed-out environments
+  keep running (`<task>__env-main-1`, sometimes for hours). Sweep with
+  `docker ps`, remove the orphans — their trials are already recorded
+  as exceptions.
+- **`mteb-retrieve` (terminal-bench@2.0) has a broken image** — it
+  never finishes building, even at 4× env-build timeout. Exclude it
+  from measured subsets rather than reporting it as an infra loss.
+- **Agents can orphan tool-spawned processes.** A trial whose agent
+  leaves a live subprocess (e.g. a sampling script) keeps the task
+  container hot through artifact collection. Check `docker stats`
+  when a trial lingers in "Collecting main service artifacts".
 
 ## Blind-safety note
 

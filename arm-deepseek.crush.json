@@ -1,0 +1,24 @@
+{
+	"providers": {
+		"opencode-go": {
+			"api_key": "$OPENCODE_API_KEY",
+			"extra_headers": {
+				"x-opencode-session": "$(cat /proc/sys/kernel/random/uuid)"
+			}
+		}
+	},
+	"models": {
+		"large": {
+			"provider": "opencode-go",
+			"model": "deepseek-v4.1-flash",
+			"temperature": 0,
+			"top_p": 1
+		},
+		"small": {
+			"provider": "opencode-go",
+			"model": "deepseek-v4.1-flash",
+			"temperature": 0,
+			"top_p": 1
+		}
+	}
+}
