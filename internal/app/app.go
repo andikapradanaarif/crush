@@ -1210,6 +1210,12 @@ func (app *App) Shutdown() {
 		shell.GetBackgroundShellManager().KillAll(shutdownCtx)
 	})
 
+	// Reap tool-spawned survivors — script `&` jobs and detached
+	// grandchildren that ctx cancellation never reached. Harness-gated
+	// internally (CRUSH_EVAL_TELEMETRY): interactive detachments are
+	// the user's own.
+	shell.ReapOrphans()
+
 	// Close herdr client to stop its background writer.
 	app.herdrClient.Close()
 

@@ -4,9 +4,12 @@ package shell
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"sync"
 	"syscall"
 	"time"
 
@@ -16,6 +19,30 @@ import (
 // defaultKillTimeout matches mvdan's DefaultExecHandler default. Extracted
 // so the coupling to upstream is explicit rather than a buried literal.
 const defaultKillTimeout = 2 * time.Second
+
+// liveChildren tracks every spawned child pid (== its process group id)
+// so survivors can be reaped at process exit. Script-internal `&` jobs
+// stay in the child's group and escape ctx cancellation — including the
+// common orphan shape where the shell itself exits while its `&`
+// grandchildren keep running — so the entry is held while the GROUP is
+// alive, not just while the direct child is.
+var liveChildren sync.Map // pgid (int) → struct{}
+
+// ReapOrphans kills each tracked child's process group. Harness runs
+// only — gated on CRUSH_EVAL_TELEMETRY, since an interactive session's
+// deliberately detached jobs are the user's own and should survive exit.
+func ReapOrphans() {
+	if os.Getenv("CRUSH_EVAL_TELEMETRY") == "" {
+		return
+	}
+	liveChildren.Range(func(k, _ any) bool {
+		if pid, ok := k.(int); ok {
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+		}
+		liveChildren.Delete(k)
+		return true
+	})
+}
 
 // isolateProcess sets SysProcAttr so the child runs in its own session,
 // fully detached from Crush's controlling terminal. This prevents shells
@@ -63,6 +90,7 @@ func processGroupExecHandler(killTimeout time.Duration) interp.ExecHandlerFunc {
 
 		err = cmd.Start()
 		if err == nil {
+			liveChildren.Store(cmd.Process.Pid, struct{}{})
 			stopf := context.AfterFunc(ctx, func() {
 				if killTimeout <= 0 {
 					_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
@@ -77,6 +105,15 @@ func processGroupExecHandler(killTimeout time.Duration) interp.ExecHandlerFunc {
 			defer stopf()
 
 			err = cmd.Wait()
+			// The child exited, but its process group may still host
+			// &-detached grandchildren — the exact orphan shape
+			// ReapOrphans exists for. Keep the pgid tracked while the
+			// group is alive (kill(0) succeeds or EPERMs); delete only
+			// on ESRCH so the entry can't later resolve to a recycled
+			// pgid.
+			if err := syscall.Kill(-cmd.Process.Pid, 0); errors.Is(err, syscall.ESRCH) {
+				liveChildren.Delete(cmd.Process.Pid)
+			}
 		}
 
 		return exitStatusFromError(ctx, hc.Stderr, err)

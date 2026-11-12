@@ -1612,6 +1612,13 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 
 	var stepMessages []fantasy.Message
 	var shouldSummarize bool
+	// spentTokens accumulates this run's per-step input+output usage —
+	// the cumulative-spend meter CRUSH_EVAL_MAX_TOKENS reads. The
+	// session's PromptTokens/CompletionTokens fields can't serve here:
+	// they hold the last request's context size, reset on summarize,
+	// and are bounded by the context window, so a multi-step burn at
+	// stable context would never trip a cap read off them.
+	var spentTokens atomic.Int64
 	// Written from OnToolCall and read from OnToolResult, which fantasy
 	// invokes concurrently for parallel tool calls.
 	sanitizedToolCalls := csync.NewMap[string, bool]()
@@ -1974,6 +1981,7 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 				return getSessionErr
 			}
 			usage, estimated := fallbackStepUsage(stepMessages, stepResult)
+			spentTokens.Add(usage.InputTokens + usage.OutputTokens)
 			logStepUsage(call.SessionID, usage, estimated)
 			if a.reqStats != nil {
 				rs, _ := a.reqStats.Get(call.SessionID)
@@ -2057,7 +2065,7 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 				}
 				return false
 			},
-		}, evalStepCaps()...),
+		}, evalStepCaps(spentTokens.Load)...),
 	})
 
 	// runResult is this turn's own result — the named return is nil'd

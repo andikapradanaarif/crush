@@ -393,6 +393,14 @@ func (c *coordinator) EdgeFiringDelta(sessionID string) map[string]map[string]in
 // per turn; kept in sync with internal/eval.EvalMaxStepsEnvVar.
 const EvalMaxStepsEnvVar = "CRUSH_EVAL_MAX_STEPS"
 
+// EvalMaxTokensEnvVar caps a single run's cumulative token spend —
+// per-step input+output usage summed in OnStepFinish — when the eval
+// harness is driving. It is deliberately NOT read off the session's
+// token counters, which hold last-request context size (reset on
+// summarize, bounded by the context window) and can't express spend.
+// The harbor adapter pins it per trial via its max_tokens option.
+const EvalMaxTokensEnvVar = "CRUSH_EVAL_MAX_TOKENS"
+
 // EvalFlagsEnvVar carries the eval flag manifest into the child
 // process — pinned only when the manifest declares flags, so it does
 // not mark every harness-driven run. Kept in sync with
@@ -433,12 +441,20 @@ func restartVector(sessionID string) RequestVector {
 	return v
 }
 
-// evalStepCaps returns the eval step cap as a StopCondition, or nil
-// when the harness isn't driving this process.
-func evalStepCaps() []fantasy.StopCondition {
-	n, err := strconv.Atoi(os.Getenv(EvalMaxStepsEnvVar))
-	if err != nil || n <= 0 {
-		return nil
+// evalStepCaps returns the eval step/token caps as StopConditions,
+// or nil when the harness isn't driving this process. totalTokens
+// reads the run's accumulated per-step spend — the caller feeds a
+// counter OnStepFinish folds usage into, so a multi-step burn at
+// stable context still trips the cap.
+func evalStepCaps(totalTokens func() int64) []fantasy.StopCondition {
+	var caps []fantasy.StopCondition
+	if n, err := strconv.Atoi(os.Getenv(EvalMaxStepsEnvVar)); err == nil && n > 0 {
+		caps = append(caps, fantasy.StepCountIs(n))
 	}
-	return []fantasy.StopCondition{fantasy.StepCountIs(n)}
+	if n, err := strconv.ParseInt(os.Getenv(EvalMaxTokensEnvVar), 10, 64); err == nil && n > 0 && totalTokens != nil {
+		caps = append(caps, func(_ []fantasy.StepResult) bool {
+			return totalTokens() >= n
+		})
+	}
+	return caps
 }

@@ -77,6 +77,12 @@ class CrushOptions(InstalledAgentOptions):
         default=None,
         description="Manifest flag names the child reports resolved.",
     )
+    max_tokens: int | None = Field(
+        default=None,
+        description="Per-trial cumulative token budget — forwarded as "
+        "CRUSH_EVAL_MAX_TOKENS so a runaway trial stops at the cap "
+        "instead of burning until the agent timeout.",
+    )
     harness_revision: str | None = Field(
         default=None,
         description="Git sha the binary's --version must report.",
@@ -184,6 +190,8 @@ class Crush(BaseInstalledAgent):
             env["SSL_CERT_FILE"] = f"{_INSTALL_DIR}/ca.pem"
         if self._opts.eval_flags:
             env["CRUSH_EVAL_FLAGS"] = self._opts.eval_flags
+        if self._opts.max_tokens:
+            env["CRUSH_EVAL_MAX_TOKENS"] = str(self._opts.max_tokens)
         config_stage = (
             f"cp {_INSTALL_DIR}/crush.json \"$PWD/.crush.json\"; "
             if self._config is not None

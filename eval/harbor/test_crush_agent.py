@@ -68,6 +68,34 @@ class TestPopulateContext(unittest.TestCase):
         with self.assertRaises(ValueError):
             agent._forward_env()
 
+    def test_max_tokens_sets_eval_env(self):
+        # The per-trial token budget rides CRUSH_EVAL_MAX_TOKENS into
+        # the run env — set by the adapter itself, not forwarded.
+        import asyncio
+
+        captured = {}
+
+        class FakeEnv:
+            async def exec(self, cmd, env=None):
+                return None
+
+        agent = crush_agent.Crush.__new__(crush_agent.Crush)
+        agent.options = crush_agent.CrushOptions(
+            binary_path="/x", max_tokens=2_000_000
+        )
+        agent._extra_env = {}
+        agent._config = None
+        agent._prompt_template_path = None
+        agent.model_name = "m"
+
+        async def fake_exec(environment, command, env=None):
+            captured.update(env or {})
+
+        agent.exec_as_agent = fake_exec
+        asyncio.run(agent.run("do thing", FakeEnv(), crush_agent.AgentContext()))
+        self.assertEqual(captured.get("CRUSH_EVAL_MAX_TOKENS"), "2000000")
+        self.assertIn("CRUSH_EVAL_TELEMETRY", captured)
+
     def test_install_uploads_ca_bundle(self):
         # Distroless task images ship no CA roots; install() uploads
         # the host certifi bundle so agent TLS egress works anyway.
