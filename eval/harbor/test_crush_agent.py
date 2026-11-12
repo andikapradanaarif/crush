@@ -68,6 +68,31 @@ class TestPopulateContext(unittest.TestCase):
         with self.assertRaises(ValueError):
             agent._forward_env()
 
+    def test_install_uploads_ca_bundle(self):
+        # Distroless task images ship no CA roots; install() uploads
+        # the host certifi bundle so agent TLS egress works anyway.
+        import asyncio
+
+        class FakeEnv:
+            def __init__(self):
+                self.uploads = []
+
+            async def exec(self, cmd):
+                return type("R", (), {"stdout": "x", "output": "x"})()
+
+            async def upload_file(self, src, dst):
+                self.uploads.append(str(dst))
+
+        binary = Path(tempfile.mkdtemp()) / "crush"
+        binary.write_text("#!/bin/sh\n")
+        agent = crush_agent.Crush.__new__(crush_agent.Crush)
+        agent.options = crush_agent.CrushOptions(binary_path=str(binary))
+        agent._config = None
+        env = FakeEnv()
+        asyncio.run(agent.install(env))
+        self.assertIn("/installed-agent/ca.pem", env.uploads)
+        self.assertTrue(agent._ca_pem)
+
 
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))

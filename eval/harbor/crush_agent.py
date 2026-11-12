@@ -89,6 +89,8 @@ class Crush(BaseInstalledAgent):
     capabilities = AgentCapabilities(native_config=True)
     options_model = CrushOptions
 
+    _ca_pem: bool = False
+
     @staticmethod
     @override
     def name() -> str:
@@ -135,6 +137,18 @@ class Crush(BaseInstalledAgent):
             f"mkdir -p {_INSTALL_DIR} {shlex.quote(self._opts.data_dir)}"
         )
         await environment.upload_file(binary, f"{_INSTALL_DIR}/crush")
+        # Task images are not guaranteed to carry CA roots (distroless-class
+        # builds ship none) — upload the host's certifi bundle so the agent's
+        # TLS egress works regardless of image contents.
+        try:
+            import certifi
+        except ImportError:
+            certifi = None
+        if certifi is not None:
+            ca = Path(certifi.where())
+            if ca.is_file():
+                await environment.upload_file(ca, f"{_INSTALL_DIR}/ca.pem")
+                self._ca_pem = True
         if self._config is not None:
             if isinstance(self._config, Path):
                 await environment.upload_file(
@@ -166,6 +180,8 @@ class Crush(BaseInstalledAgent):
     ) -> None:
         env = self._forward_env()
         env["CRUSH_EVAL_TELEMETRY"] = f"{self._opts.data_dir}/telemetry.json"
+        if self._ca_pem:
+            env["SSL_CERT_FILE"] = f"{_INSTALL_DIR}/ca.pem"
         if self._opts.eval_flags:
             env["CRUSH_EVAL_FLAGS"] = self._opts.eval_flags
         config_stage = (
