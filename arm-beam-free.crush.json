@@ -14,5 +14,19 @@
 				}
 			]
 		}
+	},
+	"models": {
+		"large": {
+			"provider": "opencode-go",
+			"model": "beam-free",
+			"temperature": 0,
+			"top_p": 1
+		},
+		"small": {
+			"provider": "opencode-go",
+			"model": "beam-free",
+			"temperature": 0,
+			"top_p": 1
+		}
 	}
 }
