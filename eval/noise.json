@@ -10,7 +10,7 @@
   },
   "harbor": {
     "model": "opencode-go/beam-free",
-    "measured_at": "2026-11-11T21:04:44.084364Z",
+    "measured_at": "2026-11-12T10:14:22.247405Z",
     "passes": {
       "dataset": "terminal-bench@2.1",
       "tasks": 30,
@@ -18,39 +18,45 @@
       "trials_per_pass": 30,
       "conclusive_per_pass": [
         19,
-        17
+        17,
+        25,
+        24
       ],
-      "passes": 2,
-      "pass_rate": 0.41640866873065013,
+      "passes": 4,
+      "pass_rate": 0.4740376676986584,
       "pass_rates": [
         0.42105263157894735,
-        0.4117647058823529
+        0.4117647058823529,
+        0.48,
+        0.5833333333333334
       ],
       "solved_per_pass": [
         8,
-        7
+        7,
+        12,
+        14
       ],
-      "delta": 0.03333333333333333,
-      "delta_trials": 1,
-      "c_min": 0.33885903396922257,
-      "tokens_cv": 0.7859688160951991,
-      "tokens_per_trial": 603237.1666666666,
-      "wall_s_per_trial": 268.0070951666667,
-      "wall_trials": 36,
+      "delta": 0.23333333333333334,
+      "delta_trials": 7,
+      "c_min": 0.866596211896833,
+      "tokens_cv": 1.4127204726573257,
+      "tokens_per_trial": 760142.1058823529,
+      "wall_s_per_trial": 335.60800789411763,
+      "wall_trials": 85,
       "cost_trials": 0
     },
     "ood": {
       "dataset": "terminal-bench@2.1",
       "tasks": 30,
       "tasks_source": "declared",
-      "pairs": 17,
-      "sigma_d": 0.5,
-      "pass_rate": 0.4117647058823529,
-      "tokens_cv": 0.7859688160951991,
-      "tokens_sigma_d": 379182.3245948018,
-      "tokens_log_ratio_sd": 0.6497825599682165,
-      "tokens_per_trial": 603237.1666666666,
-      "wall_s_per_trial": 268.0070951666667
+      "pairs": 22,
+      "sigma_d": 0.5602256811793028,
+      "pass_rate": 0.5681818181818182,
+      "tokens_cv": 1.447717908933288,
+      "tokens_sigma_d": 2343924.719252681,
+      "tokens_log_ratio_sd": 1.0524851353064975,
+      "tokens_per_trial": 875419.2040816327,
+      "wall_s_per_trial": 385.2739845918368
     }
   }
 }
