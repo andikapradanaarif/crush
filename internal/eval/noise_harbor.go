@@ -81,6 +81,13 @@ func totalTokens(r *RunRecord) float64 {
 // to read (base characterization runs a single arm; typically the
 // declared control).
 func ComputePassNoise(records []RunRecord, exp *Experiment, evalDir, arm, dataset string, invs []string) (*HarborPassNoise, error) {
+	// A best-of-k arm's trials aren't replicates — TrialsPerPass
+	// denominates by HarborSpec.K and "solved" is per-trial, while
+	// the arm's real read is per selected record (#405). Refuse
+	// rather than emit noise numbers for the wrong unit.
+	if exp != nil && exp.Arms[arm].BestOfK != nil {
+		return nil, fmt.Errorf("pass noise: arm %q declares best_of_k — trials are selection candidates, not replicates; use the task-level best_of_k read", arm)
+	}
 	if len(invs) < 2 {
 		return nil, fmt.Errorf("pass characterization needs ≥2 passes, got %d", len(invs))
 	}

@@ -297,6 +297,17 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 	defer unlock()
 
 	replicates := r.permReplicates()
+	for name, arm := range exp.Arms {
+		// A best-of-k arm's reported record is a task-level selection
+		// over k trials — the run-level (traj, run_index) pairing
+		// would silently misread it as replicates. Refuse rather
+		// than emit wrong pass deltas; the task-level read
+		// (BestOfKSummary vs control at matched tokens) is the
+		// comparison the gate wires (#405).
+		if arm.BestOfK != nil {
+			return nil, fmt.Errorf("compare: arm %q declares best_of_k — the paired run-level estimator can't read selected trials; use the task-level best_of_k read (SelectBestOfK/SummarizeBestOfK)", name)
+		}
+	}
 	records, err := r.LoadExperimentRecords(exp.Name)
 	if err != nil {
 		return nil, err

@@ -635,6 +635,39 @@ func (w *CostWeights) check(name string) error {
 type Arm struct {
 	Config   ArmConfig `json:"config"`
 	Coverage Coverage  `json:"coverage,omitempty"`
+	// BestOfK declares a matched-budget best-of-k arm (#405): the arm
+	// executes K trials per task and reports the record one selection
+	// rule picks — test-time scaling measured as a harness arm, so an
+	// evolved harness that merely samples more can't pass as smarter.
+	BestOfK *BestOfKSpec `json:"best_of_k,omitempty"`
+}
+
+// SelectionLastAttempt picks the final trial — the no-verifier
+// policy of Rethinking §4.2 (any verifier-read selection is pass@k,
+// not best-of-k).
+const SelectionLastAttempt = "last_attempt"
+
+// BestOfKSpec declares an arm's best-of-k execution: K trials per
+// task (scheduled externally — harbor runs each as its own trial
+// dir, keyed by run_index) plus the verifier-free rule selecting the
+// record the arm reports.
+type BestOfKSpec struct {
+	// K is trials per task for this arm — independent of
+	// HarborSpec.K, which counts the control's replicates.
+	K int `json:"k"`
+	// Selection is the verifier-free pick rule. Only
+	// "last_attempt" exists today; self_judge lands with its own
+	// provenance when a judge prompt is pinned.
+	Selection string `json:"selection,omitempty"`
+}
+
+// BestOfKMark stamps a record as one trial of a best-of-k arm —
+// selection is a pure function over the stamped set (max run_index
+// under last_attempt), so the mark needs no per-record selected bit
+// and re-analysis never rewrites append-only records.
+type BestOfKMark struct {
+	K         int    `json:"k"`
+	Selection string `json:"selection"`
 }
 
 // ArmConfig is the configuration an arm installs into the run workdir:
@@ -763,6 +796,12 @@ type RunRecord struct {
 	// timed out / never attempted (#115). The lifecycle evidence
 	// that a restart boundary settled cleanly. Informational only.
 	Drains []DrainReport `json:"drains,omitempty"`
+	// BestOfK marks the record as one trial of a best-of-k arm
+	// (#405). Selection is derived from the stamped set — no
+	// per-record flag — but the mark is what distinguishes this
+	// arm's trials from ordinary replicates for token accounting
+	// (all k count) and pass@1 (only the selected counts).
+	BestOfK *BestOfKMark `json:"best_of_k,omitempty"`
 	// Tail is the per-turn tail audit — which context envelopes the
 	// model actually saw each turn (section names, sizes, digest,
 	// verbatim text). The tail is ephemeral by design; absent from

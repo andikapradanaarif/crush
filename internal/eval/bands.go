@@ -566,6 +566,12 @@ func (b *Bands) assignBand(e *BandEntry, records []RunRecord, contentHash, curMo
 		if !matchesPin(r) {
 			continue
 		}
+		// Best-of-k trials are selection candidates, not arm
+		// replicates — admitting them would let k draws count as
+		// k passes/fails in band statistics (#405).
+		if r.BestOfK != nil {
+			continue
+		}
 		revision = append(revision, r)
 	}
 	sort.Slice(revision, func(i, j int) bool { return revision[i].StartedAt.After(revision[j].StartedAt) })

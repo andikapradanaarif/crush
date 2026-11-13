@@ -672,7 +672,22 @@ configs the bounded lookup finds share the same exposure, as they
 already did for options.) Units differ per schema:
 `hooks.*.timeout` is seconds, `tools.*.timeout` is a JSON duration
 in nanoseconds. Providers, MCPs, and LSPs still can't vary between
-arms. The flag under test is
+arms.
+
+An arm may declare `best_of_k` (#405 — matched-budget test-time
+scaling): the arm's K trials per task execute externally through
+the harbor adapter, ingest stamps each record `best_of_k{k,
+selection}`, and the reported record is a pure selection over the
+set — `last_attempt` (max run_index), the paper's no-verifier
+policy; verifier-read selection is pass@k, not best-of-k, and is
+never the arm's read. pass@1 counts only the selected trial while
+the arm's token budget counts all k — that asymmetry is the point:
+an evolved harness must beat sampling at matched spend, not just
+out-sample it. The paired run-level estimator refuses best-of-k
+experiments (selected trials aren't run-index replicates); the
+read is `SummarizeBestOfK` vs control at matched tokens.
+
+The flag under test is
 ordinary config, so A/B needs no code plumbing — but both arms
 MUST run the same build under test (the
 control-as-coincidence-detector logic depends on it), and the

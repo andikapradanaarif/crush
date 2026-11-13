@@ -556,6 +556,13 @@ func (r *Runner) ingestTrial(ctx context.Context, exp *Experiment, arm, invocati
 			keyExtra["$temperature"] = tempKey
 			rec.BaselineKey = manifest.keyWith(tel.ResolvedOptions, keyExtra)
 		}
+		if spec := exp.Arms[arm].BestOfK; spec != nil {
+			sel := spec.Selection
+			if sel == "" {
+				sel = SelectionLastAttempt
+			}
+			rec.BestOfK = &BestOfKMark{K: spec.K, Selection: sel}
+		}
 		if tel.Tail != nil {
 			rec.Tail = []TurnTail{*tel.Tail}
 		}
