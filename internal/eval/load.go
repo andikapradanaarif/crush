@@ -292,7 +292,7 @@ func ValidateExperiment(e *Experiment) error {
 	if e.Model == "" {
 		return fmt.Errorf("experiment model pin is required (provider/model)")
 	}
-	if len(e.Arms) != 2 {
+	if len(e.Arms) < 2 {
 		return fmt.Errorf("analysis is defined for two arms, got %d", len(e.Arms))
 	}
 	if _, ok := e.Arms[ArmControl]; !ok {
@@ -302,8 +302,23 @@ func ValidateExperiment(e *Experiment) error {
 		return fmt.Errorf("arms must include \"treatment\", got %v", sortedKeys(e.Arms))
 	}
 	for name, arm := range e.Arms {
+		// Arms beyond the gate pair carry no analysis role —
+		// best_of_k is the only non-gate role defined: the arm's
+		// records arrive via harbor ingest and are consumed by the
+		// task-level read, never by Evaluate's pairing (#405).
+		if name != ArmControl && name != ArmTreatment && arm.BestOfK == nil {
+			return fmt.Errorf("arm %q has no consumer — extra arms exist only as best_of_k baselines", name)
+		}
 		if arm.BestOfK == nil {
 			continue
+		}
+		// A best_of_k arm's k trials are one answer per task, not
+		// replicates — the gate's control/treatment pairing would
+		// read them as independent draws. The arm lives on a
+		// non-gate name and is consumed by the task-level read
+		// (CompareBestOfK) only (#405).
+		if name == ArmControl || name == ArmTreatment {
+			return fmt.Errorf("arm %q may not declare best_of_k — the gate reads control/treatment records as replicates; put best_of_k on a third arm and read it via CompareBestOfK", name)
 		}
 		// Best-of-k measures external k-trial executions — the
 		// harbor adapter is the only path that produces them.

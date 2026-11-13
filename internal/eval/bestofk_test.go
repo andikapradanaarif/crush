@@ -6,6 +6,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const armBestOfK = "best_of_k"
+
 func bokExp(mut func(*Arm)) *Experiment {
 	temp := 0.2
 	t := Arm{BestOfK: &BestOfKSpec{K: 3}}
@@ -19,7 +21,8 @@ func bokExp(mut func(*Arm)) *Experiment {
 		Corpus:      []string{"harbor"},
 		Arms: map[string]Arm{
 			ArmControl:   {},
-			ArmTreatment: t,
+			ArmTreatment: {},
+			armBestOfK:   t,
 		},
 		Harbor: &HarborSpec{Dataset: "d", TaskIDs: []string{"t1"}, K: 1, HarnessRevision: "x"},
 	}
@@ -38,12 +41,18 @@ func TestValidateExperiment_BestOfK(t *testing.T) {
 	exp := bokExp(nil)
 	exp.Harbor = nil
 	require.ErrorContains(t, ValidateExperiment(exp), "harbor")
+
+	// A gate arm can't carry the spec — Evaluate reads its
+	// records as replicates, which selected trials are not.
+	exp = bokExp(nil)
+	exp.Arms[ArmControl] = Arm{BestOfK: &BestOfKSpec{K: 3}}
+	require.ErrorContains(t, ValidateExperiment(exp), "may not declare best_of_k")
 }
 
 func bokRec(traj string, idx int, out Outcome, tokens int64) RunRecord {
 	return RunRecord{
 		TrajectoryID: traj,
-		Arm:          ArmTreatment,
+		Arm:          armBestOfK,
 		Invocation:   "inv1",
 		RunIndex:     idx,
 		Outcome:      out,
@@ -85,7 +94,7 @@ func TestSelectBestOfK(t *testing.T) {
 	stale.Invocation = "inv0"
 	sel = SelectBestOfK(append(recs, stale))
 	for _, rec := range sel {
-		if rec.TrajectoryID == "a" && rec.Arm == ArmTreatment && rec.Invocation == "inv1" {
+		if rec.TrajectoryID == "a" && rec.Arm == armBestOfK && rec.Invocation == "inv1" {
 			require.Equal(t, 2, rec.RunIndex)
 		}
 	}
@@ -102,7 +111,7 @@ func TestSummarizeBestOfK(t *testing.T) {
 		bokRec("b", 2, OutcomePass, 20),
 		bokRec("c", 0, OutcomePass, 5), // 1 of 3 trials — partial arm.
 	}
-	sum := SummarizeBestOfK(&Experiment{}, ArmTreatment, "inv1", recs)
+	sum := SummarizeBestOfK(&Experiment{}, armBestOfK, "inv1", recs)
 	// Selected: a=fail(idx2), b=pass(idx2), c=pass(idx0) → 2/3.
 	// Spend: all seven trials' tokens.
 	require.Equal(t, 3, sum.Tasks)
@@ -114,6 +123,98 @@ func TestSummarizeBestOfK(t *testing.T) {
 	// Scope: another arm or invocation contributes nothing.
 	other := bokRec("a", 0, OutcomePass, 999)
 	other.Arm, other.Invocation = ArmControl, "inv2"
-	sum = SummarizeBestOfK(&Experiment{}, ArmTreatment, "inv1", append(recs, other))
+	sum = SummarizeBestOfK(&Experiment{}, armBestOfK, "inv1", append(recs, other))
 	require.Equal(t, 95.0, sum.Spend)
+}
+
+// CompareBestOfK is the matched-budget read: the ordinary arm's
+// pass@1 against the selected pass@1 on shared tasks, both sides'
+// spend counted under one convention.
+func TestCompareBestOfK(t *testing.T) {
+	t.Parallel()
+	exp := bokExp(nil)
+	// Evolved (treatment): a passes 1/2 replicates, b passes, c fails.
+	evolved := []RunRecord{
+		{TrajectoryID: "a", Arm: ArmTreatment, Invocation: "inv1", RunIndex: 0, Outcome: OutcomePass, Tokens: TokenUsage{Input: 10}},
+		{TrajectoryID: "a", Arm: ArmTreatment, Invocation: "inv1", RunIndex: 1, Outcome: OutcomeFail, Tokens: TokenUsage{Input: 10}},
+		{TrajectoryID: "b", Arm: ArmTreatment, Invocation: "inv1", RunIndex: 0, Outcome: OutcomePass, Tokens: TokenUsage{Input: 20}},
+		{TrajectoryID: "c", Arm: ArmTreatment, Invocation: "inv1", RunIndex: 0, Outcome: OutcomeFail, Tokens: TokenUsage{Input: 5}},
+	}
+	// best_of_k k=2 cells: a selected fail, b selected pass, c selected pass.
+	trials := []RunRecord{
+		bokRec("a", 0, OutcomePass, 10), bokRec("a", 1, OutcomeFail, 10),
+		bokRec("b", 0, OutcomePass, 20), bokRec("b", 1, OutcomePass, 20),
+		bokRec("c", 0, OutcomePass, 5), bokRec("c", 1, OutcomePass, 5),
+	}
+	for i := range trials {
+		trials[i].BestOfK.K = 2
+	}
+	// A task only the bok arm ran — off the shared set, ignored.
+	lonely := bokRec("d", 0, OutcomePass, 99)
+	lonely.BestOfK.K = 1
+	recs := append(append(evolved, trials...), lonely)
+
+	cmp, err := CompareBestOfK(exp, ArmTreatment, armBestOfK, "inv1", recs)
+	require.NoError(t, err)
+	require.Equal(t, 3, cmp.SharedTasks)
+	// Evolved: a=1/2, b=1, c=0 → (0.5+1+0)/3 = 0.5.
+	require.InDelta(t, 0.5, cmp.EvolvedPass, 1e-9)
+	// Selected: a=fail, b=pass, c=pass → 2/3.
+	require.InDelta(t, 2.0/3.0, cmp.BestOfKPass, 1e-9)
+	require.Equal(t, 45.0, cmp.EvolvedSpend)
+	require.Equal(t, 70.0, cmp.BestOfKSpend) // d's lone trial is off the shared set.
+	require.InDelta(t, 70.0/45.0, cmp.SpendRatio, 1e-9)
+	// Evolved 0.5 < bok 0.67 — the pass-rate claim fails: extra
+	// sampling beat the harness under test.
+	require.False(t, cmp.GateOK)
+	require.Empty(t, cmp.Incomplete)
+
+	// c's last attempt failing makes bok 2/3 — evolved still loses.
+	recs2 := append(append([]RunRecord{}, evolved...),
+		bokRec("a", 0, OutcomePass, 10), bokRec("a", 1, OutcomePass, 10),
+		bokRec("b", 0, OutcomePass, 20), bokRec("b", 1, OutcomePass, 20),
+		bokRec("c", 0, OutcomePass, 5), bokRec("c", 1, OutcomeFail, 5),
+	)
+	for _, i := range []int{4, 5, 6, 7, 8, 9} {
+		recs2[i].BestOfK.K = 2
+	}
+	cmp, err = CompareBestOfK(exp, ArmTreatment, armBestOfK, "inv1", recs2)
+	require.NoError(t, err)
+	require.InDelta(t, 2.0/3.0, cmp.BestOfKPass, 1e-9) // a pass, b pass, c fail.
+	require.InDelta(t, 0.5, cmp.EvolvedPass, 1e-9)
+	require.False(t, cmp.GateOK) // 0.5 < 0.67 still loses.
+
+	// An incomplete shared cell blocks the claim even when winning.
+	recs3 := append(append([]RunRecord{}, evolved...),
+		bokRec("a", 0, OutcomeFail, 10), bokRec("a", 1, OutcomeFail, 10),
+		bokRec("b", 0, OutcomeFail, 20), bokRec("b", 1, OutcomeFail, 20),
+		bokRec("c", 0, OutcomeFail, 5), // 1/2 — partial cell.
+	)
+	for _, i := range []int{4, 5, 6, 7, 8} {
+		recs3[i].BestOfK.K = 2
+	}
+	cmp, err = CompareBestOfK(exp, ArmTreatment, armBestOfK, "inv1", recs3)
+	require.NoError(t, err)
+	require.Equal(t, []string{"c (1/2)"}, cmp.Incomplete)
+	require.False(t, cmp.GateOK) // Incomplete cells refuse the claim.
+
+	// Same records with the cell complete: bok 0/3, evolved 0.5 —
+	// the harness clears the extra-sampling bar.
+	recs4 := append(append([]RunRecord{}, evolved...),
+		bokRec("a", 0, OutcomeFail, 10), bokRec("a", 1, OutcomeFail, 10),
+		bokRec("b", 0, OutcomeFail, 20), bokRec("b", 1, OutcomeFail, 20),
+		bokRec("c", 0, OutcomeFail, 5), bokRec("c", 1, OutcomeFail, 5),
+	)
+	for _, i := range []int{4, 5, 6, 7, 8, 9} {
+		recs4[i].BestOfK.K = 2
+	}
+	cmp, err = CompareBestOfK(exp, ArmTreatment, armBestOfK, "inv1", recs4)
+	require.NoError(t, err)
+	require.True(t, cmp.GateOK)
+
+	// Wrong arm roles fail fast.
+	_, err = CompareBestOfK(exp, armBestOfK, ArmTreatment, "inv1", recs)
+	require.ErrorContains(t, err, "no best_of_k spec")
+	_, err = CompareBestOfK(exp, ArmControl, "ghost", "inv1", recs)
+	require.ErrorContains(t, err, "not declared")
 }
