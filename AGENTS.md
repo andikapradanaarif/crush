@@ -108,9 +108,10 @@ internal/
                                    suggested flag, project_key partition)
   redact/                          Shared secret redaction (leaf; used by
                                    cmdlog, notebook, mem0 sync)
-  params/                          Memory-subsystem parameter set (leaf):
-                                   resolved defaults + versioned snapshot
-                                   stamped as param_version (#228)
+  params/                          Parameter substrate (leaf): memory and
+                                   run-edge parameter sets — resolved
+                                   defaults + versioned snapshot stamped
+                                   as param_version (#228, #408)
   history/                         Prompt history
 eval/                              Eval corpus, experiments, and flags
 docs/                              Docs: config/, design/ (design docs), hooks/

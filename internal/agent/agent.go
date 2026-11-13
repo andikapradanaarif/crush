@@ -444,6 +444,11 @@ type sessionAgent struct {
 	// literally leave it zero, which must mean defaults, not
 	// all-zero caps.
 	memParams params.Memory
+	// edgeParams is the resolved run-edge set (#408) — the boundary
+	// thresholds and per-edge flags this agent's edges consult;
+	// read through edges(), same zero-means-defaults contract as
+	// memParams.
+	edgeParams params.Edges
 	// resolverStates maps session → the L3 resolver's cache + call
 	// budget counter (#216). Coordinator-owned and shared across
 	// agent rebuilds, like usageLedger; nil allocates its own.
@@ -768,6 +773,10 @@ type SessionAgentOptions struct {
 	// selector and tail renderer consult. Zero value falls back to
 	// the shipped defaults.
 	MemParams params.Memory
+	// EdgeParams is the resolved run-edge parameter set (#408) —
+	// the boundary thresholds and per-edge flags this agent's
+	// edges consult. Zero value falls back to the shipped defaults.
+	EdgeParams params.Edges
 	// Hooks runs lifecycle hooks for turns and compaction. Nil runs none.
 	Hooks *hooks.Runner
 	// titles is shared by a coordinator's agents so one drain covers all.
@@ -827,6 +836,7 @@ func NewSessionAgent(
 		referentMemory:         opts.ReferentMemory,
 		sessionMemory:          opts.SessionMemory,
 		memParams:              opts.MemParams.OrDefault(),
+		edgeParams:             opts.EdgeParams.OrDefault(),
 		memoryTelemetry:        opts.MemoryTelemetry,
 		agentID:                opts.AgentID,
 		ambiguityClarification: opts.AmbiguityClarification,
@@ -2052,14 +2062,14 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 				return false
 			},
 			func(steps []fantasy.StepResult) bool {
-				if hasRepeatedToolCalls(steps, loopDetectionWindowSize, loopDetectionMaxRepeats) {
+				if hasRepeatedToolCalls(steps, a.edges().LoopDetectionWindowSize, a.edges().LoopDetectionMaxRepeats) {
 					loopStopped = true
 					return true
 				}
 				return false
 			},
 			func(steps []fantasy.StepResult) bool {
-				if hasPostWriteVerifyStreak(steps) {
+				if hasPostWriteVerifyStreak(steps, a.edges().VerifyLoopMinSteps) {
 					verifyLoopStopped = true
 					return true
 				}

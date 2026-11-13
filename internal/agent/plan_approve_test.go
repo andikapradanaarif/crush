@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/params"
 	"github.com/charmbracelet/crush/internal/session"
 )
 
@@ -27,7 +28,7 @@ func approveEnv(t *testing.T) (*coordinator, fakeEnv, session.Session) {
 		cfg:       cfg,
 		messages:  env.messages,
 		sessions:  env.sessions,
-		scopeGate: newScopeGate(nil, false, env.sessions, nil, "", true, false),
+		scopeGate: newScopeGate(nil, false, env.sessions, nil, "", true, false, params.DefaultEdges()),
 	}
 	return coord, env, sess
 }

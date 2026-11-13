@@ -118,6 +118,11 @@ type App struct {
 	// never disagree about which parameters were in force.
 	memParams params.Memory
 
+	// edgeParams is the resolved run-edge parameter set (#408) —
+	// resolved beside memParams so the boundary thresholds and
+	// param_version stay in lockstep with the memory snapshot.
+	edgeParams params.Edges
+
 	// hookRunner runs user hooks for every event; it reads the config
 	// store on each event so reloads need no extra wiring.
 	hookRunner *hooks.Runner
@@ -151,6 +156,13 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 	if err != nil {
 		return nil, fmt.Errorf("options.memory_params: %w", err)
 	}
+	// The run-edge set resolves beside it under the same contract —
+	// both fold into the param_version cmdlog stamps, so an edge
+	// change rotates the cohort marker exactly like a memory one.
+	edgeParams, err := params.ResolveEdges(cfg.Options.EdgeParams)
+	if err != nil {
+		return nil, fmt.Errorf("options.edge_params: %w", err)
+	}
 
 	hookRunner := hooks.NewRunner(func() map[string][]config.HookConfig {
 		return store.Config().Hooks
@@ -183,7 +195,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		Permissions: permSvc,
 		Questions:   question.NewService(),
 		FileTracker: filetracker.NewService(q, store.WorkingDir()),
-		CmdLog:      cmdlog.NewService(q, store.WorkingDir(), memParams, cmdlog.WithProjectKey(cfg.Options.ProjectKey)),
+		CmdLog:      cmdlog.NewService(q, store.WorkingDir(), memParams, cmdlog.WithEdgeParams(edgeParams), cmdlog.WithProjectKey(cfg.Options.ProjectKey)),
 		Pinentry:    pinentry.DefaultService(),
 		LSPManager:  lsp.NewManager(store),
 		Skills:      skillsMgr,
@@ -194,7 +206,8 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 
 		config: store,
 
-		memParams: memParams,
+		memParams:  memParams,
+		edgeParams: edgeParams,
 
 		events:             pubsub.NewCoalescingBroker(eventCoalesceKey),
 		serviceEventsWG:    &sync.WaitGroup{},
@@ -1129,6 +1142,7 @@ func (app *App) initCoderAgent(ctx context.Context, interactive bool) error {
 		NotebookModelResolver: app.notebookModelResolver,
 		EdgeStore:             app.queries,
 		MemParams:             app.memParams,
+		EdgeParams:            app.edgeParams,
 		HookRunner:            app.hookRunner,
 	})
 	if err != nil {

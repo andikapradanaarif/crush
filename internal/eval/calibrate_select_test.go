@@ -199,7 +199,8 @@ func TestCalibrateOpenRenderLimit_OverlayRoundTripsThroughParams(t *testing.T) {
 	m, err := params.ResolveMemory(cert.Overlay)
 	require.NoError(t, err)
 	require.Equal(t, *cert.CertifiedValue, m.OpenRenderLimit)
-	require.Equal(t, cert.ParamVersion, m.Version())
+	require.Equal(t, cert.ParamVersion, params.Version(m, params.DefaultEdges()),
+		"the cert predicts the composite stamp a run under it produces")
 	require.Equal(t, 2, m.OpenRenderLimit)
 	require.Equal(t, params.DefaultMemory().ResolvedRenderLimit, m.ResolvedRenderLimit,
 		"the overlay touches only the certified knob")
