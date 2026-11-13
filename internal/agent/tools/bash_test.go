@@ -45,6 +45,8 @@ func (m *mockBashPermissionService) SessionAutoApproves(sessionID string) bool {
 	return false
 }
 
+func (m *mockBashPermissionService) InheritAutoApproval(parentSessionID, childSessionID string) {}
+
 func (m *mockBashPermissionService) ActiveRequest() (permission.PermissionRequest, bool) {
 	return permission.PermissionRequest{}, false
 }
@@ -143,6 +145,7 @@ func (m *recordingPermissionService) ClearSessionAutoApprove(sessionID string)  
 func (m *recordingPermissionService) SessionAutoApproves(sessionID string) bool {
 	return false
 }
+func (m *recordingPermissionService) InheritAutoApproval(parentSessionID, childSessionID string) {}
 
 func (m *recordingPermissionService) ActiveRequest() (permission.PermissionRequest, bool) {
 	return permission.PermissionRequest{}, false

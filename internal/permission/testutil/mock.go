@@ -29,6 +29,10 @@ func (m *MockPermissionService) AutoApproveSession(sessionID string) {}
 
 func (m *MockPermissionService) SetSessionAutoApprove(sessionID string, approve bool) {}
 
+func (m *MockPermissionService) InheritAutoApproval(parentSessionID, childSessionID string) {}
+
+func (m *MockPermissionService) SetSkipRequests(skip bool) {}
+
 func (m *MockPermissionService) ClearSessionAutoApprove(sessionID string) {}
 
 func (m *MockPermissionService) SessionAutoApproves(sessionID string) bool {

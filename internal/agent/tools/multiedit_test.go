@@ -40,6 +40,7 @@ func (m *mockPermissionService) ClearSessionAutoApprove(sessionID string)       
 func (m *mockPermissionService) SessionAutoApproves(sessionID string) bool {
 	return false
 }
+func (m *mockPermissionService) InheritAutoApproval(parentSessionID, childSessionID string) {}
 
 func (m *mockPermissionService) ActiveRequest() (permission.PermissionRequest, bool) {
 	return permission.PermissionRequest{}, false

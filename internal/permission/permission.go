@@ -164,6 +164,10 @@ type Service interface {
 	// given session resolve without prompting: the session's override
 	// when one is set, otherwise the workspace permission mode.
 	SessionAutoApproves(sessionID string) bool
+	// InheritAutoApproval approves the child session automatically when its
+	// parent session already is. A child of any other session keeps
+	// prompting.
+	InheritAutoApproval(parentSessionID, childSessionID string)
 	SetPermissionMode(mode PermissionMode)
 	PermissionMode() PermissionMode
 	SubscribeNotifications(ctx context.Context) <-chan pubsub.Event[PermissionNotification]
@@ -634,6 +638,18 @@ func (s *permissionService) SessionAutoApproves(sessionID string) bool {
 		return override
 	}
 	return s.PermissionMode().SkipsPrompts()
+}
+
+func (s *permissionService) InheritAutoApproval(parentSessionID, childSessionID string) {
+	// Read the parent through the override lookup so a persisted
+	// (not yet hot) approval propagates too; the child's write lock
+	// is taken after — the lookup locks internally, so the two
+	// can't share one critical section.
+	if approve, ok := s.sessionAutoApproveOverride(parentSessionID); ok && approve {
+		s.autoApproveSessionsMu.Lock()
+		s.autoApproveSessions[childSessionID] = true
+		s.autoApproveSessionsMu.Unlock()
+	}
 }
 
 func (s *permissionService) SubscribeNotifications(ctx context.Context) <-chan pubsub.Event[PermissionNotification] {
