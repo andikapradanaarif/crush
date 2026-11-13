@@ -52,7 +52,7 @@ func bokRec(traj string, idx int, out Outcome, tokens int64) RunRecord {
 }
 
 // Selection is a pure function over the stamped set — max run_index
-// per task, inconclusive final trials included.
+// per (trajectory, arm) cell, inconclusive final trials included.
 func TestSelectBestOfK(t *testing.T) {
 	t.Parallel()
 	recs := []RunRecord{
@@ -69,9 +69,17 @@ func TestSelectBestOfK(t *testing.T) {
 	require.Equal(t, "a", sel[0].TrajectoryID)
 	require.Equal(t, 1, sel[1].RunIndex) // Task b: inconclusive wins nothing back.
 	require.Equal(t, OutcomeInconclusive, sel[1].Outcome)
+
+	// Trials on the same task but different arms never compete for
+	// one slot — selection partitions by (trajectory, arm).
+	both := bokRec("a", 0, OutcomePass, 1)
+	both.Arm = ArmControl
+	recs = append(recs, both)
+	sel = SelectBestOfK(recs)
+	require.Len(t, sel, 3)
 }
 
-func TestBestOfKSummary(t *testing.T) {
+func TestSummarizeBestOfK(t *testing.T) {
 	t.Parallel()
 	recs := []RunRecord{
 		bokRec("a", 0, OutcomePass, 10),
@@ -80,9 +88,14 @@ func TestBestOfKSummary(t *testing.T) {
 		bokRec("b", 0, OutcomePass, 20),
 		bokRec("b", 1, OutcomePass, 20),
 		bokRec("b", 2, OutcomePass, 20),
+		bokRec("c", 0, OutcomePass, 5), // 1 of 3 trials — partial arm.
 	}
-	pass, tokens := BestOfKSummary(recs)
-	// Selected: a=fail(idx2), b=pass(idx2) → 1/2. Tokens: all six trials.
-	require.Equal(t, 0.5, pass)
-	require.Equal(t, int64(90), tokens)
+	sum := SummarizeBestOfK(&Experiment{}, recs)
+	// Selected: a=fail(idx2), b=pass(idx2), c=pass(idx0) → 2/3.
+	// Spend: all seven trials' tokens.
+	require.Equal(t, 3, sum.Tasks)
+	require.Equal(t, 2, sum.CompleteTasks)
+	require.Equal(t, []string{"c/treatment (1/3)"}, sum.IncompleteTasks)
+	require.InDelta(t, 2.0/3.0, sum.PassRate, 1e-9)
+	require.Equal(t, 95.0, sum.Spend)
 }

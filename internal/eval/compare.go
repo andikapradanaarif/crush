@@ -305,7 +305,7 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		// (BestOfKSummary vs control at matched tokens) is the
 		// comparison the gate wires (#405).
 		if arm.BestOfK != nil {
-			return nil, fmt.Errorf("compare: arm %q declares best_of_k — the paired run-level estimator can't read selected trials; use the task-level best_of_k read (SelectBestOfK/BestOfKSummary)", name)
+			return nil, fmt.Errorf("compare: arm %q declares best_of_k — the paired run-level estimator can't read selected trials; use the task-level best_of_k read (SelectBestOfK/SummarizeBestOfK)", name)
 		}
 	}
 	records, err := r.LoadExperimentRecords(exp.Name)

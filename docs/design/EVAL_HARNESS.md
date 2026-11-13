@@ -685,7 +685,7 @@ the arm's token budget counts all k — that asymmetry is the point:
 an evolved harness must beat sampling at matched spend, not just
 out-sample it. The paired run-level estimator refuses best-of-k
 experiments (selected trials aren't run-index replicates); the
-read is `BestOfKSummary` vs control at matched tokens.
+read is `SummarizeBestOfK` vs control at matched tokens.
 
 The flag under test is
 ordinary config, so A/B needs no code plumbing — but both arms
