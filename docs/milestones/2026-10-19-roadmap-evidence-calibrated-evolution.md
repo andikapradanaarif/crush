@@ -104,10 +104,13 @@ engine mechanism that carries it (see [Engine fit](#engine-fit-code-audit-10-19)
 4. **Run-edge thresholds and per-edge enables** (verification, todos,
    stall, verify-loop, burn-watch, reconcile — the existing middleware
    layer) via bounded params. *After #408.*
-5. **Hook configurations** (`PreToolUse`, `PreCompact`; top-level
+5. **Hook configurations** (all 13 events — Pre/PostToolUse,
+   PostToolUseFailure, PermissionRequest/Result, Session/Turn
+   Start/End, StopFailure, Interrupt, Pre/PostCompact; top-level
    `hooks`) and **tool limits** (`tools.{ls,grep,glob}`) via arm
-   config blocks. *After #409.* The hook *engine* stays immutable;
-   there is no post-tool/stop hook event.
+   config blocks. *After #409.* The hook *engine* stays immutable.
+   *(Corrected 2026-11-13 per #449: post-tool and stop events exist —
+   the audit originally listed only `PreToolUse` and `PreCompact`.)*
 6. **Tool descriptions and system prompt templates** via a runtime
    override directory (`prompt_overrides`) — compiled-in today. *After
    #406.* Prompt edits are deprioritized and always single-edit
@@ -172,7 +175,7 @@ one build** — `ArmConfig.Options` materialized into `.crush.json`
 | `params.Memory`, channel flags | `options.memory_params` overlay + `optionSpecs` bools | **Native** |
 | Primary endpoint | `DecisionRule.Primary.Metric = "tokens_to_done"`; `Guardrail{Metric: "pass_rate", MinDelta}` = non-inferiority | **Native** |
 | Middleware | Run-boundary edges already exist (`runEdgeSet`: verification, todos, stall, verify-loop, burn-watch, reconcile) — the AHE finish-hook layer. Thresholds are Go constants (`maxRepairAttempts=2`, `burnWatchStepsThreshold=30`, `verifyLoopMinSteps=8`, `loopDetectionMaxRepeats=5`, `scopeGateMinExploration=8`, …) | **Gap → #408**: move thresholds into a bounded, versioned `params` block so edges become an options-delta surface without opening Go code |
-| Hooks | `PreToolUse` (deny/allow/`updated_input`/context), `PreCompact`; config is top-level `hooks`, not `options` | **Gap → #409**: arms can only carry `options` |
+| Hooks | **13 events** (`internal/hooks/events.go`; corrected 2026-11-13 per #449): `PreToolUse` (allow/deny/halt, `updated_input`, context), `PostToolUse` (`updated_output`, context), `PostToolUseFailure` (context) — all fired by the `hookedTool` decorator (`internal/agent/hooked_tool.go`); `PermissionRequest`/`PermissionResult` (observe) fired by `permissionHooks` on prompt shown/resolved (`internal/app/hooks.go`); `SessionStart` (startup/resume) and `SessionEnd` (exit, 2s budget) fired by `app.CreateSession`/`resolveSession`/`fireSessionEnd`; `TurnStart` fired per prompt and `TurnEnd`/`StopFailure`/`Interrupt` fired exactly once per turn — outliving cancellation — via `agent.go`/`turn_hooks.go`; `PreCompact` (can block) / `PostCompact` fired by the compaction path (`agent.go`, `notebook/retrieve.go`). Matchers valid only on the 5 tool-carrying events; tool and turn events fire for the top-level agent only. Config is top-level `hooks`, not `options` | **Gap → #409**: arms can only carry `options` — and the hook surface is all 13 events, not the two originally audited |
 | Tool behavior | Top-level `tools.{ls,grep,glob}` limits/timeouts exist; bash `MaxOutputLength=30000` and `toolResultMaxContentBytes=50_000` are constants | **Gap → #409** (tools block); bash cap optional |
 | Prompts, tool descriptions | `//go:embed` + `template.Must` at package init (`prompts.go`, `tools/*.go`) — compile-time | **Gap → #406**: a runtime override dir set by an option keeps one binary per invocation and keeps upstream-owned embedded files untouched until a change lands |
 | OOD statistics | `compare.go`: BCa over pairs **resampled within trajectory**; `requiredPairs` skips trajectories with < 2 pairs. SWE-Pro OOD runs k = 1 per task → within-stratum variance is degenerate | **Gap → #407**: task-level (cluster) resampling mode, required before any OOD read |
