@@ -264,7 +264,9 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	// are different baselines, invisible unless hashed.
 	tempKey := temperatureKey(exp.Temperature)
 	rec.Env.Temperature = tempKey
-	rec.BaselineKey = manifest.keyWith(arm.Config.Options, map[string]any{"$temperature": tempKey})
+	keyExtra := arm.Config.KeyExtra()
+	keyExtra["$temperature"] = tempKey
+	rec.BaselineKey = manifest.keyWith(arm.Config.Options, keyExtra)
 
 	workdir, err := Materialize(ctx, traj, trajDir, r.workParent(), r.checkEnv())
 	if err != nil {
@@ -549,7 +551,9 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	// it — arm intent can silently no-op; resolved state is truth.
 	if len(res.ResolvedOptions) > 0 {
 		rec.ResolvedOptions = res.ResolvedOptions
-		rec.BaselineKey = manifest.keyWith(res.ResolvedOptions, map[string]any{"$temperature": tempKey})
+		keyExtra := arm.Config.KeyExtra()
+		keyExtra["$temperature"] = tempKey
+		rec.BaselineKey = manifest.keyWith(res.ResolvedOptions, keyExtra)
 	}
 	rec.Env.ModelSmall = res.ModelSmall
 	rec.Env.ModelSummary = res.ModelSummary
@@ -861,13 +865,16 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (rep Report
 		// future write path through aa can't silently corrupt
 		// control's spec mid-experiment.
 		aa.Config.Options = maps.Clone(aa.Config.Options)
+		aa.Config.Hooks = maps.Clone(aa.Config.Hooks)
+		aa.Config.Tools = maps.Clone(aa.Config.Tools)
 		aa.Coverage = maps.Clone(aa.Coverage)
 		exp.Arms[ArmAA] = aa
 		defer delete(exp.Arms, ArmAA)
 	}
 
-	baselineKey := manifest.keyWith(exp.Arms[ArmControl].Config.Options,
-		map[string]any{"$temperature": temperatureKey(exp.Temperature)})
+	ctlExtra := exp.Arms[ArmControl].Config.KeyExtra()
+	ctlExtra["$temperature"] = temperatureKey(exp.Temperature)
+	baselineKey := manifest.keyWith(exp.Arms[ArmControl].Config.Options, ctlExtra)
 	// Invocation scopes this call's records: re-running an experiment
 	// under a new build must not pool stale records into the gate.
 	inv := fmt.Sprintf("%s-%04x", r.now().UTC().Format("20060102T150405Z"), r.rng().Uint64()&0xffff)

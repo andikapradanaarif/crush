@@ -220,6 +220,14 @@ func (r *Runner) IngestHarborTrials(ctx context.Context, exp *Experiment, arm, i
 	if err != nil {
 		return nil, err
 	}
+	// Harbor trials key off the arm's config blocks — the same
+	// validation RunExperiment runs, or a malformed/unvalidated
+	// pre_tool_use spelling would hash a BaselineKey no local run
+	// of the identical arm produces (canonicalization is in place
+	// and idempotent).
+	if err := manifest.ValidateArmFlags(exp); err != nil {
+		return nil, err
+	}
 	existing, err := r.LoadExperimentRecords(exp.Name)
 	if err != nil {
 		return nil, err
@@ -540,7 +548,13 @@ func (r *Runner) ingestTrial(ctx context.Context, exp *Experiment, arm, invocati
 		}
 		if len(tel.ResolvedOptions) > 0 {
 			rec.ResolvedOptions = tel.ResolvedOptions
-			rec.BaselineKey = manifest.keyWith(tel.ResolvedOptions, map[string]any{"$temperature": tempKey})
+			// The arm's hooks/tools blocks key the record the same
+			// way a local run would — the container's config was
+			// rendered from this arm, and pooled baselines must not
+			// mix hook/tool conditions (#388 + #409).
+			keyExtra := exp.Arms[arm].Config.KeyExtra()
+			keyExtra["$temperature"] = tempKey
+			rec.BaselineKey = manifest.keyWith(tel.ResolvedOptions, keyExtra)
 		}
 		if tel.Tail != nil {
 			rec.Tail = []TurnTail{*tel.Tail}

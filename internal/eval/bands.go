@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/hooks"
 	"github.com/charmbracelet/crush/internal/params"
 )
 
@@ -141,6 +144,164 @@ func (m *FlagsManifest) ValidateArmFlags(e *Experiment) error {
 				}
 			}
 		}
+		// The arm's .crush.json blocks get the same validation contract:
+		// a malformed hook or tools key must fail here, at manifest
+		// validation, rather than inside every run's app.New.
+		if err := validateArmHooks(armName, arm.Config.Hooks); err != nil {
+			return err
+		}
+		if err := validateArmTools(armName, arm.Config.Tools); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateArmHooks schema-checks an arm's hooks block the way the
+// config loader reads it — strict decode into config.HookConfig, then
+// config.ValidateHooks runs the production checks (known event,
+// command required, matcher only on tool events, matcher compiles), so
+// a bad hook fails at manifest validation instead of inside every
+// run's app.New. Event names are normalized in place — mergeArmBlock
+// and the baseline hash then see canonical keys, not arm spelling.
+// Commands are eval-scoped: they may only reference paths inside the
+// run workdir, so absolute host paths and ~/../ escapes are rejected
+// — a hook keyed on host files would measure behavior the harness
+// can't reproduce (#391 allow-list).
+func validateArmHooks(armName string, block map[string]any) error {
+	if len(block) == 0 {
+		return nil
+	}
+	// Two spellings of one event ("PreToolUse" + "pre_tool_use") would
+	// normalize onto a single slot — the concatenation order is
+	// map-iteration random, so reject the ambiguity rather than let the
+	// merge (and hash) land on a nondeterministic hook order.
+	seen := map[string]string{}
+	for event := range block {
+		canonical, ok := hooks.NormalizeEvent(event)
+		if !ok {
+			return fmt.Errorf("arm %q hooks: unknown event %q", armName, event)
+		}
+		if prev, dup := seen[canonical]; dup {
+			return fmt.Errorf("arm %q hooks: event %q declared under two spellings (%q and %q) — pick one", armName, canonical, prev, event)
+		}
+		seen[canonical] = event
+	}
+	data, err := json.Marshal(block)
+	if err != nil {
+		return fmt.Errorf("arm %q hooks: %w", armName, err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var hookMap map[string][]config.HookConfig
+	if err := dec.Decode(&hookMap); err != nil {
+		return fmt.Errorf("arm %q hooks: decode: %w", armName, err)
+	}
+	// config.ValidateHooks normalizes event keys on the decoded map in
+	// place; write it back so materialize/merge and the baseline hash
+	// see the canonical names (a fixture's "PreToolUse" and an arm's
+	// "pre_tool_use" are the same slot — without this the arm's list
+	// would concatenate with the fixture's instead of replacing it).
+	cfg := &config.Config{Hooks: hookMap}
+	if err := cfg.ValidateHooks(); err != nil {
+		return fmt.Errorf("arm %q hooks: %w", armName, err)
+	}
+	normed := map[string]any{}
+	for event, list := range cfg.Hooks {
+		raw, err := json.Marshal(list)
+		if err != nil {
+			return fmt.Errorf("arm %q hooks[%q]: %w", armName, event, err)
+		}
+		var v any
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return fmt.Errorf("arm %q hooks[%q]: %w", armName, event, err)
+		}
+		normed[event] = v
+	}
+	for k := range block {
+		delete(block, k)
+	}
+	for k, v := range normed {
+		block[k] = v
+	}
+	for event, list := range cfg.Hooks {
+		for i, hc := range list {
+			if hc.Timeout < 0 {
+				return fmt.Errorf("arm %q hooks[%q][%d]: timeout must be >= 0 seconds, got %d", armName, event, i, hc.Timeout)
+			}
+			if err := checkHookCommandScope(armName, event, i, hc.Command); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// checkHookCommandScope enforces the workdir allow-list on a hook
+// command: every token (and the value side of VAR=/flag= assignments)
+// that looks like a path must resolve inside the workdir — filepath.
+// Clean resolves ./../ and embedded .. segments, so only commands
+// whose paths never escape pass. It is a lint, not a boundary: shell
+// indirection ($VAR, $(...) substitution, concatenated -I../flag
+// forms, interpreter -c payloads) isn't scanned — the #391 runtime
+// allow-list, not this check, is the containment guarantee.
+func checkHookCommandScope(armName, event string, i int, command string) error {
+	reject := func(tok string) error {
+		return fmt.Errorf("arm %q hooks[%q][%d]: command references %q — hook commands may only touch paths inside the run workdir (absolute host paths and ~/../ escapes are forbidden)", armName, event, i, tok)
+	}
+	for _, tok := range strings.Fields(command) {
+		for _, part := range strings.Split(tok, "=") {
+			part = strings.Trim(part, `"'`)
+			if part == "" {
+				continue
+			}
+			if strings.HasPrefix(part, "~") || filepath.IsAbs(part) {
+				return reject(part)
+			}
+			clean := filepath.ToSlash(filepath.Clean(part))
+			for _, seg := range strings.Split(clean, "/") {
+				if seg == ".." {
+					return reject(part)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// validateArmTools schema-checks an arm's tools block strictly against
+// config.Tools — an unknown sub-tool or field fails here instead of
+// silently no-oping inside the run's config load. The config types
+// carry no bounds of their own; negatives are the only values that
+// could turn a typo into a run-time failure, so they're rejected.
+func validateArmTools(armName string, block map[string]any) error {
+	if len(block) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(block)
+	if err != nil {
+		return fmt.Errorf("arm %q tools: %w", armName, err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var tools config.Tools
+	if err := dec.Decode(&tools); err != nil {
+		return fmt.Errorf("arm %q tools: %w", armName, err)
+	}
+	negErr := func(field string) error {
+		return fmt.Errorf("arm %q tools: %s must be >= 0", armName, field)
+	}
+	if tools.Ls.MaxDepth != nil && *tools.Ls.MaxDepth < 0 {
+		return negErr("ls.max_depth")
+	}
+	if tools.Ls.MaxItems != nil && *tools.Ls.MaxItems < 0 {
+		return negErr("ls.max_items")
+	}
+	if tools.Grep.Timeout != nil && *tools.Grep.Timeout < 0 {
+		return negErr("grep.timeout")
+	}
+	if tools.Glob.Timeout != nil && *tools.Glob.Timeout < 0 {
+		return negErr("glob.timeout")
 	}
 	return nil
 }

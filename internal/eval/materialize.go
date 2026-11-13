@@ -14,6 +14,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/charmbracelet/crush/internal/hooks"
 )
 
 // Materialize builds a fresh workdir for a run inside parentDir and
@@ -204,7 +206,7 @@ func ApplyPatch(ctx context.Context, workdir, patchPath string) error {
 // with the arm options winning; crush.json is lower precedence than
 // .crush.json outright, so it never shadows.
 func WriteArmConfig(workdir string, exp *Experiment, arm Arm, manifest *FlagsManifest, seedKey string) error {
-	return writeRunConfig(workdir, exp, arm.Config.Options, manifest, seedKey)
+	return writeRunConfig(workdir, exp, &arm.Config, manifest, seedKey)
 }
 
 // WriteSeedConfig drops the fixed seed-time config into the workdir:
@@ -219,7 +221,7 @@ func WriteSeedConfig(workdir string, exp *Experiment, manifest *FlagsManifest, s
 	return writeRunConfig(workdir, exp, nil, manifest, seedKey)
 }
 
-func writeRunConfig(workdir string, exp *Experiment, armOptions map[string]any, manifest *FlagsManifest, seedKey string) error {
+func writeRunConfig(workdir string, exp *Experiment, armConfig *ArmConfig, manifest *FlagsManifest, seedKey string) error {
 	if fileExists(filepath.Join(workdir, "crushrc")) {
 		return fmt.Errorf("workdir already carries crushrc — a shell config shadows the .crush.json arm; neither the fixture nor a seed session may ship crush shell config")
 	}
@@ -256,18 +258,20 @@ func writeRunConfig(workdir string, exp *Experiment, armOptions map[string]any, 
 		// partition the seeds wrote to.
 		"project_key": seedKey,
 	}
-	for k, v := range armOptions {
-		// Harness invariants an arm must not override — data dir
-		// relocation breaks telemetry/session-DB paths and litters
-		// the tree checks observe; metrics/auto-update re-enable
-		// nondeterministic side effects in measured runs; a
-		// project_key divergence would partition the arms' memory
-		// under different identities before measurement begins.
-		switch k {
-		case "data_directory", "disable_metrics", "disable_provider_auto_update", "project_key":
-			return fmt.Errorf("arm sets %q which the harness manages — remove it from the experiment", k)
+	if armConfig != nil {
+		for k, v := range armConfig.Options {
+			// Harness invariants an arm must not override — data dir
+			// relocation breaks telemetry/session-DB paths and litters
+			// the tree checks observe; metrics/auto-update re-enable
+			// nondeterministic side effects in measured runs; a
+			// project_key divergence would partition the arms' memory
+			// under different identities before measurement begins.
+			switch k {
+			case "data_directory", "disable_metrics", "disable_provider_auto_update", "project_key":
+				return fmt.Errorf("arm sets %q which the harness manages — remove it from the experiment", k)
+			}
+			options[k] = v
 		}
-		options[k] = v
 	}
 	doc := map[string]any{"options": options}
 	// A start-state .crush.json merges under the arm: the fixture's
@@ -305,6 +309,14 @@ func writeRunConfig(workdir string, exp *Experiment, armOptions map[string]any, 
 		}
 		doc = existing
 	}
+	// The arm's hooks/tools blocks merge over whatever the fixture
+	// carried — nested maps field-wise like the loader's layered merge,
+	// except hook event lists, which the arm replaces wholesale (the
+	// list is the unit of config).
+	if armConfig != nil {
+		mergeArmBlock(doc, "hooks", armConfig.Hooks)
+		mergeArmBlock(doc, "tools", armConfig.Tools)
+	}
 	// Experiment-declared providers: the child's pinned HOME hides
 	// the operator's config, so a custom provider (e.g. an
 	// OpenAI-compatible endpoint for a non-builtin model) must ride
@@ -336,6 +348,35 @@ func writeRunConfig(workdir string, exp *Experiment, armOptions map[string]any, 
 				}
 			}
 		}
+		// A fixture crush.json hook on an event the arm declares is the
+		// same foreign-condition trap, worse: the loader CONCATENATES
+		// hook lists across layers, so the fixture's entries would run
+		// alongside the arm's "replacing" list. (Tools merge field-wise
+		// under .crush.json — the arm wins shared fields legitimately.)
+		if armConfig != nil && len(armConfig.Hooks) > 0 {
+			// Both sides compare by canonical name — validation
+			// canonicalizes arm keys, but WriteArmConfig is also
+			// reachable without it.
+			armEvents := map[string]bool{}
+			for event := range armConfig.Hooks {
+				if c, ok := hooks.NormalizeEvent(event); ok {
+					armEvents[c] = true
+				} else {
+					armEvents[event] = true
+				}
+			}
+			if fhooks, ok := existing["hooks"].(map[string]any); ok {
+				for event := range fhooks {
+					canonical := event
+					if c, ok := hooks.NormalizeEvent(event); ok {
+						canonical = c
+					}
+					if armEvents[canonical] {
+						return fmt.Errorf("existing crush.json hooks event %q — the arm declares the same event and the loader concatenates hook lists across config layers; the fixture's hooks would fire alongside the arm's (fixture start-state or a seed-session write); remove it", event)
+					}
+				}
+			}
+		}
 	}
 	data, err := json.MarshalIndent(doc, "", "\t")
 	if err != nil {
@@ -345,6 +386,69 @@ func writeRunConfig(workdir string, exp *Experiment, armOptions map[string]any, 
 		return fmt.Errorf("write .crush.json: %w", err)
 	}
 	return nil
+}
+
+// mergeArmBlock overlays an arm's hooks/tools block onto the config
+// doc the way the loader's layered merge would: fixture keys survive,
+// arm keys win — and nested maps (tools.ls.{max_depth,max_items})
+// merge field-wise, matching production. Hook event lists are the
+// exception: an arm's list for an event replaces the fixture's
+// wholesale (production concatenates across layers, but an arm's hook
+// set is a unit — half-merging entries would invent a hook neither
+// side declared). Fixture hook keys are canonicalized to the same
+// event names the loader resolves so an arm's "PreToolUse" replaces a
+// fixture's "pre_tool_use" instead of coexisting.
+func mergeArmBlock(doc map[string]any, key string, block map[string]any) {
+	if len(block) == 0 {
+		return
+	}
+	dst := map[string]any{}
+	if existing, ok := doc[key].(map[string]any); ok {
+		for k, v := range existing {
+			dst[k] = v
+		}
+	}
+	src := block
+	if key == "hooks" {
+		dst = canonicalHookKeys(dst)
+		src = canonicalHookKeys(block)
+	}
+	deepMergeMap(dst, src)
+	doc[key] = dst
+}
+
+// canonicalHookKeys rewrites a hook map's keys to the canonical event
+// names the hooks package resolves — merge slots must match the names
+// the loader will see, not the file's spelling.
+func canonicalHookKeys(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		if canonical, ok := hooks.NormalizeEvent(k); ok {
+			out[canonical] = v
+		} else {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// deepMergeMap merges src into dst field-wise: nested maps recurse,
+// every other value (including lists — hook entries, scalars) is
+// replaced by src's. A literal null writes null — unlike production's
+// jsons.Merge, which treats null as a no-op. For hooks that is a
+// feature ({"PreToolUse": null} clears a fixture's event); for tools
+// it silently drops a fixture's sub-tool config — pathological, but
+// noted.
+func deepMergeMap(dst, src map[string]any) {
+	for k, v := range src {
+		if sub, ok := v.(map[string]any); ok {
+			if dstSub, ok2 := dst[k].(map[string]any); ok2 {
+				deepMergeMap(dstSub, sub)
+				continue
+			}
+		}
+		dst[k] = v
+	}
 }
 
 // modelPinLine renders the .crushrc model pin — the file's entire
