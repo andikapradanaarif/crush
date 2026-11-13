@@ -44,6 +44,7 @@ func bokRec(traj string, idx int, out Outcome, tokens int64) RunRecord {
 	return RunRecord{
 		TrajectoryID: traj,
 		Arm:          ArmTreatment,
+		Invocation:   "inv1",
 		RunIndex:     idx,
 		Outcome:      out,
 		Tokens:       TokenUsage{Input: tokens},
@@ -77,6 +78,17 @@ func TestSelectBestOfK(t *testing.T) {
 	recs = append(recs, both)
 	sel = SelectBestOfK(recs)
 	require.Len(t, sel, 3)
+
+	// And run_index ordinals reset per invocation — a stale
+	// invocation's late trial never outbids the current one.
+	stale := bokRec("a", 9, OutcomeFail, 1)
+	stale.Invocation = "inv0"
+	sel = SelectBestOfK(append(recs, stale))
+	for _, rec := range sel {
+		if rec.TrajectoryID == "a" && rec.Arm == ArmTreatment && rec.Invocation == "inv1" {
+			require.Equal(t, 2, rec.RunIndex)
+		}
+	}
 }
 
 func TestSummarizeBestOfK(t *testing.T) {
@@ -90,12 +102,18 @@ func TestSummarizeBestOfK(t *testing.T) {
 		bokRec("b", 2, OutcomePass, 20),
 		bokRec("c", 0, OutcomePass, 5), // 1 of 3 trials — partial arm.
 	}
-	sum := SummarizeBestOfK(&Experiment{}, recs)
+	sum := SummarizeBestOfK(&Experiment{}, ArmTreatment, "inv1", recs)
 	// Selected: a=fail(idx2), b=pass(idx2), c=pass(idx0) → 2/3.
 	// Spend: all seven trials' tokens.
 	require.Equal(t, 3, sum.Tasks)
 	require.Equal(t, 2, sum.CompleteTasks)
-	require.Equal(t, []string{"c/treatment (1/3)"}, sum.IncompleteTasks)
+	require.Equal(t, []string{"c (1/3)"}, sum.IncompleteTasks)
 	require.InDelta(t, 2.0/3.0, sum.PassRate, 1e-9)
+	require.Equal(t, 95.0, sum.Spend)
+
+	// Scope: another arm or invocation contributes nothing.
+	other := bokRec("a", 0, OutcomePass, 999)
+	other.Arm, other.Invocation = ArmControl, "inv2"
+	sum = SummarizeBestOfK(&Experiment{}, ArmTreatment, "inv1", append(recs, other))
 	require.Equal(t, 95.0, sum.Spend)
 }
