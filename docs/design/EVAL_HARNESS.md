@@ -653,11 +653,19 @@ lands — while JSON itself is deprecated per AGENTS.md; the corpus
 will outlive the format either way. Arm `config` carries the
 `.crush.json` blocks an arm may vary: `options` (manifest-declared
 flags only), plus `hooks` and `tools` (#409) — schema-checked at
-manifest validation and hashed into the baseline key as `$hooks`/
-`$tools` dimensions so hook/tool conditions never pool. Hook
-commands are eval-scoped: relative workdir paths only, no absolute
-host paths or `~`/`..` escapes (#391). Providers, MCPs, and LSPs
-still can't vary between arms. The flag under test is
+manifest validation (event names, required `command`, matcher only
+on tool events and compiling, tool fields and bounds) and hashed
+into the baseline key as `$hooks`/`$tools` dimensions so hook/tool
+conditions never pool. Merging follows the loader's layered rule —
+nested maps field-wise — with one deliberate divergence: an arm's
+hook list for an event *replaces* the fixture's list (production
+concatenates across layers, but an arm's hook set is a unit), and
+event names merge by canonical spelling. Hook commands are
+eval-scoped: paths must resolve inside the run workdir — absolute
+host paths and `~`/`..` escapes are rejected (#391). Units differ
+per schema: `hooks.*.timeout` is seconds, `tools.*.timeout` is a
+JSON duration in nanoseconds. Providers, MCPs, and LSPs still can't
+vary between arms. The flag under test is
 ordinary config, so A/B needs no code plumbing — but both arms
 MUST run the same build under test (the
 control-as-coincidence-detector logic depends on it), and the

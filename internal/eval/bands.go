@@ -158,43 +158,107 @@ func (m *FlagsManifest) ValidateArmFlags(e *Experiment) error {
 }
 
 // validateArmHooks schema-checks an arm's hooks block the way the
-// config loader reads it — event names are the hooks package's, each
-// entry decodes strictly into hooks.HookConfig, and command is
-// required. Commands are eval-scoped: they may only reference paths
-// inside the run workdir, so absolute host paths and ~/../ escapes are
-// rejected — a hook keyed on host files would measure behavior the
-// harness can't reproduce (#391 allow-list).
+// config loader reads it — strict decode into config.HookConfig, then
+// config.ValidateHooks runs the production checks (known event,
+// command required, matcher only on tool events, matcher compiles), so
+// a bad hook fails at manifest validation instead of inside every
+// run's app.New. Event names are normalized in place — mergeArmBlock
+// and the baseline hash then see canonical keys, not arm spelling.
+// Commands are eval-scoped: they may only reference paths inside the
+// run workdir, so absolute host paths and ~/../ escapes are rejected
+// — a hook keyed on host files would measure behavior the harness
+// can't reproduce (#391 allow-list).
 func validateArmHooks(armName string, block map[string]any) error {
-	for event, raw := range block {
-		if _, ok := hooks.NormalizeEvent(event); !ok {
+	if len(block) == 0 {
+		return nil
+	}
+	// Two spellings of one event ("PreToolUse" + "pre_tool_use") would
+	// normalize onto a single slot — the concatenation order is
+	// map-iteration random, so reject the ambiguity rather than let the
+	// merge (and hash) land on a nondeterministic hook order.
+	seen := map[string]string{}
+	for event := range block {
+		canonical, ok := hooks.NormalizeEvent(event)
+		if !ok {
 			return fmt.Errorf("arm %q hooks: unknown event %q", armName, event)
 		}
-		data, err := json.Marshal(raw)
+		if prev, dup := seen[canonical]; dup {
+			return fmt.Errorf("arm %q hooks: event %q declared under two spellings (%q and %q) — pick one", armName, canonical, prev, event)
+		}
+		seen[canonical] = event
+	}
+	data, err := json.Marshal(block)
+	if err != nil {
+		return fmt.Errorf("arm %q hooks: %w", armName, err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var hookMap map[string][]config.HookConfig
+	if err := dec.Decode(&hookMap); err != nil {
+		return fmt.Errorf("arm %q hooks: decode: %w", armName, err)
+	}
+	// config.ValidateHooks normalizes event keys on the decoded map in
+	// place; write it back so materialize/merge and the baseline hash
+	// see the canonical names (a fixture's "PreToolUse" and an arm's
+	// "pre_tool_use" are the same slot — without this the arm's list
+	// would concatenate with the fixture's instead of replacing it).
+	cfg := &config.Config{Hooks: hookMap}
+	if err := cfg.ValidateHooks(); err != nil {
+		return fmt.Errorf("arm %q hooks: %w", armName, err)
+	}
+	normed := map[string]any{}
+	for event, list := range cfg.Hooks {
+		raw, err := json.Marshal(list)
 		if err != nil {
 			return fmt.Errorf("arm %q hooks[%q]: %w", armName, event, err)
 		}
-		dec := json.NewDecoder(bytes.NewReader(data))
-		dec.DisallowUnknownFields()
-		var cfgs []config.HookConfig
-		if err := dec.Decode(&cfgs); err != nil {
-			return fmt.Errorf("arm %q hooks[%q]: decode: %w", armName, event, err)
+		var v any
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return fmt.Errorf("arm %q hooks[%q]: %w", armName, event, err)
 		}
-		for i, hc := range cfgs {
-			if strings.TrimSpace(hc.Command) == "" {
-				return fmt.Errorf("arm %q hooks[%q][%d]: command is required", armName, event, i)
-			}
+		normed[event] = v
+	}
+	for k := range block {
+		delete(block, k)
+	}
+	for k, v := range normed {
+		block[k] = v
+	}
+	for event, list := range cfg.Hooks {
+		for i, hc := range list {
 			if hc.Timeout < 0 {
 				return fmt.Errorf("arm %q hooks[%q][%d]: timeout must be >= 0 seconds, got %d", armName, event, i, hc.Timeout)
 			}
-			for _, tok := range strings.Fields(hc.Command) {
-				// Shell assignments (VAR=/x) and flags can't anchor a
-				// command — only a bare path token can reference a file.
-				tok = strings.Trim(tok, `"'`)
-				if strings.Contains(tok, "=") && !strings.HasPrefix(tok, "/") {
-					continue
-				}
-				if filepath.IsAbs(tok) || strings.HasPrefix(tok, "~") || strings.HasPrefix(tok, "..") {
-					return fmt.Errorf("arm %q hooks[%q][%d]: command references %q — hook commands may only touch paths inside the run workdir (relative paths; absolute host paths and ~/../ escapes are forbidden)", armName, event, i, tok)
+			if err := checkHookCommandScope(armName, event, i, hc.Command); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// checkHookCommandScope enforces the workdir allow-list on a hook
+// command: every token (and the value side of VAR=/flag= assignments)
+// that looks like a path must resolve inside the workdir — filepath.
+// Clean resolves ./../ and embedded .. segments, so only commands
+// whose paths never escape pass.
+func checkHookCommandScope(armName, event string, i int, command string) error {
+	reject := func(tok string) error {
+		return fmt.Errorf("arm %q hooks[%q][%d]: command references %q — hook commands may only touch paths inside the run workdir (absolute host paths and ~/../ escapes are forbidden)", armName, event, i, tok)
+	}
+	for _, tok := range strings.Fields(command) {
+		for _, part := range strings.Split(tok, "=") {
+			part = strings.Trim(part, `"'`)
+			if part == "" {
+				continue
+			}
+			if strings.HasPrefix(part, "~") || filepath.IsAbs(part) {
+				return reject(part)
+			}
+			clean := filepath.ToSlash(filepath.Clean(part))
+			for _, seg := range strings.Split(clean, "/") {
+				if seg == ".." {
+					return reject(part)
 				}
 			}
 		}

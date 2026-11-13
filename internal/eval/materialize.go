@@ -14,6 +14,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/charmbracelet/crush/internal/hooks"
 )
 
 // Materialize builds a fresh workdir for a run inside parentDir and
@@ -308,11 +310,9 @@ func writeRunConfig(workdir string, exp *Experiment, armConfig *ArmConfig, manif
 		doc = existing
 	}
 	// The arm's hooks/tools blocks merge over whatever the fixture
-	// carried with the same per-key rule options get: fixture keys
-	// survive, arm keys win. A hook event the arm declares replaces the
-	// fixture's whole list for that event — the list is the unit of
-	// config, so half-merging entries would invent a hook neither side
-	// declared.
+	// carried — nested maps field-wise like the loader's layered merge,
+	// except hook event lists, which the arm replaces wholesale (the
+	// list is the unit of config).
 	if armConfig != nil {
 		mergeArmBlock(doc, "hooks", armConfig.Hooks)
 		mergeArmBlock(doc, "tools", armConfig.Tools)
@@ -360,22 +360,62 @@ func writeRunConfig(workdir string, exp *Experiment, armConfig *ArmConfig, manif
 }
 
 // mergeArmBlock overlays an arm's hooks/tools block onto the config
-// doc: fixture keys survive, arm keys win — the per-key rule the
-// loader applies across config layers.
+// doc the way the loader's layered merge would: fixture keys survive,
+// arm keys win — and nested maps (tools.ls.{max_depth,max_items})
+// merge field-wise, matching production. Hook event lists are the
+// exception: an arm's list for an event replaces the fixture's
+// wholesale (production concatenates across layers, but an arm's hook
+// set is a unit — half-merging entries would invent a hook neither
+// side declared). Fixture hook keys are canonicalized to the same
+// event names the loader resolves so an arm's "PreToolUse" replaces a
+// fixture's "pre_tool_use" instead of coexisting.
 func mergeArmBlock(doc map[string]any, key string, block map[string]any) {
 	if len(block) == 0 {
 		return
 	}
-	merged := map[string]any{}
+	dst := map[string]any{}
 	if existing, ok := doc[key].(map[string]any); ok {
 		for k, v := range existing {
-			merged[k] = v
+			dst[k] = v
 		}
 	}
-	for k, v := range block {
-		merged[k] = v
+	src := block
+	if key == "hooks" {
+		dst = canonicalHookKeys(dst)
+		src = canonicalHookKeys(block)
 	}
-	doc[key] = merged
+	deepMergeMap(dst, src)
+	doc[key] = dst
+}
+
+// canonicalHookKeys rewrites a hook map's keys to the canonical event
+// names the hooks package resolves — merge slots must match the names
+// the loader will see, not the file's spelling.
+func canonicalHookKeys(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		if canonical, ok := hooks.NormalizeEvent(k); ok {
+			out[canonical] = v
+		} else {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// deepMergeMap merges src into dst field-wise: nested maps recurse,
+// every other value (including lists — hook entries, scalars) is
+// replaced by src's.
+func deepMergeMap(dst, src map[string]any) {
+	for k, v := range src {
+		if sub, ok := v.(map[string]any); ok {
+			if dstSub, ok2 := dst[k].(map[string]any); ok2 {
+				deepMergeMap(dstSub, sub)
+				continue
+			}
+		}
+		dst[k] = v
+	}
 }
 
 // modelPinLine renders the .crushrc model pin — the file's entire

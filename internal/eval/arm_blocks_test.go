@@ -25,6 +25,20 @@ func TestValidateArmFlags_Hooks(t *testing.T) {
 	require.NoError(t, manifest.ValidateArmFlags(hookExp(map[string]any{
 		"PreToolUse": []any{map[string]any{"command": "bash scripts/lint.sh"}},
 	})))
+	// Paths that resolve inside the workdir after cleaning are allowed
+	// — a/../b never leaves it; only a real escape fails.
+	require.NoError(t, manifest.ValidateArmFlags(hookExp(map[string]any{
+		"PreToolUse": []any{map[string]any{"command": "cat a/../b.txt"}},
+	})))
+
+	// Validation canonicalizes event spelling in place — merge slots
+	// and the baseline hash see "PreToolUse", not the arm's spelling.
+	exp := hookExp(map[string]any{
+		"pre_tool_use": []any{map[string]any{"command": "bash x.sh"}},
+	})
+	require.NoError(t, manifest.ValidateArmFlags(exp))
+	require.Contains(t, exp.Arms[ArmTreatment].Config.Hooks, "PreToolUse")
+	require.NotContains(t, exp.Arms[ArmTreatment].Config.Hooks, "pre_tool_use")
 
 	for name, hooks := range map[string]map[string]any{
 		"unknown event":   {"NotAnEvent": []any{map[string]any{"command": "x"}}},
@@ -32,9 +46,23 @@ func TestValidateArmFlags_Hooks(t *testing.T) {
 		"absolute path":   {"PreToolUse": []any{map[string]any{"command": "/usr/local/bin/lint.sh"}}},
 		"tilde escape":    {"PreToolUse": []any{map[string]any{"command": "~/bin/lint.sh"}}},
 		"dotdot escape":   {"PreToolUse": []any{map[string]any{"command": "bash ../outside/lint.sh"}}},
-		"unknown field":   {"PreToolUse": []any{map[string]any{"command": "x", "bogus": 1}}},
-		"bad timeout":     {"PreToolUse": []any{map[string]any{"command": "x", "timeout": -1}}},
-		"wrong shape":     {"PreToolUse": "bash x.sh"},
+		"nested dotdot":   {"PreToolUse": []any{map[string]any{"command": "cat a/../../etc/passwd"}}},
+		"cleaned dotdot":  {"PreToolUse": []any{map[string]any{"command": "bash ./../outside/x.sh"}}},
+		"env-assign abs":  {"PreToolUse": []any{map[string]any{"command": "FOO=/etc/passwd ./x.sh"}}},
+		"flag-value abs":  {"PreToolUse": []any{map[string]any{"command": "grep --file=/etc/p x"}}},
+		"matcher on lifecycle": {"SessionStart": []any{
+			map[string]any{"command": "x", "matcher": "bash"},
+		}},
+		"matcher bad regex": {"PreToolUse": []any{
+			map[string]any{"command": "x", "matcher": "["},
+		}},
+		"double spelling": {
+			"PreToolUse":   []any{map[string]any{"command": "x"}},
+			"pre_tool_use": []any{map[string]any{"command": "y"}},
+		},
+		"unknown field": {"PreToolUse": []any{map[string]any{"command": "x", "bogus": 1}}},
+		"bad timeout":   {"PreToolUse": []any{map[string]any{"command": "x", "timeout": -1}}},
+		"wrong shape":   {"PreToolUse": "bash x.sh"},
 	} {
 		require.Error(t, manifest.ValidateArmFlags(hookExp(hooks)), name)
 	}
@@ -111,9 +139,15 @@ func TestWriteArmConfig_HooksTools(t *testing.T) {
 	fixture := map[string]any{
 		"hooks": map[string]any{
 			"SessionStart": []any{map[string]any{"command": "bash setup.sh"}},
-			"PreToolUse":   []any{map[string]any{"command": "bash fixture.sh"}},
+			// Same event as the arm's, under a different spelling —
+			// the loader resolves both to PreToolUse, so the arm's
+			// list must replace it, not coexist.
+			"pre_tool_use": []any{map[string]any{"command": "bash fixture.sh"}},
 		},
-		"tools": map[string]any{"glob": map[string]any{"timeout": 1000000000}},
+		"tools": map[string]any{
+			"ls":   map[string]any{"max_items": 50},
+			"glob": map[string]any{"timeout": 1000000000},
+		},
 	}
 	raw, err := json.Marshal(fixture)
 	require.NoError(t, err)
@@ -121,7 +155,12 @@ func TestWriteArmConfig_HooksTools(t *testing.T) {
 
 	arm := Arm{Config: ArmConfig{
 		Hooks: map[string]any{"PreToolUse": []any{map[string]any{"command": "bash arm.sh"}}},
-		Tools: map[string]any{"grep": map[string]any{"timeout": 20000000000}},
+		Tools: map[string]any{
+			"grep": map[string]any{"timeout": 20000000000},
+			// Field-wise merge: the fixture's ls.max_items survives
+			// alongside the arm's ls.max_depth.
+			"ls": map[string]any{"max_depth": 4},
+		},
 	}}
 	exp := &Experiment{Model: "p/m"}
 	require.NoError(t, WriteArmConfig(dir, exp, arm, &FlagsManifest{Defaults: map[string]any{}}, "seed"))
@@ -133,11 +172,16 @@ func TestWriteArmConfig_HooksTools(t *testing.T) {
 
 	hooks := doc["hooks"].(map[string]any)
 	// The fixture's other event survives; the arm's event replaces the
-	// fixture's list for the same event wholesale.
+	// fixture's differently-spelled same-event list wholesale — only
+	// the canonical key remains.
 	require.Len(t, hooks["SessionStart"], 1)
+	require.NotContains(t, hooks, "pre_tool_use")
 	require.Equal(t, "bash arm.sh", hooks["PreToolUse"].([]any)[0].(map[string]any)["command"])
 
 	tools := doc["tools"].(map[string]any)
 	require.Contains(t, tools, "glob") // Fixture's sub-tool survives.
 	require.Equal(t, float64(20000000000), tools["grep"].(map[string]any)["timeout"])
+	ls := tools["ls"].(map[string]any)
+	require.Equal(t, float64(4), ls["max_depth"])  // Arm's.
+	require.Equal(t, float64(50), ls["max_items"]) // Fixture's sibling field.
 }
