@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -125,6 +126,7 @@ func (g *llmGenerator) GenerateCheckpoint(ctx context.Context, sessionID string,
 			EventType: EventCheckpoint,
 			Title:     "Checkpoint",
 			Text:      "## Checkpoint\n\n" + truncate(input, 2000) + "\n",
+			Tags:      []string{TagSrcObserved},
 		}, nil
 	}
 
@@ -147,13 +149,14 @@ func (g *llmGenerator) GenerateCheckpoint(ctx context.Context, sessionID string,
 			EventType: EventCheckpoint,
 			Title:     "Checkpoint",
 			Text:      "## Checkpoint\n\n" + truncate(input, 2000) + "\n",
+			Tags:      []string{TagSrcObserved},
 		}, nil
 	}
 	return GeneratedEntry{
 		EventType: EventCheckpoint,
 		Title:     extractTitle(text),
 		Text:      text,
-		Tags:      extractTags(text),
+		Tags:      stampSrcTag(extractTags(text), TagSrcInferred),
 	}, nil
 }
 
@@ -168,6 +171,7 @@ func (g *llmGenerator) GenerateDigest(ctx context.Context, sessionID string, inp
 			EventType: EventCheckpoint,
 			Title:     "Turn digest",
 			Text:      "## Turn digest\n\n" + truncate(input, 2000) + "\n",
+			Tags:      []string{TagSrcObserved},
 		}, nil
 	}
 
@@ -190,13 +194,14 @@ func (g *llmGenerator) GenerateDigest(ctx context.Context, sessionID string, inp
 			EventType: EventCheckpoint,
 			Title:     "Turn digest",
 			Text:      "## Turn digest\n\n" + truncate(input, 2000) + "\n",
+			Tags:      []string{TagSrcObserved},
 		}, nil
 	}
 	return GeneratedEntry{
 		EventType: EventCheckpoint,
 		Title:     extractTitle(text),
 		Text:      text,
-		Tags:      extractTags(text),
+		Tags:      stampSrcTag(extractTags(text), TagSrcInferred),
 	}, nil
 }
 
@@ -317,8 +322,18 @@ func fallbackEntry(event EntryInput, workDir string) GeneratedEntry {
 		EventType: event.EventType,
 		Title:     event.Title,
 		Text:      fmt.Sprintf("## %s\n\n%s\n", event.Title, truncate(event.Description, 800)),
-		Tags:      defaultTagsForEvent(event, workDir),
+		Tags:      append(defaultTagsForEvent(event, workDir), TagSrcObserved),
 	}
+}
+
+// stampSrcTag sets the provenance tag structurally: any src:* tag the
+// model emitted is stripped first — generated text can never tag
+// itself observed and exempt its claims from the render drop.
+func stampSrcTag(tags []string, src string) []string {
+	out := slices.DeleteFunc(slices.Clone(tags), func(t string) bool {
+		return strings.HasPrefix(t, srcTagPrefix)
+	})
+	return append(out, src)
 }
 
 // alignGeneratedEntries parses the model output and returns entries
@@ -332,11 +347,18 @@ func fallbackEntry(event EntryInput, workDir string) GeneratedEntry {
 // re-deriving correspondence.
 func alignGeneratedEntries(text string, events []EntryInput, workDir string) ([]GeneratedEntry, int) {
 	newEntry := func(body string, idx int) GeneratedEntry {
+		// Tool-bound entries restate an observed call and its result;
+		// unbound inputs (decisions) and overflow sections are
+		// generated synthesis — the inference needing evidence.
+		src := TagSrcInferred
+		if events[idx].ToolCall != nil {
+			src = TagSrcObserved
+		}
 		return GeneratedEntry{
 			EventType: events[idx].EventType,
 			Title:     extractTitle(body),
 			Text:      body,
-			Tags:      extractTags(body),
+			Tags:      stampSrcTag(extractTags(body), src),
 		}
 	}
 	var sections []markedSection
@@ -369,7 +391,7 @@ func alignGeneratedEntries(text string, events []EntryInput, workDir string) ([]
 					EventType: EventGeneral,
 					Title:     extractTitle(s.body),
 					Text:      s.body,
-					Tags:      extractTags(s.body),
+					Tags:      stampSrcTag(extractTags(s.body), TagSrcInferred),
 				})
 			}
 			continue
@@ -391,7 +413,7 @@ func alignGeneratedEntries(text string, events []EntryInput, workDir string) ([]
 				EventType: EventGeneral,
 				Title:     extractTitle(s.body),
 				Text:      s.body,
-				Tags:      extractTags(s.body),
+				Tags:      stampSrcTag(extractTags(s.body), TagSrcInferred),
 			})
 		}
 	}

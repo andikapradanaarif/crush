@@ -139,7 +139,7 @@ func intentEntries(msgs []message.Message) []GeneratedEntry {
 			EventType: EventUserIntent,
 			Title:     "User instruction",
 			Text:      "## User instruction\n" + text,
-			Tags:      []string{"intent", "msg:" + msg.ID},
+			Tags:      []string{"intent", "msg:" + msg.ID, TagSrcObserved},
 		})
 	}
 	return out
@@ -363,12 +363,12 @@ func buildTrivialExplorationEntry(trivial []EntryInput) GeneratedEntry {
 			sb.WriteString("\n")
 		}
 	}
-	sb.WriteString("#phase:exploration")
+	sb.WriteString("#phase:exploration #src:observed")
 	return GeneratedEntry{
 		EventType: EventExploration,
 		Title:     "Trivial exploration",
 		Text:      sb.String(),
-		Tags:      []string{"phase:exploration"},
+		Tags:      []string{"phase:exploration", TagSrcObserved},
 	}
 }
 
@@ -423,7 +423,7 @@ func buildPlanEntry(input EntryInput, workDir string) GeneratedEntry {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "## Plan update: %d item(s) — %d pending, %d in progress, %d completed\n",
 		len(items), pending, inProgress, completed)
-	tags := []string{"plan"}
+	tags := []string{"plan", TagSrcObserved}
 	for _, it := range items {
 		sb.WriteString(session.FormatPlanItemLine(it, keyByID) + "\n")
 		for _, p := range it.EvidencePaths {

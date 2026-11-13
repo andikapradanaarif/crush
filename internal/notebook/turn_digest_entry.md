@@ -28,13 +28,15 @@ Open:
 
 ### Tags
 
-#file:{basename} (one per file cited)
+#file:{basename} (one per file cited or touched)
 
 Rules:
 
 - Every Established claim must carry an evidence handle taken from
   the input (file:{path} or result:{tool_call_id}). A claim without
   evidence is not established — move it to Open or drop it.
+- A digest citing no artifact is dropped from context renders — tag
+  the files the turn touched even when every claim sits in Open.
 - Files touched records work done, not just knowledge: edits and
   creates lead, but reads that informed the turn's outcome belong
   too.

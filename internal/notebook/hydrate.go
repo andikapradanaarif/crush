@@ -247,7 +247,13 @@ func buildSeedEntry(it memoryItem) SeedEntry {
 		"origin-turn:/origin-segment:/origin-result: references below point at that session._\n\n",
 		date, origin)
 	sb.WriteString(recallHandleRe.ReplaceAllString(it.Body, "origin-$1:"))
-	tags := append(slices.Clone(it.Tags), TagHydrated)
+	// Foreign memories are generated synthesis even when the origin
+	// entry was observed — the seed stamps inferred, and its support
+	// is the origin provenance the header line and origin: tag carry.
+	tags := slices.DeleteFunc(slices.Clone(it.Tags), func(t string) bool {
+		return strings.HasPrefix(t, srcTagPrefix)
+	})
+	tags = append(tags, TagHydrated, TagSrcInferred)
 	if it.SessionID != "" {
 		tags = append(tags, "origin:"+it.SessionID)
 	}

@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -180,11 +182,29 @@ func (echoEntryGen) Generate(_ context.Context, _ string, events []notebook.Entr
 	return entries, nil
 }
 
+// echoFilePathRe finds file_path mentions in echoed input — the fold
+// a real consolidation does when it promotes cited files into file:
+// tags. An inferred entry citing no artifact drops at render (#447),
+// so consolidations must carry the handles their input named.
+var echoFilePathRe = regexp.MustCompile(`"file_path":"([^"]+)"`)
+
+func echoFileTags(input string) []string {
+	var tags []string
+	for _, m := range echoFilePathRe.FindAllStringSubmatch(input, -1) {
+		tag := "file:" + m[1]
+		if !slices.Contains(tags, tag) {
+			tags = append(tags, tag)
+		}
+	}
+	return tags
+}
+
 func (echoEntryGen) GenerateCheckpoint(_ context.Context, _ string, input string) (notebook.GeneratedEntry, error) {
 	return notebook.GeneratedEntry{
 		EventType: notebook.EventCheckpoint,
 		Title:     "Checkpoint",
 		Text:      "## Checkpoint\n\n" + input,
+		Tags:      echoFileTags(input),
 	}, nil
 }
 
@@ -193,6 +213,7 @@ func (echoEntryGen) GenerateDigest(_ context.Context, _ string, input string) (n
 		EventType: notebook.EventCheckpoint,
 		Title:     "Turn digest",
 		Text:      "## Turn digest\n\n" + input,
+		Tags:      echoFileTags(input),
 	}, nil
 }
 
