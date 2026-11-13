@@ -204,7 +204,7 @@ func ApplyPatch(ctx context.Context, workdir, patchPath string) error {
 // with the arm options winning; crush.json is lower precedence than
 // .crush.json outright, so it never shadows.
 func WriteArmConfig(workdir string, exp *Experiment, arm Arm, manifest *FlagsManifest, seedKey string) error {
-	return writeRunConfig(workdir, exp, arm.Config.Options, manifest, seedKey)
+	return writeRunConfig(workdir, exp, &arm.Config, manifest, seedKey)
 }
 
 // WriteSeedConfig drops the fixed seed-time config into the workdir:
@@ -219,7 +219,7 @@ func WriteSeedConfig(workdir string, exp *Experiment, manifest *FlagsManifest, s
 	return writeRunConfig(workdir, exp, nil, manifest, seedKey)
 }
 
-func writeRunConfig(workdir string, exp *Experiment, armOptions map[string]any, manifest *FlagsManifest, seedKey string) error {
+func writeRunConfig(workdir string, exp *Experiment, armConfig *ArmConfig, manifest *FlagsManifest, seedKey string) error {
 	if fileExists(filepath.Join(workdir, "crushrc")) {
 		return fmt.Errorf("workdir already carries crushrc — a shell config shadows the .crush.json arm; neither the fixture nor a seed session may ship crush shell config")
 	}
@@ -256,18 +256,20 @@ func writeRunConfig(workdir string, exp *Experiment, armOptions map[string]any, 
 		// partition the seeds wrote to.
 		"project_key": seedKey,
 	}
-	for k, v := range armOptions {
-		// Harness invariants an arm must not override — data dir
-		// relocation breaks telemetry/session-DB paths and litters
-		// the tree checks observe; metrics/auto-update re-enable
-		// nondeterministic side effects in measured runs; a
-		// project_key divergence would partition the arms' memory
-		// under different identities before measurement begins.
-		switch k {
-		case "data_directory", "disable_metrics", "disable_provider_auto_update", "project_key":
-			return fmt.Errorf("arm sets %q which the harness manages — remove it from the experiment", k)
+	if armConfig != nil {
+		for k, v := range armConfig.Options {
+			// Harness invariants an arm must not override — data dir
+			// relocation breaks telemetry/session-DB paths and litters
+			// the tree checks observe; metrics/auto-update re-enable
+			// nondeterministic side effects in measured runs; a
+			// project_key divergence would partition the arms' memory
+			// under different identities before measurement begins.
+			switch k {
+			case "data_directory", "disable_metrics", "disable_provider_auto_update", "project_key":
+				return fmt.Errorf("arm sets %q which the harness manages — remove it from the experiment", k)
+			}
+			options[k] = v
 		}
-		options[k] = v
 	}
 	doc := map[string]any{"options": options}
 	// A start-state .crush.json merges under the arm: the fixture's
@@ -304,6 +306,16 @@ func writeRunConfig(workdir string, exp *Experiment, armOptions map[string]any, 
 			existing["options"] = options
 		}
 		doc = existing
+	}
+	// The arm's hooks/tools blocks merge over whatever the fixture
+	// carried with the same per-key rule options get: fixture keys
+	// survive, arm keys win. A hook event the arm declares replaces the
+	// fixture's whole list for that event — the list is the unit of
+	// config, so half-merging entries would invent a hook neither side
+	// declared.
+	if armConfig != nil {
+		mergeArmBlock(doc, "hooks", armConfig.Hooks)
+		mergeArmBlock(doc, "tools", armConfig.Tools)
 	}
 	// Experiment-declared providers: the child's pinned HOME hides
 	// the operator's config, so a custom provider (e.g. an
@@ -345,6 +357,25 @@ func writeRunConfig(workdir string, exp *Experiment, armOptions map[string]any, 
 		return fmt.Errorf("write .crush.json: %w", err)
 	}
 	return nil
+}
+
+// mergeArmBlock overlays an arm's hooks/tools block onto the config
+// doc: fixture keys survive, arm keys win — the per-key rule the
+// loader applies across config layers.
+func mergeArmBlock(doc map[string]any, key string, block map[string]any) {
+	if len(block) == 0 {
+		return
+	}
+	merged := map[string]any{}
+	if existing, ok := doc[key].(map[string]any); ok {
+		for k, v := range existing {
+			merged[k] = v
+		}
+	}
+	for k, v := range block {
+		merged[k] = v
+	}
+	doc[key] = merged
 }
 
 // modelPinLine renders the .crushrc model pin — the file's entire

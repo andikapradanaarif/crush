@@ -540,7 +540,13 @@ func (r *Runner) ingestTrial(ctx context.Context, exp *Experiment, arm, invocati
 		}
 		if len(tel.ResolvedOptions) > 0 {
 			rec.ResolvedOptions = tel.ResolvedOptions
-			rec.BaselineKey = manifest.keyWith(tel.ResolvedOptions, map[string]any{"$temperature": tempKey})
+			// The arm's hooks/tools blocks key the record the same
+			// way a local run would — the container's config was
+			// rendered from this arm, and pooled baselines must not
+			// mix hook/tool conditions (#388 + #409).
+			keyExtra := exp.Arms[arm].Config.KeyExtra()
+			keyExtra["$temperature"] = tempKey
+			rec.BaselineKey = manifest.keyWith(tel.ResolvedOptions, keyExtra)
 		}
 		if tel.Tail != nil {
 			rec.Tail = []TurnTail{*tel.Tail}

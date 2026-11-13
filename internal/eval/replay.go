@@ -448,8 +448,9 @@ func (r *Runner) executeReplayRun(ctx context.Context, exp *Experiment, traj *Tr
 			PrefixTokens: meta.TokensUsed,
 		},
 	}
-	rec.BaselineKey = manifest.keyWith(arm.Config.Options,
-		map[string]any{"$temperature": rec.Env.Temperature})
+	keyExtra := arm.Config.KeyExtra()
+	keyExtra["$temperature"] = rec.Env.Temperature
+	rec.BaselineKey = manifest.keyWith(arm.Config.Options, keyExtra)
 	// Warm provenance rides the fork — the restored db really does
 	// contain those seed sessions. Spend fields stay zero: the
 	// recording pass paid them once ("seeded once, measured N").
@@ -521,8 +522,9 @@ func (r *Runner) executeReplayRun(ctx context.Context, exp *Experiment, traj *Tr
 	rec.Env.ModelResolved = res.ModelResolved
 	if len(res.ResolvedOptions) > 0 {
 		rec.ResolvedOptions = res.ResolvedOptions
-		rec.BaselineKey = manifest.keyWith(res.ResolvedOptions,
-			map[string]any{"$temperature": rec.Env.Temperature})
+		resExtra := arm.Config.KeyExtra()
+		resExtra["$temperature"] = rec.Env.Temperature
+		rec.BaselineKey = manifest.keyWith(res.ResolvedOptions, resExtra)
 	}
 	rec.Env.ModelSmall = res.ModelSmall
 	rec.Env.ModelSummary = res.ModelSummary

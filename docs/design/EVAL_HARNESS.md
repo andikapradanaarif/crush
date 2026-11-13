@@ -650,9 +650,14 @@ because the `option` builtin's key set is closed
 (`options.go:195`) — flags without a builtin path (`notebook_*`
 today) can't be expressed in crushrc until a generic passthrough
 lands — while JSON itself is deprecated per AGENTS.md; the corpus
-will outlive the format either way. Arm `config` is an
-options-fragment only — providers, MCPs, and LSPs can't vary
-between arms. The flag under test is
+will outlive the format either way. Arm `config` carries the
+`.crush.json` blocks an arm may vary: `options` (manifest-declared
+flags only), plus `hooks` and `tools` (#409) — schema-checked at
+manifest validation and hashed into the baseline key as `$hooks`/
+`$tools` dimensions so hook/tool conditions never pool. Hook
+commands are eval-scoped: relative workdir paths only, no absolute
+host paths or `~`/`..` escapes (#391). Providers, MCPs, and LSPs
+still can't vary between arms. The flag under test is
 ordinary config, so A/B needs no code plumbing — but both arms
 MUST run the same build under test (the
 control-as-coincidence-detector logic depends on it), and the

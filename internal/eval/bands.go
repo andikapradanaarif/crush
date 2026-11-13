@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/hooks"
 	"github.com/charmbracelet/crush/internal/params"
 )
 
@@ -141,6 +144,97 @@ func (m *FlagsManifest) ValidateArmFlags(e *Experiment) error {
 				}
 			}
 		}
+		// The arm's .crush.json blocks get the same validation contract:
+		// a malformed hook or tools key must fail here, at manifest
+		// validation, rather than inside every run's app.New.
+		if err := validateArmHooks(armName, arm.Config.Hooks); err != nil {
+			return err
+		}
+		if err := validateArmTools(armName, arm.Config.Tools); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateArmHooks schema-checks an arm's hooks block the way the
+// config loader reads it — event names are the hooks package's, each
+// entry decodes strictly into hooks.HookConfig, and command is
+// required. Commands are eval-scoped: they may only reference paths
+// inside the run workdir, so absolute host paths and ~/../ escapes are
+// rejected — a hook keyed on host files would measure behavior the
+// harness can't reproduce (#391 allow-list).
+func validateArmHooks(armName string, block map[string]any) error {
+	for event, raw := range block {
+		if _, ok := hooks.NormalizeEvent(event); !ok {
+			return fmt.Errorf("arm %q hooks: unknown event %q", armName, event)
+		}
+		data, err := json.Marshal(raw)
+		if err != nil {
+			return fmt.Errorf("arm %q hooks[%q]: %w", armName, event, err)
+		}
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.DisallowUnknownFields()
+		var cfgs []config.HookConfig
+		if err := dec.Decode(&cfgs); err != nil {
+			return fmt.Errorf("arm %q hooks[%q]: decode: %w", armName, event, err)
+		}
+		for i, hc := range cfgs {
+			if strings.TrimSpace(hc.Command) == "" {
+				return fmt.Errorf("arm %q hooks[%q][%d]: command is required", armName, event, i)
+			}
+			if hc.Timeout < 0 {
+				return fmt.Errorf("arm %q hooks[%q][%d]: timeout must be >= 0 seconds, got %d", armName, event, i, hc.Timeout)
+			}
+			for _, tok := range strings.Fields(hc.Command) {
+				// Shell assignments (VAR=/x) and flags can't anchor a
+				// command — only a bare path token can reference a file.
+				tok = strings.Trim(tok, `"'`)
+				if strings.Contains(tok, "=") && !strings.HasPrefix(tok, "/") {
+					continue
+				}
+				if filepath.IsAbs(tok) || strings.HasPrefix(tok, "~") || strings.HasPrefix(tok, "..") {
+					return fmt.Errorf("arm %q hooks[%q][%d]: command references %q — hook commands may only touch paths inside the run workdir (relative paths; absolute host paths and ~/../ escapes are forbidden)", armName, event, i, tok)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// validateArmTools schema-checks an arm's tools block strictly against
+// config.Tools — an unknown sub-tool or field fails here instead of
+// silently no-oping inside the run's config load. The config types
+// carry no bounds of their own; negatives are the only values that
+// could turn a typo into a run-time failure, so they're rejected.
+func validateArmTools(armName string, block map[string]any) error {
+	if len(block) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(block)
+	if err != nil {
+		return fmt.Errorf("arm %q tools: %w", armName, err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var tools config.Tools
+	if err := dec.Decode(&tools); err != nil {
+		return fmt.Errorf("arm %q tools: %w", armName, err)
+	}
+	negErr := func(field string) error {
+		return fmt.Errorf("arm %q tools: %s must be >= 0", armName, field)
+	}
+	if tools.Ls.MaxDepth != nil && *tools.Ls.MaxDepth < 0 {
+		return negErr("ls.max_depth")
+	}
+	if tools.Ls.MaxItems != nil && *tools.Ls.MaxItems < 0 {
+		return negErr("ls.max_items")
+	}
+	if tools.Grep.Timeout != nil && *tools.Grep.Timeout < 0 {
+		return negErr("grep.timeout")
+	}
+	if tools.Glob.Timeout != nil && *tools.Glob.Timeout < 0 {
+		return negErr("glob.timeout")
 	}
 	return nil
 }

@@ -637,9 +637,32 @@ type Arm struct {
 	Coverage Coverage  `json:"coverage,omitempty"`
 }
 
-// ArmConfig carries the options delta under test.
+// ArmConfig is the configuration an arm installs into the run workdir:
+// the .crush.json blocks it merges over the seeded start state. Options
+// are flag-projected (manifest-declared); Hooks and Tools are the
+// top-level .crush.json blocks of the same names — hooks declares
+// event → []HookConfig command lists and tools the per-tool config —
+// and rotate the baseline key as extra dimensions instead.
 type ArmConfig struct {
 	Options map[string]any `json:"options,omitempty"`
+	Hooks   map[string]any `json:"hooks,omitempty"`
+	Tools   map[string]any `json:"tools,omitempty"`
+}
+
+// KeyExtra returns the baseline-key dimensions an arm contributes
+// beyond its Options projection. Hooks and Tools aren't config.Options,
+// so they ride the "$"-prefixed dimension channel "$temperature" uses.
+// An arm without either block contributes nothing, so manifests that
+// never declare them key identically to before (#409 compatibility).
+func (c ArmConfig) KeyExtra() map[string]any {
+	extra := map[string]any{}
+	if len(c.Hooks) > 0 {
+		extra["$hooks"] = c.Hooks
+	}
+	if len(c.Tools) > 0 {
+		extra["$tools"] = c.Tools
+	}
+	return extra
 }
 
 // RunRecord is one append-only results/*.jsonl line.
