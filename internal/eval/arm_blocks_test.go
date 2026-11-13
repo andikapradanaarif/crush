@@ -185,3 +185,33 @@ func TestWriteArmConfig_HooksTools(t *testing.T) {
 	require.Equal(t, float64(4), ls["max_depth"])  // Arm's.
 	require.Equal(t, float64(50), ls["max_items"]) // Fixture's sibling field.
 }
+
+// A fixture crush.json hook on an arm-declared event must fail: the
+// loader concatenates hook lists across config layers, so the
+// fixture's entries would fire alongside the arm's replacing list.
+func TestWriteArmConfig_CrushJsonHookCollision(t *testing.T) {
+	t.Parallel()
+	fixture := map[string]any{
+		"hooks": map[string]any{"PreToolUse": []any{map[string]any{"command": "bash f.sh"}}},
+	}
+	arm := Arm{Config: ArmConfig{
+		Hooks: map[string]any{"pre_tool_use": []any{map[string]any{"command": "bash a.sh"}}},
+	}}
+	exp := &Experiment{Model: "p/m"}
+	manifest := &FlagsManifest{Defaults: map[string]any{}}
+
+	dir := t.TempDir()
+	raw, err := json.Marshal(fixture)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "crush.json"), raw, 0o644))
+	require.ErrorContains(t, WriteArmConfig(dir, exp, arm, manifest, "seed"), "crush.json hooks")
+
+	// A fixture event the arm does NOT declare is a constant across
+	// arms — allowed, same as non-flag fixture options.
+	dir = t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "crush.json"), raw, 0o644))
+	other := Arm{Config: ArmConfig{
+		Hooks: map[string]any{"SessionStart": []any{map[string]any{"command": "bash s.sh"}}},
+	}}
+	require.NoError(t, WriteArmConfig(dir, exp, other, manifest, "seed"))
+}

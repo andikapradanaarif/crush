@@ -865,6 +865,8 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (rep Report
 		// future write path through aa can't silently corrupt
 		// control's spec mid-experiment.
 		aa.Config.Options = maps.Clone(aa.Config.Options)
+		aa.Config.Hooks = maps.Clone(aa.Config.Hooks)
+		aa.Config.Tools = maps.Clone(aa.Config.Tools)
 		aa.Coverage = maps.Clone(aa.Coverage)
 		exp.Arms[ArmAA] = aa
 		defer delete(exp.Arms, ArmAA)

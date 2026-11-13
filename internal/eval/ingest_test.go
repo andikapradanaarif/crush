@@ -42,8 +42,12 @@ func harborExp(taskIDs ...string) *Experiment {
 		Temperature: &temp,
 		Corpus:      []string{"harbor"},
 		Arms: map[string]Arm{
-			ArmControl:   {Config: ArmConfig{}},
-			ArmTreatment: {Config: ArmConfig{Options: map[string]any{"x": 1}}},
+			ArmControl: {Config: ArmConfig{}},
+			// A tools block needs no flags.json entry and still
+			// rotates the arm's BaselineKey — the #409 surface.
+			ArmTreatment: {Config: ArmConfig{Tools: map[string]any{
+				"grep": map[string]any{"timeout": 1},
+			}}},
 		},
 		RunsPerTrajectory: map[Band]int{BandUncharacterized: 1},
 		Harbor: &HarborSpec{

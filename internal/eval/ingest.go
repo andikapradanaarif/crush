@@ -220,6 +220,14 @@ func (r *Runner) IngestHarborTrials(ctx context.Context, exp *Experiment, arm, i
 	if err != nil {
 		return nil, err
 	}
+	// Harbor trials key off the arm's config blocks — the same
+	// validation RunExperiment runs, or a malformed/unvalidated
+	// pre_tool_use spelling would hash a BaselineKey no local run
+	// of the identical arm produces (canonicalization is in place
+	// and idempotent).
+	if err := manifest.ValidateArmFlags(exp); err != nil {
+		return nil, err
+	}
 	existing, err := r.LoadExperimentRecords(exp.Name)
 	if err != nil {
 		return nil, err

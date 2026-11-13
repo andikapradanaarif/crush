@@ -348,6 +348,35 @@ func writeRunConfig(workdir string, exp *Experiment, armConfig *ArmConfig, manif
 				}
 			}
 		}
+		// A fixture crush.json hook on an event the arm declares is the
+		// same foreign-condition trap, worse: the loader CONCATENATES
+		// hook lists across layers, so the fixture's entries would run
+		// alongside the arm's "replacing" list. (Tools merge field-wise
+		// under .crush.json — the arm wins shared fields legitimately.)
+		if armConfig != nil && len(armConfig.Hooks) > 0 {
+			// Both sides compare by canonical name — validation
+			// canonicalizes arm keys, but WriteArmConfig is also
+			// reachable without it.
+			armEvents := map[string]bool{}
+			for event := range armConfig.Hooks {
+				if c, ok := hooks.NormalizeEvent(event); ok {
+					armEvents[c] = true
+				} else {
+					armEvents[event] = true
+				}
+			}
+			if fhooks, ok := existing["hooks"].(map[string]any); ok {
+				for event := range fhooks {
+					canonical := event
+					if c, ok := hooks.NormalizeEvent(event); ok {
+						canonical = c
+					}
+					if armEvents[canonical] {
+						return fmt.Errorf("existing crush.json hooks event %q — the arm declares the same event and the loader concatenates hook lists across config layers; the fixture's hooks would fire alongside the arm's (fixture start-state or a seed-session write); remove it", event)
+					}
+				}
+			}
+		}
 	}
 	data, err := json.MarshalIndent(doc, "", "\t")
 	if err != nil {
@@ -405,7 +434,11 @@ func canonicalHookKeys(m map[string]any) map[string]any {
 
 // deepMergeMap merges src into dst field-wise: nested maps recurse,
 // every other value (including lists — hook entries, scalars) is
-// replaced by src's.
+// replaced by src's. A literal null writes null — unlike production's
+// jsons.Merge, which treats null as a no-op. For hooks that is a
+// feature ({"PreToolUse": null} clears a fixture's event); for tools
+// it silently drops a fixture's sub-tool config — pathological, but
+// noted.
 func deepMergeMap(dst, src map[string]any) {
 	for k, v := range src {
 		if sub, ok := v.(map[string]any); ok {

@@ -660,12 +660,19 @@ conditions never pool. Merging follows the loader's layered rule —
 nested maps field-wise — with one deliberate divergence: an arm's
 hook list for an event *replaces* the fixture's list (production
 concatenates across layers, but an arm's hook set is a unit), and
-event names merge by canonical spelling. Hook commands are
-eval-scoped: paths must resolve inside the run workdir — absolute
-host paths and `~`/`..` escapes are rejected (#391). Units differ
-per schema: `hooks.*.timeout` is seconds, `tools.*.timeout` is a
-JSON duration in nanoseconds. Providers, MCPs, and LSPs still can't
-vary between arms. The flag under test is
+event names merge by canonical spelling. A fixture `crush.json`
+hook on an arm-declared event is an error — the loader concatenates
+hook lists across layers, so the fixture's entries would fire
+alongside the arm's replacing list. Hook commands are eval-scoped:
+paths must resolve inside the run workdir — absolute host paths and
+`~`/`..` escapes are rejected (#391). The check is a token-scan
+lint, not a boundary — `$VAR`/`$(...)` indirection isn't scanned;
+containment is the runtime allow-list's job. (Ancestor-directory
+configs the bounded lookup finds share the same exposure, as they
+already did for options.) Units differ per schema:
+`hooks.*.timeout` is seconds, `tools.*.timeout` is a JSON duration
+in nanoseconds. Providers, MCPs, and LSPs still can't vary between
+arms. The flag under test is
 ordinary config, so A/B needs no code plumbing — but both arms
 MUST run the same build under test (the
 control-as-coincidence-detector logic depends on it), and the

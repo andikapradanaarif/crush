@@ -241,7 +241,10 @@ func validateArmHooks(armName string, block map[string]any) error {
 // command: every token (and the value side of VAR=/flag= assignments)
 // that looks like a path must resolve inside the workdir — filepath.
 // Clean resolves ./../ and embedded .. segments, so only commands
-// whose paths never escape pass.
+// whose paths never escape pass. It is a lint, not a boundary: shell
+// indirection ($VAR, $(...) substitution, concatenated -I../flag
+// forms, interpreter -c payloads) isn't scanned — the #391 runtime
+// allow-list, not this check, is the containment guarantee.
 func checkHookCommandScope(armName, event string, i int, command string) error {
 	reject := func(tok string) error {
 		return fmt.Errorf("arm %q hooks[%q][%d]: command references %q — hook commands may only touch paths inside the run workdir (absolute host paths and ~/../ escapes are forbidden)", armName, event, i, tok)
