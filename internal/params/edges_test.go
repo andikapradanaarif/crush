@@ -44,6 +44,8 @@ func TestEdgeEnabled(t *testing.T) {
 	require.False(t, e.EdgeEnabled("stall"))
 	require.True(t, e.EdgeEnabled("burn-watch"), "other edges stay enabled")
 	require.True(t, e.EdgeEnabled("some-future-edge"), "an unknown edge reports enabled")
+	require.True(t, Edges{}.EdgeEnabled("stall"),
+		"an unresolved zero set reads as the shipped all-on defaults")
 }
 
 func TestResolveEdges(t *testing.T) {

@@ -55,6 +55,39 @@ Zero on a cap means "suppress the section" — the tighten
 direction, always allowed. `open_failure_ttl` accepts a Go
 duration string (`"168h"`) or a number of seconds in the overlay.
 
+`params.Edges` (#408) is the sibling set for the run-edge layer —
+resolved beside `Memory` at `app.New` from `options.edge_params`,
+handed to the coordinator and scope gate the same way. It carries
+the boundary thresholds plus a per-edge enable flag for each
+`runEdgeSet` edge:
+
+| Key | Default | Bound | What it bounds |
+|---|---|---|---|
+| `verification_enabled` | true | — | Verification edge may fire (still scans when off) |
+| `todos_enabled` | true | — | Todos edge may fire |
+| `stall_enabled` | true | — | Stall edge may fire (in-run loop detector still stops the run) |
+| `verify_loop_enabled` | true | — | Verify-loop edge may fire (in-run streak detector still stops the run) |
+| `burn_watch_enabled` | true | — | Burn-watch edge may fire |
+| `reconcile_enabled` | true | — | Reconcile edge may fire |
+| `fresh_review_enabled` | true | — | Fresh-review edge may fire |
+| `max_repair_attempts` | 2 | [0, 7] | Shared repair-turn budget every firing edge draws from |
+| `burn_watch_steps_threshold` | 30 | [5, 500] | Step count that alone trips burn-watch |
+| `burn_watch_min_steps` | 10 | [1, steps_threshold] | Step floor of the conjunctive token arm |
+| `burn_watch_input_tokens` | 200_000 | [1k, 100M] | Token arm's spend threshold |
+| `verify_loop_min_steps` | 8 | [2, 100] | Post-write verify streak that trips the detector |
+| `loop_detection_window_size` | 10 | [3, 100] | Steps the identical-signature detector scans |
+| `loop_detection_max_repeats` | 5 | [2, window] | Signature repeats inside the window that trip it |
+| `scope_gate_min_exploration` | 8 | [1, 200] | Explorations before the explore→execute confirm arms |
+| `scope_gate_plan_bounce_budget` | 3 | [1, 20] | Rejected plan declarations before scope escalation |
+| `scope_gate_evidence_bounce_budget` | 3 | [1, 20] | Missing-evidence write bounces before escalation |
+
+An enable flag gates firing, not measuring: a disabled edge still
+evaluates at the boundary and records `gated` — the verdict the
+feature-flag paths already produce. `stall`/`verify_loop` flags do
+not gate the in-run `StopWhen` detectors — disabling those edges
+converts detect+repair into detect+stop-dead, it does not mean
+"never interrupt on loops".
+
 ## Versioning
 
 `Memory.Version()` = `pv1-<sha256[:8]>` of the canonical JSON
@@ -62,6 +95,10 @@ snapshot — field additions rotate the hash automatically, which is
 correct: a new knob is a new snapshot semantics. `pv0` remains the
 marker on rows written before the substrate landed: same effective
 values, but written by a harness with no parameter mechanism.
+
+`params.Version(m, e)` is what actually stamps rows (#408): the
+composite hash over memory + edges, so a change to either set
+rotates `param_version` and cohorts stay honestly attributed.
 
 The version is whole-snapshot: `param_version` equality ⇒ same
 resolved set, *not* ⇒ same effective behavior for the pool under
@@ -74,11 +111,14 @@ snapshot identity, not the manifest's declared overlay.
 
 ## The override channel (what exists now)
 
-`options.memory_params` is a strict overlay onto
-`params.DefaultMemory()`:
+`options.memory_params` and `options.edge_params` are strict
+overlays onto `params.DefaultMemory()` / `params.DefaultEdges()`:
 
 ```json
-{ "options": { "memory_params": { "open_render_limit": 8, "open_failure_ttl": "168h" } } }
+{ "options": {
+    "memory_params": { "open_render_limit": 8, "open_failure_ttl": "168h" },
+    "edge_params":   { "stall_enabled": false, "max_repair_attempts": 3 }
+} }
 ```
 
 - Unknown keys, non-integral values, and out-of-bounds values are

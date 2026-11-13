@@ -26,7 +26,12 @@ type Edges struct {
 	resolved bool
 
 	// Enable flags, one per runEdgeSet edge. All default on —
-	// today's behavior.
+	// today's behavior. A flag gates the edge's repair turn, not
+	// its measurement — and for stall/verify-loop specifically it
+	// does not gate the in-run StopWhen detector: disabling those
+	// edges still ends a looping run, it just stops dead instead
+	// of replanning. "Never interrupt on loops" is not what these
+	// flags mean.
 	VerificationEnabled bool `json:"verification_enabled"`
 	TodosEnabled        bool `json:"todos_enabled"`
 	StallEnabled        bool `json:"stall_enabled"`
@@ -132,8 +137,11 @@ func (e Edges) OrDefault() Edges {
 
 // EdgeEnabled reports whether the named runEdgeSet edge may fire —
 // an unknown name reports enabled so an edge added in code before
-// its flag exists can't silently dead-code.
+// its flag exists can't silently dead-code. The set resolves to
+// defaults first: an unresolved zero Edges{} must read as the
+// shipped all-on set, not all-disabled.
 func (e Edges) EdgeEnabled(name string) bool {
+	e = e.OrDefault()
 	switch name {
 	case "verification":
 		return e.VerificationEnabled

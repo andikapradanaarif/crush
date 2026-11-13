@@ -258,7 +258,7 @@ func CalibratePromoteHits(eps []CalibrationEpisode, grid []int, alpha, delta flo
 			"referent_promote_hits": *cert.CertifiedValue,
 		}
 		cert.OverlayBase = "params.DefaultMemory()"
-		cert.ParamVersion = m.Version()
+		cert.ParamVersion = params.Version(m, params.DefaultEdges())
 		cert.Guarantee = fmt.Sprintf(
 			"with >=%.2f confidence, %s rate <=%.4f on the calibration distribution (%d stratified draws, one per session)",
 			1-delta, cert.Metric, alpha, cert.Draws)

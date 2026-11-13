@@ -306,10 +306,10 @@ func (a *sessionAgent) runEdgeSet() []runEdge {
 			note:    freshReviewExhaustNote,
 		},
 	}
-	// Per-edge enable flags (#408): a disabled edge still scans and
-	// resolves — the flag gates firing, not measuring — so a trigger
-	// it would have fired records gated, the same verdict the
-	// feature-flag paths already produce.
+	// Per-edge enable flags (#408): a disabled edge still scans —
+	// the flag gates firing, not measuring — so a trigger it would
+	// have fired records gated, the same verdict the feature-flag
+	// paths already produce (and, like them, resolve is skipped).
 	edges := a.edges()
 	for i, edge := range set {
 		if edges.EdgeEnabled(edge.name) {
