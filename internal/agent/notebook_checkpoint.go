@@ -233,7 +233,7 @@ func (a *sessionAgent) maybeCheckpointBoundary(ctx context.Context, sessionID st
 		SegmentNumber:  key.segment,
 		Granularity:    notebook.GranularityBoundary,
 		RunTag:         checkpointRunTag(stamp),
-		MinExploration: scopeGateMinExploration,
+		MinExploration: a.edges().ScopeGateMinExploration,
 		Msgs:           uncoveredTail(msgs, segs, processed),
 	})
 }

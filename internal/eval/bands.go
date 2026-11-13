@@ -131,6 +131,15 @@ func (m *FlagsManifest) ValidateArmFlags(e *Experiment) error {
 					return fmt.Errorf("arm %q memory_params: %w", armName, err)
 				}
 			}
+			if k == "edge_params" {
+				ov, ok := v.(map[string]any)
+				if !ok {
+					return fmt.Errorf("arm %q edge_params must be an object of param-name → value, got %T", armName, v)
+				}
+				if _, err := params.ResolveEdges(ov); err != nil {
+					return fmt.Errorf("arm %q edge_params: %w", armName, err)
+				}
+			}
 		}
 	}
 	return nil

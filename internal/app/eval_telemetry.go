@@ -14,6 +14,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/params"
 )
 
 // EvalTelemetryEnvVar names the file a non-interactive run writes its
@@ -60,7 +61,7 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 		// the parameter set that produced them (#228). Process-level
 		// and unconditional: even a run that errors early ran under
 		// this snapshot.
-		"param_version": app.memParams.OrDefault().Version(),
+		"param_version": params.Version(app.memParams.OrDefault(), app.edgeParams.OrDefault()),
 		// The detached-work join outcome — distinguishable as
 		// completed / timed out / never attempted (#115).
 		"drain": drain,

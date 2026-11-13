@@ -1336,6 +1336,7 @@ func TestFlagsDefaultsMatchCodeDefaults(t *testing.T) {
 		"turn_context":              opts.TurnContextMode(),
 		"failure_memory":            opts.FailureMemoryEnabled(),
 		"memory_params":             map[string]any{},
+		"edge_params":               map[string]any{},
 		"ambiguity_clarification":   opts.AmbiguityClarificationEnabled(),
 		"notebook_prior_turns":      opts.NotebookPriorTurnsMode(),
 		"notebook_pressure_gate":    opts.NotebookPressureGateEnabled(),

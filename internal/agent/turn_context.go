@@ -30,6 +30,13 @@ func (a *sessionAgent) memoryParams() params.Memory {
 	return a.memParams.OrDefault()
 }
 
+// edges resolves the agent's run-edge parameter set (#408) —
+// same contract as memoryParams: a zero struct means the shipped
+// defaults.
+func (a *sessionAgent) edges() params.Edges {
+	return a.edgeParams.OrDefault()
+}
+
 // vagueReferentRe matches prompts that lean on a definite or anaphoric
 // referent whose target context must supply — "the bug", "it", "this
 // crash". The noun list mirrors referentKindHints so a mapped noun can

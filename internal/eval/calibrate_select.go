@@ -208,8 +208,9 @@ type SelectorCertificate struct {
 	CertifiedValue *int               `json:"certified_value"`
 	Overlay        map[string]any     `json:"overlay,omitempty"`
 	// OverlayBase names the param set the stamped version assumes —
-	// applying the overlay onto a non-default memory_params resolves
-	// to a different param_version than stamped here.
+	// default memory + default edges (#408): applying the overlay
+	// onto a non-default set in either resolves to a different
+	// param_version than stamped here.
 	OverlayBase  string   `json:"overlay_base,omitempty"`
 	ParamVersion string   `json:"param_version,omitempty"`
 	Guarantee    string   `json:"guarantee,omitempty"`
@@ -374,7 +375,7 @@ func CalibrateOpenRenderLimit(decs []CalibrationDecision, grid []int, alpha, del
 			"open_render_limit": *cert.CertifiedValue,
 		}
 		cert.OverlayBase = "params.DefaultMemory()"
-		cert.ParamVersion = m.Version()
+		cert.ParamVersion = params.Version(m, params.DefaultEdges())
 		cert.Guarantee = fmt.Sprintf(
 			"with >=%.2f confidence, %s rate <=%.4f on the calibration distribution for every certified class (%s), %d stratified draws",
 			1-delta, cert.Metric, alpha, strings.Join(certifiedClasses, ", "), totalDraws(cert.Classes))

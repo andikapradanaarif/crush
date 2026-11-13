@@ -555,6 +555,18 @@ func TestVerifyLoopEdge(t *testing.T) {
 		require.Equal(t, "gated", firingOutcome(t, conn, sessionID, "verify-loop"))
 	})
 
+	t.Run("edge param off records gated, queues nothing", func(t *testing.T) {
+		t.Parallel()
+		a, conn, sessionID := interactiveEdgeAgent(t)
+		e, err := params.ResolveEdges(map[string]any{"verify_loop_enabled": false})
+		require.NoError(t, err)
+		a.edgeParams = e
+		queued := runEdgesForTest(a, t.Context(), SessionAgentCall{SessionID: sessionID},
+			edgeInput{result: verifyLoopResult(), verifyLoop: true})
+		require.False(t, queued, "a disabled edge gates firing, not measurement")
+		require.Equal(t, "gated", firingOutcome(t, conn, sessionID, "verify-loop"))
+	})
+
 	t.Run("a stalled boundary stays with the stall edge", func(t *testing.T) {
 		t.Parallel()
 		a, conn, sessionID := interactiveEdgeAgent(t)

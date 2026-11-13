@@ -901,6 +901,10 @@
           "type": "object",
           "description": "Overlay onto the memory subsystem's parameter set (selector caps / text bounds / open-failure TTL) keyed by params.Memory JSON field names — unknown keys and out-of-bounds values are errors. Experimental."
         },
+        "edge_params": {
+          "type": "object",
+          "description": "Overlay onto the run-edge parameter set (boundary thresholds and per-edge enable flags) keyed by params.Edges JSON field names — unknown keys and out-of-bounds values are errors. Experimental."
+        },
         "project_key": {
           "type": "string",
           "description": "Pin the command/failure memory partition identity instead of deriving it from the repo remote + common dir. Workspaces sharing a key share memory rows — for eval snapshots and deliberate cross-checkout sharing. Experimental."
