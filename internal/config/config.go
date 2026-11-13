@@ -641,6 +641,14 @@ type Options struct {
 	// param_version so eval cohorts attribute outcomes to the
 	// parameters that produced them (#228).
 	MemoryParams map[string]any `json:"memory_params,omitempty" jsonschema:"description=Overlay onto the memory subsystem's parameter set (selector caps / text bounds / open-failure TTL) keyed by params.Memory JSON field names — unknown keys and out-of-bounds values are errors. Experimental."`
+	// EdgeParams overlays the run-edge parameter set (params.Edges)
+	// — the boundary thresholds (repair budget, burn-watch,
+	// verify-loop, loop detector, scope gate) and per-edge enable
+	// flags — keyed by the params JSON field names. Same contract
+	// as memory_params: authored intent, so unknown keys and
+	// out-of-bounds values fail resolution; the resolved set folds
+	// into param_version so cohorts attribute outcomes to it (#408).
+	EdgeParams map[string]any `json:"edge_params,omitempty" jsonschema:"description=Overlay onto the run-edge parameter set (boundary thresholds and per-edge enable flags) keyed by params.Edges JSON field names — unknown keys and out-of-bounds values are errors. Experimental."`
 	// ProjectKey pins the command/failure memory partition identity
 	// instead of deriving it from the repo remote + common dir. The
 	// eval harness pins it so a snapshot-restored crush.db still

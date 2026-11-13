@@ -22,12 +22,12 @@ import (
 	"github.com/charmbracelet/crush/internal/toolclass"
 )
 
-// maxRepairAttempts bounds the shared repair-turn budget: the number of
-// harness-initiated follow-up turns permitted after the original turn.
-// Every firing edge draws from this one counter — unbudgeted escalation
-// is nagging. The loop detector is not a second bound: it resets per Run
-// and sees a different signature each retry anyway.
-const maxRepairAttempts = 2
+// The shared repair-turn budget lives in params.Edges (#408) —
+// MaxRepairAttempts bounds the harness-initiated follow-up turns
+// permitted after the original turn. Every firing edge draws from
+// this one counter — unbudgeted escalation is nagging. The loop
+// detector is not a second bound: it resets per Run and sees a
+// different signature each retry anyway.
 
 // edgeOutcome is the recorded per-boundary result of one edge's
 // evaluation — the edge_firings.outcome enum. A boundary with no row
@@ -248,7 +248,7 @@ type runEdge struct {
 // false-block evidence-bound items. The escalation-family first-wins
 // rule is also order-sensitive: first in this order takes the slot.
 func (a *sessionAgent) runEdgeSet() []runEdge {
-	return []runEdge{
+	set := []runEdge{
 		{
 			name:    "verification",
 			scan:    a.scanVerificationEdge,
@@ -306,6 +306,26 @@ func (a *sessionAgent) runEdgeSet() []runEdge {
 			note:    freshReviewExhaustNote,
 		},
 	}
+	// Per-edge enable flags (#408): a disabled edge still scans and
+	// resolves — the flag gates firing, not measuring — so a trigger
+	// it would have fired records gated, the same verdict the
+	// feature-flag paths already produce.
+	edges := a.edges()
+	for i, edge := range set {
+		if edges.EdgeEnabled(edge.name) {
+			continue
+		}
+		scan := edge.scan
+		set[i].scan = func(ctx context.Context, call SessionAgentCall, in edgeInput) *edgeTrigger {
+			t := scan(ctx, call, in)
+			if t != nil && t.fire {
+				t.fire = false
+				t.hint = edgeOutcomeGated
+			}
+			return t
+		}
+	}
+	return set
 }
 
 // runEdges evaluates every edge at the run boundary. Firing edges merge
@@ -535,7 +555,7 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		}
 	}
 
-	if call.RepairAttempts >= maxRepairAttempts {
+	if call.RepairAttempts >= a.edges().MaxRepairAttempts {
 		for _, c := range contenders {
 			a.recordEdgeFiring(ctx, call, in, c.edge.name, c.t, edgeOutcomeExhausted)
 		}
@@ -789,10 +809,11 @@ func (a *sessionAgent) recordEdgeFiring(ctx context.Context, call SessionAgentCa
 		// eat them. The stamp is chain-shared, so the attempt index
 		// disambiguates boundaries inside the chain; the negative
 		// keeps the fallback out of the real ordinal range. The mask
-		// bounds the product inside int64. The ×4 stride assumes
-		// RepairAttempts stays under maxRepairAttempts — widen it if
-		// the repair budget ever grows.
-		turnSeq = -((int64(call.RunStamp)%(1<<40))*4 + int64(call.RepairAttempts))
+		// bounds the product inside int64. The ×8 stride assumes
+		// RepairAttempts stays under the repair-attempts bound
+		// (max 7) — widen the stride if the budget ever grows past
+		// it.
+		turnSeq = -((int64(call.RunStamp)%(1<<40))*8 + int64(call.RepairAttempts))
 	} else if turnSeq == 0 {
 		// Both the count and the stamp failed — the row dedupes into
 		// every other boundary's. Warn so the silent loss is at
@@ -1269,7 +1290,7 @@ func (a *sessionAgent) scanStallEdge(_ context.Context, call SessionAgentCall, i
 	// the context-pressure mask — the summarize StopWhen runs before
 	// the detector and short-circuits it, so a stalled run that also
 	// crossed the context threshold ends with loopStopped false.
-	sig, tool, repeats := repeatedToolSignature(in.result.Steps, loopDetectionWindowSize, loopDetectionMaxRepeats)
+	sig, tool, repeats := repeatedToolSignature(in.result.Steps, a.edges().LoopDetectionWindowSize, a.edges().LoopDetectionMaxRepeats)
 	if !in.stalled {
 		// The fallback only exists for the mask shape: a run that
 		// ended mid-tool-chain (FinishReasonToolCalls — the summarize
@@ -1639,7 +1660,7 @@ func (a *sessionAgent) scanVerifyLoopEdge(_ context.Context, call SessionAgentCa
 		// StopTurn is an escalation in progress and a stop/error
 		// ending evaluated the detector on its last step already —
 		// neither is verify-loop evidence.
-		if !hasPostWriteVerifyStreak(in.result.Steps) || endedOnStopTurn(in.result) ||
+		if !hasPostWriteVerifyStreak(in.result.Steps, a.edges().VerifyLoopMinSteps) || endedOnStopTurn(in.result) ||
 			in.result.Steps[len(in.result.Steps)-1].FinishReason != fantasy.FinishReasonToolCalls {
 			return nil
 		}
@@ -1647,7 +1668,7 @@ func (a *sessionAgent) scanVerifyLoopEdge(_ context.Context, call SessionAgentCa
 		// claim — repeated signatures inside the streak stay stall's,
 		// symmetric to the in.stalled guard above.
 		if sig, _, _ := repeatedToolSignature(in.result.Steps,
-			loopDetectionWindowSize, loopDetectionMaxRepeats); sig != "" {
+			a.edges().LoopDetectionWindowSize, a.edges().LoopDetectionMaxRepeats); sig != "" {
 			return nil
 		}
 	}
@@ -1818,25 +1839,17 @@ func verifyLoopExhaustNote(t *edgeTrigger, attempts int) string {
 
 // --- burn-watch edge ---
 
-// Burn-watch thresholds: generous tripwires, not a governor — the edge
-// surfaces write-less spend, it doesn't throttle it. The token arm is
-// conjunctive: InputTokens counts the re-sent prompt per step, so on a
-// non-caching provider any few-step turn in a mature session crosses a
-// flat threshold — the step floor keeps the arm honest.
-const (
-	// burnWatchStepsThreshold fires on step count alone.
-	burnWatchStepsThreshold = 30
-	// burnWatchMinSteps is the step floor for the token arm.
-	burnWatchMinSteps = 10
-	// burnWatchInputTokens is the conjunctive token arm's spend
-	// threshold. Cache-read tokens are excluded where the provider
-	// separates them (Anthropic reports input excluding cache reads;
-	// OpenAI subtracts cached tokens) — but Google folds
-	// PromptTokenCount cached tokens into InputTokens, so a
-	// heavy-cache Gemini run trips the arm earlier than intended.
-	// The step floor bounds the damage.
-	burnWatchInputTokens = 200_000
-)
+// Burn-watch thresholds live in params.Edges (#408): generous
+// tripwires, not a governor — the edge surfaces write-less spend,
+// it doesn't throttle it. The token arm is conjunctive: InputTokens
+// counts the re-sent prompt per step, so on a non-caching provider
+// any few-step turn in a mature session crosses a flat threshold —
+// the step floor keeps the arm honest. Cache-read tokens are
+// excluded where the provider separates them (Anthropic reports
+// input excluding cache reads; OpenAI subtracts cached tokens) —
+// but Google folds PromptTokenCount cached tokens into InputTokens,
+// so a heavy-cache Gemini run trips the arm earlier than intended.
+// The step floor bounds the damage.
 
 // scanBurnWatchEdge fires when a clean-stopping, non-stalled run spent
 // heavily while producing zero mutating calls — monotone progress that
@@ -1857,8 +1870,9 @@ func (a *sessionAgent) scanBurnWatchEdge(_ context.Context, call SessionAgentCal
 		return nil
 	}
 	tokens := in.result.TotalUsage.InputTokens
-	if steps <= burnWatchStepsThreshold &&
-		(steps < burnWatchMinSteps || tokens <= burnWatchInputTokens) {
+	edges := a.edges()
+	if steps <= edges.BurnWatchStepsThreshold &&
+		(steps < edges.BurnWatchMinSteps || tokens <= edges.BurnWatchInputTokens) {
 		return nil
 	}
 	t := &edgeTrigger{

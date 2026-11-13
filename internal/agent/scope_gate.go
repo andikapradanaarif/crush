@@ -15,30 +15,22 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/event"
 	"github.com/charmbracelet/crush/internal/filetracker"
+	"github.com/charmbracelet/crush/internal/params"
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/toolclass"
 )
 
-// scopeGateMinExploration is the explore→execute boundary: a first
-// mutating call that arrives only after this many exploration calls
-// marks a task whose scope is worth confirming. Routine-size tasks —
-// a handful of reads before the edit — pass un-gated.
-const scopeGateMinExploration = 8
-
-// scopeGatePlanBounceBudget bounds how many times a non-validating
-// plan declaration may bounce before the gate escalates to the real
-// scope question. An unbounded bounce is a zero-cost stall — the
-// rejection only exists inside the tool result — and an unrepairable
-// one (the evidence vocabulary never surfaced to the model) is a
-// guaranteed loop, so the budget doubles as its safety valve.
-const scopeGatePlanBounceBudget = 3
-
-// scopeGateEvidenceBounceBudget bounds evidence-condition bounces
-// before escalation — the same stuck-loop safety valve the plan
-// budget provides, for the model that keeps writing files it has
-// not read.
-const scopeGateEvidenceBounceBudget = 3
+// The gate's thresholds live in params.Edges (#408): the
+// explore→execute boundary (ScopeGateMinExploration — a first
+// mutating call arriving only after that many explorations marks
+// a task whose scope is worth confirming; routine-size tasks pass
+// un-gated) and the two bounce budgets, which bound rejected plan
+// declarations and missing-evidence writes before the gate
+// escalates to the real scope question. An unbounded bounce is a
+// zero-cost stall — the rejection only exists inside the tool
+// result — and an unrepairable one is a guaranteed loop, so the
+// budgets double as its safety valve.
 
 // scopeGateState is the per-session gate bookkeeping for one turn — one
 // entry per session ID, negligible growth. A new run stamp resets it;
@@ -188,6 +180,9 @@ type scopeGate struct {
 	// evidence arms the per-call evidence condition — the #441
 	// experiment arm, off unless the option explicitly enables it.
 	evidence bool
+	// edges is the resolved run-edge parameter set (#408) — the
+	// exploration boundary and bounce budgets the gate consults.
+	edges params.Edges
 	// workdir resolves relative call targets — the same base the
 	// bash tool runs commands under.
 	workdir string
@@ -206,7 +201,7 @@ type scopeGate struct {
 
 // newScopeGate builds the gate. Returns nil when an interactive run
 // has no question service to ask through.
-func newScopeGate(svc question.Service, interactive bool, sessions session.Service, tracker filetracker.Service, workdir string, scope, evidence bool) *scopeGate {
+func newScopeGate(svc question.Service, interactive bool, sessions session.Service, tracker filetracker.Service, workdir string, scope, evidence bool, edges params.Edges) *scopeGate {
 	if interactive && svc == nil {
 		return nil
 	}
@@ -217,6 +212,7 @@ func newScopeGate(svc question.Service, interactive bool, sessions session.Servi
 		interactive: interactive,
 		scope:       scope,
 		evidence:    evidence,
+		edges:       edges.OrDefault(),
 		workdir:     workdir,
 		states:      map[string]*scopeGateState{},
 		approved:    map[string]bool{},
@@ -298,12 +294,12 @@ func (g *scopeGate) observe(ctx context.Context, call fantasy.ToolCall) gateObse
 	g.mu.Lock()
 	st := g.stateFor(sessionID, stamp)
 	needsPlanCheck := g.scope && call.Name == tools.TodosToolName &&
-		!st.resolved && !st.asking && st.explore >= scopeGateMinExploration
+		!st.resolved && !st.asking && st.explore >= g.edges.ScopeGateMinExploration
 	// The evidence condition holds wherever the armed boundary
 	// cannot fire — the whole run when scope is off, or the
 	// sub-threshold regime while it can.
 	needsEvidence := g.evidence && mutating && !st.resolved && !st.asking &&
-		(!g.scope || st.explore < scopeGateMinExploration)
+		(!g.scope || st.explore < g.edges.ScopeGateMinExploration)
 	authored := make(map[string]bool, len(st.authored))
 	for p := range st.authored {
 		authored[p] = true
@@ -349,7 +345,7 @@ func (g *scopeGate) observe(ctx context.Context, call fantasy.ToolCall) gateObse
 			return allow(gatePass)
 		case st.asking:
 			return gateObservation{verdict: gateWait, explore: st.explore, bounces: st.bounces}
-		case g.scope && st.explore >= scopeGateMinExploration:
+		case g.scope && st.explore >= g.edges.ScopeGateMinExploration:
 			st.asking = true
 			return allow(gateConfirm)
 		default:
@@ -359,7 +355,7 @@ func (g *scopeGate) observe(ctx context.Context, call fantasy.ToolCall) gateObse
 			// lack held read evidence bounces until the evidence
 			// arrives.
 			if len(missing) > 0 {
-				if st.evBounces >= scopeGateEvidenceBounceBudget {
+				if st.evBounces >= g.edges.ScopeGateEvidenceBounceBudget {
 					// Budget exhausted: escalate to the scope
 					// question rather than bounce forever — the
 					// same stuck-loop valve the plan budget gives.
@@ -389,13 +385,13 @@ func (g *scopeGate) observe(ctx context.Context, call fantasy.ToolCall) gateObse
 		// declaration lands a bare plan. Parallel tool calls make
 		// the window rare, and the alternative (queuing plan calls
 		// behind a pending question) serializes the common case.
-		if g.scope && !st.resolved && !st.asking && st.explore >= scopeGateMinExploration {
+		if g.scope && !st.resolved && !st.asking && st.explore >= g.edges.ScopeGateMinExploration {
 			// Only a parseable, non-validating list bounces — malformed
 			// input passes through so the tool's own parse error
 			// explains the failure instead of a misleading plan
 			// rejection.
 			if params, err := parsePlanCall(call.Input); err == nil && !planParamsResolve(params) && !declared {
-				if st.bounces >= scopeGatePlanBounceBudget {
+				if st.bounces >= g.edges.ScopeGatePlanBounceBudget {
 					// Budget exhausted: escalate to the real scope
 					// question with stuck-loop context rather than
 					// bounce forever. The escalating call is not

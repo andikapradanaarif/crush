@@ -9,28 +9,22 @@ import (
 	"github.com/charmbracelet/crush/internal/toolclass"
 )
 
-const (
-	loopDetectionWindowSize = 10
-	loopDetectionMaxRepeats = 5
-
-	// verifyLoopMinSteps is the post-write streak length that trips
-	// the verify-loop detector: that many consecutive steps after the
-	// last mutating call carried no writes. A healthy edit→test→edit
-	// cycle runs 2-4 steps between writes; the observed harm runs
-	// (#329) verified one early fix for 25+ steps without a second
-	// edit — the floor sits well past legitimate checking and far
-	// below the burn.
-	verifyLoopMinSteps = 8
-)
+// Loop-detector and verify-streak thresholds live in params.Edges
+// (#408) — resolved per agent, read through a.edges() at the call
+// sites. The shipped defaults equal the constants that preceded
+// them: window 10 / repeats 5, streak floor 8. The streak floor
+// sits well past legitimate checking (healthy edit→test→edit runs
+// 2-4 steps between writes) and far below the observed harm runs'
+// 25+ reverify streaks (#329).
 
 // hasPostWriteVerifyStreak reports whether the run wrote at least
-// once and then spent verifyLoopMinSteps consecutive trailing steps
-// without another mutating call — the verify-loop signature the
+// once and then spent minSteps consecutive trailing steps without
+// another mutating call — the verify-loop signature the
 // identical-signature detector misses: the calls vary (test, view,
 // ls), so no signature repeats, but no new edit ever lands. A run
 // that never wrote returns false — write-less spend is burn-watch's
 // domain, not this one's.
-func hasPostWriteVerifyStreak(steps []fantasy.StepResult) bool {
+func hasPostWriteVerifyStreak(steps []fantasy.StepResult, minSteps int) bool {
 	sawWrite := false
 	streak := 0
 	for i := len(steps) - 1; i >= 0; i-- {
@@ -40,7 +34,7 @@ func hasPostWriteVerifyStreak(steps []fantasy.StepResult) bool {
 		}
 		streak++
 	}
-	return sawWrite && streak >= verifyLoopMinSteps
+	return sawWrite && streak >= minSteps
 }
 
 // postWriteStreakLen returns the trailing run of steps since the last

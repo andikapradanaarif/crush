@@ -327,6 +327,10 @@ type service struct {
 	// force (#228), empty until the substrate exists.
 	projectKey   string
 	paramVersion string
+	// edgeParams is the run-edge half of the stamped snapshot —
+	// resolved alongside the memory set so param_version rotates
+	// on either one's change (#408).
+	edgeParams params.Edges
 	// hasRepo caches "a repo exists at workingDir" from key
 	// derivation, so RecordRun's per-run repo_state lookup can skip
 	// the git exec entirely outside a repository — non-git dirs are
@@ -424,6 +428,17 @@ func WithProjectKey(key string) Option {
 	}
 }
 
+// WithEdgeParams hands the service the resolved run-edge set
+// (#408): edge values fold into the stamped param_version so an
+// edge change rotates the cohort marker exactly like a memory
+// change — an unset option stamps the composite under default
+// edges.
+func WithEdgeParams(e params.Edges) Option {
+	return func(s *service) {
+		s.edgeParams = e.OrDefault()
+	}
+}
+
 // NewService creates the command/failure memory service rooted at
 // workingDir, so failure rows key directories the way filetracker
 // keys files — workspace-relative, cwd-independent. p is the
@@ -447,7 +462,6 @@ func NewService(q *db.Queries, workingDir string, p params.Memory, opts ...Optio
 		commonDir:           commonDir,
 		repoPrefix:          repoPrefix,
 		hasRepo:             hasRepo,
-		paramVersion:        p.Version(),
 		suggested:           map[string]map[string]struct{}{},
 		sweepFail:           map[string]struct{}{},
 		now:                 time.Now,
@@ -455,6 +469,9 @@ func NewService(q *db.Queries, workingDir string, p params.Memory, opts ...Optio
 	for _, opt := range opts {
 		opt(s)
 	}
+	// The stamped snapshot composes memory + edges — options applied
+	// first so WithEdgeParams is in force before the hash runs.
+	s.paramVersion = params.Version(p, s.edgeParams.OrDefault())
 	// Backfill: pre-provenance rows belong to this store's project,
 	// so empty keys claim into the current partition once. Failure
 	// rows need a Go-side re-key — their signature hash carries

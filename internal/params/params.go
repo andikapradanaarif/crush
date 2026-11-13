@@ -1,6 +1,7 @@
 // Package params is the learned-parameters substrate (#228): the
-// memory subsystem's tunable knobs as one typed, versioned,
-// bound-checked value.
+// memory subsystem's tunable knobs plus the run-edge layer's
+// thresholds and enable flags (#408) as typed, versioned,
+// bound-checked values.
 //
 // The substrate is deliberately thin — a design contract before a
 // store (docs/design/LEARNED_PARAMS.md). Parameters resolve as an

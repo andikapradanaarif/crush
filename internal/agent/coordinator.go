@@ -273,6 +273,10 @@ type coordinator struct {
 	// handed to every built agent so the selector's caps and the
 	// param_version cmdlog stamps describe the same snapshot.
 	memParams params.Memory
+	// edgeParams is the resolved run-edge set (#408) — same
+	// handoff contract as memParams, for the boundary thresholds
+	// and per-edge flags every built agent's edges consult.
+	edgeParams params.Edges
 	// models is shared by every agent; rebuildMu serializes rebuilds of it.
 	models    csync.Value[coordinatorModels]
 	rebuildMu sync.Mutex
@@ -382,6 +386,10 @@ type CoordinatorOptions struct {
 	// defaults; production callers pass the same snapshot cmdlog
 	// stamps row versions under so behavior and attribution agree.
 	MemParams params.Memory
+	// EdgeParams is the resolved run-edge set (#408) — same
+	// handoff contract as MemParams, for the boundary thresholds
+	// and per-edge flags the agents' edges consult.
+	EdgeParams params.Edges
 }
 
 func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, error) {
@@ -415,7 +423,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		activeSkills:          activeSkills,
 		skillTracker:          skillTracker,
 		interactive:           opts.Interactive,
-		scopeGate:             newScopeGate(opts.Questions, opts.Interactive, opts.Sessions, opts.FileTracker, opts.Config.WorkingDir(), opts.Config.Config().Options.ScopeGateEnabled(), opts.Config.Config().Options.EvidenceGateEnabled()),
+		scopeGate:             newScopeGate(opts.Questions, opts.Interactive, opts.Sessions, opts.FileTracker, opts.Config.WorkingDir(), opts.Config.Config().Options.ScopeGateEnabled(), opts.Config.Config().Options.EvidenceGateEnabled(), opts.EdgeParams.OrDefault()),
 		notebook:              opts.Notebook,
 		notebookModelResolver: opts.NotebookModelResolver,
 		summaryModel:          csync.NewValue(Model{}),
@@ -429,6 +437,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		tailAudit:             csync.NewMap[string, TailAudit](),
 		detachedWork:          &sync.WaitGroup{},
 		memParams:             opts.MemParams.OrDefault(),
+		edgeParams:            opts.EdgeParams.OrDefault(),
 		modelOverrides:        csync.NewMap[string, Model](),
 		modelOverrideGen:      make(map[string]uint64),
 		hookRunner:            opts.HookRunner,
@@ -1545,6 +1554,7 @@ func (c *coordinator) buildAgentWithModels(ctx context.Context, ready *errgroup.
 		TailAudit:              c.tailAudit,
 		DetachedWork:           c.detachedWork,
 		MemParams:              c.memParams,
+		EdgeParams:             c.edgeParams,
 		Hooks:                  c.hookRunner,
 		titles:                 &c.titles,
 	})

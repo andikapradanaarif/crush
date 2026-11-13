@@ -228,7 +228,7 @@ func TestHasPostWriteVerifyStreak(t *testing.T) {
 	t.Run("write then long verification streak trips", func(t *testing.T) {
 		t.Parallel()
 		steps := append([]fantasy.StepResult{editStep}, verifySteps(verifyLoopMinSteps)...)
-		if !hasPostWriteVerifyStreak(steps) {
+		if !hasPostWriteVerifyStreak(steps, verifyLoopMinSteps) {
 			t.Error("expected a trip on a post-write streak at the threshold")
 		}
 	})
@@ -236,14 +236,14 @@ func TestHasPostWriteVerifyStreak(t *testing.T) {
 	t.Run("below the threshold does not trip", func(t *testing.T) {
 		t.Parallel()
 		steps := append([]fantasy.StepResult{editStep}, verifySteps(verifyLoopMinSteps-1)...)
-		if hasPostWriteVerifyStreak(steps) {
+		if hasPostWriteVerifyStreak(steps, verifyLoopMinSteps) {
 			t.Error("short post-write verification is a healthy check, not a loop")
 		}
 	})
 
 	t.Run("a write-less run never trips", func(t *testing.T) {
 		t.Parallel()
-		if hasPostWriteVerifyStreak(verifySteps(3 * verifyLoopMinSteps)) {
+		if hasPostWriteVerifyStreak(verifySteps(3*verifyLoopMinSteps), verifyLoopMinSteps) {
 			t.Error("write-less spend is burn-watch's domain, not this edge's")
 		}
 	})
@@ -253,7 +253,7 @@ func TestHasPostWriteVerifyStreak(t *testing.T) {
 		steps := append([]fantasy.StepResult{editStep}, verifySteps(verifyLoopMinSteps)...)
 		steps = append(steps, editStep)
 		steps = append(steps, verifySteps(verifyLoopMinSteps-1)...)
-		if hasPostWriteVerifyStreak(steps) {
+		if hasPostWriteVerifyStreak(steps, verifyLoopMinSteps) {
 			t.Error("the last write restarted the streak below the threshold")
 		}
 	})
@@ -262,7 +262,7 @@ func TestHasPostWriteVerifyStreak(t *testing.T) {
 		t.Parallel()
 		steps := append([]fantasy.StepResult{editStep}, verifySteps(2*verifyLoopMinSteps)...)
 		steps = append(steps, editStep, makeToolStep("view", `{"file_path":"x.go"}`, "x"))
-		if hasPostWriteVerifyStreak(steps) {
+		if hasPostWriteVerifyStreak(steps, verifyLoopMinSteps) {
 			t.Error("the streak counts from the LAST write, not the first")
 		}
 	})
@@ -273,7 +273,7 @@ func TestHasPostWriteVerifyStreak(t *testing.T) {
 			makeToolStep("bash", `{"command":"echo x > out.txt"}`, ""),
 		}
 		steps = append(steps, verifySteps(verifyLoopMinSteps)...)
-		if !hasPostWriteVerifyStreak(steps) {
+		if !hasPostWriteVerifyStreak(steps, verifyLoopMinSteps) {
 			t.Error("a bash > f write is the same boundary the write-set scan uses")
 		}
 	})

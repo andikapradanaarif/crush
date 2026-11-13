@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/filetracker"
+	"github.com/charmbracelet/crush/internal/params"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
@@ -142,7 +143,7 @@ func TestScopeGate(t *testing.T) {
 		svc := &fakeQuestionService{selected: selected}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("file contents")}
-		wrapped := newScopeGate(svc, true, nil, nil, "", true, false).wrap([]fantasy.AgentTool{read, write})
+		wrapped := newScopeGate(svc, true, nil, nil, "", true, false, params.DefaultEdges()).wrap([]fantasy.AgentTool{read, write})
 		return svc, write, wrapped[0], wrapped[1]
 	}
 
@@ -207,7 +208,7 @@ func TestScopeGate(t *testing.T) {
 		svc := &fakeQuestionService{selected: []string{"proceed"}}
 		bash := &fakeTool{name: "bash", resp: fantasy.NewTextResponse("done")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
-		wrapped := newScopeGate(svc, true, nil, nil, "", true, false).wrap([]fantasy.AgentTool{read, bash})
+		wrapped := newScopeGate(svc, true, nil, nil, "", true, false, params.DefaultEdges()).wrap([]fantasy.AgentTool{read, bash})
 		ctx := gateCtx("s1", 1)
 		exploreN(t, ctx, wrapped[0], scopeGateMinExploration)
 
@@ -225,7 +226,7 @@ func TestScopeGate(t *testing.T) {
 		svc := &fakeQuestionService{selected: []string{"proceed"}}
 		bash := &fakeTool{name: "bash", resp: fantasy.NewTextResponse("ok")}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
-		wrapped := newScopeGate(svc, true, nil, nil, "", true, false).wrap([]fantasy.AgentTool{bash, write})
+		wrapped := newScopeGate(svc, true, nil, nil, "", true, false, params.DefaultEdges()).wrap([]fantasy.AgentTool{bash, write})
 		ctx := gateCtx("s1", 1)
 		for range scopeGateMinExploration {
 			resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{
@@ -245,7 +246,7 @@ func TestScopeGate(t *testing.T) {
 		t.Parallel()
 		svc := &fakeQuestionService{}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
-		shared := newScopeGate(svc, true, nil, nil, "", true, false).wrap([]fantasy.AgentTool{
+		shared := newScopeGate(svc, true, nil, nil, "", true, false, params.DefaultEdges()).wrap([]fantasy.AgentTool{
 			&fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextResponse("ok")},
 			&fakeTool{name: "view", resp: fantasy.NewTextResponse("x")},
 			write,
@@ -269,7 +270,7 @@ func TestScopeGate(t *testing.T) {
 		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextResponse("ok")}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
-		wrapped := newScopeGate(svc, true, nil, nil, "", true, false).wrap([]fantasy.AgentTool{todosTool, read, write})
+		wrapped := newScopeGate(svc, true, nil, nil, "", true, false, params.DefaultEdges()).wrap([]fantasy.AgentTool{todosTool, read, write})
 		return svc, todosTool, write, wrapped[0], wrapped[1], wrapped[2]
 	}
 	barePlan := `{"todos":[{"content":"fix the gate","status":"pending"}]}`
@@ -340,7 +341,7 @@ func TestScopeGate(t *testing.T) {
 		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextResponse("ok")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("e")}
-		wrapped := newScopeGate(svc, true, sessions, nil, "", true, false).wrap([]fantasy.AgentTool{todosTool, read, write})
+		wrapped := newScopeGate(svc, true, sessions, nil, "", true, false, params.DefaultEdges()).wrap([]fantasy.AgentTool{todosTool, read, write})
 		ctx := gateCtx(sess.ID, 1)
 		exploreN(t, ctx, wrapped[1], scopeGateMinExploration)
 		// A bare stored plan must not satisfy planDeclared: letting it
@@ -377,7 +378,7 @@ func TestScopeGate(t *testing.T) {
 		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextResponse("ok")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("e")}
-		wrapped := newScopeGate(svc, true, sessions, nil, "", true, false).wrap([]fantasy.AgentTool{todosTool, read, write})
+		wrapped := newScopeGate(svc, true, sessions, nil, "", true, false, params.DefaultEdges()).wrap([]fantasy.AgentTool{todosTool, read, write})
 		ctx := gateCtx(sess.ID, 1)
 		exploreN(t, ctx, wrapped[1], scopeGateMinExploration)
 		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{
@@ -399,7 +400,7 @@ func TestScopeGate(t *testing.T) {
 		svc := &fakeQuestionService{selected: []string{"proceed"}}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("e")}
-		gate := newScopeGate(svc, true, nil, nil, "", true, false)
+		gate := newScopeGate(svc, true, nil, nil, "", true, false, params.DefaultEdges())
 		wrapped := gate.wrap([]fantasy.AgentTool{read, write})
 
 		// Approval lands between runs — the plan run's stamp is done.
@@ -436,7 +437,7 @@ func TestScopeGate(t *testing.T) {
 		svc := &fakeQuestionService{selected: []string{"proceed"}}
 		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextResponse("ok")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
-		wrapped := newScopeGate(svc, true, sessions, nil, "", true, false).wrap([]fantasy.AgentTool{todosTool, read})
+		wrapped := newScopeGate(svc, true, sessions, nil, "", true, false, params.DefaultEdges()).wrap([]fantasy.AgentTool{todosTool, read})
 		ctx := gateCtx(sess.ID, 1)
 		exploreN(t, ctx, wrapped[1], scopeGateMinExploration)
 
@@ -469,7 +470,7 @@ func TestScopeGate(t *testing.T) {
 		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextResponse("ok")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("e")}
-		wrapped := newScopeGate(svc, true, nil, nil, "", true, false).wrap([]fantasy.AgentTool{todosTool, read, write})
+		wrapped := newScopeGate(svc, true, nil, nil, "", true, false, params.DefaultEdges()).wrap([]fantasy.AgentTool{todosTool, read, write})
 		ctx := gateCtx("s1", 1)
 		exploreN(t, ctx, wrapped[1], scopeGateMinExploration-1)
 		for i := 0; i < 5; i++ {
@@ -544,7 +545,7 @@ func TestScopeGate(t *testing.T) {
 		t.Parallel()
 		todosFake := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextResponse("ok")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
-		wrapped := newScopeGate(nil, false, nil, nil, "", true, false).wrap([]fantasy.AgentTool{todosFake, read})
+		wrapped := newScopeGate(nil, false, nil, nil, "", true, false, params.DefaultEdges()).wrap([]fantasy.AgentTool{todosFake, read})
 		ctx := gateCtx("s1", 1)
 		exploreN(t, ctx, wrapped[1], scopeGateMinExploration)
 		for i := 0; i < scopeGatePlanBounceBudget; i++ {
@@ -567,7 +568,7 @@ func TestScopeGate(t *testing.T) {
 		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextErrorResponse("invalid todos payload")}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
-		wrapped := newScopeGate(svc, true, nil, nil, "", true, false).wrap([]fantasy.AgentTool{todosTool, read, write})
+		wrapped := newScopeGate(svc, true, nil, nil, "", true, false, params.DefaultEdges()).wrap([]fantasy.AgentTool{todosTool, read, write})
 		ctx := gateCtx("s1", 1)
 		exploreN(t, ctx, wrapped[1], scopeGateMinExploration)
 		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName, Input: `{not json`})
@@ -582,7 +583,7 @@ func TestScopeGate(t *testing.T) {
 		todosTool := &fakeTool{name: tools.TodosToolName, resp: fantasy.NewTextErrorResponse("validation failed")}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
-		wrapped := newScopeGate(svc, true, nil, nil, "", true, false).wrap([]fantasy.AgentTool{todosTool, read, write})
+		wrapped := newScopeGate(svc, true, nil, nil, "", true, false, params.DefaultEdges()).wrap([]fantasy.AgentTool{todosTool, read, write})
 		ctx := gateCtx("s1", 1)
 		exploreN(t, ctx, wrapped[1], scopeGateMinExploration)
 		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: "t", Name: tools.TodosToolName, Input: boundPlan})
@@ -610,7 +611,7 @@ func TestScopeGate(t *testing.T) {
 		svc := &fakeQuestionService{err: context.DeadlineExceeded}
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
-		wrapped := newScopeGate(svc, true, nil, nil, "", true, false).wrap([]fantasy.AgentTool{read, write})
+		wrapped := newScopeGate(svc, true, nil, nil, "", true, false, params.DefaultEdges()).wrap([]fantasy.AgentTool{read, write})
 		ctx := gateCtx("s1", 1)
 		exploreN(t, ctx, wrapped[0], scopeGateMinExploration)
 		resp, err := wrapped[1].Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
@@ -623,7 +624,7 @@ func TestScopeGate(t *testing.T) {
 		t.Parallel()
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
-		wrapped := newScopeGate(nil, false, nil, nil, "", true, false).wrap([]fantasy.AgentTool{read, write})
+		wrapped := newScopeGate(nil, false, nil, nil, "", true, false, params.DefaultEdges()).wrap([]fantasy.AgentTool{read, write})
 		ctx := gateCtx("s1", 1)
 		exploreN(t, ctx, wrapped[0], scopeGateMinExploration)
 		resp, err := wrapped[1].Run(ctx, fantasy.ToolCall{ID: "w", Name: "edit"})
@@ -634,7 +635,7 @@ func TestScopeGate(t *testing.T) {
 
 	t.Run("nil service builds no gate", func(t *testing.T) {
 		t.Parallel()
-		require.Nil(t, newScopeGate(nil, true, nil, nil, "", true, false))
+		require.Nil(t, newScopeGate(nil, true, nil, nil, "", true, false, params.DefaultEdges()))
 	})
 
 	t.Run("a tool rebuild keeps gate state", func(t *testing.T) {
@@ -642,7 +643,7 @@ func TestScopeGate(t *testing.T) {
 		// SetTools rebuilds re-wrap the toolset — the same gate must
 		// keep its resolved mark so a turn isn't re-asked.
 		svc := &fakeQuestionService{selected: []string{"proceed"}}
-		gate := newScopeGate(svc, true, nil, nil, "", true, false)
+		gate := newScopeGate(svc, true, nil, nil, "", true, false, params.DefaultEdges())
 		write := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
 		wrapped := gate.wrap([]fantasy.AgentTool{read, write})
@@ -701,7 +702,7 @@ func TestScopeGateEvidence(t *testing.T) {
 		tracker := &fakeFileTracker{reads: map[string]time.Time{}}
 		bash := &fakeTool{name: "bash", resp: fantasy.NewTextResponse("done")}
 		wd := t.TempDir()
-		wrapped := newScopeGate(svc, interactive, nil, tracker, wd, false, true).wrap([]fantasy.AgentTool{bash})
+		wrapped := newScopeGate(svc, interactive, nil, tracker, wd, false, true, params.DefaultEdges()).wrap([]fantasy.AgentTool{bash})
 		return svc, tracker, bash, wrapped[0], wd
 	}
 
@@ -766,7 +767,7 @@ func TestScopeGateEvidence(t *testing.T) {
 		bash := &fakeTool{name: "bash", resp: fantasy.NewTextResponse("done")}
 		wd := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(wd, "f.go"), []byte("x"), 0o644))
-		wrapped := newScopeGate(nil, false, nil, tracker, wd, false, false).wrap([]fantasy.AgentTool{bash})
+		wrapped := newScopeGate(nil, false, nil, tracker, wd, false, false, params.DefaultEdges()).wrap([]fantasy.AgentTool{bash})
 		resp, err := wrapped[0].Run(gateCtx("s1", 1), bashCall("b", "sed -i 's/a/b/' f.go"))
 		require.NoError(t, err)
 		require.False(t, resp.IsError)
@@ -781,7 +782,7 @@ func TestScopeGateEvidence(t *testing.T) {
 		read := &fakeTool{name: "view", resp: fantasy.NewTextResponse("x")}
 		wd := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(wd, "f.go"), []byte("x"), 0o644))
-		wrapped := newScopeGate(svc, true, nil, tracker, wd, false, true).wrap([]fantasy.AgentTool{read, bash})
+		wrapped := newScopeGate(svc, true, nil, tracker, wd, false, true, params.DefaultEdges()).wrap([]fantasy.AgentTool{read, bash})
 		ctx := gateCtx("s1", 1)
 		exploreN(t, ctx, wrapped[0], scopeGateMinExploration+2)
 		resp, err := wrapped[1].Run(ctx, bashCall("b", "sed -i 's/a/b/' f.go"))
@@ -843,7 +844,7 @@ func TestScopeGateEvidence(t *testing.T) {
 		bash := &fakeTool{name: "bash", resp: fantasy.NewTextResponse("done")}
 		edit := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")}
 		wd := t.TempDir()
-		wrapped := newScopeGate(nil, false, nil, tracker, wd, false, true).wrap([]fantasy.AgentTool{edit, bash})
+		wrapped := newScopeGate(nil, false, nil, tracker, wd, false, true, params.DefaultEdges()).wrap([]fantasy.AgentTool{edit, bash})
 		ctx := gateCtx("s1", 1)
 		resp, err := wrapped[0].Run(ctx, fantasy.ToolCall{ID: "e", Name: "edit", Input: `{"file_path":"f.go"}`})
 		require.NoError(t, err)
@@ -869,7 +870,7 @@ func TestScopeGateEvidence(t *testing.T) {
 		wd := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(wd, "f.go"), []byte("x"), 0o644))
 		require.NoError(t, os.WriteFile(filepath.Join(wd, "g.go"), []byte("y"), 0o644))
-		wrapped := newScopeGate(nil, false, nil, tracker, wd, false, true).wrap([]fantasy.AgentTool{todos, bash})
+		wrapped := newScopeGate(nil, false, nil, tracker, wd, false, true, params.DefaultEdges()).wrap([]fantasy.AgentTool{todos, bash})
 		ctx := gateCtx("s1", 1)
 		resp, err := wrapped[1].Run(ctx, bashCall("b", "sed -i 's/a/b/' f.go"))
 		require.NoError(t, err)

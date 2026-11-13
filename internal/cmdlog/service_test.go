@@ -1816,8 +1816,11 @@ func TestParamVersion_StampsResolvedSnapshot(t *testing.T) {
 	workingDir := t.TempDir()
 	p := params.DefaultMemory()
 	p.OpenRenderLimit = 8
+	// The stamped identity composes memory + edges (#408) — unset,
+	// the edge half stamps under defaults.
+	snap := params.Version(p, params.DefaultEdges())
 	svc := NewService(db.New(conn), workingDir, p)
-	require.Equal(t, p.Version(), svc.ParamVersion())
+	require.Equal(t, snap, svc.ParamVersion())
 
 	svc.RecordRun(t.Context(), Run{
 		SessionID: "s1", Command: "go test .", CWD: workingDir,
@@ -1826,7 +1829,7 @@ func TestParamVersion_StampsResolvedSnapshot(t *testing.T) {
 	rows, err := svc.ListOpenFailures(t.Context(), 10)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
-	require.Equal(t, p.Version(), rows[0].ParamVersion,
+	require.Equal(t, snap, rows[0].ParamVersion,
 		"the row carries the snapshot that produced it, not pv0")
 }
 
