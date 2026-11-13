@@ -57,6 +57,22 @@ const (
 // granularityTagPrefix namespaces the checkpoint granularity tag.
 const granularityTagPrefix = "granularity:"
 
+// Provenance tag values, carried as src:<value> tags on every entry
+// (#447): whether the text is anchored to an artifact the session
+// observed — a tool call and its result, landed plan items, verbatim
+// user intent — or is generated synthesis with no tool anchor
+// (decisions, consolidations, generator extras, hydration seeds). The
+// tag is stamped structurally at construction, never trusted to the
+// model: a spoofed #src:observed on generated text would exempt
+// unsupported claims from the render drop.
+const (
+	TagSrcObserved = "src:observed"
+	TagSrcInferred = "src:inferred"
+)
+
+// srcTagPrefix namespaces the provenance tag.
+const srcTagPrefix = "src:"
+
 // granularityRank orders granularities finer → coarser. Unknown or
 // missing granularity ranks coarsest — an untagged checkpoint is
 // treated as session-grain so it never feeds a finer consolidation.

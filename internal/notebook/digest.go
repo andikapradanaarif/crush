@@ -116,6 +116,12 @@ func (s *service) GenerateTurnDigest(ctx context.Context, sessionID string, req 
 	}
 	stampTag("phase:checkpoint")
 	stampTag(granularityTagPrefix + GranularityTurn)
+	// Same discipline as GenerateCheckpoint: an entry reaching
+	// storage with no src: tag is synthesized output — the
+	// generator's deterministic fallbacks arrive tagged observed.
+	if tagValue(entry.Tags, srcTagPrefix) == "" {
+		stampTag(TagSrcInferred)
+	}
 	if estimateTokens(entry.Text) > s.opts.MaxEntryTokens {
 		entry.Text = truncateEntry(entry.Text, s.opts.MaxEntryTokens)
 	}

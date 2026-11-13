@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"regexp"
 	"strings"
 
 	"github.com/charmbracelet/crush/internal/db"
@@ -477,6 +478,53 @@ func compressEntry(text, title string, tags []string, headline string, level int
 	return out
 }
 
+// evidenceHandleRe matches the resolvable-artifact tokens an inferred
+// entry may cite in body text: file:{path}, result:{tool_call_id}, or
+// msg:{message_id}. Checkpoint Established lines carry them inline
+// ("evidence: file:..."), and seed provenance lines rewrite them to
+// origin-* handles — both count, tag presence is not the only channel.
+var evidenceHandleRe = regexp.MustCompile(`\b(?:file|result|msg):`)
+
+// UnsupportedInference reports whether e is generated synthesis
+// carrying no evidence handle — the class render drops (#447, the
+// unsupported-summary failure mode Source-Judged Compaction traced):
+// claims citing no observed artifact never become durable context.
+// Exported so render audits can assert a selected set holds none.
+func UnsupportedInference(e Entry) bool {
+	return entryInferred(e) && !hasEvidenceHandle(e)
+}
+
+// entryInferred reports the entry's provenance class. Entries written
+// before the src tag existed classify by event type under the same
+// construction rule the write path applies: consolidations and
+// assistant-text decisions are inference, tool-bound and
+// deterministic entries are observation.
+func entryInferred(e Entry) bool {
+	for _, tag := range e.Tags {
+		if strings.HasPrefix(tag, srcTagPrefix) {
+			return tag == TagSrcInferred
+		}
+	}
+	return e.EventType == EventCheckpoint || e.EventType == EventDecision
+}
+
+// hasEvidenceHandle reports whether the entry cites a resolvable
+// artifact — file:, result:, msg:, or origin: tags, or the same
+// handles inline in the body where checkpoint evidence lines write
+// them. The origin: tag supports hydration seeds: a foreign entry's
+// provenance IS its evidence, and a seed naming no origin session
+// carries no handle at all.
+func hasEvidenceHandle(e Entry) bool {
+	for _, tag := range e.Tags {
+		if strings.HasPrefix(tag, "file:") || strings.HasPrefix(tag, "result:") ||
+			strings.HasPrefix(tag, "msg:") || strings.HasPrefix(tag, "origin:") {
+			return true
+		}
+	}
+	return evidenceHandleRe.MatchString(e.EntryText) ||
+		evidenceHandleRe.MatchString(e.EntryTextFull)
+}
+
 // RenderEntries renders a list of entries into a single text block for
 // injection into the conversation as a system message.
 func RenderEntries(entries []Entry) string {
@@ -485,6 +533,11 @@ func RenderEntries(entries []Entry) string {
 	}
 	var sb strings.Builder
 	for _, e := range entries {
+		if UnsupportedInference(e) {
+			slog.Debug("Dropped unsupported inferred notebook entry",
+				"entry_id", e.ID, "title", e.Title, "event_type", e.EventType)
+			continue
+		}
 		text := e.EntryText
 		if e.CompressionLevel > 0 {
 			text = compressEntry(e.EntryText, e.Title, e.Tags, e.ErrorHeadline, e.CompressionLevel)

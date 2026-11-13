@@ -30,13 +30,16 @@ Open:
 
 ### Tags
 
-#file:{basename} (one per file cited)
+#file:{basename} (one per file cited or touched this window)
 
 Rules:
 
 - Every Established claim must carry an evidence handle taken from
   the input (file:{path} or result:{tool_call_id}). A claim without
   evidence is not established — move it to Open.
+- A checkpoint citing no artifact is dropped from context renders —
+  tag the files under investigation even when every claim sits in
+  Open.
 - Open holds open questions and pending verification, not a task
   list.
 - Prefer restating the current position over narrating history:

@@ -147,6 +147,12 @@ func (s *service) GenerateCheckpoint(ctx context.Context, sessionID string, req 
 	if req.RunTag != "" {
 		stampTag(req.RunTag)
 	}
+	// The src: tag is structural like the rest so stored rows stay
+	// self-describing: the generator's deterministic fallbacks arrive
+	// tagged observed, so an untagged entry is synthesized output.
+	if tagValue(entry.Tags, srcTagPrefix) == "" {
+		stampTag(TagSrcInferred)
+	}
 	if estimateTokens(entry.Text) > s.opts.MaxEntryTokens {
 		entry.Text = truncateEntry(entry.Text, s.opts.MaxEntryTokens)
 	}
