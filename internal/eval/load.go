@@ -301,6 +301,24 @@ func ValidateExperiment(e *Experiment) error {
 	if _, ok := e.Arms[ArmTreatment]; !ok {
 		return fmt.Errorf("arms must include \"treatment\", got %v", sortedKeys(e.Arms))
 	}
+	for name, arm := range e.Arms {
+		if arm.BestOfK == nil {
+			continue
+		}
+		// Best-of-k measures external k-trial executions — the
+		// harbor adapter is the only path that produces them.
+		if e.Harbor == nil {
+			return fmt.Errorf("arm %q best_of_k requires a harbor block — k trials execute externally through the adapter", name)
+		}
+		if arm.BestOfK.K < 2 {
+			return fmt.Errorf("arm %q best_of_k.k must be >= 2, got %d — a single trial is an ordinary replicate", name, arm.BestOfK.K)
+		}
+		switch arm.BestOfK.Selection {
+		case "", SelectionLastAttempt:
+		default:
+			return fmt.Errorf("arm %q best_of_k.selection %q unsupported — only %q (verifier-free) is defined", name, arm.BestOfK.Selection, SelectionLastAttempt)
+		}
+	}
 	// Temperature is a run condition hashed into baseline keys —
 	// characterize/smoke always pin it, so an unpinned experiment's
 	// control records land in a "default"-temp cell no baseline can
