@@ -149,6 +149,11 @@ func SummarizeBestOfK(exp *Experiment, arm, invocation string, recs []RunRecord)
 // same convention.
 func bokSpendFunc(exp *Experiment) func(RunRecord) float64 {
 	if exp != nil && exp.CostWeights != nil {
+		// primaryMetricFunc errors only on nil CostWeights — the
+		// guard holds — so the fallback is unreachable today. If
+		// weighted_cost ever gains error paths, a silent raw-token
+		// downgrade would corrupt the matched-spend read; surface
+		// that loudly rather than inherit the trap.
 		if weighted, err := primaryMetricFunc(exp, "weighted_cost"); err == nil {
 			return func(rec RunRecord) float64 { return weighted(&rec) }
 		}
@@ -198,8 +203,14 @@ type BestOfKComparison struct {
 	// refuses the claim rather than read a thinner baseline.
 	Incomplete []string
 	// GateOK is the #405 pass-rate gate: evolved >= best_of_k on
-	// shared tasks, all best_of_k cells complete, and at least one
-	// shared task. Efficiency claims never consult it.
+	// shared tasks, all best_of_k cells complete, at least one
+	// shared task, and the baseline spent at least what the arm
+	// under test did (SpendRatio >= 1). An underspending baseline
+	// makes "beat extra sampling" an easy bar — a false win — so
+	// the gate refuses rather than certify it; an overspending one
+	// only makes the claim harder. Readers wanting a symmetric
+	// match (ratio ≈ 1) check SpendRatio themselves. Efficiency
+	// claims never consult it.
 	GateOK bool
 }
 
@@ -308,6 +319,6 @@ func CompareBestOfK(exp *Experiment, evolvedArm, bokArm, invocation string, recs
 		}
 	}
 	cmp.GateOK = cmp.SharedTasks > 0 && len(cmp.Incomplete) == 0 &&
-		cmp.EvolvedPass >= cmp.BestOfKPass
+		cmp.EvolvedPass >= cmp.BestOfKPass && cmp.BestOfKSpend >= cmp.EvolvedSpend
 	return cmp, nil
 }

@@ -309,6 +309,11 @@ func ValidateExperiment(e *Experiment) error {
 		if name != ArmControl && name != ArmTreatment && arm.BestOfK == nil {
 			return fmt.Errorf("arm %q has no consumer — extra arms exist only as best_of_k baselines", name)
 		}
+		// Coverage gates only read the treatment arm's block — a
+		// third arm's declaration validates but can never fire.
+		if name != ArmControl && name != ArmTreatment && len(arm.Coverage) > 0 {
+			return fmt.Errorf("arm %q coverage has no consumer — coverage gates evaluate only the treatment arm", name)
+		}
 		if arm.BestOfK == nil {
 			continue
 		}
@@ -967,6 +972,13 @@ func (e *Experiment) validateDecisionRule() error {
 		}
 		if arm == vs {
 			return fmt.Errorf("decision_rule.%s compares arm %q against itself", kind, arm)
+		}
+		// The endpoint reads (ArmTotals, evalDecisionRule) treat an
+		// arm's records as replicates — a best_of_k arm's k trials
+		// aren't. Refused upstream by Compare today; refused here
+		// so a future read path can't inherit the trap (#405).
+		if e.Arms[arm].BestOfK != nil || e.Arms[vs].BestOfK != nil {
+			return fmt.Errorf("decision_rule.%s endpoints can't name a best_of_k arm — its trials aren't replicates; read it via CompareBestOfK", kind)
 		}
 		return nil
 	}

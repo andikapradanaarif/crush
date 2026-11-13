@@ -685,14 +685,14 @@ the arm's token budget counts all k — that asymmetry is the point:
 an evolved harness must beat sampling at matched spend, not just
 out-sample it.
 
-The arm lives on a **third name** (`"best_of_k"`), never
-`control`/`treatment` — the gate pairs those two names and would
-read selected trials as replicates. Validation admits extra arms
-only when they declare `best_of_k` (the sole non-gate role), so
-manifests stay `{control, treatment, best_of_k}`. The runner never
-schedules the third arm locally; its records arrive only through
-harbor ingest. The paired run-level estimator refuses best-of-k
-experiments outright.
+The arm lives on a non-gate name — `control`/`treatment` may not
+carry the spec, since the gate pairs those two names and would read
+selected trials as replicates (`"best_of_k"` is the convention).
+Validation admits extra arms only when they declare `best_of_k`
+(the sole non-gate role), so manifests stay `{control, treatment,
+best_of_k}`. The runner never schedules the third arm locally; its
+records arrive only through harbor ingest. The paired run-level
+estimator refuses best-of-k experiments outright.
 
 The task-level read is `CompareBestOfK(exp, evolved, best_of_k,
 invocation, recs)`: shared-task pass@1 on both sides — the ordinary
@@ -700,9 +700,10 @@ arm's per-task conclusive mean, the best_of_k arm's selected trials
 — plus both sides' total spend (all k trials vs all ordinary
 records, one convention) and the spend ratio K was chosen against.
 `GateOK` is the pass-rate claim the issue gates: evolved ≥ best_of_k
-on shared tasks with every best_of_k cell at its declared K — a
-partial arm hasn't spent its budget, so the claim refuses rather
-than read a thinner baseline. Efficiency claims never consult it.
+on shared tasks, every best_of_k cell at its declared K, and the
+baseline spending at least what the arm under test did — a partial
+cell or an underspending baseline certifies a false win, so the
+claim refuses. Efficiency claims never consult it.
 
 The flag under test is
 ordinary config, so A/B needs no code plumbing — but both arms

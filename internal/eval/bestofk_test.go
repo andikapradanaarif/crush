@@ -47,6 +47,26 @@ func TestValidateExperiment_BestOfK(t *testing.T) {
 	exp = bokExp(nil)
 	exp.Arms[ArmControl] = Arm{BestOfK: &BestOfKSpec{K: 3}}
 	require.ErrorContains(t, ValidateExperiment(exp), "may not declare best_of_k")
+
+	// Coverage on a third arm validates but never fires — the
+	// coverage gate reads only the treatment arm's block.
+	exp = bokExp(nil)
+	exp.Arms[armBestOfK] = Arm{BestOfK: &BestOfKSpec{K: 3}, Coverage: Coverage{"steps": 1}}
+	require.ErrorContains(t, ValidateExperiment(exp), "coverage has no consumer")
+
+	// A decision-rule endpoint can't name the arm — the reads
+	// behind it treat records as replicates.
+	exp = bokExp(nil)
+	exp.DecisionRule = &DecisionRule{
+		Hypothesis: "x",
+		Primary:    &RulePrimary{Metric: "tokens.input", Arm: ArmTreatment, Vs: armBestOfK, Direction: PrimaryDecrease, MinImprovement: 0.1},
+	}
+	require.ErrorContains(t, ValidateExperiment(exp), "can't name a best_of_k arm")
+
+	// An extra arm without the spec has no consumer at all.
+	exp = bokExp(nil)
+	exp.Arms["mystery"] = Arm{}
+	require.ErrorContains(t, ValidateExperiment(exp), "no consumer")
 }
 
 func bokRec(traj string, idx int, out Outcome, tokens int64) RunRecord {
@@ -212,9 +232,60 @@ func TestCompareBestOfK(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, cmp.GateOK)
 
+	// Evolved out-passing an underspending baseline is a false win —
+	// the matched-spend half of the claim refuses it.
+	cheap := []RunRecord{
+		{TrajectoryID: "a", Arm: ArmTreatment, Invocation: "inv1", RunIndex: 0, Outcome: OutcomePass, Tokens: TokenUsage{Input: 100}},
+	}
+	cheapBok := []RunRecord{
+		bokRec("a", 0, OutcomeFail, 1), bokRec("a", 1, OutcomeFail, 1),
+	}
+	cheapBok[0].BestOfK.K, cheapBok[1].BestOfK.K = 2, 2
+	cmp, err = CompareBestOfK(exp, ArmTreatment, armBestOfK, "inv1", append(cheap, cheapBok...))
+	require.NoError(t, err)
+	require.InDelta(t, 1.0, cmp.EvolvedPass, 1e-9)
+	require.Zero(t, cmp.BestOfKPass)
+	require.Less(t, cmp.SpendRatio, 1.0)
+	require.False(t, cmp.GateOK)
+
 	// Wrong arm roles fail fast.
 	_, err = CompareBestOfK(exp, armBestOfK, ArmTreatment, "inv1", recs)
 	require.ErrorContains(t, err, "no best_of_k spec")
 	_, err = CompareBestOfK(exp, ArmControl, "ghost", "inv1", recs)
 	require.ErrorContains(t, err, "not declared")
+}
+
+// When cost_weights pin relative prices, both sides' spend reads the
+// weighted convention — including generator-token sidecar spend at
+// the pinned tier — not the raw-token fallback.
+func TestCompareBestOfK_WeightedSpend(t *testing.T) {
+	t.Parallel()
+	exp := bokExp(nil)
+	exp.CostWeights = &CostWeights{
+		CacheRead: 0.1, CacheWrite: 0.5, Output: 2.0,
+		Generator: &CostWeights{CacheRead: 0.05, CacheWrite: 0.25, Output: 1.0},
+	}
+	gen := &GeneratorTokens{Input: 10, Output: 4}
+	evolved := []RunRecord{
+		{
+			TrajectoryID: "a", Arm: ArmTreatment, Invocation: "inv1", RunIndex: 0, Outcome: OutcomePass,
+			Tokens: TokenUsage{Input: 10, CacheRead: 100, Output: 5}, GeneratorTokens: gen,
+		},
+	}
+	trials := []RunRecord{
+		bokRec("a", 0, OutcomeFail, 0), bokRec("a", 1, OutcomeFail, 0),
+	}
+	for i := range trials {
+		trials[i].BestOfK.K = 2
+		trials[i].Tokens = TokenUsage{Input: 10, CacheRead: 100, Output: 5}
+		trials[i].GeneratorTokens = gen
+	}
+	cmp, err := CompareBestOfK(exp, ArmTreatment, armBestOfK, "inv1", append(evolved, trials...))
+	require.NoError(t, err)
+	// Per record: 10 + 0.1·100 + 2.0·5 = 30 solver, plus
+	// 10 + 1.0·4 = 14 generator → 44 weighted. Raw would be 129.
+	require.InDelta(t, 44.0, cmp.EvolvedSpend, 1e-9)
+	require.InDelta(t, 88.0, cmp.BestOfKSpend, 1e-9)
+	require.InDelta(t, 2.0, cmp.SpendRatio, 1e-9)
+	require.True(t, cmp.GateOK) // Complete cell, pass 1>0, ratio 2.
 }
