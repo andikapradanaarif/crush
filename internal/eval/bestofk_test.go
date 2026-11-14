@@ -67,6 +67,19 @@ func TestValidateExperiment_BestOfK(t *testing.T) {
 	exp = bokExp(nil)
 	exp.Arms["mystery"] = Arm{}
 	require.ErrorContains(t, ValidateExperiment(exp), "no consumer")
+
+	// --aa's calibration clone owns the name — an authored arm
+	// would be clobbered at run time and its records would pool
+	// into the control-noise floor.
+	exp = bokExp(nil)
+	exp.Arms[ArmAA] = Arm{BestOfK: &BestOfKSpec{K: 3}}
+	require.ErrorContains(t, ValidateExperiment(exp), "reserved")
+
+	// A best_of_k arm can't source a replay — replayed records
+	// carry no trial stamps to select over.
+	exp = bokExp(nil)
+	exp.Replay = &ReplaySpec{SourceArm: armBestOfK}
+	require.ErrorContains(t, ValidateExperiment(exp), "replay.source_arm")
 }
 
 func bokRec(traj string, idx int, out Outcome, tokens int64) RunRecord {
@@ -131,7 +144,8 @@ func TestSummarizeBestOfK(t *testing.T) {
 		bokRec("b", 2, OutcomePass, 20),
 		bokRec("c", 0, OutcomePass, 5), // 1 of 3 trials — partial arm.
 	}
-	sum := SummarizeBestOfK(&Experiment{}, armBestOfK, "inv1", recs)
+	sum, err := SummarizeBestOfK(&Experiment{}, armBestOfK, "inv1", recs)
+	require.NoError(t, err)
 	// Selected: a=fail(idx2), b=pass(idx2), c=pass(idx0) → 2/3.
 	// Spend: all seven trials' tokens.
 	require.Equal(t, 3, sum.Tasks)
@@ -143,7 +157,8 @@ func TestSummarizeBestOfK(t *testing.T) {
 	// Scope: another arm or invocation contributes nothing.
 	other := bokRec("a", 0, OutcomePass, 999)
 	other.Arm, other.Invocation = ArmControl, "inv2"
-	sum = SummarizeBestOfK(&Experiment{}, armBestOfK, "inv1", append(recs, other))
+	sum, err = SummarizeBestOfK(&Experiment{}, armBestOfK, "inv1", append(recs, other))
+	require.NoError(t, err)
 	require.Equal(t, 95.0, sum.Spend)
 }
 

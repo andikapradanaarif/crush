@@ -687,12 +687,16 @@ out-sample it.
 
 The arm lives on a non-gate name — `control`/`treatment` may not
 carry the spec, since the gate pairs those two names and would read
-selected trials as replicates (`"best_of_k"` is the convention).
-Validation admits extra arms only when they declare `best_of_k`
-(the sole non-gate role), so manifests stay `{control, treatment,
-best_of_k}`. The runner never schedules the third arm locally; its
-records arrive only through harbor ingest. The paired run-level
-estimator refuses best-of-k experiments outright.
+selected trials as replicates (`"best_of_k"` is the conventional
+name, not enforced — multiple best-of-k arms may coexist under
+distinct names, and `aa` is reserved for the runner's calibration
+clone). Validation admits extra arms only when they declare
+`best_of_k` (the sole non-gate role). The runner never schedules
+the third arm locally; its records arrive only through harbor
+ingest. The paired run-level estimator refuses a `best_of_k` spec
+on the gate pair itself — third-arm records whitelisted out of the
+pairing never reach it, so a three-arm manifest keeps its full
+control-vs-treatment read.
 
 The task-level read is `CompareBestOfK(exp, evolved, best_of_k,
 invocation, recs)`: shared-task pass@1 on both sides — the ordinary
@@ -1941,8 +1945,9 @@ the number #397 records.
 ### `crush eval run --aa` — the calibration arm
 
 `--aa` clones the control arm in-memory as a third arm named `aa`
-(authored experiments stay two-arm; the gate's schema constraint is
-untouched). It samples to N conclusive like every arm, writes
+(validation reserves the name — authored manifests can't declare
+it, so the in-memory clone can't clobber one). It samples to N
+conclusive like every arm, writes
 `arm: "aa"` records under the same invocation, and is excluded from
 every verdict tier by construction — gate comparisons key on the
 `control`/`treatment` names. Its purposes:

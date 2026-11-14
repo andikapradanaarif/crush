@@ -85,7 +85,7 @@ func SelectBestOfK(recs []RunRecord) []RunRecord {
 // invocation — the same record-scope invariant Compare enforces
 // ("pairing only holds within one"). recs may be an unfiltered
 // record set; only this arm+invocation's stamped records count.
-func SummarizeBestOfK(exp *Experiment, arm, invocation string, recs []RunRecord) BestOfKSummary {
+func SummarizeBestOfK(exp *Experiment, arm, invocation string, recs []RunRecord) (BestOfKSummary, error) {
 	var sum BestOfKSummary
 	var scoped []RunRecord
 	for _, rec := range recs {
@@ -95,7 +95,7 @@ func SummarizeBestOfK(exp *Experiment, arm, invocation string, recs []RunRecord)
 	}
 	sel := SelectBestOfK(scoped)
 	if len(sel) == 0 {
-		return sum
+		return sum, nil
 	}
 	sum.Tasks = len(sel)
 	passed := 0
@@ -135,28 +135,33 @@ func SummarizeBestOfK(exp *Experiment, arm, invocation string, recs []RunRecord)
 		}
 	}
 
-	spend := bokSpendFunc(exp)
+	spend, err := bokSpendFunc(exp)
+	if err != nil {
+		return sum, err
+	}
 	for _, rec := range scoped {
 		sum.Spend += spend(rec)
 	}
-	return sum
+	return sum, nil
 }
 
 // bokSpendFunc prices one record under the experiment's convention —
 // weighted_cost when cost_weights are pinned (the gate's own metric,
 // sidecar spend included, metrics.go), else raw solver+generator
 // token sum. Both sides of a matched-budget comparison must read the
-// same convention.
-func bokSpendFunc(exp *Experiment) func(RunRecord) float64 {
+// same convention, so a weighted_cost error under pinned weights
+// propagates rather than silently downgrade to the raw read.
+func bokSpendFunc(exp *Experiment) (func(RunRecord) float64, error) {
 	if exp != nil && exp.CostWeights != nil {
 		// primaryMetricFunc errors only on nil CostWeights — the
-		// guard holds — so the fallback is unreachable today. If
-		// weighted_cost ever gains error paths, a silent raw-token
-		// downgrade would corrupt the matched-spend read; surface
-		// that loudly rather than inherit the trap.
-		if weighted, err := primaryMetricFunc(exp, "weighted_cost"); err == nil {
-			return func(rec RunRecord) float64 { return weighted(&rec) }
+		// guard holds — so the error path is unreachable today. If
+		// weighted_cost ever gains error paths, propagating keeps a
+		// raw-token downgrade from certifying the wrong convention.
+		weighted, err := primaryMetricFunc(exp, "weighted_cost")
+		if err != nil {
+			return nil, fmt.Errorf("best_of_k spend: %w", err)
 		}
+		return func(rec RunRecord) float64 { return weighted(&rec) }, nil
 	}
 	return func(rec RunRecord) float64 {
 		t := rec.Tokens
@@ -166,7 +171,7 @@ func bokSpendFunc(exp *Experiment) func(RunRecord) float64 {
 			v += float64(g.Input + g.Output + g.CacheRead + g.CacheWrite)
 		}
 		return v
-	}
+	}, nil
 }
 
 // BestOfKComparison is the task-level matched-budget read (#405): an
@@ -189,7 +194,11 @@ type BestOfKComparison struct {
 	// their mean, not extra tasks); a shared task whose evolved
 	// records are all inconclusive contributes 0 to the mean.
 	EvolvedPass float64
-	// BestOfKPass is selected-trial pass@1 on shared tasks.
+	// BestOfKPass is selected-trial pass@1 on shared tasks — the
+	// selected trial's outcome counts outright, so an inconclusive
+	// selection reads as a miss where the evolved mean drops
+	// inconclusive replicates. Each arm answers under its own
+	// outcome convention.
 	BestOfKPass float64
 	// EvolvedSpend and BestOfKSpend are total arm spend on shared
 	// tasks under the experiment's spend convention — all trials
@@ -223,6 +232,10 @@ type BestOfKComparison struct {
 // set; only this invocation's records count. evolvedArm must not
 // declare best_of_k (a selection arm's answer isn't a per-task mean)
 // and bokArm must declare it.
+//
+// Completeness is one-directional: the evolved arm's task set is the
+// reference, so a bok arm covering a subset refuses the claim while
+// a task only the bok arm ran is off the comparison entirely.
 func CompareBestOfK(exp *Experiment, evolvedArm, bokArm, invocation string, recs []RunRecord) (*BestOfKComparison, error) {
 	if exp == nil {
 		return nil, fmt.Errorf("compare best_of_k: nil experiment")
@@ -265,7 +278,10 @@ func CompareBestOfK(exp *Experiment, evolvedArm, bokArm, invocation string, recs
 			shared[traj] = true
 		}
 	}
-	spend := bokSpendFunc(exp)
+	spend, err := bokSpendFunc(exp)
+	if err != nil {
+		return nil, fmt.Errorf("compare best_of_k: %w", err)
+	}
 	for _, rec := range recs {
 		if rec.Arm == bokArm && rec.Invocation == invocation && rec.BestOfK != nil && shared[rec.TrajectoryID] {
 			cmp.BestOfKSpend += spend(rec)
