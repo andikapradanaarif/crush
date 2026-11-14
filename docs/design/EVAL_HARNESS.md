@@ -683,9 +683,31 @@ policy; verifier-read selection is pass@k, not best-of-k, and is
 never the arm's read. pass@1 counts only the selected trial while
 the arm's token budget counts all k — that asymmetry is the point:
 an evolved harness must beat sampling at matched spend, not just
-out-sample it. The paired run-level estimator refuses best-of-k
-experiments (selected trials aren't run-index replicates); the
-read is `SummarizeBestOfK` vs control at matched tokens.
+out-sample it.
+
+The arm lives on a non-gate name — `control`/`treatment` may not
+carry the spec, since the gate pairs those two names and would read
+selected trials as replicates (`"best_of_k"` is the conventional
+name, not enforced — multiple best-of-k arms may coexist under
+distinct names, and `aa` is reserved for the runner's calibration
+clone). Validation admits extra arms only when they declare
+`best_of_k` (the sole non-gate role). The runner never schedules
+the third arm locally; its records arrive only through harbor
+ingest. The paired run-level estimator refuses a `best_of_k` spec
+on the gate pair itself — third-arm records whitelisted out of the
+pairing never reach it, so a three-arm manifest keeps its full
+control-vs-treatment read.
+
+The task-level read is `CompareBestOfK(exp, evolved, best_of_k,
+invocation, recs)`: shared-task pass@1 on both sides — the ordinary
+arm's per-task conclusive mean, the best_of_k arm's selected trials
+— plus both sides' total spend (all k trials vs all ordinary
+records, one convention) and the spend ratio K was chosen against.
+`GateOK` is the pass-rate claim the issue gates: evolved ≥ best_of_k
+on shared tasks, every best_of_k cell at its declared K, and the
+baseline spending at least what the arm under test did — a partial
+cell or an underspending baseline certifies a false win, so the
+claim refuses. Efficiency claims never consult it.
 
 The flag under test is
 ordinary config, so A/B needs no code plumbing — but both arms
@@ -1923,8 +1945,9 @@ the number #397 records.
 ### `crush eval run --aa` — the calibration arm
 
 `--aa` clones the control arm in-memory as a third arm named `aa`
-(authored experiments stay two-arm; the gate's schema constraint is
-untouched). It samples to N conclusive like every arm, writes
+(validation reserves the name — authored manifests can't declare
+it, so the in-memory clone can't clobber one). It samples to N
+conclusive like every arm, writes
 `arm: "aa"` records under the same invocation, and is excluded from
 every verdict tier by construction — gate comparisons key on the
 `control`/`treatment` names. Its purposes:

@@ -856,9 +856,10 @@ func (r *Runner) RunExperiment(ctx context.Context, exp *Experiment) (rep Report
 	}
 
 	// The calibration arm clones control after all validation —
-	// authored experiments stay two-arm, aa exists only in-memory and
-	// is removed before returning so a reused *Experiment doesn't
-	// carry it into the next call.
+	// aa exists only in-memory and is removed before returning so
+	// a reused *Experiment doesn't carry it into the next call.
+	// Validation reserves the name, so this write can't clobber an
+	// authored arm.
 	if r.AA {
 		aa := exp.Arms[ArmControl]
 		// The Arm copy shares the control's maps — clone them so a

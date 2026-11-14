@@ -485,6 +485,50 @@ func TestCompare_AARecordsCannotPair(t *testing.T) {
 	}
 }
 
+// A best_of_k spec on a third arm doesn't block the gate-pair
+// read — the pairing whitelists control/treatment, so stamped
+// records can't be misread as replicates. A spec on a gate arm
+// itself still refuses.
+func TestCompare_BestOfKThirdArmStillReads(t *testing.T) {
+	dir := t.TempDir()
+	exp := &Experiment{
+		Name:   "e",
+		Corpus: []string{"t"},
+		Arms: map[string]Arm{
+			ArmControl:   {},
+			ArmTreatment: {},
+			"best_of_k":  {BestOfK: &BestOfKSpec{K: 2}},
+		},
+	}
+	optsA := map[string]any{"f": "a"}
+	optsB := map[string]any{"f": "b"}
+	var recs []RunRecord
+	for i := 1; i <= 4; i++ {
+		recs = append(recs,
+			compareRecord("e", "t", ArmControl, "i1", i, 100, optsA),
+			compareRecord("e", "t", ArmTreatment, "i1", i, 90, optsB))
+	}
+	// Stamped third-arm records share the invocation — they no
+	// more pair than aa's do.
+	for i := 1; i <= 4; i++ {
+		b := compareRecord("e", "t", "best_of_k", "i1", i, 50, optsB)
+		b.BestOfK = &BestOfKMark{K: 2, Selection: SelectionLastAttempt}
+		recs = append(recs, b)
+	}
+	writeCompareRecords(t, dir, recs...)
+
+	rep, err := seededRunner(dir).Compare(exp, "")
+	require.NoError(t, err)
+	require.Equal(t, 4, rep.Pairs)
+	require.Equal(t, 0, rep.Unmatched)
+
+	// The spec on a gate arm stays refused — selected trials
+	// would pair as replicates.
+	exp.Arms[ArmTreatment] = Arm{BestOfK: &BestOfKSpec{K: 2}}
+	_, err = seededRunner(dir).Compare(exp, "")
+	require.ErrorContains(t, err, "best_of_k")
+}
+
 func TestCompare_DroppedAndAbsentCounted(t *testing.T) {
 	dir := t.TempDir()
 	exp := &Experiment{Name: "e"}
