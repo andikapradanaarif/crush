@@ -2,6 +2,8 @@ package eval
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 )
 
@@ -27,12 +29,13 @@ type BestOfKSummary struct {
 	// compares it against control measured the same way.
 	Spend float64
 	// CompleteTasks counts trajectories that produced exactly the
-	// declared K trials.
+	// declared K trials and hold a selected record.
 	CompleteTasks int
-	// IncompleteTasks lists trajectories whose trial count
-	// diverges from the declared K as "traj (n/k)" — informational:
-	// the selection still reports what exists, but the budget and
-	// pass@1 both read a thinner arm.
+	// IncompleteTasks lists trajectories whose stamped count
+	// diverges from the obligation as "traj (n/k)", or that hold
+	// no selected trial as "traj (n/k unselected)" —
+	// informational: the selection still reports what exists,
+	// but the budget and pass@1 both read a thinner arm.
 	IncompleteTasks []string
 }
 
@@ -81,6 +84,42 @@ func SelectBestOfK(recs []RunRecord) []RunRecord {
 	return out
 }
 
+// bokIncompleteCells audits each reference task's best-of-k cell
+// against its obligation — the larger of the stamped K and the
+// spec's: stamps attest the schedule, the spec floors it, so a
+// cell run under a thinner past spec still reads short of the
+// manifest's current declaration and a task the arm never
+// attempted reads (0/K). A stamped cell at its K holding no
+// selected trial reads "(n/k unselected)" — trials the stamped
+// rule can't select are thinner than a clean miss. Diagnostics
+// come back sorted by trajectory.
+func bokIncompleteCells(stamped []RunRecord, refTasks []string, specK int, selected map[string]bool) []string {
+	counts, declared := map[string]int{}, map[string]int{}
+	for _, rec := range stamped {
+		if rec.BestOfK == nil {
+			continue
+		}
+		counts[rec.TrajectoryID]++
+		if rec.BestOfK.K > declared[rec.TrajectoryID] {
+			declared[rec.TrajectoryID] = rec.BestOfK.K
+		}
+	}
+	trajs := append(make([]string, 0, len(refTasks)), refTasks...)
+	sort.Strings(trajs)
+	var incomplete []string
+	for _, traj := range trajs {
+		k := max(declared[traj], specK)
+		n := counts[traj]
+		switch {
+		case n != k:
+			incomplete = append(incomplete, fmt.Sprintf("%s (%d/%d)", traj, n, k))
+		case !selected[traj]:
+			incomplete = append(incomplete, fmt.Sprintf("%s (%d/%d unselected)", traj, n, k))
+		}
+	}
+	return incomplete
+}
+
 // SummarizeBestOfK computes one arm's summary inside one
 // invocation — the same record-scope invariant Compare enforces
 // ("pairing only holds within one"). recs may be an unfiltered
@@ -94,46 +133,37 @@ func SummarizeBestOfK(exp *Experiment, arm, invocation string, recs []RunRecord)
 		}
 	}
 	sel := SelectBestOfK(scoped)
-	if len(sel) == 0 {
-		return sum, nil
-	}
-	sum.Tasks = len(sel)
 	passed := 0
 	for _, rec := range sel {
 		if rec.Outcome == OutcomePass {
 			passed++
 		}
 	}
-	sum.PassRate = float64(passed) / float64(len(sel))
+	sum.Tasks = len(sel)
+	if len(sel) > 0 {
+		sum.PassRate = float64(passed) / float64(len(sel))
+	}
 
-	// Completeness: count stamped trials per trajectory against
-	// the declared K — max-wins so a spec that changed K between
-	// ingests reads the larger obligation, not whichever record
-	// iterated last. Any stamped record counts here even when an
-	// unrecognized rule excludes it from selection above — a
-	// future rule's trials still attest scheduled work.
-	counts := map[string]int{}
-	declared := map[string]int{}
+	// Completeness: stamped cells read against the spec-floored
+	// obligation. An arm whose stamped set selects nothing still
+	// reports — Tasks=0 alone would hide that its trials ran and
+	// stayed unreadable.
+	specK := 0
+	if exp != nil {
+		if a, ok := exp.Arms[arm]; ok && a.BestOfK != nil {
+			specK = a.BestOfK.K
+		}
+	}
+	refSet, selected := map[string]bool{}, map[string]bool{}
 	for _, rec := range scoped {
-		counts[rec.TrajectoryID]++
-		if rec.BestOfK.K > declared[rec.TrajectoryID] {
-			declared[rec.TrajectoryID] = rec.BestOfK.K
-		}
+		refSet[rec.TrajectoryID] = true
 	}
-	trajs := make([]string, 0, len(counts))
-	for traj := range counts {
-		trajs = append(trajs, traj)
+	for _, rec := range sel {
+		selected[rec.TrajectoryID] = true
 	}
-	sort.Strings(trajs)
-	for _, traj := range trajs {
-		n, k := counts[traj], declared[traj]
-		if n == k {
-			sum.CompleteTasks++
-		} else {
-			sum.IncompleteTasks = append(sum.IncompleteTasks,
-				fmt.Sprintf("%s (%d/%d)", traj, n, k))
-		}
-	}
+	trajs := slices.Sorted(maps.Keys(refSet))
+	sum.IncompleteTasks = bokIncompleteCells(scoped, trajs, specK, selected)
+	sum.CompleteTasks = len(trajs) - len(sum.IncompleteTasks)
 
 	spend, err := bokSpendFunc(exp)
 	if err != nil {
@@ -208,12 +238,13 @@ type BestOfKComparison struct {
 	// SpendRatio is best_of_k spend / evolved spend — the budget
 	// match K was chosen for (≈1 is matched; <1 is an easy bar).
 	SpendRatio float64
-	// Incomplete lists best_of_k cells on the evolved task set
-	// whose stamped trial count diverges from the declared K —
-	// (0/K) for a task the arm never attempted. A partial or
-	// absent arm hasn't spent its full budget, so the gate
-	// refuses the claim rather than read a thinner baseline.
-	Incomplete []string
+	// IncompleteTasks lists best_of_k cells on the evolved task
+	// set that can't certify: stamped count diverging from the
+	// obligation as "traj (n/k)" — (0/K) for a task the arm
+	// never attempted — or holding no selected trial as
+	// "traj (n/k unselected)". Any entry refuses the claim
+	// rather than read a thinner baseline.
+	IncompleteTasks []string
 	// GateOK is the #405 pass-rate gate: evolved >= best_of_k on
 	// shared tasks, all best_of_k cells complete, at least one
 	// shared task, and the baseline spent at least what the arm
@@ -319,12 +350,14 @@ func CompareBestOfK(exp *Experiment, evolvedArm, bokArm, invocation string, recs
 		cmp.SpendRatio = cmp.BestOfKSpend / cmp.EvolvedSpend
 	}
 
-	// Completeness against the declared K over the whole evolved
-	// task set — an absent cell reads as (0/K) under the spec's K
-	// and blocks the claim the same as a thin one, so the gate
-	// can't certify on whichever subset happened to run. Partial
-	// cells off the evolved set don't block the read.
-	counts, declared := map[string]int{}, map[string]int{}
+	// Completeness over the whole evolved task set — an absent
+	// cell reads (0/K) under the spec's K, a thin one (n/K), and
+	// a stamped-but-unselectable one (n/K unselected): each
+	// blocks the claim so the gate can't certify on whichever
+	// subset ran or stayed readable. shared is the selected set
+	// here — ref tasks are all evolved. Off-set partial cells
+	// don't block the read.
+	var scoped []RunRecord
 	for _, rec := range recs {
 		if rec.Arm != bokArm || rec.Invocation != invocation || rec.BestOfK == nil {
 			continue
@@ -332,27 +365,11 @@ func CompareBestOfK(exp *Experiment, evolvedArm, bokArm, invocation string, recs
 		if _, ok := evolved[rec.TrajectoryID]; !ok {
 			continue
 		}
-		counts[rec.TrajectoryID]++
-		if rec.BestOfK.K > declared[rec.TrajectoryID] {
-			declared[rec.TrajectoryID] = rec.BestOfK.K
-		}
+		scoped = append(scoped, rec)
 	}
-	trajs := make([]string, 0, len(evolved))
-	for traj := range evolved {
-		trajs = append(trajs, traj)
-	}
-	sort.Strings(trajs)
-	for _, traj := range trajs {
-		k := declared[traj]
-		if k == 0 {
-			k = arm.BestOfK.K
-		}
-		if counts[traj] != k {
-			cmp.Incomplete = append(cmp.Incomplete,
-				fmt.Sprintf("%s (%d/%d)", traj, counts[traj], k))
-		}
-	}
-	cmp.GateOK = cmp.SharedTasks > 0 && len(cmp.Incomplete) == 0 &&
+	cmp.IncompleteTasks = bokIncompleteCells(scoped,
+		slices.Collect(maps.Keys(evolved)), arm.BestOfK.K, shared)
+	cmp.GateOK = cmp.SharedTasks > 0 && len(cmp.IncompleteTasks) == 0 &&
 		cmp.EvolvedPass >= cmp.BestOfKPass && cmp.SpendRatio >= 1
 	return cmp, nil
 }
