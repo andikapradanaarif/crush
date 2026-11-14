@@ -709,6 +709,16 @@ baseline spending at least what the arm under test did — a partial
 cell or an underspending baseline certifies a false win, so the
 claim refuses. Efficiency claims never consult it.
 
+A `decision_rule.primary` on `pass_rate` consults the gate for every
+baseline the records attest — declared specs plus stamped arms the
+manifest no longer names (the marks pin which baselines ran, so
+editing the arm out can't clear a bar after the fact). Each adds an
+independent criterion to the rule verdict: losing the selected-pass
+comparison at matched spend fails the rule, while a thin cell, an
+underspending baseline, or an unreadable arm is inconclusive — a
+baseline that can't certify either way can't be waved through. Any
+other primary metric — the efficiency claims — never consults it.
+
 The flag under test is
 ordinary config, so A/B needs no code plumbing — but both arms
 MUST run the same build under test (the

@@ -1339,3 +1339,186 @@ func TestRequiredTasksCluster_BetweenTaskVariance(t *testing.T) {
 	n, taskPriced = requiredTasksCluster([][]float64{{0.5}, {0.5}}, 0.10, 0.3)
 	require.True(t, n > 0 && !taskPriced)
 }
+
+// A pass_rate primary made while a matched-budget baseline ran must
+// clear it — pass@1 ≥ the selected trials' pass on shared tasks at
+// matched spend, else "beats control" certifies sampling (#405).
+// Efficiency claims never consult it; every baseline the records
+// attest is an independent bar.
+func TestCompare_DecisionRule_BestOfKGate(t *testing.T) {
+	t.Parallel()
+
+	co := map[string]any{"f": "c"}
+	to := map[string]any{"f": "t"}
+
+	passRule := &DecisionRule{
+		Hypothesis: "treatment passes more",
+		Primary: &RulePrimary{
+			Metric: "pass_rate", Arm: ArmTreatment, Vs: ArmControl,
+			Direction: PrimaryIncrease,
+		},
+	}
+	mkExp := func(bokArms []string, rule *DecisionRule) *Experiment {
+		arms := map[string]Arm{ArmControl: {}, ArmTreatment: {}}
+		for _, n := range bokArms {
+			arms[n] = Arm{BestOfK: &BestOfKSpec{K: 2, Selection: SelectionLastAttempt}}
+		}
+		return &Experiment{
+			Name:         "e",
+			Corpus:       []string{"t"},
+			Arms:         arms,
+			Harbor:       &HarborSpec{Dataset: "d", TaskIDs: []string{"t"}, K: 1, HarnessRevision: "x"},
+			DecisionRule: rule,
+		}
+	}
+	rec := func(arm string, idx int, out Outcome, input int, opts map[string]any) RunRecord {
+		r := compareRecord("e", "t", arm, "i1", idx, input, opts)
+		r.Outcome = out
+		return r
+	}
+	// Raw spend is input+output: compareRecord pins output at 100,
+	// so a baseline trial at input I spends I+100.
+	bok := func(arm string, idx int, out Outcome, input int) RunRecord {
+		r := rec(arm, idx, out, input, to)
+		r.BestOfK = &BestOfKMark{K: 2, Selection: SelectionLastAttempt}
+		return r
+	}
+	compare := func(t *testing.T, exp *Experiment, recs ...RunRecord) *CompareReport {
+		t.Helper()
+		dir := t.TempDir()
+		writeCompareRecords(t, dir, recs...)
+		r := seededRunner(dir)
+		require.NoError(t, r.persistAlarms(exp, "i1", Report{}, nil))
+		rep, err := r.Compare(exp, "i1")
+		require.NoError(t, err)
+		return rep
+	}
+
+	t.Run("satisfied: pass@1 clears the selected trials", func(t *testing.T) {
+		t.Parallel()
+		recs := []RunRecord{}
+		for i := 0; i < 3; i++ {
+			recs = append(recs,
+				rec(ArmControl, i, OutcomeFail, 100, co),
+				rec(ArmTreatment, i, OutcomePass, 100, to))
+		}
+		// Evolved 1.0, spend 600; baseline spends 800, selected
+		// trial failed → the bar is 0.
+		recs = append(recs,
+			bok("baseline", 0, OutcomeFail, 300),
+			bok("baseline", 1, OutcomeFail, 300))
+		rep := compare(t, mkExp([]string{"baseline"}, passRule), recs...)
+		require.Equal(t, "satisfied", rep.RuleResult)
+		require.Contains(t, rep.RuleNote, `best_of_k "baseline"`)
+		require.Contains(t, rep.RuleNote, "→ satisfied")
+	})
+
+	t.Run("not satisfied: sampling beat the arm under test", func(t *testing.T) {
+		t.Parallel()
+		recs := []RunRecord{}
+		for i := 0; i < 3; i++ {
+			out := OutcomePass
+			if i == 2 {
+				out = OutcomeFail // Evolved pass .67 < selected 1.0.
+			}
+			recs = append(recs,
+				rec(ArmControl, i, OutcomeFail, 100, co),
+				rec(ArmTreatment, i, out, 100, to))
+		}
+		recs = append(recs,
+			bok("baseline", 0, OutcomePass, 300), bok("baseline", 1, OutcomePass, 300))
+		rep := compare(t, mkExp([]string{"baseline"}, passRule), recs...)
+		require.Equal(t, "not satisfied", rep.RuleResult)
+		require.Contains(t, rep.RuleNote, "sampling beat the arm under test")
+	})
+
+	t.Run("inconclusive: thin cell and underspending baseline", func(t *testing.T) {
+		t.Parallel()
+		thin := []RunRecord{}
+		for i := 0; i < 3; i++ {
+			thin = append(thin,
+				rec(ArmControl, i, OutcomeFail, 100, co),
+				rec(ArmTreatment, i, OutcomePass, 100, to))
+		}
+		thin = append(thin, bok("baseline", 0, OutcomeFail, 300))
+		rep := compare(t, mkExp([]string{"baseline"}, passRule), thin...)
+		require.Equal(t, "inconclusive", rep.RuleResult)
+		require.Contains(t, rep.RuleNote, "t (1/2)")
+
+		under := []RunRecord{}
+		for i := 0; i < 3; i++ {
+			under = append(under,
+				rec(ArmControl, i, OutcomeFail, 100, co),
+				rec(ArmTreatment, i, OutcomePass, 100, to))
+		}
+		under = append(under,
+			bok("baseline", 0, OutcomePass, 20), bok("baseline", 1, OutcomePass, 20))
+		rep = compare(t, mkExp([]string{"baseline"}, passRule), under...)
+		require.Equal(t, "inconclusive", rep.RuleResult)
+		require.Contains(t, rep.RuleNote, "baseline underspent")
+	})
+
+	t.Run("efficiency claim never consults the baseline", func(t *testing.T) {
+		t.Parallel()
+		effRule := &DecisionRule{
+			Hypothesis: "treatment is cheaper",
+			Primary: &RulePrimary{
+				Metric: "tokens.input", Arm: ArmTreatment, Vs: ArmControl,
+				Direction: PrimaryDecrease, MinImprovement: 0.1,
+			},
+		}
+		recs := []RunRecord{}
+		for i := 0; i < 4; i++ {
+			recs = append(recs, rec(ArmControl, i, OutcomeFail, 100, co))
+		}
+		for i := 0; i < 4; i++ {
+			out := OutcomePass
+			if i == 3 {
+				out = OutcomeFail // Evolved pass .75 < selected 1.0.
+			}
+			recs = append(recs, rec(ArmTreatment, i, out, 50, to))
+		}
+		recs = append(recs, bok("baseline", 0, OutcomePass, 400), bok("baseline", 1, OutcomePass, 400))
+		rep := compare(t, mkExp([]string{"baseline"}, effRule), recs...)
+		require.Equal(t, "satisfied", rep.RuleResult)
+		require.NotContains(t, rep.RuleNote, "best_of_k")
+	})
+
+	t.Run("every baseline is an independent bar", func(t *testing.T) {
+		t.Parallel()
+		recs := []RunRecord{}
+		for i := 0; i < 3; i++ {
+			out := OutcomePass
+			if i == 2 {
+				out = OutcomeFail
+			}
+			recs = append(recs,
+				rec(ArmControl, i, OutcomeFail, 100, co),
+				rec(ArmTreatment, i, out, 100, to))
+		}
+		recs = append(recs,
+			bok("baseline", 0, OutcomeFail, 300), bok("baseline", 1, OutcomeFail, 300),
+			bok("baseline2", 0, OutcomePass, 300), bok("baseline2", 1, OutcomePass, 300))
+		rep := compare(t, mkExp([]string{"baseline", "baseline2"}, passRule), recs...)
+		require.Equal(t, "not satisfied", rep.RuleResult)
+		require.Contains(t, rep.RuleNote, `best_of_k "baseline"`)
+		require.Contains(t, rep.RuleNote, `best_of_k "baseline2"`)
+	})
+
+	t.Run("stamps outlive the manifest arm", func(t *testing.T) {
+		t.Parallel()
+		// The invocation ran a baseline the manifest no longer
+		// declares — its marks still bar the pass claim it ran
+		// against; a thin ghost cell keeps the read inconclusive.
+		recs := []RunRecord{}
+		for i := 0; i < 3; i++ {
+			recs = append(recs,
+				rec(ArmControl, i, OutcomeFail, 100, co),
+				rec(ArmTreatment, i, OutcomePass, 100, to))
+		}
+		recs = append(recs, bok("ghost", 0, OutcomeFail, 300))
+		rep := compare(t, mkExp(nil, passRule), recs...)
+		require.Equal(t, "inconclusive", rep.RuleResult)
+		require.Contains(t, rep.RuleNote, `best_of_k "ghost"`)
+	})
+}

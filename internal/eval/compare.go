@@ -663,7 +663,7 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 	if rule == nil && snap != nil {
 		rule = snap.DecisionRule
 	}
-	rep.evalDecisionRule(exp, rule, recs, ruleTrusted, ruleProvNote, replicates, rng)
+	rep.evalDecisionRule(exp, rule, recs, invocation, ruleTrusted, ruleProvNote, replicates, rng)
 	return rep, nil
 }
 
@@ -1565,7 +1565,7 @@ func (rep *CompareReport) applyAcceptance(exp *Experiment, recs []RunRecord, pri
 // is "inconclusive". An untrusted or unverifiable declaration is
 // inconclusive — the rule is the anti-post-hoc device, so reading
 // a drifted one defeats its purpose.
-func (rep *CompareReport) evalDecisionRule(exp *Experiment, rule *DecisionRule, recs []RunRecord, trusted bool, provNote string, replicates int, rng *rand.Rand) {
+func (rep *CompareReport) evalDecisionRule(exp *Experiment, rule *DecisionRule, recs []RunRecord, invocation string, trusted bool, provNote string, replicates int, rng *rand.Rand) {
 	if rule == nil {
 		rep.RuleResult = "absent"
 		rep.RuleNote = "no decision_rule declared — the run characterizes, it doesn't decide"
@@ -1599,6 +1599,26 @@ func (rep *CompareReport) evalDecisionRule(exp *Experiment, rule *DecisionRule, 
 			failed = true
 		case "inconclusive":
 			undecided = true
+		}
+	}
+	// A pass_rate claim made while a matched-budget baseline is
+	// declared must clear it: the claiming arm's pass@1 ≥ the
+	// baseline's selected pass at matched spend, else "beats
+	// control" certifies extra sampling, not a smarter harness
+	// (#405). Efficiency claims never consult it; every declared
+	// best_of_k arm is an independent bar, and stamped arms the
+	// manifest no longer names still bar the claim they ran against.
+	if p := rule.Primary; p != nil && p.Metric == "pass_rate" {
+		bokExp := expWithBaselines(exp, recs)
+		for _, bok := range declaredBestOfK(bokExp) {
+			v, det := rep.bokCriterion(bokExp, p.Arm, bok, invocation, recs)
+			bits = append(bits, det)
+			switch v {
+			case "failed":
+				failed = true
+			case "inconclusive":
+				undecided = true
+			}
 		}
 	}
 	switch {
@@ -1735,6 +1755,34 @@ func (rep *CompareReport) ruleCriterion(exp *Experiment, metric, arm, vs, dir st
 		return "satisfied", label("satisfied")
 	}
 	return "failed", label("failed")
+}
+
+// bokCriterion reads one declared best_of_k baseline for a pass-rate
+// claim and returns its verdict plus a terse detail. Thin evidence
+// is inconclusive — unselected or divergent cells and unmatched
+// spend mean the baseline can't certify either way; losing the
+// selected-pass comparison at matched spend is the only failure —
+// extra sampling beat the harness under test.
+func (rep *CompareReport) bokCriterion(exp *Experiment, evolvedArm, bokArm, invocation string, recs []RunRecord) (string, string) {
+	cmp, err := CompareBestOfK(exp, evolvedArm, bokArm, invocation, recs)
+	if err != nil {
+		return "inconclusive", fmt.Sprintf("best_of_k %q: unreadable baseline — %v", bokArm, err)
+	}
+	label := func(v string) string {
+		return fmt.Sprintf("best_of_k %q: pass@1 %.3f vs selected %.3f at spend ratio %.2f → %s",
+			bokArm, cmp.EvolvedPass, cmp.BestOfKPass, cmp.SpendRatio, v)
+	}
+	switch {
+	case len(cmp.IncompleteTasks) > 0:
+		return "inconclusive", label("inconclusive") + fmt.Sprintf(" (incomplete cells %v)", cmp.IncompleteTasks)
+	case cmp.SharedTasks == 0:
+		return "inconclusive", label("inconclusive") + " (no shared tasks)"
+	case cmp.SpendRatio < 1:
+		return "inconclusive", label("inconclusive") + " (baseline underspent)"
+	case cmp.EvolvedPass < cmp.BestOfKPass:
+		return "failed", label("failed") + " (sampling beat the arm under test)"
+	}
+	return "satisfied", label("satisfied")
 }
 
 func groupBy[S ~[]E, E any, K comparable](s S, key func(E) K) map[K]S {

@@ -84,6 +84,53 @@ func SelectBestOfK(recs []RunRecord) []RunRecord {
 	return out
 }
 
+// expWithBaselines returns exp with every stamped best_of_k arm in
+// recs guaranteed an Arms entry. Manifest-declared specs win — a
+// current spec can only raise the obligation; arms the manifest no
+// longer names get a spec rebuilt from their marks (stamped K,
+// stamped selection), since the records, not today's manifest, pin
+// which baselines ran. Gate arms never become baselines: a stamp
+// on one is corruption, not a bar.
+func expWithBaselines(exp *Experiment, recs []RunRecord) *Experiment {
+	out := exp
+	for _, rec := range recs {
+		if rec.BestOfK == nil || rec.Arm == ArmControl ||
+			rec.Arm == ArmTreatment || rec.Arm == ArmAA {
+			continue
+		}
+		if a, ok := exp.Arms[rec.Arm]; ok && a.BestOfK != nil {
+			continue
+		}
+		if out == exp {
+			clone := *exp
+			clone.Arms = maps.Clone(exp.Arms)
+			out = &clone
+		}
+		arm := out.Arms[rec.Arm]
+		if arm.BestOfK == nil {
+			arm.BestOfK = &BestOfKSpec{K: rec.BestOfK.K, Selection: rec.BestOfK.Selection}
+		} else {
+			arm.BestOfK.K = max(arm.BestOfK.K, rec.BestOfK.K)
+		}
+		out.Arms[rec.Arm] = arm
+	}
+	return out
+}
+
+// declaredBestOfK names every arm carrying a best_of_k spec,
+// sorted — a manifest may declare several baselines and each is an
+// independent bar a pass claim must clear.
+func declaredBestOfK(exp *Experiment) []string {
+	var names []string
+	for name, arm := range exp.Arms {
+		if arm.BestOfK != nil {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 // bokIncompleteCells audits each reference task's best-of-k cell
 // against its obligation — the larger of the stamped K and the
 // spec's: stamps attest the schedule, the spec floors it, so a
