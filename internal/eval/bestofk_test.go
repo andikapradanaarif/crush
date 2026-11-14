@@ -248,6 +248,39 @@ func TestCompareBestOfK(t *testing.T) {
 	require.Less(t, cmp.SpendRatio, 1.0)
 	require.False(t, cmp.GateOK)
 
+	// A task the bok arm never attempted is a (0/K) cell, not a
+	// quietly dropped one — the gate can't certify on the subset
+	// that happened to run. With no stamped cell the spec's K is
+	// the declared obligation.
+	recs5 := append(append([]RunRecord{}, evolved...),
+		bokRec("a", 0, OutcomeFail, 10), bokRec("a", 1, OutcomeFail, 10),
+		bokRec("b", 0, OutcomeFail, 20), bokRec("b", 1, OutcomeFail, 20),
+	)
+	for _, i := range []int{4, 5, 6, 7} {
+		recs5[i].BestOfK.K = 2
+	}
+	cmp, err = CompareBestOfK(exp, ArmTreatment, armBestOfK, "inv1", recs5)
+	require.NoError(t, err)
+	require.Equal(t, 2, cmp.SharedTasks)
+	require.Equal(t, []string{"c (0/3)"}, cmp.Incomplete)
+	require.False(t, cmp.GateOK) // Pass and spend clear — absence alone refuses.
+
+	// Records lacking token data can't satisfy "baseline spent at
+	// least what the arm under test did": zero measured evolved
+	// spend leaves SpendRatio 0, not a trivially-passing 0 >= 0.
+	tokenless := []RunRecord{
+		{TrajectoryID: "a", Arm: ArmTreatment, Invocation: "inv1", RunIndex: 0, Outcome: OutcomePass},
+	}
+	tokenlessBok := []RunRecord{
+		bokRec("a", 0, OutcomeFail, 0), bokRec("a", 1, OutcomeFail, 0),
+	}
+	tokenlessBok[0].BestOfK.K, tokenlessBok[1].BestOfK.K = 2, 2
+	cmp, err = CompareBestOfK(exp, ArmTreatment, armBestOfK, "inv1", append(tokenless, tokenlessBok...))
+	require.NoError(t, err)
+	require.Zero(t, cmp.EvolvedSpend)
+	require.Zero(t, cmp.SpendRatio)
+	require.False(t, cmp.GateOK)
+
 	// Wrong arm roles fail fast.
 	_, err = CompareBestOfK(exp, armBestOfK, ArmTreatment, "inv1", recs)
 	require.ErrorContains(t, err, "no best_of_k spec")

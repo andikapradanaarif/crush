@@ -186,7 +186,8 @@ type BestOfKComparison struct {
 	SharedTasks int
 	// EvolvedPass is pass@1 on shared tasks: per-task conclusive
 	// pass fraction averaged over tasks (replicates contribute
-	// their mean, not extra tasks).
+	// their mean, not extra tasks); a shared task whose evolved
+	// records are all inconclusive contributes 0 to the mean.
 	EvolvedPass float64
 	// BestOfKPass is selected-trial pass@1 on shared tasks.
 	BestOfKPass float64
@@ -198,8 +199,10 @@ type BestOfKComparison struct {
 	// SpendRatio is best_of_k spend / evolved spend — the budget
 	// match K was chosen for (≈1 is matched; <1 is an easy bar).
 	SpendRatio float64
-	// Incomplete lists best_of_k cells short of their declared K —
-	// a partial arm hasn't spent its full budget, so the gate
+	// Incomplete lists best_of_k cells on the evolved task set
+	// whose stamped trial count diverges from the declared K —
+	// (0/K) for a task the arm never attempted. A partial or
+	// absent arm hasn't spent its full budget, so the gate
 	// refuses the claim rather than read a thinner baseline.
 	Incomplete []string
 	// GateOK is the #405 pass-rate gate: evolved >= best_of_k on
@@ -252,18 +255,26 @@ func CompareBestOfK(exp *Experiment, evolvedArm, bokArm, invocation string, recs
 		}
 	}
 
+	// The shared set the read conditions on: evolved records on
+	// one side, a selected trial on the other. Both spend totals
+	// scope to it — a stamped-but-unselected cell is unreachable
+	// today, but scoping to sel keeps the two sides symmetric.
+	shared := map[string]bool{}
+	for traj := range evolved {
+		if _, ok := sel[traj]; ok {
+			shared[traj] = true
+		}
+	}
 	spend := bokSpendFunc(exp)
 	for _, rec := range recs {
-		if rec.Arm == bokArm && rec.Invocation == invocation && rec.BestOfK != nil {
-			if _, shared := evolved[rec.TrajectoryID]; shared {
-				cmp.BestOfKSpend += spend(rec)
-			}
+		if rec.Arm == bokArm && rec.Invocation == invocation && rec.BestOfK != nil && shared[rec.TrajectoryID] {
+			cmp.BestOfKSpend += spend(rec)
 		}
 	}
 	passSum := 0.0
 	for traj, erecs := range evolved {
-		brec, shared := sel[traj]
-		if !shared {
+		brec, ok := sel[traj]
+		if !ok {
 			continue
 		}
 		cmp.SharedTasks++
@@ -292,14 +303,17 @@ func CompareBestOfK(exp *Experiment, evolvedArm, bokArm, invocation string, recs
 		cmp.SpendRatio = cmp.BestOfKSpend / cmp.EvolvedSpend
 	}
 
-	// Completeness against the declared K — shared tasks only, so
-	// an off-comparison partial cell doesn't block the read.
+	// Completeness against the declared K over the whole evolved
+	// task set — an absent cell reads as (0/K) under the spec's K
+	// and blocks the claim the same as a thin one, so the gate
+	// can't certify on whichever subset happened to run. Partial
+	// cells off the evolved set don't block the read.
 	counts, declared := map[string]int{}, map[string]int{}
 	for _, rec := range recs {
 		if rec.Arm != bokArm || rec.Invocation != invocation || rec.BestOfK == nil {
 			continue
 		}
-		if _, shared := evolved[rec.TrajectoryID]; !shared {
+		if _, ok := evolved[rec.TrajectoryID]; !ok {
 			continue
 		}
 		counts[rec.TrajectoryID]++
@@ -307,18 +321,22 @@ func CompareBestOfK(exp *Experiment, evolvedArm, bokArm, invocation string, recs
 			declared[rec.TrajectoryID] = rec.BestOfK.K
 		}
 	}
-	trajs := make([]string, 0, len(counts))
-	for traj := range counts {
+	trajs := make([]string, 0, len(evolved))
+	for traj := range evolved {
 		trajs = append(trajs, traj)
 	}
 	sort.Strings(trajs)
 	for _, traj := range trajs {
-		if counts[traj] != declared[traj] {
+		k := declared[traj]
+		if k == 0 {
+			k = arm.BestOfK.K
+		}
+		if counts[traj] != k {
 			cmp.Incomplete = append(cmp.Incomplete,
-				fmt.Sprintf("%s (%d/%d)", traj, counts[traj], declared[traj]))
+				fmt.Sprintf("%s (%d/%d)", traj, counts[traj], k))
 		}
 	}
 	cmp.GateOK = cmp.SharedTasks > 0 && len(cmp.Incomplete) == 0 &&
-		cmp.EvolvedPass >= cmp.BestOfKPass && cmp.BestOfKSpend >= cmp.EvolvedSpend
+		cmp.EvolvedPass >= cmp.BestOfKPass && cmp.SpendRatio >= 1
 	return cmp, nil
 }
