@@ -474,6 +474,11 @@ func ValidateExperiment(e *Experiment) error {
 		if sources != 1 {
 			return fmt.Errorf("harbor task set: exactly one of tb21_split, task_ids, or sample must be set, got %d", sources)
 		}
+		for id, reason := range h.Exclude {
+			if strings.TrimSpace(reason) == "" {
+				return fmt.Errorf("harbor.exclude[%q]: a reason is required — an exclusion without one is just a skip", id)
+			}
+		}
 		if h.K < 1 {
 			return fmt.Errorf("harbor.k must be >= 1, got %d", h.K)
 		}

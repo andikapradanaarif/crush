@@ -37,13 +37,20 @@ type HarborPassNoise struct {
 	SolvedPerPass     []int     `json:"solved_per_pass"`
 	Delta             float64   `json:"delta"`
 	DeltaTrials       int       `json:"delta_trials"`
-	CMin              float64   `json:"c_min"`
-	TokensCV          float64   `json:"tokens_cv"`
-	TokensPerTrial    float64   `json:"tokens_per_trial"`
-	WallSPerTrial     float64   `json:"wall_s_per_trial"`
-	WallTrials        int       `json:"wall_trials"`
-	CostUSDPerTrial   *float64  `json:"cost_usd_per_trial,omitempty"`
-	CostTrials        int       `json:"cost_trials"`
+	// DeltaSolve is the conclusive-normalized δ — the spread of
+	// per-pass solve rates (solved/conclusive), so infra losses
+	// stop contaminating solve variance. The G1.d amendment
+	// (#489) prices against this quantity; Delta keeps measuring
+	// the all-in spread over scheduled trials for the
+	// instability read.
+	DeltaSolve      float64  `json:"delta_solve"`
+	CMin            float64  `json:"c_min"`
+	TokensCV        float64  `json:"tokens_cv"`
+	TokensPerTrial  float64  `json:"tokens_per_trial"`
+	WallSPerTrial   float64  `json:"wall_s_per_trial"`
+	WallTrials      int      `json:"wall_trials"`
+	CostUSDPerTrial *float64 `json:"cost_usd_per_trial,omitempty"`
+	CostTrials      int      `json:"cost_trials"`
 }
 
 // HarborPairNoise is the two-run paired characterization: σ_d is
@@ -164,6 +171,14 @@ func ComputePassNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 	out.PassRate = rateSum / float64(len(invs))
 	out.DeltaTrials = hi - lo
 	out.Delta = float64(out.DeltaTrials) / float64(out.TrialsPerPass)
+	// Conclusive-normalized δ: passes normalize by their own
+	// conclusive count, so a rate-limit-thinned pass can't inflate
+	// the solve-variance spread.
+	rlo, rhi := out.PassRates[0], out.PassRates[0]
+	for _, r := range out.PassRates {
+		rlo, rhi = min(rlo, r), max(rhi, r)
+	}
+	out.DeltaSolve = rhi - rlo
 	// c_min: relative spread of per-pass mean tokens — the
 	// efficiency rule's floor for "real" cost change.
 	mlo, mhi, msum := means[0], means[0], 0.0

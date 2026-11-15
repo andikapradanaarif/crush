@@ -216,6 +216,10 @@ type alarmSnapshot struct {
 	Saturated     []string `json:"saturated,omitempty"`
 	Tolerated     []string `json:"tolerated,omitempty"`
 	Skipped       []string `json:"skipped,omitempty"`
+	// ExcludedTasks records which declared tasks harbor.exclude
+	// struck at ingest time — the snapshot keeps the reduced
+	// corpus visible so a clean verdict shows what it forgave.
+	ExcludedTasks []string `json:"excluded_tasks,omitempty"`
 	NoopFlags     []string `json:"noop_flags,omitempty"`
 }
 

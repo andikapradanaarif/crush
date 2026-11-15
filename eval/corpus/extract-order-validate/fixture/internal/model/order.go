@@ -27,10 +27,10 @@ type Return struct {
 
 // Exchange is a request to swap items for others.
 type Exchange struct {
-	OrderID   string
-	Email     string
-	OldItems  []Item
-	NewItems  []Item
-	NewTotal  int // cents
-	Reason    string
+	OrderID  string
+	Email    string
+	OldItems []Item
+	NewItems []Item
+	NewTotal int // cents
+	Reason   string
 }

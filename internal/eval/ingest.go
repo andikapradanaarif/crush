@@ -43,6 +43,10 @@ type IngestReport struct {
 	Records    int      `json:"records"`
 	Tasks      []string `json:"tasks"`
 	Skipped    []string `json:"skipped"`
+	// Excluded names declared tasks struck by harbor.exclude — the
+	// coverage obligation the manifest forgave, shown beside
+	// Skipped so a clean read still shows its reduced corpus.
+	Excluded []string `json:"excluded,omitempty"`
 	// Pending names trial dirs skipped because they carry no terminal
 	// artifact — the trial is still in flight, not failed; ingest it
 	// again once harbor writes result.json or exception.txt.
@@ -216,6 +220,11 @@ func (r *Runner) IngestHarborTrials(ctx context.Context, exp *Experiment, arm, i
 	for _, id := range declared {
 		declaredSet[id] = true
 	}
+	for id := range exp.Harbor.Exclude {
+		if !declaredSet[id] {
+			return nil, fmt.Errorf("ingest: harbor.exclude names undeclared task %q — exclusions can only strike the declared set", id)
+		}
+	}
 	manifest, err := LoadFlagsManifest(r.EvalDir)
 	if err != nil {
 		return nil, err
@@ -331,10 +340,15 @@ func (r *Runner) IngestHarborTrials(ctx context.Context, exp *Experiment, arm, i
 		recorded[rec.TrajectoryID] = true
 	}
 	for _, id := range declared {
+		if exp.Harbor.Exclude[id] != "" {
+			rep.Excluded = append(rep.Excluded, id)
+			continue
+		}
 		if !recorded[id] {
 			rep.Skipped = append(rep.Skipped, id)
 		}
 	}
+	slices.Sort(rep.Excluded)
 	rep.Tasks = slices.Compact(slices.Clone(rep.Tasks))
 	return rep, nil
 }
@@ -671,10 +685,15 @@ func (r *Runner) persistIngestAlarms(exp *Experiment, invocation string, declare
 		Resample:     exp.Resample,
 	}
 	for _, id := range declared {
+		if exp.Harbor != nil && exp.Harbor.Exclude[id] != "" {
+			snap.ExcludedTasks = append(snap.ExcludedTasks, id)
+			continue
+		}
 		if !recorded[id] {
 			snap.Skipped = append(snap.Skipped, id)
 		}
 	}
+	slices.Sort(snap.ExcludedTasks)
 	dir := filepath.Join(r.EvalDir, "results", exp.Name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
