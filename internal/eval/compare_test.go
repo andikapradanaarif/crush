@@ -1432,6 +1432,29 @@ func TestCompare_DecisionRule_BestOfKGate(t *testing.T) {
 		require.Contains(t, rep.RuleNote, "sampling beat the arm under test")
 	})
 
+	t.Run("not satisfied: underspent and still won", func(t *testing.T) {
+		t.Parallel()
+		recs := []RunRecord{}
+		for i := 0; i < 3; i++ {
+			out := OutcomePass
+			if i == 2 {
+				out = OutcomeFail // Evolved pass .67 < selected 1.0.
+			}
+			recs = append(recs,
+				rec(ArmControl, i, OutcomeFail, 100, co),
+				rec(ArmTreatment, i, out, 100, to))
+		}
+		// A baseline that outpasses on less money (spend 300 vs
+		// 600) is the strongest falsification there is — it fails
+		// rather than reading thin.
+		recs = append(recs,
+			bok("baseline", 0, OutcomePass, 50),
+			bok("baseline", 1, OutcomePass, 50))
+		rep := compare(t, mkExp([]string{"baseline"}, passRule), recs...)
+		require.Equal(t, "not satisfied", rep.RuleResult)
+		require.Contains(t, rep.RuleNote, "sampling beat the arm under test")
+	})
+
 	t.Run("inconclusive: thin cell and underspending baseline", func(t *testing.T) {
 		t.Parallel()
 		thin := []RunRecord{}

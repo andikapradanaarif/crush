@@ -1601,17 +1601,18 @@ func (rep *CompareReport) evalDecisionRule(exp *Experiment, rule *DecisionRule, 
 			undecided = true
 		}
 	}
-	// A pass_rate claim made while a matched-budget baseline is
-	// declared must clear it: the claiming arm's pass@1 ≥ the
-	// baseline's selected pass at matched spend, else "beats
-	// control" certifies extra sampling, not a smarter harness
-	// (#405). Efficiency claims never consult it; every declared
-	// best_of_k arm is an independent bar, and stamped arms the
-	// manifest no longer names still bar the claim they ran against.
+	// A pass_rate claim made while a matched-budget baseline ran
+	// must clear it: the claiming arm's pass@1 ≥ the baseline's
+	// selected pass — at matched spend to win, on any budget to
+	// lose — else "beats control" certifies extra sampling, not a
+	// smarter harness (#405). Efficiency claims never consult it;
+	// every declared best_of_k arm is an independent bar, and
+	// stamped arms the manifest no longer names still bar the
+	// claim they ran against.
 	if p := rule.Primary; p != nil && p.Metric == "pass_rate" {
 		bokExp := expWithBaselines(exp, recs)
 		for _, bok := range declaredBestOfK(bokExp) {
-			v, det := rep.bokCriterion(bokExp, p.Arm, bok, invocation, recs)
+			v, det := bokCriterion(bokExp, p.Arm, bok, invocation, recs)
 			bits = append(bits, det)
 			switch v {
 			case "failed":
@@ -1758,12 +1759,13 @@ func (rep *CompareReport) ruleCriterion(exp *Experiment, metric, arm, vs, dir st
 }
 
 // bokCriterion reads one declared best_of_k baseline for a pass-rate
-// claim and returns its verdict plus a terse detail. Thin evidence
-// is inconclusive — unselected or divergent cells and unmatched
-// spend mean the baseline can't certify either way; losing the
-// selected-pass comparison at matched spend is the only failure —
-// extra sampling beat the harness under test.
-func (rep *CompareReport) bokCriterion(exp *Experiment, evolvedArm, bokArm, invocation string, recs []RunRecord) (string, string) {
+// claim and returns its verdict plus a terse detail. The pass
+// comparison is spend-blind: a baseline that outpasses the arm under
+// test falsifies the claim on any budget — underspent most of all.
+// Spend matching prices only the win: an underspending baseline that
+// loses can't certify the bar the claim needs, so it reads
+// inconclusive like thin or unreadable evidence.
+func bokCriterion(exp *Experiment, evolvedArm, bokArm, invocation string, recs []RunRecord) (string, string) {
 	cmp, err := CompareBestOfK(exp, evolvedArm, bokArm, invocation, recs)
 	if err != nil {
 		return "inconclusive", fmt.Sprintf("best_of_k %q: unreadable baseline — %v", bokArm, err)
@@ -1777,10 +1779,10 @@ func (rep *CompareReport) bokCriterion(exp *Experiment, evolvedArm, bokArm, invo
 		return "inconclusive", label("inconclusive") + fmt.Sprintf(" (incomplete cells %v)", cmp.IncompleteTasks)
 	case cmp.SharedTasks == 0:
 		return "inconclusive", label("inconclusive") + " (no shared tasks)"
-	case cmp.SpendRatio < 1:
-		return "inconclusive", label("inconclusive") + " (baseline underspent)"
 	case cmp.EvolvedPass < cmp.BestOfKPass:
 		return "failed", label("failed") + " (sampling beat the arm under test)"
+	case cmp.SpendRatio < 1:
+		return "inconclusive", label("inconclusive") + " (baseline underspent — the bar it prices wasn't matched)"
 	}
 	return "satisfied", label("satisfied")
 }

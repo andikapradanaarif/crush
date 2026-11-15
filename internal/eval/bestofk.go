@@ -103,11 +103,17 @@ func expWithBaselines(exp *Experiment, recs []RunRecord) *Experiment {
 		}
 		if out == exp {
 			clone := *exp
-			clone.Arms = maps.Clone(exp.Arms)
+			if clone.Arms = maps.Clone(exp.Arms); clone.Arms == nil {
+				clone.Arms = map[string]Arm{}
+			}
 			out = &clone
 		}
 		arm := out.Arms[rec.Arm]
 		if arm.BestOfK == nil {
+			// Marks carry the spec — stamped K, stamped selection;
+			// conflicting selection stamps keep the first seen,
+			// informational only since SelectBestOfK dispatches
+			// per-record.
 			arm.BestOfK = &BestOfKSpec{K: rec.BestOfK.K, Selection: rec.BestOfK.Selection}
 		} else {
 			arm.BestOfK.K = max(arm.BestOfK.K, rec.BestOfK.K)
