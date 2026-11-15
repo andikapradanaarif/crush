@@ -410,3 +410,15 @@ func TestCompareBestOfK_WeightedSpend(t *testing.T) {
 	require.InDelta(t, 2.0, cmp.SpendRatio, 1e-9)
 	require.True(t, cmp.GateOK) // Complete cell, pass 1>0, ratio 2.
 }
+
+// Hand-built experiments reach Compare unvalidated — a nil Arms map
+// plus stamped records must rebuild, not panic.
+func TestExpWithBaselines_NilArms(t *testing.T) {
+	t.Parallel()
+	exp := &Experiment{}
+	stamped := RunRecord{Arm: "ghost", BestOfK: &BestOfKMark{K: 2, Selection: SelectionLastAttempt}}
+	out := expWithBaselines(exp, []RunRecord{stamped})
+	require.Equal(t, 2, out.Arms["ghost"].BestOfK.K)
+	require.Equal(t, SelectionLastAttempt, out.Arms["ghost"].BestOfK.Selection)
+	require.Nil(t, exp.Arms) // The caller's map is never written.
+}
