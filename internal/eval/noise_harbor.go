@@ -153,7 +153,18 @@ func ComputePassNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 	if exp != nil && exp.Harbor != nil {
 		k = exp.Harbor.K
 	}
-	out.TrialsPerPass = len(tasks) * k
+	// Exclusions shrink the scheduled obligation too — an excluded
+	// task's k trials would only inflate the all-in δ denominator,
+	// biasing the instability read optimistic.
+	excluded := 0
+	if exp != nil && exp.Harbor != nil {
+		for id := range exp.Harbor.Exclude {
+			if slices.Contains(tasks, id) {
+				excluded++
+			}
+		}
+	}
+	out.TrialsPerPass = (len(tasks) - excluded) * k
 	if out.TrialsPerPass == 0 {
 		out.TrialsPerPass = maxConclusive
 	}

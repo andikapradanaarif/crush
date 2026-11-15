@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -220,7 +221,7 @@ func (r *Runner) IngestHarborTrials(ctx context.Context, exp *Experiment, arm, i
 	for _, id := range declared {
 		declaredSet[id] = true
 	}
-	for id := range exp.Harbor.Exclude {
+	for _, id := range slices.Sorted(maps.Keys(exp.Harbor.Exclude)) {
 		if !declaredSet[id] {
 			return nil, fmt.Errorf("ingest: harbor.exclude names undeclared task %q — exclusions can only strike the declared set", id)
 		}

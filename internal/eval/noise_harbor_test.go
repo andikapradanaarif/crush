@@ -280,3 +280,27 @@ func TestComputePassNoise_DeltaSolve(t *testing.T) {
 	require.InDelta(t, 0.0, n.Delta, 1e-9)
 	require.InDelta(t, 0.25, n.DeltaSolve, 1e-9)
 }
+
+// Excluded tasks shrink the scheduled-trials denominator — their k
+// can't inflate the all-in δ.
+func TestComputePassNoise_TrialsPerPassExcludes(t *testing.T) {
+	exp := harborNoiseExp()
+	exp.Harbor.Exclude = map[string]string{"t-b": "image defect"}
+	var recs []RunRecord
+	pattern := map[string][]Outcome{
+		"p1": {OutcomePass, OutcomePass, OutcomeFail, OutcomePass},
+		"p2": {OutcomePass, OutcomePass, OutcomePass, OutcomePass},
+	}
+	for inv, outs := range pattern {
+		for i, task := range []string{"t-a", "t-b"} {
+			for k := 0; k < 2; k++ {
+				recs = append(recs, noiseRec(inv, ArmControl, task, k, outs[i*2+k], 100))
+			}
+		}
+	}
+	n, err := ComputePassNoise(recs, exp, "", ArmControl, "tb21", []string{"p1", "p2"})
+	require.NoError(t, err)
+	require.Equal(t, 2, n.TrialsPerPass) // (2 tasks − 1 excluded) × k=2
+	require.Equal(t, 1, n.DeltaTrials)   // solved {3,4}
+	require.InDelta(t, 0.5, n.Delta, 1e-9)
+}
