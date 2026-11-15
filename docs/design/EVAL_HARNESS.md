@@ -721,6 +721,18 @@ inconclusive alongside thin cells and unreadable arms — a baseline
 that can't certify either way can't be waved through. Any other
 primary metric — the efficiency claims — never consults it.
 
+`harbor.exclude` strikes declared tasks from the coverage
+obligation, keyed by task id with a **required reason** — the G1.a
+amendment (#489): a benchmark defect like a reproducibly unbuildable
+image is an exclusion of record, not a silent skip. Excluded tasks
+leave the snapshot's skipped set (their absence no longer voids the
+invocation) and land on `excluded_tasks` instead, so a clean verdict
+still shows the reduced corpus it forgave. Keys must name declared
+tasks — checked at ingest, where the declared set resolves — and the
+task's own trials still ingest as ordinary records: they ran, and
+those records are the exclusion's evidence. An exclusion without a
+reason is refused at load — it's just a skip wearing a manifest.
+
 The flag under test is
 ordinary config, so A/B needs no code plumbing — but both arms
 MUST run the same build under test (the
@@ -1919,7 +1931,10 @@ block — `"harbor"` — from ingested external records (#404). Two
 measurement shapes, both over one arm's conclusive records:
 `--passes inv1,inv2,...` computes the multi-pass base floor
 (per-pass pass rates, **δ** = solved-count spread ÷
-trials-per-pass in both `delta` and `delta_trials` forms, **c_min**
+trials-per-pass in both `delta` and `delta_trials` forms, plus
+`delta_solve` — the conclusive-normalized spread of per-pass solve
+rates the G1.d amendment prices against, so a rate-limit-thinned
+pass stops contaminating solve variance, **c_min**
 = relative spread of per-pass mean tokens, across-task
 `tokens_cv`); `--pair invA[,invB]` computes the paired two-run
 read (**σ_d** = SD of per-task paired pass diffs, `tokens_sigma_d`,

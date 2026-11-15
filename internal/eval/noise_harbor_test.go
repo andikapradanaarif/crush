@@ -250,3 +250,57 @@ func TestCompare_OODUnderpoweredInconclusive(t *testing.T) {
 	require.Contains(t, rep.RuleNote, "underpowered")
 	require.Contains(t, rep.RuleNote, "3 tasks recorded")
 }
+
+// Conclusive-normalized δ (#489): identical solved counts on
+// different conclusive bases must not read as zero solve variance,
+// and a rate-limit-thinned pass can't inflate it either.
+func TestComputePassNoise_DeltaSolve(t *testing.T) {
+	exp := harborNoiseExp()
+	var recs []RunRecord
+	// p1 solves 3/4 conclusive, p2 solves 3/3 — the solved-count
+	// spread is 0 while the solve rates differ by .25.
+	pattern := map[string][]Outcome{
+		"p1": {OutcomePass, OutcomePass, OutcomeFail, OutcomePass},
+		"p2": {OutcomePass, OutcomePass, OutcomePass, OutcomeInconclusive},
+	}
+	for inv, outs := range pattern {
+		for i, task := range []string{"t-a", "t-b"} {
+			for k := 0; k < 2; k++ {
+				recs = append(recs, noiseRec(inv, ArmControl, task, k, outs[i*2+k], 100))
+			}
+		}
+	}
+	n, err := ComputePassNoise(recs, exp, "", ArmControl, "tb21", []string{"p1", "p2"})
+	require.NoError(t, err)
+	require.Equal(t, []int{4, 3}, n.ConclusivePerPass)
+	require.Equal(t, []int{3, 3}, n.SolvedPerPass)
+	require.InDelta(t, 0.75, n.PassRates[0], 1e-9)
+	require.InDelta(t, 1.0, n.PassRates[1], 1e-9)
+	require.Equal(t, 0, n.DeltaTrials)
+	require.InDelta(t, 0.0, n.Delta, 1e-9)
+	require.InDelta(t, 0.25, n.DeltaSolve, 1e-9)
+}
+
+// Excluded tasks shrink the scheduled-trials denominator — their k
+// can't inflate the all-in δ.
+func TestComputePassNoise_TrialsPerPassExcludes(t *testing.T) {
+	exp := harborNoiseExp()
+	exp.Harbor.Exclude = map[string]string{"t-b": "image defect"}
+	var recs []RunRecord
+	pattern := map[string][]Outcome{
+		"p1": {OutcomePass, OutcomePass, OutcomeFail, OutcomePass},
+		"p2": {OutcomePass, OutcomePass, OutcomePass, OutcomePass},
+	}
+	for inv, outs := range pattern {
+		for i, task := range []string{"t-a", "t-b"} {
+			for k := 0; k < 2; k++ {
+				recs = append(recs, noiseRec(inv, ArmControl, task, k, outs[i*2+k], 100))
+			}
+		}
+	}
+	n, err := ComputePassNoise(recs, exp, "", ArmControl, "tb21", []string{"p1", "p2"})
+	require.NoError(t, err)
+	require.Equal(t, 2, n.TrialsPerPass) // (2 tasks − 1 excluded) × k=2
+	require.Equal(t, 1, n.DeltaTrials)   // solved {3,4}
+	require.InDelta(t, 0.5, n.Delta, 1e-9)
+}

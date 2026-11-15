@@ -397,3 +397,62 @@ func TestRunExperiment_RefusesHarbor(t *testing.T) {
 	_, err := r.RunExperiment(context.Background(), exp)
 	require.ErrorContains(t, err, "records arrive via `crush eval ingest`")
 }
+
+// harbor.exclude strikes declared tasks from the coverage
+// obligation — their absence stops voiding the invocation while
+// the reduced corpus stays visible in the snapshot, and their
+// trials still ingest as ordinary records.
+func TestIngestHarborTrials_ExcludedTask(t *testing.T) {
+	dir := t.TempDir()
+	exp := harborExp("task-a", "task-b")
+	exp.Harbor.Exclude = map[string]string{"task-b": "image fails env build at 4x timeout — dataset defect"}
+	require.NoError(t, ValidateExperiment(exp))
+	r := seededRunner(dir)
+	ctx := context.Background()
+
+	jobs := t.TempDir()
+	dirs := []string{writeTrialDir(t, jobs, "ctrl-a", "task-a", 1.0, map[string]any{
+		"session_id": "s", "steps": 2, "model": "llm/test-model",
+		"tokens": map[string]any{"input": 100}, "resolved_options": map[string]any{},
+	})}
+	rep, err := r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", dirs, nil)
+	require.NoError(t, err)
+	require.Empty(t, rep.Skipped)
+	require.Equal(t, []string{"task-b"}, rep.Excluded)
+
+	data, err := os.ReadFile(filepath.Join(dir, "results", exp.Name, "report-inv1.json"))
+	require.NoError(t, err)
+	var snap alarmSnapshot
+	require.NoError(t, json.Unmarshal(data, &snap))
+	require.Empty(t, snap.Skipped)
+	require.Equal(t, []string{"task-b"}, snap.ExcludedTasks)
+
+	// The excluded task's trials still ingest — they ran; the
+	// record is the exclusion's own evidence.
+	dirs = []string{writeTrialDir(t, jobs, "ctrl-b", "task-b", 0.0, map[string]any{
+		"session_id": "s2", "steps": 1, "model": "llm/test-model",
+		"tokens": map[string]any{"input": 10}, "resolved_options": map[string]any{},
+	})}
+	rep, err = r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", dirs, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, rep.Records)
+
+	// An exclusion naming an undeclared task refuses at ingest —
+	// the declared set only resolves here.
+	bad := harborExp("task-a")
+	bad.Harbor.Exclude = map[string]string{"nope": "typo"}
+	_, err = r.IngestHarborTrials(ctx, bad, ArmControl, "inv1", dirs, nil)
+	require.ErrorContains(t, err, "undeclared task")
+}
+
+func TestValidateExperiment_HarborExcludeReason(t *testing.T) {
+	exp := harborExp("t1")
+	exp.Harbor.Exclude = map[string]string{"t1": ""}
+	require.ErrorContains(t, ValidateExperiment(exp), "reason is required")
+
+	exp.Harbor.Exclude = map[string]string{"t1": "   "}
+	require.ErrorContains(t, ValidateExperiment(exp), "reason is required")
+
+	exp.Harbor.Exclude = map[string]string{"t1": "image fails env build"}
+	require.NoError(t, ValidateExperiment(exp))
+}

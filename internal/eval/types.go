@@ -354,6 +354,16 @@ type HarborSpec struct {
 	// into env.crush_sha so two builds never pool under one
 	// invocation.
 	HarnessRevision string `json:"harness_revision"`
+	// Exclude strikes declared tasks from the coverage obligation,
+	// keyed by task id with the documented reason each was struck
+	// — the G1.a amendment (#489): a benchmark defect like a
+	// reproducibly unbuildable image is an exclusion of record,
+	// not a silent skip. Keys must name declared tasks and every
+	// reason is required — an exclusion without its reason is just
+	// a skip wearing a manifest. Excluded tasks' records still
+	// ingest — they ran — they just stop voiding invocations
+	// whose only gap is the struck cell.
+	Exclude map[string]string `json:"exclude,omitempty"`
 }
 
 // HarborSample is a seeded task-list draw for datasets without a
