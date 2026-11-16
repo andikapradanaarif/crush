@@ -506,6 +506,15 @@ All report per-trial tokens, wall time, and USD cost.
 					rep["declared_tasks"] = len(ids)
 					rep["powered"] = len(ids) >= sizing.Required
 				}
+				// The sized schedule's projected spend — required
+				// tasks × reps/arm × arms × measured mean cost —
+				// the R1.8 budget input.
+				if mean := n.HarborCostPerTrial(); mean > 0 {
+					k := max(exp.Harbor.K, 1)
+					trials := sizing.Required * k * len(exp.Arms)
+					rep["projected_trials"] = trials
+					rep["projected_spend_usd"] = float64(trials) * mean
+				}
 			} else {
 				rep["sizing"] = "no OOD decision rule declared"
 			}

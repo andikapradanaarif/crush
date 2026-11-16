@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/charmbracelet/crush/internal/db"
 )
 
 // writeTrialDir fixtures one harbor trial dir: result.json carrying
@@ -455,4 +457,127 @@ func TestValidateExperiment_HarborExcludeReason(t *testing.T) {
 
 	exp.Harbor.Exclude = map[string]string{"t1": "image fails env build"}
 	require.NoError(t, ValidateExperiment(exp))
+}
+
+// fixtureRates builds the pinned rate block the cost tests share —
+// USD per 1M tokens: input, output, cache_read, cache_write.
+func fixtureRates(input, output, cacheRead, cacheWrite float64) *TokenRates {
+	return &TokenRates{Input: &input, Output: &output, CacheRead: &cacheRead, CacheWrite: &cacheWrite}
+}
+
+// Harbor never reports a per-trial cost — ingest must price the
+// billed classes at the manifest's pinned route rates so a paid
+// pin's spend is measured (#505). The noise block's cost fields
+// populate off those records — cost_trials > 0 is the proof.
+func TestIngestHarborTrials_PinnedRateCost(t *testing.T) {
+	dir := t.TempDir()
+	exp := harborExp("task-a", "task-b")
+	exp.CostRates = fixtureRates(0.15, 0.60, 0.015, 0.30)
+	r := seededRunner(dir)
+	ctx := context.Background()
+	jobs := t.TempDir()
+	tel := map[string]any{
+		"session_id": "s1", "model": "llm/test-model",
+		"resolved_options": map[string]any{},
+		"tokens": map[string]any{
+			"input": 1000000, "output": 100000,
+			"cache_read": 10000000, "cache_write": 100000,
+		},
+	}
+	// 1M·0.15 + 0.1M·0.60 + 10M·0.015 + 0.1M·0.30 = $0.39.
+	d1 := writeTrialDir(t, jobs, "a", "task-a", 1.0, tel)
+	d2 := writeTrialDir(t, jobs, "b", "task-b", 1.0, tel)
+	rep, err := r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", []string{d1, d2}, nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, rep.Records)
+
+	recs, err := r.LoadExperimentRecords(exp.Name)
+	require.NoError(t, err)
+	for _, rec := range recs {
+		require.NotNil(t, rec.CostUSD)
+		require.InDelta(t, 0.39, *rec.CostUSD, 1e-9)
+		require.Equal(t, "cost_rates", rec.CheckDetail["cost_basis"])
+	}
+	cells, err := ComputeCellNoise(recs, exp, "", ArmControl, "tb21", []string{"inv1"})
+	require.NoError(t, err)
+	require.Equal(t, 2, cells.CostTrials)
+	require.NotNil(t, cells.CostUSDPerTrial)
+	require.InDelta(t, 0.39, *cells.CostUSDPerTrial, 1e-9)
+
+	// A harness-reported cost wins over the pinned computation —
+	// the rates are a fallback, not an override.
+	exp2 := harborExp("task-c")
+	exp2.CostRates = fixtureRates(0.15, 0.60, 0.015, 0.30)
+	d3 := writeTrialDir(t, jobs, "c", "task-c", 1.0, tel)
+	p := filepath.Join(d3, "result.json")
+	var m map[string]any
+	data, err := os.ReadFile(p)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(data, &m))
+	m["agent_result"] = map[string]any{"cost_usd": 9.99}
+	out, err := json.Marshal(m)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(p, out, 0o644))
+	r2 := seededRunner(t.TempDir())
+	_, err = r2.IngestHarborTrials(ctx, exp2, ArmControl, "inv1", []string{d3}, nil)
+	require.NoError(t, err)
+	recs2, err := r2.LoadExperimentRecords(exp2.Name)
+	require.NoError(t, err)
+	require.Len(t, recs2, 1)
+	require.InDelta(t, 9.99, *recs2[0].CostUSD, 1e-9)
+	require.Nil(t, recs2[0].CheckDetail["cost_basis"])
+}
+
+// The declared-rate block refuses partial or negative pins — a
+// missing rate would price its class free by default (#505).
+func TestValidateExperiment_CostRates(t *testing.T) {
+	valid := harborExp("t1")
+	valid.CostRates = fixtureRates(0.15, 0.6, 0.015, 0.3)
+	require.NoError(t, ValidateExperiment(valid))
+
+	free := harborExp("t1")
+	free.CostRates = fixtureRates(0, 0, 0, 0)
+	require.NoError(t, ValidateExperiment(free))
+
+	neg := harborExp("t1")
+	neg.CostRates = fixtureRates(-0.15, 0.6, 0.015, 0.3)
+	require.ErrorContains(t, ValidateExperiment(neg), "non-negative")
+
+	missing := harborExp("t1")
+	missing.CostRates = &TokenRates{}
+	require.ErrorContains(t, ValidateExperiment(missing), "every class")
+
+	partial := harborExp("t1")
+	partial.CostRates = &TokenRates{Input: new(float64)}
+	require.ErrorContains(t, ValidateExperiment(partial), "every class")
+}
+
+// The session's own catwalk-priced cost lands in check_detail as the
+// independent cross-check — read from the preserved artifact's
+// sessions.cost, never the primary value (#505).
+func TestIngestHarborTrials_DBCostCrossCheck(t *testing.T) {
+	dir := t.TempDir()
+	exp := harborExp("task-a")
+	r := seededRunner(dir)
+	ctx := context.Background()
+	jobs := t.TempDir()
+	tel := map[string]any{
+		"session_id": "s1", "model": "llm/test-model",
+		"resolved_options": map[string]any{},
+	}
+	d := writeTrialDir(t, jobs, "a", "task-a", 1.0, tel)
+	dataDir := filepath.Join(d, "agent", "crush-data")
+	conn, err := db.Connect(ctx, dataDir)
+	require.NoError(t, err)
+	insertSession(t, conn, "s1", "")
+	_, err = conn.ExecContext(ctx, `UPDATE sessions SET cost = 0.42 WHERE id = 's1'`)
+	require.NoError(t, err)
+	require.NoError(t, db.Release(dataDir))
+
+	_, err = r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", []string{d}, nil)
+	require.NoError(t, err)
+	recs, err := r.LoadExperimentRecords(exp.Name)
+	require.NoError(t, err)
+	require.Len(t, recs, 1)
+	require.InDelta(t, 0.42, recs[0].CheckDetail["db_cost_usd"], 1e-9)
 }

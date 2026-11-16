@@ -119,9 +119,31 @@ type HarborPairNoise struct {
 	// log-ratio of tokens — the efficiency sizing's noise input
 	// (#389a). Log domain makes the measure scale-free; pairs with
 	// a zero-token side are skipped (log undefined).
-	TokensLogRatioSD float64 `json:"tokens_log_ratio_sd"`
-	TokensPerTrial   float64 `json:"tokens_per_trial"`
-	WallSPerTrial    float64 `json:"wall_s_per_trial"`
+	TokensLogRatioSD float64  `json:"tokens_log_ratio_sd"`
+	TokensPerTrial   float64  `json:"tokens_per_trial"`
+	WallSPerTrial    float64  `json:"wall_s_per_trial"`
+	CostUSDPerTrial  *float64 `json:"cost_usd_per_trial,omitempty"`
+	CostTrials       int      `json:"cost_trials"`
+}
+
+// HarborCostPerTrial returns the measured mean trial cost the
+// harbor blocks recorded — the spend basis for schedule
+// projections. Prefers the cells read (most reps), then pair,
+// then passes; 0 means unmeasured.
+func (n *NoiseFile) HarborCostPerTrial() float64 {
+	if n == nil || n.Harbor == nil {
+		return 0
+	}
+	if b := n.Harbor.Cells; b != nil && b.CostUSDPerTrial != nil {
+		return *b.CostUSDPerTrial
+	}
+	if b := n.Harbor.OOD; b != nil && b.CostUSDPerTrial != nil {
+		return *b.CostUSDPerTrial
+	}
+	if b := n.Harbor.Passes; b != nil && b.CostUSDPerTrial != nil {
+		return *b.CostUSDPerTrial
+	}
+	return 0
 }
 
 // totalTokens is the unpriced tokens-to-done quantity — all billed
@@ -292,11 +314,15 @@ func ComputePairNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 	}
 	a, b := map[string]taskRec{}, map[string]taskRec{}
 	var wall, tok metricSample
+	var allCost []float64
 	taskTok := map[string]*metricSample{}
 	add := func(m map[string]taskRec, r *RunRecord) {
 		m[r.TrajectoryID] = taskRec{pass: r.Outcome == OutcomePass, tok: totalTokens(r)}
 		tok.add(totalTokens(r))
 		wall.add(r.DurationS)
+		if r.CostUSD != nil {
+			allCost = append(allCost, *r.CostUSD)
+		}
 		ts, ok := taskTok[r.TrajectoryID]
 		if !ok {
 			ts = &metricSample{}
@@ -381,6 +407,15 @@ func ComputePairNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 	if out.Tasks == 0 {
 		out.Tasks = pairs
 	}
+	if len(allCost) > 0 {
+		var s metricSample
+		for _, c := range allCost {
+			s.add(c)
+		}
+		m := s.Mean()
+		out.CostUSDPerTrial = &m
+	}
+	out.CostTrials = len(allCost)
 	return out, nil
 }
 

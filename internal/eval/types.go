@@ -241,6 +241,12 @@ type Experiment struct {
 	// class in uncached-input units — h for cache-read, o for output —
 	// pinned per model so weighted_cost is comparable across runs.
 	CostWeights *CostWeights `json:"cost_weights,omitempty"`
+	// CostRates pins the route's USD-per-1M-token prices — the basis
+	// cost_usd is computed from when the harness reports none.
+	// Catalog prices vary ~2× by route, so a catalog lookup would
+	// price a different route than the pin runs; declaring the rates
+	// keeps the spend math measured, not assumed.
+	CostRates *TokenRates `json:"cost_rates,omitempty"`
 	// Providers declares custom providers the experiment's model
 	// resolves against — written into the generated .crush.json so
 	// non-builtin providers (e.g. an OpenAI-compatible endpoint) work
@@ -631,6 +637,36 @@ func (w *CostWeights) check(name string) error {
 		return w.Generator.check(name + ".generator")
 	}
 	return nil
+}
+
+// TokenRates is USD per 1M tokens per billed class — the route's
+// pinned prices, not the relative weights cost_weights declares.
+// Pointers so an absent rate refuses at load rather than pricing a
+// missing class free by default.
+type TokenRates struct {
+	Input      *float64 `json:"input"`
+	Output     *float64 `json:"output"`
+	CacheRead  *float64 `json:"cache_read"`
+	CacheWrite *float64 `json:"cache_write"`
+}
+
+// check validates the rate block — every class pinned and
+// non-negative.
+func (r *TokenRates) check(name string) error {
+	if r.Input == nil || r.Output == nil || r.CacheRead == nil || r.CacheWrite == nil {
+		return fmt.Errorf("%s must pin every class (input, output, cache_read, cache_write) — a missing rate prices its spend free by default", name)
+	}
+	if *r.Input < 0 || *r.Output < 0 || *r.CacheRead < 0 || *r.CacheWrite < 0 {
+		return fmt.Errorf("%s rates must be non-negative (input=%g, output=%g, cache_read=%g, cache_write=%g)",
+			name, *r.Input, *r.Output, *r.CacheRead, *r.CacheWrite)
+	}
+	return nil
+}
+
+// price converts a trial's billed classes to USD.
+func (r *TokenRates) price(t TokenUsage) float64 {
+	return (float64(t.Input)**r.Input + float64(t.Output)**r.Output +
+		float64(t.CacheRead)**r.CacheRead + float64(t.CacheWrite)**r.CacheWrite) / 1e6
 }
 
 // Arm is a generated config fragment plus an optional arm-scoped
