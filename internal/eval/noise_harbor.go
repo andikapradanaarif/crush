@@ -107,6 +107,12 @@ type HarborCellNoise struct {
 	// runaway trial from dominating the read the way it does the
 	// arithmetic spread (#507).
 	TokensLogSigmaWithin float64 `json:"tokens_log_sigma_within"`
+	// TokensMeasurableCells counts token-bearing cells with ≥2
+	// reps — the only cells within token noise is estimable from.
+	// Zero means tokens_log_sigma_within = 0 is a structural
+	// artifact (no measurable cell), not a measured-flat floor —
+	// the same tell measurable_cells gives the pass side.
+	TokensMeasurableCells int `json:"token_measurable_cells"`
 	// TokensLogSigmaBetween is the between-task systematic SD of
 	// log tokens — the same moment decomposition as the pass part:
 	// Var(task log-means) minus the expected within contribution,
@@ -125,9 +131,13 @@ type HarborCellNoise struct {
 	DeltaExpected float64 `json:"delta_expected,omitempty"`
 	// CMinExpected is the model-estimated token c_min at the same
 	// schedule: exp(1.693·σ_logw/√(n·k)) − 1 — the expected
-	// 3-pass log spread expressed as a relative token change.
-	// Once a cells block exists, "real efficiency" reads price
-	// against this, not the arithmetic all-in c_min (#507).
+	// 3-pass log spread expressed as a relative token change
+	// *from the cell minimum* (exp(range)−1 ≈ (max−min)/min).
+	// The arithmetic c_min records (max−min)/mean instead, so at
+	// high σ the two reads diverge roughly 2× by construction —
+	// different denominators, not a bug. Once a cells block
+	// exists, "real efficiency" reads price against this, not
+	// the arithmetic all-in c_min (#507).
 	CMinExpected float64 `json:"c_min_expected,omitempty"`
 	// SigmaBetween is the between-task systematic SD — the spread
 	// of p̂ᵢ left after subtracting expected within noise.
@@ -577,6 +587,9 @@ func ComputeCellNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 			withinSS += (x - m) * (x - m)
 		}
 		withinDF += ki - 1
+		if ki >= 2 {
+			out.TokensMeasurableCells++
+		}
 	}
 	if withinDF > 0 && len(logMeans) >= 2 {
 		sigmaW2 := withinSS / withinDF

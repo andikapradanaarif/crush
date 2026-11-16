@@ -747,6 +747,12 @@ func TestLoadNoise_TokenFieldValidation(t *testing.T) {
 	write(t, `"delta_expected":-0.01`)
 	_, err = LoadNoise(dir)
 	require.ErrorContains(t, err, "expected reads")
+	write(t, `"tokens_geomean_per_trial":-5`)
+	_, err = LoadNoise(dir)
+	require.ErrorContains(t, err, "tokens_geomean_per_trial")
+	write(t, `"token_measurable_cells":-1`)
+	_, err = LoadNoise(dir)
+	require.ErrorContains(t, err, "measurable counts")
 	write(t, `"tokens_log_sigma_within":0.5,"tokens_log_sigma_between":0.3,"delta_expected":0.04,"c_min_expected":0.08`)
 	_, err = LoadNoise(dir)
 	require.NoError(t, err)
@@ -947,4 +953,30 @@ func TestCompare_StratifiedCIFixedTaskCoverage(t *testing.T) {
 	require.InDelta(t, 0.95, float64(coverS)/reps, 0.08)
 	require.Less(t, widthS, widthC)
 	require.GreaterOrEqual(t, coverC, coverS-10)
+}
+
+// token_measurable_cells counts only ≥2-rep token-bearing cells —
+// the tell that separates a measured-flat within σ from a matrix
+// with no measurable cell at all (#517 review).
+func TestComputeCellNoise_TokenMeasurableCells(t *testing.T) {
+	exp := harborNoiseExp()
+	exp.Harbor.TaskIDs = nil
+	exp.Harbor.TB21Split = ""
+	var recs []RunRecord
+	// t-a: 4 token reps (measurable); t-b: 4 token reps (measurable);
+	// t-c: 1 token rep + 3 zero-token fails (not measurable — the
+	// zero-token trials contribute no log value).
+	for i := range 4 {
+		recs = append(recs,
+			tokRec("inv1", "t-a", i, OutcomePass, 100+int64(i)),
+			tokRec("inv1", "t-b", i, OutcomePass, 200+int64(i)))
+	}
+	recs = append(recs, tokRec("inv1", "t-c", 0, OutcomePass, 300))
+	for i := 1; i < 4; i++ {
+		recs = append(recs, tokRec("inv1", "t-c", i, OutcomeFail, 0))
+	}
+	cells, err := ComputeCellNoise(recs, exp, "", ArmControl, "tb21", []string{"inv1"})
+	require.NoError(t, err)
+	require.Equal(t, 2, cells.TokensMeasurableCells)
+	require.Equal(t, 3, cells.MeasurableCells)
 }
