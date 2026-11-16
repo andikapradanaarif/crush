@@ -576,3 +576,68 @@ func TestMergeHarbor_CellsBlock(t *testing.T) {
 	require.ErrorContains(t, n.MergeHarbor(&NoiseHarbor{Cells: c}, false), "already recorded")
 	require.NoError(t, n.MergeHarbor(&NoiseHarbor{Cells: c}, true))
 }
+
+// A harbor block marked superseded measured a different system than
+// the protocol now declares — it stays recorded for audit but
+// nothing may size against it (#504).
+func TestHarborOODSizing_SupersededRefused(t *testing.T) {
+	exp := harborNoiseExp()
+	exp.DecisionRule = &DecisionRule{
+		Hypothesis: "h",
+		OOD:        true,
+		Guardrail:  &RuleGuardrail{Metric: "pass_rate", MinDelta: -0.05},
+	}
+	noise := &NoiseFile{Harbor: &NoiseHarbor{
+		Status: "superseded",
+		Note:   "pilot ran a different system",
+		OOD:    &HarborPairNoise{SigmaD: 0.56, TokensLogRatioSD: 0.5},
+	}}
+	_, err := HarborOODSizing(exp, noise)
+	require.ErrorContains(t, err, "superseded")
+	require.ErrorContains(t, err, "pilot ran a different system")
+
+	// Without the mark the same numbers size fine — the refusal is
+	// the standing, not the data.
+	noise.Harbor.Status = ""
+	sizing, err := HarborOODSizing(exp, noise)
+	require.NoError(t, err)
+	require.Equal(t, 776, sizing.NNonInferiority)
+}
+
+// Only known marks load — a hand-edited status typo must fail at
+// LoadNoise, not silently size.
+func TestLoadNoise_StatusValidation(t *testing.T) {
+	dir := t.TempDir()
+	write := func(t *testing.T, status string) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "noise.json"),
+			[]byte(`{"cv":{},"harbor":{"status":`+status+`,"ood":{"sigma_d":0.5}}}`), 0o644))
+	}
+	write(t, `"deprecated"`)
+	_, err := LoadNoise(dir)
+	require.ErrorContains(t, err, "harbor.status")
+	write(t, `"superseded"`)
+	_, err = LoadNoise(dir)
+	require.NoError(t, err)
+}
+
+// A fresh characterization replaces the block's standing — a merge
+// that lands a sub-block adopts the incoming status, lifting the
+// superseded mark; a metadata-only merge leaves it alone.
+func TestMergeHarbor_StatusAdoption(t *testing.T) {
+	n := &NoiseFile{Harbor: &NoiseHarbor{Status: "superseded", Note: "old system"}}
+	require.NoError(t, n.MergeHarbor(&NoiseHarbor{
+		Passes: &HarborPassNoise{Delta: 0.1},
+	}, true))
+	require.Empty(t, n.Harbor.Status)
+	require.Empty(t, n.Harbor.Note)
+
+	// A merge that itself declares superseded propagates the mark.
+	require.NoError(t, n.MergeHarbor(&NoiseHarbor{
+		Status: "superseded",
+		Note:   "bad again",
+		OOD:    &HarborPairNoise{SigmaD: 0.3},
+	}, true))
+	require.Equal(t, "superseded", n.Harbor.Status)
+	require.Equal(t, "bad again", n.Harbor.Note)
+}

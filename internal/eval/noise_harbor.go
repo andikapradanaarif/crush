@@ -17,10 +17,18 @@ import (
 
 // NoiseHarbor is the "harbor" block of eval/noise.json.
 type NoiseHarbor struct {
-	Model      string           `json:"model"`
-	MeasuredAt time.Time        `json:"measured_at"`
-	Passes     *HarborPassNoise `json:"passes,omitempty"`
-	OOD        *HarborPairNoise `json:"ood,omitempty"`
+	Model      string    `json:"model"`
+	MeasuredAt time.Time `json:"measured_at"`
+	// Status marks the block's standing: "superseded" means the
+	// runs it was computed from measured a different system than
+	// the protocol now declares (wrong pin, sampling not delivered)
+	// and nothing may size against it (#504). The numbers stay
+	// recorded for audit; a fresh characterization clears the mark.
+	Status string `json:"status,omitempty"`
+	// Note explains the status — why the block was superseded.
+	Note   string           `json:"note,omitempty"`
+	Passes *HarborPassNoise `json:"passes,omitempty"`
+	OOD    *HarborPairNoise `json:"ood,omitempty"`
 	// Cells is the repeated-cell decomposition (#489) — when
 	// recorded it supersedes ood.sigma_d in the sizing path: the
 	// components price against the declared k, not whatever the

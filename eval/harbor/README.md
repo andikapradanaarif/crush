@@ -125,6 +125,21 @@ trial in either arm lands on the snapshot's `skipped` list and
 voids the verdict (the corpus wasn't covered); a task with an
 infra-error trial gets an error record — it ran.
 
+**One Harbor job per arm — never ingest one job under two arms.**
+Each arm gets its own `harbor run` with its own rendered config;
+ingesting the same trial dir (or the same harbor trial id) under a
+second arm or a second invocation is refused — a duplicated job is a
+fake perfect A/A, not paired data (the pilot-b2 defect, #504).
+
+Ingest also refuses records that contradict the manifest's pins: a
+resolved `model` ≠ `model`, a resolved `model_small` ≠ `small_model`
+when declared, or — once the child reports sampling params — a
+request-side `temperature` ≠ the declared `temperature`. So the arm
+config must carry what the manifest declares: the `models` block's
+`large`/`small` pins **and** its `temperature` pin (declaring
+`"temperature": 0` in the manifest while the arm config sends none
+is exactly the pilot's silent-drift defect).
+
 ## Ops notes from the field
 
 - **LiteLLM's "could not resolve model" warning is cosmetic.** Harbor

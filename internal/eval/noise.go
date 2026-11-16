@@ -42,6 +42,13 @@ func LoadNoise(evalDir string) (*NoiseFile, error) {
 			return nil, fmt.Errorf("noise.json: cv[%q] must be > 0, got %g", metric, cv)
 		}
 	}
+	if h := n.Harbor; h != nil {
+		switch h.Status {
+		case "", "superseded":
+		default:
+			return nil, fmt.Errorf("noise.json: harbor.status %q is not a known mark — want \"superseded\" or absent", h.Status)
+		}
+	}
 	// The cells matrix is hand-editable like everything else —
 	// validate it so a malformed entry can't produce NaN σ's that
 	// slip past the fail-closed checks into a "powered" verdict.
@@ -94,6 +101,11 @@ func (n *NoiseFile) MergeHarbor(h *NoiseHarbor, force bool) error {
 	// didn't touch.
 	if h.Passes != nil || h.OOD != nil || h.Cells != nil {
 		n.Harbor.MeasuredAt = h.MeasuredAt
+		// A fresh characterization replaces the block's standing —
+		// its numbers come from the new run, so a "superseded" mark
+		// carried against the old measurement lifts (#504).
+		n.Harbor.Status = h.Status
+		n.Harbor.Note = h.Note
 	}
 	return nil
 }
@@ -241,6 +253,13 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 	}
 	if noise == nil || noise.Harbor == nil || (noise.Harbor.OOD == nil && noise.Harbor.Cells == nil) {
 		return nil, fmt.Errorf("OOD sizing needs measured harbor noise — run #404 characterization first (noise.json has no harbor.ood or harbor.cells block)")
+	}
+	if noise.Harbor.Status == "superseded" {
+		note := noise.Harbor.Note
+		if note == "" {
+			note = "the runs it was computed from measured a different system"
+		}
+		return nil, fmt.Errorf("OOD sizing: noise.json's harbor block is superseded — %s; re-run the characterization before pricing against it", note)
 	}
 	ood := noise.Harbor.OOD
 	out := &OODSizing{}
