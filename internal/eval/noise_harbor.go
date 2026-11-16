@@ -78,7 +78,11 @@ type HarborCellNoise struct {
 	RepsPerTask float64           `json:"reps_per_task"`
 	PassRate    float64           `json:"pass_rate"`
 	// SigmaWithin is the per-trial within-task Bernoulli SD —
-	// √(mean p̂ᵢ(1−p̂ᵢ)) — the coin-flip component reps shrink.
+	// √(mean p̂ᵢ(1−p̂ᵢ)·kᵢ/(kᵢ−1)) — the coin-flip component reps
+	// shrink. Cells with a single rep can't contribute (p̂∈{0,1}
+	// gives w=0 structurally), so an all-1-rep matrix records 0 —
+	// an artifact, not a measured noise floor; reps_per_task is the
+	// tell. The k/(k−1) factor undoes E[p̂(1−p̂)]'s plug-in bias.
 	SigmaWithin float64 `json:"sigma_within"`
 	// SigmaBetween is the between-task systematic SD — the spread
 	// of p̂ᵢ left after subtracting expected within noise.
@@ -86,6 +90,11 @@ type HarborCellNoise struct {
 	// which a base-arm characterization can't measure — a
 	// modeling choice, not a derivation (see HarborOODSizing).
 	SigmaBetween float64 `json:"sigma_between"`
+
+	TokensPerTrial  float64  `json:"tokens_per_trial"`
+	WallSPerTrial   float64  `json:"wall_s_per_trial"`
+	CostUSDPerTrial *float64 `json:"cost_usd_per_trial,omitempty"`
+	CostTrials      int      `json:"cost_trials"`
 }
 
 // HarborPairNoise is the two-run paired characterization: σ_d is
@@ -378,7 +387,8 @@ func ComputePairNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 //
 // and solves for σ²_between (floored at 0 — a corpus thinner than
 // its noise floor reports no systematic spread). Requires ≥2 tasks
-// with conclusive cells; the within SD alone needs only one rep.
+// with conclusive cells. The within weight uses the unbiased
+// p̂ᵢ(1−p̂ᵢ)·kᵢ/(kᵢ−1) form — the raw plug-in reads low by ~1/kᵢ.
 func ComputeCellNoise(records []RunRecord, exp *Experiment, evalDir, arm, dataset string, invs []string) (*HarborCellNoise, error) {
 	if exp != nil && exp.Arms[arm].BestOfK != nil {
 		return nil, fmt.Errorf("cell noise: arm %q declares best_of_k — trials are selection candidates, not replicates; use the task-level best_of_k read", arm)
@@ -391,6 +401,8 @@ func ComputeCellNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 		invSet[i] = true
 	}
 	cells := map[string][2]int{}
+	var wall, tok metricSample
+	var allCost []float64
 	for i := range records {
 		r := &records[i]
 		if r.Arm != arm || !invSet[r.Invocation] || !r.Outcome.Conclusive() {
@@ -402,27 +414,38 @@ func ComputeCellNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 			c[0]++
 		}
 		cells[r.TrajectoryID] = c
+		wall.add(r.DurationS)
+		tok.add(float64(r.Tokens.Input + r.Tokens.Output))
+		if r.CostUSD != nil {
+			allCost = append(allCost, *r.CostUSD)
+		}
 	}
 	if len(cells) < 2 {
 		return nil, fmt.Errorf("cell characterization: %d tasks with conclusive %s cells — the decomposition needs ≥2", len(cells), arm)
 	}
-	// p̂ᵢ per cell, Bernoulli weight wᵢ = p̂ᵢ(1−p̂ᵢ), and the
-	// within contribution wᵢ/kᵢ Var(p̂ᵢ) is expected to carry.
+	// p̂ᵢ per cell; wᵢ = p̂ᵢ(1−p̂ᵢ)·kᵢ/(kᵢ−1) is the unbiased
+	// Bernoulli weight, and wᵢ/kᵢ the within contribution that
+	// Var(p̂ᵢ) is expected to carry. Single-rep cells yield w=0
+	// structurally (p̂∈{0,1}) — they inform σ_between but the
+	// within estimate silently excludes them.
 	var phats []float64
 	var wSum, withinSum float64
 	for _, c := range cells {
-		p := float64(c[0]) / float64(c[1])
+		k := float64(c[1])
+		p := float64(c[0]) / k
 		phats = append(phats, p)
-		w := p * (1 - p)
-		wSum += w
-		withinSum += w / float64(c[1])
+		if k >= 2 {
+			w := p * (1 - p) * k / (k - 1)
+			wSum += w
+			withinSum += w / k
+		}
 	}
 	n := float64(len(cells))
-	mean := 0.0
+	var phat metricSample
 	for _, p := range phats {
-		mean += p
+		phat.add(p)
 	}
-	mean /= n
+	mean := phat.Mean()
 	varSum := 0.0
 	for _, p := range phats {
 		varSum += (p - mean) * (p - mean)
@@ -433,14 +456,25 @@ func ComputeCellNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 		betweenVar = 0
 	}
 	out := &HarborCellNoise{
-		Dataset:      dataset,
-		Tasks:        len(cells),
-		TasksSource:  "recorded",
-		Cells:        cells,
-		PassRate:     mean,
-		SigmaWithin:  math.Sqrt(wSum / n),
-		SigmaBetween: math.Sqrt(betweenVar),
+		Dataset:        dataset,
+		Tasks:          len(cells),
+		TasksSource:    "recorded",
+		Cells:          cells,
+		PassRate:       mean,
+		SigmaWithin:    math.Sqrt(wSum / n),
+		SigmaBetween:   math.Sqrt(betweenVar),
+		TokensPerTrial: tok.Mean(),
+		WallSPerTrial:  wall.Mean(),
 	}
+	if len(allCost) > 0 {
+		var s metricSample
+		for _, c := range allCost {
+			s.add(c)
+		}
+		m := s.Mean()
+		out.CostUSDPerTrial = &m
+	}
+	out.CostTrials = len(allCost)
 	for _, c := range cells {
 		out.RepsPerTask += float64(c[1])
 	}

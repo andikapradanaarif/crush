@@ -307,8 +307,9 @@ func TestComputePassNoise_TrialsPerPassExcludes(t *testing.T) {
 
 // The repeated-cell decomposition (#489): p̂ per cell, Var(p̂)
 // minus expected within noise = the systematic spread. Hand-worked
-// numbers: cells {4/4, 2/4, 0/4} → Var .25, within-mean .083,
-// within-contribution .0208 → σ_between √(0.229) ≈ .479.
+// numbers: cells {4/4, 2/4, 0/4} → Var .25; the unbiased within
+// weight .25·4/3 = 1/3 gives within-contribution 1/12 ÷ 3 ≈ .0278
+// → σ_between √(.222) ≈ .471, σ_within √(1/9) ≈ .333.
 func TestComputeCellNoise_Decomposition(t *testing.T) {
 	exp := harborNoiseExp()
 	var recs []RunRecord
@@ -332,8 +333,14 @@ func TestComputeCellNoise_Decomposition(t *testing.T) {
 	require.Equal(t, map[string][2]int{"t-a": {4, 4}, "t-b": {2, 4}, "t-c": {0, 4}}, n.Cells)
 	require.InDelta(t, 4.0, n.RepsPerTask, 1e-9)
 	require.InDelta(t, 0.5, n.PassRate, 1e-9)
-	require.InDelta(t, 0.2887, n.SigmaWithin, 1e-3)
-	require.InDelta(t, 0.4787, n.SigmaBetween, 1e-3)
+	require.InDelta(t, 0.3333, n.SigmaWithin, 1e-3)
+	require.InDelta(t, 0.4714, n.SigmaBetween, 1e-3)
+	// Per-trial economics aggregate over the same records — a
+	// k-rep schedule's price is the point of the read.
+	require.InDelta(t, 125.0, n.TokensPerTrial, 1e-9)
+	require.InDelta(t, 30.0, n.WallSPerTrial, 1e-9)
+	require.Equal(t, 12, n.CostTrials)
+	require.InDelta(t, 0.02, *n.CostUSDPerTrial, 1e-9)
 
 	// An identical-p̂ corpus carries no systematic spread — the
 	// observed variance is all coin flips and floors at 0.
@@ -350,7 +357,46 @@ func TestComputeCellNoise_Decomposition(t *testing.T) {
 	n, err = ComputeCellNoise(flat, exp, "", ArmControl, "tb21", []string{"inv1"})
 	require.NoError(t, err)
 	require.Equal(t, 0.0, n.SigmaBetween)
-	require.InDelta(t, 0.4330, n.SigmaWithin, 1e-3) // √(0.75·0.25)
+	require.InDelta(t, 0.5, n.SigmaWithin, 1e-3) // √(0.75·0.25·4/3)
+}
+
+// Unequal cell sizes exercise the per-cell kᵢ weights: t-a has 4
+// reps (2/4), t-b has 2 (1/2) — same p̂, different w·k/(k−1).
+func TestComputeCellNoise_UnequalReps(t *testing.T) {
+	exp := harborNoiseExp()
+	recs := []RunRecord{
+		noiseRec("inv1", ArmControl, "t-a", 0, OutcomePass, 100),
+		noiseRec("inv1", ArmControl, "t-a", 1, OutcomeFail, 100),
+		noiseRec("inv1", ArmControl, "t-a", 2, OutcomePass, 100),
+		noiseRec("inv1", ArmControl, "t-a", 3, OutcomeFail, 100),
+		noiseRec("inv2", ArmControl, "t-b", 0, OutcomePass, 100),
+		noiseRec("inv2", ArmControl, "t-b", 1, OutcomeFail, 100),
+	}
+	n, err := ComputeCellNoise(recs, exp, "", ArmControl, "tb21", []string{"inv1", "inv2"})
+	require.NoError(t, err)
+	require.Equal(t, map[string][2]int{"t-a": {2, 4}, "t-b": {1, 2}}, n.Cells)
+	require.InDelta(t, 3.0, n.RepsPerTask, 1e-9)
+	// w_a = .5·.5·4/3 = 1/3; w_b = .5·.5·2/1 = .5 → σ_within
+	// √((1/3+.5)/2) = √(.4167) ≈ .6455. Var(p̂)=0 → between 0.
+	require.InDelta(t, 0.6455, n.SigmaWithin, 1e-3)
+	require.Equal(t, 0.0, n.SigmaBetween)
+
+	// An all-1-rep matrix can't see within noise — w=0
+	// structurally, so every scrap of spread lands in σ_between.
+	// Recorded as an artifact, flagged by reps_per_task < 2.
+	var one []RunRecord
+	for i, task := range []string{"t-a", "t-b"} {
+		out := OutcomePass
+		if i == 1 {
+			out = OutcomeFail
+		}
+		one = append(one, noiseRec("inv1", ArmControl, task, 0, out, 100))
+	}
+	n, err = ComputeCellNoise(one, exp, "", ArmControl, "tb21", []string{"inv1"})
+	require.NoError(t, err)
+	require.InDelta(t, 1.0, n.RepsPerTask, 1e-9)
+	require.Equal(t, 0.0, n.SigmaWithin)
+	require.InDelta(t, 0.7071, n.SigmaBetween, 1e-3) // √(Var({1,0})) = √.5
 }
 
 // A recorded cells block supersedes raw σ_d in sizing: the
@@ -375,6 +421,7 @@ func TestHarborOODSizing_CellsPreferred(t *testing.T) {
 	// N = (1.6449+0.8416)²·.1525/.0025 ≈ 377.3 → 378.
 	require.Equal(t, 378, sizing.NNonInferiority)
 	require.Equal(t, 378, sizing.Required)
+	require.Equal(t, "cells", sizing.SigmaSource)
 
 	// Same manifest, no cells: the raw pair σ_d prices it — the
 	// measured-inflation the amendment exists to remove.
@@ -383,6 +430,7 @@ func TestHarborOODSizing_CellsPreferred(t *testing.T) {
 	}})
 	require.NoError(t, err)
 	require.Equal(t, 776, sizing.NNonInferiority)
+	require.Equal(t, "pair", sizing.SigmaSource)
 }
 
 // The decomposition's refusal paths: best_of_k arms (selection
@@ -394,15 +442,12 @@ func TestComputeCellNoise_Errors(t *testing.T) {
 	recs := []RunRecord{
 		noiseRec("inv1", ArmControl, "t-a", 0, OutcomePass, 100),
 	}
-	if _, err := ComputeCellNoise(recs, exp, "", "bok", "tb21", []string{"inv1"}); err == nil {
-		t.Fatal("best_of_k arm accepted")
-	}
-	if _, err := ComputeCellNoise(recs, exp, "", ArmControl, "tb21", nil); err == nil {
-		t.Fatal("empty invocations accepted")
-	}
-	if _, err := ComputeCellNoise(recs, exp, "", ArmControl, "tb21", []string{"inv1"}); err == nil {
-		t.Fatal("single-task cell matrix accepted")
-	}
+	_, err := ComputeCellNoise(recs, exp, "", "bok", "tb21", []string{"inv1"})
+	require.ErrorContains(t, err, "best_of_k")
+	_, err = ComputeCellNoise(recs, exp, "", ArmControl, "tb21", nil)
+	require.ErrorContains(t, err, "≥1 invocation")
+	_, err = ComputeCellNoise(recs, exp, "", ArmControl, "tb21", []string{"inv1"})
+	require.ErrorContains(t, err, "≥2")
 }
 
 // A cells-only noise block still sizes a pass_rate rule — the

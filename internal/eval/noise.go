@@ -161,6 +161,10 @@ type OODSizing struct {
 	// improvement; reported alongside the binding endpoints, binding
 	// only when it's the sole declared claim.
 	NSuperiority int `json:"n_superiority,omitempty"`
+	// SigmaSource names which read priced the pass endpoints —
+	// "cells" (the #489 decomposition) or "pair" (raw σ_d) — so an
+	// underpowered report's σ_d isn't attributed to the wrong read.
+	SigmaSource string `json:"sigma_source,omitempty"`
 	// Required is N_OOD = max of the required endpoints — and the
 	// superiority count when that's the only endpoint declared, so a
 	// superiority-only read can't sail through unpowered.
@@ -260,6 +264,7 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 	sigmaD := 0.0
 	if ood != nil {
 		sigmaD = ood.SigmaD
+		out.SigmaSource = "pair"
 	}
 	if c := noise.Harbor.Cells; c != nil {
 		kPlan := 1
@@ -268,6 +273,7 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 		}
 		within := 2 * c.SigmaWithin * c.SigmaWithin / float64(kPlan)
 		sigmaD = math.Hypot(c.SigmaBetween, math.Sqrt(within))
+		out.SigmaSource = "cells"
 	}
 	if p := rule.Primary; p != nil && p.Metric == "pass_rate" && p.MinImprovement > 0 {
 		if sigmaD <= 0 {

@@ -408,6 +408,7 @@ All report per-trial tokens, wall time, and USD cost.
 		dataset, _ := cmd.Flags().GetString("dataset")
 		passes, _ := cmd.Flags().GetString("passes")
 		pair, _ := cmd.Flags().GetString("pair")
+		cells, _ := cmd.Flags().GetString("cells")
 		model, _ := cmd.Flags().GetString("model")
 		write, _ := cmd.Flags().GetBool("write")
 		force, _ := cmd.Flags().GetBool("force")
@@ -428,7 +429,7 @@ All report per-trial tokens, wall time, and USD cost.
 		if pair != "" {
 			pairInvs = strings.Split(pair, ",")
 		}
-		if cells, _ := cmd.Flags().GetString("cells"); cells != "" {
+		if cells != "" {
 			cellInvs = strings.Split(cells, ",")
 		}
 		if len(passInvs) == 0 && len(pairInvs) == 0 && len(cellInvs) == 0 && !size {
@@ -473,8 +474,14 @@ All report per-trial tokens, wall time, and USD cost.
 			var n *eval.NoiseFile
 			if harbor.OOD != nil || harbor.Cells != nil {
 				var lerr error
-				if n, lerr = eval.LoadNoise(evalDir); lerr != nil || n.Harbor == nil {
-					n = &eval.NoiseFile{Harbor: &eval.NoiseHarbor{}}
+				if n, lerr = eval.LoadNoise(evalDir); lerr != nil {
+					// Corrupt noise.json surfaces identically to
+					// the measurement-free --size path — a fresh
+					// block can't launder a broken recording.
+					return lerr
+				}
+				if n.Harbor == nil {
+					n.Harbor = &eval.NoiseHarbor{}
 				}
 				if harbor.OOD != nil {
 					n.Harbor.OOD = harbor.OOD
