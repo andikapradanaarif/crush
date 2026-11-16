@@ -188,6 +188,11 @@ type OODSizing struct {
 	// endpoint — "cells" (the #507 log-token decomposition) or
 	// "pair" (the #404 pair read's tokens_log_ratio_sd).
 	SigmaSourceTokens string `json:"sigma_source_tokens,omitempty"`
+	// Estimand names the variance model the N's price —
+	// "conditional" (within-task noise only, the fixed-corpus
+	// read) or "population" (within plus the σ_between plug-in
+	// for effect heterogeneity, the generalization read) (#508).
+	Estimand string `json:"estimand,omitempty"`
 	// Required is N_OOD = max of the required endpoints — and the
 	// superiority count when that's the only endpoint declared, so a
 	// superiority-only read can't sail through unpowered.
@@ -244,7 +249,7 @@ func RequiredNSuperiority(sigmaD, delta float64) int {
 // errors identically — a genuinely zero-variance pair read would
 // need infinitely many tasks either way, so fail-closed is the
 // only honest answer.
-func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
+func HarborOODSizing(exp *Experiment, noise *NoiseFile, evalDir string) (*OODSizing, error) {
 	rule := exp.DecisionRule
 	if rule == nil || !rule.OOD {
 		return nil, nil
@@ -254,7 +259,8 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 	}
 	ood := noise.Harbor.OOD
 	cells := noise.Harbor.Cells
-	out := &OODSizing{}
+	estimand := resolvedEstimand(exp)
+	out := &OODSizing{Estimand: estimand}
 	sized := false
 	if p := rule.Primary; p != nil && p.Metric != "pass_rate" {
 		// The noise input is a SD of per-task log token ratios, so
@@ -271,18 +277,21 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 		// The cells log-token decomposition (#507) supersedes the
 		// pair read's tokens_log_ratio_sd when recorded — the same
 		// replacement as the pass leg: σ²_d,tok = σ²_between,tok +
-		// 2σ²_logw/k_plan, with σ²_between,tok plugging the
-		// unmeasurable effect-heterogeneity term until the estimand
-		// split lands. A cells block predating the token read
-		// (fields absent) falls back to the pair SD.
+		// 2σ²_logw/k_plan, where σ²_between,tok prices effect
+		// heterogeneity for the population estimand and drops out
+		// of the conditional (fixed-task) one (#508). A cells block
+		// predating the token read (fields absent) falls back to
+		// the pair SD.
 		cvD, tokSource := 0.0, ""
 		if cells != nil && (cells.TokensLogSigmaWithin > 0 || cells.TokensGeomeanPerTrial > 0) {
 			kPlan := 1
 			if exp.Harbor != nil && exp.Harbor.K > 0 {
 				kPlan = exp.Harbor.K
 			}
-			cvD = math.Hypot(cells.TokensLogSigmaBetween,
-				math.Sqrt(2*cells.TokensLogSigmaWithin*cells.TokensLogSigmaWithin/float64(kPlan)))
+			cvD = math.Sqrt(2 * cells.TokensLogSigmaWithin * cells.TokensLogSigmaWithin / float64(kPlan))
+			if estimand == EstimandPopulation {
+				cvD = math.Hypot(cells.TokensLogSigmaBetween, cvD)
+			}
 			tokSource = "cells"
 		} else if ood != nil && ood.TokensLogRatioSD > 0 {
 			cvD = ood.TokensLogRatioSD
@@ -298,16 +307,19 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 	// The repeated-cell decomposition (#489) supersedes raw σ_d
 	// when recorded — with a caveat worth being honest about. The
 	// sized estimand is the cross-arm per-task effect diff, whose
-	// variance is Var(effect_i) + 2·σ²_within/k; σ²_between
-	// (single-arm task-difficulty spread) is a *plug-in* for the
-	// unmeasurable effect heterogeneity, sitting between the
-	// perfectly-paired model (0) and independent draws
-	// (2·σ²_between). Defensible and usually conservative, not a
-	// derivation: heterogeneous effects on uniform-difficulty tasks
-	// would undersize. The pair read can't help either — its σ²_d
-	// cancels task difficulty by construction (≈2σ²_within + drift).
-	// The ×2 on σ²_within is a second plug-in: it assumes the
-	// treatment arm's within noise equals the measured base
+	// variance is Var(effect_i) + 2·σ²_within/k. The conditional
+	// (fixed-task) estimand's variance is the second term alone:
+	// the task set is declared, so effect heterogeneity is not
+	// estimation noise (#508). The population estimand prices
+	// Var(effect_i) with the σ²_between plug-in (single-arm
+	// task-difficulty spread), sitting between the perfectly-
+	// paired model (0) and independent draws (2·σ²_between).
+	// Defensible and usually conservative, not a derivation:
+	// heterogeneous effects on uniform-difficulty tasks would
+	// undersize. The pair read can't help either — its σ²_d
+	// cancels task difficulty by construction (≈2σ²_within +
+	// drift). The ×2 on σ²_within is a second plug-in: it assumes
+	// the treatment arm's within noise equals the measured base
 	// arm's — symmetric flips are the honest default, but a
 	// treatment that changes flip rates shifts it either way.
 	sigmaD := 0.0
@@ -321,8 +333,10 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 		if exp.Harbor != nil && exp.Harbor.K > 0 {
 			kPlan = exp.Harbor.K
 		}
-		within := 2 * cells.SigmaWithin * cells.SigmaWithin / float64(kPlan)
-		sigmaD = math.Hypot(cells.SigmaBetween, math.Sqrt(within))
+		sigmaD = math.Sqrt(2 * cells.SigmaWithin * cells.SigmaWithin / float64(kPlan))
+		if estimand == EstimandPopulation {
+			sigmaD = math.Hypot(cells.SigmaBetween, sigmaD)
+		}
 		sigmaSource = "cells"
 	}
 	passLeg := (rule.Primary != nil && rule.Primary.Metric == "pass_rate" && rule.Primary.MinImprovement > 0) ||
@@ -370,7 +384,121 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 		// vacuous for exactly the claim being powered.
 		out.Required = out.NSuperiority
 	}
+	// The declared task set is the ceiling on any schedule: an OOD
+	// claim whose required count exceeds the split's non-excluded
+	// tasks is unpowerable by construction, at any k — refuse at
+	// sizing time rather than letting the read ship inconclusive
+	// (#508). Unresolvable declarations skip the gate; compare's
+	// recorded-task check still applies downstream.
+	if exp.Harbor != nil {
+		if ids, err := HarborTaskSet(evalDir, exp.Harbor); err == nil {
+			available := len(ids)
+			for _, id := range ids {
+				if _, struck := exp.Harbor.Exclude[id]; struck {
+					available--
+				}
+			}
+			if out.Required > available {
+				return nil, fmt.Errorf(
+					"OOD sizing: the rule needs %d tasks but the declared %s has %d non-excluded — "+
+						"the claim is unpowerable at any schedule (estimand %s); tighten the declared endpoints or the margin",
+					out.Required, harborTaskSetName(exp.Harbor), available, estimand)
+			}
+		}
+	}
 	return out, nil
+}
+
+// HarborMDE is the per-estimand MDE row of the noise report —
+// the effect each endpoint can resolve at the declared (n, k)
+// schedule under the measured noise (#508). PassMDE* are absolute
+// pass-rate differences; TokenMDE is the token reduction fraction
+// 1−e^−Δc the efficiency read resolves.
+type HarborMDE struct {
+	PassMDESuperiority    float64 `json:"pass_mde_superiority,omitempty"`
+	PassMDENonInferiority float64 `json:"pass_mde_non_inferiority,omitempty"`
+	TokenMDEReduction     float64 `json:"token_mde_reduction,omitempty"`
+	SigmaDPass            float64 `json:"sigma_d_pass,omitempty"`
+	SigmaDTokens          float64 `json:"sigma_d_tokens,omitempty"`
+	SigmaSource           string  `json:"sigma_source,omitempty"`
+}
+
+// HarborMDEReport inverts the sizing formulas at a declared
+// schedule: for n tasks at k reps each, what effect size does each
+// endpoint resolve at α=.05/power .8? Both estimands report —
+// the conditional row is the fixed-corpus answer and the
+// population row the generalization one, so a dev-split schedule
+// prints the margin it actually carries next to the claim a
+// sealed run would need. n≤0 or unmeasured noise prices nothing.
+func HarborMDEReport(exp *Experiment, noise *NoiseFile, n, k int) map[string]*HarborMDE {
+	if n <= 0 || noise == nil || noise.Harbor == nil {
+		return nil
+	}
+	if k <= 0 && exp.Harbor != nil {
+		k = exp.Harbor.K
+	}
+	if k <= 0 {
+		k = 1
+	}
+	ood := noise.Harbor.OOD
+	cells := noise.Harbor.Cells
+	out := map[string]*HarborMDE{}
+	for _, est := range []string{EstimandConditional, EstimandPopulation} {
+		row := &HarborMDE{}
+		// Pass σ_d: the cells decomposition under this estimand's
+		// variance model, else the measured pair read which is
+		// already within-dominated.
+		if cells != nil && cells.MeasurableCells > 0 && cells.SigmaWithin > 0 {
+			sd := math.Sqrt(2 * cells.SigmaWithin * cells.SigmaWithin / float64(k))
+			if est == EstimandPopulation {
+				sd = math.Hypot(cells.SigmaBetween, sd)
+			}
+			row.SigmaDPass, row.SigmaSource = sd, "cells"
+		} else if ood != nil && ood.SigmaD > 0 {
+			row.SigmaDPass, row.SigmaSource = ood.SigmaD, "pair"
+		}
+		if row.SigmaDPass > 0 {
+			row.PassMDESuperiority = (zAlphaTwoSided + zBeta80) * row.SigmaDPass / math.Sqrt(float64(n))
+			row.PassMDENonInferiority = (zAlphaOneSided + zBeta80) * row.SigmaDPass / math.Sqrt(float64(n))
+		}
+		// Token σ_d: the cells log decomposition, else the pair
+		// read's tokens_log_ratio_sd.
+		var td float64
+		if cells != nil && cells.TokensLogSigmaWithin > 0 {
+			td = math.Sqrt(2 * cells.TokensLogSigmaWithin * cells.TokensLogSigmaWithin / float64(k))
+			if est == EstimandPopulation {
+				td = math.Hypot(cells.TokensLogSigmaBetween, td)
+			}
+		} else if ood != nil && ood.TokensLogRatioSD > 0 {
+			td = ood.TokensLogRatioSD
+		}
+		if td > 0 {
+			row.SigmaDTokens = td
+			deltaC := (zAlphaTwoSided + zBeta80) * td / math.Sqrt(float64(n))
+			row.TokenMDEReduction = 1 - math.Exp(-deltaC)
+		}
+		if row.SigmaDPass > 0 || row.SigmaDTokens > 0 {
+			out[est] = row
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// harborTaskSetName labels the declared task-set source for the
+// power-gate refusal — the split, the explicit list, or the
+// seeded sample.
+func harborTaskSetName(spec *HarborSpec) string {
+	switch {
+	case spec.TB21Split != "":
+		return "tb21 " + spec.TB21Split + " split"
+	case spec.Sample != nil:
+		return "sampled task set"
+	default:
+		return "task_ids set"
+	}
 }
 
 // checkPower is the scheduling refusal: an experiment with a

@@ -2,6 +2,7 @@ package eval
 
 import (
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"testing"
@@ -162,6 +163,9 @@ func TestOODSizing_PriorReproduction(t *testing.T) {
 
 func TestHarborOODSizing_Endpoints(t *testing.T) {
 	exp := harborNoiseExp()
+	// Formula-only: no resolvable task set, so the declared-split
+	// power gate stays out of the pricing checks.
+	exp.Harbor.TaskIDs = nil
 	exp.DecisionRule = &DecisionRule{
 		Hypothesis: "treatment cuts tokens at equal pass",
 		Primary:    &RulePrimary{Metric: "tokens_to_done", Arm: ArmTreatment, Vs: ArmControl, Direction: PrimaryDecrease, MinImprovement: 0.10},
@@ -169,14 +173,14 @@ func TestHarborOODSizing_Endpoints(t *testing.T) {
 		OOD:        true,
 	}
 	// No measured block → unpowerable, fails closed.
-	_, err := HarborOODSizing(exp, &NoiseFile{})
+	_, err := HarborOODSizing(exp, &NoiseFile{}, "")
 	require.ErrorContains(t, err, "harbor")
 
 	noise := &NoiseFile{Harbor: &NoiseHarbor{OOD: &HarborPairNoise{
 		SigmaD:           0.165,
 		TokensLogRatioSD: 0.20,
 	}}}
-	s, err := HarborOODSizing(exp, noise)
+	s, err := HarborOODSizing(exp, noise, "")
 	require.NoError(t, err)
 	require.Equal(t, 32, s.NEfficiency)
 	require.InDelta(t, 187, float64(s.NNonInferiority), 1)
@@ -184,7 +188,7 @@ func TestHarborOODSizing_Endpoints(t *testing.T) {
 
 	// Non-OOD rules return nil — nothing to size.
 	exp.DecisionRule.OOD = false
-	s, err = HarborOODSizing(exp, noise)
+	s, err = HarborOODSizing(exp, noise, "")
 	require.NoError(t, err)
 	require.Nil(t, s)
 
@@ -197,7 +201,7 @@ func TestHarborOODSizing_Endpoints(t *testing.T) {
 		Primary:    &RulePrimary{Metric: "pass_rate", Arm: ArmTreatment, Vs: ArmControl, Direction: PrimaryIncrease, MinImprovement: 0.04},
 		OOD:        true,
 	}
-	s, err = HarborOODSizing(exp, noise)
+	s, err = HarborOODSizing(exp, noise, "")
 	require.NoError(t, err)
 	require.Zero(t, s.NEfficiency)
 	require.Zero(t, s.NNonInferiority)
@@ -224,6 +228,10 @@ func TestValidateExperiment_OODNeedsSizableEndpoint(t *testing.T) {
 func TestCompare_OODUnderpoweredInconclusive(t *testing.T) {
 	dir := t.TempDir()
 	exp := harborNoiseExp()
+	// Keep the recorded-count check in front: an unresolvable
+	// declaration skips the declared-split gate, so the verdict
+	// still prices what was actually recorded.
+	exp.Harbor.TaskIDs = nil
 	exp.Resample = ResampleCluster
 	exp.DecisionRule = &DecisionRule{
 		Hypothesis: "treatment cuts tokens at equal pass",
@@ -462,6 +470,7 @@ func TestLoadNoise_CellValidation(t *testing.T) {
 // oversizes massively (#489).
 func TestHarborOODSizing_CellsPreferred(t *testing.T) {
 	exp := harborNoiseExp()
+	exp.Harbor.TaskIDs = nil
 	exp.Harbor.K = 8 // The planned repeated-cell schedule.
 	exp.DecisionRule = &DecisionRule{
 		Hypothesis: "h",
@@ -472,7 +481,7 @@ func TestHarborOODSizing_CellsPreferred(t *testing.T) {
 		OOD:   &HarborPairNoise{SigmaD: 0.56, TokensLogRatioSD: 0.5},
 		Cells: &HarborCellNoise{SigmaBetween: 0.30, SigmaWithin: 0.50, MeasurableCells: 8},
 	}}
-	sizing, err := HarborOODSizing(exp, noise)
+	sizing, err := HarborOODSizing(exp, noise, "")
 	require.NoError(t, err)
 	// σ_eff² = .30² + 2·.50²/8 = .1525 → σ_eff ≈ .3905.
 	// N = (1.6449+0.8416)²·.1525/.0025 ≈ 377.3 → 378.
@@ -484,7 +493,7 @@ func TestHarborOODSizing_CellsPreferred(t *testing.T) {
 	// measured-inflation the amendment exists to remove.
 	sizing, err = HarborOODSizing(exp, &NoiseFile{Harbor: &NoiseHarbor{
 		OOD: &HarborPairNoise{SigmaD: 0.56, TokensLogRatioSD: 0.5},
-	}})
+	}}, "")
 	require.NoError(t, err)
 	require.Equal(t, 776, sizing.NNonInferiority)
 	require.Equal(t, "pair", sizing.SigmaSource)
@@ -512,6 +521,7 @@ func TestComputeCellNoise_Errors(t *testing.T) {
 // pair read, so --cells --size can't fail closed on pass claims.
 func TestHarborOODSizing_CellsOnly(t *testing.T) {
 	exp := harborNoiseExp()
+	exp.Harbor.TaskIDs = nil
 	exp.Harbor.K = 8
 	exp.DecisionRule = &DecisionRule{
 		Hypothesis: "h",
@@ -520,7 +530,7 @@ func TestHarborOODSizing_CellsOnly(t *testing.T) {
 	}
 	sizing, err := HarborOODSizing(exp, &NoiseFile{Harbor: &NoiseHarbor{
 		Cells: &HarborCellNoise{SigmaBetween: 0.30, SigmaWithin: 0.50, MeasurableCells: 8},
-	}})
+	}}, "")
 	require.NoError(t, err)
 	require.Equal(t, 378, sizing.NNonInferiority)
 
@@ -533,7 +543,7 @@ func TestHarborOODSizing_CellsOnly(t *testing.T) {
 	}
 	_, err = HarborOODSizing(exp, &NoiseFile{Harbor: &NoiseHarbor{
 		Cells: &HarborCellNoise{SigmaBetween: 0.30, SigmaWithin: 0.50, MeasurableCells: 8},
-	}})
+	}}, "")
 	require.ErrorContains(t, err, "tokens_log_ratio_sd")
 }
 
@@ -544,6 +554,7 @@ func TestHarborOODSizing_CellsOnly(t *testing.T) {
 // degenerate read can't be downgraded around.
 func TestHarborOODSizing_AllOneRepCellsRefused(t *testing.T) {
 	exp := harborNoiseExp()
+	exp.Harbor.TaskIDs = nil
 	exp.DecisionRule = &DecisionRule{
 		Hypothesis: "h",
 		OOD:        true,
@@ -553,7 +564,7 @@ func TestHarborOODSizing_AllOneRepCellsRefused(t *testing.T) {
 		OOD:   &HarborPairNoise{SigmaD: 0.56, TokensLogRatioSD: 0.5},
 		Cells: &HarborCellNoise{SigmaBetween: 0.70, SigmaWithin: 0, MeasurableCells: 0, RepsPerTask: 1},
 	}}
-	_, err := HarborOODSizing(exp, noise)
+	_, err := HarborOODSizing(exp, noise, "")
 	require.ErrorContains(t, err, "all-1-rep")
 
 	// An efficiency-only manifest never consumes σ_d — the
@@ -563,7 +574,7 @@ func TestHarborOODSizing_AllOneRepCellsRefused(t *testing.T) {
 		OOD:        true,
 		Primary:    &RulePrimary{Metric: "weighted_cost", MinImprovement: 0.1},
 	}
-	sizing, err := HarborOODSizing(exp, noise)
+	sizing, err := HarborOODSizing(exp, noise, "")
 	require.NoError(t, err)
 	require.Greater(t, sizing.NEfficiency, 0)
 }
@@ -688,6 +699,7 @@ func TestComputeCellNoise_ExpectedReadsResistOutlier(t *testing.T) {
 // replacement the pass leg already makes.
 func TestHarborOODSizing_TokenCellsPreferred(t *testing.T) {
 	exp := harborNoiseExp()
+	exp.Harbor.TaskIDs = nil
 	exp.Harbor.K = 8
 	exp.DecisionRule = &DecisionRule{
 		Hypothesis: "h",
@@ -702,7 +714,7 @@ func TestHarborOODSizing_TokenCellsPreferred(t *testing.T) {
 			TokensLogSigmaWithin: 0.5, TokensLogSigmaBetween: 0.3,
 		},
 	}}
-	sizing, err := HarborOODSizing(exp, noise)
+	sizing, err := HarborOODSizing(exp, noise, "")
 	require.NoError(t, err)
 	// (1.96+0.8416)²·0.1525/0.01 ≈ 119.9 → 120.
 	require.Equal(t, 120, sizing.NEfficiency)
@@ -713,7 +725,7 @@ func TestHarborOODSizing_TokenCellsPreferred(t *testing.T) {
 	sizing, err = HarborOODSizing(exp, &NoiseFile{Harbor: &NoiseHarbor{
 		OOD:   &HarborPairNoise{SigmaD: 0.56, TokensLogRatioSD: 0.5},
 		Cells: &HarborCellNoise{SigmaWithin: 0.5, SigmaBetween: 0.3, MeasurableCells: 8},
-	}})
+	}}, "")
 	require.NoError(t, err)
 	// (2.8016)²·0.25/0.01 ≈ 196.2 → 197.
 	require.Equal(t, 197, sizing.NEfficiency)
@@ -738,4 +750,201 @@ func TestLoadNoise_TokenFieldValidation(t *testing.T) {
 	write(t, `"tokens_log_sigma_within":0.5,"tokens_log_sigma_between":0.3,"delta_expected":0.04,"c_min_expected":0.08`)
 	_, err = LoadNoise(dir)
 	require.NoError(t, err)
+}
+
+// The estimand split (#508): the conditional read prices the
+// declared tasks as a fixed corpus — Var(effect_i) leaves σ_d, so
+// only within-task noise prices N. At the pilot's measured
+// σ_within the population plug-in's 477-task answer falls to 110.
+func TestHarborOODSizing_ConditionalDropsBetween(t *testing.T) {
+	exp := harborNoiseExp()
+	exp.Harbor.TaskIDs = nil // Formula-only — the split gate stays out.
+	exp.Harbor.K = 8
+	exp.DecisionRule = &DecisionRule{
+		Hypothesis: "treatment passes more",
+		OOD:        true,
+		Estimand:   EstimandConditional,
+		Primary:    &RulePrimary{Metric: "pass_rate", Arm: ArmTreatment, Vs: ArmControl, Direction: PrimaryIncrease, MinImprovement: 0.05},
+	}
+	noise := &NoiseFile{Harbor: &NoiseHarbor{Cells: &HarborCellNoise{
+		SigmaWithin: 0.373, SigmaBetween: 0.342, MeasurableCells: 8,
+		TokensLogSigmaWithin: 0.69, TokensLogSigmaBetween: 0.50,
+	}}}
+	s, err := HarborOODSizing(exp, noise, "")
+	require.NoError(t, err)
+	// σ_d² = 2·0.373²/8 = 0.03478 → N = 7.849·0.03478/0.0025 ≈ 109.2.
+	require.Equal(t, 110, s.NSuperiority)
+	require.Equal(t, EstimandConditional, s.Estimand)
+
+	// Population prices heterogeneity back in — the #501 answer:
+	// σ_d² = 0.342²+0.03478 = 0.1517 → N ≈ 476.5.
+	exp.DecisionRule.Estimand = EstimandPopulation
+	s, err = HarborOODSizing(exp, noise, "")
+	require.NoError(t, err)
+	require.Equal(t, 477, s.NSuperiority)
+	require.Equal(t, EstimandPopulation, s.Estimand)
+
+	// Same split on the token leg: conditional prices only
+	// 2σ²_logw/k = 0.119 → N ≈ 93.4; population adds σ²b,tok.
+	exp.DecisionRule = &DecisionRule{
+		Hypothesis: "treatment cuts tokens",
+		OOD:        true,
+		Estimand:   EstimandConditional,
+		Primary:    &RulePrimary{Metric: "weighted_cost", MinImprovement: 0.1},
+	}
+	s, err = HarborOODSizing(exp, noise, "")
+	require.NoError(t, err)
+	require.Equal(t, 94, s.NEfficiency)
+	exp.DecisionRule.Estimand = EstimandPopulation
+	s, err = HarborOODSizing(exp, noise, "")
+	require.NoError(t, err)
+	require.Equal(t, 290, s.NEfficiency)
+}
+
+// The power gate: a declared task set smaller than the priced N is
+// unpowerable at any schedule — refuse at sizing time and name the
+// declaration that bounds it (#508).
+func TestHarborOODSizing_PowerGateSplit(t *testing.T) {
+	exp := harborNoiseExp() // Two declared tasks.
+	exp.Resample = ResampleCluster
+	exp.DecisionRule = &DecisionRule{
+		Hypothesis: "treatment is non-inferior",
+		OOD:        true,
+		Guardrail:  &RuleGuardrail{Metric: "pass_rate", MinDelta: -0.03},
+	}
+	noise := &NoiseFile{Harbor: &NoiseHarbor{OOD: &HarborPairNoise{
+		SigmaD: 0.165, TokensLogRatioSD: 0.20,
+	}}}
+	// N_NI ≈ 187 ≫ 2 declared — refuse, naming the declaration.
+	_, err := HarborOODSizing(exp, noise, "")
+	require.ErrorContains(t, err, "unpowerable")
+	require.ErrorContains(t, err, "task_ids set")
+	require.ErrorContains(t, err, "2 non-excluded")
+
+	// An endpoint the declared set CAN resolve sails the gate.
+	exp.DecisionRule.Guardrail.MinDelta = -0.5
+	s, err := HarborOODSizing(exp, noise, "")
+	require.NoError(t, err)
+	require.LessOrEqual(t, s.Required, 2)
+}
+
+// The MDE report inverts the sizing at the declared (n, k) — the
+// conditional row is the dev-split's actual margin, the population
+// row the sealed claim's (#508 acceptance numbers).
+func TestHarborMDEReport(t *testing.T) {
+	exp := harborNoiseExp()
+	exp.Harbor.K = 8
+	noise := &NoiseFile{Harbor: &NoiseHarbor{Cells: &HarborCellNoise{
+		SigmaWithin: 0.373, SigmaBetween: 0.342, MeasurableCells: 8,
+		TokensLogSigmaWithin: 0.69, TokensLogSigmaBetween: 0.50,
+	}}}
+	rep := HarborMDEReport(exp, noise, 30, 8)
+	require.NotNil(t, rep)
+	cond := rep[EstimandConditional]
+	require.InDelta(t, 0.095, cond.PassMDESuperiority, 0.005) // ≈9.5pp at (30,8)
+	require.InDelta(t, 0.085, cond.PassMDENonInferiority, 0.005)
+	require.InDelta(t, 0.16, cond.TokenMDEReduction, 0.01) // ≈−16% at (30,8)
+	// The population row is wider — heterogeneity stays priced.
+	require.Greater(t, rep[EstimandPopulation].PassMDESuperiority, cond.PassMDESuperiority)
+
+	rep = HarborMDEReport(exp, noise, 59, 16)
+	require.InDelta(t, 0.048, rep[EstimandConditional].PassMDESuperiority, 0.004) // ≈4.8pp
+
+	// Nothing measured → nothing to invert.
+	require.Nil(t, HarborMDEReport(exp, &NoiseFile{}, 30, 8))
+	require.Nil(t, HarborMDEReport(exp, noise, 0, 8))
+}
+
+// The estimand/resample gate: the declared variance model and the
+// resampling unit must agree — a conditional read on the task
+// cluster, or a population read within tasks, is refused at load.
+func TestValidateExperiment_EstimandResampleGate(t *testing.T) {
+	newRule := func(est string) *DecisionRule {
+		return &DecisionRule{
+			Hypothesis: "h", OOD: true, Estimand: est,
+			Guardrail: &RuleGuardrail{Metric: "pass_rate", MinDelta: -0.03},
+		}
+	}
+	exp := harborNoiseExp()
+
+	exp.DecisionRule = newRule("bogus")
+	require.ErrorContains(t, ValidateExperiment(exp), "estimand")
+
+	// Conditional + cluster: the resample prices a variance the
+	// estimand doesn't contain.
+	exp.DecisionRule = newRule(EstimandConditional)
+	exp.Resample = ResampleCluster
+	require.ErrorContains(t, ValidateExperiment(exp), "stratified")
+	exp.Resample = ""
+	require.NoError(t, ValidateExperiment(exp))
+	exp.Resample = ResampleStratified
+	require.NoError(t, ValidateExperiment(exp))
+
+	// Undeclared on a non-dev task set resolves population — the
+	// existing cluster requirement still binds.
+	exp.DecisionRule = newRule("")
+	exp.Resample = ""
+	require.ErrorContains(t, ValidateExperiment(exp), "resample")
+	exp.Resample = ResampleCluster
+	require.NoError(t, ValidateExperiment(exp))
+
+	// A dev split defaults conditional — stratified sails,
+	// cluster refuses.
+	exp.Harbor.TB21Split = "dev"
+	exp.Harbor.TaskIDs = nil
+	exp.DecisionRule = newRule("")
+	exp.Resample = ""
+	require.NoError(t, ValidateExperiment(exp))
+	exp.Resample = ResampleCluster
+	require.ErrorContains(t, ValidateExperiment(exp), "stratified")
+}
+
+// The stratified-within-task bootstrap is the conditional
+// estimand's resample: on a fixed corpus of heterogeneous task
+// effects its CI covers the true fixed-task mean about 95% of the
+// time, and the cluster resample — which carries task-sampling
+// variance the estimand doesn't have — is wider (#508).
+func TestCompare_StratifiedCIFixedTaskCoverage(t *testing.T) {
+	rng := rand.New(rand.NewPCG(508, 1))
+	const n, k, reps, boot = 30, 8, 300, 400
+	// The corpus is FIXED — task baselines and true effects draw
+	// once; only rep noise resamples, which is what the
+	// conditional estimand's variance consists of.
+	mu := make([]float64, n)
+	theta := make([]float64, n)
+	for i := range mu {
+		mu[i] = 0.8 + 0.6*rng.Float64()
+		theta[i] = 0.10 + 0.08*rng.NormFloat64()
+	}
+	trueEffect := mean(theta)
+	var coverS, coverC int
+	var widthS, widthC float64
+	for range reps {
+		trajs := make([]trajPairs, n)
+		for i := range trajs {
+			tr := trajPairs{c: make([]float64, k), t: make([]float64, k)}
+			for j := range k {
+				tr.c[j] = mu[i] + 0.2*rng.NormFloat64()
+				tr.t[j] = mu[i]*(1+theta[i]) + 0.2*rng.NormFloat64()
+				tr.cSum += tr.c[j]
+				tr.tSum += tr.t[j]
+			}
+			trajs[i] = tr
+		}
+		if lo, hi := bcaCI(trajs, boot, rng); trueEffect >= lo && trueEffect <= hi {
+			coverS++
+			widthS += hi - lo
+		} else {
+			widthS += hi - lo
+		}
+		if lo, hi := clusterCI(trajs, boot, rng); trueEffect >= lo && trueEffect <= hi {
+			coverC++
+			widthC += hi - lo
+		} else {
+			widthC += hi - lo
+		}
+	}
+	require.InDelta(t, 0.95, float64(coverS)/reps, 0.08)
+	require.Less(t, widthS, widthC)
+	require.GreaterOrEqual(t, coverC, coverS-10)
 }

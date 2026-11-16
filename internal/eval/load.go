@@ -967,8 +967,28 @@ func (e *Experiment) validateDecisionRule() error {
 	if d.Primary == nil && d.Guardrail == nil {
 		return fmt.Errorf("decision_rule requires a primary or guardrail criterion — a rule with no measurable claim is post-hoc freedom, not pre-registration")
 	}
-	if d.OOD && e.Resample != ResampleCluster {
-		return fmt.Errorf("decision_rule.ood requires resample %q — a held-out claim must carry task-sampling uncertainty; stratified resampling conditions on the task set", ResampleCluster)
+	if d.Estimand != "" && d.Estimand != EstimandConditional && d.Estimand != EstimandPopulation {
+		return fmt.Errorf("decision_rule.estimand must be %q or %q, got %q",
+			EstimandConditional, EstimandPopulation, d.Estimand)
+	}
+	if d.OOD {
+		switch resolvedEstimand(e) {
+		case EstimandPopulation:
+			// The population claim carries task-sampling
+			// uncertainty — the resample must draw tasks, not
+			// reps within them.
+			if e.Resample != ResampleCluster {
+				return fmt.Errorf("decision_rule.ood requires resample %q — a held-out claim must carry task-sampling uncertainty; stratified resampling conditions on the task set", ResampleCluster)
+			}
+		case EstimandConditional:
+			// The conditional read fixes the task set — cluster
+			// resampling would price task-sampling variance the
+			// estimand doesn't contain and under-power every
+			// endpoint.
+			if e.Resample == ResampleCluster {
+				return fmt.Errorf("decision_rule.estimand %q requires stratified resampling — cluster resampling prices task-sampling variance the fixed-task estimand doesn't contain", EstimandConditional)
+			}
+		}
 	}
 	if d.OOD {
 		// The held-out read sizes its task count against the

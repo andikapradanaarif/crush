@@ -1488,14 +1488,19 @@ k = 1, so `requiredTasksCluster` prices the between-task spread of
 pooled-CV fallback stays labeled `pairs` — a CV-priced n is not a
 task count.
 
-**The gate.** `decision_rule.ood: true` declares a held-out
-generalization claim; `ValidateExperiment` refuses it unless
-`resample: "cluster"`. `ood` is part of the snapshotted rule (the
-claim's unit of inference is pre-registration material), and
-`resample` itself is pinned into the alarm snapshot — a mode flip
-after the run suppresses the rule result the same way a rewritten
-criterion does. `""` and `"stratified"` normalize equal, so pinning
-is drift-free for pre-#407 invocations.
+**The gate.** `decision_rule.ood: true` marks a held-out read
+sized against measured harbor noise; which resample it must carry
+follows the rule's `estimand` (#508): `estimand: "population"`
+(the default for sealed/OOD task sets) refuses unless
+`resample: "cluster"`, and `estimand: "conditional"` (the default
+for `tb21_split: "dev"` — the fixed-corpus lever-selection read)
+refuses `cluster`, since task-sampling variance is not part of
+that estimand. `ood` and `estimand` are part of the snapshotted
+rule (the claim's unit of inference is pre-registration material),
+and `resample` itself is pinned into the alarm snapshot — a mode
+flip after the run suppresses the rule result the same way a
+rewritten criterion does. `""` and `"stratified"` normalize equal,
+so pinning is drift-free for pre-#407 invocations.
 
 ## Lifecycle contract — when coverage commits
 
@@ -2000,29 +2005,60 @@ from `sigma_d` against a `pass_rate` guardrail's negative
 claims size at `n_superiority` — reported alongside the binding
 endpoints, binding when it's the sole declared claim so a
 superiority-only read can't run unpowered). When a `cells` block is
-recorded it **supersedes** `ood.sigma_d` in the pass-rate sizing:
-the effective σ_d² = σ²_between + 2·σ²_within/k_plan at the
-manifest's declared `harbor.k` (default 1). Be precise about what
-that substitutes: the sized estimand is the cross-arm effect diff,
-whose variance is Var(effect_i) + 2·σ²_within/k — `sigma_between`
-is single-arm difficulty spread plugged in for the unmeasurable
+recorded it **supersedes** `ood.sigma_d` in the pass-rate sizing,
+and which σ_d² the decomposition recombines is set by the rule's
+declared **estimand** (#508).
+
+`decision_rule.estimand` is `"conditional"` or `"population"`.
+The conditional (finite-population) read asks the average effect
+on the *fixed declared tasks* — dev-split lever selection. Its
+variance contains within-task noise alone: σ_d² = 2·σ²_within/k
+(pass leg) and σ²_d,tok = 2·σ²_logw/k (efficiency leg). The
+population read asks the effect on *new tasks* — sealed /
+generalization claims — and prices task-effect heterogeneity back
+in: σ_d² = σ²_between + 2·σ²_within/k, where `sigma_between` is
+single-arm difficulty spread plugged in for the unmeasurable
 effect-heterogeneity term (between the perfectly-paired 0 and
 independent-draws 2·σ²_between), a modeling choice that can
 undersize when effects are heterogeneous on uniform-difficulty
-tasks; the ×2 on σ²_within is a second plug-in — it assumes the
+tasks. The ×2 on σ²_within is a second plug-in — it assumes the
 treatment arm's within noise equals the measured base arm's. The
 raw pair σ_d can't substitute either way — pairing the
 same arm's reps cancels task difficulty, so it measures ≈2σ²_within
 + drift, which is why the decomposition changes the number even at
 k=1 rather than "recombining" into the pair read.
-Manifests must declare at least one sizable endpoint or
+Undeclared, the estimand resolves from the task set: `tb21_split:
+"dev"` is a fixed corpus → conditional; anything else →
+population, the safer under-declared answer.
+
+The estimand and the resampling unit must agree — validation
+refuses the mismatched pair. A conditional read resamples pairs
+**within** their task (the `stratified` mode — tasks fixed, reps
+drawn) so the interval carries only within-task variance;
+`resample: "cluster"` resamples whole tasks and prices the
+task-sampling variance a population claim must carry. Declaring
+`estimand: "conditional"` with `resample: "cluster"` (or a
+population estimand without `cluster`) refuses at load: the
+resample would price a variance the estimand doesn't contain in
+one direction, or under-cover it in the other.
+
+The declared task set is also the power gate's ceiling: an OOD
+rule whose `required` exceeds the split's non-excluded tasks is
+unpowerable at any k and refuses at sizing time, naming the split
+— the claim can't ship a schedule that reports inconclusive by
+construction. Manifests must declare at least one sizable endpoint or
 `ValidateExperiment` refuses; at compare time an OOD rule whose
 recorded task count falls short of `required` reports
 **inconclusive with the needed N** — underpowered is never a null
 verdict — and an absent measured block fails closed the same way.
 `crush eval noise <exp> --size` prints the requirement (from the
 just-computed block or noise.json) plus declared-task coverage —
-the number #397 records.
+the number #397 records — and an `mde` block inverting the
+formulas at the declared (available, k) schedule under **both**
+estimands: `pass_mde_superiority`, `pass_mde_non_inferiority`,
+and `token_mde_reduction`, so a dev-split manifest prints the
+margin it actually resolves next to what the sealed claim would
+carry.
 
 ### `crush eval run --aa` — the calibration arm
 

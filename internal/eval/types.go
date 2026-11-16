@@ -439,15 +439,42 @@ type DecisionRule struct {
 	Hypothesis string         `json:"hypothesis"`
 	Primary    *RulePrimary   `json:"primary,omitempty"`
 	Guardrail  *RuleGuardrail `json:"guardrail,omitempty"`
-	// OOD marks the claim as a held-out generalization read — the
-	// inference target is the task distribution, not this corpus.
-	// The gate refuses an OOD rule unless the experiment resamples
-	// at the task (cluster) unit: within-trajectory resampling is
-	// degenerate at k=1 and, at any k, conditions on the task set —
-	// exactly the uncertainty a generalization claim must carry
-	// (#407). Snapshotted with the rule: the claim's unit of
-	// inference is pre-registration material.
+	// OOD marks the claim as a held-out read sized against the
+	// measured harbor noise floor — both estimands size, the flag
+	// is the trigger. The variance model OOD prices is selected by
+	// Estimand (#508). Snapshotted with the rule: the claim's unit
+	// of inference is pre-registration material.
 	OOD bool `json:"ood,omitempty"`
+	// Estimand selects the variance the OOD sizing and the compare
+	// resample price (#508): "conditional" — the average effect on
+	// the fixed declared tasks, where effect heterogeneity does not
+	// enter the estimator's variance and only within-task noise
+	// does (dev-split lever selection); "population" — the effect
+	// on new tasks drawn from the benchmark's distribution, where
+	// heterogeneity is priced (sealed/generalization claims).
+	// Default resolves from the declared task set: a tb21 "dev"
+	// split is a fixed working corpus → conditional; anything else
+	// → population, the safer under-declared answer.
+	Estimand string `json:"estimand,omitempty"`
+}
+
+// Estimand values for DecisionRule.Estimand (#508).
+const (
+	EstimandConditional = "conditional"
+	EstimandPopulation  = "population"
+)
+
+// resolvedEstimand applies the declared/default rule — an explicit
+// estimand wins; a dev-split task set is a fixed corpus read
+// conditionally; everything else prices the population claim.
+func resolvedEstimand(e *Experiment) string {
+	if e.DecisionRule != nil && e.DecisionRule.Estimand != "" {
+		return e.DecisionRule.Estimand
+	}
+	if e.Harbor != nil && e.Harbor.TB21Split == "dev" {
+		return EstimandConditional
+	}
+	return EstimandPopulation
 }
 
 // RulePrimary is the decisive criterion: Arm's Metric must improve
@@ -510,6 +537,7 @@ func sameDecisionRule(a, b *DecisionRule) bool {
 	}
 	return a.Hypothesis == b.Hypothesis &&
 		a.OOD == b.OOD &&
+		a.Estimand == b.Estimand &&
 		samePrimaryRule(a.Primary, b.Primary) &&
 		sameGuardrail(a.Guardrail, b.Guardrail)
 }

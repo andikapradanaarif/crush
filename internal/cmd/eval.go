@@ -495,7 +495,7 @@ All report per-trial tokens, wall time, and USD cost.
 					return lerr
 				}
 			}
-			sizing, serr := eval.HarborOODSizing(exp, n)
+			sizing, serr := eval.HarborOODSizing(exp, n, evalDir)
 			if serr != nil {
 				return serr
 			}
@@ -503,8 +503,22 @@ All report per-trial tokens, wall time, and USD cost.
 			if sizing != nil {
 				rep["sizing"] = sizing
 				if ids, terr := eval.HarborTaskSet(evalDir, exp.Harbor); terr == nil {
+					available := len(ids)
+					for _, id := range ids {
+						if _, struck := exp.Harbor.Exclude[id]; struck {
+							available--
+						}
+					}
 					rep["declared_tasks"] = len(ids)
-					rep["powered"] = len(ids) >= sizing.Required
+					rep["available_tasks"] = available
+					rep["powered"] = available >= sizing.Required
+					// The MDE report inverts the sizing at the
+					// declared (available, k) schedule — both
+					// estimands so a dev-split read prints the
+					// margin it carries next to the sealed claim.
+					if mde := eval.HarborMDEReport(exp, n, available, exp.Harbor.K); mde != nil {
+						rep["mde"] = mde
+					}
 				}
 			} else {
 				rep["sizing"] = "no OOD decision rule declared"
