@@ -1964,7 +1964,14 @@ expected-read estimates at the declared `harbor.k` × task schedule:
 `delta_expected` = 1.693·√(mean_w/(n·k)) (the expected
 "range of 3 passes" priced against the measured within weight
 instead of one high-variance realization) and `c_min_expected` =
-exp(1.693·σ_logw/√(n·k)) − 1, the quantity the §6 efficiency
+exp(1.693·σ_logw/√(n·k)) − 1 — a relative change *from the
+cell minimum*, so at high σ it runs ~2× the arithmetic `c_min`
+whose denominator is the mean; different denominators, not a
+bug. `token_measurable_cells` counts the ≥2-rep token cells the
+within σ is estimable from — 0 means `tokens_log_sigma_within`
+= 0 is structural, not measured flat (the pass side's
+`measurable_cells` is the same tell). `c_min_expected` is the
+quantity the §6 efficiency
 rule's "real change" floor prices once a cells block exists —
 `c_min` on the passes block stays recorded as the arithmetic
 all-in spread it measures. Per-trial tokens, wall time, and

@@ -57,6 +57,12 @@ func LoadNoise(evalDir string) (*NoiseFile, error) {
 		if !(c.Cells.TokensLogSigmaWithin >= 0) || !(c.Cells.TokensLogSigmaBetween >= 0) {
 			return nil, fmt.Errorf("noise.json: harbor.cells token log sigmas must be ≥ 0, got within=%g between=%g", c.Cells.TokensLogSigmaWithin, c.Cells.TokensLogSigmaBetween)
 		}
+		if !(c.Cells.TokensGeomeanPerTrial >= 0) {
+			return nil, fmt.Errorf("noise.json: harbor.cells.tokens_geomean_per_trial must be ≥ 0, got %g", c.Cells.TokensGeomeanPerTrial)
+		}
+		if c.Cells.MeasurableCells < 0 || c.Cells.TokensMeasurableCells < 0 {
+			return nil, fmt.Errorf("noise.json: harbor.cells measurable counts must be ≥ 0, got cells=%d token_cells=%d", c.Cells.MeasurableCells, c.Cells.TokensMeasurableCells)
+		}
 		if !(c.Cells.DeltaExpected >= 0) || !(c.Cells.CMinExpected >= 0) {
 			return nil, fmt.Errorf("noise.json: harbor.cells expected reads must be ≥ 0, got delta_expected=%g c_min_expected=%g", c.Cells.DeltaExpected, c.Cells.CMinExpected)
 		}
