@@ -502,18 +502,26 @@ All report per-trial tokens, wall time, and USD cost.
 			rep := map[string]any{"experiment": exp.Name}
 			if sizing != nil {
 				rep["sizing"] = sizing
-				if ids, terr := eval.HarborTaskSet(evalDir, exp.Harbor); terr == nil {
-					rep["declared_tasks"] = len(ids)
-					rep["powered"] = len(ids) >= sizing.Required
-				}
-				// The sized schedule's projected spend — required
-				// tasks × reps/arm × arms × measured mean cost —
-				// the R1.8 budget input.
-				if mean := n.HarborCostPerTrial(); mean > 0 {
-					k := max(exp.Harbor.K, 1)
-					trials := sizing.Required * k * len(exp.Arms)
-					rep["projected_trials"] = trials
-					rep["projected_spend_usd"] = float64(trials) * mean
+				// The powered check and the spend projection are
+				// harbor-manifest reads — a non-harbor manifest can
+				// still declare an OOD decision rule and size against
+				// a shared noise.json, so the harbor fields need the
+				// guard (#516 review).
+				if exp.Harbor != nil {
+					if ids, terr := eval.HarborTaskSet(evalDir, exp.Harbor); terr == nil {
+						rep["declared_tasks"] = len(ids)
+						rep["powered"] = len(ids) >= sizing.Required
+					}
+					// The sized schedule's projected spend — required
+					// tasks × reps/arm × gate arms × measured mean
+					// cost — the R1.8 budget input. best_of_k arms
+					// are selection baselines, not the sized read's
+					// arms, so they don't multiply the schedule.
+					if mean := n.HarborCostPerTrial(); mean > 0 {
+						trials := eval.ProjectedGateTrials(exp, sizing.Required)
+						rep["projected_trials"] = trials
+						rep["projected_spend_usd"] = float64(trials) * mean
+					}
 				}
 			} else {
 				rep["sizing"] = "no OOD decision rule declared"

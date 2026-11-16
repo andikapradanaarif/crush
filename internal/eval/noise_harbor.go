@@ -156,6 +156,32 @@ func (n *NoiseFile) HarborCostPerTrial() float64 {
 	return 0
 }
 
+// GateArmCount counts the manifest's sized-read arms — every arm
+// that isn't a best_of_k selection baseline. The sized schedule's
+// trial projection multiplies by gate arms only: candidate baselines
+// aren't part of the control/treatment compare being priced (#516
+// review).
+func GateArmCount(e *Experiment) int {
+	n := 0
+	for _, a := range e.Arms {
+		if a.BestOfK == nil {
+			n++
+		}
+	}
+	return n
+}
+
+// ProjectedGateTrials prices the sized harbor schedule's trial
+// count — required tasks × declared reps/arm × gate arms. A
+// non-harbor manifest projects 0: it has no harbor schedule to price
+// (a non-harbor OOD rule still sizes against a shared noise.json).
+func ProjectedGateTrials(e *Experiment, required int) int {
+	if e == nil || e.Harbor == nil {
+		return 0
+	}
+	return required * max(e.Harbor.K, 1) * GateArmCount(e)
+}
+
 // totalTokens is the unpriced tokens-to-done quantity — all billed
 // classes summed. weighted_cost needs pinned rates; characterization
 // measures the raw count the rates would price.

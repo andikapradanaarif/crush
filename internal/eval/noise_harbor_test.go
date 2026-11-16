@@ -687,3 +687,30 @@ func TestMergeHarbor_StatusPartialCoverage(t *testing.T) {
 	}, true))
 	require.Equal(t, "superseded", n.Harbor.Status)
 }
+
+// The sized schedule's projection counts gate arms only — a
+// best_of_k candidate baseline isn't part of the control/treatment
+// compare being priced, so it mustn't multiply Required×k (#516
+// review). A non-harbor manifest has no harbor schedule at all.
+func TestProjectedGateTrials(t *testing.T) {
+	exp := &Experiment{
+		Harbor: &HarborSpec{K: 8},
+		Arms: map[string]Arm{
+			ArmControl:   {},
+			ArmTreatment: {},
+			"bok-a":      {BestOfK: &BestOfKSpec{K: 4}},
+			"bok-b":      {BestOfK: &BestOfKSpec{K: 4}},
+		},
+	}
+	require.Equal(t, 2, GateArmCount(exp))
+	require.Equal(t, 30*8*2, ProjectedGateTrials(exp, 30))
+
+	// K unpinned counts as one replicate, not zero trials.
+	exp.Harbor.K = 0
+	require.Equal(t, 60, ProjectedGateTrials(exp, 30))
+
+	// A non-harbor manifest sizes against a shared noise.json but
+	// has no harbor schedule to price.
+	exp.Harbor = nil
+	require.Equal(t, 0, ProjectedGateTrials(exp, 30))
+}
