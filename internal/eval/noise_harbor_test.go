@@ -641,3 +641,49 @@ func TestMergeHarbor_StatusAdoption(t *testing.T) {
 	require.Equal(t, "superseded", n.Harbor.Status)
 	require.Equal(t, "bad again", n.Harbor.Note)
 }
+
+// A partial re-characterization leaves recorded sub-blocks in place —
+// the mark condemns them too, so it must not lift until the merge
+// covers every recorded block (#515 review: a --pair-only rewrite
+// unmarking stale cells would resurrect them for pass-leg sizing).
+func TestMergeHarbor_StatusPartialCoverage(t *testing.T) {
+	n := &NoiseFile{Harbor: &NoiseHarbor{
+		Status: "superseded",
+		Note:   "old system",
+		OOD:    &HarborPairNoise{SigmaD: 0.9},
+		Cells:  &HarborCellNoise{SigmaWithin: 0.4},
+	}}
+	// Rewriting only ood mustn't clear the mark — cells is still the
+	// condemned measurement and would otherwise re-enter sizing.
+	require.NoError(t, n.MergeHarbor(&NoiseHarbor{
+		OOD: &HarborPairNoise{SigmaD: 0.3},
+	}, true))
+	require.Equal(t, "superseded", n.Harbor.Status)
+	require.Equal(t, 0.3, n.Harbor.OOD.SigmaD)
+
+	// A later cells-only merge doesn't lift either: the mark can't
+	// tell which recorded blocks predate it, so it stands until one
+	// merge covers every recorded sub-block (--pair --cells --write
+	// --force in a single invocation).
+	require.NoError(t, n.MergeHarbor(&NoiseHarbor{
+		Cells: &HarborCellNoise{SigmaWithin: 0.2},
+	}, true))
+	require.Equal(t, "superseded", n.Harbor.Status)
+
+	// The covering merge lifts the mark — nothing it leaves behind
+	// was measured under the old system.
+	require.NoError(t, n.MergeHarbor(&NoiseHarbor{
+		OOD:   &HarborPairNoise{SigmaD: 0.25},
+		Cells: &HarborCellNoise{SigmaWithin: 0.18},
+	}, true))
+	require.Empty(t, n.Harbor.Status)
+	require.Equal(t, 0.18, n.Harbor.Cells.SigmaWithin)
+
+	// And a fresh sub-block arriving while a mark stands doesn't lift
+	// it — additions aren't replacements.
+	n.Harbor.Status = "superseded"
+	require.NoError(t, n.MergeHarbor(&NoiseHarbor{
+		Passes: &HarborPassNoise{Delta: 0.1},
+	}, true))
+	require.Equal(t, "superseded", n.Harbor.Status)
+}

@@ -23,7 +23,9 @@ type NoiseHarbor struct {
 	// runs it was computed from measured a different system than
 	// the protocol now declares (wrong pin, sampling not delivered)
 	// and nothing may size against it (#504). The numbers stay
-	// recorded for audit; a fresh characterization clears the mark.
+	// recorded for audit; a fresh characterization clears the mark
+	// only when it covers every recorded sub-block — a partial
+	// rewrite leaves the survivors condemned (MergeHarbor).
 	Status string `json:"status,omitempty"`
 	// Note explains the status — why the block was superseded.
 	Note   string           `json:"note,omitempty"`

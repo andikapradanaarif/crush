@@ -75,6 +75,14 @@ func (n *NoiseFile) MergeHarbor(h *NoiseHarbor, force bool) error {
 		n.Harbor = h
 		return nil
 	}
+	// A merge that leaves any recorded sub-block in place is partial:
+	// the superseded mark condemns those survivors too, so it may lift
+	// only when one merge covers every recorded block — a --pair-only
+	// rewrite mustn't unmark stale cells and resurrect them for the
+	// sizing path (#515 review).
+	partial := (n.Harbor.Passes != nil && h.Passes == nil) ||
+		(n.Harbor.OOD != nil && h.OOD == nil) ||
+		(n.Harbor.Cells != nil && h.Cells == nil)
 	if h.Passes != nil {
 		if n.Harbor.Passes != nil && !force {
 			return fmt.Errorf("noise: harbor.passes already recorded — --force to retune the base floor")
@@ -103,9 +111,15 @@ func (n *NoiseFile) MergeHarbor(h *NoiseHarbor, force bool) error {
 		n.Harbor.MeasuredAt = h.MeasuredAt
 		// A fresh characterization replaces the block's standing —
 		// its numbers come from the new run, so a "superseded" mark
-		// carried against the old measurement lifts (#504).
-		n.Harbor.Status = h.Status
-		n.Harbor.Note = h.Note
+		// carried against the old measurement lifts once every
+		// recorded sub-block has been replaced (#504). An incoming
+		// mark condemns the just-written sub-blocks, so it adopts
+		// even on a partial merge — the block stays refused either
+		// way, and the newest note describes why.
+		if !partial || h.Status != "" {
+			n.Harbor.Status = h.Status
+			n.Harbor.Note = h.Note
+		}
 	}
 	return nil
 }
