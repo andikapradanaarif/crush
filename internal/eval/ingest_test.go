@@ -465,6 +465,21 @@ func fixtureRates(input, output, cacheRead, cacheWrite float64) *TokenRates {
 	return &TokenRates{Input: &input, Output: &output, CacheRead: &cacheRead, CacheWrite: &cacheWrite}
 }
 
+// setTrialID rewrites a fixture's result.json to carry harbor's
+// per-trial uuid — the dir-independent dedup key (#504).
+func setTrialID(t *testing.T, dir, id string) {
+	t.Helper()
+	p := filepath.Join(dir, "result.json")
+	var m map[string]any
+	data, err := os.ReadFile(p)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(data, &m))
+	m["id"] = id
+	out, err := json.Marshal(m)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(p, out, 0o644))
+}
+
 // Harbor never reports a per-trial cost — ingest must price the
 // billed classes at the manifest's pinned route rates so a paid
 // pin's spend is measured (#505). The noise block's cost fields
@@ -580,4 +595,148 @@ func TestIngestHarborTrials_DBCostCrossCheck(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, recs, 1)
 	require.InDelta(t, 0.42, recs[0].CheckDetail["db_cost_usd"], 1e-9)
+}
+
+// One trial's data must land in exactly one cell of the experiment —
+// a second arm, a second invocation, or a differently-spelled path to
+// the same dir are all refusals, or a duplicated job produces a fake
+// perfect A/A (the pilot-b2 defect).
+func TestIngestHarborTrials_CrossArmAndInvocationDedup(t *testing.T) {
+	dir := t.TempDir()
+	exp := harborExp("task-a")
+	r := seededRunner(dir)
+	ctx := context.Background()
+	jobs := t.TempDir()
+	d := writeTrialDir(t, jobs, "t", "task-a", 1.0, nil)
+
+	_, err := r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", []string{d}, nil)
+	require.NoError(t, err)
+
+	_, err = r.IngestHarborTrials(ctx, exp, ArmTreatment, "inv1", []string{d}, nil)
+	require.ErrorContains(t, err, "can't fill two cells")
+
+	_, err = r.IngestHarborTrials(ctx, exp, ArmControl, "inv2", []string{d}, nil)
+	require.ErrorContains(t, err, "can't fill two cells")
+
+	_, err = r.IngestHarborTrials(ctx, exp, ArmControl, "inv2",
+		[]string{d + string(filepath.Separator) + "."}, nil)
+	require.ErrorContains(t, err, "can't fill two cells")
+
+	recs, err := r.LoadExperimentRecords(exp.Name)
+	require.NoError(t, err)
+	require.Len(t, recs, 1)
+}
+
+// The dir-path key can't see a job re-ingested under a differently-
+// spelled dir — harbor's trial id in result.json is the second key.
+func TestIngestHarborTrials_TrialIDDedup(t *testing.T) {
+	dir := t.TempDir()
+	exp := harborExp("task-a")
+	r := seededRunner(dir)
+	ctx := context.Background()
+	jobs := t.TempDir()
+
+	d1 := writeTrialDir(t, jobs, "a", "task-a", 1.0, nil)
+	setTrialID(t, d1, "uuid-1")
+	_, err := r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", []string{d1}, nil)
+	require.NoError(t, err)
+
+	d2 := writeTrialDir(t, jobs, "b", "task-a", 1.0, nil)
+	setTrialID(t, d2, "uuid-1")
+	_, err = r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", []string{d2}, nil)
+	require.ErrorContains(t, err, "trial id uuid-1")
+
+	recs, err := r.LoadExperimentRecords(exp.Name)
+	require.NoError(t, err)
+	require.Len(t, recs, 1)
+	require.Equal(t, "uuid-1", recs[0].CheckDetail["trial_id"])
+}
+
+// The pin gate: what ran must be what the manifest declared —
+// resolved large/small models equal their pins when non-empty, and
+// empty telemetry fields (a trial that died early) record rather
+// than refuse: they're already inconclusive.
+func TestIngestHarborTrials_PinGate(t *testing.T) {
+	dir := t.TempDir()
+	exp := harborExp("task-a", "task-b", "task-c")
+	exp.SmallModel = "llm/small-pin"
+	r := seededRunner(dir)
+	ctx := context.Background()
+	jobs := t.TempDir()
+	tel := func(model, small string) map[string]any {
+		return map[string]any{
+			"session_id": "s", "model": model, "model_small": small,
+			"resolved_options": map[string]any{},
+		}
+	}
+
+	d := writeTrialDir(t, jobs, "a", "task-a", 1.0, tel("llm/other-model", "llm/small-pin"))
+	_, err := r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", []string{d}, nil)
+	require.ErrorContains(t, err, `resolved model "llm/other-model" ≠ manifest pin`)
+
+	d = writeTrialDir(t, jobs, "b", "task-b", 1.0, tel("llm/test-model", "llm/other-small"))
+	_, err = r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", []string{d}, nil)
+	require.ErrorContains(t, err, `resolved small model "llm/other-small" ≠ manifest small_model`)
+
+	// Matching both pins records.
+	d = writeTrialDir(t, jobs, "c", "task-c", 1.0, tel("llm/test-model", "llm/small-pin"))
+	rep, err := r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", []string{d}, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, rep.Records)
+
+	// Empty telemetry model — the trial died before its first call —
+	// is already inconclusive, not a pin violation.
+	d2 := writeTrialDir(t, jobs, "c2", "task-c", 0.0, tel("", ""))
+	rep, err = r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", []string{d2}, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, rep.Records)
+}
+
+// The declared temperature is provenance, not a promise — the
+// child's sampling export reports what actually went on the request,
+// and a mismatch (or none sent) refuses the record. A child old
+// enough to not emit sampling can't be checked and records.
+func TestIngestHarborTrials_TemperatureProvenance(t *testing.T) {
+	dir := t.TempDir()
+	exp := harborExp("task-a", "task-b", "task-c", "task-d")
+	r := seededRunner(dir)
+	ctx := context.Background()
+	jobs := t.TempDir()
+	tel := func(large map[string]any) map[string]any {
+		m := map[string]any{
+			"session_id": "s", "model": "llm/test-model",
+			"resolved_options": map[string]any{},
+		}
+		if large != nil {
+			m["sampling"] = map[string]any{"large": large}
+		}
+		return m
+	}
+
+	// Declared 0.2, sent 0.2 — records.
+	d := writeTrialDir(t, jobs, "a", "task-a", 1.0, tel(map[string]any{"temperature": 0.2}))
+	rep, err := r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", []string{d}, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, rep.Records)
+
+	// Declared 0.2, sent 0.7 — refused.
+	d = writeTrialDir(t, jobs, "b", "task-b", 1.0, tel(map[string]any{"temperature": 0.7}))
+	_, err = r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", []string{d}, nil)
+	require.ErrorContains(t, err, "resolved temperature 0.7 ≠ manifest 0.2")
+
+	// Declared 0.2, sent none — refused: the pilot's own defect.
+	d = writeTrialDir(t, jobs, "c", "task-c", 1.0, tel(map[string]any{}))
+	_, err = r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", []string{d}, nil)
+	require.ErrorContains(t, err, "the run sent none")
+
+	// No sampling block at all — a child predating the export —
+	// can't be verified and records.
+	d = writeTrialDir(t, jobs, "d", "task-d", 1.0, tel(nil))
+	rep, err = r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", []string{d}, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, rep.Records)
+
+	recs, err := r.LoadExperimentRecords(exp.Name)
+	require.NoError(t, err)
+	require.Len(t, recs, 2)
 }

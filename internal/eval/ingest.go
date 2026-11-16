@@ -36,6 +36,43 @@ import (
 //	                                        identical schema the
 //	                                        in-house driver reads
 
+// recordLoc names where one ingested trial already lives — the
+// (invocation, arm, run_index) a dedup refusal points back to.
+type recordLoc struct {
+	task       string
+	arm        string
+	runIndex   int
+	invocation string
+}
+
+// checkHarborPin is the provenance gate (#504): what ran must be
+// what the manifest declared. The resolved large model must equal
+// exp.Model and — when the manifest pins `small_model` — the resolved
+// small must equal it too; the declared temperature must equal the
+// large slot's resolved request-side temperature once the child's
+// telemetry carries it. Empty telemetry fields (a trial that died
+// before its first call, or a child predating the sampling export)
+// can't prove a mismatch and are already inconclusive — they pass.
+func checkHarborPin(exp *Experiment, rec *RunRecord) error {
+	if exp.Model != "" && rec.Env.ModelResolved != "" && rec.Env.ModelResolved != exp.Model {
+		return fmt.Errorf("resolved model %q ≠ manifest pin %q — the arm config that ran is not the declared condition", rec.Env.ModelResolved, exp.Model)
+	}
+	if exp.SmallModel != "" && rec.Env.ModelSmall != "" && rec.Env.ModelSmall != exp.SmallModel {
+		return fmt.Errorf("resolved small model %q ≠ manifest small_model %q — auxiliary calls ran on a different model than the arm declared", rec.Env.ModelSmall, exp.SmallModel)
+	}
+	if exp.Temperature != nil {
+		if s, ok := rec.Env.Sampling["large"]; ok {
+			switch {
+			case s.Temperature == nil:
+				return fmt.Errorf("declared temperature %v but the run sent none — the arm config that ran is not the declared condition", *exp.Temperature)
+			case *s.Temperature != *exp.Temperature:
+				return fmt.Errorf("resolved temperature %v ≠ manifest %v — the run's condition differs from the declared one", *s.Temperature, *exp.Temperature)
+			}
+		}
+	}
+	return nil
+}
+
 // IngestReport summarizes one IngestHarborTrials call.
 type IngestReport struct {
 	Experiment string   `json:"experiment"`
@@ -60,7 +97,11 @@ type IngestReport struct {
 // PackageTaskId{name,...}) — harborTaskID normalizes all three to
 // the benchmark task name.
 type harborTrialResult struct {
-	TaskID         json.RawMessage `json:"task_id"`
+	TaskID json.RawMessage `json:"task_id"`
+	// ID is harbor's per-trial UUID — a dir-independent dedup key:
+	// a job moved or re-ingested under a differently-spelled path
+	// still matches (#504).
+	ID             string `json:"id"`
 	VerifierResult *struct {
 		Rewards map[string]float64 `json:"rewards"`
 	} `json:"verifier_result"`
@@ -243,18 +284,30 @@ func (r *Runner) IngestHarborTrials(ctx context.Context, exp *Experiment, arm, i
 		return nil, err
 	}
 	seen := map[string]bool{}
-	dirSeen := map[string]bool{}
+	// One trial's data must land in exactly one cell of the whole
+	// experiment — same arm re-ingest, a second arm, and a later
+	// invocation are all refusals, or a duplicated job produces a
+	// fake perfect A/A (#504, the pilot-b2 defect). The index spans
+	// every recorded invocation and arm, keyed on the cleaned trial
+	// path AND harbor's trial id — either match means the trial is
+	// already recorded.
+	seenDir := map[string]recordLoc{}
+	seenTrialID := map[string]recordLoc{}
 	var invRecords []RunRecord
 	nextIndex := map[string]int{}
 	for _, rec := range existing {
+		loc := recordLoc{task: rec.TrajectoryID, arm: rec.Arm, runIndex: rec.RunIndex, invocation: rec.Invocation}
+		if d, _ := rec.CheckDetail["trial_dir"].(string); d != "" {
+			seenDir[filepath.Clean(d)] = loc
+		}
+		if id, _ := rec.CheckDetail["trial_id"].(string); id != "" {
+			seenTrialID[id] = loc
+		}
 		if rec.Invocation != invocation {
 			continue
 		}
 		invRecords = append(invRecords, rec)
 		seen[rec.TrajectoryID+"\x00"+rec.Arm+"\x00"+strconv.Itoa(rec.RunIndex)] = true
-		if d, _ := rec.CheckDetail["trial_dir"].(string); d != "" {
-			dirSeen[rec.TrajectoryID+"\x00"+rec.Arm+"\x00"+d] = true
-		}
 		// Ordinals continue past this arm's recorded cells so an
 		// incremental ingest extends k instead of colliding on
 		// index 0. Other arms' cells don't consume ordinals —
@@ -308,21 +361,31 @@ func (r *Runner) IngestHarborTrials(ctx context.Context, exp *Experiment, arm, i
 			return rep, fmt.Errorf("ingest %s: %w", dir, err)
 		}
 		rec.RunIndex = runIndex
+		if err := checkHarborPin(exp, rec); err != nil {
+			return rep, fmt.Errorf("ingest %s: %w", dir, err)
+		}
 		key := rec.TrajectoryID + "\x00" + rec.Arm + "\x00" + strconv.Itoa(rec.RunIndex)
 		if seen[key] {
 			return rep, fmt.Errorf("ingest %s: %s arm %s run %d already recorded in invocation %s — refuse to duplicate a paired cell",
 				dir, rec.TrajectoryID, rec.Arm, rec.RunIndex, invocation)
 		}
-		dirKey := rec.TrajectoryID + "\x00" + rec.Arm + "\x00" + dir
-		if dirSeen[dirKey] {
-			return rep, fmt.Errorf("ingest %s: this trial is already recorded for %s arm %s in invocation %s — the same run's data can't fill two paired cells",
-				dir, rec.TrajectoryID, rec.Arm, invocation)
+		newLoc := recordLoc{task: rec.TrajectoryID, arm: arm, runIndex: rec.RunIndex, invocation: invocation}
+		if loc, dup := seenDir[filepath.Clean(dir)]; dup {
+			return rep, fmt.Errorf("ingest %s: this trial is already recorded for %s arm %s run %d in invocation %s — the same run's data can't fill two cells",
+				dir, loc.task, loc.arm, loc.runIndex, loc.invocation)
+		}
+		if id, _ := rec.CheckDetail["trial_id"].(string); id != "" {
+			if loc, dup := seenTrialID[id]; dup {
+				return rep, fmt.Errorf("ingest %s: harbor trial id %s is already recorded for %s arm %s run %d in invocation %s — the same run's data can't fill two cells",
+					dir, id, loc.task, loc.arm, loc.runIndex, loc.invocation)
+			}
+			seenTrialID[id] = newLoc
 		}
 		if !declaredSet[rec.TrajectoryID] {
 			return rep, fmt.Errorf("ingest %s: task %q is not in the experiment's declared task set — an undeclared task's records would corrupt corpus coverage", dir, rec.TrajectoryID)
 		}
 		seen[key] = true
-		dirSeen[dirKey] = true
+		seenDir[filepath.Clean(dir)] = newLoc
 		if err := r.appendRecord(*rec); err != nil {
 			return rep, err
 		}
@@ -475,8 +538,12 @@ func (r *Runner) ingestTrial(ctx context.Context, exp *Experiment, arm, invocati
 		return nil, fmt.Errorf("read result.json: %w", err)
 	}
 	// The source dir is provenance — and the dedupe key that keeps
-	// one trial's data from filling two paired cells.
+	// one trial's data from filling two paired cells. The harbor
+	// trial id is the dir-independent second key (#504).
 	detail["trial_dir"] = dir
+	if res.ID != "" {
+		detail["trial_id"] = res.ID
+	}
 	dataDir := filepath.Join(dir, "agent", "crush-data")
 	rec := &RunRecord{
 		Experiment:   exp.Name,
@@ -530,6 +597,7 @@ func (r *Runner) ingestTrial(ctx context.Context, exp *Experiment, arm, invocati
 		rec.Env.ModelResolved = tel.Model
 		rec.Env.ModelSmall = tel.ModelSmall
 		rec.Env.ModelSummary = tel.ModelSummary
+		rec.Env.Sampling = tel.Sampling
 		rec.ErrorClass = tel.ErrorClass
 		if tel.Error != "" && outcome != OutcomeError {
 			detail["run_error"] = tel.Error
