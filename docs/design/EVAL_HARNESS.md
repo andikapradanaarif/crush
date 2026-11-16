@@ -1939,7 +1939,18 @@ pass stops contaminating solve variance, **c_min**
 `tokens_cv`); `--pair invA[,invB]` computes the paired two-run
 read (**σ_d** = SD of per-task paired pass diffs, `tokens_sigma_d`,
 `tokens_cv`) — one invocation pairs run_index 0 vs 1 cells, two
-pair each's run 0. Per-trial tokens, wall time, and USD cost land
+pair each's run 0. A third shape, `--cells inv1,inv2,...`, computes
+the **repeated-cell decomposition** (#489): every conclusive record
+for the arm is one cell rep grouped by task, and the recorded block
+(`harbor.cells`) carries the per-task outcome matrix
+(`cells: task → [passes, conclusive reps]`) plus the two variance
+components — `sigma_within` (√mean p̂ᵢ(1−p̂ᵢ), the per-trial
+coin-flip noise reps shrink) and `sigma_between` (√(Var(p̂ᵢ) −
+expected within), the systematic task-to-task spread nothing
+shrinks). Sizing on raw σ_d conflates the two — the pilot's σ_d ≈
+0.5 was nearly all coin flips, which prices G1.e/f as if the
+irreducible part could be shrunk. Per-trial tokens, wall time, and
+USD cost land
 on every block (`cost_usd` is a RunRecord field only harbor trials
 populate). Without `--write` the report prints only; with it the
 block merges **field-wise** (a `--pair`-only write can't erase a
@@ -1959,7 +1970,14 @@ from `sigma_d` against a `pass_rate` guardrail's negative
 `min_delta` (Δ_true = 0 conservative; pass-rate *superiority*
 claims size at `n_superiority` — reported alongside the binding
 endpoints, binding when it's the sole declared claim so a
-superiority-only read can't run unpowered).
+superiority-only read can't run unpowered). When a `cells` block is
+recorded it **supersedes** `ood.sigma_d` in the pass-rate sizing:
+the effective σ_d² = σ²_between + 2·σ²_within/k_plan — the
+unshrinkable spread plus both paired cells' within noise shrunk by
+the manifest's declared `harbor.k` (default 1). The k=1 case
+recombines into the pair-read quantity, so the decomposition only
+ever changes the number when repeated cells actually separate the
+components.
 Manifests must declare at least one sizable endpoint or
 `ValidateExperiment` refuses; at compare time an OOD rule whose
 recorded task count falls short of `required` reports

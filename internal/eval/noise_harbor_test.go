@@ -304,3 +304,90 @@ func TestComputePassNoise_TrialsPerPassExcludes(t *testing.T) {
 	require.Equal(t, 1, n.DeltaTrials)   // solved {3,4}
 	require.InDelta(t, 0.5, n.Delta, 1e-9)
 }
+
+// The repeated-cell decomposition (#489): p̂ per cell, Var(p̂)
+// minus expected within noise = the systematic spread. Hand-worked
+// numbers: cells {4/4, 2/4, 0/4} → Var .25, within-mean .083,
+// within-contribution .0208 → σ_between √(0.229) ≈ .479.
+func TestComputeCellNoise_Decomposition(t *testing.T) {
+	exp := harborNoiseExp()
+	var recs []RunRecord
+	add := func(task string, outs ...Outcome) {
+		for i, o := range outs {
+			recs = append(recs, noiseRec("inv1", ArmControl, task, i, o, 100))
+		}
+	}
+	add("t-a", OutcomePass, OutcomePass, OutcomePass, OutcomePass)
+	add("t-b", OutcomePass, OutcomeFail, OutcomePass, OutcomeFail)
+	add("t-c", OutcomeFail, OutcomeFail, OutcomeFail, OutcomeFail)
+	// A record outside the named invocations mustn't pool.
+	recs = append(recs, noiseRec("other", ArmControl, "t-a", 9, OutcomeFail, 100))
+
+	n, err := ComputeCellNoise(recs, exp, "", ArmControl, "tb21", []string{"inv1"})
+	require.NoError(t, err)
+	require.Equal(t, 3, n.Tasks)
+	require.Equal(t, map[string][2]int{"t-a": {4, 4}, "t-b": {2, 4}, "t-c": {0, 4}}, n.Cells)
+	require.InDelta(t, 4.0, n.RepsPerTask, 1e-9)
+	require.InDelta(t, 0.5, n.PassRate, 1e-9)
+	require.InDelta(t, 0.2887, n.SigmaWithin, 1e-3)
+	require.InDelta(t, 0.4787, n.SigmaBetween, 1e-3)
+
+	// An identical-p̂ corpus carries no systematic spread — the
+	// observed variance is all coin flips and floors at 0.
+	var flat []RunRecord
+	for _, task := range []string{"t-a", "t-b"} {
+		for i := 0; i < 4; i++ {
+			out := OutcomePass
+			if i == 0 {
+				out = OutcomeFail
+			}
+			flat = append(flat, noiseRec("inv1", ArmControl, task, i, out, 100))
+		}
+	}
+	n, err = ComputeCellNoise(flat, exp, "", ArmControl, "tb21", []string{"inv1"})
+	require.NoError(t, err)
+	require.Equal(t, 0.0, n.SigmaBetween)
+	require.InDelta(t, 0.4330, n.SigmaWithin, 1e-3) // √(0.75·0.25)
+}
+
+// A recorded cells block supersedes raw σ_d in sizing: the
+// decomposed σ_d recombines σ_between with both paired cells'
+// within noise at the manifest's declared k — sizing on raw σ_d
+// oversizes massively (#489).
+func TestHarborOODSizing_CellsPreferred(t *testing.T) {
+	exp := harborNoiseExp()
+	exp.Harbor.K = 8 // The planned repeated-cell schedule.
+	exp.DecisionRule = &DecisionRule{
+		Hypothesis: "h",
+		OOD:        true,
+		Guardrail:  &RuleGuardrail{Metric: "pass_rate", MinDelta: -0.05},
+	}
+	noise := &NoiseFile{Harbor: &NoiseHarbor{
+		OOD:   &HarborPairNoise{SigmaD: 0.56, TokensLogRatioSD: 0.5},
+		Cells: &HarborCellNoise{SigmaBetween: 0.30, SigmaWithin: 0.50},
+	}}
+	sizing, err := HarborOODSizing(exp, noise)
+	require.NoError(t, err)
+	// σ_eff² = .30² + 2·.50²/8 = .1525 → σ_eff ≈ .3905.
+	// N = (1.6449+0.8416)²·.1525/.0025 ≈ 377.3 → 378.
+	require.Equal(t, 378, sizing.NNonInferiority)
+	require.Equal(t, 378, sizing.Required)
+
+	// Same manifest, no cells: the raw pair σ_d prices it — the
+	// measured-inflation the amendment exists to remove.
+	sizing, err = HarborOODSizing(exp, &NoiseFile{Harbor: &NoiseHarbor{
+		OOD: &HarborPairNoise{SigmaD: 0.56, TokensLogRatioSD: 0.5},
+	}})
+	require.NoError(t, err)
+	require.Equal(t, 776, sizing.NNonInferiority)
+}
+
+// The cells block merges field-wise and refuses silent retuning,
+// same discipline as passes/ood.
+func TestMergeHarbor_CellsBlock(t *testing.T) {
+	n := &NoiseFile{Harbor: &NoiseHarbor{Model: "m"}}
+	c := &HarborCellNoise{SigmaBetween: 0.3}
+	require.NoError(t, n.MergeHarbor(&NoiseHarbor{Cells: c, MeasuredAt: time.Now()}, false))
+	require.ErrorContains(t, n.MergeHarbor(&NoiseHarbor{Cells: c}, false), "already recorded")
+	require.NoError(t, n.MergeHarbor(&NoiseHarbor{Cells: c}, true))
+}

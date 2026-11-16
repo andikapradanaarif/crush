@@ -67,13 +67,19 @@ func (n *NoiseFile) MergeHarbor(h *NoiseHarbor, force bool) error {
 		}
 		n.Harbor.OOD = h.OOD
 	}
+	if h.Cells != nil {
+		if n.Harbor.Cells != nil && !force {
+			return fmt.Errorf("noise: harbor.cells already recorded — --force to retune the base floor")
+		}
+		n.Harbor.Cells = h.Cells
+	}
 	if h.Model != "" {
 		n.Harbor.Model = h.Model
 	}
 	// MeasuredAt is the measurement's timestamp — a metadata-only
 	// merge (Model, or a no-op write) mustn't redate a sub-block it
 	// didn't touch.
-	if h.Passes != nil || h.OOD != nil {
+	if h.Passes != nil || h.OOD != nil || h.Cells != nil {
 		n.Harbor.MeasuredAt = h.MeasuredAt
 	}
 	return nil
@@ -240,22 +246,35 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 		out.NEfficiency = RequiredNEfficiency(ood.TokensLogRatioSD, p.MinImprovement)
 		sized = true
 	}
-	if p := rule.Primary; p != nil && p.Metric == "pass_rate" && p.MinImprovement > 0 {
-		if ood.SigmaD <= 0 {
-			return nil, fmt.Errorf("OOD sizing: pass_rate primary needs sigma_d — the #404 pair read didn't measure it")
+	// The repeated-cell decomposition (#489) supersedes raw σ_d
+	// when recorded: the sized variance is the unshrinkable
+	// systematic spread plus both paired cells' within noise at the
+	// manifest's declared k — the component k reps actually shrink.
+	sigmaD := ood.SigmaD
+	if c := noise.Harbor.Cells; c != nil {
+		kPlan := 1
+		if exp.Harbor != nil && exp.Harbor.K > 0 {
+			kPlan = exp.Harbor.K
 		}
-		out.NSuperiority = RequiredNSuperiority(ood.SigmaD, p.MinImprovement)
+		within := 2 * c.SigmaWithin * c.SigmaWithin / float64(kPlan)
+		sigmaD = math.Hypot(c.SigmaBetween, math.Sqrt(within))
+	}
+	if p := rule.Primary; p != nil && p.Metric == "pass_rate" && p.MinImprovement > 0 {
+		if sigmaD <= 0 {
+			return nil, fmt.Errorf("OOD sizing: pass_rate primary needs sigma_d or a repeated-cell read — neither the #404 pair nor the #489 cells measured it")
+		}
+		out.NSuperiority = RequiredNSuperiority(sigmaD, p.MinImprovement)
 		sized = true
 	}
 	if g := rule.Guardrail; g != nil && g.Metric == "pass_rate" {
-		if ood.SigmaD <= 0 {
-			return nil, fmt.Errorf("OOD sizing: pass_rate guardrail needs sigma_d — the #404 pair read didn't measure it")
+		if sigmaD <= 0 {
+			return nil, fmt.Errorf("OOD sizing: pass_rate guardrail needs sigma_d or a repeated-cell read — neither the #404 pair nor the #489 cells measured it")
 		}
 		if g.MinDelta < 0 {
-			out.NNonInferiority = RequiredNNonInferiority(ood.SigmaD, g.MinDelta, 0)
+			out.NNonInferiority = RequiredNNonInferiority(sigmaD, g.MinDelta, 0)
 			sized = true
 		} else if g.MinDelta > 0 {
-			out.NSuperiority = max(out.NSuperiority, RequiredNSuperiority(ood.SigmaD, g.MinDelta))
+			out.NSuperiority = max(out.NSuperiority, RequiredNSuperiority(sigmaD, g.MinDelta))
 			sized = true
 		}
 	}

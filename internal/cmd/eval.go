@@ -386,8 +386,13 @@ harbor records — the quantities the selection rules price against
                            tokens σ_d, tokens CV. One invocation
                            pairs its run_index 0 vs 1 cells; two
                            pair each's run 0.
+  --cells inv1,inv2,...    repeated-cell decomposition (#489): the
+                           per-task outcome matrix plus σ_within /
+                           σ_between — the within-task Bernoulli
+                           noise reps shrink vs the systematic
+                           spread OOD sizing needs.
 
-Both also report per-trial tokens, wall time, and USD cost.
+All report per-trial tokens, wall time, and USD cost.
 --write merges the result into eval/noise.json's harbor block
 (without it the report prints only).`,
 	Args: cobra.ExactArgs(1),
@@ -416,15 +421,18 @@ Both also report per-trial tokens, wall time, and USD cost.
 		if model == "" {
 			model = exp.Model
 		}
-		var passInvs, pairInvs []string
+		var passInvs, pairInvs, cellInvs []string
 		if passes != "" {
 			passInvs = strings.Split(passes, ",")
 		}
 		if pair != "" {
 			pairInvs = strings.Split(pair, ",")
 		}
-		if len(passInvs) == 0 && len(pairInvs) == 0 && !size {
-			return fmt.Errorf("noise: --passes or --pair is required — characterization needs measured invocations")
+		if cells, _ := cmd.Flags().GetString("cells"); cells != "" {
+			cellInvs = strings.Split(cells, ",")
+		}
+		if len(passInvs) == 0 && len(pairInvs) == 0 && len(cellInvs) == 0 && !size {
+			return fmt.Errorf("noise: --passes, --pair, or --cells is required — characterization needs measured invocations")
 		}
 		r, err := evalRunner(cmd)
 		if err != nil {
@@ -449,12 +457,18 @@ Both also report per-trial tokens, wall time, and USD cost.
 				return err
 			}
 		}
+		if len(cellInvs) > 0 {
+			harbor.Cells, err = eval.ComputeCellNoise(records, exp, evalDir, arm, dataset, cellInvs)
+			if err != nil {
+				return err
+			}
+		}
 		if size {
 			// The task-count requirement for this manifest's OOD
 			// read, priced against the noise block just computed or
 			// the one on disk — the #397 recording input.
 			var n *eval.NoiseFile
-			if harbor.OOD != nil {
+			if harbor.OOD != nil || harbor.Cells != nil {
 				n = &eval.NoiseFile{Harbor: harbor}
 			} else {
 				var lerr error
@@ -481,7 +495,7 @@ Both also report per-trial tokens, wall time, and USD cost.
 				return merr
 			}
 			fmt.Println(string(out))
-			if len(passInvs) == 0 && len(pairInvs) == 0 {
+			if len(passInvs) == 0 && len(pairInvs) == 0 && len(cellInvs) == 0 {
 				return nil
 			}
 		}
@@ -1093,6 +1107,7 @@ func init() {
 	evalNoiseCmd.Flags().String("dataset", "", "dataset label recorded in the noise block (e.g. terminal-bench@2.1)")
 	evalNoiseCmd.Flags().String("passes", "", "comma-separated invocations, one per pass over the corpus")
 	evalNoiseCmd.Flags().String("pair", "", "comma-separated invocations — one pairs run_index within it, two pair across")
+	evalNoiseCmd.Flags().String("cells", "", "comma-separated invocations — repeated-cell decomposition (σ_within / σ_between, #489)")
 	evalNoiseCmd.Flags().String("model", "", "solver model label recorded in the noise block")
 	evalNoiseCmd.Flags().Bool("write", false, "merge the result into eval/noise.json (default prints only)")
 	evalNoiseCmd.Flags().Bool("force", false, "overwrite an already-recorded noise sub-block (retune — exceptional)")
