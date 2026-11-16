@@ -1,0 +1,83 @@
+{
+	"name": "tb21-krep-beam",
+	"model": "opencode-go/beam-free",
+	"temperature": 0,
+	"corpus": [
+		"harbor"
+	],
+	"runs_per_trajectory": {
+		"uncharacterized": 1
+	},
+	"arms": {
+		"control": {
+			"config": {
+				"options": {}
+			}
+		},
+		"treatment": {
+			"config": {
+				"options": {}
+			}
+		}
+	},
+	"providers": {
+		"opencode-go": {
+			"name": "OpenCode Go",
+			"type": "openai-compat",
+			"api_key": "$OPENCODE_API_KEY",
+			"base_url": "https://opencode.ai/zen/go/v1",
+			"extra_headers": {
+				"x-opencode-session": "$(cat /proc/sys/kernel/random/uuid)"
+			},
+			"models": [
+				{
+					"id": "beam-free",
+					"name": "Beam Free",
+					"context_window": 1048576,
+					"default_max_tokens": 131072
+				}
+			]
+		}
+	},
+	"harbor": {
+		"dataset": "terminal-bench@2.1",
+		"task_ids": [
+			"bn-fit-modify",
+			"build-pov-ray",
+			"chess-best-move",
+			"code-from-image",
+			"constraints-scheduling",
+			"crack-7z-hash",
+			"db-wal-recovery",
+			"dna-insert",
+			"extract-moves-from-video",
+			"feal-linear-cryptanalysis",
+			"fix-git",
+			"git-multibranch",
+			"kv-store-grpc",
+			"log-summary-date-ranges",
+			"make-doom-for-mips",
+			"mcmc-sampling-stan",
+			"mteb-retrieve",
+			"overfull-hbox",
+			"path-tracing-reverse",
+			"polyglot-rust-c",
+			"prove-plus-comm",
+			"pytorch-model-cli",
+			"qemu-alpine-ssh",
+			"query-optimize",
+			"regex-log",
+			"schemelike-metacircular-eval",
+			"torch-pipeline-parallelism",
+			"train-fasttext",
+			"video-processing",
+			"write-compressor"
+		],
+		"k": 8,
+		"harness_revision": "58836e8f01e3",
+		"exclude": {
+			"mteb-retrieve": "dataset defect — image reproducibly fails environment build even at 4x timeout (#489 G1.a)"
+		}
+	},
+	"resample": "cluster"
+}
