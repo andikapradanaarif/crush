@@ -42,6 +42,19 @@ func LoadNoise(evalDir string) (*NoiseFile, error) {
 			return nil, fmt.Errorf("noise.json: cv[%q] must be > 0, got %g", metric, cv)
 		}
 	}
+	// The cells matrix is hand-editable like everything else —
+	// validate it so a malformed entry can't produce NaN σ's that
+	// slip past the fail-closed checks into a "powered" verdict.
+	if c := n.Harbor; c != nil && c.Cells != nil {
+		for task, cell := range c.Cells.Cells {
+			if cell[1] < 1 || cell[0] < 0 || cell[0] > cell[1] {
+				return nil, fmt.Errorf("noise.json: harbor.cells[%q] = %v — want 0 ≤ passes ≤ reps, reps ≥ 1", task, cell)
+			}
+		}
+		if !(c.Cells.SigmaWithin >= 0) || !(c.Cells.SigmaBetween >= 0) {
+			return nil, fmt.Errorf("noise.json: harbor.cells sigmas must be ≥ 0, got within=%g between=%g", c.Cells.SigmaWithin, c.Cells.SigmaBetween)
+		}
+	}
 	return &n, nil
 }
 
@@ -67,13 +80,19 @@ func (n *NoiseFile) MergeHarbor(h *NoiseHarbor, force bool) error {
 		}
 		n.Harbor.OOD = h.OOD
 	}
+	if h.Cells != nil {
+		if n.Harbor.Cells != nil && !force {
+			return fmt.Errorf("noise: harbor.cells already recorded — --force to retune the base floor")
+		}
+		n.Harbor.Cells = h.Cells
+	}
 	if h.Model != "" {
 		n.Harbor.Model = h.Model
 	}
 	// MeasuredAt is the measurement's timestamp — a metadata-only
 	// merge (Model, or a no-op write) mustn't redate a sub-block it
 	// didn't touch.
-	if h.Passes != nil || h.OOD != nil {
+	if h.Passes != nil || h.OOD != nil || h.Cells != nil {
 		n.Harbor.MeasuredAt = h.MeasuredAt
 	}
 	return nil
@@ -155,6 +174,10 @@ type OODSizing struct {
 	// improvement; reported alongside the binding endpoints, binding
 	// only when it's the sole declared claim.
 	NSuperiority int `json:"n_superiority,omitempty"`
+	// SigmaSource names which read priced the pass endpoints —
+	// "cells" (the #489 decomposition) or "pair" (raw σ_d) — so an
+	// underpowered report's σ_d isn't attributed to the wrong read.
+	SigmaSource string `json:"sigma_source,omitempty"`
 	// Required is N_OOD = max of the required endpoints — and the
 	// superiority count when that's the only endpoint declared, so a
 	// superiority-only read can't sail through unpowered.
@@ -216,8 +239,8 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 	if rule == nil || !rule.OOD {
 		return nil, nil
 	}
-	if noise == nil || noise.Harbor == nil || noise.Harbor.OOD == nil {
-		return nil, fmt.Errorf("OOD sizing needs measured harbor noise — run #404 characterization first (noise.json has no harbor.ood block)")
+	if noise == nil || noise.Harbor == nil || (noise.Harbor.OOD == nil && noise.Harbor.Cells == nil) {
+		return nil, fmt.Errorf("OOD sizing needs measured harbor noise — run #404 characterization first (noise.json has no harbor.ood or harbor.cells block)")
 	}
 	ood := noise.Harbor.OOD
 	out := &OODSizing{}
@@ -231,7 +254,7 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 		// Δ_c is used raw rather than |log(1−Δ)|: for small declared
 		// effects the approximation is tight, and the residual bias
 		// is conservative for improvements (overstates N slightly).
-		if ood.TokensLogRatioSD <= 0 {
+		if ood == nil || ood.TokensLogRatioSD <= 0 {
 			return nil, fmt.Errorf("OOD sizing: primary %q needs tokens_log_ratio_sd — the #404 pair read didn't measure it", p.Metric)
 		}
 		if p.MinImprovement <= 0 {
@@ -240,24 +263,60 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 		out.NEfficiency = RequiredNEfficiency(ood.TokensLogRatioSD, p.MinImprovement)
 		sized = true
 	}
-	if p := rule.Primary; p != nil && p.Metric == "pass_rate" && p.MinImprovement > 0 {
-		if ood.SigmaD <= 0 {
-			return nil, fmt.Errorf("OOD sizing: pass_rate primary needs sigma_d — the #404 pair read didn't measure it")
+	// The repeated-cell decomposition (#489) supersedes raw σ_d
+	// when recorded — with a caveat worth being honest about. The
+	// sized estimand is the cross-arm per-task effect diff, whose
+	// variance is Var(effect_i) + 2·σ²_within/k; σ²_between
+	// (single-arm task-difficulty spread) is a *plug-in* for the
+	// unmeasurable effect heterogeneity, sitting between the
+	// perfectly-paired model (0) and independent draws
+	// (2·σ²_between). Defensible and usually conservative, not a
+	// derivation: heterogeneous effects on uniform-difficulty tasks
+	// would undersize. The pair read can't help either — its σ²_d
+	// cancels task difficulty by construction (≈2σ²_within + drift).
+	// The ×2 on σ²_within is a second plug-in: it assumes the
+	// treatment arm's within noise equals the measured base
+	// arm's — symmetric flips are the honest default, but a
+	// treatment that changes flip rates shifts it either way.
+	sigmaD := 0.0
+	sigmaSource := ""
+	if ood != nil {
+		sigmaD = ood.SigmaD
+		sigmaSource = "pair"
+	}
+	if c := noise.Harbor.Cells; c != nil {
+		kPlan := 1
+		if exp.Harbor != nil && exp.Harbor.K > 0 {
+			kPlan = exp.Harbor.K
 		}
-		out.NSuperiority = RequiredNSuperiority(ood.SigmaD, p.MinImprovement)
+		within := 2 * c.SigmaWithin * c.SigmaWithin / float64(kPlan)
+		sigmaD = math.Hypot(c.SigmaBetween, math.Sqrt(within))
+		sigmaSource = "cells"
+	}
+	if p := rule.Primary; p != nil && p.Metric == "pass_rate" && p.MinImprovement > 0 {
+		if sigmaD <= 0 {
+			return nil, fmt.Errorf("OOD sizing: pass_rate primary needs sigma_d or a repeated-cell read — neither the #404 pair nor the #489 cells measured it")
+		}
+		out.NSuperiority = RequiredNSuperiority(sigmaD, p.MinImprovement)
 		sized = true
 	}
 	if g := rule.Guardrail; g != nil && g.Metric == "pass_rate" {
-		if ood.SigmaD <= 0 {
-			return nil, fmt.Errorf("OOD sizing: pass_rate guardrail needs sigma_d — the #404 pair read didn't measure it")
+		if sigmaD <= 0 {
+			return nil, fmt.Errorf("OOD sizing: pass_rate guardrail needs sigma_d or a repeated-cell read — neither the #404 pair nor the #489 cells measured it")
 		}
 		if g.MinDelta < 0 {
-			out.NNonInferiority = RequiredNNonInferiority(ood.SigmaD, g.MinDelta, 0)
+			out.NNonInferiority = RequiredNNonInferiority(sigmaD, g.MinDelta, 0)
 			sized = true
 		} else if g.MinDelta > 0 {
-			out.NSuperiority = max(out.NSuperiority, RequiredNSuperiority(ood.SigmaD, g.MinDelta))
+			out.NSuperiority = max(out.NSuperiority, RequiredNSuperiority(sigmaD, g.MinDelta))
 			sized = true
 		}
+	}
+	// SigmaSource labels the read that actually priced σ_d — an
+	// efficiency-only manifest never consumes it, so attributing a
+	// source there would be decoration.
+	if out.NNonInferiority > 0 || out.NSuperiority > 0 {
+		out.SigmaSource = sigmaSource
 	}
 	if !sized {
 		return nil, fmt.Errorf("OOD sizing: the rule declares no sizable endpoint — a continuous primary (min_improvement) or a pass_rate primary/guardrail")

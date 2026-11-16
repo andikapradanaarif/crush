@@ -1939,7 +1939,19 @@ pass stops contaminating solve variance, **c_min**
 `tokens_cv`); `--pair invA[,invB]` computes the paired two-run
 read (**σ_d** = SD of per-task paired pass diffs, `tokens_sigma_d`,
 `tokens_cv`) — one invocation pairs run_index 0 vs 1 cells, two
-pair each's run 0. Per-trial tokens, wall time, and USD cost land
+pair each's run 0. A third shape, `--cells inv1,inv2,...`, computes
+the **repeated-cell decomposition** (#489): every conclusive record
+for the arm is one cell rep grouped by task, and the recorded block
+(`harbor.cells`) carries the per-task outcome matrix
+(`cells: task → [passes, conclusive reps]`) plus the two variance
+components — `sigma_within` (mean over cells with ≥2 reps of the
+unbiased weight p̂ᵢ(1−p̂ᵢ)·kᵢ/(kᵢ−1), the per-trial coin-flip
+noise reps shrink; single-rep cells impute it) and `sigma_between`
+(√(Var(p̂ᵢ) − expected within), the systematic task-to-task
+spread nothing shrinks). Sizing on raw σ_d conflates the two — the pilot's σ_d ≈
+0.5 was nearly all coin flips, which prices G1.e/f as if the
+irreducible part could be shrunk. Per-trial tokens, wall time, and
+USD cost land
 on every block (`cost_usd` is a RunRecord field only harbor trials
 populate). Without `--write` the report prints only; with it the
 block merges **field-wise** (a `--pair`-only write can't erase a
@@ -1959,7 +1971,22 @@ from `sigma_d` against a `pass_rate` guardrail's negative
 `min_delta` (Δ_true = 0 conservative; pass-rate *superiority*
 claims size at `n_superiority` — reported alongside the binding
 endpoints, binding when it's the sole declared claim so a
-superiority-only read can't run unpowered).
+superiority-only read can't run unpowered). When a `cells` block is
+recorded it **supersedes** `ood.sigma_d` in the pass-rate sizing:
+the effective σ_d² = σ²_between + 2·σ²_within/k_plan at the
+manifest's declared `harbor.k` (default 1). Be precise about what
+that substitutes: the sized estimand is the cross-arm effect diff,
+whose variance is Var(effect_i) + 2·σ²_within/k — `sigma_between`
+is single-arm difficulty spread plugged in for the unmeasurable
+effect-heterogeneity term (between the perfectly-paired 0 and
+independent-draws 2·σ²_between), a modeling choice that can
+undersize when effects are heterogeneous on uniform-difficulty
+tasks; the ×2 on σ²_within is a second plug-in — it assumes the
+treatment arm's within noise equals the measured base arm's. The
+raw pair σ_d can't substitute either way — pairing the
+same arm's reps cancels task difficulty, so it measures ≈2σ²_within
++ drift, which is why the decomposition changes the number even at
+k=1 rather than "recombining" into the pair read.
 Manifests must declare at least one sizable endpoint or
 `ValidateExperiment` refuses; at compare time an OOD rule whose
 recorded task count falls short of `required` reports

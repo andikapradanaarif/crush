@@ -21,6 +21,11 @@ type NoiseHarbor struct {
 	MeasuredAt time.Time        `json:"measured_at"`
 	Passes     *HarborPassNoise `json:"passes,omitempty"`
 	OOD        *HarborPairNoise `json:"ood,omitempty"`
+	// Cells is the repeated-cell decomposition (#489) — when
+	// recorded it supersedes ood.sigma_d in the sizing path: the
+	// components price against the declared k, not whatever the
+	// pair read happened to run.
+	Cells *HarborCellNoise `json:"cells,omitempty"`
 }
 
 // HarborPassNoise is the multi-pass characterization: one
@@ -49,6 +54,46 @@ type HarborPassNoise struct {
 	TokensPerTrial  float64  `json:"tokens_per_trial"`
 	WallSPerTrial   float64  `json:"wall_s_per_trial"`
 	WallTrials      int      `json:"wall_trials"`
+	CostUSDPerTrial *float64 `json:"cost_usd_per_trial,omitempty"`
+	CostTrials      int      `json:"cost_trials"`
+}
+
+// HarborCellNoise is the repeated-cell characterization (#489): k
+// conclusive reps per task resolve each cell's flip rate p̂ᵢ,
+// separating within-task Bernoulli noise (reps shrink it) from the
+// between-task systematic spread (nothing shrinks it). The pair
+// read can't split them either — its σ²_d cancels task difficulty
+// by construction (≈2σ²_within + drift), so it measures neither
+// component of the sized estimand.
+type HarborCellNoise struct {
+	Dataset     string `json:"dataset"`
+	Tasks       int    `json:"tasks"`
+	TasksSource string `json:"tasks_source"`
+	// Cells is the per-task outcome matrix — task → [passes,
+	// conclusive reps]. The matrix is the raw evidence the
+	// decomposition stands on; it stays recorded so the σ's audit.
+	// Tasks reports the declared count when the spec resolves
+	// (sibling convention) — the recorded cell count is len(Cells).
+	Cells       map[string][2]int `json:"cells"`
+	RepsPerTask float64           `json:"reps_per_task"`
+	PassRate    float64           `json:"pass_rate"`
+	// SigmaWithin is the per-trial within-task Bernoulli SD — the
+	// mean of p̂ᵢ(1−p̂ᵢ)·kᵢ/(kᵢ−1) over cells with ≥2 reps, the
+	// only cells where within noise is measurable. Single-rep
+	// cells impute that mean for their Var(p̂) correction; an
+	// all-1-rep matrix has no measurable cell and records 0 — an
+	// artifact, not a measured noise floor; reps_per_task is the
+	// tell. The k/(k−1) factor undoes E[p̂(1−p̂)]'s plug-in bias.
+	SigmaWithin float64 `json:"sigma_within"`
+	// SigmaBetween is the between-task systematic SD — the spread
+	// of p̂ᵢ left after subtracting expected within noise.
+	// OOD sizing plugs it in for cross-arm effect heterogeneity,
+	// which a base-arm characterization can't measure — a
+	// modeling choice, not a derivation (see HarborOODSizing).
+	SigmaBetween float64 `json:"sigma_between"`
+
+	TokensPerTrial  float64  `json:"tokens_per_trial"`
+	WallSPerTrial   float64  `json:"wall_s_per_trial"`
 	CostUSDPerTrial *float64 `json:"cost_usd_per_trial,omitempty"`
 	CostTrials      int      `json:"cost_trials"`
 }
@@ -330,6 +375,129 @@ func ComputePairNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 	}
 	if out.Tasks == 0 {
 		out.Tasks = pairs
+	}
+	return out, nil
+}
+
+// ComputeCellNoise measures the repeated-cell decomposition over
+// harbor records — every conclusive record of the named arm across
+// the named invocations is one cell rep, grouped by task. Per task
+// p̂ᵢ = passes/conclusive; the decomposition then reads
+//
+//	Var(p̂ᵢ) = σ²_between + meanᵢ[p̂ᵢ(1−p̂ᵢ)/kᵢ]
+//
+// and solves for σ²_between (floored at 0 — a corpus thinner than
+// its noise floor reports no systematic spread). Requires ≥2 tasks
+// with conclusive cells. The within weight uses the unbiased
+// p̂ᵢ(1−p̂ᵢ)·kᵢ/(kᵢ−1) form — the raw plug-in reads low by ~1/kᵢ.
+func ComputeCellNoise(records []RunRecord, exp *Experiment, evalDir, arm, dataset string, invs []string) (*HarborCellNoise, error) {
+	if exp != nil && exp.Arms[arm].BestOfK != nil {
+		return nil, fmt.Errorf("cell noise: arm %q declares best_of_k — trials are selection candidates, not replicates; use the task-level best_of_k read", arm)
+	}
+	if len(invs) < 1 {
+		return nil, fmt.Errorf("cell characterization needs ≥1 invocation, got %d", len(invs))
+	}
+	invSet := map[string]bool{}
+	for _, i := range invs {
+		invSet[i] = true
+	}
+	cells := map[string][2]int{}
+	var wall, tok metricSample
+	var allCost []float64
+	for i := range records {
+		r := &records[i]
+		if r.Arm != arm || !invSet[r.Invocation] || !r.Outcome.Conclusive() {
+			continue
+		}
+		c := cells[r.TrajectoryID]
+		c[1]++
+		if r.Outcome == OutcomePass {
+			c[0]++
+		}
+		cells[r.TrajectoryID] = c
+		wall.add(r.DurationS)
+		tok.add(totalTokens(r))
+		if r.CostUSD != nil {
+			allCost = append(allCost, *r.CostUSD)
+		}
+	}
+	if len(cells) < 2 {
+		return nil, fmt.Errorf("cell characterization: %d tasks with conclusive %s cells — the decomposition needs ≥2", len(cells), arm)
+	}
+	// p̂ᵢ per cell; wᵢ = p̂ᵢ(1−p̂ᵢ)·kᵢ/(kᵢ−1) is the unbiased
+	// Bernoulli weight over cells where it's measurable (kᵢ ≥ 2),
+	// and wᵢ/kᵢ the within contribution that Var(p̂ᵢ) is expected
+	// to carry. Single-rep cells have the largest true within
+	// contribution of any cell — p(1−p)/1 — so excluding them
+	// would under-correct Var(p̂) and dump the missing mass into
+	// σ²_between; they impute at the multi-rep mean instead.
+	var phats []float64
+	var wSum, withinSum float64
+	var measurable, singletons int
+	for _, c := range cells {
+		k := float64(c[1])
+		p := float64(c[0]) / k
+		phats = append(phats, p)
+		if k >= 2 {
+			w := p * (1 - p) * k / (k - 1)
+			wSum += w
+			withinSum += w / k
+			measurable++
+		} else {
+			singletons++
+		}
+	}
+	n := float64(len(cells))
+	wMean := 0.0
+	if measurable > 0 {
+		wMean = wSum / float64(measurable)
+	}
+	withinSum += wMean * float64(singletons)
+	var phat metricSample
+	for _, p := range phats {
+		phat.add(p)
+	}
+	mean := phat.Mean()
+	varSum := 0.0
+	for _, p := range phats {
+		varSum += (p - mean) * (p - mean)
+	}
+	varSum /= n - 1
+	betweenVar := varSum - withinSum/n
+	if betweenVar < 0 {
+		betweenVar = 0
+	}
+	out := &HarborCellNoise{
+		Dataset:        dataset,
+		Tasks:          len(cells),
+		TasksSource:    "recorded",
+		Cells:          cells,
+		PassRate:       mean,
+		SigmaWithin:    math.Sqrt(wMean),
+		SigmaBetween:   math.Sqrt(betweenVar),
+		TokensPerTrial: tok.Mean(),
+		WallSPerTrial:  wall.Mean(),
+	}
+	if len(allCost) > 0 {
+		var s metricSample
+		for _, c := range allCost {
+			s.add(c)
+		}
+		m := s.Mean()
+		out.CostUSDPerTrial = &m
+	}
+	out.CostTrials = len(allCost)
+	for _, c := range cells {
+		out.RepsPerTask += float64(c[1])
+	}
+	out.RepsPerTask /= n
+	if exp != nil && exp.Harbor != nil {
+		if ids, err := HarborTaskSet(evalDir, exp.Harbor); err == nil && len(ids) > 0 {
+			// Sibling blocks report the declared count — the
+			// recorded matrix itself already lives in Cells.
+			out.Tasks = len(ids)
+			out.TasksSource = "declared"
+		}
 	}
 	return out, nil
 }
