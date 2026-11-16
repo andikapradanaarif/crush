@@ -29,7 +29,13 @@ func TestExperiments_ManifestConsistent(t *testing.T) {
 		require.NoError(t, ValidateArmCoverageResolved(exp, manifest), p)
 		// Arm coverage must be achievable on the corpus the selectors
 		// resolve — a predicate past the turn-count ceiling starves
-		// every run of that trajectory.
+		// every run of that trajectory. Harbor manifests declare the
+		// corpus: ["harbor"] marker rather than selectors — their
+		// coverage floor is the declared task set, enforced at
+		// ingest, so there's no local corpus to resolve.
+		if exp.Harbor != nil {
+			continue
+		}
 		trajs, err := SelectCorpus(corpus, bands, exp.Corpus)
 		require.NoError(t, err, p)
 		require.NoError(t, ValidateArmCoverageVsCorpus(exp, trajs), p)
