@@ -1962,6 +1962,19 @@ on each block says whether the task count came from the declared
 corpus or the recorded union — a `recorded` read on a partial
 corpus under-reports tasks by construction.
 
+A `harbor.k` replicate schedule need not land in one invocation:
+`run_index` ordinals are per-arm and continue across ingests on the
+same arm, so a k=8 batch can run as eight invocations of one
+rep/task/arm and accrue into the same cell matrix — each sliced
+invocation reports partial coverage (≈1/k of the obligation) and
+ingests fine under the pending-tolerant path (#487); nothing reads
+an invocation-complete flag from a measurement-only manifest with
+no `decision_rule`. `--cells inv1,...,inv8` then pools the slices'
+conclusive records into the intended 8-rep matrix. Records for
+`exclude`d tasks still pool into cells if they land conclusive —
+consistent with the sibling blocks, and moot for defects whose
+trials fail inconclusive anyway.
+
 The harbor block's `ood` quantities are the **OOD sizing inputs**
 (#389): a `decision_rule` with `ood: true` sizes its task count
 against them — `n_efficiency = (z₁₋α/2 + z₁₋β)²·(CV_d/Δ_c)²` from
