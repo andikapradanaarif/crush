@@ -333,6 +333,7 @@ func TestComputeCellNoise_Decomposition(t *testing.T) {
 	require.Equal(t, 2, n.Tasks)
 	require.Equal(t, "declared", n.TasksSource)
 	require.Equal(t, map[string][2]int{"t-a": {4, 4}, "t-b": {2, 4}, "t-c": {0, 4}}, n.Cells)
+	require.Equal(t, 3, n.MeasurableCells)
 	require.InDelta(t, 4.0, n.RepsPerTask, 1e-9)
 	require.InDelta(t, 0.5, n.PassRate, 1e-9)
 	require.InDelta(t, 0.3333, n.SigmaWithin, 1e-3)
@@ -398,6 +399,7 @@ func TestComputeCellNoise_UnequalReps(t *testing.T) {
 	n, err = ComputeCellNoise(one, exp, "", ArmControl, "tb21", []string{"inv1"})
 	require.NoError(t, err)
 	require.InDelta(t, 1.0, n.RepsPerTask, 1e-9)
+	require.Equal(t, 0, n.MeasurableCells)
 	require.Equal(t, 0.0, n.SigmaWithin)
 	require.InDelta(t, 0.7071, n.SigmaBetween, 1e-3) // √(Var({1,0})) = √.5
 }
@@ -419,6 +421,7 @@ func TestComputeCellNoise_SingletonImputation(t *testing.T) {
 	n, err := ComputeCellNoise(recs, exp, "", ArmControl, "tb21", []string{"inv1"})
 	require.NoError(t, err)
 	require.Equal(t, map[string][2]int{"t-a": {2, 4}, "t-b": {1, 1}}, n.Cells)
+	require.Equal(t, 1, n.MeasurableCells)
 	// σ_within = √(w_a) = √(.25·4/3) = √(1/3) ≈ .5774 — the
 	// measurable cell alone, not diluted by t-b's singleton.
 	require.InDelta(t, 0.5774, n.SigmaWithin, 1e-3)
@@ -466,7 +469,7 @@ func TestHarborOODSizing_CellsPreferred(t *testing.T) {
 	}
 	noise := &NoiseFile{Harbor: &NoiseHarbor{
 		OOD:   &HarborPairNoise{SigmaD: 0.56, TokensLogRatioSD: 0.5},
-		Cells: &HarborCellNoise{SigmaBetween: 0.30, SigmaWithin: 0.50},
+		Cells: &HarborCellNoise{SigmaBetween: 0.30, SigmaWithin: 0.50, MeasurableCells: 8},
 	}}
 	sizing, err := HarborOODSizing(exp, noise)
 	require.NoError(t, err)
@@ -515,7 +518,7 @@ func TestHarborOODSizing_CellsOnly(t *testing.T) {
 		Guardrail:  &RuleGuardrail{Metric: "pass_rate", MinDelta: -0.05},
 	}
 	sizing, err := HarborOODSizing(exp, &NoiseFile{Harbor: &NoiseHarbor{
-		Cells: &HarborCellNoise{SigmaBetween: 0.30, SigmaWithin: 0.50},
+		Cells: &HarborCellNoise{SigmaBetween: 0.30, SigmaWithin: 0.50, MeasurableCells: 8},
 	}})
 	require.NoError(t, err)
 	require.Equal(t, 378, sizing.NNonInferiority)
@@ -528,9 +531,40 @@ func TestHarborOODSizing_CellsOnly(t *testing.T) {
 		Primary:    &RulePrimary{Metric: "weighted_cost", MinImprovement: 0.1},
 	}
 	_, err = HarborOODSizing(exp, &NoiseFile{Harbor: &NoiseHarbor{
-		Cells: &HarborCellNoise{SigmaBetween: 0.30, SigmaWithin: 0.50},
+		Cells: &HarborCellNoise{SigmaBetween: 0.30, SigmaWithin: 0.50, MeasurableCells: 8},
 	}})
 	require.ErrorContains(t, err, "tokens_log_ratio_sd")
+}
+
+// An all-1-rep matrix records sigma_within=0 as an artifact, not a
+// measurement — sizing must refuse the block rather than drop the
+// within term and under-report N. Fail-closed even when a pair
+// read exists: the recorded cells block supersedes it, so a
+// degenerate read can't be downgraded around.
+func TestHarborOODSizing_AllOneRepCellsRefused(t *testing.T) {
+	exp := harborNoiseExp()
+	exp.DecisionRule = &DecisionRule{
+		Hypothesis: "h",
+		OOD:        true,
+		Guardrail:  &RuleGuardrail{Metric: "pass_rate", MinDelta: -0.05},
+	}
+	noise := &NoiseFile{Harbor: &NoiseHarbor{
+		OOD:   &HarborPairNoise{SigmaD: 0.56, TokensLogRatioSD: 0.5},
+		Cells: &HarborCellNoise{SigmaBetween: 0.70, SigmaWithin: 0, MeasurableCells: 0, RepsPerTask: 1},
+	}}
+	_, err := HarborOODSizing(exp, noise)
+	require.ErrorContains(t, err, "all-1-rep")
+
+	// An efficiency-only manifest never consumes σ_d — the
+	// degenerate cells block is beside its point, not a refusal.
+	exp.DecisionRule = &DecisionRule{
+		Hypothesis: "h",
+		OOD:        true,
+		Primary:    &RulePrimary{Metric: "weighted_cost", MinImprovement: 0.1},
+	}
+	sizing, err := HarborOODSizing(exp, noise)
+	require.NoError(t, err)
+	require.Greater(t, sizing.NEfficiency, 0)
 }
 
 // The cells block merges field-wise and refuses silent retuning,

@@ -284,14 +284,25 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 		sigmaD = ood.SigmaD
 		sigmaSource = "pair"
 	}
-	if c := noise.Harbor.Cells; c != nil {
+	cells := noise.Harbor.Cells
+	if cells != nil && cells.MeasurableCells > 0 {
 		kPlan := 1
 		if exp.Harbor != nil && exp.Harbor.K > 0 {
 			kPlan = exp.Harbor.K
 		}
-		within := 2 * c.SigmaWithin * c.SigmaWithin / float64(kPlan)
-		sigmaD = math.Hypot(c.SigmaBetween, math.Sqrt(within))
+		within := 2 * cells.SigmaWithin * cells.SigmaWithin / float64(kPlan)
+		sigmaD = math.Hypot(cells.SigmaBetween, math.Sqrt(within))
 		sigmaSource = "cells"
+	}
+	passLeg := (rule.Primary != nil && rule.Primary.Metric == "pass_rate" && rule.Primary.MinImprovement > 0) ||
+		(rule.Guardrail != nil && rule.Guardrail.Metric == "pass_rate")
+	if passLeg && cells != nil && cells.MeasurableCells == 0 {
+		// An all-1-rep matrix can't see within noise — sigma_within
+		// is a structural 0, and pricing it would undersize by the
+		// entire coin-flip term. The block supersedes the pair read
+		// when recorded, so refuse rather than silently downgrade
+		// or silently drop the within term.
+		return nil, fmt.Errorf("OOD sizing: harbor.cells has no multi-rep cells — sigma_within is unmeasured (all-1-rep matrix), rerun with ≥2 reps per task")
 	}
 	if p := rule.Primary; p != nil && p.Metric == "pass_rate" && p.MinImprovement > 0 {
 		if sigmaD <= 0 {

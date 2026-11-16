@@ -77,6 +77,11 @@ type HarborCellNoise struct {
 	Cells       map[string][2]int `json:"cells"`
 	RepsPerTask float64           `json:"reps_per_task"`
 	PassRate    float64           `json:"pass_rate"`
+	// MeasurableCells counts cells with ≥2 reps — the only cells
+	// where within noise is estimable. Zero means sigma_within is
+	// a structural artifact, not a measurement, and sizing must
+	// refuse the block rather than price a within term of 0.
+	MeasurableCells int `json:"measurable_cells"`
 	// SigmaWithin is the per-trial within-task Bernoulli SD — the
 	// mean of p̂ᵢ(1−p̂ᵢ)·kᵢ/(kᵢ−1) over cells with ≥2 reps, the
 	// only cells where within noise is measurable. Single-rep
@@ -468,15 +473,16 @@ func ComputeCellNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 		betweenVar = 0
 	}
 	out := &HarborCellNoise{
-		Dataset:        dataset,
-		Tasks:          len(cells),
-		TasksSource:    "recorded",
-		Cells:          cells,
-		PassRate:       mean,
-		SigmaWithin:    math.Sqrt(wMean),
-		SigmaBetween:   math.Sqrt(betweenVar),
-		TokensPerTrial: tok.Mean(),
-		WallSPerTrial:  wall.Mean(),
+		Dataset:         dataset,
+		Tasks:           len(cells),
+		TasksSource:     "recorded",
+		Cells:           cells,
+		MeasurableCells: measurable,
+		PassRate:        mean,
+		SigmaWithin:     math.Sqrt(wMean),
+		SigmaBetween:    math.Sqrt(betweenVar),
+		TokensPerTrial:  tok.Mean(),
+		WallSPerTrial:   wall.Mean(),
 	}
 	if len(allCost) > 0 {
 		var s metricSample

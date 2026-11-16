@@ -10,8 +10,8 @@ import (
 
 // Receipt is what a completed checkout produced.
 type Receipt struct {
-	LineCount     int
-	TotalCents    int
+	LineCount    int
+	TotalCents   int
 	ShippingCents int
 }
 

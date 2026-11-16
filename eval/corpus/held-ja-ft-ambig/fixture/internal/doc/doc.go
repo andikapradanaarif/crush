@@ -3,8 +3,8 @@ package doc
 
 // Doc is a titled list of page bodies.
 type Doc struct {
-	Title string
-	Pages []string
+	Title  string
+	Pages  []string
 }
 
 // PageCount reports how many pages the document holds.
