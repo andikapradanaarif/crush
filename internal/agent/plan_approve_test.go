@@ -252,7 +252,3 @@ func (s *busyStubAgent) GenerateTitle(context.Context, string, string) {}
 func (s *busyStubAgent) Summarize(context.Context, string, fantasy.ProviderOptions, func(context.Context, *fantasy.ProviderError) error) error {
 	return nil
 }
-
-func (s *busyStubAgent) ListSettledMessages(context.Context, string) ([]message.Message, error) {
-	return nil, nil
-}
