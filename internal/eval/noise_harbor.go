@@ -15,6 +15,11 @@ import (
 // OOD sample size derives from. Everything computes over ingested
 // RunRecords — the measurement is a report, not a runner.
 
+// rangeOf3 is E[max−min] of three standard normals — the factor
+// turning a per-pass SD into the spread G1.d's "range of 3 passes"
+// protocol expects.
+const rangeOf3 = 1.693
+
 // NoiseHarbor is the "harbor" block of eval/noise.json.
 type NoiseHarbor struct {
 	Model      string           `json:"model"`
@@ -48,7 +53,12 @@ type HarborPassNoise struct {
 	// (#489) prices against this quantity; Delta keeps measuring
 	// the all-in spread over scheduled trials for the
 	// instability read.
-	DeltaSolve      float64  `json:"delta_solve"`
+	DeltaSolve float64 `json:"delta_solve"`
+	// CMin is the legacy read — the relative spread of
+	// *arithmetic* per-pass mean tokens, all-in. One runaway
+	// trial dominates it; once a cells block exists, the
+	// efficiency rule's "real change" floor prices against
+	// cells.c_min_expected instead (#507).
 	CMin            float64  `json:"c_min"`
 	TokensCV        float64  `json:"tokens_cv"`
 	TokensPerTrial  float64  `json:"tokens_per_trial"`
@@ -90,6 +100,35 @@ type HarborCellNoise struct {
 	// artifact, not a measured noise floor; reps_per_task is the
 	// tell. The k/(k−1) factor undoes E[p̂(1−p̂)]'s plug-in bias.
 	SigmaWithin float64 `json:"sigma_within"`
+	// TokensLogSigmaWithin is the pooled within-task SD of log
+	// total tokens — df-weighted over cells with ≥2 token-bearing
+	// reps (a single-rep cell contributes no within information).
+	// Log domain makes the measure scale-free and stops one
+	// runaway trial from dominating the read the way it does the
+	// arithmetic spread (#507).
+	TokensLogSigmaWithin float64 `json:"tokens_log_sigma_within"`
+	// TokensLogSigmaBetween is the between-task systematic SD of
+	// log tokens — the same moment decomposition as the pass part:
+	// Var(task log-means) minus the expected within contribution,
+	// floored at 0.
+	TokensLogSigmaBetween float64 `json:"tokens_log_sigma_between"`
+	// TokensGeomeanPerTrial is exp(mean(log tokens)) over
+	// conclusive trials with tokens > 0 — the multiplicative
+	// center the log decomposition prices against.
+	TokensGeomeanPerTrial float64 `json:"tokens_geomean_per_trial,omitempty"`
+	// DeltaExpected is the model-estimated δ̂ at the manifest's
+	// declared schedule (tasks × k reps):
+	// 1.693·√(mean_w/(n·k)) — the expected range of 3 normals,
+	// i.e. G1.d's "range of 3 passes" priced against the measured
+	// within weight instead of one high-variance realization.
+	// Absent when no multi-rep cell measured w.
+	DeltaExpected float64 `json:"delta_expected,omitempty"`
+	// CMinExpected is the model-estimated token c_min at the same
+	// schedule: exp(1.693·σ_logw/√(n·k)) − 1 — the expected
+	// 3-pass log spread expressed as a relative token change.
+	// Once a cells block exists, "real efficiency" reads price
+	// against this, not the arithmetic all-in c_min (#507).
+	CMinExpected float64 `json:"c_min_expected,omitempty"`
 	// SigmaBetween is the between-task systematic SD — the spread
 	// of p̂ᵢ left after subtracting expected within noise.
 	// OOD sizing plugs it in for cross-arm effect heterogeneity,
@@ -407,8 +446,11 @@ func ComputeCellNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 		invSet[i] = true
 	}
 	cells := map[string][2]int{}
+	logTok := map[string][]float64{}
 	var wall, tok metricSample
 	var allCost []float64
+	var logSum float64
+	var logN int
 	for i := range records {
 		r := &records[i]
 		if r.Arm != arm || !invSet[r.Invocation] || !r.Outcome.Conclusive() {
@@ -421,7 +463,14 @@ func ComputeCellNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 		}
 		cells[r.TrajectoryID] = c
 		wall.add(r.DurationS)
-		tok.add(totalTokens(r))
+		tt := totalTokens(r)
+		tok.add(tt)
+		if tt > 0 {
+			l := math.Log(tt)
+			logTok[r.TrajectoryID] = append(logTok[r.TrajectoryID], l)
+			logSum += l
+			logN++
+		}
 		if r.CostUSD != nil {
 			allCost = append(allCost, *r.CostUSD)
 		}
@@ -504,6 +553,63 @@ func ComputeCellNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 			out.Tasks = len(ids)
 			out.TasksSource = "declared"
 		}
+	}
+	// The log-token decomposition mirrors the pass part: pooled
+	// within-cell variance (df-weighted) is the within σ², and the
+	// between σ² is Var(task log-means) minus each cell's expected
+	// within contribution σw²/kᵢ — homoscedastic pooled σw² stands
+	// in for the unmeasurable per-cell within variance.
+	if logN > 0 {
+		out.TokensGeomeanPerTrial = math.Exp(logSum / float64(logN))
+	}
+	var withinSS, withinDF, invK float64
+	var logMeans []float64
+	for _, xs := range logTok {
+		ki := float64(len(xs))
+		invK += 1 / ki
+		m := 0.0
+		for _, x := range xs {
+			m += x
+		}
+		m /= ki
+		logMeans = append(logMeans, m)
+		for _, x := range xs {
+			withinSS += (x - m) * (x - m)
+		}
+		withinDF += ki - 1
+	}
+	if withinDF > 0 && len(logMeans) >= 2 {
+		sigmaW2 := withinSS / withinDF
+		out.TokensLogSigmaWithin = math.Sqrt(sigmaW2)
+		lMean := 0.0
+		for _, m := range logMeans {
+			lMean += m
+		}
+		lMean /= float64(len(logMeans))
+		lVar := 0.0
+		for _, m := range logMeans {
+			lVar += (m - lMean) * (m - lMean)
+		}
+		lVar /= float64(len(logMeans) - 1)
+		lbVar := lVar - sigmaW2*invK/float64(len(logMeans))
+		if lbVar < 0 {
+			lbVar = 0
+		}
+		out.TokensLogSigmaBetween = math.Sqrt(lbVar)
+	}
+	// Expected-read estimates at the declared schedule: the range-
+	// of-3 factor turns the measured within weights into the
+	// spread a 3-pass protocol expects, replacing the realized
+	// range a single characterization happened to produce.
+	kPlan := 1.0
+	if exp != nil && exp.Harbor != nil && exp.Harbor.K > 0 {
+		kPlan = float64(exp.Harbor.K)
+	}
+	if wMean > 0 {
+		out.DeltaExpected = rangeOf3 * math.Sqrt(wMean/(float64(out.Tasks)*kPlan))
+	}
+	if out.TokensLogSigmaWithin > 0 {
+		out.CMinExpected = math.Exp(rangeOf3*out.TokensLogSigmaWithin/math.Sqrt(float64(out.Tasks)*kPlan)) - 1
 	}
 	return out, nil
 }
