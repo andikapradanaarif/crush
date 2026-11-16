@@ -4,6 +4,12 @@
 [2026-10-19-roadmap-evidence-calibrated-evolution](2026-10-19-roadmap-evidence-calibrated-evolution.md),
 including both of its amendments.
 
+> **Status + proposed amendment 2026-11-16:**
+> [2026-11-16-status-and-g1-reissue](2026-11-16-status-and-g1-reissue.md)
+> — measurement audit, a G1′ re-issue (pending owner sign-off of
+> D1–D5), and the work plan #504–#512. Phases and targets here are
+> unchanged.
+
 The 10-19 machinery stays: the RRSI-style ledger, gate, selector, cost
 rule, replication and integrity controls. What changes is **order and
 target**:
