@@ -58,8 +58,16 @@ const (
 // entry text — frozen with Set on the run's first render so a mid-run
 // entry commit cannot flip a turn from summary to raw mid-window.
 type turnCollapse struct {
-	Before      int64
-	Set         map[int64]bool
+	Before int64
+	Set    map[int64]bool
+	// SegSet is the segment-grain fold set (#509): covered closed
+	// segments inside the open turn, recomputed every render —
+	// segments close and cover mid-run, and the chunk frontier is
+	// what keeps the folded prefix stable between moves. segs is
+	// the segmentation the set was computed on, for the
+	// message-index → segment lookup at render.
+	SegSet      map[segmentKey]bool
+	segs        []segment
 	digestTurns map[int64]bool
 	summaries   map[int64]string
 }
@@ -146,8 +154,50 @@ func coveredPriorTurns(segs []segment, processed map[segmentKey]bool, before int
 	return out
 }
 
+// coveredFoldSegments resolves the segment-grain fold set (#509):
+// the open turn's CLOSED segments below the quantized frontier —
+// foldChunkTurns-sized chunks, the same quantum foldFrontier
+// applies at turn grain — each still gated on committed coverage.
+// The open tail is never a fold unit: its steps are the live
+// context. Segments in earlier turns are the turn-grain path's
+// business; this set is strictly intra-turn, which is what lets
+// it fire on a single-prompt trajectory at all.
+func coveredFoldSegments(segs []segment, processed map[segmentKey]bool, openTurn int64) map[segmentKey]bool {
+	var closed int64
+	for _, s := range segs {
+		if s.turn == openTurn && !s.open {
+			closed++
+		}
+	}
+	frontier := foldFrontier(closed)
+	if frontier == 0 {
+		return nil
+	}
+	out := make(map[segmentKey]bool)
+	for _, s := range segs {
+		if s.turn != openTurn || s.open || s.number >= frontier {
+			continue
+		}
+		if processed[s.key()] {
+			out[s.key()] = true
+		}
+	}
+	return out
+}
+
+// foldLabel names the collapsed span the stub text reports:
+// "prior turn N" for the turn-grain fold, "prior segment N of
+// turn M" for the intra-turn one — seg ≥ 0 selects the segment
+// label.
+func foldLabel(turn, seg int64) string {
+	if seg >= 0 {
+		return fmt.Sprintf("prior segment %d of turn %d", seg, turn)
+	}
+	return fmt.Sprintf("prior turn %d", turn)
+}
+
 // collapsedCallInput is the replacement tool-call input for a
-// collapsed turn. It must stay a valid JSON object — providers
+// collapsed span. It must stay a valid JSON object — providers
 // (Anthropic tool_use.input, Gemini args) reject prose — so the label
 // rides inside the payload rather than replacing it. For file-write
 // calls the payload was the input itself — recall("result:<id>")
@@ -155,14 +205,14 @@ func coveredPriorTurns(segs []segment, processed map[segmentKey]bool, before int
 // re-viewing the file. Other calls (reads, and bash mutations whose
 // output remains recallable) keep the generic marker, and digest
 // mode's names the consolidation that stands in for the turn.
-func collapsedCallInput(mode string, turn int64, write bool) string {
+func collapsedCallInput(mode string, label string, write bool) string {
 	if write {
-		return fmt.Sprintf(`{"_collapsed":"prior turn %d — write args dropped; re-view the file to reconstruct"}`, turn)
+		return fmt.Sprintf(`{"_collapsed":"%s — write args dropped; re-view the file to reconstruct"}`, label)
 	}
 	if mode == priorTurnsDigest {
-		return fmt.Sprintf(`{"_collapsed":"prior turn %d — consolidated in turn digest"}`, turn)
+		return fmt.Sprintf(`{"_collapsed":"%s — consolidated in turn digest"}`, label)
 	}
-	return fmt.Sprintf(`{"_collapsed":"prior turn %d"}`, turn)
+	return fmt.Sprintf(`{"_collapsed":"%s"}`, label)
 }
 
 // collapsedResultText is the constant stub text a collapsed tool
@@ -174,14 +224,14 @@ func collapsedCallInput(mode string, turn int64, write bool) string {
 // MaxOutputLength. For file-write calls the result is only the write
 // confirmation — the args lived in the input — so the stub leads with
 // re-view and qualifies what recall holds.
-func collapsedResultText(mode string, turn int64, toolCallID string, write bool) string {
+func collapsedResultText(mode string, label string, toolCallID string, write bool) string {
 	if write {
-		return fmt.Sprintf("[prior turn %d — collapsed; write args dropped — re-view the file to reconstruct; recall(\"result:%s\") holds only the confirmation]", turn, toolCallID)
+		return fmt.Sprintf("[%s — collapsed; write args dropped — re-view the file to reconstruct; recall(\"result:%s\") holds only the confirmation]", label, toolCallID)
 	}
 	if mode == priorTurnsDigest {
-		return fmt.Sprintf("[prior turn %d — consolidated in turn digest; recall(\"result:%s\") recovers the stored result, capped]", turn, toolCallID)
+		return fmt.Sprintf("[%s — consolidated in turn digest; recall(\"result:%s\") recovers the stored result, capped]", label, toolCallID)
 	}
-	return fmt.Sprintf("[prior turn %d — collapsed; recall(\"result:%s\") recovers the stored result, capped]", turn, toolCallID)
+	return fmt.Sprintf("[%s — collapsed; recall(\"result:%s\") recovers the stored result, capped]", label, toolCallID)
 }
 
 // collapseAssistantForTurn returns m with prior-turn detail removed:
@@ -200,10 +250,11 @@ func collapsedResultText(mode string, turn int64, toolCallID string, write bool)
 // (DeepSeek, Kimi) reject a replayed tool-call turn missing the
 // reasoning_content field entirely — the signature is invalid against
 // the mutated input either way, so only the field's presence survives.
-// IDs, names, and finish state are preserved. Returns m unchanged when
+// IDs, names, and finish state are preserved. label names the folded
+// span in stub text — foldLabel's output. Returns m unchanged when
 // nothing needs collapsing, plus the number of collapsed calls — the
 // per-turn event count the collapse telemetry records.
-func collapseAssistantForTurn(m message.Message, turn int64, mode string) (message.Message, int) {
+func collapseAssistantForTurn(m message.Message, label string, mode string) (message.Message, int) {
 	exempt := make(map[string]bool)
 	for _, part := range m.Parts {
 		if tc, ok := part.(message.ToolCall); ok && callIsExempt(tc) {
@@ -242,7 +293,7 @@ func collapseAssistantForTurn(m message.Message, turn int64, mode string) (messa
 			continue
 		case message.ToolCall:
 			if !exempt[p.ID] {
-				p.Input = collapsedCallInput(mode, turn, tools.WriteToolNames[p.Name])
+				p.Input = collapsedCallInput(mode, label, tools.WriteToolNames[p.Name])
 				part = p
 				collapsed++
 			}
@@ -281,10 +332,11 @@ func collapseReasoningForTurn(p message.ReasoningContent) message.ReasoningConte
 // collapseToolMessageForTurn returns m with each tool result's stored
 // content replaced by collapsedResultText under the given mode —
 // media payloads included (Data cleared so the text stub is what
-// emits). Results answering an exempt call stay verbatim with it;
-// results answering a file-write call get the re-view-led stub.
+// emits). label names the folded span (foldLabel's output). Results
+// answering an exempt call stay verbatim with it; results answering
+// a file-write call get the re-view-led stub.
 // Returns the message and how many results were collapsed.
-func collapseToolMessageForTurn(m message.Message, turn int64, mode string, exemptCalls map[string]bool, callNames map[string]string) (message.Message, int) {
+func collapseToolMessageForTurn(m message.Message, label string, mode string, exemptCalls map[string]bool, callNames map[string]string) (message.Message, int) {
 	var parts []message.ContentPart
 	count := 0
 	for i, part := range m.Parts {
@@ -295,7 +347,7 @@ func collapseToolMessageForTurn(m message.Message, turn int64, mode string, exem
 			}
 			continue
 		}
-		tr.Content = collapsedResultText(mode, turn, tr.ToolCallID, tools.WriteToolNames[callNames[tr.ToolCallID]])
+		tr.Content = collapsedResultText(mode, label, tr.ToolCallID, tools.WriteToolNames[callNames[tr.ToolCallID]])
 		tr.Data = ""
 		tr.MIMEType = ""
 		// The stub is informational, not the failure it replaces —
@@ -523,5 +575,34 @@ func (a *sessionAgent) recordCollapsedTurns(ctx context.Context, sessionID strin
 				s.EventsCollapsed += events
 			})
 		}
+	}
+}
+
+// recordCollapsedSegments accumulates the segment-grain fold's
+// telemetry (#509). bySeg maps each folded segment to its collapsed
+// call/result count. Unlike recordCollapsedTurns there is no
+// persisted marker — the fold recomputes every render, so the
+// in-memory recorded set is the only dedupe: a segment counts once
+// per process, and a resumed session recounts from scratch (the
+// conservative direction — an overcounted fold can't hide a fold
+// that never happened).
+func (a *sessionAgent) recordCollapsedSegments(sessionID string, bySeg map[segmentKey]int) {
+	if sessionID == "" || a.segCollapseRecorded == nil || a.stubStats == nil {
+		return
+	}
+	recorded, _ := a.segCollapseRecorded.Get(sessionID)
+	if recorded == nil {
+		recorded = csync.NewMap[segmentKey, bool]()
+		a.segCollapseRecorded.Set(sessionID, recorded)
+	}
+	for key, events := range bySeg {
+		if _, ok := recorded.Get(key); ok {
+			continue
+		}
+		recorded.Set(key, true)
+		a.stubStats.Update(sessionID, func(s *stubStats) {
+			s.SegmentsCollapsed++
+			s.EventsCollapsed += events
+		})
 	}
 }

@@ -173,10 +173,14 @@ type runTelemetry struct {
 	} `json:"stub_stats"`
 	// PriorTurns carries the collapse telemetry: each turn counts once
 	// trajectory-wide because the persisted collapsed_turns row is the
-	// dedupe across the per-turn subprocesses.
+	// dedupe across the per-turn subprocesses. SegmentsCollapsed is
+	// per-process — a segment folds once per run's process, and the
+	// sum across subprocesses stays one-fold-per-segment as long as
+	// the same process renders the whole trajectory.
 	PriorTurns struct {
-		TurnsCollapsed  int `json:"turns_collapsed"`
-		EventsCollapsed int `json:"events_collapsed"`
+		TurnsCollapsed    int `json:"turns_collapsed"`
+		EventsCollapsed   int `json:"events_collapsed"`
+		SegmentsCollapsed int `json:"segments_collapsed"`
 	} `json:"prior_turns"`
 	Recalls struct {
 		Result          int `json:"result"`
@@ -497,6 +501,7 @@ func (res *RunResult) addTurnTelemetry(tel runTelemetry, turn int) {
 	}
 	res.PriorTurns.TurnsCollapsed += tel.PriorTurns.TurnsCollapsed
 	res.PriorTurns.EventsCollapsed += tel.PriorTurns.EventsCollapsed
+	res.PriorTurns.SegmentsCollapsed += tel.PriorTurns.SegmentsCollapsed
 	res.Recalls.Result += tel.Recalls.Result
 	res.Recalls.Entry += tel.Recalls.Entry
 	res.Recalls.Empty += tel.Recalls.Empty

@@ -351,6 +351,12 @@ type sessionAgent struct {
 	// The arm also runs the fold regardless of pressure engagement —
 	// steady-state token savings are the point, not overflow insurance.
 	foldTurns bool
+	// foldSegments arms the segment-grain fold (#509,
+	// options.fold_segments): covered, closed segments inside the
+	// open turn collapse on the same quantized frontier at segment
+	// grain — the only fold that can fire on a single-prompt
+	// trajectory, where finished turns never exist.
+	foldSegments bool
 	// pressureGate gates the notebook render path — boundary
 	// eviction, the prefix render, and prior-turn collapse — on
 	// estimated request pressure vs. the context window. Below the
@@ -378,6 +384,11 @@ type sessionAgent struct {
 	// collapsed_turns row — the table's primary key dedupes across
 	// processes.
 	collapseRecorded *csync.Map[string, *csync.Map[int64, bool]]
+	// segCollapseRecorded marks segments whose fold this session
+	// already counted — every render past the frontier move
+	// collapses the same set again, and without the dedupe the
+	// segments_collapsed telemetry would multiply by render count.
+	segCollapseRecorded *csync.Map[string, *csync.Map[segmentKey, bool]]
 	// stubStats accumulates per-session stubbing telemetry for
 	// step-composition logging.
 	stubStats *csync.Map[string, stubStats]
@@ -654,10 +665,12 @@ type SessionAgentOptions struct {
 	EnforceContextWindow bool
 	// StubBoundary/StubStats let a coordinator share stub bookkeeping
 	// across agent rebuilds; CollapseRecorded is the same for
-	// prior-turn collapse. When nil the agent allocates its own.
-	StubBoundary     *csync.Map[string, int]
-	StubStats        *csync.Map[string, stubStats]
-	CollapseRecorded *csync.Map[string, *csync.Map[int64, bool]]
+	// prior-turn collapse and SegCollapseRecorded for segment-grain
+	// fold counting (#509). When nil the agent allocates its own.
+	StubBoundary        *csync.Map[string, int]
+	StubStats           *csync.Map[string, stubStats]
+	CollapseRecorded    *csync.Map[string, *csync.Map[int64, bool]]
+	SegCollapseRecorded *csync.Map[string, *csync.Map[segmentKey, bool]]
 	// SegmentTrackers/PrefixCache let a coordinator share segment
 	// bookkeeping and the rendered-prefix cache across agent
 	// rebuilds. When nil the agent allocates its own.
@@ -723,6 +736,11 @@ type SessionAgentOptions struct {
 	// folded prefix stays byte-stable between moves, and the fold runs
 	// regardless of pressure — steady-state savings, not insurance.
 	FoldTurns bool
+	// FoldSegments arms the intra-turn fold (#509,
+	// options.fold_segments): covered closed segments inside the
+	// open turn fold on the same quantized frontier at segment
+	// grain — the single-prompt-trajectory counterpart.
+	FoldSegments bool
 	// Interactive reports whether the run can ask the user —
 	// coordinator's interactive flag threaded through for the gate
 	// degrade branches.
@@ -823,6 +841,7 @@ func NewSessionAgent(
 		stubBoundary:           cmp.Or(opts.StubBoundary, csync.NewMap[string, int]()),
 		stubStats:              cmp.Or(opts.StubStats, csync.NewMap[string, stubStats]()),
 		collapseRecorded:       cmp.Or(opts.CollapseRecorded, csync.NewMap[string, *csync.Map[int64, bool]]()),
+		segCollapseRecorded:    cmp.Or(opts.SegCollapseRecorded, csync.NewMap[string, *csync.Map[segmentKey, bool]]()),
 		segmentTrackers:        cmp.Or(opts.SegmentTrackers, csync.NewMap[string, *segmentTracker]()),
 		prefixCache:            cmp.Or(opts.PrefixCache, csync.NewMap[string, cachedPrefix]()),
 		nbStats:                cmp.Or(opts.NotebookStats, csync.NewMap[string, notebook.Stats]()),
@@ -843,6 +862,7 @@ func NewSessionAgent(
 		freshReview:            opts.FreshReview,
 		findBugsReview:         opts.FindBugsReview,
 		foldTurns:              opts.FoldTurns,
+		foldSegments:           opts.FoldSegments,
 		interactive:            opts.Interactive,
 		advisorModel:           opts.AdvisorModel,
 		lspManager:             opts.LSPManager,
@@ -2900,6 +2920,18 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 				}
 			}
 		}
+		// The segment-grain fold (#509) recomputes EVERY render —
+		// segments close and cover mid-run, so freezing a Set like
+		// the turn path would freeze the just-seeded first chunk.
+		// Frontier quantization is what preserves prefix stability:
+		// the set only moves in foldChunkTurns-sized steps.
+		// Summarize mode is turn-grained by construction — a
+		// segment has no summary shape, so it stays out of the
+		// fold.
+		if collapse != nil && a.foldSegments && a.priorTurns != priorTurnsSummarize {
+			collapse.segs = segs
+			collapse.SegSet = coveredFoldSegments(segs, processed, collapse.Before)
+		}
 		if engaged {
 			prefix, perr := a.notebookPrefix(ctx, sessionID, msgs, boundary, boundarySegmentKey(segs, boundary), segs, collapse)
 			history = append(history, prefix...)
@@ -2982,25 +3014,44 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 	// rawMsgs can begin mid-turn, so numbering the slice would mislabel
 	// turns against the registry.
 	var turns []int64
+	var segOrd []int
 	// Stub/digest renders print recall pointers, so they collapse only
 	// when recall is live; summarize renders the entries themselves
-	// and needs no recall tool.
-	if collapse != nil && len(collapse.Set) > 0 && !prefixFailed && (recallLive || a.priorTurns == priorTurnsSummarize) {
+	// and needs no recall tool. The two fold grains gate
+	// independently: a single-turn run carries a nil-or-empty Set
+	// but a live SegSet (#509) — the grains are disjoint by
+	// construction (Set covers prior turns, SegSet the open one).
+	setLive := collapse != nil && len(collapse.Set) > 0 && !prefixFailed && (recallLive || a.priorTurns == priorTurnsSummarize)
+	segLive := collapse != nil && len(collapse.SegSet) > 0 && !prefixFailed && recallLive
+	if collapse != nil && (setLive || segLive) {
 		turns = messageTurns(msgs)
 	}
-	collapsedTurn := func(i int) (int64, bool) {
-		if turns == nil {
-			return 0, false
+	if segLive {
+		segOrd = segmentOrdinals(collapse.segs, len(msgs))
+	}
+	collapsedAt := func(i int) (turn, seg int64, ok bool) {
+		mi := rawStart + i
+		if segOrd != nil {
+			// segmentOrdinals aliases uncovered indexes to 0 —
+			// the span check is the containment answer.
+			if si := segOrd[mi]; si < len(collapse.segs) {
+				if s := collapse.segs[si]; s.start <= mi && mi < s.end && collapse.SegSet[s.key()] {
+					return s.turn, s.number, true
+				}
+			}
 		}
-		t := turns[rawStart+i]
+		if turns == nil {
+			return 0, -1, false
+		}
+		t := turns[mi]
 		if a.priorTurns == priorTurnsSummarize {
 			// The entry-joined set is the render gate — a covered turn
 			// with no entries stays verbatim rather than collapsing to
 			// an empty summary.
 			_, ok := collapse.summaries[t]
-			return t, ok
+			return t, -1, ok
 		}
-		return t, collapse.Set[t]
+		return t, -1, collapse.Set[t]
 	}
 
 	// Collect all tool call IDs present in assistant messages, then index
@@ -3035,7 +3086,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 			callNames[tc.ID] = tc.Name
 			exemptCalls[tc.ID] = callIsExempt(tc)
 			if callDropped != nil {
-				_, collapsing := collapsedTurn(i)
+				_, _, collapsing := collapsedAt(i)
 				callDropped[tc.ID] = collapsing && tc.Name != tools.QuestionToolName
 			}
 		}
@@ -3043,21 +3094,31 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 	var stubs stubReport
 	var collapsedResults int
 	collapsedEvents := make(map[int64]int)
+	collapsedSegs := make(map[segmentKey]int)
 	toolResultsByCall := make(map[string]fantasy.ToolResultPart)
 	for i, m := range rawMsgs {
 		if m.Role != message.Tool {
 			continue
 		}
-		if turn, yes := collapsedTurn(i); yes {
+		if turn, seg, yes := collapsedAt(i); yes {
 			// Turn collapse is evaluated before other stub kinds —
 			// inside a collapsed turn they are irrelevant. Summarize
 			// drops non-question results outright — their calls leave
-			// the prompt too, so nothing dangles.
+			// the prompt too, so nothing dangles. A segment-grain
+			// fold has no digest or summary shape — its stub label
+			// names the segment under the stub contract.
 			var n int
 			if a.priorTurns == priorTurnsSummarize {
 				m, n = summarizeToolMessageForTurn(m, callNames, callDropped)
 			} else {
-				m, n = collapseToolMessageForTurn(m, turn, a.priorTurns, exemptCalls, callNames)
+				mode := a.priorTurns
+				if seg >= 0 {
+					mode = priorTurnsStub
+				}
+				m, n = collapseToolMessageForTurn(m, foldLabel(turn, seg), mode, exemptCalls, callNames)
+				if n > 0 && seg >= 0 {
+					collapsedSegs[segmentKey{turn: turn, segment: seg}] += n
+				}
 			}
 			collapsedResults += n
 		} else if a.stubSuperseded && recallLive {
@@ -3105,7 +3166,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 
 	summarized := make(map[int64]bool)
 	for i, m := range rawMsgs {
-		if turn, yes := collapsedTurn(i); yes {
+		if turn, seg, yes := collapsedAt(i); yes {
 			if a.priorTurns == priorTurnsSummarize && m.Role != message.User && !summarized[turn] {
 				// The summary stands where the turn's executable span
 				// began — the first rendered message of a collapsed
@@ -3130,11 +3191,21 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 					m, n = summarizeAssistantForTurn(m)
 					collapsedEvents[turn] += n
 				} else {
-					m, n = collapseAssistantForTurn(m, turn, a.priorTurns)
-					// A covered turn whose calls are all exempt renders
+					// Segment folds carry stub labels — a
+					// segment has no digest shape to point at.
+					mode := a.priorTurns
+					if seg >= 0 {
+						mode = priorTurnsStub
+					}
+					m, n = collapseAssistantForTurn(m, foldLabel(turn, seg), mode)
+					// A covered span whose calls are all exempt renders
 					// verbatim — it must not count as collapsed.
 					if n > 0 {
-						collapsedEvents[turn] += n
+						if seg >= 0 {
+							collapsedSegs[segmentKey{turn: turn, segment: seg}] += n
+						} else {
+							collapsedEvents[turn] += n
+						}
 					}
 				}
 			}
@@ -3191,12 +3262,14 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 			"stubbed_saved_bytes", stubs.savedBytes,
 		)
 	}
-	if len(collapsedEvents) > 0 && collapse != nil {
+	if (len(collapsedEvents) > 0 || len(collapsedSegs) > 0) && collapse != nil {
 		sessionID := sessionIDFromMessages(msgs)
 		a.recordCollapsedTurns(ctx, sessionID, collapsedEvents)
+		a.recordCollapsedSegments(sessionID, collapsedSegs)
 		slog.Debug("Prior-turn tool pairs collapsed in prompt",
 			"session_id", sessionID,
 			"collapsed_turns", len(collapsedEvents),
+			"collapsed_segments", len(collapsedSegs),
 			"collapsed_results", collapsedResults,
 		)
 	}

@@ -1,0 +1,67 @@
+{
+	"name": "notebook-pressure-regime-notebook-bundle",
+	"model": "llm/deepseek-v4.1-flash",
+	"temperature": 0,
+	"corpus": [
+		"realrepo-*@min_turns>=4"
+	],
+	"runs_per_trajectory": {
+		"stable": 25,
+		"mid": 25,
+		"uncharacterized": 25
+	},
+	"primary": {
+		"metric": "weighted_cost",
+		"direction": "decrease",
+		"mde": 0.15,
+		"max_pass_drop": 0.1
+	},
+	"cost_weights": {
+		"cache_read": 0.25,
+		"cache_write": 0,
+		"output": 4
+	},
+	"expected_exclusion": {
+		"arm": "control",
+		"error_class": "window_cap_enforced",
+		"min": 1
+	},
+	"arms": {
+		"control": {
+			"config": {
+				"options": {
+					"notebook_enabled": false,
+					"disable_auto_summarize": false,
+					"enforce_context_window": true
+				}
+			}
+		},
+		"treatment": {
+			"config": {
+				"options": {
+					"notebook_enabled": true,
+					"notebook_generate": "always",
+					"notebook_pressure_gate": true,
+					"disable_auto_summarize": true,
+					"enforce_context_window": true
+				}
+			}
+		}
+	},
+	"providers": {
+		"llm": {
+			"name": "Eval LLM",
+			"type": "openai-compat",
+			"api_key": "$LLM_API_KEY",
+			"base_url": "$LLM_BASE_URL",
+			"models": [
+				{
+					"id": "deepseek-v4.1-flash",
+					"name": "DeepSeek V4.1 Flash",
+					"context_window": 64000,
+					"default_max_tokens": 8192
+				}
+			]
+		}
+	}
+}

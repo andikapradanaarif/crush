@@ -1175,9 +1175,13 @@ type StubStats struct {
 // PriorTurns mirrors the agent's prior-turn collapse telemetry:
 // distinct turns rendered collapsed and the call/result pairs inside
 // them — the flag-flip evidence for notebook_prior_turns.
+// SegmentsCollapsed is the fold_segments arm's counterpart (#509):
+// distinct intra-turn segments folded — the only fold counter that
+// can move on a single-prompt trajectory.
 type PriorTurns struct {
-	TurnsCollapsed  int `json:"turns_collapsed"`
-	EventsCollapsed int `json:"events_collapsed"`
+	TurnsCollapsed    int `json:"turns_collapsed"`
+	EventsCollapsed   int `json:"events_collapsed"`
+	SegmentsCollapsed int `json:"segments_collapsed"`
 }
 
 // Recalls mirrors notebook.Stats' recall split.

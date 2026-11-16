@@ -210,9 +210,13 @@ type coordinator struct {
 	// per-agent subscription. Nil when stubbing is disabled.
 	// collapseRecorded is the same for prior-turn collapse — the
 	// turns this process already persisted to collapsed_turns.
-	stubBoundary     *csync.Map[string, int]
-	stubStats        *csync.Map[string, stubStats]
-	collapseRecorded *csync.Map[string, *csync.Map[int64, bool]]
+	// segCollapseRecorded is the same for the segment-grain fold
+	// (#509), which has no persisted marker — its counter lives
+	// only in telemetry, so a rebuild must not recount it.
+	stubBoundary        *csync.Map[string, int]
+	stubStats           *csync.Map[string, stubStats]
+	collapseRecorded    *csync.Map[string, *csync.Map[int64, bool]]
+	segCollapseRecorded *csync.Map[string, *csync.Map[segmentKey, bool]]
 	// segmentTrackers/prefixCache share intra-turn segment state and
 	// the rendered notebook prefix across agent rebuilds. Nil when
 	// the notebook is disabled.
@@ -463,6 +467,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		c.nbScanIdx = csync.NewMap[string, int]()
 		c.nbPendingReads = csync.NewMap[string, map[string]string]()
 		c.collapseRecorded = csync.NewMap[string, *csync.Map[int64, bool]]()
+		c.segCollapseRecorded = csync.NewMap[string, *csync.Map[segmentKey, bool]]()
 		// stubBoundary/stubStats must exist for every notebook-on
 		// arm — they also carry boundary_advances, which counts
 		// prefix churn in verbatim arms too, not just under
@@ -576,6 +581,9 @@ func (c *coordinator) watchSessionDeletions() {
 		}
 		if c.collapseRecorded != nil {
 			c.collapseRecorded.Del(ev.Payload.ID)
+		}
+		if c.segCollapseRecorded != nil {
+			c.segCollapseRecorded.Del(ev.Payload.ID)
 		}
 		if c.nbPendingReads != nil {
 			c.nbPendingReads.Del(ev.Payload.ID)
@@ -1486,7 +1494,10 @@ func (c *coordinator) buildAgentWithModels(ctx context.Context, ready *errgroup.
 	notebookOn := c.cfg.Config().Options.NotebookIsEnabled()
 	recallOn := slices.Contains(agent.AllowedTools, notebooktool.RecallToolName)
 	foldTurns := c.cfg.Config().Options.FoldTurnsEnabled()
-	priorTurns := resolvePriorTurns(c.cfg.Config().Options.NotebookPriorTurnsMode(), notebookOn, recallOn, foldTurns)
+	foldSegments := c.cfg.Config().Options.FoldSegmentsEnabled()
+	// Both fold arms share the stub shape — either flag arms the
+	// coerce, and the agent picks its frontier at render.
+	priorTurns := resolvePriorTurns(c.cfg.Config().Options.NotebookPriorTurnsMode(), notebookOn, recallOn, foldTurns || foldSegments)
 	// Sub-agents get no telemetry writer — the call site re-checks
 	// isSubAgent, so this only avoids handing them a writer they
 	// never use.
@@ -1528,6 +1539,7 @@ func (c *coordinator) buildAgentWithModels(ctx context.Context, ready *errgroup.
 		StubBoundary:           c.stubBoundary,
 		StubStats:              c.stubStats,
 		CollapseRecorded:       c.collapseRecorded,
+		SegCollapseRecorded:    c.segCollapseRecorded,
 		SegmentTrackers:        c.segmentTrackers,
 		PrefixCache:            c.prefixCache,
 		NotebookStats:          c.nbStats,
@@ -1546,6 +1558,7 @@ func (c *coordinator) buildAgentWithModels(ctx context.Context, ready *errgroup.
 		FreshReview:            c.cfg.Config().Options.FreshReviewEnabled(),
 		FindBugsReview:         c.cfg.Config().Options.FindBugsReviewEnabled(),
 		FoldTurns:              foldTurns,
+		FoldSegments:           foldSegments,
 		Interactive:            c.interactive,
 		AdvisorModel:           c.advisorModelFn(sessionModels, c.cfg.Config().Options),
 		LSPManager:             c.lspManager,
