@@ -416,7 +416,7 @@ func ComputeCellNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 		}
 		cells[r.TrajectoryID] = c
 		wall.add(r.DurationS)
-		tok.add(float64(r.Tokens.Input + r.Tokens.Output))
+		tok.add(totalTokens(r))
 		if r.CostUSD != nil {
 			allCost = append(allCost, *r.CostUSD)
 		}

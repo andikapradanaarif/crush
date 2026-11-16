@@ -321,6 +321,8 @@ func TestComputeCellNoise_Decomposition(t *testing.T) {
 	add("t-a", OutcomePass, OutcomePass, OutcomePass, OutcomePass)
 	add("t-b", OutcomePass, OutcomeFail, OutcomePass, OutcomeFail)
 	add("t-c", OutcomeFail, OutcomeFail, OutcomeFail, OutcomeFail)
+	// Cache classes are billed too — tokens_per_trial prices them.
+	recs[len(recs)-1].Tokens.CacheRead = 50
 	// A record outside the named invocations mustn't pool.
 	recs = append(recs, noiseRec("other", ArmControl, "t-a", 9, OutcomeFail, 100))
 
@@ -336,8 +338,9 @@ func TestComputeCellNoise_Decomposition(t *testing.T) {
 	require.InDelta(t, 0.3333, n.SigmaWithin, 1e-3)
 	require.InDelta(t, 0.4714, n.SigmaBetween, 1e-3)
 	// Per-trial economics aggregate over the same records — a
-	// k-rep schedule's price is the point of the read.
-	require.InDelta(t, 125.0, n.TokensPerTrial, 1e-9)
+	// k-rep schedule's price is the point of the read. Cache
+	// classes count: (125·11 + 175)/12 ≈ 129.17.
+	require.InDelta(t, 129.1667, n.TokensPerTrial, 1e-3)
 	require.InDelta(t, 30.0, n.WallSPerTrial, 1e-9)
 	require.Equal(t, 12, n.CostTrials)
 	require.InDelta(t, 0.02, *n.CostUSDPerTrial, 1e-9)
