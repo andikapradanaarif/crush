@@ -1944,10 +1944,11 @@ the **repeated-cell decomposition** (#489): every conclusive record
 for the arm is one cell rep grouped by task, and the recorded block
 (`harbor.cells`) carries the per-task outcome matrix
 (`cells: task → [passes, conclusive reps]`) plus the two variance
-components — `sigma_within` (√mean p̂ᵢ(1−p̂ᵢ), the per-trial
-coin-flip noise reps shrink) and `sigma_between` (√(Var(p̂ᵢ) −
-expected within), the systematic task-to-task spread nothing
-shrinks). Sizing on raw σ_d conflates the two — the pilot's σ_d ≈
+components — `sigma_within` (mean over cells with ≥2 reps of the
+unbiased weight p̂ᵢ(1−p̂ᵢ)·kᵢ/(kᵢ−1), the per-trial coin-flip
+noise reps shrink; single-rep cells impute it) and `sigma_between`
+(√(Var(p̂ᵢ) − expected within), the systematic task-to-task
+spread nothing shrinks). Sizing on raw σ_d conflates the two — the pilot's σ_d ≈
 0.5 was nearly all coin flips, which prices G1.e/f as if the
 irreducible part could be shrunk. Per-trial tokens, wall time, and
 USD cost land
@@ -1980,7 +1981,9 @@ is single-arm difficulty spread plugged in for the unmeasurable
 effect-heterogeneity term (between the perfectly-paired 0 and
 independent-draws 2·σ²_between), a modeling choice that can
 undersize when effects are heterogeneous on uniform-difficulty
-tasks. The raw pair σ_d can't substitute either way — pairing the
+tasks; the ×2 on σ²_within is a second plug-in — it assumes the
+treatment arm's within noise equals the measured base arm's. The
+raw pair σ_d can't substitute either way — pairing the
 same arm's reps cancels task difficulty, so it measures ≈2σ²_within
 + drift, which is why the decomposition changes the number even at
 k=1 rather than "recombining" into the pair read.

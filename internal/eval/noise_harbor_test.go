@@ -381,8 +381,8 @@ func TestComputeCellNoise_UnequalReps(t *testing.T) {
 	require.InDelta(t, 0.6455, n.SigmaWithin, 1e-3)
 	require.Equal(t, 0.0, n.SigmaBetween)
 
-	// An all-1-rep matrix can't see within noise — w=0
-	// structurally, so every scrap of spread lands in σ_between.
+	// An all-1-rep matrix can't see within noise — no measurable
+	// cell exists, so every scrap of spread lands in σ_between.
 	// Recorded as an artifact, flagged by reps_per_task < 2.
 	var one []RunRecord
 	for i, task := range []string{"t-a", "t-b"} {
@@ -397,6 +397,56 @@ func TestComputeCellNoise_UnequalReps(t *testing.T) {
 	require.InDelta(t, 1.0, n.RepsPerTask, 1e-9)
 	require.Equal(t, 0.0, n.SigmaWithin)
 	require.InDelta(t, 0.7071, n.SigmaBetween, 1e-3) // √(Var({1,0})) = √.5
+}
+
+// Mixed cells: the k=1 cell's within contribution is p(1−p)/1 —
+// the largest of any cell — so it imputes the multi-rep mean rather
+// than contributing 0 and dumping the mass into σ_between. σ_within
+// is the mean over cells where it's measurable, not diluted by
+// singletons.
+func TestComputeCellNoise_SingletonImputation(t *testing.T) {
+	exp := harborNoiseExp()
+	recs := []RunRecord{
+		noiseRec("inv1", ArmControl, "t-a", 0, OutcomePass, 100),
+		noiseRec("inv1", ArmControl, "t-a", 1, OutcomeFail, 100),
+		noiseRec("inv1", ArmControl, "t-a", 2, OutcomePass, 100),
+		noiseRec("inv1", ArmControl, "t-a", 3, OutcomeFail, 100),
+		noiseRec("inv1", ArmControl, "t-b", 0, OutcomePass, 100),
+	}
+	n, err := ComputeCellNoise(recs, exp, "", ArmControl, "tb21", []string{"inv1"})
+	require.NoError(t, err)
+	require.Equal(t, map[string][2]int{"t-a": {2, 4}, "t-b": {1, 1}}, n.Cells)
+	// σ_within = √(w_a) = √(.25·4/3) = √(1/3) ≈ .5774 — the
+	// measurable cell alone, not diluted by t-b's singleton.
+	require.InDelta(t, 0.5774, n.SigmaWithin, 1e-3)
+	// withinSum = w_a/4 + w̄·1 = 1/12 + 1/3 = 5/12; Var({.5,1})=.125
+	// → .125 − .208 < 0 → floors at 0.
+	require.Equal(t, 0.0, n.SigmaBetween)
+}
+
+// noise.json's cells matrix is hand-editable — malformed entries
+// (0 reps, passes>reps, padded short arrays, NaN σ's) must fail
+// closed at load, not produce NaN sizing that reads "powered".
+func TestLoadNoise_CellValidation(t *testing.T) {
+	dir := t.TempDir()
+	write := func(t *testing.T, cells string) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "noise.json"),
+			[]byte(`{"cv":{},"harbor":{"cells":{"cells":`+cells+`,"sigma_within":0.4,"sigma_between":0.3}}}`), 0o644))
+	}
+	write(t, `{"t-a":[0,0]}`)
+	_, err := LoadNoise(dir)
+	require.ErrorContains(t, err, "harbor.cells")
+	write(t, `{"t-a":[5,4]}`)
+	_, err = LoadNoise(dir)
+	require.ErrorContains(t, err, "harbor.cells")
+	// A short array unmarshals to [4,0] — 0 reps trips the same guard.
+	write(t, `{"t-a":[4]}`)
+	_, err = LoadNoise(dir)
+	require.ErrorContains(t, err, "harbor.cells")
+	write(t, `{"t-a":[2,4],"t-b":[1,4]}`)
+	_, err = LoadNoise(dir)
+	require.NoError(t, err)
 }
 
 // A recorded cells block supersedes raw σ_d in sizing: the

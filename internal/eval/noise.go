@@ -42,6 +42,19 @@ func LoadNoise(evalDir string) (*NoiseFile, error) {
 			return nil, fmt.Errorf("noise.json: cv[%q] must be > 0, got %g", metric, cv)
 		}
 	}
+	// The cells matrix is hand-editable like everything else —
+	// validate it so a malformed entry can't produce NaN σ's that
+	// slip past the fail-closed checks into a "powered" verdict.
+	if c := n.Harbor; c != nil && c.Cells != nil {
+		for task, cell := range c.Cells.Cells {
+			if cell[1] < 1 || cell[0] < 0 || cell[0] > cell[1] {
+				return nil, fmt.Errorf("noise.json: harbor.cells[%q] = %v — want 0 ≤ passes ≤ reps, reps ≥ 1", task, cell)
+			}
+		}
+		if !(c.Cells.SigmaWithin >= 0) || !(c.Cells.SigmaBetween >= 0) {
+			return nil, fmt.Errorf("noise.json: harbor.cells sigmas must be ≥ 0, got within=%g between=%g", c.Cells.SigmaWithin, c.Cells.SigmaBetween)
+		}
+	}
 	return &n, nil
 }
 
@@ -261,10 +274,15 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 	// derivation: heterogeneous effects on uniform-difficulty tasks
 	// would undersize. The pair read can't help either — its σ²_d
 	// cancels task difficulty by construction (≈2σ²_within + drift).
+	// The ×2 on σ²_within is a second plug-in: it assumes the
+	// treatment arm's within noise equals the measured base
+	// arm's — symmetric flips are the honest default, but a
+	// treatment that changes flip rates shifts it either way.
 	sigmaD := 0.0
+	sigmaSource := ""
 	if ood != nil {
 		sigmaD = ood.SigmaD
-		out.SigmaSource = "pair"
+		sigmaSource = "pair"
 	}
 	if c := noise.Harbor.Cells; c != nil {
 		kPlan := 1
@@ -273,7 +291,7 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 		}
 		within := 2 * c.SigmaWithin * c.SigmaWithin / float64(kPlan)
 		sigmaD = math.Hypot(c.SigmaBetween, math.Sqrt(within))
-		out.SigmaSource = "cells"
+		sigmaSource = "cells"
 	}
 	if p := rule.Primary; p != nil && p.Metric == "pass_rate" && p.MinImprovement > 0 {
 		if sigmaD <= 0 {
@@ -293,6 +311,12 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 			out.NSuperiority = max(out.NSuperiority, RequiredNSuperiority(sigmaD, g.MinDelta))
 			sized = true
 		}
+	}
+	// SigmaSource labels the read that actually priced σ_d — an
+	// efficiency-only manifest never consumes it, so attributing a
+	// source there would be decoration.
+	if out.NNonInferiority > 0 || out.NSuperiority > 0 {
+		out.SigmaSource = sigmaSource
 	}
 	if !sized {
 		return nil, fmt.Errorf("OOD sizing: the rule declares no sizable endpoint — a continuous primary (min_improvement) or a pass_rate primary/guardrail")

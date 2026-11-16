@@ -77,11 +77,12 @@ type HarborCellNoise struct {
 	Cells       map[string][2]int `json:"cells"`
 	RepsPerTask float64           `json:"reps_per_task"`
 	PassRate    float64           `json:"pass_rate"`
-	// SigmaWithin is the per-trial within-task Bernoulli SD —
-	// √(mean p̂ᵢ(1−p̂ᵢ)·kᵢ/(kᵢ−1)) — the coin-flip component reps
-	// shrink. Cells with a single rep can't contribute (p̂∈{0,1}
-	// gives w=0 structurally), so an all-1-rep matrix records 0 —
-	// an artifact, not a measured noise floor; reps_per_task is the
+	// SigmaWithin is the per-trial within-task Bernoulli SD — the
+	// mean of p̂ᵢ(1−p̂ᵢ)·kᵢ/(kᵢ−1) over cells with ≥2 reps, the
+	// only cells where within noise is measurable. Single-rep
+	// cells impute that mean for their Var(p̂) correction; an
+	// all-1-rep matrix has no measurable cell and records 0 — an
+	// artifact, not a measured noise floor; reps_per_task is the
 	// tell. The k/(k−1) factor undoes E[p̂(1−p̂)]'s plug-in bias.
 	SigmaWithin float64 `json:"sigma_within"`
 	// SigmaBetween is the between-task systematic SD — the spread
@@ -424,12 +425,15 @@ func ComputeCellNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 		return nil, fmt.Errorf("cell characterization: %d tasks with conclusive %s cells — the decomposition needs ≥2", len(cells), arm)
 	}
 	// p̂ᵢ per cell; wᵢ = p̂ᵢ(1−p̂ᵢ)·kᵢ/(kᵢ−1) is the unbiased
-	// Bernoulli weight, and wᵢ/kᵢ the within contribution that
-	// Var(p̂ᵢ) is expected to carry. Single-rep cells yield w=0
-	// structurally (p̂∈{0,1}) — they inform σ_between but the
-	// within estimate silently excludes them.
+	// Bernoulli weight over cells where it's measurable (kᵢ ≥ 2),
+	// and wᵢ/kᵢ the within contribution that Var(p̂ᵢ) is expected
+	// to carry. Single-rep cells have the largest true within
+	// contribution of any cell — p(1−p)/1 — so excluding them
+	// would under-correct Var(p̂) and dump the missing mass into
+	// σ²_between; they impute at the multi-rep mean instead.
 	var phats []float64
 	var wSum, withinSum float64
+	var measurable, singletons int
 	for _, c := range cells {
 		k := float64(c[1])
 		p := float64(c[0]) / k
@@ -438,9 +442,17 @@ func ComputeCellNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 			w := p * (1 - p) * k / (k - 1)
 			wSum += w
 			withinSum += w / k
+			measurable++
+		} else {
+			singletons++
 		}
 	}
 	n := float64(len(cells))
+	wMean := 0.0
+	if measurable > 0 {
+		wMean = wSum / float64(measurable)
+	}
+	withinSum += wMean * float64(singletons)
 	var phat metricSample
 	for _, p := range phats {
 		phat.add(p)
@@ -461,7 +473,7 @@ func ComputeCellNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 		TasksSource:    "recorded",
 		Cells:          cells,
 		PassRate:       mean,
-		SigmaWithin:    math.Sqrt(wSum / n),
+		SigmaWithin:    math.Sqrt(wMean),
 		SigmaBetween:   math.Sqrt(betweenVar),
 		TokensPerTrial: tok.Mean(),
 		WallSPerTrial:  wall.Mean(),

@@ -510,8 +510,12 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 			ruleProvNote = "OOD read unpowerable: " + serr.Error()
 		case sizing != nil && len(trajIDs) < sizing.Required:
 			ruleTrusted = false
+			src := sizing.SigmaSource
+			if src == "" {
+				src = "n/a"
+			}
 			ruleProvNote = fmt.Sprintf("OOD read underpowered: %d tasks recorded, need %d (n_efficiency %d, n_noninferiority %d at σ_d[%s]/CV_d)",
-				len(trajIDs), sizing.Required, sizing.NEfficiency, sizing.NNonInferiority, sizing.SigmaSource)
+				len(trajIDs), sizing.Required, sizing.NEfficiency, sizing.NNonInferiority, src)
 		}
 	}
 
