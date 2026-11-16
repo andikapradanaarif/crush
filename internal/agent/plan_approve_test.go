@@ -241,7 +241,8 @@ func (s *busyStubAgent) SetSystemPrompt(prompt.BuiltPrompt)            {}
 func (s *busyStubAgent) Cancel(string)                                 {}
 func (s *busyStubAgent) CancelAll()                                    {}
 func (s *busyStubAgent) AddNote(string, string)                        {}
-func (s *busyStubAgent) IsSessionBusy(string) bool                     { return s.sessionBusy }
+func (s *busyStubAgent) HasActiveTurn(string) bool                     { return s.sessionBusy }
+func (s *busyStubAgent) HasPendingWork(string) bool                    { return s.sessionBusy }
 func (s *busyStubAgent) IsBusy() bool                                  { return s.sessionBusy }
 func (s *busyStubAgent) QueuedPrompts(string) int                      { return 0 }
 func (s *busyStubAgent) QueuedPromptsList(string) []string             { return nil }
@@ -250,8 +251,4 @@ func (s *busyStubAgent) Model() Model                                  { return 
 func (s *busyStubAgent) GenerateTitle(context.Context, string, string) {}
 func (s *busyStubAgent) Summarize(context.Context, string, fantasy.ProviderOptions, func(context.Context, *fantasy.ProviderError) error) error {
 	return nil
-}
-
-func (s *busyStubAgent) ListSettledMessages(context.Context, string) ([]message.Message, error) {
-	return nil, nil
 }
