@@ -250,9 +250,9 @@ type SessionAgent interface {
 	SetSystemPrompt(systemPrompt prompt.BuiltPrompt)
 	Cancel(sessionID string)
 	CancelAll()
-	IsSessionBusy(sessionID string) bool
+	HasActiveTurn(sessionID string) bool
+	HasPendingWork(sessionID string) bool
 	IsBusy() bool
-	ListSettledMessages(ctx context.Context, sessionID string) ([]message.Message, error)
 	QueuedPrompts(sessionID string) int
 	QueuedPromptsList(sessionID string) []string
 	ClearQueue(sessionID string)
@@ -1378,7 +1378,7 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 		return nil, nil, nil
 	}
 
-	if a.IsSessionBusy(call.SessionID) {
+	if a.HasActiveTurn(call.SessionID) {
 		// Busy: an earlier prompt is active. Queue this call so it is
 		// folded into (or sequenced after) the active turn, and release any
 		// accept reservation. A Cancel arriving after this point sees the
@@ -1416,6 +1416,7 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 	}
 	runCtx := context.WithValue(ctx, tools.SessionIDContextKey, call.SessionID)
 	runCtx = context.WithValue(runCtx, tools.RunStampContextKey, call.RunStamp)
+	runCtx = withRefusalRetries(runCtx, refusalRetriesPerTurn)
 	genCtx, cancel = context.WithCancel(runCtx)
 	ac := &activeCancel{cancel: cancel}
 	a.activeRequests.Set(call.SessionID, ac)
@@ -1950,6 +1951,7 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 			if !toolResult.IsError && toolResult.Name != "" {
 				completedToolCalls.Set(toolResult.Name, struct{}{})
 			}
+			toolResult.FinishedAtMs = time.Now().UnixMilli()
 			// Use parent ctx instead of genCtx to ensure the message is created
 			// even if the request is canceled mid-stream
 			_, createMsgErr := a.messages.Create(ctx, currentAssistant.SessionID, message.CreateMessageParams{
@@ -2175,6 +2177,10 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 		linkStyle := lipgloss.NewStyle().Foreground(tone.Guac).Underline(true)
 		if isCancelErr {
 			currentAssistant.AddFinish(message.FinishReasonCanceled, "User canceled request", "")
+		} else if errors.Is(err, errRefused) {
+			// Every retry was refused; keep the refusal banner rather than
+			// reporting a generic provider error.
+			currentAssistant.AddFinish(message.FinishReasonContentFilter, "", "")
 		} else if errors.As(err, &requestTimedOutErr) {
 			// Checked before the provider branches so a deadline our own
 			// request timeout imposed is never reported as a provider error.
@@ -2472,6 +2478,9 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 // Summarize compacts the session on the user's request. It returns
 // ErrCompactionBlocked when a PreCompact hook blocks it.
 func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fantasy.ProviderOptions, onAuthRefresh func(context.Context, *fantasy.ProviderError) error) error {
+	if a.HasPendingWork(sessionID) {
+		return ErrSessionBusy
+	}
 	return a.summarize(ctx, sessionID, compactTriggerManual, opts, onAuthRefresh)
 }
 
@@ -2482,7 +2491,7 @@ func (a *sessionAgent) summarize(ctx context.Context, sessionID, trigger string,
 	// incoming prompt's cancel registration get clobbered).
 	mu := a.sessionMu(sessionID)
 	mu.Lock()
-	if a.IsSessionBusy(sessionID) {
+	if a.HasPendingWork(sessionID) {
 		mu.Unlock()
 		return ErrSessionBusy
 	}
@@ -3034,7 +3043,7 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 	var stubs stubReport
 	var collapsedResults int
 	collapsedEvents := make(map[int64]int)
-	toolResultsByCall := make(map[string][]fantasy.MessagePart)
+	toolResultsByCall := make(map[string]fantasy.ToolResultPart)
 	for i, m := range rawMsgs {
 		if m.Role != message.Tool {
 			continue
@@ -3079,7 +3088,17 @@ func (a *sessionAgent) preparePrompt(ctx context.Context, msgs []message.Message
 					)
 					continue
 				}
-				toolResultsByCall[tr.ToolCallID] = append(toolResultsByCall[tr.ToolCallID], part)
+				// One result per call: a real result beats an error, since the
+				// usual duplicate is a premature "interrupted" then the output.
+				if kept, seen := toolResultsByCall[tr.ToolCallID]; seen {
+					_, keptIsError := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentError](kept.Output)
+					slog.Warn("Dropping duplicate tool result", "session_id", m.SessionID,
+						"tool_call_id", tr.ToolCallID, "kept_later", keptIsError)
+					if !keptIsError {
+						continue
+					}
+				}
+				toolResultsByCall[tr.ToolCallID] = tr
 			}
 		}
 	}
@@ -4052,6 +4071,7 @@ func (a *sessionAgent) CancelAll() {
 	}
 }
 
+// IsBusy reports whether any session has an active or accepted run.
 func (a *sessionAgent) IsBusy() bool {
 	for ac := range a.activeRequests.Seq() {
 		if ac != nil {
@@ -4076,9 +4096,19 @@ func (a *sessionAgent) IsBusy() bool {
 	return false
 }
 
-func (a *sessionAgent) IsSessionBusy(sessionID string) bool {
+// HasActiveTurn ignores accepts so Run, holding its own, doesn't queue behind itself.
+func (a *sessionAgent) HasActiveTurn(sessionID string) bool {
 	_, busy := a.activeRequests.Get(sessionID)
 	return busy
+}
+
+// HasPendingWork reports whether sessionID has an active or accepted run.
+func (a *sessionAgent) HasPendingWork(sessionID string) bool {
+	if a.HasActiveTurn(sessionID) {
+		return true
+	}
+	accepted, _ := a.acceptedRuns.Get(sessionID)
+	return accepted > 0
 }
 
 func (a *sessionAgent) QueuedPrompts(sessionID string) int {

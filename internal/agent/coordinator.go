@@ -321,6 +321,9 @@ type coordinator struct {
 	// the busy check sees subagents the main agent is not running itself.
 	subSessionsMu sync.Mutex
 	subSessions   map[string]int
+	// settleMu serializes transcript repairs so two readers cannot both
+	// settle one orphaned call.
+	settleMu sync.Mutex
 
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
@@ -1915,6 +1918,7 @@ func (c *coordinator) buildModelFromSelection(ctx context.Context, modelCfg conf
 	// configured timeout so unreachable or hung providers fail instead of
 	// blocking a session forever. Retries get a fresh budget each attempt.
 	languageModel = newRequestGuardModel(languageModel, c.cfg.Config().Options.GetRequestTimeout())
+	languageModel = newRefusalRetryModel(languageModel)
 
 	// Hyper completions no longer report the hypercredit balance, so wrap
 	// the Hyper models to fetch it from /v1/credits on every request.
@@ -2356,7 +2360,12 @@ func (c *coordinator) IsBusy() bool {
 // and safe to settle, so it must not miss a subagent running on an agent
 // instance other than the main one.
 func (c *coordinator) IsSessionBusy(sessionID string) bool {
-	return c.currentAgent().IsSessionBusy(sessionID) || c.subSessionBusy(sessionID)
+	for _, agent := range c.agents {
+		if agent.HasPendingWork(sessionID) {
+			return true
+		}
+	}
+	return c.subSessionBusy(sessionID)
 }
 
 // SetSessionModelOverride builds the selected model and pins it for
@@ -2494,10 +2503,6 @@ func (c *coordinator) sessionModelOverride(sessionID string) (Model, bool) {
 	}
 	c.modelOverrides.Set(sessionID, verdict)
 	return verdict, verdict.Model != nil
-}
-
-func (c *coordinator) ListSettledMessages(ctx context.Context, sessionID string) ([]message.Message, error) {
-	return c.currentAgent().ListSettledMessages(ctx, sessionID)
 }
 
 func (c *coordinator) SetHostContext(hc proto.HostContext) { c.hostContext.Set(hc) }
