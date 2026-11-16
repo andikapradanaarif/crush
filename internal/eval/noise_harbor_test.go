@@ -325,7 +325,10 @@ func TestComputeCellNoise_Decomposition(t *testing.T) {
 
 	n, err := ComputeCellNoise(recs, exp, "", ArmControl, "tb21", []string{"inv1"})
 	require.NoError(t, err)
-	require.Equal(t, 3, n.Tasks)
+	// Declared resolves (t-a/t-b) → Tasks reports the declared
+	// count; the recorded matrix keeps all three tasks in Cells.
+	require.Equal(t, 2, n.Tasks)
+	require.Equal(t, "declared", n.TasksSource)
 	require.Equal(t, map[string][2]int{"t-a": {4, 4}, "t-b": {2, 4}, "t-c": {0, 4}}, n.Cells)
 	require.InDelta(t, 4.0, n.RepsPerTask, 1e-9)
 	require.InDelta(t, 0.5, n.PassRate, 1e-9)
@@ -380,6 +383,56 @@ func TestHarborOODSizing_CellsPreferred(t *testing.T) {
 	}})
 	require.NoError(t, err)
 	require.Equal(t, 776, sizing.NNonInferiority)
+}
+
+// The decomposition's refusal paths: best_of_k arms (selection
+// candidates aren't replicates), zero invocations, and fewer than
+// two tasks with conclusive cells.
+func TestComputeCellNoise_Errors(t *testing.T) {
+	exp := harborNoiseExp()
+	exp.Arms["bok"] = Arm{BestOfK: &BestOfKSpec{K: 3}}
+	recs := []RunRecord{
+		noiseRec("inv1", ArmControl, "t-a", 0, OutcomePass, 100),
+	}
+	if _, err := ComputeCellNoise(recs, exp, "", "bok", "tb21", []string{"inv1"}); err == nil {
+		t.Fatal("best_of_k arm accepted")
+	}
+	if _, err := ComputeCellNoise(recs, exp, "", ArmControl, "tb21", nil); err == nil {
+		t.Fatal("empty invocations accepted")
+	}
+	if _, err := ComputeCellNoise(recs, exp, "", ArmControl, "tb21", []string{"inv1"}); err == nil {
+		t.Fatal("single-task cell matrix accepted")
+	}
+}
+
+// A cells-only noise block still sizes a pass_rate rule — the
+// efficiency leg (tokens_log_ratio_sd) is the only one needing the
+// pair read, so --cells --size can't fail closed on pass claims.
+func TestHarborOODSizing_CellsOnly(t *testing.T) {
+	exp := harborNoiseExp()
+	exp.Harbor.K = 8
+	exp.DecisionRule = &DecisionRule{
+		Hypothesis: "h",
+		OOD:        true,
+		Guardrail:  &RuleGuardrail{Metric: "pass_rate", MinDelta: -0.05},
+	}
+	sizing, err := HarborOODSizing(exp, &NoiseFile{Harbor: &NoiseHarbor{
+		Cells: &HarborCellNoise{SigmaBetween: 0.30, SigmaWithin: 0.50},
+	}})
+	require.NoError(t, err)
+	require.Equal(t, 378, sizing.NNonInferiority)
+
+	// The same cells can't power a continuous primary — the token
+	// pair read is genuinely missing.
+	exp.DecisionRule = &DecisionRule{
+		Hypothesis: "h",
+		OOD:        true,
+		Primary:    &RulePrimary{Metric: "weighted_cost", MinImprovement: 0.1},
+	}
+	_, err = HarborOODSizing(exp, &NoiseFile{Harbor: &NoiseHarbor{
+		Cells: &HarborCellNoise{SigmaBetween: 0.30, SigmaWithin: 0.50},
+	}})
+	require.ErrorContains(t, err, "tokens_log_ratio_sd")
 }
 
 // The cells block merges field-wise and refuses silent retuning,

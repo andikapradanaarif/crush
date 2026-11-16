@@ -388,9 +388,9 @@ harbor records — the quantities the selection rules price against
                            pair each's run 0.
   --cells inv1,inv2,...    repeated-cell decomposition (#489): the
                            per-task outcome matrix plus σ_within /
-                           σ_between — the within-task Bernoulli
-                           noise reps shrink vs the systematic
-                           spread OOD sizing needs.
+                           σ_between — within-task coin flips reps
+                           shrink vs the between-task spread OOD
+                           sizing plugs in for effect heterogeneity.
 
 All report per-trial tokens, wall time, and USD cost.
 --write merges the result into eval/noise.json's harbor block
@@ -466,10 +466,22 @@ All report per-trial tokens, wall time, and USD cost.
 		if size {
 			// The task-count requirement for this manifest's OOD
 			// read, priced against the noise block just computed or
-			// the one on disk — the #397 recording input.
+			// the one on disk — the #397 recording input. A just-
+			// computed sub-block overlays the disk copy for this
+			// print only (fresh measurement wins; the disk fields it
+			// doesn't cover still price) — it never persists here.
 			var n *eval.NoiseFile
 			if harbor.OOD != nil || harbor.Cells != nil {
-				n = &eval.NoiseFile{Harbor: harbor}
+				var lerr error
+				if n, lerr = eval.LoadNoise(evalDir); lerr != nil || n.Harbor == nil {
+					n = &eval.NoiseFile{Harbor: &eval.NoiseHarbor{}}
+				}
+				if harbor.OOD != nil {
+					n.Harbor.OOD = harbor.OOD
+				}
+				if harbor.Cells != nil {
+					n.Harbor.Cells = harbor.Cells
+				}
 			} else {
 				var lerr error
 				if n, lerr = eval.LoadNoise(evalDir); lerr != nil {

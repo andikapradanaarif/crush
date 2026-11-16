@@ -222,8 +222,8 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 	if rule == nil || !rule.OOD {
 		return nil, nil
 	}
-	if noise == nil || noise.Harbor == nil || noise.Harbor.OOD == nil {
-		return nil, fmt.Errorf("OOD sizing needs measured harbor noise — run #404 characterization first (noise.json has no harbor.ood block)")
+	if noise == nil || noise.Harbor == nil || (noise.Harbor.OOD == nil && noise.Harbor.Cells == nil) {
+		return nil, fmt.Errorf("OOD sizing needs measured harbor noise — run #404 characterization first (noise.json has no harbor.ood or harbor.cells block)")
 	}
 	ood := noise.Harbor.OOD
 	out := &OODSizing{}
@@ -237,7 +237,7 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 		// Δ_c is used raw rather than |log(1−Δ)|: for small declared
 		// effects the approximation is tight, and the residual bias
 		// is conservative for improvements (overstates N slightly).
-		if ood.TokensLogRatioSD <= 0 {
+		if ood == nil || ood.TokensLogRatioSD <= 0 {
 			return nil, fmt.Errorf("OOD sizing: primary %q needs tokens_log_ratio_sd — the #404 pair read didn't measure it", p.Metric)
 		}
 		if p.MinImprovement <= 0 {
@@ -247,10 +247,20 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 		sized = true
 	}
 	// The repeated-cell decomposition (#489) supersedes raw σ_d
-	// when recorded: the sized variance is the unshrinkable
-	// systematic spread plus both paired cells' within noise at the
-	// manifest's declared k — the component k reps actually shrink.
-	sigmaD := ood.SigmaD
+	// when recorded — with a caveat worth being honest about. The
+	// sized estimand is the cross-arm per-task effect diff, whose
+	// variance is Var(effect_i) + 2·σ²_within/k; σ²_between
+	// (single-arm task-difficulty spread) is a *plug-in* for the
+	// unmeasurable effect heterogeneity, sitting between the
+	// perfectly-paired model (0) and independent draws
+	// (2·σ²_between). Defensible and usually conservative, not a
+	// derivation: heterogeneous effects on uniform-difficulty tasks
+	// would undersize. The pair read can't help either — its σ²_d
+	// cancels task difficulty by construction (≈2σ²_within + drift).
+	sigmaD := 0.0
+	if ood != nil {
+		sigmaD = ood.SigmaD
+	}
 	if c := noise.Harbor.Cells; c != nil {
 		kPlan := 1
 		if exp.Harbor != nil && exp.Harbor.K > 0 {

@@ -61,8 +61,10 @@ type HarborPassNoise struct {
 // HarborCellNoise is the repeated-cell characterization (#489): k
 // conclusive reps per task resolve each cell's flip rate p̂ᵢ,
 // separating within-task Bernoulli noise (reps shrink it) from the
-// between-task systematic spread (nothing shrinks it) — raw σ_d
-// can't tell the two apart and oversizes the OOD gate massively.
+// between-task systematic spread (nothing shrinks it). The pair
+// read can't split them either — its σ²_d cancels task difficulty
+// by construction (≈2σ²_within + drift), so it measures neither
+// component of the sized estimand.
 type HarborCellNoise struct {
 	Dataset     string `json:"dataset"`
 	Tasks       int    `json:"tasks"`
@@ -70,6 +72,8 @@ type HarborCellNoise struct {
 	// Cells is the per-task outcome matrix — task → [passes,
 	// conclusive reps]. The matrix is the raw evidence the
 	// decomposition stands on; it stays recorded so the σ's audit.
+	// Tasks reports the declared count when the spec resolves
+	// (sibling convention) — the recorded cell count is len(Cells).
 	Cells       map[string][2]int `json:"cells"`
 	RepsPerTask float64           `json:"reps_per_task"`
 	PassRate    float64           `json:"pass_rate"`
@@ -77,8 +81,10 @@ type HarborCellNoise struct {
 	// √(mean p̂ᵢ(1−p̂ᵢ)) — the coin-flip component reps shrink.
 	SigmaWithin float64 `json:"sigma_within"`
 	// SigmaBetween is the between-task systematic SD — the spread
-	// of p̂ᵢ left after subtracting expected within noise — the
-	// unshrinkable quantity OOD sizing actually needs.
+	// of p̂ᵢ left after subtracting expected within noise.
+	// OOD sizing plugs it in for cross-arm effect heterogeneity,
+	// which a base-arm characterization can't measure — a
+	// modeling choice, not a derivation (see HarborOODSizing).
 	SigmaBetween float64 `json:"sigma_between"`
 }
 
@@ -441,6 +447,9 @@ func ComputeCellNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 	out.RepsPerTask /= n
 	if exp != nil && exp.Harbor != nil {
 		if ids, err := HarborTaskSet(evalDir, exp.Harbor); err == nil && len(ids) > 0 {
+			// Sibling blocks report the declared count — the
+			// recorded matrix itself already lives in Cells.
+			out.Tasks = len(ids)
 			out.TasksSource = "declared"
 		}
 	}

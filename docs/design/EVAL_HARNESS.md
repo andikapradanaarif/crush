@@ -1972,12 +1972,18 @@ claims size at `n_superiority` — reported alongside the binding
 endpoints, binding when it's the sole declared claim so a
 superiority-only read can't run unpowered). When a `cells` block is
 recorded it **supersedes** `ood.sigma_d` in the pass-rate sizing:
-the effective σ_d² = σ²_between + 2·σ²_within/k_plan — the
-unshrinkable spread plus both paired cells' within noise shrunk by
-the manifest's declared `harbor.k` (default 1). The k=1 case
-recombines into the pair-read quantity, so the decomposition only
-ever changes the number when repeated cells actually separate the
-components.
+the effective σ_d² = σ²_between + 2·σ²_within/k_plan at the
+manifest's declared `harbor.k` (default 1). Be precise about what
+that substitutes: the sized estimand is the cross-arm effect diff,
+whose variance is Var(effect_i) + 2·σ²_within/k — `sigma_between`
+is single-arm difficulty spread plugged in for the unmeasurable
+effect-heterogeneity term (between the perfectly-paired 0 and
+independent-draws 2·σ²_between), a modeling choice that can
+undersize when effects are heterogeneous on uniform-difficulty
+tasks. The raw pair σ_d can't substitute either way — pairing the
+same arm's reps cancels task difficulty, so it measures ≈2σ²_within
++ drift, which is why the decomposition changes the number even at
+k=1 rather than "recombining" into the pair read.
 Manifests must declare at least one sizable endpoint or
 `ValidateExperiment` refuses; at compare time an OOD rule whose
 recorded task count falls short of `required` reports
