@@ -1,0 +1,18 @@
+{
+	"providers": {
+		"opencode-go": {
+			"api_key": "$OPENCODE_API_KEY",
+			"extra_headers": {
+				"x-opencode-session": "$(cat /proc/sys/kernel/random/uuid)"
+			},
+			"models": [
+				{
+					"id": "beam-free",
+					"name": "Beam Free",
+					"context_window": 1048576,
+					"default_max_tokens": 131072
+				}
+			]
+		}
+	}
+}

@@ -61,6 +61,18 @@ func LoadNoise(evalDir string) (*NoiseFile, error) {
 		if !(c.Cells.SigmaWithin >= 0) || !(c.Cells.SigmaBetween >= 0) {
 			return nil, fmt.Errorf("noise.json: harbor.cells sigmas must be ≥ 0, got within=%g between=%g", c.Cells.SigmaWithin, c.Cells.SigmaBetween)
 		}
+		if !(c.Cells.TokensLogSigmaWithin >= 0) || !(c.Cells.TokensLogSigmaBetween >= 0) {
+			return nil, fmt.Errorf("noise.json: harbor.cells token log sigmas must be ≥ 0, got within=%g between=%g", c.Cells.TokensLogSigmaWithin, c.Cells.TokensLogSigmaBetween)
+		}
+		if !(c.Cells.TokensGeomeanPerTrial >= 0) {
+			return nil, fmt.Errorf("noise.json: harbor.cells.tokens_geomean_per_trial must be ≥ 0, got %g", c.Cells.TokensGeomeanPerTrial)
+		}
+		if c.Cells.MeasurableCells < 0 || c.Cells.TokensMeasurableCells < 0 {
+			return nil, fmt.Errorf("noise.json: harbor.cells measurable counts must be ≥ 0, got cells=%d token_cells=%d", c.Cells.MeasurableCells, c.Cells.TokensMeasurableCells)
+		}
+		if !(c.Cells.DeltaExpected >= 0) || !(c.Cells.CMinExpected >= 0) {
+			return nil, fmt.Errorf("noise.json: harbor.cells expected reads must be ≥ 0, got delta_expected=%g c_min_expected=%g", c.Cells.DeltaExpected, c.Cells.CMinExpected)
+		}
 	}
 	return &n, nil
 }
@@ -204,6 +216,10 @@ type OODSizing struct {
 	// "cells" (the #489 decomposition) or "pair" (raw σ_d) — so an
 	// underpowered report's σ_d isn't attributed to the wrong read.
 	SigmaSource string `json:"sigma_source,omitempty"`
+	// SigmaSourceTokens names which read priced the efficiency
+	// endpoint — "cells" (the #507 log-token decomposition) or
+	// "pair" (the #404 pair read's tokens_log_ratio_sd).
+	SigmaSourceTokens string `json:"sigma_source_tokens,omitempty"`
 	// Required is N_OOD = max of the required endpoints — and the
 	// superiority count when that's the only endpoint declared, so a
 	// superiority-only read can't sail through unpowered.
@@ -276,6 +292,7 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 		return nil, fmt.Errorf("OOD sizing: noise.json's harbor block is superseded — %s; re-run the characterization before pricing against it", note)
 	}
 	ood := noise.Harbor.OOD
+	cells := noise.Harbor.Cells
 	out := &OODSizing{}
 	sized := false
 	if p := rule.Primary; p != nil && p.Metric != "pass_rate" {
@@ -287,13 +304,38 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 		// Δ_c is used raw rather than |log(1−Δ)|: for small declared
 		// effects the approximation is tight, and the residual bias
 		// is conservative for improvements (overstates N slightly).
-		if ood == nil || ood.TokensLogRatioSD <= 0 {
-			return nil, fmt.Errorf("OOD sizing: primary %q needs tokens_log_ratio_sd — the #404 pair read didn't measure it", p.Metric)
-		}
 		if p.MinImprovement <= 0 {
 			return nil, fmt.Errorf("OOD sizing: primary %q needs min_improvement > 0 — the declared efficiency effect is the Δ_c being powered", p.Metric)
 		}
-		out.NEfficiency = RequiredNEfficiency(ood.TokensLogRatioSD, p.MinImprovement)
+		// The cells log-token decomposition (#507) supersedes the
+		// pair read's tokens_log_ratio_sd when recorded — the same
+		// replacement as the pass leg: σ²_d,tok = σ²_between,tok +
+		// 2σ²_logw/k_plan, with σ²_between,tok plugging the
+		// unmeasurable effect-heterogeneity term until the estimand
+		// split lands. A cells block predating the token read
+		// (fields absent) falls back to the pair SD. The
+		// measurable-cells requirement mirrors the pass leg's —
+		// without it a hand-edited block could price a within σ
+		// no cell actually measured (#517 review).
+		cvD, tokSource := 0.0, ""
+		if cells != nil && cells.TokensMeasurableCells > 0 &&
+			(cells.TokensLogSigmaWithin > 0 || cells.TokensGeomeanPerTrial > 0) {
+			kPlan := 1
+			if exp.Harbor != nil && exp.Harbor.K > 0 {
+				kPlan = exp.Harbor.K
+			}
+			cvD = math.Hypot(cells.TokensLogSigmaBetween,
+				math.Sqrt(2*cells.TokensLogSigmaWithin*cells.TokensLogSigmaWithin/float64(kPlan)))
+			tokSource = "cells"
+		} else if ood != nil && ood.TokensLogRatioSD > 0 {
+			cvD = ood.TokensLogRatioSD
+			tokSource = "pair"
+		}
+		if cvD <= 0 {
+			return nil, fmt.Errorf("OOD sizing: primary %q needs a token noise read — neither the pair read's tokens_log_ratio_sd nor the cells log decomposition measured one", p.Metric)
+		}
+		out.NEfficiency = RequiredNEfficiency(cvD, p.MinImprovement)
+		out.SigmaSourceTokens = tokSource
 		sized = true
 	}
 	// The repeated-cell decomposition (#489) supersedes raw σ_d
@@ -317,7 +359,6 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 		sigmaD = ood.SigmaD
 		sigmaSource = "pair"
 	}
-	cells := noise.Harbor.Cells
 	if cells != nil && cells.MeasurableCells > 0 {
 		kPlan := 1
 		if exp.Harbor != nil && exp.Harbor.K > 0 {

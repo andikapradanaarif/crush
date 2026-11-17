@@ -1950,7 +1950,26 @@ noise reps shrink; single-rep cells impute it) and `sigma_between`
 (√(Var(p̂ᵢ) − expected within), the systematic task-to-task
 spread nothing shrinks). Sizing on raw σ_d conflates the two — the pilot's σ_d ≈
 0.5 was nearly all coin flips, which prices G1.e/f as if the
-irreducible part could be shrunk. Per-trial tokens, wall time, and
+irreducible part could be shrunk. The cells block also carries the
+**log-token decomposition** (#507): `tokens_log_sigma_within` /
+`tokens_log_sigma_between` — pooled within-task SD and the same
+moment decomposition, over `log` total tokens so one runaway trial
+can't dominate the read — plus `tokens_geomean_per_trial` and two
+expected-read estimates at the declared `harbor.k` × task schedule:
+`delta_expected` = 1.693·√(mean_w/(n·k)) (the expected
+"range of 3 passes" priced against the measured within weight
+instead of one high-variance realization) and `c_min_expected` =
+exp(1.693·σ_logw/√(n·k)) − 1 — a relative change *from the
+cell minimum*, so at high σ it runs ~2× the arithmetic `c_min`
+whose denominator is the mean; different denominators, not a
+bug. `token_measurable_cells` counts the ≥2-rep token cells the
+within σ is estimable from — 0 means `tokens_log_sigma_within`
+= 0 is structural, not measured flat (the pass side's
+`measurable_cells` is the same tell). `c_min_expected` is the
+quantity the §6 efficiency
+rule's "real change" floor prices once a cells block exists —
+`c_min` on the passes block stays recorded as the arithmetic
+all-in spread it measures. Per-trial tokens, wall time, and
 USD cost land
 on every block (`cost_usd` is a RunRecord field only harbor trials
 populate). Without `--write` the report prints only; with it the
@@ -1979,7 +1998,10 @@ The harbor block's `ood` quantities are the **OOD sizing inputs**
 (#389): a `decision_rule` with `ood: true` sizes its task count
 against them — `n_efficiency = (z₁₋α/2 + z₁₋β)²·(CV_d/Δ_c)²` from
 `tokens_log_ratio_sd` against a continuous primary's
-`min_improvement`, and `n_noninferiority = (z₁₋α + z₁₋β)²·σ_d²/m²`
+`min_improvement` — or, when the cells block carries a token read,
+from the decomposition σ²_d,tok = σ²_between,tok + 2σ²_logw/k_plan
+(`sigma_source_tokens` labels which read priced it) — and
+`n_noninferiority = (z₁₋α + z₁₋β)²·σ_d²/m²`
 from `sigma_d` against a `pass_rate` guardrail's negative
 `min_delta` (Δ_true = 0 conservative; pass-rate *superiority*
 claims size at `n_superiority` — reported alongside the binding

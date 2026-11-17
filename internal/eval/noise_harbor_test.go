@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -577,6 +578,188 @@ func TestMergeHarbor_CellsBlock(t *testing.T) {
 	require.NoError(t, n.MergeHarbor(&NoiseHarbor{Cells: c}, true))
 }
 
+// tokRec builds a conclusive cell rep with exact total tokens —
+// the log decomposition prices totalTokens, so Input carries the
+// whole count.
+func tokRec(inv, task string, idx int, out Outcome, total int64) RunRecord {
+	r := noiseRec(inv, ArmControl, task, idx, out, 0)
+	r.Tokens = TokenUsage{Input: total}
+	return r
+}
+
+// A hand-worked 3×4 log-token matrix: two constant cells and one
+// varying cell give exact within/between values (#507).
+func TestComputeCellNoise_TokenDecomposition(t *testing.T) {
+	exp := harborNoiseExp()
+	exp.Harbor.K = 4
+	var recs []RunRecord
+	// t-a: all 100; t-b: all 1000 (within SS 0, df 3 each).
+	for i := range 4 {
+		recs = append(recs,
+			tokRec("inv1", "t-a", i, OutcomePass, 100),
+			tokRec("inv1", "t-b", i, OutcomePass, 1000))
+	}
+	// t-c: 90, 100, 110, 120 — the only within variance.
+	for i, tt := range []int64{90, 100, 110, 120} {
+		recs = append(recs, tokRec("inv1", "t-c", i, OutcomePass, tt))
+	}
+	cells, err := ComputeCellNoise(recs, exp, "", ArmControl, "tb21", []string{"inv1"})
+	require.NoError(t, err)
+
+	// t-c's logs: ln90..ln120, SS = 0.046007 over df 3; pooled
+	// within df = 9 → σw² = 0.005112 → σw ≈ 0.0715.
+	require.InDelta(t, 0.0715, cells.TokensLogSigmaWithin, 1e-4)
+	// Var(cell log-means) = 1.734864; expected within =
+	// σw²·(3·1/4)/3 = 0.001278 → σb = √(1.733586) ≈ 1.3167.
+	require.InDelta(t, 1.3167, cells.TokensLogSigmaBetween, 1e-4)
+	// Geomean of the 12 totals: exp(5.38707) ≈ 218.6.
+	require.InDelta(t, 218.6, cells.TokensGeomeanPerTrial, 0.5)
+}
+
+// The model-estimated δ̂ prices the pilot-like within weight at the
+// declared schedule — mean w = 0.139, n = 30, k = 8 → ≈ 4.1pp,
+// not the realized range one characterization happened to produce.
+func TestComputeCellNoise_DeltaExpected(t *testing.T) {
+	exp := harborNoiseExp()
+	exp.Harbor.K = 8
+	exp.Harbor.TaskIDs = nil // Recorded-count read — 30 cells.
+	exp.Harbor.TB21Split = ""
+	var recs []RunRecord
+	add := func(task string, passes int) {
+		for i := range 8 {
+			out := OutcomeFail
+			if i < passes {
+				out = OutcomePass
+			}
+			recs = append(recs, tokRec("inv1", task, i, out, 100))
+		}
+	}
+	// w = p̂(1−p̂)·8/7: p̂=1/8 → 0.125, p̂=2/8 → 0.2143, p̂=3/8 →
+	// 0.2679. 26·0.125 + 3·0.2143 + 0.2679 = 4.1607 → mean 0.1387.
+	for i := range 26 {
+		add(fmt.Sprintf("t-%02d", i), 1)
+	}
+	for i := range 3 {
+		add(fmt.Sprintf("u-%02d", i), 2)
+	}
+	add("v-00", 3)
+	cells, err := ComputeCellNoise(recs, exp, "", ArmControl, "tb21", []string{"inv1"})
+	require.NoError(t, err)
+	require.Equal(t, 30, cells.Tasks)
+	// δ̂ = 1.693·√(0.1387/240) = 1.693·0.024041 ≈ 0.0407.
+	require.InDelta(t, 0.041, cells.DeltaExpected, 0.002)
+}
+
+// One 11.5M-token runaway dominates the arithmetic all-in c_min
+// but barely registers in the log-domain expected read — the
+// quantity the efficiency rule's floor prices (#507).
+func TestComputeCellNoise_ExpectedReadsResistOutlier(t *testing.T) {
+	exp := harborNoiseExp()
+	exp.Harbor.K = 3
+	exp.Harbor.TaskIDs = nil
+	exp.Harbor.TB21Split = ""
+	var recs []RunRecord
+	for _, inv := range []string{"inv1", "inv2", "inv3"} {
+		for i := range 30 {
+			tok := int64(100)
+			if inv == "inv1" && i == 29 {
+				tok = 11500000
+			}
+			recs = append(recs, tokRec(inv, fmt.Sprintf("t-%02d", i), 0, OutcomePass, tok))
+		}
+	}
+	cells, err := ComputeCellNoise(recs, exp, "", ArmControl, "tb21", []string{"inv1", "inv2", "inv3"})
+	require.NoError(t, err)
+	// σ_logw ≈ 1.23 (the outlier's within cell is 1 of 30) →
+	// c_min_expected ≈ exp(1.693·1.228/√(30·3)) − 1 ≈ 0.25.
+	require.Less(t, cells.CMinExpected, 0.5)
+	require.Greater(t, cells.CMinExpected, 0.0)
+
+	passes, err := ComputePassNoise(recs, exp, "", ArmControl, "tb21", []string{"inv1", "inv2", "inv3"})
+	require.NoError(t, err)
+	// The arithmetic spread: inv1's mean is ≈480k vs 125 for
+	// inv2/inv3 → c_min ≈ 3.0 — an order of magnitude above the
+	// expected read.
+	require.Greater(t, passes.CMin, 2.0)
+}
+
+// A cells block with the #507 token read supersedes the pair
+// read's tokens_log_ratio_sd in the efficiency leg — same
+// replacement the pass leg already makes.
+func TestHarborOODSizing_TokenCellsPreferred(t *testing.T) {
+	exp := harborNoiseExp()
+	exp.Harbor.K = 8
+	exp.DecisionRule = &DecisionRule{
+		Hypothesis: "h",
+		OOD:        true,
+		Primary:    &RulePrimary{Metric: "weighted_cost", MinImprovement: 0.1},
+	}
+	// σ²_d,tok = 0.30² + 2·0.50²/8 = 0.1525 → σ ≈ 0.3905.
+	noise := &NoiseFile{Harbor: &NoiseHarbor{
+		OOD: &HarborPairNoise{SigmaD: 0.56, TokensLogRatioSD: 0.5},
+		Cells: &HarborCellNoise{
+			SigmaWithin: 0.5, SigmaBetween: 0.3, MeasurableCells: 8,
+			TokensLogSigmaWithin: 0.5, TokensLogSigmaBetween: 0.3,
+			TokensMeasurableCells: 6,
+		},
+	}}
+	sizing, err := HarborOODSizing(exp, noise)
+	require.NoError(t, err)
+	// (1.96+0.8416)²·0.1525/0.01 ≈ 119.9 → 120.
+	require.Equal(t, 120, sizing.NEfficiency)
+	require.Equal(t, "cells", sizing.SigmaSourceTokens)
+
+	// A cells block predating the token read falls back to the
+	// pair SD — the supersession is per-measurement.
+	sizing, err = HarborOODSizing(exp, &NoiseFile{Harbor: &NoiseHarbor{
+		OOD:   &HarborPairNoise{SigmaD: 0.56, TokensLogRatioSD: 0.5},
+		Cells: &HarborCellNoise{SigmaWithin: 0.5, SigmaBetween: 0.3, MeasurableCells: 8},
+	}})
+	require.NoError(t, err)
+	// (2.8016)²·0.25/0.01 ≈ 196.2 → 197.
+	require.Equal(t, 197, sizing.NEfficiency)
+	require.Equal(t, "pair", sizing.SigmaSourceTokens)
+
+	// A token σ no cell measured — a hand-edit with positive σ
+	// and zero token-measurable cells — can't price either: same
+	// measurable gate the pass leg enforces (#517 review).
+	sizing, err = HarborOODSizing(exp, &NoiseFile{Harbor: &NoiseHarbor{
+		OOD: &HarborPairNoise{SigmaD: 0.56, TokensLogRatioSD: 0.5},
+		Cells: &HarborCellNoise{
+			SigmaWithin: 0.5, SigmaBetween: 0.3, MeasurableCells: 8,
+			TokensLogSigmaWithin: 0.9, TokensLogSigmaBetween: 0.9,
+		},
+	}})
+	require.NoError(t, err)
+	require.Equal(t, "pair", sizing.SigmaSourceTokens)
+}
+
+// The new cells fields refuse negative hand-edits at load —
+// a NaN σ mustn't slip past the fail-closed checks.
+func TestLoadNoise_TokenFieldValidation(t *testing.T) {
+	dir := t.TempDir()
+	write := func(t *testing.T, fields string) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "noise.json"),
+			[]byte(`{"cv":{},"harbor":{"cells":{"cells":{"t-a":[2,4],"t-b":[1,4]},`+fields+`}}}`), 0o644))
+	}
+	write(t, `"tokens_log_sigma_within":-0.1`)
+	_, err := LoadNoise(dir)
+	require.ErrorContains(t, err, "token log sigmas")
+	write(t, `"delta_expected":-0.01`)
+	_, err = LoadNoise(dir)
+	require.ErrorContains(t, err, "expected reads")
+	write(t, `"tokens_geomean_per_trial":-5`)
+	_, err = LoadNoise(dir)
+	require.ErrorContains(t, err, "tokens_geomean_per_trial")
+	write(t, `"token_measurable_cells":-1`)
+	_, err = LoadNoise(dir)
+	require.ErrorContains(t, err, "measurable counts")
+	write(t, `"tokens_log_sigma_within":0.5,"tokens_log_sigma_between":0.3,"delta_expected":0.04,"c_min_expected":0.08`)
+	_, err = LoadNoise(dir)
+	require.NoError(t, err)
+}
+
 // A harbor block marked superseded measured a different system than
 // the protocol now declares — it stays recorded for audit but
 // nothing may size against it (#504).
@@ -619,6 +802,32 @@ func TestLoadNoise_StatusValidation(t *testing.T) {
 	write(t, `"superseded"`)
 	_, err = LoadNoise(dir)
 	require.NoError(t, err)
+}
+
+// token_measurable_cells counts only ≥2-rep token-bearing cells —
+// the tell that separates a measured-flat within σ from a matrix
+// with no measurable cell at all (#517 review).
+func TestComputeCellNoise_TokenMeasurableCells(t *testing.T) {
+	exp := harborNoiseExp()
+	exp.Harbor.TaskIDs = nil
+	exp.Harbor.TB21Split = ""
+	var recs []RunRecord
+	// t-a: 4 token reps (measurable); t-b: 4 token reps (measurable);
+	// t-c: 1 token rep + 3 zero-token fails (not measurable — the
+	// zero-token trials contribute no log value).
+	for i := range 4 {
+		recs = append(recs,
+			tokRec("inv1", "t-a", i, OutcomePass, 100+int64(i)),
+			tokRec("inv1", "t-b", i, OutcomePass, 200+int64(i)))
+	}
+	recs = append(recs, tokRec("inv1", "t-c", 0, OutcomePass, 300))
+	for i := 1; i < 4; i++ {
+		recs = append(recs, tokRec("inv1", "t-c", i, OutcomeFail, 0))
+	}
+	cells, err := ComputeCellNoise(recs, exp, "", ArmControl, "tb21", []string{"inv1"})
+	require.NoError(t, err)
+	require.Equal(t, 2, cells.TokensMeasurableCells)
+	require.Equal(t, 3, cells.MeasurableCells)
 }
 
 // A fresh characterization replaces the block's standing — a merge
