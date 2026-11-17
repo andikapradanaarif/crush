@@ -140,6 +140,68 @@ config must carry what the manifest declares: the `models` block's
 `"temperature": 0` in the manifest while the arm config sends none
 is exactly the pilot's silent-drift defect).
 
+## Runbook — `tb21-smoke-deepseek` (#506, W3)
+
+Owner-executed: ~20 paid trials on `opencode-go/deepseek-v4.1-flash`
+feeding the D1 model-pin decision. Estimated spend at the manifest's
+pinned rates: ≈ $0.30–$2.40. The agent prepares artifacts only.
+
+```sh
+# 1. Build the pinned binary — its `crush --version` sha is
+#    harbor.harness_revision. Re-pin the manifest if main has moved.
+git checkout 1715db5098   # manifest's harness_revision
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o crush-linux-amd64 .
+
+# 2. Source credentials — OPENCODE_API_KEY reaches the container via
+#    the env kwarg (never argv). Arm config: arm-deepseek.crush.json.
+source ~/.config/crush/secrets.env
+
+# 3. Single control-arm job: 10 tasks × k=2 = 20 trials.
+PYTHONPATH=$PWD harbor run \
+    -d terminal-bench/terminal-bench-2-1 \
+    --agent eval.harbor.crush_agent:Crush \
+    --agent-kwarg binary_path="$PWD/crush-linux-amd64" \
+    --agent-kwarg harness_revision=1715db5098 \
+    --agent-kwarg config="$PWD/arm-deepseek.crush.json" \
+    --agent-kwarg env=OPENCODE_API_KEY \
+    --agent-kwarg max_tokens=8000000 \
+    --include-task-name bn-fit-modify \
+    --include-task-name code-from-image \
+    --include-task-name db-wal-recovery \
+    --include-task-name feal-linear-cryptanalysis \
+    --include-task-name kv-store-grpc \
+    --include-task-name mcmc-sampling-stan \
+    --include-task-name path-tracing-reverse \
+    --include-task-name pytorch-model-cli \
+    --include-task-name regex-log \
+    --include-task-name train-fasttext \
+    --environment-build-timeout-multiplier 4 \
+    --agent-timeout-multiplier 2 \
+    --verifier-timeout-multiplier 4 \
+    -n 2 -k 2
+
+# 4. Ingest the job under a fresh invocation id, then the #506 table:
+#    pass band [0.20, 0.90], ≥16/20 conclusive, sampling provenance,
+#    measured $/trial, 429s, per-task 2-rep agreement (flips).
+crush eval ingest eval/experiments/tb21-smoke-deepseek.json \
+    --arm control --invocation deepseek-smoke-1 jobs/<job-dir>/*/
+crush eval noise eval/experiments/tb21-smoke-deepseek.json \
+    --cells deepseek-smoke-1 --passes
+```
+
+The manifest's `treatment` arm is a schema-required stub — the
+loader demands the control/treatment pair, so it mirrors `control`
+exactly (same shape as `tb21-smoke-longcat`). One job runs and
+ingests under `--arm control` only; the #506 table needs no pair.
+
+`cache_write` is pinned at the input rate ($0.30): opencode-zen
+publishes no separate write price and billing treats writes as input
+— pinning it at 0 would price that class free by default. The
+`max_tokens` kwarg caps a runaway trial (observed: an 11.5M-token
+run) instead of burning to the agent timeout; 8M is ~2× the observed
+per-trial mix. Do **not** pass `--model` — the arm config's `models`
+block carries the large/small pins (see the note above).
+
 ## Ops notes from the field
 
 - **LiteLLM's "could not resolve model" warning is cosmetic.** Harbor

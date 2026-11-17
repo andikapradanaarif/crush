@@ -1,0 +1,67 @@
+{
+	"name": "tb21-smoke-deepseek",
+	"model": "opencode-go/deepseek-v4.1-flash",
+	"small_model": "opencode-go/deepseek-v4.1-flash",
+	"temperature": 0,
+	"corpus": [
+		"harbor"
+	],
+	"runs_per_trajectory": {
+		"uncharacterized": 1
+	},
+	"arms": {
+		"control": {
+			"config": {
+				"options": {}
+			}
+		},
+		"treatment": {
+			"config": {
+				"options": {}
+			}
+		}
+	},
+	"providers": {
+		"opencode-go": {
+			"name": "OpenCode Go",
+			"type": "openai-compat",
+			"api_key": "$OPENCODE_API_KEY",
+			"base_url": "https://opencode.ai/zen/go/v1",
+			"extra_headers": {
+				"x-opencode-session": "$(cat /proc/sys/kernel/random/uuid)"
+			},
+			"models": [
+				{
+					"id": "deepseek-v4.1-flash",
+					"name": "DeepSeek V4.1 Flash",
+					"context_window": 1000000,
+					"default_max_tokens": 384000
+				}
+			]
+		}
+	},
+	"cost_rates": {
+		"input": 0.3,
+		"output": 1.2,
+		"cache_read": 0.01,
+		"cache_write": 0.3
+	},
+	"harbor": {
+		"dataset": "terminal-bench@2.1",
+		"task_ids": [
+			"bn-fit-modify",
+			"code-from-image",
+			"db-wal-recovery",
+			"feal-linear-cryptanalysis",
+			"kv-store-grpc",
+			"mcmc-sampling-stan",
+			"path-tracing-reverse",
+			"pytorch-model-cli",
+			"regex-log",
+			"train-fasttext"
+		],
+		"k": 2,
+		"harness_revision": "1715db5098"
+	},
+	"resample": "cluster"
+}
