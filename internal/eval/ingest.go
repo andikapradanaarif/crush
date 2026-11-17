@@ -195,6 +195,9 @@ func harborOutcome(res *harborTrialResult) (Outcome, map[string]any) {
 // corpus-coverage ground truth the alarm snapshot's skipped set
 // subtracts recorded ids from.
 func HarborTaskSet(evalDir string, spec *HarborSpec) ([]string, error) {
+	if spec == nil {
+		return nil, fmt.Errorf("harbor spec declares no task set")
+	}
 	switch {
 	case spec.TB21Split != "":
 		m, err := LoadTB21Manifest(evalDir, spec.TB21Split)

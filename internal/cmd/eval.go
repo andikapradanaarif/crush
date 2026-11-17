@@ -495,22 +495,40 @@ All report per-trial tokens, wall time, and USD cost.
 					return lerr
 				}
 			}
-			sizing, serr := eval.HarborOODSizing(exp, n)
+			sizing, serr := eval.HarborOODSizing(exp, n, evalDir)
 			if serr != nil {
 				return serr
 			}
 			rep := map[string]any{"experiment": exp.Name}
 			if sizing != nil {
 				rep["sizing"] = sizing
-				// The powered check and the spend projection are
+				// The task-set reads and the spend projection are
 				// harbor-manifest reads — a non-harbor manifest can
 				// still declare an OOD decision rule and size against
 				// a shared noise.json, so the harbor fields need the
 				// guard (#516 review).
 				if exp.Harbor != nil {
 					if ids, terr := eval.HarborTaskSet(evalDir, exp.Harbor); terr == nil {
+						available := len(ids)
+						for _, id := range ids {
+							if _, struck := exp.Harbor.Exclude[id]; struck {
+								available--
+							}
+						}
 						rep["declared_tasks"] = len(ids)
-						rep["powered"] = len(ids) >= sizing.Required
+						rep["available_tasks"] = available
+						// No "powered" key: the sizing call itself
+						// fails closed when Required exceeds the
+						// available set, so a printed verdict could
+						// only ever read true — the refusal is the
+						// signal, not a boolean (#518 review).
+						// The MDE report inverts the sizing at the
+						// declared (available, k) schedule — both
+						// estimands so a dev-split read prints the
+						// margin it carries next to the sealed claim.
+						if mde := eval.HarborMDEReport(exp, n, available, exp.Harbor.K); mde != nil {
+							rep["mde"] = mde
+						}
 					}
 					// The sized schedule's projected spend — required
 					// tasks × reps/arm × gate arms × measured mean

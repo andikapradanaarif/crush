@@ -70,6 +70,11 @@ type CompareReport struct {
 	// (default) or "cluster" (#407) — so a report can't be re-read
 	// under a different variance model than produced it.
 	Resample string
+	// Estimand names the variance model the report's OOD claims
+	// priced — "conditional" (fixed declared tasks) or
+	// "population" (task-distribution claim) (#508) — recorded
+	// next to Resample so the pair pins the inference target.
+	Estimand string
 	// SkippedMetrics names registry entries with too few measurable
 	// pairs to estimate — absent telemetry is visible, not silent.
 	SkippedMetrics []string
@@ -479,6 +484,12 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		Resample:     resample,
 		Provenance:   provNote,
 	}
+	// The estimand is the OOD read's variance model — a non-OOD
+	// report stamps nothing rather than claim an inference target
+	// no leg priced (#518 review).
+	if exp.DecisionRule != nil && exp.DecisionRule.OOD {
+		rep.Estimand = resolvedEstimand(exp)
+	}
 	if snap != nil {
 		rep.GateVerdict = snap.GateVerdict
 		rep.OutcomeAlarms = snap.OutcomeAlarms
@@ -503,7 +514,7 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 	// take precedence — an untrusted rule stays suppressed on its
 	// original reason.
 	if exp.DecisionRule != nil && exp.DecisionRule.OOD && ruleTrusted {
-		sizing, serr := HarborOODSizing(exp, noise)
+		sizing, serr := HarborOODSizing(exp, noise, r.EvalDir)
 		switch {
 		case serr != nil:
 			ruleTrusted = false
@@ -514,8 +525,8 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 			if src == "" {
 				src = "n/a"
 			}
-			ruleProvNote = fmt.Sprintf("OOD read underpowered: %d tasks recorded, need %d (n_efficiency %d, n_noninferiority %d at σ_d[%s]/CV_d)",
-				len(trajIDs), sizing.Required, sizing.NEfficiency, sizing.NNonInferiority, src)
+			ruleProvNote = fmt.Sprintf("OOD read underpowered: %d tasks recorded, need %d (estimand %s, n_efficiency %d, n_noninferiority %d at σ_d[%s]/CV_d)",
+				len(trajIDs), sizing.Required, sizing.Estimand, sizing.NEfficiency, sizing.NNonInferiority, src)
 		}
 	}
 
