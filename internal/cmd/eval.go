@@ -502,26 +502,46 @@ All report per-trial tokens, wall time, and USD cost.
 			rep := map[string]any{"experiment": exp.Name}
 			if sizing != nil {
 				rep["sizing"] = sizing
-				if ids, terr := eval.HarborTaskSet(evalDir, exp.Harbor); terr == nil {
-					available := len(ids)
-					for _, id := range ids {
-						if _, struck := exp.Harbor.Exclude[id]; struck {
-							available--
+				// The task-set reads and the spend projection are
+				// harbor-manifest reads — a non-harbor manifest can
+				// still declare an OOD decision rule and size against
+				// a shared noise.json, so the harbor fields need the
+				// guard (#516 review).
+				if exp.Harbor != nil {
+					if ids, terr := eval.HarborTaskSet(evalDir, exp.Harbor); terr == nil {
+						available := len(ids)
+						for _, id := range ids {
+							if _, struck := exp.Harbor.Exclude[id]; struck {
+								available--
+							}
+						}
+						rep["declared_tasks"] = len(ids)
+						rep["available_tasks"] = available
+						// No "powered" key: the sizing call itself
+						// fails closed when Required exceeds the
+						// available set, so a printed verdict could
+						// only ever read true — the refusal is the
+						// signal, not a boolean (#518 review).
+						// The MDE report inverts the sizing at the
+						// declared (available, k) schedule — both
+						// estimands so a dev-split read prints the
+						// margin it carries next to the sealed claim.
+						if mde := eval.HarborMDEReport(exp, n, available, exp.Harbor.K); mde != nil {
+							rep["mde"] = mde
 						}
 					}
-					rep["declared_tasks"] = len(ids)
-					rep["available_tasks"] = available
-					// No "powered" key: the sizing call itself
-					// fails closed when Required exceeds the
-					// available set, so a printed verdict could
-					// only ever read true — the refusal is the
-					// signal, not a boolean (#518 review).
-					// The MDE report inverts the sizing at the
-					// declared (available, k) schedule — both
-					// estimands so a dev-split read prints the
-					// margin it carries next to the sealed claim.
-					if mde := eval.HarborMDEReport(exp, n, available, exp.Harbor.K); mde != nil {
-						rep["mde"] = mde
+					// The sized schedule's projected spend — required
+					// tasks × reps/arm × gate arms × measured mean
+					// cost — the R1.8 budget input. best_of_k arms
+					// are selection baselines, not the sized read's
+					// arms, so they don't multiply the schedule.
+					// A measured mean reports even at $0 — a free
+					// route's projection is genuinely $0 spend, not
+					// unmeasured (#516 review).
+					if mean, measured := n.HarborCostPerTrial(); measured {
+						trials := eval.ProjectedGateTrials(exp, sizing.Required)
+						rep["projected_trials"] = trials
+						rep["projected_spend_usd"] = float64(trials) * mean
 					}
 				}
 			} else {

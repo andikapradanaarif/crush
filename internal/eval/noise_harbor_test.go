@@ -1133,3 +1133,53 @@ func TestMergeHarbor_StatusPartialCoverage(t *testing.T) {
 	}, true))
 	require.Equal(t, "superseded", n.Harbor.Status)
 }
+
+// A conclusive trial with no token telemetry carries a priced $0 —
+// pooling it would bias cost_usd_per_trial toward free and inflate
+// cost_trials. Zero-token records are unmeasured and stay out of
+// the cost pool (#516 review).
+func TestComputeCellNoise_ZeroTokenCostExcluded(t *testing.T) {
+	free, paid := 0.0, 0.39
+	recs := []RunRecord{
+		{TrajectoryID: "t-a", Arm: ArmControl, Invocation: "inv1", RunIndex: 0, Outcome: OutcomePass, Tokens: TokenUsage{Input: 100}, CostUSD: &paid},
+		{TrajectoryID: "t-a", Arm: ArmControl, Invocation: "inv1", RunIndex: 1, Outcome: OutcomeFail, Tokens: TokenUsage{Input: 100}, CostUSD: &paid},
+		{TrajectoryID: "t-b", Arm: ArmControl, Invocation: "inv1", RunIndex: 0, Outcome: OutcomePass, Tokens: TokenUsage{Input: 100}, CostUSD: &paid},
+		{TrajectoryID: "t-b", Arm: ArmControl, Invocation: "inv1", RunIndex: 1, Outcome: OutcomePass, Tokens: TokenUsage{Input: 100}, CostUSD: &paid},
+		// Conclusive but telemetry-free: the priced $0 never measured.
+		{TrajectoryID: "t-c", Arm: ArmControl, Invocation: "inv1", RunIndex: 0, Outcome: OutcomePass, CostUSD: &free},
+		{TrajectoryID: "t-c", Arm: ArmControl, Invocation: "inv1", RunIndex: 1, Outcome: OutcomeFail, CostUSD: &free},
+	}
+	cells, err := ComputeCellNoise(recs, harborNoiseExp(), "", ArmControl, "tb21", []string{"inv1"})
+	require.NoError(t, err)
+	require.Equal(t, 4, cells.CostTrials)
+	require.NotNil(t, cells.CostUSDPerTrial)
+	require.InDelta(t, 0.39, *cells.CostUSDPerTrial, 1e-9)
+}
+
+// A measured-free route reports (0, true) — genuinely $0, distinct
+// from unmeasured (0, false) — so --size prints the projection on
+// the measured signal rather than mean > 0 (#516 review).
+func TestNoiseFile_HarborCostPerTrialMeasured(t *testing.T) {
+	var unmeasured NoiseFile
+	mean, measured := unmeasured.HarborCostPerTrial()
+	require.False(t, measured)
+	require.Zero(t, mean)
+
+	zero := 0.0
+	n := &NoiseFile{Harbor: &NoiseHarbor{Passes: &HarborPassNoise{
+		CostUSDPerTrial: &zero, CostTrials: 4,
+	}}}
+	mean, measured = n.HarborCostPerTrial()
+	require.True(t, measured)
+	require.Zero(t, mean)
+}
+
+// A partially-pinned rates block errors at price time — manifests
+// built outside LoadExperiment skip the pinned check, and pricing
+// anyway would silently cost a missing class $0 (#516 review).
+func TestTokenRates_PriceUnpinned(t *testing.T) {
+	in := 0.15
+	partial := &TokenRates{Input: &in}
+	_, err := partial.price(TokenUsage{Input: 1})
+	require.Error(t, err)
+}
