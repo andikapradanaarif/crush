@@ -750,12 +750,12 @@ func trendTokens(ctx context.Context, conn *sql.DB, key string, shared bool, mem
 	if err != nil {
 		return fmt.Errorf("sessions: %w", err)
 	}
+	defer rows.Close()
 	sessions := map[string]*trendRow{}
 	for rows.Next() {
 		var id string
 		var createdSec, tokens int64
 		if err := rows.Scan(&id, &createdSec, &tokens); err != nil {
-			rows.Close()
 			return fmt.Errorf("sessions scan: %w", err)
 		}
 		r := bucket(createdSec * 1000)
@@ -764,10 +764,8 @@ func trendTokens(ctx context.Context, conn *sql.DB, key string, shared bool, mem
 		sessions[id] = r
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
 		return err
 	}
-	rows.Close()
 
 	messages, err := conn.QueryContext(ctx, `SELECT m.session_id, m.parts
 		FROM messages m JOIN sessions s ON s.id = m.session_id

@@ -1276,9 +1276,9 @@ func TestCompare_ResampleDriftSuppressesRule(t *testing.T) {
 	r := seededRunner(dir)
 	// Persist the snapshot under stratified, then flip the manifest
 	// — the rule must read suppressed, not re-estimated.
-	strat := *exp
-	strat.Resample = ""
-	require.NoError(t, r.persistAlarms(&strat, "i1", Report{}, nil))
+	stratified := *exp
+	stratified.Resample = ""
+	require.NoError(t, r.persistAlarms(&stratified, "i1", Report{}, nil))
 	rep, err := r.Compare(exp, "i1")
 	require.NoError(t, err)
 	require.Equal(t, "inconclusive", rep.RuleResult)
