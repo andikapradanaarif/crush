@@ -658,6 +658,22 @@ func (r *Runner) ingestTrial(ctx context.Context, exp *Experiment, arm, invocati
 		}
 		rec.StepRecords = tel.Request.Steps
 	}
+	// Harbor reports no per-trial cost — price the billed classes at
+	// the manifest's pinned route rates so a paid pin's spend is
+	// measured, not assumed. A harness-reported cost wins when
+	// present; the main-model classes price the spend (the sidecar's
+	// generator tokens run a different model's rates).
+	if rec.CostUSD == nil && exp.CostRates != nil {
+		if c, err := exp.CostRates.price(rec.Tokens); err != nil {
+			// An unpinned block reached ingest — a manifest built
+			// outside LoadExperiment can skip the pinned check.
+			// Record it rather than panic (#516 review).
+			detail["cost_error"] = err.Error()
+		} else {
+			rec.CostUSD = &c
+			detail["cost_basis"] = "cost_rates"
+		}
+	}
 	// The session DB is the failed-run forensic artifact — same
 	// preserve-then-analyze path as preserveArtifacts, against the
 	// copied-back file. Its absence is the copy-back breaking —
@@ -689,6 +705,14 @@ func (r *Runner) ingestTrial(ctx context.Context, exp *Experiment, arm, invocati
 				rec.CallMetrics = metrics
 				if rec.SessionID == "" {
 					rec.SessionID = metrics.SessionID
+				}
+			}
+			// The session's own catwalk-priced cost is the independent
+			// cross-check for the pinned-rate number — provenance in
+			// check_detail, never the primary value.
+			if rec.SessionID != "" {
+				if c, cerr := sessionDBCost(ctx, dst, rec.SessionID); cerr == nil {
+					detail["db_cost_usd"] = c
 				}
 			}
 		}
