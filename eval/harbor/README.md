@@ -158,23 +158,17 @@ source ~/.config/crush/secrets.env
 
 # 3. Single control-arm job: 10 tasks × k=2 = 20 trials.
 PYTHONPATH=$PWD harbor run \
-    -d terminal-bench/terminal-bench-2-1 \
+    -d terminal-bench@2.0 \
     --agent eval.harbor.crush_agent:Crush \
     --agent-kwarg binary_path="$PWD/crush-linux-amd64" \
     --agent-kwarg harness_revision=1715db5098 \
     --agent-kwarg config="$PWD/arm-deepseek.crush.json" \
     --agent-kwarg env=OPENCODE_API_KEY \
     --agent-kwarg max_tokens=8000000 \
-    --include-task-name bn-fit-modify \
-    --include-task-name code-from-image \
-    --include-task-name db-wal-recovery \
-    --include-task-name feal-linear-cryptanalysis \
-    --include-task-name kv-store-grpc \
-    --include-task-name mcmc-sampling-stan \
-    --include-task-name path-tracing-reverse \
-    --include-task-name pytorch-model-cli \
-    --include-task-name regex-log \
-    --include-task-name train-fasttext \
+    -i bn-fit-modify -i code-from-image -i db-wal-recovery \
+    -i feal-linear-cryptanalysis -i kv-store-grpc -i mcmc-sampling-stan \
+    -i path-tracing-reverse -i pytorch-model-cli -i regex-log \
+    -i train-fasttext \
     --environment-build-timeout-multiplier 4 \
     --agent-timeout-multiplier 2 \
     --verifier-timeout-multiplier 4 \
