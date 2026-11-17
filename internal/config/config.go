@@ -597,7 +597,7 @@ type Options struct {
 	// the only fold that can fire on a single-prompt trajectory —
 	// harbor runs have one user turn, so finished turns never
 	// exist. Needs notebook + recall live, same as stub mode.
-	FoldSegments *bool `json:"fold_segments,omitempty" jsonschema:"description=Fold covered closed segments inside the open turn into recall-backed stubs on a quantized three-segment frontier — the intra-turn variant of fold_turns for single-prompt trajectories. Requires notebook and recall. Experimental.,default=false"`
+	FoldSegments *bool `json:"fold_segments,omitempty" jsonschema:"description=Fold covered closed segments inside the open turn into recall-backed stubs on a quantized three-segment frontier — the intra-turn variant of fold_turns for single-prompt trajectories. Segment folds render stub-shaped even under digest mode (digests are turn-grain). Requires notebook and recall. Experimental.,default=false"`
 	// FailureMemory injects the <open_failures> tail — commands that
 	// failed in this workspace and have not passed since — independent
 	// of the turn_context tier so its contribution can be measured on

@@ -216,6 +216,10 @@ func TestValidateExperiment_OODNeedsSizableEndpoint(t *testing.T) {
 		Hypothesis: "treatment is better somehow",
 		Primary:    &RulePrimary{Metric: "tokens_to_done", Arm: ArmTreatment, Vs: ArmControl, Direction: PrimaryDecrease},
 		OOD:        true,
+		// Task_ids now resolves conditional by default — cluster
+		// pairs with the population estimand explicitly so the
+		// sizable-endpoint check stays the failure under test.
+		Estimand: EstimandPopulation,
 	}
 	require.ErrorContains(t, ValidateExperiment(exp), "sizable endpoint")
 	exp.DecisionRule.Guardrail = &RuleGuardrail{Metric: "pass_rate", MinDelta: -0.03}

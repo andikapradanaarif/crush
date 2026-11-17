@@ -57,9 +57,13 @@ shipped architecture diverged in ways that matter to readers:
   frontier (`foldFrontier` on the closed-segment count — the fold set
   advances one three-segment chunk at a time, so the folded prefix is
   again byte-stable inside a chunk). The open tail segment never
-  folds. Segment folds always render as stubs — digest/summarize are
-  turn-grain consolidations with no segment-level shape — and keep
-  the `recall("result:<id>")` recovery path. Telemetry is disjoint:
+  folds. Segment folds always render as stubs — digest/summarize
+  are turn-grain consolidations with no segment-level shape, so
+  under `notebook_prior_turns: "digest"` the fold still fires but
+  coerces to the stub wording for its spans (a "consolidated in
+  turn digest" label would lie — no turn digest ever consolidates
+  a mid-turn span) — and keep the `recall("result:<id>")` recovery
+  path. Telemetry is disjoint:
   `prior_turns.segments_collapsed` counts distinct folded segments,
   `prior_turns.events_collapsed` includes their call/result events,
   and recording is deduplicated per session so re-renders don't
