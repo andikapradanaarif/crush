@@ -557,6 +557,7 @@ func (r *Runner) ExecuteRun(ctx context.Context, exp *Experiment, traj *Trajecto
 	}
 	rec.Env.ModelSmall = res.ModelSmall
 	rec.Env.ModelSummary = res.ModelSummary
+	rec.Env.Sampling = res.Sampling
 
 	// Preserve the session DB — the failed-run debugging artifact is
 	// the full message/tool trace, free. Attempted regardless of

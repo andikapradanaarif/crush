@@ -700,6 +700,7 @@ func TestHarborOODSizing_TokenCellsPreferred(t *testing.T) {
 		Cells: &HarborCellNoise{
 			SigmaWithin: 0.5, SigmaBetween: 0.3, MeasurableCells: 8,
 			TokensLogSigmaWithin: 0.5, TokensLogSigmaBetween: 0.3,
+			TokensMeasurableCells: 6,
 		},
 	}}
 	sizing, err := HarborOODSizing(exp, noise)
@@ -717,6 +718,19 @@ func TestHarborOODSizing_TokenCellsPreferred(t *testing.T) {
 	require.NoError(t, err)
 	// (2.8016)²·0.25/0.01 ≈ 196.2 → 197.
 	require.Equal(t, 197, sizing.NEfficiency)
+	require.Equal(t, "pair", sizing.SigmaSourceTokens)
+
+	// A token σ no cell measured — a hand-edit with positive σ
+	// and zero token-measurable cells — can't price either: same
+	// measurable gate the pass leg enforces (#517 review).
+	sizing, err = HarborOODSizing(exp, &NoiseFile{Harbor: &NoiseHarbor{
+		OOD: &HarborPairNoise{SigmaD: 0.56, TokensLogRatioSD: 0.5},
+		Cells: &HarborCellNoise{
+			SigmaWithin: 0.5, SigmaBetween: 0.3, MeasurableCells: 8,
+			TokensLogSigmaWithin: 0.9, TokensLogSigmaBetween: 0.9,
+		},
+	}})
+	require.NoError(t, err)
 	require.Equal(t, "pair", sizing.SigmaSourceTokens)
 }
 
@@ -746,6 +760,50 @@ func TestLoadNoise_TokenFieldValidation(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// A harbor block marked superseded measured a different system than
+// the protocol now declares — it stays recorded for audit but
+// nothing may size against it (#504).
+func TestHarborOODSizing_SupersededRefused(t *testing.T) {
+	exp := harborNoiseExp()
+	exp.DecisionRule = &DecisionRule{
+		Hypothesis: "h",
+		OOD:        true,
+		Guardrail:  &RuleGuardrail{Metric: "pass_rate", MinDelta: -0.05},
+	}
+	noise := &NoiseFile{Harbor: &NoiseHarbor{
+		Status: "superseded",
+		Note:   "pilot ran a different system",
+		OOD:    &HarborPairNoise{SigmaD: 0.56, TokensLogRatioSD: 0.5},
+	}}
+	_, err := HarborOODSizing(exp, noise)
+	require.ErrorContains(t, err, "superseded")
+	require.ErrorContains(t, err, "pilot ran a different system")
+
+	// Without the mark the same numbers size fine — the refusal is
+	// the standing, not the data.
+	noise.Harbor.Status = ""
+	sizing, err := HarborOODSizing(exp, noise)
+	require.NoError(t, err)
+	require.Equal(t, 776, sizing.NNonInferiority)
+}
+
+// Only known marks load — a hand-edited status typo must fail at
+// LoadNoise, not silently size.
+func TestLoadNoise_StatusValidation(t *testing.T) {
+	dir := t.TempDir()
+	write := func(t *testing.T, status string) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "noise.json"),
+			[]byte(`{"cv":{},"harbor":{"status":`+status+`,"ood":{"sigma_d":0.5}}}`), 0o644))
+	}
+	write(t, `"deprecated"`)
+	_, err := LoadNoise(dir)
+	require.ErrorContains(t, err, "harbor.status")
+	write(t, `"superseded"`)
+	_, err = LoadNoise(dir)
+	require.NoError(t, err)
+}
+
 // token_measurable_cells counts only ≥2-rep token-bearing cells —
 // the tell that separates a measured-flat within σ from a matrix
 // with no measurable cell at all (#517 review).
@@ -770,4 +828,71 @@ func TestComputeCellNoise_TokenMeasurableCells(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, cells.TokensMeasurableCells)
 	require.Equal(t, 3, cells.MeasurableCells)
+}
+
+// A fresh characterization replaces the block's standing — a merge
+// that lands a sub-block adopts the incoming status, lifting the
+// superseded mark; a metadata-only merge leaves it alone.
+func TestMergeHarbor_StatusAdoption(t *testing.T) {
+	n := &NoiseFile{Harbor: &NoiseHarbor{Status: "superseded", Note: "old system"}}
+	require.NoError(t, n.MergeHarbor(&NoiseHarbor{
+		Passes: &HarborPassNoise{Delta: 0.1},
+	}, true))
+	require.Empty(t, n.Harbor.Status)
+	require.Empty(t, n.Harbor.Note)
+
+	// A merge that itself declares superseded propagates the mark.
+	require.NoError(t, n.MergeHarbor(&NoiseHarbor{
+		Status: "superseded",
+		Note:   "bad again",
+		OOD:    &HarborPairNoise{SigmaD: 0.3},
+	}, true))
+	require.Equal(t, "superseded", n.Harbor.Status)
+	require.Equal(t, "bad again", n.Harbor.Note)
+}
+
+// A partial re-characterization leaves recorded sub-blocks in place —
+// the mark condemns them too, so it must not lift until the merge
+// covers every recorded block (#515 review: a --pair-only rewrite
+// unmarking stale cells would resurrect them for pass-leg sizing).
+func TestMergeHarbor_StatusPartialCoverage(t *testing.T) {
+	n := &NoiseFile{Harbor: &NoiseHarbor{
+		Status: "superseded",
+		Note:   "old system",
+		OOD:    &HarborPairNoise{SigmaD: 0.9},
+		Cells:  &HarborCellNoise{SigmaWithin: 0.4},
+	}}
+	// Rewriting only ood mustn't clear the mark — cells is still the
+	// condemned measurement and would otherwise re-enter sizing.
+	require.NoError(t, n.MergeHarbor(&NoiseHarbor{
+		OOD: &HarborPairNoise{SigmaD: 0.3},
+	}, true))
+	require.Equal(t, "superseded", n.Harbor.Status)
+	require.Equal(t, 0.3, n.Harbor.OOD.SigmaD)
+
+	// A later cells-only merge doesn't lift either: the mark can't
+	// tell which recorded blocks predate it, so it stands until one
+	// merge covers every recorded sub-block (--pair --cells --write
+	// --force in a single invocation).
+	require.NoError(t, n.MergeHarbor(&NoiseHarbor{
+		Cells: &HarborCellNoise{SigmaWithin: 0.2},
+	}, true))
+	require.Equal(t, "superseded", n.Harbor.Status)
+
+	// The covering merge lifts the mark — nothing it leaves behind
+	// was measured under the old system.
+	require.NoError(t, n.MergeHarbor(&NoiseHarbor{
+		OOD:   &HarborPairNoise{SigmaD: 0.25},
+		Cells: &HarborCellNoise{SigmaWithin: 0.18},
+	}, true))
+	require.Empty(t, n.Harbor.Status)
+	require.Equal(t, 0.18, n.Harbor.Cells.SigmaWithin)
+
+	// And a fresh sub-block arriving while a mark stands doesn't lift
+	// it — additions aren't replacements.
+	n.Harbor.Status = "superseded"
+	require.NoError(t, n.MergeHarbor(&NoiseHarbor{
+		Passes: &HarborPassNoise{Delta: 0.1},
+	}, true))
+	require.Equal(t, "superseded", n.Harbor.Status)
 }

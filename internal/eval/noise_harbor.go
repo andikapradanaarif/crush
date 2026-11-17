@@ -22,10 +22,20 @@ const rangeOf3 = 1.693
 
 // NoiseHarbor is the "harbor" block of eval/noise.json.
 type NoiseHarbor struct {
-	Model      string           `json:"model"`
-	MeasuredAt time.Time        `json:"measured_at"`
-	Passes     *HarborPassNoise `json:"passes,omitempty"`
-	OOD        *HarborPairNoise `json:"ood,omitempty"`
+	Model      string    `json:"model"`
+	MeasuredAt time.Time `json:"measured_at"`
+	// Status marks the block's standing: "superseded" means the
+	// runs it was computed from measured a different system than
+	// the protocol now declares (wrong pin, sampling not delivered)
+	// and nothing may size against it (#504). The numbers stay
+	// recorded for audit; a fresh characterization clears the mark
+	// only when it covers every recorded sub-block — a partial
+	// rewrite leaves the survivors condemned (MergeHarbor).
+	Status string `json:"status,omitempty"`
+	// Note explains the status — why the block was superseded.
+	Note   string           `json:"note,omitempty"`
+	Passes *HarborPassNoise `json:"passes,omitempty"`
+	OOD    *HarborPairNoise `json:"ood,omitempty"`
 	// Cells is the repeated-cell decomposition (#489) — when
 	// recorded it supersedes ood.sigma_d in the sizing path: the
 	// components price against the declared k, not whatever the
@@ -556,12 +566,27 @@ func ComputeCellNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 		out.RepsPerTask += float64(c[1])
 	}
 	out.RepsPerTask /= n
+	// nSched is the task count the expected reads divide by — the
+	// tasks that can actually produce reps. Recorded cells are the
+	// fallback; a resolved declaration shrinks by exclusions the
+	// same way TrialsPerPass shrinks its denominator — including
+	// excluded tasks inflates n and prices δ̂/c_min_expected
+	// optimistic, the anti-conservative direction on the efficiency
+	// floor (#517 review).
+	nSched := n
 	if exp != nil && exp.Harbor != nil {
 		if ids, err := HarborTaskSet(evalDir, exp.Harbor); err == nil && len(ids) > 0 {
 			// Sibling blocks report the declared count — the
 			// recorded matrix itself already lives in Cells.
 			out.Tasks = len(ids)
 			out.TasksSource = "declared"
+			excluded := 0
+			for id := range exp.Harbor.Exclude {
+				if slices.Contains(ids, id) {
+					excluded++
+				}
+			}
+			nSched = max(float64(len(ids)-excluded), 1)
 		}
 	}
 	// The log-token decomposition mirrors the pass part: pooled
@@ -619,10 +644,10 @@ func ComputeCellNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 		kPlan = float64(exp.Harbor.K)
 	}
 	if wMean > 0 {
-		out.DeltaExpected = rangeOf3 * math.Sqrt(wMean/(float64(out.Tasks)*kPlan))
+		out.DeltaExpected = rangeOf3 * math.Sqrt(wMean/(nSched*kPlan))
 	}
 	if out.TokensLogSigmaWithin > 0 {
-		out.CMinExpected = math.Exp(rangeOf3*out.TokensLogSigmaWithin/math.Sqrt(float64(out.Tasks)*kPlan)) - 1
+		out.CMinExpected = math.Exp(rangeOf3*out.TokensLogSigmaWithin/math.Sqrt(nSched*kPlan)) - 1
 	}
 	return out, nil
 }

@@ -42,6 +42,13 @@ func LoadNoise(evalDir string) (*NoiseFile, error) {
 			return nil, fmt.Errorf("noise.json: cv[%q] must be > 0, got %g", metric, cv)
 		}
 	}
+	if h := n.Harbor; h != nil {
+		switch h.Status {
+		case "", "superseded":
+		default:
+			return nil, fmt.Errorf("noise.json: harbor.status %q is not a known mark — want \"superseded\" or absent", h.Status)
+		}
+	}
 	// The cells matrix is hand-editable like everything else —
 	// validate it so a malformed entry can't produce NaN σ's that
 	// slip past the fail-closed checks into a "powered" verdict.
@@ -80,6 +87,14 @@ func (n *NoiseFile) MergeHarbor(h *NoiseHarbor, force bool) error {
 		n.Harbor = h
 		return nil
 	}
+	// A merge that leaves any recorded sub-block in place is partial:
+	// the superseded mark condemns those survivors too, so it may lift
+	// only when one merge covers every recorded block — a --pair-only
+	// rewrite mustn't unmark stale cells and resurrect them for the
+	// sizing path (#515 review).
+	partial := (n.Harbor.Passes != nil && h.Passes == nil) ||
+		(n.Harbor.OOD != nil && h.OOD == nil) ||
+		(n.Harbor.Cells != nil && h.Cells == nil)
 	if h.Passes != nil {
 		if n.Harbor.Passes != nil && !force {
 			return fmt.Errorf("noise: harbor.passes already recorded — --force to retune the base floor")
@@ -106,6 +121,17 @@ func (n *NoiseFile) MergeHarbor(h *NoiseHarbor, force bool) error {
 	// didn't touch.
 	if h.Passes != nil || h.OOD != nil || h.Cells != nil {
 		n.Harbor.MeasuredAt = h.MeasuredAt
+		// A fresh characterization replaces the block's standing —
+		// its numbers come from the new run, so a "superseded" mark
+		// carried against the old measurement lifts once every
+		// recorded sub-block has been replaced (#504). An incoming
+		// mark condemns the just-written sub-blocks, so it adopts
+		// even on a partial merge — the block stays refused either
+		// way, and the newest note describes why.
+		if !partial || h.Status != "" {
+			n.Harbor.Status = h.Status
+			n.Harbor.Note = h.Note
+		}
 	}
 	return nil
 }
@@ -258,6 +284,13 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 	if noise == nil || noise.Harbor == nil || (noise.Harbor.OOD == nil && noise.Harbor.Cells == nil) {
 		return nil, fmt.Errorf("OOD sizing needs measured harbor noise — run #404 characterization first (noise.json has no harbor.ood or harbor.cells block)")
 	}
+	if noise.Harbor.Status == "superseded" {
+		note := noise.Harbor.Note
+		if note == "" {
+			note = "the runs it was computed from measured a different system"
+		}
+		return nil, fmt.Errorf("OOD sizing: noise.json's harbor block is superseded — %s; re-run the characterization before pricing against it", note)
+	}
 	ood := noise.Harbor.OOD
 	cells := noise.Harbor.Cells
 	out := &OODSizing{}
@@ -280,9 +313,13 @@ func HarborOODSizing(exp *Experiment, noise *NoiseFile) (*OODSizing, error) {
 		// 2σ²_logw/k_plan, with σ²_between,tok plugging the
 		// unmeasurable effect-heterogeneity term until the estimand
 		// split lands. A cells block predating the token read
-		// (fields absent) falls back to the pair SD.
+		// (fields absent) falls back to the pair SD. The
+		// measurable-cells requirement mirrors the pass leg's —
+		// without it a hand-edited block could price a within σ
+		// no cell actually measured (#517 review).
 		cvD, tokSource := 0.0, ""
-		if cells != nil && (cells.TokensLogSigmaWithin > 0 || cells.TokensGeomeanPerTrial > 0) {
+		if cells != nil && cells.TokensMeasurableCells > 0 &&
+			(cells.TokensLogSigmaWithin > 0 || cells.TokensGeomeanPerTrial > 0) {
 			kPlan := 1
 			if exp.Harbor != nil && exp.Harbor.K > 0 {
 				kPlan = exp.Harbor.K
