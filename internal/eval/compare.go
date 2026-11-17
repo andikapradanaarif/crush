@@ -482,8 +482,13 @@ func (r *Runner) Compare(exp *Experiment, invocation string) (*CompareReport, er
 		Pairs:        len(pairs),
 		Unmatched:    unmatched,
 		Resample:     resample,
-		Estimand:     resolvedEstimand(exp),
 		Provenance:   provNote,
+	}
+	// The estimand is the OOD read's variance model — a non-OOD
+	// report stamps nothing rather than claim an inference target
+	// no leg priced (#518 review).
+	if exp.DecisionRule != nil && exp.DecisionRule.OOD {
+		rep.Estimand = resolvedEstimand(exp)
 	}
 	if snap != nil {
 		rep.GateVerdict = snap.GateVerdict

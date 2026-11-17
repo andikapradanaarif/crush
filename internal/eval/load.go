@@ -997,6 +997,13 @@ func (e *Experiment) validateDecisionRule() error {
 		return fmt.Errorf("decision_rule.estimand must be %q or %q, got %q",
 			EstimandConditional, EstimandPopulation, d.Estimand)
 	}
+	if d.Estimand != "" && !d.OOD {
+		// The estimand is the OOD read's variance model — on a
+		// non-OOD rule it declares intent nothing honors, and the
+		// stamped report would claim an inference target the
+		// compare never priced (#518 review).
+		return fmt.Errorf("decision_rule.estimand requires ood: true — the variance model only applies to held-out claims")
+	}
 	if d.OOD {
 		switch resolvedEstimand(e) {
 		case EstimandPopulation:

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/config"
@@ -242,6 +244,36 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 		if m, ok := app.config.Config().Models[slot]; ok {
 			doc["model_"+string(slot)] = m.Provider + "/" + m.Model
 		}
+	}
+	// Resolved sampling params per slot — the same values
+	// mergeCallOptions puts on the request (config pin first, then
+	// the provider catalog default). A null field means the
+	// parameter was never sent: "declared but not delivered" is the
+	// pilot defect this provenance exists to catch (#504).
+	sampling := map[string]any{}
+	for _, slot := range []config.SelectedModelType{
+		config.SelectedModelTypeLarge,
+		config.SelectedModelTypeSmall,
+		config.SelectedModelTypeSummary,
+	} {
+		sel, ok := app.config.Config().Models[slot]
+		if !ok {
+			continue
+		}
+		var cat catwalk.ModelOptions
+		if m := app.config.Config().GetModel(sel.Provider, sel.Model); m != nil {
+			cat = m.Options
+		}
+		sampling[string(slot)] = map[string]any{
+			"temperature":       cmp.Or(sel.Temperature, cat.Temperature),
+			"top_p":             cmp.Or(sel.TopP, cat.TopP),
+			"top_k":             cmp.Or(sel.TopK, cat.TopK),
+			"frequency_penalty": cmp.Or(sel.FrequencyPenalty, cat.FrequencyPenalty),
+			"presence_penalty":  cmp.Or(sel.PresencePenalty, cat.PresencePenalty),
+		}
+	}
+	if len(sampling) > 0 {
+		doc["sampling"] = sampling
 	}
 	if runErr != nil {
 		doc["error"] = runErr.Error()

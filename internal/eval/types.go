@@ -465,13 +465,14 @@ const (
 )
 
 // resolvedEstimand applies the declared/default rule — an explicit
-// estimand wins; a dev-split task set is a fixed corpus read
-// conditionally; everything else prices the population claim.
+// estimand wins; a fixed task set (a dev split or an enumerated
+// task_ids corpus alike) reads conditionally; everything else
+// prices the population claim.
 func resolvedEstimand(e *Experiment) string {
 	if e.DecisionRule != nil && e.DecisionRule.Estimand != "" {
 		return e.DecisionRule.Estimand
 	}
-	if e.Harbor != nil && e.Harbor.TB21Split == "dev" {
+	if e.Harbor != nil && (e.Harbor.TB21Split == "dev" || len(e.Harbor.TaskIDs) > 0) {
 		return EstimandConditional
 	}
 	return EstimandPopulation
@@ -1233,9 +1234,15 @@ type Env struct {
 	// conditions the baseline key must not merge. "default" marks
 	// an unpinned temperature.
 	Temperature string `json:"temperature,omitempty"`
-	Go          string `json:"go"`
-	OS          string `json:"os"`
-	ContentHash string `json:"content_hash"`
+	// Sampling is the run's resolved sampling parameters per model
+	// slot (large/small/summary) — what the run actually put on the
+	// request, not what the manifest declared. Nil fields mean the
+	// parameter was never sent (#504). Absent on runs predating the
+	// child's sampling export.
+	Sampling    map[string]SamplingParams `json:"sampling,omitempty"`
+	Go          string                    `json:"go"`
+	OS          string                    `json:"os"`
+	ContentHash string                    `json:"content_hash"`
 	// EnvAllowlist names every parent-env variable permitted into the
 	// run's subprocesses (#345) — the fixed minimal set plus the vars
 	// the manifest references. Names only, never values: the list is
@@ -1243,6 +1250,19 @@ type Env struct {
 	// from record + operator env), and a credential that influenced a
 	// run must appear here.
 	EnvAllowlist []string `json:"env_allowlist,omitempty"`
+}
+
+// SamplingParams are the per-slot sampling values the child resolved
+// — config pin first, then the provider catalog default, mirroring
+// mergeCallOptions. A nil field is load-bearing: it means the
+// parameter was not sent on the request, which is distinguishable
+// from sent-as-zero in a way a float can't express (#504).
+type SamplingParams struct {
+	Temperature      *float64 `json:"temperature,omitempty"`
+	TopP             *float64 `json:"top_p,omitempty"`
+	TopK             *int64   `json:"top_k,omitempty"`
+	FrequencyPenalty *float64 `json:"frequency_penalty,omitempty"`
+	PresencePenalty  *float64 `json:"presence_penalty,omitempty"`
 }
 
 // BaselineCounts are the integer cells Fisher's exact needs; p̂ is

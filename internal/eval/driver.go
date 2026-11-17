@@ -74,6 +74,10 @@ type RunResult struct {
 	ModelResolved string
 	ModelSmall    string
 	ModelSummary  string
+	// Sampling is the trajectory-final process's resolved per-slot
+	// sampling params — the actual request-side temperature/top_p,
+	// which the declared manifest temperature may not match (#504).
+	Sampling map[string]SamplingParams
 	// ResolvedOptions is the child's report of what each manifest
 	// flag resolved to — the truth the baseline key hashes.
 	ResolvedOptions map[string]any
@@ -264,6 +268,11 @@ type runTelemetry struct {
 	Model        string                    `json:"model"`
 	ModelSmall   string                    `json:"model_small"`
 	ModelSummary string                    `json:"model_summary"`
+	// Sampling is the child's resolved sampling parameters per model
+	// slot — what actually went on the request (nil = not sent). The
+	// provenance read the ingest pin gate checks against the
+	// manifest's declared temperature (#504).
+	Sampling map[string]SamplingParams `json:"sampling,omitempty"`
 	// ResolvedOptions is the child's effective config projected onto
 	// the manifest flags — what actually ran, not what the arm asked.
 	ResolvedOptions map[string]any `json:"resolved_options"`
@@ -396,6 +405,9 @@ func noteTurnFields(res *RunResult, tel runTelemetry) {
 	}
 	if tel.ModelSummary != "" {
 		res.ModelSummary = tel.ModelSummary
+	}
+	if len(tel.Sampling) > 0 {
+		res.Sampling = tel.Sampling
 	}
 	if len(tel.ResolvedOptions) > 0 {
 		res.ResolvedOptions = tel.ResolvedOptions
