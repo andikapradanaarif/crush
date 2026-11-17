@@ -10,12 +10,6 @@
 		"mid": 1,
 		"uncharacterized": 1
 	},
-	"primary": {
-		"metric": "weighted_cost",
-		"direction": "decrease",
-		"mde": 0.15,
-		"max_pass_drop": 0.1
-	},
 	"cost_weights": {
 		"cache_read": 0.25,
 		"cache_write": 0,
