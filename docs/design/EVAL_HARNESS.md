@@ -2034,9 +2034,18 @@ raw pair σ_d can't substitute either way — pairing the
 same arm's reps cancels task difficulty, so it measures ≈2σ²_within
 + drift, which is why the decomposition changes the number even at
 k=1 rather than "recombining" into the pair read.
-Undeclared, the estimand resolves from the task set: `tb21_split:
-"dev"` is a fixed corpus → conditional; anything else →
-population, the safer under-declared answer.
+Undeclared, the estimand resolves from the task set: any fixed
+corpus → conditional — `tb21_split: "dev"` **or** an enumerated
+`task_ids` list; anything else → population, the safer
+under-declared answer. This is a behavior break for existing
+manifests (#518 review): a dev-split or task-ids OOD manifest that
+declared no estimand previously resolved population and required
+`resample: "cluster"`; it now resolves conditional and *refuses*
+`cluster`. Such manifests keep the old pairing by declaring
+`estimand: "population"` explicitly (with `cluster`), or adopt the
+conditional read by switching to `stratified`. And `estimand`
+itself requires `ood: true` — on a non-OOD rule it stamps nothing
+meaningful, so validation refuses it.
 
 The estimand and the resampling unit must agree — validation
 refuses the mismatched pair. A conditional read resamples pairs

@@ -511,7 +511,11 @@ All report per-trial tokens, wall time, and USD cost.
 					}
 					rep["declared_tasks"] = len(ids)
 					rep["available_tasks"] = available
-					rep["powered"] = available >= sizing.Required
+					// No "powered" key: the sizing call itself
+					// fails closed when Required exceeds the
+					// available set, so a printed verdict could
+					// only ever read true — the refusal is the
+					// signal, not a boolean (#518 review).
 					// The MDE report inverts the sizing at the
 					// declared (available, k) schedule — both
 					// estimands so a dev-split read prints the

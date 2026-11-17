@@ -57,6 +57,8 @@
       "tokens_log_ratio_sd": 1.0524851353064975,
       "tokens_per_trial": 875419.2040816327,
       "wall_s_per_trial": 385.2739845918368
-    }
+    },
+    "status": "superseded",
+    "note": "2026-11-16 audit: computed from the tb21-pilot-beam pilot, which ran a different system — small model resolved to deepseek-v4.1-flash against the beam-free pin, declared temperature was never sent, and pilot-b2 treatment was a duplicate of its control arm. Numbers stay recorded for audit; re-run the base characterization on the D1 pin before sizing (#504)."
   }
 }
