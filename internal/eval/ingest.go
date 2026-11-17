@@ -661,9 +661,15 @@ func (r *Runner) ingestTrial(ctx context.Context, exp *Experiment, arm, invocati
 	// present; the main-model classes price the spend (the sidecar's
 	// generator tokens run a different model's rates).
 	if rec.CostUSD == nil && exp.CostRates != nil {
-		c := exp.CostRates.price(rec.Tokens)
-		rec.CostUSD = &c
-		detail["cost_basis"] = "cost_rates"
+		if c, err := exp.CostRates.price(rec.Tokens); err != nil {
+			// An unpinned block reached ingest — a manifest built
+			// outside LoadExperiment can skip the pinned check.
+			// Record it rather than panic (#516 review).
+			detail["cost_error"] = err.Error()
+		} else {
+			rec.CostUSD = &c
+			detail["cost_basis"] = "cost_rates"
+		}
 	}
 	// The session DB is the failed-run forensic artifact — same
 	// preserve-then-analyze path as preserveArtifacts, against the

@@ -138,22 +138,24 @@ type HarborPairNoise struct {
 
 // HarborCostPerTrial returns the measured mean trial cost the
 // harbor blocks recorded — the spend basis for schedule
-// projections. Prefers the cells read (most reps), then pair,
-// then passes; 0 means unmeasured.
-func (n *NoiseFile) HarborCostPerTrial() float64 {
+// projections — and whether any block measured one. Prefers the
+// cells read (most reps), then pair, then passes. A measured free
+// route returns (0, true): $0 measured, not unmeasured, so
+// projections should still report (#516 review).
+func (n *NoiseFile) HarborCostPerTrial() (float64, bool) {
 	if n == nil || n.Harbor == nil {
-		return 0
+		return 0, false
 	}
 	if b := n.Harbor.Cells; b != nil && b.CostUSDPerTrial != nil {
-		return *b.CostUSDPerTrial
+		return *b.CostUSDPerTrial, true
 	}
 	if b := n.Harbor.OOD; b != nil && b.CostUSDPerTrial != nil {
-		return *b.CostUSDPerTrial
+		return *b.CostUSDPerTrial, true
 	}
 	if b := n.Harbor.Passes; b != nil && b.CostUSDPerTrial != nil {
-		return *b.CostUSDPerTrial
+		return *b.CostUSDPerTrial, true
 	}
-	return 0
+	return 0, false
 }
 
 // GateArmCount counts the manifest's sized-read arms — every arm
@@ -235,7 +237,11 @@ func ComputePassNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 				wall.add(r.DurationS)
 				out.WallTrials++
 			}
-			if r.CostUSD != nil {
+			// A conclusive trial that emitted no token telemetry
+			// prices $0 — pooling it would bias the mean toward
+			// free and misreport cost_trials. Zero-token records
+			// are unmeasured, not free (#516 review).
+			if r.CostUSD != nil && tt > 0 {
 				allCost = append(allCost, *r.CostUSD)
 			}
 			ts, ok := taskTok[r.TrajectoryID]
@@ -356,7 +362,9 @@ func ComputePairNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 		m[r.TrajectoryID] = taskRec{pass: r.Outcome == OutcomePass, tok: totalTokens(r)}
 		tok.add(totalTokens(r))
 		wall.add(r.DurationS)
-		if r.CostUSD != nil {
+		// Zero-token records price $0 without measuring — excluded
+		// from the cost pool, same as the pass and cell blocks.
+		if r.CostUSD != nil && totalTokens(r) > 0 {
 			allCost = append(allCost, *r.CostUSD)
 		}
 		ts, ok := taskTok[r.TrajectoryID]
@@ -493,7 +501,9 @@ func ComputeCellNoise(records []RunRecord, exp *Experiment, evalDir, arm, datase
 		cells[r.TrajectoryID] = c
 		wall.add(r.DurationS)
 		tok.add(totalTokens(r))
-		if r.CostUSD != nil {
+		// Zero-token records price $0 without measuring — excluded
+		// from the cost pool, same as the pass and pair blocks.
+		if r.CostUSD != nil && totalTokens(r) > 0 {
 			allCost = append(allCost, *r.CostUSD)
 		}
 	}

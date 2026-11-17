@@ -663,10 +663,16 @@ func (r *TokenRates) check(name string) error {
 	return nil
 }
 
-// price converts a trial's billed classes to USD.
-func (r *TokenRates) price(t TokenUsage) float64 {
+// price converts a trial's billed classes to USD. A partially-pinned
+// block errors rather than pricing a missing class free — the same
+// refusal check() enforces at load, held for programmatically-built
+// experiments that bypass LoadExperiment (#516 review).
+func (r *TokenRates) price(t TokenUsage) (float64, error) {
+	if err := r.check("cost_rates"); err != nil {
+		return 0, err
+	}
 	return (float64(t.Input)**r.Input + float64(t.Output)**r.Output +
-		float64(t.CacheRead)**r.CacheRead + float64(t.CacheWrite)**r.CacheWrite) / 1e6
+		float64(t.CacheRead)**r.CacheRead + float64(t.CacheWrite)**r.CacheWrite) / 1e6, nil
 }
 
 // Arm is a generated config fragment plus an optional arm-scoped

@@ -740,3 +740,29 @@ func TestIngestHarborTrials_TemperatureProvenance(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, recs, 2)
 }
+
+// A partially-pinned rates block must record, not panic — a
+// manifest built outside LoadExperiment bypasses the pinned check
+// (#516 review).
+func TestIngestHarborTrials_PartialRatesNoPanic(t *testing.T) {
+	in := 0.15
+	dir := t.TempDir()
+	exp := harborExp("task-a")
+	exp.CostRates = &TokenRates{Input: &in}
+	r := seededRunner(dir)
+	ctx := context.Background()
+	jobs := t.TempDir()
+	tel := map[string]any{
+		"session_id": "s1", "model": "llm/test-model",
+		"resolved_options": map[string]any{},
+		"tokens":           map[string]any{"input": 100, "output": 10},
+	}
+	d1 := writeTrialDir(t, jobs, "a", "task-a", 1.0, tel)
+	_, err := r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", []string{d1}, nil)
+	require.NoError(t, err)
+	recs, err := r.LoadExperimentRecords(exp.Name)
+	require.NoError(t, err)
+	require.Len(t, recs, 1)
+	require.Nil(t, recs[0].CostUSD)
+	require.Contains(t, recs[0].CheckDetail["cost_error"], "cost_rates")
+}

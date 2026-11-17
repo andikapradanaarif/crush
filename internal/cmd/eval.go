@@ -517,7 +517,10 @@ All report per-trial tokens, wall time, and USD cost.
 					// cost — the R1.8 budget input. best_of_k arms
 					// are selection baselines, not the sized read's
 					// arms, so they don't multiply the schedule.
-					if mean := n.HarborCostPerTrial(); mean > 0 {
+					// A measured mean reports even at $0 — a free
+					// route's projection is genuinely $0 spend, not
+					// unmeasured (#516 review).
+					if mean, measured := n.HarborCostPerTrial(); measured {
 						trials := eval.ProjectedGateTrials(exp, sizing.Required)
 						rep["projected_trials"] = trials
 						rep["projected_spend_usd"] = float64(trials) * mean
