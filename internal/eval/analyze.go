@@ -600,6 +600,22 @@ func hasCanceledFinish(parts []rawPart) bool {
 	return false
 }
 
+// sessionDBCost reads sessions.cost — crush's own catwalk-priced
+// record — as the independent cross-check for the pinned-rate cost
+// ingest computes. Read-only against the preserved artifact; not a
+// primary value, so a miss is silent.
+func sessionDBCost(ctx context.Context, dbPath, sessionID string) (float64, error) {
+	conn, err := db.ConnectReadOnly(ctx, dbPath)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+	var cost float64
+	err = conn.QueryRowContext(ctx,
+		`SELECT cost FROM sessions WHERE id = ?`, sessionID).Scan(&cost)
+	return cost, err
+}
+
 // latestParentSession picks the most recently created top-level
 // session — sub-agent child sessions share the DB but are out of scope.
 func latestParentSession(ctx context.Context, conn *sql.DB) (string, error) {

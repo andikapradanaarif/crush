@@ -397,6 +397,11 @@ func ValidateExperiment(e *Experiment) error {
 			return err
 		}
 	}
+	if e.CostRates != nil {
+		if err := e.CostRates.check("cost_rates"); err != nil {
+			return err
+		}
+	}
 	if e.Replay != nil {
 		// The recorded prefix is shaped by one declared arm — an
 		// unknown name would fork from a config that never ran.
