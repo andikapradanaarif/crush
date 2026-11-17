@@ -1339,6 +1339,8 @@ func TestFlagsDefaultsMatchCodeDefaults(t *testing.T) {
 		"edge_params":               map[string]any{},
 		"ambiguity_clarification":   opts.AmbiguityClarificationEnabled(),
 		"notebook_prior_turns":      opts.NotebookPriorTurnsMode(),
+		"fold_turns":                opts.FoldTurnsEnabled(),
+		"fold_segments":             opts.FoldSegmentsEnabled(),
 		"notebook_pressure_gate":    opts.NotebookPressureGateEnabled(),
 		"notebook_generate":         opts.NotebookGenerateMode(),
 		"notebook_hydration":        opts.NotebookHydrationEnabled(),

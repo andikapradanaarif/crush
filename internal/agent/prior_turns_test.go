@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"charm.land/fantasy"
 	"charm.land/fantasy/providers/openaicompat"
 	"github.com/charmbracelet/crush/internal/agent/tools"
@@ -332,7 +333,7 @@ func TestCollapseAssistantForTurn_ReasoningStrippedToPresence(t *testing.T) {
 		},
 	}
 
-	out, n := collapseAssistantForTurn(m, 0, priorTurnsStub)
+	out, n := collapseAssistantForTurn(m, foldLabel(0, -1), priorTurnsStub)
 	require.Equal(t, 1, n)
 	rcs := make([]message.ReasoningContent, 0)
 	for _, part := range out.Parts {
@@ -1218,4 +1219,221 @@ func TestPreparePrompt_SummarizeCrossTurnResultSurvives(t *testing.T) {
 	require.False(t, callPresent(history, "tc-late"))
 	require.False(t, resultPresent(history, "tc-late"))
 	require.Contains(t, renderedText(history), "[Summary of turn 1]")
+}
+
+// #509 finding 1, the structural A/A: a Harbor-shaped trajectory is
+// ONE user turn with many completed segments, so the fold_turns arm
+// has no prior turn to collapse — turns_collapsed must read 0 no
+// matter how much foldable work the turn contains. This is the
+// measurement fold_segments exists to fix.
+func TestPreparePrompt_FoldTurnsSinglePromptCollapsesNoTurns(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsStub // the shape fold_turns coerces to
+	a.foldTurns = true
+	a.segmentMaxSteps = 2
+	// One user turn, eight tool steps → three closed covered
+	// segments plus the open tail.
+	msgs := segBuildTurn(t, svc, sessionID, "task", 8, "step payload")
+	ctx := t.Context()
+	a.detectSegments(ctx, sessionID, msgs)
+	segs, processed := a.detectSegments(ctx, sessionID, msgs)
+	require.Len(t, segs, 4, "fixture must close three segments inside the one turn")
+
+	collapse := a.newTurnCollapse(0)
+	history, _ := a.preparePrompt(ctx, msgs, false, false, collapse, false)
+
+	require.Empty(t, collapse.Set, "a single-prompt run has no prior turn to fold")
+	require.NotNil(t, processed)
+	for _, m := range history {
+		for _, p := range m.Content {
+			if tc, ok := p.(fantasy.ToolCallPart); ok {
+				require.NotContains(t, tc.Input, "_collapsed")
+			}
+		}
+	}
+	s, _ := a.stubStats.Get(sessionID)
+	require.Zero(t, s.TurnsCollapsed)
+	require.Zero(t, s.SegmentsCollapsed)
+}
+
+// The segment frontier quantizes to whole foldChunkTurns chunks of
+// CLOSED segments in the open turn — coverage still gates each, and
+// the open tail never folds.
+func TestCoveredFoldSegments_FrontierQuantization(t *testing.T) {
+	t.Parallel()
+
+	segs := []segment{
+		{turn: 0, number: 0, start: 0, end: 4},
+		{turn: 0, number: 1, start: 4, end: 8},
+		{turn: 0, number: 2, start: 8, end: 12},
+		{turn: 0, number: 3, start: 12, end: 16},
+		{turn: 0, number: 4, start: 16, end: 20, open: true},
+		{turn: 1, number: 0, start: 20, end: 24},
+	}
+	processed := map[segmentKey]bool{
+		{turn: 0, segment: 0}: true,
+		{turn: 0, segment: 1}: true,
+		{turn: 0, segment: 2}: true,
+		{turn: 0, segment: 3}: true,
+		{turn: 0, segment: 4}: true,
+		{turn: 1, segment: 0}: true,
+	}
+
+	// Four closed segments hold the frontier at 3: segment 3 waits
+	// for its chunk-mates, the open tail and the other turn stay out.
+	require.Equal(t, map[segmentKey]bool{
+		{turn: 0, segment: 0}: true,
+		{turn: 0, segment: 1}: true,
+		{turn: 0, segment: 2}: true,
+	}, coveredFoldSegments(segs, processed, 0))
+
+	// Fewer than a full chunk folds nothing — the frontier keeps the
+	// folded prefix stable instead of chasing each close.
+	require.Empty(t, coveredFoldSegments(segs[:2], processed, 0))
+
+	// Six closed segments complete a second chunk.
+	segs[4].open = false
+	segs[5] = segment{turn: 0, number: 5, start: 20, end: 24}
+	segs = append(segs, segment{turn: 0, number: 6, start: 24, end: 28, open: true})
+	processed[segmentKey{turn: 0, segment: 5}] = true
+	require.Equal(t, map[segmentKey]bool{
+		{turn: 0, segment: 0}: true,
+		{turn: 0, segment: 1}: true,
+		{turn: 0, segment: 2}: true,
+		{turn: 0, segment: 3}: true,
+		{turn: 0, segment: 4}: true,
+		{turn: 0, segment: 5}: true,
+	}, coveredFoldSegments(segs, processed, 0))
+
+	// An uncovered segment below the frontier stays verbatim — its
+	// stub would point at entries that don't exist.
+	delete(processed, segmentKey{turn: 0, segment: 1})
+	require.Equal(t, map[segmentKey]bool{
+		{turn: 0, segment: 0}: true,
+		{turn: 0, segment: 2}: true,
+	}, coveredFoldSegments(segs[:4], processed, 0))
+
+	// A different open turn owns no segments here.
+	require.Empty(t, coveredFoldSegments(segs, processed, 7))
+}
+
+// The fold that replaces the A/A: covered, closed segments inside the
+// open turn collapse to recall-backed stubs on the quantized frontier
+// — no pressure required, no prior turn required.
+func TestPreparePrompt_FoldSegmentsCollapsesInsideOpenTurn(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsStub // the shape fold_segments coerces to
+	a.foldSegments = true
+	a.segCollapseRecorded = csync.NewMap[string, *csync.Map[segmentKey, bool]]()
+	a.segmentMaxSteps = 2
+	msgs := segBuildTurn(t, svc, sessionID, "task", 8, "step payload")
+	ctx := t.Context()
+	a.detectSegments(ctx, sessionID, msgs)
+
+	collapse := a.newTurnCollapse(0)
+	history, _ := a.preparePrompt(ctx, msgs, false, false, collapse, false)
+
+	require.Equal(t, map[segmentKey]bool{
+		{turn: 0, segment: 0}: true,
+		{turn: 0, segment: 1}: true,
+		{turn: 0, segment: 2}: true,
+	}, collapse.SegSet, "the three closed segments fold; the open tail stays verbatim")
+
+	// Stub text names the segment inside the still-open turn and
+	// carries the same recall pointer contract as the turn fold.
+	res := renderedResultText(t, history, "tc-task-a")
+	require.Contains(t, res, "prior segment 0 of turn 0")
+	require.Contains(t, res, `recall("result:tc-task-a")`)
+	require.NotContains(t, res, "step payload")
+	call := renderedCall(t, history, "tc-task-a")
+	require.JSONEq(t, `{"_collapsed":"prior segment 0 of turn 0"}`, call.Input)
+
+	// The open tail keeps its live context verbatim.
+	tail := renderedResultText(t, history, "tc-task-xh")
+	require.Contains(t, tail, "step payload")
+
+	s, _ := a.stubStats.Get(sessionID)
+	require.Equal(t, 3, s.SegmentsCollapsed)
+	require.Zero(t, s.TurnsCollapsed)
+	require.Positive(t, s.EventsCollapsed)
+
+	// A second render recounts nothing — the frontier set is stable
+	// and the recorded set dedupes.
+	_, _ = a.preparePrompt(ctx, msgs, false, false, a.newTurnCollapse(0), false)
+	s, _ = a.stubStats.Get(sessionID)
+	require.Equal(t, 3, s.SegmentsCollapsed)
+}
+
+// The fold arm runs regardless of pressure engagement — steady-state
+// savings, not overflow insurance — so a disengaged gate must not
+// freeze the segment set out.
+func TestPreparePrompt_FoldSegmentsFiresWithoutPressure(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsStub
+	a.foldSegments = true
+	a.segCollapseRecorded = csync.NewMap[string, *csync.Map[segmentKey, bool]]()
+	a.segmentMaxSteps = 2
+	a.pressureGate = true
+	a.models = fixedModels(Model{CatwalkCfg: catwalk.Model{
+		ContextWindow:    1_000_000,
+		DefaultMaxTokens: 8_000,
+	}}, Model{})
+	a.reqStats = csync.NewMap[string, requestStats]()
+	msgs := segBuildTurn(t, svc, sessionID, "task", 8, "step payload")
+	ctx := t.Context()
+	a.detectSegments(ctx, sessionID, msgs)
+
+	collapse := a.newTurnCollapse(0)
+	history, _ := a.preparePrompt(ctx, msgs, false, false, collapse, false)
+
+	require.Equal(t, 3, len(collapse.SegSet))
+	res := renderedResultText(t, history, "tc-task-a")
+	require.Contains(t, res, "prior segment 0 of turn 0")
+	s, _ := a.stubStats.Get(sessionID)
+	require.Equal(t, 3, s.SegmentsCollapsed)
+}
+
+// Write-call inputs inside a folded segment keep the re-view stub —
+// the args were the input itself, recall can't recover them, and the
+// label names the segment.
+func TestPreparePrompt_FoldSegmentsWriteArgs(t *testing.T) {
+	t.Parallel()
+
+	a, svc, _, sessionID := newSegmentTestAgent(t, echoEntryGen{})
+	a.priorTurns = priorTurnsStub
+	a.foldSegments = true
+	a.segCollapseRecorded = csync.NewMap[string, *csync.Map[segmentKey, bool]]()
+	a.segmentMaxSteps = 2
+	mkMsg(t, svc, sessionID, message.User, message.TextContent{Text: "task"})
+	mkMsg(t, svc, sessionID, message.Assistant,
+		message.ToolCall{ID: "tc-write", Name: "write", Input: `{"file_path":"out.go","content":"package x\n\n// 500 lines\n"}`, Finished: true})
+	mkMsg(t, svc, sessionID, message.Tool,
+		message.ToolResult{ToolCallID: "tc-write", Name: "write", Content: "File created successfully"})
+	for i := range 7 {
+		mkMsg(t, svc, sessionID, message.Assistant,
+			message.ToolCall{ID: "tc-b" + string(rune('a'+i)), Name: "bash", Input: `{"command":"ls"}`, Finished: true})
+		mkMsg(t, svc, sessionID, message.Tool,
+			message.ToolResult{ToolCallID: "tc-b" + string(rune('a'+i)), Name: "bash", Content: "listing"})
+	}
+	msgs, err := svc.List(t.Context(), sessionID)
+	require.NoError(t, err)
+	ctx := t.Context()
+	a.detectSegments(ctx, sessionID, msgs)
+
+	history, _ := a.preparePrompt(ctx, msgs, false, false, a.newTurnCollapse(0), false)
+
+	call := renderedCall(t, history, "tc-write")
+	require.JSONEq(t,
+		`{"_collapsed":"prior segment 0 of turn 0 — write args dropped; re-view the file to reconstruct"}`,
+		call.Input)
+	res := renderedResultText(t, history, "tc-write")
+	require.Contains(t, res, "write args dropped — re-view the file")
+	require.Contains(t, res, `recall("result:tc-write")`)
+	require.Contains(t, res, "holds only the confirmation")
 }

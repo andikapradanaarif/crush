@@ -62,9 +62,13 @@ type SessionTelemetry struct {
 	GeneratorCacheWriteTokens int64 `json:"generator_cache_write_tokens"`
 	// Prior-turn collapse telemetry: distinct turns collapsed and the
 	// call/result pairs inside them — deduped against the persisted
-	// collapsed_turns rows.
-	TurnsCollapsed  int `json:"turns_collapsed"`
-	EventsCollapsed int `json:"events_collapsed"`
+	// collapsed_turns rows. SegmentsCollapsed is the segment-grain
+	// fold's counterpart (#509): distinct intra-turn segments folded,
+	// deduped in memory only — a resumed session recounts. Its
+	// pairs fold into EventsCollapsed.
+	TurnsCollapsed    int `json:"turns_collapsed"`
+	EventsCollapsed   int `json:"events_collapsed"`
+	SegmentsCollapsed int `json:"segments_collapsed"`
 	// SummaryFetchFailed marks a summarize-mode run whose entry fetch
 	// failed — the run rendered verbatim, a control-shaped prompt
 	// inside the treatment arm.
@@ -145,6 +149,7 @@ func (c *coordinator) SessionTelemetry(sessionID string) SessionTelemetry {
 		t.BoundaryAdvances = s.BoundaryAdvances
 		t.TurnsCollapsed = s.TurnsCollapsed
 		t.EventsCollapsed = s.EventsCollapsed
+		t.SegmentsCollapsed = s.SegmentsCollapsed
 		t.SummaryFetchFailed = s.SummaryFetchFailed
 		t.PrefixFetchFailed = s.PrefixFetchFailed
 		if len(s.Kinds) > 0 {
@@ -246,6 +251,7 @@ func (t SessionTelemetry) delta(prev SessionTelemetry) SessionTelemetry {
 	d.StubSavedBytes -= prev.StubSavedBytes
 	d.BoundaryAdvances -= prev.BoundaryAdvances
 	d.TurnsCollapsed -= prev.TurnsCollapsed
+	d.SegmentsCollapsed -= prev.SegmentsCollapsed
 	d.EventsCollapsed -= prev.EventsCollapsed
 	d.ResultRecalls -= prev.ResultRecalls
 	d.EntryRecalls -= prev.EntryRecalls

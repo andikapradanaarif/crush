@@ -727,6 +727,24 @@ var priorTurnsRecallLive = starvationRule{
 	},
 }
 
+// segmentFoldLive is the mode gate for
+// prior_turns.segments_collapsed (#509): every mode but summarize
+// carries a foldable shape — verbatim coerces to stub under
+// fold_segments the same way it does under fold_turns — and an
+// explicit summarize never computes the segment set at all, so a
+// min_ predicate on it starves by construction.
+var segmentFoldLive = starvationRule{
+	"notebook_prior_turns!=summarize (segments never fold under summarize)",
+	func(resolve func(string) (any, bool)) bool {
+		v, known := resolve("notebook_prior_turns")
+		if !known {
+			return true
+		}
+		s, _ := v.(string)
+		return s != "summarize"
+	},
+}
+
 // referentFloorLive passes unless memory_params explicitly zeroes
 // referent_rate_floor — the shipped default (0.6) keeps the gate
 // live, so an absent overlay means "armed", while floor=0 disables
@@ -895,6 +913,14 @@ func armStarvationRules(field string) []starvationRule {
 	}
 	if strings.HasPrefix(field, "hydration.") {
 		return []starvationRule{boolOn("notebook_hydration"), boolOn("notebook_enabled")}
+	}
+	if field == "prior_turns.segments_collapsed" {
+		// The segment-grain fold (#509) fires inside the open turn —
+		// its gate is the fold flag and a fold-capable mode, plus
+		// unconditional recall since its stubs always print
+		// pointers (the verbatim coerced mode would slip the
+		// conditional prior_turns recall check).
+		return []starvationRule{boolOn("notebook_enabled"), boolOn("fold_segments"), segmentFoldLive, recallToolLive}
 	}
 	if strings.HasPrefix(field, "prior_turns.") {
 		return []starvationRule{boolOn("notebook_enabled"), modeIs("notebook_prior_turns", "stub", "digest", "summarize"), priorTurnsRecallLive}
@@ -1181,6 +1207,8 @@ func checkArmStarvation(armName, key, op, field string, resolve func(string) (an
 var flagCodeDefaults = map[string]bool{
 	"notebook_enabled":         false,
 	"notebook_stub_superseded": false,
+	"fold_turns":               false,
+	"fold_segments":            false,
 	"notebook_checkpoint":      false,
 	"notebook_hydration":       true,
 	"notebook_pressure_gate":   true,

@@ -590,6 +590,14 @@ type Options struct {
 	// a per-turn fold would destroy (ReFold's masking variant dropped
 	// hits 84%→23%). Needs notebook + recall live, same as stub mode.
 	FoldTurns *bool `json:"fold_turns,omitempty" jsonschema:"description=Fold finished covered turns into recall-backed stubs on a quantized three-turn frontier so the folded prompt prefix stays stable and hot for prompt caching. Requires notebook and recall. Experimental.,default=false"`
+	// FoldSegments arms the segment-grain variant of the fold
+	// (#509): covered, closed segments INSIDE the open turn
+	// collapse to recall-backed stubs on the same three-chunk
+	// quantized frontier fold_turns applies at turn grain. It is
+	// the only fold that can fire on a single-prompt trajectory —
+	// harbor runs have one user turn, so finished turns never
+	// exist. Needs notebook + recall live, same as stub mode.
+	FoldSegments *bool `json:"fold_segments,omitempty" jsonschema:"description=Fold covered closed segments inside the open turn into recall-backed stubs on a quantized three-segment frontier — the intra-turn variant of fold_turns for single-prompt trajectories. Segment folds render stub-shaped even under digest mode (digests are turn-grain). Requires notebook and recall. Experimental.,default=false"`
 	// FailureMemory injects the <open_failures> tail — commands that
 	// failed in this workspace and have not passed since — independent
 	// of the turn_context tier so its contribution can be measured on
@@ -1877,6 +1885,17 @@ func (o *Options) FoldTurnsEnabled() bool {
 		return false
 	}
 	return *o.FoldTurns
+}
+
+// FoldSegmentsEnabled returns the resolved segment-folding
+// setting, defaulting to false — the intra-turn fold arm (#509)
+// is its own experiment and stays opt-in until the paired
+// dev-split read decides it.
+func (o *Options) FoldSegmentsEnabled() bool {
+	if o == nil || o.FoldSegments == nil {
+		return false
+	}
+	return *o.FoldSegments
 }
 
 // NotebookMemoryServerName returns the resolved memory server name,

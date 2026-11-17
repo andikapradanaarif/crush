@@ -47,6 +47,33 @@ shipped architecture diverged in ways that matter to readers:
   tokens −15% to −40% at equal pass *with the cache-hit rate reported*
   — a variant that buys tokens by killing prefix cache is a rejected
   variant.
+- **Segment-grain fold** (`fold_segments`, #509 — R1.5 L6,
+  experimental). `fold_turns` folds *finished user turns*, so it can
+  never fire on a single-prompt trajectory (Harbor arrives as one
+  `crush run` instruction; repair prompts stay inside the open turn).
+  `fold_segments` applies the same machinery at segment grain:
+  covered, *closed* segments inside the open turn collapse to
+  recall-backed stubs once they sit strictly below the same quantized
+  frontier (`foldFrontier` on the closed-segment count — the fold set
+  advances one three-segment chunk at a time, so the folded prefix is
+  again byte-stable inside a chunk). The open tail segment never
+  folds. Segment folds always render as stubs — digest/summarize
+  are turn-grain consolidations with no segment-level shape, so
+  under `notebook_prior_turns: "digest"` the fold still fires but
+  coerces to the stub wording for its spans (a "consolidated in
+  turn digest" label would lie — no turn digest ever consolidates
+  a mid-turn span) — and keep the `recall("result:<id>")` recovery
+  path. Telemetry is disjoint:
+  `prior_turns.segments_collapsed` counts distinct folded segments,
+  `prior_turns.events_collapsed` includes their call/result events,
+  and recording is deduplicated per session so re-renders don't
+  multiply counts. Turn folds (`collapse.Set`) and segment folds
+  (`collapse.SegSet`) never overlap — a segment is intra-turn by
+  construction. Requires notebook + recall like `fold_turns`, and a
+  fold-capable prior-turn mode (segment folding is skipped under
+  `summarize`). A single-turn trajectory returns a non-nil collapse
+  state whose `Before` is the open turn, so segment folding is the
+  only fold that can engage there.
 - **Adaptive raw window.** The verbatim tail is bounded by
   `notebook_raw_token_budget` (default 25K), the rendered prefix by
   `notebook_max_tokens` (default 100K) — see "adaptive by token budget"

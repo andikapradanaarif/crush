@@ -1,0 +1,118 @@
+{
+	"name": "tb21-l6-fold-segments",
+	"model": "opencode-go/beam-free",
+	"temperature": 0,
+	"corpus": [
+		"harbor"
+	],
+	"runs_per_trajectory": {
+		"uncharacterized": 1
+	},
+	"cost_weights": {
+		"cache_read": 0.25,
+		"cache_write": 0,
+		"output": 4
+	},
+	"arms": {
+		"control": {
+			"config": {
+				"options": {
+					"notebook_enabled": false
+				}
+			}
+		},
+		"treatment": {
+			"config": {
+				"options": {
+					"notebook_enabled": true,
+					"notebook_prior_turns": "stub",
+					"fold_segments": true,
+					"notebook_generate": "never",
+					"notebook_checkpoint": false,
+					"notebook_hydration": false,
+					"notebook_auto_inject": false,
+					"notebook_sync_mem0": false
+				}
+			},
+			"coverage": {
+				"min_prior_turns.segments_collapsed": 1
+			}
+		}
+	},
+	"decision_rule": {
+		"hypothesis": "L6 mechanical fold: covered, closed segments inside Harbor's single long turn collapse to recall-backed stubs on the quantized frontier (#509), cutting tokens-to-done vs the verbatim control without hurting pass rate. Mechanical arm only — notebook_generate=never, so no sidecar LLM spend contaminates the efficiency read.",
+		"estimand": "conditional",
+		"ood": true,
+		"primary": {
+			"metric": "tokens_to_done",
+			"arm": "treatment",
+			"vs": "control",
+			"direction": "decrease",
+			"min_improvement": 0.1
+		},
+		"guardrail": {
+			"metric": "pass_rate",
+			"min_delta": -0.1
+		}
+	},
+	"resample": "stratified",
+	"providers": {
+		"opencode-go": {
+			"name": "OpenCode Go",
+			"type": "openai-compat",
+			"api_key": "$OPENCODE_API_KEY",
+			"base_url": "https://opencode.ai/zen/go/v1",
+			"extra_headers": {
+				"x-opencode-session": "$(cat /proc/sys/kernel/random/uuid)"
+			},
+			"models": [
+				{
+					"id": "beam-free",
+					"name": "Beam Free",
+					"context_window": 1048576,
+					"default_max_tokens": 131072
+				}
+			]
+		}
+	},
+	"harbor": {
+		"dataset": "terminal-bench@2.1",
+		"task_ids": [
+			"bn-fit-modify",
+			"build-pov-ray",
+			"chess-best-move",
+			"code-from-image",
+			"constraints-scheduling",
+			"crack-7z-hash",
+			"db-wal-recovery",
+			"dna-insert",
+			"extract-moves-from-video",
+			"feal-linear-cryptanalysis",
+			"fix-git",
+			"git-multibranch",
+			"kv-store-grpc",
+			"log-summary-date-ranges",
+			"make-doom-for-mips",
+			"mcmc-sampling-stan",
+			"mteb-retrieve",
+			"overfull-hbox",
+			"path-tracing-reverse",
+			"polyglot-rust-c",
+			"prove-plus-comm",
+			"pytorch-model-cli",
+			"qemu-alpine-ssh",
+			"query-optimize",
+			"regex-log",
+			"schemelike-metacircular-eval",
+			"torch-pipeline-parallelism",
+			"train-fasttext",
+			"video-processing",
+			"write-compressor"
+		],
+		"k": 8,
+		"harness_revision": "c6ed0fdbb743",
+		"exclude": {
+			"mteb-retrieve": "dataset defect — image reproducibly fails environment build even at 4x timeout (#489 G1.a)"
+		}
+	}
+}

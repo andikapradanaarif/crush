@@ -584,6 +584,7 @@ func (r *Runner) ingestTrial(ctx context.Context, exp *Experiment, arm, invocati
 		rec.StubStats.Kinds = tel.StubStats.Kinds
 		rec.PriorTurns.TurnsCollapsed = tel.PriorTurns.TurnsCollapsed
 		rec.PriorTurns.EventsCollapsed = tel.PriorTurns.EventsCollapsed
+		rec.PriorTurns.SegmentsCollapsed = tel.PriorTurns.SegmentsCollapsed
 		rec.Recalls.Result = tel.Recalls.Result
 		rec.Recalls.Entry = tel.Recalls.Entry
 		rec.Recalls.Empty = tel.Recalls.Empty

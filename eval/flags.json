@@ -14,6 +14,8 @@
   "edge_params": {},
   "ambiguity_clarification": false,
   "notebook_prior_turns": "verbatim",
+  "fold_turns": false,
+  "fold_segments": false,
   "notebook_pressure_gate": true,
   "notebook_generate": "always",
   "notebook_hydration": true,

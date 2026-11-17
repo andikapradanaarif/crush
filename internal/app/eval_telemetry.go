@@ -145,8 +145,9 @@ func (app *App) emitEvalTelemetry(sessionID string, result *fantasy.AgentResult,
 			"kinds":             kinds,
 		}
 		doc["prior_turns"] = map[string]any{
-			"turns_collapsed":  tel.TurnsCollapsed,
-			"events_collapsed": tel.EventsCollapsed,
+			"turns_collapsed":    tel.TurnsCollapsed,
+			"events_collapsed":   tel.EventsCollapsed,
+			"segments_collapsed": tel.SegmentsCollapsed,
 		}
 		doc["recalls"] = map[string]any{
 			"result":            tel.ResultRecalls,

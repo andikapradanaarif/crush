@@ -66,6 +66,12 @@ type stubStats struct {
 	// EventsCollapsed counts collapsed call/result pairs across those
 	// turns.
 	EventsCollapsed int
+	// SegmentsCollapsed counts distinct intra-turn segments rendered
+	// folded (#509) — deduped in memory only, so a resumed session
+	// recounts its fold. The flag-flip evidence for fold_segments;
+	// on a single-prompt trajectory this is the only fold counter
+	// that can move.
+	SegmentsCollapsed int
 	// SummaryFetchFailed marks a summarize-mode run whose entry fetch
 	// failed at freeze — the run renders verbatim, so without the
 	// marker it would poison the treatment arm as a control-shaped
