@@ -255,7 +255,7 @@ func checkHookCommandScope(armName, event string, i int, command string) error {
 			if part == "" {
 				continue
 			}
-			if strings.HasPrefix(part, "~") || filepath.IsAbs(part) {
+			if strings.HasPrefix(part, "~") || isAbsHookPath(part) {
 				return reject(part)
 			}
 			clean := filepath.ToSlash(filepath.Clean(part))
@@ -267,6 +267,26 @@ func checkHookCommandScope(armName, event string, i int, command string) error {
 		}
 	}
 	return nil
+}
+
+// isAbsHookPath reports whether part is absolute under the semantics
+// the command actually runs under, not the validating host's: hook
+// commands execute via bash, where /x is rooted even on Windows —
+// filepath.IsAbs would miss it there — and a manifest authored on
+// Windows can carry C:\ or \\host forms that Unix filepath.IsAbs
+// ignores. Reject all three spellings unconditionally.
+func isAbsHookPath(part string) bool {
+	if filepath.IsAbs(part) || strings.HasPrefix(part, "/") {
+		return true
+	}
+	if strings.HasPrefix(part, `\\`) {
+		return true
+	}
+	if len(part) >= 3 && part[1] == ':' && (part[2] == '/' || part[2] == '\\') {
+		c := part[0]
+		return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+	}
+	return false
 }
 
 // validateArmTools schema-checks an arm's tools block strictly against

@@ -253,6 +253,7 @@ func TestTrendNonUserTurn(t *testing.T) {
 		{"malformed parts", `not-json`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			require.Equal(t, tc.want, trendNonUserTurn(tc.parts))
 		})
 	}
