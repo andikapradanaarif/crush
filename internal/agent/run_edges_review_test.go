@@ -272,7 +272,7 @@ func TestFreshReviewDiff(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		git := func(args ...string) {
-			cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+			cmd := exec.CommandContext(t.Context(), "git", append([]string{"-C", dir}, args...)...)
 			out, err := cmd.CombinedOutput()
 			require.NoError(t, err, string(out))
 		}
@@ -295,7 +295,7 @@ func TestFreshReviewDiff(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		git := func(args ...string) {
-			cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+			cmd := exec.CommandContext(t.Context(), "git", append([]string{"-C", dir}, args...)...)
 			out, err := cmd.CombinedOutput()
 			require.NoError(t, err, string(out))
 		}
