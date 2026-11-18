@@ -23,6 +23,10 @@
   "disable_auto_summarize": false,
   "failure_memory_edges": true,
   "referent_memory": false,
-  "session_memory": false
+  "session_memory": false,
+  "edge_advisor": false,
+  "evidence_gate": false,
+  "fresh_review": false,
+  "find_bugs_review": false
  }
 }
