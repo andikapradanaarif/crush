@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/catwalk/v3/pkg/catwalk"
 	"github.com/charmbracelet/x/powernap/pkg/lsp/protocol"
 
 	mcptools "github.com/charmbracelet/crush/internal/agent/tools/mcp"
@@ -217,7 +218,7 @@ func (b *Backend) GetWorkspaceConfig(workspaceID string) (*config.Config, error)
 
 // GetWorkspaceProviders returns the configured providers for a
 // workspace.
-func (b *Backend) GetWorkspaceProviders(workspaceID string) (any, error) {
+func (b *Backend) GetWorkspaceProviders(workspaceID string) ([]catwalk.Provider, error) {
 	ws, err := b.GetWorkspace(workspaceID)
 	if err != nil {
 		return nil, err

@@ -205,7 +205,7 @@ func (c *controllerV1) handleGetWorkspaceProviders(w http.ResponseWriter, r *htt
 		c.handleError(w, r, err)
 		return
 	}
-	jsonEncode(w, providers)
+	jsonEncode(w, proto.ProvidersFromCatwalk(providers))
 }
 
 // handleGetWorkspaceEvents streams workspace events as Server-Sent Events.
