@@ -334,6 +334,9 @@ func ValidateExperiment(e *Experiment) error {
 			if arm.ForeignAgent.Name == "" || arm.ForeignAgent.Model == "" {
 				return fmt.Errorf("arm %q foreign_agent requires both name and model — name is the arm-agent identity check, model the declared parity spelling", name)
 			}
+			if arm.BestOfK != nil {
+				return fmt.Errorf("arm %q foreign_agent + best_of_k is undefined — best-of-k's selection path keys on crush arms' records; a foreign best-of-k arm needs its own consumer", name)
+			}
 		}
 		if arm.BestOfK == nil {
 			continue

@@ -36,6 +36,13 @@ import (
 //	                                        identical schema the
 //	                                        in-house driver reads
 
+// harborCrushAgent is the registered agent identity the crush
+// wrapper's jobs carry in config.json's agent block — the exact
+// string a crush arm's trial must report. agent_info's self-report
+// spells it short ("crush"); both are admitted, anything else is a
+// foreign trial (#510).
+const harborCrushAgent = "eval.harbor.crush_agent:Crush"
+
 // recordLoc names where one ingested trial already lives — the
 // (invocation, arm, run_index) a dedup refusal points back to.
 type recordLoc struct {
@@ -658,6 +665,12 @@ func (r *Runner) ingestTrial(ctx context.Context, exp *Experiment, arm, invocati
 		// agent_result. crush-data absence is by design, not a
 		// copy-back defect.
 		rec.Env.ModelResolved = agentModel
+		// env.model_resolved will carry the harbor-side spelling
+		// while env.model_pin keeps exp.Model's — a reader seeing
+		// two different strings could take it for the drift the pin
+		// check exists to catch. The parity claim is declared, so
+		// record it: same route and weights by construction (#510).
+		detail["model_parity"] = fmt.Sprintf("harbor spelling %q declared ≡ manifest pin %q", agentModel, exp.Model)
 		if res.AgentResult != nil {
 			if res.AgentResult.InputTokens != nil {
 				rec.Tokens.Input = *res.AgentResult.InputTokens
@@ -669,7 +682,7 @@ func (r *Runner) ingestTrial(ctx context.Context, exp *Experiment, arm, invocati
 				rec.Tokens.CacheRead = *res.AgentResult.CacheTokens
 			}
 		}
-	case agentName != "" && !strings.Contains(agentName, "crush"):
+	case agentName != "" && agentName != harborCrushAgent && agentName != "crush":
 		return nil, fmt.Errorf("arm %s runs the crush wrapper but the trial ran %q — a foreign agent's records can't fill a crush arm's cells", arm, agentName)
 	}
 	// Telemetry is the same CRUSH_EVAL_TELEMETRY blob the in-house

@@ -40,7 +40,7 @@
 		}
 	},
 	"harbor": {
-		"dataset": "terminal-bench@2.1",
+		"dataset": "terminal-bench@2.0",
 		"task_ids": [
 			"bn-fit-modify",
 			"cancel-async-tasks",

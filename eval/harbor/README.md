@@ -97,7 +97,7 @@ all show up under load.
             "treatment": {"config": {"options": {"lever": true}}} },
   "runs_per_trajectory": {"uncharacterized": 1},
   "harbor": {
-    "dataset": "terminal-bench@2.1",
+    "dataset": "terminal-bench@2.0",
     "tb21_split": "dev",          // or "task_ids": [...], or "sample": {...}
     "k": 1,
     "harness_revision": "<git sha>"

@@ -338,7 +338,7 @@ type Experiment struct {
 // corpus voids the verdict exactly like an aborted in-house run.
 type HarborSpec struct {
 	// Dataset names the benchmark for provenance only —
-	// "terminal-bench@2.1", "swe-bench-pro-v2", or a local tasks
+	// "terminal-bench@2.0", "swe-bench-pro-v2", or a local tasks
 	// path. Nothing resolves against it; the task set below does.
 	Dataset string `json:"dataset"`
 	// TB21Split resolves the declared task set from the frozen

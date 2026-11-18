@@ -47,7 +47,7 @@
 		"cache_write": 0.3
 	},
 	"harbor": {
-		"dataset": "terminal-bench@2.1",
+		"dataset": "terminal-bench@2.0",
 		"task_ids": [
 			"bn-fit-modify",
 			"code-from-image",

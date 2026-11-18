@@ -53,7 +53,7 @@ func harborExp(taskIDs ...string) *Experiment {
 		},
 		RunsPerTrajectory: map[Band]int{BandUncharacterized: 1},
 		Harbor: &HarborSpec{
-			Dataset:         "terminal-bench@2.1",
+			Dataset:         "terminal-bench@2.0",
 			TaskIDs:         taskIDs,
 			K:               1,
 			HarnessRevision: "abc1234",
@@ -845,6 +845,9 @@ func TestIngestHarborTrials_ForeignAgent(t *testing.T) {
 	require.Equal(t, int64(700000), rec.Tokens.CacheRead)
 	require.Equal(t, 600.0, rec.DurationS)
 	require.Empty(t, rec.CallMetricsError)
+	// The declared equivalence rides in the record — pin spelling
+	// vs harbor spelling isn't drift evidence on a foreign arm.
+	require.Contains(t, rec.CheckDetail["model_parity"], "declared ≡")
 
 	// A different agent's job under the foreign arm refuses.
 	d = writeForeignTrialDir(t, jobs, "b", "task-b", "terminus-3", "openai/deepseek-v4.1-flash", 1.0)
@@ -866,6 +869,13 @@ func TestIngestHarborTrials_ForeignAgent(t *testing.T) {
 	d = writeForeignTrialDir(t, jobs, "e", "task-e", "terminus-2", "openai/deepseek-v4.1-flash", 1.0)
 	_, err = r.IngestHarborTrials(ctx, exp, ArmTreatment, "inv1", []string{d}, nil)
 	require.ErrorContains(t, err, "can't fill a crush arm's cells")
+
+	// A merely crush-sounding name isn't the wrapper — the check
+	// is exact, not a substring match.
+	exp2 := harborExp("task-a")
+	d = writeForeignTrialDir(t, jobs, "f", "task-a", "my-crush-agent", "openai/deepseek-v4.1-flash", 1.0)
+	_, err = r.IngestHarborTrials(ctx, exp2, ArmControl, "inv1", []string{d}, nil)
+	require.ErrorContains(t, err, "can't fill a crush arm's cells")
 }
 
 // foreign_agent is a harbor-only declaration requiring both name
@@ -885,4 +895,12 @@ func TestValidateExperiment_ForeignAgent(t *testing.T) {
 		ForeignAgent: &ForeignAgentSpec{Name: "terminus-2"},
 	}
 	require.ErrorContains(t, ValidateExperiment(missing), "both name and model")
+
+	combo := harborExp("task-a")
+	combo.Arms[ArmControl] = Arm{
+		Config:       ArmConfig{},
+		ForeignAgent: &ForeignAgentSpec{Name: "terminus-2", Model: "openai/x"},
+		BestOfK:      &BestOfKSpec{K: 4},
+	}
+	require.ErrorContains(t, ValidateExperiment(combo), "foreign_agent + best_of_k")
 }
