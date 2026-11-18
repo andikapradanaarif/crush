@@ -1349,6 +1349,10 @@ func TestFlagsDefaultsMatchCodeDefaults(t *testing.T) {
 		"failure_memory_edges":      opts.FailureMemoryEdgesEnabled(),
 		"referent_memory":           opts.ReferentMemoryEnabled(),
 		"session_memory":            opts.SessionMemoryEnabled(),
+		"edge_advisor":              opts.EdgeAdvisorEnabled(),
+		"evidence_gate":             opts.EvidenceGateEnabled(),
+		"fresh_review":              opts.FreshReviewEnabled(),
+		"find_bugs_review":          opts.FindBugsReviewEnabled(),
 	}
 
 	m, err := LoadFlagsManifest("../../eval")

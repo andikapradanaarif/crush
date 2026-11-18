@@ -41,8 +41,9 @@ func TestToolResultBeforeToolItemIsAttached(t *testing.T) {
 
 	item, ok := m.chat.MessageItem("call-1").(chat.ToolMessageItem)
 	require.True(t, ok, "the assistant update must create the tool item")
-	fin, ok := item.(interface{ Finished() bool })
+	spin, ok := item.(interface{ Spinning() bool })
 	require.True(t, ok)
-	require.True(t, fin.Finished(),
+	require.False(t, spin.Spinning(),
 		"the early result must attach to the new item — without it the item renders 'Waiting for tool response...' forever")
+	require.NotContains(t, item.Render(80), "Waiting for tool response")
 }

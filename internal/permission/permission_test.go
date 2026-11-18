@@ -2,6 +2,7 @@ package permission
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -696,15 +697,14 @@ func TestPermissionService_ResolveIdempotency(t *testing.T) {
 	})
 }
 
-func TestActiveRequest(t *testing.T) {
+func TestActiveRequests(t *testing.T) {
 	t.Parallel()
 
 	t.Run("reports the pending request only while resolvable", func(t *testing.T) {
 		t.Parallel()
 		service := NewPermissionService("/tmp", nil, nil)
 
-		_, ok := service.ActiveRequest()
-		assert.False(t, ok, "no request pending yet")
+		assert.Empty(t, service.ActiveRequests(), "no request pending yet")
 
 		events := service.Subscribe(t.Context())
 		done := make(chan bool, 1)
@@ -721,16 +721,15 @@ func TestActiveRequest(t *testing.T) {
 		}()
 
 		event := <-events
-		active, ok := service.ActiveRequest()
-		require.True(t, ok, "request must be active while awaiting a decision")
-		assert.Equal(t, event.Payload.ID, active.ID)
-		assert.Equal(t, "s1", active.SessionID)
+		active := service.ActiveRequests()
+		require.Len(t, active, 1, "request must be active while awaiting a decision")
+		assert.Equal(t, event.Payload.ID, active[0].ID)
+		assert.Equal(t, "s1", active[0].SessionID)
 
-		assert.True(t, service.Grant(active))
+		assert.True(t, service.Grant(active[0]))
 		assert.True(t, <-done)
 
-		_, ok = service.ActiveRequest()
-		assert.False(t, ok, "resolved request must no longer be active")
+		assert.Empty(t, service.ActiveRequests(), "resolved request must no longer be active")
 	})
 
 	t.Run("does not report a request whose waiter was cancelled", func(t *testing.T) {
@@ -753,14 +752,12 @@ func TestActiveRequest(t *testing.T) {
 		}()
 
 		<-events
-		_, ok := service.ActiveRequest()
-		require.True(t, ok, "request must be active before cancellation")
+		require.Len(t, service.ActiveRequests(), 1, "request must be active before cancellation")
 
 		cancel()
 		<-done
 
-		_, ok = service.ActiveRequest()
-		assert.False(t, ok, "cancelled request cannot be resolved and must not be reported")
+		assert.Empty(t, service.ActiveRequests(), "cancelled request cannot be resolved and must not be reported")
 	})
 }
 
@@ -876,16 +873,19 @@ func TestSessionAutoApprove(t *testing.T) {
 func TestPendingRequests(t *testing.T) {
 	t.Parallel()
 	service := NewPermissionService("/tmp", nil, nil)
+	service.SetSessionScope(func(_ context.Context, sessionID string) string {
+		return sessionID
+	})
 
 	events := service.Subscribe(t.Context())
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
 
-	park := func(callID string) chan bool {
+	park := func(sessionID, callID string) chan bool {
 		done := make(chan bool, 1)
 		go func() {
 			granted, _ := service.Request(ctx, CreatePermissionRequest{
-				SessionID:   "s1",
+				SessionID:   sessionID,
 				ToolCallID:  callID,
 				ToolName:    "bash",
 				Action:      "execute",
@@ -897,12 +897,13 @@ func TestPendingRequests(t *testing.T) {
 		return done
 	}
 
-	done1 := park("call-1")
-	done2 := park("call-2")
+	done1 := park("s1", "call-1")
+	done2 := park("s2", "call-2")
 
 	// Both requests must publish and park — previously the second call
 	// blocked on requestMu until the first resolved, leaving it
-	// invisible and unanswerable.
+	// invisible and unanswerable. Requests in different sessions park
+	// concurrently; same-session requests serialize on the scope lock.
 	var reqs []PermissionRequest
 	for range 2 {
 		select {
@@ -942,14 +943,17 @@ func TestPendingRequests(t *testing.T) {
 	}, 2*time.Second, 5*time.Millisecond)
 }
 
-// TestGrantPersistent_ResolvesParkedSameKeyRequests pins the "allow for
-// session" sweep: a second call carrying the same PermissionKey can park
-// before the first is answered, so the persistent grant must flush
-// already-parked matching requests rather than re-prompting for an
-// action class the user just approved.
-func TestGrantPersistent_ResolvesParkedSameKeyRequests(t *testing.T) {
+// TestGrantPersistent_ResolvesSubsequentSameKeyRequests pins the "allow
+// for session" grant: a second call carrying the same PermissionKey
+// arrives only after the first resolves (same-session calls serialize on
+// the scope lock), and the remembered grant must approve it inline
+// rather than re-prompting for an action class the user just approved.
+func TestGrantPersistent_ResolvesSubsequentSameKeyRequests(t *testing.T) {
 	t.Parallel()
 	service := NewPermissionService("/tmp", nil, nil)
+	service.SetSessionScope(func(_ context.Context, sessionID string) string {
+		return sessionID
+	})
 
 	events := service.Subscribe(t.Context())
 	ctx, cancel := context.WithCancel(t.Context())
@@ -972,22 +976,21 @@ func TestGrantPersistent_ResolvesParkedSameKeyRequests(t *testing.T) {
 	}
 
 	done1 := park("s1", "call-1")
-	done2 := park("s1", "call-2")
 	done3 := park("s2", "call-3") // Different session: different key.
 
 	var reqs []PermissionRequest
-	for range 3 {
+	for range 2 {
 		select {
 		case ev := <-events:
 			reqs = append(reqs, ev.Payload)
 		case <-time.After(2 * time.Second):
-			t.Fatal("expected three published requests")
+			t.Fatal("expected two published requests")
 		}
 	}
-	require.Len(t, service.PendingRequests(), 3)
+	require.Len(t, service.PendingRequests(), 2)
 
-	// "Allow for session" on a call-1 request resolves both same-key
-	// s1 parked calls and leaves the s2 one parked.
+	// "Allow for session" on the s1 request records the remembered grant
+	// and leaves the s2 one parked.
 	var req1 PermissionRequest
 	for _, r := range reqs {
 		if r.ToolCallID == "call-1" {
@@ -998,7 +1001,20 @@ func TestGrantPersistent_ResolvesParkedSameKeyRequests(t *testing.T) {
 	require.True(t, service.GrantPersistent(req1))
 
 	require.True(t, <-done1)
-	require.True(t, <-done2, "same-key parked request must be granted by the persistent sweep")
+
+	// A later same-key call for the same session auto-approves on the
+	// remembered grant without prompting — same-session calls serialize
+	// on the scope lock, so it cannot have parked before the grant.
+	granted, err := service.Request(ctx, CreatePermissionRequest{
+		SessionID:   "s1",
+		ToolCallID:  "call-2",
+		ToolName:    "bash",
+		Action:      "execute",
+		Description: "run a command",
+		Path:        "/tmp",
+	})
+	require.NoError(t, err)
+	require.True(t, granted, "same-key request must be granted by the remembered session permission")
 
 	pending := service.PendingRequests()
 	require.Len(t, pending, 1)
@@ -1113,6 +1129,52 @@ func TestRequest_CancelAfterGrantEmitsNoWithdrawal(t *testing.T) {
 		t.Fatalf("spurious notification after resolution: %+v", n.Payload)
 	case <-time.After(200 * time.Millisecond):
 	}
+}
+
+// TestRequestScopes guards that a pending prompt only holds back later
+// requests in its own session scope, not every other session's.
+func TestRequestScopes(t *testing.T) {
+	t.Parallel()
+	service := NewPermissionService("/tmp", nil, nil)
+	service.SetSessionScope(func(_ context.Context, sessionID string) string {
+		root, _, _ := strings.Cut(sessionID, "/")
+		return root
+	})
+	events := service.Subscribe(t.Context())
+	var wg sync.WaitGroup
+	t.Cleanup(wg.Wait)
+	request := func(sessionID string) {
+		wg.Go(func() {
+			_, _ = service.Request(t.Context(), CreatePermissionRequest{
+				SessionID:  sessionID,
+				ToolCallID: "call-" + sessionID,
+				ToolName:   "bash",
+				Action:     "execute",
+				Path:       "/tmp",
+			})
+		})
+	}
+	next := func() PermissionRequest {
+		select {
+		case ev := <-events:
+			return ev.Payload
+		case <-time.After(2 * time.Second):
+			t.Fatal("permission request was never published")
+			return PermissionRequest{}
+		}
+	}
+
+	request("s1")
+	first := next()
+	request("s1/child")
+	request("s2")
+	second := next()
+	require.Equal(t, "s2", second.SessionID, "another scope's request must not wait")
+	require.True(t, service.Grant(second))
+	require.True(t, service.Grant(first))
+	child := next()
+	require.Equal(t, "s1/child", child.SessionID)
+	require.True(t, service.Grant(child))
 }
 
 func TestNotificationsCarrySessionID(t *testing.T) {

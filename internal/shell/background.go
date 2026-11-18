@@ -34,7 +34,9 @@ type BackgroundShell struct {
 	// construction before the shell is published — never mutated —
 	// so readers need no lock; "" leaves the run on the
 	// ledger-baseline fallback.
-	HeadBefore  string
+	HeadBefore string
+
+	owner       any // Who started the shell, for KillOwned
 	ctx         context.Context
 	cancel      context.CancelFunc
 	stdout      *cappedBuffer
@@ -74,10 +76,12 @@ func GetBackgroundShellManager() *BackgroundShellManager {
 }
 
 // Start creates and starts a new background shell with the given command,
-// unless maxJobs jobs are already running. headBefore carries the
-// caller's pre-exec HEAD stamp through to whoever records the run —
-// opaque to the shell.
-func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, blockFuncs []BlockFunc, command, description string, maxJobs int, headBefore string) (*BackgroundShell, error) {
+// unless maxJobs jobs are already running. The shell is tagged with owner, a
+// comparable value identifying who started it, so that
+// [BackgroundShellManager.KillOwned] can stop it with that owner's other
+// shells. headBefore carries the caller's pre-exec HEAD stamp through to
+// whoever records the run — opaque to the shell.
+func (m *BackgroundShellManager) Start(ctx context.Context, owner any, workingDir string, blockFuncs []BlockFunc, command, description string, maxJobs int, headBefore string) (*BackgroundShell, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -101,6 +105,7 @@ func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, b
 		WorkingDir:  workingDir,
 		HeadBefore:  headBefore,
 		Shell:       shell,
+		owner:       owner,
 		ctx:         shellCtx,
 		cancel:      cancel,
 		stdout:      newCappedBuffer(maxKeptOutput),
@@ -209,6 +214,29 @@ func (m *BackgroundShellManager) KillAll(ctx context.Context) {
 	m.shells = map[string]*BackgroundShell{}
 	m.mu.Unlock()
 
+	killShells(ctx, shells)
+}
+
+// KillOwned terminates the background shells started on behalf of owner,
+// leaving every other owner's shells running. The provided context bounds
+// how long the function waits for each shell to exit.
+func (m *BackgroundShellManager) KillOwned(ctx context.Context, owner any) {
+	m.mu.Lock()
+	shells := map[string]*BackgroundShell{}
+	for id, shell := range m.shells {
+		if shell.owner == owner {
+			shells[id] = shell
+			delete(m.shells, id)
+		}
+	}
+	m.mu.Unlock()
+
+	killShells(ctx, shells)
+}
+
+// killShells cancels the given shells and waits for each to exit, or for
+// ctx to be done.
+func killShells(ctx context.Context, shells map[string]*BackgroundShell) {
 	var wg sync.WaitGroup
 	for _, shell := range shells {
 		wg.Go(func() {

@@ -177,7 +177,7 @@ func coderAgent(r *vcr.Recorder, env fakeEnv, large, small fantasy.LanguageModel
 	}
 
 	allTools := []fantasy.AgentTool{
-		tools.NewBashTool(nil, env.permissions, env.workingDir, cfg.Config().Options.DataDirectory, cfg.Config().Options.Attribution, modelName, cfg.Config().Options.GetMaxBackgroundJobs(), cfg.Config().Permissions, env.cmdlog),
+		tools.NewBashTool(nil, env.permissions, env.workingDir, cfg.Config().Options.DataDirectory, cfg.Config().Options.Attribution, modelName, cfg.Config().Options.GetMaxBackgroundJobs(), cfg.Config().Permissions, nil, env.cmdlog),
 		tools.NewDownloadTool(env.permissions, env.workingDir, r.GetDefaultClient()),
 		tools.NewEditTool(env.permissions, env.history, *env.filetracker, env.workingDir),
 		tools.NewMultiEditTool(env.permissions, env.history, *env.filetracker, env.workingDir),
@@ -213,6 +213,9 @@ func pinCassetteConfig(cfg *config.ConfigStore) {
 	cfg.Config().Options.ContextPaths = nil
 	cfg.Config().Options.GlobalContextPaths = nil
 	cfg.Config().LSP = nil
+	// The working directory is not a git repository, so Load caps the ls
+	// walk. The cassettes were recorded without that cap.
+	cfg.Config().Tools.Ls = config.ToolLs{}
 	// Notebook and project-index blocks/hints are gated on these
 	// options — an ambient `option notebook-enabled`/`project-index`
 	// in global config would inject them into the system prompt.

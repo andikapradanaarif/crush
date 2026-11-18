@@ -194,6 +194,7 @@ type coordinator struct {
 	// failure so identical errors are logged only once.
 	summaryFailure *summaryFailureState
 	summaryErrMu   sync.Mutex
+	shellOwner     any
 
 	// agentMu guards mainAgent and mainAgentName: SetMainAgent runs on
 	// HTTP handler goroutines while runs, cancels, and probes read the
@@ -397,6 +398,9 @@ type CoordinatorOptions struct {
 	// handoff contract as MemParams, for the boundary thresholds
 	// and per-edge flags the agents' edges consult.
 	EdgeParams params.Edges
+	// ShellOwner tags the background shells the bash tool starts, so the
+	// owner can stop its own shells without touching anyone else's.
+	ShellOwner any
 }
 
 func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, error) {
@@ -448,6 +452,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		modelOverrides:        csync.NewMap[string, Model](),
 		modelOverrideGen:      make(map[string]uint64),
 		hookRunner:            opts.HookRunner,
+		shellOwner:            opts.ShellOwner,
 		dispatched:            csync.NewMap[string, *dispatchedAgent](),
 		backgroundAfter:       subAgentBackgroundAfter,
 	}
@@ -1725,7 +1730,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 
 	allTools = append(
 		allTools,
-		tools.NewBashTool(c.lspManager, c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.DataDirectory, c.cfg.Config().Options.Attribution, modelID, c.cfg.Config().Options.GetMaxBackgroundJobs(), c.cfg.Config().Permissions, c.cmdlog),
+		tools.NewBashTool(c.lspManager, c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.DataDirectory, c.cfg.Config().Options.Attribution, modelID, c.cfg.Config().Options.GetMaxBackgroundJobs(), c.cfg.Config().Permissions, c.shellOwner, c.cmdlog),
 		tools.NewCrushInfoTool(c.cfg, c.lspManager, c.allSkills, c.activeSkills, c.skillTracker),
 		tools.NewCrushLogsTool(logFile),
 		tools.NewJobOutputTool(c.cfg.Config().Options.DataDirectory, c.cmdlog),
