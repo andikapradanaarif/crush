@@ -20,7 +20,7 @@
 				"options": {}
 			}
 		},
-		"bestofk": {
+		"best_of_k": {
 			"config": {
 				"options": {}
 			},
