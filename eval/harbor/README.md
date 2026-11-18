@@ -269,6 +269,82 @@ assumption #501 currently plugs, and the A/A pairing is the
 harness's own drift check. Re-pin `harness_revision` if main moves
 before the run — the whole batch must pool under one binary.
 
+## Runbook — `tb21-n1a-deepseek` (#510)
+
+Owner-executed: 464 trials (29 tasks × k=8 × 2 arms — control is
+harbor's built-in `terminus-2`, treatment is the Crush wrapper)
+feeding the N1a anchor: pass non-inferiority at margin δ. Estimated
+spend at the smoke's measured $0.0275/trial: ≈ $13 (terminus-side
+trials price at the same pinned rates — same route).
+
+**Model parity.** Terminus-2 takes its model as a LiteLLM string:
+`openai/deepseek-v4.1-flash` + `api_base=https://opencode.ai/zen/go/v1`
+hits the same route and weights as the crush arm's
+`opencode-go/deepseek-v4.1-flash`. Temperature parity is exact —
+terminus-2 accepts `temperature=0` as an agent kwarg. Remaining gap,
+recorded not fixed: terminus-2 is a single-loop agent — it makes no
+small-model/auxiliary calls, so the manifest's small-model pin
+applies to the crush arm only. That asymmetry is the comparison's
+subject, not a defect.
+
+**Margin.** `decision_rule.guardrail.min_delta: -0.12` is pinned
+from the smoke's δ̂ — **re-pin it to #503's measured k-rep δ̂
+before running**; the manifest's pre-registration depends on the
+characterization number.
+
+```sh
+# 1. Binary + credentials (same as #503):
+git checkout 3d2ade856d   # manifest's harness_revision
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o crush-linux-amd64 .
+source ~/.config/crush/secrets.env
+export OPENAI_API_KEY="$OPENCODE_API_KEY"   # terminus reads litellm's
+                                          # OPENAI_* env convention
+
+# 2. Control job — terminus-2 on the same 29 effective tasks, k=8
+#    ($TASKS is the list defined in the #503 section above):
+PYTHONPATH=$PWD harbor run \
+    -d terminal-bench@2.0 \
+    --agent terminus-2 \
+    --model openai/deepseek-v4.1-flash \
+    --agent-kwarg api_base=https://opencode.ai/zen/go/v1 \
+    --agent-kwarg temperature=0 \
+    --ae OPENAI_API_KEY \
+    $TASKS \
+    --environment-build-timeout-multiplier 4 \
+    --agent-timeout-multiplier 2 \
+    --verifier-timeout-multiplier 4 \
+    -n 2 -k 8
+
+# 3. Treatment job — the crush wrapper, same tasks/k (the #503
+#    treatment-arm command shape):
+PYTHONPATH=$PWD harbor run \
+    -d terminal-bench@2.0 \
+    --agent eval.harbor.crush_agent:Crush \
+    --agent-kwarg binary_path="$PWD/crush-linux-amd64" \
+    --agent-kwarg harness_revision=3d2ade856d \
+    --agent-kwarg config="$PWD/arm-deepseek.crush.json" \
+    --agent-kwarg env=OPENCODE_API_KEY \
+    --agent-kwarg max_tokens=8000000 \
+    $TASKS \
+    --environment-build-timeout-multiplier 4 \
+    --agent-timeout-multiplier 2 \
+    --verifier-timeout-multiplier 4 \
+    -n 2 -k 8
+
+# 4. Ingest under one invocation, then compare:
+crush eval ingest eval/experiments/tb21-n1a-deepseek.json \
+    --arm control   --invocation n1a-1 jobs/<terminus-job>/*/
+crush eval ingest eval/experiments/tb21-n1a-deepseek.json \
+    --arm treatment --invocation n1a-1 jobs/<crush-job>/*/
+crush eval compare eval/experiments/tb21-n1a-deepseek.json \
+    --invocation n1a-1
+```
+
+Ingest verifies agent identity both ways: terminus trials under
+`--arm control` must report `terminus-2`, and a non-crush agent
+under `--arm treatment` refuses. The reported `model_name` must
+equal the manifest's declared `openai/deepseek-v4.1-flash` spelling.
+
 ## Ops notes from the field
 
 - **LiteLLM's "could not resolve model" warning is cosmetic.** Harbor

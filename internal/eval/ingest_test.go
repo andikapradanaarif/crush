@@ -766,3 +766,123 @@ func TestIngestHarborTrials_PartialRatesNoPanic(t *testing.T) {
 	require.Nil(t, recs[0].CostUSD)
 	require.Contains(t, recs[0].CheckDetail["cost_error"], "cost_rates")
 }
+
+// writeForeignTrialDir fixtures a non-Crush harbor trial dir (#510):
+// config.json carries the job's agent block (name + model_name),
+// result.json the verifier outcome and harbor's agent_result
+// accounting — and there is no agent/crush-data by design.
+func writeForeignTrialDir(t *testing.T, root, dirName, taskID, agentName, agentModel string, reward float64) string {
+	t.Helper()
+	dir := filepath.Join(root, dirName)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	cfg := map[string]any{
+		"task":  map[string]any{"path": "/tasks/" + taskID},
+		"agent": map[string]any{"name": agentName, "model_name": agentModel},
+	}
+	data, err := json.Marshal(cfg)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.json"), data, 0o644))
+	result := map[string]any{
+		"task_id": map[string]any{"name": taskID},
+		"agent_info": map[string]any{
+			"name":       agentName,
+			"model_info": agentModel,
+		},
+		"agent_execution": map[string]any{
+			"started_at":  "2026-11-18T00:00:00Z",
+			"finished_at": "2026-11-18T00:10:00Z",
+		},
+		"agent_result": map[string]any{
+			"n_input_tokens":  50000,
+			"n_cache_tokens":  700000,
+			"n_output_tokens": 30000,
+		},
+	}
+	if reward >= 0 {
+		result["verifier_result"] = map[string]any{"rewards": map[string]any{"reward": reward}}
+	}
+	data, err = json.Marshal(result)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "result.json"), data, 0o644))
+	return dir
+}
+
+// A foreign_agent arm ingests a non-Crush agent's harbor trials:
+// outcome from the verifier reward, wall time from agent_execution,
+// tokens from harbor's agent_result — crush-data's absence is the
+// design, so no CallMetricsError lands. Identity is checked both
+// ways: the trial must name the arm's declared agent, and its
+// reported model the declared parity spelling.
+func TestIngestHarborTrials_ForeignAgent(t *testing.T) {
+	dir := t.TempDir()
+	exp := harborExp("task-a", "task-b", "task-c", "task-d", "task-e")
+	exp.Arms[ArmControl] = Arm{
+		Config: ArmConfig{},
+		ForeignAgent: &ForeignAgentSpec{
+			Name:  "terminus-2",
+			Model: "openai/deepseek-v4.1-flash",
+		},
+	}
+	require.NoError(t, ValidateExperiment(exp))
+	r := seededRunner(dir)
+	ctx := context.Background()
+	jobs := t.TempDir()
+
+	// The clean case: terminus-2's trial under the foreign arm.
+	d := writeForeignTrialDir(t, jobs, "a", "task-a", "terminus-2", "openai/deepseek-v4.1-flash", 1.0)
+	rep, err := r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", []string{d}, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, rep.Records)
+	recs, err := r.LoadExperimentRecords(exp.Name)
+	require.NoError(t, err)
+	require.Len(t, recs, 1)
+	rec := recs[0]
+	require.Equal(t, OutcomePass, rec.Outcome)
+	require.Equal(t, "terminus-2", rec.Env.Agent)
+	require.Equal(t, "openai/deepseek-v4.1-flash", rec.Env.ModelResolved)
+	require.Equal(t, int64(50000), rec.Tokens.Input)
+	require.Equal(t, int64(30000), rec.Tokens.Output)
+	require.Equal(t, int64(700000), rec.Tokens.CacheRead)
+	require.Equal(t, 600.0, rec.DurationS)
+	require.Empty(t, rec.CallMetricsError)
+
+	// A different agent's job under the foreign arm refuses.
+	d = writeForeignTrialDir(t, jobs, "b", "task-b", "terminus-3", "openai/deepseek-v4.1-flash", 1.0)
+	_, err = r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", []string{d}, nil)
+	require.ErrorContains(t, err, "a different agent's records can't fill")
+
+	// A wrong-model job refuses — the parity check.
+	d = writeForeignTrialDir(t, jobs, "c", "task-c", "terminus-2", "anthropic/claude-opus-4.5", 1.0)
+	_, err = r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", []string{d}, nil)
+	require.ErrorContains(t, err, "≠ declared foreign model")
+
+	// No model reported at all refuses — parity can't be proven.
+	d = writeForeignTrialDir(t, jobs, "d", "task-d", "terminus-2", "", 1.0)
+	_, err = r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", []string{d}, nil)
+	require.ErrorContains(t, err, "reported no model")
+
+	// The same foreign trial under the crush arm refuses — a
+	// foreign agent's records can't fill a crush arm's cells.
+	d = writeForeignTrialDir(t, jobs, "e", "task-e", "terminus-2", "openai/deepseek-v4.1-flash", 1.0)
+	_, err = r.IngestHarborTrials(ctx, exp, ArmTreatment, "inv1", []string{d}, nil)
+	require.ErrorContains(t, err, "can't fill a crush arm's cells")
+}
+
+// foreign_agent is a harbor-only declaration requiring both name
+// (the arm-agent identity check) and model (the parity spelling).
+func TestValidateExperiment_ForeignAgent(t *testing.T) {
+	noHarbor := harborExp("task-a")
+	noHarbor.Harbor = nil
+	noHarbor.Arms[ArmControl] = Arm{
+		Config:       ArmConfig{},
+		ForeignAgent: &ForeignAgentSpec{Name: "terminus-2", Model: "openai/x"},
+	}
+	require.ErrorContains(t, ValidateExperiment(noHarbor), "requires a harbor block")
+
+	missing := harborExp("task-a")
+	missing.Arms[ArmControl] = Arm{
+		Config:       ArmConfig{},
+		ForeignAgent: &ForeignAgentSpec{Name: "terminus-2"},
+	}
+	require.ErrorContains(t, ValidateExperiment(missing), "both name and model")
+}
