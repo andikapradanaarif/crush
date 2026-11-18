@@ -5,9 +5,9 @@ proposed. It replaces #397's 10-19 criteria table and the #489
 amendments with one gate aligned to the 11-09 §8 G1′ (R1.1, R1.2,
 R1.3, R1.8).
 
-**Status: PROPOSED — takes effect on merge.** The D-decisions are
-owner authority; merging this document ratifies §B as written. Until
-then nothing below is a recorded decision and #503's run stays gated.
+**Status: RATIFIED — merged `081a547fe`, 2026-11-18.** The D-decisions
+were owner authority; the merge ratified §B as written. #503's run is
+cleared.
 
 ## A. Criteria table
 
