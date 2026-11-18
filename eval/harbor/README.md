@@ -345,6 +345,38 @@ Ingest verifies agent identity both ways: terminus trials under
 under `--arm treatment` refuses. The reported `model_name` must
 equal the manifest's declared `openai/deepseek-v4.1-flash` spelling.
 
+## Lever reads (L1–L4, L6)
+
+Same slice shape as #503 — one job per arm per slice — but the
+lever's `options` live in the *arm config file*, not the harbor
+command line. Each arm's file carries that arm's `options` block
+from the manifest on top of the committed base
+`arm-deepseek.crush.json` (L1/L2/L3 controls = the base unchanged;
+L4's control is itself `fresh_review`-armed). Derive, don't
+hand-author:
+
+```sh
+# L1 example — the same one-liner works for every lever key:
+python3 -c "
+import json
+d = json.load(open('arm-deepseek.crush.json'))
+d.setdefault('options', {})['edge_advisor'] = True
+json.dump(d, open('arm-l1.crush.json', 'w'), indent=1)
+"
+# L3: 'fresh_review'; L4 treatment: 'fresh_review' + 'find_bugs_review'
+# L4 control: 'fresh_review' alone (the incremental framing read).
+# L6: the manifest's full notebook_* option set.
+
+# Then run slices exactly like #503 — control job with
+# --agent-kwarg config=$PWD/arm-deepseek.crush.json, treatment job
+# with the derived file — and ingest each under its own --arm.
+```
+
+Fire-rate caveat: L1's edges and L2's gate are conditional
+mechanisms and no coverage counter exists for them — a near-null
+read must check the records for whether the lever actually fired
+(the #509 lesson, folded into each manifest's hypothesis).
+
 ## Ops notes from the field
 
 - **LiteLLM's "could not resolve model" warning is cosmetic.** Harbor

@@ -1,6 +1,6 @@
 {
 	"name": "tb21-l6-fold-segments",
-	"model": "opencode-go/beam-free",
+	"model": "opencode-go/deepseek-v4.1-flash",
 	"temperature": 0,
 	"corpus": [
 		"harbor"
@@ -40,7 +40,7 @@
 		}
 	},
 	"decision_rule": {
-		"hypothesis": "L6 mechanical fold: covered, closed segments inside Harbor's single long turn collapse to recall-backed stubs on the quantized frontier (#509), cutting tokens-to-done vs the verbatim control without hurting pass rate. Mechanical arm only — notebook_generate=never, so no sidecar LLM spend contaminates the efficiency read.",
+		"hypothesis": "L6 mechanical fold: covered, closed segments inside Harbor's single long turn collapse to recall-backed stubs on the quantized frontier (#509), cutting tokens-to-done vs the verbatim control without hurting pass rate. Mechanical arm only \u2014 notebook_generate=never, so no sidecar LLM spend contaminates the efficiency read.",
 		"estimand": "conditional",
 		"ood": true,
 		"primary": {
@@ -67,10 +67,10 @@
 			},
 			"models": [
 				{
-					"id": "beam-free",
-					"name": "Beam Free",
-					"context_window": 1048576,
-					"default_max_tokens": 131072
+					"id": "deepseek-v4.1-flash",
+					"name": "DeepSeek V4.1 Flash",
+					"context_window": 1000000,
+					"default_max_tokens": 384000
 				}
 			]
 		}
@@ -110,9 +110,16 @@
 			"write-compressor"
 		],
 		"k": 8,
-		"harness_revision": "c6ed0fdbb743",
+		"harness_revision": "58dfce7b76",
 		"exclude": {
-			"mteb-retrieve": "dataset defect — image reproducibly fails environment build even at 4x timeout (#489 G1.a)"
+			"mteb-retrieve": "dataset defect \u2014 image reproducibly fails environment build even at 4x timeout (#489 G1.a)"
 		}
+	},
+	"small_model": "opencode-go/deepseek-v4.1-flash",
+	"cost_rates": {
+		"input": 0.3,
+		"output": 1.2,
+		"cache_read": 0.01,
+		"cache_write": 0.3
 	}
 }
