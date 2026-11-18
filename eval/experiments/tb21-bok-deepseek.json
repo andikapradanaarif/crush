@@ -1,0 +1,99 @@
+{
+	"name": "tb21-bok-deepseek",
+	"model": "opencode-go/deepseek-v4.1-flash",
+	"small_model": "opencode-go/deepseek-v4.1-flash",
+	"temperature": 0,
+	"corpus": [
+		"harbor"
+	],
+	"runs_per_trajectory": {
+		"uncharacterized": 1
+	},
+	"arms": {
+		"control": {
+			"config": {
+				"options": {}
+			}
+		},
+		"treatment": {
+			"config": {
+				"options": {}
+			}
+		},
+		"bestofk": {
+			"config": {
+				"options": {}
+			},
+			"best_of_k": {
+				"k": 3,
+				"selection": "last_attempt"
+			}
+		}
+	},
+	"providers": {
+		"opencode-go": {
+			"name": "OpenCode Go",
+			"type": "openai-compat",
+			"api_key": "$OPENCODE_API_KEY",
+			"base_url": "https://opencode.ai/zen/go/v1",
+			"extra_headers": {
+				"x-opencode-session": "$(cat /proc/sys/kernel/random/uuid)"
+			},
+			"models": [
+				{
+					"id": "deepseek-v4.1-flash",
+					"name": "DeepSeek V4.1 Flash",
+					"context_window": 1000000,
+					"default_max_tokens": 384000
+				}
+			]
+		}
+	},
+	"cost_rates": {
+		"input": 0.3,
+		"output": 1.2,
+		"cache_read": 0.01,
+		"cache_write": 0.3
+	},
+	"harbor": {
+		"dataset": "terminal-bench@2.0",
+		"task_ids": [
+			"bn-fit-modify",
+			"build-pov-ray",
+			"chess-best-move",
+			"code-from-image",
+			"constraints-scheduling",
+			"crack-7z-hash",
+			"db-wal-recovery",
+			"dna-insert",
+			"extract-moves-from-video",
+			"feal-linear-cryptanalysis",
+			"fix-git",
+			"git-multibranch",
+			"kv-store-grpc",
+			"log-summary-date-ranges",
+			"make-doom-for-mips",
+			"mcmc-sampling-stan",
+			"mteb-retrieve",
+			"overfull-hbox",
+			"path-tracing-reverse",
+			"polyglot-rust-c",
+			"prove-plus-comm",
+			"pytorch-model-cli",
+			"qemu-alpine-ssh",
+			"query-optimize",
+			"regex-log",
+			"schemelike-metacircular-eval",
+			"torch-pipeline-parallelism",
+			"train-fasttext",
+			"video-processing",
+			"write-compressor"
+		],
+		"k": 3,
+		"harness_revision": "58dfce7b76",
+		"exclude": {
+			"mteb-retrieve": "dataset defect — image reproducibly fails environment build even at 4x timeout (#489 G1.a)"
+		}
+	},
+	"resample": "stratified"
+}
