@@ -196,6 +196,79 @@ run) instead of burning to the agent timeout; 8M is ~2× the observed
 per-trial mix. Do **not** pass `--model` — the arm config's `models`
 block carries the large/small pins (see the note above).
 
+## Runbook — `tb21-krep-deepseek` (#503)
+
+Owner-executed: ~464 paid trials (29 tasks × k=8 × 2 arms — the
+`mteb-retrieve` exclusion is recorded in the manifest's `exclude`
+block, so it is absent from the run's `-i` list rather than burned
+on doomed env-builds). Estimated spend at the smoke's measured
+$0.0275/trial: ≈ $13. The agent prepares artifacts only; run this
+after D1 lands the deepseek pin.
+
+The k=8 schedule runs as **8 invocation slices** of 1 rep/task/arm
+(EVAL_HARNESS.md — `run_index` accrues per arm across ingests, and
+`--cells` pools the slices). Each slice = 2 jobs, one per arm.
+
+```sh
+# 1. Build the pinned binary. Manifest harness_revision:
+git checkout baa8bdf3af
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o crush-linux-amd64 .
+
+# 2. Credentials + arm config (same as #506):
+source ~/.config/crush/secrets.env
+
+# 3. Eight slices; each runs both arms' jobs. `jobs/` grows a fresh
+#    <timestamp> dir per harbor run — capture it for step 4.
+TASKS="-i bn-fit-modify -i build-pov-ray -i chess-best-move \
+  -i code-from-image -i constraints-scheduling -i crack-7z-hash \
+  -i db-wal-recovery -i dna-insert -i extract-moves-from-video \
+  -i feal-linear-cryptanalysis -i fix-git -i git-multibranch \
+  -i kv-store-grpc -i log-summary-date-ranges -i make-doom-for-mips \
+  -i mcmc-sampling-stan -i overfull-hbox -i path-tracing-reverse \
+  -i polyglot-rust-c -i prove-plus-comm -i pytorch-model-cli \
+  -i qemu-alpine-ssh -i query-optimize -i regex-log \
+  -i schemelike-metacircular-eval -i torch-pipeline-parallelism \
+  -i train-fasttext -i video-processing -i write-compressor"
+for slice in 1 2 3 4 5 6 7 8; do
+  for armjob in control treatment; do
+    PYTHONPATH=$PWD harbor run \
+        -d terminal-bench@2.0 \
+        --agent eval.harbor.crush_agent:Crush \
+        --agent-kwarg binary_path="$PWD/crush-linux-amd64" \
+        --agent-kwarg harness_revision=baa8bdf3af \
+        --agent-kwarg config="$PWD/arm-deepseek.crush.json" \
+        --agent-kwarg env=OPENCODE_API_KEY \
+        --agent-kwarg max_tokens=8000000 \
+        $TASKS \
+        --environment-build-timeout-multiplier 4 \
+        --agent-timeout-multiplier 2 \
+        --verifier-timeout-multiplier 4 \
+        -n 2 -k 1
+  done
+done
+
+#    Wall-clock: ~4 h per 29-trial job at -n 2 → ~64 h sequential.
+#    Run slices in parallel shells (or raise -n) for the parallelism
+#    the slicing exists for.
+
+# 4. Per slice, ingest each arm's job under the slice invocation:
+crush eval ingest eval/experiments/tb21-krep-deepseek.json \
+    --arm control   --invocation krep-ds-1 jobs/<control-job-1>/*/
+crush eval ingest eval/experiments/tb21-krep-deepseek.json \
+    --arm treatment --invocation krep-ds-1 jobs/<treat-job-1>/*/
+#    …repeat for slices 2–8…
+
+# 5. Pool all slices into the 8-rep matrix per arm:
+crush eval noise eval/experiments/tb21-krep-deepseek.json \
+    --cells krep-ds-1,krep-ds-2,krep-ds-3,krep-ds-4,krep-ds-5,krep-ds-6,krep-ds-7,krep-ds-8
+```
+
+Both arms run the identical config deliberately: per-arm σ_within
+measured on both sides lets a later read test the symmetric-within
+assumption #501 currently plugs, and the A/A pairing is the
+harness's own drift check. Re-pin `harness_revision` if main moves
+before the run — the whole batch must pool under one binary.
+
 ## Ops notes from the field
 
 - **LiteLLM's "could not resolve model" warning is cosmetic.** Harbor
