@@ -48,6 +48,7 @@ Thumbs.db
 **/.crush/**
 
 /crush
+/crush-linux-*
 /tmp/
 
 manpages/
