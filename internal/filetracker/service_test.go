@@ -268,3 +268,17 @@ func TestService_ListHotFiles(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, hot, 1)
 }
+
+// TestService_PathsRelativeToWorkingDir guards that read records resolve
+// against the workspace, so they survive a server running from another cwd.
+func TestService_PathsRelativeToWorkingDir(t *testing.T) {
+	env := setupTest(t)
+	sessionID := "test-session-4"
+	path := filepath.Join(env.workingDir, "main.go")
+	env.createSession(t, sessionID)
+
+	t.Chdir(t.TempDir())
+	NewService(env.q, env.workingDir).RecordRead(env.ctx, sessionID, path)
+	t.Chdir(t.TempDir())
+	require.False(t, NewService(env.q, env.workingDir).LastReadTime(env.ctx, sessionID, path).IsZero())
+}

@@ -457,6 +457,56 @@ func TestConfig_setDefaults(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, filepath.Join(subEval, defaultDataDirectory), gotEval)
 	})
+
+	t.Run("does not climb out of git worktree spelled in different case", func(t *testing.T) {
+		if _, err := exec.LookPath("git"); err != nil {
+			t.Skip("git not available")
+		}
+
+		parent := t.TempDir()
+
+		// Stray .crush above the worktree root.
+		require.NoError(t, os.Mkdir(filepath.Join(parent, defaultDataDirectory), 0o755))
+
+		worktree := filepath.Join(parent, "Worktree")
+		require.NoError(t, os.Mkdir(worktree, 0o755))
+
+		gitInit := exec.CommandContext(t.Context(), "git", "init", "-q")
+		gitInit.Dir = worktree
+		require.NoError(t, gitInit.Run())
+
+		// On a case-insensitive filesystem (the macOS default) this
+		// spelling opens the same worktree, while git reports its root
+		// with the on-disk case.
+		variant := filepath.Join(parent, "worktree")
+		if _, err := os.Stat(variant); err != nil {
+			t.Skip("filesystem is case-sensitive")
+		}
+
+		cfg := &Config{}
+		cfg.setDefaults(variant, "")
+
+		require.Equal(t, filepath.Join(variant, defaultDataDirectory), cfg.Options.DataDirectory)
+	})
+}
+
+// TestLoad_WalkLimitsFollowWorkingDir guards that the git check behind the
+// non-git walk limits looks at the workspace, not the process cwd.
+func TestLoad_WalkLimitsFollowWorkingDir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	plain, _ := isolateLoadEnv(t)
+	t.Setenv("CRUSH_DISABLE_PROVIDER_AUTO_UPDATE", "1")
+	repo := t.TempDir()
+	gitInit := exec.CommandContext(t.Context(), "git", "init", "-q")
+	gitInit.Dir = repo
+	require.NoError(t, gitInit.Run())
+
+	t.Chdir(plain)
+	require.Nil(t, loadIsolated(t, repo).Config().Tools.Ls.MaxDepth)
+	t.Chdir(repo)
+	require.NotNil(t, loadIsolated(t, plain).Config().Tools.Ls.MaxDepth)
 }
 
 func TestConfig_configureProviders(t *testing.T) {

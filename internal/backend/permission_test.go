@@ -158,8 +158,9 @@ func TestSessionPermissionsSkip_UnknownSession(t *testing.T) {
 }
 
 // TestRepublishPendingPrompts_ReplaysAll covers the multi-park case:
-// two requests parked on session A plus one on session B — reporting
-// session A must re-publish both of A's requests and none of B's.
+// requests parked on sessions A and B — reporting session A must
+// re-publish A's request and none of B's. Same-scope requests serialize
+// on the scope lock, so at most one request per session root parks.
 func TestRepublishPendingPrompts_ReplaysAll(t *testing.T) {
 	b, ws, evc := newPublishingWorkspace(t)
 	ctx := t.Context()
@@ -182,12 +183,11 @@ func TestRepublishPendingPrompts_ReplaysAll(t *testing.T) {
 		}()
 	}
 	park(sessA.ID, "a-1")
-	park(sessA.ID, "a-2")
 	park(sessB.ID, "b-1")
 
 	require.Eventually(t, func() bool {
-		return len(ws.Permissions.PendingRequests()) == 3
-	}, 10*time.Second, 5*time.Millisecond, "all three requests must park concurrently")
+		return len(ws.Permissions.PendingRequests()) == 2
+	}, 10*time.Second, 5*time.Millisecond, "both requests must park concurrently")
 
 	// Flush the original publish and session-creation events so the
 	// channel only carries what republishPendingPrompts re-emits.
@@ -197,7 +197,7 @@ func TestRepublishPendingPrompts_ReplaysAll(t *testing.T) {
 
 	got := map[string]bool{}
 	deadline := time.After(10 * time.Second)
-	for len(got) < 2 {
+	for len(got) < 1 {
 		select {
 		case ev, ok := <-evc:
 			if !ok {
@@ -211,11 +211,10 @@ func TestRepublishPendingPrompts_ReplaysAll(t *testing.T) {
 				"a parked request for another session must not replay")
 			got[pe.Payload.ToolCallID] = true
 		case <-deadline:
-			t.Fatalf("expected both parked requests to replay, got %v", got)
+			t.Fatalf("expected the parked request to replay, got %v", got)
 		}
 	}
-	require.True(t, got["a-1"], "first parked request must replay")
-	require.True(t, got["a-2"], "second parked request must replay")
+	require.True(t, got["a-1"], "parked request must replay")
 
 	// Nothing else should follow: session B's parked request stays out
 	// of A's replay.

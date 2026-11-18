@@ -46,10 +46,10 @@ func (f *fakeQuestionService) Ask(_ context.Context, req question.Request) ([]qu
 	return []question.Answer{{SelectedIDs: f.selected}}, nil
 }
 
-func (f *fakeQuestionService) Answer([]question.Answer) bool { return false }
-func (f *fakeQuestionService) Cancel() bool                  { return false }
-func (f *fakeQuestionService) Pending() (question.Request, bool) {
-	return question.Request{}, false
+func (f *fakeQuestionService) Answer(string, []question.Answer) bool { return false }
+func (f *fakeQuestionService) Cancel(string) bool                    { return false }
+func (f *fakeQuestionService) Pending() []question.Request {
+	return nil
 }
 
 // countingSessionService wraps a real session.Service and counts

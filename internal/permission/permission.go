@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -135,17 +136,19 @@ type Service interface {
 	// already been resolved or is unknown.
 	Deny(permission PermissionRequest) bool
 	Request(ctx context.Context, opts CreatePermissionRequest) (bool, error)
-	// ActiveRequest returns the request that is currently awaiting a
-	// decision, or false when no request is pending. A request is only
-	// reported while it can still be resolved; a request whose waiter
-	// was cancelled is not returned. When several requests are parked
-	// the most recently published one is preferred; if it has already
-	// been resolved, any still-pending request is returned.
-	ActiveRequest() (PermissionRequest, bool)
+	// ActiveRequests returns the requests that are currently awaiting a
+	// decision, at most one per scope (see SessionScope). A request is
+	// only reported while it can still be resolved; a request whose
+	// waiter was cancelled is not returned.
+	ActiveRequests() []PermissionRequest
 	// PendingRequests returns every request currently parked awaiting a
 	// decision. Requests are only listed while they can still be
 	// resolved; a request whose waiter was cancelled is not returned.
 	PendingRequests() []PermissionRequest
+	// SetSessionScope makes requests wait only for earlier requests in
+	// the same scope instead of every earlier request. A nil scope
+	// restores the default of one scope for the whole service.
+	SetSessionScope(scope SessionScope)
 	AutoApproveSession(sessionID string)
 	// SetSessionAutoApprove sets the session's auto-approve override.
 	// Unlike GrantPersistent it takes effect without answering a
@@ -173,6 +176,12 @@ type Service interface {
 	SubscribeNotifications(ctx context.Context) <-chan pubsub.Event[PermissionNotification]
 	SubscribeModeChanges(ctx context.Context) <-chan pubsub.Event[ModeChangedEvent]
 }
+
+// SessionScope maps a session to the scope its permission requests are
+// processed in. A request is only shown once the earlier requests in its
+// scope are resolved, so each scope shows one prompt at a time, while
+// requests in different scopes never wait for each other.
+type SessionScope func(ctx context.Context, sessionID string) string
 
 // PermissionKey is a composite key for session permission lookups.
 type PermissionKey struct {
@@ -226,19 +235,26 @@ type permissionService struct {
 	mode               PermissionMode
 	modeMu             sync.RWMutex
 
-	// requestMu serializes request registration and publishing so
-	// concurrent calls emit events in a deterministic order. It is
-	// released before the caller parks, so several tool calls can
-	// await decisions concurrently.
-	requestMu       sync.Mutex
-	activeRequest   *PermissionRequest
-	activeRequestMu sync.Mutex
+	// Requests are processed one at a time per scope (see SessionScope).
+	// activeRequests holds the request each scope is showing, by ID.
+	scope          atomic.Pointer[SessionScope]
+	requestLocks   map[string]*requestLock
+	requestLocksMu sync.Mutex
+	activeRequests *csync.Map[string, PermissionRequest]
 
 	// sessionOverride resolves a session's persisted auto-approve
 	// override on a map miss — restart rehydration without a startup
 	// scan. Nil disables lookup; a nil return means the row carries
 	// no override (or the session is unknown).
 	sessionOverride func(sessionID string) (*bool, error)
+}
+
+// requestLock serializes the requests of one scope. refs counts the
+// requests holding or waiting for it, so it is dropped once its scope
+// has no requests left.
+type requestLock struct {
+	sync.Mutex
+	refs int
 }
 
 // resolve atomically removes the pending request entry for the given
@@ -285,12 +301,6 @@ func (s *permissionService) resolve(permission PermissionRequest, granted, denie
 	// per request because Take removes the entry under the map lock,
 	// so this send never blocks.
 	pending.respCh <- granted
-
-	s.activeRequestMu.Lock()
-	if s.activeRequest != nil && s.activeRequest.ID == req.ID {
-		s.activeRequest = nil
-	}
-	s.activeRequestMu.Unlock()
 	return true
 }
 
@@ -310,35 +320,9 @@ func (s *permissionService) GrantPersistent(permission PermissionRequest) bool {
 	// pending-request race. Otherwise a losing GrantPersistent that
 	// lost to a Deny would still leave an auto-approve entry behind,
 	// silently flipping later denied calls to allowed.
-	var req PermissionRequest
-	if !s.resolve(permission, true, false, func(r PermissionRequest) {
-		req = r
+	return s.resolve(permission, true, false, func(r PermissionRequest) {
 		s.sessionPermissions.Set(permissionKeyFor(r), true)
-	}) {
-		return false
-	}
-
-	// A persistent grant also covers requests already parked with the
-	// same key: with concurrent parking, a second same-key call can
-	// register before the grant lands. Resolve them here rather than
-	// re-prompting for an action class just approved for the session.
-	// Entries resolved concurrently lose their Take inside resolve and
-	// are skipped.
-	//
-	// requestMu serializes the sweep against registerRequest's
-	// check-and-insert, so a same-key request cannot slip between the
-	// grant being recorded and the sweep reading the map: it either
-	// registered first (the sweep resolves it) or registers after (its
-	// sessionPermissions check hits and it is approved inline).
-	key := permissionKeyFor(req)
-	s.requestMu.Lock()
-	for _, queued := range s.pendingRequests.Seq2() {
-		if permissionKeyFor(queued.req) == key {
-			s.resolve(queued.req, true, false, nil)
-		}
-	}
-	s.requestMu.Unlock()
-	return true
+	})
 }
 
 func (s *permissionService) Grant(permission PermissionRequest) bool {
@@ -392,6 +376,12 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 		return true, nil
 	}
 
+	// The scope lock serializes this session-scope's requests end to end:
+	// the caller holds it through the park, so a later same-scope request
+	// only publishes once this one is resolved.
+	unlock := s.lockScope(ctx, opts.SessionID)
+	defer unlock()
+
 	fileInfo, err := os.Stat(opts.Path)
 	dir := opts.Path
 	if err == nil {
@@ -411,13 +401,12 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 		return true, nil
 	}
 	defer s.pendingRequests.Del(entry.req.ID)
+	defer s.activeRequests.Del(entry.req.ID)
 
 	resolved := s.observe(ctx, entry.req)
 
-	// registerRequest returns with requestMu already released, so the
-	// caller parks without serializing other requests: several tool
-	// calls may await decisions concurrently, and every parked request
-	// stays listed in pendingRequests for replay and enumeration.
+	// The caller still holds its scope lock while parked here — the next
+	// request in the same scope publishes only once this one resolves.
 	select {
 	case <-ctx.Done():
 		// The prompt is abandoned without a decision; tell subscribers
@@ -440,18 +429,13 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 	}
 }
 
-// registerRequest performs the locked section of Request: it publishes
-// the request-start notification, applies the inline-approval checks
-// (auto-approve and remembered session grant), and — when approval is
-// not short-circuited — builds, registers, and publishes the pending
-// request. requestMu is held for the whole section so notification,
-// registration, and request events stay in deterministic order across
-// concurrent callers. It returns the parked entry, or approved=true
-// when the request was granted inline and nothing parked.
+// registerRequest performs the registration section of Request under the
+// caller's scope lock: it publishes the request-start notification,
+// applies the inline-approval checks (auto-approve and remembered session
+// grant), and — when approval is not short-circuited — builds, registers,
+// and publishes the pending request. It returns the parked entry, or
+// approved=true when the request was granted inline and nothing parked.
 func (s *permissionService) registerRequest(opts CreatePermissionRequest, dir string) (pendingRequest, bool) {
-	s.requestMu.Lock()
-	defer s.requestMu.Unlock()
-
 	// tell the UI that a permission was requested
 	s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
 		SessionID:  opts.SessionID,
@@ -493,9 +477,9 @@ func (s *permissionService) registerRequest(opts CreatePermissionRequest, dir st
 		return pendingRequest{}, true
 	}
 
-	s.activeRequestMu.Lock()
-	s.activeRequest = &permission
-	s.activeRequestMu.Unlock()
+	// Request's deferred Del outlives the park — the entry stays
+	// reported as active until the request returns.
+	s.activeRequests.Set(permission.ID, permission)
 
 	respCh := make(chan bool, 1)
 	entry := pendingRequest{req: permission, respCh: respCh}
@@ -503,6 +487,36 @@ func (s *permissionService) registerRequest(opts CreatePermissionRequest, dir st
 
 	s.Publish(pubsub.CreatedEvent, permission)
 	return entry, false
+}
+
+// lockScope waits until no earlier request in the scope of sessionID is
+// awaiting a decision, and returns the function that lets the next
+// request in that scope through.
+func (s *permissionService) lockScope(ctx context.Context, sessionID string) func() {
+	var key string
+	if scope := s.scope.Load(); scope != nil {
+		key = (*scope)(ctx, sessionID)
+	}
+
+	s.requestLocksMu.Lock()
+	l, ok := s.requestLocks[key]
+	if !ok {
+		l = &requestLock{}
+		s.requestLocks[key] = l
+	}
+	l.refs++
+	s.requestLocksMu.Unlock()
+
+	l.Lock()
+	return func() {
+		l.Unlock()
+		s.requestLocksMu.Lock()
+		l.refs--
+		if l.refs == 0 {
+			delete(s.requestLocks, key)
+		}
+		s.requestLocksMu.Unlock()
+	}
 }
 
 // observe reports the prompt to the observer and returns the function
@@ -529,36 +543,38 @@ func outcomeOf(granted bool) Outcome {
 	return OutcomeDenied
 }
 
-// ActiveRequest returns the request that is currently awaiting a
-// decision. The active pointer can outlive the waiter that published
-// it (Request leaves it behind when its context is cancelled), so a
-// request is only reported while its ID is still registered in
-// pendingRequests, i.e. while Grant/Deny can actually resolve it. When
-// the recorded request is gone but others remain parked — possible now
-// that requests park concurrently — a still-pending one is returned.
-func (s *permissionService) ActiveRequest() (PermissionRequest, bool) {
-	s.activeRequestMu.Lock()
-	active := s.activeRequest
-	s.activeRequestMu.Unlock()
-	if active != nil {
-		if _, ok := s.pendingRequests.Get(active.ID); ok {
-			return *active, true
+// ActiveRequests returns the requests that are currently awaiting a
+// decision. An entry outlives the decision on its request (or the
+// cancellation of its waiter) until Request returns, so a request is
+// only reported while its ID is still registered in pendingRequests,
+// i.e. while Grant/Deny can actually resolve it.
+func (s *permissionService) ActiveRequests() []PermissionRequest {
+	var active []PermissionRequest
+	for req := range s.activeRequests.Seq() {
+		if _, ok := s.pendingRequests.Get(req.ID); ok {
+			active = append(active, req)
 		}
 	}
-	for _, entry := range s.pendingRequests.Seq2() {
-		return entry.req, true
-	}
-	return PermissionRequest{}, false
+	return active
 }
 
 // PendingRequests returns every request currently parked awaiting a
-// decision.
+// decision — at most one per scope under the scope lock's
+// serialization, so the enumeration covers each scope's shown request.
 func (s *permissionService) PendingRequests() []PermissionRequest {
 	var out []PermissionRequest
 	for _, entry := range s.pendingRequests.Seq2() {
 		out = append(out, entry.req)
 	}
 	return out
+}
+
+func (s *permissionService) SetSessionScope(scope SessionScope) {
+	if scope == nil {
+		s.scope.Store(nil)
+		return
+	}
+	s.scope.Store(&scope)
 }
 
 func (s *permissionService) AutoApproveSession(sessionID string) {
@@ -700,6 +716,8 @@ func NewPermissionService(workingDir string, allowedTools []string, observer Pro
 		allowedTools:          allowedTools,
 		pendingRequests:       csync.NewMap[string, pendingRequest](),
 		observer:              observer,
+		requestLocks:          make(map[string]*requestLock),
+		activeRequests:        csync.NewMap[string, PermissionRequest](),
 	}
 	for _, opt := range opts {
 		opt(svc)
