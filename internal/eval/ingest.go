@@ -36,6 +36,13 @@ import (
 //	                                        identical schema the
 //	                                        in-house driver reads
 
+// harborCrushAgent is the registered agent identity the crush
+// wrapper's jobs carry in config.json's agent block — the exact
+// string a crush arm's trial must report. agent_info's self-report
+// spells it short ("crush"); both are admitted, anything else is a
+// foreign trial (#510).
+const harborCrushAgent = "eval.harbor.crush_agent:Crush"
+
 // recordLoc names where one ingested trial already lives — the
 // (invocation, arm, run_index) a dedup refusal points back to.
 type recordLoc struct {
@@ -54,6 +61,23 @@ type recordLoc struct {
 // before its first call, or a child predating the sampling export)
 // can't prove a mismatch and are already inconclusive — they pass.
 func checkHarborPin(exp *Experiment, rec *RunRecord) error {
+	// Foreign arms (#510): the trial's only model evidence is the
+	// harbor-reported spelling — compare it to the arm's declared
+	// foreign_agent.model, and refuse a silent gap outright: a
+	// foreign record whose model can't be proven is contamination,
+	// not a vacuous pass like crush arms' empty wire stamps (which
+	// are inconclusive on other axes anyway). Small-model and
+	// temperature checks don't apply — foreign wire stamps don't
+	// exist for ingest to verify.
+	if fa := exp.Arms[rec.Arm].ForeignAgent; fa != nil {
+		switch {
+		case rec.Env.ModelResolved == "":
+			return fmt.Errorf("arm %s declares foreign agent %q but the trial reported no model — parity with the declared %q can't be proven", rec.Arm, fa.Name, fa.Model)
+		case rec.Env.ModelResolved != fa.Model:
+			return fmt.Errorf("arm %s: harbor-reported model %q ≠ declared foreign model %q — the job that ran is not the declared condition", rec.Arm, rec.Env.ModelResolved, fa.Model)
+		}
+		return nil
+	}
 	if exp.Model != "" && rec.Env.ModelResolved != "" && rec.Env.ModelResolved != exp.Model {
 		return fmt.Errorf("resolved model %q ≠ manifest pin %q — the arm config that ran is not the declared condition", rec.Env.ModelResolved, exp.Model)
 	}
@@ -113,6 +137,13 @@ type harborTrialResult struct {
 		StartedAt  time.Time `json:"started_at"`
 		FinishedAt time.Time `json:"finished_at"`
 	} `json:"agent_execution"`
+	// AgentInfo is the agent's self-reported identity (#510) —
+	// name and a loosely-shaped model_info the config block
+	// supplements; either may carry the model a foreign agent ran.
+	AgentInfo *struct {
+		Name      string          `json:"name"`
+		ModelInfo json.RawMessage `json:"model_info"`
+	} `json:"agent_info"`
 	AgentResult *struct {
 		InputTokens  *int64   `json:"n_input_tokens"`
 		CacheTokens  *int64   `json:"n_cache_tokens"`
@@ -484,6 +515,57 @@ func trialConfigTask(dir string) (string, error) {
 	return "", fmt.Errorf("config.json carries no task id")
 }
 
+// trialAgent reports which agent ran a trial (#510): config.json's
+// agent block is the scheduled identity (name = registered agent,
+// model_name = the --model LiteLLM spelling); result.json's
+// agent_info is the agent's self-report filling either gap.
+func trialAgent(dir string, res *harborTrialResult) (name, model string) {
+	if data, err := os.ReadFile(filepath.Join(dir, "config.json")); err == nil {
+		var cfg struct {
+			Agent struct {
+				Name      string `json:"name"`
+				ModelName string `json:"model_name"`
+			} `json:"agent"`
+		}
+		if json.Unmarshal(data, &cfg) == nil {
+			name, model = cfg.Agent.Name, cfg.Agent.ModelName
+		}
+	}
+	if res != nil && res.AgentInfo != nil {
+		if name == "" {
+			name = res.AgentInfo.Name
+		}
+		if model == "" {
+			model = agentInfoModel(res.AgentInfo.ModelInfo)
+		}
+	}
+	return name, model
+}
+
+// agentInfoModel pulls a model string out of agent_info.model_info —
+// harbor agents emit it as a plain string or an object carrying a
+// name/model field.
+func agentInfoModel(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var obj struct {
+		Name  string `json:"name"`
+		Model string `json:"model"`
+	}
+	if json.Unmarshal(raw, &obj) == nil {
+		if obj.Name != "" {
+			return obj.Name
+		}
+		return obj.Model
+	}
+	return ""
+}
+
 // exceptionDetail distills a trial's exception.txt into check_detail
 // fields — the last non-empty line of a harbor traceback carries
 // "some.ErrorType: message".
@@ -565,99 +647,139 @@ func (r *Runner) ingestTrial(ctx context.Context, exp *Experiment, arm, invocati
 	if res.AgentResult != nil {
 		rec.CostUSD = res.AgentResult.CostUSD
 	}
+	// Agent identity is provenance and a refusal (#510): the arm
+	// declares who ran — a foreign arm wants exactly its declared
+	// agent, a crush arm wants the crush wrapper; a job run by
+	// anything else under either arm is the wrong experiment's data.
+	agentName, agentModel := trialAgent(dir, &res)
+	rec.Env.Agent = agentName
+	fa := exp.Arms[arm].ForeignAgent
+	switch {
+	case fa != nil:
+		if agentName != fa.Name {
+			return nil, fmt.Errorf("arm %s declares foreign agent %q but the trial ran %q — a different agent's records can't fill this arm's cells", arm, fa.Name, agentName)
+		}
+		// Foreign trials carry no crush-data — their metrics are
+		// harbor's own accounting: verifier outcome (above), wall
+		// time from agent_execution (above), tokens and cost from
+		// agent_result. crush-data absence is by design, not a
+		// copy-back defect.
+		rec.Env.ModelResolved = agentModel
+		// env.model_resolved will carry the harbor-side spelling
+		// while env.model_pin keeps exp.Model's — a reader seeing
+		// two different strings could take it for the drift the pin
+		// check exists to catch. The parity claim is declared, so
+		// record it: same route and weights by construction (#510).
+		detail["model_parity"] = fmt.Sprintf("harbor spelling %q declared ≡ manifest pin %q", agentModel, exp.Model)
+		if res.AgentResult != nil {
+			if res.AgentResult.InputTokens != nil {
+				rec.Tokens.Input = *res.AgentResult.InputTokens
+			}
+			if res.AgentResult.OutputTokens != nil {
+				rec.Tokens.Output = *res.AgentResult.OutputTokens
+			}
+			if res.AgentResult.CacheTokens != nil {
+				rec.Tokens.CacheRead = *res.AgentResult.CacheTokens
+			}
+		}
+	case agentName != "" && agentName != harborCrushAgent && agentName != "crush":
+		return nil, fmt.Errorf("arm %s runs the crush wrapper but the trial ran %q — a foreign agent's records can't fill a crush arm's cells", arm, agentName)
+	}
 	// Telemetry is the same CRUSH_EVAL_TELEMETRY blob the in-house
 	// driver decodes — the copy-back makes the container child's
 	// report readable host-side. A trial that died before writing
 	// telemetry still earns its (error) record.
-	if tel, err := readRunTelemetry(filepath.Join(dataDir, "telemetry.json")); err == nil {
-		rec.SessionID = tel.SessionID
-		rec.ParamVersion = tel.ParamVersion
-		rec.Steps = tel.Steps
-		rec.Tokens.Input = tel.Tokens.Input
-		rec.Tokens.Output = tel.Tokens.Output
-		rec.Tokens.CacheRead = tel.Tokens.CacheRead
-		rec.Tokens.CacheWrite = tel.Tokens.CacheWrite
-		rec.StubStats.Invalidations = tel.StubStats.Invalidations
-		rec.StubStats.Results = tel.StubStats.Results
-		rec.StubStats.SavedBytes = tel.StubStats.SavedBytes
-		rec.StubStats.BoundaryAdvances = tel.StubStats.BoundaryAdvances
-		rec.StubStats.Kinds = tel.StubStats.Kinds
-		rec.PriorTurns.TurnsCollapsed = tel.PriorTurns.TurnsCollapsed
-		rec.PriorTurns.EventsCollapsed = tel.PriorTurns.EventsCollapsed
-		rec.PriorTurns.SegmentsCollapsed = tel.PriorTurns.SegmentsCollapsed
-		rec.Recalls.Result = tel.Recalls.Result
-		rec.Recalls.Entry = tel.Recalls.Entry
-		rec.Recalls.Empty = tel.Recalls.Empty
-		rec.Recalls.Cross = tel.Recalls.Cross
-		rec.Recalls.PriorTurnResult = tel.Recalls.PriorTurnResult
-		rec.Checkpoints.Written = tel.Checkpoints.Written
-		rec.Checkpoints.Rendered = tel.Checkpoints.Rendered
-		rec.Digests.Written = tel.Digests.Written
-		rec.Digests.Rendered = tel.Digests.Rendered
-		rec.Hydration.Seeds = tel.Hydration.Seeds
-		rec.Hydration.PlanSeeds = tel.Hydration.PlanSeeds
-		rec.Hydration.Rendered = tel.Hydration.Rendered
-		rec.EdgeFirings = tel.EdgeFirings
-		rec.Env.ModelResolved = tel.Model
-		rec.Env.ModelSmall = tel.ModelSmall
-		rec.Env.ModelSummary = tel.ModelSummary
-		rec.Env.Sampling = tel.Sampling
-		rec.ErrorClass = tel.ErrorClass
-		if tel.Error != "" && outcome != OutcomeError {
-			detail["run_error"] = tel.Error
-		}
-		if tel.GeneratorTokens.Calls > 0 {
-			rec.GeneratorTokens = &GeneratorTokens{
-				Calls:      tel.GeneratorTokens.Calls,
-				Input:      tel.GeneratorTokens.Input,
-				Output:     tel.GeneratorTokens.Output,
-				CacheRead:  tel.GeneratorTokens.CacheRead,
-				CacheWrite: tel.GeneratorTokens.CacheWrite,
+	if fa == nil {
+		if tel, err := readRunTelemetry(filepath.Join(dataDir, "telemetry.json")); err == nil {
+			rec.SessionID = tel.SessionID
+			rec.ParamVersion = tel.ParamVersion
+			rec.Steps = tel.Steps
+			rec.Tokens.Input = tel.Tokens.Input
+			rec.Tokens.Output = tel.Tokens.Output
+			rec.Tokens.CacheRead = tel.Tokens.CacheRead
+			rec.Tokens.CacheWrite = tel.Tokens.CacheWrite
+			rec.StubStats.Invalidations = tel.StubStats.Invalidations
+			rec.StubStats.Results = tel.StubStats.Results
+			rec.StubStats.SavedBytes = tel.StubStats.SavedBytes
+			rec.StubStats.BoundaryAdvances = tel.StubStats.BoundaryAdvances
+			rec.StubStats.Kinds = tel.StubStats.Kinds
+			rec.PriorTurns.TurnsCollapsed = tel.PriorTurns.TurnsCollapsed
+			rec.PriorTurns.EventsCollapsed = tel.PriorTurns.EventsCollapsed
+			rec.PriorTurns.SegmentsCollapsed = tel.PriorTurns.SegmentsCollapsed
+			rec.Recalls.Result = tel.Recalls.Result
+			rec.Recalls.Entry = tel.Recalls.Entry
+			rec.Recalls.Empty = tel.Recalls.Empty
+			rec.Recalls.Cross = tel.Recalls.Cross
+			rec.Recalls.PriorTurnResult = tel.Recalls.PriorTurnResult
+			rec.Checkpoints.Written = tel.Checkpoints.Written
+			rec.Checkpoints.Rendered = tel.Checkpoints.Rendered
+			rec.Digests.Written = tel.Digests.Written
+			rec.Digests.Rendered = tel.Digests.Rendered
+			rec.Hydration.Seeds = tel.Hydration.Seeds
+			rec.Hydration.PlanSeeds = tel.Hydration.PlanSeeds
+			rec.Hydration.Rendered = tel.Hydration.Rendered
+			rec.EdgeFirings = tel.EdgeFirings
+			rec.Env.ModelResolved = tel.Model
+			rec.Env.ModelSmall = tel.ModelSmall
+			rec.Env.ModelSummary = tel.ModelSummary
+			rec.Env.Sampling = tel.Sampling
+			rec.ErrorClass = tel.ErrorClass
+			if tel.Error != "" && outcome != OutcomeError {
+				detail["run_error"] = tel.Error
 			}
-		}
-		if tel.Request.PromptRequests > 0 {
-			rec.Request = &RequestStats{
-				PromptRequests:   tel.Request.PromptRequests,
-				PromptTokensPeak: tel.Request.PromptTokensPeak,
-				SystemBytes:      tel.Request.SystemBytes,
-				NotebookBytes:    tel.Request.NotebookBytes,
-				HistoryBytes:     tel.Request.HistoryBytes,
-				ToolCallBytes:    tel.Request.ToolCallBytes,
-				ToolResultBytes:  tel.Request.ToolResultBytes,
+			if tel.GeneratorTokens.Calls > 0 {
+				rec.GeneratorTokens = &GeneratorTokens{
+					Calls:      tel.GeneratorTokens.Calls,
+					Input:      tel.GeneratorTokens.Input,
+					Output:     tel.GeneratorTokens.Output,
+					CacheRead:  tel.GeneratorTokens.CacheRead,
+					CacheWrite: tel.GeneratorTokens.CacheWrite,
+				}
 			}
-		}
-		if tel.Pressure.Estimate > 0 || tel.Pressure.Engaged || tel.Pressure.Activations > 0 {
-			rec.Pressure = &Pressure{
-				Activations: tel.Pressure.Activations,
-				Engaged:     tel.Pressure.Engaged,
-				Estimate:    tel.Pressure.Estimate,
+			if tel.Request.PromptRequests > 0 {
+				rec.Request = &RequestStats{
+					PromptRequests:   tel.Request.PromptRequests,
+					PromptTokensPeak: tel.Request.PromptTokensPeak,
+					SystemBytes:      tel.Request.SystemBytes,
+					NotebookBytes:    tel.Request.NotebookBytes,
+					HistoryBytes:     tel.Request.HistoryBytes,
+					ToolCallBytes:    tel.Request.ToolCallBytes,
+					ToolResultBytes:  tel.Request.ToolResultBytes,
+				}
 			}
-		}
-		if len(tel.ResolvedOptions) > 0 {
-			rec.ResolvedOptions = tel.ResolvedOptions
-			// The arm's hooks/tools blocks key the record the same
-			// way a local run would — the container's config was
-			// rendered from this arm, and pooled baselines must not
-			// mix hook/tool conditions (#388 + #409).
-			keyExtra := exp.Arms[arm].Config.KeyExtra()
-			keyExtra["$temperature"] = tempKey
-			rec.BaselineKey = manifest.keyWith(tel.ResolvedOptions, keyExtra)
-		}
-		if spec := exp.Arms[arm].BestOfK; spec != nil {
-			sel := spec.Selection
-			if sel == "" {
-				sel = SelectionLastAttempt
+			if tel.Pressure.Estimate > 0 || tel.Pressure.Engaged || tel.Pressure.Activations > 0 {
+				rec.Pressure = &Pressure{
+					Activations: tel.Pressure.Activations,
+					Engaged:     tel.Pressure.Engaged,
+					Estimate:    tel.Pressure.Estimate,
+				}
 			}
-			rec.BestOfK = &BestOfKMark{K: spec.K, Selection: sel}
+			if len(tel.ResolvedOptions) > 0 {
+				rec.ResolvedOptions = tel.ResolvedOptions
+				// The arm's hooks/tools blocks key the record the same
+				// way a local run would — the container's config was
+				// rendered from this arm, and pooled baselines must not
+				// mix hook/tool conditions (#388 + #409).
+				keyExtra := exp.Arms[arm].Config.KeyExtra()
+				keyExtra["$temperature"] = tempKey
+				rec.BaselineKey = manifest.keyWith(tel.ResolvedOptions, keyExtra)
+			}
+			if spec := exp.Arms[arm].BestOfK; spec != nil {
+				sel := spec.Selection
+				if sel == "" {
+					sel = SelectionLastAttempt
+				}
+				rec.BestOfK = &BestOfKMark{K: spec.K, Selection: sel}
+			}
+			if tel.Tail != nil {
+				rec.Tail = []TurnTail{*tel.Tail}
+			}
+			rec.TailRuns = tel.TailRuns
+			if tel.Drain != nil {
+				rec.Drains = []DrainReport{*tel.Drain}
+			}
+			rec.StepRecords = tel.Request.Steps
 		}
-		if tel.Tail != nil {
-			rec.Tail = []TurnTail{*tel.Tail}
-		}
-		rec.TailRuns = tel.TailRuns
-		if tel.Drain != nil {
-			rec.Drains = []DrainReport{*tel.Drain}
-		}
-		rec.StepRecords = tel.Request.Steps
 	}
 	// Harbor reports no per-trial cost — price the billed classes at
 	// the manifest's pinned route rates so a paid pin's spend is
@@ -679,10 +801,14 @@ func (r *Runner) ingestTrial(ctx context.Context, exp *Experiment, arm, invocati
 	// preserve-then-analyze path as preserveArtifacts, against the
 	// copied-back file. Its absence is the copy-back breaking —
 	// record it like preserveArtifacts records a failed preserve.
+	// Foreign arms have no crush.db by design (#510) — nothing to
+	// preserve or flag.
 	dbPath := filepath.Join(dataDir, "crush.db")
-	if !fileExists(dbPath) {
+	switch {
+	case fa != nil:
+	case !fileExists(dbPath):
 		rec.CallMetricsError = fmt.Sprintf("no session db at %s — agent copy-back did not land", dbPath)
-	} else {
+	default:
 		dstDir := filepath.Join(r.EvalDir, "results", exp.Name, "artifacts")
 		if err := os.MkdirAll(dstDir, 0o755); err != nil {
 			return nil, err

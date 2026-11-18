@@ -338,7 +338,7 @@ type Experiment struct {
 // corpus voids the verdict exactly like an aborted in-house run.
 type HarborSpec struct {
 	// Dataset names the benchmark for provenance only —
-	// "terminal-bench@2.1", "swe-bench-pro-v2", or a local tasks
+	// "terminal-bench@2.0", "swe-bench-pro-v2", or a local tasks
 	// path. Nothing resolves against it; the task set below does.
 	Dataset string `json:"dataset"`
 	// TB21Split resolves the declared task set from the frozen
@@ -716,11 +716,31 @@ func (r *TokenRates) price(t TokenUsage) (float64, error) {
 type Arm struct {
 	Config   ArmConfig `json:"config"`
 	Coverage Coverage  `json:"coverage,omitempty"`
+	// ForeignAgent declares that this arm's trials are executed by a
+	// non-Crush harbor agent (#510, N1a) — ingest then reads the
+	// arm's metrics from harbor's own trial accounting instead of
+	// the crush copy-back, and the pin check compares the arm's
+	// declared harbor-side model spelling against what the trial's
+	// config reports. Nil means the arm runs the crush wrapper.
+	ForeignAgent *ForeignAgentSpec `json:"foreign_agent,omitempty"`
 	// BestOfK declares a matched-budget best-of-k arm (#405): the arm
 	// executes K trials per task and reports the record one selection
 	// rule picks — test-time scaling measured as a harness arm, so an
 	// evolved harness that merely samples more can't pass as smarter.
 	BestOfK *BestOfKSpec `json:"best_of_k,omitempty"`
+}
+
+// ForeignAgentSpec is the arm's declared foreign-agent identity —
+// both fields required: Name is what the trial's config.json
+// reports under agent.name (e.g. "terminus-2"); Model is the
+// harbor-side model spelling (the LiteLLM string --model takes,
+// e.g. "openai/deepseek-v4.1-flash") the parity check compares
+// against agent.model_name. The model-equivalence claim itself —
+// that spelling hits the same route and weights as the manifest's
+// exp.Model pin — is documentation, not something ingest can prove.
+type ForeignAgentSpec struct {
+	Name  string `json:"name"`
+	Model string `json:"model"`
 }
 
 // SelectionLastAttempt picks the final trial — the no-verifier
@@ -1261,6 +1281,11 @@ type Hydration struct {
 // last-green and first-red env blocks is the first place to look.
 type Env struct {
 	CrushSHA string `json:"crush_sha"`
+	// Agent is the harbor-side agent identity the trial's
+	// config.json reports (e.g. "eval.harbor.crush_agent:Crush",
+	// "terminus-2") — empty on runner-produced records and harbor
+	// trials whose config block predates the field (#510).
+	Agent string `json:"agent,omitempty"`
 	// ModelPin is the experiment's model string as spelled in the
 	// pin; ModelResolved is what the run actually resolved to. They
 	// can differ (aliases, normalization) — the pin defines the

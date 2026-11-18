@@ -12,7 +12,7 @@
     "model": "opencode-go/beam-free",
     "measured_at": "2026-11-12T10:14:22.247405Z",
     "passes": {
-      "dataset": "terminal-bench@2.1",
+      "dataset": "terminal-bench@2.0",
       "tasks": 30,
       "tasks_source": "declared",
       "trials_per_pass": 30,
@@ -46,7 +46,7 @@
       "cost_trials": 0
     },
     "ood": {
-      "dataset": "terminal-bench@2.1",
+      "dataset": "terminal-bench@2.0",
       "tasks": 30,
       "tasks_source": "declared",
       "pairs": 22,

@@ -322,6 +322,22 @@ func ValidateExperiment(e *Experiment) error {
 		if name != ArmControl && name != ArmTreatment && len(arm.Coverage) > 0 {
 			return fmt.Errorf("arm %q coverage has no consumer — coverage gates evaluate only the treatment arm", name)
 		}
+		// A foreign_agent arm's trials arrive only through harbor
+		// ingest (#510) — without a harbor block the declaration is
+		// dead config. Name and model are both required: name is the
+		// arm-agent identity check, model the declared harbor-side
+		// spelling the parity check compares.
+		if arm.ForeignAgent != nil {
+			if e.Harbor == nil {
+				return fmt.Errorf("arm %q foreign_agent requires a harbor block — foreign trials only exist as harbor output", name)
+			}
+			if arm.ForeignAgent.Name == "" || arm.ForeignAgent.Model == "" {
+				return fmt.Errorf("arm %q foreign_agent requires both name and model — name is the arm-agent identity check, model the declared parity spelling", name)
+			}
+			if arm.BestOfK != nil {
+				return fmt.Errorf("arm %q foreign_agent + best_of_k is undefined — best-of-k's selection path keys on crush arms' records; a foreign best-of-k arm needs its own consumer", name)
+			}
+		}
 		if arm.BestOfK == nil {
 			continue
 		}
