@@ -1161,7 +1161,7 @@ func init() {
 	evalCalibrateCmd.Flags().String("grid", "5,4,3,2,1", "candidate values, any order — tested most-conservative first")
 	evalCalibrateCmd.Flags().String("out", "", "write the certificate JSON here (also printed)")
 	evalNoiseCmd.Flags().String("arm", "control", "arm whose records the characterization reads")
-	evalNoiseCmd.Flags().String("dataset", "", "dataset label recorded in the noise block (e.g. terminal-bench@2.1)")
+	evalNoiseCmd.Flags().String("dataset", "", "dataset label recorded in the noise block (e.g. terminal-bench@2.0)")
 	evalNoiseCmd.Flags().String("passes", "", "comma-separated invocations, one per pass over the corpus")
 	evalNoiseCmd.Flags().String("pair", "", "comma-separated invocations — one pairs run_index within it, two pair across")
 	evalNoiseCmd.Flags().String("cells", "", "comma-separated invocations — repeated-cell decomposition (σ_within / σ_between, #489)")
