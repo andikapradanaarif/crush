@@ -315,8 +315,7 @@ SET
     completion_tokens = ?,
     summary_message_id = ?,
     cost = ?,
-    todos = ?,
-    channel = ?
+    todos = ?
 WHERE id = ?
 RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, channel, permission_skip, model_override
 `
@@ -328,10 +327,12 @@ type UpdateSessionParams struct {
 	SummaryMessageID sql.NullString `json:"summary_message_id"`
 	Cost             float64        `json:"cost"`
 	Todos            sql.NullString `json:"todos"`
-	Channel          sql.NullString `json:"channel"`
 	ID               string         `json:"id"`
 }
 
+// channel is deliberately not written here: SetSessionChannel owns the
+// binding, so a load-modify-Save cycle with a stale session cannot
+// clobber the channel the coordinator just set.
 func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) (Session, error) {
 	row := q.queryRow(ctx, q.updateSessionStmt, updateSession,
 		arg.Title,
@@ -340,7 +341,6 @@ func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) (S
 		arg.SummaryMessageID,
 		arg.Cost,
 		arg.Todos,
-		arg.Channel,
 		arg.ID,
 	)
 	var i Session

@@ -20,6 +20,12 @@ func isolateProcess(_ *exec.Cmd) {}
 // ReapOrphans is a no-op on Windows — process-group reaping is Unix-only.
 func ReapOrphans() {}
 
+// killGroupOnCancel only sets a WaitDelay on Windows; negative-PID signal
+// targeting is Unix-only, so cancellation keeps the default process kill.
+func killGroupOnCancel(cmd *exec.Cmd) {
+	cmd.WaitDelay = defaultKillTimeout + time.Second
+}
+
 // processGroupExecHandler returns interp.DefaultExecHandler on Windows.
 func processGroupExecHandler(killTimeout time.Duration) interp.ExecHandlerFunc {
 	return interp.DefaultExecHandler(killTimeout)

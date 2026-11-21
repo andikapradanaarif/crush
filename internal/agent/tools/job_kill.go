@@ -49,7 +49,7 @@ func NewJobKillTool(cmdLog cmdlog.Service) fantasy.AgentTool {
 				Description: bgShell.Description,
 			}
 
-			err := bgManager.Kill(params.ShellID)
+			err := bgManager.Kill(ctx, params.ShellID)
 			if err != nil {
 				return fantasy.NewTextErrorResponse(err.Error()), nil
 			}

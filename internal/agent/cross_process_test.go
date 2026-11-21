@@ -28,7 +28,7 @@ type toolThenTextModel struct {
 }
 
 func (m *toolThenTextModel) Stream(_ context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
-	if strings.Contains(promptText(call.Prompt), "Generate a concise title") {
+	if strings.Contains(flatPromptText(call.Prompt), "Generate a concise title") {
 		return gateTextStream("title"), nil
 	}
 	if m.calls.Add(1) != 1 {

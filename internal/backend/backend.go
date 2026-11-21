@@ -48,6 +48,7 @@ var (
 	ErrInvalidTheme            = errors.New("invalid host theme")
 	ErrChannelOptInMismatch    = errors.New("requested channels differ from the existing workspace; channels are an explicit opt-in and are not shared across duplicate creates")
 	ErrInvalidModelSelection   = errors.New("model selection could not be built")
+	ErrPromptOverrideMismatch  = errors.New("another Crush session already has this directory open with different prompts; --prompt only applies to the session that opens it, so close the others and try again")
 )
 
 // DefaultCreateGrace is the window in which a client must open an SSE
@@ -445,9 +446,9 @@ func (b *Backend) CreateWorkspace(args proto.Workspace) (*Workspace, proto.Works
 			// return cannot be torn out from under us
 			// between lookup and registerClient. Lock order
 			// here is b.mu -> ws.clientsMu.
-			if !stringSlicesEqual(ws.Cfg.Overrides().EnabledChannels, args.Channels) {
+			if err := joinMismatch(ws, args); err != nil {
 				b.mu.Unlock()
-				return nil, proto.Workspace{}, ErrChannelOptInMismatch
+				return nil, proto.Workspace{}, err
 			}
 			logFirstWinsMismatch(ws, args)
 			b.registerClient(ws, clientID)
@@ -483,6 +484,10 @@ func (b *Backend) CreateWorkspace(args proto.Workspace) (*Workspace, proto.Works
 		}
 	}()
 
+	if err := config.ValidatePromptNames(args.Prompts); err != nil {
+		return nil, proto.Workspace{}, err
+	}
+
 	id := uuid.New().String()
 	cfg, err := config.Init(context.Background(), args.Path, args.DataDir, args.Debug)
 	if err != nil {
@@ -491,6 +496,7 @@ func (b *Backend) CreateWorkspace(args proto.Workspace) (*Workspace, proto.Works
 
 	cfg.Overrides().EnabledChannels = args.Channels
 	cfg.Overrides().PermissionMode = proto.ProtoModeToPermission(args.PermissionMode)
+	cfg.Overrides().Prompts = args.Prompts
 
 	if err := createDotCrushDir(cfg.Config().Options.DataDirectory); err != nil {
 		return nil, proto.Workspace{}, fmt.Errorf("failed to create data directory: %w", err)
@@ -558,10 +564,10 @@ func (b *Backend) CreateWorkspace(args proto.Workspace) (*Workspace, proto.Works
 			// Register under b.mu so teardown cannot run
 			// between lookup and registerClient. Lock order
 			// is b.mu -> ws.clientsMu.
-			if !stringSlicesEqual(existing.Cfg.Overrides().EnabledChannels, args.Channels) {
+			if err := joinMismatch(existing, args); err != nil {
 				b.mu.Unlock()
 				ws.invokeShutdown()
-				return nil, proto.Workspace{}, ErrChannelOptInMismatch
+				return nil, proto.Workspace{}, err
 			}
 			logFirstWinsMismatch(existing, args)
 			b.registerClient(existing, clientID)
@@ -1009,7 +1015,7 @@ func (b *Backend) teardown(ws *Workspace) {
 	// live run is the bug this guard exists to fix, and a wedged run
 	// is visible to the user who can cancel it. An escape hatch would
 	// reintroduce mid-run cancellation under a timer.
-	if ws.App != nil && ws.AgentCoordinator != nil && ws.AgentCoordinator.IsBusy() {
+	if coord := ws.Coordinator(); ws.App != nil && coord != nil && coord.IsBusy() {
 		b.mu.Unlock()
 		slog.Debug("Workspace busy, deferring teardown",
 			"workspace_id", ws.ID,
@@ -1426,6 +1432,7 @@ func workspaceToProto(ws *Workspace) proto.Workspace {
 		Path:           ws.Path,
 		PermissionMode: proto.PermissionModeToProto(ws.Permissions.PermissionMode()),
 		Channels:       ws.Cfg.Overrides().EnabledChannels,
+		Prompts:        ws.Cfg.Overrides().Prompts,
 		DataDir:        cfg.Options.DataDirectory,
 		Debug:          cfg.Options.Debug,
 		Config:         cfg,
@@ -1436,6 +1443,21 @@ func workspaceToProto(ws *Workspace) proto.Workspace {
 		out.Skills = skillStatesToProto(ws.Skills.States())
 	}
 	return out
+}
+
+// joinMismatch reports why a duplicate create may not join existing.
+// Channels must match exactly. Prompts only have to match when the caller
+// asked for some: a plain client may join a workspace opened with --prompt,
+// but a --prompt the existing workspace would ignore must not be dropped
+// without a word.
+func joinMismatch(existing *Workspace, args proto.Workspace) error {
+	if !stringSlicesEqual(existing.Cfg.Overrides().EnabledChannels, args.Channels) {
+		return ErrChannelOptInMismatch
+	}
+	if len(args.Prompts) > 0 && !maps.Equal(existing.Cfg.Overrides().Prompts, args.Prompts) {
+		return ErrPromptOverrideMismatch
+	}
+	return nil
 }
 
 // logFirstWinsMismatch emits a debug line whenever a second
@@ -1458,7 +1480,8 @@ func logFirstWinsMismatch(existing *Workspace, args proto.Workspace) {
 		existingCfg.Options.Debug == args.Debug &&
 		existingCfg.Options.DataDirectory == args.DataDir &&
 		stringSlicesEqual(existing.Env, args.Env) &&
-		stringSlicesEqual(existingChannels, args.Channels) {
+		stringSlicesEqual(existingChannels, args.Channels) &&
+		maps.Equal(existing.Cfg.Overrides().Prompts, args.Prompts) {
 		return
 	}
 	slog.Debug(
@@ -1475,6 +1498,8 @@ func logFirstWinsMismatch(existing *Workspace, args proto.Workspace) {
 		"requested_env", args.Env,
 		"existing_channels", existingChannels,
 		"requested_channels", args.Channels,
+		"existing_prompts", existing.Cfg.Overrides().Prompts,
+		"requested_prompts", args.Prompts,
 	)
 }
 

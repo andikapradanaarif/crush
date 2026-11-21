@@ -450,7 +450,7 @@ func executeBashCommand(ctx context.Context, params BashParams, execWorkingDir, 
 	case <-ctx.Done():
 		// Incoming context was cancelled before we moved to background
 		// Kill the shell and return error
-		bgManager.Kill(bgShell.ID)
+		bgManager.Kill(ctx, bgShell.ID)
 		if cmdLog != nil && bgShell.TakeRecorded() {
 			killOut, killErr, kDone, kErr := bgShell.GetOutput()
 			run := cmdlog.Run{
