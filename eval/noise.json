@@ -9,56 +9,208 @@
     "weighted_cost": 0.3
   },
   "harbor": {
-    "model": "opencode-go/beam-free",
-    "measured_at": "2026-11-12T10:14:22.247405Z",
+    "model": "opencode-go/deepseek-v4.1-flash",
+    "measured_at": "2026-11-21T20:03:49.235962Z",
     "passes": {
       "dataset": "terminal-bench@2.0",
       "tasks": 30,
       "tasks_source": "declared",
-      "trials_per_pass": 30,
+      "trials_per_pass": 29,
       "conclusive_per_pass": [
-        19,
-        17,
+        27,
+        28,
+        27,
+        26,
+        27,
         25,
-        24
+        26,
+        25
       ],
-      "passes": 4,
-      "pass_rate": 0.4740376676986584,
+      "passes": 8,
+      "pass_rate": 0.6219469881969882,
       "pass_rates": [
-        0.42105263157894735,
-        0.4117647058823529,
-        0.48,
-        0.5833333333333334
+        0.48148148148148145,
+        0.6071428571428571,
+        0.6296296296296297,
+        0.6923076923076923,
+        0.6296296296296297,
+        0.68,
+        0.6153846153846154,
+        0.64
       ],
       "solved_per_pass": [
-        8,
-        7,
-        12,
-        14
+        13,
+        17,
+        17,
+        18,
+        17,
+        17,
+        16,
+        16
       ],
-      "delta": 0.23333333333333334,
-      "delta_trials": 7,
-      "c_min": 0.866596211896833,
-      "tokens_cv": 1.4127204726573257,
-      "tokens_per_trial": 760142.1058823529,
-      "wall_s_per_trial": 335.60800789411763,
-      "wall_trials": 85,
-      "cost_trials": 0
+      "delta": 0.1724137931034483,
+      "delta_trials": 5,
+      "delta_solve": 0.21082621082621084,
+      "c_min": 0.6817058004810308,
+      "tokens_cv": 1.0963860642211158,
+      "tokens_per_trial": 706552.3601895735,
+      "wall_s_per_trial": 548.2990705924171,
+      "cost_usd_per_trial": 0.03680311668246445,
+      "cost_trials": 211
     },
     "ood": {
       "dataset": "terminal-bench@2.0",
       "tasks": 30,
       "tasks_source": "declared",
-      "pairs": 22,
-      "sigma_d": 0.5602256811793028,
-      "pass_rate": 0.5681818181818182,
-      "tokens_cv": 1.447717908933288,
-      "tokens_sigma_d": 2343924.719252681,
-      "tokens_log_ratio_sd": 1.0524851353064975,
-      "tokens_per_trial": 875419.2040816327,
-      "wall_s_per_trial": 385.2739845918368
+      "pairs": 27,
+      "sigma_d": 0.5337605126836238,
+      "pass_rate": 0.5555555555555556,
+      "tokens_cv": 1.336295642449742,
+      "tokens_sigma_d": 1139353.7731959014,
+      "tokens_log_ratio_sd": 0.8414117574360941,
+      "tokens_per_trial": 849609.7272727273,
+      "wall_s_per_trial": 553.902606290909,
+      "cost_usd_per_trial": 0.03999665090909091,
+      "cost_trials": 55
     },
-    "status": "superseded",
-    "note": "2026-11-16 audit: computed from the tb21-pilot-beam pilot, which ran a different system — small model resolved to deepseek-v4.1-flash against the beam-free pin, declared temperature was never sent, and pilot-b2 treatment was a duplicate of its control arm. Numbers stay recorded for audit; re-run the base characterization on the D1 pin before sizing (#504)."
+    "cells": {
+      "dataset": "terminal-bench@2.0",
+      "tasks": 30,
+      "tasks_source": "declared",
+      "cells": {
+        "bn-fit-modify": [
+          4,
+          8
+        ],
+        "build-pov-ray": [
+          6,
+          8
+        ],
+        "chess-best-move": [
+          5,
+          8
+        ],
+        "code-from-image": [
+          7,
+          8
+        ],
+        "constraints-scheduling": [
+          8,
+          8
+        ],
+        "crack-7z-hash": [
+          4,
+          8
+        ],
+        "db-wal-recovery": [
+          8,
+          8
+        ],
+        "dna-insert": [
+          4,
+          8
+        ],
+        "extract-moves-from-video": [
+          0,
+          6
+        ],
+        "feal-linear-cryptanalysis": [
+          8,
+          8
+        ],
+        "fix-git": [
+          8,
+          8
+        ],
+        "git-multibranch": [
+          7,
+          7
+        ],
+        "kv-store-grpc": [
+          0,
+          8
+        ],
+        "log-summary-date-ranges": [
+          5,
+          8
+        ],
+        "make-doom-for-mips": [
+          0,
+          6
+        ],
+        "mcmc-sampling-stan": [
+          3,
+          8
+        ],
+        "overfull-hbox": [
+          6,
+          8
+        ],
+        "path-tracing-reverse": [
+          6,
+          8
+        ],
+        "polyglot-rust-c": [
+          7,
+          8
+        ],
+        "prove-plus-comm": [
+          8,
+          8
+        ],
+        "pytorch-model-cli": [
+          1,
+          7
+        ],
+        "qemu-alpine-ssh": [
+          0,
+          7
+        ],
+        "query-optimize": [
+          5,
+          6
+        ],
+        "regex-log": [
+          8,
+          8
+        ],
+        "schemelike-metacircular-eval": [
+          3,
+          4
+        ],
+        "torch-pipeline-parallelism": [
+          3,
+          6
+        ],
+        "train-fasttext": [
+          0,
+          3
+        ],
+        "video-processing": [
+          0,
+          8
+        ],
+        "write-compressor": [
+          7,
+          7
+        ]
+      },
+      "reps_per_task": 7.275862068965517,
+      "pass_rate": 0.5983169129720853,
+      "measurable_cells": 29,
+      "sigma_within": 0.34306404539774105,
+      "tokens_log_sigma_within": 0.5680265525614282,
+      "token_measurable_cells": 29,
+      "tokens_log_sigma_between": 1.0021584858473174,
+      "tokens_geomean_per_trial": 368417.6965115747,
+      "delta_expected": 0.03813187583091019,
+      "c_min_expected": 0.0651723956778345,
+      "sigma_between": 0.35722802761121875,
+      "tokens_per_trial": 706552.3601895735,
+      "wall_s_per_trial": 548.2990705924174,
+      "cost_usd_per_trial": 0.03680311668246447,
+      "cost_trials": 211
+    },
+    "note": "tb21-krep-deepseek A/A corpus, control arm: 29 effective tasks x 8 reps, 232 records (211 conclusive). passes block computed over run_index 0-7 \u2014 a single-invocation k-rep corpus where each rep is a full sweep (--passes needs >=2 invocations). ood pairs run_index 0 vs 1. A/A treatment arm read: pass 56.1%, delta_expected 4.06pp, c_min_expected 6.37% \u2014 the N1a -0.08 margin prices max(arm delta)x2. delta 17.2% > the 3pp target \u2014 adjudicated via G1' margins, see milestone 2026-11-21-exp-krep-aa-calibration."
   }
 }
