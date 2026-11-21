@@ -110,7 +110,7 @@ def project_databases(registry, quotas=QUOTAS):
     return databases
 
 
-def read_candidates(databases, cutoff, post_433=False, quotas=QUOTAS):
+def read_candidates(databases, cutoff, post_433=False, quotas=QUOTAS, since=None):
     candidates = []
     for project, db_path in sorted(databases.items()):
         if not db_path.is_file():
@@ -125,14 +125,18 @@ def read_candidates(databases, cutoff, post_433=False, quotas=QUOTAS):
                     f"{project}: expected one project partition, found {len(project_keys)}"
                 )
             workdir_clause = "AND t.workdir != ''" if post_433 else ""
+            since_clause = "AND t.settled_at >= ?" if since is not None else ""
+            params = [project_keys[0], cutoff]
+            if since is not None:
+                params.append(since)
             rows = conn.execute(
                 f"""SELECT t.session_id, t.turn_id, t.verdict, m.parts
                    FROM turn_outcomes t
                    JOIN messages m ON m.id = t.turn_id AND m.session_id = t.session_id
                    WHERE t.project_key = ? AND t.settled_at IS NOT NULL
-                     AND t.settled_at < ? {workdir_clause}
+                     AND t.settled_at < ? {workdir_clause} {since_clause}
                    ORDER BY t.session_id, t.turn_id""",
-                (project_keys[0], cutoff),
+                params,
             )
             for session_id, turn_id, verdict, parts in rows:
                 # The old turn-boundary filter omitted the reconcile edge.
@@ -362,6 +366,7 @@ def main():
                 cutoff_millis(cutoff),
                 post_433=wave["post_433"],
                 quotas=quotas,
+                since=cutoff_millis(wave["since"]) if wave.get("since") else None,
             )
             selected = select_sample(candidates, quotas, seed)
             review = [
