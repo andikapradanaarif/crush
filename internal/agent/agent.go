@@ -206,6 +206,13 @@ type SessionAgentCall struct {
 	// is rewritten and no longer carries the element, so the reply
 	// target is not lost when a long channel turn is summarized.
 	channelMeta map[string]string
+	// reviewBase is the worktree's git baseline captured at this run's
+	// start — the revision, pre-dirty paths, and pre-existing diff the
+	// fresh-review edge diffs against so owner edits and mid-turn
+	// commits don't corrupt the evidence. It rides the call so the
+	// repair chain (`retry := call`) reviews the whole turn's delta,
+	// not just the last attempt's patch.
+	reviewBase *freshReviewState
 }
 
 // filterToolsForChannel scopes the tool list for a turn. A channel-originated
@@ -1629,6 +1636,14 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 	// comparison — failure rows first seen after this instant are the
 	// run's own, older ones are pre-existing observations.
 	runStart := time.Now()
+	// The git baseline rides the call: the reviewer diffs from the
+	// revision the work began at, and owner-dirty state captured now
+	// stays separable from the run's own writes at the boundary.
+	// Gated on the edge — three git subprocesses on a large dirty
+	// worktree are pure waste when fresh review can't fire.
+	if a.freshReview && a.configStore != nil && call.reviewBase == nil {
+		call.reviewBase = freshReviewBaseline(ctx, a.configStore.WorkingDir())
+	}
 
 	// Add the session to the context. The run context (genCtx) and its
 	// cancel func were already created and registered under the dispatch
@@ -1674,6 +1689,10 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 
 	var stepMessages []fantasy.Message
 	var foldedPromptInsertions []foldedPromptInsertion
+	// Set when a queued owner message folded into this run's context is
+	// a bare stop command — runEdges checks call.Prompt only, so the
+	// folded stop must reach the boundary through edgeInput.
+	var foldedOwnerStop atomic.Bool
 	var shouldSummarize bool
 	// spentTokens accumulates this run's per-step input+output usage —
 	// the cumulative-spend meter CRUSH_EVAL_MAX_TOKENS reads. The
@@ -1750,6 +1769,9 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 				// In notebook mode the per-step rebuild re-renders the
 				// persisted folded message; appending it here would
 				// duplicate it.
+				if isOwnerStopPrompt(queued.Prompt) {
+					foldedOwnerStop.Store(true)
+				}
 				if !notebookOn {
 					foldedMessages = append(foldedMessages, userMessage.ToAIMessage()...)
 				} else {
@@ -2299,6 +2321,7 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 		verifyLoop:       verifyLoopStopped,
 		turnSeq:          turnSeq,
 		startedAt:        runStart,
+		foldedOwnerStop:  foldedOwnerStop.Load(),
 	})
 
 	// Post-run decision stamping (#221): with the run's verdicts
@@ -2399,7 +2422,13 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 			continued = true
 		}
 	}
-	finished := currentAssistant != nil && !continued
+	// A turn that queued an edge repair is not finished: the retry
+	// delivers the corrected response and fires TurnEnd at its own
+	// boundary. Reporting finished here would give a channel user the
+	// pre-repair answer and a TurnEnd integration the intermediate
+	// result — both suppressed on the same decision the finished
+	// notification already uses.
+	finished := currentAssistant != nil && !continued && !repairQueued
 
 	// Route the finished turn's response back to the channel it came
 	// from. Runs before the busy state is released so a follow-up push
@@ -2418,6 +2447,10 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 	cancel()
 
 	if finished {
+		// TurnEnd is the logical-turn boundary: it fires once, on the
+		// attempt that actually delivers. TurnStart still fires per
+		// attempt — each repair really does start work — so hooks
+		// pairing the events see N starts to one end by design.
 		a.fireTurnHook(ctx, call, turnEndEvent(nil, currentAssistant))
 	}
 

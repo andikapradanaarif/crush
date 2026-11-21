@@ -68,6 +68,75 @@ const freshReviewFindBugsPrompt = "You are a fresh-context reviewer hunting for 
 	"fails the task; otherwise VERDICT: ISSUES. For ISSUES follow with one finding per " +
 	"line: file — what is wrong — why it fails the task."
 
+// freshReviewState is the worktree's git baseline captured at run
+// start: the revision the work began from, the paths already dirty
+// then, and the bounded pre-existing diff. The reviewer diffs from
+// startRev so a mid-turn commit still lands in evidence, and preDirty
+// keeps owner edits separable from the agent's own writes — the case
+// that made `git diff HEAD` show an owner's unrelated file while a
+// `?? dir/` entry hid the agent's whole change.
+type freshReviewState struct {
+	// startRev is `git rev-parse HEAD` at run start — "" when the
+	// worktree had no commits yet.
+	startRev string
+	// preDirty is every status path already modified or untracked at
+	// run start — owner's edits, not the agent's work.
+	preDirty map[string]struct{}
+	// preDiff is the bounded worktree-vs-HEAD diff at run start, so an
+	// owner's edits inside a file the agent later touches stay
+	// distinguishable from the agent's hunks.
+	preDiff string
+}
+
+// freshReviewBaseline snapshots the worktree's git state for the run.
+// Nil when dir is not a git worktree — the review degrades to its
+// file-roster evidence as before.
+func freshReviewBaseline(ctx context.Context, dir string) *freshReviewState {
+	if dir == "" {
+		return nil
+	}
+	bctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	rev, rerr := freshReviewGit(bctx, dir, "rev-parse", "--verify", "HEAD")
+	status, serr := freshReviewGit(bctx, dir, "status", "--porcelain", "-uall")
+	diff, derr := freshReviewGit(bctx, dir, "diff", "HEAD", "--")
+	if rerr != nil && serr != nil && derr != nil {
+		return nil
+	}
+	st := &freshReviewState{
+		startRev: strings.TrimSpace(rev),
+		preDiff:  diff,
+		preDirty: map[string]struct{}{},
+	}
+	for _, p := range porcelainPaths(status) {
+		st.preDirty[p] = struct{}{}
+	}
+	return st
+}
+
+// porcelainPaths extracts the path set from `git status --porcelain`
+// lines — every `XY path` row, with renames resolved to the new path
+// and C-quoted names unquoted.
+func porcelainPaths(status string) []string {
+	var out []string
+	for _, line := range strings.Split(status, "\n") {
+		if len(line) < 4 {
+			continue
+		}
+		p := strings.TrimSpace(line[3:])
+		if i := strings.LastIndex(p, " -> "); i >= 0 {
+			p = p[i+4:]
+		}
+		if u, err := strconv.Unquote(p); err == nil {
+			p = u
+		}
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // freshVerdict is the deterministic parse of the reviewer's reply.
 type freshVerdict struct {
 	// issues is the rendered findings text — non-empty fires the edge.
@@ -117,9 +186,10 @@ func (a *sessionAgent) scanFreshReviewEdge(_ context.Context, call SessionAgentC
 	}
 	writeSet := stepWriteSet(in.result.Steps)
 	t := &edgeTrigger{
-		steps:    in.result.Steps,
-		writeSet: writeSet,
-		detail:   fmt.Sprintf("writes=%d", len(writeSet)),
+		steps:      in.result.Steps,
+		writeSet:   writeSet,
+		reviewBase: call.reviewBase,
+		detail:     fmt.Sprintf("writes=%d", len(writeSet)),
 	}
 	if !a.freshReview {
 		t.hint = edgeOutcomeGated
@@ -280,7 +350,7 @@ func (a *sessionAgent) freshReviewBundle(ctx context.Context, call SessionAgentC
 	if a.configStore != nil {
 		dir = a.configStore.WorkingDir()
 	}
-	b.WriteString(freshReviewDiff(ctx, dir))
+	b.WriteString(freshReviewDiff(ctx, dir, t.reviewBase))
 	b.WriteString("\n")
 	switch {
 	case t.lastCheck != nil:
@@ -309,18 +379,29 @@ func (a *sessionAgent) freshReviewBundle(ctx context.Context, call SessionAgentC
 }
 
 // freshReviewDiff renders the workspace delta the reviewer judges:
-// git status for the changed-file roster, git diff HEAD for tracked
-// changes (capped), and the heads of untracked files the diff
-// cannot show. Outside a git worktree the file list stands alone —
-// the review degrades its evidence, never its availability.
-func freshReviewDiff(ctx context.Context, dir string) string {
+// git status -uall for the changed-file roster (individual files, so a
+// new directory can't hide its contents behind a `?? dir/` entry), the
+// diff from the run's starting revision (so mid-turn commits still
+// count), and the heads of untracked files the diff cannot show. Paths
+// dirty before the run are labeled as the owner's edits, not the
+// agent's. Outside a git worktree the file list stands alone — the
+// review degrades its evidence, never its availability.
+func freshReviewDiff(ctx context.Context, dir string, base *freshReviewState) string {
 	if dir == "" {
 		return "Workspace diff: unavailable — no working directory.\n"
 	}
 	dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	status, serr := freshReviewGit(dctx, dir, "status", "--porcelain")
-	diff, derr := freshReviewGit(dctx, dir, "diff", "HEAD", "--")
+	status, serr := freshReviewGit(dctx, dir, "status", "--porcelain", "-uall")
+	// Diff from the run's starting revision: a HEAD-anchored diff
+	// vanishes the moment the agent commits mid-turn. When the baseline
+	// is absent or had no commits, the empty tree keeps the whole
+	// workspace state in evidence.
+	rev := "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+	if base != nil && base.startRev != "" {
+		rev = base.startRev
+	}
+	diff, derr := freshReviewGit(dctx, dir, "diff", rev, "--")
 	if serr != nil && derr != nil {
 		return "Workspace diff: unavailable — not a git worktree.\n"
 	}
@@ -328,7 +409,14 @@ func freshReviewDiff(ctx context.Context, dir string) string {
 	b.WriteString("Workspace diff:\n```diff\n")
 	b.WriteString(capHeadText(diff, freshReviewDiffCap))
 	b.WriteString("\n```\n")
-	var newFiles []string
+	var preExisting, newFiles []string
+	for _, p := range porcelainPaths(status) {
+		if base != nil {
+			if _, ok := base.preDirty[p]; ok {
+				preExisting = append(preExisting, p)
+			}
+		}
+	}
 	for _, line := range strings.Split(status, "\n") {
 		if !strings.HasPrefix(line, "?? ") {
 			continue
@@ -338,6 +426,16 @@ func freshReviewDiff(ctx context.Context, dir string) string {
 			p = u
 		}
 		newFiles = append(newFiles, p)
+	}
+	if len(preExisting) > 0 {
+		shown := preExisting
+		more := ""
+		if len(shown) > 5 {
+			more = fmt.Sprintf(" +%d more", len(shown)-5)
+			shown = shown[:5]
+		}
+		fmt.Fprintf(&b, "Already dirty before this run (owner edits — may also contain agent work): %s%s\n",
+			strings.Join(shown, ", "), more)
 	}
 	for i, p := range newFiles {
 		if i >= 3 {
@@ -357,6 +455,10 @@ func freshReviewDiff(ctx context.Context, dir string) string {
 			continue
 		}
 		fmt.Fprintf(&b, "--- new file: %s ---\n%s\n", p, content)
+	}
+	if base != nil && strings.TrimSpace(base.preDiff) != "" {
+		fmt.Fprintf(&b, "Pre-existing changes present before this run (owner's, not the agent's):\n```diff\n%s\n```\n",
+			capHeadText(base.preDiff, freshReviewUntrackedCap*2))
 	}
 	return b.String()
 }

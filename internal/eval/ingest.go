@@ -180,46 +180,64 @@ func harborTaskID(raw json.RawMessage) (string, error) {
 	return "", fmt.Errorf("task_id object carries no name or path")
 }
 
-// harborOutcome maps a trial's verifier reward to an Outcome.
-// Benchmarks in scope (Terminal-Bench 2.x, SWE-bench) score binary —
-// a full-reward task passes, anything less fails; partial credit is
-// not a pass for the pass-rate metric. A trial that raised before
-// the verifier ran (exception_info) or never produced a reward is
-// error — infra derailment, not a task verdict.
+// harborOutcome normalizes a trial's terminal facts. Reward,
+// exception, and execution are retained as SEPARATE fields — #503
+// had 56 trials carrying both an exception_info and a verifier
+// reward (three of them reward 1), and the early exception return
+// that dropped the reward is exactly the evidence loss this fixes:
+// whether a timed-out-but-verified trial scores is a protocol
+// decision the record must let the owner revisit without re-reading
+// raw trial dirs.
+//
+// Eligibility is explicit, not flow-shaped:
+//   - exception anywhere → the verdict is contaminated: OutcomeError,
+//     not score-eligible, requeue-eligible (a fresh run can replace
+//     the observation; its retained reward is evidence, not a verdict);
+//   - no usable reward → no verdict was produced: OutcomeError,
+//     not score-eligible, requeue-eligible;
+//   - reward ≥ 1 → pass; 0 ≤ reward < 1 → fail (binary verifiers
+//     emit exact 0/1 — a fractional value is genuine partial credit,
+//     and partial credit is not a pass); both score-eligible;
+//   - negative reward → malformed artifact: error, requeue-eligible.
 func harborOutcome(res *harborTrialResult) (Outcome, map[string]any) {
 	detail := map[string]any{}
+	detail["executed"] = res.AgentExecution != nil
 	if res.ExceptionInfo != nil {
 		detail["exception_type"] = res.ExceptionInfo.Type
 		detail["exception_message"] = res.ExceptionInfo.Message
-		return OutcomeError, detail
 	}
+	reward, hasReward := 0.0, false
 	if res.VerifierResult == nil || len(res.VerifierResult.Rewards) == 0 {
 		detail["missing"] = "verifier_result"
-		return OutcomeError, detail
-	}
-	reward, ok := res.VerifierResult.Rewards["reward"]
-	if !ok {
-		switch len(res.VerifierResult.Rewards) {
-		case 1:
-			for _, v := range res.VerifierResult.Rewards {
-				reward = v
-			}
-		default:
-			detail["rewards"] = res.VerifierResult.Rewards
-			return OutcomeError, detail
+	} else if r, ok := res.VerifierResult.Rewards["reward"]; ok {
+		reward, hasReward = r, true
+	} else if len(res.VerifierResult.Rewards) == 1 {
+		for _, v := range res.VerifierResult.Rewards {
+			reward, hasReward = v, true
 		}
+	} else {
+		detail["rewards"] = res.VerifierResult.Rewards
 	}
-	detail["reward"] = reward
-	// Floating-point near-miss reads as fail — binary verifiers
-	// emit exact 0/1, so a fractional value is genuine partial
-	// credit, and partial credit is not a pass.
-	if reward >= 1.0 {
+	if hasReward {
+		detail["reward"] = reward
+	}
+	// The explicit eligibility rule — kept beside the derived fields
+	// so the record states its own protocol handling.
+	eligible := func(score, requeue bool) {
+		detail["score_eligible"] = score
+		detail["requeue_eligible"] = requeue
+	}
+	switch {
+	case res.ExceptionInfo != nil, !hasReward, reward < 0:
+		eligible(false, true)
+		return OutcomeError, detail
+	case reward >= 1.0:
+		eligible(true, false)
 		return OutcomePass, detail
-	}
-	if reward >= 0 {
+	default:
+		eligible(true, false)
 		return OutcomeFail, detail
 	}
-	return OutcomeError, detail
 }
 
 // HarborTaskSet resolves the experiment's declared task list — the
@@ -619,6 +637,10 @@ func (r *Runner) ingestTrial(ctx context.Context, exp *Experiment, arm, invocati
 			return nil, fmt.Errorf("derive task from config.json: %w", err)
 		}
 		outcome, detail = OutcomeError, exceptionDetail(dir)
+		// Same explicit rule as result.json exceptions: contaminated
+		// verdict — not score-eligible, requeue-eligible.
+		detail["score_eligible"] = false
+		detail["requeue_eligible"] = true
 	default:
 		return nil, fmt.Errorf("read result.json: %w", err)
 	}
