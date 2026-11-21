@@ -10,10 +10,13 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestProcessIsolation_SignalDoesNotReachParent verifies that a child
@@ -123,7 +126,18 @@ func TestProcessIsolation_ZshJobControlDoesNotSuspend(t *testing.T) {
 // the grandchild running in the dead child's process group. The pgid
 // must stay tracked after Wait returns, and ReapOrphans must kill the
 // surviving group — a Delete-on-Wait registry misses this case.
+// clearLiveChildren drops every tracked pgid so a test sees only the
+// groups its own Run spawned — earlier tests can leave entries whose
+// groups are still draining through the cancel escalation.
+func clearLiveChildren() {
+	liveChildren.Range(func(k, _ any) bool {
+		liveChildren.Delete(k)
+		return true
+	})
+}
+
 func TestReapOrphans_KillsGroupAfterShellExit(t *testing.T) {
+	clearLiveChildren()
 	t.Setenv("CRUSH_EVAL_TELEMETRY", filepath.Join(t.TempDir(), "tel.json"))
 
 	var stderr bytes.Buffer
@@ -170,6 +184,7 @@ func TestReapOrphans_KillsGroupAfterShellExit(t *testing.T) {
 // TestReapOrphans_NoTelemetryGate verifies reaping stays inert outside
 // eval runs — an interactive user's detached jobs must survive exit.
 func TestReapOrphans_NoTelemetryGate(t *testing.T) {
+	clearLiveChildren()
 	t.Setenv("CRUSH_EVAL_TELEMETRY", "")
 
 	err := Run(t.Context(), RunOptions{
@@ -205,6 +220,7 @@ func TestReapOrphans_NoTelemetryGate(t *testing.T) {
 // command leaves no registry entry — the entry deletes on ESRCH so a
 // recycled pgid can never be targeted.
 func TestReapOrphans_GroupDrainedCleansEntry(t *testing.T) {
+	clearLiveChildren()
 	t.Setenv("CRUSH_EVAL_TELEMETRY", filepath.Join(t.TempDir(), "tel.json"))
 
 	err := Run(t.Context(), RunOptions{
@@ -246,5 +262,47 @@ func TestProcessIsolation_ChildProcessGroupKill(t *testing.T) {
 	// Allow up to 4s: 500ms context timeout + 2s kill timeout + margin.
 	if elapsed > 4*time.Second {
 		t.Fatalf("cancellation took %v; expected prompt process group kill", elapsed)
+	}
+}
+
+// TestProcessIsolation_WaitsForEscalation covers descendants that ignore
+// SIGINT and do not keep the leader's output streams open.
+func TestProcessIsolation_WaitsForEscalation(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	cwd := t.TempDir()
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, RunOptions{
+			Command: `sh -c 'trap "exit 130" INT; (trap "" INT; exec sleep 12) </dev/null >/dev/null 2>&1 & echo "$$" > ready; wait'`,
+			Cwd:     cwd,
+			Env:     os.Environ(),
+		})
+	}()
+
+	var group int
+	require.Eventually(t, func() bool {
+		data, err := os.ReadFile(filepath.Join(cwd, "ready"))
+		if err != nil {
+			return false
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil || pid <= 1 {
+			return false
+		}
+		group = -pid
+		return true
+	}, 3*time.Second, 10*time.Millisecond)
+	t.Cleanup(func() { _ = syscall.Kill(group, syscall.SIGKILL) })
+
+	start := time.Now()
+	cancel()
+	select {
+	case <-done:
+		require.GreaterOrEqual(t, time.Since(start), defaultKillTimeout)
+	case <-time.After(defaultKillTimeout + 3*time.Second):
+		t.Fatal("cancellation did not finish after process-group escalation")
 	}
 }

@@ -180,6 +180,8 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 				Models:               func(string) ModelSet { return c.smallOnlyModels() },
 				SystemPromptPrefix:   smallProviderCfg.SystemPromptPrefix,
 				SystemPrompt:         systemPrompt,
+				Cfg:                  c.cfg,
+				Prompts:              c.promptTexts,
 				DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
 				Sessions:             c.sessions,
 				Messages:             c.messages,

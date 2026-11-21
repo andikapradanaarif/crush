@@ -489,6 +489,9 @@ type Querier interface {
 	SettleTurnOutcome(ctx context.Context, arg SettleTurnOutcomeParams) error
 	UpdateMessage(ctx context.Context, arg UpdateMessageParams) error
 	UpdateNotebookCompression(ctx context.Context, arg UpdateNotebookCompressionParams) error
+	// channel is deliberately not written here: SetSessionChannel owns the
+	// binding, so a load-modify-Save cycle with a stale session cannot
+	// clobber the channel the coordinator just set.
 	UpdateSession(ctx context.Context, arg UpdateSessionParams) (Session, error)
 	UpdateSessionTitleAndUsage(ctx context.Context, arg UpdateSessionTitleAndUsageParams) error
 	// Project-scoped command ledger: one row per normalized command,

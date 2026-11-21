@@ -342,6 +342,9 @@ type coordinator struct {
 	skillKeys   map[string]string
 	skillKeysMu sync.Mutex
 
+	// promptTexts is every prompt's text, read once at startup.
+	promptTexts map[string]string
+
 	readyWg errgroup.Group
 
 	hostContext csync.Value[proto.HostContext]
@@ -509,7 +512,13 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		return nil, errCoderAgentNotConfigured
 	}
 
-	coderPrompt, err := coderPrompt(c.skillOverrideOptions()...)
+	promptTexts, err := loadPromptTexts(c.cfg)
+	if err != nil {
+		return nil, err
+	}
+	c.promptTexts = promptTexts
+
+	coderPrompt, err := c.newPrompt("coder", c.skillOverrideOptions()...)
 	if err != nil {
 		return nil, err
 	}
@@ -525,7 +534,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		return nil, errPlanAgentNotConfigured
 	}
 
-	planSystemPrompt, err := planPrompt(append(
+	planSystemPrompt, err := c.newPrompt("plan", append(
 		c.skillOverrideOptions(),
 		prompt.WithToolNames(c.effectiveToolNames(planCfg, false)),
 	)...)
@@ -1520,6 +1529,7 @@ func (c *coordinator) buildAgentWithModels(ctx context.Context, ready *errgroup.
 		Messages:             c.messages,
 		Permissions:          c.permissions,
 		Cfg:                  c.cfg,
+		Prompts:              c.promptTexts,
 		Tools:                nil,
 		Notify:               c.notify,
 		RunComplete:          c.runComplete,

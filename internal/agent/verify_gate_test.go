@@ -647,8 +647,8 @@ func (m *gateScriptModel) StreamObject(context.Context, fantasy.ObjectCall) (fan
 	return nil, errors.New("not implemented")
 }
 
-// promptText flattens a fantasy prompt's text for assertions.
-func promptText(p fantasy.Prompt) string {
+// flatPromptText flattens a fantasy prompt's text for assertions.
+func flatPromptText(p fantasy.Prompt) string {
 	var b strings.Builder
 	for _, msg := range p {
 		for _, part := range msg.Content {
@@ -662,7 +662,7 @@ func promptText(p fantasy.Prompt) string {
 }
 
 func (m *gateScriptModel) Stream(_ context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
-	text := promptText(call.Prompt)
+	text := flatPromptText(call.Prompt)
 	if strings.Contains(text, "Generate a concise title") {
 		// Title generation shares the model — answer it without
 		// consuming a main-turn call.
