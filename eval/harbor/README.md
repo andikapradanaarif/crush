@@ -287,14 +287,20 @@ small-model/auxiliary calls, so the manifest's small-model pin
 applies to the crush arm only. That asymmetry is the comparison's
 subject, not a defect.
 
-**Margin.** `decision_rule.guardrail.min_delta: -0.12` is pinned
-from the smoke's δ̂ — **re-pin it to #503's measured k-rep δ̂
-before running**; the manifest's pre-registration depends on the
-characterization number.
+**Margin.** `decision_rule.guardrail.min_delta: -0.08` is pinned
+to **2× #503's measured k-rep δ̂** (post-requeue expected spread:
+δ_expected 3.81pp control / 4.06pp treatment, `--cells krep`).
+The binding quantity is the *paired-run* spread, not the A/A
+signed difference — at ~1δ (~4pp) the anchor false-fails ~20% of
+the time at true parity; at 2δ the false-fail rate drops to ~5%
+while the read still detects any real deficit ≥ 8pp — larger than
+any single expected lever gain, so a failure correctly triggers
+R1's kill rule. Both manifests' `harness_revision` pins now carry
+the merged ingest/boundary fixes (`c153a99463`).
 
 ```sh
 # 1. Binary + credentials (same as #503):
-git checkout 3d2ade856d   # manifest's harness_revision
+git checkout c153a99463   # manifest's harness_revision
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o crush-linux-amd64 .
 source ~/.config/crush/secrets.env
 export OPENAI_API_KEY="$OPENCODE_API_KEY"   # terminus reads litellm's
@@ -321,7 +327,7 @@ PYTHONPATH=$PWD harbor run \
     -d terminal-bench@2.0 \
     --agent eval.harbor.crush_agent:Crush \
     --agent-kwarg binary_path="$PWD/crush-linux-amd64" \
-    --agent-kwarg harness_revision=3d2ade856d \
+    --agent-kwarg harness_revision=c153a99463 \
     --agent-kwarg config="$PWD/arm-deepseek.crush.json" \
     --agent-kwarg env=OPENCODE_API_KEY \
     --agent-kwarg max_tokens=8000000 \
@@ -375,7 +381,22 @@ json.dump(d, open('arm-l1.crush.json', 'w'), indent=1)
 Fire-rate caveat: L1's edges and L2's gate are conditional
 mechanisms and no coverage counter exists for them — a near-null
 read must check the records for whether the lever actually fired
-(the #509 lesson, folded into each manifest's hypothesis).
+(the #509 lesson, folded into each manifest's hypothesis). L6's
+manifest carries a hard coverage gate instead —
+`min_prior_turns.segments_collapsed ≥ 1` — so a batch where the
+frontier never quantizes fails the run, not just the read.
+
+**L6 decision math (post-#503 refresh).** Primary is
+`tokens_to_done`, treatment vs control, `min_improvement: 0.14` —
+set just above the refreshed detectable-token bound (~13.5% at
+29×8, log-σ_between ≈ 1.0), so a declared win is a *resolved*
+win, not noise. L6's expected effect is −15% to −40%, so the
+read is powered for the low end with ~1.5pp of headroom; a
+measured effect between −14% and −10% reads as
+screening-inconclusive (below the declared threshold, above
+nothing). Guardrail `pass_rate min_delta: -0.1` sits ~2.5× the
+refreshed δ_expected — a pass regression beyond noise fails the
+lever even if tokens drop.
 
 ## Ops notes from the field
 

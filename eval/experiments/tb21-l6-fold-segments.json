@@ -40,7 +40,7 @@
 		}
 	},
 	"decision_rule": {
-		"hypothesis": "L6 mechanical fold: covered, closed segments inside Harbor's single long turn collapse to recall-backed stubs on the quantized frontier (#509), cutting tokens-to-done vs the verbatim control without hurting pass rate. Mechanical arm only \u2014 notebook_generate=never, so no sidecar LLM spend contaminates the efficiency read.",
+		"hypothesis": "L6 mechanical fold: covered, closed segments inside Harbor's single long turn collapse to recall-backed stubs on the quantized frontier (#509), cutting tokens-to-done vs the verbatim control without hurting pass rate. Mechanical arm only — notebook_generate=never, so no sidecar LLM spend contaminates the efficiency read.",
 		"estimand": "conditional",
 		"ood": true,
 		"primary": {
@@ -48,7 +48,7 @@
 			"arm": "treatment",
 			"vs": "control",
 			"direction": "decrease",
-			"min_improvement": 0.1
+			"min_improvement": 0.14
 		},
 		"guardrail": {
 			"metric": "pass_rate",
@@ -110,9 +110,9 @@
 			"write-compressor"
 		],
 		"k": 8,
-		"harness_revision": "58dfce7b76",
+		"harness_revision": "c153a99463",
 		"exclude": {
-			"mteb-retrieve": "dataset defect \u2014 image reproducibly fails environment build even at 4x timeout (#489 G1.a)"
+			"mteb-retrieve": "dataset defect — image reproducibly fails environment build even at 4x timeout (#489 G1.a)"
 		}
 	},
 	"small_model": "opencode-go/deepseek-v4.1-flash",
