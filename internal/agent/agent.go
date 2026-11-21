@@ -1674,6 +1674,10 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 
 	var stepMessages []fantasy.Message
 	var foldedPromptInsertions []foldedPromptInsertion
+	// Set when a queued owner message folded into this run's context is
+	// a bare stop command — runEdges checks call.Prompt only, so the
+	// folded stop must reach the boundary through edgeInput.
+	var foldedOwnerStop atomic.Bool
 	var shouldSummarize bool
 	// spentTokens accumulates this run's per-step input+output usage —
 	// the cumulative-spend meter CRUSH_EVAL_MAX_TOKENS reads. The
@@ -1750,6 +1754,9 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 				// In notebook mode the per-step rebuild re-renders the
 				// persisted folded message; appending it here would
 				// duplicate it.
+				if isOwnerStopPrompt(queued.Prompt) {
+					foldedOwnerStop.Store(true)
+				}
 				if !notebookOn {
 					foldedMessages = append(foldedMessages, userMessage.ToAIMessage()...)
 				} else {
@@ -2299,6 +2306,7 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 		verifyLoop:       verifyLoopStopped,
 		turnSeq:          turnSeq,
 		startedAt:        runStart,
+		foldedOwnerStop:  foldedOwnerStop.Load(),
 	})
 
 	// Post-run decision stamping (#221): with the run's verdicts

@@ -1913,6 +1913,23 @@ func TestOwnerStopBoundary(t *testing.T) {
 		require.Equal(t, "owner-stop", firingOutcome(t, conn, sessionID, "stall"))
 	})
 
+	t.Run("a folded owner-stop lands the same verdict", func(t *testing.T) {
+		t.Parallel()
+		a, conn, sessionID := interactiveEdgeAgent(t)
+		// The initiating prompt is real work; the stop arrived queued
+		// and folded into the model's context mid-run — the worker saw
+		// it and ended. The boundary checks call.Prompt only, so the
+		// folded stop must arrive through edgeInput or a firing edge
+		// mints a resume the owner never asked for.
+		queued := runEdgesForTest(a, t.Context(),
+			SessionAgentCall{SessionID: sessionID, Prompt: "finish the refactor"},
+			edgeInput{result: stallResult(), stalled: true, foldedOwnerStop: true})
+		require.False(t, queued, "a folded explicit stop cannot mint a resume")
+		q, _ := a.messageQueue.Get(sessionID)
+		require.Empty(t, q)
+		require.Equal(t, "owner-stop", firingOutcome(t, conn, sessionID, "stall"))
+	})
+
 	t.Run("a gated trigger keeps its gated verdict", func(t *testing.T) {
 		t.Parallel()
 		// ambiguityClarification off — the verify-loop trigger scans

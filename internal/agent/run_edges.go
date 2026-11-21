@@ -123,6 +123,11 @@ type edgeInput struct {
 	// failure rows' FirstSeen against it to distinguish rows this run
 	// introduced from pre-existing ones it re-observed.
 	startedAt time.Time
+	// foldedOwnerStop records that a queued owner message folded into
+	// this run's context was a bare stop command. The worker saw it
+	// and ended, so the boundary must not enqueue a repair behind the
+	// stop's back — the initiating call.Prompt can't see folded text.
+	foldedOwnerStop bool
 }
 
 // edgeTrigger is one edge's scan output: the evidence a retry prompt or
@@ -387,7 +392,7 @@ func (a *sessionAgent) runEdges(ctx context.Context, call SessionAgentCall, in e
 		return false, call
 	}
 
-	if isOwnerStopPrompt(call.Prompt) {
+	if isOwnerStopPrompt(call.Prompt) || in.foldedOwnerStop {
 		// The owner told the run to stop. Edges still scan so the
 		// would-have-fired verdict lands in telemetry, but resolve
 		// never runs and no trigger takes a retry slot — a resume
