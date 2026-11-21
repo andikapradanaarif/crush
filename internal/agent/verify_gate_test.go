@@ -20,6 +20,7 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/db"
+	"github.com/charmbracelet/crush/internal/hooks"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
@@ -630,6 +631,9 @@ type gateScriptModel struct {
 	mu       sync.Mutex
 	prompts  []string
 	editPath string
+	// texts overrides the streamed text per call index (1-based);
+	// unset entries default to "done".
+	texts []string
 }
 
 func (m *gateScriptModel) Provider() string { return "fake" }
@@ -675,7 +679,11 @@ func (m *gateScriptModel) Stream(_ context.Context, call fantasy.Call) (fantasy.
 	m.mu.Unlock()
 
 	if n != 1 {
-		return gateTextStream("done"), nil
+		txt := "done"
+		if int(n) <= len(m.texts) && m.texts[n-1] != "" {
+			txt = m.texts[n-1]
+		}
+		return gateTextStream(txt), nil
 	}
 
 	input := fmt.Sprintf(`{"file_path":%q,"old_string":"a","new_string":"b"}`, m.editPath)
@@ -817,6 +825,56 @@ settleDrain:
 		}
 	}
 	require.True(t, found, "stored tool result for tc1 not found")
+}
+
+// TestRunRepair_SingleTurnEnd proves the delivery decision is shared:
+// when the first turn ends on a failed check and an edge repair is
+// queued, the intermediate response must not fire TurnEnd — the retry
+// delivers the corrected result, and exactly one hook fires for the
+// logical turn.
+func TestRunRepair_SingleTurnEnd(t *testing.T) {
+	t.Parallel()
+	env := testEnv(t)
+	dir := env.workingDir
+	editPath := filepath.Join(dir, "x.go")
+
+	model := &gateScriptModel{
+		editPath: editPath,
+		// Turn one's text is the intermediate answer the channel user
+		// must not see; the retry's is what TurnEnd should carry.
+		texts: []string{"", "intermediate", "corrected"},
+	}
+	tool := &verifyingTool{
+		inner:      &fakeTool{name: "edit", resp: fantasy.NewTextResponse("edited")},
+		workingDir: dir,
+		pendingChecks: func(string) []message.VerificationCheck {
+			return []message.VerificationCheck{{
+				Check:   "verify:test",
+				State:   message.VerificationPending,
+				Command: "exit 1",
+				Timeout: 30,
+			}}
+		},
+	}
+
+	sa := testSessionAgent(env, model, model, "system", tool).(*sessionAgent)
+	sa.configStore = config.NewTestStoreWithDir(&config.Config{}, dir)
+	read := recordingHooks(t, sa, hooks.EventTurnEnd)
+
+	sess, err := env.sessions.Create(t.Context(), "session")
+	require.NoError(t, err)
+
+	_, err = sa.Run(t.Context(), SessionAgentCall{
+		SessionID: sess.ID,
+		RunID:     "run-single-delivery",
+		Prompt:    "edit the file",
+	})
+	require.NoError(t, err)
+
+	// Three Stream calls: edit step, turn-one stop, repair turn.
+	require.Equal(t, int32(3), model.calls.Load())
+	require.Equal(t, []string{"TurnEnd corrected"}, read(),
+		"the repair turn fires the logical turn's only TurnEnd")
 }
 
 type gateRecordingCmdLog struct {

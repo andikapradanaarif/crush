@@ -2407,7 +2407,13 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 			continued = true
 		}
 	}
-	finished := currentAssistant != nil && !continued
+	// A turn that queued an edge repair is not finished: the retry
+	// delivers the corrected response and fires TurnEnd at its own
+	// boundary. Reporting finished here would give a channel user the
+	// pre-repair answer and a TurnEnd integration the intermediate
+	// result — both suppressed on the same decision the finished
+	// notification already uses.
+	finished := currentAssistant != nil && !continued && !repairQueued
 
 	// Route the finished turn's response back to the channel it came
 	// from. Runs before the busy state is released so a follow-up push
