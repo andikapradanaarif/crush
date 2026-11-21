@@ -90,7 +90,7 @@
 			"write-compressor"
 		],
 		"k": 3,
-		"harness_revision": "58dfce7b76",
+		"harness_revision": "c153a99463",
 		"exclude": {
 			"mteb-retrieve": "dataset defect — image reproducibly fails environment build even at 4x timeout (#489 G1.a)"
 		}
