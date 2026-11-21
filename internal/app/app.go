@@ -263,7 +263,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		// Sidecar generation spend lands on the session's counters —
 		// the coordinator may not exist yet at construction, so the
 		// sink resolves it at call time.
-		if c, ok := app.AgentCoordinator.(interface {
+		if c, ok := app.Agent().(interface {
 			RecordGeneratorUsage(string, fantasy.Usage)
 		}); ok {
 			c.RecordGeneratorUsage(sessionID, usage)
@@ -379,7 +379,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		cancel()
 		return nil, fmt.Errorf("failed to initialize coder agent: %w", err)
 	}
-	go app.refreshDiscoveredModels(ctx, app.AgentCoordinator)
+	go app.refreshDiscoveredModels(ctx, app.Agent())
 
 	// Set up callback for LSP state updates.
 	app.LSPManager.SetCallback(func(name string, client *lsp.Client) {
@@ -733,7 +733,7 @@ const detachedCancelDrainTimeout = 2 * time.Second
 // turn's coverage gate starves. No-op on coordinators that don't
 // expose the join.
 func (app *App) drainDetachedWork(timeout time.Duration) (attempted, completed bool) {
-	c, ok := app.AgentCoordinator.(interface {
+	c, ok := app.Agent().(interface {
 		WaitForDetachedWork(time.Duration) bool
 	})
 	if !ok {
@@ -758,10 +758,11 @@ func (app *App) UpdateAgentModel(ctx context.Context) error {
 // model. Returns an error if the summary slot is configured but
 // invalid, so the UI can warn the user after an explicit selection.
 func (app *App) UpdateSummaryModel(ctx context.Context) error {
-	if app.AgentCoordinator == nil {
+	coord := app.Agent()
+	if coord == nil {
 		return fmt.Errorf("agent configuration is missing")
 	}
-	return app.AgentCoordinator.UpdateSummaryModel(ctx)
+	return coord.UpdateSummaryModel(ctx)
 }
 
 // restoreModelFromSession reads the last assistant message in the

@@ -1015,7 +1015,7 @@ func (b *Backend) teardown(ws *Workspace) {
 	// live run is the bug this guard exists to fix, and a wedged run
 	// is visible to the user who can cancel it. An escape hatch would
 	// reintroduce mid-run cancellation under a timer.
-	if ws.App != nil && ws.AgentCoordinator != nil && ws.AgentCoordinator.IsBusy() {
+	if coord := ws.Coordinator(); ws.App != nil && coord != nil && coord.IsBusy() {
 		b.mu.Unlock()
 		slog.Debug("Workspace busy, deferring teardown",
 			"workspace_id", ws.ID,

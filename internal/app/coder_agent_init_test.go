@@ -39,6 +39,7 @@ func (c *initFakeCoordinator) ClearQueue(string)                       {}
 func (c *initFakeCoordinator) ApprovePlan(context.Context, string) error {
 	return nil
 }
+
 func (c *initFakeCoordinator) SetSessionModelOverride(context.Context, string, config.SelectedModel) error {
 	return nil
 }
