@@ -198,6 +198,10 @@ type edgeTrigger struct {
 	// verification metadata) used when no bash verdict exists — a
 	// verify-loop that tripped on a decorator-run check.
 	checkFallback *gateCheckOutcome
+	// reviewBase is the git baseline the run started from, propagated
+	// from the call — the fresh-review edge diffs against it so owner
+	// edits and mid-turn commits stay separable from the agent's work.
+	reviewBase *freshReviewState
 }
 
 // deferredTrigger is a firing trigger that lost its boundary's prompt

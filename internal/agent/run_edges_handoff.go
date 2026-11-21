@@ -8,6 +8,11 @@ import (
 	"charm.land/fantasy"
 )
 
+// handoffGoalCap bounds the owner's goal text carried into handoff and
+// review evidence — multiline so acceptance criteria survive, capped
+// so a pasted spec can't crowd out the rest of the prompt.
+const handoffGoalCap = 1200
+
 // pullEscalationHandoff fills the trigger's escalate-handoff evidence
 // (#444) — goal and lastCheck — from the stored transcript and the
 // run's own steps. Pulled in resolve (like pullReplanHandoff) so the
@@ -22,7 +27,10 @@ func (a *sessionAgent) pullEscalationHandoff(ctx context.Context, call SessionAg
 	if a.messages != nil {
 		if msgs, err := a.messages.List(ctx, call.SessionID); err == nil {
 			if idx := lastRealUserIdx(msgs, ""); idx >= 0 {
-				t.goal = truncateTailText(strings.TrimSpace(firstLine(msgs[idx].JoinedText())), 200)
+				// Bounded multiline: a first-line-only goal drops
+				// multiline acceptance criteria the reviewer or the
+				// handoff needs to judge against.
+				t.goal = truncateTailText(strings.TrimSpace(msgs[idx].JoinedText()), handoffGoalCap)
 			}
 		}
 	}

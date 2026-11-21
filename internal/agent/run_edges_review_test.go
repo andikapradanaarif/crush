@@ -259,13 +259,13 @@ func TestFreshReviewDiff(t *testing.T) {
 
 	t.Run("outside a worktree reports unavailable", func(t *testing.T) {
 		t.Parallel()
-		out := freshReviewDiff(t.Context(), t.TempDir())
+		out := freshReviewDiff(t.Context(), t.TempDir(), nil)
 		require.Contains(t, out, "unavailable")
 	})
 
 	t.Run("empty dir reports unavailable", func(t *testing.T) {
 		t.Parallel()
-		require.Contains(t, freshReviewDiff(t.Context(), ""), "unavailable")
+		require.Contains(t, freshReviewDiff(t.Context(), "", nil), "unavailable")
 	})
 
 	t.Run("a real repo renders diff plus untracked heads", func(t *testing.T) {
@@ -285,7 +285,7 @@ func TestFreshReviewDiff(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "tracked.go"), []byte("package x\n// changed\n"), 0o644))
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "new.go"), []byte("package x\n// brand new\n"), 0o644))
 
-		out := freshReviewDiff(t.Context(), dir)
+		out := freshReviewDiff(t.Context(), dir, nil)
 		require.Contains(t, out, "changed")
 		require.Contains(t, out, "new file: new.go")
 		require.Contains(t, out, "brand new")
@@ -311,9 +311,81 @@ func TestFreshReviewDiff(t *testing.T) {
 		require.NoError(t, os.WriteFile(secret, []byte("TOP-SECRET-VALUE"), 0o644))
 		require.NoError(t, os.Symlink(secret, filepath.Join(dir, "leak.txt")))
 
-		out := freshReviewDiff(t.Context(), dir)
+		out := freshReviewDiff(t.Context(), dir, nil)
 		require.NotContains(t, out, "TOP-SECRET-VALUE")
 		require.NotContains(t, out, "new file: leak.txt")
+	})
+
+	// The bug that motivated the baseline: an owner-edited file plus
+	// the agent's new directory left the reviewer seeing only the
+	// owner's diff, and a mid-turn commit could hide the whole change
+	// behind `git diff HEAD` + `?? dir/`.
+	t.Run("baseline separates owner edits and covers mid-turn commits", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		git := func(args ...string) {
+			cmd := exec.CommandContext(t.Context(), "git", append([]string{"-C", dir}, args...)...)
+			out, err := cmd.CombinedOutput()
+			require.NoError(t, err, string(out))
+		}
+		git("init")
+		git("config", "user.email", "t@t")
+		git("config", "user.name", "t")
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "owner.txt"), []byte("v1\n"), 0o644))
+		git("add", ".")
+		git("commit", "-m", "init")
+
+		// The owner's edit predates the run — the baseline records the
+		// dirty path and its diff.
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "owner.txt"), []byte("v1\nowner edit\n"), 0o644))
+		base := freshReviewBaseline(t.Context(), dir)
+		require.NotNil(t, base)
+		require.NotEmpty(t, base.startRev)
+		require.Contains(t, base.preDirty, "owner.txt")
+
+		// The agent builds in a new directory and commits it before
+		// the boundary.
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "feature"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "feature", "main.go"), []byte("package feature\n"), 0o644))
+		git("add", "feature/main.go")
+		git("commit", "-m", "agent work")
+
+		out := freshReviewDiff(t.Context(), dir, base)
+		// Committed mid-turn work still lands in the start-rev diff —
+		// the HEAD-anchored version showed only owner.txt here.
+		require.Contains(t, out, "feature/main.go")
+		require.Contains(t, out, "package feature")
+		// The owner's edit is labeled pre-existing, not the agent's work.
+		require.Contains(t, out, "Already dirty before this run")
+		require.Contains(t, out, "owner.txt")
+		require.Contains(t, out, "Pre-existing changes")
+	})
+
+	// The same new-directory case without the commit: `status -uall`
+	// must list feature/main.go itself so the head is read — without
+	// it status collapses to `?? feature/` and the reader skips dirs.
+	t.Run("untracked files in new dirs are read individually", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		git := func(args ...string) {
+			cmd := exec.CommandContext(t.Context(), "git", append([]string{"-C", dir}, args...)...)
+			out, err := cmd.CombinedOutput()
+			require.NoError(t, err, string(out))
+		}
+		git("init")
+		git("config", "user.email", "t@t")
+		git("config", "user.name", "t")
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "owner.txt"), []byte("v1\n"), 0o644))
+		git("add", ".")
+		git("commit", "-m", "init")
+		base := freshReviewBaseline(t.Context(), dir)
+
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "feature"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "feature", "main.go"), []byte("package feature\n// agent work\n"), 0o644))
+
+		out := freshReviewDiff(t.Context(), dir, base)
+		require.Contains(t, out, "new file: feature/main.go")
+		require.Contains(t, out, "agent work")
 	})
 }
 

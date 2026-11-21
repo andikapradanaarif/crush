@@ -206,6 +206,13 @@ type SessionAgentCall struct {
 	// is rewritten and no longer carries the element, so the reply
 	// target is not lost when a long channel turn is summarized.
 	channelMeta map[string]string
+	// reviewBase is the worktree's git baseline captured at this run's
+	// start — the revision, pre-dirty paths, and pre-existing diff the
+	// fresh-review edge diffs against so owner edits and mid-turn
+	// commits don't corrupt the evidence. It rides the call so the
+	// repair chain (`retry := call`) reviews the whole turn's delta,
+	// not just the last attempt's patch.
+	reviewBase *freshReviewState
 }
 
 // filterToolsForChannel scopes the tool list for a turn. A channel-originated
@@ -1629,6 +1636,12 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 	// comparison — failure rows first seen after this instant are the
 	// run's own, older ones are pre-existing observations.
 	runStart := time.Now()
+	// The git baseline rides the call: the reviewer diffs from the
+	// revision the work began at, and owner-dirty state captured now
+	// stays separable from the run's own writes at the boundary.
+	if a.configStore != nil && call.reviewBase == nil {
+		call.reviewBase = freshReviewBaseline(ctx, a.configStore.WorkingDir())
+	}
 
 	// Add the session to the context. The run context (genCtx) and its
 	// cancel func were already created and registered under the dispatch
