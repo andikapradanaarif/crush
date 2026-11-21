@@ -175,7 +175,7 @@ func TestIngestHarborTrials_RecordsAndSnapshot(t *testing.T) {
 
 func TestIngestHarborTrials_Outcomes(t *testing.T) {
 	dir := t.TempDir()
-	exp := harborExp("t-pass", "t-fail", "t-exc", "t-nover", "t-partial")
+	exp := harborExp("t-pass", "t-fail", "t-exc", "t-nover", "t-partial", "t-both")
 	r := seededRunner(dir)
 	ctx := context.Background()
 
@@ -196,19 +196,56 @@ func TestIngestHarborTrials_Outcomes(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(excDir, "result.json"), data, 0o644))
 	dirs = append(dirs, excDir)
 
+	// The #503 shape: exception AND a verifier reward — 56 trials
+	// carried both, three of them reward 1. The outcome stays error
+	// (contaminated verdict) but the record must retain both facts
+	// plus explicit eligibility so the score rule stays re-derivable.
+	bothDir := filepath.Join(jobs, "f")
+	require.NoError(t, os.MkdirAll(bothDir, 0o755))
+	data, _ = json.Marshal(map[string]any{
+		"task_id":         map[string]any{"name": "t-both"},
+		"verifier_result": map[string]any{"rewards": map[string]any{"reward": 1.0}},
+		"exception_info":  map[string]any{"exception_type": "AgentTimeoutError", "exception_message": "timed out"},
+		"agent_execution": map[string]any{"started_at": "2026-01-01T00:00:00Z", "finished_at": "2026-01-01T00:10:00Z"},
+	})
+	require.NoError(t, os.WriteFile(filepath.Join(bothDir, "result.json"), data, 0o644))
+	dirs = append(dirs, bothDir)
+
 	_, err := r.IngestHarborTrials(ctx, exp, ArmControl, "inv1", dirs, nil)
 	require.NoError(t, err)
 	recs, err := r.LoadExperimentRecords(exp.Name)
 	require.NoError(t, err)
 	got := map[string]Outcome{}
-	for _, rec := range recs {
-		got[rec.TrajectoryID] = rec.Outcome
+	var both *RunRecord
+	for i := range recs {
+		got[recs[i].TrajectoryID] = recs[i].Outcome
+		if recs[i].TrajectoryID == "t-both" {
+			both = &recs[i]
+		}
 	}
 	require.Equal(t, OutcomePass, got["t-pass"])
 	require.Equal(t, OutcomeFail, got["t-fail"])
 	require.Equal(t, OutcomeError, got["t-exc"])
 	require.Equal(t, OutcomeError, got["t-nover"])
 	require.Equal(t, OutcomeFail, got["t-partial"]) // partial credit is not a pass
+	require.Equal(t, OutcomeError, got["t-both"])
+
+	require.NotNil(t, both)
+	require.Equal(t, 1.0, both.CheckDetail["reward"])
+	require.Equal(t, "AgentTimeoutError", both.CheckDetail["exception_type"])
+	require.Equal(t, true, both.CheckDetail["executed"])
+	require.Equal(t, false, both.CheckDetail["score_eligible"])
+	require.Equal(t, true, both.CheckDetail["requeue_eligible"])
+	for _, rec := range recs {
+		switch rec.Outcome {
+		case OutcomePass, OutcomeFail:
+			require.Equal(t, true, rec.CheckDetail["score_eligible"], rec.TrajectoryID)
+			require.Equal(t, false, rec.CheckDetail["requeue_eligible"], rec.TrajectoryID)
+		case OutcomeError:
+			require.Equal(t, false, rec.CheckDetail["score_eligible"], rec.TrajectoryID)
+			require.Equal(t, true, rec.CheckDetail["requeue_eligible"], rec.TrajectoryID)
+		}
+	}
 }
 
 func TestIngestHarborTrials_DuplicateRefused(t *testing.T) {
