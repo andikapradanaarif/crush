@@ -1639,7 +1639,9 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 	// The git baseline rides the call: the reviewer diffs from the
 	// revision the work began at, and owner-dirty state captured now
 	// stays separable from the run's own writes at the boundary.
-	if a.configStore != nil && call.reviewBase == nil {
+	// Gated on the edge — three git subprocesses on a large dirty
+	// worktree are pure waste when fresh review can't fire.
+	if a.freshReview && a.configStore != nil && call.reviewBase == nil {
 		call.reviewBase = freshReviewBaseline(ctx, a.configStore.WorkingDir())
 	}
 
@@ -2445,6 +2447,10 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 	cancel()
 
 	if finished {
+		// TurnEnd is the logical-turn boundary: it fires once, on the
+		// attempt that actually delivers. TurnStart still fires per
+		// attempt — each repair really does start work — so hooks
+		// pairing the events see N starts to one end by design.
 		a.fireTurnHook(ctx, call, turnEndEvent(nil, currentAssistant))
 	}
 

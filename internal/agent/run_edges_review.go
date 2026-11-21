@@ -434,7 +434,7 @@ func freshReviewDiff(ctx context.Context, dir string, base *freshReviewState) st
 			more = fmt.Sprintf(" +%d more", len(shown)-5)
 			shown = shown[:5]
 		}
-		fmt.Fprintf(&b, "Already dirty before this run (not the agent's work): %s%s\n",
+		fmt.Fprintf(&b, "Already dirty before this run (owner edits — may also contain agent work): %s%s\n",
 			strings.Join(shown, ", "), more)
 	}
 	for i, p := range newFiles {
