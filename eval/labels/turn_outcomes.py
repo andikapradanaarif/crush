@@ -7,9 +7,10 @@ import json
 import os
 import shlex
 import sqlite3
-from collections import Counter
+import sys
+from collections import Counter, defaultdict
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -93,37 +94,69 @@ def cutoff_millis(value):
     return int(instant.timestamp() * 1000)
 
 
-def project_databases(registry, quotas=QUOTAS):
+def project_databases(registry, quotas=QUOTAS, skipped=None):
     entries = json.loads(registry.read_text())["projects"]
-    wanted = {project for by_project in quotas.values() for project in by_project}
+    wanted = (
+        None
+        if quotas is None
+        else {project for by_project in quotas.values() for project in by_project}
+    )
     databases = {}
+    seen_paths = {}
     for entry in entries:
         name = Path(entry["path"]).name
-        if name not in wanted:
+        if wanted is not None and name not in wanted:
             continue
+        db_path = (Path(entry["data_dir"]) / "crush.db").resolve()
         if name in databases:
-            raise ValueError(f"multiple registered projects named {name!r}")
-        databases[name] = Path(entry["data_dir"]) / "crush.db"
-    missing = sorted(wanted - databases.keys())
-    if missing:
-        raise ValueError(f"projects missing from registry: {', '.join(missing)}")
+            # Relaxed in all modes, not just pool: two registrations of the
+            # identical db file are unambiguous — dedupe instead of raising.
+            if databases[name] == db_path:
+                continue
+            if skipped is None:
+                raise ValueError(f"multiple registered projects named {name!r}")
+            skipped.append((name, f"duplicate registration ({entry['path']})"))
+            continue
+        # Two project names can share one data dir — the rows belong to
+        # the db's single partition, so a second name would count them
+        # again. First name wins (deterministic: registry order).
+        if db_path in seen_paths:
+            if skipped is not None:
+                skipped.append(
+                    (name, f"shares a data dir with {seen_paths[db_path]}")
+                )
+            continue
+        seen_paths[db_path] = name
+        databases[name] = db_path
+    if wanted is not None:
+        missing = sorted(wanted - databases.keys())
+        if missing:
+            raise ValueError(f"projects missing from registry: {', '.join(missing)}")
     return databases
 
 
-def read_candidates(databases, cutoff, post_433=False, quotas=QUOTAS, since=None):
+def read_candidates(
+    databases, cutoff, post_433=False, quotas=QUOTAS, since=None, skipped=None
+):
     candidates = []
     for project, db_path in sorted(databases.items()):
         if not db_path.is_file():
-            raise ValueError(f"{project}: database missing at {db_path}")
+            if skipped is None:
+                raise ValueError(f"{project}: database missing at {db_path}")
+            skipped.append((project, "no database"))
+            continue
         with closing(sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True)) as conn:
             project_keys = [
                 row[0]
                 for row in conn.execute("SELECT DISTINCT project_key FROM turn_outcomes")
             ]
             if len(project_keys) != 1:
-                raise ValueError(
-                    f"{project}: expected one project partition, found {len(project_keys)}"
-                )
+                if skipped is None:
+                    raise ValueError(
+                        f"{project}: expected one project partition, found {len(project_keys)}"
+                    )
+                skipped.append((project, f"{len(project_keys)} project partitions"))
+                continue
             workdir_clause = "AND t.workdir != ''" if post_433 else ""
             since_clause = "AND t.settled_at >= ?" if since is not None else ""
             params = [project_keys[0], cutoff]
@@ -148,7 +181,7 @@ def read_candidates(databases, cutoff, post_433=False, quotas=QUOTAS, since=None
                 # settled corpus.
                 if verdict == "not_applicable":
                     continue
-                if verdict not in quotas:
+                if quotas is not None and verdict not in quotas:
                     raise ValueError(f"{project}: unexpected settled verdict {verdict!r}")
                 candidates.append(
                     {
@@ -353,9 +386,15 @@ def main():
     report.add_argument("--manifest", type=Path, required=True)
     report.add_argument("--review", type=Path, required=True)
     report.add_argument("--gold-out", type=Path)
+    pool = commands.add_parser(
+        "pool", help="measure the reviewable pool under the sampler's filters"
+    )
+    pool.add_argument("--registry", type=Path, default=default_registry())
+    pool.add_argument("--since", help="settled_at lower bound, ISO with timezone")
+    pool.add_argument("--cutoff", help="settled_at upper bound, ISO with timezone")
     args = parser.parse_args()
 
-    wave = WAVES[args.wave]
+    wave = WAVES[args.wave] if args.command != "pool" else None
     try:
         if args.command == "sample":
             cutoff = args.cutoff or wave["cutoff"]
@@ -386,6 +425,37 @@ def main():
             print(f"blind review: {review_path}")
             print(f"manifest: {manifest_path}")
             print(f"manifest SHA-256: {hashlib.sha256(manifest_path.read_bytes()).hexdigest()}")
+        elif args.command == "pool":
+            cutoff = (
+                cutoff_millis(args.cutoff)
+                if args.cutoff
+                else int(datetime.now(timezone.utc).timestamp() * 1000)
+            )
+            since = cutoff_millis(args.since) if args.since else None
+            skipped = []
+            candidates = read_candidates(
+                project_databases(args.registry, quotas=None, skipped=skipped),
+                cutoff,
+                post_433=True,
+                quotas=None,
+                since=since,
+                skipped=skipped,
+            )
+            by_project = defaultdict(Counter)
+            for row in candidates:
+                by_project[row["project"]][row["settled_verdict"]] += 1
+            totals = Counter()
+            for project, counts in sorted(by_project.items()):
+                totals.update(counts)
+                print(f"{project:22} {dict(counts)}")
+            non_accepted = sum(
+                count for verdict, count in totals.items() if verdict != "accepted"
+            )
+            print(
+                f"total {dict(totals)} — non-accepted reviewable: {non_accepted}"
+            )
+            for project, reason in skipped:
+                print(f"skipped {project}: {reason}", file=sys.stderr)
         elif args.command == "review":
             review_arg = args.review or Path(__file__).parent / f"{wave['prefix']}_review.draft.jsonl"
             rows = load_jsonl(review_arg)
