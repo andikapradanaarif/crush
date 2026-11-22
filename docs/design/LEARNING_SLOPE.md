@@ -134,7 +134,10 @@ amends the series pin at freeze.
   effect size (small-positive). The declared series should target
   **n = 4, N ≥ 48** where the harvest allows; n = 3 is admissible
   only as an early-kill check (slope clearly ≤ 0) — a 3-round null
-  reports underpowered-inconclusive, not "no learning".
+  reports underpowered-inconclusive, not "no learning". If the
+  harvest underdelivers, n = 4 at the 30-task floor still resolves
+  small-positive (4.6pp/round pass, 7.6%/round tokens) — the cost
+  of running under target is resolution, not validity.
 
 ## Anti-gaming clauses (all enforced by the harness, not convention)
 
