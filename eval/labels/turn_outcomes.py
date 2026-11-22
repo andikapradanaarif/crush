@@ -107,10 +107,12 @@ def project_databases(registry, quotas=QUOTAS, skipped=None):
         name = Path(entry["path"]).name
         if wanted is not None and name not in wanted:
             continue
-        db_path = Path(entry["data_dir"]) / "crush.db"
+        db_path = (Path(entry["data_dir"]) / "crush.db").resolve()
         if name in databases:
+            # Relaxed in all modes, not just pool: two registrations of the
+            # identical db file are unambiguous — dedupe instead of raising.
             if databases[name] == db_path:
-                continue  # Same underlying db registered under two paths.
+                continue
             if skipped is None:
                 raise ValueError(f"multiple registered projects named {name!r}")
             skipped.append((name, f"duplicate registration ({entry['path']})"))
