@@ -905,7 +905,7 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, report *mess
 		slog.Error("Failed to rebuild system prompt after skill toggle", "error", err)
 	}
 
-	model := agent.Model()
+	model := c.effectiveSessionModel(agent, sessionID)
 	maxTokens := model.CatwalkCfg.DefaultMaxTokens
 	if model.ModelCfg.MaxTokens != 0 {
 		maxTokens = model.ModelCfg.MaxTokens
@@ -2469,6 +2469,18 @@ func (c *coordinator) sessionModels(base func() ModelSet, isSubAgent bool) func(
 	}
 }
 
+// effectiveSessionModel resolves the model a run on sessionID actually
+// uses: the session's pinned override when one applies, else the
+// agent's current model. Coordinator entry points must pin this —
+// not the session-unaware agent.Model() — into SessionAgentCall, or a
+// persisted session override never reaches the run.
+func (c *coordinator) effectiveSessionModel(agent SessionAgent, sessionID string) Model {
+	if override, ok := c.sessionModelOverride(sessionID); ok {
+		return override
+	}
+	return agent.Model()
+}
+
 // sessionModelOverride resolves a session's pinned large model,
 // rehydrating the in-memory map from the persisted session row on a
 // miss — a restarted process finds overrides set before it died
@@ -2690,7 +2702,7 @@ func (c *coordinator) QueuedPromptsList(sessionID string) []string {
 
 func (c *coordinator) Summarize(ctx context.Context, sessionID string) error {
 	agent := c.currentAgent()
-	model := agent.Model()
+	model := c.effectiveSessionModel(agent, sessionID)
 	providerCfg, ok := c.cfg.Config().Providers.Get(model.ModelCfg.Provider)
 	if !ok {
 		return errModelProviderNotConfigured
