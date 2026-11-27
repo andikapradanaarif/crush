@@ -262,6 +262,11 @@ The remaining `internal/` packages are small utilities: `ansiext`,
 - NEVER force-push. To update a stacked branch onto a new base, merge the
   base branch into it (`git merge <base>`) instead of rebasing — merge
   commits are fine since PRs are squash-merged.
+- EXCEPTION: upstream-sync PRs must be merged with a true merge commit,
+  NOT squash. Squashing a sync severs ancestry to upstream commits, which
+  breaks version stamping (the nearest reachable release tag stays behind)
+  and destroys the merge base for the next sync — every future sync would
+  re-fight the same semantic conflicts.
 - Push to `origin` (the fork) only — never `upstream`.
 
 ## Pull Requests
