@@ -28,6 +28,7 @@ import (
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/stretchr/testify/require"
 	yaml "go.yaml.in/yaml/v4"
 	"gopkg.in/dnaeon/go-vcr.v4/pkg/cassette"
@@ -38,7 +39,7 @@ func TestPatchCoderCassettes(t *testing.T) {
 		t.Skip("set CRUSH_PATCH_CASSETTES=1 to rewrite cassettes")
 	}
 
-	dir := filepath.Join("testdata", "TestCoderAgent", "deepseek-v4")
+	dir := filepath.Join("testdata", "TestCoderAgent", "prism-flash")
 	files, err := filepath.Glob(filepath.Join(dir, "*.yaml"))
 	require.NoError(t, err)
 	require.NotEmpty(t, files)
@@ -50,7 +51,7 @@ func TestPatchCoderCassettes(t *testing.T) {
 
 	for _, file := range files {
 		base := strings.TrimSuffix(filepath.Base(file), ".yaml")
-		workingDir := filepath.Join("/tmp/crush-test/TestCoderAgent/deepseek-v4", base)
+		workingDir := filepath.Join("/tmp/crush-test/TestCoderAgent/prism-flash", base)
 		require.NoError(t, os.MkdirAll(workingDir, 0o755))
 		// Hermetic config: ambient providers make Init stall on catalog
 		// fetches, and the rendered prompt must not depend on them.
@@ -58,10 +59,10 @@ func TestPatchCoderCassettes(t *testing.T) {
   "options": {"disable_default_providers": true, "disable_provider_auto_update": true},
   "providers": {"hyper": {"id": "hyper", "name": "Hyper", "type": "openai-compat",
     "base_url": "https://hyper.charm.land/v1", "api_key": "cassette",
-    "models": [{"id": "deepseek-v4-pro-0813", "name": "DeepSeek V4 Pro",
+    "models": [{"id": "prism-flash", "name": "DeepSeek V4 Pro",
                 "context_window": 200000, "default_max_tokens": 10000}]}},
-  "models": {"large": {"provider": "hyper", "model": "deepseek-v4-pro-0813"},
-             "small": {"provider": "hyper", "model": "deepseek-v4-pro-0813"}}
+  "models": {"large": {"provider": "hyper", "model": "prism-flash"},
+             "small": {"provider": "hyper", "model": "prism-flash"}}
 }`), 0o644))
 
 		// Render the new system prompt exactly as coderAgent does.
@@ -76,13 +77,13 @@ func TestPatchCoderCassettes(t *testing.T) {
 		require.NoError(t, err)
 		pinCassetteConfig(cfg)
 
-		built, err := p.Build(t.Context(), "hyper", "deepseek-v4-pro-0813", cfg)
+		built, err := p.Build(t.Context(), "hyper", "prism-flash", cfg)
 		require.NoError(t, err)
 		newPrompt := built.Text
 
 		// Render the new bash description exactly as the test tool list does.
 		perms := permission.NewPermissionService(workingDir, []string{}, nil)
-		bashTool := tools.NewBashTool(nil, perms, workingDir, workingDir, cfg.Config().Options.Attribution, "", cfg.Config().Options.GetMaxBackgroundJobs(), nil, nil, nil)
+		bashTool := tools.NewBashTool(nil, perms, workingDir, workingDir, cfg.Config().Options.Attribution, "", cfg.Config().Options.GetMaxBackgroundJobs(), shell.CoreutilsOff, nil, nil, nil, nil)
 		newBashDesc := bashTool.Info().Description
 
 		// Patch every interaction's request body.
@@ -160,14 +161,14 @@ func TestPatchCoderCassetteEditResults(t *testing.T) {
 		t.Skip("set CRUSH_PATCH_CASSETTES=1 to rewrite cassettes")
 	}
 
-	dir := filepath.Join("testdata", "TestCoderAgent", "deepseek-v4")
+	dir := filepath.Join("testdata", "TestCoderAgent", "prism-flash")
 	files, err := filepath.Glob(filepath.Join(dir, "*.yaml"))
 	require.NoError(t, err)
 	require.NotEmpty(t, files)
 
 	for _, file := range files {
 		base := strings.TrimSuffix(filepath.Base(file), ".yaml")
-		workingDir := filepath.Join("/tmp/crush-test/TestCoderAgent/deepseek-v4", base)
+		workingDir := filepath.Join("/tmp/crush-test/TestCoderAgent/prism-flash", base)
 		require.NoError(t, os.MkdirAll(workingDir, 0o755))
 		createSimpleGoProject(t, workingDir)
 

@@ -8,7 +8,7 @@ func Fee(weightGrams int, zone string) int {
 		base += 600
 	}
 	if weightGrams > 2000 {
-		base += (weightGrams-2000+999)/1000 * 150
+		base += (weightGrams - 2000 + 999) / 1000 * 150
 	}
 	return base
 }

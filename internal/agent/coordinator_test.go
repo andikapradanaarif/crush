@@ -49,7 +49,7 @@ func (m *mockSessionAgent) QueuedPrompts(sessionID string) int          { return
 func (m *mockSessionAgent) QueuedPromptsList(sessionID string) []string { return nil }
 func (m *mockSessionAgent) ClearQueue(sessionID string)                 {}
 func (m *mockSessionAgent) AddNote(sessionID, text string)              {}
-func (m *mockSessionAgent) Summarize(context.Context, string, fantasy.ProviderOptions, func(context.Context, *fantasy.ProviderError) error) error {
+func (m *mockSessionAgent) Summarize(context.Context, string, Model, fantasy.ProviderOptions, func(context.Context, *fantasy.ProviderError) error) error {
 	return nil
 }
 func (m *mockSessionAgent) GenerateTitle(context.Context, string, string) {}
@@ -849,9 +849,10 @@ func TestCoordinatorSetMainAgent(t *testing.T) {
 			},
 		}
 
+		assert.Equal(t, config.AgentCoder, coord.MainAgent())
 		err := coord.SetMainAgent(config.AgentPlan)
 		require.NoError(t, err)
-		assert.Equal(t, config.AgentPlan, coord.mainAgentName)
+		assert.Equal(t, config.AgentPlan, coord.MainAgent())
 		assert.Same(t, plan, coord.mainAgent)
 	})
 

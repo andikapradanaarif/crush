@@ -160,6 +160,7 @@ Flags:
       --extra-header key value      add an HTTP header (repeatable)
       --extra-body JSON             merge a JSON object into request bodies
       --provider-options JSON       merge a provider-specific JSON object
+      --aws-auth-refresh string     command run when AWS credentials expire (Bedrock only)
 ```
 
 ```bash
@@ -545,6 +546,8 @@ Boolean Keys:
   auto-summarize                 automatically summarize long conversations
   provider-auto-update           update the provider catalog automatically
   default-providers              include built-in providers
+  subagents                      let agents start subagents (agent,
+                                 agent_dispatch, agentic_fetch)
   attribution-generated-with     add the Generated with Crush line
   project-index                  build a project index for the map tool
 
@@ -553,6 +556,8 @@ String Keys:
   initialize-as string             context filename created by crush init
   notifications string             notification style: auto, native, osc, bell,
                                    or disabled
+  coreutils string                 core utilities used by shell commands:
+                                   turtle, system, auto, or off (default auto)
   attribution-trailer-style string attribution trailer: none, co-authored-by,
                                    or assisted-by
 
@@ -584,6 +589,28 @@ option skill-path ./skills
 option attribution-trailer-style assisted-by
 ```
 
+#### `option coreutils`
+
+Select which implementation of the Unix core utilities Crush's shell runs
+for commands like `ls`, `find`, or `sed`.
+
+- `turtle`: always run
+  [`charm.land/turtle`](https://github.com/charmbracelet/turtle)'s
+  implementations.
+- `system`: prefer the system utilities found in PATH, falling back to
+  Turtle when one is missing.
+- `auto` (default): Turtle on Windows, the system utilities elsewhere.
+- `off`: skip the coreutils middleware entirely, so every core utility
+  resolves through the host system.
+
+```bash
+option coreutils turtle
+```
+
+The setting applies to the agent's bash tool, `!` commands, and hooks. A
+`crushrc` itself always runs with Turtle while its own configuration is
+being read.
+
 #### `option reset`
 
 Clear every value previously added to a list option. Values added after the
@@ -599,6 +626,21 @@ Available Keys:
   skill-path            clear additional skill directories
   disable-skill         clear disabled skill names
 ```
+
+#### Environment variables
+
+Variables you `export` in a `crushrc` are set in Crush's environment when it
+starts, the same as the `env` object in `crush.json`. Only variables the
+script exports or changes count; the environment Crush inherited is left
+alone.
+
+```bash
+export AWS_PROFILE=work
+```
+
+Anything a sourced script exports comes along too. To override it, export
+again after the `source`; the last assignment wins, as in any shell.
+
 
 #### `option prompt`
 
@@ -805,7 +847,8 @@ For a full reference, See the [JSON schema](../../schema.json).
 
 In JSON, only selected string fields (API keys, URLs, MCP/LSP commands and args,
 headers) are shell-expanded at load time. In `crushrc` there's no such list —
-it's all just Bash.
+it's all just Bash, and values are expanded once, by Bash. A single-quoted
+`'$FOO'` stays the literal text `$FOO`.
 
 Both formats are trusted code: they run with your shell privileges before the UI
 appears. Don't launch Crush in a directory whose config you haven't read.

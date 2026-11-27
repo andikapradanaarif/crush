@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/message"
@@ -416,4 +417,27 @@ func TestMessageToProtoReasoningParity(t *testing.T) {
 	tc, ok := got.Parts[1].(proto.ToolCall)
 	require.True(t, ok, "expected proto.ToolCall, got %T", got.Parts[1])
 	require.True(t, tc.ProviderExecuted)
+}
+
+func TestToolProgressToProto_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	src := pubsub.Event[tools.ToolProgress]{
+		Type: pubsub.UpdatedEvent,
+		Payload: tools.ToolProgress{
+			SessionID:  "s1",
+			ToolCallID: "call-1",
+			ShellID:    "001",
+			Output:     "line 1\nline 2",
+		},
+	}
+
+	env := wrapEvent(src)
+	require.NotNil(t, env)
+	require.Equal(t, pubsub.PayloadTypeToolProgress, env.Type)
+
+	var decoded pubsub.Event[proto.ToolProgress]
+	require.NoError(t, json.Unmarshal(env.Payload, &decoded))
+	require.Equal(t, pubsub.UpdatedEvent, decoded.Type)
+	require.Equal(t, proto.ToolProgress(src.Payload), decoded.Payload)
 }

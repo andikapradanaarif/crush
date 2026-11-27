@@ -249,6 +249,6 @@ func (s *busyStubAgent) QueuedPromptsList(string) []string             { return 
 func (s *busyStubAgent) ClearQueue(string)                             {}
 func (s *busyStubAgent) Model() Model                                  { return Model{} }
 func (s *busyStubAgent) GenerateTitle(context.Context, string, string) {}
-func (s *busyStubAgent) Summarize(context.Context, string, fantasy.ProviderOptions, func(context.Context, *fantasy.ProviderError) error) error {
+func (s *busyStubAgent) Summarize(context.Context, string, Model, fantasy.ProviderOptions, func(context.Context, *fantasy.ProviderError) error) error {
 	return nil
 }

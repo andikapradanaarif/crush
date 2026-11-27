@@ -20,6 +20,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/clipboard"
 	"github.com/charmbracelet/crush/internal/cmdlog"
@@ -107,6 +108,7 @@ type App struct {
 	// drive their exit on a deterministic, payload-bearing event
 	// instead of guessing from message finish parts.
 	runCompletions *pubsub.Broker[notify.RunComplete]
+	toolProgress   *pubsub.Broker[tools.ToolProgress]
 
 	// herdrClient reports agent state to herdr when running inside
 	// a herdr-managed pane. Nil when not in a herdr environment.
@@ -174,7 +176,9 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 
 	hookRunner := hooks.NewRunner(func() map[string][]config.HookConfig {
 		return store.Config().Hooks
-	}, store.WorkingDir(), store.WorkingDir())
+	}, store.WorkingDir(), store.WorkingDir(), hooks.WithCoreutils(func() shell.CoreutilsMode {
+		return store.Config().Options.GetCoreutils()
+	}))
 
 	permSvc := permission.NewPermissionService(store.WorkingDir(), allowedTools, permissionHooks{hookRunner},
 		// Persisted per-session auto-approve overrides hydrate the
@@ -222,6 +226,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		tuiWG:              &sync.WaitGroup{},
 		agentNotifications: pubsub.NewBroker[notify.Notification](),
 		runCompletions:     pubsub.NewBroker[notify.RunComplete](),
+		toolProgress:       pubsub.NewCoalescingBroker(toolProgressCoalesceKey),
 	}
 
 	// Initialize notebook service. Enabled by default; the model
@@ -587,29 +592,37 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 	// Report session identity to herdr.
 	app.ReportCurrentSession(sess.ID)
 
-	type response struct {
+	answer, err := newAnswerPrinter(ctx, output, sess.ID, app.Messages, continueSessionID != "" || useLast)
+	if err != nil {
+		return err
+	}
+
+	// Subscribe before the agent starts, so no update is published before
+	// anyone listens.
+	subCtx, cancelSub := context.WithCancel(ctx)
+	defer cancelSub()
+	messageEvents := app.Messages.Subscribe(subCtx)
+
+	// capture carries the run's result for eval telemetry. The goroutine
+	// writes it before signaling done, and printUntilDone (or the cancel
+	// grace below) reads it only after receiving from done, so the
+	// channel handoff keeps the race detector happy.
+	var capture struct {
 		result *fantasy.AgentResult
 		err    error
 	}
-	done := make(chan response, 1)
-
+	done := make(chan error, 1)
 	coord := app.Agent()
 	go func(ctx context.Context, sessionID, prompt string) {
-		result, err := coord.Run(ctx, sess.ID, prompt)
+		result, err := coord.Run(ctx, sessionID, prompt)
 		if err != nil {
-			done <- response{
-				err: fmt.Errorf("failed to start agent processing stream: %w", err),
-			}
+			capture.err = fmt.Errorf("failed to start agent processing stream: %w", err)
+			done <- capture.err
 			return
 		}
-		done <- response{
-			result: result,
-		}
+		capture.result = result
+		done <- nil
 	}(ctx, sess.ID, prompt)
-
-	messageEvents := app.Messages.Subscribe(ctx)
-	messageReadBytes := make(map[string]int)
-	var printed bool
 
 	defer func() {
 		if progress && stderrTTY {
@@ -621,97 +634,57 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 		_, _ = fmt.Fprintln(output)
 	}()
 
-	for {
+	beforeWait := func() {
 		if progress && stderrTTY {
 			// HACK: Reinitialize the terminal progress bar on every iteration
 			// so it doesn't get hidden by the terminal due to inactivity.
 			_, _ = fmt.Fprintf(os.Stderr, ansi.SetIndeterminateProgressBar)
 		}
-
-		select {
-		case result := <-done:
-			stopSpinner()
-			// Join detached notebook work before exit — a short-lived
-			// `crush run` process must commit coverage (and let the
-			// telemetry/report reflect it) rather than killing the
-			// generators mid-flight.
-			attempted, completed := app.drainDetachedWork(detachedDrainTimeout)
-			app.emitEvalTelemetry(sess.ID, result.result, result.err, 0,
-				drainReport{Attempted: attempted, Completed: completed, TimeoutMs: detachedDrainTimeout.Milliseconds()})
-			if result.err != nil {
-				if errors.Is(result.err, context.Canceled) || errors.Is(result.err, agent.ErrRequestCancelled) {
-					slog.Debug("Non-interactive: agent processing cancelled", "session_id", sess.ID)
-					return nil
-				}
-				return fmt.Errorf("agent processing failed: %w", result.err)
-			}
-			return nil
-
-		case event := <-messageEvents:
-			msg := event.Payload
-			if msg.SessionID == sess.ID && msg.Role == message.Assistant && len(msg.Parts) > 0 {
-				stopSpinner()
-
-				content := msg.Content().String()
-				readBytes := messageReadBytes[msg.ID]
-
-				if len(content) < readBytes {
-					slog.Error("Non-interactive: message content is shorter than read bytes", "message_length", len(content), "read_bytes", readBytes)
-					return fmt.Errorf("message content is shorter than read bytes: %d < %d", len(content), readBytes)
-				}
-
-				part := content[readBytes:]
-				// Trim leading whitespace. Sometimes the LLM includes leading
-				// formatting and indentation, which we don't want here.
-				if readBytes == 0 {
-					part = strings.TrimPrefix(part, "\n")
-					part = strings.TrimLeft(part, " \t")
-				}
-				// Ignore initial whitespace-only messages.
-				if printed || strings.TrimSpace(part) != "" {
-					printed = true
-					fmt.Fprint(output, part)
-				}
-				messageReadBytes[msg.ID] = len(content)
-			}
-
-		case <-ctx.Done():
-			stopSpinner()
-			// The 2s grace exists only for the eval harness — the
-			// telemetry distinguishes "timed out while erroring" from
-			// a clean timeout. Without it, exit promptly on cancel.
-			if os.Getenv(EvalTelemetryEnvVar) == "" {
-				return ctx.Err()
-			}
-			select {
-			case result := <-done:
-				// The run goroutine returned — no new top-level
-				// spawns can land, so joining detached work here
-				// cannot race an Add on an empty wait group.
-				// Generations run on detached contexts and may still
-				// be in flight; give near-done ones a beat to commit
-				// coverage before the process dies.
-				attempted, completed := app.drainDetachedWork(detachedCancelDrainTimeout)
-				// An errored run may carry a nil result — still record
-				// the approximate step burn.
-				app.emitEvalTelemetry(sess.ID, result.result, result.err, len(messageReadBytes),
-					drainReport{Attempted: attempted, Completed: completed, TimeoutMs: detachedCancelDrainTimeout.Milliseconds()})
-				if result.err != nil &&
-					!errors.Is(result.err, context.Canceled) &&
-					!errors.Is(result.err, agent.ErrRequestCancelled) {
-					return fmt.Errorf("agent processing failed: %w", result.err)
-				}
-			case <-time.After(2 * time.Second):
-				// len(messageReadBytes) approximates steps burned —
-				// distinct assistant messages seen before the kill.
-				// The drain never ran — record that, not a fake
-				// completion.
-				app.emitEvalTelemetry(sess.ID, nil, ctx.Err(), len(messageReadBytes),
-					drainReport{Attempted: false})
-			}
-			return ctx.Err()
-		}
 	}
+	runErr := answer.printUntilDone(ctx, messageEvents, done, app.Messages, beforeWait, stopSpinner)
+
+	// Join detached notebook work before exit — a short-lived
+	// `crush run` process must commit coverage (and let the
+	// telemetry/report reflect it) rather than killing the
+	// generators mid-flight — and record eval telemetry on every
+	// exit path.
+	if runErr == nil || !errors.Is(runErr, ctx.Err()) {
+		// The done channel fired (success or run failure): capture is
+		// populated and a full drain is affordable.
+		attempted, completed := app.drainDetachedWork(detachedDrainTimeout)
+		app.emitEvalTelemetry(sess.ID, capture.result, capture.err, 0,
+			drainReport{Attempted: attempted, Completed: completed, TimeoutMs: detachedDrainTimeout.Milliseconds()})
+		return runErr
+	}
+
+	// The run was canceled from outside. The 2s grace exists only for
+	// the eval harness — the telemetry distinguishes "timed out while
+	// erroring" from a clean timeout. Without it, exit promptly on
+	// cancel.
+	if os.Getenv(EvalTelemetryEnvVar) == "" {
+		return runErr
+	}
+	select {
+	case <-done:
+		// The run goroutine returned — no new top-level
+		// spawns can land, so joining detached work here
+		// cannot race an Add on an empty wait group.
+		// Generations run on detached contexts and may still
+		// be in flight; give near-done ones a beat to commit
+		// coverage before the process dies.
+		attempted, completed := app.drainDetachedWork(detachedCancelDrainTimeout)
+		// An errored run may carry a nil result — still record
+		// the approximate step burn.
+		app.emitEvalTelemetry(sess.ID, capture.result, capture.err, answer.replyCount(),
+			drainReport{Attempted: attempted, Completed: completed, TimeoutMs: detachedCancelDrainTimeout.Milliseconds()})
+	case <-time.After(2 * time.Second):
+		// replyCount approximates steps burned — distinct assistant
+		// messages seen before the kill. The drain never ran —
+		// record that, not a fake completion.
+		app.emitEvalTelemetry(sess.ID, nil, ctx.Err(), answer.replyCount(),
+			drainReport{Attempted: false})
+	}
+	return runErr
 }
 
 // detachedDrainTimeout bounds the pre-exit join on detached agent
@@ -1013,6 +986,7 @@ func (app *App) setupEvents() {
 	app.subscribe(ctx, "mcp", mcp.SubscribeEvents)
 	app.subscribe(ctx, "mcp-channels", app.subscribeScopedChannelEvents)
 	app.subscribe(ctx, "lsp", SubscribeLSPEvents)
+	app.subscribe(ctx, "tool-progress", app.toolProgress.Subscribe)
 	if app.Skills != nil {
 		app.subscribe(ctx, "skills", app.Skills.SubscribeEvents)
 	}
@@ -1056,13 +1030,24 @@ func (app *App) subscribeScopedChannelEvents(ctx context.Context) <-chan pubsub.
 	return scoped
 }
 
-// eventCoalesceKey keeps at most one pending message update per message
-// for each slow app.events subscriber.
+// eventCoalesceKey keeps at most one pending message or tool-progress
+// update per item for each slow app.events subscriber.
 func eventCoalesceKey(ev pubsub.Event[tea.Msg]) string {
-	if e, ok := ev.Payload.(pubsub.Event[message.Message]); ok {
-		return message.CoalesceKey(e)
+	switch e := ev.Payload.(type) {
+	case pubsub.Event[message.Message]:
+		if k := message.CoalesceKey(e); k != "" {
+			return "msg:" + k
+		}
+	case pubsub.Event[tools.ToolProgress]:
+		if k := toolProgressCoalesceKey(e); k != "" {
+			return "tool-progress:" + k
+		}
 	}
 	return ""
+}
+
+func toolProgressCoalesceKey(ev pubsub.Event[tools.ToolProgress]) string {
+	return ev.Payload.ToolCallID
 }
 
 // subscribe fans a service's event stream into the shared app.events
@@ -1188,6 +1173,7 @@ func (app *App) initCoderAgent(ctx context.Context, interactive bool) error {
 		LSPManager:            app.LSPManager,
 		Notify:                app.agentNotifications,
 		RunComplete:           app.runCompletions,
+		ToolProgress:          app.toolProgress,
 		Skills:                app.Skills,
 		Interactive:           interactive,
 		Notebook:              app.Notebook,

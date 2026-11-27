@@ -203,6 +203,34 @@
         "display"
       ]
     },
+    "ExperimentalOptions": {
+      "properties": {
+        "client_server": {
+          "type": "boolean",
+          "description": "Run the agent in a background server that the TUI attaches to. Overridden by CRUSH_CLIENT_SERVER.",
+          "default": false
+        },
+        "server_ready_timeout": {
+          "type": "integer",
+          "description": "Seconds a client waits for the server to become ready. Overridden by CRUSH_SERVER_READY_TIMEOUT.",
+          "examples": [
+            30
+          ]
+        },
+        "server_idle_timeout": {
+          "type": "integer",
+          "description": "Seconds the server stays alive after its last workspace closes. 0 shuts it down at once. Overridden by CRUSH_SERVER_IDLE_TIMEOUT.",
+          "default": 60
+        },
+        "server_detach_grace": {
+          "type": "integer",
+          "description": "Seconds a workspace survives after a client's connection drops. 0 tears it down at once. Overridden by CRUSH_SERVER_DETACH_GRACE.",
+          "default": 10
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
     "HookConfig": {
       "properties": {
         "name": {
@@ -663,6 +691,11 @@
           "description": "Disable providers auto-update",
           "default": false
         },
+        "disable_subagents": {
+          "type": "boolean",
+          "description": "Prevent agents from starting subagents. Removes the agent, agent_dispatch, agent_send, agent_status, agent_stop, and agentic_fetch tools",
+          "default": false
+        },
         "disable_default_providers": {
           "type": "boolean",
           "description": "Ignore all default/embedded providers. When enabled, providers must be fully specified in the config file with base_url, models, and api_key - no merging with defaults occurs",
@@ -925,6 +958,21 @@
         "prompts": {
           "$ref": "#/$defs/PromptPaths",
           "description": "Files that replace Crush's built-in prompts, keyed by prompt name. A replacement is used verbatim, so anything the built-in template injected (skills, context files, LSP status) is lost unless the replacement asks for it too."
+        },
+        "experimental": {
+          "$ref": "#/$defs/ExperimentalOptions",
+          "description": "Experimental features. They are unfinished and may change or be removed in any release."
+        },
+        "coreutils": {
+          "type": "string",
+          "enum": [
+            "turtle",
+            "system",
+            "auto",
+            "off"
+          ],
+          "description": "How core utilities run in Crush shells.",
+          "default": "auto"
         }
       },
       "additionalProperties": false,

@@ -6,6 +6,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/ui/dialog"
 	"github.com/stretchr/testify/require"
 )
@@ -245,4 +246,58 @@ func TestPermissionResponse_SilentGrantDrainsQueue(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "call-2", pd.ToolCallID())
 	require.Empty(t, u.pendingPermissions)
+}
+
+// permissionWorkspace is a countingWorkspace with the config the
+// permissions dialog reads its diff mode from.
+type permissionWorkspace struct {
+	*countingWorkspace
+}
+
+func (permissionWorkspace) Config() *config.Config {
+	return &config.Config{Options: &config.Options{TUI: &config.TUIOptions{}}}
+}
+
+// permissionEvent is the event the workspace publishes when a tool asks for
+// the permission with the given ID, and again whenever the request is
+// replayed.
+func permissionEvent(id string) pubsub.Event[permission.PermissionRequest] {
+	return pubsub.Event[permission.PermissionRequest]{
+		Type: pubsub.CreatedEvent,
+		Payload: permission.PermissionRequest{
+			ID:         id,
+			SessionID:  "s1",
+			ToolCallID: "tool-call-" + id,
+			ToolName:   "bash",
+		},
+	}
+}
+
+func TestPermissionRequestReplayKeepsDialog(t *testing.T) {
+	t.Setenv("CRUSH_PERMISSIONS_PIPED", "")
+	u := newProgramStatusUI(t)
+	u.com.Workspace = permissionWorkspace{u.com.Workspace.(*countingWorkspace)}
+	notifier := &recordingNotifier{}
+	u.notifyBackend = notifier
+	u.caps.ReportFocusEvents = true
+	u.notifyWindowFocused = false
+
+	_, _ = u.Update(permissionEvent("perm-1"))
+	dlg := u.dialog.Dialog(dialog.PermissionsID)
+	require.NotNil(t, dlg)
+	require.Len(t, notifier.sent, 1)
+
+	// The server re-sends a pending request whenever a client reports its
+	// session; the replay must keep the open dialog, with its scroll, diff
+	// mode, and selected button, and not notify again.
+	_, _ = u.Update(permissionEvent("perm-1"))
+	require.Same(t, dlg, u.dialog.Dialog(dialog.PermissionsID))
+	require.Len(t, notifier.sent, 1)
+
+	// A different request does not replace the open dialog — it queues
+	// behind it (replacing would strand the displayed request's tool
+	// call) — but the user is still notified.
+	_, _ = u.Update(permissionEvent("perm-2"))
+	require.Same(t, dlg, u.dialog.Dialog(dialog.PermissionsID))
+	require.Len(t, notifier.sent, 2)
 }

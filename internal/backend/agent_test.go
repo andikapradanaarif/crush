@@ -73,6 +73,7 @@ func (c *blockingCoordinator) ClearSessionModelOverride(string)          {}
 func (c *blockingCoordinator) ApprovePlan(context.Context, string) error { return nil }
 func (c *blockingCoordinator) SetHostContext(proto.HostContext)          {}
 func (c *blockingCoordinator) HostContext() proto.HostContext            { return proto.HostContext{} }
+func (c *blockingCoordinator) MainAgent() string                         { return "" }
 
 func (c *blockingCoordinator) SetMainAgent(agentName string) error {
 	c.lastMainAgentSet.Store(agentName)

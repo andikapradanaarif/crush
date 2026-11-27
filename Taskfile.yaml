@@ -72,6 +72,7 @@ tasks:
   run:onboarding:
     desc: Run build with custom config to test onboarding
     env:
+      CRUSH_DATA_DIR: tmp/onboarding/.crush
       CRUSH_GLOBAL_DATA: tmp/onboarding/data
       CRUSH_GLOBAL_CONFIG: tmp/onboarding/config
     cmds:
@@ -88,7 +89,7 @@ tasks:
     desc: Run tests and record all VCR cassettes again
     aliases: [record]
     cmds:
-      - rm -r internal/agent/testdata
+      - rm -rf internal/agent/testdata
       - go test -v -count=1 -timeout=1h ./internal/agent
 
   fmt:

@@ -3,7 +3,7 @@ package ledger
 
 // Entry is one posted line.
 type Entry struct {
-	Memo       string
+	Memo        string
 	AmountCents int
 }
 

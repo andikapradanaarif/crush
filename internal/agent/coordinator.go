@@ -120,6 +120,8 @@ type Coordinator interface {
 	// plan: it seeds the typed plan items the plan agent emitted and
 	// resolves the scope gate for the next run.
 	ApprovePlan(ctx context.Context, sessionID string) error
+	// MainAgent names the current main agent, as last set by SetMainAgent.
+	MainAgent() string
 	Run(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error)
 	// RunAccepted runs a call that was already accepted via
 	// BeginAccepted on the fire-and-forget dispatch path. The handle is
@@ -160,18 +162,19 @@ type Coordinator interface {
 }
 
 type coordinator struct {
-	cfg         *config.ConfigStore
-	sessions    session.Service
-	messages    message.Service
-	permissions permission.Service
-	questions   question.Service
-	history     history.Service
-	filetracker filetracker.Service
-	cmdlog      cmdlog.Service
-	lspManager  *lsp.Manager
-	notify      pubsub.Publisher[notify.Notification]
-	runComplete pubsub.Publisher[notify.RunComplete]
-	interactive bool
+	cfg          *config.ConfigStore
+	sessions     session.Service
+	messages     message.Service
+	permissions  permission.Service
+	questions    question.Service
+	history      history.Service
+	filetracker  filetracker.Service
+	cmdlog       cmdlog.Service
+	lspManager   *lsp.Manager
+	notify       pubsub.Publisher[notify.Notification]
+	runComplete  pubsub.Publisher[notify.RunComplete]
+	toolProgress pubsub.Publisher[tools.ToolProgress]
+	interactive  bool
 	// scopeGate is the coordinator's long-lived first-write gate —
 	// one instance wraps every tool rebuild so per-turn bookkeeping
 	// survives SetTools.
@@ -379,9 +382,11 @@ type CoordinatorOptions struct {
 	LSPManager  *lsp.Manager
 	Notify      pubsub.Publisher[notify.Notification]
 	RunComplete pubsub.Publisher[notify.RunComplete]
-	Skills      *skills.Manager
-	HookRunner  *hooks.Runner
-	Interactive bool
+	// ToolProgress carries live tool output for display; may be nil.
+	ToolProgress pubsub.Publisher[tools.ToolProgress]
+	Skills       *skills.Manager
+	HookRunner   *hooks.Runner
+	Interactive  bool
 	// Notebook is the per-event context notebook service. May be nil
 	// when notebook is disabled.
 	Notebook notebook.Service
@@ -432,6 +437,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		lspManager:            opts.LSPManager,
 		notify:                opts.Notify,
 		runComplete:           opts.RunComplete,
+		toolProgress:          opts.ToolProgress,
 		agents:                make(map[string]SessionAgent),
 		allSkills:             allSkills,
 		activeSkills:          activeSkills,
@@ -834,6 +840,12 @@ func (c *coordinator) planSeeds(sessionID, plan string) []session.PlanItem {
 	return clean
 }
 
+// MainAgent implements Coordinator.
+func (c *coordinator) MainAgent() string {
+	_, name := c.activeAgent()
+	return name
+}
+
 // Run implements Coordinator.
 func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
 	return c.run(ctx, nil, nil, sessionID, prompt, attachments...)
@@ -955,6 +967,7 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, report *mess
 			Report:            report,
 			HiddenUserMessage: message.HiddenUserMessage(ctx),
 			Attachments:       attachments,
+			Model:             model,
 			MaxOutputTokens:   maxTokens,
 			ProviderOptions:   mergedOptions,
 			Temperature:       temp,
@@ -1740,10 +1753,10 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 
 	allTools = append(
 		allTools,
-		tools.NewBashTool(c.lspManager, c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.DataDirectory, c.cfg.Config().Options.Attribution, modelID, c.cfg.Config().Options.GetMaxBackgroundJobs(), c.cfg.Config().Permissions, c.shellOwner, c.cmdlog),
+		tools.NewBashTool(c.lspManager, c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.DataDirectory, c.cfg.Config().Options.Attribution, modelID, c.cfg.Config().Options.GetMaxBackgroundJobs(), c.cfg.Config().Options.GetCoreutils(), c.cfg.Config().Permissions, c.shellOwner, c.cmdlog, c.toolProgress),
 		tools.NewCrushInfoTool(c.cfg, c.lspManager, c.allSkills, c.activeSkills, c.skillTracker),
 		tools.NewCrushLogsTool(logFile),
-		tools.NewJobOutputTool(c.cfg.Config().Options.DataDirectory, c.cmdlog),
+		tools.NewJobOutputTool(c.cfg.Config().Options.DataDirectory, c.cmdlog, c.toolProgress),
 		tools.NewJobKillTool(c.cmdlog),
 		tools.NewDownloadTool(c.permissions, c.cfg.WorkingDir(), nil),
 		tools.NewEditTool(c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
@@ -2677,7 +2690,8 @@ func (c *coordinator) QueuedPromptsList(sessionID string) []string {
 
 func (c *coordinator) Summarize(ctx context.Context, sessionID string) error {
 	agent := c.currentAgent()
-	providerCfg, ok := c.cfg.Config().Providers.Get(agent.Model().ModelCfg.Provider)
+	model := agent.Model()
+	providerCfg, ok := c.cfg.Config().Providers.Get(model.ModelCfg.Provider)
 	if !ok {
 		return errModelProviderNotConfigured
 	}
@@ -2688,9 +2702,9 @@ func (c *coordinator) Summarize(ctx context.Context, sessionID string) error {
 
 	// Auth failures during summarize flow through fantasy's OnAuthRefresh,
 	// the same path used by regular turns.
-	opts := getProviderOptions(agent.Model(), providerCfg)
+	opts := getProviderOptions(model, providerCfg)
 	injectOpenrouterSessionID(opts, sessionID)
-	return agent.Summarize(ctx, sessionID, opts, c.makeAuthRefreshCallback(providerCfg))
+	return agent.Summarize(ctx, sessionID, model, opts, c.makeAuthRefreshCallback(providerCfg))
 }
 
 // GenerateTitle generates a session title using the current agent.
@@ -2869,7 +2883,7 @@ func callTopK(providerCfg config.ProviderConfig, topK *int64) *int64 {
 // settings for the subagent's own model, not the parent's. Both the initial
 // task and any message sent to a running subagent go through it, so a
 // mid-flight message cannot start a turn with an unconfigured model.
-func (c *coordinator) subAgentCall(agent SessionAgent, sessionID, prompt string) (SessionAgentCall, Model, error) {
+func (c *coordinator) subAgentCall(agent SessionAgent, sessionID, prompt string) (SessionAgentCall, error) {
 	model := agent.Model()
 	maxTokens := model.CatwalkCfg.DefaultMaxTokens
 	if model.ModelCfg.MaxTokens != 0 {
@@ -2878,7 +2892,7 @@ func (c *coordinator) subAgentCall(agent SessionAgent, sessionID, prompt string)
 
 	providerCfg, ok := c.cfg.Config().Providers.Get(model.ModelCfg.Provider)
 	if !ok {
-		return SessionAgentCall{}, Model{}, errModelProviderNotConfigured
+		return SessionAgentCall{}, errModelProviderNotConfigured
 	}
 
 	opts := getProviderOptions(model, providerCfg)
@@ -2887,6 +2901,7 @@ func (c *coordinator) subAgentCall(agent SessionAgent, sessionID, prompt string)
 	return SessionAgentCall{
 		SessionID:        sessionID,
 		Prompt:           prompt,
+		Model:            model,
 		MaxOutputTokens:  maxTokens,
 		ProviderOptions:  opts,
 		Temperature:      model.ModelCfg.Temperature,
@@ -2896,7 +2911,7 @@ func (c *coordinator) subAgentCall(agent SessionAgent, sessionID, prompt string)
 		PresencePenalty:  model.ModelCfg.PresencePenalty,
 		NonInteractive:   true,
 		OnAuthRefresh:    c.makeAuthRefreshCallback(providerCfg),
-	}, model, nil
+	}, nil
 }
 
 // runSubAgent runs a subagent and handles session management and cost accumulation.
@@ -2920,7 +2935,7 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		params.SessionSetup(session.ID)
 	}
 
-	call, model, err := c.subAgentCall(params.Agent, session.ID, params.Prompt)
+	call, err := c.subAgentCall(params.Agent, session.ID, params.Prompt)
 	if err != nil {
 		return fantasy.ToolResponse{}, err
 	}
@@ -2928,7 +2943,7 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 	done := c.trackSubSession(session.ID)
 	result, err := params.Agent.Run(ctx, call)
 	done()
-	c.askToSignInAgain(err, model)
+	c.askToSignInAgain(err, call.Model)
 	if err != nil {
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to generate response: %s", err)), nil
 	}

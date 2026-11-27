@@ -225,6 +225,7 @@ func (c *scriptedCoordinator) UpdateModels(context.Context) error            { r
 func (c *scriptedCoordinator) UpdateSummaryModel(context.Context) error      { return nil }
 func (c *scriptedCoordinator) ApprovePlan(context.Context, string) error     { return nil }
 func (c *scriptedCoordinator) SetMainAgent(string) error                     { return nil }
+func (c *scriptedCoordinator) MainAgent() string                             { return "" }
 func (c *scriptedCoordinator) GenerateTitle(context.Context, string, string) {}
 func (c *scriptedCoordinator) SetSessionModelOverride(context.Context, string, config.SelectedModel) error {
 	return nil

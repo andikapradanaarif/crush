@@ -52,6 +52,7 @@ func (c *errorCoordinator) UpdateModels(context.Context) error                { 
 func (c *errorCoordinator) UpdateSummaryModel(context.Context) error          { return nil }
 func (c *errorCoordinator) ApprovePlan(context.Context, string) error         { return nil }
 func (c *errorCoordinator) SetMainAgent(string) error                         { return nil }
+func (c *errorCoordinator) MainAgent() string                                 { return "" }
 func (c *errorCoordinator) GenerateTitle(context.Context, string, string)     {}
 func (c *errorCoordinator) SetSessionModelOverride(context.Context, string, config.SelectedModel) error {
 	return nil
