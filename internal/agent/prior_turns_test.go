@@ -762,7 +762,10 @@ func TestSummarize_RendersVerbatim(t *testing.T) {
 	ctx := t.Context()
 	a.detectSegments(ctx, sessionID, msgs)
 
-	require.NoError(t, a.Summarize(ctx, sessionID, fantasy.ProviderOptions{}, nil))
+	require.NoError(t, a.Summarize(ctx, sessionID, Model{
+		Model:    model,
+		ModelCfg: config.SelectedModel{Model: "fake-model", Provider: "fake"},
+	}, fantasy.ProviderOptions{}, nil))
 	require.NotEmpty(t, model.prompts)
 
 	// The summary's input must be the verbatim transcript: a collapsed

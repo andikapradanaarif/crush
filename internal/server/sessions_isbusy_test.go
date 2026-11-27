@@ -57,6 +57,7 @@ func (s *stubCoordinator) UpdateModels(context.Context) error            { retur
 func (s *stubCoordinator) UpdateSummaryModel(context.Context) error      { return nil }
 func (s *stubCoordinator) ApprovePlan(context.Context, string) error     { return nil }
 func (s *stubCoordinator) SetMainAgent(string) error                     { return nil }
+func (s *stubCoordinator) MainAgent() string                             { return "" }
 func (s *stubCoordinator) GenerateTitle(context.Context, string, string) {}
 func (s *stubCoordinator) SetSessionModelOverride(context.Context, string, config.SelectedModel) error {
 	return nil

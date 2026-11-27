@@ -49,7 +49,7 @@ func (m *mockSessionAgent) QueuedPrompts(sessionID string) int          { return
 func (m *mockSessionAgent) QueuedPromptsList(sessionID string) []string { return nil }
 func (m *mockSessionAgent) ClearQueue(sessionID string)                 {}
 func (m *mockSessionAgent) AddNote(sessionID, text string)              {}
-func (m *mockSessionAgent) Summarize(context.Context, string, fantasy.ProviderOptions, func(context.Context, *fantasy.ProviderError) error) error {
+func (m *mockSessionAgent) Summarize(context.Context, string, Model, fantasy.ProviderOptions, func(context.Context, *fantasy.ProviderError) error) error {
 	return nil
 }
 func (m *mockSessionAgent) GenerateTitle(context.Context, string, string) {}
@@ -849,9 +849,10 @@ func TestCoordinatorSetMainAgent(t *testing.T) {
 			},
 		}
 
+		assert.Equal(t, config.AgentCoder, coord.MainAgent())
 		err := coord.SetMainAgent(config.AgentPlan)
 		require.NoError(t, err)
-		assert.Equal(t, config.AgentPlan, coord.mainAgentName)
+		assert.Equal(t, config.AgentPlan, coord.MainAgent())
 		assert.Same(t, plan, coord.mainAgent)
 	})
 
@@ -866,4 +867,139 @@ func TestCoordinatorSetMainAgent(t *testing.T) {
 		require.Error(t, err)
 		assert.ErrorIs(t, err, errMainAgentNotFound)
 	})
+}
+
+// TestRunPinsSessionModelOverride is the regression test for the merge
+// regression where coordinator.run pinned the session-unaware
+// agent.Model() into SessionAgentCall: a session's pinned model
+// override never reached the run because the session-aware fallback in
+// sessionAgent.Run only fires when the call carries no explicit model.
+// The coordinator must resolve the override itself and pin the
+// effective model.
+func TestRunPinsSessionModelOverride(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	workingDir := t.TempDir()
+
+	cfg, err := config.Init(t.Context(), workingDir, "", false)
+	require.NoError(t, err)
+	cfg.Config().Providers.Set("testp", config.ProviderConfig{
+		ID:      "testp",
+		Name:    "testp",
+		Type:    catwalk.TypeCompletions,
+		BaseURL: "http://127.0.0.1:0/v1",
+		APIKey:  "test",
+		Models: []catwalk.Model{
+			{ID: "base-model", DefaultMaxTokens: 1000},
+			{ID: "override-model", DefaultMaxTokens: 2000},
+		},
+	})
+	cfg.OverridePreferredModel(config.SelectedModelTypeLarge, config.SelectedModel{Provider: "testp", Model: "base-model"})
+	cfg.OverridePreferredModel(config.SelectedModelTypeSmall, config.SelectedModel{Provider: "testp", Model: "base-model"})
+	cfg.SetupAgents()
+
+	// Keep buildTools light: no subagent or agentic-fetch construction.
+	coderCfg := cfg.Config().Agents[config.AgentCoder]
+	coderCfg.AllowedTools = nil
+	cfg.Config().Agents[config.AgentCoder] = coderCfg
+
+	coordIface, err := NewCoordinator(t.Context(), CoordinatorOptions{
+		Config:      cfg,
+		Sessions:    env.sessions,
+		Messages:    env.messages,
+		Permissions: env.permissions,
+		Interactive: true,
+	})
+	require.NoError(t, err)
+	c := coordIface.(*coordinator)
+
+	// Swap the main agent for a capturing mock: the real agent would
+	// consume the pinned call internally, hiding what run assembled.
+	var pinnedModel string
+	var pinnedMaxTokens int64
+	mock := newMockAgent("testp", 1000, func(_ context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+		pinnedModel = call.Model.ModelCfg.Model
+		pinnedMaxTokens = call.MaxOutputTokens
+		return agentResultWithText("done"), nil
+	})
+	mock.model.ModelCfg.Model = "base-model"
+	c.agentMu.Lock()
+	c.mainAgent = mock
+	c.agents[config.AgentCoder] = mock
+	c.agentMu.Unlock()
+
+	sess, err := env.sessions.Create(t.Context(), "override session")
+	require.NoError(t, err)
+
+	// Pin the override the way SetSessionModelOverride leaves it in the
+	// in-memory map after a successful build: Model non-nil marks the
+	// pin positive.
+	c.modelOverrides.Set(sess.ID, Model{
+		CatwalkCfg: catwalk.Model{DefaultMaxTokens: 2000},
+		ModelCfg:   config.SelectedModel{Provider: "testp", Model: "override-model"},
+		Model:      &finishStreamModel{text: "override"},
+	})
+
+	_, err = c.Run(t.Context(), sess.ID, "hello")
+	require.NoError(t, err)
+	require.Equal(t, "override-model", pinnedModel,
+		"the run must pin the session's override model, not the shared selection")
+	require.Equal(t, int64(2000), pinnedMaxTokens,
+		"max tokens must derive from the override model, not the shared selection")
+}
+
+// TestRunWithoutOverridePinsSharedModel is the control: with no
+// override pinned, the run pins the agent's shared model.
+func TestRunWithoutOverridePinsSharedModel(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	workingDir := t.TempDir()
+
+	cfg, err := config.Init(t.Context(), workingDir, "", false)
+	require.NoError(t, err)
+	cfg.Config().Providers.Set("testp", config.ProviderConfig{
+		ID:      "testp",
+		Name:    "testp",
+		Type:    catwalk.TypeCompletions,
+		BaseURL: "http://127.0.0.1:0/v1",
+		APIKey:  "test",
+		Models:  []catwalk.Model{{ID: "base-model", DefaultMaxTokens: 1000}},
+	})
+	cfg.OverridePreferredModel(config.SelectedModelTypeLarge, config.SelectedModel{Provider: "testp", Model: "base-model"})
+	cfg.OverridePreferredModel(config.SelectedModelTypeSmall, config.SelectedModel{Provider: "testp", Model: "base-model"})
+	cfg.SetupAgents()
+
+	coderCfg := cfg.Config().Agents[config.AgentCoder]
+	coderCfg.AllowedTools = nil
+	cfg.Config().Agents[config.AgentCoder] = coderCfg
+
+	coordIface, err := NewCoordinator(t.Context(), CoordinatorOptions{
+		Config:      cfg,
+		Sessions:    env.sessions,
+		Messages:    env.messages,
+		Permissions: env.permissions,
+		Interactive: true,
+	})
+	require.NoError(t, err)
+	c := coordIface.(*coordinator)
+
+	var pinnedModel string
+	mock := newMockAgent("testp", 1000, func(_ context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+		pinnedModel = call.Model.ModelCfg.Model
+		return agentResultWithText("done"), nil
+	})
+	mock.model.ModelCfg.Model = "base-model"
+	c.agentMu.Lock()
+	c.mainAgent = mock
+	c.agents[config.AgentCoder] = mock
+	c.agentMu.Unlock()
+
+	sess, err := env.sessions.Create(t.Context(), "plain session")
+	require.NoError(t, err)
+
+	_, err = c.Run(t.Context(), sess.ID, "hello")
+	require.NoError(t, err)
+	require.Equal(t, "base-model", pinnedModel)
 }

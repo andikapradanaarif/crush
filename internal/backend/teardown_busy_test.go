@@ -39,6 +39,7 @@ func (c *busyCoordinator) RunAccepted(context.Context, *agent.AcceptedRun, strin
 func (c *busyCoordinator) BeginAccepted(string) *agent.AcceptedRun { return nil }
 func (c *busyCoordinator) Cancel(string)                           {}
 func (c *busyCoordinator) CancelAll()                              {}
+func (c *busyCoordinator) MainAgent() string                       { return "" }
 func (c *busyCoordinator) IsBusy() bool                            { return c.busy.Load() }
 func (c *busyCoordinator) IsSessionBusy(string) bool               { return false }
 func (c *busyCoordinator) QueuedPrompts(string) int                { return 0 }

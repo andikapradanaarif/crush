@@ -241,6 +241,12 @@ The remaining `internal/` packages are small utilities: `ansiext`,
   - If `goimports` is not available, use `gofmt`.
   - You can also use `task fmt` to run `gofumpt -w .` on the entire project,
     as long as `gofumpt` is on the `PATH`.
+- NEVER reformat files under `eval/corpus/`. Fixture bytes are pinned by
+  scorer checks (SHA-256 hashes in `check-*.sh` scripts), so a
+  repository-wide `gofumpt -w .` silently invalidates them — even a correct
+  eval solution then fails its gate. After running repo-wide formatting,
+  restore any corpus changes with `git checkout -- eval/corpus` unless the
+  change is intentional and the affected hashes have been recalibrated.
 
 ## Comments
 

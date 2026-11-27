@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -47,14 +48,20 @@ type RunOptions struct {
 	// BlockFuncs is an optional list of deny-list matchers applied before
 	// each command reaches the exec layer. nil disables blocking entirely.
 	BlockFuncs []BlockFunc
+	// Coreutils selects how core utilities execute. The zero value runs
+	// Turtle, used where no workspace configuration is available.
+	Coreutils CoreutilsMode
 	// TermWidth is the terminal width in columns for PTY execution.
 	// Zero uses a default of 200.
 	TermWidth int
+	// Exports, if set, is called after a successful run for each variable
+	// the command exported or changed while exported.
+	Exports func(name, value string)
 }
 
 // Run parses and executes a shell command using the same mvdan.cc/sh
 // interpreter stack that the stateful [Shell] type uses (builtins,
-// optional block list, optional Go coreutils). It is safe to call
+// optional block list, optional Turtle coreutils). It is safe to call
 // concurrently from multiple goroutines: each call builds its own
 // [interp.Runner] and shares no state with other callers or with any
 // [Shell] instance.
@@ -99,12 +106,42 @@ func run(ctx context.Context, opts RunOptions, components *componentLog) (err er
 		return fmt.Errorf("could not parse command: %w", err)
 	}
 
-	runner, err := newRunner(opts.Cwd, opts.Env, opts.Stdin, stdout, stderr, opts.BlockFuncs, components)
+	runner, err := newRunner(opts.Cwd, opts.Env, opts.Stdin, stdout, stderr, opts.BlockFuncs, components, opts.Coreutils)
 	if err != nil {
 		return fmt.Errorf("could not run command: %w", err)
 	}
 
-	return runner.Run(ctx, line)
+	if opts.Exports == nil {
+		return runner.Run(ctx, line)
+	}
+
+	// Reset seeds interpreter defaults (IFS, OPTIND, ...) so they land in
+	// the snapshot and are not mistaken for the script's own exports.
+	runner.Reset()
+	before := maps.Collect(runner.Env.Each)
+	maps.Copy(before, runner.Vars)
+
+	if err := runner.Run(ctx, line); err != nil {
+		return err
+	}
+	reportExports(before, runner.Vars, opts.Exports)
+	return nil
+}
+
+// reportExports calls report for each exported string variable in after
+// that is new or changed relative to before. PWD and OLDPWD are skipped
+// because cd changes them as a side effect, not as an export.
+func reportExports(before, after map[string]expand.Variable, report func(name, value string)) {
+	for _, name := range slices.Sorted(maps.Keys(after)) {
+		v := after[name]
+		if name == "PWD" || name == "OLDPWD" || !v.Exported || !v.IsSet() || v.Kind != expand.String {
+			continue
+		}
+		if prev, ok := before[name]; ok && prev.Exported && prev.Str == v.Str {
+			continue
+		}
+		report(name, v.Str)
+	}
 }
 
 // CaptureResult holds the combined output and exit code from a
@@ -236,7 +273,7 @@ func (s syncWriter) Write(p []byte) (int, error) {
 // newRunner constructs an [interp.Runner] configured with the standard
 // Crush handler stack. Shared by the stateless [Run] entrypoint and the
 // stateful [Shell] so the two surfaces cannot drift.
-func newRunner(cwd string, env []string, stdin io.Reader, stdout, stderr io.Writer, blockFuncs []BlockFunc, components *componentLog) (*interp.Runner, error) {
+func newRunner(cwd string, env []string, stdin io.Reader, stdout, stderr io.Writer, blockFuncs []BlockFunc, components *componentLog, coreutils CoreutilsMode) (*interp.Runner, error) {
 	env = withNonInteractiveEnv(env)
 	// Pipeline members share the runner's stderr, and each subprocess
 	// spawns its own copy goroutine — an unguarded buffer would race.
@@ -248,7 +285,7 @@ func newRunner(cwd string, env []string, stdin io.Reader, stdout, stderr io.Writ
 		interp.Interactive(false),
 		interp.Env(expand.ListEnviron(env...)),
 		interp.Dir(cwd),
-		execHandlerOption(blockFuncs, components),
+		execHandlerOption(blockFuncs, components, coreutils),
 	)
 }
 
@@ -262,10 +299,10 @@ func newRunner(cwd string, env []string, stdin io.Reader, stdout, stderr io.Writ
 // isolation. Without isolation, shells like zsh that set up job control
 // when sourcing framework files can send SIGINT/SIGTERM to Crush's process
 // group and crash the parent.
-func execHandlerOption(blockFuncs []BlockFunc, components *componentLog) interp.RunnerOption {
+func execHandlerOption(blockFuncs []BlockFunc, components *componentLog, coreutils CoreutilsMode) interp.RunnerOption {
 	base := processGroupExecHandler(defaultKillTimeout)
 	handler := base
-	for _, mw := range slices.Backward(standardHandlers(blockFuncs, components)) {
+	for _, mw := range slices.Backward(standardHandlers(blockFuncs, components, coreutils)) {
 		handler = mw(handler)
 	}
 	// ExecHandlers always appends DefaultExecHandler which lacks process
@@ -433,7 +470,7 @@ func componentStatusHandler(log *componentLog) execMiddleware {
 //     invocations through loopback pinentry (the TUI prompts for the
 //     passphrase/PIN) instead of an external terminal pinentry. It runs
 //     after the block list so deny rules still apply to gpg;
-//  6. optional Go coreutils (only when useGoCoreUtils is on).
+//  6. optional Turtle coreutils (skipped when coreutils is off).
 //
 // What this chain can and cannot see is worth stating plainly, because it
 // is easy to assume more: it observes commands this interpreter dispatches
@@ -441,16 +478,16 @@ func componentStatusHandler(log *componentLog) execMiddleware {
 // interpreter, `sh -c`, make, a language runtime — is invisible to it. The
 // block list is a guardrail against invoking something dangerous by
 // accident, not a sandbox.
-func standardHandlers(blockFuncs []BlockFunc, components *componentLog) []execMiddleware {
+func standardHandlers(blockFuncs []BlockFunc, components *componentLog, coreutils CoreutilsMode) []execMiddleware {
 	handlers := []execMiddleware{
 		blockHandler(blockFuncs),
 		componentStatusHandler(components),
 		builtinHandler(),
-		scriptDispatchHandler(blockFuncs),
+		scriptDispatchHandler(blockFuncs, coreutils),
 		gpgHandler(),
 	}
-	if useGoCoreUtils && coreUtilsExecHandler != nil {
-		handlers = append(handlers, coreUtilsExecHandler)
+	if mw := coreutilsHandler(coreutils); mw != nil {
+		handlers = append(handlers, mw)
 	}
 	return handlers
 }

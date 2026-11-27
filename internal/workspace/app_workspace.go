@@ -144,6 +144,7 @@ func (w *AppWorkspace) AgentRunShellCommand(ctx context.Context, sessionID, comm
 		Command:   command,
 		Cwd:       w.store.WorkingDir(),
 		TermWidth: termWidth,
+		Coreutils: w.store.Config().Options.GetCoreutils(),
 	}
 
 	// Stamp before exec so the recorded run attributes only its own
@@ -229,6 +230,7 @@ func (w *AppWorkspace) AgentModel() AgentModel {
 	}
 	m := w.app.Agent().Model()
 	return AgentModel{
+		Agent:      w.app.Agent().MainAgent(),
 		CatwalkCfg: m.CatwalkCfg,
 		ModelCfg:   m.ModelCfg,
 	}
@@ -461,6 +463,10 @@ func (w *AppWorkspace) LSPGetDiagnosticCounts(name string) lsp.DiagnosticCounts 
 
 func (w *AppWorkspace) Config() *config.Config {
 	return w.store.Config()
+}
+
+func (w *AppWorkspace) ShouldOnboard() bool {
+	return w.store.ShouldOnboard()
 }
 
 func (w *AppWorkspace) WorkingDir() string {

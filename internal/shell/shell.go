@@ -75,6 +75,7 @@ type Shell struct {
 	// statuses — reset at the top of each execCommon so a stale run
 	// can't leak into the next verdict.
 	components *componentLog
+	coreutils  CoreutilsMode
 }
 
 // Options for creating a new shell
@@ -83,6 +84,9 @@ type Options struct {
 	Env        []string
 	Logger     Logger
 	BlockFuncs []BlockFunc
+	// Coreutils selects how core utilities execute. The zero value runs
+	// Turtle, used where no workspace configuration is available.
+	Coreutils CoreutilsMode
 }
 
 // NewShell creates a new shell instance with the given options
@@ -119,6 +123,7 @@ func NewShell(opts *Options) *Shell {
 		env:        env,
 		logger:     logger,
 		blockFuncs: opts.BlockFuncs,
+		coreutils:  opts.Coreutils,
 	}
 }
 
@@ -463,7 +468,7 @@ func isDynamicWord(word *syntax.Word) bool {
 // newInterp creates a new interpreter with the current shell state. A nil
 // stdin is equivalent to an empty input stream.
 func (s *Shell) newInterp(stdin io.Reader, stdout, stderr io.Writer) (*interp.Runner, error) {
-	return newRunner(s.cwd, s.env, stdin, stdout, stderr, s.blockFuncs, s.components)
+	return newRunner(s.cwd, s.env, stdin, stdout, stderr, s.blockFuncs, s.components, s.coreutils)
 }
 
 // updateShellFromRunner updates the shell from the interpreter after execution.

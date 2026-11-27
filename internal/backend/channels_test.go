@@ -173,6 +173,7 @@ func (c *recordingCoordinator) UpdateModels(context.Context) error            { 
 func (c *recordingCoordinator) SetMainAgent(string) error                     { return nil }
 func (c *recordingCoordinator) ApprovePlan(context.Context, string) error     { return nil }
 func (c *recordingCoordinator) UpdateSummaryModel(context.Context) error      { return nil }
+func (c *recordingCoordinator) MainAgent() string                             { return "" }
 func (c *recordingCoordinator) GenerateTitle(context.Context, string, string) {}
 func (c *recordingCoordinator) SetSessionModelOverride(context.Context, string, config.SelectedModel) error {
 	return nil

@@ -19,6 +19,7 @@ import (
 	"github.com/charmbracelet/crush/internal/hooks"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
+	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/invopop/jsonschema"
 )
 
@@ -471,6 +472,7 @@ type Options struct {
 	DataDirectory             string       `json:"data_directory,omitempty" jsonschema:"description=Directory for storing application data. Relative paths are resolved against the working directory; absolute paths are used as-is.,default=.crush,example=.crush"`
 	DisabledTools             []string     `json:"disabled_tools,omitempty" jsonschema:"description=List of built-in tools to disable and hide from the agent,example=bash,example=sourcegraph"`
 	DisableProviderAutoUpdate bool         `json:"disable_provider_auto_update,omitempty" jsonschema:"description=Disable providers auto-update,default=false"`
+	DisableSubagents          bool         `json:"disable_subagents,omitempty" jsonschema:"description=Prevent agents from starting subagents. Removes the agent\\, agent_dispatch\\, agent_send\\, agent_status\\, agent_stop\\, and agentic_fetch tools,default=false"`
 	DisableDefaultProviders   bool         `json:"disable_default_providers,omitempty" jsonschema:"description=Ignore all default/embedded providers. When enabled\\, providers must be fully specified in the config file with base_url\\, models\\, and api_key - no merging with defaults occurs,default=false"`
 	Attribution               *Attribution `json:"attribution,omitempty" jsonschema:"description=Attribution settings for generated content"`
 	DisableMetrics            bool         `json:"disable_metrics,omitempty" jsonschema:"description=Disable sending metrics,default=false"`
@@ -671,9 +673,45 @@ type Options struct {
 	// Crush dialog (loopback pinentry) instead of handing the terminal
 	// over to an external pinentry program. No GPG or git configuration
 	// is modified: the redirect only applies to processes Crush spawns.
-	PinentryIntegrated   *bool       `json:"pinentry_integrated,omitempty" jsonschema:"description=Render GPG passphrase prompts as a native Crush dialog instead of an external pinentry program. Works with file-based keys and security keys and never modifies GPG or git configuration.,default=true"`
-	PinentryCacheTimeout *int        `json:"pinentry_cache_timeout,omitempty" jsonschema:"description=Seconds Crush keeps an entered GPG passphrase in memory so repeated signing operations do not re-prompt. 0 (the default) disables it; gpg-agent's own cache applies regardless.,default=0,example=300"`
-	Prompts              PromptPaths `json:"prompts,omitempty" jsonschema:"description=Files that replace Crush's built-in prompts\\, keyed by prompt name. A replacement is used verbatim\\, so anything the built-in template injected (skills\\, context files\\, LSP status) is lost unless the replacement asks for it too."`
+	PinentryIntegrated   *bool                `json:"pinentry_integrated,omitempty" jsonschema:"description=Render GPG passphrase prompts as a native Crush dialog instead of an external pinentry program. Works with file-based keys and security keys and never modifies GPG or git configuration.,default=true"`
+	PinentryCacheTimeout *int                 `json:"pinentry_cache_timeout,omitempty" jsonschema:"description=Seconds Crush keeps an entered GPG passphrase in memory so repeated signing operations do not re-prompt. 0 (the default) disables it; gpg-agent's own cache applies regardless.,default=0,example=300"`
+	Prompts              PromptPaths          `json:"prompts,omitempty" jsonschema:"description=Files that replace Crush's built-in prompts\\, keyed by prompt name. A replacement is used verbatim\\, so anything the built-in template injected (skills\\, context files\\, LSP status) is lost unless the replacement asks for it too."`
+	Experimental         *ExperimentalOptions `json:"experimental,omitempty" jsonschema:"description=Experimental features. They are unfinished and may change or be removed in any release."`
+	Coreutils            CoreutilsMode        `json:"coreutils,omitempty" jsonschema:"description=How core utilities run in Crush shells.,enum=turtle,enum=system,enum=auto,enum=off,default=auto"`
+}
+
+// CoreutilsMode is the shell package's coreutils mode, aliased so configs
+// can hold it directly.
+type CoreutilsMode = shell.CoreutilsMode
+
+// Coreutils mode values.
+const (
+	CoreutilsTurtle = shell.CoreutilsTurtle
+	CoreutilsSystem = shell.CoreutilsSystem
+	CoreutilsAuto   = shell.CoreutilsAuto
+	CoreutilsOff    = shell.CoreutilsOff
+)
+
+// DefaultCoreutils is the coreutils mode used when the configuration does
+// not specify one.
+const DefaultCoreutils = CoreutilsAuto
+
+// GetCoreutils returns the configured coreutils mode, or DefaultCoreutils
+// when it is not set. Callers pass the result to the shell surfaces.
+func (o *Options) GetCoreutils() CoreutilsMode {
+	if o == nil || o.Coreutils == "" {
+		return DefaultCoreutils
+	}
+	return o.Coreutils
+}
+
+// ExperimentalOptions holds unfinished features. Each mirrors an environment
+// variable, which wins over the config value when set.
+type ExperimentalOptions struct {
+	ClientServer       *bool `json:"client_server,omitempty" jsonschema:"description=Run the agent in a background server that the TUI attaches to. Overridden by CRUSH_CLIENT_SERVER.,default=false"`
+	ServerReadyTimeout *int  `json:"server_ready_timeout,omitempty" jsonschema:"description=Seconds a client waits for the server to become ready. Overridden by CRUSH_SERVER_READY_TIMEOUT.,example=30"`
+	ServerIdleTimeout  *int  `json:"server_idle_timeout,omitempty" jsonschema:"description=Seconds the server stays alive after its last workspace closes. 0 shuts it down at once. Overridden by CRUSH_SERVER_IDLE_TIMEOUT.,default=60"`
+	ServerDetachGrace  *int  `json:"server_detach_grace,omitempty" jsonschema:"description=Seconds a workspace survives after a client's connection drops. 0 tears it down at once. Overridden by CRUSH_SERVER_DETACH_GRACE.,default=10"`
 }
 
 // OptionKeys returns the Options struct's JSON field names — the set
@@ -1367,6 +1405,9 @@ func allToolNames() []string {
 	}
 }
 
+// subagentToolNames are the tools that start or manage subagents.
+var subagentToolNames = []string{"agent", "agent_dispatch", "agent_send", "agent_status", "agent_stop", "agentic_fetch"}
+
 func resolveAllowedTools(allTools []string, disabledTools []string) []string {
 	if disabledTools == nil {
 		return allTools
@@ -1434,7 +1475,11 @@ func filterSlice(data []string, mask []string, include bool) []string {
 }
 
 func (c *Config) SetupAgents() {
-	allowedTools := resolveAllowedTools(allToolNames(), c.Options.DisabledTools)
+	disabled := c.Options.DisabledTools
+	if c.Options.DisableSubagents {
+		disabled = append(slices.Clone(disabled), subagentToolNames...)
+	}
+	allowedTools := resolveAllowedTools(allToolNames(), disabled)
 
 	agents := map[string]Agent{
 		AgentCoder: {
