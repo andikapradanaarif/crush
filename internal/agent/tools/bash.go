@@ -406,9 +406,6 @@ func executeBashCommand(ctx context.Context, params BashParams, execWorkingDir, 
 
 			interrupted := shell.IsInterrupt(execErr)
 			exitCode := shell.ExitCode(execErr)
-			if exitCode == 0 && !interrupted && execErr != nil {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("[Job %s] Error executing command: %s", bgShell.ID, execErr)), nil
-			}
 			recordRun(ctx, cmdLog, sessionID, toolCallID, bgShell, stdout, stderr, execErr)
 
 			stdout = formatOutput(stdout, stderr, execErr, spillDir)
@@ -513,9 +510,6 @@ wait:
 
 		interrupted := shell.IsInterrupt(execErr)
 		exitCode := shell.ExitCode(execErr)
-		if exitCode == 0 && !interrupted && execErr != nil {
-			return fantasy.NewTextErrorResponse(fmt.Sprintf("[Job %s] Error executing command: %s", bgShell.ID, execErr)), nil
-		}
 		recordRun(ctx, cmdLog, sessionID, toolCallID, bgShell, stdout, stderr, execErr)
 
 		stdout = formatOutput(stdout, stderr, execErr, spillDir)
@@ -565,29 +559,17 @@ func preRunHead(ctx context.Context, cmdLog cmdlog.Service) string {
 	return cmdLog.HeadSHA(ctx)
 }
 
-// formatOutput formats the output of a completed command with error handling
+// formatOutput joins stdout, stderr, and how the command ended.
 func formatOutput(stdout, stderr string, execErr error, spillDir string) string {
-	interrupted := shell.IsInterrupt(execErr)
-	exitCode := shell.ExitCode(execErr)
-
 	stdout = TruncateOutput(stdout, spillDir)
 	stderr = TruncateOutput(stderr, spillDir)
 
 	errorMessage := stderr
-	if errorMessage == "" && execErr != nil {
-		errorMessage = execErr.Error()
-	}
-
-	if interrupted {
+	if status := shell.Describe(execErr); status != "" {
 		if errorMessage != "" {
 			errorMessage += "\n"
 		}
-		errorMessage += "Command was aborted before completion"
-	} else if exitCode != 0 {
-		if errorMessage != "" {
-			errorMessage += "\n"
-		}
-		errorMessage += fmt.Sprintf("Exit code %d", exitCode)
+		errorMessage += status
 	}
 
 	hasBothOutputs := stdout != "" && stderr != ""

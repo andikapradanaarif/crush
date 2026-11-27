@@ -2,6 +2,8 @@ package shell
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"mvdan.cc/sh/v3/interp"
 )
 
 // Benchmark to measure CPU efficiency
@@ -174,5 +177,29 @@ func TestCrossPlatformExecution(t *testing.T) {
 	// The output should contain "hello" regardless of platform
 	if !strings.Contains(strings.ToLower(stdout), "hello") {
 		t.Errorf("Echo output should contain 'hello', got: %q", stdout)
+	}
+}
+
+func TestDescribe(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "success", err: nil, want: ""},
+		{name: "exit code", err: interp.ExitStatus(2), want: "Exit code 2"},
+		{name: "exit code zero", err: interp.ExitStatus(0), want: ""},
+		{name: "plain error", err: errors.New("boom"), want: "Error: boom"},
+		{name: "canceled", err: context.Canceled, want: "Command was aborted before completion"},
+		{name: "deadline", err: context.DeadlineExceeded, want: "Command was aborted before completion"},
+		{name: "wrapped canceled", err: fmt.Errorf("run: %w", context.Canceled), want: "Command was aborted before completion"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, Describe(tt.err))
+		})
 	}
 }

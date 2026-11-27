@@ -1610,18 +1610,17 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 	// completes. This is used for notebook entry generation.
 	preTurnMsgCount := len(msgs)
 
-	// Generate title from the first real (non-shell) user prompt. It
-	// can take tens of seconds, and blocking Run on it delays the
-	// response to the caller — spawn it detached instead. The detached
-	// context survives Run's cancel; GenerateTitle registers with
-	// a.titles so CancelAll drains it, and spawnDetached keeps it
-	// tracked through process exit.
+	// Generate title from the first real (non-shell) user prompt in the
+	// background; Run must not wait on it. CancelAll stops it.
 	if !hasSubstantiveUserMessage(msgs) {
-		titleCtx := context.WithoutCancel(ctx)
+		titleCtx, endTitle := a.titles.begin(ctx)
 		// Capture the fields now — runEdges reassigns call at the
 		// run-boundary seam, which the detached goroutine would race.
 		titleSessionID, titlePrompt := call.SessionID, call.Prompt
-		a.spawnDetached(func() { a.GenerateTitle(titleCtx, titleSessionID, titlePrompt) })
+		go func() {
+			defer endTitle()
+			a.generateTitle(titleCtx, titleSessionID, titlePrompt)
+		}()
 	}
 
 	// Add the user message to the session. The context sent ahead of the
@@ -3791,8 +3790,8 @@ func hasSubstantiveUserMessage(msgs []message.Message) bool {
 
 // GenerateTitle generates a session title based on the initial prompt.
 func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, userPrompt string) {
-	a.titles.begin()
-	defer a.titles.end()
+	ctx, endTitle := a.titles.begin(ctx)
+	defer endTitle()
 	a.generateTitle(ctx, sessionID, userPrompt)
 }
 
@@ -4209,14 +4208,16 @@ func (a *sessionAgent) CancelAll() {
 			a.clearQueueAndNotify(sessionID)
 			mu.Unlock()
 		}
+		// Cancelled runs unwind in milliseconds; poll finely so quit is quick.
 		for a.IsBusy() {
 			if time.Now().After(deadline) {
 				slog.Warn("Gave up waiting for agent runs to cancel; their final state may not be recorded")
 				break
 			}
-			time.Sleep(200 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
+	a.titles.shutdown() // Don't wait on the model; stopped titles save a fallback.
 	if !a.titles.wait(time.Until(deadline)) {
 		slog.Warn("Gave up waiting for session title generation to finish")
 	}

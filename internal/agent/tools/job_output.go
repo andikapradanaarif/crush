@@ -15,6 +15,11 @@ import (
 
 const (
 	JobOutputToolName = "job_output"
+
+	// jobOutputWaitLimit caps how long a wait=true call blocks, so a long
+	// job hands control back to the agent instead of stalling the turn.
+	// Keep job_output.md, bash.md.tpl, and the wait param in sync.
+	jobOutputWaitLimit = 2 * time.Minute
 )
 
 //go:embed job_output.md
@@ -22,7 +27,7 @@ var jobOutputDescription string
 
 type JobOutputParams struct {
 	ShellID string `json:"shell_id" description:"The ID of the background shell to retrieve output from"`
-	Wait    bool   `json:"wait" description:"If true, block until the background shell completes before returning output"`
+	Wait    bool   `json:"wait" description:"If true, block until the background shell completes, for at most 2 minutes, before returning output"`
 }
 
 type JobOutputResponseMetadata struct {
@@ -39,6 +44,12 @@ type JobOutputResponseMetadata struct {
 }
 
 func NewJobOutputTool(spillDir string, cmdLog cmdlog.Service, progress pubsub.Publisher[ToolProgress]) fantasy.AgentTool {
+	return newJobOutputTool(spillDir, cmdLog, progress, jobOutputWaitLimit)
+}
+
+// newJobOutputTool is NewJobOutputTool with an injectable wait limit, so
+// tests need not wait the full two minutes.
+func newJobOutputTool(spillDir string, cmdLog cmdlog.Service, progress pubsub.Publisher[ToolProgress], waitLimit time.Duration) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		JobOutputToolName,
 		jobOutputDescription,
@@ -54,7 +65,9 @@ func NewJobOutputTool(spillDir string, cmdLog cmdlog.Service, progress pubsub.Pu
 			}
 
 			if params.Wait {
-				waitWithProgress(ctx, bgShell, newProgressReporter(progress, GetSessionFromContext(ctx), call.ID))
+				waitCtx, cancel := context.WithTimeout(ctx, waitLimit)
+				waitWithProgress(waitCtx, bgShell, newProgressReporter(progress, GetSessionFromContext(ctx), call.ID))
+				cancel()
 			}
 
 			stdout, stderr, done, err := bgShell.GetOutput()
@@ -94,8 +107,8 @@ func NewJobOutputTool(spillDir string, cmdLog cmdlog.Service, progress pubsub.Pu
 			if done {
 				status = "completed"
 				exitCode = shell.ExitCode(err)
-				if exitCode != 0 {
-					outputParts = append(outputParts, fmt.Sprintf("Exit code %d", exitCode))
+				if msg := shell.Describe(err); msg != "" {
+					outputParts = append(outputParts, msg)
 				}
 			}
 
@@ -116,6 +129,9 @@ func NewJobOutputTool(spillDir string, cmdLog cmdlog.Service, progress pubsub.Pu
 			}
 
 			result := fmt.Sprintf("Status: %s\n\n%s", status, output)
+			if params.Wait && !done && ctx.Err() == nil {
+				result += "\n\nStopped waiting: the job is still running and the output above is what it has printed so far. Keep working on other things and check back; wait again only if nothing else is left to do."
+			}
 			return fantasy.WithResponseMetadata(fantasy.NewTextResponse(result), metadata), nil
 		},
 	)
