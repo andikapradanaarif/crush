@@ -95,7 +95,9 @@ tasks:
   fmt:
     desc: Run gofumpt
     cmds:
-      - gofumpt -w .
+      # eval/corpus is excluded — fixture bytes are hash-pinned by the
+      # eval scorers; reformatting them invalidates the gates.
+      - ./scripts/fmt.sh
 
   fmt:html:
     desc: Run prettier on HTML/CSS/JS files
