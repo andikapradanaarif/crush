@@ -11,6 +11,9 @@ import (
 	"mvdan.cc/sh/v3/interp"
 )
 
+// ReapOrphans is a no-op on Windows — process-group reaping is Unix-only.
+func ReapOrphans() {}
+
 // processGroupExecHandler returns the Windows counterpart of the Unix
 // handler. Windows has no process groups to signal, so cancellation kills
 // the process directly. Unlike interp.DefaultExecHandler on Windows, it
