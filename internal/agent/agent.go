@@ -1611,16 +1611,19 @@ func (a *sessionAgent) runTurn(ctx context.Context, call SessionAgentCall) (resu
 	preTurnMsgCount := len(msgs)
 
 	// Generate title from the first real (non-shell) user prompt in the
-	// background; Run must not wait on it. CancelAll stops it.
+	// background; Run must not wait on it. The two trackers are
+	// complementary: GenerateTitle self-registers with a.titles, so
+	// CancelAll still stops it fast on TUI quit, while spawnDetached
+	// puts it in the one-shot process-exit drain — a fast `crush run`
+	// otherwise loses the title forever (the session is substantive by
+	// the next run, so nothing retries it). spawnDetached's panic
+	// recovery comes along.
 	if !hasSubstantiveUserMessage(msgs) {
-		titleCtx, endTitle := a.titles.begin(ctx)
+		titleCtx := context.WithoutCancel(ctx)
 		// Capture the fields now — runEdges reassigns call at the
 		// run-boundary seam, which the detached goroutine would race.
 		titleSessionID, titlePrompt := call.SessionID, call.Prompt
-		go func() {
-			defer endTitle()
-			a.generateTitle(titleCtx, titleSessionID, titlePrompt)
-		}()
+		a.spawnDetached(func() { a.GenerateTitle(titleCtx, titleSessionID, titlePrompt) })
 	}
 
 	// Add the user message to the session. The context sent ahead of the
