@@ -3,10 +3,15 @@
 package shell
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -71,7 +76,8 @@ func TestKill_SetsidDescendantHoldsPipe(t *testing.T) {
 
 // A backgrounded child that outlives its `sh -c` parent holds the output pipe
 // open. Without a WaitDelay the job never completes on its own; with one it
-// finishes about WaitDelay (killTimeout + 1s) after the parent exits.
+// finishes about WaitDelay (killTimeout + 1s) after the parent exits, and
+// the rest of the script still runs with a clean status.
 func TestJobCompletesWhenBackgroundedChildHoldsPipe(t *testing.T) {
 	reapSleep(t, "8")
 	manager := newBackgroundShellManager()
@@ -84,22 +90,87 @@ func TestJobCompletesWhenBackgroundedChildHoldsPipe(t *testing.T) {
 	t.Cleanup(cancel)
 	require.True(t, bgShell.WaitContext(ctx), "job never completed: cmd.Wait was held open by the backgrounded child")
 	require.Less(t, time.Since(start), 6*time.Second)
+
+	stdout, stderr, done, execErr := bgShell.GetOutput()
+	require.True(t, done)
+	require.NoError(t, execErr, "stderr=%q", stderr)
+	require.Equal(t, 0, ExitCode(execErr))
+	require.Equal(t, "hi\n", stdout)
+}
+
+// The shebang dispatch path has the same WaitDelay and must behave the same.
+func TestRun_ShebangScriptContinuesWhenBackgroundedChildHoldsPipe(t *testing.T) {
+	t.Parallel()
+	reapSleep(t, "11")
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "bg.sh")
+	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nsleep 11 &\n"), 0o755))
+
+	var stdout, stderr bytes.Buffer
+	err := Run(t.Context(), RunOptions{
+		Command: "./bg.sh; echo hi",
+		Cwd:     dir,
+		Env:     os.Environ(),
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+	})
+	require.NoError(t, err, "stderr=%q", stderr.String())
+	require.Equal(t, "hi\n", stdout.String())
+}
+
+// Wait only reports ErrWaitDelay after a clean exit, so a failing command
+// keeps its own status even while a backgrounded child holds the pipe.
+func TestRun_NonZeroExitKeptWhenBackgroundedChildHoldsPipe(t *testing.T) {
+	t.Parallel()
+	reapSleep(t, "7")
+
+	var stdout, stderr bytes.Buffer
+	err := Run(t.Context(), RunOptions{
+		Command: "sh -c 'sleep 7 & exit 3'; echo rc=$?",
+		Cwd:     t.TempDir(),
+		Env:     os.Environ(),
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+	})
+	require.NoError(t, err, "stderr=%q", stderr.String())
+	require.Equal(t, "rc=3\n", stdout.String())
 }
 
 // The shebang dispatch path must kill the interpreter's whole process group,
 // not just the interpreter PID, or the script's child keeps the pipes open
-// and cmd.Wait blocks forever.
+// and cmd.Wait blocks forever. The child ignores SIGINT as a background job
+// of a non-interactive shell, so this also covers the SIGKILL escalation.
 func TestKill_ShebangScriptChild(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "hang.sh")
-	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nsleep 15 &\nwait\n"), 0o755))
+	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nsleep 15 &\necho $! > child.pid\nwait\n"), 0o755))
 	reapSleep(t, "15")
 	manager := newBackgroundShellManager()
 
 	bgShell, err := manager.Start(context.Background(), nil, dir, nil, CoreutilsTurtle, "./hang.sh", "", testMaxJobs, "")
 	require.NoError(t, err)
-	requireDescendant(t, "sleep 15")
 
-	killWithin(t, manager, bgShell.ID, 6*time.Second)
+	var pid int
+	require.Eventually(t, func() bool {
+		data, err := os.ReadFile(filepath.Join(dir, "child.pid"))
+		if err != nil {
+			return false
+		}
+		pid, err = strconv.Atoi(strings.TrimSpace(string(data)))
+		return err == nil && pid > 1
+	}, 5*time.Second, 10*time.Millisecond, "script never recorded its child PID")
+
+	// The child survives SIGINT, so Kill must wait out the grace period
+	// before the SIGKILL escalation takes it down.
+	start := time.Now()
+	killWithin(t, manager, bgShell.ID, defaultKillTimeout+4*time.Second)
+	require.GreaterOrEqual(t, time.Since(start), defaultKillTimeout)
 	require.True(t, bgShell.IsDone())
+
+	// Poll until the child is gone; an orphaned zombie lingers briefly
+	// until init reaps it.
+	require.Eventually(t, func() bool {
+		return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
+	}, 5*time.Second, 20*time.Millisecond, "script child %d survived cancel", pid)
 }

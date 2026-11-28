@@ -384,7 +384,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		cancel()
 		return nil, fmt.Errorf("failed to initialize coder agent: %w", err)
 	}
-	go app.refreshDiscoveredModels(ctx, app.Agent())
+	go app.refreshCatalogs(ctx, app.AgentCoordinator)
 
 	// Set up callback for LSP state updates.
 	app.LSPManager.SetCallback(func(name string, client *lsp.Client) {
@@ -403,14 +403,12 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 	return app, nil
 }
 
-// refreshDiscoveredModels updates custom provider models that startup took
-// from the discovery cache. The coordinator is passed in rather than read
-// from app so this goroutine never races a later InitCoderAgent.
-func (app *App) refreshDiscoveredModels(ctx context.Context, coordinator agent.Coordinator) {
-	defer log.RecoverPanic("app.refreshDiscoveredModels", nil)
-	reloaded, err := app.config.RefreshDiscoveredModels(ctx)
+// refreshCatalogs updates cached catalogs; taking coordinator avoids racing InitCoderAgent.
+func (app *App) refreshCatalogs(ctx context.Context, coordinator agent.Coordinator) {
+	defer log.RecoverPanic("app.refreshCatalogs", nil)
+	reloaded, err := app.config.RefreshCatalogs(ctx)
 	if err != nil {
-		slog.Warn("Failed to apply refreshed provider models", "error", err)
+		slog.Warn("Failed to apply refreshed provider catalogs", "error", err)
 	}
 	if !reloaded {
 		return
